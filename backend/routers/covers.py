@@ -1,6 +1,6 @@
 """Cover art endpoints.
 
-Two routes:
+Routes:
 
   GET /api/covers/{cover_id}             — direct UUID lookup, instant.
   GET /api/covers/by-media/{media_file_id}
@@ -8,6 +8,10 @@ Two routes:
                                             disk, fall back to Last.fm,
                                             cache result, mark sentinel
                                             on permanent failure.
+  GET /api/covers/caa/{rg_mbid}          — a phantom album's Cover Art
+                                            Archive front image, fronted
+                                            with a cache policy the browser
+                                            can use (see _caa_fetch).
 
 Resolved covers carry an `immutable` Cache-Control. The sentinel 404 is
 served with a short max-age so a manual rescan / new disk file can
@@ -17,8 +21,11 @@ unblock the next request.
 import asyncio
 import logging
 import time
+import uuid
+from collections import OrderedDict
 from typing import Dict
 
+import httpx
 from fastapi import APIRouter, HTTPException, Path as FPath
 from fastapi.concurrency import run_in_threadpool
 from fastapi.responses import Response
@@ -65,6 +72,79 @@ _photo_sem = asyncio.Semaphore(1)
 _PHOTO_MIN_INTERVAL = 1.0
 _PHOTO_WAIT_BUDGET = 2.5
 _photo_last_call = 0.0
+
+
+# Cover Art Archive front images for phantom albums (albums.cover_url is a
+# CAA hotlink for the whole phantom layer). Hotlinked from the browser, CAA
+# answers 307 → archive.org 302 → 200 with no Cache-Control (heuristic
+# freshness only) and its 404s carry none either — so a shelf of phantom
+# albums re-walked the redirects on every render and re-asked CAA for every
+# artless release group. Fronted here, the browser keeps a cover for a month
+# and a miss for a day. The bytes stay in a bounded process cache — the art
+# is CAA's, no covers row is minted for it.
+_CAA_FRONT = "https://coverartarchive.org/release-group/{rg}/front-500"
+_CAA_MAX_AGE = 30 * 86400       # the URL is not content-addressed: no `immutable`
+_CAA_MISS_MAX_AGE = 86400
+_CAA_CACHE_ENTRIES = 256        # ≈ 15 MB of JPEG at CAA's front-500 size
+_caa_cache: "OrderedDict[str, tuple[int, str, bytes]]" = OrderedDict()
+_caa_inflight: Dict[str, asyncio.Future] = {}
+
+
+async def _caa_fetch(rg: str) -> tuple[int, str, bytes]:
+    """(status, mime, body): 200 with the image, 404 for a release group
+    without art, 502 for anything else (unreachable, a 5xx) — never raises."""
+    try:
+        async with httpx.AsyncClient(timeout=10.0, follow_redirects=True) as client:
+            resp = await client.get(_CAA_FRONT.format(rg=rg))
+    except httpx.HTTPError as e:
+        logger.warning("CAA fetch failed for %s: %s", rg, e)
+        return 502, "", b""
+    if resp.status_code == 200 and resp.content:
+        return 200, resp.headers.get("content-type", "image/jpeg"), resp.content
+    if resp.status_code == 404:
+        return 404, "", b""
+    logger.warning("CAA answered %s for %s", resp.status_code, rg)
+    return 502, "", b""
+
+
+async def _caa_lookup(rg: str) -> tuple[int, str, bytes]:
+    """Cached, single-flight: a shelf on two devices asks CAA once per
+    release group. Only definite answers (200/404) are remembered."""
+    hit = _caa_cache.get(rg)
+    if hit is not None:
+        _caa_cache.move_to_end(rg)
+        return hit
+    fut = _caa_inflight.get(rg)
+    if fut is not None:
+        return await fut
+    fut = asyncio.get_running_loop().create_future()
+    _caa_inflight[rg] = fut
+    try:
+        result = await _caa_fetch(rg)
+    finally:
+        del _caa_inflight[rg]
+    if result[0] in (200, 404):
+        _caa_cache[rg] = result
+        while len(_caa_cache) > _CAA_CACHE_ENTRIES:
+            _caa_cache.popitem(last=False)
+    fut.set_result(result)
+    return result
+
+
+@router.get("/caa/{rg_mbid}")
+async def get_cover_caa(rg_mbid: str = FPath(..., min_length=36, max_length=36)):
+    try:
+        rg = str(uuid.UUID(rg_mbid))
+    except ValueError:
+        raise HTTPException(status_code=404, detail="not a release group id")
+    status, mime, body = await _caa_lookup(rg)
+    if status == 200:
+        return Response(content=body, media_type=mime,
+                        headers={"Cache-Control": f"public, max-age={_CAA_MAX_AGE}"})
+    if status == 404:
+        return Response(status_code=404, content=b"",
+                        headers={"Cache-Control": f"public, max-age={_CAA_MISS_MAX_AGE}"})
+    return _defer_cover()   # upstream trouble: the lazy <img> retries on a later render
 
 
 def _defer_cover() -> Response:

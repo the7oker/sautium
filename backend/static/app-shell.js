@@ -89,10 +89,20 @@
      caches the result in covers.id. Returns "" when neither is available
      so callers fall back to a gradient placeholder. */
 
+  // A phantom album's Cover Art Archive hotlink → our /api/covers/caa/{rg}
+  // front: CAA's redirect chain is uncacheable and its images carry no
+  // Cache-Control, so the browser re-walked it on every render; the route
+  // answers with a month of cache (a day for "no art").
+  const CAA_FRONT = /^https:\/\/coverartarchive\.org\/release-group\/([0-9a-f-]{36})\/front-500$/;
+  function caaSrc(url) {
+    const m = CAA_FRONT.exec(url || '');
+    return m ? '/api/covers/caa/' + m[1] : url;
+  }
+
   function coverUrl(item) {
     if (!item) return '';
     // External cover (Cover Art Archive) for phantom albums with no local file.
-    if (item.cover_url) return item.cover_url;
+    if (item.cover_url) return caaSrc(item.cover_url);
     if (item.cover_id) return '/api/covers/' + encodeURIComponent(item.cover_id);
     if (item.media_file_id != null) {
       return '/api/covers/by-media/' + encodeURIComponent(item.media_file_id);
@@ -4030,7 +4040,7 @@
       items.map(a => {
         const c = coverPlaceholderColors(a.title || '');
         const cover = a.cover_url
-          ? `<img src="${escapeHtml(a.cover_url)}" alt="" loading="lazy" onerror="this.style.display='none'">`
+          ? `<img src="${escapeHtml(caaSrc(a.cover_url))}" alt="" loading="lazy" onerror="this.style.display='none'">`
           : '';
         const yr = a.year ? ` · ${a.year}` : '';
         return `
