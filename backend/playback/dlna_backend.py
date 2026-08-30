@@ -41,6 +41,7 @@ except ImportError:
 
 _CMD_TIMEOUT = 10.0
 _TRACK_END_SLACK = 3.0      # STOPPED within this many seconds of the length = track finished
+_RELTIME_TOLERANCE = 3.0    # a RelTime this close to our clock is the renderer's word on it
 
 
 class DlnaAttachError(RuntimeError):
@@ -272,6 +273,9 @@ class DlnaBackend(PlayerBackend):
         # 0-based on that stream — the real track position is offset + rel.
         self._pos_offset = 0.0
         self._length = 0.0
+        # A RelTime reading that disagreed with the clock, kept until the
+        # next one confirms it (a device-side seek) or the clock wins.
+        self._rel_stray: Optional[tuple[float, float]] = None
         # A Play we issued that the renderer has not been seen acting on.
         # Until it reports PLAYING/PAUSED for this load, everything it says
         # is still about the PREVIOUS track: KANN sits in STOPPED for
@@ -510,13 +514,55 @@ class DlnaBackend(PlayerBackend):
                 return
         self._emit_now(state)
 
+    def _adopt_reltime(self, real: float, now: float) -> None:
+        """A renderer's RelTime is its word on the position — when it moves
+        with the clock. KANN on Opus reports 00:00:00 for the whole track and
+        one stray non-zero reading right after SetNextAVTransportURI (the
+        probed NEXT stream's position, live: ~1 s at 11 s in); anchoring on
+        it lost everything played before, the clock then ran that much
+        short, and every natural end read as a manual stop 6–16 s early.
+        A reading within tolerance of the clock is adopted; one far from it
+        is held, and adopted only if the next reading advanced from it —
+        that is a seek made on the device, which the clock cannot know."""
+        if abs(real - self._wall_estimate()) <= _RELTIME_TOLERANCE:
+            self._rebaseline(real)
+            self._rel_stray = None
+            return
+        if self._rel_stray is not None:
+            held, at = self._rel_stray
+            if abs(real - (held + (now - at))) <= _RELTIME_TOLERANCE:
+                self._rebaseline(real)
+                self._rel_stray = None
+                return
+        self._rel_stray = (real, now)
+        self._position = self._wall_estimate()
+
+    @staticmethod
+    def _clock() -> float:
+        """The clock the position estimate runs on: REALTIME, not monotonic.
+        A WSL2 VM's CLOCK_MONOTONIC runs slow after the host slept (measured
+        4.9 %: systemd-timesyncd steps realtime +1.47 s every 30 s while
+        monotonic is never corrected) — a monotonic estimate came up 7 s
+        short on every 152-s track and each natural end read as a manual
+        stop, halting the queue mid-album. Realtime is what the OS keeps
+        honest against the world; its corrections are small forward steps
+        the progress bar absorbs."""
+        return time.time()
+
+    def _wall_estimate(self) -> float:
+        """Position by the clock since the last anchor (a real RelTime, a
+        Play/seek, or the paused position), capped at the track length."""
+        est = self._wall_base + (self._clock() - self._wall_t0)
+        return min(est, self._length) if self._length else est
+
     def _rebaseline(self, pos: float) -> None:
         """Anchor the wall-clock position estimate at `pos` now — called
         whenever the true position is known (track start, resume, seek, or a
         real RelTime reading)."""
         self._position = pos
         self._wall_base = pos
-        self._wall_t0 = time.monotonic()
+        self._wall_t0 = self._clock()
+        self._rel_stray = None
 
     def _settle_pending_play(self, state: str) -> Optional[str]:
         """Reconcile one transport observation with a Play still awaiting
@@ -592,6 +638,7 @@ class DlnaBackend(PlayerBackend):
                     return
                 if self._loading:
                     continue   # the load sequence owns the status right now
+                t_tick = time.monotonic()
                 try:
                     await self._dmr.async_update()
                     misses = 0
@@ -642,23 +689,45 @@ class DlnaBackend(PlayerBackend):
                 # software renderers self-correct every tick; the frozen ones
                 # ride the clock instead of a stuck slider.
                 rel = self._dmr.media_position if fresh else None
+                t_update = time.monotonic()
                 if rel is not None and rel > 0.5:
                     # RelTime is 0-based on the (possibly offset) stream.
-                    self._rebaseline(self._pos_offset + float(rel))
+                    self._adopt_reltime(self._pos_offset + float(rel), self._clock())
                 elif state == "playing":
-                    est = self._wall_base + (time.monotonic() - self._wall_t0)
-                    self._position = min(est, self._length) if self._length else est
+                    self._position = self._wall_estimate()
+                elif state == "paused":
+                    # Freeze the clock: paused seconds are not played seconds,
+                    # and the wall estimate is what the track-end verdict
+                    # falls back on.
+                    self._rebaseline(self._position)
+                logger.debug("poll tick %s rel=%s dur=%s cur=…%s pos=%.1f/%.1f",
+                             state, rel, dur, (cur or "")[-14:],
+                             self._position, self._length)
                 if state == "stopped":
+                    # The verdict is about where the audio WAS when it stopped.
+                    # _position is the previous tick's value; if the tick before
+                    # the stop stalled (the renderer's control channel, the
+                    # status pipeline) it is seconds stale and a natural end
+                    # read as a manual stop — the queue halted mid-album on
+                    # KANN, 7 s short of 152 s. The clock only runs while
+                    # playing (paused re-anchors it), so it is the honest
+                    # bound.
+                    pos = max(self._position, self._wall_estimate())
                     finished = (self._length > 0 and
-                                self._position >= self._length - _TRACK_END_SLACK)
+                                pos >= self._length - _TRACK_END_SLACK)
                     logger.info("position poll exit: device stopped (pos=%.1f/%.1f finished=%s)",
-                                self._position, self._length, finished)
+                                pos, self._length, finished)
                     if finished:
                         await self._advance()
                     else:
                         self._emit_now("stopped")
                     return
                 self._emit_now(state)
+                t_emit = time.monotonic()
+                if t_emit - t_tick > 2.0:
+                    logger.warning("poll tick took %.1fs (renderer update %.1fs, "
+                                   "status emit %.1fs) — position estimate stalls",
+                                   t_emit - t_tick, t_update - t_tick, t_emit - t_update)
         except asyncio.CancelledError:
             logger.info("position poll exit: cancelled")
 
@@ -1198,7 +1267,10 @@ class DlnaBackend(PlayerBackend):
                 # this is a fresh start it has yet to confirm.
                 fresh_start = self._state_name() != "paused"
                 await self._avt("Play", Speed="1")
-                self._rebaseline(self._position)   # resume from where we are
+                # Paused → resumes where it was; stopped → UPnP Stop reset the
+                # position and Play starts the track over (KANN, live: the
+                # display sat at 151/151 while the track restarted).
+                self._rebaseline(0.0 if fresh_start else self._position)
                 self._awaiting_play = fresh_start
                 self._ensure_poll()
                 self._emit_now("loading" if fresh_start else "playing")
