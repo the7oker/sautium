@@ -593,6 +593,18 @@ def _persist_phantom_tracklist(album_id: str, artist_id: str,
                            tr["length_ms"] or sibling_lengths.get(normalize(title))), title))
     if not slot_rows:
         return 0
+    # A tracklist MB never timed is not a phantom we can do anything with. The
+    # catalog length is the only thing a provider's hit is held to, so without
+    # it the resolve accepts any listing at any duration and preview enrichment
+    # refuses the audio outright — the album shows up in the library, plays
+    # nothing and can never be verified. `_sibling_lengths` has already tried
+    # the release group's other editions by the time we get here, so this is
+    # the end of the road: leave the slots unwritten and let the caller's
+    # reconcile drop the album.
+    if not any(row[5] for row, _ in slot_rows):
+        logger.info("phantom %s (%s): MB times none of its %d tracks — not minting",
+                    album_id, rg_mbid, len(slot_rows))
+        return 0
 
     _carry_rekeyed_slots(album_id, slot_rows, slot_artists)
 
@@ -742,6 +754,20 @@ def _reconcile_phantoms(artist_id: str, missing_rgs: List[str]) -> None:
               AND NOT EXISTS (SELECT 1 FROM album_variants av WHERE av.album_id = al.id)
               {analyzed_guard}
         """, {"id": artist_id})
+
+    # A phantom with no tracklist at all — MB timed none of its tracks, so the
+    # mint declined to write one (see _persist_phantom_tracklist). Unlink it:
+    # nothing about it can be streamed, enriched or verified, and it would sit
+    # in the artist's shelf as an album that plays nothing.
+    db_execute(f"""
+        DELETE FROM album_artists aa
+        USING albums al
+        WHERE al.id = aa.album_id
+          AND aa.artist_id = %(id)s::uuid
+          AND NOT EXISTS (SELECT 1 FROM album_variants av WHERE av.album_id = al.id)
+          AND NOT EXISTS (SELECT 1 FROM album_tracks at WHERE at.album_id = al.id)
+          {analyzed_guard}
+    """, {"id": artist_id})
 
     db_execute("""
         DELETE FROM albums al
