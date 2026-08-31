@@ -295,6 +295,7 @@ def _upsert_phantom_album(artist_id: str, artist_name: str, rg: dict,
 
 # mb_release.status id (MB InsertDefaultRows): 1 = Official.
 _MB_RELEASE_STATUS_OFFICIAL = 1
+_MB_LANGUAGE_ENGLISH = 120       # MB language id; 3.5M of its ~4.4M releases
 
 
 def _release_date_key(release: dict) -> tuple:
@@ -314,10 +315,25 @@ def _pick_canonical_release(releases: List[dict]) -> Optional[dict]:
     is 65 official releases of 8 tracks, three of 137 and one box of 196,
     and Kind of Blue is decades of 5-track vinyl, cassette and CD against a
     handful of Legacy editions at 6..21. Until 2026-08-29 the rule was "the
-    most complete tracklist", which picked that box. Ties on the count go to
-    the earliest-dated release (the original edition), then the shorter
-    tracklist, then the lowest gid — deterministic, so a re-sync picks the
-    same release. Releases with no tracks never win.
+    most complete tracklist", which picked that box.
+
+    A LOCALIZED pressing then loses to an English one. MB records the
+    language a release prints its own titles in, and a national edition
+    prints them translated: Emahoy Tsegué-Maryam Guèbrou's album is one
+    German 1967 pressing ("Der heimatlose Wanderer") against four English
+    ones ("The Homeless Wanderer"), and the earliest-date rule alone took
+    the German. Translated titles are the wrong ones to hold everywhere at
+    once — streaming catalogs index the international spelling, so the
+    resolve searches for words no provider carries; an owner whose rip is
+    tagged in English never collapses onto the phantom, so P2P keeps two
+    identities for one album; and Sautium's audience is not German. English
+    is the tie-break, not a filter: a release group with no English edition
+    (a Japanese-only pressing) is untouched, and among English editions the
+    order below decides as before.
+
+    Ties then go to the earliest-dated release (the original edition), then
+    the shorter tracklist, then the lowest gid — deterministic, so a re-sync
+    picks the same release. Releases with no tracks never win.
     """
     pool = [r for r in releases if r.get("tracks")]
     if not pool:
@@ -327,7 +343,46 @@ def _pick_canonical_release(releases: List[dict]) -> Optional[dict]:
     votes = Counter(len(r["tracks"]) for r in pool)
     top = max(votes.values())
     return min((r for r in pool if votes[len(r["tracks"])] == top),
-               key=lambda r: (_release_date_key(r), len(r["tracks"]), r["release_mbid"]))
+               key=lambda r: (r.get("language") != _MB_LANGUAGE_ENGLISH,
+                              _release_date_key(r), len(r["tracks"]), r["release_mbid"]))
+
+
+def _sibling_lengths(releases: List[dict], best: dict) -> dict:
+    """Track length in ms per normalized title, taken from the release
+    group's OTHER editions — for the slots the canonical release leaves
+    blank.
+
+    MB stores a length per TRACK, not per recording, so an edition whose
+    durations nobody ever entered leaves its whole tracklist blank while a
+    sibling pressing of the same works carries them (Emahoy Tsegué-Maryam
+    Guèbrou's "Spielt eigene Kompositionen": the picked edition blank, the
+    "Spielt Eigen Kompositionen" pressing complete). For a phantom that is
+    not a missing display value — the catalog length is the ONLY thing a
+    provider's hit is held to, so without it the resolve accepts any
+    listing at any duration and preview enrichment then refuses the audio
+    outright, having no way to verify the match. That album streamed a 31 s
+    video for an 8:26 piece and produced no analysis at all.
+
+    Keyed on the TITLE, never the position: a sibling edition reorders and
+    retitles ("The Last Day of the Deceased" sits at position 2 where ours
+    has "The Last Tears of the Deceased"), and a length read off the
+    position alone is another track's. The modal value wins, as in
+    _pick_canonical_release — reissues agree on the master, an outlier edit
+    does not.
+    """
+    if all(t["length_ms"] for t in best["tracks"]):
+        return {}
+    wanted = {normalize(t["title"] or "") for t in best["tracks"] if not t["length_ms"]}
+    wanted.discard("")
+    seen: dict = {}
+    for r in releases:
+        if r["release_mbid"] == best["release_mbid"]:
+            continue
+        for t in r["tracks"]:
+            key = normalize(t["title"] or "")
+            if key in wanted and t["length_ms"]:
+                seen.setdefault(key, Counter())[t["length_ms"]] += 1
+    return {k: c.most_common(1)[0][0] for k, c in seen.items()}
 
 
 def _carry_rekeyed_slots(album_id: str, slot_rows: list, slot_artists: dict) -> int:
@@ -427,9 +482,11 @@ def _persist_phantom_tracklist(album_id: str, artist_id: str,
     analysis (delete_orphan_tracks spares it). Returns slots written.
     """
     from transliterate import latinize
-    best = _pick_canonical_release(mb.fetch_release_tracklists(rg_mbid))
+    releases = mb.fetch_release_tracklists(rg_mbid)
+    best = _pick_canonical_release(releases)
     if not best:
         return 0
+    sibling_lengths = _sibling_lengths(releases, best)
 
     # The album's artists by MB gid and by normalized name. A credit head that
     # IS one of them uses THAT artist's row — not the row of whichever
@@ -485,7 +542,8 @@ def _persist_phantom_tracklist(album_id: str, artist_id: str,
             artist_rows.append((tid, "featured", fid))
         slot_artists[tid] = slot_artist_id
         slot_rows.append(((album_id, tid, tr["disc"] or 1, tr["position"],
-                           tr["recording_mbid"], tr["length_ms"]), title))
+                           tr["recording_mbid"],
+                           tr["length_ms"] or sibling_lengths.get(normalize(title))), title))
     if not slot_rows:
         return 0
 

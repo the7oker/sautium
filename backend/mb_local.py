@@ -206,7 +206,9 @@ def fetch_release_tracklists(rg_mbid: str) -> List[dict]:
     ``[year, month, day]`` with the unknown parts None, or None when MB has
     no date at all — the pick's tie-break toward the original edition.
     ``name`` is the MB release title — the clean label an owned edition
-    adopts once its tracklist matches this release. ``credit`` is the track's
+    adopts once its tracklist matches this release. ``language`` is MB's
+    language id for the release's own titles (120 = English), the signal the
+    canonical pick uses to skip a localized pressing. ``credit`` is the track's
     own artist credit as printed ("Daft Punk feat. Pharrell Williams" — join
     phrases included, the way a tag would carry it); ``credit_artist_mbid``
     is that artist's gid when the credit names exactly one artist, else
@@ -220,6 +222,7 @@ def fetch_release_tracklists(rg_mbid: str) -> List[dict]:
     """
     rows = db_query("""
         SELECT r.gid::text AS release_mbid, r.name AS release_name, r.status,
+               r.language,
                (SELECT ARRAY[d.y, d.m, d.d] FROM (
                     SELECT rc.date_year AS y, rc.date_month AS m, rc.date_day AS d
                     FROM mb_release_country rc WHERE rc.release = r.id
@@ -255,7 +258,7 @@ def fetch_release_tracklists(rg_mbid: str) -> List[dict]:
         rel = rels.setdefault(r["release_mbid"],
                               {"release_mbid": r["release_mbid"],
                                "name": r["release_name"] or "",
-                               "status": r["status"],
+                               "status": r["status"], "language": r["language"],
                                "release_date": r["release_date"], "tracks": []})
         rel["tracks"].append({
             "title": r["title"] or "",

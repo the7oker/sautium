@@ -21,11 +21,21 @@ logger = logging.getLogger(__name__)
 
 
 def norm_key(s: str) -> str:
-    """Comparison key for names across catalogs: case-folded alphanumerics,
-    every script kept. The catalog credits 細野晴臣 and ሙላቱ አስታጥቄ under their
-    own scripts; a key that strips non-Latin letters compares every such
-    artist as the empty string and lets any channel through."""
-    return "".join(ch for ch in unicodedata.normalize("NFKC", s or "").casefold()
+    """Comparison key for names across catalogs: case-folded alphanumerics
+    with the accents folded away, every script kept. The catalog credits
+    細野晴臣 and ሙላቱ አስታጥቄ under their own scripts; a key that strips non-Latin
+    letters compares every such artist as the empty string and lets any
+    channel through.
+
+    Accents fold because catalogs drop them and we cannot tell which spelling
+    a given one kept: MusicBrainz's "Tsegué-Maryam Guebrou" is Deezer's
+    "Tsegue-maryam Guebrou", and holding the artist gate to the accent
+    rejected an exact title at an exact length. This is a comparison key
+    only — identity keys on uuid_utils.normalize, which is a different
+    function and unaffected."""
+    bare = "".join(ch for ch in unicodedata.normalize("NFD", s or "")
+                   if not unicodedata.combining(ch))
+    return "".join(ch for ch in unicodedata.normalize("NFKC", bare).casefold()
                    if ch.isalnum())
 
 
