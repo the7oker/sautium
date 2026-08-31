@@ -306,6 +306,32 @@ def _release_date_key(release: dict) -> tuple:
                  for i in range(3))
 
 
+def _script_tier(release: dict) -> int:
+    """How Latin this tracklist reads: 0 = essentially all, 1 = mixed, 2 = not.
+
+    This is about REACH, not legibility. A provider is searched by the words
+    we hold, and `_corroborate` lines a catalog album up against ours by title
+    — so a tracklist in katakana matches nothing on a catalog that sells the
+    same album in romaji, and the album resolves nowhere at all. Haruomi
+    Hosono's "Pacific" is on Deezer as Saigono Rakuen / Coral Reef / Cosmic
+    Surfin', second for second the MB romaji edition; against MB's Japanese
+    pressing (最後の楽園 / コーラル・リーフ) not one pair would form. Its
+    barcode does not rescue it either — the release Deezer's UPC names carries
+    Japanese titles in MB, so the tracklist still fails to line up.
+
+    Measured off the TITLES, never MB's `script` field, which is unreliable:
+    that same "Pacific" has a script=Latin release titled in katakana, and
+    trusting the field moved 26 picks to buy 10 Latin tracklists where reading
+    the titles moved 17 to buy 14. Coarse tiers so an accented word never
+    moves a pick; a tracklist of pure digits counts as Latin.
+    """
+    letters = [c for t in release["tracks"] for c in (t["title"] or "") if c.isalpha()]
+    if not letters:
+        return 0
+    share = sum(1 for c in letters if c.isascii()) / len(letters)
+    return 0 if share >= 0.9 else (1 if share >= 0.5 else 2)
+
+
 def _unnamed_tracks(release: dict) -> int:
     """Slots the catalog left without a name. "[untitled]" is MB's marker for
     what a DISC carries and no one titled — a pregap, a hidden track, a data
@@ -342,8 +368,9 @@ def _pick_canonical_release(releases: List[dict]) -> Optional[dict]:
     (a Japanese-only pressing) is untouched, and among English editions the
     order below decides as before.
 
-    A pressing that leaves slots UNNAMED then loses to one that names them
-    all. Two editions can share a tracklist length and still not the same
+    A tracklist a catalog cannot be searched by then loses to one it can
+    (`_script_tier`), and a pressing that leaves slots UNNAMED loses to one
+    that names them all. Two editions can share a tracklist length and still not the same
     tracklist: the "Make the Road by Walking" CD spends its 11th slot on an
     8-second [untitled] pregap and merges two works into its 10th, where the
     digital edition of the same 11 names every one. Counting slots cannot
@@ -363,7 +390,7 @@ def _pick_canonical_release(releases: List[dict]) -> Optional[dict]:
     top = max(votes.values())
     return min((r for r in pool if votes[len(r["tracks"])] == top),
                key=lambda r: (r.get("language") != _MB_LANGUAGE_ENGLISH,
-                              _unnamed_tracks(r),
+                              _script_tier(r), _unnamed_tracks(r),
                               _release_date_key(r), len(r["tracks"]), r["release_mbid"]))
 
 
