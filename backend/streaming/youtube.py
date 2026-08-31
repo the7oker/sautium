@@ -182,7 +182,7 @@ class YouTubeProvider(StreamProvider):
             q = queries[i]
             if isinstance(cs, ProviderUnavailable) or not q.album_id:
                 continue
-            gates = [g for g in (norm_key(a) for a in (q.artist, *q.artist_alts)) if g]
+            gates = self._gates(q)
             for c in self._title_attested(q, cs, gates):
                 if fits_length(q, c["duration"]):
                     (votes.setdefault(q.album_id, {})
@@ -190,6 +190,15 @@ class YouTubeProvider(StreamProvider):
         return {aid: frozenset(ch for ch, tracks in by_ch.items()
                                if len(tracks) >= self.ALBUM_CONSENSUS)
                 for aid, by_ch in votes.items()}
+
+    @staticmethod
+    def _gates(query: TrackQuery) -> list:
+        """The names a source must carry to be this query's artist: the credit,
+        its MB alternates, and — where the catalog names them — the performers.
+        A release can be filed under either (a work is issued under its composer
+        as readily as under the ensemble playing it), so both are admitted."""
+        names = (query.artist, *query.artist_alts, *query.performers)
+        return [g for g in (norm_key(a) for a in names) if g]
 
     def _title_attested(self, query: TrackQuery, cands: list, gates: list) -> list:
         """Candidates whose TITLE stands for this track: it is the work and
@@ -226,18 +235,22 @@ class YouTubeProvider(StreamProvider):
         # in their title, e.g. a "Duo Diamanti" upload titled "Musica Nuda - Lunedì").
         # Any MB-canonical alternate satisfies the gate — YouTube channels a band
         # under its canonical name even when our credit is a lineup variant. A
-        # gate wipe-out retries the search ONCE under the canonical name.
-        gates = [g for g in (norm_key(a) for a in (query.artist, *query.artist_alts)) if g]
+        # gate wipe-out retries the search ONCE under the canonical name. Where
+        # the credit names PERFORMERS they are the gate instead (see _gates):
+        # "Steve Reich and Musicians - Topic" carries the composer's name and so
+        # passed for an album played by Ensemble Contrechamps — another reading
+        # of the same work, two of whose sections happened to fit the length.
+        gates = self._gates(query)
         matched = ([c for c in cands if any(g in norm_key(c["channel"]) for g in gates)]
                    if gates else cands)
-        if not matched and query.artist_alts:
+        if not matched and query.artist_alts and not query.performers:
             alt = self._flat_search(f"{query.artist_alts[0]} {query.title}".strip())
             matched = [c for c in alt if any(g in norm_key(c["channel"]) for g in gates)]
             seen = {c["id"] for c in cands}
             cands = cands + [c for c in alt if c["id"] not in seen]
         if not cands:
             raise ProviderError(f"youtube: no results for {search!r}")
-        if not matched and trusted:
+        if not matched and trusted and not query.performers:
             # No channel names the artist, but this track's ALBUM has vouched
             # for one (_album_consensus): a channel holding the tracklist under
             # its own titles at its own lengths. Its upload for this track is
@@ -245,6 +258,16 @@ class YouTubeProvider(StreamProvider):
             # still decides. Corroborated, never merely plausible: with `trusted`
             # empty (a lone track, or an album that vouched for nobody) this
             # tier does not exist and the resolve fails instead of guessing.
+            #
+            # It is also refused outright for a performed work. The tier reads
+            # a channel answering several of one tracklist as holding a rip of
+            # it — true for a band whose titles are its own, false for a work
+            # every ensemble records under the SAME section names at nearly the
+            # same lengths: Colin Currie's Music for 18 Musicians matched four
+            # sections of Ensemble Contrechamps' reading (291 s against 289,
+            # 81 against 85) and that was enough to vouch for the whole
+            # channel. Where MB names the performers, only a channel that names
+            # them will do.
             matched = [c for c in self._title_attested(query, cands, gates)
                        if norm_key(c["channel"]) in trusted]
             if matched:

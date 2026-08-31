@@ -1898,6 +1898,47 @@ def _album_primary_artists(album_ids: list) -> dict:
     return {k: tuple(v) for k, v in out.items()}
 
 
+def _album_performers(album_ids: list) -> dict:
+    """Performers per album id — the artists an MB credit names AFTER the
+    composers, split on the ';' its join phrases carry ("Steve Reich;
+    Ensemble Contrechamps & Eklekto", "Rihm, Currier; Anne-Sophie Mutter,
+    New York Philharmonic, …").
+
+    A classical release group IS one reading of a work, but our album is
+    credited to whoever wrote it, and every other ensemble's reading of the
+    same movements runs to nearly the same length: Music for 18 Musicians by
+    Contrechamps/Eklekto matched Reich's own 1978 recording on two of
+    fourteen sections (239 s against a catalogued 233 s — 2.6 %, well inside
+    the tolerance) and would have streamed the wrong ensemble. The composer's
+    name gates nothing here; the performers do. Empty for albums whose credit
+    names only the artist — the ordinary case, where nothing changes."""
+    import mb_backend as mb
+    if not album_ids or not mb.LOCAL_DUMP:
+        return {}
+    rows = _db_query("""
+        SELECT a.id::text AS album_id, acn.position,
+               COALESCE(ma.name, acn.name) AS artist, acn.join_phrase
+        FROM albums a
+        JOIN mb_release_group rg ON rg.gid = a.musicbrainz_id
+        JOIN mb_artist_credit_name acn ON acn.artist_credit = rg.artist_credit
+        LEFT JOIN mb_artist ma ON ma.id = acn.artist
+        WHERE a.id = ANY(CAST(%(ids)s AS uuid[]))
+        ORDER BY a.id, acn.position
+    """, {"ids": album_ids})
+    members: dict = {}
+    for r in rows:
+        members.setdefault(r["album_id"], []).append(r)
+    out: dict = {}
+    for aid, ms in members.items():
+        split = next((i for i, m in enumerate(ms) if ";" in (m["join_phrase"] or "")), None)
+        if split is None:
+            continue
+        names = tuple(m["artist"] for m in ms[split + 1:] if m["artist"])
+        if names:
+            out[aid] = names
+    return out
+
+
 def _album_barcodes(album_ids: list) -> dict:
     """MB barcodes per album id — those of the release group's editions that
     carry exactly this many tracks, i.e. the tracklist the phantom shows. A
@@ -1973,6 +2014,7 @@ def _phantom_track_queries(track_ids: list[str]) -> dict:
     album_ids = list({r["album_id"] for r in rows})
     owners = _album_primary_artists(album_ids)
     codes = _album_barcodes(album_ids)
+    players = _album_performers(album_ids)
     alts = {(r["artist"], r["album_id"]): _credit_alts(r["artist"], owners.get(r["album_id"], ()))
             for r in rows if r["artist"]}
     return {
@@ -1983,7 +2025,8 @@ def _phantom_track_queries(track_ids: list[str]) -> dict:
             lengths=tuple(float(ms) / 1000.0 for ms in (r["lengths_ms"] or [])),
             track_id=r["track_id"], cover_url=r["cover_url"],
             album_id=r["album_id"], album_artists=owners.get(r["album_id"], ()),
-            barcodes=codes.get(r["album_id"], ()))
+            barcodes=codes.get(r["album_id"], ()),
+            performers=players.get(r["album_id"], ()))
         for r in rows if r["title"]
     }
 
@@ -2024,6 +2067,7 @@ def _phantom_album_queries(album_id: str, track_id: Optional[str] = None) -> lis
     """, {"album_id": album_id, "track_id": track_id})
     album_artists = _album_primary_artists([album_id]).get(album_id, ())
     barcodes = _album_barcodes([album_id]).get(album_id, ())
+    performers = _album_performers([album_id]).get(album_id, ())
     alts = {n: _credit_alts(n, album_artists) for n in {r["artist"] for r in rows if r["artist"]}}
     return [
         TrackQuery(
@@ -2031,7 +2075,7 @@ def _phantom_album_queries(album_id: str, track_id: Optional[str] = None) -> lis
             artist_alts=alts.get(r["artist"], ()),
             duration=(float(r["length_ms"]) / 1000.0 if r["length_ms"] else None),
             track_id=r["track_id"], cover_url=r["cover_url"], album_id=album_id,
-            album_artists=album_artists, barcodes=barcodes)
+            album_artists=album_artists, barcodes=barcodes, performers=performers)
         for r in rows if r["title"]
     ]
 

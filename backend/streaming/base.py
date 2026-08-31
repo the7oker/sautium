@@ -185,6 +185,12 @@ class TrackQuery:
     barcodes: tuple = ()               # MB barcodes of the editions carrying this very
                                        # tracklist — the release itself, where a catalog answers
                                        # to a barcode (Deezer /album/upc:); no search to second-guess
+    performers: tuple = ()             # who PLAYS this album, when the credit names them apart
+                                       # from who wrote it ("Steve Reich; Ensemble Contrechamps &
+                                       # Eklekto"). A work has many readings and they run to
+                                       # similar lengths, so the composer's name identifies none
+                                       # of them — where these are known they are the artist gate,
+                                       # and the composer alone stops being enough
 
 
 @dataclass
