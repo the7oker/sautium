@@ -306,6 +306,17 @@ def _release_date_key(release: dict) -> tuple:
                  for i in range(3))
 
 
+def _unnamed_tracks(release: dict) -> int:
+    """Slots the catalog left without a name. "[untitled]" is MB's marker for
+    what a DISC carries and no one titled — a pregap, a hidden track, a data
+    session: Menahan Street Band's "Make the Road by Walking" CD ends on an
+    8-second [untitled] where the digital edition of the same 11 tracks simply
+    ends. Such a slot is an artefact of the medium, not a work: it names
+    nothing a provider could resolve and nothing a listener asked for."""
+    return sum(1 for t in release["tracks"]
+               if (t["title"] or "").strip().lower() in ("", "[untitled]"))
+
+
 def _pick_canonical_release(releases: List[dict]) -> Optional[dict]:
     """The release whose tracklist represents the phantom album.
 
@@ -331,6 +342,14 @@ def _pick_canonical_release(releases: List[dict]) -> Optional[dict]:
     (a Japanese-only pressing) is untouched, and among English editions the
     order below decides as before.
 
+    A pressing that leaves slots UNNAMED then loses to one that names them
+    all. Two editions can share a tracklist length and still not the same
+    tracklist: the "Make the Road by Walking" CD spends its 11th slot on an
+    8-second [untitled] pregap and merges two works into its 10th, where the
+    digital edition of the same 11 names every one. Counting slots cannot
+    tell them apart, and the artefact then sits in the album view as a track
+    nothing can resolve.
+
     Ties then go to the earliest-dated release (the original edition), then
     the shorter tracklist, then the lowest gid — deterministic, so a re-sync
     picks the same release. Releases with no tracks never win.
@@ -344,6 +363,7 @@ def _pick_canonical_release(releases: List[dict]) -> Optional[dict]:
     top = max(votes.values())
     return min((r for r in pool if votes[len(r["tracks"])] == top),
                key=lambda r: (r.get("language") != _MB_LANGUAGE_ENGLISH,
+                              _unnamed_tracks(r),
                               _release_date_key(r), len(r["tracks"]), r["release_mbid"]))
 
 
