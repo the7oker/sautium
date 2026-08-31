@@ -601,10 +601,20 @@ def _persist_phantom_tracklist(album_id: str, artist_id: str,
     # the release group's other editions by the time we get here, so this is
     # the end of the road: leave the slots unwritten and let the caller's
     # reconcile drop the album.
-    if not any(row[5] for row, _ in slot_rows):
+    timed = [(row, title) for row, title in slot_rows if row[5]]
+    if not timed:
         logger.info("phantom %s (%s): MB times none of its %d tracks — not minting",
                     album_id, rg_mbid, len(slot_rows))
         return 0
+    if len(timed) < len(slot_rows):
+        # Same rule per slot: an untimed track on an otherwise timed album is
+        # just as unplayable, and leaving it in the tracklist offers the
+        # listener a row that resolves nothing. The positions keep MB's
+        # numbering, so the gap says plainly that the catalog has no such
+        # track for us rather than renumbering the album into a lie.
+        logger.info("phantom %s (%s): MB times %d of %d tracks — minting the timed ones",
+                    album_id, rg_mbid, len(timed), len(slot_rows))
+        slot_rows = timed
 
     _carry_rekeyed_slots(album_id, slot_rows, slot_artists)
 
