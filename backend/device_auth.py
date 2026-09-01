@@ -153,6 +153,30 @@ def account_configured() -> bool:
     return bool(account_username()) and _expected_pubkey() is not None
 
 
+def account_anonymous() -> bool:
+    """True when nobody knows this node's password.
+
+    The setup wizard turns a skipped account form into a real identity —
+    `anonymous-<4 hex>` plus a 32-byte random password that is derived,
+    used and dropped, never shown. Such a node HAS an account and still
+    cannot be signed into by password: the PIN is its only door. Reading
+    that off the username shape is the fallback for identities minted
+    before the flag was written."""
+    import json
+    import re
+
+    d = _identity_dir()
+    if d is None:
+        return False
+    try:
+        info = json.loads((d / "node_info.json").read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return False
+    if "anonymous" in info:
+        return bool(info["anonymous"])
+    return bool(re.fullmatch(r"anonymous-[0-9a-f]{4}", info.get("username") or ""))
+
+
 class AccountExists(Exception):
     """Raised when setup is attempted on a node that already has an identity."""
 

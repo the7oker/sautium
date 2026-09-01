@@ -28,6 +28,7 @@
   const TOKEN_KEY = "sautium.device_token";
   const enc = new TextEncoder();
   let _key = null;
+  let _keyToken = "";          // the token _key was imported from
 
   function storedToken() {
     try {
@@ -43,20 +44,38 @@
       else localStorage.removeItem(TOKEN_KEY);
     } catch { /* nothing to do — auth degrades to "log in every load" */ }
     _key = null;               // force re-import on next signature
+    _keyToken = "";
   }
 
+  // Storage is read on every signature, and the imported key is a cache OF
+  // that read rather than a copy that outlives it. localStorage belongs to
+  // the origin, not to this tab: a second tab redeeming a pairing link
+  // replaces the token underneath us, and a key kept from before that point
+  // signs requests the server correctly rejects — which was then read as
+  // "the token is dead" and logged every tab out, the freshly paired one
+  // included.
+  //
+  // Returns {key, token} — the pair, never the key alone, so a signature
+  // stays attributable to the token that made it even when a concurrent
+  // request re-imports the cache in between.
   async function getKey() {
-    if (_key) return _key;
     const tok = storedToken();
-    if (!tok) return null;
-    _key = await crypto.subtle.importKey(
+    if (!tok) {
+      _key = null;
+      _keyToken = "";
+      return null;
+    }
+    if (_key && _keyToken === tok) return { key: _key, token: tok };
+    const key = await crypto.subtle.importKey(
       "raw",
       enc.encode(tok),
       { name: "HMAC", hash: "SHA-256" },
       false,
       ["sign"]
     );
-    return _key;
+    _key = key;
+    _keyToken = tok;
+    return { key, token: tok };
   }
 
   function toHex(buf) {
@@ -89,13 +108,17 @@
   }
 
   async function signRequest(method, pathAndQuery, body) {
-    const key = await getKey();
-    if (!key) return null;     // not paired yet — send the request unsigned
+    const signer = await getKey();
+    if (!signer) return null;  // not paired yet — send the request unsigned
     const ts = Math.floor(Date.now() / 1000).toString();
     const bodyHash = await sha256Hex(await bodyBytes(body));
     const canonical = `${method}\n${pathAndQuery}\n${ts}\n${bodyHash}`;
-    const sigBuf = await crypto.subtle.sign("HMAC", key, enc.encode(canonical));
-    return { ts, sig: toHex(sigBuf) };
+    const sigBuf = await crypto.subtle.sign("HMAC", signer.key,
+                                            enc.encode(canonical));
+    // The token rides back with the signature: a 401 has to be attributable
+    // to the key that actually produced it, not to whatever is in storage by
+    // the time the answer lands.
+    return { ts, sig: toHex(sigBuf), token: signer.token };
   }
 
   // -- fetch override --------------------------------------------------------
@@ -147,25 +170,33 @@
 
     let resp = await _origFetch(input, { ...init, headers });
 
-    // Stale timestamp: the request sat in the network queue past the replay
-    // window — a frozen phone tab flushes requests signed minutes ago on
-    // wake. The token is fine and the server rejected the request before
-    // handling it, so re-signing and retrying once is always safe.
-    if (resp.status === 401 && signed &&
-        resp.headers.get("X-Sautium-Auth-Error") === "stale-ts") {
-      const fresh = await signRequest(method, pathAndQuery, body);
-      const retryHeaders = new Headers(init.headers || {});
-      retryHeaders.set("X-Sautium-Ts", fresh.ts);
-      retryHeaders.set("X-Sautium-Sig", fresh.sig);
-      resp = await _origFetch(input, { ...init, headers: retryHeaders });
-    }
+    // Two 401s say nothing about the token itself, and both are repaired by
+    // signing again:
+    //   stale-ts — the request sat in the network queue past the replay
+    //     window; a frozen phone tab flushes minutes-old signatures on wake.
+    //   bad-sig over a token that is no longer the stored one — the browser
+    //     signed in (a pairing link, another tab) while this request was in
+    //     flight, so what the server rejected is a key that has already been
+    //     superseded here.
+    const authError = resp.status === 401 && signed
+      ? resp.headers.get("X-Sautium-Auth-Error") : null;
+    const superseded = authError === "bad-sig" &&
+      storedToken() && storedToken() !== signed.token;
 
-    // Only a rejected signature means the token is dead (epoch bumped by a
-    // password change or "log out everywhere") — drop it so the app falls
-    // back to the login screen. Any other 401 is the route's own verdict
-    // (e.g. an expired media URL) and says nothing about the token.
-    if (resp.status === 401 && signed &&
-        resp.headers.get("X-Sautium-Auth-Error") === "bad-sig") {
+    if (authError === "stale-ts" || superseded) {
+      const fresh = await signRequest(method, pathAndQuery, body);
+      if (fresh) {
+        const retryHeaders = new Headers(init.headers || {});
+        retryHeaders.set("X-Sautium-Ts", fresh.ts);
+        retryHeaders.set("X-Sautium-Sig", fresh.sig);
+        resp = await _origFetch(input, { ...init, headers: retryHeaders });
+      }
+    } else if (authError === "bad-sig") {
+      // The token the browser still holds is the one the server refused, so
+      // it is genuinely dead (epoch bumped by a password change or "log out
+      // everywhere", or a different node answering on this address now).
+      // Any other 401 is the route's own verdict (e.g. an expired media URL)
+      // and says nothing about the token.
       setToken("");
       window.dispatchEvent(new CustomEvent("sautium:auth-required"));
     }
@@ -281,9 +312,14 @@
           : "Enter the account password.";
         fields.innerHTML = input("auth-pass", "password", "password");
       } else {
+        // Nothing to ask for but the PIN: this node's account was created
+        // without a password anyone has seen. Both host affordances end
+        // here — "Open Web UI" signs a browser on that machine in outright,
+        // and the code beside the QR is what a device elsewhere types.
         msg.textContent =
-          "Open Sautium on the computer that runs it, press “Pair a device” " +
-          "in Settings, and type the code shown there.";
+          "This node has no account password. On the computer that runs " +
+          "Sautium press “Open Web UI”, or type the pairing code shown " +
+          "under the QR there.";
         fields.innerHTML = input("auth-pin", "text", "XXXX-XXXX");
       }
       const first = fields.querySelector("input");
@@ -326,6 +362,19 @@
 
   window.Sautium.auth.showLoginGate = showLoginGate;
   window.addEventListener("sautium:auth-required", showLoginGate);
+
+  // The token belongs to the origin, so signing in or out is news for every
+  // other tab of it — and the tab that learns it by failing a request has
+  // already shown the user a broken screen. `storage` fires in the tabs that
+  // did NOT make the change, which is exactly the audience.
+  window.addEventListener("storage", (e) => {
+    if (e.key !== null && e.key !== TOKEN_KEY) return;   // null = clear()
+    if (!storedToken()) {
+      showLoginGate();
+    } else if (document.getElementById("auth-gate")) {
+      location.reload();       // signed in elsewhere — this tab can go on
+    }
+  });
 
   // A pairing code can arrive in the URL fragment — that is how the launcher's
   // "Open Web UI" button and its QR sign a device in without anyone reading a

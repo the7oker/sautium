@@ -43,7 +43,11 @@ async def auth_status() -> dict:
     pairing PIN is currently outstanding."""
     configured = device_auth.account_configured()
     return {
-        "password_login": configured,
+        # An anonymous account (wizard, random password nobody has seen) is
+        # configured and still has no password door. Reporting one sent the
+        # UI to a prompt that could never be satisfied, on the very nodes the
+        # PIN exists for.
+        "password_login": configured and not device_auth.account_anonymous(),
         # No account yet: the node cannot be signed into at all, so the UI
         # offers to create one. The window closes for good the moment it is.
         "onboarding": not configured,

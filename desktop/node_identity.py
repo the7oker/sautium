@@ -233,6 +233,7 @@ def create_account(
     password: str,
     email: str = "",
     email_verified: bool = False,
+    anonymous: bool = False,
 ) -> dict:
     """
     Create or recover account from username + password.
@@ -240,7 +241,11 @@ def create_account(
     Uses Argon2id to derive deterministic Ed25519 keypair.
     Same username + password on any device = same keys = same identity.
 
-    Returns: {node_id, public_key_hex, algorithm, username, invite_code, email, email_verified}
+    `anonymous` records that the password was minted rather than chosen, so
+    nobody can ever type it. It is what tells the login gate to offer the
+    pairing PIN instead of a password prompt nothing could satisfy.
+
+    Returns: {node_id, public_key_hex, algorithm, username, invite_code, email, email_verified, anonymous}
     """
     if not HAS_CRYPTO:
         raise RuntimeError("cryptography package required")
@@ -263,6 +268,7 @@ def create_account(
         "invite_code": invite_code,
         "email": email,
         "email_verified": email_verified,
+        "anonymous": anonymous,
     }
     _save_keypair(private_key, info)
     logger.info(f"Account created: {username} (invite: {invite_code})")
@@ -355,6 +361,10 @@ def rotate_keys(username: str, new_password: str) -> dict:
         "algorithm": "Ed25519",
         "username": username,
         "invite_code": new_invite_code,
+        # Whatever the password was before, this one was typed by its owner —
+        # so the password door opens from here on, even for an account that
+        # kept its `anonymous-XXXX` name.
+        "anonymous": False,
     }
     _save_keypair(new_private, new_info)
 

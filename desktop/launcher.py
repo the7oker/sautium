@@ -162,6 +162,17 @@ class LauncherApp(ctk.CTk):
         self._qr_labels: dict = {}
         self._qr_drawn: Optional[list] = None   # targets the row currently shows
 
+        # The same code in text, for a device with no camera. It is drawn
+        # from the one current_pin() the QRs encode, so the two cannot
+        # disagree — and without it the login gate's "type the code shown
+        # on the host" was an instruction about a code the host never wrote
+        # down anywhere.
+        self._qr_code_label = ctk.CTkLabel(
+            self, text="", text_color="gray",
+            font=ctk.CTkFont(size=11),
+        )
+        self._qr_code_label.pack(pady=(2, 0))
+
         # No loopback URL line: "Open Web UI" already opens exactly that, and
         # the addresses another device would use are captioned under their QR.
 
@@ -559,6 +570,8 @@ class LauncherApp(ctk.CTk):
         code = info.get("code")
         port = self.config.get("ports", {}).get("web", 8000)
         fragment = f"#pair={code}" if code else ""
+        self._qr_code_label.configure(
+            text=f"Pairing code: {code}" if code else "")
 
         # Rebuild whenever the set of addresses changes, rather than adding to
         # what is there. The addresses are not fixed: Tailscale can be

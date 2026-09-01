@@ -1746,6 +1746,7 @@ class SetupWizard(ctk.CTkToplevel):
                         account_data["password"],
                         email=account_data.get("email", ""),
                         email_verified=account_data.get("email_verified", False),
+                        anonymous=account_data.get("anonymous", False),
                     )
                     logger.info(
                         f"Account created: {info['invite_code']}"
