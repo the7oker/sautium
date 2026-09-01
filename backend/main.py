@@ -1039,6 +1039,7 @@ def _scan_worker(limit: Optional[int], skip_existing: bool, subpath: Optional[st
                         progress_cb=lambda msg: state.update(progress=msg),
                         subpath=subpath,
                         cancel_check=lambda: state["cancel_requested"],
+                        disk_paths=scanner.last_disk_paths,
                     )
                     result["prune"] = prune_stats
                     logger.info(f"Prune results: {prune_stats}")

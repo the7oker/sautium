@@ -12,7 +12,7 @@ from collections import defaultdict
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
 from pathlib import Path
-from typing import Optional, Dict, Any, List, Tuple
+from typing import Optional, Dict, Any, List, Set, Tuple
 
 import mutagen
 from mutagen.flac import FLAC
@@ -116,6 +116,9 @@ class LibraryScanner:
             raise ValueError(f"Library path does not exist: {self.library_path}")
 
         logger.info(f"Initialized scanner for: {self.library_path}")
+        # Host paths of the last FULL discovery, for the prune that closes a
+        # scan run (see scan_and_import).
+        self.last_disk_paths: Optional[Set[str]] = None
 
     @staticmethod
     def extract_metadata(file_path: Path) -> Optional[Dict[str, Any]]:
@@ -430,6 +433,14 @@ class LibraryScanner:
         if not audio_files:
             logger.warning("No audio files found")
             return stats
+
+        # The prune that closes a scan run reconciles this very tree, and the
+        # walk costs ~6 min on the reference library over drvfs. Hand it this
+        # one. A limited scan truncates the list, so it never becomes a prune
+        # input — everything outside the limit would read as deleted.
+        self.last_disk_paths = None if limit else {
+            settings.translate_to_host_path(str(fp.absolute())) for fp in audio_files
+        }
 
         total_files = len(audio_files)
 
@@ -919,14 +930,20 @@ def prune_missing_files(
     progress_cb: Optional[callable] = None,
     subpath: Optional[str] = None,
     cancel_check: Optional[callable] = None,
+    disk_paths: Optional[Set[str]] = None,
 ) -> Dict[str, int]:
     """Remove DB records for files that no longer exist on disk.
 
     Uses a single directory scan + set difference instead of per-file exists()
     calls, which is orders of magnitude faster on WSL2/network mounts.
 
-    Deletion order: MediaFile → Track → AlbumVariant → Album → Artist.
-    DB-level ON DELETE CASCADE handles child tables (embeddings, stats, etc).
+    Deletion order: MediaFile → Track → AlbumVariant → Album → Artist, each
+    step scoped to the rows the removed files justified — the phantom layer
+    is not this function's business. DB-level ON DELETE CASCADE handles child
+    tables (embeddings, stats, etc).
+
+    disk_paths lets a caller that has just walked the tree hand its result in
+    (see LibraryScanner.scan_and_import) instead of paying for a second walk.
 
     cancel_check is forwarded to find_audio_files so a Cancel tap takes
     effect during the slow disk-discovery phase.
@@ -936,15 +953,26 @@ def prune_missing_files(
     stats = {"checked": 0, "pruned": 0, "orphan_tracks": 0,
              "orphan_variants": 0, "orphan_albums": 0, "orphan_artists": 0}
 
-    if progress_cb:
-        progress_cb("Discovering files on disk...")
+    if disk_paths is None:
+        if progress_cb:
+            progress_cb("Discovering files on disk...")
 
-    scanner = LibraryScanner()
-    disk_files, _cues = scanner.find_audio_files(subpath=subpath, cancel_check=cancel_check)
-    if cancel_check and cancel_check():
-        logger.info("Prune cancelled during discovery")
+        scanner = LibraryScanner()
+        disk_files, _cues = scanner.find_audio_files(subpath=subpath, cancel_check=cancel_check)
+        if cancel_check and cancel_check():
+            logger.info("Prune cancelled during discovery")
+            return stats
+        disk_paths = {settings.translate_to_host_path(str(fp.absolute())) for fp in disk_files}
+
+    # An empty tree is an unmounted library (E:/Music rides a drvfs mount that
+    # does not survive a host shutdown), never a library the owner emptied —
+    # and every DB record would read as missing.
+    if not disk_paths:
+        logger.error("Prune aborted: discovery found no audio files under "
+                     f"{settings.music_library_path} — library not mounted?")
+        if progress_cb:
+            progress_cb("Prune skipped: no files found on disk")
         return stats
-    disk_paths = {settings.translate_to_host_path(str(fp.absolute())) for fp in disk_files}
 
     with get_db_context() as db:
         query = db.query(MediaFile.id, MediaFile.file_path)
@@ -972,49 +1000,67 @@ def prune_missing_files(
         if progress_cb:
             progress_cb(f"Removing {len(missing_ids)} missing files...")
 
+        # Everything below is scoped to the rows THESE files justified. The
+        # prune reconciles the file layer; a global "delete what nothing
+        # references" sweep reads the whole phantom layer as orphans — a track
+        # with no media_file IS a phantom, an album with no variant IS a
+        # phantom album, an artist with no tracks IS a minted similar. On
+        # 2026-09-01 such a sweep deleted 2.97M tracks, 282k albums and 311k
+        # artists (with their bios, tags and similars) on a 12-file prune.
+        affected = db.execute(text("""
+            SELECT array_agg(DISTINCT track_id) AS tracks,
+                   array_agg(DISTINCT album_variant_id) AS variants
+            FROM media_files WHERE id = ANY(CAST(:ids AS int[]))
+        """), {"ids": missing_ids}).one()
+        track_ids = list(affected.tracks or [])
+        variant_ids = list(affected.variants or [])
+
+        album_ids = [r[0] for r in db.execute(text("""
+            SELECT DISTINCT album_id FROM album_variants
+            WHERE id = ANY(CAST(:ids AS int[])) AND album_id IS NOT NULL
+        """), {"ids": variant_ids})]
+
+        # Artist links cascade with the track/album rows, so the candidates
+        # have to be read before the deletes, not after.
+        artist_ids = [r[0] for r in db.execute(text("""
+            SELECT artist_id FROM track_artists WHERE track_id = ANY(CAST(:t AS uuid[]))
+            UNION
+            SELECT artist_id FROM album_artists WHERE album_id = ANY(CAST(:a AS uuid[]))
+        """), {"t": [str(t) for t in track_ids], "a": [str(a) for a in album_ids]})]
+
         db.query(MediaFile).filter(MediaFile.id.in_(missing_ids)).delete(synchronize_session=False)
 
         # Analysis-carrying tracks are spared: embeddings + analysis_sources
         # cascade with the track, and neither the node's own streamed
         # enrichment nor rows a CGNAT peer push-seeded here (carry) can be
         # re-derived without the audio. The file is gone; the analysis of it
-        # is still real.
+        # is still real. A listen is the same kind of fact.
         r = db.execute(text("""
-            DELETE FROM tracks WHERE id IN (
-                SELECT t.id FROM tracks t
-                LEFT JOIN media_files mf ON mf.track_id = t.id
-                WHERE mf.id IS NULL
-                  AND NOT EXISTS (SELECT 1 FROM embeddings e WHERE e.track_id = t.id)
-            )
-        """))
+            DELETE FROM tracks t WHERE t.id = ANY(CAST(:ids AS uuid[]))
+              AND NOT EXISTS (SELECT 1 FROM media_files mf WHERE mf.track_id = t.id)
+              AND NOT EXISTS (SELECT 1 FROM embeddings e WHERE e.track_id = t.id)
+              AND NOT EXISTS (SELECT 1 FROM listening_history lh WHERE lh.track_id = t.id)
+        """), {"ids": [str(t) for t in track_ids]})
         stats["orphan_tracks"] = r.rowcount
 
         r = db.execute(text("""
-            DELETE FROM album_variants WHERE id IN (
-                SELECT av.id FROM album_variants av
-                LEFT JOIN media_files mf ON mf.album_variant_id = av.id
-                WHERE mf.id IS NULL
-            )
-        """))
+            DELETE FROM album_variants av WHERE av.id = ANY(CAST(:ids AS int[]))
+              AND NOT EXISTS (SELECT 1 FROM media_files mf WHERE mf.album_variant_id = av.id)
+        """), {"ids": variant_ids})
         stats["orphan_variants"] = r.rowcount
 
         r = db.execute(text("""
-            DELETE FROM albums WHERE id IN (
-                SELECT a.id FROM albums a
-                LEFT JOIN album_variants av ON av.album_id = a.id
-                WHERE av.id IS NULL
-            )
-        """))
+            DELETE FROM albums a WHERE a.id = ANY(CAST(:ids AS uuid[]))
+              AND NOT EXISTS (SELECT 1 FROM album_variants av WHERE av.album_id = a.id)
+              AND NOT EXISTS (SELECT 1 FROM album_tracks at WHERE at.album_id = a.id)
+        """), {"ids": [str(a) for a in album_ids]})
         stats["orphan_albums"] = r.rowcount
 
         r = db.execute(text("""
-            DELETE FROM artists WHERE id IN (
-                SELECT ar.id FROM artists ar
-                LEFT JOIN track_artists ta ON ta.artist_id = ar.id
-                LEFT JOIN album_artists aa ON aa.artist_id = ar.id
-                WHERE ta.track_id IS NULL AND aa.album_id IS NULL
-            )
-        """))
+            DELETE FROM artists ar WHERE ar.id = ANY(CAST(:ids AS uuid[]))
+              AND NOT EXISTS (SELECT 1 FROM track_artists ta WHERE ta.artist_id = ar.id)
+              AND NOT EXISTS (SELECT 1 FROM album_artists aa WHERE aa.artist_id = ar.id)
+        """), {"ids": [str(a) for a in artist_ids]})
         stats["orphan_artists"] = r.rowcount
 
         db.commit()
