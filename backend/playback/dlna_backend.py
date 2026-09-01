@@ -42,6 +42,7 @@ except ImportError:
 _CMD_TIMEOUT = 10.0
 _TRACK_END_SLACK = 3.0      # STOPPED within this many seconds of the length = track finished
 _RELTIME_TOLERANCE = 3.0    # a RelTime this close to our clock is the renderer's word on it
+_PENDING_PLAY_DEADLINE = 20.0   # a Play unconfirmed this long stops claiming `loading`
 
 
 class DlnaAttachError(RuntimeError):
@@ -112,6 +113,26 @@ _MIME_BY_FORMAT = {
     "FLAC": "audio/flac", "MP3": "audio/mpeg", "WAV": "audio/wav",
     "OGG": "audio/ogg", "M4A": "audio/mp4", "AIFF": "audio/aiff",
 }
+
+
+def _parse_reltime(value) -> Optional[float]:
+    """H:MM:SS[.f] → seconds; None for absent/NOT_IMPLEMENTED/garbage.
+    str() first so a timedelta normalizes to the same shape."""
+    try:
+        h, m, s = str(value).split(":")
+        return int(h) * 3600 + int(m) * 60 + float(s)
+    except (TypeError, ValueError):
+        return None
+
+
+def _transient_501(e: Exception) -> bool:
+    """KANN's wedged-stack refusal: UPnP error 501 'Current state of service
+    prevents invoking that action' — thrown as an NPE right after the output
+    is selected, or as its internal transport lock timing out. The state is
+    transient (the same call succeeds seconds later), unlike a real fault."""
+    if getattr(e, "error_code", None) == 501:
+        return True
+    return "upnp error: 501" in str(e)
 
 
 def renderer_reachable(location: str, timeout: float = 2.0) -> bool:
@@ -283,6 +304,17 @@ class DlnaBackend(PlayerBackend):
         # reading (246 of 248) read as the new track finishing at 99% —
         # the poll died, the backend went deaf, the renderer played on.
         self._awaiting_play = False
+        self._pending_since = 0.0     # monotonic mark of the awaited Play
+        # Last direct GetPositionInfo reading (RelTime, monotonic at) — the
+        # renderer's word via position when its transport state is idle or
+        # lying (see _probe_advancing).
+        self._probe_last: Optional[tuple[float, float]] = None
+        # Bumped by every load as it adopts its slot. Poll evidence gathered
+        # across an await is stamped with the generation it started under; a
+        # verdict whose generation moved mixes the old device reading with
+        # the new load's fields and must dissolve (observed live: a stale
+        # track-end verdict advancing into a freshly replaced queue).
+        self._load_gen = 0
         self._poll_task: Optional[asyncio.Task] = None
         self._preload_task: Optional[asyncio.Task] = None   # SetNext, once the next buffer is in hand
         self._art_misses: set = set()   # cover URLs that answered "no art" — not re-asked per track
@@ -638,6 +670,13 @@ class DlnaBackend(PlayerBackend):
                     return
                 if self._loading:
                     continue   # the load sequence owns the status right now
+                # Everything read across the awaits below is evidence about
+                # THIS load generation — a load landing mid-await (queue
+                # replace, manual jump) rewrites index/position/length, and
+                # a verdict mixing the old device reading with the new
+                # fields fired _advance() into the freshly replaced queue
+                # (observed live: [Play all] starting on track 2).
+                gen = self._load_gen
                 t_tick = time.monotonic()
                 try:
                     await self._dmr.async_update()
@@ -660,12 +699,42 @@ class DlnaBackend(PlayerBackend):
                         self._emit_now("stopped")
                         return
                     continue
+                if self._load_gen != gen:
+                    continue
                 state = self._state_name()
                 pending = self._settle_pending_play(state)
                 if pending == "failed":
                     return
                 if pending:
-                    continue
+                    probed = await self._probe_advancing()
+                    if self._load_gen != gen:
+                        continue
+                    if probed is not None:
+                        # The position moves on our URI: the renderer IS
+                        # playing this load, whatever its transport state
+                        # claims — KANN's wedged stack reported STOPPED
+                        # through an entire playing track (2026-09-01).
+                        self._awaiting_play = False
+                        self._rebaseline(self._pos_offset + probed)
+                        logger.info("pending play confirmed by position "
+                                    "probe (rel=%.1f, transport says %s)",
+                                    probed, state)
+                        state = "playing"
+                    elif (time.monotonic() - self._pending_since
+                            > _PENDING_PLAY_DEADLINE):
+                        # Never confirmed, never denied, no error reported —
+                        # a pending play must not hold `loading` forever (it
+                        # kept the backend deaf for 13 minutes: no track-end,
+                        # no advance, no tracking). Let the renderer's own
+                        # state through; the stopped verdict below closes
+                        # the session honestly.
+                        self._awaiting_play = False
+                        logger.warning("pending play unresolved after %.0fs "
+                                       "(transport says %s) — reporting the "
+                                       "renderer's own state",
+                                       _PENDING_PLAY_DEADLINE, state)
+                    else:
+                        continue
                 cur = getattr(self._dmr, "current_track_uri", None)
                 if cur and self._next_url and cur == self._next_url:
                     # Gapless boundary: this very reading (URI, duration,
@@ -704,6 +773,17 @@ class DlnaBackend(PlayerBackend):
                              state, rel, dur, (cur or "")[-14:],
                              self._position, self._length)
                 if state == "stopped":
+                    probed = await self._probe_advancing()
+                    if self._load_gen != gen:
+                        continue
+                    if probed is not None:
+                        # Transport says STOPPED while the position advances
+                        # on our URI (the wedged-KANN signature): the
+                        # position is the renderer's word — keep the session
+                        # alive on it instead of closing a playing track.
+                        self._rebaseline(self._pos_offset + probed)
+                        self._emit_now("playing")
+                        continue
                     # The verdict is about where the audio WAS when it stopped.
                     # _position is the previous tick's value; if the tick before
                     # the stop stalled (the renderer's control channel, the
@@ -730,6 +810,36 @@ class DlnaBackend(PlayerBackend):
                                    t_emit - t_tick, t_update - t_tick, t_emit - t_update)
         except asyncio.CancelledError:
             logger.info("position poll exit: cancelled")
+
+    async def _probe_advancing(self) -> Optional[float]:
+        """RelTime from a direct GetPositionInfo when it names the current
+        URL and has advanced since the previous probe — the renderer's word
+        via position that it is really playing this load. None: no answer,
+        another URI, or no movement. DmrDevice.async_update refreshes the
+        position variables only in PLAYING/PAUSED, so when the transport
+        state is idle (or lying — KANN's wedged stack) this direct action
+        is the only live reading there is."""
+        action = self._dmr._action("AVT", "GetPositionInfo")
+        if action is None or not self._current_url:
+            return None
+        try:
+            res = await action.async_call(InstanceID=0)
+        except Exception as e:
+            logger.debug("position probe failed: %s", e)
+            self._probe_last = None
+            return None
+        rel = _parse_reltime(res.get("RelTime"))
+        if rel is None or res.get("TrackURI") != self._current_url:
+            self._probe_last = None
+            return None
+        now = time.monotonic()
+        prev, self._probe_last = self._probe_last, (rel, now)
+        # A baseline older than a few ticks proves nothing about NOW — at
+        # the first stopped tick after real play it would read a track's
+        # worth of natural progress as "advancing".
+        if prev and now - prev[1] <= 3.0 and rel > prev[0] + 0.3:
+            return rel
+        return None
 
     # -- queue walking -----------------------------------------------------------
 
@@ -995,6 +1105,7 @@ class DlnaBackend(PlayerBackend):
         # track with a transition spinner instead of either lying
         # ("playing") or looking dead while the old audio rides on.
         self._index = index
+        self._load_gen += 1     # in-flight poll evidence is now about a dead world
         self._pos_offset = ss   # 0 for a fresh track; the seek offset otherwise
         self._position = ss     # so the loading state shows the seek target
         self._length = item.duration_seconds or 0.0
@@ -1028,11 +1139,11 @@ class DlnaBackend(PlayerBackend):
         # an action is missing from it (the Phase-2 Pause lesson). A gated
         # SetAVTransportURI/Play here meant next/prev committed the new
         # index while the renderer kept playing the old track.
-        await self._avt("SetAVTransportURI", CurrentURI=url,
-                        CurrentURIMetaData=await self._transport_meta(url, item))
+        await self._avt_retry("SetAVTransportURI", CurrentURI=url,
+                              CurrentURIMetaData=await self._transport_meta(url, item))
         self._current_url = url
         if play:
-            await self._avt("Play", Speed="1")
+            await self._avt_retry("Play", Speed="1")
             self._rebaseline(ss)      # clock starts at the offset (0 for a fresh track)
             # Accepted is not started: the renderer confirms by reporting
             # PLAYING (poll/GENA clear this), and until then the track is
@@ -1040,6 +1151,8 @@ class DlnaBackend(PlayerBackend):
             # and a Last.fm now-playing for a track the renderer may yet
             # refuse, and made its first idle tick read as a stop.
             self._awaiting_play = True
+            self._pending_since = time.monotonic()
+            self._probe_last = None
             self._ensure_poll()
         self._arm_preload()
         # Explicit state: _loading is still set here, and a load that did
@@ -1189,6 +1302,24 @@ class DlnaBackend(PlayerBackend):
             raise RuntimeError(f"renderer lacks AVTransport/{name}")
         return await action.async_call(InstanceID=0, **kwargs)
 
+    async def _avt_retry(self, name: str, **kwargs):
+        """One bounded retry on a transient 501. KANN's freshly-selected
+        stack refuses the very first SetAVTransportURI with an NPE and a
+        Play with an internal lock timeout, then executes the same call
+        seconds later — there is no event to wait on (its "ready" is
+        unobservable; SUBSCRIBE 500s through the same window), so a single
+        spaced retry at this external boundary is the whole remedy. A
+        second 501 propagates: the device is refusing, not settling."""
+        try:
+            return await self._avt(name, **kwargs)
+        except Exception as e:
+            if not _transient_501(e):
+                raise
+            logger.warning("%s refused with a transient 501 — retrying once "
+                           "(%s)", name, str(e).strip() or type(e).__name__)
+            await asyncio.sleep(2.0)
+            return await self._avt(name, **kwargs)
+
     def _cmd_failed(self, e: Exception, what: str) -> None:
         if isinstance(e, (TimeoutError, OSError)):
             # Connection-level failure (hang / refused / unreachable) —
@@ -1266,12 +1397,15 @@ class DlnaBackend(PlayerBackend):
                 # from STOPPED (a finished or refused track, still loaded)
                 # this is a fresh start it has yet to confirm.
                 fresh_start = self._state_name() != "paused"
-                await self._avt("Play", Speed="1")
+                await self._avt_retry("Play", Speed="1")
                 # Paused → resumes where it was; stopped → UPnP Stop reset the
                 # position and Play starts the track over (KANN, live: the
                 # display sat at 151/151 while the track restarted).
                 self._rebaseline(0.0 if fresh_start else self._position)
                 self._awaiting_play = fresh_start
+                if fresh_start:
+                    self._pending_since = time.monotonic()
+                    self._probe_last = None
                 self._ensure_poll()
                 self._emit_now("loading" if fresh_start else "playing")
         return self._call_async(_p())

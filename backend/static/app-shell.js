@@ -5445,6 +5445,27 @@
   }
   window.reportOutputUnavailable = reportOutputUnavailable;
 
+  // Backend-async playback failures ride the status stream (`error`), not
+  // an HTTP response: a fire-and-forget DLNA/HQP load that dies (renderer
+  // 500, dozing device, unfetchable stream) reports here, and the state
+  // just returns to `stopped`. Without surfacing it the tap looks ignored —
+  // [Play all] on a wedged renderer produced no music and no explanation.
+  // The status repeats the error on every emit, so show each distinct text
+  // once and re-arm when the backend clears the field (next successful
+  // command / load).
+  let lastPlayerErrorShown = null;
+  document.addEventListener('np-update', (e) => {
+    const err = e.detail && e.detail.error;
+    if (!err) { lastPlayerErrorShown = null; return; }
+    if (err === lastPlayerErrorShown) return;
+    lastPlayerErrorShown = err;
+    notifyDialog({
+      title: 'Playback error',
+      message: escapeProfileHtml(err),
+      kind: 'error',
+    });
+  });
+
   async function reportPlaybackResult(resp, body) {
     if (resp && resp.ok) return true;
     // A Response body is one-shot: callers that already read resp.json() must
