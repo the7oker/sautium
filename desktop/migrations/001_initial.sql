@@ -760,6 +760,20 @@ CREATE TABLE IF NOT EXISTS album_descriptions (
     CONSTRAINT chk_has_album_description CHECK (summary IS NOT NULL OR content IS NOT NULL)
 );
 
+-- Curated cold-start picks: the 52-album seed layer a fresh node imports at
+-- first start (backend/seed_import.py) so Home has recommendations before
+-- the first listen. LOCAL-ONLY like album_descriptions — albums never sync
+-- by UUID. tier: 1 = list A (bridge gems), 2 = list B (taste palette),
+-- 3 = honourable mentions, 4 = rotation pool. rank = global 1..52 curation
+-- order. Emptied only by the explicit "Remove phantom layer" action, which
+-- un-pins the layer from Home.
+CREATE TABLE IF NOT EXISTS seed_picks (
+    album_id UUID PRIMARY KEY REFERENCES albums(id) ON DELETE CASCADE ON UPDATE CASCADE,
+    tier SMALLINT NOT NULL CHECK (tier BETWEEN 1 AND 4),
+    rank SMALLINT NOT NULL UNIQUE,
+    created_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP
+);
+
 -- Generic key/value store for app-level user preferences. Keys are
 -- dotted strings (e.g. 'hqplayer.favorite_filters') and the value
 -- carries whatever JSON the feature needs. Single-row-per-key by

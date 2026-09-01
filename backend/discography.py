@@ -824,6 +824,13 @@ def prune_phantom_layer(cancel_flag=None, progress_cb=None) -> Dict[str, Any]:
     `progress_cb(done, total)` fires every 250 artists and at the end; the
     planner statistics are refreshed afterwards so the Settings footprint
     row reads the new size at once."""
+    # Un-pin the curated seed layer first: the album rows themselves follow
+    # analyzed_guard (all seed albums carry analysis, so they survive), but
+    # "remove the phantom layer" also means "stop showcasing it on Home" —
+    # the favourites tail, cold-start rotation and filler all key on this
+    # table.
+    unpinned = db_execute(
+        "WITH d AS (DELETE FROM seed_picks RETURNING 1) SELECT COUNT(*) AS n FROM d")
     artists = db_query("""
         SELECT DISTINCT aa.artist_id
         FROM album_artists aa
@@ -831,7 +838,8 @@ def prune_phantom_layer(cancel_flag=None, progress_cb=None) -> Dict[str, Any]:
         WHERE NOT EXISTS (SELECT 1 FROM album_variants av WHERE av.album_id = al.id)
     """)
     total = len(artists)
-    stats = {"artists": 0, "total": total, "cancelled": False}
+    stats = {"artists": 0, "total": total, "cancelled": False,
+             "seed_picks_unpinned": int(unpinned["n"]) if unpinned else 0}
     for row in artists:
         if cancel_flag and cancel_flag():
             stats["cancelled"] = True

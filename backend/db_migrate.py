@@ -71,6 +71,16 @@ def apply_pending() -> dict:
             logger.info("identity re-normalization: %s", stats)
             _mark(conn, mark)
             out["identity_renormalized"] = True
+
+        # Cold-start seed: after the identity pass, so the bundle's rule
+        # check compares against a fully renormalized database. The marker
+        # lands only on a COMPLETE import — a skip (no bundle yet, phantom
+        # layer off) or a shortfall re-evaluates on the next start.
+        if not _marked(conn, "seed_v1"):
+            import seed_import
+            out["seed"] = seed_import.apply_seed(conn, settings.database_url)
+            if out["seed"].get("complete"):
+                _mark(conn, "seed_v1")
     finally:
         conn.close()
     logger.info("db_migrate: %s", out)

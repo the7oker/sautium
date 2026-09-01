@@ -810,6 +810,11 @@ ANNOUNCE_TAIL_SQL = """
       FROM analyzed x
       JOIN track_artists ta ON ta.track_id = x.track_id
       LEFT JOIN artist_bios ab ON ab.artist_id = ta.artist_id
+     WHERE NOT EXISTS (
+         SELECT 1 FROM seed_picks sp
+         JOIN album_tracks at2 ON at2.album_id = sp.album_id
+        WHERE at2.track_id = x.track_id
+     )
      GROUP BY ta.artist_id
      ORDER BY MAX(ab.listeners) ASC NULLS FIRST
      LIMIT %s
@@ -833,6 +838,13 @@ def get_announce_tail_uuids(conn, limit: int) -> list[str]:
     track_artists rows, none with an embeddings row — which is also why
     the query drives FROM the analyzed set (tens of thousands) instead of
     filtering track_artists.
+
+    Seed-pick tracks are excluded on every node, the master included:
+    their analysis ships in every install's seed bundle, and universally
+    held is the same as popular — an exact DHT key spent on it is wasted
+    and, on a fresh node, would make the tail 100% identical seeds. An
+    artist with any non-seed analyzed track still enters via those
+    tracks.
 
     Ranked by Last.fm listeners as the rarity proxy: a peer's random node
     sample will surface anything popular anyway, so an exact key is only

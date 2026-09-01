@@ -375,6 +375,10 @@ def _update_album_uuid(db: Session, old_id, new_id) -> str:
             WHERE ad.album_id = :old
               AND NOT EXISTS (SELECT 1 FROM album_descriptions x
                                WHERE x.album_id = :new AND x.source = ad.source)"""), p)
+        db.execute(text("""
+            UPDATE seed_picks sp SET album_id = :new
+            WHERE sp.album_id = :old
+              AND NOT EXISTS (SELECT 1 FROM seed_picks x WHERE x.album_id = :new)"""), p)
         db.execute(text("UPDATE listening_sessions SET origin_album_id = :new "
                         "WHERE origin_album_id = :old"), p)
         db.execute(text("""

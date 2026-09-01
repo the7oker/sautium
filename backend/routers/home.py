@@ -7,10 +7,14 @@ on-readiness instead of waiting for the slowest block to load, and so
 
 Favourite artists rank by total listening time (not play count): a
 single 90-minute ambient track should outweigh ten 5-minute pop plays.
+Artists of the curated seed picks (seed_picks) trail the listened ones
+so a fresh install is never an empty shelf.
 
 Recommendations are CLAP-similarity-driven from recent listening
-(see get_recommendations for the full pipeline). Cold start
-(no listening_history) falls back to newest-by-file_modified_at.
+(see get_recommendations for the full pipeline), folding to owned AND
+phantom albums — a node can live entirely on streamed phantoms. Cold
+start (no listening_history) leads with the seed-pick rotation, then
+newest-by-file_modified_at.
 """
 
 import logging
@@ -56,21 +60,38 @@ HNSW_EF_SEARCH = 500
 # Tier 1 ("forgotten") threshold: albums whose last play was longer than
 # this ago — eligible to resurface once tier 0 (never played) is exhausted.
 FORGOTTEN_THRESHOLD_DAYS = 90
+# Seed-pick rotation quotas per curation tier (list A bridge gems / list B
+# palette / honourable mentions / rotation pool) out of the 20-slot shelf:
+# the shelf leads with the bridges yet every tier surfaces daily. Once a
+# tier's unplayed pool runs dry the overflow refills from the rest; a
+# played pick leaves the rotation for good and competes only organically.
+SEED_TIER_QUOTAS = {1: 12, 2: 5, 3: 2, 4: 1}
 
 
-# Subqueries shared by new-in-library and recommendations to fetch the
-# album-tile-row contract: {artist, cover_id, media_file_id}.
+# Subqueries shared by the album shelves to fetch the album-tile-row
+# contract: {artist, cover_url, cover_id, media_file_id}. A phantom album
+# has no files, so the artist falls back to the album credit and its art
+# is the CAA cover_url (the frontend's coverUrl() prefers it).
 _ALBUM_TILE_SUBQUERIES = """
-    (SELECT a.name
-     FROM artists a
-     JOIN track_artists ta ON ta.artist_id = a.id AND ta.role = 'primary'
-     JOIN tracks t ON t.id = ta.track_id
-     JOIN media_files mf2 ON mf2.track_id = t.id
-     JOIN album_variants av2 ON av2.id = mf2.album_variant_id
-     WHERE av2.album_id = al.id
-     GROUP BY a.id, a.name
-     ORDER BY COUNT(*) DESC
-     LIMIT 1) AS artist,
+    COALESCE(
+        (SELECT a.name
+         FROM artists a
+         JOIN track_artists ta ON ta.artist_id = a.id AND ta.role = 'primary'
+         JOIN tracks t ON t.id = ta.track_id
+         JOIN media_files mf2 ON mf2.track_id = t.id
+         JOIN album_variants av2 ON av2.id = mf2.album_variant_id
+         WHERE av2.album_id = al.id
+         GROUP BY a.id, a.name
+         ORDER BY COUNT(*) DESC
+         LIMIT 1),
+        (SELECT a.name
+         FROM artists a
+         JOIN album_artists aa ON aa.artist_id = a.id AND aa.role = 'primary'
+         WHERE aa.album_id = al.id
+         ORDER BY a.name
+         LIMIT 1)
+    ) AS artist,
+    al.cover_url,
     (SELECT mf3.cover_id::text
      FROM media_files mf3
      JOIN album_variants av3 ON av3.id = mf3.album_variant_id
@@ -89,7 +110,8 @@ _ALBUM_TILE_SUBQUERIES = """
 def get_favourite_artists(
     limit: int = Query(100, ge=1, le=200),
 ) -> dict[str, list[dict[str, Any]]]:
-    """Top primary artists ranked by total listening time."""
+    """Top primary artists by listening time, then unlistened seed-pick
+    artists at the tail."""
 
     # Count time only against the primary artist of each track — featured /
     # composer / conductor rows in track_artists would otherwise hoist
@@ -97,17 +119,46 @@ def get_favourite_artists(
     # the artist page lists albums only where they are primary, so the tile
     # would lead to an empty detail screen. Tie-break by play_count so two
     # artists with identical (rare) total_seconds order stably.
+    #
+    # Bucket 1 is the curated seed layer's artists with no listens yet —
+    # never hidden by the zero-plays gate, ordered by curation tier/rank.
+    # One completed listen promotes an artist into bucket 0 naturally
+    # (local_play_stats keys on track_id, so streamed phantom plays count);
+    # past the limit on a mature node the tail falls off by ranking, which
+    # is the designed behavior, not hiding. is_owned is resolved only for
+    # the emitted rows and drives the phantom tile styling.
     artists = db_query("""
-        SELECT a.id::text AS id,
-               a.name,
-               SUM(lps.play_count)::int AS play_count,
-               FLOOR(SUM(lps.total_listen_time))::bigint AS total_seconds
-        FROM artists a
-        JOIN track_artists ta ON ta.artist_id = a.id AND ta.role = 'primary'
-        JOIN local_play_stats lps ON lps.track_id = ta.track_id
-        GROUP BY a.id, a.name
-        HAVING SUM(lps.total_listen_time) > 0
-        ORDER BY total_seconds DESC, play_count DESC
+        WITH listened AS (
+            SELECT a.id, a.name,
+                   SUM(lps.play_count)::int AS play_count,
+                   FLOOR(SUM(lps.total_listen_time))::bigint AS total_seconds
+            FROM artists a
+            JOIN track_artists ta ON ta.artist_id = a.id AND ta.role = 'primary'
+            JOIN local_play_stats lps ON lps.track_id = ta.track_id
+            GROUP BY a.id, a.name
+            HAVING SUM(lps.total_listen_time) > 0
+        ),
+        seed_tail AS (
+            SELECT DISTINCT ON (a.id) a.id, a.name, sp.tier, sp.rank
+            FROM seed_picks sp
+            JOIN album_artists aa ON aa.album_id = sp.album_id AND aa.role = 'primary'
+            JOIN artists a ON a.id = aa.artist_id
+            WHERE NOT EXISTS (SELECT 1 FROM listened l WHERE l.id = a.id)
+            ORDER BY a.id, sp.tier, sp.rank
+        )
+        SELECT u.id::text AS id, u.name, u.play_count, u.total_seconds,
+               EXISTS (SELECT 1 FROM track_artists ta2
+                       JOIN media_files mf ON mf.track_id = ta2.track_id
+                       WHERE ta2.artist_id = u.id) AS is_owned
+        FROM (
+            SELECT id, name, play_count, total_seconds,
+                   0 AS bucket, 0 AS tier, 0 AS rank
+            FROM listened
+            UNION ALL
+            SELECT id, name, 0, 0, 1, tier, rank
+            FROM seed_tail
+        ) u
+        ORDER BY u.bucket, u.total_seconds DESC, u.play_count DESC, u.tier, u.rank
         LIMIT %(limit)s
     """, {"limit": limit})
 
@@ -222,10 +273,14 @@ def get_recommendations(
       4. Album fold: score = SUM(seed_weight x sim) / (hits + 3) — an album
          similar to SEVERAL of the week's tastes outranks a one-hit match;
          the +3 is the same Bayesian shrink the search engine's roll-ups use.
+         Folds to owned albums (via media_files) AND phantom albums (via
+         album_tracks) — a node can live entirely on streamed phantoms.
       5. Two-tier ordering — never-played (tier 0) before forgotten albums
-         whose last play is older than FORGOTTEN_THRESHOLD_DAYS (tier 1).
-      6. Random fill if tier 0+1 came up short; cold start (no completed
-         listens in the window) → newest-by-file_modified_at.
+         whose last play is older than FORGOTTEN_THRESHOLD_DAYS (tier 1) —
+         then one edition per release group.
+      6. Shortfall fill: unplayed seed picks first, then random owned
+         albums; cold start (no completed listens in the window) →
+         seed-pick rotation, then newest-by-file_modified_at.
     """
     has_seeds = db_query_one(f"""
         SELECT 1 AS x FROM listening_history lh
@@ -235,7 +290,11 @@ def get_recommendations(
         LIMIT 1
     """)
     if not has_seeds:
-        return {"albums": _cold_start_albums(limit)}
+        albums = _seed_fill(limit, exclude=set())
+        if len(albums) < limit:
+            albums.extend(_cold_start_albums(
+                limit - len(albums), exclude={a["id"] for a in albums}))
+        return {"albums": albums}
 
     albums = db_query_with_ef_search(
         f"""
@@ -287,25 +346,51 @@ def get_recommendations(
         candidate_albums AS (
             -- DISTINCT folds multi-edition variants of one album; the same
             -- track hit from TWO seeds keeps two rows — cross-taste evidence.
+            -- Two fold arms: owned albums via media_files, phantom albums via
+            -- album_tracks. Both are indexed joins driven by the ≤1200 hit
+            -- rows — the phantom layer's size never enters the cost. UNION
+            -- also dedups an owned album that carries a canonized tracklist.
             SELECT DISTINCT av.album_id, h.w, h.track_id, h.sim
             FROM hits h
             JOIN media_files mf ON mf.track_id = h.track_id
             JOIN album_variants av ON av.id = mf.album_variant_id
+            UNION
+            SELECT at2.album_id, h.w, h.track_id, h.sim
+            FROM hits h
+            JOIN album_tracks at2 ON at2.track_id = h.track_id
         ),
         -- Tier state derives from the SAME source as the seed
         -- (listening_history, completed plays) so an album that seeds the
         -- shelf also counts as "played" and leaves it. Reading play state
         -- from local_play_stats here would split the source of truth.
+        -- Membership is judged by TRACK identity (files ∪ tracklist):
+        -- phantom plays land with media_file_id NULL and would otherwise
+        -- never mark their album as played. Driven FROM the played tracks —
+        -- the small side — mapped to albums by indexed lateral probes;
+        -- driving from candidate albums instead re-scanned listening_history
+        -- once per album (measured 1.3s vs 19ms on the reference library).
         album_state AS (
-            SELECT av.album_id,
-                   MAX(lh.started_at) AS last_touch,
-                   COUNT(lh.id) AS total_plays
-            FROM album_variants av
-            JOIN media_files mf ON mf.album_variant_id = av.id
-            LEFT JOIN listening_history lh
-                   ON lh.media_file_id = mf.id AND lh.completed
-            WHERE av.album_id IN (SELECT album_id FROM candidate_albums)
-            GROUP BY av.album_id
+            SELECT c.album_id, p.last_touch, COALESCE(p.total_plays, 0) AS total_plays
+            FROM (SELECT DISTINCT album_id FROM candidate_albums) c
+            LEFT JOIN (
+                SELECT x.album_id, MAX(tp.last_touch) AS last_touch,
+                       SUM(tp.plays) AS total_plays
+                FROM (SELECT track_id, MAX(started_at) AS last_touch,
+                             COUNT(*) AS plays
+                      FROM listening_history WHERE completed
+                      GROUP BY track_id) tp
+                CROSS JOIN LATERAL (
+                    SELECT av.album_id
+                    FROM media_files mf
+                    JOIN album_variants av ON av.id = mf.album_variant_id
+                    WHERE mf.track_id = tp.track_id
+                    UNION
+                    SELECT at2.album_id
+                    FROM album_tracks at2
+                    WHERE at2.track_id = tp.track_id
+                ) x
+                GROUP BY x.album_id
+            ) p ON p.album_id = c.album_id
         ),
         scored AS (
             SELECT ca.album_id,
@@ -319,20 +404,34 @@ def get_recommendations(
             JOIN album_state als ON als.album_id = ca.album_id
             GROUP BY ca.album_id, als.total_plays, als.last_touch
         )
+        -- One edition per release group: with phantoms in the fold, a hit
+        -- track can sit on several near-identical editions/compilations of
+        -- one record. The dedup runs on slim rows; the tile subqueries are
+        -- evaluated only for the ≤limit emitted rows.
         SELECT al.id::text AS id,
                al.title,
                al.release_year AS year,
                {_ALBUM_TILE_SUBQUERIES}
-        FROM scored s
-        JOIN albums al ON al.id = s.album_id
-        WHERE s.tier <= 1
-        ORDER BY s.tier ASC, s.score DESC
+        FROM (
+            SELECT DISTINCT ON (COALESCE(al2.musicbrainz_id::text, al2.id::text))
+                   s.album_id, s.tier, s.score
+            FROM scored s
+            JOIN albums al2 ON al2.id = s.album_id
+            WHERE s.tier <= 1
+            ORDER BY COALESCE(al2.musicbrainz_id::text, al2.id::text),
+                     s.tier ASC, s.score DESC
+        ) d
+        JOIN albums al ON al.id = d.album_id
+        ORDER BY d.tier ASC, d.score DESC
         LIMIT %(limit)s
         """,
         {"tau_sec": RECENCY_TAU_HOURS * 3600, "limit": limit},
         ef_search=HNSW_EF_SEARCH,
     )
 
+    if len(albums) < limit:
+        existing = {a["id"] for a in albums}
+        albums.extend(_seed_fill(limit - len(albums), exclude=existing))
     if len(albums) < limit:
         existing = {a["id"] for a in albums}
         albums.extend(_random_fill(limit - len(albums), exclude=existing))
@@ -425,6 +524,55 @@ def get_listening_session(session_id: str) -> dict[str, Any]:
 
 
 
+def _seed_fill(needed: int, exclude: set[str]) -> list[dict[str, Any]]:
+    """Curated-pick filler: unplayed seed albums in a deterministic daily
+    rotation, tier-weighted by SEED_TIER_QUOTAS with overflow refill.
+
+    md5(album_id || current_date) is the rotation primitive — stable within
+    a day, different tomorrow (hashtext is internal API, md5 is documented).
+    A pick with any completed listen (by track identity, so streamed
+    phantom plays count) leaves the pool for good: from then on it competes
+    only organically through the similarity fold."""
+
+    if needed <= 0:
+        return []
+
+    quota_case = (f"CASE tier WHEN 1 THEN {SEED_TIER_QUOTAS[1]} "
+                  f"WHEN 2 THEN {SEED_TIER_QUOTAS[2]} "
+                  f"WHEN 3 THEN {SEED_TIER_QUOTAS[3]} "
+                  f"ELSE {SEED_TIER_QUOTAS[4]} END")
+    return db_query(
+        f"""
+        WITH pool AS (
+            SELECT sp.album_id, sp.tier,
+                   md5(sp.album_id::text || current_date::text) AS shuffle
+            FROM seed_picks sp
+            WHERE sp.album_id::text != ALL(%(exclude)s::text[])
+              AND NOT EXISTS (
+                  SELECT 1 FROM album_tracks at2
+                  JOIN listening_history lh
+                       ON lh.track_id = at2.track_id AND lh.completed
+                  WHERE at2.album_id = sp.album_id)
+        ),
+        ranked AS (
+            SELECT album_id, tier, shuffle,
+                   ROW_NUMBER() OVER (PARTITION BY tier ORDER BY shuffle) AS rn,
+                   {quota_case} AS cap
+            FROM pool
+        )
+        SELECT al.id::text AS id,
+               al.title,
+               al.release_year AS year,
+               {_ALBUM_TILE_SUBQUERIES}
+        FROM ranked r
+        JOIN albums al ON al.id = r.album_id
+        ORDER BY (r.rn > r.cap), r.tier, r.shuffle
+        LIMIT %(needed)s
+        """,
+        {"exclude": list(exclude), "needed": needed},
+    )
+
+
 def _random_fill(needed: int, exclude: set[str]) -> list[dict[str, Any]]:
     """Tier-2 fallback: random albums from the whole library, minus exclude."""
 
@@ -449,8 +597,9 @@ def _random_fill(needed: int, exclude: set[str]) -> list[dict[str, Any]]:
     )
 
 
-def _cold_start_albums(limit: int) -> list[dict[str, Any]]:
-    """No listening history yet — newest imports first."""
+def _cold_start_albums(limit: int, exclude: set[str] = frozenset()) -> list[dict[str, Any]]:
+    """No listening history yet — newest imports first, after the seed
+    rotation (exclude covers owned pick albums already emitted by it)."""
 
     return db_query(
         f"""
@@ -459,6 +608,7 @@ def _cold_start_albums(limit: int) -> list[dict[str, Any]]:
                    MAX(av.file_modified_at) AS newest_added
             FROM albums al
             JOIN album_variants av ON av.album_id = al.id
+            WHERE al.id::text != ALL(%(exclude)s::text[])
             GROUP BY al.id
         )
         SELECT al.id::text AS id,
@@ -470,5 +620,5 @@ def _cold_start_albums(limit: int) -> list[dict[str, Any]]:
         ORDER BY ak.newest_added DESC NULLS LAST, RANDOM()
         LIMIT %(limit)s
         """,
-        {"limit": limit},
+        {"limit": limit, "exclude": list(exclude)},
     )
