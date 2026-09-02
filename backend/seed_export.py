@@ -40,6 +40,7 @@ import psycopg2
 
 from config import settings
 from desktop.p2p import sync_queries as sq
+from discography import _CAA_FRONT_URL
 from uuid_utils import IDENTITY_RULE, album_uuid, artist_uuid
 
 SEED_DIR = Path(__file__).resolve().parent / "seed"
@@ -96,9 +97,14 @@ def _coverage(conn, picks: list[dict]) -> tuple[list[str], list[str], list[dict]
         row = p["_row"]
         if not row["mbid"]:
             fatal.append(f"{label}: albums.musicbrainz_id is NULL")
-        if not row["cover_url"]:
-            fatal.append(f"{label}: albums.cover_url is NULL — on a user node "
-                         "every pick is a phantom and cover_url is its only art")
+        if not row["cover_url"] and not row["mbid"]:
+            # An owned album keeps its art in local files and has no
+            # cover_url; on a user node every pick is a phantom, so the
+            # export gives it the Cover Art Archive front by release group —
+            # exactly what the mint gives a phantom. Only a pick with
+            # neither is art-less.
+            fatal.append(f"{label}: no cover_url and no release group to derive "
+                         "the Cover Art Archive front from")
 
         desc = sq.db_query(
             conn, "SELECT 1 AS x FROM album_descriptions WHERE album_id = %s::uuid",
@@ -216,6 +222,7 @@ def _collect_ids(conn, album_ids: list[str]) -> tuple[list[str], list[str]]:
 def _structural(conn, picks: list[dict], album_ids: list[str],
                 track_ids: list[str], artist_ids: list[str]) -> dict:
     q = sq.db_query
+    caa_pre, caa_suf = _CAA_FRONT_URL.split("{rg}")
     out = {
         "artists": q(conn, """
             SELECT id::text AS id, name, raw_name, name_latin,
@@ -225,9 +232,11 @@ def _structural(conn, picks: list[dict], album_ids: list[str],
         "albums": q(conn, """
             SELECT id::text AS id, title, title_latin, release_year, label,
                    catalog_number, total_tracks, musicbrainz_id::text AS musicbrainz_id,
-                   mb_match_confidence::text AS mb_match_confidence, cover_url,
+                   mb_match_confidence::text AS mb_match_confidence,
+                   COALESCE(cover_url, %(caa_pre)s || musicbrainz_id::text || %(caa_suf)s) AS cover_url,
                    author_pubkey, signature, batch_root, merkle_proof
-            FROM albums WHERE id = ANY(%s::uuid[]) ORDER BY id""", [album_ids]),
+            FROM albums WHERE id = ANY(%(ids)s::uuid[]) ORDER BY id""",
+            {"ids": album_ids, "caa_pre": caa_pre, "caa_suf": caa_suf}),
         "tracks": q(conn, """
             SELECT id::text AS id, title, title_latin
             FROM tracks WHERE id = ANY(%s::uuid[]) ORDER BY id""", [track_ids]),
