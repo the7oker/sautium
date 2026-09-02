@@ -543,10 +543,15 @@ def pending_slice_names(conn, limit: int = 200) -> list:
     library), so alphabetical order — what this used to do — parked a
     Z-named OWNED artist behind four thousand discovery stubs for days.
     Owned canon is not a nicety: album canon, editions, discographies and
-    carry pushability all gate on it. Within the phantom layer the tiers
-    mirror discography.stale_canonized_artists — listened-to first, then
-    artists similar to those, then the rest — so the part of the
-    discovery graph you actually touch resolves first."""
+    carry pushability all gate on it. Next come canonized artists that
+    have never been shelved (artist_mbids row, no files, last_album_sync
+    NULL) — the seed picks and carried phantoms a fresh replica arrives
+    with: the discography sync answers no_source for them until their
+    slice lands (discography._mb_source_covers), so this queue is the only
+    thing that turns a curated pick into a discography. Within the phantom
+    stub layer the tiers mirror discography.stale_canonized_artists —
+    listened-to first, then artists similar to those, then the rest — so
+    the part of the discovery graph you actually touch resolves first."""
     with conn.cursor() as cur:
         cur.execute("""
             WITH listened AS (
@@ -565,11 +570,19 @@ def pending_slice_names(conn, limit: int = 200) -> list:
                     WHERE ta.artist_id = ar.id AND ta.role = 'primary'
                       AND (ar.last_mb_sync IS NULL OR mf.created_at > ar.last_mb_sync))
                 UNION ALL
+                SELECT a.name, 1 AS tier
+                FROM artists a
+                WHERE a.last_album_sync IS NULL
+                  AND EXISTS (SELECT 1 FROM artist_mbids am WHERE am.artist_id = a.id)
+                  AND NOT EXISTS (SELECT 1 FROM track_artists ta
+                                  JOIN media_files mf ON mf.track_id = ta.track_id
+                                  WHERE ta.artist_id = a.id)
+                UNION ALL
                 SELECT a.name,
                        CASE WHEN EXISTS (SELECT 1 FROM similar_artists sa
                                           JOIN listened l ON l.artist_id = sa.artist_id
-                                         WHERE sa.similar_artist_id = a.id) THEN 1
-                            ELSE 2 END AS tier
+                                         WHERE sa.similar_artist_id = a.id) THEN 2
+                            ELSE 3 END AS tier
                 FROM artists a
                 WHERE EXISTS (SELECT 1 FROM similar_artists sa
                               WHERE sa.similar_artist_id = a.id)

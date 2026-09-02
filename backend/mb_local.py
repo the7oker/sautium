@@ -231,7 +231,7 @@ def fetch_release_tracklists(rg_mbid: str) -> List[dict]:
                     FROM mb_release_unknown_country ru WHERE ru.release = r.id
                 ) d WHERE d.y IS NOT NULL
                 ORDER BY d.y, d.m NULLS LAST, d.d NULLS LAST LIMIT 1) AS release_date,
-               t.name AS title, t.length AS length_ms,
+               t.name AS title, COALESCE(t.length, rec.length) AS length_ms,
                rec.gid::text AS recording_mbid, m.position AS disc, t.position AS pos,
                ac.name AS credit,
                CASE WHEN ac.artist_count = 1 THEN ca.gid::text END AS credit_artist_mbid,

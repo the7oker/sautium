@@ -14,6 +14,13 @@ VERBATIM output of the pull handlers in desktop/p2p/sync_queries.py, so
 the importer replays it through the ordinary verify-and-import gate with
 zero format drift.
 
+Reliability over coverage: a pick with any integrity gap — a slot without
+a catalog length, a tracklist with position gaps (a partial mint), no
+tracklist, no cover, no description, unsealed rows, unsealed or missing
+analysis — is EXCLUDED from the bundle and named in the output, never
+shipped half-right. The exit status is 1 while anything is excluded, so
+the bundle is complete only when the run ends with 0.
+
 Deterministic output: rows sorted by primary key, canonical JSON, gzip
 mtime=0 — re-exporting unchanged data is byte-identical and makes no git
 churn.
@@ -69,17 +76,21 @@ def _resolve_picks(conn, manifest: dict) -> list[dict]:
 
 
 def _coverage(conn, picks: list[dict]) -> tuple[list[str], list[str], list[dict]]:
-    """Per-pick coverage against the export gate. Returns (fatal, warns, report)."""
+    """Per-pick integrity against the export gate. Every gap lands in the
+    pick's `_problems` (the export excludes such picks) and in the returned
+    fatal list. Returns (fatal, warns, report)."""
     fatal, warns, report = [], [], []
     for p in picks:
         label = f"#{p['rank']:>2} {p['artist']} — {p['title']}"
         r = {"label": label}
         report.append(r)
         fatal_before = len(fatal)
+        p["_problems"] = []
         if not p["_found"]:
             r["status"] = "MISSING ALBUM"
             fatal.append(f"{label}: no albums row for {p['album_id']} — "
                          "manifest artist/title does not reproduce the minted uuid")
+            p["_problems"].append("missing album")
             continue
 
         row = p["_row"]
@@ -99,14 +110,22 @@ def _coverage(conn, picks: list[dict]) -> tuple[list[str], list[str], list[dict]
             conn,
             """SELECT COUNT(*) AS n,
                       COUNT(*) FILTER (WHERE length_ms IS NULL) AS untimed,
-                      COUNT(*) FILTER (WHERE signature IS NULL OR batch_root IS NULL) AS unsealed
-               FROM album_tracks WHERE album_id = %s::uuid""",
-            [p["album_id"]])[0]
+                      COUNT(*) FILTER (WHERE signature IS NULL OR batch_root IS NULL) AS unsealed,
+                      COALESCE(SUM(d.gaps), 0) AS gaps
+               FROM album_tracks at2
+               LEFT JOIN (SELECT album_id, disc, MAX(position) - COUNT(*) AS gaps
+                          FROM album_tracks WHERE album_id = %(aid)s::uuid
+                          GROUP BY album_id, disc) d ON d.album_id = at2.album_id AND d.disc = at2.disc
+               WHERE at2.album_id = %(aid)s::uuid""",
+            {"aid": p["album_id"]})[0]
         if not slots["n"]:
             fatal.append(f"{label}: empty tracklist (no album_tracks rows)")
         if slots["untimed"]:
             fatal.append(f"{label}: {slots['untimed']}/{slots['n']} slots without "
                          "length_ms — streaming resolve has nothing to hold a hit to")
+        if slots["gaps"]:
+            fatal.append(f"{label}: tracklist has position gaps (a partial mint) — "
+                         "rows the listener would be offered that resolve nothing")
         if slots["unsealed"]:
             fatal.append(f"{label}: {slots['unsealed']}/{slots['n']} album_tracks "
                          "rows unsealed — run sign_audio on the master first")
@@ -169,7 +188,8 @@ def _coverage(conn, picks: list[dict]) -> tuple[list[str], list[str], list[dict]
                          f"DB says {p['owned_on_master']} (informational)")
 
         gaps = len(fatal) - fatal_before
-        r["status"] = f"{gaps} gap(s)" if gaps else "ok"
+        p["_problems"].extend(fatal[fatal_before:])
+        r["status"] = f"EXCLUDED ({gaps})" if gaps else "ok"
         r["tracks"] = slots["n"]
     return fatal, warns, report
 
@@ -322,6 +342,8 @@ def main() -> int:
         picks = _resolve_picks(conn, _manifest_cache)
         fatal, warns, report = _coverage(conn, picks)
 
+        shipped = [p for p in picks if not p["_problems"]]
+        excluded = [p for p in picks if p["_problems"]]
         if args.report:
             for r in report:
                 suffix = f" ({r['tracks']} tracks)" if r.get("tracks") else ""
@@ -330,15 +352,18 @@ def main() -> int:
         for w in warns:
             print(f"WARN  {w}")
         if fatal:
-            print(f"\n{len(fatal)} blocking gap(s):")
+            print(f"\n{len(excluded)} pick(s) excluded for {len(fatal)} integrity gap(s):")
             for f in fatal:
-                print(f"FAIL  {f}")
-            return 1
+                print(f"EXCLUDED  {f}")
         if args.report:
-            print("coverage green — ready to export")
-            return 0
+            print(f"\n{len(shipped)}/{len(picks)} picks would ship"
+                  + ("" if excluded else " — coverage green"))
+            return 1 if excluded else 0
+        if not shipped:
+            print("nothing to export — every pick is excluded")
+            return 1
 
-        bundle = build_bundle(conn, picks)
+        bundle = build_bundle(conn, shipped)
     finally:
         conn.close()
 
@@ -348,10 +373,10 @@ def main() -> int:
         with gzip.GzipFile(fileobj=fh, mode="wb", mtime=0) as gz:
             gz.write(raw)
     seg_tracks = len(bundle["analysis"]["segments"]["items"])
-    print(f"exported {len(picks)} picks, {seg_tracks} analyzed tracks: "
+    print(f"exported {len(shipped)}/{len(picks)} picks, {seg_tracks} analyzed tracks: "
           f"{BUNDLE_PATH} ({BUNDLE_PATH.stat().st_size / 1_048_576:.1f} MB gz, "
           f"{len(raw) / 1_048_576:.1f} MB raw)")
-    return 0
+    return 1 if excluded else 0
 
 
 if __name__ == "__main__":

@@ -210,6 +210,32 @@ def _mb_load_in_progress() -> bool:
             return not got
 
 
+# The local mb_* tables are authoritative for an artist only when this node
+# holds a COMPLETED full dump (user_settings 'musicbrainz.db_version', the
+# per-DSN marker mb_dump_load writes — see mb_slice_queries.DB_VERSION_KEY)
+# or a peer has answered the artist's NAME through the slice protocol
+# (mb_slice_fetches, a zero-match answer included: the slice is a closed
+# world per name). A replica's mb_* is otherwise a patchwork of other
+# artists' slices: an unfetched artist reads as an empty release-group list,
+# which the reconcile would take for "nothing missing" and strip the shelf,
+# and the stamp would then park the artist for a month. HTTP-API nodes
+# (no local tables) answer for every artist and never consult this.
+_MB_SOURCE_COVERS_SQL = """
+    EXISTS (SELECT 1 FROM user_settings WHERE key = 'musicbrainz.db_version')
+    OR EXISTS (SELECT 1 FROM mb_slice_fetches f
+               WHERE f.name_key = lower(btrim({name})))
+"""
+
+
+def _mb_source_covers(artist_name: str) -> bool:
+    if not mb.LOCAL_DUMP:
+        return True
+    return db_query_one(
+        "SELECT 1 AS x WHERE " + _MB_SOURCE_COVERS_SQL.format(name="%(name)s"),
+        {"name": artist_name},
+    ) is not None
+
+
 def _artist_mbids(artist_id: str) -> List[str]:
     """All MB artist MBIDs for a library artist (>1 = conflated namesakes;
     their discographies are unioned). Empty = not canonized."""
@@ -379,7 +405,10 @@ def _pick_canonical_release(releases: List[dict]) -> Optional[dict]:
 
     Ties then go to the earliest-dated release (the original edition), then
     the shorter tracklist, then the lowest gid — deterministic, so a re-sync
-    picks the same release. Releases with no tracks never win.
+    picks the same release. Releases with no tracks never win, and within
+    the winning tracklist shape a fully timed release outranks every other
+    tie-break; an album whose modal shape has no fully timed edition is not
+    minted at all (see _fully_timed).
     """
     pool = [r for r in releases if r.get("tracks")]
     if not pool:
@@ -388,48 +417,28 @@ def _pick_canonical_release(releases: List[dict]) -> Optional[dict]:
     pool = official or pool
     votes = Counter(len(r["tracks"]) for r in pool)
     top = max(votes.values())
-    return min((r for r in pool if votes[len(r["tracks"])] == top),
-               key=lambda r: (r.get("language") != _MB_LANGUAGE_ENGLISH,
+    best = min((r for r in pool if votes[len(r["tracks"])] == top),
+               key=lambda r: (not _fully_timed(r),
+                              r.get("language") != _MB_LANGUAGE_ENGLISH,
                               _script_tier(r), _unnamed_tracks(r),
                               _release_date_key(r), len(r["tracks"]), r["release_mbid"]))
+    return best if _fully_timed(best) else None
 
 
-def _sibling_lengths(releases: List[dict], best: dict) -> dict:
-    """Track length in ms per normalized title, taken from the release
-    group's OTHER editions — for the slots the canonical release leaves
-    blank.
-
-    MB stores a length per TRACK, not per recording, so an edition whose
-    durations nobody ever entered leaves its whole tracklist blank while a
-    sibling pressing of the same works carries them (Emahoy Tsegué-Maryam
-    Guèbrou's "Spielt eigene Kompositionen": the picked edition blank, the
-    "Spielt Eigen Kompositionen" pressing complete). For a phantom that is
-    not a missing display value — the catalog length is the ONLY thing a
-    provider's hit is held to, so without it the resolve accepts any
-    listing at any duration and preview enrichment then refuses the audio
-    outright, having no way to verify the match. That album streamed a 31 s
-    video for an 8:26 piece and produced no analysis at all.
-
-    Keyed on the TITLE, never the position: a sibling edition reorders and
-    retitles ("The Last Day of the Deceased" sits at position 2 where ours
-    has "The Last Tears of the Deceased"), and a length read off the
-    position alone is another track's. The modal value wins, as in
-    _pick_canonical_release — reissues agree on the master, an outlier edit
-    does not.
-    """
-    if all(t["length_ms"] for t in best["tracks"]):
-        return {}
-    wanted = {normalize(t["title"] or "") for t in best["tracks"] if not t["length_ms"]}
-    wanted.discard("")
-    seen: dict = {}
-    for r in releases:
-        if r["release_mbid"] == best["release_mbid"]:
-            continue
-        for t in r["tracks"]:
-            key = normalize(t["title"] or "")
-            if key in wanted and t["length_ms"]:
-                seen.setdefault(key, Counter())[t["length_ms"]] += 1
-    return {k: c.most_common(1)[0][0] for k, c in seen.items()}
+def _fully_timed(release: dict) -> bool:
+    """Every slot of the release carries a catalog length — the track's own
+    or its recording's (mb_local COALESCEs the two; a recording's length is
+    MB's datum for the same recording, not a guess). Reliability over
+    coverage (2026-09-02): a slot without a length is a slot the streaming
+    resolve holds to nothing, so a provider's wrong listing passes, the
+    stream enricher then seals analysis of the wrong audio and carry spreads
+    it over P2P. A release that leaves one slot blank therefore does not
+    represent the album — the pick prefers a fully timed edition of the
+    same tracklist shape and declines the album when there is none. This
+    replaced borrowing lengths across editions by track title
+    (_sibling_lengths) and minting the timed slots of a half-timed release,
+    both of which traded exactly that reliability for coverage."""
+    return all(t["length_ms"] for t in release["tracks"])
 
 
 def _carry_rekeyed_slots(album_id: str, slot_rows: list, slot_artists: dict) -> int:
@@ -532,8 +541,10 @@ def _persist_phantom_tracklist(album_id: str, artist_id: str,
     releases = mb.fetch_release_tracklists(rg_mbid)
     best = _pick_canonical_release(releases)
     if not best:
+        if releases:
+            logger.info("phantom %s (%s): no fully timed release of the album's "
+                        "tracklist shape — not minting", album_id, rg_mbid)
         return 0
-    sibling_lengths = _sibling_lengths(releases, best)
 
     # The album's artists by MB gid and by normalized name. A credit head that
     # IS one of them uses THAT artist's row — not the row of whichever
@@ -589,33 +600,9 @@ def _persist_phantom_tracklist(album_id: str, artist_id: str,
             artist_rows.append((tid, "featured", fid))
         slot_artists[tid] = slot_artist_id
         slot_rows.append(((album_id, tid, tr["disc"] or 1, tr["position"],
-                           tr["recording_mbid"],
-                           tr["length_ms"] or sibling_lengths.get(normalize(title))), title))
+                           tr["recording_mbid"], tr["length_ms"]), title))
     if not slot_rows:
         return 0
-    # A tracklist MB never timed is not a phantom we can do anything with. The
-    # catalog length is the only thing a provider's hit is held to, so without
-    # it the resolve accepts any listing at any duration and preview enrichment
-    # refuses the audio outright — the album shows up in the library, plays
-    # nothing and can never be verified. `_sibling_lengths` has already tried
-    # the release group's other editions by the time we get here, so this is
-    # the end of the road: leave the slots unwritten and let the caller's
-    # reconcile drop the album.
-    timed = [(row, title) for row, title in slot_rows if row[5]]
-    if not timed:
-        logger.info("phantom %s (%s): MB times none of its %d tracks — not minting",
-                    album_id, rg_mbid, len(slot_rows))
-        return 0
-    if len(timed) < len(slot_rows):
-        # Same rule per slot: an untimed track on an otherwise timed album is
-        # just as unplayable, and leaving it in the tracklist offers the
-        # listener a row that resolves nothing. The positions keep MB's
-        # numbering, so the gap says plainly that the catalog has no such
-        # track for us rather than renumbering the album into a lie.
-        logger.info("phantom %s (%s): MB times %d of %d tracks — minting the timed ones",
-                    album_id, rg_mbid, len(timed), len(slot_rows))
-        slot_rows = timed
-
     _carry_rekeyed_slots(album_id, slot_rows, slot_artists)
 
     with get_conn() as conn:
@@ -680,7 +667,16 @@ def remint_tracklists(artist_name: Optional[str] = None,
     across re-keyed slots, then drop the old rows nothing points at any
     more. The one-off that follows a mint-rule or normalization change: the
     incremental path never revisits an album that already has a tracklist.
-    Per-album isolation, resumable."""
+    Per-album isolation, resumable.
+
+    An album the current rules DECLINE (no fully timed release of its
+    tracklist shape, see _fully_timed) is retired the way the discography
+    reconcile retires a trackless phantom: its stale tracklist goes, the
+    album is unlinked and garbage-collected, and tracks carrying analysis
+    or listens survive as track rows (delete_orphan_tracks spares them).
+    Leaving the old partial tracklist in place would keep offering rows
+    the rules no longer admit. Seed picks are spared like everywhere else
+    — a pick the rules decline shows up in seed_export --report instead."""
     from canon.identity import delete_orphan_tracks
     from database import SessionLocal
     rows = db_query(f"""
@@ -697,13 +693,18 @@ def remint_tracklists(artist_name: Optional[str] = None,
         ORDER BY al.id, aa.artist_id
         {f"LIMIT {int(limit)}" if limit else ""}
     """, {"name": artist_name, "ids": list(album_ids or [])})
-    totals = {"albums": len(rows), "processed": 0, "slots": 0, "errors": 0}
+    totals = {"albums": len(rows), "processed": 0, "slots": 0, "errors": 0,
+              "declined": 0, "retired": 0}
     logger.info(f"remint_tracklists: {len(rows)} phantom albums"
                 f"{' of ' + artist_name if artist_name else ''}")
+    declined: List[str] = []
     for row in rows:
         try:
-            totals["slots"] += _persist_phantom_tracklist(
+            slots = _persist_phantom_tracklist(
                 row["album_id"], row["artist_id"], row["artist_name"], row["rg_mbid"])
+            totals["slots"] += slots
+            if not slots:
+                declined.append(row["album_id"])
         except Exception as e:
             totals["errors"] += 1
             logger.error(f"remint failed for album {row['album_id']} "
@@ -712,6 +713,32 @@ def remint_tracklists(artist_name: Optional[str] = None,
         if totals["processed"] % 1000 == 0:
             logger.info(f"remint_tracklists: {totals['processed']}/{len(rows)} albums, "
                         f"{totals['slots']} slots, {totals['errors']} errors")
+    totals["declined"] = len(declined)
+    if declined:
+        with get_conn() as conn:
+            with conn.cursor() as cur:
+                cur.execute("""
+                    DELETE FROM album_tracks atr
+                    WHERE atr.album_id = ANY(%(ids)s::uuid[])
+                      AND NOT EXISTS (SELECT 1 FROM seed_picks sp WHERE sp.album_id = atr.album_id)
+                """, {"ids": declined})
+                cur.execute("""
+                    DELETE FROM album_artists aa
+                    USING albums al
+                    WHERE al.id = aa.album_id
+                      AND al.id = ANY(%(ids)s::uuid[])
+                      AND NOT EXISTS (SELECT 1 FROM album_variants av WHERE av.album_id = al.id)
+                      AND NOT EXISTS (SELECT 1 FROM album_tracks at2 WHERE at2.album_id = al.id)
+                      AND NOT EXISTS (SELECT 1 FROM seed_picks sp WHERE sp.album_id = al.id)
+                """, {"ids": declined})
+                cur.execute("""
+                    DELETE FROM albums al
+                    WHERE al.id = ANY(%(ids)s::uuid[])
+                      AND NOT EXISTS (SELECT 1 FROM album_variants av WHERE av.album_id = al.id)
+                      AND NOT EXISTS (SELECT 1 FROM album_artists aa WHERE aa.album_id = al.id)
+                """, {"ids": declined})
+                totals["retired"] = cur.rowcount
+            conn.commit()
     db = SessionLocal()
     try:
         totals["orphans_deleted"] = delete_orphan_tracks(db)
@@ -739,10 +766,16 @@ def _reconcile_phantoms(artist_id: str, missing_rgs: List[str]) -> None:
     # Streaming-minted phantoms are OUTSIDE the MB source-of-truth: the user
     # clicked a provider tile (explicit intent), the album has no rg MBID, and
     # this reconcile used to nuke it on the very first artist-page view.
+    # A curated seed pick is spared on the same footing: it is product
+    # intent, not an MB-derived guess, so MB reclassifying its release group
+    # (a compilation flag, a namesake merge) or a replica that holds no
+    # facts for the artist yet must never strip it. The explicit prune
+    # empties seed_picks before reconciling, so that path still removes it.
     analyzed_guard = """
               AND NOT EXISTS (SELECT 1 FROM album_tracks at
                               JOIN embeddings e ON e.track_id = at.track_id
                               WHERE at.album_id = al.id)
+              AND NOT EXISTS (SELECT 1 FROM seed_picks sp WHERE sp.album_id = al.id)
     """
     if missing_rgs:
         db_execute(f"""
@@ -824,11 +857,11 @@ def prune_phantom_layer(cancel_flag=None, progress_cb=None) -> Dict[str, Any]:
     `progress_cb(done, total)` fires every 250 artists and at the end; the
     planner statistics are refreshed afterwards so the Settings footprint
     row reads the new size at once."""
-    # Un-pin the curated seed layer first: the album rows themselves follow
-    # analyzed_guard (all seed albums carry analysis, so they survive), but
-    # "remove the phantom layer" also means "stop showcasing it on Home" —
-    # the favourites tail, cold-start rotation and filler all key on this
-    # table.
+    # Un-pin the curated seed layer first: with the pick rows gone the
+    # albums follow the ordinary reconcile rules (analysis-carrying ones are
+    # spared like any other phantom), and "remove the phantom layer" also
+    # means "stop showcasing it on Home" — the favourites tail, cold-start
+    # rotation and filler all key on this table.
     unpinned = db_execute(
         "WITH d AS (DELETE FROM seed_picks RETURNING 1) SELECT COUNT(*) AS n FROM d")
     artists = db_query("""
@@ -863,7 +896,9 @@ def sync_artist_discography(artist_id, artist_name: str) -> Dict[str, int]:
     Returns a stats dict: ``{status, found, new, skipped_owned}``.
     `status` is success / not_canonized (no `artist_mbids` row — gate, not
     stamped) / mb_loading (dump reload in flight — skipped, not stamped) /
-    rate_limited (dump-less nodes on the MB HTTP API).
+    no_source (slice replica without this artist's MB facts yet — skipped,
+    not stamped; see _mb_source_covers) / rate_limited (dump-less nodes on
+    the MB HTTP API).
     """
     artist_id = str(artist_id)
     stats = {"status": "success", "found": 0, "new": 0, "skipped_owned": 0,
@@ -896,6 +931,13 @@ def sync_artist_discography(artist_id, artist_name: str) -> Dict[str, int]:
         # Dump reload in flight — candidates would come from TRUNCATEd
         # tables. Not stamped: retried on the next view/batch.
         stats["status"] = "mb_loading"
+        return stats
+
+    if not _mb_source_covers(artist_name):
+        # No MB truth for this artist here yet. Not stamped: the slice queue
+        # lists exactly these artists (mb_slice_queries.pending_slice_names)
+        # and the first batch after the slice lands mints the shelf.
+        stats["status"] = "no_source"
         return stats
 
     try:
@@ -1038,7 +1080,14 @@ def stale_canonized_artists(limit: Optional[int] = None,
 
     Within a tier: oldest data first. Shared by the background step and
     the CLI backfill — one source of truth for the priority.
+
+    On a local-dump node an artist whose MB facts are not here yet (a slice
+    replica, see _mb_source_covers) is left out rather than returned: the
+    sync would answer no_source without stamping, so it would sit at the
+    head of every batch and starve the artists that can be shelved.
     """
+    covered = "TRUE" if not mb.LOCAL_DUMP else \
+        "(" + _MB_SOURCE_COVERS_SQL.format(name="a.name") + ")"
     sql = f"""
         WITH listened AS (
             SELECT DISTINCT ta.artist_id
@@ -1059,6 +1108,7 @@ def stale_canonized_artists(limit: Optional[int] = None,
         WHERE EXISTS (SELECT 1 FROM artist_mbids am WHERE am.artist_id = a.id)
           AND (a.last_album_sync IS NULL
                OR a.last_album_sync < now() - make_interval(days => %(days)s))
+          AND {covered}
         ORDER BY
           CASE WHEN a.id IN (SELECT artist_id FROM listened) THEN 0
                WHEN a.id IN (SELECT artist_id FROM similar_of_listened) THEN 1
