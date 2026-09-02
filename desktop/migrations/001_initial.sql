@@ -578,11 +578,12 @@ CREATE TABLE IF NOT EXISTS audio_features (
 -- The signed/verifiable unit is the SEGMENT (deterministic per index), not the
 -- mean vector (varies with the sampled K). The content-address a record signs
 -- against is its LINKED analysis_sources row (registered at analysis time).
--- Signable material: every first-hand origin='local' analysis (the per-album
--- signing whitelist was dropped 2026-07-07 — an unsigned network breaks
--- integrity testing and the sync verify chain), or origin='deezer' AND
--- is_lossless (tier 3 — a clean stream signs against the STREAM's pcm_hash,
--- claiming no possession of any local rip).
+-- Signable material: every first-hand analysis with a known origin — a local
+-- rip (the per-album signing whitelist was dropped 2026-07-07 — an unsigned
+-- network breaks integrity testing and the sync verify chain) or a stream
+-- (tier 3 — signs against the STREAM's pcm_hash, claiming no possession of
+-- any local rip; lossy streams sign too since 2026-09-02, is_lossless rides
+-- in the provenance for ranking).
 -- ============================================================
 
 -- One row per Worker-timestamped signing batch (the daily notary root that

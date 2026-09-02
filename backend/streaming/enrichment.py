@@ -137,25 +137,16 @@ class PreviewEnricher:
         from config import settings
         from database import SessionLocal
 
-        # Idempotent, quality-aware: a track already analysed from an owned
-        # file or a lossless stream is done — skip the decode + GPU entirely.
-        # A lossy-sourced analysis (YouTube, a degraded tier) is re-derived
-        # when lossless audio arrives: only first-hand lossless material
-        # signs (sign_audio._SIGNABLE_SRC), so lossy analysis is a dead end
-        # for the network — never carried, never seeded — and the persist
-        # step's origin/quality rank makes the replacement a strict upgrade.
-        from sqlalchemy import text
+        # Idempotent: a previously-enriched (or owned) track already has an
+        # embedding — skip the decode + GPU entirely. A lossy-sourced analysis
+        # is as final as a lossless one: every first-hand stream signs
+        # (sign_audio._SIGNABLE_SRC), and re-deriving it from a later
+        # lossless fetch would only re-spend the GPU and re-seal rows that
+        # peers may already hold.
+        from models import Embedding
         with SessionLocal() as db:
-            existing = db.execute(text("""
-                SELECT s.origin::text AS origin, s.is_lossless
-                FROM embeddings e
-                LEFT JOIN analysis_sources s ON s.id = e.analysis_source_id
-                WHERE e.track_id = :tid
-                LIMIT 1"""), {"tid": track_id}).fetchone()
-        if existing is not None and (existing.origin == "local"
-                                     or bool(existing.is_lossless)
-                                     or not lossless):
-            return
+            if db.query(Embedding.id).filter(Embedding.track_id == track_id).first():
+                return
 
         # Decode the in-memory FLAC to 48k mono and take the SAME middle window
         # the scanner uses, so the embedding is comparable to owned tracks.

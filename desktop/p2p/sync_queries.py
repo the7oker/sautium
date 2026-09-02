@@ -633,7 +633,7 @@ def get_pushable_tracks(conn, limit: int) -> list[dict]:
         album: the full-snapshot proof that this node's canon matured
         around the track, not just its analysis. sign_audio seals those rows
         for every track with signable first-hand analysis — an owned rip OR
-        a lossless stream of a phantom;
+        a stream of a phantom;
       * a recording to name the track by — the offer round speaks MBIDs.
         Two sources, one per identity path: the canon matcher's sealed
         track_mbids binding (owned files), or the sealed tracklist row's own

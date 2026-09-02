@@ -9,9 +9,15 @@ the scanner / stream enricher — never recomputed here) is signable material:
     signing_whitelist gate was dropped 2026-07-07: an unsigned network breaks
     integrity testing and the sync verify chain; selective privacy policy is
     off), or
-  - origin='deezer' AND is_lossless — tier 3: a streamed clean source signs
-    against the STREAM's pcm_hash, claiming no possession of any local rip.
-    YouTube / lossy tiers never sign (decode-varying pcm_hash, lossy master).
+  - origin='deezer' / 'youtube' — tier 3: a streamed source signs against
+    the STREAM's pcm_hash, claiming no possession of any local rip. Until
+    2026-09-02 only a lossless Deezer fetch qualified (decode-varying
+    pcm_hash, lossy master); lossy streams sign too now — the analysis
+    loses nothing measurable at lossy rates, the Deezer provider ships
+    outside the distribution so YouTube is the only stream most nodes
+    ever analyse, and a network where none of that signs carries nothing.
+    The seal binds the author's OWN decode; is_lossless rides in the
+    provenance so a peer can still rank sources.
 
 Each unsigned CLAP segment (via its embeddings row) and audio_features row is
 author-signed against that source's content-address; all new signatures batch
@@ -61,9 +67,7 @@ MAX_RECORDS_PER_BATCH = 250_000
 # A record signs only when its linked source is signable-classed AND
 # first-hand (imported sources arrived over sync — signing analysis this node
 # never computed would be authorship theft in reverse).
-_SIGNABLE_SRC = """(NOT src.imported
-                    AND ((src.origin = 'deezer' AND src.is_lossless)
-                         OR src.origin = 'local'))"""
+_SIGNABLE_SRC = "(NOT src.imported AND src.origin IS NOT NULL)"
 
 
 def _pubkey_hex(key) -> str:
@@ -88,11 +92,10 @@ def _timestamp_root(root: str) -> dict:
 
 def _signable_tracks(cur) -> list:
     """Track ids with at least one first-hand signable source."""
-    cur.execute("""
-        SELECT DISTINCT track_id::text AS tid
-        FROM analysis_sources
-        WHERE NOT imported
-          AND (origin = 'local' OR (origin = 'deezer' AND is_lossless))
+    cur.execute(f"""
+        SELECT DISTINCT src.track_id::text AS tid
+        FROM analysis_sources src
+        WHERE {_SIGNABLE_SRC}
     """)
     return [r["tid"] for r in cur.fetchall()]
 
@@ -132,7 +135,7 @@ _ENRICHMENT_SOURCES = {
         FROM genre_descriptions gd
         WHERE gd.signature IS NULL AND NOT gd.imported""", "genre_descriptions"),
     # Carry v3 — the album layer. Only what stands on this node's OWN
-    # signable analysis signs (_SIGNABLE_SRC: a local rip or a lossless
+    # signable analysis signs (_SIGNABLE_SRC: a local rip or a first-hand
     # stream): the ~3M MB-minted phantom tracklist rows nobody analyzed are
     # derived from the dump, not observed, and attesting them would sign a
     # copy of MusicBrainz. The gate used to be an owned FILE, which left every
