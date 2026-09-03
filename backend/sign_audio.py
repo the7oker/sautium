@@ -197,13 +197,18 @@ _TABLE_ENTITY = {"embedding_segments": None,       # via embeddings.track_id, se
 
 
 def _materialize_owned_tracklists(cur) -> int:
-    """album_tracks rows for owned analysis-source tracks.
+    """album_tracks rows for owned tracks, from their files' tags.
 
     The owned layer lives in albums → album_variants → media_files, so most
     owned tracks have no album_tracks row at all — that junction was built
     for PHANTOM tracklists. The carry snapshot needs one sealed tracklist
     shape for both, and the file's own tags (disc, track number, duration,
-    recording mbid) are this node's first-hand observation of it. Idempotent
+    recording mbid) are this node's first-hand observation of it. Every
+    tagged file counts, not only the analysis source (the 2026-09-03
+    change): an album's tracklist is a property of its files, not of which
+    copy the GPU happened to read — with the source-only rule a rip whose
+    tracks were analysed from a best-of or a box set had no tracklist at
+    all (922 of 3 747 owned albums on the reference library). Idempotent
     and incremental: ON CONFLICT keeps whatever row already claims the slot
     (an MB-minted one outranks a re-derivation). Tracks with no tag number
     are skipped, not invented — a made-up position is not an observation.
@@ -218,7 +223,7 @@ def _materialize_owned_tracklists(cur) -> int:
                (mf.duration_seconds * 1000)::int
         FROM media_files mf
         JOIN album_variants av ON av.id = mf.album_variant_id
-        WHERE mf.is_analysis_source AND mf.track_number IS NOT NULL
+        WHERE mf.track_number IS NOT NULL
           AND NOT EXISTS (SELECT 1 FROM album_tracks at2
                            WHERE at2.album_id = av.album_id
                              AND at2.track_id = mf.track_id)

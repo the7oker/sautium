@@ -1,5 +1,5 @@
 {
-  "comment": "Curated cold-start picks v1 (2026-09-01). Source of truth for the seed bundle. artist/title must reproduce the minted album UUIDs through uuid_utils.album_uuid() — seed_export.py validates every entry against the master DB and fails loudly on misses. tier: 1 = list A (bridge gems), 2 = list B (taste palette), 3 = honourable mentions, 4 = rotation pool. owned_on_master and year are informational; the exporter recomputes ownership from the DB.",
+  "comment": "Curated cold-start picks v1 (2026-09-01). Source of truth for the seed bundle. artist/title must reproduce the minted album UUIDs through uuid_utils.album_uuid() — seed_export.py validates every entry against the master DB and excludes picks with integrity gaps. tier: 1 = list A (bridge gems), 2 = list B (taste palette), 3 = honourable mentions, 4 = rotation pool. owned_on_master and year are informational; the exporter recomputes ownership from the DB. analysis_waiver: true = the curator ships this pick even though a track lacks sealed analysis (Valerii, 2026-09-03: Zombie, Heaven or Las Vegas, MHTRTC — one unresolvable track each); the album streams whole, only radio/similarity lack that track.",
   "picks": [
     {"rank": 1, "tier": 1, "artist": "Hidden Orchestra", "title": "Night Walks", "year": 2010, "owned_on_master": true},
     {"rank": 2, "tier": 1, "artist": "GoGo Penguin", "title": "v2.0", "year": 2014, "owned_on_master": false},
@@ -34,7 +34,7 @@
     {"rank": 31, "tier": 2, "artist": "Songs: Ohia", "title": "The Magnolia Electric Co.", "year": 2003, "owned_on_master": false},
     {"rank": 32, "tier": 2, "artist": "Björk", "title": "Vespertine", "year": 2001, "owned_on_master": true},
     {"rank": 33, "tier": 2, "artist": "Bob Marley & The Wailers", "title": "Exodus", "year": 1977, "owned_on_master": false},
-    {"rank": 34, "tier": 2, "artist": "Fela Kuti", "title": "Zombie", "year": 1976, "owned_on_master": false},
+    {"rank": 34, "tier": 2, "artist": "Fela Kuti", "title": "Zombie", "year": 1976, "owned_on_master": false, "analysis_waiver": true},
     {"rank": 35, "tier": 2, "artist": "The Cure", "title": "Disintegration", "year": 1989, "owned_on_master": false},
     {"rank": 36, "tier": 2, "artist": "Nujabes", "title": "Modal Soul", "year": 2005, "owned_on_master": false},
     {"rank": 37, "tier": 2, "artist": "Pink Floyd", "title": "The Dark Side of the Moon", "year": 1973, "owned_on_master": true},
@@ -49,9 +49,9 @@
     {"rank": 46, "tier": 3, "artist": "Kelly Moran", "title": "Ultraviolet", "year": 2018, "owned_on_master": false},
     {"rank": 47, "tier": 3, "artist": "Blu", "title": "HerFavoriteColo(u)r", "year": 2011, "owned_on_master": false},
     {"rank": 48, "tier": 4, "artist": "Portishead", "title": "Dummy", "year": 1994, "owned_on_master": false},
-    {"rank": 49, "tier": 4, "artist": "Cocteau Twins", "title": "Heaven or Las Vegas", "year": 1990, "owned_on_master": false},
+    {"rank": 49, "tier": 4, "artist": "Cocteau Twins", "title": "Heaven or Las Vegas", "year": 1990, "owned_on_master": false, "analysis_waiver": true},
     {"rank": 50, "tier": 4, "artist": "Metallica", "title": "Master of Puppets", "year": 1986, "owned_on_master": false},
-    {"rank": 51, "tier": 4, "artist": "Boards of Canada", "title": "Music Has the Right to Children", "year": 1998, "owned_on_master": false},
+    {"rank": 51, "tier": 4, "artist": "Boards of Canada", "title": "Music Has the Right to Children", "year": 1998, "owned_on_master": false, "analysis_waiver": true},
     {"rank": 52, "tier": 4, "artist": "Steve Reich", "title": "Music for 18 Musicians", "year": 1978, "owned_on_master": true}
   ]
 }

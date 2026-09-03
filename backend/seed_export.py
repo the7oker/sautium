@@ -19,7 +19,10 @@ a catalog length, a tracklist with position gaps (a partial mint), no
 tracklist, no cover, no description, unsealed rows, unsealed or missing
 analysis — is EXCLUDED from the bundle and named in the output, never
 shipped half-right. The exit status is 1 while anything is excluded, so
-the bundle is complete only when the run ends with 0.
+the bundle is complete only when the run ends with 0. The one curatorial
+exception is explicit in the manifest: `analysis_waiver` ships a pick
+whose track(s) have no sealed analysis (a track no provider resolves) —
+the album still streams whole, only radio/similarity lack that track.
 
 Deterministic output: rows sorted by primary key, canonical JSON, gzip
 mtime=0 — re-exporting unchanged data is byte-identical and makes no git
@@ -67,6 +70,7 @@ def _resolve_picks(conn, manifest: dict) -> list[dict]:
             "tier": entry["tier"],
             "artist": entry["artist"],
             "title": entry["title"],
+            "analysis_waiver": bool(entry.get("analysis_waiver")),
             "album_id": aid,
             "artist_id": str(artist_uuid(entry["artist"])),
             "owned_on_master": bool(row and row[0]["owned"]),
@@ -132,9 +136,12 @@ def _coverage(conn, picks: list[dict]) -> tuple[list[str], list[str], list[dict]
         if slots["gaps"]:
             fatal.append(f"{label}: tracklist has position gaps (a partial mint) — "
                          "rows the listener would be offered that resolve nothing")
+        # A slot seals with its track's analysis, and the album row with any
+        # analysed track — so under an analysis waiver these are the same gap.
+        waivable = warns if p["analysis_waiver"] else fatal
         if slots["unsealed"]:
-            fatal.append(f"{label}: {slots['unsealed']}/{slots['n']} album_tracks "
-                         "rows unsealed — run sign_audio on the master first")
+            waivable.append(f"{label}: {slots['unsealed']}/{slots['n']} album_tracks "
+                            "rows unsealed — run sign_audio on the master first")
 
         album_seal = sq.db_query(
             conn,
@@ -142,7 +149,7 @@ def _coverage(conn, picks: list[dict]) -> tuple[list[str], list[str], list[dict]
                WHERE id = %s::uuid AND signature IS NOT NULL AND batch_root IS NOT NULL""",
             [p["album_id"]])
         if not album_seal:
-            fatal.append(f"{label}: albums row unsealed — run sign_audio on the master first")
+            waivable.append(f"{label}: albums row unsealed — run sign_audio on the master first")
 
         analysis = sq.db_query(
             conn,
@@ -161,11 +168,13 @@ def _coverage(conn, picks: list[dict]) -> tuple[list[str], list[str], list[dict]
                FROM album_tracks at2 WHERE at2.album_id = %s::uuid""",
             [p["album_id"]])[0]
         if analysis["no_segments"]:
-            fatal.append(f"{label}: {analysis['no_segments']}/{analysis['n']} tracks "
-                         "without sealed segments")
+            waivable.append(f"{label}: {analysis['no_segments']}/{analysis['n']} tracks "
+                            "without sealed segments"
+                            + (" (waived)" if p["analysis_waiver"] else ""))
         if analysis["no_features"]:
-            fatal.append(f"{label}: {analysis['no_features']}/{analysis['n']} tracks "
-                         "without sealed audio_features")
+            waivable.append(f"{label}: {analysis['no_features']}/{analysis['n']} tracks "
+                            "without sealed audio_features"
+                            + (" (waived)" if p["analysis_waiver"] else ""))
 
         enrich = sq.db_query(
             conn,
