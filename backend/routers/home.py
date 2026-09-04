@@ -3,7 +3,7 @@ Home screen endpoints.
 
 Each Home section is its own endpoint so the frontend can render
 on-readiness instead of waiting for the slowest block to load, and so
-"New in library" can paginate independently via infinite scroll.
+"New in my collection" can paginate independently via infinite scroll.
 
 Favourite artists rank by total listening time (not play count): a
 single 90-minute ambient track should outweigh ten 5-minute pop plays.
