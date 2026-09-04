@@ -525,7 +525,7 @@ def _persist_phantom_tracklist(album_id: str, artist_id: str,
     an anchor would put the row into stale_canonized_artists' discography
     re-derive, and a compilation's fifteen credits times their discographies
     is the fan-out the engagement rule forbids; the anchor arrives the day
-    the user engages with the artist. Until 2026-08-25 every slot carried the
+    the user engages with the artist (canon.phantom.canonize_engaged_credit_heads). Until 2026-08-25 every slot carried the
     album artist, so a "Various Artists" phantom could never collapse with a
     rip — 530 same-recording pairs on the master lived under two uuids.
 

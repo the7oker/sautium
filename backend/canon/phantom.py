@@ -255,3 +255,83 @@ def canonize_phantom_similars(limit: Optional[int] = None, dry_run: bool = False
             stats["discarded"] = cur.rowcount
     logger.info("phantom canon: %s", stats)
     return stats
+
+
+def canonize_engaged_credit_heads(limit: Optional[int] = None) -> dict:
+    """Anchor the credit heads of MB-minted tracklists once the listener has
+    engaged with them.
+
+    A phantom tracklist credits each slot to its MB artist-credit head; a head
+    that is not the album artist gets a name-only artists row and, on purpose,
+    no artist_mbids — an anchor puts the row into stale_canonized_artists'
+    discography derive, and a compilation's fifteen credits times their
+    discographies is the fan-out the engagement rule forbids
+    (discography._persist_phantom_tracklist). The mint promised the anchor
+    "the day the user engages": this is that day. Candidates are file-less,
+    uncanonized artists with track credits and a completed, unskipped listen
+    (ARTIST_ENGAGED — the similars backfill's gate, linear in listening).
+
+    The MBID is not a name guess: the slot's recording_mbid names the MB
+    recording, its artist credit names the head by MB artist id, and the
+    credited name (or the artist's own) equal to the row's name IS the head
+    — hence confidence 'name_exact' (MB-structural, not content-verified),
+    never 'phantom'. A row whose credits resolve to two MB artists is a
+    namesake collision the mint's name-keyed rows cannot express; it is left
+    for the namesake split. Nothing is discarded: a head whose recordings
+    are not in the local mb_* tables yet (a slice replica ahead of its slice)
+    keeps its tracks and is retried next pass."""
+    from sql_queries import ARTIST_ENGAGED
+    stats = {"candidates": 0, "canonized": 0, "ambiguous": 0, "unresolved": 0}
+    lim = "LIMIT %(lim)s" if limit else ""
+    rows = db_query(f"""
+        WITH cand AS (
+            SELECT a.id, a.name
+            FROM artists a
+            WHERE NOT EXISTS (SELECT 1 FROM artist_mbids am WHERE am.artist_id = a.id)
+              AND EXISTS (SELECT 1 FROM track_artists ta WHERE ta.artist_id = a.id)
+              AND NOT EXISTS (SELECT 1 FROM track_artists ta
+                              JOIN media_files mf ON mf.track_id = ta.track_id
+                              WHERE ta.artist_id = a.id)
+              AND {ARTIST_ENGAGED}
+            ORDER BY a.name
+            {lim}
+        )
+        SELECT c.id::text AS artist_id,
+               array_remove(array_agg(DISTINCT ma.gid::text), NULL) AS gids
+        FROM cand c
+        LEFT JOIN track_artists ta ON ta.artist_id = c.id
+        LEFT JOIN album_tracks at2 ON at2.track_id = ta.track_id
+                                  AND at2.recording_mbid IS NOT NULL
+        LEFT JOIN mb_recording rec ON rec.gid = at2.recording_mbid
+        LEFT JOIN mb_artist_credit_name acn ON acn.artist_credit = rec.artist_credit
+        LEFT JOIN mb_artist ma ON ma.id = acn.artist
+                              AND (lower(btrim(acn.name)) = lower(btrim(c.name))
+                                   OR lower(btrim(ma.name)) = lower(btrim(c.name)))
+        GROUP BY c.id
+    """, {"lim": limit} if limit else {})
+    stats["candidates"] = len(rows)
+    anchors = []
+    for r in rows:
+        gids = r["gids"] or []
+        if len(gids) == 1:
+            anchors.append((gids[0], r["artist_id"]))
+        elif gids:
+            stats["ambiguous"] += 1
+        else:
+            stats["unresolved"] += 1
+    if anchors:
+        from psycopg2.extras import execute_values
+        with get_conn() as conn:
+            conn.autocommit = True
+            with conn.cursor() as cur:
+                execute_values(cur,
+                    "INSERT INTO artist_mbids (mbid, artist_id, confidence) VALUES %s "
+                    "ON CONFLICT (mbid) DO NOTHING",
+                    anchors, template="(%s::uuid, %s::uuid, 'name_exact')")
+                cur.execute("""
+                    SELECT COUNT(*) FROM artist_mbids
+                    WHERE artist_id = ANY(%s::uuid[])""", ([a for _, a in anchors],))
+                stats["canonized"] = cur.fetchone()[0]
+    if stats["candidates"]:
+        logger.info("credit-head canon: %s", stats)
+    return stats
