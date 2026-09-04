@@ -3022,8 +3022,8 @@
 
   // Three independent fetches, each section renders as its endpoint
   // resolves. Mirrors the Discovery "render on readiness" pattern so
-  // a slow Favourite-artists aggregation doesn't block New in library
-  // from appearing.
+  // a slow Favourite-artists aggregation doesn't block New in my
+  // collection from appearing.
   async function renderHome(root) {
     const screen = document.createElement('div');
     screen.className = 'screen';
@@ -3036,17 +3036,24 @@
 
     const favSec = createHomeSection(screen, 'Favourite artists');
     const recSec = createHomeSection(screen, 'Recommendations');
-    const newSec = createHomeSection(screen, 'New in library');
+    // Owned-only shelf (album_variants exist for scanned files, never for
+    // phantoms), so it stays hidden until the first page proves there IS a
+    // collection — a node living entirely on streamed music has none.
+    const newSec = createHomeSection(screen, 'New in my collection');
+    newSec.section.hidden = true;
     const histSec = createHomeSection(screen, 'Listening history');
 
-    const sectionFailure = (section, label) => (err) => {
+    // A failed fetch reveals its section with the '—' marker — a dead
+    // endpoint must not read as "you own nothing".
+    const sectionFailure = (sec, label) => (err) => {
       console.warn(`Home/${label} failed:`, err);
-      section.row.innerHTML = '';
+      sec.section.hidden = false;
+      sec.row.innerHTML = '';
       const empty = document.createElement('div');
       empty.className = 'placeholder-body';
       empty.style.padding = 'var(--space-2)';
       empty.textContent = '—';
-      section.row.appendChild(empty);
+      sec.row.appendChild(empty);
     };
 
     fetch('/api/home/listening-history?limit=20')
@@ -3062,6 +3069,11 @@
     fetch('/api/home/new-in-library?limit=20')
       .then(r => { if (!r.ok) throw new Error('HTTP ' + r.status); return r.json(); })
       .then(data => {
+        if (!data.albums.length) {
+          newSec.section.remove();
+          return;
+        }
+        newSec.section.hidden = false;
         fillHomeRow(newSec.row, data.albums, 'album');
         attachInfiniteScroll(newSec.row, '/api/home/new-in-library',
           data.next_cursor, 'album');

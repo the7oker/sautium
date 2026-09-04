@@ -199,7 +199,7 @@ current tab stack (changes hash).
 
 | Screen | Hash | Contents |
 |--------|------|----------|
-| **Home** | `#home` | 3 horizontal-scroll sections (6 items each, lazy "See all"): Favourite artists · New in library · Recommendations. Optional 4th: Recent queues (queue history). |
+| **Home** | `#home` | 3 horizontal-scroll sections (6 items each, lazy "See all"): Favourite artists · New in my collection · Recommendations. Optional 4th: Recent queues (queue history). |
 | **Discovery** | `#discovery` | Search bar (default visible), advanced filters (collapsed), below: horizontal-scroll shuffle mosaic (infinite, random albums from library) |
 | **Friends** | `#friends` | Identity card (invite code), add-by-code form, email-invite form, friends list. (Chat is a pushed detail per-friend.) |
 | **More** | `#more` | Bottom-up sheet listing HQPlayer / DSP / Settings / Profile / etc. |
@@ -328,7 +328,7 @@ lazy-load "See all" into a full screen.
 | Section | Content | Source |
 |---------|---------|--------|
 | **Favourite artists** | Artists with highest listen count in `local_play_stats`, ordered by play frequency | Aggregated from listening history |
-| **New in library** | Albums most recently imported, `media_files.file_modified_at DESC` | Scanner-tracked |
+| **New in my collection** | Albums most recently imported, `media_files.file_modified_at DESC` | Scanner-tracked |
 | **Recommendations** | "Like what you love, haven't heard yet" — similar to highly-played artists but under-played themselves | CLAP embeddings + `similar_artists` + play counts |
 | **Recent queues** *(optional, if queue-history populated)* | Last 3–5 replaced queues | `queue_history` table |
 
@@ -650,7 +650,7 @@ or is a thin query over existing data.
 | Block | MVP source | Evolution |
 |-------|------------|-----------|
 | Favourite artists | `local_play_stats` aggregated by artist | + listening recency weight |
-| New in library | `media_files.file_modified_at DESC`, grouped to album | + scanner-assigned "fresh" tag |
+| New in my collection | `media_files.file_modified_at DESC`, grouped to album | + scanner-assigned "fresh" tag |
 | Recommendations | CLAP audio similarity to top-played tracks, filter to artists not yet heard much | + AI assistant contextual blends |
 | Recent queues *(if populated)* | `queue_history` table **(new)** + `(new endpoint)` GET `/queue/history` | + cross-device sync via P2P |
 

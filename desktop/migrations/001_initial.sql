@@ -306,7 +306,7 @@ CREATE TABLE IF NOT EXISTS album_variants (
     is_lossless BOOLEAN DEFAULT TRUE,
     -- Denormalised MAX(media_files.file_modified_at) across this variant's
     -- files. Maintained by FOR EACH STATEMENT triggers on media_files so the
-    -- Home "New in library" feed sorts by an indexed column instead of a
+    -- Home "New in my collection" feed sorts by an indexed column instead of a
     -- runtime GROUP BY across 30k media_files on every request.
     file_modified_at TIMESTAMPTZ,
     created_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP,
@@ -1179,7 +1179,7 @@ DO $$ BEGIN CREATE TRIGGER update_media_files_updated_at BEFORE UPDATE ON media_
 EXCEPTION WHEN duplicate_object THEN NULL; END $$;
 
 -- Denormalise media_files.file_modified_at onto album_variants so the Home
--- "New in library" sort uses an index on album_variants instead of MAX() +
+-- "New in my collection" sort uses an index on album_variants instead of MAX() +
 -- GROUP BY across 30k media_files on every request. FOR EACH STATEMENT (not
 -- FOR EACH ROW) so a bulk import inserting hundreds of files triggers one
 -- recompute, not one per row. Postgres forbids combining REFERENCING ...
