@@ -271,6 +271,43 @@ class ChatService:
         finally:
             self._return_db(conn)
 
+    def friend_for_key(self, public_key_hex: str) -> Optional[dict]:
+        """The friend row a peer speaks for: the resolved row, else a
+        `pending:` stub whose invite code binds this key — resolved here.
+
+        The stub is the operator's consent, and the digest inside the
+        invite code names the one key that can ever claim it, so a request
+        from that key carries everything the classic handshake establishes.
+        Waiting for the handshake instead deadlocks a friendship deleted
+        and re-added on one side: the peer still holds us resolved and
+        never handshakes again, and a node that never initiates (the
+        master) keeps the stub forever. A stub carrying a join token stays
+        pending — that one resolves through OUR token handshake, which
+        burns the use and mints the rights."""
+        friend = self.get_friend_by_public_key(public_key_hex)
+        if friend is not None:
+            return friend
+        from desktop.node_identity import verify_invite_code
+        conn = self._get_db()
+        try:
+            with conn.cursor() as cur:
+                cur.execute("""
+                    SELECT invite_code FROM friends
+                    WHERE public_key_hex LIKE 'pending:%'
+                      AND join_token_id IS NULL
+                """)
+                stubs = [row[0] for row in cur.fetchall()]
+        finally:
+            self._return_db(conn)
+        invite = next((code for code in stubs
+                       if verify_invite_code(code, public_key_hex)), None)
+        if invite is None:
+            return None
+        self.add_friend(public_key_hex=public_key_hex, invite_code=invite)
+        logger.info(f"Pending friend {invite} resolved by the peer's own "
+                    f"request ({public_key_hex[:16]}...)")
+        return self.get_friend_by_public_key(public_key_hex)
+
     def update_friend_last_seen(self, public_key_hex: str):
         """Update last_seen timestamp for a friend.
 

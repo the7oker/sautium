@@ -130,6 +130,33 @@ class PeerChatService:
                   source_token_id))
             return cur.fetchone()[0]
 
+    def friend_for_key(self, public_key_hex: str) -> Optional[dict]:
+        """Mirror of chat_service.friend_for_key: the resolved row, else a
+        `pending:` stub whose invite code binds this key, resolved here —
+        the operator's consent plus the key the digest names is all the
+        classic handshake establishes, and a peer that already holds us as
+        a friend never sends one. Token stubs stay pending: those resolve
+        through our own token handshake."""
+        friend = self.get_friend_by_public_key(public_key_hex)
+        if friend is not None:
+            return friend
+        from p2p_identity import verify_invite_code
+        with get_conn() as conn, conn.cursor() as cur:
+            cur.execute("""
+                SELECT invite_code FROM friends
+                 WHERE public_key_hex LIKE 'pending:%'
+                   AND join_token_id IS NULL
+            """)
+            stubs = [row[0] for row in cur.fetchall()]
+        invite = next((code for code in stubs
+                       if verify_invite_code(code, public_key_hex)), None)
+        if invite is None:
+            return None
+        self.add_friend(public_key_hex, invite)
+        logger.info("Pending friend %s resolved by the peer's own request "
+                    "(%s...)", invite, public_key_hex[:16])
+        return self.get_friend_by_public_key(public_key_hex)
+
     def update_friend_last_seen(self, public_key_hex: str) -> None:
         """Mirror of chat_service.update_friend_last_seen — NOTIFY only on a
         real row (the UPDATE event has no trigger, unlike message inserts)."""

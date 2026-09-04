@@ -182,6 +182,19 @@ A leaked invite code does not create a friendship on its own — **both** sides
 must add each other's invite code. The handshake only completes on
 seen_by_both. Without it, one leaked code would produce a fake friendship.
 
+Adding a code stores a `pending:<invite>` stub — the operator's half of the
+consent. The stub resolves on the peer's classic handshake and, since
+2026-09-04, on ANY request that peer makes to us (wake-stream, probe,
+history, message, forward, diag — `friend_for_key` in both chat services):
+the digest inside the invite code names the one key that can ever claim the
+stub, so a request from that key carries what the handshake would. That is
+what repairs a friendship deleted and re-added on one side only — the other
+side still holds us resolved and never handshakes again, and a node that
+never initiates (the master) would otherwise keep the stub forever, both
+sides reading "offline". A stub carrying a join token stays pending: it
+resolves through our own token handshake, which burns the use and mints the
+rights.
+
 ### Invite tokens (auto-confirm) — SHIPPED 2026-07-31
 
 The share string gains a third segment: `username#XXXX-XXXX-XXXX#<token-uuid>`.

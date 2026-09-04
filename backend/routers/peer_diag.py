@@ -32,6 +32,7 @@ from fastapi.responses import JSONResponse
 from config import settings
 from db_pool import db_execute, db_query, db_query_one, get_conn
 from desktop.p2p import diag_protocol, peer_auth
+from p2p_chat import get_peer_chat
 from p2p_identity import load_signing_key, resolve_identity
 
 logger = logging.getLogger(__name__)
@@ -85,8 +86,8 @@ def _verify(request: Request, body: bytes):
         return None, _err(err, 403)
     if not pubkey:
         return None, _err("signature required", 403)
-    friend = db_query_one(
-        "SELECT is_blocked FROM friends WHERE public_key_hex = %s", (pubkey,))
+    svc = get_peer_chat()
+    friend = svc.friend_for_key(pubkey) if svc else None
     if friend is None or friend["is_blocked"]:
         return None, _err("not a friend", 403)
     return pubkey, None
