@@ -41,10 +41,12 @@ RECENCY_TAU_HOURS = 168
 # A play from 4 months ago has tiny exp-weight anyway, but the cap keeps
 # the seed-pool query bounded and skips cold-cache reads.
 SEED_WINDOW_DAYS = 60
-# Seed selection: top candidates by recency-weight, then a diversity prune —
-# in the dense normalized-mean space five tracks of one album are ONE taste,
-# and a seed is dropped when it sits within SEED_DIVERSITY_CEIL cosine of a
-# heavier seed. What survives (~5-8 seeds) spans the week's distinct tastes.
+# Seed selection: top release groups by recency-weighted listening — one
+# slot per record (see the query), each standing in the kNN as its heaviest
+# embedded track — then a diversity prune: a seed is dropped when it sits
+# within SEED_DIVERSITY_CEIL cosine of a heavier one, which is also how one
+# work under two release groups (a coupling, a compilation) folds to one
+# taste. What survives (~5-8 seeds) spans the week's distinct records.
 # No centroid: averaging the seeds (means of means) drifts into the manifold
 # centre and recommends the grey middle of the library; each taste gets its
 # own kNN instead and albums merge across tastes.
@@ -265,7 +267,9 @@ def get_recommendations(
 
     Pipeline (all in the query, no Python vector math):
       1. Seed candidates: recent completed listens within SEED_WINDOW_DAYS,
-         weight = duration x exp(-hours_since_play / RECENCY_TAU_HOURS).
+         weight = duration x exp(-hours_since_play / RECENCY_TAU_HOURS),
+         summed per RELEASE GROUP — one seed slot per record, its heaviest
+         embedded track as the vector.
       2. Diversity prune: drop a seed within SEED_DIVERSITY_CEIL cosine of a
          heavier one — the survivors span the week's distinct tastes.
       3. Per-seed HNSW kNN (parameterized LATERAL) — NO centroid: averaging
@@ -277,7 +281,8 @@ def get_recommendations(
          album_tracks) — a node can live entirely on streamed phantoms.
       5. Two-tier ordering — never-played (tier 0) before forgotten albums
          whose last play is older than FORGOTTEN_THRESHOLD_DAYS (tier 1) —
-         then one edition per release group.
+         then one edition per release group and one record per credited
+         artist.
       6. Shortfall fill: unplayed seed picks first, then random owned
          albums; cold start (no completed listens in the window) →
          seed-pick rotation, then newest-by-file_modified_at.
@@ -298,7 +303,7 @@ def get_recommendations(
 
     albums = db_query_with_ef_search(
         f"""
-        WITH raw_seeds AS (
+        WITH played AS (
             SELECT lh.track_id,
                    SUM(
                        lh.duration_listened *
@@ -310,13 +315,58 @@ def get_recommendations(
               AND lh.completed
             GROUP BY lh.track_id
         ),
-        cand_seeds AS (
-            SELECT r.track_id, r.weight, e.vector,
-                   ROW_NUMBER() OVER (ORDER BY r.weight DESC) AS rk
-            FROM raw_seeds r
-            JOIN embeddings e ON e.track_id = r.track_id
-            ORDER BY r.weight DESC
+        -- A taste is a listening EVENT, and for a collector that is the
+        -- record: seed slots are allotted per release group, never per
+        -- track. Per-track slots let the weight's unit pick the seeds — by
+        -- seconds a 22-minute post-rock track outweighs a whole streamed
+        -- album of four-minute songs, by plays one album streamed front to
+        -- back fills half the slots — and the shelf froze on the week's few
+        -- heaviest tracks. Membership is track identity (files ∪ tracklist),
+        -- the rule album_state uses; editions fold on the release group
+        -- like the shelf's own dedup; a played track on no album at all (a
+        -- phantom without a tracklist) is its own group, so every completed
+        -- play stays eligible.
+        played_groups AS (
+            SELECT DISTINCT p.track_id, p.weight,
+                   COALESCE(al.musicbrainz_id::text, al.id::text,
+                            p.track_id::text) AS rg,
+                   EXISTS (SELECT 1 FROM embeddings e
+                           WHERE e.track_id = p.track_id) AS embedded
+            FROM played p
+            LEFT JOIN LATERAL (
+                SELECT av.album_id
+                FROM media_files mf
+                JOIN album_variants av ON av.id = mf.album_variant_id
+                WHERE mf.track_id = p.track_id
+                UNION
+                SELECT at2.album_id
+                FROM album_tracks at2
+                WHERE at2.track_id = p.track_id
+            ) x ON true
+            LEFT JOIN albums al ON al.id = x.album_id
+        ),
+        raw_seeds AS (
+            SELECT rg, SUM(weight) AS weight
+            FROM played_groups
+            GROUP BY rg
+            HAVING bool_or(embedded)
+            ORDER BY weight DESC
             LIMIT {SEED_CANDIDATES}
+        ),
+        -- The group's heaviest embedded track stands for it in the kNN: a
+        -- real point on the manifold (no within-record centroid — a mean of
+        -- the v2 means drifts to the centre of the space) and the track the
+        -- listener dwelt on most. The weight is the whole group's.
+        cand_seeds AS (
+            SELECT rep.track_id, rep.weight, e.vector,
+                   ROW_NUMBER() OVER (ORDER BY rep.weight DESC) AS rk
+            FROM (
+                SELECT DISTINCT ON (pg.rg) pg.track_id, rs.weight
+                FROM raw_seeds rs
+                JOIN played_groups pg ON pg.rg = rs.rg AND pg.embedded
+                ORDER BY pg.rg, pg.weight DESC
+            ) rep
+            JOIN embeddings e ON e.track_id = rep.track_id
         ),
         seeds AS (
             -- Diversity prune against every HEAVIER candidate (not only kept
@@ -403,16 +453,11 @@ def get_recommendations(
             FROM candidate_albums ca
             JOIN album_state als ON als.album_id = ca.album_id
             GROUP BY ca.album_id, als.total_plays, als.last_touch
-        )
+        ),
         -- One edition per release group: with phantoms in the fold, a hit
         -- track can sit on several near-identical editions/compilations of
-        -- one record. The dedup runs on slim rows; the tile subqueries are
-        -- evaluated only for the ≤limit emitted rows.
-        SELECT al.id::text AS id,
-               al.title,
-               al.release_year AS year,
-               {_ALBUM_TILE_SUBQUERIES}
-        FROM (
+        -- one record.
+        editions AS (
             SELECT DISTINCT ON (COALESCE(al2.musicbrainz_id::text, al2.id::text))
                    s.album_id, s.tier, s.score
             FROM scored s
@@ -420,7 +465,34 @@ def get_recommendations(
             WHERE s.tier <= 1
             ORDER BY COALESCE(al2.musicbrainz_id::text, al2.id::text),
                      s.tier ASC, s.score DESC
-        ) d
+        ),
+        -- One record per credited artist: a seed pulls a whole discography
+        -- of one voice (four Godspeed records, three Kevin Kern) and a
+        -- 20-tile shelf would spend itself on it. The key is the album's
+        -- primary credit, name-ordered for a stable pick on multi-artist
+        -- credits; a credit-less album keys on itself. Both dedups run on
+        -- slim rows; the tile subqueries are evaluated only for the ≤limit
+        -- emitted rows.
+        shelf AS (
+            SELECT DISTINCT ON (artist_key) album_id, tier, score
+            FROM (
+                SELECT ed.album_id, ed.tier, ed.score,
+                       COALESCE((SELECT aa.artist_id
+                                 FROM album_artists aa
+                                 JOIN artists a ON a.id = aa.artist_id
+                                 WHERE aa.album_id = ed.album_id
+                                   AND aa.role = 'primary'
+                                 ORDER BY a.name
+                                 LIMIT 1), ed.album_id) AS artist_key
+                FROM editions ed
+            ) keyed
+            ORDER BY artist_key, tier ASC, score DESC
+        )
+        SELECT al.id::text AS id,
+               al.title,
+               al.release_year AS year,
+               {_ALBUM_TILE_SUBQUERIES}
+        FROM shelf d
         JOIN albums al ON al.id = d.album_id
         ORDER BY d.tier ASC, d.score DESC
         LIMIT %(limit)s
