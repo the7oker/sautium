@@ -3036,12 +3036,17 @@
 
     const favSec = createHomeSection(screen, 'Favourite artists');
     const recSec = createHomeSection(screen, 'Recommendations');
-    // Owned-only shelf (album_variants exist for scanned files, never for
-    // phantoms), so it stays hidden until the first page proves there IS a
-    // collection — a node living entirely on streamed music has none.
+    // Two shelves whose emptiness is a fact about the node, not a loading
+    // state: the owned collection (album_variants exist for scanned files,
+    // never for phantoms) and past listening. Both stay hidden until their
+    // first page proves there is something to show — a node living entirely
+    // on streamed music has no collection, a fresh one has no history.
+    // Favourite artists and Recommendations fall back to the seed picks, so
+    // they always have content and never need this.
     const newSec = createHomeSection(screen, 'New in my collection');
     newSec.section.hidden = true;
     const histSec = createHomeSection(screen, 'Listening history');
+    histSec.section.hidden = true;
 
     // A failed fetch reveals its section with the '—' marker — a dead
     // endpoint must not read as "you own nothing".
@@ -3058,7 +3063,14 @@
 
     fetch('/api/home/listening-history?limit=20')
       .then(r => { if (!r.ok) throw new Error('HTTP ' + r.status); return r.json(); })
-      .then(data => fillHomeRow(histSec.row, data.sessions, renderSessionTile))
+      .then(data => {
+        if (!data.sessions.length) {
+          histSec.section.remove();
+          return;
+        }
+        histSec.section.hidden = false;
+        fillHomeRow(histSec.row, data.sessions, renderSessionTile);
+      })
       .catch(sectionFailure(histSec, 'listening-history'));
 
     fetch('/api/home/favourite-artists?limit=100')
