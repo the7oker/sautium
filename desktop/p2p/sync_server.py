@@ -1163,6 +1163,10 @@ class SyncServer:
                 request, {"error": "message too large"}, status=413
             )
 
+        if self._chat_service.friend_for_key(sender_pubkey) is None:
+            return self._json_response(
+                request, {"error": "not permitted"}, status=403
+            )
         from desktop.p2p import invite_tokens
         if not invite_tokens.friend_has_right(
                 self._chat_service.db_conn(), sender_pubkey, "can_message"):
@@ -1251,7 +1255,7 @@ class SyncServer:
             )
 
         # Verify requester is a known friend
-        friend = self._chat_service.get_friend_by_public_key(requester_pubkey)
+        friend = self._chat_service.friend_for_key(requester_pubkey)
         if not friend:
             return self._json_response(
                 request, {"error": "not a friend"}, status=403
@@ -1440,7 +1444,7 @@ class SyncServer:
         # legacy): a friend-client that wants to be announced still sends
         # one. Gating on friendship first silently dropped exactly that —
         # two friendly launchers could never relay for each other.
-        friend = self._chat_service.get_friend_by_public_key(pubkey)
+        friend = self._chat_service.friend_for_key(pubkey)
         if friend and friend.get("is_blocked"):
             return self._json_response(
                 request, {"error": "not a friend"}, status=403)
@@ -1501,14 +1505,14 @@ class SyncServer:
             "X-Accel-Buffering": "no",
         })
         is_client = voucher is not None
-        # Presence bumps follow the FRIEND row, not the client flag — a
-        # friend that also sent a voucher is still a friend in the UI.
-        bump_presence = friend is not None
         await resp.prepare(request)
         try:
             await resp.write(b": connected\n\n")
-            if bump_presence:
-                self._chat_service.update_friend_last_seen(pubkey)
+            # Presence follows the friend row AS IT IS at bump time: the
+            # UPDATE matches nothing for a voucher-only stranger, and a
+            # friendship that appears while the stream is up starts
+            # bumping at the next cycle, not at the next reconnect.
+            self._chat_service.update_friend_last_seen(pubkey)
             cycles = 0
             while not sub.closed:
                 try:
@@ -1535,8 +1539,7 @@ class SyncServer:
                     await resp.write(b": keepalive\n\n")
                 cycles += 1
                 if cycles >= 8:          # ~2 min — passive presence bump
-                    if bump_presence:
-                        self._chat_service.update_friend_last_seen(pubkey)
+                    self._chat_service.update_friend_last_seen(pubkey)
                     cycles = 0
         except (ConnectionResetError, ConnectionError):
             pass  # subscriber went away — normal churn, not an error
@@ -1587,7 +1590,7 @@ class SyncServer:
         if not self._verify_peer_sig(pubkey, signed, sig):
             return self._json_response(
                 request, {"error": "invalid signature"}, status=403)
-        friend = self._chat_service.get_friend_by_public_key(pubkey)
+        friend = self._chat_service.friend_for_key(pubkey)
         if not friend or friend.get("is_blocked"):
             return self._json_response(
                 request, {"error": "not a friend"}, status=403)
@@ -1693,7 +1696,7 @@ class SyncServer:
         # that is the whole point of being someone's relay, and the client's
         # E2E decrypt is what actually rejects mail from non-friends. A
         # blocked friend stays blocked on both paths.
-        friend = self._chat_service.get_friend_by_public_key(sender)
+        friend = self._chat_service.friend_for_key(sender)
         if friend and friend.get("is_blocked"):
             return self._json_response(
                 request, {"error": "not a friend"}, status=403)

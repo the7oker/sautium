@@ -430,6 +430,8 @@ async def chat_message(request: Request):
     if len(encrypted) > MAX_ENCRYPTED_CHARS:
         return _err("message too large", 413)
 
+    if svc.friend_for_key(sender_pubkey) is None:
+        return _err("not permitted", 403)
     with get_conn() as conn:
         if not invite_tokens.friend_has_right(conn, sender_pubkey,
                                               "can_message"):
@@ -456,6 +458,9 @@ def mailbox_import(m: dict) -> None:
     encrypted = m.get("encrypted", "")
     if len(encrypted) > MAX_ENCRYPTED_CHARS:
         logger.warning("mailbox: oversized message from %s dropped", sender_pubkey[:8])
+        return
+    if svc.friend_for_key(sender_pubkey) is None:
+        logger.info("mailbox: message from %s without can_message dropped", sender_pubkey[:8])
         return
     with get_conn() as conn:
         if not invite_tokens.friend_has_right(conn, sender_pubkey, "can_message"):
@@ -490,7 +495,7 @@ async def chat_history(request: Request):
                            signature_hex):
         return _err("invalid signature", 403)
 
-    friend = svc.get_friend_by_public_key(requester_pubkey)
+    friend = svc.friend_for_key(requester_pubkey)
     if not friend:
         return _err("not a friend", 403)
     if friend.get("is_blocked"):
@@ -562,7 +567,7 @@ async def wake_stream(request: Request, pubkey: str = "", ts: str = "",
     # friendship first silently dropped exactly that — two friendly
     # launchers could never relay for each other. Mirror of
     # desktop/p2p/sync_server.py.
-    friend = svc.get_friend_by_public_key(pubkey)
+    friend = svc.friend_for_key(pubkey)
     if friend and friend.get("is_blocked"):
         return _err("not a friend", 403)
     voucher = None
@@ -593,7 +598,6 @@ async def wake_stream(request: Request, pubkey: str = "", ts: str = "",
     if sub is None:
         return _err("too many subscriptions", 429)
     is_client = voucher is not None
-    bump_presence = friend is not None
     if is_client:
         with _wake_lock:
             _relay_clients[pubkey] = voucher
@@ -606,8 +610,11 @@ async def wake_stream(request: Request, pubkey: str = "", ts: str = "",
     async def gen():
         try:
             yield ": connected\n\n"
-            if bump_presence:
-                svc.update_friend_last_seen(pubkey)
+            # Presence follows the friend row AS IT IS at bump time: the
+            # UPDATE matches nothing for a voucher-only stranger, and a
+            # friendship that appears while the stream is up starts
+            # bumping at the next cycle, not at the next reconnect.
+            svc.update_friend_last_seen(pubkey)
             if _subscribe_hook is not None:
                 try:
                     await _subscribe_hook(pubkey)
@@ -641,8 +648,7 @@ async def wake_stream(request: Request, pubkey: str = "", ts: str = "",
                     yield ": keepalive\n\n"
                 cycles += 1
                 if cycles >= 8:          # ~2 min — passive presence bump
-                    if bump_presence:
-                        svc.update_friend_last_seen(pubkey)
+                    svc.update_friend_last_seen(pubkey)
                     cycles = 0
         finally:
             with _wake_lock:
@@ -714,7 +720,7 @@ async def probe_connect(request: Request):
     signed = f"probe_request:{int(ts)}:{ident['public_key_hex']}:{port}"
     if not _verify_ed25519(pubkey, signed, sig):
         return _err("invalid signature", 403)
-    friend = svc.get_friend_by_public_key(pubkey)
+    friend = svc.friend_for_key(pubkey)
     if not friend or friend.get("is_blocked"):
         return _err("not a friend", 403)
 
@@ -810,7 +816,7 @@ async def relay_forward(request: Request):
     # a STRANGER may forward only to a voucher-registered client — that is
     # the point of being someone's relay, and the client's E2E decrypt is
     # what actually rejects mail from non-friends.
-    friend = svc.get_friend_by_public_key(sender)
+    friend = svc.friend_for_key(sender)
     if friend and friend.get("is_blocked"):
         return _err("not a friend", 403)
     if not friend:
