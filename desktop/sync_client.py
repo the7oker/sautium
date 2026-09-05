@@ -131,24 +131,6 @@ class SyncClient:
             self._conn.close()
             self._conn = None
 
-    def _log_missing_tracks(self, missing_uuids: set[str]):
-        """Log details of tracks not found at source."""
-        conn = self._get_conn()
-        with conn.cursor() as cur:
-            cur.execute(
-                """SELECT t.id::text, t.title, a.name AS artist
-                   FROM tracks t
-                   LEFT JOIN track_artists ta ON ta.track_id = t.id AND ta.role = 'primary'
-                   LEFT JOIN artists a ON a.id = ta.artist_id
-                   WHERE t.id = ANY(%s::uuid[])""",
-                [list(missing_uuids)],
-            )
-            for row in cur.fetchall():
-                artist = row[2] or "Unknown"
-                logger.warning(
-                    f"  Not at source: {artist} - {row[1]} ({row[0][:8]}...)"
-                )
-
     def _get_local_track_uuids(self) -> list[str]:
         """Get all track UUIDs from the local database."""
         conn = self._get_conn()
@@ -221,14 +203,15 @@ class SyncClient:
             self._progress("Inventory request failed.")
             return {"error": "inventory_failed"}
 
-        # Log tracks not found at source
+        # A track the source does not hold is the normal case, not an
+        # anomaly — on a node with the phantom layer it is millions of rows
+        # per peer. One count is all the log needs.
         source_tracks = set(inventory.get("tracks", []))
         not_found = set(track_uuids) - source_tracks
         if not_found:
             self._progress(
                 f"  {len(not_found)} tracks not found at source"
             )
-            self._log_missing_tracks(not_found)
 
         # Step 4: Filter out what we already have locally
         needed = self._compute_needed(inventory, use_segments)
