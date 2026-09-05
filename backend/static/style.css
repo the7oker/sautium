@@ -249,7 +249,11 @@ body.no-fab.has-miniplayer #app {
 .album-cover img {
   width: 100%; height: 100%; object-fit: cover; display: block;
 }
-.album-tile-feat {
+/* Small mono chip top-left of a cover: "feat." on a discography tile where
+   the artist only guests, "×N" on a history tile for a queue played N times
+   in a row. */
+.album-tile-feat,
+.album-tile-repeat {
   position: absolute;
   top: calc(6 * var(--px));
   left: calc(6 * var(--px));
@@ -2725,6 +2729,89 @@ body.has-miniplayer .ai-fab {
 .album-tracklist .disc-header:first-child {
   padding-top: calc(4 * var(--px));
 }
+
+/* ---- Listening-history session detail ----
+   Same anatomy as the album screen; the context is the snapshot's own. */
+/* The artist line names every artist in the snapshot: each a link like the
+   album screen's artist line, dot-separated, "+N" muted for the overflow. */
+.session-artists {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  column-gap: calc(6 * var(--px));
+  row-gap: calc(2 * var(--px));
+}
+.session-artist {
+  background: none;
+  border: 0;
+  padding: 0;
+  cursor: pointer;
+  font: inherit;
+  color: inherit;
+  text-align: left;
+}
+.session-artist:active { opacity: 0.7; }
+.session-artist-sep { color: var(--color-text-dim); }
+.session-artist-more {
+  font-family: var(--font-mono);
+  font-size: calc(12 * var(--px));
+  color: var(--color-text-muted);
+}
+/* Origin tag for a queue that is neither an album nor a track (radio, mix):
+   a neutral status tag like the Lossless badge — never blue, that is for
+   numbers. */
+.am-kind {
+  margin-left: auto;
+  padding: calc(3 * var(--px)) calc(8 * var(--px));
+  border: 1px solid var(--color-divider);
+  border-radius: calc(3 * var(--px));
+  font-family: var(--font-mono);
+  font-size: calc(9.5 * var(--px));
+  font-weight: 600;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--color-text-muted);
+}
+/* Play · Album · Queue on a single-album session — one row, like the phantom
+   album's three; the Album button hides behind the confirm bar the way Buy
+   does. */
+.album-actions.has-album { grid-template-columns: 1fr auto auto; }
+.album-actions.is-confirming > .album-open-btn { display: none; }
+/* A tappable album header between a multi-album session's groups: the
+   disc-header's typography with the album in text colour, its artist muted,
+   and a chevron flush right as the "opens the album" cue. */
+.album-tracklist .session-album-header {
+  display: flex;
+  align-items: baseline;
+  gap: calc(6 * var(--px));
+  width: 100%;
+  background: none;
+  border-left: 0;
+  border-right: 0;
+  border-top: 0;
+  cursor: pointer;
+  font-family: inherit;
+  text-align: left;
+}
+.album-tracklist .session-album-header:active { opacity: 0.7; }
+.album-tracklist .session-album-header .sah-title,
+.album-tracklist .session-album-header .sah-artist {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.album-tracklist .session-album-header .sah-title { color: var(--color-text); }
+.album-tracklist .session-album-header .sah-artist { flex-shrink: 3; }
+.album-tracklist .session-album-header .sah-artist::before { content: '· '; }
+.album-tracklist .session-album-header .sah-chevron {
+  margin-left: auto;
+  flex-shrink: 0;
+  font-size: calc(14 * var(--px));
+  line-height: 1;
+  letter-spacing: 0;
+}
+.session-empty { padding: calc(12 * var(--px)) 0; }
 
 /* =====================================================================
  * Discovery screen (Step 1.5a)

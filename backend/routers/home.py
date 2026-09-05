@@ -515,32 +515,79 @@ def get_recommendations(
 def get_listening_history(
     limit: int = Query(20, ge=1, le=50),
 ) -> dict[str, list[dict[str, Any]]]:
-    """Archived listening sessions (queue-lifetime snapshots), newest first.
+    """Archived listening sessions (queue-lifetime snapshots), newest first,
+    with consecutive replays of one queue collapsed into a single card.
 
     Only completed sessions — the active queue lives in Now Playing / Queue,
-    not here. cover_id is denormalised onto the session row so the shelf
-    renders without joining session_tracks.
+    not here. The card (title, subtitle, cover) is denormalised onto the
+    session row; the live facts are counted over the slots (a PK-prefix scan
+    per card): album_count flags a snapshot that spans several albums, and
+    the content key — the ordered track ids — is what makes two sessions
+    "the same queue", so a run of consecutive ones collapses into its newest
+    card, which carries the run's length as repeat_count. A session whose
+    slots are gone (its tracks left the catalog) has nothing to open, so it
+    stays off the shelf. The scan window is a multiple of the page, and a
+    run is only ever as long as the window sees — the right cap for a shelf.
     """
     sessions = db_query("""
+        WITH recent AS (
+            SELECT ls.id, ls.title, ls.subtitle, ls.cover_id, ls.cover_url,
+                   ls.origin, ls.track_count, ls.started_at, ls.ended_at,
+                   (SELECT count(DISTINCT st.album_id) FROM session_tracks st
+                    WHERE st.session_id = ls.id AND st.album_id IS NOT NULL) AS album_count,
+                   (SELECT md5(string_agg(st.track_id::text, ',' ORDER BY st.position))
+                    FROM session_tracks st WHERE st.session_id = ls.id) AS content_key
+            FROM listening_sessions ls
+            WHERE ls.ended_at IS NOT NULL
+              AND EXISTS (SELECT 1 FROM session_tracks st WHERE st.session_id = ls.id)
+            ORDER BY ls.ended_at DESC, ls.id
+            LIMIT %(scan)s
+        ),
+        runs AS (
+            SELECT r.*,
+                   CASE WHEN content_key = LAG(content_key) OVER (ORDER BY ended_at DESC, id)
+                        THEN 0 ELSE 1 END AS run_start
+            FROM recent r
+        ),
+        numbered AS (
+            SELECT r.*,
+                   SUM(run_start) OVER (ORDER BY ended_at DESC, id
+                                        ROWS UNBOUNDED PRECEDING) AS run_no
+            FROM runs r
+        ),
+        counted AS (
+            SELECT n.*, count(*) OVER (PARTITION BY run_no) AS repeat_count
+            FROM numbered n
+        )
         SELECT id::text AS id,
                title,
                subtitle,
                cover_id::text AS cover_id,
                cover_url,
                origin,
-               track_count
-        FROM listening_sessions
-        WHERE ended_at IS NOT NULL
-        ORDER BY ended_at DESC
+               track_count,
+               started_at,
+               album_count,
+               repeat_count
+        FROM counted
+        WHERE run_start = 1
+        ORDER BY ended_at DESC, id
         LIMIT %(limit)s
-    """, {"limit": limit})
+    """, {"limit": limit, "scan": limit * 5})
 
     return {"sessions": sessions}
 
 
 @router.get("/listening-history/{session_id}")
 def get_listening_session(session_id: str) -> dict[str, Any]:
-    """Session header + ordered track list for the session-detail view."""
+    """Session header, the artists the snapshot spans, and its ordered slots
+    for the session-detail view.
+
+    The context is derived from the CONTENT, not the origin: `artists` is
+    every primary artist in the snapshot by share (the screen links each),
+    and every slot names the album it was queued from, which is what groups
+    the tracklist and links a single-album session to its album. Per-slot
+    duration and art prefer that album's listing over any other edition."""
 
     session = db_query_one("""
         SELECT id::text AS id,
@@ -550,36 +597,65 @@ def get_listening_session(session_id: str) -> dict[str, Any]:
                cover_url,
                origin,
                origin_album_id::text AS origin_album_id,
-               track_count
+               track_count,
+               started_at,
+               ended_at
         FROM listening_sessions
         WHERE id = %(id)s::uuid AND ended_at IS NOT NULL
     """, {"id": session_id})
     if session is None:
         raise HTTPException(status_code=404, detail="Session not found")
 
+    session["artists"] = db_query("""
+        SELECT a.id::text AS id,
+               a.name,
+               count(*) AS track_count
+        FROM session_tracks st
+        JOIN track_artists ta ON ta.track_id = st.track_id AND ta.role = 'primary'
+        JOIN artists a ON a.id = ta.artist_id
+        WHERE st.session_id = %(id)s::uuid
+        GROUP BY a.id, a.name
+        ORDER BY track_count DESC, min(st.position)
+    """, {"id": session_id})
+
     session["tracks"] = db_query("""
         SELECT st.media_file_id,
                st.track_id::text AS track_id,
+               st.album_id::text AS album_id,
+               al.title AS album_title,
+               al.release_year AS album_year,
                t.title,
-               a.name AS artist,
+               pa.id::text AS artist_id,
+               pa.name AS artist,
                COALESCE(
                    mf.duration_seconds,
                    (SELECT atk.length_ms / 1000.0 FROM album_tracks atk
-                    WHERE atk.track_id = t.id AND atk.length_ms IS NOT NULL LIMIT 1)
+                    WHERE atk.track_id = t.id AND atk.length_ms IS NOT NULL
+                    ORDER BY (atk.album_id = st.album_id) DESC NULLS LAST
+                    LIMIT 1)
                )::float AS duration_seconds,
                mf.cover_id::text AS cover_id,
-               (SELECT al.cover_url FROM album_tracks atk
-                JOIN albums al ON al.id = atk.album_id
-                WHERE atk.track_id = t.id AND al.cover_url IS NOT NULL LIMIT 1) AS cover_url,
+               (SELECT al2.cover_url FROM album_tracks atk
+                JOIN albums al2 ON al2.id = atk.album_id
+                WHERE atk.track_id = t.id AND al2.cover_url IS NOT NULL
+                ORDER BY (al2.id = st.album_id) DESC NULLS LAST
+                LIMIT 1) AS cover_url,
                (st.media_file_id IS NULL) AS is_phantom,
                af.key,
                af.mode,
                af.bpm::float AS bpm
         FROM session_tracks st
         JOIN tracks t ON t.id = st.track_id
+        LEFT JOIN albums al ON al.id = st.album_id
         LEFT JOIN media_files mf ON mf.id = st.media_file_id
-        LEFT JOIN track_artists ta ON ta.track_id = t.id AND ta.role = 'primary'
-        LEFT JOIN artists a ON a.id = ta.artist_id
+        LEFT JOIN LATERAL (
+            SELECT a.id, a.name
+            FROM track_artists ta
+            JOIN artists a ON a.id = ta.artist_id
+            WHERE ta.track_id = t.id AND ta.role = 'primary'
+            ORDER BY a.name
+            LIMIT 1
+        ) pa ON TRUE
         LEFT JOIN audio_features af ON af.track_id = t.id
         WHERE st.session_id = %(id)s::uuid
         ORDER BY st.position

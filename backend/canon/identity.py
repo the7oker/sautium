@@ -352,8 +352,8 @@ def _update_album_uuid(db: Session, old_id, new_id) -> str:
         # Merge: move album variants to target (folding same-directory
         # siblings), then everything else the target lacks — tracklist slots
         # (a slot the target already fills is the target's), artist links,
-        # genres, descriptions, streaming mints, session origins; fill blank
-        # canon fields from the old row — then delete old.
+        # genres, descriptions, streaming mints, session origins and slots;
+        # fill blank canon fields from the old row — then delete old.
         _merge_album_variants(db, new_str, from_album=old_str)
         p = {"new": new_str, "old": old_str}
         db.execute(text("""
@@ -381,6 +381,8 @@ def _update_album_uuid(db: Session, old_id, new_id) -> str:
               AND NOT EXISTS (SELECT 1 FROM seed_picks x WHERE x.album_id = :new)"""), p)
         db.execute(text("UPDATE listening_sessions SET origin_album_id = :new "
                         "WHERE origin_album_id = :old"), p)
+        db.execute(text("UPDATE session_tracks SET album_id = :new "
+                        "WHERE album_id = :old"), p)
         db.execute(text("""
             UPDATE albums n SET
                 musicbrainz_id = COALESCE(n.musicbrainz_id, o.musicbrainz_id),

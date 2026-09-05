@@ -894,6 +894,10 @@ CREATE TABLE IF NOT EXISTS local_play_stats (
 -- — the one fact HQPlayer (source of truth for the live queue) does not know.
 -- seed_track_id is the logical seed (owned AND phantom); seed_media_file_id is
 -- the owned-only physical file (mirrors listening_history's dual key).
+-- origin_album_id is the album the queue was started FROM: the album itself
+-- for an album session, the album the seed row was clicked on for a track
+-- session (a canonical track sits on every album that lists it — the card's
+-- cover must be that edition's, not an arbitrary one). NULL for radio/mix.
 CREATE TABLE IF NOT EXISTS listening_sessions (
     id                 UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     origin             session_origin NOT NULL,
@@ -917,12 +921,17 @@ CREATE TABLE IF NOT EXISTS listening_sessions (
 -- media_file_id is the owned-only physical file, NULL for streamed phantoms.
 -- media_file_id ON DELETE SET NULL — a removed owned file must not erase
 -- session history now that track_id carries identity (track_count is the
--- stored snapshot, intentionally not re-derived).
+-- stored snapshot, intentionally not re-derived). album_id is the album the
+-- slot was queued FROM (the canonical queue's QueueItem.album_id): a track
+-- sits on every album that lists it, so the snapshot keeps the edition the
+-- listener actually pressed — it is what groups a session's tracklist by
+-- album and what a replay hands back to the streaming resolver.
 CREATE TABLE IF NOT EXISTS session_tracks (
     session_id     UUID NOT NULL REFERENCES listening_sessions(id) ON DELETE CASCADE,
     position       INTEGER NOT NULL,
     track_id       UUID NOT NULL REFERENCES tracks(id) ON DELETE CASCADE ON UPDATE CASCADE,
     media_file_id  INTEGER REFERENCES media_files(id) ON DELETE SET NULL,
+    album_id       UUID REFERENCES albums(id) ON DELETE SET NULL ON UPDATE CASCADE,
     PRIMARY KEY (session_id, position)
 );
 
@@ -1138,6 +1147,8 @@ CREATE INDEX IF NOT EXISTS idx_session_tracks_media_file
     ON session_tracks(media_file_id);
 CREATE INDEX IF NOT EXISTS idx_session_tracks_track
     ON session_tracks(track_id);
+CREATE INDEX IF NOT EXISTS idx_session_tracks_album
+    ON session_tracks(album_id);
 CREATE INDEX IF NOT EXISTS idx_listening_sessions_seed_track
     ON listening_sessions(seed_track_id);
 
