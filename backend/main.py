@@ -440,7 +440,7 @@ async def lifespan(app: FastAPI):
             _serve_p2p(settings.p2p_sync_port))
 
     # Start DHT service for P2P peer discovery
-    global _dht_service, _dht_reannounce_task, _dht_online_task
+    global _dht_service, _dht_online_task
     if settings.p2p_enabled and HAS_LIBTORRENT and settings.p2p_sync_port:
         try:
             from desktop.p2p.dht_state import DhtStateStore
