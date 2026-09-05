@@ -211,7 +211,7 @@ class P2PManager:
             mb_dump_version=self._mb_dump_version,
         )
         self._dht_service = DHTService(
-            state_store=DhtStateStore(db_dsn),
+            state_store=DhtStateStore(self.db_dsn),
             listen_port=dht_port,
             http_port=http_port,
         )
