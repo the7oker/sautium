@@ -10962,6 +10962,7 @@
           <span class="form-label">Background enrichment</span>
           <button class="toggle ${bgEnrich ? 'on' : ''}" data-action="toggle-bg-enrich"><span class="knob"></span></button>
         </div>
+        ${bgStatusLine}
         <div class="form-row">
           <span class="form-label">Re-analyze synced audio</span>
           <button class="toggle ${sync.reanalyze_imported ? 'on' : ''}" data-action="toggle-reanalyze"><span class="knob"></span></button>
