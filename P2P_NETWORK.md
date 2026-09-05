@@ -114,23 +114,40 @@ session.dht_announce(artist_infohash, port=sync_port, flags=0)
 > lesson in Open Questions #4) and reflects "I hold analysis", not file
 > ownership.
 
-### Layered sync flow (P3)
+### Layered sync flow (P3; reworked 2026-09-05 — the sync runs itself)
 
 ```
-Sync trigger
+Trigger — the first SOURCE after start (a LAN beacon or the DHT bootstrap,
+60 s cap), NOTIFY sautium_sync_request after a scan that added files, a LAN
+peer appearing, the interval timer (sync.auto_interval_min). No buttons.
      │
+     ├── the node-key DHT lookup and the Worker directory fetch start NOW,
+     │   in the background — their windows overlap the LAN work
      ▼
 LAN Discovery (UDP broadcast on 19002 + localhost Docker probe)
+     │  peers found → direct HTTPS, richest first
+     ▼
+Internet tiers, only for what the LAN left behind:
+   A. discovery-key nodes + directory volunteers → health-probed 8 at a
+      time, drained ONE at a time (each inventory answers for the whole
+      library); the master hint only when nothing else exists
+   B. residual rare artists → per-artist keys, a ROTATING slice of 50
+      (cursor in user_settings, so the same unfindable names are not asked
+      for every run while the rest of the tail never is)
      │
-     ├── Peers found → direct HTTP (fast, reliable)
-     └── None → DHT lookup for one artist → find a seed
-                        │
-                        ▼
-                  Inventory call to the seed about ALL unenriched artists
-                        │
-                        ▼
-                  Batch pull (gzip JSON) → import
+     ▼
+Batch pull (gzip JSON) → import → NOTIFY sautium_sync_done → the backend's
+background enrichment runs a pass for what no peer had
 ```
+
+Peer-search memory is address-keyed and process-local — never per-peer sync
+state: a dead address backs off (30 min, doubling to a day — a DHT entry
+outlives its node by up to 30 min, so every lookup keeps returning it), and a
+reachable peer that answered with nothing for us is left alone until our gap
+set grows (a scan, a LAN peer). The DHT routing table itself is persisted
+(`p2p_dht_state`, saved at every key re-announce and on stop), so a restart
+rejoins from live neighbours in seconds, and the bootstrap never blocks the
+rest of P2P: announces and lookups await readiness, chat and friends do not.
 
 **Smart seed reuse**: 1 DHT lookup + 1 inventory call instead of N lookups for
 N artists.

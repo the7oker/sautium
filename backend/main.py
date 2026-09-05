@@ -68,6 +68,7 @@ logger = logging.getLogger(__name__)
 # Global DHT service reference (set during lifespan)
 _dht_service: DHTService | None = None
 _dht_reannounce_task: asyncio.Task | None = None
+_dht_online_task: asyncio.Task | None = None
 _p2p_server_task: asyncio.Task | None = None
 _identity_task: asyncio.Task | None = None
 _identity_stop: threading.Event | None = None
@@ -439,70 +440,96 @@ async def lifespan(app: FastAPI):
             _serve_p2p(settings.p2p_sync_port))
 
     # Start DHT service for P2P peer discovery
-    global _dht_service, _dht_reannounce_task
+    global _dht_service, _dht_reannounce_task, _dht_online_task
     if settings.p2p_enabled and HAS_LIBTORRENT and settings.p2p_sync_port:
         try:
+            from desktop.p2p.dht_state import DhtStateStore
             _dht_service = DHTService(
                 listen_port=settings.p2p_dht_port,
                 http_port=announce_port,
+                state_store=DhtStateStore(settings.database_url),
             )
             await _dht_service.start()
 
             if _load_meter is not None:
                 _dht_service.set_pace_provider(_load_meter.announce_pace)
 
-            # The discovery key — how peers find this node at all.
-            await _dht_service.announce_node()
-
-            # Announce user identity in DHT
-            if _p2p_identity:
-                await _dht_service.announce_user(
-                    _p2p_identity["invite_code"]
-                )
-
-            # Advertise the MB dump so dump-less nodes can find this one as a
-            # slice source without a LAN beacon or a hand-written peer entry.
-            try:
-                from routers.sync import mb_dump_version
-                if mb_dump_version():
-                    await _dht_service.announce_capability("mbdump")
-            except Exception as e:
-                logger.warning(f"MB dump capability announce failed: {e}")
-
-            # Relay role (Phase D). A Docker peer surface is reachable by
-            # deployment definition (its port was forwarded by hand), so the
-            # only gate is the setting. The announce is what CGNAT clients
-            # discover relays by; the wake/forward/ack contract is already
-            # served on the peer port either way.
+            # Relay clients announce through this node whenever they
+            # subscribe — a callback registration, needs no routing table.
             try:
                 from routers.peer_chat import set_client_announce_cbs
                 set_client_announce_cbs(
                     lambda code: asyncio.get_running_loop().create_task(
                         _dht_service.announce_user_for(code)),
                     _dht_service.withdraw_user_for)
-                from routers.settings import _read
-                if _read("p2p.relay_enabled"):
-                    await _dht_service.announce_capability("relay")
-                    asyncio.create_task(_relay_cap_loop())
             except Exception as e:
-                logger.warning(f"relay role init failed: {e}")
+                logger.warning(f"relay announce callbacks failed: {e}")
 
-            # Rare-artist tail — registration only; the drip loop in
-            # dht_service announces it at its own spacing.
-            artist_uuids = await asyncio.to_thread(_get_announce_tail_uuids)
-            if artist_uuids:
-                asyncio.create_task(_dht_service.announce_artists(artist_uuids))
-                logger.info(
-                    f"P2P online: node announced, {len(artist_uuids)} rare "
-                    f"artists queued (peer port {announce_port})"
-                )
-            else:
-                logger.info("P2P online: node announced (no rare-artist tail)")
+            async def _dht_online() -> None:
+                """Everything that needs a bootstrapped routing table — the
+                discovery/identity keys, capabilities, the relay role, the
+                rare-artist tail, the re-announce cycles. A task, so the
+                lifespan (and every request behind it) does not wait out a
+                cold bootstrap; with a restored table it is seconds."""
+                global _dht_reannounce_task
+                try:
+                    await _dht_service.wait_ready()
 
-            # Periodic re-announce
-            _dht_reannounce_task = asyncio.create_task(
-                _dht_service.periodic_reannounce()
-            )
+                    # The discovery key — how peers find this node at all.
+                    await _dht_service.announce_node()
+
+                    # Announce user identity in DHT
+                    if _p2p_identity:
+                        await _dht_service.announce_user(
+                            _p2p_identity["invite_code"]
+                        )
+
+                    # Advertise the MB dump so dump-less nodes can find this
+                    # one as a slice source without a LAN beacon or a
+                    # hand-written peer entry.
+                    try:
+                        from routers.sync import mb_dump_version
+                        if mb_dump_version():
+                            await _dht_service.announce_capability("mbdump")
+                    except Exception as e:
+                        logger.warning(f"MB dump capability announce failed: {e}")
+
+                    # Relay role (Phase D). A Docker peer surface is reachable
+                    # by deployment definition (its port was forwarded by
+                    # hand), so the only gate is the setting. The announce is
+                    # what CGNAT clients discover relays by; the
+                    # wake/forward/ack contract is already served on the peer
+                    # port either way.
+                    try:
+                        from routers.settings import _read
+                        if _read("p2p.relay_enabled"):
+                            await _dht_service.announce_capability("relay")
+                            asyncio.create_task(_relay_cap_loop())
+                    except Exception as e:
+                        logger.warning(f"relay role init failed: {e}")
+
+                    # Rare-artist tail — registration only; the drip loop in
+                    # dht_service announces it at its own spacing.
+                    artist_uuids = await asyncio.to_thread(_get_announce_tail_uuids)
+                    if artist_uuids:
+                        asyncio.create_task(
+                            _dht_service.announce_artists(artist_uuids))
+                        logger.info(
+                            f"P2P online: node announced, {len(artist_uuids)} "
+                            f"rare artists queued (peer port {announce_port})"
+                        )
+                    else:
+                        logger.info(
+                            "P2P online: node announced (no rare-artist tail)")
+
+                    # Periodic re-announce
+                    _dht_reannounce_task = asyncio.create_task(
+                        _dht_service.periodic_reannounce()
+                    )
+                except Exception as e:
+                    logger.error(f"DHT online sequence failed: {e}")
+
+            _dht_online_task = asyncio.create_task(_dht_online())
         except Exception as e:
             logger.error(f"DHT startup failed: {e}")
             _dht_service = None
@@ -632,12 +659,13 @@ async def lifespan(app: FastAPI):
             await _p2p_server_task
         except asyncio.CancelledError:
             pass
-    if _dht_reannounce_task:
-        _dht_reannounce_task.cancel()
-        try:
-            await _dht_reannounce_task
-        except asyncio.CancelledError:
-            pass
+    for _task in (_dht_online_task, _dht_reannounce_task):
+        if _task:
+            _task.cancel()
+            try:
+                await _task
+            except asyncio.CancelledError:
+                pass
     if _dht_service:
         await _dht_service.stop()
         _dht_service = None
@@ -1074,6 +1102,17 @@ def _scan_worker(limit: Optional[int], skip_existing: bool, subpath: Optional[st
                 )
             except Exception as e:
                 logger.warning(f"Failed to persist last_scan_at: {e}")
+
+            # New files are new gaps. Kick the launcher's P2P sync now (it
+            # LISTENs on this channel) instead of leaving them to the next
+            # interval — peers fill for free what enrichment would otherwise
+            # fetch from Last.fm. A Docker node has no listener: harmless.
+            if result.get("added"):
+                try:
+                    from db_pool import db_execute
+                    db_execute("NOTIFY sautium_sync_request")
+                except Exception as e:
+                    logger.warning(f"Post-scan sync request failed: {e}")
         state["result"] = result
 
     except Exception as e:

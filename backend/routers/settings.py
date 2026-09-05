@@ -174,7 +174,7 @@ def notify_codex_subscribers() -> None:
 
 # Sync DB listener: bridge between launcher's P2PManager and the
 # library SSE channel. The launcher fires NOTIFY sautium_sync_done
-# after each P2P sync (manual or auto). We listen here, then wake
+# after each P2P sync. We listen here, then wake
 # library subscribers so the Settings screen re-fetches and shows
 # the new last_sync_at / items_received. Same NOTIFY pattern used
 # by chat (routers/p2p.py); no polling.
@@ -201,8 +201,14 @@ def _sync_db_listener() -> None:
                 if ready[0]:
                     conn.poll()
                     if conn.notifies:
+                        channels = set()
                         while conn.notifies:
-                            conn.notifies.pop(0)
+                            channels.add(conn.notifies.pop(0).channel)
+                        if "sautium_sync_done" in channels:
+                            # The sync just imported what peers had; the
+                            # enrichment pass that follows fetches the rest.
+                            import background_enrichment
+                            background_enrichment.wake("P2P sync finished")
                         notify_library_subscribers()
         except Exception as e:
             logger.debug(f"Sync DB listener error: {e}")
@@ -1852,19 +1858,6 @@ def phantom_prune_cancel() -> Dict[str, Any]:
         _phantom_state["cancel_requested"] = True
     notify_library_subscribers()
     return {"success": True}
-
-
-@router.post("/sync/force")
-def force_sync() -> Dict[str, Any]:
-    """Kick the P2P sync runner manually.
-
-    Fires NOTIFY sautium_sync_request — the launcher's P2PManager
-    listens on this channel and runs sync_from_peers() in its asyncio
-    loop. The sync is asynchronous; the listener writes sync.last_at
-    and sync.last_items_received on completion and emits
-    NOTIFY sautium_sync_done so the SSE stream can push the result."""
-    db_execute("NOTIFY sautium_sync_request")
-    return {"ok": True, "triggered": True}
 
 
 # ============================================================

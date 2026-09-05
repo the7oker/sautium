@@ -23,6 +23,12 @@ batch (queue empty, rate limit, cooldown) or any error hands control back
 to the interval timer, which is the backoff. The DB-only steps never
 drain: each is a bounded slice of a table walk that the timer paces.
 
+The loop follows the P2P sync rather than its own clock where it can: at
+boot the first pass waits (bounded) for the first `sautium_sync_done`,
+and every later sync completion wakes a pass at once — peers fill a fresh
+library's gaps for free, the pass that follows fetches only the rest.
+The interval is the fallback for a node with sync off or no peers.
+
 Track-stats priority (Tier 1 → 3):
   1. Tracks whose primary artist has the most accumulated listen-time
   2. Tracks whose genre has the most accumulated listen-time
@@ -69,6 +75,7 @@ _NEGATIVE_CACHE_WINDOW = """
 # no production reason to make them user-configurable until we have
 # data showing the defaults are wrong.
 _BATCH_INTERVAL_MIN = 30          # idle sleep between passes; also the DB-only steps' cadence
+_FIRST_SYNC_WAIT_MIN = 10         # boot: how long the first pass waits for the first P2P sync
 _TRACK_STATS_PER_BATCH = 100      # Last.fm track.getInfo calls per batch
 _LYRICS_PER_BATCH = 50            # lrclib/genius calls per batch
 _ARTISTS_PER_BATCH = 30           # Last.fm artist.getInfo calls per batch
@@ -186,6 +193,55 @@ def _bump(key: str, n: int) -> None:
 
 def _cancel_flag() -> bool:
     return bool(_state["cancel"])
+
+
+# Cross-process wake from the launcher's P2P sync: the LISTEN thread in
+# routers/settings.py sets it on NOTIFY sautium_sync_done. A sync that
+# completes while a pass is running leaves it set, so the next wait()
+# returns at once and the following pass sees the freshly imported rows.
+_sync_wake = threading.Event()
+
+
+def wake(reason: str = "") -> None:
+    """Run the next pass now instead of at the interval (any thread)."""
+    logger.info(f"Background enrichment wake: {reason or 'requested'}")
+    _sync_wake.set()
+
+
+def _await_first_sync() -> None:
+    """Boot order: let the first P2P sync fill the gaps for free before the
+    first API call — a fresh library's bios, stats and similars mostly exist
+    on peers already. Bounded: a node with sync off, or one whose peers are
+    slow, runs its first pass after _FIRST_SYNC_WAIT_MIN anyway."""
+    try:
+        from routers.settings import _read
+        p2p_on = bool(_read("sync.p2p_enabled"))
+    except Exception as e:
+        logger.warning(f"sync.p2p_enabled read failed — not waiting for a sync: {e}")
+        p2p_on = False
+    if not p2p_on:
+        return
+    _set(current_step="awaiting_sync")
+    deadline = time.time() + _FIRST_SYNC_WAIT_MIN * 60
+    while time.time() < deadline and not _cancel_flag():
+        if _sync_wake.wait(timeout=1):
+            _sync_wake.clear()
+            logger.info("Background enrichment: first pass follows the P2P sync")
+            return
+    logger.info(
+        f"Background enrichment: no P2P sync within {_FIRST_SYNC_WAIT_MIN} min, "
+        "first pass runs now"
+    )
+
+
+def _sleep_until(seconds: int) -> None:
+    """Idle until the interval elapses, a sync completes (wake) or cancel —
+    1s slices so stop() never waits out the interval."""
+    deadline = time.time() + seconds
+    while time.time() < deadline and not _cancel_flag():
+        if _sync_wake.wait(timeout=1):
+            _sync_wake.clear()
+            return
 
 
 # ============================================================
@@ -607,11 +663,13 @@ def _loop() -> None:
     """One pass = a batch of every network step, then — when the interval
     timer says so — the DB-only steps. A pass that left a network backlog
     behind is followed by the next one at once (drain); otherwise the loop
-    sleeps out the interval. Exits when cancel is set."""
+    idles until the interval elapses or a P2P sync completes. Exits when
+    cancel is set."""
     logger.info("Background enrichment loop started")
     db_due_at = 0.0        # the first pass runs the DB steps too
     minted = False         # canon work created since the last NOTIFY
     try:
+        _await_first_sync()
         while not _cancel_flag():
             backlog = False
             db_ran = False
@@ -650,16 +708,8 @@ def _loop() -> None:
             if backlog:
                 continue
 
-            # Sleep in 1s slices so cancel doesn't have to wait for
-            # the full interval. Plain time.sleep would block stop()
-            # for up to half an hour, which is rude.
             _set(current_step="idle")
-            slept = 0
-            while slept < _BATCH_INTERVAL_MIN * 60:
-                if _cancel_flag():
-                    break
-                time.sleep(1)
-                slept += 1
+            _sleep_until(_BATCH_INTERVAL_MIN * 60)
     finally:
         _set(running=False, current_step="", next_run_at=None, draining=False)
         logger.info("Background enrichment loop stopped")

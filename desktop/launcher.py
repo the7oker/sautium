@@ -255,13 +255,6 @@ class LauncherApp(ctk.CTk):
         )
         self._btn_enrich.pack(pady=3)
 
-        self._btn_sync = ctk.CTkButton(
-            btn_frame, text="Sync Library", width=200,
-            command=self._sync_library, state="disabled",
-            fg_color="transparent", border_width=1,
-        )
-        self._btn_sync.pack(pady=3)
-
         self._btn_settings = ctk.CTkButton(
             btn_frame, text="Settings", width=200,
             command=self._open_settings,
@@ -451,8 +444,6 @@ class LauncherApp(ctk.CTk):
         self._btn_open.configure(state="normal")
         self._btn_scan.configure(state="normal")
         self._btn_enrich.configure(state=self._enrich_idle_state())
-        # Sync button stays disabled until P2P is ready
-        self._btn_sync.configure(state="disabled")
         self._progress_text.configure(text=gpu_text)
 
         # Connect API client to the right port
@@ -798,9 +789,6 @@ class LauncherApp(ctk.CTk):
                 self.p2p_manager.start(
                     node_id=node_id, progress_cb=progress,
                 )
-                # Enable Sync button now that P2P is ready
-                self.ui_call(lambda: self._btn_sync.configure(
-                    state="normal"))
             except Exception as e:
                 logger.error(f"P2P startup failed: {e}", exc_info=True)
                 from desktop.config_manager import get_data_dir
@@ -808,9 +796,6 @@ class LauncherApp(ctk.CTk):
                 diag_events.record_or_spool(
                     self._get_local_db_dsn(), get_data_dir(), "p2p.start_failed",
                     {"error": str(e)[:500]})
-                # Enable Sync anyway — it will show a clear error
-                self.ui_call(lambda: self._btn_sync.configure(
-                    state="normal"))
             finally:
                 self._p2p_starting = False
 
@@ -1060,7 +1045,6 @@ class LauncherApp(ctk.CTk):
                                  command=self._cancel_scan,
                                  fg_color="#8B0000", hover_color="#A52A2A")
         self._btn_enrich.configure(state="disabled")
-        self._btn_sync.configure(state="disabled")
         self._progress_text.configure(text="Starting scan...")
 
         def _do_start():
@@ -1127,7 +1111,6 @@ class LauncherApp(ctk.CTk):
             hover_color=("gray75", "gray25"),
         )
         self._btn_enrich.configure(state=self._enrich_idle_state())
-        self._btn_sync.configure(state="normal")
         self._fetch_and_display_stats()
 
     def _enrich_library(self):
@@ -1186,73 +1169,6 @@ class LauncherApp(ctk.CTk):
         """Build DSN for the launcher's local PostgreSQL."""
         from desktop.config_manager import local_db_dsn
         return local_db_dsn(self.config)
-
-    def _sync_library(self):
-        """Sync enrichment data purely via P2P (LAN discovery + DHT)."""
-        self._btn_sync.configure(state="disabled", text="Syncing...")
-        self._btn_scan.configure(state="disabled")
-        self._btn_enrich.configure(state="disabled")
-
-        if not self.p2p_manager or not self.p2p_manager.is_running:
-            self._progress_text.configure(
-                text="P2P not running — restart the app")
-            self._sync_done()
-            return
-
-        self._progress_text.configure(text="Syncing: searching peers...")
-
-        def _do_sync():
-            # Normalize local artists before sync
-            self.ui_call(lambda: self._progress_text.configure(
-                text="Normalizing artists..."))
-            norm_result = self.api_client.normalize_artists()
-            if norm_result:
-                p1 = norm_result.get("statistics", {}).get("pass1", {})
-                if p1.get("split", 0) > 0:
-                    logger.info(f"Pre-sync normalization: {p1}")
-
-            def progress(msg):
-                self.ui_call(lambda: self._progress_text.configure(text=msg)
-                )
-
-            try:
-                stats = self.p2p_manager.sync_from_peers(
-                    progress_cb=progress
-                )
-            except Exception as e:
-                logger.error(f"P2P sync failed: {e}", exc_info=True)
-                self.ui_call(lambda: self._progress_text.configure(
-                    text=f"Sync failed: {str(e)[:100]}"))
-                self.ui_call(self._sync_done)
-                return
-
-            total = sum(
-                v for v in stats.values() if isinstance(v, int)
-            )
-
-            if total == 0:
-                self.ui_call(lambda: self._progress_text.configure(
-                    text="No peers found with enrichment data"))
-            else:
-                msg = f"Sync complete — {total} items imported"
-                details = ", ".join(
-                    f"{k}: {v}" for k, v in stats.items()
-                    if isinstance(v, int) and v > 0
-                )
-                if details:
-                    msg += f" ({details})"
-                self.ui_call(lambda: self._progress_text.configure(text=msg))
-
-            self.ui_call(self._sync_done)
-
-        threading.Thread(target=_do_sync, daemon=True).start()
-
-    def _sync_done(self):
-        """Restore UI after sync completes."""
-        self._btn_sync.configure(state="normal", text="Sync Library")
-        self._btn_scan.configure(state="normal")
-        self._btn_enrich.configure(state=self._enrich_idle_state())
-        self._fetch_and_display_stats()
 
     @staticmethod
     def _is_subpath(child: Path, parent: Path) -> bool:
