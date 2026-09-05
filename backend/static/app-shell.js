@@ -2831,7 +2831,12 @@
 
   // A listening-history tile. Reuses the album-tile visual (cover + two
   // lines) but maps title/subtitle from the session and routes to the
-  // session-detail view instead of an album.
+  // session-detail view instead of an album. The card names what the queue
+  // STARTED with; a snapshot that grew across several albums wears the
+  // stacked count badge the discography uses for a multi-edition group —
+  // "more inside" — so the card stays truthful. Radio is many albums by
+  // nature and carries none. A queue played several times in a row is one
+  // card (the shelf collapses the run) with the count on the cover.
   function renderSessionTile(item) {
     const { id, title, subtitle } = item;
     const tile = document.createElement('button');
@@ -2844,9 +2849,13 @@
               onerror="this.style.display='none'"
               style="width:100%;height:100%;object-fit:cover;display:block;">`
       : `<div class="placeholder-badge">${escapeHtml(title || '')}</div>`;
+    const stack = (item.album_count > 1 && item.origin !== 'radio')
+      ? `<span class="album-tile-editions">${Number(item.album_count)}</span>` : '';
+    const repeat = (item.repeat_count > 1)
+      ? `<span class="album-tile-repeat">×${Number(item.repeat_count)}</span>` : '';
     tile.innerHTML = `
       <div class="album-cover" style="--cover-bg-1: ${c.bg1}; --cover-bg-2: ${c.bg2};">
-        ${cover}
+        ${cover}${repeat}${stack}
       </div>
       <div class="album-title">${escapeHtml(title || '')}</div>
       <div class="album-artist">${escapeHtml(subtitle || '')}</div>
@@ -4487,6 +4496,7 @@
   const SVG_KEBAB = '<svg width="22" height="22" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><circle cx="12" cy="5" r="1.8"/><circle cx="12" cy="12" r="1.8"/><circle cx="12" cy="19" r="1.8"/></svg>';
   const SVG_PLUS = '<svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" aria-hidden="true"><path d="M12 5v14M5 12h14"/></svg>';
   const SVG_PLAY = '<svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d="M8 5.2v13.6a1 1 0 001.5.87l11-6.8a1 1 0 000-1.74l-11-6.8A1 1 0 008 5.2z"/></svg>';
+  const SVG_DISC = '<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" aria-hidden="true"><circle cx="12" cy="12" r="8.5"/><circle cx="12" cy="12" r="2.4"/></svg>';
 
   // Sort spec for the Artist screen's Albums block. Each entry maps
   // the user-facing label, the picker hint, the inline glyph that
@@ -5333,9 +5343,31 @@
         navigateToEntity('album', el.getAttribute('data-album-id'))));
   }
 
+  // A session date for the meta row: today / yesterday by name, otherwise
+  // the day and month, with the year once it is not this one.
+  function fmtSessionDate(iso) {
+    if (!iso) return '';
+    const d = new Date(iso);
+    if (isNaN(d)) return '';
+    const now = new Date();
+    const dayStart = (x) => new Date(x.getFullYear(), x.getMonth(), x.getDate()).getTime();
+    const days = Math.round((dayStart(now) - dayStart(d)) / 86400000);
+    if (days === 0) return 'Today';
+    if (days === 1) return 'Yesterday';
+    const opts = { day: 'numeric', month: 'short' };
+    if (d.getFullYear() !== now.getFullYear()) opts.year = 'numeric';
+    return d.toLocaleDateString('en-GB', opts);
+  }
+
   // Listening-history session detail. Modelled on renderAlbum's
-  // .detail-screen, but the hero/title come from the session snapshot and
-  // "Play" replays the stored tracks (which opens a fresh 'mix' session).
+  // .detail-screen — the same hero / title / artist / meta / actions /
+  // tracklist anatomy — but the context comes from the snapshot's CONTENT,
+  // since a queue is not an album: the artist line names every artist in it
+  // (each a link, as on the album screen), one album behind all the slots
+  // gets an Album button, several group the tracklist under tappable album
+  // headers when the slots run in album-sized runs, or name the album on
+  // each row when they don't. Play / Queue replay the stored slots
+  // server-side.
   async function renderSession(root, sessionId) {
     root.innerHTML = '';
     const screen = document.createElement('div');
@@ -5364,50 +5396,119 @@
             style="--cover-bg-1: ${c.bg1}; --cover-bg-2: ${c.bg2};"></div>`;
 
     const tracksList = d.tracks || [];
+    const artists = d.artists || [];
     const anyPhantom = tracksList.some(t => t.is_phantom);
     const anyOwned = tracksList.some(t => !t.is_phantom);
-    // An all-phantom album session replays/streams by album_id, exactly like the
-    // album screen's phantom path — so Play/Queue route through play-phantom.
+    // An all-phantom album session is the phantom album screen's twin: tag it
+    // so the global preview-events listener refreshes these rows' buffering +
+    // key·bpm by track_id, exactly as it does for that screen.
     const phantomAlbumId = (d.origin === 'album' && d.origin_album_id
                             && anyPhantom && !anyOwned) ? d.origin_album_id : null;
-    const rowAlbumId = (d.origin === 'album' && d.origin_album_id) ? d.origin_album_id : null;
-    // Tag the screen so the global preview-events listener refreshes these rows'
-    // buffering + key·bpm by track_id — same mechanism the album page uses, so a
-    // whole-album Play's optimistic "Buffering…" lines clear as each track lands.
     if (phantomAlbumId) screen.dataset.phantomAlbumId = phantomAlbumId;
+
+    // Album groups = consecutive runs of slots queued from one album. A
+    // group's artist is whoever is behind at least half its rows; a row by
+    // anyone else (a guest, one name on a compilation) says so under its
+    // title, so a many-artist session never shows a bare list of titles.
+    const groups = [];
+    for (const t of tracksList) {
+      const albumId = t.album_id || null;
+      const last = groups[groups.length - 1];
+      if (last && last.albumId === albumId) last.tracks.push(t);
+      else groups.push({ albumId, title: t.album_title || '', tracks: [t] });
+    }
+    for (const g of groups) {
+      const tally = new Map();
+      for (const t of g.tracks) {
+        if (!t.artist_id) continue;
+        const e = tally.get(t.artist_id) || { id: t.artist_id, name: t.artist, n: 0 };
+        e.n += 1;
+        tally.set(t.artist_id, e);
+      }
+      const top = [...tally.values()].sort((a, b) => b.n - a.n)[0];
+      g.artist = (top && top.n * 2 >= g.tracks.length) ? top : null;
+    }
+    const albumIds = [...new Set(tracksList.map(t => t.album_id).filter(Boolean))];
+    const singleAlbumId = albumIds.length === 1 ? albumIds[0] : null;
+    // Headers earn their place when they label RUNS. A run of one track is a
+    // header per row — a radio station, a set of singles — which reads better
+    // flat, with the album named on the row. The switch is the concentration
+    // of the snapshot, tracks per run: grouped from two up.
+    const grouped = albumIds.length > 1 && tracksList.length >= 2 * groups.length;
+    // The artist a row is measured against: its run's when grouped, the
+    // session's own (whoever is behind at least half the rows) when flat.
+    const top = artists[0];
+    const sessionArtist = (top && top.track_count * 2 >= tracksList.length)
+      ? { id: top.id, name: top.name } : null;
+
     const trackParts = [];
     let n = 0;
-    for (const t of tracksList) {
-      n += 1;
-      // Match the album screen: key + tempo under the title, not the artist.
-      const sub = [
-        t.key ? (t.key + (modeShort(t.mode) ? ' ' + modeShort(t.mode) : '')) : null,
-        t.bpm ? Math.round(t.bpm) + ' bpm' : null,
-      ].filter(Boolean).join(' · ');
-      // Phantom (streamed) rows carry is-phantom-track + data-track-id so the
-      // shared handlers route them (click → play-phantom-track, [+] → queue);
-      // owned rows keep data-media-file-id. Same dim styling as other surfaces.
-      // data-album-id is the album the rows are listed under (album-origin
-      // sessions), so a click queues THIS album's edition of the track.
-      const attrs = t.is_phantom
-        ? `class="track-row is-phantom-track" data-track-id="${escapeHtml(String(t.track_id || ''))}"`
-          + (rowAlbumId ? ` data-album-id="${escapeHtml(rowAlbumId)}"` : '')
-        : `class="track-row" data-media-file-id="${escapeHtml(String(t.media_file_id || ''))}"`;
-      trackParts.push(`
-        <button ${attrs} type="button">
-          <span class="track-rank">${n}</span>
-          <div class="track-info">
-            <div class="track-title-line">${escapeHtml(t.title || '')}</div>
-            ${sub ? `<div class="track-sub">${escapeHtml(sub)}</div>` : ''}
-            ${t.is_phantom ? '<div class="track-buffering" hidden>Buffering…</div>' : ''}
-          </div>
-          <span class="track-dur">${fmtDuration(t.duration_seconds)}</span>
-          <span class="track-add" aria-label="Add to queue">${SVG_PLUS}</span>
-        </button>
-      `);
+    for (const g of groups) {
+      if (grouped && g.albumId) {
+        trackParts.push(`
+          <button class="disc-header session-album-header" type="button"
+                  data-album-id="${escapeHtml(g.albumId)}">
+            <span class="sah-title">${escapeHtml(g.title)}</span>
+            ${g.artist ? `<span class="sah-artist">${escapeHtml(g.artist.name)}</span>` : ''}
+            <span class="sah-chevron" aria-hidden="true">›</span>
+          </button>`);
+      }
+      const ref = grouped ? g.artist : sessionArtist;
+      for (const t of g.tracks) {
+        n += 1;
+        const line = [
+          (t.artist && !(ref && ref.id === t.artist_id)) ? t.artist : null,
+          (!grouped && albumIds.length > 1) ? t.album_title : null,
+        ].filter(Boolean).join(' · ');
+        const artistLine = line
+          ? `<div class="track-artist-line">${escapeHtml(line)}</div>` : '';
+        // Match the album screen: key + tempo under the title.
+        const sub = [
+          t.key ? (t.key + (modeShort(t.mode) ? ' ' + modeShort(t.mode) : '')) : null,
+          t.bpm ? Math.round(t.bpm) + ' bpm' : null,
+        ].filter(Boolean).join(' · ');
+        // Phantom (streamed) rows carry is-phantom-track + data-track-id so the
+        // shared handlers route them (click → play-phantom-track, [+] → queue);
+        // owned rows keep data-media-file-id. data-album-id is the album the
+        // slot was queued from, so a click plays THIS edition of the track.
+        const attrs = t.is_phantom
+          ? `class="track-row is-phantom-track" data-track-id="${escapeHtml(String(t.track_id || ''))}"`
+            + (t.album_id ? ` data-album-id="${escapeHtml(t.album_id)}"` : '')
+          : `class="track-row" data-media-file-id="${escapeHtml(String(t.media_file_id || ''))}"`;
+        trackParts.push(`
+          <button ${attrs} type="button">
+            <span class="track-rank">${n}</span>
+            <div class="track-info">
+              <div class="track-title-line">${escapeHtml(t.title || '')}</div>
+              ${artistLine}
+              ${sub ? `<div class="track-sub">${escapeHtml(sub)}</div>` : ''}
+              ${t.is_phantom ? '<div class="track-buffering" hidden>Buffering…</div>' : ''}
+            </div>
+            <span class="track-dur">${fmtDuration(t.duration_seconds)}</span>
+            <span class="track-add" aria-label="Add to queue">${SVG_PLUS}</span>
+          </button>
+        `);
+      }
     }
 
+    // The artist line: the snapshot's artists by share, the first three as
+    // links and a "+N" for the rest. A snapshot with no artist rows left
+    // falls back to the stored card line (an artist name for album / track /
+    // mix cards; radio's says "Radio", which the meta row shows instead).
+    const shown = artists.slice(0, 3);
+    const more = artists.length - shown.length;
+    const artistLine = artists.length
+      ? `<div class="album-artist-line session-artists">${
+          shown.map(a => `<button class="session-artist" type="button"
+                                  data-artist-id="${escapeHtml(a.id)}">${escapeHtml(a.name)}</button>`)
+               .join('<span class="session-artist-sep" aria-hidden="true">·</span>')
+        }${more > 0 ? `<span class="session-artist-more">+${more}</span>` : ''}</div>`
+      : ((d.subtitle && d.origin !== 'radio')
+          ? `<div class="album-artist-line">${escapeHtml(d.subtitle)}</div>` : '');
+
     const count = tracksList.length;
+    const when = fmtSessionDate(d.started_at);
+    const kind = d.origin === 'radio' ? 'Radio' : d.origin === 'mix' ? 'Mix' : '';
     screen.innerHTML = `
       <div class="album-hero">
         ${heroImg}
@@ -5418,23 +5519,35 @@
       </div>
       <div class="album-meta-block">
         <h1 class="album-title-line">${escapeHtml(d.title || '')}</h1>
-        ${d.subtitle ? `<div class="album-artist-line" style="text-align:left;">${escapeHtml(d.subtitle)}</div>` : ''}
+        ${artistLine}
         <div class="album-meta-row">
+          ${when ? `<span class="am-year">${escapeHtml(when)}</span><span class="am-dot"></span>` : ''}
           <span class="am-dur" style="margin-left: 0;">${count} track${count === 1 ? '' : 's'}</span>
           ${d.total_duration ? `<span class="am-dot"></span><span class="am-dur" style="margin-left: 0;">${fmtDurationLong(d.total_duration)}</span>` : ''}
+          ${kind ? `<span class="am-kind">${kind}</span>` : ''}
         </div>
       </div>
-      <div class="album-actions">
-        <button class="btn-primary" type="button" data-action="${phantomAlbumId ? 'play-phantom' : 'play-all'}">${SVG_PLAY} Play</button>
-        <button class="btn-secondary album-queue-btn" type="button" data-action="${phantomAlbumId ? 'queue-phantom-album' : 'queue-album'}">
+      <div class="album-actions${singleAlbumId ? ' has-album' : ''}">
+        <button class="btn-primary" type="button" data-action="play-session"${count ? '' : ' disabled'}>${SVG_PLAY} Play</button>
+        ${singleAlbumId ? `
+          <button class="btn-secondary album-open-btn" type="button" data-album-id="${escapeHtml(singleAlbumId)}">
+            <span class="btn-icon">${SVG_DISC}</span><span class="btn-label">Album</span>
+          </button>` : ''}
+        <button class="btn-secondary album-queue-btn" type="button" data-action="queue-session"${count ? '' : ' disabled'}>
           <span class="btn-icon">${SVG_PLUS}</span><span class="btn-label">Queue</span>
         </button>
       </div>
-      <div class="album-tracklist">${trackParts.join('')}</div>
+      <div class="album-tracklist">${
+        count ? trackParts.join('')
+              : '<div class="placeholder-body session-empty">The tracks of this session are no longer in the catalog.</div>'
+      }</div>
       <div style="height: calc(24 * var(--px));"></div>
     `;
 
-    wireDetailHandlers(screen, { tracks: tracksList, phantomAlbumId });
+    wireDetailHandlers(screen, {
+      tracks: tracksList, phantomAlbumId,
+      sessionId, sessionHasPhantom: anyPhantom,
+    });
     updatePlayingHighlight();
   }
 
@@ -5709,9 +5822,11 @@
         if (id) navigateToEntity('artist', id);
       });
     });
-    // Album tile — a multi-edition group opens the release-group screen, a
-    // single album opens straight to the album.
-    screen.querySelectorAll('[data-album-id]').forEach(el => {
+    // Album tile / header / button — a multi-edition group opens the
+    // release-group screen, a single album opens straight to the album. A
+    // track row's data-album-id is play CONTEXT (the edition its click
+    // streams), not a destination, so rows are left out.
+    screen.querySelectorAll('[data-album-id]:not(.track-row)').forEach(el => {
       el.addEventListener('click', e => {
         e.stopPropagation();
         const id = el.getAttribute('data-album-id');
@@ -5789,9 +5904,53 @@
         else openPhantomAlbumQueueConfirm(screen, wrap, ctx.phantomAlbumId);
       });
     });
+    // Listening-history replay — the snapshot's slots are rebuilt server-side
+    // (owned files and streamed tracks alike, each from the album it was
+    // queued from), so the screen sends only the session id.
+    screen.querySelectorAll('[data-action="play-session"]').forEach(btn => {
+      btn.addEventListener('click', async () => {
+        if (btn.disabled || !ctx.sessionId) return;
+        btn.disabled = true;            // block double-fire; faded while in flight
+        window.maybeClaimRenderer();
+        try {
+          const resp = await fetch('/api/player/play-session', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ session_id: ctx.sessionId }),
+          }).catch(() => null);
+          let body = null;
+          try { body = resp ? await resp.json() : null; } catch (_) {}
+          if (!(await reportPlaybackResult(resp, body))) return;
+          // Optimistic buffering on streamed rows the preview-events listener
+          // will clear — it refreshes by album, so only a tagged (all-phantom
+          // album) screen gets it; elsewhere the rows would never clear.
+          if (ctx.phantomAlbumId) {
+            (ctx.tracks || []).forEach(t => {
+              if (t.is_phantom && t.track_id) setTrackBuffering(screen, t.track_id, true);
+            });
+          }
+        } finally { btn.disabled = false; }
+      });
+    });
+    screen.querySelectorAll('[data-action="queue-session"]').forEach(btn => {
+      btn.addEventListener('click', () => {
+        if (btn.disabled || !ctx.sessionId) return;
+        const wrap = btn.closest('.album-actions');
+        if (!wrap) return;
+        if (wrap.classList.contains('is-confirming')) { closeAlbumQueueConfirm(wrap); return; }
+        // Streamed slots roll in from the ordered worker, which only appends.
+        openAlbumQueueBar(wrap, async (position) => {
+          const resp = await fetch('/api/player/queue-session', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ session_id: ctx.sessionId, position }),
+          }).catch(() => null);
+          await reportPlaybackResult(resp);
+        }, { ask: 'Add to:', next: !ctx.sessionHasPhantom });
+      });
+    });
     // Play all — replaces the queue with the full track list. ctx.playOrigin
-    // lets the album screen tag the new session 'album' (+ origin_album_id);
-    // session replay sends no origin → backend defaults to 'mix'.
+    // lets the album screen tag the new session 'album' (+ origin_album_id).
     screen.querySelectorAll('[data-action="play-all"]').forEach(btn => {
       btn.addEventListener('click', async () => {
         if (btn.disabled || !ctx.tracks || !ctx.tracks.length) return;
@@ -6150,19 +6309,29 @@
     bar.querySelector('[data-confirm="end"]').addEventListener('click', e => { e.stopPropagation(); go('end'); });
   }
 
-  function openPhantomAlbumQueueConfirm(screen, wrap, albumId) {
-    if (!albumId) return;
+  // The album-wide "Add … to: [Next] [End]" bar for actions the SERVER
+  // positions (a phantom album, a history snapshot): `go(position)` makes the
+  // request once the bar is closed. opts.next=false leaves End alone when the
+  // server can only append; opts.ask replaces the "Add album to:" label.
+  function openAlbumQueueBar(wrap, go, opts = {}) {
     wrap.classList.add('is-confirming');
     const bar = document.createElement('div');
     bar.className = 'track-confirm-bar';
     bar.innerHTML = `
-      <span class="track-confirm-ask">Add album to:</span>
-      <button class="track-confirm-btn" type="button" data-confirm="next">Next</button>
+      <span class="track-confirm-ask">${escapeHtml(opts.ask || 'Add album to:')}</span>
+      ${opts.next === false ? '' : '<button class="track-confirm-btn" type="button" data-confirm="next">Next</button>'}
       <button class="track-confirm-btn" type="button" data-confirm="end">End</button>`;
     const queueBtn = wrap.querySelector('.album-queue-btn');
     if (queueBtn) wrap.insertBefore(bar, queueBtn); else wrap.appendChild(bar);
-    const go = async (position) => {
+    bar.querySelectorAll('[data-confirm]').forEach(b => b.addEventListener('click', e => {
+      e.stopPropagation();
       closeAlbumQueueConfirm(wrap);
+      go(b.getAttribute('data-confirm'));
+    }));
+  }
+  function openPhantomAlbumQueueConfirm(screen, wrap, albumId) {
+    if (!albumId) return;
+    openAlbumQueueBar(wrap, async (position) => {
       const resp = await fetch('/api/player/queue-phantom-album', {
         method: 'POST', headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ album_id: albumId, position }),
@@ -6171,9 +6340,7 @@
       try { body = resp ? await resp.json() : null; } catch (_) {}
       if (!resp || !resp.ok) { await reportPlaybackResult(resp); return; }
       applyPhantomMissing(screen, body && body.missing);
-    };
-    bar.querySelector('[data-confirm="next"]').addEventListener('click', e => { e.stopPropagation(); go('next'); });
-    bar.querySelector('[data-confirm="end"]').addEventListener('click', e => { e.stopPropagation(); go('end'); });
+    });
   }
 
   /* ---------- Genre screen ----------

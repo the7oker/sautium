@@ -127,6 +127,13 @@ class QueueEntitiesRequest(BaseModel):
     # one on, and the user says which ("build me a set" vs "play these").
     autoplay: bool = True
 
+class PlaySessionRequest(BaseModel):
+    session_id: str
+
+class QueueSessionRequest(BaseModel):
+    session_id: str
+    position: str = "end"   # 'next' | 'end' — next only for an all-owned snapshot
+
 class JumpRequest(BaseModel):
     index: int  # 1-based, matches HQPlayer's select_track convention
 
@@ -2306,9 +2313,12 @@ def play_phantom_track(req: PlayPhantomTrackRequest):
     if e is None or e.audio is None:
         raise HTTPException(status_code=502, detail="This track isn't available to stream right now.")
 
-    # A single streamed track is a 'track'-origin session seeded by its UUID.
+    # A single streamed track is a 'track'-origin session seeded by its UUID;
+    # the album the row was clicked on is the session's origin album, so the
+    # card wears that edition's cover.
     sessions.rotate_session(manager.queue, 'track',
-                            seed_track_id=req.track_id)
+                            seed_track_id=req.track_id,
+                            origin_album_id=req.album_id)
 
     try:
         item = queue_mod.item_for_proxy_token(tokens[0])
@@ -2633,6 +2643,134 @@ def play_entities(req: QueueEntitiesRequest):
         raise HTTPException(status_code=503, detail=str(e))
     return {"ok": True, "playing": req.autoplay, "queued": owned,
             "streaming": phantom, "not_found": missing}
+
+
+# -- Listening-history replay --------------------------------------------------
+#
+# A session snapshot is a list of queue SLOTS — (track_id, media_file_id,
+# album_id) — not a list of catalog refs: an owned slot names the very file
+# that played, a streamed slot the album it was queued from. Replaying rebuilds
+# the queue from those slots here, so a snapshot that mixes owned files with
+# streamed tracks comes back whole. (The client used to replay through
+# play-tracks with the owned ids alone, which silently dropped every streamed
+# slot and could not replay an all-streamed track session at all.)
+
+
+def _session_segments(session_id: str) -> tuple[list, int]:
+    """('owned', [media rows]) / ('phantom', [TrackQuery]) segments for a
+    session snapshot, in slot order, plus the count of slots nothing can play.
+    An owned slot prefers its own file, then any rip of the track (the file
+    was removed, the track kept); a slot with no file left streams like a
+    phantom. Streamed queries are built per album — the slot's album_id keeps
+    the edition the listener pressed — and a slot whose album no longer lists
+    the track (or never had one) gets the display edition."""
+    rows = _db_query("""
+        SELECT st.track_id::text AS track_id, st.album_id::text AS album_id,
+               (SELECT mf.id FROM media_files mf
+                WHERE mf.track_id = st.track_id
+                ORDER BY (mf.id = st.media_file_id) DESC NULLS LAST,
+                         mf.is_analysis_source DESC, mf.id
+                LIMIT 1) AS media_file_id
+        FROM session_tracks st
+        WHERE st.session_id = %(id)s::uuid
+        ORDER BY st.position
+    """, {"id": session_id})
+
+    by_album: dict[Optional[str], list[str]] = {}
+    for r in rows:
+        if r["media_file_id"] is None:
+            by_album.setdefault(r["album_id"], []).append(r["track_id"])
+    queries: dict[str, object] = {}
+    loose: list[str] = []
+    for album_id, tids in by_album.items():
+        own = ({q.track_id: q for q in _phantom_album_queries(album_id)}
+               if album_id else {})
+        for tid in tids:
+            if tid in own:
+                queries[tid] = own[tid]
+            else:
+                loose.append(tid)
+    if loose:
+        queries.update(_phantom_track_queries(loose))
+
+    segments: list[tuple[str, list]] = []
+    missing = 0
+    for r in rows:
+        if r["media_file_id"] is not None:
+            _push_segment(segments, "owned", [{"id": r["media_file_id"]}])
+        elif r["track_id"] in queries:
+            _push_segment(segments, "phantom", [queries[r["track_id"]]])
+        else:
+            missing += 1
+    return segments, missing
+
+
+@router.post("/play-session")
+def play_session(req: PlaySessionRequest):
+    """Replace the queue with a listening-history snapshot and play it — the
+    session screen's Play. The listen keeps its archived origin (an album
+    session replays as that album, a track session as that track), except
+    radio: the snapshot is a static list now, not a station, so it is a mix."""
+    header = _db_query_one("""
+        SELECT origin, title, origin_album_id::text AS origin_album_id
+        FROM listening_sessions
+        WHERE id = %(id)s::uuid AND ended_at IS NOT NULL
+    """, {"id": req.session_id})
+    if header is None:
+        raise HTTPException(status_code=404, detail="Session not found")
+
+    segments, missing = _session_segments(req.session_id)
+    if not segments:
+        raise HTTPException(status_code=404, detail="Nothing in this session can be played any more")
+    owned = sum(len(p) for k, p in segments if k == "owned")
+    phantom = sum(len(p) for k, p in segments if k == "phantom")
+    if phantom:
+        _ensure_streaming_ready()
+
+    head_kind, head_items = segments[0]
+    origin = "mix" if header["origin"] == "radio" else header["origin"]
+    sessions.rotate_session(
+        manager.queue, origin,
+        origin_album_id=header["origin_album_id"],
+        seed_media_file_id=(head_items[0]["id"] if head_kind == "owned" else None),
+        seed_track_id=(None if head_kind == "owned" else head_items[0].track_id),
+        # A mix keeps the name it was archived under (a radio, replaying as a
+        # static mix, keeps its seed's); album and track cards are recomputed
+        # from their origin and need nothing carried.
+        title=(header["title"] if origin == "mix" else None))
+
+    try:
+        _play_segments(segments, "play-session")
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=503, detail=str(e))
+    return {"ok": True, "queued": owned, "streaming": phantom, "missing": missing}
+
+
+@router.post("/queue-session")
+def queue_session(req: QueueSessionRequest):
+    """Append a listening-history snapshot to the queue. An all-owned snapshot
+    takes either position; one with streamed slots rolls in from the ordered
+    worker, which only appends — the screen offers End alone for those."""
+    if req.position not in ("next", "end"):
+        raise HTTPException(status_code=400, detail="position must be 'next' or 'end'")
+    segments, missing = _session_segments(req.session_id)
+    if not segments:
+        raise HTTPException(status_code=404, detail="Nothing in this session can be played any more")
+    owned = sum(len(p) for k, p in segments if k == "owned")
+    phantom = sum(len(p) for k, p in segments if k == "phantom")
+    if phantom:
+        _ensure_streaming_ready()
+
+    if len(segments) == 1 and segments[0][0] == "owned":
+        _add_owned(segments[0][1], clear_first=False, position=req.position)
+    else:
+        if req.position == "next":
+            raise HTTPException(status_code=400,
+                                detail="A snapshot with streamed tracks queues at the end only")
+        _queue_segments_async(segments, manager.queue.generation, "queue-session")
+    return {"ok": True, "queued": owned, "streaming": phantom, "missing": missing}
 
 
 @router.post("/play-similar")
