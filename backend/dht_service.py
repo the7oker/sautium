@@ -246,6 +246,10 @@ class DHTService:
         await self._wait_for_dht_ready()
         logger.info("DHT bootstrap complete")
         self._ready.set()
+        # Snapshot right away: a process that never reaches a clean stop
+        # (docker kill, a crash, a power cut) must still leave the next
+        # start a warm table, not depend on the shutdown path.
+        await asyncio.get_event_loop().run_in_executor(None, self._save_state)
 
     async def wait_ready(self, timeout: Optional[float] = None) -> bool:
         """Block until the routing table is usable (see _bootstrap_watch)."""
