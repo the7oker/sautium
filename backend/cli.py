@@ -754,6 +754,7 @@ def analyze_audio(limit, batch_size, force, newest_first, librosa_only, max_dura
 @click.option("--max-duration", "-d", type=int, default=None, help="Maximum duration in seconds (e.g., 1800 for 30 minutes)")
 @click.option("--skip-embeddings", is_flag=True, help="Skip audio embedding generation")
 @click.option("--skip-lastfm", is_flag=True, help="Skip Last.fm enrichment (artist, album, track)")
+@click.option("--skip-lyrics", is_flag=True, help="Skip lyrics fetching (lrclib/genius)")
 @click.option("--skip-audio-analysis", is_flag=True, help="Skip audio feature extraction")
 @click.option("--force-embeddings", is_flag=True, help="Regenerate audio embeddings even if exist")
 @click.option("--force-audio-analysis", is_flag=True, help="Re-analyze audio even if features exist")
@@ -762,7 +763,7 @@ def analyze_audio(limit, batch_size, force, newest_first, librosa_only, max_dura
 @click.option("--worker-count", type=int, default=None, help="Total number of workers for parallel processing (use with --worker-id)")
 @track_filter_options
 def enrich_tracks(limit, newest_first, max_duration, skip_embeddings, skip_lastfm,
-                  skip_audio_analysis, force_embeddings,
+                  skip_lyrics, skip_audio_analysis, force_embeddings,
                   force_audio_analysis, lastfm_delay,
                   worker_id, worker_count,
                   filter_artist, filter_album, filter_genre, filter_path,
@@ -772,7 +773,7 @@ def enrich_tracks(limit, newest_first, max_duration, skip_embeddings, skip_lastf
 
     Phase 1 (parallel):
       A) GPU: audio embeddings + audio features (batched)
-      B) Network: Last.fm artist/album/track enrichment
+      B) Network: Last.fm artist bios
       C) Network: Lyrics fetching (lrclib/genius)
     Phase 2 (sequential):
       D) Text embeddings, lyrics embeddings, enrichment embeddings
@@ -806,6 +807,8 @@ def enrich_tracks(limit, newest_first, max_duration, skip_embeddings, skip_lastf
         skip_steps.append("audio embeddings")
     if skip_lastfm:
         skip_steps.append("Last.fm")
+    if skip_lyrics:
+        skip_steps.append("lyrics")
     if skip_audio_analysis:
         skip_steps.append("audio analysis")
 
@@ -849,6 +852,7 @@ def enrich_tracks(limit, newest_first, max_duration, skip_embeddings, skip_lastf
             limit=limit,
             skip_embeddings=skip_embeddings,
             skip_lastfm=skip_lastfm,
+            skip_lyrics=skip_lyrics,
             skip_audio_analysis=skip_audio_analysis,
             force_embeddings=force_embeddings,
             force_audio_analysis=force_audio_analysis,
@@ -880,7 +884,8 @@ def enrich_tracks(limit, newest_first, max_duration, skip_embeddings, skip_lastf
 
         # Lyrics stats
         lyrics = result.get("lyrics", {})
-        click.echo(f"   • Lyrics: {lyrics.get('found', 0)} found, {lyrics.get('not_found', 0)} not found")
+        if not skip_lyrics:
+            click.echo(f"   • Lyrics: {lyrics.get('found', 0)} found, {lyrics.get('not_found', 0)} not found")
 
         # Phase 2 stats
         text_emb = result.get("text_embeddings", {})

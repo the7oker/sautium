@@ -96,7 +96,7 @@ beyond ~2–3k tracks)**. Feasibility of local analysis is a function of
 | HQPlayer status poller (`routers/player.py:335`) | **1 s** always | **none** — runs even with no HQPlayer configured |
 | DHT alert pump ×2 (backend `dht_service.py:314`, launcher `p2p/dht_service.py:420`) | **0.5 s** | via `p2p_enabled` only |
 | DHT re-announce (∝ enriched artists) | 15 min | announce_limit setting |
-| Background enrichment (network-only) | 30 min, 1s cancel ticks | `enrichment.background_enabled` (default **on**) |
+| Background enrichment (network-only) | 30 min idle; a network backlog drains pass-to-pass (DB-only steps stay on the timer); 1s cancel ticks | `enrichment.background_enabled` (default **on**) |
 | Launcher stats poll / health watchdog / friend resolve | 60 s / 10 s / 15 s | none |
 | Model prewarm at boot | every boot | **none** |
 | 2 idle psycopg2 LISTEN connections (launcher chat+sync) | permanent | — |
@@ -257,7 +257,7 @@ wiring, not new machinery):
 | `embedding_segments` (local computation) | balanced K | balanced K | none — no local analysis; imported segments arrive once segment sync ships (import default per profile, see §2.4) |
 | Stream enrichment (`streaming_preview_analyze`) | on (GPU, as today) | on (GPU) / trickle (CPU-only) | **trickle** (§2.7) — off only by user switch or below floor |
 | Phantom layer (similars / missing albums) | **owner's switch, on in all profiles** — `discovery.phantom_layer` (off = nothing new minted, existing rows stay); removal only by the explicit Settings action, never by tier | | |
-| Background enrichment | on | on | manual button |
+| Background enrichment | on | on | on — since 2026-09-05 the manual button is analysis-only, so the loop is the sole network path on every profile |
 | Player status loop | owned by the active output backend (§2.6) — no configured output, no loop | | |
 | torch threads / I/O pool | default / 16 | cores−2 / min(8,cores) | max(2,cores/2) / min(4,cores) |
 | P2P sync + chat + DHT | **on in all profiles** — sync is the lite node's lifeline | | |

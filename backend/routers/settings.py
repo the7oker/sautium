@@ -329,24 +329,10 @@ _DEFAULTS: Dict[str, Any] = {
 }
 
 
-# Defaults that depend on the hardware profile — computed at read time so
-# the UI and the startup autostart see the same value. An explicit
-# user_settings row always wins.
-def _background_enrichment_default() -> bool:
-    import hardware_profile
-    return hardware_profile.resolve().background_enrichment_default
-
-
-_DYNAMIC_DEFAULTS = {
-    "enrichment.background_enabled": _background_enrichment_default,
-}
-
-
 def _read(key: str) -> Any:
     row = db_query_one("SELECT value FROM user_settings WHERE key = %(k)s", {"k": key})
     if row is None:
-        dyn = _DYNAMIC_DEFAULTS.get(key)
-        return dyn() if dyn else _DEFAULTS.get(key)
+        return _DEFAULTS.get(key)
     return row.get("value")
 
 
@@ -685,6 +671,7 @@ async def _library_state() -> Dict[str, Any]:
         "lyrics_done":        stats.get("tracks_with_lyrics", 0),
         "lastfm_done":        stats.get("artists_with_lastfm", 0),
         "lastfm_total":       stats.get("library_artists", 0),
+        "analysis_available": bool(stats.get("analysis_available")),
         # Last scan + runtime workers
         "last_scan_at":       _read("library.last_scan_at"),
         "scan":               scan,

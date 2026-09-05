@@ -317,7 +317,8 @@ class BackendAPIClient:
         return self._post_json("/scan/cancel", timeout=5)
 
     def enrich_start(self) -> Optional[dict]:
-        """Start background enrichment (all steps)."""
+        """Start the analysis run (audio embeddings + features, then the
+        text encoders). Network enrichment is the backend's background loop."""
         return self._post_json("/enrich/start", timeout=10)
 
     def enrich_status(self) -> Optional[dict]:

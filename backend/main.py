@@ -919,6 +919,14 @@ async def get_stats() -> Dict[str, Any]:
             if enr:
                 row.update(dict(enr._mapping))
 
+            # Not a DB figure, but this payload feeds the launcher's stats
+            # panel and the Library screen, and that panel owns the
+            # "Analyse library" button: on a node with no ML runtime the run
+            # is a no-op (analysis arrives via P2P import), so the button
+            # must not exist there.
+            import hardware_profile
+            row["analysis_available"] = hardware_profile.resolve().ml_available
+
             return {**defaults, **row}
     except Exception as e:
         logger.error(f"Failed to get stats: {e}")
@@ -1274,9 +1282,9 @@ def _notify_library_subs_safe():
         pass
 
 
-def _enrich_worker(limit: Optional[int], skip_embeddings: bool,
-                   skip_lastfm: bool, skip_audio_analysis: bool):
-    """Background worker that delegates to run_parallel_enrichment."""
+def _enrich_worker(limit: Optional[int], local_analysis: bool):
+    """Background worker for the analysis run: run_parallel_enrichment with
+    the network pipelines off (Last.fm and lyrics are background_enrichment's)."""
     state = _enrich_state
 
     def _progress_cb(msg):
@@ -1296,9 +1304,10 @@ def _enrich_worker(limit: Optional[int], skip_embeddings: bool,
         from track_enrichment import run_parallel_enrichment
         result = run_parallel_enrichment(
             limit=limit,
-            skip_embeddings=skip_embeddings,
-            skip_lastfm=skip_lastfm,
-            skip_audio_analysis=skip_audio_analysis,
+            skip_embeddings=not local_analysis,
+            skip_audio_analysis=not local_analysis,
+            skip_lastfm=True,
+            skip_lyrics=True,
             cancel_flag=_cancel_flag,
             progress_cb=_progress_cb,
         )
@@ -1307,14 +1316,18 @@ def _enrich_worker(limit: Optional[int], skip_embeddings: bool,
         gpu_s = result.get("gpu", {})
         emb_s = gpu_s.get("embeddings", {})
         af_s = gpu_s.get("audio_features", {})
-        lastfm_s = result.get("lastfm", {})
-        lyrics_s = result.get("lyrics", {})
+        text_s = result.get("text_embeddings", {})
+        lyrics_emb_s = result.get("lyrics_embeddings", {})
+        bio_emb_s = result.get("enrichment_embeddings", {}).get("artist_bios", {})
         parts = [
             f"Emb: {emb_s.get('success', 0)}",
             f"Features: {af_s.get('success', 0)}",
-            f"Last.fm: {lastfm_s.get('artists_success', 0)} artists, {lastfm_s.get('albums_success', 0)} albums",
-            f"Lyrics: {lyrics_s.get('found', 0)}/{lyrics_s.get('processed', 0)}",
+            f"Text: {text_s.get('success', 0)}",
+            f"Lyrics emb: {lyrics_emb_s.get('success', 0)}",
+            f"Bio emb: {bio_emb_s.get('success', 0)}",
         ]
+        if result.get("note"):
+            parts.append(result["note"])
         state["progress"] = " | ".join(parts)
         state["result"] = {"success": True, "statistics": result}
         # Signing moved into run_parallel_enrichment (right after the audio
@@ -1349,20 +1362,25 @@ def _fetch_lyrics_sync(limit=None, cancel_flag=None, progress_cb=None):
 
 
 @app.post("/enrich/start")
-async def enrich_start(
-    limit: Optional[int] = None,
-    skip_embeddings: bool = False,
-    skip_lastfm: bool = False,
-    skip_audio_analysis: bool = False,
-) -> Dict[str, Any]:
-    """Start enrichment as a background task. Poll /enrich/status for progress."""
-    # Lite profile: no bulk local analysis — the GPU steps are skipped and
-    # embeddings/features arrive via P2P import; the network steps (Last.fm,
-    # lyrics) still run. Explicit skip flags from the caller are additive.
+async def enrich_start(limit: Optional[int] = None) -> Dict[str, Any]:
+    """Start the analysis run as a background task; poll /enrich/status.
+
+    Audio embeddings + features, sealed, then the text encoders (titles,
+    lyrics, bios, genres). Network enrichment — Last.fm, lyrics — is not
+    part of this run on purpose: background_enrichment.py fetches it on
+    its own cadence, on every profile. Lite skips the audio phase (its
+    analysis arrives via P2P import) and still runs the text encoders; a
+    node with no ML runtime at all is refused — both UIs hide the button
+    there (`/stats` → analysis_available).
+    """
     import hardware_profile
-    if not hardware_profile.resolve().local_analysis:
-        skip_embeddings = True
-        skip_audio_analysis = True
+    profile = hardware_profile.resolve()
+    if not profile.ml_available:
+        raise HTTPException(
+            status_code=400,
+            detail="No ML runtime on this node — analysis arrives via P2P import",
+        )
+    local_analysis = profile.local_analysis
 
     with _enrich_lock:
         if _enrich_state["running"]:
@@ -1373,9 +1391,7 @@ async def enrich_start(
         )
 
     t = threading.Thread(
-        target=_enrich_worker,
-        args=(limit, skip_embeddings, skip_lastfm, skip_audio_analysis),
-        daemon=True,
+        target=_enrich_worker, args=(limit, local_analysis), daemon=True,
     )
     t.start()
     return {"success": True, "message": "Enrichment started"}
