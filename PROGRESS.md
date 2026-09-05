@@ -149,6 +149,16 @@ implementation details live in the code, DB and git history.
   and neither waits on the other. A node with no ML runtime has no button
   at all — launcher disabled, web hidden, endpoint 400 — because the run
   would be a no-op there (`/stats` → `analysis_available`).
+- **Enrichment follows the sync (2026-09-05).** The background loop's first
+  pass waits (≤10 min) for the first P2P sync, and every later
+  `sautium_sync_done` wakes a pass at once: peers fill a fresh library's
+  bios, stats and similars for free, the API pass fetches only the rest.
+  The 30-min interval is the fallback for a node with sync off or no peers.
+  The sync itself runs on events — first source after start, a scan that
+  added files, a LAN peer appearing, the interval — and the manual buttons
+  (launcher "Sync Library", web "Force sync now") are gone; the web button
+  was already dead on a Docker node, which never pulls. Peer-search
+  details in P2P_NETWORK.md § Layered sync flow.
 
 ### AI assistant
 

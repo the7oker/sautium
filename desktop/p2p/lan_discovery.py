@@ -23,7 +23,7 @@ import json
 import logging
 import socket
 import time
-from typing import Dict, Optional, Tuple
+from typing import Callable, Dict, Optional, Tuple
 
 from desktop.p2p.addrs import fmt_addr
 
@@ -46,12 +46,18 @@ class LANDiscovery:
         invite_code: str = "",
         discovery_port: int = LAN_DISCOVERY_PORT,
         localhost_probe_ports: list[int] | None = None,
+        on_new_peer: Optional[Callable[[str, int], None]] = None,
     ):
         self.sync_port = sync_port
         self.node_id = node_id
         self.invite_code = invite_code
         self.discovery_port = discovery_port
         self._localhost_probe_ports = localhost_probe_ports or []
+        # Fired (on the event loop) the first time an address is seen this
+        # session — a beacon, a sibling node on the sender's host, or the
+        # localhost Docker probe. The manager syncs on it: a node one hop
+        # away is the cheapest source there is.
+        self._on_new_peer = on_new_peer
 
         # {(ip, sync_port): {"node_id": ..., "artists": ..., "invite_code": ..., "last_seen": ...}}
         self._peers: Dict[Tuple[str, int], dict] = {}
@@ -252,6 +258,8 @@ class LANDiscovery:
                         asyncio.ensure_future(
                             self._warmup_peer(loop, ip, port)
                         )
+                        if self._on_new_peer:
+                            self._on_new_peer(ip, port)
                     # Sibling nodes on the sender's host (its Docker backend):
                     # reachable at the sender's address, invisible otherwise.
                     for extra in info.get("nodes", ()):
@@ -273,6 +281,8 @@ class LANDiscovery:
                             asyncio.ensure_future(
                                 self._warmup_peer(loop, ip, extra)
                             )
+                            if self._on_new_peer:
+                                self._on_new_peer(ip, extra)
             except asyncio.CancelledError:
                 break
             except Exception as e:
@@ -357,6 +367,8 @@ class LANDiscovery:
                                     f"Localhost peer discovered: "
                                     f"{scheme}://127.0.0.1:{port}"
                                 )
+                                if self._on_new_peer:
+                                    self._on_new_peer("127.0.0.1", port)
                         break
                     except Exception:
                         continue

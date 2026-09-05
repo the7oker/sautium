@@ -29,6 +29,7 @@ from desktop.p2p.addrs import fmt_addr
 from desktop.p2p.peer_auth import pinned_pubkey, pinned_ssl_context
 from desktop.p2p.chat_service import ChatService
 from desktop.p2p.dht_service import DHTService
+from desktop.p2p.dht_state import DhtStateStore
 from desktop.p2p.lan_discovery import LANDiscovery
 from desktop.p2p.sync_server import (
     FORWARD_ACK_TIMEOUT, VOUCHER_TTL, SyncServer, voucher_payload,
@@ -47,6 +48,21 @@ logger = logging.getLogger(__name__)
 # the rare tail is announced by key at all — so this stays a probe, not a
 # sweep. Sized ~2 waves of the DHT batch concurrency (20).
 _DHT_TAIL_PROBE = 50
+
+# The first sync waits for a SOURCE — a LAN peer's beacon or the DHT
+# bootstrap — not for a fixed delay; this caps the wait for a node with
+# neither (the directory tier needs no local state at all).
+FIRST_SYNC_MAX_DELAY = 60
+
+# Peer-search memory (process lifetime, address-keyed, never per-peer sync
+# state). A dead address backs off — a DHT entry outlives its node by up to
+# 30 min, so every lookup keeps returning it — and a peer that answered
+# with nothing for us is left alone until our gaps change: the residue is
+# elsewhere by definition.
+UNREACHABLE_BACKOFF_BASE = 30 * 60
+UNREACHABLE_BACKOFF_MAX = 24 * 3600
+EMPTY_PEER_TTL = 6 * 3600
+PROBE_CONCURRENCY = 8
 
 
 class P2PManager:
@@ -71,6 +87,7 @@ class P2PManager:
         self._stop_event: Optional[asyncio.Event] = None
         self._chat_notify: Optional[asyncio.Event] = None
         self._reannounce_task: Optional[asyncio.Task] = None
+        self._dht_online_task: Optional[asyncio.Task] = None
         self._upnp_renewal_task: Optional[asyncio.Task] = None
         self._pending_retry_task: Optional[asyncio.Task] = None
         self._resolve_friends_task: Optional[asyncio.Task] = None
@@ -81,6 +98,11 @@ class P2PManager:
         self._sync_request_listen_task: Optional[asyncio.Task] = None
         self._auto_sync_task: Optional[asyncio.Task] = None
         self._sync_request_notify: Optional[asyncio.Event] = None
+        self._sync_reasons: set[str] = set()     # why the queued run was asked for
+        self._unreachable: dict[str, tuple[float, int]] = {}   # addr -> (retry_after, strikes)
+        self._empty_peers: dict[str, float] = {}               # addr -> ignore until
+        self._gap_count = 0                                    # last incomplete-set size
+        self._first_source: Optional[asyncio.Event] = None   # LAN peer seen / DHT ready
         self._sync_lock: Optional[asyncio.Lock] = None
         self._mb_slice_task: Optional[asyncio.Task] = None
         self._mb_slice_lock: Optional[asyncio.Lock] = None
@@ -189,6 +211,7 @@ class P2PManager:
             mb_dump_version=self._mb_dump_version,
         )
         self._dht_service = DHTService(
+            state_store=DhtStateStore(db_dsn),
             listen_port=dht_port,
             http_port=http_port,
         )
@@ -201,6 +224,7 @@ class P2PManager:
             node_id=node_id,
             invite_code=invite_code,
             localhost_probe_ports=docker_ports,
+            on_new_peer=self._on_lan_peer,
         )
         # UPnP: map ONLY the P2P sync port. Never include backend / docker
         # ports here — the backend has no app-level auth (see CLAUDE.md
@@ -298,6 +322,7 @@ class P2PManager:
         self._stop_event = asyncio.Event()
         self._chat_notify = asyncio.Event()
         self._sync_request_notify = asyncio.Event()
+        self._first_source = asyncio.Event()
         self._sync_lock = asyncio.Lock()
         self._mb_slice_lock = asyncio.Lock()
         self._mb_probe_lock = asyncio.Lock()
@@ -350,50 +375,15 @@ class P2PManager:
                 _progress(f"Reachability: {heuristic[0]} — "
                           "DHT announces suppressed")
 
-            # Start DHT
+            # Start DHT — returns at once. The routing table warms up in
+            # the background and _dht_online announces once it is usable,
+            # so chat, friends and the sync loops start without waiting
+            # out a cold bootstrap.
             if self._dht_service.is_available:
                 _progress("Starting DHT...")
                 await self._dht_service.start()
-
-                # Announce user identity in DHT
-                from desktop.node_identity import get_account_info
-                account_info = get_account_info()
-                if account_info and account_info.get("invite_code"):
-                    await self._dht_service.announce_user(
-                        account_info["invite_code"]
-                    )
-                    _progress(
-                        f"User announced: {account_info['invite_code']}"
-                    )
-
-                # The discovery key — how peers find this node at all.
-                await self._dht_service.announce_node()
-
-                # Rare-artist tail — registration only; the drip loop in
-                # dht_service announces it at its own spacing.
-                _progress("Querying enriched artists...")
-                enriched = await self._get_enriched_artists()
-                self._lan_discovery.update_enriched_count(len(enriched))
-                tail = await self._get_announce_tail()
-                if tail:
-                    asyncio.create_task(
-                        self._dht_service.announce_artists(tail)
-                    )
-                    _progress(
-                        f"P2P online: node announced, {len(tail)} rare "
-                        f"artists queued"
-                    )
-                else:
-                    _progress("P2P online: node announced")
-
-                # Advertise the MB dump capability so dump-less nodes can
-                # find this node beyond LAN/manual peers
-                if self._mb_dump_version:
-                    await self._dht_service.announce_capability("mbdump")
-
-                # Start periodic re-announce
-                self._reannounce_task = asyncio.create_task(
-                    self._dht_service.periodic_reannounce()
+                self._dht_online_task = asyncio.create_task(
+                    self._dht_online(_progress)
                 )
             else:
                 _progress(
@@ -442,10 +432,11 @@ class P2PManager:
                 self._directory_register_loop()
             )
 
-            # Sync triggers: NOTIFY sautium_sync_request (Web UI Force
-            # sync now → backend → here) + auto-sync timer
-            # (sync.auto_interval_min). Both serialise through
-            # self._sync_lock so concurrent triggers merge to one run.
+            # Sync triggers: NOTIFY sautium_sync_request (the backend
+            # after a scan that added files), a LAN peer appearing
+            # (_on_lan_peer) and the auto-sync timer (sync.auto_interval_min).
+            # All serialise through self._sync_lock so concurrent triggers
+            # merge to one run.
             self._sync_request_listen_task = asyncio.create_task(
                 self._sync_request_listener_thread()
             )
@@ -492,6 +483,45 @@ class P2PManager:
             _progress(f"P2P error: {e}")
         finally:
             await self._cleanup()
+
+    async def _dht_online(self, _progress) -> None:
+        """Everything that needs a bootstrapped routing table: the identity
+        and discovery keys, the rare-artist tail, capabilities, the
+        re-announce cycles — and the sync loop's first source."""
+        await self._dht_service.wait_ready()
+
+        from desktop.node_identity import get_account_info
+        account_info = get_account_info()
+        if account_info and account_info.get("invite_code"):
+            await self._dht_service.announce_user(account_info["invite_code"])
+            _progress(f"User announced: {account_info['invite_code']}")
+
+        # The discovery key — how peers find this node at all.
+        await self._dht_service.announce_node()
+
+        # Rare-artist tail — registration only; the drip loop in
+        # dht_service announces it at its own spacing.
+        _progress("Querying enriched artists...")
+        enriched = await self._get_enriched_artists()
+        self._lan_discovery.update_enriched_count(len(enriched))
+        tail = await self._get_announce_tail()
+        if tail:
+            asyncio.create_task(self._dht_service.announce_artists(tail))
+            _progress(
+                f"P2P online: node announced, {len(tail)} rare artists queued"
+            )
+        else:
+            _progress("P2P online: node announced")
+
+        # Advertise the MB dump capability so dump-less nodes can find
+        # this node beyond LAN/manual peers
+        if self._mb_dump_version:
+            await self._dht_service.announce_capability("mbdump")
+
+        self._reannounce_task = asyncio.create_task(
+            self._dht_service.periodic_reannounce()
+        )
+        self._first_source.set()
 
     async def _check_sync_server_health(self) -> bool:
         """Check if the sync server is actually accepting connections.
@@ -581,7 +611,8 @@ class P2PManager:
 
     async def _cleanup(self):
         """Clean shutdown of all services."""
-        for task in (self._reannounce_task, self._pending_retry_task,
+        for task in (self._dht_online_task, self._reannounce_task,
+                     self._pending_retry_task,
                      self._resolve_friends_task, self._db_listen_task,
                      self._pending_accepts_task, self._lan_discovery_task,
                      self._sync_request_listen_task, self._sync_request_task,
@@ -796,40 +827,29 @@ class P2PManager:
         return await asyncio.get_event_loop().run_in_executor(None, _blocking)
 
     # -------------------------------------------------------------------
-    # P2P Sync (called from launcher thread)
+    # P2P Sync — event-driven: first source, post-scan request, LAN peer,
+    # interval timer (see _async_main)
     # -------------------------------------------------------------------
 
-    def sync_from_peers(
-        self,
-        progress_cb: Optional[Callable[[str], None]] = None,
-    ) -> dict:
-        """
-        Sync enrichment data from P2P network.
+    def _request_sync(self, reason: str) -> None:
+        """Queue a sync run and remember why (loop thread). Concurrent
+        reasons merge into the one run the request loop starts next."""
+        self._sync_reasons.add(reason)
+        if self._sync_request_notify:
+            self._sync_request_notify.set()
 
-        Called from the launcher thread (blocking).
-        Tries manual peers first, then DHT discovery.
-        """
-        if not self._running:
-            if progress_cb:
-                progress_cb("P2P not running")
-            return {"error": "p2p_not_running"}
-
-        # Run the async sync in the P2P event loop
-        future = asyncio.run_coroutine_threadsafe(
-            self._async_sync_from_peers(progress_cb),
-            self._loop,
-        )
-        try:
-            return future.result(timeout=600)  # 10 min max
-        except Exception as e:
-            logger.error(f"P2P sync failed: {e}")
-            if progress_cb:
-                progress_cb(f"P2P sync error: {e}")
-            return {"error": str(e)}
+    def _on_lan_peer(self, ip: str, port: int) -> None:
+        """A LAN beacon (or the localhost Docker probe) found a node that
+        was not there a moment ago — the cheapest source there is, one hop
+        away. Sync now rather than at the next interval."""
+        if self._first_source:
+            self._first_source.set()
+        self._request_sync("lan-peer")
 
     async def _async_sync_from_peers(
         self,
         progress_cb: Optional[Callable[[str], None]] = None,
+        trigger: str = "auto",
     ) -> dict:
         """Async implementation of P2P sync."""
 
@@ -848,6 +868,12 @@ class P2PManager:
         # when nothing new exists.
         _progress("Finding artists needing sync...")
         incomplete = await self._get_incomplete_artists()
+        # New gaps make the "had nothing for us" notes stale: a scan or a
+        # listen added names the same peers may well have.
+        if (len(incomplete) > self._gap_count
+                or "request" in trigger or "lan-peer" in trigger):
+            self._empty_peers.clear()
+        self._gap_count = len(incomplete)
         if not incomplete:
             _progress("All artists fully synced!")
             return {"status": "all_synced"}
@@ -863,16 +889,32 @@ class P2PManager:
 
         _progress(f"Need enrichment for {len(track_uuids)} tracks")
 
-        # Step 3: Try manual peers first (e.g., Docker backend)
         total_stats = {}
-        manual_peers = self.config.get("p2p", {}).get("manual_peers", [])
-        for peer_addr in manual_peers:
-            synced = await self._sync_from_peer(
-                peer_addr, track_uuids, _progress, progress_cb
-            )
+
+        def _add_stats(synced: dict) -> int:
+            items = 0
             for k, v in synced.items():
                 if isinstance(v, int):
                     total_stats[k] = total_stats.get(k, 0) + v
+                    items += v
+            return items
+
+        # Internet-tier discovery starts NOW and overlaps the LAN work: the
+        # node-key lookup waits out its whole collection window, and the
+        # directory is one HTTPS call — by the time the LAN peers are
+        # drained both answers are usually in hand.
+        from desktop.p2p import master_hint, node_hints
+        dht_nodes_task = None
+        if self._dht_service and self._dht_service.is_available:
+            dht_nodes_task = asyncio.create_task(self._lookup_nodes_safe())
+        directory_task = asyncio.get_event_loop().run_in_executor(
+            None, node_hints.fetch, "sync")
+
+        # Step 3: Try manual peers first (e.g., Docker backend)
+        manual_peers = self.config.get("p2p", {}).get("manual_peers", [])
+        for peer_addr in manual_peers:
+            _add_stats(await self._sync_from_peer(
+                peer_addr, track_uuids, _progress, progress_cb))
 
         # Step 4: LAN peers (fast, works behind any NAT)
         if self._lan_discovery:
@@ -896,23 +938,18 @@ class P2PManager:
                         f"LAN peer {peer_url} "
                         f"({artist_count} artists)..."
                     )
-                    synced = await self._sync_from_peer(
-                        peer_url,
-                        track_uuids,
-                        _progress,
-                        progress_cb,
+                    _add_stats(await self._sync_from_peer(
+                        peer_url, track_uuids, _progress, progress_cb,
                         is_lan=True,
-                    )
-                    for k, v in synced.items():
-                        if isinstance(v, int):
-                            total_stats[k] = total_stats.get(k, 0) + v
+                    ))
 
-        # Step 5: DHT lookup for remaining unenriched artists (internet)
+        # Step 5: the internet tiers — only for what the LAN left behind.
         #
-        # Flow: search DHT by artist → find seed → sync artist tracks →
-        # ask same seed about ALL remaining unenriched tracks (high
-        # probability it has more) → continue searching if gaps remain.
-        synced_peers: set[str] = set()  # peers already fully queried
+        # Flow: nodes on the discovery key and the directory's volunteers,
+        # probed concurrently, drained one at a time (each node's inventory
+        # answers for the whole library at once); then the residual rare
+        # artists through their own keys.
+        dht_seen: set[str] = set()       # addresses already considered this run
 
         # Build a set of DHT addresses to skip (only for our external IP):
         # - our own node (external_ip:announce_port)
@@ -938,74 +975,87 @@ class P2PManager:
         if skip_dht_addrs:
             logger.debug(f"DHT skip list: {skip_dht_addrs}")
 
-        if self._dht_service and self._dht_service.is_available:
-            dht_seen: set[str] = set()
+        now = time.time()
 
-            async def _drain_peer(peer_addr: str):
-                """Ask one peer about everything we're still missing. The
-                inventory call does the matching, so there is no reason to
-                ask about a subset — this is what made per-artist discovery
-                pointless in the first place."""
+        def _fresh(addrs) -> list[str]:
+            """Addresses worth a probe: not us, not a LAN peer, not already
+            considered this run, not backing off, not noted empty-handed."""
+            out = []
+            for ip, port in addrs:
+                addr = fmt_addr(ip, port)
+                if addr in dht_seen or addr in skip_dht_addrs:
+                    continue
+                dht_seen.add(addr)
+                retry_after, _ = self._unreachable.get(addr, (0.0, 0))
+                if retry_after > now or self._empty_peers.get(addr, 0.0) > now:
+                    continue
+                out.append(addr)
+            return out
+
+        async def _drain(reachable) -> None:
+            """Ask each reachable peer about everything still missing, one
+            at a time: the inventory call does the matching, and the gap set
+            shrinks after every peer, so parallel pulls would only
+            duplicate."""
+            for addr, api in reachable:
                 remaining = await self._get_unenriched_artists()
                 if not remaining:
                     return
                 tracks = await self._get_tracks_for_artists(remaining)
                 if not tracks:
                     return
-                _progress(
-                    f"Asking {peer_addr} about {len(tracks)} tracks..."
-                )
+                _progress(f"Asking {addr} about {len(tracks)} tracks...")
                 synced = await self._sync_from_peer(
-                    peer_addr, tracks, _progress, progress_cb,
+                    addr, tracks, _progress, progress_cb, peer_api=api,
                 )
-                items = 0
-                for k, v in synced.items():
-                    if isinstance(v, int):
-                        total_stats[k] = total_stats.get(k, 0) + v
-                        items += v
-                if items:
-                    synced_peers.add(peer_addr)
+                if not _add_stats(synced) and "error" not in synced:
+                    # Reachable, answered, had nothing for us — the residue
+                    # is elsewhere by definition; leave it alone until our
+                    # gaps change.
+                    self._empty_peers[addr] = now + EMPTY_PEER_TTL
 
-            async def _drain_new(peers) -> None:
-                for ip, port in peers:
-                    addr = fmt_addr(ip, port)
-                    if (addr in dht_seen or addr in synced_peers
-                            or addr in skip_dht_addrs):
-                        continue
-                    dht_seen.add(addr)
-                    await _drain_peer(addr)
-
-            # Step A: node discovery — ONE lookup yields nodes, and each
-            # node's inventory answers for the whole library at once.
-            _progress("Searching DHT for nodes...")
-            await _drain_new(await self._dht_service.lookup_nodes())
-            if not dht_seen and not synced_peers:
-                # Dead DHT (mobile): volunteer sync nodes from the Worker
-                # directory first, the master hint last (Ф16c) —
-                # _drain_peer validates each like any other node.
-                from desktop.p2p import master_hint, node_hints
-                volunteers = await asyncio.get_event_loop().run_in_executor(
-                    None, node_hints.fetch, "sync")
-                if volunteers:
-                    await _drain_new([(h, p) for h, p, _ in volunteers])
+        remaining = await self._get_unenriched_artists()
+        if not remaining:
+            _progress("Nothing left for the internet tiers")
+        else:
+            # Tier A: ONE node-key lookup plus the directory's volunteers.
+            nodes = await dht_nodes_task if dht_nodes_task else []
+            try:
+                volunteers = await directory_task
+            except Exception as e:
+                logger.warning(f"Directory lookup failed: {e}")
+                volunteers = []
+            candidates = _fresh(
+                list(nodes) + [(h, p) for h, p, _ in (volunteers or [])])
+            if not candidates and not dht_seen:
+                # Nothing anywhere (dead DHT, empty directory): the master
+                # hint is the last tier, validated like any other node.
                 hint = await asyncio.get_event_loop().run_in_executor(
                     None, master_hint.fetch)
                 if hint:
-                    await _drain_new([hint])
+                    candidates = _fresh([hint])
+            if candidates:
+                _progress(f"Probing {len(candidates)} nodes...")
+                await _drain(await self._probe_candidates(candidates))
 
-            # Step B: residual artists — targeted keys against the rare-artist
-            # tail peers announce. Small by construction: whatever is common
-            # enough to sit on a random node was already drained in Step A.
+            # Tier B: residual artists — targeted keys against the rare-
+            # artist tail peers announce. A rotating slice: the same
+            # unfindable names must not be asked for every run while the
+            # rest of the tail never is.
             residual = await self._get_unenriched_artists()
-            if residual:
-                probe = residual[:_DHT_TAIL_PROBE]
+            if residual and dht_nodes_task is not None:
+                probe = await self._residual_slice(residual)
                 _progress(
                     f"Searching DHT for {len(probe)} of {len(residual)} "
                     f"rare artists..."
                 )
                 peer_map = await self._dht_service.lookup_artists_batch(probe)
+                found: list[tuple[str, int]] = []
                 for peers in peer_map.values():
-                    await _drain_new(peers)
+                    found.extend(peer for peer in peers if peer not in found)
+                candidates = _fresh(found)
+                if candidates:
+                    await _drain(await self._probe_candidates(candidates))
 
         # Sync may have enriched artists that now belong in the rare tail
         # (paced — background task, the sync result must not wait for it).
@@ -1022,6 +1072,84 @@ class P2PManager:
         )
         _progress(f"P2P sync complete: {total_items} items synced")
         return total_stats
+
+    async def _lookup_nodes_safe(self) -> list[tuple[str, int]]:
+        try:
+            return await self._dht_service.lookup_nodes()
+        except Exception as e:
+            logger.warning(f"DHT node lookup failed: {e}")
+            return []
+
+    async def _probe_candidates(
+        self, addrs: list[str],
+    ) -> list[tuple[str, BackendAPIClient]]:
+        """Health-probe candidates concurrently — sequentially every dead
+        address cost its full 5 s timeout, N of them per run — and keep the
+        answering ones in the order they came. Draining stays sequential."""
+        sem = asyncio.Semaphore(PROBE_CONCURRENCY)
+
+        async def probe(addr: str):
+            async with sem:
+                api = await self._try_connect_peer(addr)
+            if api is None:
+                self._note_unreachable(addr)
+            else:
+                self._unreachable.pop(addr, None)
+            return addr, api
+
+        results = await asyncio.gather(*(probe(a) for a in addrs))
+        return [(addr, api) for addr, api in results if api is not None]
+
+    def _note_unreachable(self, addr: str) -> None:
+        """Back a dead address off: 30 min, doubling to a day."""
+        _, strikes = self._unreachable.get(addr, (0.0, 0))
+        delay = min(UNREACHABLE_BACKOFF_BASE * (2 ** strikes),
+                    UNREACHABLE_BACKOFF_MAX)
+        self._unreachable[addr] = (time.time() + delay, strikes + 1)
+
+    async def _residual_slice(self, residual: list[str]) -> list[str]:
+        """The next _DHT_TAIL_PROBE names of the (ordered) residual, from a
+        cursor kept in user_settings so it survives restarts and walks the
+        whole tail over successive runs."""
+        loop = asyncio.get_event_loop()
+        cursor = await loop.run_in_executor(
+            None, self._read_setting_value, "sync.residual_cursor")
+        start = int(cursor or 0) % len(residual)
+        probe = (residual[start:] + residual[:start])[:_DHT_TAIL_PROBE]
+        await loop.run_in_executor(
+            None, self._write_setting_value, "sync.residual_cursor",
+            (start + len(probe)) % len(residual))
+        return probe
+
+    def _read_setting_value(self, key: str):
+        """One user_settings value on a short-lived connection (executor)."""
+        conn = psycopg2.connect(self.db_dsn)
+        try:
+            with conn.cursor() as cur:
+                cur.execute("SELECT value FROM user_settings WHERE key = %s",
+                            (key,))
+                row = cur.fetchone()
+                return row[0] if row else None
+        finally:
+            conn.close()
+
+    def _write_setting_value(self, key: str, value) -> None:
+        conn = psycopg2.connect(self.db_dsn)
+        conn.autocommit = True
+        try:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    INSERT INTO user_settings (key, value)
+                    VALUES (%s, %s::jsonb)
+                    ON CONFLICT (key) DO UPDATE
+                        SET value = EXCLUDED.value,
+                            updated_at = CURRENT_TIMESTAMP
+                    """,
+                    (key, json.dumps(value)),
+                )
+        finally:
+            conn.close()
 
     async def _try_connect_peer(
         self, peer_addr: str, is_lan: bool = False,
@@ -1085,14 +1213,16 @@ class P2PManager:
         _progress,
         progress_cb,
         is_lan: bool = False,
+        peer_api: Optional[BackendAPIClient] = None,
     ) -> dict:
-        """Sync enrichment data from a single peer. Returns stats dict."""
-        _progress(f"Connecting to {peer_addr}...")
-
-        peer_api = await self._try_connect_peer(peer_addr, is_lan=is_lan)
+        """Sync enrichment data from a single peer. Returns stats dict.
+        `peer_api`: a client the caller already probed — skips the probe."""
+        if peer_api is None:
+            _progress(f"Connecting to {peer_addr}...")
+            peer_api = await self._try_connect_peer(peer_addr, is_lan=is_lan)
         if not peer_api:
             _progress(f"  {peer_addr} not reachable, skipping")
-            return {}
+            return {"error": "unreachable"}
 
         _progress(
             f"Syncing from {peer_addr} ({len(track_uuids)} tracks)..."
@@ -1113,7 +1243,7 @@ class P2PManager:
         except Exception as e:
             logger.error(f"Sync from {peer_addr} failed: {e}")
             _progress(f"  Sync from {peer_addr} failed: {e}")
-            return {}
+            return {"error": str(e)}
 
         # We just pulled from this peer, so it accepts inbound connections —
         # which is exactly what makes it a candidate carrier. Offer it our
@@ -3232,9 +3362,8 @@ class P2PManager:
                         channels = set()
                         while conn.notifies:
                             channels.add(conn.notifies.pop(0).channel)
-                        if ("sautium_sync_request" in channels
-                                and self._sync_request_notify):
-                            self._sync_request_notify.set()
+                        if "sautium_sync_request" in channels:
+                            self._request_sync("request")
                         if "sautium_enrich_done" in channels:
                             asyncio.create_task(
                                 self._request_mb_slices_safe())
@@ -3252,7 +3381,8 @@ class P2PManager:
                         pass
 
     async def _sync_request_loop(self):
-        """Dispatcher: on notify, run sync_from_peers via _run_sync_with_status."""
+        """Dispatcher: on a queued request, run one sync via
+        _run_sync_with_status, labelled with the merged reasons."""
         while self._running:
             try:
                 await self._sync_request_notify.wait()
@@ -3261,17 +3391,24 @@ class P2PManager:
                 break
             if not self._running:
                 break
-            await self._run_sync_with_status(trigger="manual")
+            reasons = "+".join(sorted(self._sync_reasons)) or "request"
+            self._sync_reasons.clear()
+            await self._run_sync_with_status(trigger=reasons)
 
     async def _auto_sync_loop(self):
         """Periodic sync based on sync.auto_interval_min.
 
         Re-reads the setting each cycle so config changes apply at the
-        next interval without restart. Initial delay of 60s lets the
-        DHT/LAN discovery warm up before the first auto-sync.
+        next interval without restart. The first run waits for the first
+        SOURCE — a LAN peer's beacon or the DHT bootstrap sets
+        _first_source — capped by FIRST_SYNC_MAX_DELAY for a node with
+        neither, not for a fixed delay.
         """
         try:
-            await asyncio.sleep(60)
+            await asyncio.wait_for(self._first_source.wait(),
+                                   timeout=FIRST_SYNC_MAX_DELAY)
+        except asyncio.TimeoutError:
+            pass
         except asyncio.CancelledError:
             return
 
@@ -3335,7 +3472,8 @@ class P2PManager:
             started = datetime.now(timezone.utc)
             logger.info(f"P2P sync starting (trigger={trigger})")
             try:
-                stats = await self._async_sync_from_peers(progress_cb=None)
+                stats = await self._async_sync_from_peers(
+                    progress_cb=None, trigger=trigger)
             except Exception as e:
                 logger.error(f"P2P sync failed: {e}", exc_info=True)
                 stats = {"error": str(e)}

@@ -96,7 +96,8 @@ beyond ~2–3k tracks)**. Feasibility of local analysis is a function of
 | HQPlayer status poller (`routers/player.py:335`) | **1 s** always | **none** — runs even with no HQPlayer configured |
 | DHT alert pump ×2 (backend `dht_service.py:314`, launcher `p2p/dht_service.py:420`) | **0.5 s** | via `p2p_enabled` only |
 | DHT re-announce (∝ enriched artists) | 15 min | announce_limit setting |
-| Background enrichment (network-only) | 30 min idle; a network backlog drains pass-to-pass (DB-only steps stay on the timer); 1s cancel ticks | `enrichment.background_enabled` (default **on**) |
+| Background enrichment (network-only) | follows the P2P sync: a pass on every `sautium_sync_done`, the first pass waits ≤10 min for the first sync; 30 min fallback; a network backlog drains pass-to-pass (DB-only steps stay on the timer); 1s cancel ticks | `enrichment.background_enabled` (default **on**) |
+| P2P auto-sync (launcher) | first source after start (LAN beacon / DHT ready, ≤60 s), after a scan that added files, when a LAN peer appears, then every `sync.auto_interval_min` (30 min) | interval setting — no manual button since 2026-09-05 |
 | Launcher stats poll / health watchdog / friend resolve | 60 s / 10 s / 15 s | none |
 | Model prewarm at boot | every boot | **none** |
 | 2 idle psycopg2 LISTEN connections (launcher chat+sync) | permanent | — |

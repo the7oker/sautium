@@ -10843,6 +10843,19 @@
     return '';
   }
 
+  function _syncCadenceLine(sync) {
+    // The sync runs itself: on the first source after start, after a scan
+    // that added files, when a LAN peer appears, and on the interval. Only
+    // the timed run has a knowable "next"; the event-driven ones show up
+    // as a fresh last_sync_at.
+    const interval = sync.auto_interval_min;
+    if (!interval) return 'Automatic sync is off';
+    if (!sync.last_sync_at) return `Syncs automatically every ${interval} min · first run after start`;
+    const dueMs = new Date(sync.last_sync_at).getTime() + interval * 60000 - Date.now();
+    const mins = Math.round(dueMs / 60000);
+    return `Syncs automatically every ${interval} min · next ${mins <= 0 ? 'any moment' : 'in ' + mins + ' min'}`;
+  }
+
   function _bgEnrichStatusLine(s, enabled) {
     // Status under the Background enrichment toggle. Three states:
     //   - toggle off → nothing (the row above already says "off")
@@ -10869,6 +10882,7 @@
       canonize:    'canonizing artists',
       discography: 'reconciling discographies',
       name_latin:  'transliterating names',
+      awaiting_sync: 'waiting for the first P2P sync',
       idle:        'idle',
       starting:    'starting',
       '':          'idle',
@@ -10987,6 +11001,7 @@
           ${sync.last_items_received != null ? `<div class="row-stack-value" style="margin-top:calc(2*var(--px));">
             <span style="font-family:var(--font-mono);color:var(--color-blue);font-size:calc(12.5*var(--px));letter-spacing:0.02em;">${fmtNum(sync.last_items_received)} new ${sync.last_items_received === 1 ? 'item' : 'items'}</span>
           </div>` : ''}
+          <div class="row-stack-sub">${escapeProfileHtml(_syncCadenceLine(sync))}</div>
         </div>
         <div class="form-row">
           <span class="form-label">Friends online</span>
@@ -11016,9 +11031,6 @@
           <span class="form-label">Support</span>
           <span class="form-value mono" title="${escapeProfileHtml(supportDetail(sync.support))}">${escapeProfileHtml(supportLabel(sync.support))}</span>
         </div>
-      </div>
-      <div class="btn-row single">
-        <button class="btn btn-secondary" data-action="force-sync"${_syncInFlight ? ' disabled' : ''}>${_syncInFlight ? 'Syncing…' : 'Force sync now'}</button>
       </div>
     `;
   }
@@ -11095,16 +11107,6 @@
     return [`w = ${g.w_ms} ms${g.w_calibrated ? '' : ' (default)'}`, `headroom ${Math.round((g.headroom || 0) * 100)}%`,
             `siege ${g.siege_s || 0}s`].join(' · ');
   }
-
-  // Module-scope state for the async Force sync flow. _syncInFlight
-  // keeps the button in "Syncing…" state across re-renders triggered
-  // by /api/settings/library/stream wake events (the same SSE channel
-  // backed by sautium_sync_done). _syncBaselineLastAt snapshots the
-  // last_sync_at value at trigger time so the next render that sees
-  // a different last_sync_at recognises completion and shows the
-  // "Synced · N items" toast — no polling, no setTimeout.
-  let _syncInFlight = false;
-  let _syncBaselineLastAt = null;
 
   /* ---------- Audio output (Output picker) ----------
      #more/output — select where Sautium plays: HQPlayer (external, its
@@ -12346,24 +12348,6 @@
       const id = await openSettingsPicker({ title: 'Carry for others', options: CARRY_LIMIT_OPTIONS, currentId: sync.carry_limit || 0 });
       if (id != null) await putSync({ carry_limit: Number(id) });
     });
-    onAction('[data-action="force-sync"]', async () => {
-      if (_syncInFlight) return;  // double-click guard
-      _syncBaselineLastAt = sync.last_sync_at || null;
-      _syncInFlight = true;
-      // Targeted button update — keeps SSE subscription alive (re-
-      // rendering the whole screen would re-subscribe and trigger
-      // the server's initial ping, causing an SSE/fetch ping-pong).
-      const btn = root.querySelector('[data-action="force-sync"]');
-      if (btn) { btn.disabled = true; btn.textContent = 'Syncing…'; }
-      try {
-        await fetch('/api/settings/sync/force', { method: 'POST' });
-      } catch (_) {
-        _syncInFlight = false;
-        if (btn) { btn.disabled = false; btn.textContent = 'Force sync now'; }
-      }
-      // Completion is reported via SSE wake (sautium_sync_done →
-      // library/stream subscribers); _refreshSyncContents handles it.
-    });
   }
 
   /* SSE-driven refresh — re-renders ONLY the [data-sync-content] block
@@ -12383,27 +12367,10 @@
       const sync = await _fetchSyncState();
       if (!sync) return;
 
-      let justCompletedItems = null;
-      if (_syncInFlight
-          && sync.last_sync_at
-          && sync.last_sync_at !== _syncBaselineLastAt) {
-        _syncInFlight = false;
-        justCompletedItems = sync.last_items_received;
-      }
-
       const contentDiv = root.querySelector('[data-sync-content]');
       if (!contentDiv) return;
       contentDiv.innerHTML = _renderSync(sync);
 
-      if (justCompletedItems != null) {
-        const btnRow = root.querySelector('[data-action="force-sync"]')?.parentElement;
-        if (btnRow) {
-          const toast = document.createElement('div');
-          toast.className = 'toast-inline';
-          toast.innerHTML = `${SETTINGS_ICONS.check} Synced · <span class="mono">${fmtNum(justCompletedItems)}</span> new ${justCompletedItems === 1 ? 'item' : 'items'}`;
-          btnRow.parentElement.insertBefore(toast, btnRow);
-        }
-      }
       _wireSyncActions(root, sync);
     }
 

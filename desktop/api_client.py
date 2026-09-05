@@ -348,10 +348,6 @@ class BackendAPIClient:
         """Complete Last.fm OAuth flow. Returns {"session_key": "..."}."""
         return self._post_json("/lastfm/auth/complete", timeout=10)
 
-    def normalize_artists(self) -> Optional[dict]:
-        """Run artist normalization (deterministic Pass 1 — feat./vs. splits only)."""
-        return self._post_json("/normalize-artists", timeout=120)
-
     def canonicalize(self) -> Optional[dict]:
         """Trigger backend canonicalization in the background (returns immediately)."""
         return self._post_json("/canonicalize", timeout=10)

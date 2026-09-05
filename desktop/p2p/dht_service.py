@@ -141,11 +141,15 @@ def node_infohash(prefix: str = "") -> bytes:
 class DHTService:
     """libtorrent-based DHT service for per-artist peer discovery."""
 
-    def __init__(self, listen_port: int = 19001, http_port: int = 19000):
+    def __init__(self, listen_port: int = 19001, http_port: int = 19000,
+                 state_store=None):
         """
         Args:
             listen_port: UDP port for libtorrent DHT operations
             http_port: TCP port of the HTTP sync server (announced to peers)
+            state_store: desktop/p2p/dht_state.DhtStateStore — the routing
+                table snapshot loaded at start and saved every re-announce
+                cycle and on stop. None = cold bootstrap every run.
         """
         self.listen_port = listen_port
         self.http_port = http_port
@@ -178,6 +182,11 @@ class DHTService:
         self._pending_lookups: dict[str, list[tuple[asyncio.Future, bool]]] = {}
         # ih_hex -> peers seen so far in the traversal currently in flight.
         self._lookup_buffers: dict[str, set[tuple[str, int]]] = {}
+        self._state_store = state_store
+        # Set once the routing table is usable (or the bootstrap window
+        # ended) — announces and lookups wait on it, nothing else does.
+        self._ready: Optional[asyncio.Event] = None
+        self._bootstrap_task: Optional[asyncio.Task] = None
 
     @property
     def is_available(self) -> bool:
@@ -211,7 +220,11 @@ class DHTService:
             self._announces_enabled = enabled
 
     async def start(self):
-        """Create libtorrent session and bootstrap DHT."""
+        """Create the libtorrent session and start bootstrapping. Returns at
+        once: the routing table warms up in the background and `_ready` is
+        set when it has enough nodes (or the bootstrap window ended) — see
+        _bootstrap_watch. Announces and lookups await wait_ready(); the
+        rest of the node must not, a cold bootstrap is up to 30 s."""
         if not HAS_LIBTORRENT:
             logger.warning("libtorrent not available, DHT service disabled")
             return
@@ -230,20 +243,61 @@ class DHTService:
                 | lt.alert.category_t.dht_operation_notification
             ),
         }
-        self._session = lt.session(settings)
+        params = lt.session_params(settings)
+        saved = None
+        if self._state_store:
+            saved = await asyncio.get_event_loop().run_in_executor(
+                None, self._state_store.load)
+        if saved:
+            try:
+                params.dht_state = lt.read_session_params(saved).dht_state
+                logger.info(f"DHT: routing table restored ({len(saved)} bytes)")
+            except Exception as e:
+                logger.warning(f"DHT: saved state unreadable, bootstrapping cold: {e}")
+        self._session = lt.session(params)
 
+        # The public routers stay as the fallback: a restored table whose
+        # nodes all went away still needs a way in.
         for host, port in DHT_ROUTERS:
             self._session.add_dht_router(host, port)
 
         self._running = True
+        self._ready = asyncio.Event()
         self._alert_task = asyncio.create_task(self._poll_alerts())
+        self._bootstrap_task = asyncio.create_task(self._bootstrap_watch())
 
-        # Wait for DHT to bootstrap
-        logger.info(
-            f"DHT bootstrapping on UDP port {self.listen_port}..."
-        )
+    async def _bootstrap_watch(self):
+        """Set `_ready` when the routing table has enough nodes — seconds
+        with a restored table, up to DHT_BOOTSTRAP_TIMEOUT cold. Set at the
+        deadline either way: a thin table still answers some lookups, and
+        waiters must not hang on a dead network."""
+        logger.info(f"DHT bootstrapping on UDP port {self.listen_port}...")
         await self._wait_for_dht_ready()
         logger.info("DHT bootstrap complete")
+        self._ready.set()
+
+    async def wait_ready(self, timeout: Optional[float] = None) -> bool:
+        """Block until the routing table is usable (see _bootstrap_watch)."""
+        if not self._ready:
+            return False
+        try:
+            await asyncio.wait_for(self._ready.wait(), timeout)
+            return True
+        except asyncio.TimeoutError:
+            return False
+
+    def _save_state(self) -> None:
+        """Snapshot the routing table (dht_state only) into the store.
+        Executor-safe: session_state() is a synchronous round-trip into
+        libtorrent's thread."""
+        if not (self._session and self._state_store):
+            return
+        try:
+            params = self._session.session_state(
+                lt.save_state_flags_t.save_dht_state)
+            self._state_store.save(lt.write_session_params_buf(params))
+        except Exception as e:
+            logger.warning(f"DHT: state save failed: {e}")
 
     async def _wait_for_dht_ready(self, min_nodes: int = 20):
         """Wait until DHT has enough nodes for reliable lookups."""
@@ -265,13 +319,15 @@ class DHTService:
     async def stop(self):
         """Shut down libtorrent session."""
         self._running = False
-        if self._alert_task:
-            self._alert_task.cancel()
-            try:
-                await self._alert_task
-            except asyncio.CancelledError:
-                pass
+        for task in (self._alert_task, self._bootstrap_task):
+            if task:
+                task.cancel()
+                try:
+                    await task
+                except asyncio.CancelledError:
+                    pass
         if self._session:
+            self._save_state()
             self._session.pause()
             del self._session
             self._session = None
@@ -395,6 +451,10 @@ class DHTService:
         if not self._session:
             return []
 
+        # A traversal over a table still bootstrapping finds nothing and
+        # burns its whole window; wait the bootstrap out first (bounded).
+        await self.wait_ready(DHT_BOOTSTRAP_TIMEOUT)
+
         sha1 = lt.sha1_hash(infohash)
         ih_hex = sha1.to_string().hex()
 
@@ -514,6 +574,10 @@ class DHTService:
                 f"{len(self._client_invites)} clients + "
                 f"{len(self._capabilities)} capabilities"
             )
+            # The table moved since the last snapshot; keep the stored one
+            # fresh so the next start rejoins from nodes that are alive.
+            await asyncio.get_event_loop().run_in_executor(
+                None, self._save_state)
 
     async def _reannounce_tail(self):
         """The rare-artist tail as a continuous drip — no sweep, no sleep

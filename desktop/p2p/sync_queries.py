@@ -884,7 +884,8 @@ def get_unenriched_artist_uuids(conn) -> list[str]:
            )
            AND NOT EXISTS (
                SELECT 1 FROM audio_features af WHERE af.track_id = ta.track_id
-           )""",
+           )
+           ORDER BY 1""",
     )
     return [r["artist_uuid"] for r in rows]
 
