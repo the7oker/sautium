@@ -10455,7 +10455,6 @@
     input.addEventListener('keydown', e => { if (e.key === 'Enter') { e.preventDefault(); submit(); } });
   }
 
-  /* Library section renderers — full vs first-run-empty. */
   /* 2×2 stat cell builders for the Library screen. */
   function _statCell(label, value) {
     return `
@@ -10495,110 +10494,6 @@
     const v = _enrichRowValueHTML(done, total);
     if (value.className !== v.className) value.className = v.className;
     if (value.innerHTML !== v.html) value.innerHTML = v.html;
-  }
-
-  function _renderLibraryFull(lib) {
-    const scanRunning = !!(lib.scan && lib.scan.running);
-    const enrichRunning = !!(lib.enrich && lib.enrich.running);
-    const tracks = lib.total_tracks || 0;
-    const artists = lib.total_artists || 0;
-    const totalArtists = artists;
-    const withBio = lib.artists_with_bio || 0;
-    const bioPct = totalArtists > 0 ? Math.round((withBio / totalArtists) * 100) : 0;
-    const totalTracks = tracks;
-    const withAudio = lib.tracks_with_audio || 0;
-    const audioPct = totalTracks > 0 ? Math.round((withAudio / totalTracks) * 100) : 0;
-    const path = fmtPathForDisplay(lib.music_path || '/music');
-    const lastScan = lib.last_scan_at;
-
-    return `
-      <div class="form-group">
-        <div class="form-row stacked">
-          <div class="row-stack">
-            <span class="row-stack-label">Music path</span>
-            <span class="path-value" title="${escapeProfileHtml(path)}">${escapeProfileHtml(path)}</span>
-          </div>
-          <div class="row-stack-sub">Configured in the launcher.</div>
-        </div>
-        <div class="form-row">
-          <span class="form-label">Tracks</span>
-          <span class="form-value mono">${fmtNum(tracks)}</span>
-        </div>
-        <div class="form-row">
-          <span class="form-label">Artists</span>
-          <span class="form-value mono">${fmtNum(artists)}</span>
-        </div>
-        <div class="form-row">
-          <span class="form-label">Albums</span>
-          <span class="form-value mono">${fmtNum(lib.total_albums || 0)}</span>
-        </div>
-        <div class="form-row">
-          <span class="form-label">Storage</span>
-          <span class="form-value mono">${escapeProfileHtml(fmtBytes(lib.total_size_bytes))}</span>
-        </div>
-        <div class="enrich-row">
-          <div class="enrich-line">
-            <span class="label">Artist bios</span>
-            <span class="val">${fmtNum(withBio)} <span class="of">/ ${fmtNum(totalArtists)}</span></span>
-          </div>
-          <div class="enrich-bar"><div class="fill" style="width:${bioPct}%;"></div></div>
-        </div>
-        <div class="enrich-row">
-          <div class="enrich-line">
-            <span class="label">Tracks analysed</span>
-            <span class="val">${fmtNum(withAudio)} <span class="of">/ ${fmtNum(totalTracks)}</span></span>
-          </div>
-          <div class="enrich-bar"><div class="fill" style="width:${audioPct}%;"></div></div>
-        </div>
-        <div class="form-row stacked">
-          <div class="row-stack">
-            <span class="row-stack-label">Last scan</span>
-            <span class="row-stack-value">${scanRunning ? 'running…' : escapeProfileHtml(fmtRelative(lastScan))}</span>
-          </div>
-          ${(!scanRunning && lastScan) ? `<div class="row-stack-sub" style="font-family:var(--font-mono);letter-spacing:0.02em;">${escapeProfileHtml(fmtAbs(lastScan))}</div>` : ''}
-        </div>
-      </div>
-
-      ${scanRunning ? `
-        <div class="progress-strip">
-          <div class="head">
-            <span class="label">Scanning library</span>
-            <span class="stats">${escapeProfileHtml((lib.scan.stats && lib.scan.stats.scanned) || lib.scan.progress || '…')}</span>
-          </div>
-          <div class="bar"><div class="fill" style="width:36%;"></div></div>
-          <div class="cancel"><button data-cancel-scan>Cancel</button></div>
-        </div>
-        <div class="btn-row single" style="margin-top:calc(10*var(--px));">
-          <button class="btn btn-secondary" ${enrichRunning ? 'disabled' : ''} data-action="enrich">Re-enrich missing</button>
-        </div>
-      ` : `
-        <div class="btn-row">
-          <button class="btn btn-primary" data-action="scan">Rescan library</button>
-          <button class="btn btn-secondary" ${enrichRunning ? 'disabled' : ''} data-action="enrich">Re-enrich missing</button>
-        </div>
-      `}
-    `;
-  }
-  function _renderLibraryEmpty(lib) {
-    const path = fmtPathForDisplay(lib.music_path || '/music');
-    return `
-      <div class="form-group">
-        <div class="form-row stacked">
-          <div class="row-stack">
-            <span class="row-stack-label">Music path</span>
-            <span class="path-value" title="${escapeProfileHtml(path)}">${escapeProfileHtml(path)}</span>
-          </div>
-          <div class="row-stack-sub">Configured in the launcher.</div>
-        </div>
-      </div>
-      <div class="empty-library">
-        <div class="icon">${SETTINGS_ICONS.vinyl}</div>
-        <p class="empty-library-msg">
-          No tracks indexed yet. Run the first scan to discover your library — it usually takes a few minutes per 10k tracks.
-        </p>
-        <button class="empty-cta" data-action="scan">${SETTINGS_ICONS.refresh}Run first scan</button>
-      </div>
-    `;
   }
 
   function _renderAi(ai, claudeState, codexState) {
@@ -10953,22 +10848,27 @@
     //   - toggle off → nothing (the row above already says "off")
     //   - on + idle → "Idle · last run X min ago · 17 stats, 4 lyrics"
     //   - on + busy → "Working on track stats · 17 stats, 4 lyrics so far"
+    //   - on + draining a backlog → "Catching up · fetching lyrics"
     if (!enabled || !s) return '';
     const totals = s.totals || {};
     const partsArr = [];
     if (totals.track_stats) partsArr.push(totals.track_stats + ' stats');
     if (totals.lyrics)      partsArr.push(totals.lyrics      + ' lyrics');
     if (totals.artists)     partsArr.push(totals.artists     + ' artists');
-    if (totals.albums)      partsArr.push(totals.albums      + ' albums');
     if (totals.genres)      partsArr.push(totals.genres      + ' genres');
+    if (totals.similar)     partsArr.push(totals.similar     + ' similars');
+    if (totals.discography) partsArr.push(totals.discography + ' albums found');
     const totalsLine = partsArr.length ? partsArr.join(', ') : 'no items yet';
 
     const stepLabels = {
       track_stats: 'fetching track stats',
       lyrics:      'fetching lyrics',
       artists:     'fetching artist info',
-      albums:      'fetching album info',
       genres:      'fetching genre wikis',
+      similar:     'fetching similar artists',
+      canonize:    'canonizing artists',
+      discography: 'reconciling discographies',
+      name_latin:  'transliterating names',
       idle:        'idle',
       starting:    'starting',
       '':          'idle',
@@ -10978,7 +10878,7 @@
 
     let primary;
     if (isWorking) {
-      primary = 'Working · ' + step;
+      primary = (s.draining ? 'Catching up · ' : 'Working · ') + step;
     } else if (s.last_run_at) {
       primary = 'Idle · last batch ' + fmtRelative(s.last_run_at);
     } else {
@@ -11997,14 +11897,17 @@
       </div>
     `;
 
-    const enrichActions = enrichRunning ? `
+    // No ML runtime → no button: the run would be a no-op there (analysis
+    // arrives over P2P) and the backend refuses it.
+    const analysisAvailable = !!lib.analysis_available;
+    const enrichActions = !analysisAvailable ? '' : enrichRunning ? `
       <div class="btn-row single">
-        <button class="btn btn-danger" data-cancel-enrich ${enrichCancelling ? 'disabled' : ''}>${enrichCancelling ? 'Cancelling…' : 'Cancel enrichment'}</button>
+        <button class="btn btn-danger" data-cancel-enrich ${enrichCancelling ? 'disabled' : ''}>${enrichCancelling ? 'Cancelling…' : 'Cancel analysis'}</button>
       </div>
-      <div class="action-progress" data-progress-for="enrich">${escapeProfileHtml(enrichCancelling ? 'Finishing the current step… cancel will take effect at the next checkpoint.' : (lib.enrich.progress || 'Enriching…'))}</div>
+      <div class="action-progress" data-progress-for="enrich">${escapeProfileHtml(enrichCancelling ? 'Finishing the current step… cancel will take effect at the next checkpoint.' : (lib.enrich.progress || 'Analysing…'))}</div>
     ` : `
       <div class="btn-row single">
-        <button class="btn btn-secondary" data-action="enrich">Re-enrich missing</button>
+        <button class="btn btn-secondary" data-action="enrich">Analyse library</button>
       </div>
     `;
 
@@ -12026,6 +11929,9 @@
         ${_enrichRow('features',   'Features',   lib.features_done,   lib.total_tracks)}
         ${_enrichRow('lastfm',     'Last.fm',    lib.lastfm_done,     lib.lastfm_total)}
         ${_enrichRow('lyrics',     'Lyrics',     lib.lyrics_done,     lib.total_tracks)}
+        <div class="form-row stacked"><div class="row-stack-sub">${analysisAvailable
+          ? 'Analyse library computes embeddings and features on this machine.'
+          : 'This machine has no ML runtime, so embeddings and features arrive from peers over P2P.'} Last.fm and lyrics arrive on their own through Background enrichment (Sync &amp; P2P).</div></div>
       </div>
       ${enrichActions}
     `;

@@ -53,6 +53,7 @@ def run_parallel_enrichment(
     skip_embeddings: bool = False,
     skip_lastfm: bool = False,
     skip_audio_analysis: bool = False,
+    skip_lyrics: bool = False,
     force_embeddings: bool = False,
     force_audio_analysis: bool = False,
     lastfm_delay: float = 0.2,
@@ -68,12 +69,16 @@ def run_parallel_enrichment(
 
     Phase 1 (parallel via ThreadPoolExecutor):
       A) GPU: audio embeddings (batched) → audio features (CLAP classify)
-      B) Network: Last.fm artist/album/track enrichment
+      B) Network: Last.fm artist bios (engagement-gated)
       C) Network: Lyrics fetching (lrclib/genius)
     Phase 2 (sequential, GPU):
-      D) Text embeddings (sentence-transformers)
+      D) Text embeddings (BGE-M3)
       E) Lyrics embeddings
-      F) Enrichment embeddings (artist bios, album info, genre desc)
+      F) Enrichment embeddings (artist bios, genre desc)
+
+    The product's manual run (/enrich/start) is analysis-only — it passes
+    skip_lastfm=skip_lyrics=True, because the network steps belong to
+    background_enrichment.py. Only the CLI runs everything in one go.
 
     Returns dict with stats from all pipelines.
     """
@@ -175,8 +180,6 @@ def run_parallel_enrichment(
 
     # --- Pipeline B: Last.fm enrichment (by artist + album, not per-track) ---
     def _run_lastfm_pipeline():
-        if _skip_lastfm:
-            return {}
         logger.info("Pipeline B (Network): starting Last.fm enrichment")
 
         from lastfm import LastFmService
@@ -270,20 +273,28 @@ def run_parallel_enrichment(
             logger.warning(f"Signing failed (records left for next run): {e}")
 
     # === Phase 1: Run A, B, C in parallel ===
+    network_pipelines = {}
+    if not _skip_lastfm:
+        network_pipelines["lastfm"] = _run_lastfm_pipeline
+    if not skip_lyrics:
+        network_pipelines["lyrics"] = _run_lyrics_pipeline
+    phase1 = [name for name, on in (
+        ("GPU", not (skip_embeddings and skip_audio_analysis)),
+        ("Last.fm", "lastfm" in network_pipelines),
+        ("Lyrics", "lyrics" in network_pipelines),
+    ) if on]
     if progress_cb:
-        progress_cb("Phase 1: GPU + Last.fm + Lyrics (parallel)...")
-    logger.info("=== Phase 1: parallel pipelines ===")
+        progress_cb(f"Phase 1: {' + '.join(phase1) if phase1 else 'skipped'}...")
+    logger.info(f"=== Phase 1: {', '.join(phase1) if phase1 else 'no pipelines'} ===")
 
     # GPU runs in the main thread to keep the CUDA context owner stable across
     # phases. Network-bound pipelines (Last.fm, lyrics) run in worker threads
     # in parallel — same wall-clock as the previous all-in-pool layout, but
     # Phase 2 inherits a clean CUDA context instead of one handed off from a
     # worker that already exited.
-    with ThreadPoolExecutor(max_workers=2, thread_name_prefix="enrich") as pool:
-        futures = {
-            pool.submit(_run_lastfm_pipeline): "lastfm",
-            pool.submit(_run_lyrics_pipeline): "lyrics",
-        }
+    with ThreadPoolExecutor(max_workers=max(1, len(network_pipelines)),
+                            thread_name_prefix="enrich") as pool:
+        futures = {pool.submit(fn): name for name, fn in network_pipelines.items()}
 
         try:
             result_parts["gpu"] = _run_gpu_pipeline()
@@ -470,7 +481,13 @@ def _fetch_lyrics_batch(
             if not lrclib_ok and not genius_ok:
                 break
 
+            # An 'error' verdict does not take the track out of the candidate
+            # set (only a not_found marker does), so it must count as an
+            # error, not a not_found — the background drain reads a full
+            # error-free batch as progress and would never back off from a
+            # failing source otherwise.
             found = False
+            failed = False
             if lrclib_ok:
                 try:
                     result = lrclib_service.fetch_and_store(
@@ -478,25 +495,35 @@ def _fetch_lyrics_batch(
                         album_name=row.album,
                         duration=int(row.duration_seconds) if row.duration_seconds else None,
                     )
-                    if result and result.get("status") not in ("not_found", "error"):
+                    status = result.get("status") if result else "not_found"
+                    if status == "error":
+                        failed = True
+                    elif status != "not_found":
                         found = True
                     time.sleep(0.1)
                 except Exception as e:
-                    logger.debug(f"LRCLIB failed for {row.artist} - {row.title}: {e}")
+                    logger.warning(f"LRCLIB failed for {row.artist} - {row.title}: {e}")
+                    failed = True
 
             if not found and genius_ok:
                 try:
                     result = genius_service.fetch_and_store(
                         db, row.track_id, row.title, row.artist,
                     )
-                    if result and result.get("status") not in ("not_found", "error"):
+                    status = result.get("status") if result else "not_found"
+                    if status == "error":
+                        failed = True
+                    elif status != "not_found":
                         found = True
                     time.sleep(1.0)
                 except Exception as e:
-                    logger.debug(f"Genius failed for {row.artist} - {row.title}: {e}")
+                    logger.warning(f"Genius failed for {row.artist} - {row.title}: {e}")
+                    failed = True
 
             if found:
                 stats["found"] += 1
+            elif failed:
+                stats["errors"] += 1
             else:
                 stats["not_found"] += 1
 

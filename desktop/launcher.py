@@ -68,6 +68,7 @@ class LauncherApp(ctk.CTk):
         self.after(100, self._drain_ui_queue)
         self._streams_started = False
         self._active_job = None       # "scan" | "enrich" — what a Library wake refers to
+        self._analysis_available = True   # from /stats; False on a node with no ML runtime
         self._qr_timer = None
 
         # Check first run
@@ -248,7 +249,7 @@ class LauncherApp(ctk.CTk):
         self._btn_scan.pack(pady=3)
 
         self._btn_enrich = ctk.CTkButton(
-            btn_frame, text="Enrich Library", width=200,
+            btn_frame, text="Analyse Library", width=200,
             command=self._enrich_library, state="disabled",
             fg_color="transparent", border_width=1,
         )
@@ -449,7 +450,7 @@ class LauncherApp(ctk.CTk):
         )
         self._btn_open.configure(state="normal")
         self._btn_scan.configure(state="normal")
-        self._btn_enrich.configure(state="normal")
+        self._btn_enrich.configure(state=self._enrich_idle_state())
         # Sync button stays disabled until P2P is ready
         self._btn_sync.configure(state="disabled")
         self._progress_text.configure(text=gpu_text)
@@ -937,9 +938,18 @@ class LauncherApp(ctk.CTk):
         if data:
             self._update_stats_labels(data)
 
+    def _enrich_idle_state(self) -> str:
+        """Button state between jobs. A node with no ML runtime never gets
+        the button: the run would be a no-op there (analysis arrives via
+        P2P import) and the backend refuses it."""
+        return "normal" if self._analysis_available else "disabled"
+
     def _update_stats_labels(self, data: dict):
         """Update stats labels from API response."""
         total_tracks = int(data.get("total_tracks", 0))
+        self._analysis_available = bool(data.get("analysis_available"))
+        if not self._analysis_available:
+            self._btn_enrich.configure(state="disabled")
 
         # Library stats (simple counts)
         simple = {
@@ -1116,28 +1126,29 @@ class LauncherApp(ctk.CTk):
             state="normal", fg_color="transparent",
             hover_color=("gray75", "gray25"),
         )
-        self._btn_enrich.configure(state="normal")
+        self._btn_enrich.configure(state=self._enrich_idle_state())
         self._btn_sync.configure(state="normal")
         self._fetch_and_display_stats()
 
     def _enrich_library(self):
-        """Start background enrichment and poll for progress."""
+        """Start the analysis run (audio embeddings + features, then the
+        text encoders); progress arrives on the Library channel."""
         result = self.api_client.enrich_start()
         if not result or not result.get("success"):
             detail = result.get("detail", "no response") if result else "no response"
-            self._progress_text.configure(text=f"Enrich failed: {detail[:80]}")
+            self._progress_text.configure(text=f"Analysis failed: {detail[:80]}")
             return
 
-        self._btn_enrich.configure(text="Cancel Enrichment",
+        self._btn_enrich.configure(text="Cancel Analysis",
                                    command=self._cancel_enrich,
                                    fg_color="#8B0000", hover_color="#A52A2A")
         self._btn_scan.configure(state="disabled")
-        self._progress_text.configure(text="Starting enrichment...")
+        self._progress_text.configure(text="Starting analysis...")
         self._active_job = "enrich"
         self._refresh_enrich()
 
     def _refresh_enrich(self):
-        """Read enrichment status once, on a Library channel wake."""
+        """Read the analysis run's status once, on a Library channel wake."""
         def _check():
             status = self.api_client.enrich_status()
             if not status:
@@ -1155,17 +1166,17 @@ class LauncherApp(ctk.CTk):
         threading.Thread(target=_check, daemon=True).start()
 
     def _cancel_enrich(self):
-        """Request cancellation of running enrichment."""
+        """Request cancellation of the running analysis."""
         self.api_client.enrich_cancel()
         self._progress_text.configure(text="Cancelling...")
         self._btn_enrich.configure(state="disabled")
 
     def _enrich_done(self):
-        """Restore UI after enrichment completes."""
+        """Restore UI after the analysis run completes."""
         self._active_job = None
         self._btn_enrich.configure(
-            text="Enrich Library", command=self._enrich_library,
-            state="normal", fg_color="transparent",
+            text="Analyse Library", command=self._enrich_library,
+            state=self._enrich_idle_state(), fg_color="transparent",
             hover_color=("gray75", "gray25"),
         )
         self._btn_scan.configure(state="normal")
@@ -1240,7 +1251,7 @@ class LauncherApp(ctk.CTk):
         """Restore UI after sync completes."""
         self._btn_sync.configure(state="normal", text="Sync Library")
         self._btn_scan.configure(state="normal")
-        self._btn_enrich.configure(state="normal")
+        self._btn_enrich.configure(state=self._enrich_idle_state())
         self._fetch_and_display_stats()
 
     @staticmethod

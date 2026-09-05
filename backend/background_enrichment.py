@@ -1,17 +1,27 @@
-"""Background (network-only) enrichment loop.
+"""Background enrichment loop — since 2026-09-05 the ONLY path that fetches
+metadata from public APIs (Last.fm, lrclib/genius); the manual "Analyse
+library" run is GPU/text analysis only. No GPU work here. Started/stopped
+by the `enrichment.background_enabled` user_settings flag (settings.py);
+the toggle in More → Sync & P2P flips the same key.
 
-Periodic batch loop that fetches metadata from public APIs only — no
-GPU work. Started/stopped by the `enrichment.background_enabled`
-user_settings flag (settings.py); the toggle in More → Sync & P2P
-flips the same key.
-
-Each batch, in order:
+Each pass, in order:
   1. Last.fm track_stats (listeners + playcount) — priority-ordered
   2. Lyrics (lrclib/genius) for tracks missing them
   3. Last.fm artist bios for new artists
   4. Last.fm genre wiki for new genres
   5. Last.fm similars for engaged artists (owned file OR completed listen)
-  6. Missing-album reconcile for canonized artists (local MB dump, DB-only)
+  then, on the interval timer only:
+  6. Canonize the uncanonized residue (local MB dump, DB-only)
+  7. Missing-album reconcile for canonized artists (local MB dump, DB-only)
+  8. name_latin backfill for pre-0a phantom rows (pure Python)
+
+Two cadences. The network steps DRAIN: a step that came back with a full,
+error-free batch has a longer queue behind it, so the next pass follows at
+once instead of after the interval — a fresh library's bios take minutes,
+not days, while the per-call delay still caps the request rate. A short
+batch (queue empty, rate limit, cooldown) or any error hands control back
+to the interval timer, which is the backoff. The DB-only steps never
+drain: each is a bounded slice of a table walk that the timer paces.
 
 Track-stats priority (Tier 1 → 3):
   1. Tracks whose primary artist has the most accumulated listen-time
@@ -29,7 +39,7 @@ import logging
 import threading
 import time
 from datetime import datetime, timezone
-from typing import Any, Callable, Dict, List, Optional
+from typing import Any, Callable, Dict, List, Optional, Tuple
 
 from sqlalchemy import text
 
@@ -58,7 +68,7 @@ _NEGATIVE_CACHE_WINDOW = """
 # Tunables. These are intentionally module-level constants — there is
 # no production reason to make them user-configurable until we have
 # data showing the defaults are wrong.
-_BATCH_INTERVAL_MIN = 30          # sleep between batches
+_BATCH_INTERVAL_MIN = 30          # idle sleep between passes; also the DB-only steps' cadence
 _TRACK_STATS_PER_BATCH = 100      # Last.fm track.getInfo calls per batch
 _LYRICS_PER_BATCH = 50            # lrclib/genius calls per batch
 _ARTISTS_PER_BATCH = 30           # Last.fm artist.getInfo calls per batch
@@ -146,6 +156,7 @@ _state: Dict[str, Any] = {
     "running": False,            # thread alive
     "cancel": False,             # stop requested
     "current_step": "",          # what the loop is doing right now
+    "draining": False,           # network backlog: passes follow at once, no interval sleep
     "last_run_at": None,         # ISO timestamp of last batch end
     "next_run_at": None,         # ISO timestamp of next batch start
     "last_batch": None,          # counts dict from last run_once
@@ -485,60 +496,59 @@ def _step_backfill_name_latin(limit: int) -> Dict[str, int]:
     return out
 
 
-def _run_once() -> Dict[str, Any]:
-    """Run one full batch (all steps). Honours cancel between steps."""
-    summary = {"track_stats": {}, "lyrics": {}, "artists": {}, "genres": {},
-               "similar": {}, "canonize": {}, "discography": {}, "name_latin": {}}
-
-    if _cancel_flag():
-        return summary
-
-    _set(current_step="track_stats")
-    if not cooling_down('lastfm'):
-        summary["track_stats"] = _step_track_stats(_TRACK_STATS_PER_BATCH)
-        _bump("track_stats", summary["track_stats"].get("success", 0))
-
-    if _cancel_flag():
-        return summary
-
-    _set(current_step="lyrics")
-    summary["lyrics"] = _step_lyrics(_LYRICS_PER_BATCH)
-    _bump("lyrics", summary["lyrics"].get("found", 0))
-
-    if _cancel_flag():
-        return summary
-
-    _set(current_step="artists")
-    if not cooling_down('lastfm'):
-        summary["artists"] = _step_missing_artists(_ARTISTS_PER_BATCH)
-        _bump("artists", summary["artists"].get("success", 0))
-
-    if _cancel_flag():
-        return summary
-
-    _set(current_step="genres")
-    if not cooling_down('lastfm'):
-        summary["genres"] = _step_missing_genres(_GENRES_PER_BATCH)
-        _bump("genres", summary["genres"].get("success", 0))
-
-    if _cancel_flag():
-        return summary
-
+_NETWORK_STEPS = (
+    # (state key, step, batch cap, stats key folded into the running totals,
+    #  gated on the Last.fm cooldown)
+    ("track_stats", _step_track_stats,     _TRACK_STATS_PER_BATCH, "success", True),
+    ("lyrics",      _step_lyrics,          _LYRICS_PER_BATCH,      "found",   False),
+    ("artists",     _step_missing_artists, _ARTISTS_PER_BATCH,     "success", True),
+    ("genres",      _step_missing_genres,  _GENRES_PER_BATCH,      "success", True),
     # Engagement-gated similars (owned file OR completed listen) that never
-    # had getSimilar. Runs directly BEFORE canonize so the stubs this step
-    # mints are resolved-or-discarded the same batch, and discography then
-    # shelves the survivors — one cycle from a night's listening to
-    # Discovery-visible similars.
-    _set(current_step="similar")
-    if not cooling_down('lastfm'):
-        summary["similar"] = _step_similar_artists(_SIMILAR_PER_BATCH)
-        _bump("similar", summary["similar"].get("stored", 0))
+    # had getSimilar. Last of the network steps, so the stubs it mints go
+    # straight into canonize when the DB steps follow in the same pass.
+    ("similar",     _step_similar_artists, _SIMILAR_PER_BATCH,     "stored",  True),
+)
 
+
+def _wants_more(stats: Dict[str, int], limit: int) -> bool:
+    """A full, error-free batch means the queue behind it is longer than the
+    batch, so the next pass follows at once. A short batch (queue drained,
+    rate limit, cancel) or any error hands control back to the timer — the
+    interval IS the backoff. Safe because every step stamps what it
+    processed (a row, a not_found/error marker, last_similar_sync): a full
+    batch never hands the same rows back."""
+    return stats.get("processed", 0) >= limit and not stats.get("errors")
+
+
+def _run_network_steps() -> Tuple[Dict[str, Any], bool]:
+    """One batch of every network step, in order. Returns the per-step
+    stats and whether any step still has a backlog behind it."""
+    summary: Dict[str, Any] = {}
+    backlog = False
+    for key, step, limit, total_key, lastfm_gated in _NETWORK_STEPS:
+        if _cancel_flag():
+            break
+        if lastfm_gated and cooling_down('lastfm'):
+            summary[key] = {}
+            continue
+        _set(current_step=key)
+        stats = step(limit)
+        summary[key] = stats
+        _bump(key, stats.get(total_key, 0))
+        backlog = backlog or _wants_more(stats, limit)
+    return summary, backlog
+
+
+def _run_db_steps() -> Dict[str, Any]:
+    """The DB-only steps — canonize, discography reconcile, name_latin
+    backfill. Timer-paced regardless of network backlog: each is a bounded
+    slice of a table walk, not a queue with an end."""
+    summary: Dict[str, Any] = {}
     if _cancel_flag():
         return summary
 
     # Layer 2: distill uncanonized artists (content + phantom) BEFORE
-    # discography, so a freshly-canonized artist gets its shelf this batch.
+    # discography, so a freshly-canonized artist gets its shelf this pass.
     # Defer canon while a dump op is downloading/loading — it would read a stale or
     # half-TRUNCATEd dump and watermark artists out of the dump's own fresh pass.
     try:
@@ -557,14 +567,11 @@ def _run_once() -> Dict[str, Any]:
     if _cancel_flag():
         return summary
 
-    # NOTE: the AI canonization tier is NOT run on this 30-min timer — it's LLM-
-    # slow and re-attempting the same residue every cycle would burn tokens. It is
-    # EVENT-triggered instead (once per dump load + once per scan, new files only),
-    # async in the background via routers.settings.start_aicanon_job, plus the
-    # manual "Run now" button. See the AI assistant screen.
-
-    if _cancel_flag():
-        return summary
+    # NOTE: the AI canonization tier is NOT run on this timer — it's LLM-slow
+    # and re-attempting the same residue every cycle would burn tokens. It is
+    # EVENT-triggered instead (once per dump load + once per scan, new files
+    # only), async in the background via routers.settings.start_aicanon_job,
+    # plus the manual "Run now" button. See the AI assistant screen.
 
     # Re-enabled 2026-06-12: discography moved from Deezer to the local MB
     # dump — the "no automatic crawling" reason for the 2026-06-02 disable is
@@ -597,38 +604,56 @@ def _now_iso() -> str:
 
 
 def _loop() -> None:
-    """Top-level loop: run one batch, sleep, repeat. Exits when cancel set."""
+    """One pass = a batch of every network step, then — when the interval
+    timer says so — the DB-only steps. A pass that left a network backlog
+    behind is followed by the next one at once (drain); otherwise the loop
+    sleeps out the interval. Exits when cancel is set."""
     logger.info("Background enrichment loop started")
+    db_due_at = 0.0        # the first pass runs the DB steps too
+    minted = False         # canon work created since the last NOTIFY
     try:
         while not _cancel_flag():
+            backlog = False
+            db_ran = False
             try:
-                batch = _run_once()
+                batch, backlog = _run_network_steps()
+                if not _cancel_flag() and time.time() >= db_due_at:
+                    batch.update(_run_db_steps())
+                    db_due_at = time.time() + _BATCH_INTERVAL_MIN * 60
+                    db_ran = True
             except Exception as e:
                 logger.error(f"Background batch failed: {e}", exc_info=True)
                 batch = {"error": str(e)}
 
-            now = _now_iso()
-            next_at = datetime.fromtimestamp(
+            next_at = None if backlog else datetime.fromtimestamp(
                 time.time() + _BATCH_INTERVAL_MIN * 60, tz=timezone.utc,
             ).isoformat()
-            _set(last_batch=batch, last_run_at=now, next_run_at=next_at,
-                 current_step="idle")
+            _set(last_batch=batch, last_run_at=_now_iso(), next_run_at=next_at,
+                 draining=backlog)
 
-            # A batch that minted artists (similars, streaming stubs) just
+            # A pass that minted artists (similars, streaming stubs) just
             # created canon work that a dump-less node can only do with
-            # peer slices. Tell the launcher now instead of letting the
-            # freshly minted names sit out its 6-hour timer.
-            if ((batch.get("artists") or {}).get("success")
-                    or (batch.get("similar") or {}).get("stored")):
+            # peer slices. Tell the launcher instead of letting the freshly
+            # minted names sit out its 6-hour timer — at most once per DB
+            # cycle while draining, not once per pass: the launcher's slice
+            # fetch has no dedupe of its own.
+            minted = minted or bool((batch.get("artists") or {}).get("success")
+                                    or (batch.get("similar") or {}).get("stored"))
+            if minted and (db_ran or not backlog):
+                minted = False
                 try:
                     from db_pool import db_execute
                     db_execute("NOTIFY sautium_enrich_done")
                 except Exception as e:
                     logger.debug(f"enrich-done notify failed: {e}")
 
+            if backlog:
+                continue
+
             # Sleep in 1s slices so cancel doesn't have to wait for
             # the full interval. Plain time.sleep would block stop()
             # for up to half an hour, which is rude.
+            _set(current_step="idle")
             slept = 0
             while slept < _BATCH_INTERVAL_MIN * 60:
                 if _cancel_flag():
@@ -636,7 +661,7 @@ def _loop() -> None:
                 time.sleep(1)
                 slept += 1
     finally:
-        _set(running=False, current_step="", next_run_at=None)
+        _set(running=False, current_step="", next_run_at=None, draining=False)
         logger.info("Background enrichment loop stopped")
 
 
@@ -683,6 +708,7 @@ def status() -> Dict[str, Any]:
         return {
             "running":      _state["running"],
             "current_step": _state["current_step"],
+            "draining":     _state["draining"],
             "last_run_at":  _state["last_run_at"],
             "next_run_at":  _state["next_run_at"],
             "last_batch":   _state["last_batch"],

@@ -136,6 +136,19 @@ implementation details live in the code, DB and git history.
   only runs if missing. Resumable without losing progress. Idempotence is a
   **correctness property, not an optimization** — enrichment re-runs must be
   safe.
+- **Manual run = analysis only; network enrichment lives in the background
+  loop (2026-09-05).** "Analyse Library" (launcher) / "Analyse library"
+  (More → Library) run audio embeddings + features, seal them, then the text
+  encoders. Last.fm bios/stats/similars and lyrics are fetched only by
+  `background_enrichment.py`, on every profile — lite's "manual button"
+  exception went with the split. Its network steps drain a backlog
+  pass-to-pass (a full, error-free batch means more behind it; a short
+  batch or any error is the signal to sleep out the 30-min interval), the
+  DB-only steps stay on the timer. One job per kind of work: the GPU run
+  is bounded by the library, the network trickle by per-call API delays,
+  and neither waits on the other. A node with no ML runtime has no button
+  at all — launcher disabled, web hidden, endpoint 400 — because the run
+  would be a no-op there (`/stats` → `analysis_available`).
 
 ### AI assistant
 

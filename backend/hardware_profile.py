@@ -89,12 +89,6 @@ class HardwareProfile:
         return self.ml_available and self.name != "lite"
 
     @property
-    def background_enrichment_default(self) -> bool:
-        """Default for enrichment.background_enabled when the user never
-        set the key. An explicit user_settings row always wins."""
-        return self.name != "lite"
-
-    @property
     def unload_instruments_after_run(self) -> bool:
         """Release AST+PaSST after a bulk run / trickle idle. On CUDA-full
         the resident pair is cheap next to dedicated VRAM headroom and keeps
