@@ -8,11 +8,15 @@ Used by both the aiohttp P2P sync server and the FastAPI backend.
 import base64
 import json
 import logging
+import threading
+import time
 from datetime import datetime, timezone
+from typing import Optional
 
 import psycopg2.extras
 
 from desktop.p2p import record_sig
+from desktop.p2p.bloom import BloomFilter
 
 logger = logging.getLogger(__name__)
 
@@ -21,7 +25,7 @@ logger = logging.getLogger(__name__)
 # (pull category `segments`, seals on the wire) and the legacy mean-vector
 # `embeddings` pull is deprecated for it. Mirrored by the FastAPI backend
 # (backend/routers/sync.py SYNC_CAPABILITIES) — keep in step.
-CAPABILITIES = ["segments", "carry"]
+CAPABILITIES = ["segments", "carry", "holdings"]
 
 # A track bundle is K=12..24 vectors, each ~2.7KB base64 + ~1.3KB proof —
 # segments pulls get a tighter per-request cap than plain-row categories.
@@ -109,9 +113,21 @@ EMPTY_INVENTORY = {
 }
 
 
-def get_inventory(conn, track_uuids: list[str]) -> dict:
+# Rows the sync protocol will hand out: sealed ones. The inventory and the
+# holdings filter must draw from the same population, or a filter hit would
+# be a promise the inventory then breaks.
+_SIGNED = "signature IS NOT NULL AND batch_root IS NOT NULL"
+
+
+def get_inventory(conn, track_uuids: list[str],
+                  artist_uuids: Optional[list[str]] = None) -> dict:
     """
     Check what enrichment data is available for the given track UUIDs.
+
+    `artist_uuids` asks the artist-level categories about these artists
+    directly, on top of the artists of the given tracks — the holdings-
+    filter path names phantom artists whose tracks all missed the track
+    filter but who may still have a bio, tags or similars here.
 
     Returns category -> uuid_list dict. The versioned categories return
     [uuid, analysis_version, segment_count] triples (embeddings) and
@@ -124,11 +140,13 @@ def get_inventory(conn, track_uuids: list[str]) -> dict:
     category that is verbatim copyrighted text — every node fetches its own
     from the public sources.
     """
-    if not track_uuids:
+    track_uuids = track_uuids or []
+    artist_uuids = artist_uuids or []
+    if not track_uuids and not artist_uuids:
         return dict(EMPTY_INVENTORY)
 
     uuids = track_uuids
-    q = lambda sql: db_query(conn, sql, [uuids])
+    q = lambda sql: db_query(conn, sql, [uuids]) if uuids else []
 
     # -- Track-level data --
     tracks = _uuid_list(
@@ -157,30 +175,27 @@ def get_inventory(conn, track_uuids: list[str]) -> dict:
         "track_id",
     )
 
-    # -- Related artists (via track_artists) --
-    artists = _uuid_list(
+    # -- Related artists: the tracks' artists plus the ones named outright --
+    artist_set = set(_uuid_list(
         q("SELECT DISTINCT artist_id FROM track_artists WHERE track_id = ANY(%s::uuid[])"),
         "artist_id",
-    )
+    ))
+    artist_set.update(artist_uuids)
+    artists = sorted(artist_set)
+    qa = lambda sql: db_query(conn, sql, [artists]) if artists else []
     artist_bios = _uuid_list(
-        q("""SELECT DISTINCT ab.artist_id FROM artist_bios ab
-             INNER JOIN track_artists ta ON ta.artist_id = ab.artist_id
-             WHERE ta.track_id = ANY(%s::uuid[])
-               AND ab.signature IS NOT NULL AND ab.batch_root IS NOT NULL"""),
+        qa(f"""SELECT DISTINCT artist_id FROM artist_bios
+               WHERE artist_id = ANY(%s::uuid[]) AND {_SIGNED}"""),
         "artist_id",
     )
     artist_tags = _uuid_list(
-        q("""SELECT DISTINCT at2.artist_id FROM artist_tags at2
-             INNER JOIN track_artists ta ON ta.artist_id = at2.artist_id
-             WHERE ta.track_id = ANY(%s::uuid[])
-               AND at2.signature IS NOT NULL AND at2.batch_root IS NOT NULL"""),
+        qa(f"""SELECT DISTINCT artist_id FROM artist_tags
+               WHERE artist_id = ANY(%s::uuid[]) AND {_SIGNED}"""),
         "artist_id",
     )
     similar_artists = _uuid_list(
-        q("""SELECT DISTINCT sa.artist_id FROM similar_artists sa
-             INNER JOIN track_artists ta ON ta.artist_id = sa.artist_id
-             WHERE ta.track_id = ANY(%s::uuid[])
-               AND sa.signature IS NOT NULL AND sa.batch_root IS NOT NULL"""),
+        qa(f"""SELECT DISTINCT artist_id FROM similar_artists
+               WHERE artist_id = ANY(%s::uuid[]) AND {_SIGNED}"""),
         "artist_id",
     )
     # -- Related genres (album-grain: genres of the albums containing these tracks).
@@ -215,6 +230,144 @@ def get_inventory(conn, track_uuids: list[str]) -> dict:
         "genres": genres,
         "genre_descriptions": genre_descriptions,
     }
+
+
+# ---------------------------------------------------------------------------
+# Holdings filter — the compressed inventory (P2P_NETWORK.md § Holdings filter)
+# ---------------------------------------------------------------------------
+# A node with millions of phantom gaps cannot ask every peer about all of
+# them (306 inventory requests per peer per run at the master's size). The
+# peer publishes instead: two Bloom filters over what it HOLDS — track uuids
+# with sealed analysis, artist uuids with sealed bios/tags/similars — sized
+# by its holdings, never by anyone's gaps. The asker tests its gaps locally
+# and asks the exact inventory only about the hits. Built in memory when the
+# holdings version moved (checked at most every _HOLDINGS_RECHECK_S), served
+# from memory otherwise; a caller that already has the current version gets
+# a stub, no bits.
+
+HOLDINGS_FPR = 0.01
+_HOLDINGS_RECHECK_S = 300
+
+_holdings_lock = threading.Lock()
+_holdings: dict = {"checked_at": 0.0, "version": None, "payload": None,
+                   "tracks_n": 0, "artists_n": 0}
+
+_HOLDINGS_TRACKS_SQL = f"""
+    SELECT track_id::text FROM embeddings
+    UNION SELECT track_id::text FROM audio_features WHERE {_SIGNED}
+    UNION SELECT track_id::text FROM track_stats WHERE {_SIGNED}"""
+_HOLDINGS_ARTISTS_SQL = f"""
+    SELECT artist_id::text FROM artist_bios WHERE {_SIGNED}
+    UNION SELECT artist_id::text FROM artist_tags WHERE {_SIGNED}
+    UNION SELECT artist_id::text FROM similar_artists WHERE {_SIGNED}"""
+
+
+def holdings_version(conn) -> str:
+    """Moves whenever a contributing table's row count or latest updated_at
+    moves — one scan per table, so it is checked on a timer, not per
+    request."""
+    row = db_query(conn, f"""
+        SELECT (SELECT count(*) FROM embeddings) AS e,
+               (SELECT count(*) FROM audio_features WHERE {_SIGNED}) AS af,
+               (SELECT count(*) FROM track_stats WHERE {_SIGNED}) AS ts,
+               (SELECT count(*) FROM artist_bios WHERE {_SIGNED}) AS ab,
+               (SELECT count(*) FROM artist_tags WHERE {_SIGNED}) AS atg,
+               (SELECT count(*) FROM similar_artists WHERE {_SIGNED}) AS sa,
+               GREATEST((SELECT max(updated_at) FROM embeddings),
+                        (SELECT max(updated_at) FROM audio_features),
+                        (SELECT max(updated_at) FROM track_stats),
+                        (SELECT max(updated_at) FROM artist_bios),
+                        (SELECT max(updated_at) FROM artist_tags),
+                        (SELECT max(updated_at) FROM similar_artists)) AS latest
+    """)[0]
+    counts = [int(row[k]) for k in ("e", "af", "ts", "ab", "atg", "sa")]
+    latest = int(row["latest"].timestamp()) if row["latest"] else 0
+    return ".".join(str(n) for n in counts) + f".{latest}"
+
+
+def _stream_uuids(conn, sql: str):
+    # A holdable server-side cursor: both peer surfaces run autocommit
+    # connections, and a plain cursor would pull millions of rows into the
+    # client at once.
+    with conn.cursor(name="sautium_holdings", withhold=True) as cur:
+        cur.itersize = 50_000
+        cur.execute(sql)
+        for (uid,) in cur:
+            yield uid
+
+
+def _build_filter(conn, sql: str) -> BloomFilter:
+    # Sized by the exact distinct count — the per-table row counts in the
+    # version are a poor bound (one artist has many tag rows, one track
+    # sits in three tables), and an oversized filter is wasted bytes for
+    # every peer that fetches it. One extra pass over the union, on
+    # rebuild only.
+    capacity = db_query(conn, f"SELECT count(*) AS n FROM ({sql}) u")[0]["n"]
+    bf = BloomFilter.sized(max(int(capacity), 1000), HOLDINGS_FPR)
+    bf.update(_stream_uuids(conn, sql))
+    return bf
+
+
+def get_holdings(conn, have: Optional[str] = None) -> dict:
+    """The holdings payload: {"version", "tracks": filter, "artists":
+    filter}. `have` is the version the caller already holds — an unchanged
+    one answers {"version", "unchanged": true}."""
+    with _holdings_lock:
+        now = time.monotonic()
+        if (_holdings["payload"] is None
+                or now - _holdings["checked_at"] > _HOLDINGS_RECHECK_S):
+            version = holdings_version(conn)
+            if version != _holdings["version"]:
+                t0 = time.monotonic()
+                tracks = _build_filter(conn, _HOLDINGS_TRACKS_SQL)
+                artists = _build_filter(conn, _HOLDINGS_ARTISTS_SQL)
+                _holdings.update(
+                    version=version, tracks_n=tracks.n, artists_n=artists.n,
+                    payload={"version": version,
+                             "tracks": tracks.to_dict(),
+                             "artists": artists.to_dict()},
+                )
+                logger.info(
+                    f"Holdings filter rebuilt: {tracks.n} tracks + "
+                    f"{artists.n} artists, "
+                    f"{(len(tracks.bits) + len(artists.bits)) // 1024} KB, "
+                    f"{time.monotonic() - t0:.1f}s"
+                )
+            _holdings["checked_at"] = now
+        if have and have == _holdings["version"]:
+            return {"version": _holdings["version"], "unchanged": True}
+        return _holdings["payload"]
+
+
+def holdings_summary() -> Optional[dict]:
+    """Version and counts for /health, from memory only — never builds.
+    The asker prices "fetch the filter" against "send my gaps" with it;
+    None until the first holdings request built the filters."""
+    if _holdings["payload"] is None:
+        return None
+    return {"version": _holdings["version"],
+            "tracks": _holdings["tracks_n"], "artists": _holdings["artists_n"]}
+
+
+def split_engaged(conn, artist_uuids: list[str]) -> tuple[list[str], list[str]]:
+    """Partition artists into the ENGAGED core — an owned file or a
+    completed, unskipped listen — asked of every peer in full, and the
+    phantom bulk, asked through the holdings filter."""
+    if not artist_uuids:
+        return [], []
+    rows = db_query(conn, """
+        SELECT DISTINCT ta.artist_id::text AS artist_uuid
+          FROM track_artists ta
+         WHERE ta.artist_id = ANY(%s::uuid[])
+           AND (EXISTS (SELECT 1 FROM media_files mf
+                         WHERE mf.track_id = ta.track_id)
+                OR EXISTS (SELECT 1 FROM listening_history lh
+                            WHERE lh.track_id = ta.track_id
+                              AND lh.completed AND NOT lh.skipped))""",
+        [artist_uuids])
+    engaged = {r["artist_uuid"] for r in rows}
+    return ([a for a in artist_uuids if a in engaged],
+            [a for a in artist_uuids if a not in engaged])
 
 
 # ---------------------------------------------------------------------------

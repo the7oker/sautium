@@ -31,7 +31,8 @@ import psycopg2.extras
 from desktop.api_client import BackendAPIClient
 from desktop.p2p import record_sig as rs
 from desktop.p2p.birth_cert import TRUSTED_AUTHORITIES
-from desktop.p2p.sync_queries import CARRY_CATEGORIES
+from desktop.p2p.bloom import BloomFilter
+from desktop.p2p.sync_queries import CARRY_CATEGORIES, EMPTY_INVENTORY
 
 logger = logging.getLogger(__name__)
 
@@ -101,6 +102,7 @@ class SyncClient:
         db_dsn: str,
         batch_size: int = DEFAULT_BATCH_SIZE,
         progress_cb: Optional[Callable[[str], None]] = None,
+        holdings_cache: Optional[dict] = None,
     ):
         # api_client is None on the receiving side of a push: the payload
         # arrives instead of being fetched, but it goes through the same
@@ -109,6 +111,10 @@ class SyncClient:
         self.db_dsn = db_dsn
         self.batch_size = batch_size
         self.progress_cb = progress_cb
+        # peer pubkey -> {"version", "tracks": BloomFilter, "artists":
+        # BloomFilter}: the peers' published holdings, kept by the manager
+        # across runs (process lifetime) and refreshed by version.
+        self.holdings_cache = holdings_cache if holdings_cache is not None else {}
         self._conn: Optional[psycopg2.extensions.connection] = None
         # Filled by run_sync's capability probe; the caller reads it to
         # decide whether this peer can also be pushed to.
@@ -138,55 +144,84 @@ class SyncClient:
             cur.execute("SELECT id::text FROM tracks ORDER BY id")
             return [row[0] for row in cur.fetchall()]
 
-    def _get_existing_uuids(self, table: str, uuid_col: str) -> set[str]:
-        """Get UUIDs that already have data in a local enrichment table."""
+    # Both existence checks are bounded by the INVENTORY, never by the
+    # table: a filled node holds millions of rows per category and a run
+    # asks about a few thousand — reading the whole table per category,
+    # per peer, per run was seconds of pure waste on every sync.
+
+    def _get_existing_uuids(self, table: str, uuid_col: str,
+                            candidates) -> set[str]:
+        """Of `candidates`, the uuids that already have a local row."""
+        candidates = list(candidates)
+        if not candidates:
+            return set()
         conn = self._get_conn()
         try:
             with conn.cursor() as cur:
-                cur.execute(f"SELECT DISTINCT {uuid_col}::text FROM {table}")
+                cur.execute(f"SELECT DISTINCT {uuid_col}::text FROM {table} "
+                            f"WHERE {uuid_col} = ANY(%s::uuid[])", [candidates])
                 return {row[0] for row in cur.fetchall()}
         except psycopg2.errors.UndefinedTable:
             conn.rollback()
             return set()
 
-    def _get_existing_versions(self, table: str, uuid_col: str) -> dict[str, int]:
-        """uuid -> analysis_version for a versioned enrichment table."""
+    def _get_existing_versions(self, table: str, uuid_col: str,
+                               candidates) -> dict[str, int]:
+        """Of `candidates`, uuid -> local analysis_version."""
+        candidates = list(candidates)
+        if not candidates:
+            return {}
         conn = self._get_conn()
         try:
             with conn.cursor() as cur:
                 cur.execute(f"SELECT {uuid_col}::text, MAX(analysis_version) "
-                            f"FROM {table} GROUP BY {uuid_col}")
+                            f"FROM {table} WHERE {uuid_col} = ANY(%s::uuid[]) "
+                            f"GROUP BY {uuid_col}", [candidates])
                 return {row[0]: row[1] for row in cur.fetchall()}
         except psycopg2.errors.UndefinedTable:
             conn.rollback()
             return {}
 
-    def run_sync(self, track_uuids: list[str] = None) -> dict:
+    def run_sync(self, track_uuids: list[str] = None,
+                 bulk_track_uuids: Optional[list[str]] = None,
+                 bulk_artist_uuids: Optional[list[str]] = None) -> dict:
         """
         Run full synchronization.
 
         Args:
-            track_uuids: specific track UUIDs to sync, or None for all local tracks.
+            track_uuids: the CORE — tracks of engaged artists, asked of the
+                peer in full through the exact inventory; None = every
+                local track.
+            bulk_track_uuids / bulk_artist_uuids: the phantom BULK — asked
+                through the peer's holdings filter when that is the cheaper
+                direction, so millions of gaps cost one filter download and
+                a handful of exact questions about the hits.
 
         Returns:
             dict with sync statistics per category.
         """
         try:
-            return self._run_sync_inner(track_uuids)
+            return self._run_sync_inner(track_uuids, bulk_track_uuids or [],
+                                        bulk_artist_uuids or [])
         finally:
             self._close_conn()
 
-    def _run_sync_inner(self, track_uuids: list[str] = None) -> dict:
+    def _run_sync_inner(self, track_uuids: list[str],
+                        bulk_track_uuids: list[str],
+                        bulk_artist_uuids: list[str]) -> dict:
         # Step 1: Get track UUIDs
         if track_uuids is None:
             self._progress("Getting local track UUIDs...")
             track_uuids = self._get_local_track_uuids()
 
-        if not track_uuids:
+        if not track_uuids and not bulk_track_uuids and not bulk_artist_uuids:
             self._progress("No tracks to sync.")
             return {"total_tracks": 0}
 
-        self._progress(f"Syncing enrichment for {len(track_uuids)} tracks...")
+        self._progress(
+            f"Syncing enrichment for {len(track_uuids)} tracks"
+            + (f" + {len(bulk_track_uuids)} phantom-bulk tracks"
+               if bulk_track_uuids else "") + "...")
 
         # Step 2: Capability probe — which audio category does the peer speak?
         health = self.api.get_health() or {}
@@ -197,21 +232,30 @@ class SyncClient:
                 "  peer has no `segments` capability — legacy mean-vector pull")
 
         # Step 3: Inventory — ask source what it has (chunked + merged)
-        self._progress("Requesting inventory...")
-        inventory = self._fetch_inventory(track_uuids)
-        if not inventory:
-            self._progress("Inventory request failed.")
-            return {"error": "inventory_failed"}
+        inventory = dict(EMPTY_INVENTORY)
+        if track_uuids:
+            self._progress("Requesting inventory...")
+            inventory = self._fetch_inventory(track_uuids)
+            if not inventory:
+                self._progress("Inventory request failed.")
+                return {"error": "inventory_failed"}
 
-        # A track the source does not hold is the normal case, not an
-        # anomaly — on a node with the phantom layer it is millions of rows
-        # per peer. One count is all the log needs.
-        source_tracks = set(inventory.get("tracks", []))
-        not_found = set(track_uuids) - source_tracks
-        if not_found:
-            self._progress(
-                f"  {len(not_found)} tracks not found at source"
-            )
+            # A track the source does not hold is the normal case, not an
+            # anomaly — on a node with the phantom layer it is millions of
+            # rows per peer. One count is all the log needs.
+            source_tracks = set(inventory.get("tracks", []))
+            not_found = set(track_uuids) - source_tracks
+            if not_found:
+                self._progress(
+                    f"  {len(not_found)} tracks not found at source"
+                )
+
+        if bulk_track_uuids or bulk_artist_uuids:
+            bulk = self._bulk_inventory(health, bulk_track_uuids, bulk_artist_uuids)
+            if bulk:
+                for key, value in bulk.items():
+                    if isinstance(value, list):
+                        inventory.setdefault(key, []).extend(value)
 
         # Step 4: Filter out what we already have locally
         needed = self._compute_needed(inventory, use_segments)
@@ -245,22 +289,79 @@ class SyncClient:
         self._progress(f"Sync complete. Imported {total} items across {len(stats)} categories.")
         return stats
 
-    def _fetch_inventory(self, track_uuids: list[str]) -> Optional[dict]:
+    def _fetch_inventory(self, track_uuids: list[str],
+                         artist_uuids: Optional[list[str]] = None) -> Optional[dict]:
         """Inventory in ≤INVENTORY_CHUNK slices, merged. Chunks are disjoint
         track sets, so list values concatenate; artist/genre categories may
-        repeat across chunks and are consumed as sets downstream."""
-        merged: Optional[dict] = None
-        for i in range(0, len(track_uuids), INVENTORY_CHUNK):
-            part = self.api.sync_inventory(track_uuids[i:i + INVENTORY_CHUNK])
+        repeat across chunks and are consumed as sets downstream. Artists
+        named outright travel in their own chunks."""
+        requests = [(track_uuids[i:i + INVENTORY_CHUNK], None)
+                    for i in range(0, len(track_uuids), INVENTORY_CHUNK)]
+        artist_uuids = artist_uuids or []
+        requests += [([], artist_uuids[i:i + INVENTORY_CHUNK])
+                     for i in range(0, len(artist_uuids), INVENTORY_CHUNK)]
+        merged: dict = dict(EMPTY_INVENTORY)
+        for tracks, artists in requests:
+            part = self.api.sync_inventory(tracks, artists)
             if not part or "tracks" not in part:
                 return None
-            if merged is None:
-                merged = part
-            else:
-                for k, v in part.items():
-                    if isinstance(v, list):
-                        merged.setdefault(k, []).extend(v)
+            for k, v in part.items():
+                if isinstance(v, list):
+                    merged.setdefault(k, []).extend(v)
         return merged
+
+    def _bulk_inventory(self, health: dict, bulk_tracks: list[str],
+                        bulk_artists: list[str]) -> Optional[dict]:
+        """Inventory for the phantom bulk by the cheaper direction: the
+        peer's holdings filter (one download, cached by version, tested
+        locally) when the bulk is bigger than the filter, the exact
+        inventory otherwise or when the peer has no filter. Returns the
+        inventory for what is worth asking, None when nothing is."""
+        if "holdings" not in self.peer_capabilities:
+            self._progress(
+                f"  bulk: peer has no holdings filter — asking about "
+                f"{len(bulk_tracks)} tracks directly")
+            return self._fetch_inventory(bulk_tracks, bulk_artists)
+
+        key = self.api.peer_pubkey or self.api.base_url
+        cached = self.holdings_cache.get(key)
+        summary = health.get("holdings") or None
+        if cached and summary and summary.get("version") == cached["version"]:
+            filters = cached
+        else:
+            # Price the two directions: ~40 bytes per uuid on the wire
+            # against ~1.2 bytes per held element in the filter.
+            ask_cost = (len(bulk_tracks) + len(bulk_artists)) * 40
+            if summary:
+                fetch_cost = (summary.get("tracks", 0) + summary.get("artists", 0)) * 1.2
+                if fetch_cost > ask_cost:
+                    self._progress(
+                        f"  bulk: {len(bulk_tracks)} gaps weigh less than the "
+                        f"peer's filter — asking directly")
+                    return self._fetch_inventory(bulk_tracks, bulk_artists)
+            payload = self.api.sync_holdings(cached["version"] if cached else None)
+            if not payload or "version" not in payload:
+                self._progress("  holdings request failed — bulk skipped this run")
+                return None
+            if payload.get("unchanged") and cached:
+                filters = cached
+            else:
+                filters = {"version": payload["version"],
+                           "tracks": BloomFilter.from_dict(payload["tracks"]),
+                           "artists": BloomFilter.from_dict(payload["artists"])}
+                self.holdings_cache[key] = filters
+                self._progress(
+                    f"  holdings filter fetched: {filters['tracks'].n} tracks + "
+                    f"{filters['artists'].n} artists held by the peer")
+
+        hits_t = filters["tracks"].hits(bulk_tracks)
+        hits_a = filters["artists"].hits(bulk_artists)
+        self._progress(
+            f"  holdings filter: {len(hits_t)} of {len(bulk_tracks)} tracks and "
+            f"{len(hits_a)} of {len(bulk_artists)} artists worth asking")
+        if not hits_t and not hits_a:
+            return None
+        return self._fetch_inventory(hits_t, hits_a)
 
     def _protected_analysis_tracks(self, uuids: list[str]) -> set:
         """Tracks whose local analysis a peer import must never replace:
@@ -311,7 +412,8 @@ class SyncClient:
                                       for row in inventory.get(inv_key, [])}
                 if not available_versions:
                     continue
-                local = self._get_existing_versions(table, uuid_col)
+                local = self._get_existing_versions(
+                    table, uuid_col, available_versions)
                 new = [u for u in available_versions if u not in local]
                 outdated = [u for u, v in available_versions.items()
                             if u in local and local[u] < v]
@@ -336,7 +438,7 @@ class SyncClient:
             if not available:
                 continue
 
-            existing = self._get_existing_uuids(table, uuid_col)
+            existing = self._get_existing_uuids(table, uuid_col, available)
             missing = available - existing
 
             # Similars are ENGAGED-ONLY, mirroring the local enrichment rule

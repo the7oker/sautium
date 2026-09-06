@@ -128,6 +128,10 @@ def _load_carry():
 carry_queries, carry_importer = _load_carry()
 if carry_importer is not None:
     SYNC_CAPABILITIES.append("carry")
+if carry_queries is not None:
+    # The holdings filter lives in the same shared module — same reason:
+    # the two surfaces must agree on what "held" means.
+    SYNC_CAPABILITIES.append("holdings")
 
 
 def _carry_budget() -> int:
@@ -318,6 +322,10 @@ class InventoryRequest(BaseModel):
     # Same ceiling as the launcher sync server (MAX_UUIDS_PER_REQUEST) — the
     # client chunks its library into ≤10k slices and merges the responses.
     track_uuids: list[str] = Field(default_factory=list, max_length=10000)
+    # Artists to answer the artist-level categories for directly — the
+    # holdings-filter path names phantom artists whose tracks all missed
+    # the track filter but who may still have a bio, tags or similars here.
+    artist_uuids: list[str] = Field(default_factory=list, max_length=10000)
 
 
 class PullRequest(BaseModel):
@@ -349,7 +357,7 @@ async def get_inventory(req: InventoryRequest) -> dict:
     Uses 3 consolidated CTE queries instead of 15 separate ones.
     """
     _require_sharing()
-    if not req.track_uuids:
+    if not req.track_uuids and not req.artist_uuids:
         return dict(_EMPTY_INVENTORY)
 
     uuids = req.track_uuids
@@ -396,7 +404,8 @@ async def get_inventory(req: InventoryRequest) -> dict:
         artist_row = _db_query_one("""
             WITH uuids AS (SELECT unnest(%(u)s::uuid[]) AS id),
                  rel AS (SELECT DISTINCT ta.artist_id FROM track_artists ta
-                         WHERE ta.track_id IN (SELECT id FROM uuids))
+                         WHERE ta.track_id IN (SELECT id FROM uuids)
+                         UNION SELECT unnest(%(a)s::uuid[]))
             SELECT
                 ARRAY(SELECT artist_id::text FROM rel) AS artists,
                 ARRAY(SELECT DISTINCT ab.artist_id::text FROM artist_bios ab
@@ -411,7 +420,7 @@ async def get_inventory(req: InventoryRequest) -> dict:
                       WHERE sa.artist_id IN (SELECT artist_id FROM rel)
                         AND sa.signature IS NOT NULL
                         AND sa.batch_root IS NOT NULL) AS similar_artists
-        """, {"u": uuids})
+        """, {"u": uuids, "a": req.artist_uuids})
 
         return {
             "tracks": track_row["tracks"],
@@ -428,6 +437,30 @@ async def get_inventory(req: InventoryRequest) -> dict:
 
     except Exception as e:
         logger.error(f"Inventory query failed: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.get("/holdings")
+async def get_holdings(have: Optional[str] = None) -> dict:
+    """The holdings filters — what this node holds, compressed (Bloom
+    filters over sealed track and artist uuids), so a peer with millions
+    of gaps tests them locally and asks /inventory only about the hits.
+    `have` = the version the caller already holds; unchanged answers with
+    a stub. Logic in desktop/p2p/sync_queries.get_holdings, shared with
+    the launcher surface."""
+    _require_sharing()
+    if carry_queries is None:
+        raise HTTPException(status_code=404, detail="holdings unavailable")
+    import asyncio
+
+    def _run():
+        with get_conn() as conn:
+            return carry_queries.get_holdings(conn, have)
+
+    try:
+        return await asyncio.to_thread(_run)
+    except Exception as e:
+        logger.error(f"Holdings query failed: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
 
