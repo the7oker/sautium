@@ -311,13 +311,17 @@ class SyncClient:
         requests += [([], artist_uuids[i:i + INVENTORY_CHUNK])
                      for i in range(0, len(artist_uuids), INVENTORY_CHUNK)]
         merged: dict = dict(EMPTY_INVENTORY)
-        for tracks, artists in requests:
+        for i, (tracks, artists) in enumerate(requests, 1):
+            t0 = time.monotonic()
             part = self.api.sync_inventory(tracks, artists)
             if not part or "tracks" not in part:
                 return None
             for k, v in part.items():
                 if isinstance(v, list):
                     merged.setdefault(k, []).extend(v)
+            self._progress(
+                f"  inventory {i}/{len(requests)}: {len(tracks)} tracks, "
+                f"{len(artists or [])} artists in {time.monotonic() - t0:.1f}s")
         return merged
 
     def _bulk_inventory(self, health: dict, bulk_tracks: list[str],
@@ -420,6 +424,7 @@ class SyncClient:
 
         needed = {}
         for cat_key, (table, uuid_col) in local_check.items():
+            t0 = time.monotonic()
             inv_key = "embeddings" if cat_key == "segments" else cat_key
             if cat_key in versioned:
                 available_versions = {row[0]: row[1]
@@ -446,6 +451,7 @@ class SyncClient:
                         f"  {cat_key}: {len(new)} new + {len(outdated)} outdated "
                         f"/ {len(available_versions)} available"
                     )
+                self._note_slow(cat_key, t0)
                 continue
 
             available = set(inventory.get(cat_key, []))
@@ -479,8 +485,17 @@ class SyncClient:
                 self._progress(
                     f"  {cat_key}: {len(missing)} new / {len(available)} available"
                 )
+            self._note_slow(cat_key, t0)
 
         return needed
+
+    def _note_slow(self, cat_key: str, t0: float) -> None:
+        """A local existence check is a handful of indexed lookups; when it
+        takes seconds the node's database is the bottleneck (a sync went
+        silent for six minutes here on 2026-09-06) — say so, with the time."""
+        dt = time.monotonic() - t0
+        if dt > 2.0:
+            self._progress(f"  {cat_key}: local check took {dt:.1f}s")
 
     def _engaged_artist_uuids(self, artist_uuids) -> set:
         """Of these artists, the ones this node owns a file by OR has a
