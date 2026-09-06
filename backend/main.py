@@ -627,6 +627,14 @@ async def lifespan(app: FastAPI):
     except Exception as e:
         logger.warning(f"Background enrichment autostart failed: {e}")
 
+    # The sealing owner: author-signs on every producer's wake, Worker-stamps
+    # on its own cadence (notary.py). The startup wake is the catch-up for
+    # whatever was sealed or shed while the backend was down — a canon
+    # migration, --renormalize — and scans the album layer end to end.
+    import notary
+    if notary.start():
+        notary.wake("startup", full=True)
+
     # MusicBrainz dump auto-update (opt-in toggle in More → Library).
     try:
         from routers.settings import maybe_auto_update
@@ -682,6 +690,9 @@ async def lifespan(app: FastAPI):
         background_enrichment.stop()
     except Exception:
         pass
+
+    import notary
+    notary.stop()
 
     # Cleanup resources
     import model_cache
@@ -1058,14 +1069,12 @@ def _scan_worker(limit: Optional[int], skip_existing: bool, subpath: Optional[st
                 except Exception as e:
                     logger.error(f"Post-scan MB canonicalization failed: {e}")
 
-            # Sign whatever analysis this scan produced (idempotent — exits
-            # without a Worker call when nothing is unsigned).
+            # The scan's analysis and its post-scan canon are signable state:
+            # wake the sealing owner (full — canon may have anchored albums
+            # whose tracks were signed long ago).
             if not state["cancel_requested"]:
-                try:
-                    import sign_audio
-                    sign_audio.run()
-                except Exception as e:
-                    logger.warning(f"Post-scan signing failed: {e}")
+                import notary
+                notary.wake("scan", full=True)
 
             if prune and not state["cancel_requested"]:
                 state["progress"] = "Pruning missing files..."

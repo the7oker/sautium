@@ -819,6 +819,7 @@ def _sync_state() -> Dict[str, Any]:
         bg_status = background_enrichment.status()
     except Exception as e:
         logger.warning(f"background_enrichment status read failed: {e}")
+    import notary
 
     def _relay_client_count() -> int:
         # Docker mode: the relay registry lives in this process. Launcher
@@ -840,6 +841,7 @@ def _sync_state() -> Dict[str, Any]:
         "relay_enabled":           bool(_read("p2p.relay_enabled")),
         "relay_clients":           _relay_client_count(),
         "background_status":       bg_status,
+        "notary_status":           notary.status(),
         "last_sync_at":            _read("sync.last_at"),
         "last_items_received":     _read("sync.last_items_received"),
         "friends_online":          friends_online,
