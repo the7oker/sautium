@@ -1073,9 +1073,13 @@ def stale_canonized_artists(limit: Optional[int] = None,
     `stale_days`, in update-priority order:
 
       tier 0 — artists actually listened to in the last 6 months,
-      tier 1 — artists similar to those (both edge directions — Last.fm
-               similarity is stored directed, see the artist-screen note),
-      tier 2 — the rest (so a post-dump-refresh re-derive eventually
+      tier 1 — artists of the cold-start seed picks: what a fresh node's
+               Home shows first, so their shelves must exist before the
+               user opens them (a node with listens outgrows this tier),
+      tier 2 — artists similar to the listened ones (both edge directions —
+               Last.fm similarity is stored directed, see the artist-screen
+               note),
+      tier 3 — the rest (so a post-dump-refresh re-derive eventually
                covers everyone, relevant shelves first).
 
     Within a tier: oldest data first. Shared by the background step and
@@ -1096,6 +1100,12 @@ def stale_canonized_artists(limit: Optional[int] = None,
             WHERE ta.role = 'primary'
               AND lh.started_at > now() - interval '{_LISTENED_MONTHS} months'
         ),
+        seeded AS (
+            SELECT DISTINCT ta.artist_id
+            FROM seed_picks sp
+            JOIN album_tracks at ON at.album_id = sp.album_id
+            JOIN track_artists ta ON ta.track_id = at.track_id
+        ),
         similar_of_listened AS (
             SELECT sa.similar_artist_id AS artist_id
             FROM similar_artists sa JOIN listened l ON l.artist_id = sa.artist_id
@@ -1111,8 +1121,9 @@ def stale_canonized_artists(limit: Optional[int] = None,
           AND {covered}
         ORDER BY
           CASE WHEN a.id IN (SELECT artist_id FROM listened) THEN 0
-               WHEN a.id IN (SELECT artist_id FROM similar_of_listened) THEN 1
-               ELSE 2 END,
+               WHEN a.id IN (SELECT artist_id FROM seeded) THEN 1
+               WHEN a.id IN (SELECT artist_id FROM similar_of_listened) THEN 2
+               ELSE 3 END,
           a.last_album_sync ASC NULLS FIRST,
           a.name
     """

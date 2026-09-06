@@ -75,7 +75,7 @@ _NEGATIVE_CACHE_WINDOW = """
 # no production reason to make them user-configurable until we have
 # data showing the defaults are wrong.
 _BATCH_INTERVAL_MIN = 30          # idle sleep between passes; also the DB-only steps' cadence
-_DB_RETRY_S = 120                 # DB-only steps deferred (dump/slice load in flight): retry soon, not next cycle
+_DB_RETRY_S = 120                 # DB-only steps with work left (full batch, or blocked by a dump/slice load): retry soon, not next cycle
 _FIRST_SYNC_WAIT_MIN = 10         # boot: how long the first pass waits for the first P2P sync
 _TRACK_STATS_PER_BATCH = 100      # Last.fm track.getInfo calls per batch
 _LYRICS_PER_BATCH = 50            # lrclib/genius calls per batch
@@ -490,6 +490,11 @@ def _step_canonize(limit: int) -> Dict[str, int]:
         return {"canonized": 0, "errors": 1}
     ph = out.get("phantom") or {}
     out["canonized"] = ph.get("canonized", 0)
+    # A full batch on either layer means more residue behind it — a fresh
+    # node lands hundreds of slice-fed phantoms at once.
+    if (ph.get("phantoms", 0) >= limit
+            or (out.get("content") or {}).get("pending", 0) >= limit):
+        out["retry_soon"] = True
     return out
 
 
@@ -505,15 +510,17 @@ def _step_sync_discographies(limit: int) -> Dict[str, int]:
     """
     from discography import stale_canonized_artists, sync_artist_discography
 
-    # `deferred`: the step could not do its work (API cooldown, a dump or
-    # slice load holding the lock) — the loop retries it in _DB_RETRY_S
-    # instead of leaving the reconcile to the next interval.
+    # `retry_soon`: work is left — the step could not do it (API cooldown,
+    # a dump or slice load holding the lock) or a full batch says more is
+    # queued — so the loop comes back in _DB_RETRY_S instead of leaving
+    # the reconcile to the next interval. A fresh node canonizes hundreds
+    # of artists in minutes; at 50 per interval their shelves took hours.
     stats = {"processed": 0, "new_albums": 0, "errors": 0}
 
     # Dump-less nodes hit the MB HTTP API — skip the whole step while it's
     # cooling down (no-op on dump nodes, which never arm the cooldown).
     if cooling_down('musicbrainz'):
-        stats["deferred"] = True
+        stats["retry_soon"] = True
         return stats
 
     rows = stale_canonized_artists(limit=int(limit),
@@ -530,13 +537,15 @@ def _step_sync_discographies(limit: int) -> Dict[str, int]:
             result = sync_artist_discography(row["id"], row["name"])
             if result.get("status") in ("rate_limited", "mb_loading"):
                 logger.info(f"Background discography: {result['status']} — ending batch")
-                stats["deferred"] = True
+                stats["retry_soon"] = True
                 break
             stats["new_albums"] += result.get("new", 0)
         except Exception as e:
             logger.error(f"Background discography failed for {row['name']}: {e}")
             stats["errors"] += 1
 
+    if stats["processed"] >= int(limit):
+        stats["retry_soon"] = True
     return stats
 
 
@@ -633,7 +642,7 @@ def _run_db_steps() -> Dict[str, Any]:
     except Exception:
         _dump_busy = False
     if _dump_busy:
-        summary["deferred"] = True
+        summary["retry_soon"] = True
     else:
         from canon import algo_canon
         with algo_canon() as _ok:   # priority over AI; holds the dump lock for the run
@@ -641,6 +650,8 @@ def _run_db_steps() -> Dict[str, Any]:
                 _set(current_step="canonize")
                 summary["canonize"] = _step_canonize(_CANONIZE_PER_BATCH)
                 _bump("canonize", summary["canonize"].get("canonized", 0))
+                if summary["canonize"].get("retry_soon"):
+                    summary["retry_soon"] = True
 
     if _cancel_flag():
         return summary
@@ -658,8 +669,8 @@ def _run_db_steps() -> Dict[str, Any]:
     _set(current_step="discography")
     summary["discography"] = _step_sync_discographies(_DISCOGRAPHY_PER_BATCH)
     _bump("discography", summary["discography"].get("new_albums", 0))
-    if summary["discography"].get("deferred"):
-        summary["deferred"] = True
+    if summary["discography"].get("retry_soon"):
+        summary["retry_soon"] = True
 
     if _cancel_flag():
         return summary
@@ -705,7 +716,7 @@ def _loop() -> None:
                     _db_wake.clear()
                     batch.update(_run_db_steps())
                     db_due_at = time.time() + (
-                        _DB_RETRY_S if batch.get("deferred")
+                        _DB_RETRY_S if batch.get("retry_soon")
                         else _BATCH_INTERVAL_MIN * 60)
                     db_ran = True
             except Exception as e:
