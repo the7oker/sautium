@@ -183,10 +183,33 @@ const TIMESTAMP_VERSION = 2;
 // How ip_hash is derived. v1 was uuid5 over a namespace shipped in this file —
 // reversible by brute-forcing the IPv4 space, which published the submitter's
 // address to every peer holding a sealed record. v2 is HMAC under IP_PEPPER:
-// same equality (so Sybil merging by address still works), no search.
-// A stamp whose ipv is older is re-issued on the next submission of that root,
-// keeping its original date — authorship priority never regresses.
-const IP_HASH_VERSION = 2;
+// same equality (so Sybil merging by address still works), no search. v3
+// (2026-09-06) hashes addrKey(): the /64 for IPv6 — privacy extensions rotate
+// the interface half daily and a merge over the exact address dissolved with
+// them; IPv4 input is unchanged, so every existing v4 stamp re-issues
+// byte-identical. A stamp whose ipv is older is re-issued on the next
+// submission of that root, keeping its original date — authorship priority
+// never regresses.
+const IP_HASH_VERSION = 3;
+
+// Timestamp-notary budget (Ф20, shadow). Per IDENTITY, not per address — a
+// CGNAT cohort shares an address, a botnet does not share a birth history:
+//   budget/day = STAMP_BASE_PER_DAY × weight(method, email_class)
+//                × age_ramp(witnessed age) ÷ m(conjunction)
+// spent as a token bucket STAMP_BURST deep, refilled at budget/day, so a
+// re-seal's back-to-back batches pass and a day-old key still gets its first
+// batch. Shadow until armed: the ledger records the verdict and the response
+// carries it as `not_before` advice; only the per-address brake bindings
+// (BRAKE_STAMP / BRAKE_BIRTH in wrangler.toml — WAF-grade, no KV write, sized
+// for a cohort) answer 429. Inputs the Worker can vouch for itself: the
+// mailbox class it verified, the birth it witnessed, the stamps it issued.
+const STAMP_BUDGET_ARMED = false;
+const STAMP_BASE_PER_DAY = 48;
+const STAMP_BURST = 6;
+const STAMP_AGE_RAMP_DAYS = 7;
+const STAMP_MAX_ROOTS = 100;
+const STAMP_REQUEST_VERSION = 1;
+const BRAKE_RETRY_AFTER_S = 60;
 
 // Enforced on account creation client-side; re-checked here because invite
 // codes arrive from the network. Guarantees '#' appears exactly once in an
@@ -451,6 +474,9 @@ async function handleIssuanceStats(env, corsHeaders) {
       pow_params_version: POW_PARAMS_VERSION,
       adaptive_armed: ADAPTIVE_DIFFICULTY_ARMED,
       adaptive_cap: ADAPTIVE_MULT_CAP,
+      stamp_budget_armed: STAMP_BUDGET_ARMED,
+      stamp_base_per_day: STAMP_BASE_PER_DAY,
+      stamp_burst: STAMP_BURST,
     },
     days: stats,
     ledger: await ledgerCall(env, "/stats"),
@@ -491,10 +517,14 @@ async function handleBirthCertificate(request, env, corsHeaders) {
     return json({ error: "invalid signature" }, corsHeaders, 403);
   }
 
+  // Per-address emergency brake only (plan invariant 6): a birth is a
+  // once-per-life event, its real price is the proof peers verify and the
+  // ledger's adaptive difficulty — a CGNAT cohort onboarding together must
+  // never meet a 429 here.
   const ip = request.headers.get("CF-Connecting-IP") || "unknown";
-  const rateLimitResult = await checkRateLimit(env, ip, `birth:${pubkey}`);
-  if (rateLimitResult) {
-    return json({ error: rateLimitResult }, corsHeaders, 429);
+  if (!await brake(env.BRAKE_BIRTH, `birth:${addrKey(ip)}`)) {
+    return throttled("rate limited (too many requests from your address)",
+                     corsHeaders, BRAKE_RETRY_AFTER_S);
   }
 
   let record = await loadBirthRecord(env, pubkey);
@@ -564,25 +594,37 @@ function isNativeGlobalV6(ip) {
   return true;
 }
 
+function expandV6(ip) {
+  // Eight hex groups with :: expanded and each group normalised — textual
+  // slicing put 2a00:db8::x and 2a00:db8:0:1::x (the same /48) into
+  // different buckets.
+  let groups;
+  if (ip.includes("::")) {
+    const [head, tail] = ip.split("::", 2);
+    const h = head ? head.split(":") : [];
+    const t = tail ? tail.split(":") : [];
+    groups = h.concat(Array(Math.max(0, 8 - h.length - t.length)).fill("0"), t);
+  } else {
+    groups = ip.split(":");
+  }
+  return groups.map((g) => (parseInt(g || "0", 16) || 0).toString(16));
+}
+
 function subnetOf(ip) {
   if (!ip) return "";
   if (ip.includes(":")) {
     // IPv6: /48 — the customer allocation size, one household or one VPS.
-    // Expand :: first: textual slicing put 2a00:db8::x and 2a00:db8:0:1::x
-    // (the same /48) into different buckets.
-    let groups;
-    if (ip.includes("::")) {
-      const [head, tail] = ip.split("::", 2);
-      const h = head ? head.split(":") : [];
-      const t = tail ? tail.split(":") : [];
-      groups = h.concat(Array(Math.max(0, 8 - h.length - t.length)).fill("0"), t);
-    } else {
-      groups = ip.split(":");
-    }
-    const norm = groups.slice(0, 3).map((g) => (parseInt(g || "0", 16) || 0).toString(16));
-    return norm.join(":") + "::/48";
+    return expandV6(ip).slice(0, 3).join(":") + "::/48";
   }
   return ip.split(".").slice(0, 3).join(".") + ".0/24";
+}
+
+function addrKey(ip) {
+  // The per-address axis (brakes, ip_hash): the exact IPv4, the /64 for
+  // IPv6 — one household's prefix, stable while privacy extensions rotate
+  // the interface half of the address daily.
+  if (!ip || !ip.includes(":")) return ip || "";
+  return expandV6(ip).slice(0, 4).join(":") + "::/64";
 }
 
 async function subnetToken(env, ip) {
@@ -640,12 +682,30 @@ export class BirthLedger {
     this.sql.exec("CREATE INDEX IF NOT EXISTS births_sub_ts ON births (sub, ts)");
     this.sql.exec("CREATE INDEX IF NOT EXISTS births_asn_ts ON births (asn, ts)");
     this.sql.exec("CREATE INDEX IF NOT EXISTS births_addr_ts ON births (addr, ts)");
+    // The notary's contact history (Ф20): one row per /timestamp request,
+    // signed or not, with the verdict it got — the axes a stamp farm shares
+    // (address, subnet, ASN, birth window, cadence) and the distributions
+    // the thresholds are tuned on before the budget is armed.
+    this.sql.exec(`CREATE TABLE IF NOT EXISTS stamps (
+      id INTEGER PRIMARY KEY AUTOINCREMENT, pubkey TEXT NOT NULL, ts INTEGER NOT NULL,
+      addr TEXT NOT NULL DEFAULT '', sub TEXT NOT NULL DEFAULT '', asn INTEGER NOT NULL DEFAULT 0,
+      n_new INTEGER NOT NULL, n_roots INTEGER NOT NULL, m REAL NOT NULL,
+      budget REAL NOT NULL, allowed INTEGER NOT NULL)`);
+    this.sql.exec("CREATE INDEX IF NOT EXISTS stamps_ts ON stamps (ts)");
+    this.sql.exec("CREATE INDEX IF NOT EXISTS stamps_pubkey_ts ON stamps (pubkey, ts)");
+    this.sql.exec("CREATE INDEX IF NOT EXISTS stamps_addr_ts ON stamps (addr, ts)");
+    // Per-identity token bucket — atomic here, which the KV counters never were.
+    this.sql.exec(`CREATE TABLE IF NOT EXISTS notary_budget (
+      pubkey TEXT PRIMARY KEY, tokens REAL NOT NULL, updated INTEGER NOT NULL)`);
   }
 
   async fetch(request) {
     const url = new URL(request.url);
     if (request.method === "POST" && url.pathname === "/birth") {
       return Response.json(this.recordBirth(await request.json()));
+    }
+    if (request.method === "POST" && url.pathname === "/stamp") {
+      return Response.json(this.recordStamp(await request.json()));
     }
     if (request.method === "POST" && url.pathname === "/method") {
       const { pubkey, method } = await request.json();
@@ -688,6 +748,66 @@ export class BirthLedger {
     return { m_shadow, ...counts };
   }
 
+  recordStamp({ pubkey, issued_at, method, email_class, n_new, n_roots, addr, sub, asn, now }) {
+    // The per-identity verdict for one /timestamp request (see the STAMP_*
+    // constants). Unsigned requests are recorded and never priced: there is
+    // no identity to charge, only the address brake in front of them.
+    pubkey = pubkey || ""; addr = addr || ""; sub = sub || "";
+    n_new = Number(n_new) || 0; n_roots = Number(n_roots) || 0;
+    let verdict = { allowed: true, not_before: null, budget_per_day: null,
+                    m: 1, weight: 1, age_days: null, tokens: null, signed: false };
+    if (pubkey) {
+      const birth = this.sql.exec(
+        "SELECT ts, m_shadow FROM births WHERE pubkey = ?", pubkey).toArray()[0];
+      // Witnessed age: the birth this ledger saw, else the certificate's own
+      // issued_at (identities older than the ledger), else "born now".
+      const bornAt = birth ? Number(birth.ts) : (Number(issued_at) || now);
+      const ageDays = Math.max(0, (now - bornAt) / 86400e3);
+      const ramp = Math.min(1, 0.25 + 0.75 * ageDays / STAMP_AGE_RAMP_DAYS);
+      const weight = method === "email" && email_class !== "disposable" ? 2 : 1;
+      // Live conjunction (invariant 3 — axes conjoined, never alone): other
+      // identities that stamped from this address within the day AND were
+      // born within a day of this one. The address alone is a CGNAT cohort;
+      // the address and the birth window together is a farm.
+      const cohort = addr ? this._count(
+        `SELECT count(DISTINCT s.pubkey) AS n
+           FROM stamps s JOIN births b ON b.pubkey = s.pubkey
+          WHERE s.addr = ? AND s.ts > ? AND s.pubkey <> ? AND abs(b.ts - ?) < ?`,
+        addr, now - 86400e3, pubkey, bornAt, 86400e3) : 0;
+      let m = Math.max(1, birth ? Number(birth.m_shadow) : 1);
+      if (cohort >= 2) m *= 2;
+      if (cohort >= 5) m *= 2;
+      m = Math.min(m, ADAPTIVE_MULT_CAP);
+      const budget = STAMP_BASE_PER_DAY * weight * ramp / m;   // per day
+      const refill = budget / 86400e3;                          // per ms
+      const row = this.sql.exec(
+        "SELECT tokens, updated FROM notary_budget WHERE pubkey = ?", pubkey).toArray()[0];
+      let tokens = row
+        ? Math.min(STAMP_BURST, Number(row.tokens) + (now - Number(row.updated)) * refill)
+        : STAMP_BURST;
+      const allowed = n_new === 0 || tokens >= n_new;
+      // Shadow charges even a would-be refusal (bounded debt), so the deficit
+      // an armed notary would have enforced is visible in not_before.
+      if (allowed || !STAMP_BUDGET_ARMED) tokens = Math.max(-STAMP_BURST, tokens - n_new);
+      const notBeforeMs = tokens >= 1 ? now : now + (1 - tokens) / refill;
+      this.sql.exec(
+        `INSERT INTO notary_budget (pubkey, tokens, updated) VALUES (?, ?, ?)
+         ON CONFLICT(pubkey) DO UPDATE SET tokens = excluded.tokens, updated = excluded.updated`,
+        pubkey, tokens, now);
+      verdict = { allowed, not_before: Math.ceil(notBeforeMs / 1000),
+                  budget_per_day: Number(budget.toFixed(2)), m, weight,
+                  age_days: Number(ageDays.toFixed(2)),
+                  tokens: Number(tokens.toFixed(3)), signed: true };
+    }
+    this.sql.exec(
+      `INSERT INTO stamps (pubkey, ts, addr, sub, asn, n_new, n_roots, m, budget, allowed)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      pubkey, now, addr, sub, Number(asn) || 0, n_new, n_roots, verdict.m,
+      verdict.budget_per_day ?? 0, verdict.allowed ? 1 : 0);
+    this.sql.exec("DELETE FROM stamps WHERE ts < ?", now - LEDGER_RETENTION_MS);
+    return verdict;
+  }
+
   stats(now) {
     const day = now - 86400 * 1000, week = now - 7 * 86400 * 1000;
     const hist = (since) => ({
@@ -705,11 +825,23 @@ export class BirthLedger {
     const topAsn = this.sql.exec(
       "SELECT asn, cc, count(*) AS n FROM births WHERE ts > ? GROUP BY asn, cc ORDER BY n DESC LIMIT 5",
       week).toArray().map((r) => ({ asn: Number(r.asn), cc: r.cc, births: Number(r.n) }));
+    // The notary in shadow: what the budget WOULD have refused, and the share
+    // of requests still arriving unsigned (older clients) — both read at T1
+    // before arming.
+    const notary = (since) => ({
+      requests: this._count("SELECT count(*) AS n FROM stamps WHERE ts > ?", since),
+      new_roots: this._count("SELECT coalesce(sum(n_new), 0) AS n FROM stamps WHERE ts > ?", since),
+      unsigned: this._count("SELECT count(*) AS n FROM stamps WHERE ts > ? AND pubkey = ''", since),
+      identities: this._count("SELECT count(DISTINCT pubkey) AS n FROM stamps WHERE ts > ? AND pubkey <> ''", since),
+      would_throttle: this._count("SELECT count(*) AS n FROM stamps WHERE ts > ? AND allowed = 0", since),
+      m2: this._count("SELECT count(*) AS n FROM stamps WHERE ts > ? AND m >= 2", since),
+    });
     return {
       total: this._count("SELECT count(*) AS n FROM births"),
       last_24h: hist(day),
       last_7d: hist(week),
       top_asn_7d: topAsn,
+      notary: { last_24h: notary(day), last_7d: notary(week) },
     };
   }
 }
@@ -1178,57 +1310,119 @@ export class MasterMailbox {
 
 async function handleTimestamp(request, env, corsHeaders) {
   /**
-   * Notarize a Merkle batch root at the current date — the "when" a signed
+   * Notarize Merkle batch roots at the current date — the "when" a signed
    * enrichment record needs for authorship priority (see docs/design/
    * P2P-SYNC-INTEGRITY.md: The karma curve / Notary scaling). The Worker
    * signs roots, not records: a node submits one 32-byte root per batch.
    *
-   * Body: {root}  (64-hex Merkle root)
-   * Returns {root, date, sig, authority}; sig is over
-   *   sautium-timestamp:v1:{root}:{date}
+   * Body: {root}            one 64-hex root (the batch shape), or
+   *       {roots: [...]}    up to STAMP_MAX_ROOTS (the re-stamp shape),
+   *       + pubkey, ts, signature — the submitter's identity (Ф20): sig by the
+   *         node key over
+   *           sautium-timestamp-request:v{STAMP_REQUEST_VERSION}:{ts}:{roots joined by ","}
+   *         with ts within MAIL_SIG_SKEW_S. Optional while the budget is
+   *         shadow (older clients send none): an unsigned request rides the
+   *         address brake alone and is recorded as such.
+   * Returns {root, date, ip_hash, sig, authority, v, not_before} for the batch
+   * shape, {stamps: [...], v, not_before} for the re-stamp shape; sig is over
+   *   sautium-timestamp:v{TIMESTAMP_VERSION}:{root}:{date}:{ip_hash}
    * by the master authority (BIRTH_SIGNING_KEY, domain-separated from birth
-   * certs by the payload prefix). Idempotent: a root is stamped once (the
-   * KV record is the transparency log entry). No auth — notarizing a hash
-   * reveals nothing; rate-limited against flooding.
+   * certs by the payload prefix). Idempotent per root: the KV record is the
+   * transparency-log entry, a re-submitted root keeps its FIRST date and only
+   * a record in an older format is re-signed. `not_before` (epoch seconds) is
+   * the ledger's pace advice for this identity, which the client's notary
+   * waits for. The identity reveals nothing new — root↔author is public in
+   * every peer's signing_batches — and notarizing a hash still reveals
+   * nothing about the records.
    */
   const body = await request.json();
-  const root = (body.root || "").toLowerCase();
-  if (!/^[0-9a-f]{64}$/.test(root)) {
+  const single = body.roots === undefined;
+  const raw = single ? [body.root] : body.roots;
+  if (!Array.isArray(raw) || raw.length < 1 || raw.length > STAMP_MAX_ROOTS) {
+    return json({ error: "invalid roots" }, corsHeaders, 400);
+  }
+  const roots = raw.map((r) => String(r || "").toLowerCase());
+  if (roots.some((r) => !/^[0-9a-f]{64}$/.test(r))) {
     return json({ error: "invalid root" }, corsHeaders, 400);
   }
 
   const ip = request.headers.get("CF-Connecting-IP") || "unknown";
-  const rateLimitResult = await checkRateLimit(env, ip, `ts:${ip}`);
-  if (rateLimitResult) {
-    return json({ error: rateLimitResult }, corsHeaders, 429);
+  if (!await brake(env.BRAKE_STAMP, `ts:${addrKey(ip)}`)) {
+    return throttled("rate limited (too many requests from your address)",
+                     corsHeaders, BRAKE_RETRY_AFTER_S);
+  }
+
+  let identity = null;
+  if (body.pubkey !== undefined || body.signature !== undefined) {
+    const pubkey = String(body.pubkey || "").toLowerCase();
+    if (!isValidPubkeyHex(pubkey)) {
+      return json({ error: "invalid pubkey" }, corsHeaders, 400);
+    }
+    if (!tsFresh(body.ts)) {
+      return json({ error: "stale timestamp" }, corsHeaders, 403);
+    }
+    const message = `sautium-timestamp-request:v${STAMP_REQUEST_VERSION}:${body.ts}:${roots.join(",")}`;
+    if (!await verifySignature(message, String(body.signature || ""), pubkey)) {
+      return json({ error: "invalid signature" }, corsHeaders, 403);
+    }
+    identity = { pubkey, born: await loadBirthRecord(env, pubkey) };
+  }
+
+  // A known root costs nothing (idempotent re-submission, a format refresh):
+  // the budget charges new roots only.
+  const records = await Promise.all(
+    roots.map((r) => env.RATE_LIMITS.get(`ts:${r}`, "json")));
+  const ipHash = await ipHashUuid(env, ip);
+  const cf = request.cf || {};
+  const verdict = await ledgerCall(env, "/stamp", {
+    pubkey: identity?.pubkey || "",
+    issued_at: identity?.born ? Date.parse(identity.born.issued_at) : 0,
+    method: identity?.born?.method || "",
+    email_class: identity?.born?.email_class || "",
+    n_new: records.filter((r) => !r).length,
+    n_roots: roots.length,
+    addr: ipHash,
+    sub: await subnetToken(env, ip),
+    asn: Number(cf.asn) || 0,
+    now: Date.now(),
+  });
+  if (STAMP_BUDGET_ARMED && verdict && verdict.allowed === false) {
+    const wait = Math.max(1, Math.ceil(verdict.not_before - Date.now() / 1000));
+    return throttled("notary budget spent for this identity", corsHeaders,
+                     wait, verdict.not_before);
   }
 
   // Idempotent per root, but re-sign any record still in an older format so a
-  // re-submitted v1 root upgrades to v2 (adds ip_hash). The date is the
-  // FIRST-issuance moment — preserved across a re-sign so authorship priority
-  // never regresses; only ip_hash reflects whoever re-submits.
-  let record = await env.RATE_LIMITS.get(`ts:${root}`, "json");
-  if (!record || record.v !== TIMESTAMP_VERSION
-      || record.ipv !== IP_HASH_VERSION) {
-    const date = record?.date || nowIsoSeconds();
-    const ipHash = await ipHashUuid(env, ip);
-    const key = await birthSigningKey(env);
-    const sig = bytesToHex(new Uint8Array(await crypto.subtle.sign(
-      "Ed25519", key,
-      new TextEncoder().encode(
-        `sautium-timestamp:v${TIMESTAMP_VERSION}:${root}:${date}:${ipHash}`))));
-    record = { v: TIMESTAMP_VERSION, ipv: IP_HASH_VERSION, date,
-               ip_hash: ipHash, sig };
-    await env.RATE_LIMITS.put(`ts:${root}`, JSON.stringify(record));
+  // re-submitted root upgrades. The date is the FIRST-issuance moment —
+  // preserved across a re-sign so authorship priority never regresses; only
+  // ip_hash reflects whoever re-submits.
+  const key = await birthSigningKey(env);
+  const stamps = [];
+  for (let i = 0; i < roots.length; i++) {
+    const root = roots[i];
+    let record = records[i];
+    if (!record || record.v !== TIMESTAMP_VERSION
+        || record.ipv !== IP_HASH_VERSION) {
+      const date = record?.date || nowIsoSeconds();
+      const sig = bytesToHex(new Uint8Array(await crypto.subtle.sign(
+        "Ed25519", key,
+        new TextEncoder().encode(
+          `sautium-timestamp:v${TIMESTAMP_VERSION}:${root}:${date}:${ipHash}`))));
+      record = { v: TIMESTAMP_VERSION, ipv: IP_HASH_VERSION, date,
+                 ip_hash: ipHash, sig };
+      await env.RATE_LIMITS.put(`ts:${root}`, JSON.stringify(record));
+    }
+    stamps.push({
+      root,
+      date: record.date,
+      ip_hash: record.ip_hash,
+      sig: record.sig,
+      authority: TRUSTED_AUTHORITIES[0],
+    });
   }
-
-  return json({
-    root,
-    date: record.date,
-    ip_hash: record.ip_hash,
-    sig: record.sig,
-    authority: TRUSTED_AUTHORITIES[0],
-  }, corsHeaders);
+  const policy = { v: TIMESTAMP_VERSION, not_before: verdict?.not_before ?? null };
+  return json(single ? { ...stamps[0], ...policy } : { stamps, ...policy },
+              corsHeaders);
 }
 
 // -----------------------------------------------------------------------
@@ -1268,7 +1462,7 @@ async function handleVerification(request, env, corsHeaders) {
   }
 
   const ip = request.headers.get("CF-Connecting-IP") || "unknown";
-  const rateLimitResult = await checkRateLimit(env, ip, to);
+  const rateLimitResult = await checkRateLimit(env, ip, to, "mail");
   if (rateLimitResult) {
     return json({ error: rateLimitResult }, corsHeaders, 429);
   }
@@ -1407,7 +1601,7 @@ async function handleInvite(request, env, corsHeaders) {
   }
 
   const ip = request.headers.get("CF-Connecting-IP") || "unknown";
-  const rateLimitResult = await checkRateLimit(env, ip, to);
+  const rateLimitResult = await checkRateLimit(env, ip, to, "mail");
   if (rateLimitResult) {
     return json({ error: rateLimitResult }, corsHeaders, 429);
   }
@@ -1539,7 +1733,7 @@ async function handleAcceptInvite(request, env, corsHeaders) {
     const myVerifiedEmail = (await getVerified(env, my_invite_code))?.email;
 
     const ip = request.headers.get("CF-Connecting-IP") || "unknown";
-    const rateLimitResult = await checkRateLimit(env, ip, senderEmail);
+    const rateLimitResult = await checkRateLimit(env, ip, senderEmail, "mail");
     if (!rateLimitResult) {
       const html = acceptNotificationEmailHtml(myUsername, my_invite_code, myVerifiedEmail);
       const result = await sendEmail(env, senderEmail, `${myUsername} accepted your Sautium invite`, html);
@@ -1707,10 +1901,32 @@ async function sendEmail(env, to, subject, html) {
 // Rate limiting
 // -----------------------------------------------------------------------
 
-async function checkRateLimit(env, ip, recipient) {
+async function brake(binding, key) {
+  // Per-address emergency brake in a Rate Limiting binding: no KV write, a
+  // 60 s window, counted per Cloudflare location — WAF-grade by design
+  // (plan invariant 6), never the accounting. Absent binding (the test
+  // harness, a dev deploy) = no brake.
+  if (!binding) return true;
+  const { success } = await binding.limit({ key });
+  return success;
+}
+
+function throttled(error, corsHeaders, retryAfterS, notBefore = null) {
+  return new Response(
+    JSON.stringify({ error, retry_after: retryAfterS, not_before: notBefore }), {
+      status: 429,
+      headers: { "Content-Type": "application/json",
+                 "Retry-After": String(retryAfterS), ...corsHeaders },
+    });
+}
+
+async function checkRateLimit(env, ip, recipient, route) {
+  // The mail routes' KV limiter. The address bucket is per ROUTE: it used to
+  // be one bucket for every route, and a CGNAT cohort's stamps could spend
+  // its neighbours' email verifications.
   if (!env.RATE_LIMITS) return null;
 
-  const ipKey = `rl:ip:${ip}`;
+  const ipKey = `rl:ip:${route}:${ip}`;
   const recipientKey = `rl:to:${recipient}`;
 
   // Increment FIRST, then check (pessimistic).
@@ -1876,14 +2092,15 @@ async function ipHashUuid(env, ip) {
   // pulls a sealed record. HMAC under IP_PEPPER keeps equality — the only
   // property the merge needs — while making that search impossible without
   // the secret. UUID shape is preserved so the wire format, the signed
-  // timestamp string and the `uuid` column all stay as they are.
+  // timestamp string and the `uuid` column all stay as they are. Hashes
+  // addrKey() (IP_HASH_VERSION 3): the exact IPv4, the /64 for IPv6.
   const pepper = env.IP_PEPPER;
   if (!pepper) throw new Error("IP_PEPPER is not configured");
   const key = await crypto.subtle.importKey(
     "raw", new TextEncoder().encode(pepper),
     { name: "HMAC", hash: "SHA-256" }, false, ["sign"]);
   const mac = new Uint8Array(await crypto.subtle.sign(
-    "HMAC", key, new TextEncoder().encode(`ip:${normalizeText(ip)}`)));
+    "HMAC", key, new TextEncoder().encode(`ip:${normalizeText(addrKey(ip))}`)));
   const h = mac.slice(0, 16);
   h[6] = (h[6] & 0x0f) | 0x40; // version 4 shape: this is keyed, not a uuid5
   h[8] = (h[8] & 0x3f) | 0x80; // RFC 4122 variant

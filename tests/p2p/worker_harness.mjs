@@ -94,10 +94,22 @@ const directory = new workerModule.NodeDirectory(
 const directoryStub = { fetch: (url, init) => directory.fetch(url instanceof Request ? url : new Request(url, init)) };
 
 const store = new Map();
+// Rate Limiting bindings emulated as plain counters (the real ones count per
+// location over a 60 s window; the contract is only `limit({key}) → {success}`).
+const brakeCounts = new Map();
+const fakeBrake = (limit) => ({
+  async limit({ key }) {
+    const c = (brakeCounts.get(key) || 0) + 1;
+    brakeCounts.set(key, c);
+    return { success: c <= limit };
+  },
+});
 const env = {
   BIRTH_SIGNING_KEY: authoritySeedHex,
   EMAIL_PEPPER: emailPepper,
   IP_PEPPER: "test-ip-pepper",
+  BRAKE_STAMP: fakeBrake(8),
+  BRAKE_BIRTH: fakeBrake(100),
   BIRTH_LEDGER: { idFromName: (name) => name, get: () => ledgerStub },
   MAILBOX: { idFromName: (name) => name, get: () => mailboxStub },
   NODE_DIRECTORY: { idFromName: (name) => name, get: () => directoryStub },
@@ -350,6 +362,40 @@ dirDb.prepare("INSERT INTO nodes (pubkey, host4, host6, port, caps, ts) VALUES (
   .run("ee".repeat(32), "203.0.113.200", 21000, "mbdump", Date.now() - 3 * 3600 * 1000);
 const hintsAfterStale = await call("GET", "/node-hints?cap=mbdump");
 
+// --- timestamp notary (Ф20): identity-signed stamps, ledger-priced in shadow ---
+const tsNow = Math.floor(Date.now() / 1000);
+const rootA = "a1".repeat(32), rootB = "b2".repeat(32), rootC = "c3".repeat(32);
+const stampReq = async (key, roots, ts = tsNow) => ({
+  ...(roots.length === 1 ? { root: roots[0] } : { roots }),
+  pubkey: key.pubHex, ts,
+  signature: await sign(key, `sautium-timestamp-request:v1:${ts}:${roots.join(",")}`),
+});
+const tsSigned = await call("POST", "/timestamp", await stampReq(s1, [rootA]), { ip: "198.51.100.90" });
+const tsSignedAgain = await call("POST", "/timestamp", await stampReq(s1, [rootA]), { ip: "198.51.100.90" });
+const tsMulti = await call("POST", "/timestamp", await stampReq(s1, [rootA, rootB]), { ip: "198.51.100.90" });
+const tsUnsigned = await call("POST", "/timestamp", { root: rootC }, { ip: "198.51.100.91" });
+const tsBadSig = await call("POST", "/timestamp",
+  { ...(await stampReq(s1, [rootA])), signature: "00".repeat(64) }, { ip: "198.51.100.90" });
+const tsStale = await call("POST", "/timestamp", await stampReq(s1, [rootA], tsNow - 3600), { ip: "198.51.100.90" });
+const tsBadRoot = await call("POST", "/timestamp", { root: "zz" }, { ip: "198.51.100.90" });
+const tsTooMany = await call("POST", "/timestamp",
+  await stampReq(s1, Array.from({ length: 101 }, (_, i) => i.toString(16).padStart(64, "0"))), { ip: "198.51.100.90" });
+// no certificate: a signal in the ledger, not a refusal, while the budget is shadow
+const tsStranger = await call("POST", "/timestamp", await stampReq(stranger2, ["d4".repeat(32)]), { ip: "198.51.100.92" });
+// the address brake (8 per window in the harness), one IPv6 /64 across many interface ids
+const tsBrake = [];
+for (let i = 0; i < 10; i++) {
+  const r = await call("POST", "/timestamp", { root: (i + 0x10).toString(16).padStart(64, "e") },
+    { ip: `2a00:db8:1:2::${i + 1}` });
+  tsBrake.push({ status: r.status, retry: r.body.retry_after ?? null });
+}
+const stampRows = db.prepare("SELECT pubkey, n_new, n_roots, m, allowed, addr FROM stamps ORDER BY id").all();
+const budgetRow = db.prepare("SELECT tokens FROM notary_budget WHERE pubkey = ?").get(s1.pubHex);
+// ip_hash merges a /64: two interface ids, one pseudonym; another /64, another one
+const ipHash64a = (await call("POST", "/timestamp", { root: "f0".repeat(32) }, { ip: "2a00:db8:1:9::1" })).body.ip_hash;
+const ipHash64b = (await call("POST", "/timestamp", { root: "f1".repeat(32) }, { ip: "2a00:db8:1:9:aaaa:bbbb:cccc:dddd" })).body.ip_hash;
+const ipHash64c = (await call("POST", "/timestamp", { root: "f2".repeat(32) }, { ip: "2a00:db8:1:a::1" })).body.ip_hash;
+
 const stats = await call("GET", "/issuance-stats");
 const badSig = await call("POST", "/birth-certificate", {
   pubkey_hex: s1.pubHex, signature: "00".repeat(64),
@@ -372,5 +418,8 @@ console.log(JSON.stringify({
   v6birth, v6birth2, tun6to4, tunTeredo, tunnelFams, wake6, hintDual, ledgerRowsV6,
   reg1, reg3, regNoCert, regBadSig, masterReg, regReplay,
   hintsDump, hintsRelay, hintsSlices, hintsBadCap, hintsAfterStale,
+  tsSigned, tsSignedAgain, tsMulti, tsUnsigned, tsBadSig, tsStale, tsBadRoot, tsTooMany,
+  tsStranger, tsBrake, stampRows, budgetRow, ipHash64a, ipHash64b, ipHash64c,
+  brakeStampKey: tsBrake.length ? [...brakeCounts.keys()].find((k) => k.startsWith("ts:2a00:db8:1:2")) : null,
   verified_record: JSON.parse(store.get(`verified:${inviteCode.replace("#", ":")}`)),
 }));

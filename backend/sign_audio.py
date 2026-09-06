@@ -55,8 +55,10 @@ import json
 import logging
 import os
 import sys
+import time
 import urllib.error
 import urllib.request
+from collections import namedtuple
 from datetime import timezone
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
@@ -95,20 +97,40 @@ def _vector_bytes(text: str) -> bytes:
     return rs.vector_to_bytes([float(x) for x in text.strip("[]").split(",")])
 
 
+# The /timestamp request carries the node's identity (Ф20): the Worker prices
+# stamps per identity from its birth ledger and answers with `not_before`,
+# the earliest moment it wants this node's next stamp. The request signature
+# reveals nothing new — root↔author is public in every peer's signing_batches.
+STAMP_REQUEST_VERSION = 1
+STAMP_MAX_ROOTS = 100
+
+# What stamp() hands the notary: records stamped, and the Worker's pace
+# advice (epoch seconds, None when the Worker gave none).
+StampResult = namedtuple("StampResult", "stamped not_before")
+
+
 class NotaryThrottled(Exception):
-    """The Worker answered 429 — its per-IP budget for this hour is spent, by
-    this node or by whoever shares the address. `retry_after` is the Worker's
-    Retry-After in seconds when it sent one, else None."""
+    """The Worker answered 429 — the address brake, or (once armed) this
+    identity's budget. `retry_after` is the Worker's Retry-After in seconds
+    when it sent one, else None."""
 
     def __init__(self, retry_after=None):
         super().__init__("Worker throttled the timestamp request")
         self.retry_after = retry_after
 
 
-def _timestamp_root(root: str) -> dict:
+def _timestamp_roots(roots: list, key, author: str) -> dict:
+    """POST the roots to the Worker under this node's signature. Returns the
+    response body: {stamps: [{root, date, ip_hash, sig, authority}], v,
+    not_before}."""
+    ts = int(time.time())
+    message = (f"sautium-timestamp-request:v{STAMP_REQUEST_VERSION}:{ts}:"
+               + ",".join(roots)).encode("utf-8")
+    body = {"roots": roots, "pubkey": author, "ts": ts,
+            "signature": rs.sign(message, key)}
     req = urllib.request.Request(
         f"{WORKER_URL}/timestamp", method="POST",
-        data=json.dumps({"root": root}).encode(),
+        data=json.dumps(body).encode(),
         headers={"Content-Type": "application/json", "User-Agent": "Sautium/1.0"})
     try:
         return json.loads(urllib.request.urlopen(req, timeout=30).read())
@@ -117,6 +139,16 @@ def _timestamp_root(root: str) -> dict:
             retry = e.headers.get("Retry-After")
             raise NotaryThrottled(int(retry) if retry and retry.isdigit() else None) from e
         raise
+
+
+def _timestamp_root(root: str, key, author: str) -> dict:
+    """One batch root → its stamp, with the response's policy fields folded
+    in (v, not_before)."""
+    out = _timestamp_roots([root], key, author)
+    stamp_ = dict(out["stamps"][0])
+    stamp_["v"] = out.get("v", rs.TIMESTAMP_VERSION)
+    stamp_["not_before"] = out.get("not_before")
+    return stamp_
 
 
 def connect():
@@ -472,14 +504,20 @@ _STAMP_TABLES = ("embedding_segments", "audio_features", "artist_bios",
                  "genre_descriptions", "albums", "album_tracks", "track_mbids")
 
 
-def stamp(conn, dry_run=False, max_records=MAX_RECORDS_PER_BATCH) -> int:
+def stamp(conn, dry_run=False, max_records=MAX_RECORDS_PER_BATCH) -> StampResult:
     """Stage 2 — one Merkle batch over everything signed but not yet
     stamped, one Worker call, root + proofs written back. The only stage
     on the network, so the only one that can fail or be throttled
     (NotaryThrottled) — and failing loses nothing: the signatures stay and
     the next call finds them again. One batch per author key, so a rotated
-    identity's leftovers stamp under their own author. Returns the number
-    of records stamped; a call that fills the cap means more are waiting."""
+    identity's leftovers stamp under their own author (the request itself
+    is signed by the CURRENT key — the identity the Worker prices). Returns
+    the records stamped and the Worker's `not_before`; a count that fills
+    the cap means more are waiting."""
+    signer = _signer()
+    if signer is None:
+        return StampResult(0, None)
+    key, me = signer
     cur = conn.cursor()
     pending = []
     for table in _STAMP_TABLES:
@@ -496,13 +534,13 @@ def stamp(conn, dry_run=False, max_records=MAX_RECORDS_PER_BATCH) -> int:
                        for r in cur.fetchall())
     if not pending:
         conn.rollback()
-        return 0
+        return StampResult(0, None)
 
     by_author: dict = {}
     for rec in pending:
         by_author.setdefault(rec[2], []).append(rec)
 
-    stamped = 0
+    stamped, not_before = 0, None
     for author, recs in by_author.items():
         leaves = [rs.record_leaf(sig) for _, _, _, sig in recs]
         root, proofs = rs.merkle_tree(leaves)
@@ -511,18 +549,19 @@ def stamp(conn, dry_run=False, max_records=MAX_RECORDS_PER_BATCH) -> int:
         if dry_run:
             continue
 
-        ts = _timestamp_root(root)
+        ts = _timestamp_root(root, key, me)
+        not_before = ts.get("not_before") or not_before
         if not rs.verify_timestamp(root, ts["date"], ts["ip_hash"], ts["sig"],
-                                   ts["authority"]):
+                                   ts["authority"], int(ts["v"])):
             conn.rollback()
             raise RuntimeError("Worker timestamp failed verification — aborting")
 
         cur.execute("""INSERT INTO signing_batches
                          (batch_root, author_pubkey, worker_date, ip_hash,
-                          worker_sig, authority)
-                       VALUES (%s, %s, %s, %s, %s, %s)""",
+                          worker_sig, authority, timestamp_version)
+                       VALUES (%s, %s, %s, %s, %s, %s, %s)""",
                     (root, author, ts["date"], ts["ip_hash"], ts["sig"],
-                     ts["authority"]))
+                     ts["authority"], int(ts["v"])))
         by_table: dict = {}
         for (table, pk, _, sig), proof in zip(recs, proofs):
             by_table.setdefault(table, []).append((pk, sig, root, json.dumps(proof)))
@@ -553,19 +592,21 @@ def stamp(conn, dry_run=False, max_records=MAX_RECORDS_PER_BATCH) -> int:
                                len(rows) - done, len(rows), table)
             logger.info("stamped %d rows in %s", done, table)
         conn.commit()
-        logger.info("stamped %d record(s) in batch %s @ %s",
-                    len(recs), root[:16], ts["date"])
+        logger.info("stamped %d record(s) in batch %s @ %s (next stamp welcome %s)",
+                    len(recs), root[:16], ts["date"],
+                    "any time" if not ts.get("not_before")
+                    else time.strftime("%H:%M:%SZ", time.gmtime(ts["not_before"])))
         stamped += len(recs)
 
     if dry_run:
         conn.rollback()
         logger.info("dry-run — %d record(s) would stamp, not timestamped or stored",
                     len(pending))
-        return len(pending)
+        return StampResult(len(pending), None)
     if max_records and len(pending) >= max_records:
         logger.info("batch capped at %d records — run again to continue",
                     max_records)
-    return stamped
+    return StampResult(stamped, not_before)
 
 
 def run(stage="both", limit=None, dry_run=False, until_done=False,
@@ -584,7 +625,7 @@ def run(stage="both", limit=None, dry_run=False, until_done=False,
                 break
     if stage in ("stamp", "both"):
         while True:
-            n = stamp(conn, dry_run=dry_run, max_records=max_records)
+            n = stamp(conn, dry_run=dry_run, max_records=max_records).stamped
             total += n
             if not until_done or dry_run or n < max_records or not max_records:
                 break
@@ -610,12 +651,13 @@ def verify_all() -> bool:
     conn.cursor_factory = psycopg2.extras.RealDictCursor
     cur = conn.cursor()
 
-    cur.execute("SELECT batch_root, worker_date, ip_hash, worker_sig, authority "
-                "FROM signing_batches")
+    cur.execute("SELECT batch_root, worker_date, ip_hash, worker_sig, authority, "
+                "timestamp_version FROM signing_batches")
     batches = {
         b["batch_root"]: (
             b["worker_date"].astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
-            str(b["ip_hash"]), b["worker_sig"], b["authority"])
+            str(b["ip_hash"]), b["worker_sig"], b["authority"],
+            int(b["timestamp_version"]))
         for b in cur.fetchall()
     }
 
@@ -625,7 +667,8 @@ def verify_all() -> bool:
         b = batches.get(r["batch_root"])
         return bool(b and rs.verify_seal(
             payload, r["signature"], r["author_pubkey"], r["merkle_proof"],
-            r["batch_root"], b[0], b[1], b[2], b[3], TRUSTED_AUTHORITIES))
+            r["batch_root"], b[0], b[1], b[2], b[3], TRUSTED_AUTHORITIES,
+            worker_version=b[4]))
 
     # Server-side cursor: a signed library is hundreds of thousands of
     # segments, each row carrying a 512-float vector as text — fetchall()
@@ -710,10 +753,14 @@ def resign_timestamps():
     already in the current format comes back byte-identical, so this stays
     idempotent without the client having to know which formats exist.
 
-    One Worker request per root, committed as it lands: the Worker's per-IP
-    budget is an hour's worth of requests, and a run over more batches than
-    that stops at the throttle with its progress kept — re-run later for the
-    rest (a root already refreshed comes back byte-identical)."""
+    STAMP_MAX_ROOTS roots per Worker request (a known root costs the
+    identity's budget nothing), each page committed as it lands: a run that
+    meets the address brake stops with its progress kept — re-run later for
+    the rest (a root already refreshed comes back byte-identical)."""
+    signer = _signer()
+    if signer is None:
+        return
+    key, me = signer
     conn = connect()
     cur = conn.cursor()
 
@@ -724,24 +771,32 @@ def resign_timestamps():
         return
     logger.info("re-timestamping %d batch(es)", len(roots))
 
-    for i, root in enumerate(roots):
+    done = 0
+    for i in range(0, len(roots), STAMP_MAX_ROOTS):
+        page = roots[i:i + STAMP_MAX_ROOTS]
         try:
-            ts = _timestamp_root(root)
+            out = _timestamp_roots(page, key, me)
         except NotaryThrottled as e:
             logger.warning("Worker throttled after %d of %d batch(es) — re-run "
-                           "in %s to continue", i, len(roots),
-                           f"{e.retry_after}s" if e.retry_after else "an hour")
+                           "in %s to continue", done, len(roots),
+                           f"{e.retry_after}s" if e.retry_after else "a minute")
             return
-        if not rs.verify_timestamp(root, ts["date"], ts["ip_hash"], ts["sig"],
-                                   ts["authority"]):
-            conn.rollback()
-            raise RuntimeError(f"re-timestamp failed verification: {root[:16]}")
-        cur.execute("""UPDATE signing_batches
-                       SET worker_date=%s, ip_hash=%s, worker_sig=%s, authority=%s
-                       WHERE batch_root=%s""",
-                    (ts["date"], ts["ip_hash"], ts["sig"], ts["authority"], root))
+        version = int(out.get("v", rs.TIMESTAMP_VERSION))
+        for ts in out["stamps"]:
+            root = ts["root"]
+            if not rs.verify_timestamp(root, ts["date"], ts["ip_hash"], ts["sig"],
+                                       ts["authority"], version):
+                conn.rollback()
+                raise RuntimeError(f"re-timestamp failed verification: {root[:16]}")
+            cur.execute("""UPDATE signing_batches
+                           SET worker_date=%s, ip_hash=%s, worker_sig=%s,
+                               authority=%s, timestamp_version=%s
+                           WHERE batch_root=%s""",
+                        (ts["date"], ts["ip_hash"], ts["sig"], ts["authority"],
+                         version, root))
         conn.commit()
-    logger.info("re-timestamped %d batch(es)", len(roots))
+        done += len(page)
+    logger.info("re-timestamped %d batch(es)", done)
 
 
 if __name__ == "__main__":

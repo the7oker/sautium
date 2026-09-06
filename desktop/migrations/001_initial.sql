@@ -600,7 +600,11 @@ CREATE TABLE IF NOT EXISTS signing_batches (
     ip_hash       UUID,
     worker_sig    CHAR(128) NOT NULL,
     authority     CHAR(64) NOT NULL,
-    created_at    TIMESTAMPTZ DEFAULT now()
+    created_at    TIMESTAMPTZ DEFAULT now(),
+    -- The Worker payload format this batch was countersigned under
+    -- (record_sig.timestamp_payload); travels with the batch on the sync
+    -- wire so a format bump never invalidates stamps already issued.
+    timestamp_version SMALLINT NOT NULL DEFAULT 2
 );
 
 -- Per-record author signature + Merkle inclusion in a timestamped batch.

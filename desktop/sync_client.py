@@ -704,8 +704,10 @@ class SyncClient:
                 b = batches.get(root)
                 cache[root] = bool(
                     b and b.get("authority") in TRUSTED_AUTHORITIES
-                    and rs.verify_timestamp(root, b["worker_date"], b["ip_hash"],
-                                            b["worker_sig"], b["authority"]))
+                    and rs.verify_timestamp(
+                        root, b["worker_date"], b["ip_hash"],
+                        b["worker_sig"], b["authority"],
+                        int(b.get("timestamp_version") or rs.TIMESTAMP_VERSION)))
             return cache[root]
 
         return ok
@@ -713,19 +715,23 @@ class SyncClient:
     @staticmethod
     def _insert_batches(cur, batches: dict, roots: set):
         """Store the Worker-timestamp rows referenced by verified seals, so
-        this node re-serves the full chain (relay keeps authorship intact)."""
+        this node re-serves the full chain (relay keeps authorship intact).
+        A peer on the wire format before timestamp_version sends none — its
+        batches are the one format that ever existed."""
         if not roots:
             return
         psycopg2.extras.execute_values(
             cur,
             """INSERT INTO signing_batches
                (batch_root, author_pubkey, worker_date, ip_hash,
-                worker_sig, authority)
+                worker_sig, authority, timestamp_version)
                VALUES %s ON CONFLICT (batch_root) DO NOTHING""",
             [(r, batches[r]["author_pubkey"], batches[r]["worker_date"],
               batches[r]["ip_hash"], batches[r]["worker_sig"],
-              batches[r]["authority"]) for r in roots],
-            template="(%s, %s, %s::timestamptz, %s::uuid, %s, %s)",
+              batches[r]["authority"],
+              int(batches[r].get("timestamp_version") or rs.TIMESTAMP_VERSION))
+             for r in roots],
+            template="(%s, %s, %s::timestamptz, %s::uuid, %s, %s, %s)",
         )
 
     @staticmethod

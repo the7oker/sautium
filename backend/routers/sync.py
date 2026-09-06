@@ -607,7 +607,7 @@ def _batches_map(roots: set) -> dict:
         return {}
     rows = _db_query(
         """SELECT batch_root, author_pubkey, worker_date, ip_hash::text AS ip_hash,
-                  worker_sig, authority
+                  worker_sig, authority, timestamp_version
            FROM signing_batches WHERE batch_root = ANY(%s)""",
         [list(roots)],
     )
@@ -619,6 +619,7 @@ def _batches_map(roots: set) -> dict:
             "ip_hash": r["ip_hash"],
             "worker_sig": r["worker_sig"],
             "authority": r["authority"],
+            "timestamp_version": r["timestamp_version"],
         }
         for r in rows
     }
