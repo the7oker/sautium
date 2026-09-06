@@ -469,7 +469,8 @@ class P2PManager:
 
                 if needs_restart:
                     logger.warning(
-                        "Sync server not responding, restarting..."
+                        f"Sync server not responding ({needs_restart}), "
+                        "restarting..."
                     )
                     try:
                         await self._sync_server.stop()
@@ -527,29 +528,31 @@ class P2PManager:
     async def _check_sync_server_health(self) -> bool:
         """Check if the sync server is actually accepting connections.
 
-        Returns True if the server needs to be restarted.
+        Returns the reason the server needs a restart (a short string),
+        or None when it is healthy — the reason is logged, so a restart
+        can be told apart from a probe hiccup after the fact.
 
         First checks socket-level state (fast), then falls back to a
         self-connection probe every 3 consecutive failures to avoid
         false positives from transient network hiccups.
         """
         if not self._sync_server or not self._sync_server._site:
-            return True
+            return "no site"
 
         site = self._sync_server._site
         # Fast checks: server object or socket clearly dead
         if site._server is None:
-            return True
+            return "server object gone"
         if site._server.sockets is not None and len(
             site._server.sockets
         ) == 0:
-            return True
+            return "no listening sockets"
         try:
             if (site._server.sockets
                     and site._server.sockets[0].fileno() == -1):
-                return True
-        except Exception:
-            return True
+                return "listening socket closed"
+        except Exception as e:
+            return f"socket state unreadable: {e!r}"
 
         # Self-connection probe: catches the Python 3.13 proactor bug
         # where the socket looks alive but the accept loop is dead.
@@ -566,16 +569,13 @@ class P2PManager:
                 lambda: sock.connect(("127.0.0.1", self._http_port)),
             )
             self._health_fail_count = 0
-            return False  # server is healthy
+            return None  # server is healthy
         except Exception as exc:
             self._health_fail_count += 1
             if self._health_fail_count >= 3:
-                logger.warning(
-                    "Sync server health check failed "
-                    f"{self._health_fail_count} times: {exc}"
-                )
-                return True  # needs restart
-            return False  # might be transient
+                return (f"self-connect failed {self._health_fail_count} "
+                        f"times: {exc}")
+            return None  # might be transient
         finally:
             if sock:
                 try:

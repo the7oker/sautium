@@ -544,7 +544,15 @@ def _step_sync_discographies(limit: int) -> Dict[str, int]:
             logger.error(f"Background discography failed for {row['name']}: {e}")
             stats["errors"] += 1
 
-    if stats["processed"] >= int(limit):
+    # Drain only while the batch still carried WANTED artists (listened,
+    # seeded, similar to listened). Tier 3 — every other canonized artist —
+    # is the ungated fan-out: each reconciled discography credits more
+    # artists, whose canon mints more names, whose discographies credit
+    # more. Its only bound is the interval, so it keeps it: 50 per 30 min,
+    # never 50 per 2 min (a fresh node went 21k → 94k phantom tracks in 40
+    # minutes when it did).
+    if (stats["processed"] >= int(limit)
+            and any(int(r.get("tier", 3)) < 3 for r in rows)):
         stats["retry_soon"] = True
     return stats
 

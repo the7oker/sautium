@@ -1113,17 +1113,17 @@ def stale_canonized_artists(limit: Optional[int] = None,
             SELECT sa.artist_id
             FROM similar_artists sa JOIN listened l ON l.artist_id = sa.similar_artist_id
         )
-        SELECT a.id::text AS id, a.name
+        SELECT a.id::text AS id, a.name,
+               CASE WHEN a.id IN (SELECT artist_id FROM listened) THEN 0
+                    WHEN a.id IN (SELECT artist_id FROM seeded) THEN 1
+                    WHEN a.id IN (SELECT artist_id FROM similar_of_listened) THEN 2
+                    ELSE 3 END AS tier
         FROM artists a
         WHERE EXISTS (SELECT 1 FROM artist_mbids am WHERE am.artist_id = a.id)
           AND (a.last_album_sync IS NULL
                OR a.last_album_sync < now() - make_interval(days => %(days)s))
           AND {covered}
-        ORDER BY
-          CASE WHEN a.id IN (SELECT artist_id FROM listened) THEN 0
-               WHEN a.id IN (SELECT artist_id FROM seeded) THEN 1
-               WHEN a.id IN (SELECT artist_id FROM similar_of_listened) THEN 2
-               ELSE 3 END,
+        ORDER BY tier,
           a.last_album_sync ASC NULLS FIRST,
           a.name
     """
