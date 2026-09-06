@@ -152,6 +152,37 @@ rest of P2P: announces and lookups await readiness, chat and friends do not.
 **Smart seed reuse**: 1 DHT lookup + 1 inventory call instead of N lookups for
 N artists.
 
+### Holdings filter — the compressed inventory (2026-09-06)
+
+The gap set of a node with the phantom layer is millions of tracks, and asking
+a peer about all of them is ~306 inventory requests (10k uuids each, ~110 MB
+up) per peer per run — for answers that are "not here" almost every time. The
+sync now splits its gaps:
+
+- **Core** — tracks of ENGAGED artists (an owned file or a completed listen):
+  asked of every peer in full through the exact `/api/sync/inventory`, as
+  before. Bounded by human behaviour.
+- **Bulk** — everything else (phantom-only artists): asked through the peer's
+  **holdings filter**, `GET /api/sync/holdings` — two Bloom filters
+  (`desktop/p2p/bloom.py`, 1% false positives, 9.6 bits per element, seven
+  positions from the uuid's own SHA-1 bits, no hash functions) over what the
+  peer HOLDS: track uuids with sealed analysis, artist uuids with sealed
+  bios/tags/similars. The asker tests its bulk locally — a miss is final, a
+  hit is a reason to ask — and sends the exact inventory only the hits, plus
+  the hit ARTISTS named outright (`artist_uuids`), so an artist whose tracks
+  all missed still yields its bio.
+
+Sized by holdings, never by gaps: 40k held tracks ≈ 50 KB, 3M ≈ 3.6 MB. Both
+directions stay available and the asker picks the cheaper one per peer from
+the counts `/health` advertises (~40 bytes per uuid to send vs ~1.2 bytes per
+held element to fetch): a small node keeps sending its gaps, a big node fetches
+the small node's filter. Filters are cached per peer key for the process
+lifetime and refreshed by version (`?have=<version>` answers with a stub when
+nothing moved); the peer rebuilds its filters in memory when its holdings
+version — row counts + latest `updated_at` of the six contributing tables,
+checked at most every 5 min — moves. Adds only, so a delta update (uuids
+since version N) is a plain append when it is needed.
+
 ### Account Identity + Chat Discovery
 
 Phase P4 added **per-user announces** on top of the per-artist ones:

@@ -277,6 +277,12 @@ class BackendAPIClient:
         """Fetch library statistics from GET /stats."""
         return self._get_json("/stats")
 
+    @property
+    def peer_pubkey(self) -> Optional[str]:
+        """The node key the TLS channel pinned on the last /health — what a
+        cache of this peer's published state is keyed by."""
+        return self._server_pubkey
+
     def get_health(self) -> Optional[dict]:
         """Fetch health status from GET /health. For a peer this is also
         where its pubkey is learned — every later request is signed for
@@ -354,13 +360,22 @@ class BackendAPIClient:
 
     # -- Sync API ----------------------------------------------------------
 
-    def sync_inventory(self, track_uuids: list[str]) -> Optional[dict]:
-        """Get available enrichment data for given track UUIDs."""
-        return self._post_json(
-            "/api/sync/inventory",
-            body={"track_uuids": track_uuids},
-            timeout=300,
-        )
+    def sync_inventory(self, track_uuids: list[str],
+                       artist_uuids: Optional[list[str]] = None) -> Optional[dict]:
+        """Get available enrichment data for given track UUIDs, plus the
+        artist-level categories for `artist_uuids` named outright."""
+        body = {"track_uuids": track_uuids}
+        if artist_uuids:
+            body["artist_uuids"] = artist_uuids
+        return self._post_json("/api/sync/inventory", body=body, timeout=300)
+
+    def sync_holdings(self, have: Optional[str] = None) -> Optional[dict]:
+        """The peer's holdings filters (GET /api/sync/holdings); `have` =
+        the version already cached, answered with a stub when unchanged."""
+        path = "/api/sync/holdings"
+        if have:
+            path += "?have=" + urllib.parse.quote(have, safe="")
+        return self._get_json(path, timeout=300)
 
     def sync_pull(self, category: str, uuids: list[str]) -> Optional[dict]:
         """Pull enrichment data for a category and list of UUIDs."""

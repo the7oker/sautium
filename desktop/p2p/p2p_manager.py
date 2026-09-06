@@ -100,6 +100,7 @@ class P2PManager:
         self._sync_request_notify: Optional[asyncio.Event] = None
         self._sync_reasons: set[str] = set()     # why the queued run was asked for
         self._unreachable: dict[str, tuple[float, int]] = {}   # addr -> (retry_after, strikes)
+        self._holdings_cache: dict = {}                        # peer pubkey -> published holdings filters
         self._empty_peers: dict[str, float] = {}               # addr -> ignore until
         self._gap_count = 0                                    # last incomplete-set size
         self._first_source: Optional[asyncio.Event] = None   # LAN peer seen / DHT ready
@@ -789,6 +790,26 @@ class P2PManager:
                 conn.close()
         return await asyncio.get_event_loop().run_in_executor(None, _blocking)
 
+    async def _core_and_bulk(
+        self, artist_uuids: list[str]
+    ) -> tuple[list[str], tuple[list[str], list[str]]]:
+        """(core track uuids, (bulk track uuids, bulk artist uuids)): the
+        engaged artists' tracks are the core a peer is asked about in full;
+        the rest is the phantom bulk that goes through the holdings
+        filter (sync_queries.split_engaged)."""
+        def _blocking():
+            conn = psycopg2.connect(self.db_dsn)
+            conn.autocommit = True
+            try:
+                return sync_queries.split_engaged(conn, artist_uuids)
+            finally:
+                conn.close()
+        engaged, rest = await asyncio.get_event_loop().run_in_executor(
+            None, _blocking)
+        core = await self._get_tracks_for_artists(engaged)
+        bulk_tracks = await self._get_tracks_for_artists(rest)
+        return core, (bulk_tracks, rest)
+
     async def _get_tracks_for_artists(
         self, artist_uuids: list[str]
     ) -> list[str]:
@@ -880,14 +901,19 @@ class P2PManager:
 
         _progress(f"Found {len(incomplete)} artists with missing data")
 
-        # Step 2: Collect track UUIDs for all incomplete artists (single query)
-        track_uuids = await self._get_tracks_for_artists(incomplete)
+        # Step 2: the CORE (engaged artists — asked of every peer in full)
+        # and the phantom BULK (asked through the peer's holdings filter).
+        track_uuids, bulk = await self._core_and_bulk(incomplete)
 
-        if not track_uuids:
+        if not track_uuids and not bulk[0]:
             _progress("No tracks found for unenriched artists")
             return {"status": "no_tracks"}
 
-        _progress(f"Need enrichment for {len(track_uuids)} tracks")
+        _progress(
+            f"Need enrichment for {len(track_uuids)} core tracks"
+            + (f" + {len(bulk[0])} phantom-bulk tracks of {len(bulk[1])} artists"
+               if bulk[0] else "")
+        )
 
         total_stats = {}
 
@@ -914,7 +940,7 @@ class P2PManager:
         manual_peers = self.config.get("p2p", {}).get("manual_peers", [])
         for peer_addr in manual_peers:
             _add_stats(await self._sync_from_peer(
-                peer_addr, track_uuids, _progress, progress_cb))
+                peer_addr, track_uuids, _progress, progress_cb, bulk=bulk))
 
         # Step 4: LAN peers (fast, works behind any NAT)
         if self._lan_discovery:
@@ -940,7 +966,7 @@ class P2PManager:
                     )
                     _add_stats(await self._sync_from_peer(
                         peer_url, track_uuids, _progress, progress_cb,
-                        is_lan=True,
+                        is_lan=True, bulk=bulk,
                     ))
 
         # Step 5: the internet tiers — only for what the LAN left behind.
@@ -1001,12 +1027,13 @@ class P2PManager:
                 remaining = await self._get_unenriched_artists()
                 if not remaining:
                     return
-                tracks = await self._get_tracks_for_artists(remaining)
-                if not tracks:
+                tracks, rest = await self._core_and_bulk(remaining)
+                if not tracks and not rest[0]:
                     return
-                _progress(f"Asking {addr} about {len(tracks)} tracks...")
+                _progress(f"Asking {addr} about {len(tracks)} core + "
+                          f"{len(rest[0])} bulk tracks...")
                 synced = await self._sync_from_peer(
-                    addr, tracks, _progress, progress_cb, peer_api=api,
+                    addr, tracks, _progress, progress_cb, peer_api=api, bulk=rest,
                 )
                 if not _add_stats(synced) and "error" not in synced:
                     # Reachable, answered, had nothing for us — the residue
@@ -1214,9 +1241,12 @@ class P2PManager:
         progress_cb,
         is_lan: bool = False,
         peer_api: Optional[BackendAPIClient] = None,
+        bulk: Optional[tuple[list[str], list[str]]] = None,
     ) -> dict:
         """Sync enrichment data from a single peer. Returns stats dict.
-        `peer_api`: a client the caller already probed — skips the probe."""
+        `peer_api`: a client the caller already probed — skips the probe.
+        `bulk`: (track uuids, artist uuids) of the phantom bulk, asked
+        through the peer's holdings filter (see SyncClient.run_sync)."""
         if peer_api is None:
             _progress(f"Connecting to {peer_addr}...")
             peer_api = await self._try_connect_peer(peer_addr, is_lan=is_lan)
@@ -1233,12 +1263,15 @@ class P2PManager:
             db_dsn=self.db_dsn,
             batch_size=500,
             progress_cb=progress_cb,
+            holdings_cache=self._holdings_cache,
         )
 
+        bulk_tracks, bulk_artists = bulk or ([], [])
         try:
             stats = await asyncio.get_event_loop().run_in_executor(
                 None,
-                partial(sync_client.run_sync, track_uuids),
+                partial(sync_client.run_sync, track_uuids,
+                        bulk_tracks, bulk_artists),
             )
         except Exception as e:
             logger.error(f"Sync from {peer_addr} failed: {e}")

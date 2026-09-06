@@ -600,6 +600,9 @@ class SyncServer:
             "mb_dump": self.mb_dump_version,
             "mb_slices": self._slice_blob_total(),
             "capabilities": sync_queries.CAPABILITIES,
+            # Version + counts of the holdings filter (None until built):
+            # the asker prices fetching it against sending its own gaps.
+            "holdings": sync_queries.holdings_summary(),
         })
 
     def _slice_blob_total(self) -> int:
@@ -634,24 +637,50 @@ class SyncServer:
         try:
             body = await request.json()
             track_uuids = body.get("track_uuids", [])
+            artist_uuids = body.get("artist_uuids", [])
         except (json.JSONDecodeError, Exception):
             return self._json_response(
                 request, {"error": "invalid JSON"}, status=400
             )
 
-        if not isinstance(track_uuids, list) or len(track_uuids) > MAX_UUIDS_PER_REQUEST:
-            return self._json_response(
-                request, {"error": f"track_uuids must be a list of at most {MAX_UUIDS_PER_REQUEST} items"},
-                status=400,
-            )
+        for name, lst in (("track_uuids", track_uuids), ("artist_uuids", artist_uuids)):
+            if not isinstance(lst, list) or len(lst) > MAX_UUIDS_PER_REQUEST:
+                return self._json_response(
+                    request, {"error": f"{name} must be a list of at most {MAX_UUIDS_PER_REQUEST} items"},
+                    status=400,
+                )
 
         try:
             result = await self._run_query(
-                sync_queries.get_inventory, track_uuids
+                sync_queries.get_inventory, track_uuids, artist_uuids
             )
             return self._json_response(request, result)
         except Exception as e:
             logger.error(f"Inventory query failed: {e}")
+            return self._json_response(
+                request, {"error": "internal error"}, status=500
+            )
+
+    async def handle_holdings(self, request: web.Request) -> web.Response:
+        """GET /api/sync/holdings?have=<version> — the holdings filters
+        (sync_queries.get_holdings): what this node holds, compressed, so a
+        peer with millions of gaps tests them locally and asks the exact
+        inventory only about the hits."""
+        ip = request.remote or "unknown"
+        if not self._check_rate_limit(ip):
+            return self._json_response(
+                request, {"error": "rate limited"}, status=429
+            )
+        if not self._sharing_enabled():
+            return self._json_response(
+                request, {"error": "sharing disabled"}, status=403)
+        try:
+            result = await self._run_query(
+                sync_queries.get_holdings, request.query.get("have") or None
+            )
+            return self._json_response(request, result)
+        except Exception as e:
+            logger.error(f"Holdings query failed: {e}")
             return self._json_response(
                 request, {"error": "internal error"}, status=500
             )
@@ -1988,6 +2017,7 @@ class SyncServer:
         self._app = web.Application(middlewares=[self._inbound_middleware])
         self._app.router.add_get("/health", self.handle_health)
         self._app.router.add_post("/api/sync/inventory", self.handle_inventory)
+        self._app.router.add_get("/api/sync/holdings", self.handle_holdings)
         self._app.router.add_post(
             "/api/sync/pull/{category}", self.handle_pull
         )

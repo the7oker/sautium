@@ -37,7 +37,8 @@ from fastapi.responses import JSONResponse
 
 from db_pool import get_conn
 from routers.sync import (
-    SYNC_CAPABILITIES, mb_dump_version, mb_router, node_pubkey_hex, router,
+    SYNC_CAPABILITIES, carry_queries, mb_dump_version, mb_router,
+    node_pubkey_hex, router,
 )
 
 logger = logging.getLogger(__name__)
@@ -427,6 +428,10 @@ async def health() -> dict:
         "mb_dump": mb_dump_version(),
         "mb_slices": mb_slices,
         "capabilities": SYNC_CAPABILITIES,
+        # Version + counts of the holdings filter (None until built): the
+        # asker prices fetching it against sending its own gaps.
+        "holdings": (carry_queries.holdings_summary()
+                     if carry_queries is not None else None),
     }
 
 
