@@ -333,3 +333,59 @@ def test_worker_mailbox_contract():
     assert r["hintsSlices"]["body"]["nodes"] == []           # nobody registered that capability
     assert r["hintsBadCap"]["status"] == 400
     assert [n["host"] for n in r["hintsAfterStale"]["body"]["nodes"]] == ["198.51.100.50"]   # TTL hides the stale row
+
+
+@pytest.mark.skipif(shutil.which("node") is None, reason="node not installed")
+def test_worker_timestamp_contract():
+    """The timestamp notary (Ф20): identity-signed requests are priced by the
+    ledger in shadow and answered with pace advice, unsigned ones still stamp,
+    the address brake answers 429 — and every stamp verifies with the client's
+    own timestamp verifier."""
+    from backend import record_sig
+
+    seed, _, issuer = _authority()
+    r = json.loads(subprocess.run(
+        ["node", str(HERE / "worker_harness.mjs"), seed.hex(), "test-email-pepper"],
+        capture_output=True, text=True, timeout=120, check=True,
+    ).stdout)
+
+    s = r["tsSigned"]
+    assert s["status"] == 200
+    b = s["body"]
+    assert b["root"] == "a1" * 32 and b["authority"] == issuer and b["v"] == 2
+    assert isinstance(b["not_before"], int)
+    assert record_sig.verify_timestamp(b["root"], b["date"], b["ip_hash"], b["sig"], issuer, b["v"])
+    assert not record_sig.verify_timestamp(b["root"], b["date"], b["ip_hash"], b["sig"], issuer, 7)
+    # idempotent: the same root keeps its first date and signature
+    again = r["tsSignedAgain"]["body"]
+    assert again["date"] == b["date"] and again["sig"] == b["sig"]
+    m = r["tsMulti"]["body"]
+    assert [x["root"] for x in m["stamps"]] == ["a1" * 32, "b2" * 32]
+    assert m["stamps"][0]["sig"] == b["sig"] and m["v"] == 2
+    # an unsigned (older client) request stamps, with no identity to pace
+    assert r["tsUnsigned"]["status"] == 200 and r["tsUnsigned"]["body"]["not_before"] is None
+    assert r["tsBadSig"]["status"] == 403 and r["tsStale"]["status"] == 403
+    assert r["tsBadRoot"]["status"] == 400 and r["tsTooMany"]["status"] == 400
+    # no certificate: a ledger signal while the budget is shadow, not a refusal
+    assert r["tsStranger"]["status"] == 200
+    # the address brake: one IPv6 /64 across interface ids, 8 pass then 429
+    assert [x["status"] for x in r["tsBrake"]] == [200] * 8 + [429, 429]
+    assert r["tsBrake"][-1]["retry"] == 60
+    assert r["brakeStampKey"] == "ts:2a00:db8:1:2::/64"
+    # ip_hash (v3) merges a /64 and separates the next one
+    assert r["ipHash64a"] == r["ipHash64b"] and r["ipHash64a"] != r["ipHash64c"]
+
+    rows = r["stampRows"]
+    assert [(row["n_new"], row["n_roots"], row["allowed"]) for row in rows[:5]] == [
+        (1, 1, 1), (0, 1, 1), (1, 2, 1), (1, 1, 1), (1, 1, 1)]
+    assert rows[0]["pubkey"] == r["issue1"]["body"]["pubkey"] and rows[3]["pubkey"] == ""
+    assert all(row["m"] == 1 for row in rows)
+    # the bucket: 6 deep, one token per NEW root (a re-submitted root is free)
+    assert 3.9 < r["budgetRow"]["tokens"] < 4.1
+
+    n = r["stats"]["body"]["ledger"]["notary"]["last_24h"]
+    assert n == {"requests": 16, "new_roots": 15, "unsigned": 12, "identities": 2,
+                 "would_throttle": 0, "m2": 0}
+    policy = r["stats"]["body"]["policy"]
+    assert policy["stamp_budget_armed"] is False
+    assert policy["stamp_base_per_day"] == 48 and policy["stamp_burst"] == 6

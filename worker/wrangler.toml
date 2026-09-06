@@ -40,3 +40,16 @@ storage = "sqlite"
 
 # Custom domain (optional): verify.sautium.net
 # Configure in Cloudflare dashboard: Workers → Triggers → Custom Domains
+
+# Per-address emergency brakes (Ф20): Rate Limiting bindings — no KV write, a
+# 60 s window, counted per location — sized for a CGNAT cohort, never the
+# accounting. The per-identity budget lives in the birth ledger (shadow).
+[[ratelimits]]
+name = "BRAKE_STAMP"
+namespace_id = "1001"
+simple = { limit = 30, period = 60 }
+
+[[ratelimits]]
+name = "BRAKE_BIRTH"
+namespace_id = "1002"
+simple = { limit = 10, period = 60 }

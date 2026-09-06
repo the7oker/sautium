@@ -15,11 +15,12 @@ contract.
 Why two cadences: a signature is local and instant, so it lands on every
 wake — the row is final from then on and no later uuid rewrite can be
 mis-attested (the guard sheds it). A stamp is one Worker call per batch
-against a per-IP hourly budget shared with whoever else sits behind the
-same address (CGNAT), so wakes inside STAMP_MIN_SPACING_S coalesce into
-one stamp at the window's end: an album's worth of streamed tracks is one
-root, not twelve. Every deadline here is known when it is set — the loop
-waits on its event with the deadline as the timeout, never polls.
+against a budget the Worker keeps per identity (Ф20) and per address, so
+wakes inside the pace coalesce into one stamp at its end: an album's worth
+of streamed tracks is one root, not twelve. The pace is the Worker's
+`not_before` when it gave one, STAMP_MIN_SPACING_S otherwise. Every
+deadline here is known when it is set — the loop waits on its event with
+the deadline as the timeout, never polls.
 """
 
 import logging
@@ -30,12 +31,12 @@ from typing import Optional
 
 logger = logging.getLogger(__name__)
 
-# Minimum gap between two Worker stamps from this node. Sized against the
-# Worker's per-IP budget (10/h, shared by a CGNAT cohort): a node listening
-# all day makes at most four stamps an hour, and a normal album lands in one.
+# The node's own minimum gap between two Worker stamps, for a Worker that
+# sends no `not_before`: a node listening all day makes at most four stamps
+# an hour, and a normal album lands in one.
 STAMP_MIN_SPACING_S = 15 * 60
 # Worker unreachable, or throttled without a Retry-After: the retry ladder,
-# holding at the last rung (the Worker's rate window is an hour).
+# holding at the last rung.
 _RETRY_S = (60, 300, 900, 3600)
 
 
@@ -52,8 +53,8 @@ class _Notary:
         self._conn = None
         self._reasons: list = []
         self._full = False
-        self._stamp_at: Optional[float] = None
-        self._last_stamp = 0.0
+        self._stamp_at: Optional[float] = None    # a scheduled stamp attempt
+        self._earliest = 0.0                      # the pace: no stamp before this
         self._failures = 0
         self._state = {
             "running": False,
@@ -149,15 +150,15 @@ class _Notary:
         now = time.time()
         with self._lock:
             due = self._stamp_at
-            since_last = now - self._last_stamp
+            earliest = self._earliest
         if due is not None and now < due:
             return
-        if due is None and since_last < STAMP_MIN_SPACING_S:
-            self._defer_stamp(STAMP_MIN_SPACING_S - since_last)
+        if due is None and now < earliest:
+            self._defer_stamp(earliest - now)
             return
         conn = self._connect()
         try:
-            n = sign_audio.stamp(conn)
+            result = sign_audio.stamp(conn)
         except sign_audio.NotaryThrottled as e:
             wait = e.retry_after or self._backoff()
             logger.warning("notary: Worker throttled — next stamp in %ds", wait)
@@ -167,15 +168,18 @@ class _Notary:
         with self._lock:
             self._stamp_at = None
             self._failures = 0
-            if n:
-                self._last_stamp = time.time()
+            if result.stamped:
+                # The Worker's pace when it gave one, the node's own otherwise.
+                self._earliest = (float(result.not_before) if result.not_before
+                                  else time.time() + STAMP_MIN_SPACING_S)
         self._set(next_stamp_at=None, last_error=None)
-        if n:
-            self._set(last_stamp_at=_now_iso(), last_stamped=n)
-            if n >= sign_audio.MAX_RECORDS_PER_BATCH:
-                # A capped backlog (a full re-seal) continues at once: each
-                # batch is one Worker call, a handful in a row is within budget.
-                self._defer_stamp(0)
+        if result.stamped:
+            self._set(last_stamp_at=_now_iso(), last_stamped=result.stamped)
+            if result.stamped >= sign_audio.MAX_RECORDS_PER_BATCH:
+                # A capped backlog (a full re-seal) continues as soon as the
+                # pace allows — a burst of batches is what the Worker's
+                # bucket is deep for.
+                self._defer_stamp(max(0.0, self._earliest - time.time()))
 
     # ---- helpers ---------------------------------------------------------
     def _defer_stamp(self, seconds: float) -> None:
