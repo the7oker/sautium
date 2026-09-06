@@ -668,6 +668,7 @@ def _loop() -> None:
     logger.info("Background enrichment loop started")
     db_due_at = 0.0        # the first pass runs the DB steps too
     minted = False         # canon work created since the last NOTIFY
+    grew = False           # new phantom gaps created since the last sync request
     try:
         _await_first_sync()
         while not _cancel_flag():
@@ -697,13 +698,23 @@ def _loop() -> None:
             # fetch has no dedupe of its own.
             minted = minted or bool((batch.get("artists") or {}).get("success")
                                     or (batch.get("similar") or {}).get("stored"))
-            if minted and (db_ran or not backlog):
-                minted = False
+            # New phantom albums (discography reconcile on the MB dump) and
+            # new similar-artist stubs are gaps the P2P sync has never asked
+            # about — on a fresh node a seed's 500 tracks become 20k within
+            # minutes. Ask for a sync now rather than at the interval; the
+            # launcher merges and serialises concurrent requests.
+            grew = grew or bool((batch.get("discography") or {}).get("new_albums")
+                                or (batch.get("similar") or {}).get("stored"))
+            if (minted or grew) and (db_ran or not backlog):
                 try:
                     from db_pool import db_execute
-                    db_execute("NOTIFY sautium_enrich_done")
+                    if minted:
+                        db_execute("NOTIFY sautium_enrich_done")
+                    if grew:
+                        db_execute("NOTIFY sautium_sync_request")
                 except Exception as e:
-                    logger.debug(f"enrich-done notify failed: {e}")
+                    logger.debug(f"enrich notify failed: {e}")
+                minted = grew = False
 
             if backlog:
                 continue

@@ -297,9 +297,15 @@ class DHTService:
         if not (self._session and self._state_store):
             return
         try:
-            params = self._session.session_state(
-                lt.save_state_flags_t.save_dht_state)
-            self._state_store.save(lt.write_session_params_buf(params))
+            flags = lt.save_state_flags_t.save_dht_state
+            if hasattr(self._session, "session_state"):
+                buf = lt.write_session_params_buf(self._session.session_state(flags))
+            else:
+                # libtorrent 2.0.x bindings: the deprecated save_state()
+                # entry carries the same "dht state" dict, and
+                # read_session_params reads it back (verified 2026-09-06).
+                buf = lt.bencode(self._session.save_state(flags))
+            self._state_store.save(buf)
         except Exception as e:
             logger.warning(f"DHT: state save failed: {e}")
 
