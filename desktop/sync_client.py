@@ -23,6 +23,7 @@ import base64
 import logging
 import math
 import struct
+import time
 from typing import Optional, Callable
 
 import psycopg2
@@ -91,6 +92,15 @@ SEGMENT_PULL_BATCH = 100
 # Both server implementations reject inventory requests above 10k UUIDs —
 # the client slices its library and merges the responses.
 INVENTORY_CHUNK = 10_000
+
+# A fetched holdings filter is used as-is for this long before the peer's
+# version is even compared: a peer's version moves with every enrichment
+# pass it runs (the counts of six tables are in it), and the syncs that
+# follow a minting burst come minutes apart — refetching a filter that is
+# 99.9% the same for each of them is the waste the filter exists to avoid.
+# Staleness costs nothing but a delay: an element the peer gained since
+# the fetch is missed until the next refresh, never answered wrongly.
+HOLDINGS_MAX_AGE_S = 15 * 60
 
 
 class SyncClient:
@@ -326,7 +336,9 @@ class SyncClient:
         key = self.api.peer_pubkey or self.api.base_url
         cached = self.holdings_cache.get(key)
         summary = health.get("holdings") or None
-        if cached and summary and summary.get("version") == cached["version"]:
+        fresh = cached and time.time() - cached["fetched_at"] < HOLDINGS_MAX_AGE_S
+        if fresh or (cached and summary
+                     and summary.get("version") == cached["version"]):
             filters = cached
         else:
             # Price the two directions: ~40 bytes per uuid on the wire
@@ -345,8 +357,10 @@ class SyncClient:
                 return None
             if payload.get("unchanged") and cached:
                 filters = cached
+                filters["fetched_at"] = time.time()
             else:
                 filters = {"version": payload["version"],
+                           "fetched_at": time.time(),
                            "tracks": BloomFilter.from_dict(payload["tracks"]),
                            "artists": BloomFilter.from_dict(payload["artists"])}
                 self.holdings_cache[key] = filters
