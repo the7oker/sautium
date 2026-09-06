@@ -339,29 +339,41 @@ def verify_proof(leaf_hex: str, proof: list, root_hex: str) -> bool:
         return False
 
 
-def timestamp_payload(root_hex: str, date_iso: str, ip_hash: str) -> bytes:
+def timestamp_payload(root_hex: str, date_iso: str, ip_hash: str,
+                      version: int = TIMESTAMP_VERSION) -> bytes:
     """The bytes the Worker (master authority) signs to notarize a batch root
     at a date, bound to the submitter's ip_hash — domain-separated from birth
-    certs by the prefix. ip_hash is uuid5(NAMESPACE, "ip:"+ip) computed by the
-    Worker (the only party that sees the client IP): accountability for who
-    notarized the batch, not a claim about who analyzed the audio. Versioned by
-    TIMESTAMP_VERSION (in step with worker/verify.js), not by the record
-    format — a record-format bump must not desync the Worker."""
-    return (f"sautium-timestamp:v{TIMESTAMP_VERSION}:{root_hex.lower()}:"
+    certs by the prefix. ip_hash is the Worker's peppered pseudonym of the
+    submitter's address (the only party that sees the client IP):
+    accountability for who notarized the batch, not a claim about who
+    analyzed the audio. Versioned per BATCH (signing_batches.timestamp_version,
+    in step with worker/verify.js TIMESTAMP_VERSION for new stamps): a bump
+    adds a format here and invalidates nothing already issued. Decoupled
+    from the record format — a record-format bump must not desync the Worker."""
+    if version != 2:
+        raise ValueError(f"unsupported timestamp payload version {version}")
+    return (f"sautium-timestamp:v2:{root_hex.lower()}:"
             f"{date_iso}:{ip_hash.lower()}").encode("utf-8")
 
 
 def verify_timestamp(root_hex: str, date_iso: str, ip_hash: str,
-                     signature_hex: str, authority_pubkey_hex: str) -> bool:
-    """Check the Worker's countersignature over {root, date, ip_hash}."""
-    return verify(timestamp_payload(root_hex, date_iso, ip_hash), signature_hex,
-                  authority_pubkey_hex)
+                     signature_hex: str, authority_pubkey_hex: str,
+                     version: int = TIMESTAMP_VERSION) -> bool:
+    """Check the Worker's countersignature over {root, date, ip_hash} in the
+    payload format the batch was issued under; an unknown format verifies as
+    False, never raises."""
+    try:
+        payload = timestamp_payload(root_hex, date_iso, ip_hash, version)
+    except ValueError:
+        return False
+    return verify(payload, signature_hex, authority_pubkey_hex)
 
 
 def verify_seal(payload: bytes, signature_hex: str, author_pubkey_hex: str,
                 merkle_proof: list, batch_root_hex: str,
                 worker_date: str, worker_ip_hash: str, worker_sig_hex: str,
-                worker_authority_hex: str, trusted_authorities: list) -> bool:
+                worker_authority_hex: str, trusted_authorities: list,
+                worker_version: int = TIMESTAMP_VERSION) -> bool:
     """Full seal check for one record, in order:
       1. the author signed this exact content (author_pubkey is bound in the
          payload, so this also names the author),
@@ -377,7 +389,8 @@ def verify_seal(payload: bytes, signature_hex: str, author_pubkey_hex: str,
         and verify(payload, signature_hex, author_pubkey_hex)
         and verify_proof(record_leaf(signature_hex), merkle_proof, batch_root_hex)
         and verify_timestamp(batch_root_hex, worker_date, worker_ip_hash,
-                             worker_sig_hex, worker_authority_hex))
+                             worker_sig_hex, worker_authority_hex,
+                             worker_version))
 
 
 def sign(payload: bytes, private_key) -> str:
