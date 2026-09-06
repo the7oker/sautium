@@ -75,6 +75,7 @@ _NEGATIVE_CACHE_WINDOW = """
 # no production reason to make them user-configurable until we have
 # data showing the defaults are wrong.
 _BATCH_INTERVAL_MIN = 30          # idle sleep between passes; also the DB-only steps' cadence
+_DB_RETRY_S = 120                 # DB-only steps deferred (dump/slice load in flight): retry soon, not next cycle
 _FIRST_SYNC_WAIT_MIN = 10         # boot: how long the first pass waits for the first P2P sync
 _TRACK_STATS_PER_BATCH = 100      # Last.fm track.getInfo calls per batch
 _LYRICS_PER_BATCH = 50            # lrclib/genius calls per batch
@@ -205,6 +206,20 @@ _sync_wake = threading.Event()
 def wake(reason: str = "") -> None:
     """Run the next pass now instead of at the interval (any thread)."""
     logger.info(f"Background enrichment wake: {reason or 'requested'}")
+    _sync_wake.set()
+
+
+# The DB-only steps run on the interval timer — except when something just
+# created their work: a canon run that canonized artists leaves
+# discographies to reconcile, and that reconcile is what mints the phantom
+# albums the P2P sync then fills. Set by main._canon_trigger_worker.
+_db_wake = threading.Event()
+
+
+def wake_db_steps(reason: str = "") -> None:
+    """Run the DB-only steps at the next pass, and start that pass now."""
+    logger.info(f"Background enrichment DB-steps wake: {reason or 'requested'}")
+    _db_wake.set()
     _sync_wake.set()
 
 
@@ -490,11 +505,15 @@ def _step_sync_discographies(limit: int) -> Dict[str, int]:
     """
     from discography import stale_canonized_artists, sync_artist_discography
 
+    # `deferred`: the step could not do its work (API cooldown, a dump or
+    # slice load holding the lock) — the loop retries it in _DB_RETRY_S
+    # instead of leaving the reconcile to the next interval.
     stats = {"processed": 0, "new_albums": 0, "errors": 0}
 
     # Dump-less nodes hit the MB HTTP API — skip the whole step while it's
     # cooling down (no-op on dump nodes, which never arm the cooldown).
     if cooling_down('musicbrainz'):
+        stats["deferred"] = True
         return stats
 
     rows = stale_canonized_artists(limit=int(limit),
@@ -511,6 +530,7 @@ def _step_sync_discographies(limit: int) -> Dict[str, int]:
             result = sync_artist_discography(row["id"], row["name"])
             if result.get("status") in ("rate_limited", "mb_loading"):
                 logger.info(f"Background discography: {result['status']} — ending batch")
+                stats["deferred"] = True
                 break
             stats["new_albums"] += result.get("new", 0)
         except Exception as e:
@@ -612,7 +632,9 @@ def _run_db_steps() -> Dict[str, Any]:
         _dump_busy = mb_load_active()
     except Exception:
         _dump_busy = False
-    if not _dump_busy:
+    if _dump_busy:
+        summary["deferred"] = True
+    else:
         from canon import algo_canon
         with algo_canon() as _ok:   # priority over AI; holds the dump lock for the run
             if _ok:
@@ -636,6 +658,8 @@ def _run_db_steps() -> Dict[str, Any]:
     _set(current_step="discography")
     summary["discography"] = _step_sync_discographies(_DISCOGRAPHY_PER_BATCH)
     _bump("discography", summary["discography"].get("new_albums", 0))
+    if summary["discography"].get("deferred"):
+        summary["deferred"] = True
 
     if _cancel_flag():
         return summary
@@ -676,9 +700,13 @@ def _loop() -> None:
             db_ran = False
             try:
                 batch, backlog = _run_network_steps()
-                if not _cancel_flag() and time.time() >= db_due_at:
+                if not _cancel_flag() and (time.time() >= db_due_at
+                                           or _db_wake.is_set()):
+                    _db_wake.clear()
                     batch.update(_run_db_steps())
-                    db_due_at = time.time() + _BATCH_INTERVAL_MIN * 60
+                    db_due_at = time.time() + (
+                        _DB_RETRY_S if batch.get("deferred")
+                        else _BATCH_INTERVAL_MIN * 60)
                     db_ran = True
             except Exception as e:
                 logger.error(f"Background batch failed: {e}", exc_info=True)

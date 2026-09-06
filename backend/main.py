@@ -1251,6 +1251,12 @@ def _canon_trigger_worker():
                 # background distill loop.
                 canon["phantom"] = canonize_phantom_similars(dry_run=False)
         logger.info(f"Triggered canon: {canon}")
+        # Freshly canonized artists have discographies to reconcile, and
+        # that reconcile is what mints the phantom albums the P2P sync then
+        # fills — run the DB steps now, not at the interval.
+        if canon.get("artists") or (canon.get("phantom") or {}).get("canonized"):
+            import background_enrichment
+            background_enrichment.wake_db_steps("canon")
     except Exception:
         logger.exception("canonicalize trigger worker crashed")
     finally:
