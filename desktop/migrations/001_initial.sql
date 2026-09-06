@@ -619,6 +619,16 @@ ALTER TABLE audio_features
 
 CREATE INDEX IF NOT EXISTS idx_emb_segments_unsigned
     ON embedding_segments (embedding_id) WHERE signature IS NULL;
+-- Sealing is two stages (sign_audio.py sign()/stamp(), driven by
+-- notary.py): "signed, awaiting stamp" is an ordinary persistent state the
+-- stamp pass discovers by scan. Partial on exactly that state, so the
+-- indexes stay tiny and the scan never walks the gigabytes of vectors.
+CREATE INDEX IF NOT EXISTS idx_emb_segments_unstamped
+    ON embedding_segments (id) INCLUDE (signature)
+    WHERE signature IS NOT NULL AND batch_root IS NULL;
+CREATE INDEX IF NOT EXISTS idx_audio_features_unstamped
+    ON audio_features (id) INCLUDE (signature)
+    WHERE signature IS NOT NULL AND batch_root IS NULL;
 
 -- Seal invalidation at the data layer: any UPDATE that changes a signed
 -- payload column without presenting a new signature loses the seal. This is
@@ -2767,6 +2777,9 @@ ALTER TABLE track_mbids
 -- gate) must not walk the ~3M MB-minted phantom tracklist rows.
 CREATE INDEX IF NOT EXISTS idx_albums_unsigned
     ON albums (id) WHERE signature IS NULL;
+CREATE INDEX IF NOT EXISTS idx_albums_unstamped
+    ON albums (id) INCLUDE (signature)
+    WHERE signature IS NOT NULL AND batch_root IS NULL;
 -- MB slice replication (phase-E replacement): verified per-name blobs kept
 -- verbatim with the ORIGINAL dump node's signature. One table, three roles:
 -- a dump node's hot cache (a prolific artist is computed and signed once
@@ -2787,6 +2800,9 @@ CREATE INDEX IF NOT EXISTS idx_album_tracks_recording
     ON album_tracks (recording_mbid) WHERE recording_mbid IS NOT NULL;
 CREATE INDEX IF NOT EXISTS idx_album_tracks_unsigned
     ON album_tracks (track_id) WHERE signature IS NULL;
+CREATE INDEX IF NOT EXISTS idx_album_tracks_unstamped
+    ON album_tracks (id) INCLUDE (signature)
+    WHERE signature IS NOT NULL AND batch_root IS NULL;
 CREATE INDEX IF NOT EXISTS idx_track_mbids_unsigned
     ON track_mbids (track_id) WHERE signature IS NULL;
 

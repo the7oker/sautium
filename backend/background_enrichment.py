@@ -737,6 +737,13 @@ def _loop() -> None:
             _set(last_batch=batch, last_run_at=_now_iso(), next_run_at=next_at,
                  draining=backlog)
 
+            # Every network step writes signable rows (bios, tags, similars,
+            # stats, genre descriptions); the DB steps also shed seals (canon
+            # re-keys) and mint tracklists under already-signed tracks — those
+            # need the album layer rescanned end to end.
+            import notary
+            notary.wake("background pass", full=db_ran)
+
             # A pass that minted artists (similars, streaming stubs) just
             # created canon work that a dump-less node can only do with
             # peer slices. Tell the launcher instead of letting the freshly

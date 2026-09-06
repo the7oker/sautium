@@ -196,6 +196,9 @@ class PreviewEnricher:
                 self._save_features(db, track_id, feats, src_id, provider_id)
             db.commit()
 
+        if saved or feats:
+            import notary
+            notary.wake("preview analysis")
         self._empty_cache()
         preview_events.ping()   # features committed → open album page re-fetches key·bpm
         logger.info("preview enriched %s (embedding=%s features=%s)",
