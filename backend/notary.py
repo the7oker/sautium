@@ -165,20 +165,25 @@ class _Notary:
             self._defer_stamp(wait)
             self._set(last_error="Worker throttled")
             return
+        capped = result.stamped >= sign_audio.MAX_RECORDS_PER_BATCH
         with self._lock:
             self._stamp_at = None
             self._failures = 0
             if result.stamped:
-                # The Worker's pace when it gave one, the node's own otherwise.
-                self._earliest = (float(result.not_before) if result.not_before
-                                  else time.time() + STAMP_MIN_SPACING_S)
+                # The Worker's `not_before` is the budget's lower bound, not
+                # a "stamp now": the node's own spacing is what coalesces a
+                # listening burst into one root — taking the Worker's word
+                # alone stamped after every 5-minute background pass while
+                # its bucket had tokens (8 roots in 40 min, 2026-09-06). A
+                # capped batch is a known backlog, not a burst to coalesce:
+                # it continues as soon as the Worker allows.
+                server = float(result.not_before or 0)
+                own = 0.0 if capped else time.time() + STAMP_MIN_SPACING_S
+                self._earliest = max(server, own)
         self._set(next_stamp_at=None, last_error=None)
         if result.stamped:
             self._set(last_stamp_at=_now_iso(), last_stamped=result.stamped)
-            if result.stamped >= sign_audio.MAX_RECORDS_PER_BATCH:
-                # A capped backlog (a full re-seal) continues as soon as the
-                # pace allows — a burst of batches is what the Worker's
-                # bucket is deep for.
+            if capped:
                 self._defer_stamp(max(0.0, self._earliest - time.time()))
 
     # ---- helpers ---------------------------------------------------------
