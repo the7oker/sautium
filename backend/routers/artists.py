@@ -13,7 +13,7 @@ from typing import Optional
 
 from fastapi import APIRouter, HTTPException, Query
 
-from db_pool import db_query, db_query_one
+from db_pool import db_execute, db_query, db_query_one
 from discography import fetch_new_albums, sync_artist_discography
 from genre_queries import artist_genres
 from release_groups import collapse_to_groups
@@ -532,6 +532,10 @@ def sync_discography(artist_id: str) -> dict:
         return {"new_albums": fetch_new_albums(artist_id), "synced": False}
 
     result = sync_artist_discography(artist_id, row["name"])
+    if result.get("new"):
+        # New phantom albums are new gaps — ask the launcher's P2P sync now
+        # rather than at the interval (no listener on a Docker node: harmless).
+        db_execute("NOTIFY sautium_sync_request")
     return {
         "new_albums": fetch_new_albums(artist_id),
         "synced": result.get("status") == "success",
