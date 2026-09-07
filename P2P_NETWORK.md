@@ -93,26 +93,44 @@ vector, bound to `track_uuid`).
 
 ## DHT Discovery Strategy
 
-### Principle: announce **per artist**, not per node
+### Two keys, and when the second one earns its traversal (2026-09-07)
 
-The launcher does not announce itself as a single node. It announces **every
-artist** it holds enrichment for (an embedding or audio_features for at least
-one track):
+Every node announces ONE discovery key, `SHA1("Sautium-node")`: a peer finds
+nodes with a single lookup and asks each for an inventory / holdings filter,
+which answers "what do you have of mine?" for a whole library in one call.
+Per-artist keys, `SHA1("Sautium-artist:" + uuid)`, exist for a node's RAREST
+held artists (the tail: `ANNOUNCE_TAIL_SQL`, ranked by Last.fm listeners,
+capped by `sync.announce_limit`) — and a per-artist key can only ever name a
+node the discovery key already carries, so it pays for itself only once the
+discovery key stops being a list. libtorrent stores 500 peers per key and
+answers a `get_peers` with 100 of them at random; the directory hands out 20
+random volunteers. Under that, a sync run enumerates the network completely
+and a per-artist key is a traversal spent on a question the inventory already
+answered. Over it, the discovery key is a rotating sample — a holder of one
+rare artist turns up in a run with probability ~100/N — and at a thousand
+nodes an exact key starts saving real time.
 
-```python
-artist_infohash = SHA1("Sautium-artist:" + artist_uuid)
-session.dht_announce(artist_infohash, port=sync_port, flags=0)
-```
+So the tail is gated on the SIZE of the network, both directions at once
+(`desktop/p2p/network_size.py`): below `RARE_ON` = 1000 nodes no per-artist
+announces and no per-artist lookups, above it both, off again under
+`RARE_OFF` = 500 (hysteresis). Every node measures the same network, so they
+flip in the same era without coordinating. The estimate: `p2p_nodes_seen`
+records every reachable peer met (by the TLS-verified `/health` node key), and
+each run's discovery-key reply is a capture-recapture sample against it
+(Chapman); a reply under the 100-peer cap was exhaustive and IS the live
+population; the directory's fresh-volunteer count (`total` on `/node-hints`)
+is an exact floor. Verdict and estimate live in `user_settings`
+(`p2p.rare_mode`, `p2p.network_estimate`); a restart starts from the last
+verdict. The Docker node runs no sync walk and gates its tail on the directory
+count alone.
 
-**Advantages:**
-- Precise lookup: "who has Pink Floyd?" → a direct DHT lookup
-- No broadcast/flood: only the artists actually wanted are searched for
-- Natural scaling: more participants → more artists
-- ~2550 announces every 15 min ≈ 3/sec — nothing for libtorrent
-
-> Superseded in part: the tail is now capped and ranked (see the announce-storm
-> lesson in Open Questions #4) and reflects "I hold analysis", not file
-> ownership.
+Announces and lookups of the tail draw on ONE budget — the traversal lane in
+`dht_service` (`_TraversalLane`): one initiation at a time, ≥3 s apart × the
+load-meter pace, strictly alternating when both sides wait. The lane holds 300
+initiations per 15-minute entry lifetime; `sync.announce_limit` defaults to
+150 so a tail pass fits in one lifetime with the search taking the other half.
+The node, user and capability keys stay outside the lane: single,
+latency-bound, nothing to meter.
 
 ### Layered sync flow (P3; reworked 2026-09-05 — the sync runs itself)
 
@@ -131,9 +149,11 @@ Internet tiers, only for what the LAN left behind:
    A. discovery-key nodes + directory volunteers → health-probed 8 at a
       time, drained ONE at a time (each inventory answers for the whole
       library); the master hint only when nothing else exists
-   B. residual rare artists → per-artist keys, a ROTATING slice of 50
-      (cursor in user_settings, so the same unfindable names are not asked
-      for every run while the rest of the tail never is)
+   B. only past the network-size threshold: ENGAGED artists (an owned file
+      or a completed listen) still missing analysis, rarest first → their
+      exact keys, a ROTATING slice of 50 through the traversal lane (cursor
+      in user_settings, so the same unfindable names are not asked for
+      every run while the rest never is)
      │
      ▼
 Batch pull (gzip JSON) → import → NOTIFY sautium_sync_done → the backend's
@@ -413,7 +433,10 @@ Phase 2 & 3: Embeddings + features (lazy, on demand, gzip)
    for ~a minute past it. The current regime is 5 announces + a 1 s pause; a
    ~300-key tail takes ~60 s out of the 15-minute cycle. Announce-on-behalf
    (phase D) adds at most the client cap — tens of keys — which fits that
-   budget.
+   budget. Since 2026-09-07 the rate is a property of the traversal lane,
+   shared by tail announces and rare-artist lookups (the lookups used to run
+   20 traversals at once, outside every brake), and the tail itself is gated
+   on the size of the network — "Two keys" above.
 5. **Slice replication and freshness**: a replica holds the blob of the dump
    version it was signed under. Once a dump node updates, two generations of
    one name's blob coexist in the network. Today whoever answers first wins

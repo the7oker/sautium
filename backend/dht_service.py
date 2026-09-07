@@ -27,6 +27,17 @@ one key (hot-key eviction on the 8 nodes storing it), nodes start ALSO
 announcing SHA1("Sautium-node" + prefix) levels; the global key stays, so
 old and new clients keep seeing each other.
 
+The TAIL — announced and searched — is gated on the SIZE of the network
+(desktop/p2p/network_size.py): a per-artist key can only ever name a node
+the node key already carries, so it earns its traversal only once the node
+key is too big to enumerate. Until then `set_tail_enabled(False)` holds it,
+and the tail is registration only.
+
+Announces and lookups of the tail draw on ONE budget, the traversal lane
+(_TraversalLane): a get_peers traversal is what either costs the network
+(an announce adds one write at its end), so one initiation at a time at the
+measured-safe spacing, whoever asks, split fairly between the two.
+
 Shared by both Docker backend (FastAPI) and desktop launcher (aiohttp).
 """
 
@@ -34,6 +45,7 @@ import asyncio
 import hashlib
 import logging
 import time
+from collections import deque
 from typing import Optional
 
 logger = logging.getLogger(__name__)
@@ -82,8 +94,13 @@ REANNOUNCE_INTERVAL = 15 * 60  # 15 minutes
 # refresh inside one entry lifetime, and that is the right trade: its
 # oldest keys expire and come back on the next pass, so presence degrades
 # smoothly with tail size instead of the announcer taking the audio path
-# down with it. At the shipped sync.announce_limit of 300 a pass is exactly
-# one lifetime and nothing expires at all.
+# down with it.
+#
+# The spacing is the floor of the traversal LANE, which the tail shares
+# with the rare-artist lookups of the sync walk: both sides waiting means
+# strict alternation, so each gets half of REANNOUNCE_INTERVAL/3 = 300
+# initiations per lifetime. The shipped sync.announce_limit of 150 is that
+# half — a pass is exactly one lifetime with the search running beside it.
 MIN_ANNOUNCE_SPACING = 3.0
 TAIL_IDLE_RECHECK = 60.0
 
@@ -137,6 +154,73 @@ def capability_infohash(capability: str) -> bytes:
     ).digest()
 
 
+class _TraversalLane:
+    """One traversal initiation at a time, at the measured-safe spacing,
+    shared fairly between the tail announcer and the rare-artist search.
+    MIRRORS desktop/p2p/dht_service.py — see the reasoning there.
+    """
+
+    SIDES = ("tail", "search")
+
+    def __init__(self, spacing: float, pace):
+        self._spacing = spacing
+        self._pace = pace                    # () -> multiplier, read per grant
+        self._waiting = {side: deque() for side in self.SIDES}
+        self._last = "search"                # the tail goes first on a tie
+        self._kick = asyncio.Event()
+        self._task: Optional[asyncio.Task] = None
+
+    def start(self) -> None:
+        self._task = asyncio.create_task(self._run())
+
+    async def stop(self) -> None:
+        if self._task:
+            self._task.cancel()
+            try:
+                await self._task
+            except asyncio.CancelledError:
+                pass
+            self._task = None
+        for queue in self._waiting.values():
+            while queue:
+                fut = queue.popleft()
+                if not fut.done():
+                    fut.cancel()
+
+    async def slot(self, side: str) -> None:
+        """Return when this caller may initiate ONE traversal."""
+        fut = asyncio.get_event_loop().create_future()
+        self._waiting[side].append(fut)
+        self._kick.set()
+        await fut
+
+    def _next(self) -> Optional[asyncio.Future]:
+        ready = []
+        for side in self.SIDES:
+            queue = self._waiting[side]
+            while queue and queue[0].done():      # a waiter that gave up
+                queue.popleft()
+            if queue:
+                ready.append(side)
+        if not ready:
+            return None
+        side = ready[0]
+        if len(ready) == 2:
+            side = "search" if self._last == "tail" else "tail"
+        self._last = side
+        return self._waiting[side].popleft()
+
+    async def _run(self) -> None:
+        while True:
+            fut = self._next()
+            if fut is None:
+                self._kick.clear()
+                await self._kick.wait()
+                continue
+            fut.set_result(None)
+            await asyncio.sleep(self._spacing * self._pace())
+
+
 class DHTService:
     """libtorrent-based DHT service for per-artist peer discovery."""
 
@@ -174,6 +258,25 @@ class DHTService:
         self._ready: Optional[asyncio.Event] = None
         self._bootstrap_task: Optional[asyncio.Task] = None
         self._pace = lambda: 1.0     # load_meter.announce_pace when installed
+        # Network-size gate (desktop/p2p/network_size.py): the tail is
+        # announced only once the node key is too big to enumerate. Off
+        # until the lifespan has measured (the directory count, here).
+        self._tail_enabled = False
+        self._lane = _TraversalLane(MIN_ANNOUNCE_SPACING, lambda: self._pace())
+
+    def set_tail_enabled(self, enabled: bool):
+        """Gate the per-artist tail by the network-size verdict (see
+        __init__). The node key is unaffected."""
+        if enabled != self._tail_enabled:
+            logger.info(
+                "DHT rare-artist tail %s (network-size verdict)",
+                "enabled" if enabled else "held",
+            )
+            self._tail_enabled = enabled
+
+    @property
+    def tail_enabled(self) -> bool:
+        return self._tail_enabled
 
     def set_pace_provider(self, fn) -> None:
         """Multiplier for the drip spacing (desktop/p2p/load_meter.py: 1× when
@@ -234,6 +337,7 @@ class DHTService:
 
         self._running = True
         self._ready = asyncio.Event()
+        self._lane.start()
         self._alert_task = asyncio.create_task(self._poll_alerts())
         self._bootstrap_task = asyncio.create_task(self._bootstrap_watch())
 
@@ -299,6 +403,7 @@ class DHTService:
     async def stop(self):
         """Shut down libtorrent session."""
         self._running = False
+        await self._lane.stop()
         for task in (self._alert_task, self._bootstrap_task):
             if task:
                 task.cancel()
@@ -400,8 +505,13 @@ class DHTService:
         )
 
     async def _lookup(self, infohash: bytes, cache_key: str,
-                      want_all: bool = False) -> list[tuple[str, int]]:
+                      want_all: bool = False,
+                      metered: bool = False) -> list[tuple[str, int]]:
         """get_peers on an infohash, with the shared peer cache.
+
+        `metered`: take a turn on the traversal lane first — the tail
+        lookups are bulk and go through the budget; the node, user and
+        capability keys are single, latency-bound and do not.
 
         One traversal answers with one alert PER responding node, so the
         first reply carries one holder's view, not the set (measured
@@ -426,6 +536,10 @@ class DHTService:
         # A traversal over a table still bootstrapping finds nothing and
         # burns its whole window; wait the bootstrap out first (bounded).
         await self.wait_ready(DHT_BOOTSTRAP_TIMEOUT)
+        if metered:
+            await self._lane.slot("search")
+            if not self._session:
+                return []
 
         sha1 = lt.sha1_hash(infohash)
         ih_hex = sha1.to_string().hex()
@@ -462,28 +576,26 @@ class DHTService:
 
     async def lookup_artist(self, artist_uuid: str) -> list[tuple[str, int]]:
         """Find peers announcing this specific artist — the targeted path for
-        residual rare artists a node-discovery sweep failed to cover."""
-        return await self._lookup(artist_infohash(artist_uuid), artist_uuid)
+        residual rare artists a node-discovery sweep failed to cover. Metered:
+        one lane turn per key."""
+        return await self._lookup(artist_infohash(artist_uuid), artist_uuid,
+                                  metered=True)
 
     async def lookup_artists_batch(
-        self, artist_uuids: list[str], max_concurrent: int = 20
+        self, artist_uuids: list[str]
     ) -> dict[str, list[tuple[str, int]]]:
-        """
-        Batch lookup for multiple artists.
-
-        Returns: {artist_uuid: [(ip, port), ...]}
+        """{artist_uuid: [(ip, port), ...]} for the ones somebody announces.
+        Every key waits for its lane turn; replies are awaited concurrently.
         """
         results = {}
-        sem = asyncio.Semaphore(max_concurrent)
 
-        async def _lookup(uuid):
-            async with sem:
-                peers = await self.lookup_artist(uuid)
-                if peers:
-                    results[uuid] = peers
+        async def _one(uuid):
+            peers = await self.lookup_artist(uuid)
+            if peers:
+                results[uuid] = peers
 
-        tasks = [_lookup(uuid) for uuid in artist_uuids]
-        await asyncio.gather(*tasks, return_exceptions=True)
+        await asyncio.gather(*(_one(uuid) for uuid in artist_uuids),
+                             return_exceptions=True)
         return results
 
     def _get_cached_peers(
@@ -564,7 +676,7 @@ class DHTService:
         passes re-spaces itself without any bookkeeping."""
         while self._running:
             uuids = sorted(self._announced)
-            if not uuids or not self._session:
+            if not uuids or not self._session or not self._tail_enabled:
                 await asyncio.sleep(TAIL_IDLE_RECHECK)
                 continue
 
@@ -574,6 +686,11 @@ class DHTService:
                 f"{spacing:.1f}s apart"
             )
             for uuid in uuids:
+                if not self._running or not self._session:
+                    return
+                if not self._tail_enabled:
+                    break
+                await self._lane.slot("tail")
                 if not self._running or not self._session:
                     return
                 self._session.dht_announce(
@@ -641,6 +758,7 @@ class DHTService:
             "running": self._running,
             "nodes": status.dht_nodes,
             "announced_artists": len(self._announced),
+            "tail_enabled": self._tail_enabled,
             "cached_peers": sum(
                 len(v) for v in self._peer_cache.values()
             ),

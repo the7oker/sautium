@@ -250,7 +250,11 @@ _DEFAULTS: Dict[str, Any] = {
     "sync.p2p_enabled":          True,
     "sync.auto_interval_min":    30,
     # Size of the rare-artist DHT announce tail (0/null = node key only).
-    "sync.announce_limit":       300,
+    # 150 = half the traversal lane (dht_service MIN_ANNOUNCE_SPACING): a
+    # pass refreshes every key inside one DHT entry lifetime with the
+    # rare-artist search taking the other half. Announced only under the
+    # network-size verdict (p2p.rare_mode, desktop/p2p/network_size.py).
+    "sync.announce_limit":       150,
     # Foreign TRACKS whose audio analysis this node will hold on other
     # peers' behalf (push-seeding). A node behind CGNAT cannot be pulled
     # FROM, so its own analysis only reaches the network if somebody
@@ -848,6 +852,10 @@ def _sync_state() -> Dict[str, Any]:
         "reachability":            _read("p2p.reachability") or "unknown",
         "reachability_detail":     _read("p2p.reachability_detail"),
         "reachability_checked_at": _read("p2p.reachability_checked_at"),
+        # Network-size verdict (desktop/p2p/network_size.py): the tail is
+        # announced and searched only past the threshold.
+        "network_estimate":        _read("p2p.network_estimate"),
+        "rare_mode":               bool(_read("p2p.rare_mode")),
         "identity":                _read("p2p.identity"),
         "load":                    _read("p2p.load"),
         "gate":                    _gate_snapshot(),

@@ -18,14 +18,15 @@ from datetime import datetime, timezone
 from functools import partial
 from pathlib import Path
 from typing import Callable, Optional
+from urllib.parse import urlsplit
 
 import psycopg2
 import psycopg2.extensions
 
 from desktop.api_client import BackendAPIClient
 from desktop.mb_slice_client import MBSliceClient
-from desktop.p2p import diag_protocol, mb_slice_queries, sync_queries
-from desktop.p2p.addrs import fmt_addr
+from desktop.p2p import diag_protocol, mb_slice_queries, network_size, sync_queries
+from desktop.p2p.addrs import canon_host, fmt_addr
 from desktop.p2p.peer_auth import pinned_pubkey, pinned_ssl_context
 from desktop.p2p.chat_service import ChatService
 from desktop.p2p.dht_service import DHTService
@@ -102,6 +103,9 @@ class P2PManager:
         self._unreachable: dict[str, tuple[float, int]] = {}   # addr -> (retry_after, strikes)
         self._holdings_cache: dict = {}                        # peer pubkey -> published holdings filters
         self._empty_peers: dict[str, float] = {}               # addr -> ignore until
+        # Reachable peers met in the current sync run, (pubkey, host, port):
+        # the capture side of the network-size estimate (network_size).
+        self._run_sightings: list[tuple[str, str, int]] = []
         self._gap_count = 0                                    # last incomplete-set size
         self._first_source: Optional[asyncio.Event] = None   # LAN peer seen / DHT ready
         self._sync_lock: Optional[asyncio.Lock] = None
@@ -502,7 +506,12 @@ class P2PManager:
         await self._dht_service.announce_node()
 
         # Rare-artist tail — registration only; the drip loop in
-        # dht_service announces it at its own spacing.
+        # dht_service announces it at its own spacing, and only under the
+        # network-size verdict, which starts from the last run's so a
+        # restart neither waits for a sync run nor announces blind.
+        previous = await asyncio.get_event_loop().run_in_executor(
+            None, self._read_setting_value, "p2p.rare_mode")
+        self._dht_service.set_tail_enabled(bool(previous))
         _progress("Querying enriched artists...")
         enriched = await self._get_enriched_artists()
         self._lan_discovery.update_enriched_count(len(enriched))
@@ -764,14 +773,25 @@ class P2PManager:
         return await asyncio.get_event_loop().run_in_executor(None, _blocking)
 
     async def _get_unenriched_artists(self) -> list[str]:
-        """Audio-only-empty artists — DHT lookup candidates (cheap to
-        skip when we have any audio data; partial gaps are filled by
-        _get_incomplete_artists in the manual/LAN sync path)."""
+        """The audio gap set between drains (partial gaps are
+        _get_incomplete_artists' job in the manual/LAN sync path)."""
         def _blocking() -> list[str]:
             conn = psycopg2.connect(self.db_dsn)
             conn.autocommit = True
             try:
                 return sync_queries.get_unenriched_artist_uuids(conn)
+            finally:
+                conn.close()
+        return await asyncio.get_event_loop().run_in_executor(None, _blocking)
+
+    async def _get_rare_search_artists(self) -> list[str]:
+        """Engaged artists with an audio gap, rarest first — the ones worth
+        an exact DHT key (sync_queries.get_rare_search_uuids)."""
+        def _blocking() -> list[str]:
+            conn = psycopg2.connect(self.db_dsn)
+            conn.autocommit = True
+            try:
+                return sync_queries.get_rare_search_uuids(conn)
             finally:
                 conn.close()
         return await asyncio.get_event_loop().run_in_executor(None, _blocking)
@@ -1041,36 +1061,47 @@ class P2PManager:
                     # gaps change.
                     self._empty_peers[addr] = now + EMPTY_PEER_TTL
 
+        # Tier A: ONE node-key lookup plus the directory's volunteers —
+        # awaited whether or not anything is missing, because the reply is
+        # also this run's network-size sample: the tail announces follow the
+        # verdict, and they serve OTHER nodes.
+        nodes = await dht_nodes_task if dht_nodes_task else []
+        try:
+            volunteers = await directory_task
+        except Exception as e:
+            logger.warning(f"Directory lookup failed: {e}")
+            volunteers = []
+        sample = [(ip, port) for ip, port in nodes
+                  if fmt_addr(ip, port) not in skip_dht_addrs]
         remaining = await self._get_unenriched_artists()
+        candidates = _fresh(
+            list(nodes) + [(h, p) for h, p, _ in (volunteers or [])])
+        if remaining and not candidates and not dht_seen:
+            # Nothing anywhere (dead DHT, empty directory): the master
+            # hint is the last tier, validated like any other node.
+            hint = await asyncio.get_event_loop().run_in_executor(
+                None, master_hint.fetch)
+            if hint:
+                candidates = _fresh([hint])
         if not remaining:
-            _progress("Nothing left for the internet tiers")
-        else:
-            # Tier A: ONE node-key lookup plus the directory's volunteers.
-            nodes = await dht_nodes_task if dht_nodes_task else []
-            try:
-                volunteers = await directory_task
-            except Exception as e:
-                logger.warning(f"Directory lookup failed: {e}")
-                volunteers = []
-            candidates = _fresh(
-                list(nodes) + [(h, p) for h, p, _ in (volunteers or [])])
-            if not candidates and not dht_seen:
-                # Nothing anywhere (dead DHT, empty directory): the master
-                # hint is the last tier, validated like any other node.
-                hint = await asyncio.get_event_loop().run_in_executor(
-                    None, master_hint.fetch)
-                if hint:
-                    candidates = _fresh([hint])
-            if candidates:
-                _progress(f"Probing {len(candidates)} nodes...")
-                await _drain(await self._probe_candidates(candidates))
+            _progress("Nothing left to pull — measuring the network only")
+        if candidates:
+            _progress(f"Probing {len(candidates)} nodes...")
+            reachable = await self._probe_candidates(candidates)
+            if remaining:
+                await _drain(reachable)
+        rare_mode = await self._measure_network(
+            len(nodes), sample, node_hints.total("sync"))
 
-            # Tier B: residual artists — targeted keys against the rare-
-            # artist tail peers announce. A rotating slice: the same
-            # unfindable names must not be asked for every run while the
-            # rest of the tail never is.
-            residual = await self._get_unenriched_artists()
-            if residual and dht_nodes_task is not None:
+        # Tier B: engaged artists still missing analysis — exact keys
+        # against the tails peers announce, a rotating slice (the same
+        # unfindable names must not be asked for every run while the rest
+        # never is). Only once the network is too big for tier A to have
+        # listed every holder: below that a per-artist key can only name a
+        # node the inventory round already asked.
+        if remaining and dht_nodes_task is not None:
+            residual = await self._get_rare_search_artists() if rare_mode else []
+            if residual:
                 probe = await self._residual_slice(residual)
                 _progress(
                     f"Searching DHT for {len(probe)} of {len(residual)} "
@@ -1083,6 +1114,9 @@ class P2PManager:
                 candidates = _fresh(found)
                 if candidates:
                     await _drain(await self._probe_candidates(candidates))
+            elif not rare_mode:
+                _progress("Rare-artist keys held: the node key still lists "
+                          "the whole network")
 
         # Sync may have enriched artists that now belong in the rare tail
         # (paced — background task, the sync result must not wait for it).
@@ -1122,6 +1156,7 @@ class P2PManager:
                 self._note_unreachable(addr)
             else:
                 self._unreachable.pop(addr, None)
+                self._note_sighting(api)
             return addr, api
 
         results = await asyncio.gather(*(probe(a) for a in addrs))
@@ -1133,6 +1168,78 @@ class P2PManager:
         delay = min(UNREACHABLE_BACKOFF_BASE * (2 ** strikes),
                     UNREACHABLE_BACKOFF_MAX)
         self._unreachable[addr] = (time.time() + delay, strikes + 1)
+
+    def _note_sighting(self, api: BackendAPIClient) -> None:
+        """A peer that answered /health on a verified channel: one capture
+        for the network-size ledger (network_size.record_sightings)."""
+        parts = urlsplit(api.base_url)
+        if api.peer_pubkey and parts.hostname and parts.port:
+            self._run_sightings.append(
+                (api.peer_pubkey, parts.hostname, parts.port))
+
+    async def _measure_network(
+        self, reply_size: int, sample: list[tuple[str, int]],
+        directory_total: Optional[int],
+    ) -> bool:
+        """This run's network-size measurement (desktop/p2p/network_size.py):
+        the DHT sample against the ledger of nodes met before, the
+        directory's count as a floor. The verdict gates the tail both ways
+        — announced and searched — and is persisted so a restart starts
+        from it. Returns the rare mode."""
+        sightings, self._run_sightings = self._run_sightings, []
+        if not sample and directory_total is None:
+            return bool(self._dht_service and self._dht_service.tail_enabled)
+
+        def _blocking() -> tuple[int, bool]:
+            conn = psycopg2.connect(self.db_dsn)
+            conn.autocommit = True
+            try:
+                marked = network_size.ledger_size(conn)
+                sample_set = {(canon_host(h), int(p)) for h, p in sample}
+                known_addr = network_size.known_addresses(conn, sample_set)
+                probed = {}
+                for pubkey, host, port in sightings:
+                    key = (canon_host(host), int(port))
+                    if key in sample_set:
+                        probed[key] = pubkey.lower()
+                # A known node at a new address is a recapture, not a
+                # newcomer — matched by key once the probe named it.
+                moved = network_size.known_pubkeys(
+                    conn, [pk for hp, pk in probed.items()
+                           if hp not in known_addr])
+                live = known_addr | set(probed)
+                recaptured = len(known_addr) + sum(
+                    1 for hp, pk in probed.items()
+                    if hp not in known_addr and pk in moved)
+                network_size.record_sightings(conn, sightings)
+                estimate = network_size.estimate(
+                    marked, len(live), recaptured,
+                    exhaustive=reply_size < network_size.DHT_REPLY_CAP)
+                if directory_total is not None:
+                    estimate = max(estimate, directory_total)
+                with conn.cursor() as cur:
+                    cur.execute("SELECT value FROM user_settings WHERE key = %s",
+                                ("p2p.rare_mode",))
+                    row = cur.fetchone()
+                mode = network_size.rare_mode(estimate, bool(row and row[0]))
+            finally:
+                conn.close()
+            self._write_settings_blocking({
+                "p2p.network_estimate": estimate,
+                "p2p.rare_mode": mode,
+            })
+            return estimate, mode
+
+        estimate, mode = await asyncio.get_event_loop().run_in_executor(
+            None, _blocking)
+        if self._dht_service:
+            self._dht_service.set_tail_enabled(mode)
+        logger.info(
+            f"Network size: ~{estimate} nodes (DHT sample {len(sample)}, "
+            f"directory {directory_total if directory_total is not None else '—'}) "
+            f"— rare-artist keys {'on' if mode else 'held'}"
+        )
+        return mode
 
     async def _residual_slice(self, residual: list[str]) -> list[str]:
         """The next _DHT_TAIL_PROBE names of the (ordered) residual, from a
@@ -1250,6 +1357,8 @@ class P2PManager:
         if peer_api is None:
             _progress(f"Connecting to {peer_addr}...")
             peer_api = await self._try_connect_peer(peer_addr, is_lan=is_lan)
+            if peer_api:
+                self._note_sighting(peer_api)
         if not peer_api:
             _progress(f"  {peer_addr} not reachable, skipping")
             return {"error": "unreachable"}
