@@ -26,7 +26,7 @@ from desktop.utils import (get_local_ip, get_project_root, get_tailscale_ip,
 
 logger = logging.getLogger(__name__)
 
-WINDOW_WIDTH, WINDOW_HEIGHT = 480, 900
+WINDOW_WIDTH, WINDOW_HEIGHT = 480, 640
 WINDOW_SIZE = f"{WINDOW_WIDTH}x{WINDOW_HEIGHT}"
 
 # Appearance
@@ -163,20 +163,6 @@ class LauncherApp(ctk.CTk):
         self._qr_labels: dict = {}
         self._qr_drawn: Optional[list] = None   # targets the row currently shows
 
-        # The same code in text, for a device with no camera. It is drawn
-        # from the one current_pin() the QRs encode, so the two cannot
-        # disagree — and without it the login gate's "type the code shown
-        # on the host" was an instruction about a code the host never wrote
-        # down anywhere.
-        self._qr_code_label = ctk.CTkLabel(
-            self, text="", text_color="gray",
-            font=ctk.CTkFont(size=11),
-        )
-        self._qr_code_label.pack(pady=(2, 0))
-
-        # No loopback URL line: "Open Web UI" already opens exactly that, and
-        # the addresses another device would use are captioned under their QR.
-
         # First-visit hint about self-signed certificate. Hidden until
         # services are running — see _on_services_ready.
         self._url_hint_label = ctk.CTkLabel(
@@ -184,52 +170,6 @@ class LauncherApp(ctk.CTk):
             font=ctk.CTkFont(size=10),
         )
         self._url_hint_label.pack(pady=(0, 5))
-
-        # Library stats section
-        stats_outer = ctk.CTkFrame(self)
-        stats_outer.pack(fill="x", padx=20, pady=5)
-
-        ctk.CTkLabel(
-            stats_outer, text="Library",
-            font=ctk.CTkFont(size=13, weight="bold"),
-        ).pack(anchor="w", padx=10, pady=(5, 2))
-
-        stats_grid = ctk.CTkFrame(stats_outer, fg_color="transparent")
-        stats_grid.pack(fill="x", padx=10, pady=(0, 5))
-        stats_grid.columnconfigure((0, 1), weight=1)
-
-        self._stat_labels = {}
-        for i, (key, label) in enumerate([
-            ("tracks", "Tracks"), ("artists", "Artists"),
-            ("albums", "Albums"), ("genres", "Genres"),
-        ]):
-            lbl = ctk.CTkLabel(
-                stats_grid, text=f"{label}: —",
-                font=ctk.CTkFont(size=12), text_color="gray",
-            )
-            lbl.grid(row=i // 2, column=i % 2, sticky="w", padx=5, pady=1)
-            self._stat_labels[key] = lbl
-
-        # Enrichment stats section
-        ctk.CTkLabel(
-            stats_outer, text="Enrichment",
-            font=ctk.CTkFont(size=13, weight="bold"),
-        ).pack(anchor="w", padx=10, pady=(5, 2))
-
-        enrich_grid = ctk.CTkFrame(stats_outer, fg_color="transparent")
-        enrich_grid.pack(fill="x", padx=10, pady=(0, 5))
-        enrich_grid.columnconfigure((0, 1), weight=1)
-
-        for i, (key, label) in enumerate([
-            ("embeddings", "Embeddings"), ("features", "Features"),
-            ("lastfm", "Last.fm"), ("lyrics", "Lyrics"),
-        ]):
-            lbl = ctk.CTkLabel(
-                enrich_grid, text=f"{label}: —",
-                font=ctk.CTkFont(size=12), text_color="gray",
-            )
-            lbl.grid(row=i // 2, column=i % 2, sticky="w", padx=5, pady=1)
-            self._stat_labels[key] = lbl
 
         # Buttons
         btn_frame = ctk.CTkFrame(self, fg_color="transparent")
@@ -449,8 +389,8 @@ class LauncherApp(ctk.CTk):
         # Connect API client to the right port
         self.api_client.set_port(port)
 
-        # Fetch and display library stats
-        self._fetch_and_display_stats()
+        # A node with no ML runtime must not be offered the analysis button.
+        self._refresh_analysis_available()
 
         # QRs carry a pairing code so scanning the phone straight into a
         # signed-in session needs no typing. They keep themselves current
@@ -519,15 +459,13 @@ class LauncherApp(ctk.CTk):
                              daemon=True).start()
 
     def _on_library_event(self):
-        """A scan or enrich worker reached a checkpoint. Read the job we
-        started; stats follow from that. If we started nothing, the change
-        came from the Web UI and only the counters can have moved."""
+        """A scan or enrich worker reached a checkpoint. Only a job this
+        window started has a progress line on screen to move; one started
+        from the Web UI reports itself there."""
         if self._active_job == "scan":
             self._refresh_scan()
         elif self._active_job == "enrich":
             self._refresh_enrich()
-        else:
-            self._fetch_and_display_stats()
 
     def _refresh_pairing_qr(self):
         """Draw the QR with a code that is current, and arrange to redraw it
@@ -562,33 +500,26 @@ class LauncherApp(ctk.CTk):
         code = info.get("code")
         port = self.config.get("ports", {}).get("web", 8000)
         fragment = f"#pair={code}" if code else ""
-        self._qr_code_label.configure(
-            text=f"Pairing code: {code}" if code else "")
 
         # Rebuild whenever the set of addresses changes, rather than adding to
         # what is there. The addresses are not fixed: Tailscale can be
         # installed (or stopped) while the launcher runs, and a DHCP renewal
         # or a Wi-Fi/Ethernet switch moves the LAN one. Growing the row only
-        # ever forwards left a column for a tunnel that was gone, and printed
-        # an address that had since changed — the QR image was regenerated,
-        # but the caption beneath it kept the old number and quietly lied.
+        # ever forwards left a column for a tunnel that was gone.
         if targets != self._qr_drawn:
             for child in self._qr_frame.winfo_children():
                 child.destroy()
             self._qr_labels = {}
-            for ip, caption in targets:
+            for _, caption in targets:
                 column = ctk.CTkFrame(self._qr_frame, fg_color="transparent")
                 column.pack(side="left", padx=8)
                 widget = ctk.CTkLabel(column, text="")
                 widget.pack()
                 # Captioned by what it achieves, not by the technology: the
                 # person holding the phone knows where they will be, not which
-                # interface the packet leaves by. The address carries the port
-                # so a device with no camera has something to type.
+                # interface the packet leaves by.
                 ctk.CTkLabel(column, text=caption, text_color="gray",
                              font=ctk.CTkFont(size=11)).pack()
-                ctk.CTkLabel(column, text=f"{ip}:{port}", text_color="gray",
-                             font=ctk.CTkFont(size=10)).pack()
                 self._qr_labels[caption] = widget
             self._qr_drawn = list(targets)
 
@@ -596,7 +527,7 @@ class LauncherApp(ctk.CTk):
             widget = self._qr_labels.get(caption)
             if widget is None:
                 continue
-            # 150, not 180: the window is a fixed 900 tall and the Quit button
+            # 150, not 180: the window is a fixed height and the Quit button
             # is the thing that falls off the bottom. Horizontal room is what
             # we have to spend, and a ~30-module code at 150px is still 5px
             # per module — well inside what a phone camera reads.
@@ -898,82 +829,36 @@ class LauncherApp(ctk.CTk):
 
         threading.Thread(target=_complete, daemon=True).start()
 
-    def _fetch_and_display_stats(self):
-        """Fetch library stats from backend and update UI labels. Driven by
-        the Library SSE channel, which the scan and enrich workers already
-        wake at every checkpoint — no timer."""
+    def _refresh_analysis_available(self):
+        """Read the one thing this window still needs from /stats: whether the
+        node can analyse at all. It is a property of the backend build, not a
+        counter, so it is read when the backend comes up and not again."""
         def _fetch():
             data = self.api_client.get_stats()
             # Marshal back to the Tk main thread. Guard the shutdown window:
             # the loop can be torn down while this worker is blocked on the
             # network call.
-            if self._shutting_down:
+            if self._shutting_down or not data:
                 return
             try:
-                self.ui_call(lambda: self._apply_stats(data))
+                self.ui_call(lambda: self._apply_analysis_available(data))
             except RuntimeError:
                 pass   # main loop gone between the check and the call
 
         threading.Thread(target=_fetch, daemon=True).start()
 
-    def _apply_stats(self, data: dict):
-        """Apply fetched stats — always on the main thread."""
+    def _apply_analysis_available(self, data: dict):
         if self._shutting_down:
             return
-        if data:
-            self._update_stats_labels(data)
+        self._analysis_available = bool(data.get("analysis_available"))
+        if not self._analysis_available:
+            self._btn_enrich.configure(state="disabled")
 
     def _enrich_idle_state(self) -> str:
         """Button state between jobs. A node with no ML runtime never gets
         the button: the run would be a no-op there (analysis arrives via
         P2P import) and the backend refuses it."""
         return "normal" if self._analysis_available else "disabled"
-
-    def _update_stats_labels(self, data: dict):
-        """Update stats labels from API response."""
-        total_tracks = int(data.get("total_tracks", 0))
-        self._analysis_available = bool(data.get("analysis_available"))
-        if not self._analysis_available:
-            self._btn_enrich.configure(state="disabled")
-
-        # Library stats (simple counts)
-        simple = {
-            "tracks": ("Tracks", "total_tracks"),
-            "artists": ("Artists", "total_artists"),
-            "albums": ("Albums", "total_albums"),
-            "genres": ("Genres", "unique_genres"),
-        }
-        for key, (label, api_key) in simple.items():
-            value = data.get(api_key, 0)
-            if isinstance(value, (int, float)):
-                value = f"{int(value):,}"
-            self._stat_labels[key].configure(text=f"{label}: {value}")
-
-        # Enrichment stats (coverage format: done / total)
-        embeddings = int(data.get("tracks_with_embeddings", 0))
-        features = int(data.get("tracks_with_features", 0))
-        lib_artists = int(data.get("library_artists", 0))
-        lastfm_artists = int(data.get("artists_with_lastfm", 0))
-        lyrics = int(data.get("tracks_with_lyrics", 0))
-
-        lastfm_total = lib_artists
-        lastfm_done = lastfm_artists
-
-        enrichment = {
-            "embeddings": ("Embeddings", embeddings, total_tracks),
-            "features": ("Features", features, total_tracks),
-            "lastfm": ("Last.fm", lastfm_done, lastfm_total),
-            "lyrics": ("Lyrics", lyrics, total_tracks),
-        }
-        for key, (label, done, total) in enrichment.items():
-            if total > 0:
-                pct = done * 100 // total
-                txt = f"{label}: {done:,} / {total:,}  ({pct}%)"
-                color = "#22c55e" if pct == 100 else "#f59e0b" if pct >= 80 else "gray"
-            else:
-                txt = f"{label}: —"
-                color = "gray"
-            self._stat_labels[key].configure(text=txt, text_color=color)
 
     def _set_status(self, state: str, text: str):
         """Update status indicator."""
@@ -1089,8 +974,6 @@ class LauncherApp(ctk.CTk):
             running = status.get("running", False)
 
             self.ui_call(lambda: self._progress_text.configure(text=progress))
-            if status.get("stats"):
-                self.ui_call(self._fetch_and_display_stats)
             if not running:
                 self.ui_call(self._scan_done)
 
@@ -1111,7 +994,6 @@ class LauncherApp(ctk.CTk):
             hover_color=("gray75", "gray25"),
         )
         self._btn_enrich.configure(state=self._enrich_idle_state())
-        self._fetch_and_display_stats()
 
     def _enrich_library(self):
         """Start the analysis run (audio embeddings + features, then the
@@ -1142,7 +1024,6 @@ class LauncherApp(ctk.CTk):
             running = status.get("running", False)
 
             self.ui_call(lambda: self._progress_text.configure(text=progress))
-            self.ui_call(self._fetch_and_display_stats)
             if not running:
                 self.ui_call(self._enrich_done)
 
@@ -1163,7 +1044,6 @@ class LauncherApp(ctk.CTk):
             hover_color=("gray75", "gray25"),
         )
         self._btn_scan.configure(state="normal")
-        self._fetch_and_display_stats()
 
     def _get_local_db_dsn(self) -> str:
         """Build DSN for the launcher's local PostgreSQL."""

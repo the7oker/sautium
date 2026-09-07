@@ -315,11 +315,11 @@
         // Nothing to ask for but the PIN: this node's account was created
         // without a password anyone has seen. Both host affordances end
         // here — "Open Web UI" signs a browser on that machine in outright,
-        // and the code beside the QR is what a device elsewhere types.
+        // and the QR carries the same code to a device elsewhere.
         msg.textContent =
           "This node has no account password. On the computer that runs " +
-          "Sautium press “Open Web UI”, or type the pairing code shown " +
-          "under the QR there.";
+          "Sautium press “Open Web UI”, or scan the QR code shown " +
+          "there with this device.";
         fields.innerHTML = input("auth-pin", "text", "XXXX-XXXX");
       }
       const first = fields.querySelector("input");
