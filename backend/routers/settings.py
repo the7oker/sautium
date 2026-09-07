@@ -634,10 +634,9 @@ def _phantom_section() -> Dict[str, Any]:
 async def _library_state() -> Dict[str, Any]:
     """Stats + ongoing scan progress for the Library section.
 
-    Mirrors the launcher's `_update_stats_labels` shape so the web
-    Library screen reads identical numbers to the launcher's stats
-    panel — Tracks / Artists / Albums / Genres on the Library side,
-    Embeddings / Features / Last.fm / Lyrics on the Enrichment side."""
+    The Library screen is where these numbers live — Tracks / Artists /
+    Albums / Genres on the Library side, Embeddings / Features /
+    Last.fm / Lyrics on the Enrichment side."""
     from main import get_stats, _scan_state, _enrich_state
 
     try:
