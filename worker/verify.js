@@ -147,7 +147,11 @@ const MAIL_SIG_SKEW_S = 300;
 // existing periodic cycles; an entry older than the TTL is dead. K keeps
 // the answer a SAMPLE, not a map of the network.
 const DIRECTORY_TTL_MS = 2 * 3600 * 1000;
-const DIRECTORY_K = 5;
+// Volunteers per answer. A client asks once per sync run (cached 10 min on
+// its side), so K sets how much of the directory one run enumerates, not
+// how often the Worker is asked: at 20 a directory of a few dozen nodes is
+// walked in a couple of runs instead of a day of five-at-a-time samples.
+const DIRECTORY_K = 20;
 const DIRECTORY_CAPS = new Set(["sync", "mbdump", "relay", "mbslices"]);
 const DIRECTORY_REG_PER_IP_HOUR = 12;
 // email_class is a coarse, Worker-side hint (the node never sees the domain):
@@ -1176,9 +1180,15 @@ export class NodeDirectory {
           WHERE ts > ? AND (',' || caps || ',') LIKE ?
           ORDER BY RANDOM() LIMIT ?`,
         now - DIRECTORY_TTL_MS, `%,${cap},%`, DIRECTORY_K).toArray();
+      // `total`: how many fresh volunteers the sample was drawn from — the
+      // exact size of the reachable network for this capability, which
+      // clients take as the floor of their network-size estimate.
+      const total = Number(this.sql.exec(
+        `SELECT count(*) AS n FROM nodes WHERE ts > ? AND (',' || caps || ',') LIKE ?`,
+        now - DIRECTORY_TTL_MS, `%,${cap},%`).one().n);
       return Response.json({ nodes: rows.map((r) => ({
         pubkey: r.pubkey, host: r.host4 || null, host6: r.host6 || null, port: Number(r.port),
-      })) });
+      })), total });
     }
     if (request.method === "GET" && url.pathname === "/stats") {
       const now = parseInt(url.searchParams.get("now")) || 0;

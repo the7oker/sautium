@@ -1022,12 +1022,12 @@ def get_track_uuids_for_artist(conn, artist_uuid: str) -> list[str]:
 
 def get_unenriched_artist_uuids(conn) -> list[str]:
     """
-    Return artist UUIDs that have tracks but NO audio enrichment data
-    (no embeddings and no audio_features for any of their tracks).
-    These are the artists we should look for in DHT — DHT lookup is
-    expensive and only worth it when we don't have anything for the
-    artist; partial-enrichment gaps are filled via the manual/LAN
-    sync flow which uses get_incomplete_artist_uuids instead.
+    Artists with at least one track that has neither an embedding nor
+    audio_features — the audio gap set the sync walk asks each peer's
+    inventory about between drains. Per track, not per artist: one
+    unanalysed track is a reason to ask, a fully analysed discography is
+    not. Partial-category gaps (a bio missing on an analysed artist) are
+    get_incomplete_artist_uuids' job.
     """
     rows = db_query(
         conn,
@@ -1042,6 +1042,44 @@ def get_unenriched_artist_uuids(conn) -> list[str]:
            ORDER BY 1""",
     )
     return [r["artist_uuid"] for r in rows]
+
+
+RARE_SEARCH_SQL = """
+    WITH engaged AS (
+        SELECT DISTINCT ta.artist_id
+          FROM track_artists ta
+         WHERE EXISTS (SELECT 1 FROM media_files mf
+                        WHERE mf.track_id = ta.track_id)
+            OR EXISTS (SELECT 1 FROM listening_history lh
+                        WHERE lh.track_id = ta.track_id
+                          AND lh.completed AND NOT lh.skipped)
+    )
+    SELECT ta.artist_id::text AS artist_uuid
+      FROM engaged e
+      JOIN track_artists ta ON ta.artist_id = e.artist_id
+      LEFT JOIN artist_bios ab ON ab.artist_id = ta.artist_id
+     WHERE NOT EXISTS (SELECT 1 FROM embeddings em
+                        WHERE em.track_id = ta.track_id)
+       AND NOT EXISTS (SELECT 1 FROM audio_features af
+                        WHERE af.track_id = ta.track_id)
+     GROUP BY ta.artist_id
+     ORDER BY MAX(ab.listeners) ASC NULLS FIRST, ta.artist_id
+"""
+
+
+def get_rare_search_uuids(conn) -> list[str]:
+    """The artists worth an exact DHT key: ENGAGED (an owned file or a
+    completed, unskipped listen — the same gate as split_engaged and the
+    similars pull) with a track this node holds no analysis for, rarest
+    first (the announce tail's order — the popular ones are found through
+    the node key, the rare ones are what a per-artist key is for).
+
+    Engagement is the whole point. The audio gap set alone is, on a node
+    with the phantom layer, the phantom layer: thousands of artists nobody
+    owns, nobody has listened to and — since a tail announces only HELD
+    analysis — nobody announces. Asking the DHT for those was 47 s of dead
+    traversals per run for an answer of zero, every run."""
+    return [r["artist_uuid"] for r in db_query(conn, RARE_SEARCH_SQL)]
 
 
 def get_incomplete_artist_uuids(conn) -> list[str]:

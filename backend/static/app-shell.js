@@ -10267,9 +10267,12 @@
   ];
   // The node itself is always announced; this sizes the extra per-artist
   // keys published for the RAREST owned artists (see backend/dht_service.py).
+  // 150 = half the DHT traversal lane: a pass refreshes every key inside
+  // one entry lifetime with the rare-artist search beside it; 300 takes the
+  // whole lane and the oldest keys lapse while a search runs.
   const ANNOUNCE_LIMIT_OPTIONS = [
     { id: 0,    label: 'Node only' },
-    { id: 100,  label: '100 rare artists' },
+    { id: 150,  label: '150 rare artists' },
     { id: 300,  label: '300 rare artists' },
     { id: 1000, label: '1000 rare artists' },
   ];
@@ -10916,6 +10919,13 @@
     const limit = sync.announce_limit;
     const limitLabel = (ANNOUNCE_LIMIT_OPTIONS.find(o => o.id === (limit || 0)) || ANNOUNCE_LIMIT_OPTIONS[0]).label;
     const carryLabel = (CARRY_LIMIT_OPTIONS.find(o => o.id === (sync.carry_limit || 0)) || CARRY_LIMIT_OPTIONS[0]).label;
+    // The tail is announced and searched only past the network-size
+    // threshold (desktop/p2p/network_size.py); say so, or the row promises
+    // announces that are not happening.
+    const estimate = sync.network_estimate;
+    const rareLine = !limit ? '' : sync.rare_mode
+      ? `On — the network is ~${estimate} nodes, too many for the node key alone.`
+      : `Held until the network passes ~1000 nodes${estimate != null ? ` (now ~${estimate})` : ''} — the node key still lists everyone.`;
     const bgEnrich = !!sync.background_enrichment;
     const bgStatusLine = _bgEnrichStatusLine(sync.background_status, bgEnrich);
 
@@ -10965,6 +10975,7 @@
             <span class="chev">${SETTINGS_ICONS.chev}</span>
           </button>
         </div>
+        ${rareLine ? `<div class="form-row stacked"><div class="row-stack-sub">${escapeProfileHtml(rareLine)}</div></div>` : ''}
         <div class="form-row">
           <span class="form-label">Carry for others</span>
           <button class="select-trigger" data-action="pick-carry">

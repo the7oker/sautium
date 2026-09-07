@@ -76,6 +76,40 @@ _mailbox_task: asyncio.Task | None = None
 _load_meter = None
 
 
+async def _apply_rare_mode() -> None:
+    """Network-size verdict for the tail (desktop/p2p/network_size.py). The
+    Docker node runs no sync walk, so it has no DHT sample to estimate
+    from; the directory's fresh-volunteer count — exact for the reachable
+    network — is its whole measurement, persisted like the launcher's so
+    the Settings screen and a restart see the same verdict."""
+    if _dht_service is None:
+        return
+    try:
+        from desktop.p2p import network_size, node_hints
+        from routers.settings import _read, _write
+        await asyncio.to_thread(node_hints.fetch, "sync")
+        total = node_hints.total("sync")
+        if total is None:
+            return
+        mode = network_size.rare_mode(total, bool(_read("p2p.rare_mode")))
+        _write("p2p.network_estimate", total)
+        _write("p2p.rare_mode", mode)
+        _dht_service.set_tail_enabled(mode)
+        logger.info(f"Network size: {total} directory volunteers — "
+                    f"rare-artist keys {'on' if mode else 'held'}")
+    except Exception as e:
+        logger.warning(f"rare-mode verdict failed: {e}")
+
+
+async def _rare_mode_loop() -> None:
+    """The verdict on the re-announce cadence — one directory read per
+    cycle (the hints client caches for 10 min anyway)."""
+    from dht_service import REANNOUNCE_INTERVAL
+    while True:
+        await _apply_rare_mode()
+        await asyncio.sleep(REANNOUNCE_INTERVAL)
+
+
 async def _relay_cap_loop() -> None:
     """Adaptive relay cap (Phase D, Валерій's design): a full relay stops
     advertising Sautium-cap:relay so newcomers don't knock in vain; if it
@@ -509,7 +543,9 @@ async def lifespan(app: FastAPI):
                         logger.warning(f"relay role init failed: {e}")
 
                     # Rare-artist tail — registration only; the drip loop in
-                    # dht_service announces it at its own spacing.
+                    # dht_service announces it at its own spacing, and only
+                    # under the network-size verdict (_rare_mode_loop).
+                    asyncio.create_task(_rare_mode_loop())
                     artist_uuids = await asyncio.to_thread(_get_announce_tail_uuids)
                     if artist_uuids:
                         asyncio.create_task(

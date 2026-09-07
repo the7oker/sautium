@@ -267,11 +267,18 @@ See:
   `similar` step) and the sync's similars pull (`_engaged_artist_uuids`)
   carry this gate; the DHT announce tail is gated differently — on held
   analysis ("serveability", `ANNOUNCE_TAIL_SQL`), which name-only stubs
-  never enter. Without a gate every hop multiplies by ~50 Last.fm entries
+  never enter, and on the SIZE of the network (`desktop/p2p/network_size.py`:
+  per-artist keys are announced AND searched only past ~1000 reachable
+  nodes — below that the node key lists everyone and a per-artist key can
+  name nobody it doesn't; the rare search set is the ENGAGED artists with
+  an audio gap, never the phantom layer). Tail announces and rare lookups
+  share one traversal lane in `dht_service` — one initiation per ≥3 s,
+  alternating. Without a gate every hop multiplies by ~50 Last.fm entries
   and the pipeline walks all recorded music.
 - **P2P-facing settings** (all in `user_settings`, defaults in
   `backend/routers/settings.py` `_DEFAULTS`): `sync.announce_limit` (rare
-  artist DHT tail), `sync.carry_limit` (foreign TRACKS carried, ~46 KB
+  artist DHT tail; 150 = half the traversal lane, announced only under the
+  computed `p2p.rare_mode`), `sync.carry_limit` (foreign TRACKS carried, ~46 KB
   each), `p2p.relay_enabled` (relay role), `enrichment.reanalyze_imported`
   (re-derive first-hand analysis over P2P-imported — default off: the
   sync's whole point is not doing the work twice), `p2p.gate_mode`

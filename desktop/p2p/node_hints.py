@@ -36,6 +36,7 @@ CAPS = ("sync", "mbdump", "relay", "mbslices")
 _lock = threading.Lock()
 _cache: dict = {}                  # cap → (nodes, fetched_at)
 _failed_at: dict = {}              # cap → monotonic
+_totals: dict = {}                 # cap → fresh-volunteer count the last fetch carried
 
 
 def _worker_url() -> str:
@@ -53,7 +54,9 @@ def _get(url: str) -> dict:
 def fetch(cap: str, force: bool = False, _get=None) -> List[Tuple[str, int, str]]:
     """[(host, port, pubkey)] of fresh volunteers for a capability —
     possibly empty. v4 slot preferred; a v6-only entry is still dialable
-    (fmt_addr brackets it)."""
+    (fmt_addr brackets it). The directory's fresh-volunteer count rides
+    along (`total`, read back through total()) — the exact size of the
+    reachable network, which the network-size estimate takes as its floor."""
     from desktop.p2p.master_node import master_configured
     if cap not in CAPS or not master_configured():
         return []
@@ -79,8 +82,19 @@ def fetch(cap: str, force: bool = False, _get=None) -> List[Tuple[str, int, str]
             if isinstance(host, str) and host and isinstance(port, int) and 0 < port < 65536:
                 nodes.append((host, port, pubkey))
         _cache[cap] = (nodes, now)
+        total = body.get("total")
+        if isinstance(total, int) and total >= 0:
+            _totals[cap] = total
         _failed_at.pop(cap, None)
         return nodes
+
+
+def total(cap: str) -> Optional[int]:
+    """Fresh volunteers the directory holds for a capability, as of the last
+    fetch — None until a fetch has answered (or when the Worker predates the
+    field)."""
+    with _lock:
+        return _totals.get(cap)
 
 
 def registration_signature(sign: Callable[[bytes], bytes], port: int,
