@@ -15,14 +15,17 @@ import gzip
 import hashlib
 import json
 import logging
+import threading
 import time
 from collections import defaultdict, deque
+from contextlib import contextmanager
 from functools import partial
 from typing import Callable, Optional
 
 import re
 
 import psycopg2
+import psycopg2.pool
 
 from aiohttp import web
 
@@ -39,12 +42,6 @@ def _response_bytes(response) -> int:
     only known after write)."""
     body = getattr(response, "body", None)
     return len(body) if isinstance(body, (bytes, bytearray)) else 0
-
-
-def _conn_factory_for(dsn: str):
-    """One short-lived autocommit connection per call (executor-safe)."""
-    from desktop.p2p.identity_registry import psycopg2_conn_factory
-    return psycopg2_conn_factory(dsn)
 
 
 # Rate limiting: max requests per IP per minute
@@ -74,6 +71,9 @@ SEARCH_RATE_GLOBAL = 120
 
 # Max UUIDs per request (prevents memory/DB DoS)
 MAX_UUIDS_PER_REQUEST = 10_000
+
+# Pooled DB connections: one per busy executor thread, bounded.
+DB_POOL_MAX = 32
 
 # Signed-request replay window + relay caps — mirror
 # backend/routers/peer_chat.py, keep in step.
@@ -154,12 +154,14 @@ class SyncServer:
         self._request_counts: dict[str, list[float]] = defaultdict(list)
         self._sharing = True
         self._sharing_checked = 0.0
+        self._pool: Optional[psycopg2.pool.ThreadedConnectionPool] = None
+        self._pool_lock = threading.Lock()
         self._gate = None          # identity_registry.IdentityGate, lazy
         self._gate_service = None  # gate_service.GateService, lazy
         self._pricer = None        # pricing.Pricer, lazy
         self._gate_mode = ("shadow", 0.0)   # (value, read-at) — user_settings p2p.gate_mode, cached
         self._contact_log = contact_log.ContactLog(
-            partial(_conn_factory_for, self.db_dsn))
+            self._db)
         # Relay wake registry: subscriber pubkey -> _WakeSub
         self._wake_subs: dict[str, _WakeSub] = {}
         # Peer-relay clients (Phase D): pubkey -> voucher record
@@ -332,7 +334,7 @@ class SyncServer:
         addr = request.remote
 
         def _registry():
-            with identity_registry.psycopg2_conn_factory(self.db_dsn) as conn:
+            with self._db() as conn:
                 if identity_registry.is_banned(conn, pubkey):
                     return "banned", None
                 if bundle is not None:
@@ -370,7 +372,7 @@ class SyncServer:
             from desktop.p2p import gate_service, identity_registry
 
             def evidence(pubkey: str, reason: str) -> None:
-                with _conn_factory_for(self.db_dsn) as conn:
+                with self._db() as conn:
                     identity_registry.mark_failed(conn, pubkey, None, reason)
 
             from desktop.p2p import load_meter
@@ -378,7 +380,7 @@ class SyncServer:
             self._gate_service = gate_service.GateService(
                 self.account_info.get("public_key_hex", ""), sign_message,
                 admission.derive_gate_secret(get_private_key_raw()),
-                conn_factory=partial(_conn_factory_for, self.db_dsn),
+                conn_factory=self._db,
                 on_evidence=evidence, meter=meter,
                 verify_concurrency=1 if (meter is not None and meter.profile == "lite") else 2)
         return self._gate_service
@@ -392,7 +394,7 @@ class SyncServer:
             return value
         mode = "shadow"
         try:
-            with _conn_factory_for(self.db_dsn) as conn, conn.cursor() as cur:
+            with self._db() as conn, conn.cursor() as cur:
                 cur.execute("SELECT value FROM user_settings WHERE key = 'p2p.gate_mode'")
                 row = cur.fetchone()
                 if row and isinstance(row[0], str):
@@ -409,7 +411,7 @@ class SyncServer:
             from functools import partial
             from desktop.p2p import load_meter, pricing, similarity
             index = similarity.current() or similarity.install(
-                similarity.SimilarityIndex(partial(_conn_factory_for, self.db_dsn)))
+                similarity.SimilarityIndex(self._db))
             self._pricer = pricing.install(pricing.Pricer(
                 load_meter.current(), costs=self._contact_log.costs, mode=self._read_gate_mode,
                 sim_mult=index.sim_mult))
@@ -419,7 +421,7 @@ class SyncServer:
         """Registry lane for a signed requester (blocking — executor)."""
         from desktop.p2p import identity_registry
         try:
-            with _conn_factory_for(self.db_dsn) as conn:
+            with self._db() as conn:
                 return identity_registry.lane_for(identity_registry.get(conn, pubkey), signed=True)
         except Exception:
             return peer_auth.LANE_STRANGER
@@ -430,7 +432,7 @@ class SyncServer:
         from desktop.p2p import gate_service, identity_registry
         domain = None
         try:
-            with _conn_factory_for(self.db_dsn) as conn:
+            with self._db() as conn:
                 row = identity_registry.get(conn, pubkey)
                 domain = row["email_domain_token"] if row else None
         except Exception as e:
@@ -464,21 +466,34 @@ class SyncServer:
     def _identity_gate(self):
         """Lazy: the asyncio semaphore inside must be born on the serving loop."""
         if self._gate is None:
-            from functools import partial
             from desktop.p2p import identity_registry
             from desktop.p2p.birth_cert import verify_certificate
-            self._gate = identity_registry.IdentityGate(
-                partial(identity_registry.psycopg2_conn_factory, self.db_dsn),
-                verify_certificate)
+            self._gate = identity_registry.IdentityGate(self._db, verify_certificate)
         return self._gate
 
-    def _new_db(self) -> psycopg2.extensions.connection:
-        """Create a new DB connection (caller must close it)."""
-        conn = psycopg2.connect(self.db_dsn)
-        conn.autocommit = True
-        with conn.cursor() as cur:
-            cur.execute("SET timezone = 'UTC'")
-        return conn
+    @contextmanager
+    def _db(self):
+        """A pooled connection — a long-lived one per busy thread instead
+        of a fresh one per request: a Windows PostgreSQL connect measured
+        2 s on 2026-09-08, and a 3M-track peer's inventory is 48 requests.
+        A connection that died under us (PostgreSQL restarted beneath the
+        launcher) is discarded, never returned to the pool."""
+        with self._pool_lock:
+            if self._pool is None:
+                self._pool = psycopg2.pool.ThreadedConnectionPool(
+                    1, DB_POOL_MAX, self.db_dsn)
+        conn = self._pool.getconn()
+        broken = False
+        try:
+            conn.autocommit = True
+            with conn.cursor() as cur:
+                cur.execute("SET timezone = 'UTC'")
+            yield conn
+        except (psycopg2.OperationalError, psycopg2.InterfaceError):
+            broken = True
+            raise
+        finally:
+            self._pool.putconn(conn, close=broken)
 
     def _sharing_enabled(self) -> bool:
         """The "P2P sharing" switch from Settings. Peer endpoints have no
@@ -491,16 +506,13 @@ class SyncServer:
             return self._sharing
         self._sharing_checked = now
         try:
-            conn = self._new_db()
-            try:
+            with self._db() as conn:
                 with conn.cursor() as cur:
                     cur.execute("SELECT value FROM user_settings "
                                 "WHERE key = 'sync.p2p_enabled'")
                     row = cur.fetchone()
                 # Absent row means the default, which is on.
                 self._sharing = True if row is None else bool(row[0])
-            finally:
-                conn.close()
         except Exception as e:
             logger.warning("sharing flag unreadable (%s) — refusing to serve", e)
             self._sharing = False
@@ -568,11 +580,8 @@ class SyncServer:
         loop = asyncio.get_event_loop()
 
         def _with_conn():
-            conn = self._new_db()
-            try:
+            with self._db() as conn:
                 return func(conn, *args)
-            finally:
-                conn.close()
 
         return await loop.run_in_executor(None, _with_conn)
 
@@ -602,12 +611,9 @@ class SyncServer:
         now = time.time()
         if now - getattr(self, "_slice_count_at", 0) > 60:
             try:
-                conn = self._new_db()
-                try:
+                with self._db() as conn:
                     self._slice_count = \
                         mb_slice_queries.count_slice_blobs(conn)
-                finally:
-                    conn.close()
             except Exception:
                 self._slice_count = 0
             self._slice_count_at = now
@@ -729,8 +735,7 @@ class SyncServer:
         row means nobody has touched the setting, not "no" — the default
         applies, same as it does when the backend reads it."""
         try:
-            conn = self._new_db()
-            try:
+            with self._db() as conn:
                 with conn.cursor() as cur:
                     cur.execute("SELECT value FROM user_settings "
                                 "WHERE key = 'sync.carry_limit'")
@@ -738,8 +743,6 @@ class SyncServer:
                 if row is None:
                     return sync_queries.CARRY_DEFAULT_BUDGET
                 return int(row[0]) if row[0] is not None else 0
-            finally:
-                conn.close()
         except Exception as e:
             logger.warning("carry budget unreadable (%s) — not carrying", e)
             return 0
@@ -1947,16 +1950,13 @@ class SyncServer:
     def _has_pending_invites_db(self) -> bool:
         """Blocking: check DB for unreciprocated sent invites."""
         try:
-            conn = self._new_db()
-            try:
+            with self._db() as conn:
                 with conn.cursor() as cur:
                     cur.execute(
                         "SELECT 1 FROM sent_invites "
                         "WHERE sent_at > NOW() - INTERVAL '30 days' LIMIT 1"
                     )
                     return cur.fetchone() is not None
-            finally:
-                conn.close()
         except Exception:
             return False
 
@@ -1997,16 +1997,12 @@ class SyncServer:
         # place gains it without a manual migration.
         try:
             def _prep():
-                conn = self._new_db()
-                try:
+                with self._db() as conn:
                     mb_slice_queries.ensure_blob_table(conn)
                     from desktop.p2p import gate_pool, identity_registry
                     identity_registry.ensure_schema(conn)
                     contact_log.ensure_schema(conn)
                     gate_pool.ensure_schema(conn)
-                    conn.commit()
-                finally:
-                    conn.close()
             await asyncio.get_event_loop().run_in_executor(None, _prep)
         except Exception as e:
             logger.warning(f"slice blob table init failed: {e}")
@@ -2102,4 +2098,7 @@ class SyncServer:
         if self._runner:
             await self._runner.cleanup()
         await asyncio.get_event_loop().run_in_executor(None, self._contact_log.stop)
+        if self._pool is not None:
+            self._pool.closeall()
+            self._pool = None
         logger.info("Sync server stopped")

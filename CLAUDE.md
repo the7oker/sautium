@@ -297,10 +297,13 @@ See:
 - `sautium-backend` — FastAPI on `0.0.0.0:8000`, exposed to host at `localhost:8800`. GPU access via NVIDIA runtime. Also owns **play tracking** (`listening_history` + `local_play_stats` + Last.fm scrobbling) inside its status poller — keyed source-agnostically on `track_id`, so streamed phantom plays track like owned files. There is **no separate tracker daemon** (consolidated 2026-06-30; the old `sautium-playback-tracker` was retired).
 - Music library mounted read-only: `E:\Music` → `/music:ro` inside backend.
 - Launcher tree mounted read-only: `./desktop` → `/app/desktop:ro`, so the peer
-  surface imports `desktop.sync_client.import_pushed` and
-  `desktop.p2p.sync_queries` instead of mirroring them. Anything the two
-  surfaces must agree on *exactly* — the seal-verification gate, the carry SQL,
-  the DHT announce query — lives there and is imported, not copied.
+  surface imports `desktop.sync_client.import_pushed`,
+  `desktop.p2p.sync_queries` and the whole pull side,
+  `desktop.p2p.sync_walk` (the Docker node walks the network like a launcher
+  since 2026-09-08 — before that it only served and accepted carry), instead
+  of mirroring them. Anything the two surfaces must agree on *exactly* — the
+  seal-verification gate, the carry SQL, the DHT announce query, the walk —
+  lives there and is imported, not copied.
 - Model cache external: `./data/cache` → `/root/.cache`.
 - Identity documents: `./data/node_identity` → `/app/data/node_identity`
   (`birth_certificate.json` + `identity_proof.json` — the Docker node derives
@@ -489,6 +492,7 @@ break the design language. Use `window.notifyDialog()` and
 | `desktop/node_identity.py` | Ed25519 identity + account system (Argon2id) |
 | `desktop/sync_client.py` | Sync client + the seal-verifying import gate (`import_pushed` for carry); post-import classifiers |
 | `desktop/p2p/sync_queries.py` | Shared SQL logic (pull handlers, carry offer/wanted, DHT announce tail) |
+| `desktop/p2p/sync_walk.py` | The pull side — `SyncWalk`: gap set, peer tiers (manual/LAN/DHT+directory/rare keys), carry push, network-size verdict, triggers; run by P2PManager AND the Docker lifespan |
 | `desktop/p2p/sync_server.py` | aiohttp HTTPS sync server + chat + relay (voucher/wake/forward) + watchdog |
 | `desktop/p2p/mb_slice_queries.py` | MB slice protocol: per-artist signed blobs, `mb_slice_blobs` cache/replica inventory, pending-name priority |
 | `desktop/mb_slice_client.py` | Slice requester — per-name verification against the ORIGINAL dump node's key |

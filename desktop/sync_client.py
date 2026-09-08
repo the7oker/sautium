@@ -194,31 +194,37 @@ class SyncClient:
 
     def run_sync(self, track_uuids: list[str] = None,
                  bulk_track_uuids: Optional[list[str]] = None,
-                 bulk_artist_uuids: Optional[list[str]] = None) -> dict:
+                 bulk_artist_uuids: Optional[list[str]] = None,
+                 core_artist_uuids: Optional[list[str]] = None) -> dict:
         """
         Run full synchronization.
 
         Args:
-            track_uuids: the CORE — tracks of engaged artists, asked of the
-                peer in full through the exact inventory; None = every
-                local track.
-            bulk_track_uuids / bulk_artist_uuids: the phantom BULK — asked
-                through the peer's holdings filter when that is the cheaper
-                direction, so millions of gaps cost one filter download and
-                a handful of exact questions about the hits.
+            track_uuids: the CORE — tracks of engaged artists; None = every
+                local track. `core_artist_uuids` names those artists too,
+                so their bios/tags/similars are asked about even when every
+                track of theirs misses the peer's filter.
+            bulk_track_uuids / bulk_artist_uuids: the phantom BULK.
+
+        Core and bulk are priced the same way against the peer's holdings
+        filter: one filter download and a handful of exact questions about
+        the hits when the ask is bigger than the filter, the exact
+        inventory otherwise.
 
         Returns:
             dict with sync statistics per category.
         """
         try:
             return self._run_sync_inner(track_uuids, bulk_track_uuids or [],
-                                        bulk_artist_uuids or [])
+                                        bulk_artist_uuids or [],
+                                        core_artist_uuids or [])
         finally:
             self._close_conn()
 
     def _run_sync_inner(self, track_uuids: list[str],
                         bulk_track_uuids: list[str],
-                        bulk_artist_uuids: list[str]) -> dict:
+                        bulk_artist_uuids: list[str],
+                        core_artist_uuids: list[str]) -> dict:
         # Step 1: Get track UUIDs
         if track_uuids is None:
             self._progress("Getting local track UUIDs...")
@@ -241,31 +247,20 @@ class SyncClient:
             self._progress(
                 "  peer has no `segments` capability — legacy mean-vector pull")
 
-        # Step 3: Inventory — ask source what it has (chunked + merged)
-        inventory = dict(EMPTY_INVENTORY)
-        if track_uuids:
-            self._progress("Requesting inventory...")
-            inventory = self._fetch_inventory(track_uuids)
-            if not inventory:
-                self._progress("Inventory request failed.")
-                return {"error": "inventory_failed"}
-
-            # A track the source does not hold is the normal case, not an
-            # anomaly — on a node with the phantom layer it is millions of
-            # rows per peer. One count is all the log needs.
-            source_tracks = set(inventory.get("tracks", []))
-            not_found = set(track_uuids) - source_tracks
-            if not_found:
-                self._progress(
-                    f"  {len(not_found)} tracks not found at source"
-                )
-
-        if bulk_track_uuids or bulk_artist_uuids:
-            bulk = self._bulk_inventory(health, bulk_track_uuids, bulk_artist_uuids)
-            if bulk:
-                for key, value in bulk.items():
-                    if isinstance(value, list):
-                        inventory.setdefault(key, []).extend(value)
+        # Step 3: Inventory — what the peer holds of our gaps, core and bulk
+        # alike: the exact inventory when our ask weighs less than the
+        # peer's holdings filter (or the peer publishes none), otherwise
+        # the filter — fetched once per version, tested locally — and the
+        # exact inventory only about the hits. Until 2026-09-08 the core
+        # was always asked in full: a 3M-track master paid 48 exact
+        # requests per peer per run for what the filter answers in a
+        # second.
+        inventory = self._holdings_inventory(
+            health, list(track_uuids) + list(bulk_track_uuids),
+            list(core_artist_uuids) + list(bulk_artist_uuids))
+        if inventory is None:
+            self._progress("Inventory request failed.")
+            return {"error": "inventory_failed"}
 
         # Step 4: Filter out what we already have locally
         needed = self._compute_needed(inventory, use_segments)
@@ -324,18 +319,18 @@ class SyncClient:
                 f"{len(artists or [])} artists in {time.monotonic() - t0:.1f}s")
         return merged
 
-    def _bulk_inventory(self, health: dict, bulk_tracks: list[str],
-                        bulk_artists: list[str]) -> Optional[dict]:
-        """Inventory for the phantom bulk by the cheaper direction: the
-        peer's holdings filter (one download, cached by version, tested
-        locally) when the bulk is bigger than the filter, the exact
-        inventory otherwise or when the peer has no filter. Returns the
-        inventory for what is worth asking, None when nothing is."""
+    def _holdings_inventory(self, health: dict, tracks: list[str],
+                            artists: list[str]) -> Optional[dict]:
+        """Inventory for our gaps by the cheaper direction: the peer's
+        holdings filter (one download, cached by version, tested locally)
+        when the ask is bigger than the filter, the exact inventory
+        otherwise or when the peer has no filter. An empty inventory when
+        nothing is worth asking; None when a request failed."""
         if "holdings" not in self.peer_capabilities:
             self._progress(
-                f"  bulk: peer has no holdings filter — asking about "
-                f"{len(bulk_tracks)} tracks directly")
-            return self._fetch_inventory(bulk_tracks, bulk_artists)
+                f"  peer has no holdings filter — asking about "
+                f"{len(tracks)} tracks + {len(artists)} artists directly")
+            return self._fetch_inventory(tracks, artists)
 
         key = self.api.peer_pubkey or self.api.base_url
         cached = self.holdings_cache.get(key)
@@ -347,17 +342,17 @@ class SyncClient:
         else:
             # Price the two directions: ~40 bytes per uuid on the wire
             # against ~1.2 bytes per held element in the filter.
-            ask_cost = (len(bulk_tracks) + len(bulk_artists)) * 40
+            ask_cost = (len(tracks) + len(artists)) * 40
             if summary:
                 fetch_cost = (summary.get("tracks", 0) + summary.get("artists", 0)) * 1.2
                 if fetch_cost > ask_cost:
                     self._progress(
-                        f"  bulk: {len(bulk_tracks)} gaps weigh less than the "
-                        f"peer's filter — asking directly")
-                    return self._fetch_inventory(bulk_tracks, bulk_artists)
+                        f"  {len(tracks)} track + {len(artists)} artist gaps "
+                        f"weigh less than the peer's filter — asking directly")
+                    return self._fetch_inventory(tracks, artists)
             payload = self.api.sync_holdings(cached["version"] if cached else None)
             if not payload or "version" not in payload:
-                self._progress("  holdings request failed — bulk skipped this run")
+                self._progress("  holdings request failed")
                 return None
             if payload.get("unchanged") and cached:
                 filters = cached
@@ -372,13 +367,13 @@ class SyncClient:
                     f"  holdings filter fetched: {filters['tracks'].n} tracks + "
                     f"{filters['artists'].n} artists held by the peer")
 
-        hits_t = filters["tracks"].hits(bulk_tracks)
-        hits_a = filters["artists"].hits(bulk_artists)
+        hits_t = filters["tracks"].hits(tracks)
+        hits_a = filters["artists"].hits(artists)
         self._progress(
-            f"  holdings filter: {len(hits_t)} of {len(bulk_tracks)} tracks and "
-            f"{len(hits_a)} of {len(bulk_artists)} artists worth asking")
+            f"  holdings filter: {len(hits_t)} of {len(tracks)} tracks and "
+            f"{len(hits_a)} of {len(artists)} artists worth asking")
         if not hits_t and not hits_a:
-            return None
+            return dict(EMPTY_INVENTORY)
         return self._fetch_inventory(hits_t, hits_a)
 
     def _protected_analysis_tracks(self, uuids: list[str]) -> set:

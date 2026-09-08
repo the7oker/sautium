@@ -74,40 +74,32 @@ _identity_task: asyncio.Task | None = None
 _identity_stop: threading.Event | None = None
 _mailbox_task: asyncio.Task | None = None
 _load_meter = None
+_sync_walk = None                          # the pull side (desktop/p2p/sync_walk.py)
+_sync_walk_tasks: list[asyncio.Task] = []
 
 
-async def _apply_rare_mode() -> None:
-    """Network-size verdict for the tail (desktop/p2p/network_size.py). The
-    Docker node runs no sync walk, so it has no DHT sample to estimate
-    from; the directory's fresh-volunteer count — exact for the reachable
-    network — is its whole measurement, persisted like the launcher's so
-    the Settings screen and a restart see the same verdict."""
-    if _dht_service is None:
-        return
-    try:
-        from desktop.p2p import network_size, node_hints
-        from routers.settings import _read, _write
-        await asyncio.to_thread(node_hints.fetch, "sync")
-        total = node_hints.total("sync")
-        if total is None:
-            return
-        mode = network_size.rare_mode(total, bool(_read("p2p.rare_mode")))
-        _write("p2p.network_estimate", total)
-        _write("p2p.rare_mode", mode)
-        _dht_service.set_tail_enabled(mode)
-        logger.info(f"Network size: {total} directory volunteers — "
-                    f"rare-artist keys {'on' if mode else 'held'}")
-    except Exception as e:
-        logger.warning(f"rare-mode verdict failed: {e}")
+def _build_sync_walk():
+    """This runtime's dependencies for the shared sync walk
+    (desktop/p2p/sync_walk.py): the node's identity as the peer client, the
+    sharing switch on the carry push, a failed run as a local incident. No
+    LAN tier — a container cannot hear the beacon — and no address skip
+    list: the walk recognises its own address by the key /health returns."""
+    from db_pool import get_conn
+    from desktop.p2p import diag_events
+    from desktop.p2p.sync_walk import SyncWalk
+    from p2p_identity import peer_identity
+    from routers.settings import _read
 
+    def diag_record(kind: str, detail: dict) -> None:
+        with get_conn() as conn:
+            diag_events.record(conn, kind, detail)
 
-async def _rare_mode_loop() -> None:
-    """The verdict on the re-announce cadence — one directory read per
-    cycle (the hints client caches for 10 min anyway)."""
-    from dht_service import REANNOUNCE_INTERVAL
-    while True:
-        await _apply_rare_mode()
-        await asyncio.sleep(REANNOUNCE_INTERVAL)
+    return SyncWalk(
+        settings.database_url,
+        identity=lambda: peer_identity(settings),
+        sharing_enabled=lambda: bool(_read("sync.p2p_enabled")),
+        diag_record=diag_record,
+    )
 
 
 async def _relay_cap_loop() -> None:
@@ -473,6 +465,26 @@ async def lifespan(app: FastAPI):
         _p2p_server_task = asyncio.create_task(
             _serve_p2p(settings.p2p_sync_port))
 
+    # The pull side — the sync walk shared with the launcher. Until
+    # 2026-09-08 a Docker node only served pulls and accepted carry; now it
+    # walks the network like any launcher: the Worker directory and the DHT
+    # tiers, on the same triggers (NOTIFY sautium_sync_request, the
+    # sync.auto_interval_min timer, first run at the first source).
+    global _sync_walk, _sync_walk_tasks
+    if settings.p2p_enabled and settings.p2p_sync_port:
+        from desktop.p2p import sync_walk
+        _sync_walk = _build_sync_walk()
+        _sync_walk.bind()
+        _sync_walk_tasks = [
+            asyncio.create_task(sync_walk.listen_notifications(
+                settings.database_url,
+                {"sautium_sync_request": lambda: _sync_walk.request("request")},
+                lambda: _sync_walk.running)),
+            asyncio.create_task(_sync_walk.dispatch_loop()),
+            asyncio.create_task(_sync_walk.interval_loop()),
+        ]
+        logger.info("P2P sync walk armed")
+
     # Start DHT service for P2P peer discovery
     global _dht_service, _dht_online_task
     if settings.p2p_enabled and HAS_LIBTORRENT and settings.p2p_sync_port:
@@ -484,6 +496,8 @@ async def lifespan(app: FastAPI):
                 state_store=DhtStateStore(settings.database_url),
             )
             await _dht_service.start()
+            if _sync_walk is not None:
+                _sync_walk.dht = _dht_service
 
             if _load_meter is not None:
                 _dht_service.set_pace_provider(_load_meter.announce_pace)
@@ -544,8 +558,10 @@ async def lifespan(app: FastAPI):
 
                     # Rare-artist tail — registration only; the drip loop in
                     # dht_service announces it at its own spacing, and only
-                    # under the network-size verdict (_rare_mode_loop).
-                    asyncio.create_task(_rare_mode_loop())
+                    # under the network-size verdict, which the sync walk
+                    # measures per run and persists — start from the last one.
+                    from routers.settings import _read as _read_setting
+                    _dht_service.set_tail_enabled(bool(_read_setting("p2p.rare_mode")))
                     artist_uuids = await asyncio.to_thread(_get_announce_tail_uuids)
                     if artist_uuids:
                         asyncio.create_task(
@@ -562,6 +578,8 @@ async def lifespan(app: FastAPI):
                     _dht_reannounce_task = asyncio.create_task(
                         _dht_service.periodic_reannounce()
                     )
+                    if _sync_walk is not None:
+                        _sync_walk.first_source.set()
                 except Exception as e:
                     logger.error(f"DHT online sequence failed: {e}")
 
@@ -710,6 +728,14 @@ async def lifespan(app: FastAPI):
                 await _task
             except asyncio.CancelledError:
                 pass
+    if _sync_walk is not None:
+        _sync_walk.stop()
+    for _task in _sync_walk_tasks:
+        _task.cancel()
+        try:
+            await _task
+        except asyncio.CancelledError:
+            pass
     if _dht_service:
         await _dht_service.stop()
         _dht_service = None

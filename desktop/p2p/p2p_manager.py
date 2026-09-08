@@ -18,20 +18,20 @@ from datetime import datetime, timezone
 from functools import partial
 from pathlib import Path
 from typing import Callable, NamedTuple, Optional
-from urllib.parse import urlsplit
 
 import psycopg2
 import psycopg2.extensions
 
 from desktop.api_client import BackendAPIClient
 from desktop.mb_slice_client import MBSliceClient
-from desktop.p2p import diag_protocol, mb_slice_queries, network_size, sync_queries
-from desktop.p2p.addrs import canon_host, fmt_addr, is_internet_vantage
+from desktop.p2p import diag_protocol, mb_slice_queries, sync_walk
+from desktop.p2p.addrs import fmt_addr, is_internet_vantage
 from desktop.p2p.peer_auth import pinned_pubkey, pinned_ssl_context
 from desktop.p2p.chat_service import ChatService
 from desktop.p2p.dht_service import DHTService
 from desktop.p2p.dht_state import DhtStateStore
 from desktop.p2p.lan_discovery import LANDiscovery
+from desktop.p2p.sync_walk import SyncWalk
 from desktop.p2p.sync_server import (
     FORWARD_ACK_TIMEOUT, VOUCHER_TTL, SyncServer, voucher_payload,
 )
@@ -40,7 +40,6 @@ from desktop.p2p.sync_server import (
 # it that window plus the round trip before we give up on the request.
 FORWARD_TIMEOUT = FORWARD_ACK_TIMEOUT + 10
 from desktop.p2p.upnp_service import UPnPService
-from desktop.sync_client import SEGMENT_PULL_BATCH, SyncClient
 
 logger = logging.getLogger(__name__)
 
@@ -52,27 +51,6 @@ class _ProbeResult(NamedTuple):
     verdict: Optional[bool]
     detail: str
     retry_soon: bool = False
-
-# How many residual artists get a targeted per-artist DHT lookup after node
-# discovery has been drained. Each lookup costs a get_peers timeout, and only
-# the rare tail is announced by key at all — so this stays a probe, not a
-# sweep. Sized ~2 waves of the DHT batch concurrency (20).
-_DHT_TAIL_PROBE = 50
-
-# The first sync waits for a SOURCE — a LAN peer's beacon or the DHT
-# bootstrap — not for a fixed delay; this caps the wait for a node with
-# neither (the directory tier needs no local state at all).
-FIRST_SYNC_MAX_DELAY = 60
-
-# Peer-search memory (process lifetime, address-keyed, never per-peer sync
-# state). A dead address backs off — a DHT entry outlives its node by up to
-# 30 min, so every lookup keeps returning it — and a peer that answered
-# with nothing for us is left alone until our gaps change: the residue is
-# elsewhere by definition.
-UNREACHABLE_BACKOFF_BASE = 30 * 60
-UNREACHABLE_BACKOFF_MAX = 24 * 3600
-EMPTY_PEER_TTL = 6 * 3600
-PROBE_CONCURRENCY = 8
 
 
 class P2PManager:
@@ -107,17 +85,7 @@ class P2PManager:
         self._sync_request_task: Optional[asyncio.Task] = None
         self._sync_request_listen_task: Optional[asyncio.Task] = None
         self._auto_sync_task: Optional[asyncio.Task] = None
-        self._sync_request_notify: Optional[asyncio.Event] = None
-        self._sync_reasons: set[str] = set()     # why the queued run was asked for
-        self._unreachable: dict[str, tuple[float, int]] = {}   # addr -> (retry_after, strikes)
-        self._holdings_cache: dict = {}                        # peer pubkey -> published holdings filters
-        self._empty_peers: dict[str, float] = {}               # addr -> ignore until
-        # Reachable peers met in the current sync run, (pubkey, host, port):
-        # the capture side of the network-size estimate (network_size).
-        self._run_sightings: list[tuple[str, str, int]] = []
-        self._gap_count = 0                                    # last incomplete-set size
-        self._first_source: Optional[asyncio.Event] = None   # LAN peer seen / DHT ready
-        self._sync_lock: Optional[asyncio.Lock] = None
+        self._walk: Optional[SyncWalk] = None   # the pull side (desktop/p2p/sync_walk.py)
         self._mb_slice_task: Optional[asyncio.Task] = None
         self._mb_slice_lock: Optional[asyncio.Lock] = None
         self._mb_dump_version: Optional[str] = None
@@ -245,6 +213,21 @@ class P2PManager:
         # "Security Posture"). docker_ports above is for LAN-discovery
         # probing of localhost only.
         self._upnp = UPnPService(ports=[http_port])
+        # The pull side, shared with the Docker backend: this runtime's
+        # services go in as dependencies (desktop/p2p/sync_walk.py).
+        self._walk = SyncWalk(
+            self.db_dsn,
+            identity=self._peer_identity,
+            sharing_enabled=lambda: bool(
+                self._sync_server and self._sync_server._sharing_enabled()),
+            dht=self._dht_service,
+            lan=self._lan_discovery,
+            manual_peers=p2p_cfg.get("manual_peers", []),
+            skip_addrs=self._dht_skip_addrs,
+            diag_record=self._diag_record,
+            after_run=self._request_mb_slices_safe,
+            on_enriched_count=self._lan_discovery.update_enriched_count,
+        )
 
         # Initialize chat service if account exists
         if account_info:
@@ -335,9 +318,7 @@ class P2PManager:
         """Main async routine: start services, announce, wait."""
         self._stop_event = asyncio.Event()
         self._chat_notify = asyncio.Event()
-        self._sync_request_notify = asyncio.Event()
-        self._first_source = asyncio.Event()
-        self._sync_lock = asyncio.Lock()
+        self._walk.bind()
         self._mb_slice_lock = asyncio.Lock()
         self._mb_probe_lock = asyncio.Lock()
         # Support diagnostics: one sequential worker fed by the master's
@@ -449,16 +430,16 @@ class P2PManager:
             # Sync triggers: NOTIFY sautium_sync_request (the backend
             # after a scan that added files), a LAN peer appearing
             # (_on_lan_peer) and the auto-sync timer (sync.auto_interval_min).
-            # All serialise through self._sync_lock so concurrent triggers
-            # merge to one run.
+            # All serialise inside the walk, so concurrent triggers merge
+            # to one run (desktop/p2p/sync_walk.py).
             self._sync_request_listen_task = asyncio.create_task(
-                self._sync_request_listener_thread()
+                self._sync_notification_listener()
             )
             self._sync_request_task = asyncio.create_task(
-                self._sync_request_loop()
+                self._walk.dispatch_loop()
             )
             self._auto_sync_task = asyncio.create_task(
-                self._auto_sync_loop()
+                self._walk.interval_loop()
             )
             self._mb_slice_task = asyncio.create_task(
                 self._mb_slice_loop()
@@ -518,13 +499,12 @@ class P2PManager:
         # dht_service announces it at its own spacing, and only under the
         # network-size verdict, which starts from the last run's so a
         # restart neither waits for a sync run nor announces blind.
-        previous = await asyncio.get_event_loop().run_in_executor(
-            None, self._read_setting_value, "p2p.rare_mode")
+        previous = await self._walk.db(sync_walk.read_setting, "p2p.rare_mode")
         self._dht_service.set_tail_enabled(bool(previous))
         _progress("Querying enriched artists...")
-        enriched = await self._get_enriched_artists()
+        enriched = await self._walk.db(sync_walk.enriched_artist_uuids)
         self._lan_discovery.update_enriched_count(len(enriched))
-        tail = await self._get_announce_tail()
+        tail = await self._walk.db(sync_walk.announce_tail_uuids)
         if tail:
             asyncio.create_task(self._dht_service.announce_artists(tail))
             _progress(
@@ -541,7 +521,7 @@ class P2PManager:
         self._reannounce_task = asyncio.create_task(
             self._dht_service.periodic_reannounce()
         )
-        self._first_source.set()
+        self._walk.first_source.set()
 
     async def _check_sync_server_health(self) -> bool:
         """Check if the sync server is actually accepting connections.
@@ -744,593 +724,43 @@ class P2PManager:
         self._thread = None
         logger.info("P2P manager stopped")
 
-    # psycopg2.connect() is a sync C-call: invoking it directly from a
-    # coroutine blocks the event loop until the TCP/auth handshake returns
-    # (seconds, especially during a backend restart). While blocked, every
-    # `loop.call_soon_threadsafe(...)` from another thread is queued but
-    # never runs — `stop()` then times out and force-cleanup leaks the
-    # aiohttp socket. Always do the full connect+query+close inside the
-    # executor.
-
-    async def _get_enriched_artists(self) -> list[str]:
-        """Query local DB for enriched artist UUIDs."""
-        def _blocking() -> list[str]:
-            conn = psycopg2.connect(self.db_dsn)
-            conn.autocommit = True
-            try:
-                return sync_queries.get_enriched_artist_uuids(conn)
-            finally:
-                conn.close()
-        return await asyncio.get_event_loop().run_in_executor(None, _blocking)
-
-    async def _get_announce_tail(self) -> list[str]:
-        """Rare-artist tail for DHT announcing, sized by sync.announce_limit
-        (0/null = node key only)."""
-        def _blocking() -> list[str]:
-            conn = psycopg2.connect(self.db_dsn)
-            conn.autocommit = True
-            try:
-                with conn.cursor() as cur:
-                    cur.execute(
-                        "SELECT value FROM user_settings WHERE key = %s",
-                        ("sync.announce_limit",))
-                    row = cur.fetchone()
-                limit = int(row[0]) if row and row[0] else 0
-                return sync_queries.get_announce_tail_uuids(conn, limit)
-            finally:
-                conn.close()
-        return await asyncio.get_event_loop().run_in_executor(None, _blocking)
-
-    async def _get_unenriched_artists(self) -> list[str]:
-        """The audio gap set between drains (partial gaps are
-        _get_incomplete_artists' job in the manual/LAN sync path)."""
-        def _blocking() -> list[str]:
-            conn = psycopg2.connect(self.db_dsn)
-            conn.autocommit = True
-            try:
-                return sync_queries.get_unenriched_artist_uuids(conn)
-            finally:
-                conn.close()
-        return await asyncio.get_event_loop().run_in_executor(None, _blocking)
-
-    async def _get_rare_search_artists(self) -> list[str]:
-        """Engaged artists with an audio gap, rarest first — the ones worth
-        an exact DHT key (sync_queries.get_rare_search_uuids)."""
-        def _blocking() -> list[str]:
-            conn = psycopg2.connect(self.db_dsn)
-            conn.autocommit = True
-            try:
-                return sync_queries.get_rare_search_uuids(conn)
-            finally:
-                conn.close()
-        return await asyncio.get_event_loop().run_in_executor(None, _blocking)
-
-    async def _get_incomplete_artists(self) -> list[str]:
-        """Artists missing data in any sync category — manual/LAN trigger
-        set. Catches partial-sync states (audio landed but Last.fm bio
-        didn't, etc.) that the audio-only AND-logic in
-        _get_unenriched_artists silently skipped."""
-        def _blocking() -> list[str]:
-            conn = psycopg2.connect(self.db_dsn)
-            conn.autocommit = True
-            try:
-                return sync_queries.get_incomplete_artist_uuids(conn)
-            finally:
-                conn.close()
-        return await asyncio.get_event_loop().run_in_executor(None, _blocking)
-
-    async def _core_and_bulk(
-        self, artist_uuids: list[str]
-    ) -> tuple[list[str], tuple[list[str], list[str]]]:
-        """(core track uuids, (bulk track uuids, bulk artist uuids)): the
-        engaged artists' tracks are the core a peer is asked about in full;
-        the rest is the phantom bulk that goes through the holdings
-        filter (sync_queries.split_engaged)."""
-        def _blocking():
-            conn = psycopg2.connect(self.db_dsn)
-            conn.autocommit = True
-            try:
-                return sync_queries.split_engaged(conn, artist_uuids)
-            finally:
-                conn.close()
-        engaged, rest = await asyncio.get_event_loop().run_in_executor(
-            None, _blocking)
-        core = await self._get_tracks_for_artists(engaged)
-        bulk_tracks = await self._get_tracks_for_artists(rest)
-        return core, (bulk_tracks, rest)
-
-    async def _get_tracks_for_artists(
-        self, artist_uuids: list[str]
-    ) -> list[str]:
-        """Get all track UUIDs for a list of artists (single query)."""
-        if not artist_uuids:
-            return []
-
-        def _blocking() -> list[str]:
-            conn = psycopg2.connect(self.db_dsn)
-            conn.autocommit = True
-            try:
-                with conn.cursor() as cur:
-                    cur.execute(
-                        "SELECT DISTINCT track_id::text FROM track_artists "
-                        "WHERE artist_id = ANY(%s::uuid[])",
-                        [artist_uuids],
-                    )
-                    return [r[0] for r in cur.fetchall()]
-            finally:
-                conn.close()
-        return await asyncio.get_event_loop().run_in_executor(None, _blocking)
-
-    async def _get_track_uuids_for_artist(
-        self, artist_uuid: str
-    ) -> list[str]:
-        """Get track UUIDs for a specific artist."""
-        def _blocking() -> list[str]:
-            conn = psycopg2.connect(self.db_dsn)
-            conn.autocommit = True
-            try:
-                return sync_queries.get_track_uuids_for_artist(
-                    conn, artist_uuid
-                )
-            finally:
-                conn.close()
-        return await asyncio.get_event_loop().run_in_executor(None, _blocking)
-
     # -------------------------------------------------------------------
-    # P2P Sync — event-driven: first source, post-scan request, LAN peer,
-    # interval timer (see _async_main)
+    # P2P Sync — the walk lives in desktop/p2p/sync_walk.py (shared with
+    # the Docker backend); this side only feeds it triggers.
     # -------------------------------------------------------------------
 
     def _request_sync(self, reason: str) -> None:
         """Queue a sync run and remember why (loop thread). Concurrent
-        reasons merge into the one run the request loop starts next."""
-        self._sync_reasons.add(reason)
-        if self._sync_request_notify:
-            self._sync_request_notify.set()
+        reasons merge into the one run the dispatcher starts next."""
+        self._walk.request(reason)
 
     def _on_lan_peer(self, ip: str, port: int) -> None:
         """A LAN beacon (or the localhost Docker probe) found a node that
         was not there a moment ago — the cheapest source there is, one hop
         away. Sync now rather than at the next interval."""
-        if self._first_source:
-            self._first_source.set()
+        if self._walk.first_source:
+            self._walk.first_source.set()
         self._request_sync("lan-peer")
 
-    async def _async_sync_from_peers(
-        self,
-        progress_cb: Optional[Callable[[str], None]] = None,
-        trigger: str = "auto",
-    ) -> dict:
-        """Async implementation of P2P sync."""
-
-        def _progress(msg):
-            logger.info(msg)
-            if progress_cb:
-                progress_cb(msg)
-
-        # Step 1: Find artists missing data in any sync category.
-        # `incomplete` is broader than `unenriched` (which is audio-only,
-        # AND-logic) — incomplete catches partial states like
-        # "audio landed, Last.fm bio never came through" that the old
-        # gate silently skipped. Inventory + _compute_needed inside
-        # the peer sync handles per-category filtering so a wide
-        # trigger here costs only one inventory round-trip per peer
-        # when nothing new exists.
-        _progress("Finding artists needing sync...")
-        incomplete = await self._get_incomplete_artists()
-        # New gaps make the "had nothing for us" notes stale: a scan or a
-        # listen added names the same peers may well have.
-        if (len(incomplete) > self._gap_count
-                or "request" in trigger or "lan-peer" in trigger):
-            self._empty_peers.clear()
-        self._gap_count = len(incomplete)
-        if not incomplete:
-            _progress("All artists fully synced!")
-            return {"status": "all_synced"}
-
-        _progress(f"Found {len(incomplete)} artists with missing data")
-
-        # Step 2: the CORE (engaged artists — asked of every peer in full)
-        # and the phantom BULK (asked through the peer's holdings filter).
-        track_uuids, bulk = await self._core_and_bulk(incomplete)
-
-        if not track_uuids and not bulk[0]:
-            _progress("No tracks found for unenriched artists")
-            return {"status": "no_tracks"}
-
-        _progress(
-            f"Need enrichment for {len(track_uuids)} core tracks"
-            + (f" + {len(bulk[0])} phantom-bulk tracks of {len(bulk[1])} artists"
-               if bulk[0] else "")
-        )
-
-        total_stats = {}
-
-        def _add_stats(synced: dict) -> int:
-            items = 0
-            for k, v in synced.items():
-                if isinstance(v, int):
-                    total_stats[k] = total_stats.get(k, 0) + v
-                    items += v
-            return items
-
-        # Internet-tier discovery starts NOW and overlaps the LAN work: the
-        # node-key lookup waits out its whole collection window, and the
-        # directory is one HTTPS call — by the time the LAN peers are
-        # drained both answers are usually in hand.
-        from desktop.p2p import master_hint, node_hints
-        dht_nodes_task = None
-        if self._dht_service and self._dht_service.is_available:
-            dht_nodes_task = asyncio.create_task(self._lookup_nodes_safe())
-        directory_task = asyncio.get_event_loop().run_in_executor(
-            None, node_hints.fetch, "sync")
-
-        # Step 3: Try manual peers first (e.g., Docker backend)
-        manual_peers = self.config.get("p2p", {}).get("manual_peers", [])
-        for peer_addr in manual_peers:
-            _add_stats(await self._sync_from_peer(
-                peer_addr, track_uuids, _progress, progress_cb, bulk=bulk))
-
-        # Step 4: LAN peers (fast, works behind any NAT)
-        if self._lan_discovery:
-            lan_peers = self._lan_discovery.peers
-            if lan_peers:
-                _progress(f"Found {len(lan_peers)} LAN peers")
-                # Sort by artist count descending (prefer richer peers)
-                lan_peers_sorted = sorted(
-                    lan_peers,
-                    key=lambda p: (
-                        self._lan_discovery.get_peer_info(*p) or {}
-                    ).get("artists", 0),
-                    reverse=True,
-                )
-                for ip, port in lan_peers_sorted:
-                    info = self._lan_discovery.get_peer_info(ip, port)
-                    artist_count = (info or {}).get("artists", "?")
-                    scheme = (info or {}).get("scheme", "https")
-                    peer_url = f"{scheme}://{fmt_addr(ip, port)}"
-                    _progress(
-                        f"LAN peer {peer_url} "
-                        f"({artist_count} artists)..."
-                    )
-                    _add_stats(await self._sync_from_peer(
-                        peer_url, track_uuids, _progress, progress_cb,
-                        is_lan=True, bulk=bulk,
-                    ))
-
-        # Step 5: the internet tiers — only for what the LAN left behind.
-        #
-        # Flow: nodes on the discovery key and the directory's volunteers,
-        # probed concurrently, drained one at a time (each node's inventory
-        # answers for the whole library at once); then the residual rare
-        # artists through their own keys.
-        dht_seen: set[str] = set()       # addresses already considered this run
-
-        # Build a set of DHT addresses to skip (only for our external IP):
-        # - our own node (external_ip:announce_port)
-        # - LAN peers via external IP (already synced above)
-        # - UPnP-mapped Docker ports (not Sautium sync servers)
-        skip_dht_addrs: set[str] = set()
+    def _dht_skip_addrs(self) -> set[str]:
+        """DHT addresses that are not peers worth probing, all on our own
+        external IP: this node (external_ip:announce_port), LAN peers
+        through the router (same external IP — already synced one hop
+        away) and UPnP-mapped Docker ports (not Sautium sync servers)."""
+        skip: set[str] = set()
         ext_ip = self._upnp.external_ip if self._upnp else None
-        if ext_ip:
-            # Skip self
-            if self._dht_service:
-                skip_dht_addrs.add(
-                    f"{ext_ip}:{self._dht_service._announce_port}"
-                )
-            # Skip LAN peers (same router = same external IP)
-            if self._lan_discovery:
-                for lip, lport in self._lan_discovery.peers:
-                    skip_dht_addrs.add(f"{ext_ip}:{lport}")
-            # Skip UPnP-mapped Docker ports
-            if self._upnp:
-                for ext_port, int_port in self._upnp._mapped:
-                    skip_dht_addrs.add(f"{ext_ip}:{ext_port}")
-                    skip_dht_addrs.add(f"{ext_ip}:{int_port}")
-        if skip_dht_addrs:
-            logger.debug(f"DHT skip list: {skip_dht_addrs}")
-
-        now = time.time()
-
-        def _fresh(addrs) -> list[str]:
-            """Addresses worth a probe: not us, not a LAN peer, not already
-            considered this run, not backing off, not noted empty-handed."""
-            out = []
-            for ip, port in addrs:
-                addr = fmt_addr(ip, port)
-                if addr in dht_seen or addr in skip_dht_addrs:
-                    continue
-                dht_seen.add(addr)
-                retry_after, _ = self._unreachable.get(addr, (0.0, 0))
-                if retry_after > now or self._empty_peers.get(addr, 0.0) > now:
-                    continue
-                out.append(addr)
-            return out
-
-        async def _drain(reachable) -> None:
-            """Ask each reachable peer about everything still missing, one
-            at a time: the inventory call does the matching, and the gap set
-            shrinks after every peer, so parallel pulls would only
-            duplicate."""
-            for addr, api in reachable:
-                remaining = await self._get_unenriched_artists()
-                if not remaining:
-                    return
-                tracks, rest = await self._core_and_bulk(remaining)
-                if not tracks and not rest[0]:
-                    return
-                _progress(f"Asking {addr} about {len(tracks)} core + "
-                          f"{len(rest[0])} bulk tracks...")
-                synced = await self._sync_from_peer(
-                    addr, tracks, _progress, progress_cb, peer_api=api, bulk=rest,
-                )
-                if not _add_stats(synced) and "error" not in synced:
-                    # Reachable, answered, had nothing for us — the residue
-                    # is elsewhere by definition; leave it alone until our
-                    # gaps change.
-                    self._empty_peers[addr] = now + EMPTY_PEER_TTL
-
-        # Tier A: ONE node-key lookup plus the directory's volunteers —
-        # awaited whether or not anything is missing, because the reply is
-        # also this run's network-size sample: the tail announces follow the
-        # verdict, and they serve OTHER nodes.
-        nodes = await dht_nodes_task if dht_nodes_task else []
-        try:
-            volunteers = await directory_task
-        except Exception as e:
-            logger.warning(f"Directory lookup failed: {e}")
-            volunteers = []
-        sample = [(ip, port) for ip, port in nodes
-                  if fmt_addr(ip, port) not in skip_dht_addrs]
-        remaining = await self._get_unenriched_artists()
-        candidates = _fresh(
-            list(nodes) + [(h, p) for h, p, _ in (volunteers or [])])
-        if remaining and not candidates and not dht_seen:
-            # Nothing anywhere (dead DHT, empty directory): the master
-            # hint is the last tier, validated like any other node.
-            hint = await asyncio.get_event_loop().run_in_executor(
-                None, master_hint.fetch)
-            if hint:
-                candidates = _fresh([hint])
-        if not remaining:
-            _progress("Nothing left to pull — measuring the network only")
-        if candidates:
-            _progress(f"Probing {len(candidates)} nodes...")
-            reachable = await self._probe_candidates(candidates)
-            if remaining:
-                await _drain(reachable)
-        rare_mode = await self._measure_network(
-            len(nodes), sample, node_hints.total("sync"))
-
-        # Tier B: engaged artists still missing analysis — exact keys
-        # against the tails peers announce, a rotating slice (the same
-        # unfindable names must not be asked for every run while the rest
-        # never is). Only once the network is too big for tier A to have
-        # listed every holder: below that a per-artist key can only name a
-        # node the inventory round already asked.
-        if remaining and dht_nodes_task is not None:
-            residual = await self._get_rare_search_artists() if rare_mode else []
-            if residual:
-                probe = await self._residual_slice(residual)
-                _progress(
-                    f"Searching DHT for {len(probe)} of {len(residual)} "
-                    f"rare artists..."
-                )
-                peer_map = await self._dht_service.lookup_artists_batch(probe)
-                found: list[tuple[str, int]] = []
-                for peers in peer_map.values():
-                    found.extend(peer for peer in peers if peer not in found)
-                candidates = _fresh(found)
-                if candidates:
-                    await _drain(await self._probe_candidates(candidates))
-            elif not rare_mode:
-                _progress("Rare-artist keys held: the node key still lists "
-                          "the whole network")
-
-        # Sync may have enriched artists that now belong in the rare tail
-        # (paced — background task, the sync result must not wait for it).
-        if total_stats and self._dht_service:
-            tail = await self._get_announce_tail()
-            if tail:
-                _progress("Re-announcing the rare-artist tail...")
-                asyncio.create_task(self._dht_service.announce_artists(tail))
-            self._lan_discovery.update_enriched_count(
-                len(await self._get_enriched_artists()))
-
-        total_items = sum(
-            v for v in total_stats.values() if isinstance(v, int)
-        )
-        _progress(f"P2P sync complete: {total_items} items synced")
-        return total_stats
-
-    async def _lookup_nodes_safe(self) -> list[tuple[str, int]]:
-        try:
-            return await self._dht_service.lookup_nodes()
-        except Exception as e:
-            logger.warning(f"DHT node lookup failed: {e}")
-            return []
-
-    async def _probe_candidates(
-        self, addrs: list[str],
-    ) -> list[tuple[str, BackendAPIClient]]:
-        """Health-probe candidates concurrently — sequentially every dead
-        address cost its full 5 s timeout, N of them per run — and keep the
-        answering ones in the order they came. Draining stays sequential."""
-        sem = asyncio.Semaphore(PROBE_CONCURRENCY)
-
-        async def probe(addr: str):
-            async with sem:
-                api = await self._try_connect_peer(addr)
-            if api is None:
-                self._note_unreachable(addr)
-            else:
-                self._unreachable.pop(addr, None)
-                self._note_sighting(api)
-            return addr, api
-
-        results = await asyncio.gather(*(probe(a) for a in addrs))
-        return [(addr, api) for addr, api in results if api is not None]
-
-    def _note_unreachable(self, addr: str) -> None:
-        """Back a dead address off: 30 min, doubling to a day."""
-        _, strikes = self._unreachable.get(addr, (0.0, 0))
-        delay = min(UNREACHABLE_BACKOFF_BASE * (2 ** strikes),
-                    UNREACHABLE_BACKOFF_MAX)
-        self._unreachable[addr] = (time.time() + delay, strikes + 1)
-
-    def _note_sighting(self, api: BackendAPIClient) -> None:
-        """A peer that answered /health on a verified channel: one capture
-        for the network-size ledger (network_size.record_sightings)."""
-        parts = urlsplit(api.base_url)
-        if api.peer_pubkey and parts.hostname and parts.port:
-            self._run_sightings.append(
-                (api.peer_pubkey, parts.hostname, parts.port))
-
-    async def _measure_network(
-        self, reply_size: int, sample: list[tuple[str, int]],
-        directory_total: Optional[int],
-    ) -> bool:
-        """This run's network-size measurement (desktop/p2p/network_size.py):
-        the DHT sample against the ledger of nodes met before, the
-        directory's count as a floor. The verdict gates the tail both ways
-        — announced and searched — and is persisted so a restart starts
-        from it. Returns the rare mode."""
-        sightings, self._run_sightings = self._run_sightings, []
-        if not sample and directory_total is None:
-            return bool(self._dht_service and self._dht_service.tail_enabled)
-
-        def _blocking() -> tuple[int, bool]:
-            conn = psycopg2.connect(self.db_dsn)
-            conn.autocommit = True
-            try:
-                marked = network_size.ledger_size(conn)
-                sample_set = {(canon_host(h), int(p)) for h, p in sample}
-                known_addr = network_size.known_addresses(conn, sample_set)
-                probed = {}
-                for pubkey, host, port in sightings:
-                    key = (canon_host(host), int(port))
-                    if key in sample_set:
-                        probed[key] = pubkey.lower()
-                # A known node at a new address is a recapture, not a
-                # newcomer — matched by key once the probe named it.
-                moved = network_size.known_pubkeys(
-                    conn, [pk for hp, pk in probed.items()
-                           if hp not in known_addr])
-                live = known_addr | set(probed)
-                recaptured = len(known_addr) + sum(
-                    1 for hp, pk in probed.items()
-                    if hp not in known_addr and pk in moved)
-                network_size.record_sightings(conn, sightings)
-                estimate = network_size.estimate(
-                    marked, len(live), recaptured,
-                    exhaustive=reply_size < network_size.DHT_REPLY_CAP)
-                if directory_total is not None:
-                    estimate = max(estimate, directory_total)
-                with conn.cursor() as cur:
-                    cur.execute("SELECT value FROM user_settings WHERE key = %s",
-                                ("p2p.rare_mode",))
-                    row = cur.fetchone()
-                mode = network_size.rare_mode(estimate, bool(row and row[0]))
-            finally:
-                conn.close()
-            self._write_settings_blocking({
-                "p2p.network_estimate": estimate,
-                "p2p.rare_mode": mode,
-            })
-            return estimate, mode
-
-        estimate, mode = await asyncio.get_event_loop().run_in_executor(
-            None, _blocking)
+        if not ext_ip:
+            return skip
         if self._dht_service:
-            self._dht_service.set_tail_enabled(mode)
-        logger.info(
-            f"Network size: ~{estimate} nodes (DHT sample {len(sample)}, "
-            f"directory {directory_total if directory_total is not None else '—'}) "
-            f"— rare-artist keys {'on' if mode else 'held'}"
-        )
-        return mode
-
-    async def _residual_slice(self, residual: list[str]) -> list[str]:
-        """The next _DHT_TAIL_PROBE names of the (ordered) residual, from a
-        cursor kept in user_settings so it survives restarts and walks the
-        whole tail over successive runs."""
-        loop = asyncio.get_event_loop()
-        cursor = await loop.run_in_executor(
-            None, self._read_setting_value, "sync.residual_cursor")
-        start = int(cursor or 0) % len(residual)
-        probe = (residual[start:] + residual[:start])[:_DHT_TAIL_PROBE]
-        await loop.run_in_executor(
-            None, self._write_setting_value, "sync.residual_cursor",
-            (start + len(probe)) % len(residual))
-        return probe
-
-    def _read_setting_value(self, key: str):
-        """One user_settings value on a short-lived connection (executor)."""
-        conn = psycopg2.connect(self.db_dsn)
-        try:
-            with conn.cursor() as cur:
-                cur.execute("SELECT value FROM user_settings WHERE key = %s",
-                            (key,))
-                row = cur.fetchone()
-                return row[0] if row else None
-        finally:
-            conn.close()
-
-    def _write_setting_value(self, key: str, value) -> None:
-        conn = psycopg2.connect(self.db_dsn)
-        conn.autocommit = True
-        try:
-            with conn.cursor() as cur:
-                cur.execute(
-                    """
-                    INSERT INTO user_settings (key, value)
-                    VALUES (%s, %s::jsonb)
-                    ON CONFLICT (key) DO UPDATE
-                        SET value = EXCLUDED.value,
-                            updated_at = CURRENT_TIMESTAMP
-                    """,
-                    (key, json.dumps(value)),
-                )
-        finally:
-            conn.close()
-
-    async def _try_connect_peer(
-        self, peer_addr: str, is_lan: bool = False,
-    ) -> Optional[BackendAPIClient]:
-        """Try to connect to a peer, testing HTTPS then HTTP.
-
-        Returns a working BackendAPIClient or None.
-        For LAN peers (is_lan=True), retries once — the first connection
-        from a fresh process can fail due to OS-level cold-start overhead.
-        """
-        loop = asyncio.get_event_loop()
-
-        peer_identity = self._peer_identity()
-        if "://" in peer_addr:
-            # Explicit scheme — try as-is
-            api = BackendAPIClient(peer_addr, peer=peer_identity)
-            attempts = 2 if is_lan else 1
-            for attempt in range(attempts):
-                health = await loop.run_in_executor(
-                    None, api.get_health
-                )
-                if health:
-                    return api
-                if attempt == 0 and is_lan:
-                    logger.info(
-                        f"  LAN peer {peer_addr} not reachable, "
-                        f"retrying in 5s..."
-                    )
-                    await asyncio.sleep(5)
-            return None
-
-        # No scheme — HTTPS only: every peer surface serves TLS (uvicorn
-        # or the master's Caddy front), and only TLS can carry the node-key
-        # binding peer clients now require. The old plain-HTTP fallback was
-        # a downgrade an on-path impostor could force.
-        api = BackendAPIClient(f"https://{peer_addr}", peer=peer_identity)
-        health = await loop.run_in_executor(None, api.get_health)
-        return api if health else None
+            skip.add(f"{ext_ip}:{self._dht_service._announce_port}")
+        if self._lan_discovery:
+            for _lip, lport in self._lan_discovery.peers:
+                skip.add(f"{ext_ip}:{lport}")
+        if self._upnp:
+            for ext_port, int_port in self._upnp._mapped:
+                skip.add(f"{ext_ip}:{ext_port}")
+                skip.add(f"{ext_ip}:{int_port}")
+        return skip
 
     def _peer_identity(self):
         """This node as a peer CLIENT (wire format v1, desktop/p2p/peer_auth.py):
@@ -1348,120 +778,6 @@ class P2PManager:
 
         return peer_auth.PeerIdentity(pubkey=account["public_key_hex"].lower(),
                                       sign=sign_message, cert_bundle=bundle)
-
-    async def _sync_from_peer(
-        self,
-        peer_addr: str,
-        track_uuids: list[str],
-        _progress,
-        progress_cb,
-        is_lan: bool = False,
-        peer_api: Optional[BackendAPIClient] = None,
-        bulk: Optional[tuple[list[str], list[str]]] = None,
-    ) -> dict:
-        """Sync enrichment data from a single peer. Returns stats dict.
-        `peer_api`: a client the caller already probed — skips the probe.
-        `bulk`: (track uuids, artist uuids) of the phantom bulk, asked
-        through the peer's holdings filter (see SyncClient.run_sync)."""
-        if peer_api is None:
-            _progress(f"Connecting to {peer_addr}...")
-            peer_api = await self._try_connect_peer(peer_addr, is_lan=is_lan)
-            if peer_api:
-                self._note_sighting(peer_api)
-        if not peer_api:
-            _progress(f"  {peer_addr} not reachable, skipping")
-            return {"error": "unreachable"}
-
-        _progress(
-            f"Syncing from {peer_addr} ({len(track_uuids)} tracks)..."
-        )
-
-        sync_client = SyncClient(
-            api_client=peer_api,
-            db_dsn=self.db_dsn,
-            batch_size=500,
-            progress_cb=progress_cb,
-            holdings_cache=self._holdings_cache,
-        )
-
-        bulk_tracks, bulk_artists = bulk or ([], [])
-        try:
-            stats = await asyncio.get_event_loop().run_in_executor(
-                None,
-                partial(sync_client.run_sync, track_uuids,
-                        bulk_tracks, bulk_artists),
-            )
-        except Exception as e:
-            logger.error(f"Sync from {peer_addr} failed: {e}")
-            _progress(f"  Sync from {peer_addr} failed: {e}")
-            return {"error": str(e)}
-
-        # We just pulled from this peer, so it accepts inbound connections —
-        # which is exactly what makes it a candidate carrier. Offer it our
-        # own first-hand canon material: nobody can pull from a node behind
-        # CGNAT, so pushing is the only way its analysis ever reaches the
-        # network. Never fatal to the sync that just succeeded.
-        if ("carry" in sync_client.peer_capabilities
-                and self._sync_server and self._sync_server._sharing_enabled()):
-            try:
-                await asyncio.get_event_loop().run_in_executor(
-                    None, partial(self._push_to_carrier, peer_api, _progress))
-            except Exception as e:
-                logger.debug(f"Carry offer to {peer_addr} failed: {e}")
-        return stats
-
-    def _push_to_carrier(self, peer_api, _progress) -> int:
-        """Offer our first-hand canon audio analysis to a reachable peer and
-        push whatever it asks for. Blocking — runs in the executor.
-
-        v4: the offer speaks recording MBIDs, the answer speaks the
-        CARRIER's track uuids — existing rows only, so its phantom
-        catalogue acts as the taste filter and nothing is minted remotely.
-        We serve only the wanted uuids we also hold (the pull handlers do
-        that naturally), which is exactly the set where the seals'
-        track-uuid binding survives re-serve."""
-        conn = psycopg2.connect(self.db_dsn)
-        try:
-            conn.autocommit = True
-            candidates = sync_queries.get_pushable_tracks(
-                conn, sync_queries.CARRY_MAX_TRACKS)
-            recordings = sorted({
-                mbid
-                for c in candidates
-                for mbid in (c.get("recordings") or [])
-            })
-            if not recordings:
-                return 0
-            answer = peer_api.carry_offer(recordings) or {}
-            wanted = answer.get("wanted") or {}
-            if not any(wanted.values()):
-                return 0
-
-            pushed = 0
-
-            def push(category: str, payload: dict) -> int:
-                if not payload.get("items"):
-                    return 0
-                res = peer_api.carry_push(category.replace("_", "-"), payload)
-                return (res or {}).get("imported") or 0
-
-            for category, batch in (("segments", SEGMENT_PULL_BATCH),
-                                    ("audio_features", 500),
-                                    ("track_mbids", 500)):
-                uuids = wanted.get(category) or []
-                handler = sync_queries.PULL_HANDLERS[category]
-                for i in range(0, len(uuids), batch):
-                    took = push(category, handler(conn, uuids[i:i + batch]))
-                    pushed += took
-                    if took:
-                        _progress(
-                            f"  carried {took} {category} record(s) to peer")
-
-            if pushed:
-                logger.info("Push-seeded %d record(s) to a carrier", pushed)
-            return pushed
-        finally:
-            conn.close()
 
     # -------------------------------------------------------------------
     # Chat operations (called from launcher thread)
@@ -3511,177 +2827,27 @@ class P2PManager:
                         )
 
     # -------------------------------------------------------------------
-    # Sync triggers: Web UI Force sync + Auto-sync timer
+    # Sync triggers — the walk itself lives in desktop/p2p/sync_walk.py
     # -------------------------------------------------------------------
 
-    async def _sync_request_listener_thread(self):
-        """LISTEN on sautium_sync_request, wake _sync_request_loop.
-
-        Mirrors _listen_for_db_notifications (chat) — same select-on-
-        socket pattern with a 5s timeout so cancellation is responsive.
-        """
-        while self._running:
-            conn = None
-            try:
-                conn = psycopg2.connect(self.db_dsn)
-                conn.set_isolation_level(
-                    psycopg2.extensions.ISOLATION_LEVEL_AUTOCOMMIT
-                )
-                with conn.cursor() as cur:
-                    cur.execute("LISTEN sautium_sync_request")
-                    # Enrichment is what MINTS phantom similars, and it runs
-                    # in the backend — without this the freshly minted names
-                    # wait out the 6-hour slice timer even with a dump peer
-                    # online right now.
-                    cur.execute("LISTEN sautium_enrich_done")
-                    # Backend fires this when a remote MB search exhausted
-                    # every known source — re-probe now instead of waiting
-                    # out the slice timer, so the chip flips honestly.
-                    cur.execute("LISTEN sautium_mb_sources_request")
-
-                while self._running:
-                    ready = await asyncio.get_event_loop().run_in_executor(
-                        None,
-                        lambda: select.select([conn], [], [], 5),
-                    )
-                    if ready[0]:
-                        conn.poll()
-                        channels = set()
-                        while conn.notifies:
-                            channels.add(conn.notifies.pop(0).channel)
-                        if "sautium_sync_request" in channels:
-                            self._request_sync("request")
-                        if "sautium_enrich_done" in channels:
-                            asyncio.create_task(
-                                self._request_mb_slices_safe())
-                        if "sautium_mb_sources_request" in channels:
-                            asyncio.create_task(
-                                self._refresh_mb_sources())
-            except Exception as e:
-                logger.debug(f"sync_request LISTEN error: {e}")
-                await asyncio.sleep(5)
-            finally:
-                if conn:
-                    try:
-                        conn.close()
-                    except Exception:
-                        pass
-
-    async def _sync_request_loop(self):
-        """Dispatcher: on a queued request, run one sync via
-        _run_sync_with_status, labelled with the merged reasons."""
-        while self._running:
-            try:
-                await self._sync_request_notify.wait()
-                self._sync_request_notify.clear()
-            except asyncio.CancelledError:
-                break
-            if not self._running:
-                break
-            reasons = "+".join(sorted(self._sync_reasons)) or "request"
-            self._sync_reasons.clear()
-            await self._run_sync_with_status(trigger=reasons)
-
-    async def _auto_sync_loop(self):
-        """Periodic sync based on sync.auto_interval_min.
-
-        Re-reads the setting each cycle so config changes apply at the
-        next interval without restart. The first run waits for the first
-        SOURCE — a LAN peer's beacon or the DHT bootstrap sets
-        _first_source — capped by FIRST_SYNC_MAX_DELAY for a node with
-        neither, not for a fixed delay.
-        """
-        try:
-            await asyncio.wait_for(self._first_source.wait(),
-                                   timeout=FIRST_SYNC_MAX_DELAY)
-        except asyncio.TimeoutError:
-            pass
-        except asyncio.CancelledError:
-            return
-
-        while self._running:
-            interval_min = self._read_auto_sync_interval()
-            if interval_min and interval_min > 0:
-                await self._run_sync_with_status(trigger="auto")
-                sleep_for = interval_min * 60
-            else:
-                sleep_for = 60  # re-check setting every minute when disabled
-
-            try:
-                await asyncio.sleep(sleep_for)
-            except asyncio.CancelledError:
-                break
-
-    # Mirrors _DEFAULTS["sync.auto_interval_min"] in
-    # backend/routers/settings.py — keep in sync so the UI's displayed
-    # default and the launcher's actual cadence match on a fresh
-    # install (no user_settings row yet).
-    _AUTO_SYNC_INTERVAL_DEFAULT_MIN = 30
-
-    def _read_auto_sync_interval(self) -> Optional[int]:
-        """Read sync.auto_interval_min from user_settings (None = disabled)."""
-        try:
-            conn = psycopg2.connect(self.db_dsn)
-            conn.autocommit = True
-            try:
-                with conn.cursor() as cur:
-                    cur.execute(
-                        "SELECT value FROM user_settings WHERE key = %s",
-                        ("sync.auto_interval_min",),
-                    )
-                    row = cur.fetchone()
-                    if row is None:
-                        return self._AUTO_SYNC_INTERVAL_DEFAULT_MIN
-                    if row[0] is None:
-                        return None  # explicitly disabled
-                    return int(row[0]) if row[0] else None
-            finally:
-                conn.close()
-        except Exception as e:
-            logger.debug(f"Failed to read sync.auto_interval_min: {e}")
-        return None
-
-    async def _run_sync_with_status(self, trigger: str):
-        """Run sync_from_peers, persist results to user_settings, NOTIFY UI.
-
-        Serialised via self._sync_lock so manual + auto triggers can't
-        run concurrently. Writes sync.last_at and sync.last_items_received
-        on completion (success or failure), then NOTIFY sautium_sync_done
-        wakes the backend SSE bridge.
-        """
-        if self._sync_lock.locked():
-            logger.debug(
-                f"P2P sync already in progress, skipping {trigger} trigger"
-            )
-            return
-
-        async with self._sync_lock:
-            started = datetime.now(timezone.utc)
-            logger.info(f"P2P sync starting (trigger={trigger})")
-            try:
-                stats = await self._async_sync_from_peers(
-                    progress_cb=None, trigger=trigger)
-            except Exception as e:
-                logger.error(f"P2P sync failed: {e}", exc_info=True)
-                stats = {"error": str(e)}
-                await asyncio.get_event_loop().run_in_executor(
-                    None, self._diag_record, "sync.failed",
-                    {"trigger": trigger, "error": str(e)[:500]})
-
-            items = sum(v for v in stats.values() if isinstance(v, int))
-            await asyncio.get_event_loop().run_in_executor(
-                None, self._write_sync_status, started, items
-            )
-            logger.info(
-                f"P2P sync complete (trigger={trigger}): "
-                f"{items} items, stats={stats}"
-            )
-
-        # A sync may have imported new artists/phantoms whose canon is now
-        # blocked on missing MB facts — fetch their slices right away instead
-        # of waiting for the periodic loop (fire-and-forget; merges with a
-        # concurrent run via _mb_slice_lock).
-        asyncio.create_task(self._request_mb_slices_safe())
+    async def _sync_notification_listener(self):
+        """LISTEN for the walk's request channel plus the launcher's two
+        MB-slice wakes (desktop/p2p/sync_walk.listen_notifications)."""
+        await sync_walk.listen_notifications(self.db_dsn, {
+            # The backend after a scan that added files, a canon run, a
+            # discography/similars growth — sync now, not at the interval.
+            "sautium_sync_request": lambda: self._walk.request("request"),
+            # Enrichment is what MINTS phantom similars, and it runs in the
+            # backend — without this the freshly minted names wait out the
+            # 6-hour slice timer even with a dump peer online right now.
+            "sautium_enrich_done": lambda: asyncio.create_task(
+                self._request_mb_slices_safe()),
+            # Backend fires this when a remote MB search exhausted every
+            # known source — re-probe now instead of waiting out the slice
+            # timer, so the chip flips honestly.
+            "sautium_mb_sources_request": lambda: asyncio.create_task(
+                self._refresh_mb_sources()),
+        }, lambda: self._running)
 
     async def _request_mb_slices_safe(self):
         try:
@@ -3865,7 +3031,7 @@ class P2PManager:
             if mb_slice_queries.addr_uuid(addr) in banned_addrs:
                 logger.info(f"MB slice: skipping banned address {addr}")
                 continue
-            api = await self._try_connect_peer(addr)
+            api = await self._walk.connect_peer(addr)
             if not api:
                 continue
             health = await loop.run_in_executor(None, api.get_health)
@@ -4216,39 +3382,6 @@ class P2PManager:
         logger.info("diag report delivered: %d event(s)", len(events))
         if len(events) >= diag_protocol.REPORT_MAX_EVENTS:
             self._diag_queue.put_nowait(("report",))     # more is waiting
-
-    def _write_sync_status(self, started: datetime, items: int) -> None:
-        """Persist sync.last_at + items_received, fire sautium_sync_done."""
-        try:
-            conn = psycopg2.connect(self.db_dsn)
-            conn.autocommit = True
-            try:
-                with conn.cursor() as cur:
-                    cur.execute(
-                        """
-                        INSERT INTO user_settings (key, value)
-                        VALUES (%s, %s::jsonb)
-                        ON CONFLICT (key) DO UPDATE
-                            SET value = EXCLUDED.value,
-                                updated_at = CURRENT_TIMESTAMP
-                        """,
-                        ("sync.last_at", json.dumps(started.isoformat())),
-                    )
-                    cur.execute(
-                        """
-                        INSERT INTO user_settings (key, value)
-                        VALUES (%s, %s::jsonb)
-                        ON CONFLICT (key) DO UPDATE
-                            SET value = EXCLUDED.value,
-                                updated_at = CURRENT_TIMESTAMP
-                        """,
-                        ("sync.last_items_received", json.dumps(int(items))),
-                    )
-                    cur.execute("NOTIFY sautium_sync_done")
-            finally:
-                conn.close()
-        except Exception as e:
-            logger.warning(f"Failed to write sync status: {e}")
 
     def get_status(self) -> dict:
         """Get P2P status for UI display."""
