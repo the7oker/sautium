@@ -121,8 +121,9 @@ each run's discovery-key reply is a capture-recapture sample against it
 population; the directory's fresh-volunteer count (`total` on `/node-hints`)
 is an exact floor. Verdict and estimate live in `user_settings`
 (`p2p.rare_mode`, `p2p.network_estimate`); a restart starts from the last
-verdict. The Docker node runs no sync walk and gates its tail on the directory
-count alone.
+verdict. Both runtimes measure the same way: the walk is one module
+(`desktop/p2p/sync_walk.py`, shared since 2026-09-08 — before that the Docker
+node ran no walk and gated its tail on the directory count alone).
 
 Announces and lookups of the tail draw on ONE budget — the traversal lane in
 `dht_service` (`_TraversalLane`): one initiation at a time, ≥3 s apart × the
@@ -172,6 +173,26 @@ rest of P2P: announces and lookups await readiness, chat and friends do not.
 **Smart seed reuse**: 1 DHT lookup + 1 inventory call instead of N lookups for
 N artists.
 
+**One walk, two runtimes (2026-09-08).** The walk above is
+`desktop/p2p/sync_walk.SyncWalk`, imported by the launcher's P2PManager and by
+the Docker backend's lifespan alike — never copied. Until then a Docker node
+only served pulls and accepted carry, so the master's phantom layer received a
+peer's first-hand analysis only when that peer chose to carry it, and never a
+peer's bios/tags/stats at all. Runtime differences are injected: the DHT
+service, LAN discovery (none in a container — it cannot hear the beacon),
+manual peers, the address skip list (the launcher subtracts itself by its
+UPnP external IP; every runtime also recognises its own address by the key
+`/health` returns), the sharing switch on the carry push, the diag sink, the
+post-run hook (the launcher fetches MB slices). Triggers are the same on both:
+`NOTIFY sautium_sync_request`, the `sync.auto_interval_min` timer, the first
+source after start. The master's first run (2026-09-08, 297k artists with a
+gap → 479k core + 2.65M bulk tracks) took 6 min 50 s against one peer and
+exposed two costs fixed the same day: the core was asked in full (48 exact
+inventory requests — now priced through the holdings filter like the bulk)
+and the launcher's sync server opened a PostgreSQL connection per request
+(2 s each on Windows — now a pool, `SyncServer._db`). The phantom-layer ask
+budget stays the open question it was.
+
 ### Holdings filter — the compressed inventory (2026-09-06)
 
 The gap set of a node with the phantom layer is millions of tracks, and asking
@@ -179,9 +200,12 @@ a peer about all of them is ~306 inventory requests (10k uuids each, ~110 MB
 up) per peer per run — for answers that are "not here" almost every time. The
 sync now splits its gaps:
 
-- **Core** — tracks of ENGAGED artists (an owned file or a completed listen):
-  asked of every peer in full through the exact `/api/sync/inventory`, as
-  before. Bounded by human behaviour.
+- **Core** — tracks of ENGAGED artists (an owned file or a completed listen),
+  plus the artists themselves. Asked of every peer in full through the exact
+  `/api/sync/inventory` until 2026-09-08; since then priced exactly like the
+  bulk below — a master's core is 479k tracks (whole discographies of 3.8k
+  engaged artists), 48 exact requests per peer per run for what the filter
+  answers in a second.
 - **Bulk** — everything else (phantom-only artists): asked through the peer's
   **holdings filter**, `GET /api/sync/holdings` — two Bloom filters
   (`desktop/p2p/bloom.py`, 1% false positives, 9.6 bits per element, seven
