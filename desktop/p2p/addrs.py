@@ -51,3 +51,20 @@ def fmt_addr(host: str, port: Union[int, str]) -> str:
     """`host:port` text that is unambiguous for both families —
     `203.0.113.7:8801` / `[2a00:db8::1]:8801`."""
     return f"{fmt_host(host)}:{int(port)}"
+
+
+def is_internet_vantage(host: str) -> bool:
+    """Is this SOURCE address a point on the internet — one whose view of
+    us says something about our reachability from outside? Loopback,
+    RFC 1918, link-local, the Docker bridge gateway and carrier NAT
+    (100.64/10) all answer False: a request from any of them proves only
+    that we are reachable from THAT segment. The single definition behind
+    both signals that become a reachability verdict — the passive inbound
+    proof (sync_server) and the probe-connect call-back (both peer
+    surfaces): a probe answered from a non-vantage is no verdict at all,
+    because the master would dial the wrong network (its own container
+    loopback, for a launcher on the same host). Never raises."""
+    try:
+        return ipaddress.ip_address(canon_host(host)).is_global
+    except ValueError:
+        return False

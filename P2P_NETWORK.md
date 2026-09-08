@@ -308,7 +308,15 @@ auto-add never resurrects it (re-adding the code by hand clears the flag).
 - `POST /api/relay/probe-connect` — the relay knocks BACK on the request's
   source address (never on an IP from the body — that would be a
   reflector/port scanner) and checks `node_id` in `/health`. This is how
-  torrent trackers derive the connectable flag.
+  torrent trackers derive the connectable flag. A verdict exists only from
+  an internet vantage: a source that is not globally routable (loopback,
+  LAN, the Docker bridge, carrier NAT) gets `reachable: null` and spends no
+  cooldown — a Docker master dialling its own container loopback for a
+  launcher on the same host answered `false` for weeks (found 2026-09-08)
+  — and the prober asks only through the master's public addresses (the
+  Worker's address hint stands in when it knows the master by LAN alone).
+  The same rule, `addrs.is_internet_vantage`, gates the passive inbound
+  proof.
 
 An unreachable node **suppresses its own DHT announces**
 (`set_announces_enabled`): a dead address in the DHT pollutes everyone's

@@ -2,7 +2,7 @@
 spelling per address in every pseudonym, unambiguous host:port text."""
 
 from desktop.p2p import contact_log, mb_slice_queries
-from desktop.p2p.addrs import canon_host, fmt_addr, fmt_host, is_ipv6
+from desktop.p2p.addrs import canon_host, fmt_addr, fmt_host, is_internet_vantage, is_ipv6
 
 
 def test_canonical_spelling_is_unique_per_address():
@@ -19,6 +19,19 @@ def test_fmt_addr_is_unambiguous_for_both_families():
     assert fmt_addr("[2a00:db8::1]", "8801") == "[2a00:db8::1]:8801"
     assert fmt_host("example.com") == "example.com"
     assert is_ipv6("2a00:db8::1") and not is_ipv6("203.0.113.7") and not is_ipv6("host")
+
+
+def test_internet_vantage_is_a_globally_routable_source():
+    for src in ["8.8.8.8", "91.227.181.179", "2a00:1450:4001::1",
+                "[2a00:1450:4001::1]", "::ffff:8.8.8.8"]:
+        assert is_internet_vantage(src), src
+    # Loopback, RFC 1918, the Docker bridge, link-local, carrier NAT, v6
+    # ULA/link-local, names and junk: a request from there proves nothing
+    # about reachability from the internet.
+    for src in ["127.0.0.1", "192.168.1.188", "10.0.0.1", "172.22.0.1",
+                "169.254.1.1", "100.64.3.4", "::1", "fe80::1%eth0", "fd00::1",
+                "host.docker.internal", "", None]:
+        assert not is_internet_vantage(src), src
 
 
 def test_pseudonym_formulas_agree_across_v6_spellings():
