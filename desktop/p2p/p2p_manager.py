@@ -17,7 +17,7 @@ import time
 from datetime import datetime, timezone
 from functools import partial
 from pathlib import Path
-from typing import Callable, Optional
+from typing import Callable, NamedTuple, Optional
 from urllib.parse import urlsplit
 
 import psycopg2
@@ -26,7 +26,7 @@ import psycopg2.extensions
 from desktop.api_client import BackendAPIClient
 from desktop.mb_slice_client import MBSliceClient
 from desktop.p2p import diag_protocol, mb_slice_queries, network_size, sync_queries
-from desktop.p2p.addrs import canon_host, fmt_addr
+from desktop.p2p.addrs import canon_host, fmt_addr, is_internet_vantage
 from desktop.p2p.peer_auth import pinned_pubkey, pinned_ssl_context
 from desktop.p2p.chat_service import ChatService
 from desktop.p2p.dht_service import DHTService
@@ -43,6 +43,15 @@ from desktop.p2p.upnp_service import UPnPService
 from desktop.sync_client import SEGMENT_PULL_BATCH, SyncClient
 
 logger = logging.getLogger(__name__)
+
+
+class _ProbeResult(NamedTuple):
+    """One reachability probe cycle. `verdict` None = no internet vantage
+    answered; `retry_soon` = the reason is transient (master mid-resolution,
+    cooldown) rather than settled."""
+    verdict: Optional[bool]
+    detail: str
+    retry_soon: bool = False
 
 # How many residual artists get a targeted per-artist DHT lookup after node
 # discovery has been drained. Each lookup costs a get_peers timeout, and only
@@ -2782,24 +2791,45 @@ class P2PManager:
                     sub.closed = True
                     sub.loop.call_soon_threadsafe(sub.evt.set)
 
-    async def _probe_reachability_via_master(self):
+    async def _probe_reachability_via_master(self) -> "_ProbeResult":
         """Definitive test — ask the master to connect back to our sync
-        port (BT-tracker style). None when the master is not resolved or
-        not reachable itself."""
+        port (BT-tracker style). Only the master's globally routable
+        addresses are asked: a call-back from a LAN or loopback vantage
+        tests the wrong network — a Docker master on this very host dialled
+        its own container loopback and answered `false` (2026-09-08) — so
+        the master refuses such a verdict (`reachable: null`) and we never
+        spend its per-key cooldown on one. The Worker's address hint stands
+        in when the organic tiers know the master by LAN alone."""
         from desktop.p2p.master_node import MASTER_PUBKEY_HEX, master_configured
         if not master_configured() or not self._chat_service:
-            return None
+            return _ProbeResult(None, "no master configured")
         from desktop.node_identity import get_account_info, sign_message
         account = get_account_info()
-        if not account or account["public_key_hex"] == MASTER_PUBKEY_HEX:
-            return None
+        if not account:
+            return _ProbeResult(None, "no account yet", retry_soon=True)
+        if account["public_key_hex"] == MASTER_PUBKEY_HEX:
+            return _ProbeResult(None, "this node is the master")
         master = self._chat_service.get_friend_by_public_key(
             MASTER_PUBKEY_HEX)
         if not master:
-            return None
+            return _ProbeResult(None, "master contact not seeded yet",
+                                retry_soon=True)
         peers = await self._find_friend_peers(master)
-        if not peers:
-            return None
+        vantages = [p for p in peers if is_internet_vantage(p[0])]
+        if not vantages:
+            from desktop.p2p import master_hint
+            hint = await asyncio.get_event_loop().run_in_executor(
+                None, master_hint.fetch)
+            if hint and is_internet_vantage(hint[0]):
+                vantages = [hint]
+        if not vantages:
+            if not peers:
+                return _ProbeResult(None, "master not resolved yet",
+                                    retry_soon=True)
+            known = ", ".join(fmt_addr(ip, p) for ip, p in peers)
+            return _ProbeResult(
+                None, f"no internet vantage: master known only at {known}",
+                retry_soon=True)
         port = (self._upnp.get_external_port(self._http_port)
                 if self._upnp else None) or self._http_port
         ts = int(time.time())
@@ -2811,7 +2841,7 @@ class P2PManager:
             "port": port, "ts": ts, "signature": sig,
         }
         import aiohttp
-        for ip, mport in peers:
+        for ip, mport in vantages:
             try:
                 async with aiohttp.ClientSession(
                     connector=aiohttp.TCPConnector(
@@ -2822,16 +2852,33 @@ class P2PManager:
                             f"https://{fmt_addr(ip, mport)}/api/relay/probe-connect",
                             json=payload) as resp:
                         if resp.status == 429:
-                            return None  # cooldown — try next cycle
+                            return _ProbeResult(
+                                None, "master probe on cooldown",
+                                retry_soon=True)
                         if resp.status != 200:
                             continue
                         data = await resp.json()
                         self._note_peer_alive(master.get("id"),
                                               MASTER_PUBKEY_HEX, ip, mport)
-                        return bool(data.get("reachable"))
+                        seen = fmt_addr(data.get("observed_ip") or "unknown",
+                                        port)
+                        verdict = data.get("reachable")
+                        if verdict is None:
+                            # The master still saw a LAN/loopback source —
+                            # a hairpin that keeps the private address.
+                            logger.debug(f"Probe via {fmt_addr(ip, mport)}: "
+                                         f"no vantage (seen as {seen})")
+                            continue
+                        if verdict:
+                            return _ProbeResult(
+                                True, f"master probe connected (seen as {seen})")
+                        return _ProbeResult(
+                            False, "master probe failed: "
+                            f"{data.get('error') or 'no answer'} "
+                            f"(seen as {seen})")
             except Exception as e:
-                logger.debug(f"Probe via {ip}:{mport} failed: {e}")
-        return None
+                logger.debug(f"Probe via {fmt_addr(ip, mport)} failed: {e}")
+        return _ProbeResult(None, "master probe: no vantage answered")
 
     async def _directory_register_loop(self) -> None:
         """The volunteer side of the capability directory (Ф16c): while this
@@ -2866,38 +2913,36 @@ class P2PManager:
             await asyncio.sleep(3600)
 
     async def _reachability_loop(self) -> None:
-        """Adaptive-cadence self-check: retry every RETRY_UNKNOWN while we
-        still have no verdict — at startup the master contact is usually
-        mid-resolution, so the first probe has no target — then settle into
-        the infrastructure cadence (6 h, like REANNOUNCE). Passive inbound
-        proof overrides in between via _note_inbound_reachable."""
+        """Adaptive-cadence self-check: retry every RETRY_UNKNOWN while the
+        probe has nothing to ask yet — at startup the master contact is
+        usually mid-resolution — then settle into the infrastructure
+        cadence (6 h, like REANNOUNCE); a probe that WAS asked and returned
+        no verdict is settled too. Passive inbound proof overrides in
+        between via _note_inbound_reachable."""
         RETRY_UNKNOWN = 60
         await asyncio.sleep(20)  # let UPnP/DHT settle after startup
         while self._running:
-            status = "unknown"
+            retry_soon = True
             try:
                 probe = await self._probe_reachability_via_master()
                 heuristic = self._reachability_heuristic()
-                if probe is True:
-                    status, detail = "reachable", "master probe connected"
-                elif probe is False:
-                    status, detail = ((heuristic[0], heuristic[1])
-                                      if heuristic else
-                                      ("unreachable", "master probe failed"))
+                status, detail = "unknown", probe.detail
+                if probe.verdict is True:
+                    status = "reachable"
+                elif probe.verdict is False:
+                    status, detail = heuristic or ("unreachable", detail)
                 elif heuristic:
                     status, detail = heuristic
                 elif self._reachability_status == "reachable":
                     status, detail = ("reachable",
                                       "inbound request observed")
-                else:
-                    status, detail = "unknown", "no probe target yet"
+                retry_soon = status == "unknown" and probe.retry_soon
                 await self._apply_reachability(status, detail)
             except asyncio.CancelledError:
                 raise
             except Exception as e:
                 logger.debug(f"Reachability check error: {e}")
-            await asyncio.sleep(RETRY_UNKNOWN if status == "unknown"
-                                else 6 * 3600)
+            await asyncio.sleep(RETRY_UNKNOWN if retry_soon else 6 * 3600)
 
     async def _poll_pending_accepts(self):
         """One-time startup check for pending accepts from the Worker.

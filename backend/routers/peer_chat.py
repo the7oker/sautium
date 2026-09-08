@@ -700,7 +700,10 @@ _probe_lock = threading.Lock()
 async def probe_connect(request: Request):
     """Connectability check, BT-tracker style: connect BACK to the request's
     source address (never a caller-supplied IP — no reflector) on the port
-    the caller claims to serve, and confirm the /health identity matches."""
+    the caller claims to serve, and confirm the /health identity matches.
+    A verdict exists only from an internet vantage: a source that is not
+    globally routable gets `reachable: null` and spends no cooldown
+    (mirrors desktop/p2p/sync_server.py)."""
     svc = get_peer_chat()
     ident = resolve_identity(settings)
     if svc is None or not ident:
@@ -724,6 +727,20 @@ async def probe_connect(request: Request):
     if not friend or friend.get("is_blocked"):
         return _err("not a friend", 403)
 
+    source_ip = request.client.host if request.client else ""
+    from desktop.p2p.addrs import is_internet_vantage
+    if not is_internet_vantage(source_ip):
+        # A call-back from here would test the LAN — or, for a launcher on
+        # this very host, this container's own loopback (measured 2026-09-08:
+        # `reachable:false` for a node that was fine). No verdict and no
+        # cooldown spent: the prober's try through our public address is the
+        # real one. Without the trusted front every peer is the bridge
+        # gateway here, so a front-less Docker master is never a vantage —
+        # correct, it cannot see anyone's real address.
+        return JSONResponse({"reachable": None, "observed_ip": source_ip,
+                             "tested_port": port,
+                             "error": "source not globally routable"})
+
     now = time.monotonic()
     with _probe_lock:
         last = _probe_last.get(pubkey, 0)
@@ -735,7 +752,6 @@ async def probe_connect(request: Request):
                       if now - v > PROBE_COOLDOWN]:
                 _probe_last.pop(k, None)
 
-    source_ip = request.client.host if request.client else ""
     host = f"[{source_ip}]" if ":" in source_ip else source_ip
     reachable, error = False, None
     try:

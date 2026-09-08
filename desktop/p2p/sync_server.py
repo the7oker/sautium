@@ -26,7 +26,7 @@ import psycopg2
 
 from aiohttp import web
 
-from desktop.p2p import admission, contact_log, mb_slice_queries, peer_auth, sync_queries
+from desktop.p2p import addrs, admission, contact_log, mb_slice_queries, peer_auth, sync_queries
 
 logger = logging.getLogger(__name__)
 
@@ -220,20 +220,11 @@ class SyncServer:
         return False
 
     def _note_inbound(self, ip: Optional[str]) -> None:
-        if not self._inbound_cb or not ip:
-            return
-        try:
-            import ipaddress
-            addr = ipaddress.ip_address(ip)
-            # LAN/loopback/link-local prove nothing about internet
-            # reachability; neither does 100.64/10 — a CGNAT/Tailscale
-            # overlay peer reaches us over its tunnel, not our inbound port.
-            if addr.is_private or addr.is_loopback or addr.is_link_local:
-                return
-            if (addr.version == 4
-                    and addr in ipaddress.ip_network("100.64.0.0/10")):
-                return
-        except ValueError:
+        # The probe call-back's vantage rule, shared: LAN/loopback/link-local
+        # prove nothing about internet reachability, neither does 100.64/10 —
+        # a CGNAT/Tailscale overlay peer reaches us over its tunnel, not our
+        # inbound port.
+        if not self._inbound_cb or not ip or not addrs.is_internet_vantage(ip):
             return
         try:
             self._inbound_cb()
@@ -1591,7 +1582,10 @@ class SyncServer:
     async def handle_probe_connect(self, request: web.Request) -> web.Response:
         """POST /api/relay/probe-connect — connectability check, BT-tracker
         style: connect BACK to the request's source address (never a
-        caller-supplied IP — no reflector) and confirm /health identity."""
+        caller-supplied IP — no reflector) and confirm /health identity.
+        A verdict exists only from an internet vantage: a source that is
+        not globally routable gets `reachable: null` and spends no cooldown
+        (mirrors backend/routers/peer_chat.py)."""
         ip = request.remote or "unknown"
         if not self._check_rate_limit(ip):
             return self._json_response(
@@ -1624,6 +1618,16 @@ class SyncServer:
             return self._json_response(
                 request, {"error": "not a friend"}, status=403)
 
+        source_ip = request.remote or ""
+        if not addrs.is_internet_vantage(source_ip):
+            # A call-back from here would test the LAN — or, for a node on
+            # this very host, our own loopback — so either verdict would be
+            # about the wrong network. No verdict and no cooldown spent: the
+            # prober's try through our public address is the real one.
+            return self._json_response(request, {
+                "reachable": None, "observed_ip": source_ip,
+                "tested_port": port, "error": "source not globally routable"})
+
         now = time.monotonic()
         if now - self._probe_last.get(pubkey, 0) < PROBE_COOLDOWN:
             return self._json_response(
@@ -1634,7 +1638,6 @@ class SyncServer:
                       if now - v > PROBE_COOLDOWN]:
                 self._probe_last.pop(k, None)
 
-        source_ip = request.remote or ""
         host = f"[{source_ip}]" if ":" in source_ip else source_ip
         reachable, error = False, None
         import aiohttp as _aiohttp
