@@ -559,6 +559,165 @@
     updateFabVisibility(currentRoute);
   }
 
+  /* ---------- Library wake channel ----------
+     One SSE connection for every surface that reacts to scan / enrich /
+     sync / settings movement. Each screen used to open its own copy of
+     /api/settings/library/stream — Library, Streaming library, Sync &
+     P2P — and the guidance trail below needs one open on every route,
+     which would have made a fourth connection to a single endpoint
+     against the browser's six-per-origin budget. Subscribers get the
+     same abort() shape sseStream returns, so leaving a screen still
+     reads the same at the call site. */
+  const libraryWake = {
+    subs: new Set(),
+    ctrl: null,
+    timer: null,
+    on(fn) {
+      this.subs.add(fn);
+      if (!this.ctrl) {
+        this.ctrl = window.sseStream('/api/settings/library/stream',
+          () => this._fanOut(),
+          (_err) => { /* sseStream auto-reconnects with backoff */ });
+      }
+      return { abort: () => this.subs.delete(fn) };
+    },
+    // A single enrichment run hits the server's progress callback a dozen
+    // times in the first second (GPU init, text embeddings, lyrics
+    // embeddings, enrichment embeddings …). The burst is an artefact of how
+    // the workers report, so it is coalesced HERE rather than in each
+    // subscriber — one trailing edge for everyone, and the longest gap
+    // before a visible update stays ~200 ms.
+    _fanOut() {
+      if (this.timer) return;
+      this.timer = setTimeout(() => {
+        this.timer = null;
+        this.subs.forEach(f => f());
+      }, 200);
+    },
+  };
+
+  /* ---------- Guidance trail ----------
+     The node knows what still needs a human (GET /api/settings/guidance);
+     this side knows where that thing lives. A task id is painted on every
+     element carrying `data-guide="<id>"` — the More tab, the drawer row,
+     the control itself — so the user follows one mark down to the button
+     instead of hunting for it. `data-guide="*"` stands for any open task,
+     which is what the tab bar can honestly say from outside the drawer.
+
+     A guided control that also carries `data-guide-scroll` gets the puck
+     below: the mark is useless on a control that sits past the fold. */
+  const guide = {
+    tasks: new Set(),
+
+    has(id) { return id === '*' ? this.tasks.size > 0 : this.tasks.has(id); },
+
+    paint() {
+      document.querySelectorAll('[data-guide]').forEach(el => {
+        const on = this.has(el.dataset.guide);
+        el.classList.toggle('is-guided', on);
+        if (el.hasAttribute('data-guide-scroll')) {
+          if (on) attachGuidePuck(el); else detachGuidePuck(el);
+        }
+      });
+    },
+
+    _apply(tasks) {
+      this.tasks = new Set(tasks || []);
+      this.paint();
+    },
+
+    async refresh() {
+      try {
+        const r = await fetch('/api/settings/guidance');
+        if (!r.ok) return;             // keep the last painted trail
+        this._apply((await r.json()).tasks);
+      } catch (_) { /* offline: the next wake repaints */ }
+    },
+
+    /* Retire a task whose completion is a judgement, not a state we can
+       read — being taken to the screen IS the whole of it. */
+    async seen(id) {
+      if (!this.tasks.has(id)) return;
+      try {
+        const r = await fetch(`/api/settings/guidance/${id}/seen`, { method: 'POST' });
+        if (r.ok) this._apply((await r.json()).tasks);
+      } catch (_) { /* the wake from the write repaints */ }
+    },
+  };
+
+  /* ---------- The "it is below" puck ----------
+     A control the trail points at is often past the fold, and a mark the
+     user cannot see teaches nothing. The puck is a handle that rides the
+     bottom of the viewport while the target is out of sight, lands exactly
+     on it as it scrolls into view, and slides under it — the control it
+     points at is the thing that hides it. Tapping it scrolls the target to
+     the puck's own resting place, so the button arrives under the finger
+     that asked for it.
+
+     Sticky, not a scroll listener: the browser does the tracking. The rail
+     is an out-of-flow strip from the top of the screen down to the target's
+     centre, and a sticky box is clamped to its containing block, so the puck
+     physically cannot drift past the target. The one measurement is the
+     rail's height, re-read when the screen resizes under it. */
+
+  const GUIDE_PUCK_ARROW = `
+    <svg width="20" height="20" viewBox="0 0 24 24" fill="none"
+         stroke="currentColor" stroke-width="2.2" stroke-linecap="round"
+         stroke-linejoin="round" aria-hidden="true">
+      <path d="M12 5v13M6 12l6 6 6-6"/>
+    </svg>`;
+
+  const _guidePucks = new WeakMap();
+
+  function attachGuidePuck(target) {
+    const existing = _guidePucks.get(target);
+    if (existing) { existing.measure(); return; }
+    const screen = target.closest('.screen');
+    if (!screen) return;
+
+    const rail = document.createElement('div');
+    rail.className = 'guide-rail';
+    rail.innerHTML = `<button class="guide-puck" type="button"
+      aria-label="Scroll to the pending action">${GUIDE_PUCK_ARROW}</button>`;
+    const puck = rail.firstElementChild;
+    screen.classList.add('has-guide-rail');
+    screen.appendChild(rail);
+
+    const measure = () => {
+      const t = target.getBoundingClientRect();
+      const s = screen.getBoundingClientRect();
+      rail.style.height =
+        (t.top - s.top + t.height / 2 + puck.offsetHeight / 2) + 'px';
+    };
+    measure();
+
+    puck.addEventListener('click', () => {
+      const rest = parseFloat(getComputedStyle(puck).bottom) + puck.offsetHeight / 2;
+      const t = target.getBoundingClientRect();
+      window.scrollTo({
+        top: window.scrollY + t.top + t.height / 2 - (window.innerHeight - rest),
+        behavior: 'smooth',
+      });
+    });
+
+    const ro = new ResizeObserver(measure);
+    ro.observe(screen);
+    ro.observe(target);
+    _guidePucks.set(target, { rail, ro, measure });
+  }
+
+  function detachGuidePuck(target) {
+    const state = _guidePucks.get(target);
+    if (!state) return;
+    state.ro.disconnect();
+    const screen = state.rail.parentElement;
+    state.rail.remove();
+    if (screen && !screen.querySelector('.guide-rail')) {
+      screen.classList.remove('has-guide-rail');
+    }
+    _guidePucks.delete(target);
+  }
+
   /* ---------- Now Playing sheet ----------
      Markup mirrors docs/design/reference/claude-design-bundle/project/
      Now Playing v4.html. Class names and DOM IDs map 1:1 to the
@@ -7532,6 +7691,7 @@
       });
       updateFabVisibility(currentRoute);
       this._refreshHqpStatus();
+      guide.paint();
     },
     close() {
       if (!this.el) return;
@@ -7647,7 +7807,7 @@
               <span class="more-hint" id="hqpHint">…</span>
               <span class="more-chev">${CHEV}</span>
             </button>
-            <button class="more-row" type="button" data-go="more/output">
+            <button class="more-row" type="button" data-go="more/output" data-guide="audio_output">
               <span class="more-icon">${ICON_OUTPUT}</span>
               <span class="more-label">Audio output</span>
               <span class="more-hint" id="outputHint"></span>
@@ -7659,7 +7819,7 @@
               <span class="more-hint"></span>
               <span class="more-chev">${CHEV}</span>
             </button>
-            <button class="more-row" type="button" data-go="more/library">
+            <button class="more-row" type="button" data-go="more/library" data-guide="analyse_library">
               <span class="more-icon">${ICON_LIBRARY}</span>
               <span class="more-label">Library</span>
               <span class="more-hint"></span>
@@ -10874,6 +11034,7 @@
     if (totals.genres)      partsArr.push(totals.genres      + ' genres');
     if (totals.similar)     partsArr.push(totals.similar     + ' similars');
     if (totals.discography) partsArr.push(totals.discography + ' albums found');
+    if (totals.embeddings)  partsArr.push(totals.embeddings  + ' embedded');
     const totalsLine = partsArr.length ? partsArr.join(', ') : 'no items yet';
 
     const stepLabels = {
@@ -10882,6 +11043,9 @@
       artists:     'fetching artist info',
       genres:      'fetching genre wikis',
       similar:     'fetching similar artists',
+      text_emb:    'embedding track metadata',
+      lyrics_emb:  'embedding lyrics',
+      enrich_emb:  'embedding bios and genre wikis',
       canonize:    'canonizing artists',
       discography: 'reconciling discographies',
       name_latin:  'transliterating names',
@@ -11149,6 +11313,7 @@
     _wireBack(root);
     _wireOutputActions(root);
     _refreshOutputHqpDot(root);
+    guide.seen('audio_output');
     // Opening the picker IS the discovery intent: kick an SSDP scan in the
     // background (multi-interface, ~10 s) and refresh the list once it lands
     // — but only if the user is still on this screen.
@@ -11794,10 +11959,9 @@
      the prune worker already calls notify_library_subscribers() — and pulls
      its own endpoint on each wake. */
   let _phantomStreamCtrl = null;
-  let _phantomStreamDebounce = null;
+
   function _subscribePhantomStream(root) {
     if (_phantomStreamCtrl) { _phantomStreamCtrl.abort(); _phantomStreamCtrl = null; }
-    if (_phantomStreamDebounce) { clearTimeout(_phantomStreamDebounce); _phantomStreamDebounce = null; }
 
     async function refresh() {
       if (!parseHash().startsWith('more/phantoms')) {
@@ -11849,19 +12013,7 @@
       }
     }
 
-    const scheduleRefresh = () => {
-      if (_phantomStreamDebounce) return;
-      _phantomStreamDebounce = setTimeout(() => {
-        _phantomStreamDebounce = null;
-        refresh();
-      }, 200);
-    };
-
-    _phantomStreamCtrl = window.sseStream('/api/settings/library/stream', () => {
-      scheduleRefresh();
-    }, (_err) => {
-      // sseStream auto-reconnects with backoff; nothing to do here.
-    });
+    _phantomStreamCtrl = libraryWake.on(refresh);
   }
 
   /* ============ Library screen — #more/library ============ */
@@ -11912,8 +12064,12 @@
     `;
 
     // No ML runtime → no button: the run would be a no-op there (analysis
-    // arrives over P2P) and the backend refuses it.
+    // arrives over P2P) and the backend refuses it. Lite keeps the button —
+    // it is the manual path for the text side when Background enrichment is
+    // switched off — but skips the audio phase, so on lite embeddings and
+    // features stay a P2P gap and the screen must not promise otherwise.
     const analysisAvailable = !!lib.analysis_available;
+    const localAnalysis     = !!lib.local_analysis;
     const enrichActions = !analysisAvailable ? '' : enrichRunning ? `
       <div class="btn-row single">
         <button class="btn btn-danger" data-cancel-enrich ${enrichCancelling ? 'disabled' : ''}>${enrichCancelling ? 'Cancelling…' : 'Cancel analysis'}</button>
@@ -11921,7 +12077,8 @@
       <div class="action-progress" data-progress-for="enrich">${escapeProfileHtml(enrichCancelling ? 'Finishing the current step… cancel will take effect at the next checkpoint.' : (lib.enrich.progress || 'Analysing…'))}</div>
     ` : `
       <div class="btn-row single">
-        <button class="btn btn-secondary" data-action="enrich">Analyse library</button>
+        <button class="btn btn-secondary" data-action="enrich"
+                data-guide="analyse_library" data-guide-scroll>Analyse library</button>
       </div>
     `;
 
@@ -11943,9 +12100,9 @@
         ${_enrichRow('features',   'Features',   lib.features_done,   lib.total_tracks)}
         ${_enrichRow('lastfm',     'Last.fm',    lib.lastfm_done,     lib.lastfm_total)}
         ${_enrichRow('lyrics',     'Lyrics',     lib.lyrics_done,     lib.total_tracks)}
-        <div class="form-row stacked"><div class="row-stack-sub">${analysisAvailable
+        <div class="form-row stacked"><div class="row-stack-sub">${localAnalysis
           ? 'Analyse library computes embeddings and features on this machine.'
-          : 'This machine has no ML runtime, so embeddings and features arrive from peers over P2P.'} Last.fm and lyrics arrive on their own through Background enrichment (Sync &amp; P2P).</div></div>
+          : 'This machine does not analyse audio locally, so embeddings and features arrive from peers over P2P.'} Last.fm, lyrics and the text embeddings are handled on their own by Background enrichment (Sync &amp; P2P).</div></div>
       </div>
       ${enrichActions}
     `;
@@ -12013,6 +12170,7 @@
     onAction('[data-cancel-scan]',         async () => { await fetch('/api/settings/library/scan/cancel',   { method: 'POST' }); render(); });
     onAction('[data-cancel-enrich]',       async () => { await fetch('/api/settings/library/enrich/cancel', { method: 'POST' }); render(); });
 
+    guide.paint();
     _subscribeLibraryStream(root);
   }
 
@@ -12023,10 +12181,9 @@
      re-fetches /api/settings/library on each wake and updates the
      same in-place targets that the old poll used. */
   let _libraryStreamCtrl = null;
-  let _libraryStreamDebounce = null;
+
   function _subscribeLibraryStream(root) {
     if (_libraryStreamCtrl) { _libraryStreamCtrl.abort(); _libraryStreamCtrl = null; }
-    if (_libraryStreamDebounce) { clearTimeout(_libraryStreamDebounce); _libraryStreamDebounce = null; }
 
     async function refresh() {
       if (!parseHash().startsWith('more/library')) {
@@ -12067,28 +12224,7 @@
       }
     }
 
-    // Trailing-edge debounce on the SSE wake-event burst.
-    // A single enrichment-run hits progress_cb a dozen times in
-    // the first second (Phase 1 GPU init, Phase 2 text embeddings
-    // start, lyrics embeddings start, enrichment embeddings start
-    // …). Without coalescing the client would fire one
-    // /api/settings/library fetch per wake; debouncing collapses
-    // the burst into a single refresh while keeping the
-    // "immediate" feel — the longest gap before a visible update
-    // is ~200ms.
-    const scheduleRefresh = () => {
-      if (_libraryStreamDebounce) return;
-      _libraryStreamDebounce = setTimeout(() => {
-        _libraryStreamDebounce = null;
-        refresh();
-      }, 200);
-    };
-
-    _libraryStreamCtrl = window.sseStream('/api/settings/library/stream', () => {
-      scheduleRefresh();
-    }, (_err) => {
-      // sseStream auto-reconnects with backoff; nothing to do here.
-    });
+    _libraryStreamCtrl = libraryWake.on(refresh);
   }
 
   /* ============ AI assistant screen — #more/ai ============ */
@@ -12306,7 +12442,6 @@
 
   /* ============ Sync & P2P screen — #more/sync ============ */
   let _syncStreamCtrl = null;
-  let _syncStreamDebounce = null;
 
   async function renderSync(root) {
     const sync = await _fetchSyncState();
@@ -12367,7 +12502,6 @@
      impossible. Mirrors Library's refresh() / sseStream pattern. */
   function _subscribeSyncStream(root) {
     if (_syncStreamCtrl) { _syncStreamCtrl.abort(); _syncStreamCtrl = null; }
-    if (_syncStreamDebounce) { clearTimeout(_syncStreamDebounce); _syncStreamDebounce = null; }
 
     async function refresh() {
       if (!parseHash().startsWith('more/sync')) {
@@ -12385,19 +12519,7 @@
       _wireSyncActions(root, sync);
     }
 
-    const scheduleRefresh = () => {
-      if (_syncStreamDebounce) return;
-      _syncStreamDebounce = setTimeout(() => {
-        _syncStreamDebounce = null;
-        refresh();
-      }, 200);
-    };
-
-    _syncStreamCtrl = window.sseStream('/api/settings/library/stream', () => {
-      scheduleRefresh();
-    }, (_err) => {
-      // sseStream auto-reconnects; nothing to do here.
-    });
+    _syncStreamCtrl = libraryWake.on(refresh);
   }
 
   /* ---------- Wire it up ---------- */
@@ -12454,6 +12576,8 @@
     queue.init();
     moreDrawer.init();
     refreshAiAvailability();
+    guide.refresh();
+    libraryWake.on(() => guide.refresh());
     document.addEventListener('np-update', e => {
       const d = e.detail || {};
       _lastNpMediaFileId = d.media_file_id != null ? d.media_file_id : null;

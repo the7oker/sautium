@@ -1020,13 +1020,18 @@ async def get_stats() -> Dict[str, Any]:
             if enr:
                 row.update(dict(enr._mapping))
 
-            # Not a DB figure, but this payload feeds the launcher's stats
-            # panel and the Library screen, and that panel owns the
-            # "Analyse library" button: on a node with no ML runtime the run
-            # is a no-op (analysis arrives via P2P import), so the button
-            # must not exist there.
+            # Not DB figures, but this payload feeds the Library screen,
+            # which owns the "Analyse library" button. Two axes, and they
+            # are not the same question: with no ML runtime the run is a
+            # no-op, so the button must not exist; on lite the run still
+            # does its text side (BGE-M3 over titles, lyrics, bios, genre
+            # descriptions — local-only data no peer carries) but SKIPS the
+            # audio phase, so the screen must not promise embeddings and
+            # features it will never compute.
             import hardware_profile
-            row["analysis_available"] = hardware_profile.resolve().ml_available
+            _profile = hardware_profile.resolve()
+            row["analysis_available"] = _profile.ml_available
+            row["local_analysis"] = _profile.local_analysis
 
             return {**defaults, **row}
     except Exception as e:

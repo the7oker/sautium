@@ -322,18 +322,10 @@ class BackendAPIClient:
         """Cancel running scan."""
         return self._post_json("/scan/cancel", timeout=5)
 
-    def enrich_start(self) -> Optional[dict]:
-        """Start the analysis run (audio embeddings + features, then the
-        text encoders). Network enrichment is the backend's background loop."""
-        return self._post_json("/enrich/start", timeout=10)
-
     def enrich_status(self) -> Optional[dict]:
-        """Poll enrichment progress."""
+        """Read enrichment progress — for the support bundle. The run itself
+        is started and cancelled from the Web UI's Library screen."""
         return self._get_json("/enrich/status", timeout=5)
-
-    def enrich_cancel(self) -> Optional[dict]:
-        """Cancel running enrichment."""
-        return self._post_json("/enrich/cancel", timeout=5)
 
     def mb_dump_start(self) -> Optional[dict]:
         """Start the MusicBrainz catalogue download+load in the background

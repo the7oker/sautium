@@ -208,33 +208,37 @@ class TextEmbeddingGenerator:
         # Query tracks to process. Owned tracks only: phantom tracklist
         # rows (no media_files) have no genre/feature context and must not
         # occupy the GPU batch.
-        where_parts = [
-            "EXISTS (SELECT 1 FROM media_files mf WHERE mf.track_id = t.id)"
-        ]
+        #
+        # Driven FROM media_files — the owned set — never from tracks, the
+        # same rule the lyrics planner already carries. tracks now holds
+        # millions of trackless phantom rows, so asking it for the owned
+        # ~37k walked all of them: 3.4 s per batch against 16 ms (measured).
+        # It was survivable while a human pressed a button once; the
+        # background loop drains this queue now, and pays it every pass.
+        # GROUP BY collapses the several media_files a track can own (CUE
+        # slices, duplicate rips) back to one row per track.
+        where_parts = []
         params: Dict[str, Any] = {}
 
         if not force:
             where_parts.append("""
-                t.id NOT IN (SELECT te.track_id FROM text_embeddings te)
+                NOT EXISTS (SELECT 1 FROM text_embeddings te
+                             WHERE te.track_id = mf.track_id)
             """)
 
         if track_ids is not None:
-            where_parts.append("t.id = ANY(:filter_track_ids)")
+            where_parts.append("mf.track_id = ANY(:filter_track_ids)")
             params["filter_track_ids"] = track_ids
 
         where_clause = ("WHERE " + " AND ".join(where_parts)) if where_parts else ""
 
         if order_by_date:
-            order_clause = """
-                ORDER BY (
-                    SELECT MAX(mf.file_modified_at)
-                    FROM media_files mf WHERE mf.track_id = t.id
-                ) DESC NULLS LAST
-            """
+            order_clause = "ORDER BY MAX(mf.file_modified_at) DESC NULLS LAST"
         else:
-            order_clause = "ORDER BY t.id"
+            order_clause = "ORDER BY mf.track_id"
 
-        query_sql = f"SELECT t.id FROM tracks t {where_clause} {order_clause}"
+        query_sql = (f"SELECT mf.track_id FROM media_files mf {where_clause} "
+                     f"GROUP BY mf.track_id {order_clause}")
         if limit:
             query_sql += f" LIMIT {limit}"
 

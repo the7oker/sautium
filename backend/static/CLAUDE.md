@@ -165,6 +165,46 @@ layer proper is `index.html` + `style.css` (+ `tokens.css`). Older
 notes or commits that say `app.js` mean "now `app-shell.js` +
 `player.js`".
 
+### Guidance trail — pointing at a pending action
+
+A node knows what still needs a human (`GET /api/settings/guidance`
+returns a list of task ids); the view layer knows where each one
+lives. `guide` in `app-shell.js` paints an active task on **every**
+element carrying `data-guide="<task-id>"`, so the user follows one
+amber dot down the hierarchy — More tab → drawer row → the control
+itself — instead of hunting for it. `data-guide="*"` marks a step
+that stands for "any open task", which is all the tab bar can
+honestly say from outside the drawer.
+
+To point at something new:
+
+1. Add the task id to `_guidance_state()` in
+   `backend/routers/settings.py`, with the rule for when it is done.
+   The rule belongs there, next to the workers that satisfy it —
+   three surfaces re-deriving it from raw counters would drift, and
+   a trail whose steps disagree points nowhere.
+2. Put `data-guide="<id>"` on each element along the path.
+3. Call `guide.paint()` after that markup is built (renderers do
+   this at the end; the drawer does it on open).
+
+A task whose completion is a judgement rather than a state we can
+read (visiting a screen IS the whole of it) is retired with
+`guide.seen(id)` and must be listed in `_GUIDANCE_DISMISSIBLE`.
+
+A control that sits past the fold also gets `data-guide-scroll`.
+That attaches the **puck**: a handle that rides the bottom of the
+viewport while the target is out of sight, lands exactly on it as it
+scrolls into view, and slides under it — the control it points at is
+the thing that hides it. Tapping it scrolls the target to the puck's
+own resting place, so the button arrives under the finger that asked
+for it. It is `position: sticky`, never a scroll listener: the rail
+is an out-of-flow strip from the top of the screen down to the
+target's centre, and a sticky box cannot leave its containing block,
+so the puck physically cannot drift past the target. The one
+measurement is the rail's height, re-read by a `ResizeObserver`.
+The guided control needs an opaque background for the tuck to read
+(see `.btn-secondary.is-guided`).
+
 ### Native dialogs are an anti-pattern
 
 **Never call `alert()`, `confirm()`, or `prompt()`.** Browsers

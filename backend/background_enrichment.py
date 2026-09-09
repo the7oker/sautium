@@ -1,8 +1,7 @@
 """Background enrichment loop — since 2026-09-05 the ONLY path that fetches
-metadata from public APIs (Last.fm, lrclib/genius); the manual "Analyse
-library" run is GPU/text analysis only. No GPU work here. Started/stopped
-by the `enrichment.background_enabled` user_settings flag (settings.py);
-the toggle in More → Sync & P2P flips the same key.
+metadata from public APIs (Last.fm, lrclib/genius). Started/stopped by the
+`enrichment.background_enabled` user_settings flag (settings.py); the
+toggle in More → Sync & P2P flips the same key.
 
 Each pass, in order:
   1. Last.fm track_stats (listeners + playcount) — priority-ordered
@@ -10,17 +9,28 @@ Each pass, in order:
   3. Last.fm artist bios for new artists
   4. Last.fm genre wiki for new genres
   5. Last.fm similars for engaged artists (owned file OR completed listen)
+  then the text half of the analysis, over what the steps above just wrote:
+  6. Text embeddings (BGE-M3) for owned tracks
+  7. Lyrics embeddings
+  8. Artist-bio + genre-wiki embeddings
   then, on the interval timer only:
-  6. Canonize the uncanonized residue (local MB dump, DB-only)
-  7. Missing-album reconcile for canonized artists (local MB dump, DB-only)
-  8. name_latin backfill for pre-0a phantom rows (pure Python)
+  9. Canonize the uncanonized residue (local MB dump, DB-only)
+ 10. Missing-album reconcile for canonized artists (local MB dump, DB-only)
+ 11. name_latin backfill for pre-0a phantom rows (pure Python)
 
-Two cadences. The network steps DRAIN: a step that came back with a full,
-error-free batch has a longer queue behind it, so the next pass follows at
-once instead of after the interval — a fresh library's bios take minutes,
-not days, while the per-call delay still caps the request rate. A short
-batch (queue empty, rate limit, cooldown) or any error hands control back
-to the interval timer, which is the backoff. The DB-only steps never
+Steps 6-8 moved here on 2026-09-09. They used to belong to the manual
+"Analyse library" run, which meant a person had to authorise embedding a
+bio this loop had fetched itself — and had no way to know it was owed: the
+first node to be asked was sitting on 7.3k unembedded bios. Nothing else
+computes these vectors and no peer carries them, so the producer drains
+them. The manual run keeps the AUDIO phase, which only a new file creates.
+
+Two cadences. The network and model steps DRAIN: a step that came back with
+a full, error-free batch has a longer queue behind it, so the next pass
+follows at once instead of after the interval — a fresh library's bios take
+minutes, not days, while the per-call delay still caps the request rate. A
+short batch (queue empty, rate limit, cooldown) or any error hands control
+back to the interval timer, which is the backoff. The DB-only steps never
 drain: each is a bounded slice of a table walk that the timer paces.
 
 The loop follows the P2P sync rather than its own clock where it can: at
@@ -89,6 +99,17 @@ _DISCOGRAPHY_PER_BATCH = 50       # canonized artists reconciled per batch (loca
 _DISCOGRAPHY_STALE_DAYS = 30      # re-sync an artist's discography at most monthly
 
 _NAME_LATIN_PER_BATCH = 50000     # phantom name_latin rows per batch (Phase 0a) — pure-Python transliteration, not API-bound, so far larger than the Last.fm steps
+
+# The text half of the analysis. Model-bound, not API-bound, so the caps are
+# batch sizes rather than rate limits — and the encoder is a process-wide
+# singleton, so a drain pays its load once and not once per pass. Sized off
+# measured throughput on a warm 4090: ~36 texts/s, so a pass spends tens of
+# seconds on the GPU, not minutes. _LOCAL_MODEL_SCALE cuts them where that
+# arithmetic does not hold.
+_TEXT_EMB_PER_BATCH   = 500       # BGE-M3 over owned-track metadata
+_LYRICS_EMB_PER_BATCH = 200       # a lyric is chunked into several vectors
+_ENRICH_EMB_PER_BATCH = 500       # artist bios + genre wikis, chunked the same way
+_LOCAL_MODEL_SCALE    = {"lite": 5}   # profile → batch divisor; CPU encoding is ~an order slower
 
 _PRIORITY_SQL = text("""
     WITH artist_listen AS (
@@ -175,6 +196,7 @@ _state: Dict[str, Any] = {
         "genres": 0,
         "similar": 0,
         "discography": 0,
+        "embeddings": 0,
     },
 }
 _thread: Optional[threading.Thread] = None
@@ -603,14 +625,51 @@ _NETWORK_STEPS = (
 )
 
 
+def _step_text_embeddings(limit: int) -> Dict[str, int]:
+    from text_embeddings import generate_text_embeddings
+    return generate_text_embeddings(limit=limit, cancel_flag=_cancel_flag)
+
+
+def _step_lyrics_embeddings(limit: int) -> Dict[str, int]:
+    from lyrics_embeddings import generate_lyrics_embeddings
+    return generate_lyrics_embeddings(limit=limit, cancel_flag=_cancel_flag)
+
+
+def _step_enrichment_embeddings(limit: int) -> Dict[str, int]:
+    """Artist bios + genre wikis. The generator caps EACH of the two, so the
+    pair reports up to 2 x limit and the drain check reads it as one batch —
+    over-eager by at most one extra pass, which the next short batch ends."""
+    from enrichment_embeddings import generate_all_enrichment_embeddings
+    out: Dict[str, int] = {}
+    for part in generate_all_enrichment_embeddings(
+            limit=limit, cancel_flag=_cancel_flag).values():
+        for key, value in part.items():
+            if isinstance(value, int):
+                out[key] = out.get(key, 0) + value
+    return out
+
+
+_LOCAL_MODEL_STEPS = (
+    # (state key, step, batch cap)
+    ("text_emb",   _step_text_embeddings,       _TEXT_EMB_PER_BATCH),
+    ("lyrics_emb", _step_lyrics_embeddings,     _LYRICS_EMB_PER_BATCH),
+    ("enrich_emb", _step_enrichment_embeddings, _ENRICH_EMB_PER_BATCH),
+)
+
+
 def _wants_more(stats: Dict[str, int], limit: int) -> bool:
     """A full, error-free batch means the queue behind it is longer than the
     batch, so the next pass follows at once. A short batch (queue drained,
     rate limit, cancel) or any error hands control back to the timer — the
     interval IS the backoff. Safe because every step stamps what it
     processed (a row, a not_found/error marker, last_similar_sync): a full
-    batch never hands the same rows back."""
-    return stats.get("processed", 0) >= limit and not stats.get("errors")
+    batch never hands the same rows back.
+
+    Both error key names count: the network steps report `errors`, the model
+    steps `failed`. A step whose every item fails still fills a batch, and
+    reading only one name would drain on it forever."""
+    return (stats.get("processed", 0) >= limit
+            and not stats.get("errors") and not stats.get("failed"))
 
 
 def _run_network_steps() -> Tuple[Dict[str, Any], bool]:
@@ -628,6 +687,46 @@ def _run_network_steps() -> Tuple[Dict[str, Any], bool]:
         stats = step(limit)
         summary[key] = stats
         _bump(key, stats.get(total_key, 0))
+        backlog = backlog or _wants_more(stats, limit)
+    return summary, backlog
+
+
+def _run_local_model_steps() -> Tuple[Dict[str, Any], bool]:
+    """The text half of the analysis: embeddings for track metadata, lyrics,
+    artist bios and genre wikis.
+
+    It belongs here because it is work THIS loop creates. The bio was fetched
+    two steps up, the lyric one step up; no peer carries these vectors (they
+    are not sync categories) and nothing else computes them. Before the loop
+    drained them, the pool grew silently until a human happened to press
+    "Analyse library" — 7.3k unembedded bios on the first node that looked,
+    and no way for its owner to know. Asking a person to authorise work the
+    machine created and knows how to do is not a decision, it is a chore.
+
+    Model-bound rather than network-bound, but the same drain contract: a
+    full batch means more behind it, and the encoder is a process-wide
+    singleton (text_embedder.get_text_embedder), so consecutive passes pay
+    the load once. A node with no ML runtime has nothing to run at all."""
+    summary: Dict[str, Any] = {}
+    import hardware_profile
+    profile = hardware_profile.resolve()
+    if not profile.ml_available:
+        return summary, False
+    # The profile governs compute (CLAUDE.md): lite encodes on the CPU,
+    # where the same slice costs an order of magnitude more wall-clock.
+    # Smaller slices there — same queue, more passes, a machine that stays
+    # usable while it drains.
+    scale = _LOCAL_MODEL_SCALE.get(profile.name, 1)
+
+    backlog = False
+    for key, step, cap in _LOCAL_MODEL_STEPS:
+        if _cancel_flag():
+            break
+        limit = max(20, cap // scale)
+        _set(current_step=key)
+        stats = step(limit)
+        summary[key] = stats
+        _bump("embeddings", stats.get("success", 0))
         backlog = backlog or _wants_more(stats, limit)
     return summary, backlog
 
@@ -719,6 +818,12 @@ def _loop() -> None:
             db_ran = False
             try:
                 batch, backlog = _run_network_steps()
+                # After the network steps, so a bio or lyric fetched in this
+                # pass is embedded in this pass.
+                if not _cancel_flag():
+                    local, local_backlog = _run_local_model_steps()
+                    batch.update(local)
+                    backlog = backlog or local_backlog
                 if not _cancel_flag() and (time.time() >= db_due_at
                                            or _db_wake.is_set()):
                     _db_wake.clear()
@@ -736,6 +841,15 @@ def _loop() -> None:
             ).isoformat()
             _set(last_batch=batch, last_run_at=_now_iso(), next_run_at=next_at,
                  draining=backlog)
+
+            # Wake the Library channel: this pass changed what the UI reads
+            # from it — the Sync screen's background-enrichment block, and
+            # the guidance trail, which has to learn that the pool of work
+            # grew without anyone touching the library. A producer that
+            # mutates state and tells nobody is exactly what forces a client
+            # onto a timer. notify_* swallows a closed subscriber loop.
+            from routers.settings import notify_library_subscribers
+            notify_library_subscribers()
 
             # Every network step writes signable rows (bios, tags, similars,
             # stats, genre descriptions); the DB steps also shed seals (canon

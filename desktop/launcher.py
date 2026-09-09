@@ -26,7 +26,7 @@ from desktop.utils import (get_local_ip, get_project_root, get_tailscale_ip,
 
 logger = logging.getLogger(__name__)
 
-WINDOW_WIDTH, WINDOW_HEIGHT = 480, 640
+WINDOW_WIDTH, WINDOW_HEIGHT = 480, 606
 WINDOW_SIZE = f"{WINDOW_WIDTH}x{WINDOW_HEIGHT}"
 
 # Appearance
@@ -67,8 +67,7 @@ class LauncherApp(ctk.CTk):
         self._ui_queue: queue.Queue = queue.Queue()
         self.after(100, self._drain_ui_queue)
         self._streams_started = False
-        self._active_job = None       # "scan" | "enrich" — what a Library wake refers to
-        self._analysis_available = True   # from /stats; False on a node with no ML runtime
+        self._scan_active = False     # a Library wake is only ours while a scan we started runs
         self._qr_timer = None
 
         # Check first run
@@ -187,13 +186,6 @@ class LauncherApp(ctk.CTk):
             fg_color="transparent", border_width=1,
         )
         self._btn_scan.pack(pady=3)
-
-        self._btn_enrich = ctk.CTkButton(
-            btn_frame, text="Analyse Library", width=200,
-            command=self._enrich_library, state="disabled",
-            fg_color="transparent", border_width=1,
-        )
-        self._btn_enrich.pack(pady=3)
 
         self._btn_settings = ctk.CTkButton(
             btn_frame, text="Settings", width=200,
@@ -383,14 +375,10 @@ class LauncherApp(ctk.CTk):
         )
         self._btn_open.configure(state="normal")
         self._btn_scan.configure(state="normal")
-        self._btn_enrich.configure(state=self._enrich_idle_state())
         self._progress_text.configure(text=gpu_text)
 
         # Connect API client to the right port
         self.api_client.set_port(port)
-
-        # A node with no ML runtime must not be offered the analysis button.
-        self._refresh_analysis_available()
 
         # QRs carry a pairing code so scanning the phone straight into a
         # signed-in session needs no typing. They keep themselves current
@@ -459,13 +447,11 @@ class LauncherApp(ctk.CTk):
                              daemon=True).start()
 
     def _on_library_event(self):
-        """A scan or enrich worker reached a checkpoint. Only a job this
-        window started has a progress line on screen to move; one started
-        from the Web UI reports itself there."""
-        if self._active_job == "scan":
+        """A scan or enrich worker reached a checkpoint. Only a scan this
+        window started has a progress line on screen to move; everything
+        else — a Web UI scan, the analysis run — reports itself there."""
+        if self._scan_active:
             self._refresh_scan()
-        elif self._active_job == "enrich":
-            self._refresh_enrich()
 
     def _refresh_pairing_qr(self):
         """Draw the QR with a code that is current, and arrange to redraw it
@@ -829,37 +815,6 @@ class LauncherApp(ctk.CTk):
 
         threading.Thread(target=_complete, daemon=True).start()
 
-    def _refresh_analysis_available(self):
-        """Read the one thing this window still needs from /stats: whether the
-        node can analyse at all. It is a property of the backend build, not a
-        counter, so it is read when the backend comes up and not again."""
-        def _fetch():
-            data = self.api_client.get_stats()
-            # Marshal back to the Tk main thread. Guard the shutdown window:
-            # the loop can be torn down while this worker is blocked on the
-            # network call.
-            if self._shutting_down or not data:
-                return
-            try:
-                self.ui_call(lambda: self._apply_analysis_available(data))
-            except RuntimeError:
-                pass   # main loop gone between the check and the call
-
-        threading.Thread(target=_fetch, daemon=True).start()
-
-    def _apply_analysis_available(self, data: dict):
-        if self._shutting_down:
-            return
-        self._analysis_available = bool(data.get("analysis_available"))
-        if not self._analysis_available:
-            self._btn_enrich.configure(state="disabled")
-
-    def _enrich_idle_state(self) -> str:
-        """Button state between jobs. A node with no ML runtime never gets
-        the button: the run would be a no-op there (analysis arrives via
-        P2P import) and the backend refuses it."""
-        return "normal" if self._analysis_available else "disabled"
-
     def _set_status(self, state: str, text: str):
         """Update status indicator."""
         colors = {
@@ -929,7 +884,6 @@ class LauncherApp(ctk.CTk):
         self._btn_scan.configure(text="Cancel Scan",
                                  command=self._cancel_scan,
                                  fg_color="#8B0000", hover_color="#A52A2A")
-        self._btn_enrich.configure(state="disabled")
         self._progress_text.configure(text="Starting scan...")
 
         def _do_start():
@@ -951,7 +905,7 @@ class LauncherApp(ctk.CTk):
 
             result = self.api_client.start_scan(subpath)
             if result and result.get("success"):
-                self._active_job = "scan"
+                self._scan_active = True
                 self.ui_call(self._refresh_scan)
             else:
                 self.ui_call(lambda: self._progress_text.configure(
@@ -987,63 +941,12 @@ class LauncherApp(ctk.CTk):
 
     def _scan_done(self):
         """Restore UI after scan completes."""
-        self._active_job = None
+        self._scan_active = False
         self._btn_scan.configure(
             text="Scan Library", command=self._scan_library,
             state="normal", fg_color="transparent",
             hover_color=("gray75", "gray25"),
         )
-        self._btn_enrich.configure(state=self._enrich_idle_state())
-
-    def _enrich_library(self):
-        """Start the analysis run (audio embeddings + features, then the
-        text encoders); progress arrives on the Library channel."""
-        result = self.api_client.enrich_start()
-        if not result or not result.get("success"):
-            detail = result.get("detail", "no response") if result else "no response"
-            self._progress_text.configure(text=f"Analysis failed: {detail[:80]}")
-            return
-
-        self._btn_enrich.configure(text="Cancel Analysis",
-                                   command=self._cancel_enrich,
-                                   fg_color="#8B0000", hover_color="#A52A2A")
-        self._btn_scan.configure(state="disabled")
-        self._progress_text.configure(text="Starting analysis...")
-        self._active_job = "enrich"
-        self._refresh_enrich()
-
-    def _refresh_enrich(self):
-        """Read the analysis run's status once, on a Library channel wake."""
-        def _check():
-            status = self.api_client.enrich_status()
-            if not status:
-                self.ui_call(self._enrich_done)
-                return
-
-            progress = status.get("progress", "")
-            running = status.get("running", False)
-
-            self.ui_call(lambda: self._progress_text.configure(text=progress))
-            if not running:
-                self.ui_call(self._enrich_done)
-
-        threading.Thread(target=_check, daemon=True).start()
-
-    def _cancel_enrich(self):
-        """Request cancellation of the running analysis."""
-        self.api_client.enrich_cancel()
-        self._progress_text.configure(text="Cancelling...")
-        self._btn_enrich.configure(state="disabled")
-
-    def _enrich_done(self):
-        """Restore UI after the analysis run completes."""
-        self._active_job = None
-        self._btn_enrich.configure(
-            text="Analyse Library", command=self._enrich_library,
-            state=self._enrich_idle_state(), fg_color="transparent",
-            hover_color=("gray75", "gray25"),
-        )
-        self._btn_scan.configure(state="normal")
 
     def _get_local_db_dsn(self) -> str:
         """Build DSN for the launcher's local PostgreSQL."""

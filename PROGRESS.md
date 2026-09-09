@@ -159,6 +159,50 @@ implementation details live in the code, DB and git history.
   (launcher "Sync Library", web "Force sync now") are gone; the web button
   was already dead on a Docker node, which never pulls. Peer-search
   details in P2P_NETWORK.md § Layered sync flow.
+- **Analysis is the last step of setup, and only the Web UI starts it
+  (2026-09-09).** The launcher's "Analyse Library" button is gone. Running
+  the GPU straight after a scan burns it on tracks peers have already
+  analysed: the scan gives the network something to match on, the sync
+  brings the analysis back, and only the remainder is worth computing. So
+  the button lives on one screen (Library, Web UI) and the node points at
+  it when the moment is right — `GET /api/settings/guidance` reports
+  `analyse_library` once a sync has run over what the last scan added
+  (`sync.last_at >= library.last_scan_at`, or immediately with P2P off),
+  the node analyses audio locally, no scan/enrich is running, and an owned
+  track still lacks embeddings or features. It retires itself when the gap
+  closes. The gate is `profile.local_analysis`, not `ml_available`: a lite
+  node keeps the button (the run does its text encoders) but skips the audio
+  phase, so the gap the trail points at never closes there and the mark
+  would nag forever.
+  The pending probe is driven from `media_files`, never from `tracks` —
+  the phantom layer makes the tracks-first shape 2.9 s against 46 ms.
+- **The text half of the analysis drains itself (2026-09-09).** Steps 6-8
+  of the background loop — text, lyrics and bio/genre-wiki embeddings —
+  moved out of the manual run into `background_enrichment`. They are work
+  that loop creates: the bio was fetched two steps up, the lyric one step
+  up, no peer carries these vectors (not sync categories) and nothing else
+  computes them. Under the old split a person had to authorise embedding a
+  bio the machine had just fetched, with no way to know it was owed — the
+  first node asked was sitting on 7.3k unembedded bios. The manual run
+  keeps the AUDIO phase, which only a new file creates and which therefore
+  converges to zero; that is what the guidance trail can honestly point at.
+  Two supporting fixes: the loop now calls `notify_library_subscribers()`
+  at pass end (a producer that mutates state and tells nobody is what
+  forces a client onto a timer — the Sync screen's own progress block was
+  stale for the same reason), and `_wants_more` reads `failed` as well as
+  `errors`, or a model step whose every item fails would drain forever.
+  Three planner bugs surfaced the moment a loop ran these instead of a
+  person, all pre-existing and all cheap only at one-run-per-button:
+  `text_embeddings` and `lyrics_embeddings` both walked the phantom layer
+  from `tracks` to find the owned few (3.4 s and 3.9 s per batch, against
+  16 ms and 100 ms driven from `media_files` / `track_lyrics`), and the
+  lyrics planner returned a track once PER SOURCE — `track_lyrics` is
+  unique on `(track_id, source)`, so a track fetched from both lrclib and
+  genius violated `uq_lyrics_embeddings_track_model_chunk` on its second
+  copy. 92 tracks on this node. One failure per batch reads as "stop
+  draining", so the queue would have advanced one batch per 30 min;
+  `DISTINCT ON (track_id)` with the artist-bio generator's richest-field
+  preference fixes it.
 
 ### AI assistant
 
