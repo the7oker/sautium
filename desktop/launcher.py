@@ -166,7 +166,7 @@ class LauncherApp(ctk.CTk):
         # services are running — see _on_services_ready.
         self._url_hint_label = ctk.CTkLabel(
             self, text="", text_color="gray",
-            font=ctk.CTkFont(size=10),
+            font=ctk.CTkFont(size=11),   # matches the QR captions below it
         )
         self._url_hint_label.pack(pady=(0, 5))
 
