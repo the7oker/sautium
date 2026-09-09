@@ -5830,6 +5830,24 @@ select.add-gear-input {
   font-size: calc(13 * var(--px));
   font-weight: 600;
   cursor: pointer;
+  text-decoration: none;
+}
+/* CLI agent sign-in (More → AI): the pasted-code row and the codex
+   device code the user types on OpenAI's page. */
+.signin-code-row {
+  display: flex;
+  gap: calc(8 * var(--px));
+  margin-top: calc(10 * var(--px));
+}
+.signin-code-row .add-gear-input { flex: 1; min-width: 0; }
+.signin-code-row .btn { flex: 0 0 auto; }
+.signin-device-code {
+  margin: calc(8 * var(--px)) 0 calc(4 * var(--px));
+  font-family: var(--font-mono);
+  font-size: calc(22 * var(--px));
+  letter-spacing: 0.12em;
+  color: var(--color-text);
+  user-select: all;
 }
 /* Destructive action — same terracotta as confirmDestructive's
    primary. Used to turn the Scan / Re-enrich button into Cancel while
