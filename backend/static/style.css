@@ -6208,3 +6208,98 @@ select.add-gear-input {
   animation: transport-spin 0.9s linear infinite;
 }
 @keyframes transport-spin { to { transform: rotate(360deg); } }
+
+
+/* =====================================================================
+ * Guidance trail — the marks that lead to a pending setup action
+ * ===================================================================== */
+
+/* One mark, three hosts: the tab that owns the drawer, the row inside it,
+   and the control the trail ends on. A dot, not a count — there is
+   nothing to count, only somewhere to go — in amber, the attention
+   colour (POSITIONING §"Colour palette (v1)"). */
+.nav-tab.is-guided::after,
+.more-row.is-guided .more-label::after,
+.btn.is-guided::after {
+  content: '';
+  width: calc(7 * var(--px));
+  height: calc(7 * var(--px));
+  border-radius: 50%;
+  background: var(--color-amber);
+  flex: none;
+}
+/* The tab has no room in flow — over the icon's top-right corner,
+   where .nav-badge already puts unread mail. */
+.nav-tab.is-guided::after {
+  position: absolute;
+  top: calc(6 * var(--px));
+  left: 50%;
+  margin-left: calc(6 * var(--px));
+}
+.more-row.is-guided .more-label::after {
+  display: inline-block;
+  vertical-align: middle;
+  margin-left: calc(7 * var(--px));
+}
+/* .btn is a flex row with its own gap, so the dot needs no margin. The
+   opaque ground is load-bearing: a secondary button is transparent, and
+   the puck below has to disappear behind this one. */
+.btn.is-guided {
+  position: relative;
+  z-index: 21;
+}
+.btn-secondary.is-guided {
+  background: var(--color-foundation);
+  border-color: var(--color-amber);
+}
+
+/* The rail is an out-of-flow strip from the top of the screen down to the
+   target's centre (height measured in attachGuidePuck). Its only job is to
+   be the puck's containing block: a sticky box cannot leave it, so the
+   puck stops exactly on the control and slides under it. */
+.screen.has-guide-rail { position: relative; }
+
+.guide-rail {
+  position: absolute;
+  left: 0;
+  right: 0;
+  top: 0;
+  z-index: 20;
+  display: flex;
+  flex-direction: column;
+  justify-content: flex-end;
+  align-items: center;
+  pointer-events: none;   /* a track, not a surface */
+}
+
+/* Rides the same line as the AI FAB, so the two float as one row. */
+.guide-puck {
+  position: sticky;
+  bottom: calc(var(--nav-h) + var(--safe-bottom) + var(--space-4));
+  pointer-events: auto;
+  width: calc(44 * var(--px));
+  height: calc(44 * var(--px));
+  border-radius: 50%;
+  display: grid;
+  place-items: center;
+  background: var(--color-surface-hi);
+  color: var(--color-amber);
+  border: 1px solid var(--color-amber);
+  box-shadow: var(--shadow-3);
+  cursor: pointer;
+}
+body.has-miniplayer .guide-puck {
+  bottom: calc(var(--nav-h) + var(--mp-h) + var(--safe-bottom) + var(--space-3));
+}
+.guide-puck:active { background: var(--color-amber-weak); }
+
+/* The glyph moves, never the box: a transform on the sticky element
+   would make it a containing block and break the clamp that lands it. */
+.guide-puck svg { animation: guide-puck-bob 1.9s var(--ease-standard) infinite; }
+@keyframes guide-puck-bob {
+  0%, 100% { transform: translateY(calc(-2 * var(--px))); }
+  50%      { transform: translateY(calc(2 * var(--px))); }
+}
+@media (prefers-reduced-motion: reduce) {
+  .guide-puck svg { animation: none; }
+}

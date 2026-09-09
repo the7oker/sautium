@@ -336,6 +336,9 @@ _DEFAULTS: Dict[str, Any] = {
     # are a deliberate metered-connection choice. HQPlayer / local always
     # lossless (they never carry the quality param into the media URL).
     "output.stream_quality":     "lossless",   # lossless | opus_192 | opus_96
+    # Guidance trail (see _guidance_state): set once the owner has been
+    # taken to the Audio output picker, whatever they chose there.
+    "guidance.audio_output_seen": False,
 }
 
 
@@ -681,6 +684,7 @@ async def _library_state() -> Dict[str, Any]:
         "lastfm_done":        stats.get("artists_with_lastfm", 0),
         "lastfm_total":       stats.get("library_artists", 0),
         "analysis_available": bool(stats.get("analysis_available")),
+        "local_analysis":     bool(stats.get("local_analysis")),
         # Last scan + runtime workers
         "last_scan_at":       _read("library.last_scan_at"),
         "scan":               scan,
@@ -919,6 +923,100 @@ def _audio_output_state() -> Dict[str, Any]:
         "hqplayer_host":      app_settings.hqplayer_host,
         "hqplayer_port":      app_settings.hqplayer_port,
     }
+
+
+# ============================================================
+# Guidance — the setup trail
+# ============================================================
+#
+# What a node still needs a human for. The rule for "this is undone"
+# lives here, next to the workers that satisfy it, because three
+# surfaces point at the same task (the More tab, the drawer row, the
+# control itself) and a trail whose steps disagree points nowhere.
+# The client owns only the route each id maps to.
+
+_GUIDANCE_DISMISSIBLE = {"audio_output"}
+
+
+def _analysis_pending() -> bool:
+    """Any owned track without embeddings or without features. EXISTS,
+    not a count — the trail is a boolean, so the query stops at the
+    first hit. Driven from media_files, never from tracks: the phantom
+    layer makes `tracks` three million rows, and the owned-first shape
+    is the difference between 46 ms and 2.9 s (measured)."""
+    row = db_query_one("""
+        SELECT EXISTS (
+            SELECT 1 FROM media_files mf
+             WHERE NOT EXISTS (SELECT 1 FROM embeddings e
+                                WHERE e.track_id = mf.track_id)
+                OR NOT EXISTS (SELECT 1 FROM audio_features af
+                                WHERE af.track_id = mf.track_id)
+        ) AS pending
+    """)
+    return bool(row and row.get("pending"))
+
+
+def _synced_since_scan() -> bool:
+    """Has a sync run over what the last scan added?
+
+    Analysis is the LAST step of setup, not the first: the scan gives
+    the network something to match on, the sync brings back whatever
+    peers already computed, and only the remainder is worth the GPU.
+    A node with P2P off has nothing to wait for."""
+    if not _read("sync.p2p_enabled"):
+        return True
+    last_sync = _read("sync.last_at")
+    if not last_sync:
+        return False
+    last_scan = _read("library.last_scan_at")
+    if not last_scan:
+        return True
+    from datetime import datetime
+    # sync.last_at is the run's START, last_scan_at its FINISH — a sync
+    # that began before the scan ended never saw the new files.
+    return datetime.fromisoformat(last_sync) >= datetime.fromisoformat(last_scan)
+
+
+def _guidance_state() -> Dict[str, Any]:
+    from main import _scan_state, _enrich_state
+
+    tasks: List[str] = []
+
+    # Nothing plays until an output is picked, and the picker is two
+    # levels down. Cleared by VISITING it: an owner who looked and kept
+    # what was there has decided, and a node that keeps nagging after
+    # that is broken, not helpful.
+    if _read("output.type") is None and not _read("guidance.audio_output_seen"):
+        tasks.append("audio_output")
+
+    # `local_analysis`, not `ml_available`. A lite node with torch keeps the
+    # button — the run still does the text encoders there — but SKIPS the
+    # audio phase: its embeddings and features arrive over P2P import. The
+    # gap this trail points at never closes locally on lite, so a mark there
+    # would nag forever. A node with no ML runtime has no button at all.
+    if not _scan_state.get("running") and not _enrich_state.get("running"):
+        import hardware_profile
+        if (hardware_profile.resolve().local_analysis
+                and _synced_since_scan() and _analysis_pending()):
+            tasks.append("analyse_library")
+
+    return {"tasks": tasks}
+
+
+@router.get("/guidance")
+def get_guidance() -> Dict[str, Any]:
+    return _guidance_state()
+
+
+@router.post("/guidance/{task}/seen")
+def post_guidance_seen(task: str) -> Dict[str, Any]:
+    """Retire a task the user has been shown. Only the ones whose
+    completion is a human's judgement rather than a state we can read."""
+    if task not in _GUIDANCE_DISMISSIBLE:
+        raise HTTPException(status_code=400, detail=f"not dismissible: {task}")
+    _write(f"guidance.{task}_seen", True)
+    notify_library_subscribers()
+    return _guidance_state()
 
 
 @router.get("/library")
@@ -1686,6 +1784,7 @@ def put_output_prefs(req: OutputPrefs) -> Dict[str, Any]:
         raise
     except Exception as e:
         raise HTTPException(status_code=503, detail=str(e))
+    notify_library_subscribers()   # the guidance trail reads output.type
     return get_output_prefs()
 
 

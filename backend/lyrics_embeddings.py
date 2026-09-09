@@ -223,6 +223,13 @@ class LyricsEmbeddingGenerator:
         # Find tracks with lyrics that need embedding
         # Filter out junk lyrics (> MAX_LYRICS_CHARS) at DB level to avoid
         # transferring megabytes of novels/legislation from Genius API
+        #
+        # Driven from track_lyrics alone. The join to tracks was a pure FK
+        # existence check, but `ORDER BY t.id LIMIT n` made the planner walk
+        # the tracks pkey — three million phantom rows — probing for the few
+        # thousand that have lyrics: 3.9 s per batch against 100 ms
+        # (measured). The background loop drains this queue now and pays it
+        # every pass.
         where_parts = [
             "tl.plain_lyrics IS NOT NULL",
             "tl.instrumental = FALSE",
@@ -232,21 +239,26 @@ class LyricsEmbeddingGenerator:
 
         if not force:
             where_parts.append("""
-                t.id NOT IN (SELECT DISTINCT le.track_id FROM lyrics_embeddings le)
+                NOT EXISTS (SELECT 1 FROM lyrics_embeddings le
+                             WHERE le.track_id = tl.track_id)
             """)
 
         if track_ids is not None:
-            where_parts.append("t.id = ANY(:filter_track_ids)")
+            where_parts.append("tl.track_id = ANY(:filter_track_ids)")
             params["filter_track_ids"] = track_ids
 
         where_clause = "WHERE " + " AND ".join(where_parts)
 
+        # DISTINCT ON: track_lyrics is unique on (track_id, source), so a
+        # track fetched from both lrclib and genius appears twice, and the
+        # second copy hit uq_lyrics_embeddings_track_model_chunk — a failure
+        # per batch that the background loop reads as "stop draining". Same
+        # richest-field preference the artist-bio generator uses.
         query_sql = f"""
-            SELECT t.id as track_id, tl.plain_lyrics
-            FROM tracks t
-            JOIN track_lyrics tl ON tl.track_id = t.id
+            SELECT DISTINCT ON (tl.track_id) tl.track_id, tl.plain_lyrics
+            FROM track_lyrics tl
             {where_clause}
-            ORDER BY t.id
+            ORDER BY tl.track_id, LENGTH(tl.plain_lyrics) DESC
         """
         if limit:
             query_sql += f" LIMIT {limit}"
