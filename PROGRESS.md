@@ -405,6 +405,53 @@ The short version of the hard-learned lessons:
   command line tools, invoking it pops the Xcode installer. New builds arrive
   as a new DMG.
 
+### CLI agent sign-in without a console (2026-09-09)
+
+- **The console was the only interactive thing about either login.** Both
+  CLIs finish their OAuth without a terminal: `claude auth login` and
+  `codex login` run on plain pipes (no pty, no ConPTY), print the link, open
+  the browser themselves and exit 0 with the credentials stored where the
+  chat turns already read them. `desktop/agent_login.py` drives that process
+  for the wizard and the backend alike; `desktop/utils.launch_*_setup` and
+  the `cmd /k` / `osascript` console launchers are gone.
+- **Claude prints one URL and opens another.** The printed link carries
+  `redirect_uri=platform.claude.com/oauth/code/callback` — a page that shows
+  a code — while the browser gets the same request with a
+  `localhost:<random>/callback` redirect. On the machine running the CLI a
+  click on Authorize therefore completes the login; the printed link plus
+  the code (written to the CLI's stdin) is the path for a browser elsewhere:
+  a phone, the host of a Docker node. Measured by capturing `$BROWSER`.
+- **Codex has a device-code flow.** `codex login --device-auth` prints
+  `auth.openai.com/codex/device` and a one-time code the user types there;
+  the CLI polls OpenAI itself. Inside a container that is the only flow
+  that can finish (the browser cannot reach the container's localhost:1455),
+  so the backend forces it there; on the launcher the browser flow is the
+  default and the device flow is the "not at the computer" alternative.
+- **`codex login` is a logout first.** It deletes the existing `auth.json`
+  the moment it starts, before any authorization (measured on 0.149 and
+  0.153, browser and device flows alike); `claude auth login` keeps the old
+  credentials until the new ones land. A cancelled codex re-authorization
+  therefore leaves the node signed out of ChatGPT (falling back to
+  `OPENAI_API_KEY` when one is set), and the Reauthorize row says so.
+- **Docker signs in from the Web UI now.** Both CLIs are baked into the
+  image and `~/.claude` / `~/.codex` are host mounts, so `host_unsupported`
+  shrank to "a container without the CLI"; the sign-in process runs demoted
+  to the agent user like every chat turn, which is what puts the credentials
+  in the mounted HOME.
+- **Completion is an event, not a poll.** The driver's reader thread wakes
+  the settings SSE stream on every parsed change and on exit — the wizard's
+  2-second credential poll (5 minutes, then "click Refresh") and the Web
+  UI's "detects the sign-in automatically" promise that depended on a state
+  read are gone. A failed attempt keeps the CLI's last line
+  (`agent.signin_failed`), a 15-minute deadline kills an abandoned one
+  (`agent.signin_timeout`).
+- **Rejected: writing the credentials ourselves.** `claude setup-token` +
+  `CLAUDE_CODE_OAUTH_TOKEN` is documented for CI but yields a one-year token
+  with no refresh that Sautium would have to keep; `.credentials.json` is
+  undocumented (and a Keychain entry on macOS) and performing the OAuth flow
+  with the CLI's client id ourselves is neither. The CLI-driven login is the
+  supported surface and needs none of it.
+
 ---
 
 ## Known Gotchas

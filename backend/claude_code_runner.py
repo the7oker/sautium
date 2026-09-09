@@ -320,19 +320,13 @@ def call_claude_code(
         }
 
 
-def _spawn_claude(cmd: list[str], stdout=subprocess.PIPE, stderr=subprocess.PIPE):
-    """Common subprocess setup — non-root user on Linux/Docker, no
-    flashing console window on Windows. Returns the Popen handle."""
-    env = _claude_env()
-    kwargs: dict[str, Any] = {
-        "stdout": stdout,
-        "stderr": stderr,
-        "env": env,
-        "text": True,
-        "encoding": "utf-8",
-        "errors": "replace",
-    }
-
+def spawn_kwargs(env: dict) -> dict:
+    """Popen setup shared by every Claude Code spawn — the chat turns and
+    the sign-in (claude_code.start_signin): non-root user on Linux/Docker,
+    whose HOME is where the CLI keeps credentials and sessions, so a
+    sign-in run this way lands exactly where the next turn looks; no
+    flashing console window on Windows."""
+    kwargs: dict[str, Any] = {"env": env}
     if sys.platform == "win32":
         kwargs["creationflags"] = subprocess.CREATE_NO_WINDOW
     elif sys.platform != "darwin":
@@ -345,7 +339,14 @@ def _spawn_claude(cmd: list[str], stdout=subprocess.PIPE, stderr=subprocess.PIPE
 
         kwargs["preexec_fn"] = demote
         env["HOME"] = pw.pw_dir
+    return kwargs
 
+
+def _spawn_claude(cmd: list[str], stdout=subprocess.PIPE, stderr=subprocess.PIPE):
+    """A chat turn's subprocess. Returns the Popen handle."""
+    kwargs = spawn_kwargs(_claude_env())
+    kwargs.update(stdout=stdout, stderr=stderr, text=True,
+                  encoding="utf-8", errors="replace")
     return subprocess.Popen(cmd, **kwargs)
 
 

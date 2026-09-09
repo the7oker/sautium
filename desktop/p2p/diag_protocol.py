@@ -45,6 +45,7 @@ EVENT_KINDS = frozenset({
     "backend.restarted",
     "backend.gave_up",
     "agent.signin_opened",
+    "agent.signin_failed",
     "agent.signin_timeout",
     "agent.state_changed",
     "chat.error",

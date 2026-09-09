@@ -887,11 +887,43 @@ def _diag_observe_agent(agent: str, state: str) -> None:
         diag_events.observe_agent_state(conn, agent, state)
 
 
-def _diag_signin_opened(agent: str, state: str) -> None:
+def _diag_signin_opened(agent: str, state: str, flow: str) -> None:
     from desktop.p2p import diag_events
     with get_conn() as conn:
         diag_events.record(conn, "agent.signin_opened",
-                           {"agent": agent, "state": state, "source": "settings"})
+                           {"agent": agent, "state": state, "flow": flow,
+                            "source": "settings"})
+
+
+def _signin_changed(agent: str, snap: Dict[str, Any]) -> None:
+    """The sign-in driver's on_change, on its reader thread: every parsed
+    change wakes the screen's SSE clients; the exit also observes the new
+    auth state right here — the tab that started the sign-in may be gone,
+    so the state read that used to notice cannot be relied on — and keeps
+    a failure for support."""
+    if agent == "claude":
+        import claude_code as cli
+        notify = notify_claude_subscribers
+    else:
+        import codex_cli as cli
+        notify = notify_codex_subscribers
+    if snap["running"]:
+        notify()
+        return
+    state = cli.get_state()
+    if state == "ready":
+        from providers import reset as _reset_providers
+        _reset_providers()
+    _diag_observe_agent(agent, state)
+    if snap.get("timed_out") or snap.get("error"):
+        from desktop.p2p import diag_events
+        kind = "agent.signin_timeout" if snap.get("timed_out") else "agent.signin_failed"
+        with get_conn() as conn:
+            diag_events.record(conn, kind, {
+                "agent": agent, "flow": snap.get("flow"),
+                "error": (snap.get("error") or "")[:300], "source": "settings",
+            })
+    notify()
 
 
 def _gate_snapshot() -> Optional[Dict[str, Any]]:
@@ -1354,7 +1386,7 @@ def get_claude_state() -> Dict[str, Any]:
     backend restart."""
     from claude_code import (
         get_state, get_claude_executable, detect_node_version,
-        is_launcher_mode,
+        is_launcher_mode, signin_snapshot,
     )
     state = get_state()
     _diag_observe_agent("claude", state)
@@ -1369,6 +1401,7 @@ def get_claude_state() -> Dict[str, Any]:
         "node_version":   ".".join(str(p) for p in node_ver) if node_ver else None,
         "claude_path":    str(claude) if claude else None,
         "install":        dict(_claude_install_state),
+        "signin":         signin_snapshot(),
     }
 
 
@@ -1420,24 +1453,41 @@ def post_claude_install() -> Dict[str, Any]:
     return dict(_claude_install_state)
 
 
+class SigninCodeRequest(BaseModel):
+    code: str
+
+
 @router.post("/ai/claude/signin")
 def post_claude_signin() -> Dict[str, Any]:
-    """Launch a terminal window running the `claude` CLI so the user
-    can run `/login`. Caller polls /state.state for transition to
-    'ready'. Returns immediately."""
-    from claude_code import is_launcher_mode, launch_signin_terminal
-    if not is_launcher_mode():
-        raise HTTPException(
-            status_code=400,
-            detail="Sign-in requires a native terminal — use the Desktop Launcher.",
-        )
+    """Start the headless `claude auth login` (desktop/agent_login.py).
+    Returns the sign-in snapshot; every later change — the link and the
+    paste prompt, the exit — wakes /ai/claude/stream. Idempotent while a
+    sign-in runs."""
+    import claude_code
+    if claude_code.get_claude_executable() is None:
+        raise HTTPException(status_code=400, detail="Claude Code is not installed.")
+    snap = claude_code.start_signin(lambda s: _signin_changed("claude", s))
+    _diag_signin_opened("claude", claude_code.get_state(), snap["flow"])
+    return snap
+
+
+@router.post("/ai/claude/signin/code")
+def post_claude_signin_code(req: SigninCodeRequest) -> Dict[str, Any]:
+    """The code the platform page showed (a browser that could not reach
+    the CLI's localhost callback), into the CLI's stdin."""
+    import claude_code
     try:
-        launch_signin_terminal()
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
-    from claude_code import get_state
-    _diag_signin_opened("claude", get_state())
-    return {"opened": True}
+        return claude_code.submit_signin_code(req.code)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except RuntimeError as e:
+        raise HTTPException(status_code=409, detail=str(e))
+
+
+@router.delete("/ai/claude/signin")
+def delete_claude_signin() -> Dict[str, Any]:
+    import claude_code
+    return claude_code.cancel_signin() or {"running": False}
 
 
 # ============================================================
@@ -1512,6 +1562,7 @@ def get_codex_state() -> Dict[str, Any]:
         "codex_path":     str(codex) if codex else None,
         "auth_method":    codex_cli.codex_auth_method(),
         "install":        dict(_codex_install_state),
+        "signin":         codex_cli.signin_snapshot(),
     }
 
 
@@ -1560,23 +1611,28 @@ def post_codex_install() -> Dict[str, Any]:
     return dict(_codex_install_state)
 
 
+class CodexSigninRequest(BaseModel):
+    # The device-code flow: for a browser that cannot reach this host's
+    # localhost:1455 (a phone). Forced inside a container.
+    device: bool = False
+
+
 @router.post("/ai/codex/signin")
-def post_codex_signin() -> Dict[str, Any]:
-    """Launch a terminal window running `codex login` (ChatGPT OAuth).
-    Caller polls /state.state for transition to 'ready'."""
+def post_codex_signin(req: Optional[CodexSigninRequest] = None) -> Dict[str, Any]:
+    """Start the headless `codex login` — mirror of /ai/claude/signin."""
     import codex_cli
-    from claude_code import is_launcher_mode
-    if not is_launcher_mode():
-        raise HTTPException(
-            status_code=400,
-            detail="Sign-in requires a native terminal — use the Desktop Launcher.",
-        )
-    try:
-        codex_cli.launch_signin_terminal()
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
-    _diag_signin_opened("codex", codex_cli.get_state())
-    return {"opened": True}
+    if codex_cli.get_codex_executable() is None:
+        raise HTTPException(status_code=400, detail="Codex is not installed.")
+    snap = codex_cli.start_signin(lambda s: _signin_changed("codex", s),
+                                  device=bool(req and req.device))
+    _diag_signin_opened("codex", codex_cli.get_state(), snap["flow"])
+    return snap
+
+
+@router.delete("/ai/codex/signin")
+def delete_codex_signin() -> Dict[str, Any]:
+    import codex_cli
+    return codex_cli.cancel_signin() or {"running": False}
 
 
 # ============================================================

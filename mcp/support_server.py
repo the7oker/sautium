@@ -151,7 +151,7 @@ def support_reports(node: str = "", kind: str = "", since: str = "", limit: int 
     """Event reports nodes sent on their own (newest first). `node` is a
     username or pubkey prefix; `kind` one of node.started, service.start_failed,
     p2p.start_failed, backend.crashed, backend.restarted, backend.gave_up,
-    agent.signin_opened, agent.signin_timeout, agent.state_changed, chat.error,
+    agent.signin_opened, agent.signin_failed, agent.signin_timeout, agent.state_changed, chat.error,
     sync.failed, sync.import_failed, update.failed; `since` ISO 8601. Reports carry states,
     counters and error strings — never logs or dialogs (those need a warrant)."""
     try:

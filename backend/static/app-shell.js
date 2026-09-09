@@ -10821,30 +10821,65 @@
     `;
   }
 
+  // Both CLI agents sign in headless (desktop/agent_login.py): the state
+  // carries a `signin` snapshot — running/url/code/accepts_code/error —
+  // and the server wakes the stream on every change, so the panel below
+  // is re-rendered from facts, never from a timer. While a sign-in runs
+  // the panel replaces the state block whatever the state is (Reauthorize
+  // starts one from 'ready').
+  const _cliSigninProse = 'color:var(--color-text-muted);font-size:calc(12.5*var(--px));line-height:1.6;';
+
+  function _signinLink(url, label) {
+    if (!url) return `<span>${label}</span>`;
+    return `<a class="btn-link" href="${escapeProfileHtml(url)}" target="_blank" rel="noopener">${label}</a>`;
+  }
+
+  function _renderClaudeSigninPanel(cc) {
+    const sg = cc.signin;
+    const link = _signinLink(sg.url, 'Open the sign-in page');
+    // On the host the CLI opened the browser itself with a localhost
+    // callback, so a click on Authorize finishes everything; the printed
+    // link (with the code-showing callback) is for a browser elsewhere.
+    const lead = cc.launcher_mode
+      ? 'A Claude sign-in tab opened in the browser on this computer. Authorize there — Sautium finishes on its own.'
+      : `${link}, authorize, and paste the code the page shows below.`;
+    const alt = cc.launcher_mode
+      ? `<div class="row-stack-sub">Not at the computer? ${link} on this device and paste the code it shows below.</div>`
+      : '';
+    const paste = sg.accepts_code ? `
+          <div class="signin-code-row">
+            <input class="add-gear-input" id="ccSigninCode" type="text" placeholder="Paste the code" autocomplete="off" autocapitalize="off" spellcheck="false">
+            <button class="btn btn-primary" data-action="cc-signin-code">Submit</button>
+          </div>` : '';
+    return `
+        <div class="form-row stacked">
+          <div class="row-stack">
+            <span class="row-stack-label">Sign in</span>
+            <button class="btn-link" data-action="cc-signin-cancel">Cancel</button>
+          </div>
+          <div class="row-stack-value" style="${_cliSigninProse}">${lead}</div>
+          ${alt}
+          ${paste}
+        </div>`;
+  }
+
   function _renderClaudeCodeBlock(cc) {
     const s = cc.state;
     const installing = cc.install && cc.install.running;
     const installErr = cc.install && cc.install.error;
+    const sg = cc.signin;
+    if (sg && sg.running) return _renderClaudeSigninPanel(cc);
     if (s === 'ready') {
-      // Same Docker gate as the codex block: the terminal flow only
-      // exists on a native host; in Docker credentials ride the
-      // host's ~/.claude mount.
-      const reauth = cc.launcher_mode
-        ? '<button class="btn-link" data-action="cc-signin">Reauthorize</button>'
-        : '<span></span>';
-      const sub = cc.launcher_mode
-        ? 'No API key needed. Plays nicely with the Claude Code CLI.'
-        : 'To switch accounts, run <code style="font-family:var(--font-mono);color:var(--color-blue);">claude /login</code> on the host — picked up automatically.';
       return `
         <div class="form-row stacked">
           <div class="row-stack">
             <span class="row-stack-label">Authentication</span>
-            ${reauth}
+            <button class="btn-link" data-action="cc-signin">Reauthorize</button>
           </div>
           <div class="row-stack-value" style="display:flex;align-items:center;gap:calc(8*var(--px));">
             <span style="color:var(--color-positive);font-family:var(--font-mono);font-size:calc(12*var(--px));letter-spacing:0.02em;"><span class="status-dot green"></span>Signed in via subscription</span>
           </div>
-          <div class="row-stack-sub">${sub}</div>
+          <div class="row-stack-sub">No API key needed. Reauthorize to switch accounts.</div>
         </div>`;
     }
     if (s === 'host_unsupported') {
@@ -10854,8 +10889,8 @@
             <span class="row-stack-label">Setup</span>
             <span></span>
           </div>
-          <div class="row-stack-value" style="color:var(--color-text-muted);font-size:calc(12.5*var(--px));line-height:1.5;">
-            Claude Code installation needs native access to your machine. Open the <b>Sautium Desktop Launcher</b> → <b>Settings</b> → <b>AI provider</b> to install and sign in.
+          <div class="row-stack-value" style="${_cliSigninProse}">
+            Claude Code is not installed in this container. Rebuild the Sautium image (it bakes the CLI in), or use the <b>Sautium Desktop Launcher</b>.
           </div>
         </div>`;
     }
@@ -10866,7 +10901,7 @@
             <span class="row-stack-label">Setup</span>
             <button class="btn-link" data-action="cc-refresh">Refresh</button>
           </div>
-          <div class="row-stack-value" style="color:var(--color-text-muted);font-size:calc(12.5*var(--px));line-height:1.5;">
+          <div class="row-stack-value" style="${_cliSigninProse}">
             Node.js 18+ is required for Claude Code. Re-run the Sautium installer (it bundles Node) or install Node.js manually, then tap Refresh.
           </div>
         </div>`;
@@ -10878,7 +10913,7 @@
             <span class="row-stack-label">Setup</span>
             <span></span>
           </div>
-          <div class="row-stack-value" style="color:var(--color-text-muted);font-size:calc(12.5*var(--px));line-height:1.5;">
+          <div class="row-stack-value" style="${_cliSigninProse}">
             Claude Code is not installed yet. Downloads ~5 MB via npm.
           </div>
           ${installErr ? `<div class="row-stack-sub" style="color:var(--color-negative);white-space:pre-wrap;">${escapeProfileHtml(installErr)}</div>` : ''}
@@ -10888,57 +10923,74 @@
         </div>`;
     }
     if (s === 'not_authed') {
+      const failed = sg && sg.error;
+      const how = cc.launcher_mode
+        ? 'A browser tab opens on this computer; authorize there and Sautium finishes on its own.'
+        : 'Sautium gives you a sign-in link and takes the code the page shows.';
       return `
         <div class="form-row stacked">
           <div class="row-stack">
             <span class="row-stack-label">Sign in</span>
             <button class="btn-link" data-action="cc-refresh">Refresh</button>
           </div>
-          <div class="row-stack-value" style="color:var(--color-text-muted);font-size:calc(12.5*var(--px));line-height:1.6;">
-            Sautium will open a terminal running <b>claude</b>. In it:
-            <ol style="margin:calc(6*var(--px)) 0 0;padding-left:calc(18*var(--px));">
-              <li>Pick a theme (first run only)</li>
-              <li>Type <code style="font-family:var(--font-mono);color:var(--color-blue);">/login</code></li>
-              <li>Choose <i>Claude account with subscription</i></li>
-              <li>Authorize in the browser tab</li>
-              <li>Done — close the terminal window</li>
-            </ol>
-            Sautium detects the sign-in automatically.
+          <div class="row-stack-value" style="${_cliSigninProse}">
+            Sign in with your Claude subscription. ${how}
           </div>
+          ${failed ? `<div class="row-stack-sub" style="color:var(--color-negative);">${escapeProfileHtml(sg.error)}</div>` : ''}
           <div class="btn-row single" style="margin:calc(10*var(--px)) 0 0;">
-            <button class="btn btn-primary" data-action="cc-signin">Sign in to Claude</button>
+            <button class="btn btn-primary" data-action="cc-signin">${failed ? 'Try again' : 'Sign in to Claude'}</button>
           </div>
         </div>`;
     }
     return '';
   }
 
+  function _renderCodexSigninPanel(cx) {
+    const sg = cx.signin;
+    const link = _signinLink(sg.url, 'Open the sign-in page');
+    let body;
+    if (sg.flow === 'device') {
+      // The device flow: the code is typed on OpenAI's page, the CLI
+      // polls for the result — nothing comes back through this host.
+      body = `
+          <div class="row-stack-value" style="${_cliSigninProse}">${link}, sign in to ChatGPT and enter this one-time code:</div>
+          <div class="signin-device-code">${sg.code ? escapeProfileHtml(sg.code) : '…'}</div>
+          <div class="row-stack-sub">The code expires in 15 minutes. Sautium finishes on its own once you enter it.</div>`;
+    } else {
+      body = `
+          <div class="row-stack-value" style="${_cliSigninProse}">A ChatGPT sign-in tab opened in the browser on this computer. Authorize there — Sautium finishes on its own.</div>
+          <div class="row-stack-sub">Tab didn't open? ${link}. Not at the computer? <button class="btn-link" data-action="cx-signin-device">Use a code instead</button>.</div>`;
+    }
+    return `
+        <div class="form-row stacked">
+          <div class="row-stack">
+            <span class="row-stack-label">Sign in</span>
+            <button class="btn-link" data-action="cx-signin-cancel">Cancel</button>
+          </div>
+          ${body}
+        </div>`;
+  }
+
   function _renderCodexBlock(cx) {
     const s = cx.state;
     const installing = cx.install && cx.install.running;
     const installErr = cx.install && cx.install.error;
+    const sg = cx.signin;
+    if (sg && sg.running) return _renderCodexSigninPanel(cx);
     if (s === 'ready') {
       const via = cx.auth_method === 'chatgpt' ? 'Signed in with ChatGPT'
                 : cx.auth_method === 'api_key' ? 'API key (stored)'
                 : 'API key from .env';
-      // Reauthorize opens a terminal — impossible from Docker, where the
-      // credentials arrive via the host's ~/.codex mount instead.
-      const reauth = cx.launcher_mode
-        ? '<button class="btn-link" data-action="cx-signin">Reauthorize</button>'
-        : '<span></span>';
-      const sub = cx.launcher_mode
-        ? 'ChatGPT subscription preferred; an OPENAI_API_KEY works as fallback.'
-        : 'To switch accounts, run <code style="font-family:var(--font-mono);color:var(--color-blue);">codex login</code> on the host — picked up automatically.';
       return `
         <div class="form-row stacked">
           <div class="row-stack">
             <span class="row-stack-label">Authentication</span>
-            ${reauth}
+            <button class="btn-link" data-action="cx-signin">Reauthorize</button>
           </div>
           <div class="row-stack-value" style="display:flex;align-items:center;gap:calc(8*var(--px));">
             <span style="color:var(--color-positive);font-family:var(--font-mono);font-size:calc(12*var(--px));letter-spacing:0.02em;"><span class="status-dot green"></span>${via}</span>
           </div>
-          <div class="row-stack-sub">${sub}</div>
+          <div class="row-stack-sub">ChatGPT subscription preferred; an OPENAI_API_KEY works as fallback. Reauthorize signs out first, then signs in again.</div>
         </div>`;
     }
     if (s === 'host_unsupported') {
@@ -10948,8 +11000,8 @@
             <span class="row-stack-label">Setup</span>
             <span></span>
           </div>
-          <div class="row-stack-value" style="color:var(--color-text-muted);font-size:calc(12.5*var(--px));line-height:1.5;">
-            Codex installation needs native access to your machine. Open the <b>Sautium Desktop Launcher</b> → <b>Settings</b> → <b>AI provider</b> to install and sign in — or run <code style="font-family:var(--font-mono);color:var(--color-blue);">codex login</code> on the host.
+          <div class="row-stack-value" style="${_cliSigninProse}">
+            Codex is not installed in this container. Rebuild the Sautium image (it bakes the CLI in), or use the <b>Sautium Desktop Launcher</b>.
           </div>
         </div>`;
     }
@@ -10960,7 +11012,7 @@
             <span class="row-stack-label">Setup</span>
             <button class="btn-link" data-action="cx-refresh">Refresh</button>
           </div>
-          <div class="row-stack-value" style="color:var(--color-text-muted);font-size:calc(12.5*var(--px));line-height:1.5;">
+          <div class="row-stack-value" style="${_cliSigninProse}">
             Node.js 18+ is required for Codex. Re-run the Sautium installer (it bundles Node) or install Node.js manually, then tap Refresh.
           </div>
         </div>`;
@@ -10972,7 +11024,7 @@
             <span class="row-stack-label">Setup</span>
             <span></span>
           </div>
-          <div class="row-stack-value" style="color:var(--color-text-muted);font-size:calc(12.5*var(--px));line-height:1.5;">
+          <div class="row-stack-value" style="${_cliSigninProse}">
             OpenAI Codex is not installed yet. Downloads via npm.
           </div>
           ${installErr ? `<div class="row-stack-sub" style="color:var(--color-negative);white-space:pre-wrap;">${escapeProfileHtml(installErr)}</div>` : ''}
@@ -10982,24 +11034,23 @@
         </div>`;
     }
     if (s === 'not_authed') {
+      const failed = sg && sg.error;
+      const how = cx.launcher_mode
+        ? 'A browser tab opens on this computer; authorize there and Sautium finishes on its own.'
+        : 'Sautium gives you a sign-in link and a one-time code to enter there.';
       return `
         <div class="form-row stacked">
           <div class="row-stack">
             <span class="row-stack-label">Sign in</span>
             <button class="btn-link" data-action="cx-refresh">Refresh</button>
           </div>
-          <div class="row-stack-value" style="color:var(--color-text-muted);font-size:calc(12.5*var(--px));line-height:1.6;">
-            Sautium will open a terminal running <b>codex login</b>. In it:
-            <ol style="margin:calc(6*var(--px)) 0 0;padding-left:calc(18*var(--px));">
-              <li>Choose <i>Sign in with ChatGPT</i></li>
-              <li>Authorize in the browser tab</li>
-              <li>Done — close the terminal window</li>
-            </ol>
-            Sautium detects the sign-in automatically. Alternatively, set
+          <div class="row-stack-value" style="${_cliSigninProse}">
+            Sign in with your ChatGPT account. ${how} Alternatively, set
             <code style="font-family:var(--font-mono);color:var(--color-blue);">OPENAI_API_KEY</code> in .env.
           </div>
+          ${failed ? `<div class="row-stack-sub" style="color:var(--color-negative);">${escapeProfileHtml(sg.error)}</div>` : ''}
           <div class="btn-row single" style="margin:calc(10*var(--px)) 0 0;">
-            <button class="btn btn-primary" data-action="cx-signin">Sign in to ChatGPT</button>
+            <button class="btn btn-primary" data-action="cx-signin">${failed ? 'Try again' : 'Sign in to ChatGPT'}</button>
           </div>
         </div>`;
     }
@@ -12394,11 +12445,39 @@
       // transitions over /api/settings/ai/claude/stream.
       render();
     });
-    onAction('[data-action="cc-signin"]', async () => {
+    // Sign-in: start / paste the code / cancel. Each call returns the
+    // driver snapshot and the stream wakes on every later change, so a
+    // single render() after the call is all the client does.
+    const _signinCall = async (title, url, opts) => {
       try {
-        const r = await fetch('/api/settings/ai/claude/signin', { method: 'POST' });
-        if (!r.ok) { await _ccError('Claude Code sign-in failed', r); return; }
-      } catch (err) { await _ccError('Claude Code sign-in failed', null, err); return; }
+        const r = await fetch(url, opts);
+        if (!r.ok) { await _ccError(title, r); return false; }
+      } catch (err) { await _ccError(title, null, err); return false; }
+      return true;
+    };
+    onAction('[data-action="cc-signin"]', async () => {
+      await _signinCall('Claude Code sign-in failed', '/api/settings/ai/claude/signin', { method: 'POST' });
+      render();
+    });
+    onAction('[data-action="cc-signin-code"]', async () => {
+      const input = root.querySelector('#ccSigninCode');
+      const code = input ? input.value.trim() : '';
+      if (!code) { if (input) input.focus(); return; }
+      const ok = await _signinCall('Claude Code sign-in failed', '/api/settings/ai/claude/signin/code', {
+        method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify({ code }) });
+      if (ok) render();
+    });
+    const ccCode = root.querySelector('#ccSigninCode');
+    if (ccCode) {
+      ccCode.addEventListener('keydown', (e) => {
+        if (e.key !== 'Enter') return;
+        e.preventDefault();
+        const btn = root.querySelector('[data-action="cc-signin-code"]');
+        if (btn) btn.click();
+      });
+    }
+    onAction('[data-action="cc-signin-cancel"]', async () => {
+      await _signinCall('Claude Code sign-in', '/api/settings/ai/claude/signin', { method: 'DELETE' });
       render();
     });
 
@@ -12411,11 +12490,15 @@
       } catch (err) { await _ccError('Codex install failed', null, err); return; }
       render();
     });
-    onAction('[data-action="cx-signin"]', async () => {
-      try {
-        const r = await fetch('/api/settings/ai/codex/signin', { method: 'POST' });
-        if (!r.ok) { await _ccError('Codex sign-in failed', r); return; }
-      } catch (err) { await _ccError('Codex sign-in failed', null, err); return; }
+    const cxSignin = async (device) => {
+      await _signinCall('Codex sign-in failed', '/api/settings/ai/codex/signin', {
+        method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify({ device }) });
+      render();
+    };
+    onAction('[data-action="cx-signin"]',        () => cxSignin(false));
+    onAction('[data-action="cx-signin-device"]', () => cxSignin(true));
+    onAction('[data-action="cx-signin-cancel"]', async () => {
+      await _signinCall('Codex sign-in', '/api/settings/ai/codex/signin', { method: 'DELETE' });
       render();
     });
 

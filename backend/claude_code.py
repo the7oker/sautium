@@ -1,11 +1,12 @@
 """Claude Code (subscription CLI) detection, install and sign-in.
 
 Backend mirror of `desktop/utils.py` for the parts that the Web UI
-needs: state detection, npm install, and launching the interactive
-sign-in terminal. Backend can only do these when it runs as a native
-process on the host (launcher mode) — Docker has no node/npm and no
-host terminal to open. The launcher exports `P2P_IDENTITY_DIR`, which
-we use as the marker for native mode.
+needs: state detection and npm install. The install needs node/npm on
+the host, so it only works when the backend runs as a native process
+(launcher mode — the launcher exports `P2P_IDENTITY_DIR`, the marker
+for native mode). The sign-in does not: it is the CLI's own headless
+login driven over pipes (`desktop/agent_login.py`), so Docker, where
+the CLI is baked into the image, signs in from the Web UI too.
 """
 
 from __future__ import annotations
@@ -200,19 +201,20 @@ def get_state() -> str:
     volume mount" — both serve identical chat requests. This mirrors
     providers._claude_code_ready(); keep the two in sync.
 
-    The launcher-mode branches only fire as guidance when the CLI
-    isn't ready: in Docker without credentials we surface
-    'host_unsupported' (point user at the Desktop Launcher); in
-    native launcher mode we walk through node/install/signin so the
-    Web UI can drive setup."""
-    if get_claude_executable() is not None and claude_authenticated():
+    Without credentials the CLI's presence decides: a present CLI is
+    'not_authed' on every runtime, because the sign-in runs headless
+    from here (start_signin). Only the install needs the native host,
+    so a container WITHOUT the CLI is 'host_unsupported' and native
+    mode walks through node/install."""
+    claude = get_claude_executable()
+    if claude is not None and claude_authenticated():
         return "ready"
     if not is_launcher_mode():
-        return "host_unsupported"
+        return "not_authed" if claude is not None else "host_unsupported"
     node_ver = detect_node_version()
     if node_ver is None or node_ver[0] < 18:
         return "node_missing"
-    if get_claude_executable() is None:
+    if claude is None:
         return "claude_missing"
     return "not_authed"
 
@@ -265,30 +267,46 @@ def install_claude_runtime() -> Tuple[bool, str]:
 
 # --- Sign in ----------------------------------------------------------------
 
-def launch_signin_terminal() -> None:
-    """Open `claude` in a new console/terminal window so the user can
-    run `/login` and complete the OAuth flow. Caller polls
-    `claude_authenticated()` to detect completion."""
+# The one sign-in per process: `claude auth login` driven over pipes. The
+# last driver stays for its snapshot (the error of a failed attempt is
+# what the UI shows next to the retry button).
+_signin = None
+
+
+def start_signin(on_change) -> dict:
+    """Start `claude auth login` with the chat turns' own spawn setup, so
+    the credentials land where they read them (the demoted agent user's
+    HOME in Docker). A sign-in already running is returned as is."""
+    global _signin
+    if _signin is not None and _signin.running:
+        return _signin.snapshot()
+    from desktop.agent_login import AgentLogin, claude_login_command
+    from claude_code_runner import spawn_kwargs
     claude = get_claude_executable()
     if claude is None:
         raise RuntimeError("Claude Code CLI not installed")
+    env = os.environ.copy()
+    # The login must bind the subscription the chat turns bill, not a
+    # stray API key — same drop as the runner's _claude_env().
+    env.pop("ANTHROPIC_API_KEY", None)
+    _signin = AgentLogin("claude", claude_login_command(claude),
+                         spawn_kwargs(env), on_change=on_change)
+    return _signin.start()
 
-    if sys.platform == "win32":
-        subprocess.Popen(
-            ["cmd.exe", "/c", "start", "Claude Setup",
-             "cmd.exe", "/k", str(claude)],
-            creationflags=subprocess.CREATE_NEW_CONSOLE,
-        )
-        return
-    if sys.platform == "darwin":
-        # Path shell-quoted — the bundled prefix lives under
-        # "Application Support" and an unquoted space breaks zsh.
-        script = (
-            f'tell application "Terminal"\n'
-            f'  do script "\'{claude}\'"\n'
-            f'  activate\n'
-            f'end tell'
-        )
-        subprocess.Popen(["osascript", "-e", script])
-        return
-    raise RuntimeError("Interactive Claude setup not supported on this platform")
+
+def signin_snapshot() -> Optional[dict]:
+    return _signin.snapshot() if _signin is not None else None
+
+
+def submit_signin_code(code: str) -> dict:
+    if _signin is None:
+        raise RuntimeError("No sign-in is in progress")
+    _signin.submit_code(code)
+    return _signin.snapshot()
+
+
+def cancel_signin() -> Optional[dict]:
+    if _signin is None:
+        return None
+    _signin.cancel()
+    return _signin.snapshot()

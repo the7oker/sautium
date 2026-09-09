@@ -302,38 +302,6 @@ def install_claude_runtime(progress_cb=None) -> Tuple[bool, str]:
     return True, "Claude Code installed"
 
 
-def launch_claude_setup() -> "subprocess.Popen":
-    """Open `claude` in a new console/terminal window so the user can
-    pick a theme and complete the OAuth login flow. Returns the Popen
-    handle. Polls `claude_authenticated()` to know when the user is done."""
-    claude = get_claude_executable()
-    if claude is None:
-        raise RuntimeError("Claude Code CLI not installed")
-
-    if sys.platform == "win32":
-        # `start` spins up a fresh console; `cmd /k` keeps it open after
-        # claude exits so the user sees the final "logged in" message.
-        return subprocess.Popen(
-            ["cmd.exe", "/c", "start", "Claude Setup",
-             "cmd.exe", "/k", str(claude)],
-            creationflags=subprocess.CREATE_NEW_CONSOLE,
-        )
-    if sys.platform == "darwin":
-        # AppleScript opens Terminal.app with the command. The path MUST be
-        # shell-quoted: the bundled prefix lives under "Application Support"
-        # and an unquoted space made zsh run "/Users/…/Library/Application"
-        # (measured on the codex twin, 2026-08-23). Single quotes are safe
-        # inside the AppleScript double-quoted literal.
-        script = (
-            f'tell application "Terminal"\n'
-            f'  do script "\'{claude}\'"\n'
-            f'  activate\n'
-            f'end tell'
-        )
-        return subprocess.Popen(["osascript", "-e", script])
-    raise RuntimeError("Interactive Claude setup not supported on this platform")
-
-
 # ---------------------------------------------------------------------------
 # OpenAI Codex CLI — the second subscription agent; mirrors the Claude
 # block above. Backend mirror: backend/codex_cli.py (keep in sync).
@@ -529,33 +497,6 @@ def install_codex_runtime(progress_cb=None) -> Tuple[bool, str]:
         return False, "Install reported success but codex binary not found in prefix"
 
     return True, "Codex installed"
-
-
-def launch_codex_setup() -> "subprocess.Popen":
-    """Open `codex login` in a new console/terminal window — the CLI
-    prints an auth URL and finishes the ChatGPT OAuth flow itself.
-    Poll `codex_authenticated()` to know when the user is done."""
-    codex = get_codex_executable()
-    if codex is None:
-        raise RuntimeError("Codex CLI not installed")
-
-    if sys.platform == "win32":
-        return subprocess.Popen(
-            ["cmd.exe", "/c", "start", "Codex Setup",
-             "cmd.exe", "/k", str(codex), "login"],
-            creationflags=subprocess.CREATE_NEW_CONSOLE,
-        )
-    if sys.platform == "darwin":
-        # Path shell-quoted — the prefix lives under "Application Support"
-        # (see launch_claude_setup).
-        script = (
-            f'tell application "Terminal"\n'
-            f'  do script "\'{codex}\' login"\n'
-            f'  activate\n'
-            f'end tell'
-        )
-        return subprocess.Popen(["osascript", "-e", script])
-    raise RuntimeError("Interactive Codex setup not supported on this platform")
 
 
 def detect_git() -> bool:

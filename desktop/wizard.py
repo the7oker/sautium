@@ -10,19 +10,26 @@ A multi-step customtkinter wizard that collects:
 """
 
 import logging
+import os
 import queue
 import secrets
 import shutil
 import subprocess
 import sys
 import threading
-import time
+import webbrowser
 from pathlib import Path
 from tkinter import filedialog
 from typing import Optional
 
 import customtkinter as ctk
 
+from desktop.agent_login import (
+    AgentLogin,
+    claude_login_command,
+    codex_login_command,
+    native_popen_kwargs,
+)
 from desktop.config_manager import get_data_dir, load_config, save_config
 from desktop.utils import (
     claude_auth_verified,
@@ -37,8 +44,6 @@ from desktop.utils import (
     get_codex_executable,
     install_claude_runtime,
     install_codex_runtime,
-    launch_claude_setup,
-    launch_codex_setup,
 )
 
 logger = logging.getLogger(__name__)
@@ -82,8 +87,9 @@ class SetupWizard(ctk.CTkToplevel):
         # because it can change during the wizard (install, sign-in).
         self._claude_install_thread: Optional[threading.Thread] = None
         self._node_install_thread: Optional[threading.Thread] = None
-        self._claude_poll_after_id: Optional[str] = None
-        self._claude_poll_deadline: float = 0.0
+        # The headless sign-in in flight (desktop/agent_login.py); its
+        # changes arrive through ui_call.
+        self._claude_login: Optional[AgentLogin] = None
         # Live-probe verdict over stored credentials: None = not checked yet,
         # False = file exists but auth is dead (expired beyond refresh /
         # revoked). Presence of .credentials.json alone proves nothing.
@@ -91,8 +97,7 @@ class SetupWizard(ctk.CTkToplevel):
         self._claude_verify_thread: Optional[threading.Thread] = None
         # Codex mirror of the Claude state machine above.
         self._codex_install_thread: Optional[threading.Thread] = None
-        self._codex_poll_after_id: Optional[str] = None
-        self._codex_poll_deadline: float = 0.0
+        self._codex_login: Optional[AgentLogin] = None
         self._codex_verified: Optional[bool] = None
         self._codex_verify_thread: Optional[threading.Thread] = None
 
@@ -137,8 +142,8 @@ class SetupWizard(ctk.CTkToplevel):
             widget.destroy()
 
     def _show_step(self):
-        self._cancel_claude_poll()
-        self._cancel_codex_poll()
+        self._cancel_claude_login()
+        self._cancel_codex_login()
         self._clear_content()
         self.steps[self.current_step]()
         self.step_label.configure(
@@ -852,61 +857,17 @@ class SetupWizard(ctk.CTkToplevel):
             font=ctk.CTkFont(size=13),
         ).pack(anchor="w")
 
-        instr_frame = ctk.CTkFrame(
-            self._provider_fields_frame,
-            fg_color=("#F0F0F0", "#2B2B2B"),
-        )
-        instr_frame.pack(fill="x", pady=(4, 4))
-
-        ctk.CTkLabel(
-            instr_frame,
-            text="In the new terminal window:",
-            font=ctk.CTkFont(size=12, weight="bold"),
-        ).pack(anchor="w", padx=12, pady=(6, 2))
-
-        ctk.CTkLabel(
-            instr_frame,
-            text="1. Pick a theme (first run only)",
-            font=ctk.CTkFont(size=12),
-        ).pack(anchor="w", padx=20)
-
-        step2 = ctk.CTkFrame(instr_frame, fg_color="transparent")
-        step2.pack(anchor="w", padx=20, fill="x")
-        ctk.CTkLabel(
-            step2, text="2. Type the command:",
-            font=ctk.CTkFont(size=12),
-        ).pack(side="left")
-        ctk.CTkLabel(
-            step2, text="  /login",
-            font=ctk.CTkFont(size=14, family="Consolas", weight="bold"),
-            text_color="#4A7FA7",
-        ).pack(side="left")
-
-        ctk.CTkLabel(
-            instr_frame,
-            text="3. Choose 'Claude account with subscription'",
-            font=ctk.CTkFont(size=12),
-        ).pack(anchor="w", padx=20)
-        ctk.CTkLabel(
-            instr_frame,
-            text="4. Authorize in the browser tab that opens",
-            font=ctk.CTkFont(size=12),
-        ).pack(anchor="w", padx=20)
-        ctk.CTkLabel(
-            instr_frame,
-            text="5. Done — close the terminal window",
-            font=ctk.CTkFont(size=12),
-        ).pack(anchor="w", padx=20, pady=(0, 6))
-
         ctk.CTkLabel(
             self._provider_fields_frame,
-            text="Sautium will detect the sign-in automatically.",
-            text_color="gray",
+            text=("Sign in with your Claude subscription: a browser tab opens,\n"
+                  "you authorize there, and Sautium finishes on its own."),
+            text_color="gray", justify="left",
             font=ctk.CTkFont(size=12),
-        ).pack(anchor="w", pady=(0, 4))
+        ).pack(anchor="w", pady=(2, 6))
 
         self._claude_signin_status = ctk.CTkLabel(
             self._provider_fields_frame, text="", text_color="gray",
+            wraplength=420, justify="left",
         )
         self._claude_signin_status.pack(anchor="w", pady=(0, 5))
 
@@ -914,12 +875,13 @@ class SetupWizard(ctk.CTkToplevel):
             self._provider_fields_frame, fg_color="transparent"
         )
         btn_frame.pack(anchor="w")
-        ctk.CTkButton(
+        self._claude_signin_btn = ctk.CTkButton(
             btn_frame,
             text="Sign in to Claude",
             width=180,
             command=self._signin_claude_clicked,
-        ).pack(side="left", padx=(0, 8))
+        )
+        self._claude_signin_btn.pack(side="left", padx=(0, 8))
         ctk.CTkButton(
             btn_frame,
             text="Refresh",
@@ -927,6 +889,43 @@ class SetupWizard(ctk.CTkToplevel):
             command=self._refresh_claude_state,
             fg_color="transparent", border_width=1,
         ).pack(side="left")
+
+        # Packed while a sign-in runs: the printed link for a browser that
+        # did not open, the code a browser shows when it cannot come back
+        # to the CLI (it goes to the CLI's stdin), and Cancel.
+        self._claude_signin_frame = ctk.CTkFrame(
+            self._provider_fields_frame,
+            fg_color=("#F0F0F0", "#2B2B2B"),
+        )
+        ctk.CTkLabel(
+            self._claude_signin_frame,
+            text="Browser didn't open, or shows a code instead of coming back?",
+            font=ctk.CTkFont(size=12, weight="bold"),
+        ).pack(anchor="w", padx=12, pady=(6, 2))
+        row = ctk.CTkFrame(self._claude_signin_frame, fg_color="transparent")
+        row.pack(fill="x", padx=12, pady=(0, 6))
+        ctk.CTkButton(
+            row, text="Open sign-in page", width=140,
+            command=lambda: self._open_signin_url(self._claude_login),
+            fg_color="transparent", border_width=1,
+        ).pack(side="left", padx=(0, 8))
+        self._claude_code_entry = ctk.CTkEntry(
+            row, width=150, placeholder_text="Paste the code")
+        self._claude_code_entry.pack(side="left", padx=(0, 8))
+        self._claude_code_entry.bind(
+            "<Return>", lambda _e: self._submit_claude_code())
+        ctk.CTkButton(
+            row, text="Submit", width=70,
+            command=self._submit_claude_code,
+        ).pack(side="left", padx=(0, 8))
+        ctk.CTkButton(
+            row, text="Cancel", width=70,
+            command=self._cancel_claude_login,
+            fg_color="transparent", border_width=1,
+        ).pack(side="left")
+
+        if self._claude_login is not None and self._claude_login.running:
+            self._on_claude_login_change(self._claude_login.snapshot())
 
     def _render_node_missing(self, on_refresh) -> None:
         """Both agents are npm packages, so both stall on the same missing
@@ -1034,22 +1033,107 @@ class SetupWizard(ctk.CTkToplevel):
             )
 
     def _signin_claude_clicked(self):
-        """Open `claude` in a new terminal and start polling for credentials."""
+        """Start the headless `claude auth login`. The CLI opens the
+        browser itself; every change of the sign-in comes back through
+        ui_call, the exit included — nothing is polled."""
+        if self._claude_login is not None and self._claude_login.running:
+            return
+        claude = get_claude_executable()
+        if claude is None:
+            self._claude_signin_status.configure(
+                text="Claude Code CLI not installed", text_color="red")
+            return
+        env = os.environ.copy()
+        # The login must bind the subscription the chat turns bill, not a
+        # stray API key — the same drop the assistant runner makes.
+        env.pop("ANTHROPIC_API_KEY", None)
+        login = AgentLogin(
+            "claude", claude_login_command(claude), native_popen_kwargs(env),
+            on_change=lambda snap: self.ui_call(
+                lambda: self._on_claude_login_change(snap)),
+        )
         try:
-            launch_claude_setup()
-        except Exception as e:
+            login.start()
+        except OSError as e:
             self._claude_signin_status.configure(
                 text=f"Could not launch claude: {e}", text_color="red",
             )
             return
-
+        self._claude_login = login
         self._diag_spool("agent.signin_opened", {"agent": "claude"})
+        self._on_claude_login_change(login.snapshot())
+
+    def _on_claude_login_change(self, snap: dict):
+        """Repaint from the driver's snapshot — only while this provider's
+        widgets are on screen; the user may have moved on."""
+        if not self._provider_widgets_alive("claude_code", "_claude_signin_status"):
+            return
+        if snap["running"]:
+            self._claude_signin_btn.configure(state="disabled", text="Signing in…")
+            self._claude_signin_status.configure(
+                text=("Finish signing in in the browser tab." if snap["url"]
+                      else "Starting the sign-in…"),
+                text_color="gray",
+            )
+            self._claude_signin_frame.pack(fill="x", pady=(6, 4))
+            return
+        self._claude_signin_frame.pack_forget()
+        self._claude_signin_btn.configure(state="normal", text="Sign in to Claude")
+        if snap["timed_out"]:
+            self._diag_spool("agent.signin_timeout", {"agent": "claude"})
+            self._claude_signin_status.configure(
+                text=snap["error"], text_color="orange")
+            return
+        if snap["error"]:
+            self._diag_spool("agent.signin_failed",
+                             {"agent": "claude", "error": snap["error"][:300]})
+            self._claude_signin_status.configure(
+                text=f"Sign-in failed: {snap['error']}", text_color="red")
+            return
+        if claude_authenticated():
+            self._diag_spool("agent.state_changed",
+                             {"agent": "claude", "from": "not_authed", "to": "ready"})
+            # Fresh credentials just landed — probe them instead of
+            # trusting a pre-login verdict.
+            self._claude_verified = None
+            self._render_claude_state_ui()  # transitions to verifying → ready
+            return
         self._claude_signin_status.configure(
-            text="Waiting for sign-in (poll every 2s for 5 min)...",
+            text=("Sign-in cancelled." if snap["cancelled"]
+                  else "The sign-in ended without credentials. Try again."),
             text_color="gray",
         )
-        self._claude_poll_deadline = time.monotonic() + 300
-        self._poll_claude_auth()
+
+    def _submit_claude_code(self):
+        login = self._claude_login
+        if login is None:
+            return
+        try:
+            login.submit_code(self._claude_code_entry.get())
+        except (ValueError, RuntimeError) as e:
+            self._claude_signin_status.configure(text=str(e), text_color="orange")
+            return
+        self._claude_signin_status.configure(
+            text="Checking the code…", text_color="gray")
+
+    def _cancel_claude_login(self):
+        if self._claude_login is not None:
+            self._claude_login.cancel()
+
+    def _provider_widgets_alive(self, provider: str, status_attr: str) -> bool:
+        """The provider's radio is selected and its status label was not
+        destroyed by a later render."""
+        try:
+            return (self._provider_var.get() == provider
+                    and bool(getattr(self, status_attr).winfo_exists()))
+        except Exception:
+            return False
+
+    @staticmethod
+    def _open_signin_url(login: Optional[AgentLogin]) -> None:
+        snap = login.snapshot() if login is not None else None
+        if snap and snap["url"]:
+            webbrowser.open(snap["url"])
 
     def _start_claude_verify(self):
         """Probe stored credentials with a live CLI turn (worker thread)."""
@@ -1081,35 +1165,6 @@ class SetupWizard(ctk.CTkToplevel):
         outside our console (user's own terminal) gets re-checked."""
         self._claude_verified = None
         self._render_claude_state_ui()
-
-    def _poll_claude_auth(self):
-        """Self-rescheduling timer that checks for credentials."""
-        if claude_authenticated():
-            self._claude_poll_after_id = None
-            self._diag_spool("agent.state_changed",
-                             {"agent": "claude", "from": "not_authed", "to": "ready"})
-            # Fresh credentials just landed — re-probe them instead of
-            # trusting a pre-login verdict.
-            self._claude_verified = None
-            self._render_claude_state_ui()  # transitions to verifying → ready
-            return
-        if time.monotonic() >= self._claude_poll_deadline:
-            self._claude_poll_after_id = None
-            self._diag_spool("agent.signin_timeout", {"agent": "claude"})
-            self._claude_signin_status.configure(
-                text="Sign-in not detected. Click Refresh after authorizing.",
-                text_color="orange",
-            )
-            return
-        self._claude_poll_after_id = self.after(2000, self._poll_claude_auth)
-
-    def _cancel_claude_poll(self):
-        if self._claude_poll_after_id is not None:
-            try:
-                self.after_cancel(self._claude_poll_after_id)
-            except Exception:
-                pass
-            self._claude_poll_after_id = None
 
     # ================================================================
     # OpenAI Codex provider — mirror of the Claude state machine above
@@ -1205,43 +1260,17 @@ class SetupWizard(ctk.CTkToplevel):
             font=ctk.CTkFont(size=13),
         ).pack(anchor="w")
 
-        instr_frame = ctk.CTkFrame(
-            self._provider_fields_frame,
-            fg_color=("#F0F0F0", "#2B2B2B"),
-        )
-        instr_frame.pack(fill="x", pady=(4, 4))
-
-        ctk.CTkLabel(
-            instr_frame,
-            text="In the new terminal window (runs `codex login`):",
-            font=ctk.CTkFont(size=12, weight="bold"),
-        ).pack(anchor="w", padx=12, pady=(6, 2))
-
-        ctk.CTkLabel(
-            instr_frame,
-            text="1. Choose 'Sign in with ChatGPT'",
-            font=ctk.CTkFont(size=12),
-        ).pack(anchor="w", padx=20)
-        ctk.CTkLabel(
-            instr_frame,
-            text="2. Authorize in the browser tab that opens",
-            font=ctk.CTkFont(size=12),
-        ).pack(anchor="w", padx=20)
-        ctk.CTkLabel(
-            instr_frame,
-            text="3. Done — close the terminal window",
-            font=ctk.CTkFont(size=12),
-        ).pack(anchor="w", padx=20, pady=(0, 6))
-
         ctk.CTkLabel(
             self._provider_fields_frame,
-            text="Sautium will detect the sign-in automatically.",
-            text_color="gray",
+            text=("Sign in with your ChatGPT account: a browser tab opens,\n"
+                  "you authorize there, and Sautium finishes on its own."),
+            text_color="gray", justify="left",
             font=ctk.CTkFont(size=12),
-        ).pack(anchor="w", pady=(0, 4))
+        ).pack(anchor="w", pady=(2, 6))
 
         self._codex_signin_status = ctk.CTkLabel(
             self._provider_fields_frame, text="", text_color="gray",
+            wraplength=420, justify="left",
         )
         self._codex_signin_status.pack(anchor="w", pady=(0, 5))
 
@@ -1249,12 +1278,13 @@ class SetupWizard(ctk.CTkToplevel):
             self._provider_fields_frame, fg_color="transparent"
         )
         btn_frame.pack(anchor="w")
-        ctk.CTkButton(
+        self._codex_signin_btn = ctk.CTkButton(
             btn_frame,
             text="Sign in to ChatGPT",
             width=180,
             command=self._signin_codex_clicked,
-        ).pack(side="left", padx=(0, 8))
+        )
+        self._codex_signin_btn.pack(side="left", padx=(0, 8))
         ctk.CTkButton(
             btn_frame,
             text="Refresh",
@@ -1262,6 +1292,34 @@ class SetupWizard(ctk.CTkToplevel):
             command=self._refresh_codex_state,
             fg_color="transparent", border_width=1,
         ).pack(side="left")
+
+        # Packed while a sign-in runs: the printed link for a browser
+        # that did not open, and Cancel. The callback lands on this
+        # machine's localhost:1455, so there is no code to paste.
+        self._codex_signin_frame = ctk.CTkFrame(
+            self._provider_fields_frame,
+            fg_color=("#F0F0F0", "#2B2B2B"),
+        )
+        ctk.CTkLabel(
+            self._codex_signin_frame,
+            text="Browser didn't open?",
+            font=ctk.CTkFont(size=12, weight="bold"),
+        ).pack(anchor="w", padx=12, pady=(6, 2))
+        row = ctk.CTkFrame(self._codex_signin_frame, fg_color="transparent")
+        row.pack(fill="x", padx=12, pady=(0, 6))
+        ctk.CTkButton(
+            row, text="Open sign-in page", width=140,
+            command=lambda: self._open_signin_url(self._codex_login),
+            fg_color="transparent", border_width=1,
+        ).pack(side="left", padx=(0, 8))
+        ctk.CTkButton(
+            row, text="Cancel", width=70,
+            command=self._cancel_codex_login,
+            fg_color="transparent", border_width=1,
+        ).pack(side="left")
+
+        if self._codex_login is not None and self._codex_login.running:
+            self._on_codex_login_change(self._codex_login.snapshot())
 
     def _install_codex_clicked(self):
         if self._codex_install_thread and self._codex_install_thread.is_alive():
@@ -1293,21 +1351,72 @@ class SetupWizard(ctk.CTkToplevel):
             )
 
     def _signin_codex_clicked(self):
+        """Start the headless `codex login` (browser callback on this
+        machine's localhost:1455) — mirror of the Claude handler."""
+        if self._codex_login is not None and self._codex_login.running:
+            return
+        codex = get_codex_executable()
+        if codex is None:
+            self._codex_signin_status.configure(
+                text="Codex CLI not installed", text_color="red")
+            return
+        login = AgentLogin(
+            "codex", codex_login_command(codex, device=False),
+            native_popen_kwargs(os.environ.copy()),
+            on_change=lambda snap: self.ui_call(
+                lambda: self._on_codex_login_change(snap)),
+        )
         try:
-            launch_codex_setup()
-        except Exception as e:
+            login.start()
+        except OSError as e:
             self._codex_signin_status.configure(
                 text=f"Could not launch codex: {e}", text_color="red",
             )
             return
-
+        self._codex_login = login
         self._diag_spool("agent.signin_opened", {"agent": "codex"})
+        self._on_codex_login_change(login.snapshot())
+
+    def _on_codex_login_change(self, snap: dict):
+        if not self._provider_widgets_alive("codex", "_codex_signin_status"):
+            return
+        if snap["running"]:
+            self._codex_signin_btn.configure(state="disabled", text="Signing in…")
+            self._codex_signin_status.configure(
+                text=("Finish signing in in the browser tab." if snap["url"]
+                      else "Starting the sign-in…"),
+                text_color="gray",
+            )
+            self._codex_signin_frame.pack(fill="x", pady=(6, 4))
+            return
+        self._codex_signin_frame.pack_forget()
+        self._codex_signin_btn.configure(state="normal", text="Sign in to ChatGPT")
+        if snap["timed_out"]:
+            self._diag_spool("agent.signin_timeout", {"agent": "codex"})
+            self._codex_signin_status.configure(
+                text=snap["error"], text_color="orange")
+            return
+        if snap["error"]:
+            self._diag_spool("agent.signin_failed",
+                             {"agent": "codex", "error": snap["error"][:300]})
+            self._codex_signin_status.configure(
+                text=f"Sign-in failed: {snap['error']}", text_color="red")
+            return
+        if codex_authenticated():
+            self._diag_spool("agent.state_changed",
+                             {"agent": "codex", "from": "not_authed", "to": "ready"})
+            self._codex_verified = None
+            self._render_codex_state_ui()  # transitions to verifying → ready
+            return
         self._codex_signin_status.configure(
-            text="Waiting for sign-in (poll every 2s for 5 min)...",
+            text=("Sign-in cancelled." if snap["cancelled"]
+                  else "The sign-in ended without credentials. Try again."),
             text_color="gray",
         )
-        self._codex_poll_deadline = time.monotonic() + 300
-        self._poll_codex_auth()
+
+    def _cancel_codex_login(self):
+        if self._codex_login is not None:
+            self._codex_login.cancel()
 
     def _start_codex_verify(self):
         if self._codex_verify_thread and self._codex_verify_thread.is_alive():
@@ -1333,24 +1442,6 @@ class SetupWizard(ctk.CTkToplevel):
         self._codex_verified = None
         self._render_codex_state_ui()
 
-    def _poll_codex_auth(self):
-        if codex_authenticated():
-            self._codex_poll_after_id = None
-            self._diag_spool("agent.state_changed",
-                             {"agent": "codex", "from": "not_authed", "to": "ready"})
-            self._codex_verified = None
-            self._render_codex_state_ui()  # transitions to verifying → ready
-            return
-        if time.monotonic() >= self._codex_poll_deadline:
-            self._codex_poll_after_id = None
-            self._diag_spool("agent.signin_timeout", {"agent": "codex"})
-            self._codex_signin_status.configure(
-                text="Sign-in not detected. Click Refresh after authorizing.",
-                text_color="orange",
-            )
-            return
-        self._codex_poll_after_id = self.after(2000, self._poll_codex_auth)
-
     def _diag_spool(self, kind: str, detail: dict) -> None:
         """Support diagnostics before a database exists: the wizard runs
         first, so its sign-in outcomes wait in the spool the launcher
@@ -1358,14 +1449,6 @@ class SetupWizard(ctk.CTkToplevel):
         silent failure support most needs to see."""
         from desktop.p2p import diag_events
         diag_events.spool(get_data_dir(), kind, {**detail, "source": "wizard"})
-
-    def _cancel_codex_poll(self):
-        if self._codex_poll_after_id is not None:
-            try:
-                self.after_cancel(self._codex_poll_after_id)
-            except Exception:
-                pass
-            self._codex_poll_after_id = None
 
     def _step_lastfm(self):
         ctk.CTkLabel(
@@ -1811,8 +1894,8 @@ class SetupWizard(ctk.CTkToplevel):
         """Handle window close — quit the whole app if wizard not completed."""
         if self.current_step == len(self.steps) - 1:
             return  # Don't close during init
-        self._cancel_claude_poll()
-        self._cancel_codex_poll()
+        self._cancel_claude_login()
+        self._cancel_codex_login()
         self.destroy()
         # Quit the parent app since setup was not completed
         if self.master:

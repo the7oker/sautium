@@ -1,10 +1,11 @@
 """OpenAI Codex CLI detection, install and sign-in.
 
 Codex mirror of `claude_code.py` — state detection, npm install into a
-per-user prefix, and launching the interactive sign-in terminal. Same
-mode split: install/signin only work when the backend runs natively on
-the host (launcher mode); in Docker the CLI is baked into the image and
-auth arrives via the ~/.codex volume mount.
+per-user prefix, and the headless sign-in (`desktop/agent_login.py`).
+The install needs the native host (launcher mode); the sign-in runs on
+every runtime — in Docker the CLI is baked into the image and the
+device-code flow stands in for the browser callback the container's
+localhost cannot receive.
 
 Auth model (differs from Claude Code): the CLI reads ONLY
 `$CODEX_HOME/auth.json` — a bare OPENAI_API_KEY env var is ignored
@@ -169,16 +170,19 @@ def codex_auth_method() -> Optional[str]:
 def get_state() -> str:
     """One of: 'host_unsupported', 'node_missing', 'codex_missing',
     'not_authed', 'ready'. Same fact-based-first ordering as
-    claude_code.get_state(); mirrors providers._codex_ready() — keep
-    the two in sync."""
-    if get_codex_executable() is not None and codex_authenticated():
+    claude_code.get_state() — a present CLI without credentials is
+    'not_authed' on every runtime, 'host_unsupported' is a container
+    without the CLI; mirrors providers._codex_ready() — keep the two
+    in sync."""
+    codex = get_codex_executable()
+    if codex is not None and codex_authenticated():
         return "ready"
     if not is_launcher_mode():
-        return "host_unsupported"
+        return "not_authed" if codex is not None else "host_unsupported"
     node_ver = detect_node_version()
     if node_ver is None or node_ver[0] < 18:
         return "node_missing"
-    if get_codex_executable() is None:
+    if codex is None:
         return "codex_missing"
     return "not_authed"
 
@@ -231,32 +235,47 @@ def install_codex_runtime() -> Tuple[bool, str]:
 
 # --- Sign in -----------------------------------------------------------------
 
-def launch_signin_terminal() -> None:
-    """Open `codex login` in a new console/terminal window — the CLI
-    prints an auth URL and finishes the ChatGPT OAuth flow itself.
-    Caller polls `codex_authenticated()` to detect completion."""
-    import subprocess
+# The one sign-in per process — see claude_code._signin.
+_signin = None
 
+
+def start_signin(on_change, device: bool) -> dict:
+    """Start `codex login` (browser callback on localhost:1455) or
+    `codex login --device-auth` (a code typed on OpenAI's page) with the
+    chat turns' own spawn setup. Inside a container only the device flow
+    can finish — the browser cannot reach the container's localhost — so
+    the flag is forced there. A running sign-in of the same flow is
+    returned as is; asking for the other flow replaces it.
+
+    Unlike `claude auth login`, `codex login` deletes the existing
+    auth.json the moment it starts (measured on 0.149 and 0.153, both
+    flows), so a cancelled re-authorization leaves the node signed out
+    of ChatGPT — the UI says so next to Reauthorize."""
+    global _signin
+    if not is_launcher_mode():
+        device = True
+    flow = "device" if device else "browser"
+    if _signin is not None and _signin.running:
+        if _signin.flow == flow:
+            return _signin.snapshot()
+        _signin.cancel()
+    from desktop.agent_login import AgentLogin, codex_login_command
+    from codex_runner import _spawn_kwargs
     codex = get_codex_executable()
     if codex is None:
         raise RuntimeError("Codex CLI not installed")
+    _signin = AgentLogin("codex", codex_login_command(codex, device),
+                         _spawn_kwargs(os.environ.copy()),
+                         on_change=on_change, flow=flow)
+    return _signin.start()
 
-    if sys.platform == "win32":
-        subprocess.Popen(
-            ["cmd.exe", "/c", "start", "Codex Setup",
-             "cmd.exe", "/k", str(codex), "login"],
-            creationflags=subprocess.CREATE_NEW_CONSOLE,
-        )
-        return
-    if sys.platform == "darwin":
-        # Path shell-quoted — the bundled prefix lives under
-        # "Application Support" and an unquoted space breaks zsh.
-        script = (
-            f'tell application "Terminal"\n'
-            f'  do script "\'{codex}\' login"\n'
-            f'  activate\n'
-            f'end tell'
-        )
-        subprocess.Popen(["osascript", "-e", script])
-        return
-    raise RuntimeError("Interactive Codex setup not supported on this platform")
+
+def signin_snapshot() -> Optional[dict]:
+    return _signin.snapshot() if _signin is not None else None
+
+
+def cancel_signin() -> Optional[dict]:
+    if _signin is None:
+        return None
+    _signin.cancel()
+    return _signin.snapshot()
