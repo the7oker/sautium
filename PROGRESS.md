@@ -203,6 +203,22 @@ implementation details live in the code, DB and git history.
   draining", so the queue would have advanced one batch per 30 min;
   `DISTINCT ON (track_id)` with the artist-bio generator's richest-field
   preference fixes it.
+- **The text half yields to playback (2026-09-09).** BGE-M3 is the one part
+  of the background loop heavy enough to be heard, and HQPlayer wants the
+  machine more than we do, so steps 6-8 skip a pass while
+  `load_meter.playback_active` — the same rule the identity miner already
+  follows, and the same reason: playback is a priority signal, not a load.
+  A batch already running yields at its next internal boundary (the model
+  steps get a `cancel_flag` that also trips on playback), and the meter's
+  playback falling edge wakes a pass, so a node played in half-hour
+  stretches does not wait out the interval each time. Deliberately NOT
+  gated on headroom: headroom counts our OWN process tree, so a step that
+  paused on it would pause on its own CPU and oscillate — `mining_hold`
+  states this for the miner. Foreign load (a game, a compile, HQPlayer's
+  own CPU) is simply not measurable here: on a Docker install `/proc/stat`
+  inside the container is the WSL VM's, and HQPlayer runs on the Windows
+  side of it. Playback is the proxy because it is the one signal every
+  runtime can observe.
 
 ### AI assistant
 
