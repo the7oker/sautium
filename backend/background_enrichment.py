@@ -25,6 +25,13 @@ first node to be asked was sitting on 7.3k unembedded bios. Nothing else
 computes these vectors and no peer carries them, so the producer drains
 them. The manual run keeps the AUDIO phase, which only a new file creates.
 
+Steps 6-8 YIELD WHILE THE NODE IS PLAYING (_playback_hold): the model is
+the one part of this loop heavy enough to be heard, and HQPlayer wants the
+machine more than we do. What the meter cannot see is load from OUTSIDE
+this process tree — a game, a compile, HQPlayer's own CPU on the host side
+of a Docker install. Playback is the signal that stands in for it, because
+it is the one the product can observe on every runtime.
+
 Two cadences. The network and model steps DRAIN: a step that came back with
 a full, error-free batch has a longer queue behind it, so the next pass
 follows at once instead of after the interval — a fresh library's bios take
@@ -625,14 +632,42 @@ _NETWORK_STEPS = (
 )
 
 
+def _playback_hold() -> Optional[str]:
+    """Why the text half must yield right now, or None.
+
+    Playback only — the same rule the identity miner already follows
+    (load_meter.mining_hold). Playback is a priority signal, not a load:
+    when the machine is doing the thing the product exists for, discretionary
+    work gets out of the way. HQPlayer is the hungriest process on a listening
+    machine, and a few hundred texts through BGE-M3 while it feeds a DAC is
+    how a background nicety turns into a stutter.
+
+    Deliberately NOT gated on headroom, for the reason load_meter states for
+    mining: headroom counts OUR OWN process tree, so a step that pauses on it
+    pauses on its own CPU and oscillates. Foreign load is a different
+    question and this meter cannot answer it — see the module docstring."""
+    from desktop.p2p import load_meter
+    meter = load_meter.current()
+    if meter is not None and meter.playback_active:
+        return "playback"
+    return None
+
+
+def _model_cancel() -> bool:
+    """Stop signal for the model steps: the loop's own cancel, or playback
+    starting mid-batch. The generators stamp every batch they finish, so
+    yielding here costs the current batch's tail and nothing else."""
+    return _cancel_flag() or _playback_hold() is not None
+
+
 def _step_text_embeddings(limit: int) -> Dict[str, int]:
     from text_embeddings import generate_text_embeddings
-    return generate_text_embeddings(limit=limit, cancel_flag=_cancel_flag)
+    return generate_text_embeddings(limit=limit, cancel_flag=_model_cancel)
 
 
 def _step_lyrics_embeddings(limit: int) -> Dict[str, int]:
     from lyrics_embeddings import generate_lyrics_embeddings
-    return generate_lyrics_embeddings(limit=limit, cancel_flag=_cancel_flag)
+    return generate_lyrics_embeddings(limit=limit, cancel_flag=_model_cancel)
 
 
 def _step_enrichment_embeddings(limit: int) -> Dict[str, int]:
@@ -642,7 +677,7 @@ def _step_enrichment_embeddings(limit: int) -> Dict[str, int]:
     from enrichment_embeddings import generate_all_enrichment_embeddings
     out: Dict[str, int] = {}
     for part in generate_all_enrichment_embeddings(
-            limit=limit, cancel_flag=_cancel_flag).values():
+            limit=limit, cancel_flag=_model_cancel).values():
         for key, value in part.items():
             if isinstance(value, int):
                 out[key] = out.get(key, 0) + value
@@ -712,6 +747,12 @@ def _run_local_model_steps() -> Tuple[Dict[str, Any], bool]:
     profile = hardware_profile.resolve()
     if not profile.ml_available:
         return summary, False
+    hold = _playback_hold()
+    if hold:
+        # No backlog reported: the pass hands control back to the timer, and
+        # the falling edge of playback wakes it sooner (see _loop).
+        logger.debug("text half yields: %s", hold)
+        return {"text_half": {"held": hold}}, False
     # The profile governs compute (CLAUDE.md): lite encodes on the CPU,
     # where the same slice costs an order of magnitude more wall-clock.
     # Smaller slices there — same queue, more passes, a machine that stays
@@ -801,6 +842,29 @@ def _now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
+def _wake_when_playback_ends() -> None:
+    """Run a pass as soon as the machine stops playing.
+
+    Without this the text half would hold and then wait out the whole
+    interval, so a node played in half-hour stretches would embed almost
+    nothing. The meter fires on band changes; only the playback falling edge
+    is a reason to wake, and only after a rise we actually saw."""
+    from desktop.p2p import load_meter
+    meter = load_meter.current()
+    if meter is None:
+        return
+    seen_playing = {"v": False}
+
+    def _on_load(snap: Dict[str, Any]) -> None:
+        if snap.get("playback"):
+            seen_playing["v"] = True
+        elif seen_playing["v"]:
+            seen_playing["v"] = False
+            wake("playback ended")
+
+    meter.subscribe(_on_load)
+
+
 def _loop() -> None:
     """One pass = a batch of every network step, then — when the interval
     timer says so — the DB-only steps. A pass that left a network backlog
@@ -808,6 +872,7 @@ def _loop() -> None:
     idles until the interval elapses or a P2P sync completes. Exits when
     cancel is set."""
     logger.info("Background enrichment loop started")
+    _wake_when_playback_ends()
     db_due_at = 0.0        # the first pass runs the DB steps too
     minted = False         # canon work created since the last NOTIFY
     grew = False           # new phantom gaps created since the last sync request
