@@ -254,11 +254,36 @@ username + password → Argon2id KDF (256MB, 4 iter) → 32-byte seed → Ed2551
 in hex. Human-readable, and the hash part defends against forgery (a different
 "bob42" gets a different hash).
 
-**Key rotation** (password change):
-1. New keypair (from the new password)
-2. A `{new_public_key}` message is signed with the **old** private key
-3. Broadcast to friends over `/api/chat/key-rotation`
-4. The friend verifies the signature with the old key → updates the record
+**Key rotation** (name or password change — SHIPPED 2026-09-10). Both are
+KDF inputs, so either change is a new key; the old one is kept:
+1. `node_identity.rotate_identity(dir, name, password, anonymous)` derives
+   the new keypair, signs a canonical `key_rotation` notice with **both**
+   keys (old = continuity, new = possession), moves the old key, node_info,
+   certificate and proof into `node_identity/previous/<when>-<pubkey>/`
+   next to `rotation.json`, and writes the new identity with
+   `email_verified: false` and a `previous` list. Empty password = minted
+   (`anonymous: true`, the PIN stays the only door), as in the wizard.
+2. `POST /api/auth/change-identity` (signed) runs it under the account lock,
+   drops the process caches, bumps the token epoch, hands the caller a fresh
+   token (tokens are bound to the pubkey) and `NOTIFY sautium_identity_rotated`.
+   The launcher restarts its P2P manager on the notify; a Docker node reports
+   `restart_required` — its peer surface is TLS-bound to the key at start.
+3. At P2P start, `p2p.bound_identity` ≠ the live key + a `rotation.json` for
+   the bound key → `_announce_rotation`: the notice goes to every resolved
+   friend over the direct path (`/api/chat/key-rotation`, launcher and Docker
+   receivers, `parse_rotation_notice` takes every field from the signed bytes,
+   never the body). A friend it reaches applies it at once
+   (`friends.previous_public_key_hex` keeps the old key); one it does not is
+   unbound to `pending:` and re-introduced with the invite token — the road
+   that never needed the old key. No bound-identity record, or a notice this
+   node no longer holds, = a replacement: everyone re-introduces.
+4. Retired seeds stay loaded in both chat services: a friend who has not
+   applied the notice still encrypts to the old key, and that message opens.
+5. The Worker mapped the OLD invite code to the mailbox — the owner verifies
+   the email again from the new key, and that is what makes the notary name
+   the old key as `predecessor` (succession, cert v4). Nothing is queued
+   through the relay or the mailbox: the notice needs the friend online, and
+   the offline friend is exactly whom re-introduction covers.
 
 ### Email verification (optional)
 

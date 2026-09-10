@@ -8568,11 +8568,12 @@
     }
     if (emailStatus.verified) {
       return `
-        <div class="form-row" data-row="email">
+        <div class="form-row is-clickable" data-action="set-email" data-row="email">
           <span class="form-label">Email</span>
           <span class="form-actions">
             <span class="form-value">${escapeProfileHtml(email)}</span>
             <span class="verified">${PROFILE_ICONS.check}verified</span>
+            <span class="link-chev">${PROFILE_ICONS.chev}</span>
           </span>
         </div>`;
     }
@@ -8607,7 +8608,7 @@
     const verifyRow = root.querySelector('[data-action="verify-email"]');
     if (verifyRow) verifyRow.addEventListener('click', () => openEmailVerifyFlow());
     const setRow = root.querySelector('[data-action="set-email"]');
-    if (setRow) setRow.addEventListener('click', () => openSetEmailFlow());
+    if (setRow) setRow.addEventListener('click', () => openSetEmailFlow((data && data.email) || ''));
   }
 
   /* ------------------------------------------------------------------
@@ -9148,8 +9149,8 @@
         <div class="profile-group-label">Account</div>
         <div class="form-group">
           ${emailRowHTML(account, emailStatus)}
-          <div class="form-row is-clickable" data-action="change-password">
-            <span class="form-label">Password</span>
+          <div class="form-row is-clickable" data-action="change-identity">
+            <span class="form-label">Name &amp; password</span>
             <span class="form-actions">
               <span class="form-value action">Change</span>
               <span class="link-chev">${PROFILE_ICONS.chev}</span>
@@ -9248,6 +9249,9 @@
 
     const lfmRow = root.querySelector('[data-action="lastfm"]');
     if (lfmRow) lfmRow.addEventListener('click', () => openLastfmAuthFlow());
+
+    const identityRow = root.querySelector('[data-action="change-identity"]');
+    if (identityRow) identityRow.addEventListener('click', () => openChangeIdentityFlow(account));
 
     const signOutRow = root.querySelector('[data-action="logout-all"]');
     if (signOutRow) signOutRow.addEventListener('click', async () => {
@@ -9554,14 +9558,14 @@
     });
   }
 
-  async function openSetEmailFlow() {
+  async function openSetEmailFlow(current = '') {
     const overlay = document.createElement('div');
     overlay.className = 'add-gear-overlay';
     overlay.innerHTML = `
       <div class="add-gear-sheet">
         <div class="sheet-handle"></div>
         <div class="add-gear-head">
-          <h2 class="add-gear-title">Add email</h2>
+          <h2 class="add-gear-title">${current ? 'Change email' : 'Add email'}</h2>
           <button class="icon-btn" data-cancel aria-label="close">${PROFILE_ICONS.close}</button>
         </div>
         <div class="add-gear-row">
@@ -9570,7 +9574,7 @@
             invites you send. Verification is a separate step — saving an
             address here doesn't send any email yet.
           </p>
-          <input class="add-gear-input" id="setEmailInput" type="email" placeholder="you@example.com" maxlength="320" autocomplete="email">
+          <input class="add-gear-input" id="setEmailInput" type="email" placeholder="you@example.com" maxlength="320" autocomplete="email" value="${escapeProfileHtml(current)}">
           <button class="profile-btn primary" data-confirm>Save</button>
           <div id="setEmailMsg" style="font-size:calc(12*var(--px));color:var(--color-text-dim);min-height:calc(16*var(--px));"></div>
         </div>
@@ -9620,6 +9624,92 @@
     };
     overlay.querySelector('[data-confirm]').addEventListener('click', submit);
     emailInput.addEventListener('keydown', e => { if (e.key === 'Enter') { e.preventDefault(); submit(); } });
+  }
+
+  // Name and password are both KDF inputs, so either change is a new key;
+  // the sheet says what that costs before the tap. Same shape as the
+  // wizard's identity step: the password is optional, the confirmation
+  // appears only once there is a password (a login form never asks for
+  // one, so its arrival is what says "you are creating this").
+  async function openChangeIdentityFlow(account) {
+    const current = (account && account.username) || '';
+    const overlay = document.createElement('div');
+    overlay.className = 'add-gear-overlay';
+    overlay.innerHTML = `
+      <div class="add-gear-sheet">
+        <div class="sheet-handle"></div>
+        <div class="add-gear-head">
+          <h2 class="add-gear-title">Change name or password</h2>
+          <button class="icon-btn" data-cancel aria-label="close">${PROFILE_ICONS.close}</button>
+        </div>
+        <div class="add-gear-row">
+          <p style="margin:0;color:var(--color-text-muted);font-size:calc(13*var(--px));line-height:1.5;">
+            The name and password themselves are the identity, so either change
+            gives this node a new key. Friends are told automatically, signed by
+            the current key. Other devices sign in with the new pair; every
+            paired phone signs in again; a verified email is verified again.
+          </p>
+          <label style="display:flex;flex-direction:column;gap:calc(4*var(--px));">
+            <span style="color:var(--color-text-muted);font-size:calc(12*var(--px));">Name (what friends see)</span>
+            <input class="add-gear-input" id="idName" type="text" maxlength="32" autocomplete="username" value="${escapeProfileHtml(current)}">
+          </label>
+          <label style="display:flex;flex-direction:column;gap:calc(4*var(--px));">
+            <span style="color:var(--color-text-muted);font-size:calc(12*var(--px));">Password — optional</span>
+            <input class="add-gear-input" id="idPass" type="password" placeholder="min 8 characters" autocomplete="new-password">
+          </label>
+          <p style="margin:0;color:var(--color-text-dim);font-size:calc(12*var(--px));line-height:1.5;">
+            Makes this name yours on any device. Without it, the identity lives only on this machine.
+          </p>
+          <label id="idConfirmRow" style="display:flex;flex-direction:column;gap:calc(4*var(--px));" hidden>
+            <span style="color:var(--color-text-muted);font-size:calc(12*var(--px));">Confirm password</span>
+            <input class="add-gear-input" id="idPass2" type="password" autocomplete="new-password">
+          </label>
+          <button class="profile-btn primary" data-confirm>Change</button>
+          <div id="idMsg" style="font-size:calc(12*var(--px));color:var(--color-text-dim);min-height:calc(16*var(--px));"></div>
+        </div>
+      </div>
+    `;
+    document.body.appendChild(overlay);
+    const close = () => overlay.remove();
+    overlay.addEventListener('click', e => { if (e.target === overlay) close(); });
+    overlay.querySelector('[data-cancel]').addEventListener('click', close);
+    const nameInput = overlay.querySelector('#idName');
+    const passInput = overlay.querySelector('#idPass');
+    const pass2Input = overlay.querySelector('#idPass2');
+    const confirmRow = overlay.querySelector('#idConfirmRow');
+    const msg = overlay.querySelector('#idMsg');
+    const confirmBtn = overlay.querySelector('[data-confirm]');
+    passInput.addEventListener('input', () => { confirmRow.hidden = !passInput.value; });
+    setTimeout(() => nameInput.focus(), 100);
+
+    const fail = (text) => { msg.style.color = 'var(--color-negative)'; msg.textContent = text; };
+    const submit = async () => {
+      const username = nameInput.value.trim();
+      const password = passInput.value;
+      if (!/^[A-Za-z0-9_-]{3,32}$/.test(username)) return fail('Name: 3-32 letters, digits, - or _.');
+      if (password && password.length < 8) return fail('Password must be at least 8 characters.');
+      if (password && password !== pass2Input.value) return fail("Passwords don't match.");
+      confirmBtn.disabled = true;
+      msg.style.color = 'var(--color-text-muted)';
+      msg.textContent = 'Deriving the new key…';
+      const result = await window.Sautium.auth.changeIdentity(username, password);
+      if (!result.ok) { confirmBtn.disabled = false; return fail(result.error); }
+      close();
+      if (result.restart_required) {
+        await notifyDialog({
+          title: 'Restart the backend',
+          kind: 'info',
+          message: 'The identity is changed. Peers see the new key once the backend restarts.',
+        });
+      }
+      // The Worker knew the old invite code — the mailbox is verified again
+      // from the new key, which is what records the succession.
+      if (result.email_needs_verification) await openEmailVerifyFlow();
+      render();
+    };
+    confirmBtn.addEventListener('click', submit);
+    pass2Input.addEventListener('keydown', e => { if (e.key === 'Enter') { e.preventDefault(); submit(); } });
+    nameInput.addEventListener('keydown', e => { if (e.key === 'Enter') { e.preventDefault(); submit(); } });
   }
 
   async function openLastfmAuthFlow() {

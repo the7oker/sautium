@@ -203,6 +203,46 @@ async def create_account(username: str, password: str) -> dict:
         return await asyncio.to_thread(_write_identity, d, username, password)
 
 
+async def rotate_identity(username: str, password: str) -> dict:
+    """A new name and/or password for the node's identity — in a
+    deterministic KDF that is a new key (desktop/node_identity.rotate_identity
+    keeps the old one in the archive). An empty password is minted, as the
+    wizard mints it: `anonymous` stays the property that the PIN is the only
+    door. Same lock as create_account — two rotations racing would archive
+    the same key twice.
+
+    Everything in this process that cached the old key is told; the P2P
+    layer learns through NOTIFY (the launcher restarts its manager on it —
+    a Docker node restarts the backend, its peer surface is bound to the
+    key at start)."""
+    d = _identity_dir()
+    if d is None:
+        raise RuntimeError("no identity directory configured")
+    from desktop.node_identity import rotate_identity as _rotate
+
+    async with _create_lock:
+        if not account_configured():
+            raise RuntimeError("no account to change")
+        anonymous = not password
+        result = await asyncio.to_thread(
+            _rotate, d, username, password or secrets.token_urlsafe(32), anonymous)
+
+    import p2p_chat
+    import p2p_identity
+    from db_pool import db_execute
+    from routers import p2p as p2p_router
+    p2p_identity.forget_cached()
+    p2p_router.forget_identity()
+    p2p_chat.forget_service()
+    # The Worker's invite code → mailbox mapping named the old code.
+    db_execute("UPDATE user_profile SET email_verified = FALSE WHERE id = 1")
+    # Tokens are bound to the public key, so every paired browser is out
+    # already; the epoch bump makes that an explicit, logged event.
+    bump_epoch()
+    db_execute("NOTIFY sautium_identity_rotated")
+    return result["info"]
+
+
 def _write_identity(d, username: str, password: str) -> dict:
     import json
     import os

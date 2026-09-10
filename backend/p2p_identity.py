@@ -146,6 +146,15 @@ _identity_cache = None
 _identity_cache_mtime = None
 
 
+def forget_cached() -> None:
+    """Drop the process-wide identity caches — after a rotation on disk the
+    next call reads the new key and node_info.json."""
+    global _signing_key_cache, _identity_cache, _identity_cache_mtime
+    _signing_key_cache = None
+    _identity_cache = None
+    _identity_cache_mtime = None
+
+
 def load_signing_key(settings):
     """The node's Ed25519 signing key — desktop PEM or docker-derived — or
     None when no identity is configured."""

@@ -36,6 +36,12 @@ class PairRequest(BaseModel):
     code: str = Field(default="", max_length=32)
 
 
+class ChangeIdentityRequest(BaseModel):
+    username: str = Field(default="", max_length=32)
+    # Empty = minted, as in the wizard: the identity stays this machine's.
+    password: str = Field(default="", max_length=256)
+
+
 @router.get("/status")
 async def auth_status() -> dict:
     """What this node accepts, so the UI knows which form to show. Says
@@ -104,6 +110,43 @@ async def pair(req: PairRequest) -> dict:
     if not await device_auth.redeem_pin(req.code):
         raise HTTPException(status_code=401, detail="invalid or expired code")
     return {"token": device_auth.current_token(_secret())}
+
+
+@router.post("/change-identity")
+async def change_identity(req: ChangeIdentityRequest) -> dict:
+    """A new name and/or password. The name and the password are both KDF
+    inputs, so either change IS a new key: friends are told by a notice the
+    old key signed (P2P layer), a verified email has to be verified again
+    from the new key (which is what makes the notary record succession),
+    other devices sign in with the new pair, and every paired browser is out
+    — this one gets a fresh token in the reply, like logout-all.
+
+    Signature-protected (not whitelisted): only a paired browser or the
+    host can rotate."""
+    username = req.username.strip()
+    if not username:
+        raise HTTPException(status_code=422, detail="Name required")
+    if req.password and len(req.password) < 8:
+        raise HTTPException(status_code=422, detail="Password: 8+ characters")
+    try:
+        info = await device_auth.rotate_identity(username, req.password)
+    except ValueError as e:                       # username shape / same pair
+        raise HTTPException(status_code=400, detail=str(e))
+    except RuntimeError as e:
+        raise HTTPException(status_code=409, detail=str(e))
+    from config import settings
+    return {
+        "token": device_auth.current_token(_secret()),
+        "username": info["username"],
+        "invite_code": info["invite_code"],
+        "public_key_hex": info["public_key_hex"],
+        "anonymous": info["anonymous"],
+        "email_needs_verification": bool(info.get("email")),
+        # The launcher restarts its P2P manager on the NOTIFY; a Docker
+        # node serves its peer surface from this process, bound to the key
+        # it started with.
+        "restart_required": not settings.p2p_listen_port,
+    }
 
 
 @router.post("/logout-all")
