@@ -11910,6 +11910,21 @@
   /* Hardware profile block (Profile screen) — read-only info. Selection is
      automatic (backend auto-detects full/standard/lite; SAUTIUM_PROFILE env
      is the only override, for diagnostics). Loads itself after render. */
+  // "cuda · 17.2 GB · 32 cores" named neither what the 17.2 was (VRAM, in
+  // decimal GB) nor the card — the owner of a 16 GB / 32 GB machine asked
+  // where the number came from. Figures come in GiB now; the RAM is what
+  // this backend can see, which inside a container is the VM's share.
+  function _hwMachineLine(d) {
+    const gb = (v) => (v == null ? '?' : String(v));
+    const parts = [];
+    if (d.accel_name) parts.push(d.accel_name);
+    if (d.device === 'cuda') parts.push(`${gb(d.accel_memory_gb)} GB VRAM`, `${gb(d.ram_gb)} GB RAM`);
+    else if (d.device === 'mps') parts.push(`${gb(d.accel_memory_gb)} GB unified memory`);
+    else parts.push('CPU only', `${gb(d.ram_gb)} GB RAM`);
+    parts.push(`${gb(d.cores)} cores`);
+    return parts.join(' · ');
+  }
+
   async function _loadHwBlock(root) {
     const holder = root.querySelector('[data-hw-block]');
     if (!holder) return;
@@ -11924,7 +11939,7 @@
       <div class="profile-group-label">Hardware profile</div>
       <div class="form-group">
         <div class="form-row"><span class="form-label">Active</span><span class="form-value">${escapeProfileHtml(String(hw.profile || '?'))}${hw.source === 'env' ? ' · env override' : ''}</span></div>
-        <div class="form-row stacked"><div class="row-stack-sub">Auto-selected from this machine: ${escapeProfileHtml(String(d.device || '?'))} · ${escapeProfileHtml(String(d.accel_memory_gb ?? '?'))} GB · ${escapeProfileHtml(String(d.cores ?? '?'))} cores. Scales analysis, model pre-warm and background load.</div></div>
+        <div class="form-row stacked"><div class="row-stack-sub">Auto-selected from this machine: ${escapeProfileHtml(_hwMachineLine(d))}. Scales analysis, model pre-warm and background load.</div></div>
       </div>`;
   }
 
