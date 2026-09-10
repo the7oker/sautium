@@ -9150,7 +9150,7 @@
         <div class="form-group">
           ${emailRowHTML(account, emailStatus)}
           <div class="form-row is-clickable" data-action="change-identity">
-            <span class="form-label">Name &amp; password</span>
+            <span class="form-label">Nickname &amp; password</span>
             <span class="form-actions">
               <span class="form-value action">Change</span>
               <span class="link-chev">${PROFILE_ICONS.chev}</span>
@@ -9639,26 +9639,29 @@
       <div class="add-gear-sheet">
         <div class="sheet-handle"></div>
         <div class="add-gear-head">
-          <h2 class="add-gear-title">Change name or password</h2>
+          <h2 class="add-gear-title">Change nickname or password</h2>
           <button class="icon-btn" data-cancel aria-label="close">${PROFILE_ICONS.close}</button>
         </div>
         <div class="add-gear-row">
           <p style="margin:0;color:var(--color-text-muted);font-size:calc(13*var(--px));line-height:1.5;">
-            The name and password themselves are the identity, so either change
-            gives this node a new key. Friends are told automatically, signed by
+            The nickname and password themselves are the identity, so either
+            change gives this node a new key. Friends are told automatically, signed by
             the current key. Other devices sign in with the new pair; every
             paired phone signs in again; a verified email is verified again.
           </p>
           <label style="display:flex;flex-direction:column;gap:calc(4*var(--px));">
-            <span style="color:var(--color-text-muted);font-size:calc(12*var(--px));">Name (what friends see)</span>
+            <span style="color:var(--color-text-muted);font-size:calc(12*var(--px));">Nickname (what friends see)</span>
             <input class="add-gear-input" id="idName" type="text" maxlength="32" autocomplete="username" value="${escapeProfileHtml(current)}">
           </label>
+          <p style="margin:0;color:var(--color-text-dim);font-size:calc(12*var(--px));line-height:1.5;">
+            Latin letters, digits, - or _ — it sits inside your invite code.
+          </p>
           <label style="display:flex;flex-direction:column;gap:calc(4*var(--px));">
             <span style="color:var(--color-text-muted);font-size:calc(12*var(--px));">Password — optional</span>
             <input class="add-gear-input" id="idPass" type="password" placeholder="min 8 characters" autocomplete="new-password">
           </label>
           <p style="margin:0;color:var(--color-text-dim);font-size:calc(12*var(--px));line-height:1.5;">
-            Makes this name yours on any device. Without it, the identity lives only on this machine.
+            Makes this nickname yours on any device. Without it, the identity lives only on this machine.
           </p>
           <label id="idConfirmRow" style="display:flex;flex-direction:column;gap:calc(4*var(--px));" hidden>
             <span style="color:var(--color-text-muted);font-size:calc(12*var(--px));">Confirm password</span>
@@ -9686,7 +9689,7 @@
     const submit = async () => {
       const username = nameInput.value.trim();
       const password = passInput.value;
-      if (!/^[A-Za-z0-9_-]{3,32}$/.test(username)) return fail('Name: 3-32 letters, digits, - or _.');
+      if (!/^[A-Za-z0-9_-]{3,32}$/.test(username)) return fail('Nickname: 3-32 Latin letters, digits, - or _.');
       if (password && password.length < 8) return fail('Password must be at least 8 characters.');
       if (password && password !== pass2Input.value) return fail("Passwords don't match.");
       confirmBtn.disabled = true;

@@ -143,7 +143,7 @@ def validate_username(username: str) -> None:
     """Raise ValueError unless the username fits the network-wide format."""
     if not USERNAME_RE.match(username):
         raise ValueError(
-            "Username must be 3-32 characters: letters, digits, '-' or '_'")
+            "Nickname: 3-32 Latin letters, digits, '-' or '_'")
 
 
 def derive_seed(username: str, password: str) -> bytes:
