@@ -13,7 +13,9 @@ import sys
 import threading
 import time
 from pathlib import Path
-from typing import Optional, Tuple
+from typing import NamedTuple, Optional, Tuple
+
+import psutil
 
 logger = logging.getLogger(__name__)
 
@@ -499,11 +501,6 @@ def install_codex_runtime(progress_cb=None) -> Tuple[bool, str]:
     return True, "Codex installed"
 
 
-def detect_git() -> bool:
-    """Check if git is available in PATH."""
-    return shutil.which("git") is not None
-
-
 def detect_gpu() -> Tuple[bool, Optional[str], Optional[float]]:
     """
     Detect GPU / AI accelerator.
@@ -557,8 +554,50 @@ def detect_gpu() -> Tuple[bool, Optional[str], Optional[float]]:
     return False, None, None
 
 
-# Backward compatibility alias
-detect_cuda = detect_gpu
+class HardwareProfile(NamedTuple):
+    """The tier this machine lands in, in the terms the backend uses."""
+    name: str            # full | standard | lite
+    device: str          # cuda | mps | cpu
+    accel_name: Optional[str]   # GPU / chip as reported, None without one
+    accel_gb: float      # VRAM, or unified memory on Apple Silicon
+    ram_gb: float
+    cores: int
+    ml_available: bool   # PyTorch publishes wheels for this platform
+
+
+def detect_hardware_profile() -> HardwareProfile:
+    """Resolve the hardware tier from the machine alone.
+
+    MIRRORS backend/hardware_profile._auto_tier — the launcher build cannot
+    import backend modules, and the wizard runs before the backend venv
+    exists at all. Update both together.
+    """
+    gpu_available, accel_name, vram_gb = detect_gpu()
+    apple_silicon = sys.platform == "darwin" and platform.machine() == "arm64"
+    device = "mps" if apple_silicon else "cuda" if gpu_available else "cpu"
+    ram_gb = psutil.virtual_memory().total / 1e9
+    cores = os.cpu_count() or 4
+    # Unified memory IS system RAM, and a CPU node works out of RAM anyway.
+    accel_gb = vram_gb if device == "cuda" else ram_gb
+
+    if device == "cuda":
+        # nvidia-smi reports MiB, the backend tiers on torch's decimal GB
+        # (mem_get_info / 1e9) — compare on its scale so a card near a
+        # boundary lands in the same tier here and there.
+        tier_gb = accel_gb * 1024 ** 3 / 1e9
+        name = "full" if tier_gb >= 7.5 else "standard" if tier_gb >= 5.5 else "lite"
+    elif device == "mps":
+        name = "full" if accel_gb >= 23 else "standard" if accel_gb >= 15 else "lite"
+    else:
+        name = "lite"
+    if ram_gb < 12 and name != "lite":
+        name = "standard" if name == "full" else "lite"
+
+    # PyTorch stopped at 2.2.2 for macOS x86_64 — service_manager skips the
+    # ML stack there, so such a node runs torch-less whatever its tier.
+    ml_available = not (sys.platform == "darwin" and platform.machine() == "x86_64")
+    return HardwareProfile(name, device, accel_name, accel_gb, ram_gb, cores,
+                           ml_available)
 
 
 def find_available_port(preferred: int) -> int:
