@@ -29,6 +29,11 @@ logger = logging.getLogger(__name__)
 # 636 = the 606 the buttons and QR block needed, plus the folder caption
 # (11 px label + 14 px gap) under "Choose Music Folder…".
 WINDOW_WIDTH, WINDOW_HEIGHT = 480, 636
+# 150, not 180: the window is a fixed height and the Quit button is the
+# thing that falls off the bottom. Horizontal room is what we have to
+# spend, and a ~30-module code at 150px is still 5px per module — well
+# inside what a phone camera reads.
+QR_SIZE = 150
 WINDOW_SIZE = f"{WINDOW_WIDTH}x{WINDOW_HEIGHT}"
 
 # Appearance
@@ -163,6 +168,15 @@ class LauncherApp(ctk.CTk):
         self._qr_frame.pack(pady=5)
         self._qr_labels: dict = {}
         self._qr_drawn: Optional[list] = None   # targets the row currently shows
+        # The block's height is reserved before the first code is drawn: an
+        # empty CTkFrame is 200 px by default and the drawn block is 178, so
+        # every button below — and Quit's margin — moved the moment the
+        # services came up. One blank column, the shape _draw_pairing_qr
+        # builds, until it rebuilds the row with the real ones.
+        placeholder = ctk.CTkFrame(self._qr_frame, fg_color="transparent")
+        placeholder.pack(side="left", padx=8)
+        ctk.CTkLabel(placeholder, text="", width=QR_SIZE, height=QR_SIZE).pack()
+        ctk.CTkLabel(placeholder, text="", font=ctk.CTkFont(size=11)).pack()
 
         # First-visit hint about self-signed certificate. Hidden until
         # services are running — see _on_services_ready.
@@ -527,11 +541,7 @@ class LauncherApp(ctk.CTk):
             widget = self._qr_labels.get(caption)
             if widget is None:
                 continue
-            # 150, not 180: the window is a fixed height and the Quit button
-            # is the thing that falls off the bottom. Horizontal room is what
-            # we have to spend, and a ~30-module code at 150px is still 5px
-            # per module — well inside what a phone camera reads.
-            img = generate_qr_ctk(f"https://{ip}:{port}/{fragment}", size=150)
+            img = generate_qr_ctk(f"https://{ip}:{port}/{fragment}", size=QR_SIZE)
             if img:
                 widget.configure(image=img, text="")
             else:
