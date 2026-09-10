@@ -18,8 +18,6 @@ import subprocess
 import sys
 import threading
 import webbrowser
-from pathlib import Path
-from tkinter import filedialog
 from typing import Optional
 
 import customtkinter as ctk
@@ -36,9 +34,7 @@ from desktop.utils import (
     claude_authenticated,
     codex_auth_verified,
     codex_authenticated,
-    detect_claude_cli,
-    detect_git,
-    detect_gpu,
+    detect_hardware_profile,
     detect_node_version,
     get_claude_executable,
     get_codex_executable,
@@ -81,8 +77,7 @@ class SetupWizard(ctk.CTkToplevel):
         ]
 
         # Detection results
-        self._gpu_available, self._gpu_name, self._gpu_vram = detect_gpu()
-        self._git_available = detect_git()
+        self._hw = detect_hardware_profile()
         # Claude Code state is computed on-demand via _claude_state()
         # because it can change during the wizard (install, sign-in).
         self._claude_install_thread: Optional[threading.Thread] = None
@@ -389,47 +384,113 @@ class SetupWizard(ctk.CTkToplevel):
     # Step implementations
     # ================================================================
 
+    # What the tier buys, in the terms the first screen can honour. The
+    # backend re-detects the same profile at every start (Settings shows it),
+    # so nothing here is a promise the running node can contradict.
+    _PROFILE_DETAIL = {
+        "full": "Analysis, search and the models all run locally — a "
+                "30,000-track library takes hours, not days.",
+        "standard": "Analysis, search and the models all run locally; a large "
+                    "library analyses overnight.",
+        "lite": "Too small for local audio analysis — it arrives from the "
+                "network instead. Library, player, search and streaming are "
+                "unaffected.",
+    }
+    _NO_ML_DETAIL = ("PyTorch has no build for this Mac, so audio analysis and "
+                     "sound search stay off. Library, player, streaming and "
+                     "text search work.")
+
+    # Fresh-install footprint, from the reference node's own caches and the
+    # pinned wheel set: BGE-M3 4.3 + CLAP 1.2 + MiniLM 0.6 on every tier, plus
+    # AST 0.35 + PaSST 0.35 + MADLAD-ct2 2.8 where analysis and translation
+    # run; the torch trio is ~4.5 GB as a CUDA build and ~1.5 GB otherwise;
+    # portable PostgreSQL and the media tools add ~0.3 GB.
+    def _install_gb(self) -> int:
+        if not self._hw.ml_available:
+            return 2
+        models = 6.1 if self._hw.name == "lite" else 9.6
+        runtime = 5.2 if self._hw.device == "cuda" else 2.2
+        return round(models + runtime + 0.3)
+
     def _step_welcome(self):
         ctk.CTkLabel(
             self.content_frame,
             text="Sautium",
             font=ctk.CTkFont(size=28, weight="bold"),
-        ).pack(pady=(30, 10))
+        ).pack(pady=(24, 8))
 
         ctk.CTkLabel(
             self.content_frame,
             text=(
                 "AI-powered music library management.\n"
-                "Search your collection by sound, mood, lyrics, or description.\n"
+                "Search your collection by sound, mood, lyrics, or description,\n"
+                "and stream what you don't own yet — whole discographies and\n"
+                "neighbouring artists, browsable next to your own shelf.\n"
                 "Works standalone or with an AI agent for chat recommendations."
             ),
             font=ctk.CTkFont(size=14),
             justify="center",
-        ).pack(pady=10)
+        ).pack(pady=(0, 4))
 
-        # System info
-        info_frame = ctk.CTkFrame(self.content_frame)
-        info_frame.pack(fill="x", pady=20, padx=40)
+        hw = self._hw
+        install = self._install_gb()
+        free = self._free_gb()
+        # The install plus the database a mid-size library builds: 10 GB
+        # covers the reference node's 42k owned tracks and its streaming
+        # layer. The catalogue is excluded — its own step prices it.
+        room = free >= install + 10
+        accel = (f"{hw.accel_name} · {hw.accel_gb:.0f} GB VRAM"
+                 if hw.device == "cuda" else hw.accel_name or "CPU only")
 
-        _agent_status = {
-            "ready": "Signed in",
-            "not_authed": "Installed (sign in required)",
-            "claude_missing": "Not installed",
-            "codex_missing": "Not installed",
-            "node_missing": "Node.js not found",
-        }
         items = [
-            ("Accelerator", f"{self._gpu_name} ({self._gpu_vram}GB)" if self._gpu_available and self._gpu_vram else
-                            self._gpu_name if self._gpu_available else "Not detected"),
-            ("Claude Code", _agent_status[self._claude_state()]),
-            ("OpenAI Codex", _agent_status[self._codex_state()]),
-            ("Git", "Available" if self._git_available else "Not found"),
+            ("Hardware profile", hw.name.capitalize(), None,
+             f"Auto-selected from this machine: {accel} · {hw.ram_gb:.0f} GB "
+             f"RAM · {hw.cores} cores. "
+             + (self._PROFILE_DETAIL[hw.name] if hw.ml_available
+                else self._NO_ML_DETAIL)),
+            ("Disk space", f"~{install} GB to install · {free:.0f} GB free",
+             None if room else "#C86450",
+             "Runtime, AI models and the database. Your own library adds "
+             "roughly 2 GB per 10,000 tracks"
+             + (", and the music catalogue is priced at its own step."
+                if room else
+                f" — this drive is tight for that, ~{install + 10} GB is "
+                "comfortable.")),
+            ("First run",
+             "20–40 min on broadband" if hw.ml_available else "A few minutes",
+             None,
+             ("PostgreSQL, the Python runtime and the AI models"
+              if hw.ml_available else "PostgreSQL and the Python runtime")
+             + " download once, right after setup. The app opens as they land."),
+            ("Music folder", "Chosen at the first scan", None,
+             "Scan in the launcher opens a folder picker. Files are only ever "
+             "read — never moved, renamed or re-tagged."),
+            ("Network", "Peer-to-peer, on", None,
+             "Nodes trade audio analysis and catalogue facts, so a fresh "
+             "library doesn't start from zero. Your files and what you play "
+             "never leave this machine. Switch it off in Settings."),
         ]
-        for label, value in items:
+
+        info_frame = ctk.CTkFrame(self.content_frame)
+        info_frame.pack(fill="x", pady=(12, 0), padx=30)
+        for index, (label, value, value_color, detail) in enumerate(items):
             row = ctk.CTkFrame(info_frame, fg_color="transparent")
-            row.pack(fill="x", padx=10, pady=2)
-            ctk.CTkLabel(row, text=f"{label}:", width=100, anchor="w").pack(side="left")
-            ctk.CTkLabel(row, text=value, anchor="w").pack(side="left", padx=5)
+            row.pack(fill="x", padx=12, pady=(8, 0))
+            ctk.CTkLabel(row, text=f"{label}:", width=130, anchor="w",
+                         font=ctk.CTkFont(weight="bold")).pack(side="left")
+            ctk.CTkLabel(row, text=value, anchor="w",
+                         text_color=value_color).pack(side="left", padx=5)
+            # 492 = the 540 px info_frame less this label's own padding:
+            # Tk wraps at a pixel column, so a smaller number would leave a
+            # right margin wider than the left one.
+            ctk.CTkLabel(
+                info_frame, text=detail, text_color="gray", anchor="w",
+                font=ctk.CTkFont(size=12), justify="left", wraplength=492,
+            # The last row's detail carries the frame's bottom margin — at the
+            # shared 6 px it sat tighter against the edge than the first row's
+            # 8 px does against the top.
+            ).pack(fill="x", padx=24,
+                   pady=(1, 14 if index == len(items) - 1 else 6))
 
     def _step_account(self):
         # Two-phase step: phase 1 = fields, phase 2 = email verification
@@ -577,56 +638,6 @@ class SetupWizard(ctk.CTkToplevel):
         self._account_verify_phase = False
         self.current_step += 1
         self._show_step()
-
-    def _step_music_path(self):
-        ctk.CTkLabel(
-            self.content_frame,
-            text="Music Library",
-            font=ctk.CTkFont(size=22, weight="bold"),
-        ).pack(pady=(20, 5))
-
-        ctk.CTkLabel(
-            self.content_frame,
-            text="Select the folder containing your music collection.",
-        ).pack(pady=5)
-
-        path_frame = ctk.CTkFrame(self.content_frame, fg_color="transparent")
-        path_frame.pack(fill="x", pady=20, padx=20)
-
-        self._music_path_var = ctk.StringVar(
-            value=self.config.get("music_path", "")
-        )
-        entry = ctk.CTkEntry(
-            path_frame, textvariable=self._music_path_var, width=400,
-        )
-        entry.pack(side="left", fill="x", expand=True, padx=(0, 10))
-
-        ctk.CTkButton(
-            path_frame, text="Browse...", width=100,
-            command=self._browse_music_path,
-        ).pack(side="right")
-
-        self._music_path_error = ctk.CTkLabel(
-            self.content_frame, text="", text_color="red",
-        )
-        self._music_path_error.pack()
-
-        ctk.CTkLabel(
-            self.content_frame,
-            text=(
-                "Expected structure: Music / Genre / Artist / Album / Track.flac\n"
-                "The library will be accessed read-only."
-            ),
-            text_color="gray",
-            font=ctk.CTkFont(size=12),
-            justify="center",
-        ).pack(pady=20)
-
-    def _browse_music_path(self):
-        path = filedialog.askdirectory(title="Select Music Library Folder")
-        if path:
-            self._music_path_var.set(path)
-            self._music_path_error.configure(text="")
 
     def _step_provider(self):
         ctk.CTkLabel(
@@ -1488,11 +1499,13 @@ class SetupWizard(ctk.CTkToplevel):
             justify="center",
         ).pack(pady=5)
 
-    # The MusicBrainz dump: ~7 GB compressed, and the loaded tables plus
-    # their indexes take roughly twice that again — 3× is the honest
-    # headroom test, checked against the drive the data dir lives on.
-    _MB_DUMP_GB = 7
-    _MB_DUMP_HEADROOM = 3
+    # MIRRORS backend/mb_dump_load (ARCHIVE_GB 7.5 + TABLES_GB 21 +
+    # MARGIN_GB 2): what disk_budget() gates a fresh load on, measured
+    # 2026-08. The launcher cannot import backend — keep the two in step.
+    # Under-promising here invites a 7.5 GB download onto a volume that
+    # cannot finish the load.
+    _MB_ARCHIVE_GB = 7.5
+    _MB_NEEDED_GB = 31
 
     def _free_gb(self) -> float:
         try:
@@ -1509,8 +1522,7 @@ class SetupWizard(ctk.CTkToplevel):
         silent: the checkbox is visible, the cost is stated, and Settings
         keeps a Delete button, which is what makes a bold default fair."""
         free = self._free_gb()
-        needed = self._MB_DUMP_GB * self._MB_DUMP_HEADROOM
-        enough = free >= needed
+        enough = free >= self._MB_NEEDED_GB
 
         ctk.CTkLabel(
             self.content_frame,
@@ -1535,14 +1547,16 @@ class SetupWizard(ctk.CTkToplevel):
             "• Better P2P coverage — canonized music is what peers can"
             " actually exchange analysis about; yours becomes shareable too.",
         ):
+            # 544 = the 600 px content frame less this label's own padding,
+            # so the bullets wrap at the margin instead of well short of it.
             ctk.CTkLabel(self.content_frame, text=line, justify="left",
-                         wraplength=470, anchor="w").pack(
+                         wraplength=544, anchor="w").pack(
                              fill="x", padx=28, pady=2)
 
         self._mb_dump_var = ctk.BooleanVar(value=enough)
         chk = ctk.CTkCheckBox(
             self.content_frame,
-            text=f"Download the catalogue after setup (~{self._MB_DUMP_GB} GB)",
+            text=f"Download the catalogue after setup (~{self._MB_ARCHIVE_GB:g} GB download)",
             variable=self._mb_dump_var,
         )
         chk.pack(pady=(16, 6))
@@ -1552,11 +1566,15 @@ class SetupWizard(ctk.CTkToplevel):
         ctk.CTkLabel(
             self.content_frame,
             text=(
-                f"Free space: {free:.0f} GB — enough (needs ~{needed} GB "
-                f"with room to load)."
+                f"Free space: {free:.0f} GB — enough. Needs "
+                f"~{self._MB_NEEDED_GB} GB: ~21 GB in the database once "
+                f"loaded, plus the archive while it installs (deleted "
+                f"afterwards)."
                 if enough else
-                f"Free space: {free:.0f} GB — not enough (needs ~{needed} GB). "
-                f"You can enable this later in More → Library."
+                f"Free space: {free:.0f} GB — not enough (needs "
+                f"~{self._MB_NEEDED_GB} GB: ~21 GB in the database, plus the "
+                f"archive while it installs). You can enable this later in "
+                f"More → Library."
             ),
             text_color="gray" if enough else "#C86450",
             wraplength=470, justify="left",
@@ -1601,9 +1619,9 @@ class SetupWizard(ctk.CTkToplevel):
                 if lastfm_cfg.get("pending_auth")
                 else "Disabled",
             ),
-            ("Accelerator", self._gpu_name if self._gpu_available else "CPU mode"),
+            ("Accelerator", self._hw.accel_name or "CPU mode"),
             ("Music catalogue",
-             f"Download after start (~{self._MB_DUMP_GB} GB)"
+             f"Download after start (~{self._MB_ARCHIVE_GB:g} GB)"
              if getattr(self, "_mb_dump_var", None)
              and self._mb_dump_var.get() else "Skip for now"),
         ]
@@ -1874,8 +1892,13 @@ class SetupWizard(ctk.CTkToplevel):
                     stop_postgres()
                 except Exception as se:
                     logger.warning(f"Cleanup stop_postgres failed: {se}")
+                # Python unbinds `e` at the end of the except block, and the
+                # lambda runs later on the UI thread — reading it there raised
+                # NameError into ui_call's debug log, leaving the wizard silent
+                # about why initialization failed.
+                message = str(e)
                 self.ui_call(lambda: self._progress_label.configure(
-                        text=f"Error: {e}", text_color="red"
+                        text=f"Error: {message}", text_color="red"
                     ),
                 )
                 self.ui_call(lambda: self._progress_bar.stop())
