@@ -26,7 +26,9 @@ from desktop.utils import (get_local_ip, get_project_root, get_tailscale_ip,
 
 logger = logging.getLogger(__name__)
 
-WINDOW_WIDTH, WINDOW_HEIGHT = 480, 606
+# 636 = the 606 the buttons and QR block needed, plus the folder caption
+# (11 px label + 14 px gap) under "Choose Music Folder…".
+WINDOW_WIDTH, WINDOW_HEIGHT = 480, 636
 WINDOW_SIZE = f"{WINDOW_WIDTH}x{WINDOW_HEIGHT}"
 
 # Appearance
@@ -186,6 +188,17 @@ class LauncherApp(ctk.CTk):
             fg_color="transparent", border_width=1,
         )
         self._btn_scan.pack(pady=3)
+        # What the button above will act on: the folder, or the fact that
+        # none is needed. A caption of its own — the progress line below
+        # the buttons is an event line and holds nothing longer than the
+        # next event.
+        self._folder_caption = ctk.CTkLabel(
+            btn_frame, text=self._folder_caption_text(), text_color="gray",
+            font=ctk.CTkFont(size=11),
+        )
+        # Tight above, roomy below: the caption belongs to the button it
+        # continues, not to the one after it.
+        self._folder_caption.pack(pady=(0, 14))
 
         self._btn_settings = ctk.CTkButton(
             btn_frame, text="Settings", width=200,
@@ -375,12 +388,8 @@ class LauncherApp(ctk.CTk):
         )
         self._btn_open.configure(state="normal")
         self._btn_scan.configure(state="normal", text=self._scan_button_label())
-        # A node with no music folder is a working node — Home, streaming
-        # and friends run without one — and that is worth more here than
-        # the GPU line, which returns once a folder is chosen.
-        self._progress_text.configure(
-            text=gpu_text if self.config.get("music_path") else
-            "No music folder — streaming works; choose one to add your own files.")
+        self._folder_caption.configure(text=self._folder_caption_text())
+        self._progress_text.configure(text=gpu_text)
 
         # Connect API client to the right port
         self.api_client.set_port(port)
@@ -884,6 +893,20 @@ class LauncherApp(ctk.CTk):
         named an operation on something the user did not have."""
         return "Scan Library…" if self.config.get("music_path") else "Choose Music Folder…"
 
+    def _folder_caption_text(self) -> str:
+        """The folder the scan button acts on — or, while there is none,
+        that a node without one is a working node: Home, streaming and
+        friends run without a single file."""
+        path = self.config.get("music_path", "")
+        if not path:
+            return "or stream music now"
+        if len(path) <= 48:
+            return path
+        # Cut at a separator, so the tail starts with a whole folder name.
+        tail = path[-47:]
+        cut = max(tail.find("\\"), tail.find("/"))
+        return "…" + (tail[cut:] if cut >= 0 else tail)
+
     def _scan_library(self):
         """Open folder picker and scan selected folder."""
         music_path = self.config.get("music_path", "")
@@ -976,6 +999,7 @@ class LauncherApp(ctk.CTk):
             state="normal", fg_color="transparent",
             hover_color=("gray75", "gray25"),
         )
+        self._folder_caption.configure(text=self._folder_caption_text())
 
     def _get_local_db_dsn(self) -> str:
         """Build DSN for the launcher's local PostgreSQL."""
