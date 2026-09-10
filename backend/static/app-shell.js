@@ -12258,7 +12258,7 @@
       <div class="empty-library">
         <div class="icon">${SETTINGS_ICONS.vinyl}</div>
         <p class="empty-library-msg">
-          Music library path is not configured yet. Open the <b>Desktop Launcher</b>, set the folder that holds your music, and click <b>Scan library</b> there.
+          No music folder yet — Home, streaming and friends work without one. To add your own files, open the <b>Desktop Launcher</b> and tap <b>Choose Music Folder</b>; files are only ever read.
         </p>
       </div>` : `
       <div class="empty-library">

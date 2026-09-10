@@ -456,9 +456,10 @@ class SetupWizard(ctk.CTkToplevel):
              ("PostgreSQL, the Python runtime and the AI models"
               if hw.ml_available else "PostgreSQL and the Python runtime")
              + " download once, right after setup. The app opens as they land."),
-            ("Music folder", "Chosen at the first scan", None,
-             "Scan in the launcher opens a folder picker. Files are only ever "
-             "read — never moved, renamed or re-tagged."),
+            ("Music folder", "Optional", None,
+             "Home, streaming and friends work without one. To add your own "
+             "files, choose the folder in the launcher — they are only ever "
+             "read, never moved, renamed or re-tagged."),
             ("Network", "Peer-to-peer, on", None,
              "Nodes trade audio analysis and catalogue facts, so a fresh "
              "library doesn't start from zero. Your files and what you play "

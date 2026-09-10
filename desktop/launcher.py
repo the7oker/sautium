@@ -181,7 +181,7 @@ class LauncherApp(ctk.CTk):
         self._btn_open.pack(pady=3)
 
         self._btn_scan = ctk.CTkButton(
-            btn_frame, text="Scan Library", width=200,
+            btn_frame, text=self._scan_button_label(), width=200,
             command=self._scan_library, state="disabled",
             fg_color="transparent", border_width=1,
         )
@@ -374,8 +374,13 @@ class LauncherApp(ctk.CTk):
             text="First visit shows a browser security warning — accept it to continue (self-signed cert)."
         )
         self._btn_open.configure(state="normal")
-        self._btn_scan.configure(state="normal")
-        self._progress_text.configure(text=gpu_text)
+        self._btn_scan.configure(state="normal", text=self._scan_button_label())
+        # A node with no music folder is a working node — Home, streaming
+        # and friends run without one — and that is worth more here than
+        # the GPU line, which returns once a folder is chosen.
+        self._progress_text.configure(
+            text=gpu_text if self.config.get("music_path") else
+            "No music folder — streaming works; choose one to add your own files.")
 
         # Connect API client to the right port
         self.api_client.set_port(port)
@@ -873,6 +878,12 @@ class LauncherApp(ctk.CTk):
             self.after(8000, lambda: self._progress_text.configure(text=""))
         webbrowser.open(f"https://localhost:{port}/{fragment}")
 
+    def _scan_button_label(self) -> str:
+        """The button picks a folder first and scans second. Before any
+        folder is set that first half is the whole act, and "Scan Library"
+        named an operation on something the user did not have."""
+        return "Scan Library…" if self.config.get("music_path") else "Choose Music Folder…"
+
     def _scan_library(self):
         """Open folder picker and scan selected folder."""
         music_path = self.config.get("music_path", "")
@@ -961,7 +972,7 @@ class LauncherApp(ctk.CTk):
         """Restore UI after scan completes."""
         self._scan_active = False
         self._btn_scan.configure(
-            text="Scan Library", command=self._scan_library,
+            text=self._scan_button_label(), command=self._scan_library,
             state="normal", fg_color="transparent",
             hover_color=("gray75", "gray25"),
         )
