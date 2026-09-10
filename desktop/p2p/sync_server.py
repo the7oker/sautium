@@ -1388,6 +1388,10 @@ class SyncServer:
 
         friend = self._chat_service.get_friend_by_public_key(notice["old_public_key"])
         if not friend:
+            # Applied on an earlier delivery the sender never heard about —
+            # 200, like the Docker mirror, so it stops offering this link.
+            if self._chat_service.get_friend_by_public_key(notice["new_public_key"]):
+                return self._json_response(request, {"status": "accepted"})
             return self._json_response(
                 request, {"error": "unknown sender"}, status=404
             )

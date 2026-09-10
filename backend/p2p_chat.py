@@ -114,6 +114,20 @@ class PeerChatService:
         it as previous_public_key_hex (get_friend_by_public_key answers to
         both), and the Box cached for the old key is dropped."""
         with get_conn() as conn, conn.cursor() as cur:
+            # The friend may already be here under the new key: a node that
+            # could not deliver its notice re-introduced itself by token, and
+            # that made a second friendship. Fold it into the original — the
+            # history lives there — before the key moves.
+            cur.execute(
+                "SELECT id FROM friends WHERE public_key_hex = %s AND id <> %s",
+                (new_public_key_hex, friend_id))
+            dup = cur.fetchone()
+            if dup:
+                cur.execute("UPDATE p2p_messages SET friend_id = %s WHERE friend_id = %s",
+                            (friend_id, dup[0]))
+                cur.execute("DELETE FROM friends WHERE id = %s", (dup[0],))
+                logger.info("Key rotation: merged duplicate friend row %s into %s",
+                            dup[0], friend_id)
             cur.execute("""
                 UPDATE friends
                    SET previous_public_key_hex = public_key_hex,
@@ -145,31 +159,35 @@ class PeerChatService:
         """Two-phase upsert mirroring chat_service.add_friend: resolve a
         pending: stub for this invite first, insert otherwise."""
         with get_conn() as conn, conn.cursor() as cur:
+            # Either way the peer accepted the key we hold NOW — that is
+            # what bound_identity records (mirror of chat_service.add_friend).
             cur.execute("""
                 UPDATE friends
                    SET public_key_hex = %s,
                        username = COALESCE(NULLIF(%s, ''), username),
                        source = %s::friend_source,
-                       source_token_id = %s
+                       source_token_id = %s,
+                       bound_identity = %s
                  WHERE invite_code = %s
                    AND public_key_hex LIKE 'pending:%%'
              RETURNING id
             """, (public_key_hex, username, source, source_token_id,
-                  invite_code))
+                  self.public_key_hex, invite_code))
             row = cur.fetchone()
             if row:
                 return row[0]
             cur.execute("""
                 INSERT INTO friends (public_key_hex, invite_code, username,
-                                     source, source_token_id)
-                VALUES (%s, %s, %s, %s::friend_source, %s)
+                                     source, source_token_id, bound_identity)
+                VALUES (%s, %s, %s, %s::friend_source, %s, %s)
                 ON CONFLICT (public_key_hex) DO UPDATE SET
                     invite_code = EXCLUDED.invite_code,
                     username = COALESCE(NULLIF(EXCLUDED.username, ''),
-                                        friends.username)
+                                        friends.username),
+                    bound_identity = EXCLUDED.bound_identity
              RETURNING id
             """, (public_key_hex, invite_code, username, source,
-                  source_token_id))
+                  source_token_id, self.public_key_hex))
             return cur.fetchone()[0]
 
     def friend_for_key(self, public_key_hex: str) -> Optional[dict]:

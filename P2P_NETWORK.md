@@ -268,22 +268,30 @@ KDF inputs, so either change is a new key; the old one is kept:
    token (tokens are bound to the pubkey) and `NOTIFY sautium_identity_rotated`.
    The launcher restarts its P2P manager on the notify; a Docker node reports
    `restart_required` — its peer surface is TLS-bound to the key at start.
-3. At P2P start, `p2p.bound_identity` ≠ the live key + a `rotation.json` for
-   the bound key → `_announce_rotation`: the notice goes to every resolved
-   friend over the direct path (`/api/chat/key-rotation`, launcher and Docker
-   receivers, `parse_rotation_notice` takes every field from the signed bytes,
-   never the body). A friend it reaches applies it at once
-   (`friends.previous_public_key_hex` keeps the old key); one it does not is
-   unbound to `pending:` and re-introduced with the invite token — the road
-   that never needed the old key. No bound-identity record, or a notice this
-   node no longer holds, = a replacement: everyone re-introduces.
+3. `friends.bound_identity` (delta 014) records which of OUR keys each
+   friend binds our invite code to — set by `add_friend` on both surfaces,
+   advanced when a notice is accepted. `_deliver_rotation_notices` runs on
+   the friend-resolver cadence (15 s fallback, nudged by a LAN arrival):
+   every resolved friend not bound to the current key is offered the notice
+   that retires the key they know, over the direct path
+   (`/api/chat/key-rotation`, launcher and Docker receivers,
+   `parse_rotation_notice` takes every field from the signed bytes, never the
+   body). Accepted → the row advances one link; unreachable → next pass; a
+   NULL row (pre-column) is offered the chain oldest first, and 404s all the
+   way mean the friendship was made under the current key. The receiver
+   MERGES a duplicate row already holding the new key into the original
+   (messages re-pointed, duplicate deleted) — the shape a re-introduction by
+   token leaves behind, since a rotated invite code reads as a new person.
+   A rotation therefore never unbinds a friend to `pending:`; only a
+   REPLACEMENT (no bound-identity record, or a notice this node no longer
+   holds) does, and everyone re-introduces.
 4. Retired seeds stay loaded in both chat services: a friend who has not
    applied the notice still encrypts to the old key, and that message opens.
 5. The Worker mapped the OLD invite code to the mailbox — the owner verifies
    the email again from the new key, and that is what makes the notary name
    the old key as `predecessor` (succession, cert v4). Nothing is queued
-   through the relay or the mailbox: the notice needs the friend online, and
-   the offline friend is exactly whom re-introduction covers.
+   through the relay or the mailbox: the notice is retried from the row until
+   the friend is reachable directly.
 
 ### Email verification (optional)
 

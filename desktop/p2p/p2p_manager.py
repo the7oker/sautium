@@ -752,6 +752,10 @@ class P2PManager:
         if self._walk.first_source:
             self._walk.first_source.set()
         self._request_sync("lan-peer")
+        # A friend one hop away may be the one still waiting on a rotation
+        # notice or a handshake — no reason to sit out the resolver's tick.
+        if self._resolve_nudge is not None and self._loop and not self._loop.is_closed():
+            self._loop.call_soon_threadsafe(self._resolve_nudge.set)
 
     def _dht_skip_addrs(self) -> set[str]:
         """DHT addresses that are not peers worth probing, all on our own
@@ -1282,6 +1286,7 @@ class P2PManager:
 
     async def _do_resolve_pending(self):
         """Check LAN/DHT peers for pending friends and do handshake."""
+        await self._deliver_rotation_notices()
         friends = self._chat_service.get_friends()
 
         # Collect invite codes that are already resolved (have real public key)
@@ -1602,20 +1607,21 @@ class P2PManager:
     async def _reintroduce_after_identity_change(self) -> None:
         """Every friendship this node holds is built on its own key: the peer
         bound our invite code to the key it accepted, and re-checks it on
-        every friend-gated request. The identity those rows were bound under
-        is recorded beside them, and a mismatch at start means our friends
-        know a key we no longer hold.
+        every friend-gated request. Which of our keys each friend knows is
+        recorded on the row (friends.bound_identity); the node-wide
+        p2p.bound_identity is the identity the LAST run held.
 
-        Two ways that happens. A ROTATION (Profile → name / password) left a
-        notice signed by the old key in the identity archive: friends the
-        direct path reaches apply it on the spot and keep the friendship
-        without a new handshake. A REPLACEMENT — a new account through the
-        wizard, or a rotation this node no longer holds the notice for —
-        has nothing to prove continuity with, so every row goes back to
-        `pending:` and the resolver introduces us again, carrying the invite
-        token that made the friendship in the first place. A friend the
-        notice cannot reach takes that same road. The check sits here, at
-        the observation point, rather than in each way a key can change.
+        A ROTATION (Profile → nickname / password) left a notice signed by
+        the old key in the identity archive: _deliver_rotation_notices hands
+        it to each friend as they are reached, and the friendship migrates on
+        their side without a new handshake. A REPLACEMENT — a new account
+        through the wizard, or a rotation this node no longer holds the
+        notice for — has nothing to prove continuity with: every row goes
+        back to `pending:` and the resolver introduces us again with the
+        invite token. Never the other way round — a re-introduction by token
+        after a rotation makes the peer a SECOND friendship (the invite code
+        carries a digest of the key), which is what the notice exists to
+        avoid.
         """
         from desktop.node_identity import get_account_info, rotation_record
         account = get_account_info()
@@ -1626,13 +1632,10 @@ class P2PManager:
         if bound == ours:
             return
         if bound is not None:
-            rotation = rotation_record(bound)
-            if rotation and rotation["new_public_key"] == ours:
-                told, unreached = await self._announce_rotation(rotation)
+            if rotation_record(bound) is not None:
                 logger.info(
-                    "Identity rotated (%s… → %s…): %d friend(s) told, %d "
-                    "queued for re-introduction", bound[:16], ours[:16],
-                    told, unreached)
+                    "Identity rotated (%s… → %s…): friends get the notice as "
+                    "they are reached", bound[:16], ours[:16])
             else:
                 reset = self._chat_service.unbind_friendships()
                 logger.warning(
@@ -1641,48 +1644,84 @@ class P2PManager:
         await asyncio.get_running_loop().run_in_executor(
             None, self._write_settings_blocking, {"p2p.bound_identity": ours})
 
-    async def _announce_rotation(self, rotation: dict) -> tuple:
-        """Hand every resolved friend the signed rotation notice over the
-        direct path; returns (told, unreached). A friend it does not reach is
-        unbound to `pending:` for the resolver — the relay carries chat
-        envelopes, not notices, and the re-introduction road already covers
-        an offline friend, so the notice is not queued anywhere."""
-        import aiohttp
-        payload = {
-            "rotation_message": rotation["message"],
-            "old_signature": rotation["old_signature"],
-            "new_signature": rotation["new_signature"],
-        }
-        told = unreached = 0
-        for friend in self._chat_service.get_friends():
-            pubkey = friend["public_key_hex"]
-            if pubkey.startswith("pending:"):
-                continue
-            delivered = False
-            peers = await self._find_friend_peers(friend)
-            if peers:
-                async with aiohttp.ClientSession(
-                    connector=aiohttp.TCPConnector(ssl=pinned_ssl_context(pubkey)),
-                    timeout=aiohttp.ClientTimeout(total=10),
-                ) as session:
-                    for ip, port in peers:
-                        url = f"https://{fmt_addr(ip, port)}/api/chat/key-rotation"
-                        try:
-                            async with session.post(url, json=payload) as resp:
-                                if resp.status == 200:
-                                    self._note_peer_alive(friend["id"], pubkey, ip, port)
-                                    delivered = True
-                                    break
-                                logger.debug("Rotation notice refused (%d) by %s:%s",
-                                             resp.status, ip, port)
-                        except (aiohttp.ClientError, asyncio.TimeoutError, OSError) as e:
-                            logger.debug("Rotation notice to %s:%s failed: %s", ip, port, e)
-            if delivered:
-                told += 1
+    async def _deliver_rotation_notices(self) -> None:
+        """Offer each friend not known to bind our current key the notice
+        that retires the key they DO know, over the direct path; runs on
+        the friend-resolver cadence, so an offline friend gets it when they
+        are back rather than a second friendship. A row whose bound key is
+        unknown (NULL, from before the column) is offered the chain oldest
+        first — a notice for a key the friend never knew is a 404, which
+        is an answer: past the last one, they know only the current key.
+        A chain is walked one link per pass."""
+        from desktop.node_identity import previous_identities, rotation_record
+        retired = previous_identities()
+        if not retired:
+            return
+        ours = self._chat_service.public_key_hex
+        for friend in self._chat_service.friends_needing_notice():
+            bound = friend["bound_identity"]
+            if bound is not None:
+                record = rotation_record(bound)
+                if record is None:
+                    # A key of ours this node holds no notice for — the
+                    # token road is all that is left for this friend.
+                    self._chat_service.unbind_friend(friend["id"])
+                    continue
+                candidates = [record]
             else:
-                self._chat_service.unbind_friend(friend["id"])
-                unreached += 1
-        return told, unreached
+                candidates = [r for r in (rotation_record(e["public_key_hex"])
+                                          for e in retired) if r is not None]
+            peers = await self._find_friend_peers(friend)
+            if not peers:
+                continue
+            for record in candidates:
+                status = await self._post_rotation_notice(friend, peers, record)
+                if status == 200:
+                    self._chat_service.set_bound_identity(
+                        friend["id"], record["new_public_key"])
+                    logger.info("Rotation notice accepted by %s (%s… → %s…)",
+                                friend.get("username") or friend["public_key_hex"][:16],
+                                record["old_public_key"][:16],
+                                record["new_public_key"][:16])
+                    break
+                if status != 404:
+                    break                       # unreachable now — next pass
+            else:
+                # Every notice offered was for a key the friend does not
+                # hold. From a walk of the whole chain that means the
+                # friendship was made under the current key; from a single
+                # recorded link it means the record is stale (the notice
+                # landed and the row never heard) — walk the chain next pass.
+                self._chat_service.set_bound_identity(
+                    friend["id"], ours if bound is None else None)
+
+    async def _post_rotation_notice(self, friend: dict, peers: list,
+                                    record: dict) -> Optional[int]:
+        """The HTTP status the first answering address gave, or None."""
+        import aiohttp
+        pubkey = friend["public_key_hex"]
+        payload = {
+            "rotation_message": record["message"],
+            "old_signature": record["old_signature"],
+            "new_signature": record["new_signature"],
+        }
+        async with aiohttp.ClientSession(
+            connector=aiohttp.TCPConnector(ssl=pinned_ssl_context(pubkey)),
+            timeout=aiohttp.ClientTimeout(total=10),
+        ) as session:
+            for ip, port in peers:
+                url = f"https://{fmt_addr(ip, port)}/api/chat/key-rotation"
+                try:
+                    async with session.post(url, json=payload) as resp:
+                        if resp.status == 200:
+                            self._note_peer_alive(friend["id"], pubkey, ip, port)
+                        elif resp.status != 404:
+                            logger.debug("Rotation notice refused (%d) by %s:%s",
+                                         resp.status, ip, port)
+                        return resp.status
+                except (aiohttp.ClientError, asyncio.TimeoutError, OSError) as e:
+                    logger.debug("Rotation notice to %s:%s failed: %s", ip, port, e)
+        return None
 
     async def _ensure_master_contact(self) -> None:
         """Seed the shipped master contact as a pending friend — the

@@ -183,17 +183,20 @@ class ChatService:
         try:
             with conn.cursor() as cur:
                 # First, try to resolve a pending entry with matching invite_code
+                # Either way the peer accepted the key we hold NOW — that is
+                # what bound_identity records (see friends in 001).
                 cur.execute("""
                     UPDATE friends
                     SET public_key_hex = %s,
                         username = COALESCE(NULLIF(%s, ''), username),
                         display_name = COALESCE(NULLIF(%s, ''), display_name),
                         source = COALESCE(%s::friend_source, source),
-                        source_token_id = COALESCE(%s, source_token_id)
+                        source_token_id = COALESCE(%s, source_token_id),
+                        bound_identity = %s
                     WHERE invite_code = %s AND public_key_hex LIKE 'pending:%%'
                     RETURNING id
                 """, (public_key_hex, username, display_name, source,
-                      source_token_id, invite_code))
+                      source_token_id, self.public_key_hex, invite_code))
                 row = cur.fetchone()
                 if row:
                     logger.info(
@@ -205,16 +208,18 @@ class ChatService:
                 # No pending entry — regular upsert by public_key_hex
                 cur.execute("""
                     INSERT INTO friends (public_key_hex, invite_code, username,
-                                         display_name, source, source_token_id)
+                                         display_name, source, source_token_id,
+                                         bound_identity)
                     VALUES (%s, %s, %s, %s,
-                            COALESCE(%s::friend_source, 'manual'), %s)
+                            COALESCE(%s::friend_source, 'manual'), %s, %s)
                     ON CONFLICT (public_key_hex) DO UPDATE
                         SET invite_code = EXCLUDED.invite_code,
                             username = EXCLUDED.username,
-                            display_name = COALESCE(NULLIF(EXCLUDED.display_name, ''), friends.display_name)
+                            display_name = COALESCE(NULLIF(EXCLUDED.display_name, ''), friends.display_name),
+                            bound_identity = EXCLUDED.bound_identity
                     RETURNING id
                 """, (public_key_hex, invite_code, username, display_name,
-                      source, source_token_id))
+                      source, source_token_id, self.public_key_hex))
                 row = cur.fetchone()
                 return row[0] if row else None
         finally:
@@ -253,9 +258,38 @@ class ChatService:
         finally:
             self._return_db(conn)
 
+    def friends_needing_notice(self) -> list[dict]:
+        """Resolved, unblocked friends not known to bind our CURRENT key —
+        the rotation notice goes to each until one is accepted. NULL is a
+        row from before bound_identity existed: which of our keys it knows
+        is found out by offering the chain."""
+        conn = self._get_db()
+        try:
+            with conn.cursor() as cur:
+                cur.execute("""
+                    SELECT id, username, public_key_hex, invite_code, bound_identity
+                      FROM friends
+                     WHERE public_key_hex NOT LIKE 'pending:%%'
+                       AND NOT is_blocked
+                       AND bound_identity IS DISTINCT FROM %s
+                """, (self.public_key_hex,))
+                cols = [d[0] for d in cur.description]
+                return [dict(zip(cols, row)) for row in cur.fetchall()]
+        finally:
+            self._return_db(conn)
+
+    def set_bound_identity(self, friend_id: int, pubkey_hex: Optional[str]) -> None:
+        conn = self._get_db()
+        try:
+            with conn.cursor() as cur:
+                cur.execute("UPDATE friends SET bound_identity = %s WHERE id = %s",
+                            (pubkey_hex, friend_id))
+        finally:
+            self._return_db(conn)
+
     def unbind_friend(self, friend_id: int) -> None:
-        """One friendship back to `pending:<invite_code>` — for a friend the
-        rotation notice could not reach; see unbind_friendships."""
+        """One friendship back to `pending:<invite_code>` — for a friend we
+        hold no notice for; see unbind_friendships."""
         conn = self._get_db()
         try:
             with conn.cursor() as cur:
@@ -721,6 +755,22 @@ class ChatService:
                 )
                 old_row = cur.fetchone()
                 old_pubkey = old_row[0] if old_row else None
+
+                # The friend may already be here under the new key: a node
+                # that could not deliver its notice re-introduced itself by
+                # token, and that made a second friendship. Fold it into the
+                # original — the history lives there — before the key moves.
+                cur.execute(
+                    "SELECT id FROM friends WHERE public_key_hex = %s AND id <> %s",
+                    (new_pubkey, friend_id),
+                )
+                dup = cur.fetchone()
+                if dup:
+                    cur.execute("UPDATE p2p_messages SET friend_id = %s WHERE friend_id = %s",
+                                (friend_id, dup[0]))
+                    cur.execute("DELETE FROM friends WHERE id = %s", (dup[0],))
+                    logger.info("Key rotation: merged duplicate friend row %s into %s",
+                                dup[0], friend_id)
 
                 cur.execute("""
                     UPDATE friends
