@@ -78,6 +78,9 @@ class SetupWizard(ctk.CTkToplevel):
 
         # Detection results
         self._hw = detect_hardware_profile()
+        # The name/password this node gets when the human types none — see
+        # _minted_credentials.
+        self._minted: Optional[dict] = None
         # Claude Code state is computed on-demand via _claude_state()
         # because it can change during the wizard (install, sign-in).
         self._claude_install_thread: Optional[threading.Thread] = None
@@ -196,7 +199,7 @@ class SetupWizard(ctk.CTkToplevel):
             # value — registration happens right here, with the birth
             # certificate attached by register_verified_email)
             if getattr(self, "_account_verify_phase", False):
-                code = self._verify_code_var.get().strip().upper()
+                code = self._verify_code.get().strip().upper()
                 if not code:
                     self._account_error.configure(text="Enter the code from email")
                     return False
@@ -218,10 +221,10 @@ class SetupWizard(ctk.CTkToplevel):
                 return True
 
             # Phase 1: account fields
-            username = self._account_user_var.get().strip()
-            password = self._account_pass_var.get()
-            password2 = self._account_pass2_var.get()
-            email = self._account_email_var.get().strip()
+            username = self._account_user.get().strip()
+            password = self._account_pass.get()
+            password2 = self._account_pass2.get()
+            email = self._account_email.get().strip()
 
             # Persist values for re-render
             self._account_user_val = username
@@ -233,31 +236,7 @@ class SetupWizard(ctk.CTkToplevel):
                 self._account_error.configure(text="Invalid email address")
                 return False
 
-            if not username:
-                # Skipping the form still produces a real account —
-                # `anonymous-<4 hex>` username plus a 32-byte random
-                # password. Without one `_get_identity()` returns None
-                # downstream, which hides the invite code and leaves
-                # Friends / chat / P2P sync silently broken. The user
-                # can rename later from Profile. An email entered with
-                # it is NOT dropped: it is verified for the anonymous
-                # identity below, exactly as for a named one (an
-                # anonymous account with a verified mailbox is a
-                # method:email identity). The credentials are minted
-                # once and reused across re-renders, so the identity
-                # that received the code is the one that redeems it.
-                acct = self.config.get("_account") or {}
-                if not acct.get("anonymous"):
-                    acct = {
-                        "username": "anonymous-" + secrets.token_hex(2),
-                        "password": secrets.token_urlsafe(32),
-                        "anonymous": True,
-                    }
-                self.config["_account"] = acct
-                username, password = acct["username"], acct["password"]
-                if not email:
-                    return True
-            else:
+            if username:
                 from desktop.node_identity import validate_username
                 try:
                     validate_username(username)
@@ -265,26 +244,41 @@ class SetupWizard(ctk.CTkToplevel):
                     self._account_error.configure(text=str(e))
                     return False
 
-                if not password:
-                    self._account_error.configure(text="Password is required")
+            if password:
+                if not username:
+                    # A minted name is half of a pair nobody could ever
+                    # retype on another device — the password would buy
+                    # nothing.
+                    self._account_error.configure(
+                        text="Choose a name to go with the password")
                     return False
-
                 if len(password) < 8:
                     self._account_error.configure(
                         text="Password must be at least 8 characters"
                     )
                     return False
-
                 if password != password2:
                     self._account_error.configure(text="Passwords don't match")
                     return False
 
-                self.config["_account"] = {
-                    "username": username,
-                    "password": password,
-                }
+            # Every path yields a real account: without one `_get_identity()`
+            # returns None downstream, which hides the invite code and leaves
+            # Friends / chat / P2P sync silently broken. `anonymous` names the
+            # property device_auth reads — the password was minted, nobody can
+            # type it, the pairing PIN is the only door — and a chosen name
+            # over a minted password has exactly that property.
+            minted = self._minted_credentials()
+            self.config["_account"] = {
+                "username": username or minted["username"],
+                "password": password or minted["password"],
+                "anonymous": not password,
+            }
+            username = self.config["_account"]["username"]
+            password = self.config["_account"]["password"]
 
-            # If email provided — check if already verified, otherwise send code
+            # An email is verified for whichever identity the pair yields —
+            # an anonymous account with a verified mailbox is a method:email
+            # identity like any other.
             if email:
                 self._account_error.configure(
                     text="Checking email...", text_color="gray"
@@ -492,6 +486,17 @@ class SetupWizard(ctk.CTkToplevel):
             ).pack(fill="x", padx=24,
                    pady=(1, 14 if index == len(items) - 1 else 6))
 
+    def _minted_credentials(self) -> dict:
+        """The name and password this node gets when the human types none.
+        Minted once per wizard and reused across re-renders, so the identity
+        that receives an email code is the one that redeems it."""
+        if self._minted is None:
+            self._minted = {
+                "username": "anonymous-" + secrets.token_hex(2),
+                "password": secrets.token_urlsafe(32),
+            }
+        return self._minted
+
     def _step_account(self):
         # Two-phase step: phase 1 = fields, phase 2 = email verification
         if getattr(self, "_account_verify_phase", False):
@@ -500,84 +505,101 @@ class SetupWizard(ctk.CTkToplevel):
 
         ctk.CTkLabel(
             self.content_frame,
-            text="P2P Identity",
+            text="Identity",
             font=ctk.CTkFont(size=22, weight="bold"),
         ).pack(pady=(20, 5))
 
+        # In a deterministic KDF creating an identity and signing back into
+        # it are the same act, so the crypto never says "new" or "returning"
+        # — the copy has to, or four fields read as a sign-up wall to the
+        # newcomer and as a login to a stranger's account to everyone else.
         ctk.CTkLabel(
             self.content_frame,
             text=(
-                "Create an account for P2P chat and friend discovery.\n"
-                "Same username + password on any device = same identity."
+                "Nothing is signed up anywhere: the name and password themselves\n"
+                "are the identity. The same pair on any device is the same you."
             ),
             justify="center",
-        ).pack(pady=5)
+        ).pack(pady=(0, 6))
 
-        fields_frame = ctk.CTkFrame(self.content_frame, fg_color="transparent")
-        fields_frame.pack(fill="x", padx=40, pady=10)
+        fields = ctk.CTkFrame(self.content_frame, fg_color="transparent")
+        fields.pack(fill="x", padx=40, pady=6)
+        fields.grid_columnconfigure(0, weight=1)
 
-        self._account_user_var = ctk.StringVar(
-            value=getattr(self, "_account_user_val", "")
-        )
-        self._account_pass_var = ctk.StringVar(
-            value=getattr(self, "_account_pass_val", "")
-        )
-        self._account_pass2_var = ctk.StringVar(
-            value=getattr(self, "_account_pass2_val", "")
-        )
-        self._account_email_var = ctk.StringVar(
-            value=getattr(self, "_account_email_val", "")
-        )
+        def label(row, text):
+            widget = ctk.CTkLabel(fields, text=text)
+            widget.grid(row=row, column=0, sticky="w")
+            return widget
 
-        ctk.CTkLabel(fields_frame, text="Username:").pack(anchor="w")
-        ctk.CTkEntry(
-            fields_frame,
-            textvariable=self._account_user_var,
-            width=300,
-            placeholder_text="your nickname",
-        ).pack(fill="x", pady=(0, 8))
+        # No textvariable: CTkEntry never shows a placeholder on an entry
+        # bound to one, and the placeholders here carry the copy. The
+        # widgets own their text; validation reads them and keeps the
+        # `_account_*_val` copies that survive a re-render.
+        def entry(row, saved, **kw):
+            widget = ctk.CTkEntry(fields, **kw)
+            widget.grid(row=row, column=0, sticky="ew", pady=(0, 4))
+            if saved:
+                widget.insert(0, saved)
+            return widget
 
-        ctk.CTkLabel(fields_frame, text="Password:").pack(anchor="w")
-        ctk.CTkEntry(
-            fields_frame,
-            textvariable=self._account_pass_var,
-            width=300,
-            show="*",
-            placeholder_text="min 8 characters",
-        ).pack(fill="x", pady=(0, 8))
+        def hint(row, text):
+            # height=0: a CTkLabel is otherwise 28 px tall with the text
+            # centred, so a hint that fits one line sits ~6 px lower than
+            # one that wraps and the gaps around it drift with the font.
+            # 520 = the 600 px content frame less this frame's padding.
+            ctk.CTkLabel(
+                fields, text=text, text_color="gray", anchor="w", height=0,
+                font=ctk.CTkFont(size=12), justify="left", wraplength=520,
+            ).grid(row=row, column=0, sticky="ew", pady=(0, 10))
 
-        ctk.CTkLabel(fields_frame, text="Confirm password:").pack(anchor="w")
-        ctk.CTkEntry(
-            fields_frame,
-            textvariable=self._account_pass2_var,
-            width=300,
-            show="*",
-        ).pack(fill="x", pady=(0, 8))
+        # An empty field invites a name; one pre-filled with the minted
+        # value invites accepting it — and an anonymous friend is a cost
+        # every one of their friends pays in chat.
+        label(0, "Name (what friends see)")
+        self._account_user = entry(
+            1, getattr(self, "_account_user_val", ""),
+            placeholder_text=f"{self._minted_credentials()['username']} "
+                             "if left empty")
+        self._account_user.grid_configure(pady=(0, 10))
 
-        ctk.CTkLabel(fields_frame, text="Email (optional):").pack(anchor="w")
-        ctk.CTkEntry(
-            fields_frame,
-            textvariable=self._account_email_var,
-            width=300,
-            placeholder_text="for friend discovery",
-        ).pack(fill="x", pady=(0, 5))
+        label(2, "Password — optional")
+        self._account_pass = entry(
+            3, getattr(self, "_account_pass_val", ""), show="*",
+            placeholder_text="min 8 characters")
+        hint(4, "Makes this name yours on any device. Without it, the "
+                "identity lives only on this machine.")
+
+        confirm_label = label(5, "Confirm password")
+        self._account_pass2 = entry(
+            6, getattr(self, "_account_pass2_val", ""), show="*")
+        self._account_pass2.grid_configure(pady=(0, 10))
+
+        label(7, "Email — optional")
+        self._account_email = entry(
+            8, getattr(self, "_account_email_val", ""),
+            placeholder_text="you@example.com")
+        hint(9, "Friends find you by it, and the network admits you at once "
+                "— no proof of work to mine — with priority access when it "
+                "is busy. If this machine is ever lost, the mailbox carries "
+                "your standing to the next identity.")
+
+        # A confirmation means nothing until there is a password, and a
+        # login form never asks for one: its arrival is what tells the
+        # newcomer and the returning owner alike that they are CREATING
+        # this pair. In a KDF a typo mints a different identity, so the
+        # returning owner needs it as much as the newcomer.
+        def sync_confirm(_event=None):
+            show = bool(self._account_pass.get())
+            for widget in (confirm_label, self._account_pass2):
+                widget.grid() if show else widget.grid_remove()
+
+        self._account_pass.bind("<KeyRelease>", sync_confirm)
+        sync_confirm()
 
         self._account_error = ctk.CTkLabel(
             self.content_frame, text="", text_color="red",
         )
         self._account_error.pack()
-
-        ctk.CTkLabel(
-            self.content_frame,
-            text=(
-                "Leave all empty to skip — an anonymous identity\n"
-                "(anonymous-XXXX) will be created. You can rename it\n"
-                "later from your Profile."
-            ),
-            text_color="gray",
-            font=ctk.CTkFont(size=12),
-            justify="center",
-        ).pack(pady=(5, 0))
 
     def _step_account_verify(self):
         """Phase 2: email verification code input."""
@@ -598,16 +620,16 @@ class SetupWizard(ctk.CTkToplevel):
         fields_frame = ctk.CTkFrame(self.content_frame, fg_color="transparent")
         fields_frame.pack(fill="x", padx=40, pady=10)
 
-        self._verify_code_var = ctk.StringVar()
-
         ctk.CTkLabel(fields_frame, text="Enter code from email:").pack(anchor="w")
-        ctk.CTkEntry(
+        # Widget-owned, like the phase-1 fields: a textvariable would hide
+        # the placeholder.
+        self._verify_code = ctk.CTkEntry(
             fields_frame,
-            textvariable=self._verify_code_var,
             width=200,
             placeholder_text="e.g. X7K9M2",
             font=ctk.CTkFont(size=18, family="Consolas"),
-        ).pack(anchor="w", pady=(0, 10))
+        )
+        self._verify_code.pack(anchor="w", pady=(0, 10))
 
         self._account_error = ctk.CTkLabel(
             self.content_frame, text="", text_color="red",
@@ -1597,8 +1619,13 @@ class SetupWizard(ctk.CTkToplevel):
         summary_frame = ctk.CTkFrame(self.content_frame)
         summary_frame.pack(fill="x", padx=20, pady=10)
 
-        account = self.config.get("_account")
-        account_text = account["username"] if account else "Random (no account)"
+        account = self.config["_account"]
+        account_text = account["username"] + (
+            " — this machine only" if account["anonymous"]
+            else " — any device with the password")
+        if account.get("email"):
+            account_text += (" · email verified" if account.get("email_verified")
+                             else " · email unverified")
         lastfm_cfg = self.config.get("lastfm", {})
         items = [
             ("Identity", account_text),
