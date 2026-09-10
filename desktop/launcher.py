@@ -664,6 +664,22 @@ class LauncherApp(ctk.CTk):
         except Exception as e:
             logger.warning(f"OpenSSL DLL fix failed: {e}")
 
+    def _on_identity_rotated(self):
+        """The backend rotated this node's key (Profile → name / password).
+        Everything the P2P manager holds is built on the old one — the chat
+        boxes, the TLS binding, the DHT announces, the certificate — so it
+        comes down and up on the new identity; its start-up check tells the
+        friends. Called from the P2P thread; stop() belongs to the launcher
+        thread, so the restart is marshalled there first."""
+        def _restart():
+            manager, self.p2p_manager = self.p2p_manager, None
+            if manager is not None:
+                manager.stop()
+            self.ui_call(self._start_p2p)
+
+        self.ui_call(lambda: threading.Thread(
+            target=_restart, daemon=True, name="p2p-rotate").start())
+
     def _start_p2p(self):
         """Start P2P services unconditionally: sync server, DHT + LAN
         discovery, chat, MB slice loop. A privacy connect/disconnect
@@ -703,6 +719,8 @@ class LauncherApp(ctk.CTk):
                 self.service_manager._prune_stale_p2p_rules(sync_port)
 
                 self.p2p_manager = P2PManager(db_dsn, self.config)
+                self.p2p_manager.set_identity_rotated_callback(
+                    self._on_identity_rotated)
                 self.p2p_manager.start(
                     node_id=node_id, progress_cb=progress,
                 )

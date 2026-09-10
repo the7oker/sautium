@@ -254,6 +254,24 @@
       setToken((await r.json()).token);
       return true;
     },
+    async changeIdentity(username, password) {
+      // A new name or password is a new key, and the token is bound to the
+      // key — every paired browser is out, this one takes the fresh token
+      // from the same reply. Returns the reply, or {ok:false, error}.
+      const r = await fetch("/api/auth/change-identity", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ username, password }),
+      });
+      if (!r.ok) {
+        let error = `HTTP ${r.status}`;
+        try { error = (await r.json()).detail || error; } catch {}
+        return { ok: false, error };
+      }
+      const data = await r.json();
+      setToken(data.token);
+      return { ok: true, ...data };
+    },
   };
 
   // -- login gate ------------------------------------------------------------

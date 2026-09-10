@@ -48,13 +48,19 @@ def _sender_timestamp(timestamp_iso: str) -> datetime:
 class PeerChatService:
     """Chat crypto + DB operations bound to this node's account identity."""
 
-    def __init__(self, private_seed_raw: bytes, public_key_hex: str):
+    def __init__(self, private_seed_raw: bytes, public_key_hex: str,
+                 previous_seeds: tuple = ()):
         from nacl.public import Box  # noqa: F401 — fail fast if PyNaCl absent
         from nacl.signing import SigningKey
 
         self.public_key_hex = public_key_hex
         self._curve_private = SigningKey(
             private_seed_raw).to_curve25519_private_key()
+        # Keys this node retired (node_identity rotation archive), newest
+        # first — a friend who has not applied the notice yet still encrypts
+        # to one of them.
+        self._previous_curve = [SigningKey(s).to_curve25519_private_key()
+                                for s in previous_seeds]
         self._boxes: dict = {}
 
     # -- crypto (mirror of chat_service.py) --------------------------------
@@ -78,8 +84,44 @@ class PeerChatService:
 
     def decrypt_message(self, encrypted_b64: str, sender_public_key_hex: str) -> str:
         import base64
-        box = self._get_box(sender_public_key_hex)
-        return box.decrypt(base64.b64decode(encrypted_b64)).decode("utf-8")
+        from nacl.exceptions import CryptoError
+        from nacl.public import Box
+        from nacl.signing import VerifyKey
+        encrypted = base64.b64decode(encrypted_b64)
+        try:
+            return self._get_box(sender_public_key_hex).decrypt(encrypted).decode("utf-8")
+        except CryptoError:
+            if not self._previous_curve:
+                raise
+        friend_curve_pub = VerifyKey(
+            bytes.fromhex(sender_public_key_hex)).to_curve25519_public_key()
+        for index, curve_private in enumerate(self._previous_curve):
+            try:
+                plaintext = Box(curve_private, friend_curve_pub).decrypt(encrypted)
+            except CryptoError:
+                if index == len(self._previous_curve) - 1:
+                    raise
+                continue
+            logger.info("Message from %s… was encrypted to a retired key — "
+                        "they have not applied the rotation yet",
+                        sender_public_key_hex[:16])
+            return plaintext.decode("utf-8")
+
+    def apply_key_rotation(self, friend_id: int, old_public_key_hex: str,
+                           new_public_key_hex: str, new_invite_code: str) -> None:
+        """Mirror of chat_service.store_key_rotation + apply_key_rotation in
+        one step: the friend row moves to the new key, the old one stays on
+        it as previous_public_key_hex (get_friend_by_public_key answers to
+        both), and the Box cached for the old key is dropped."""
+        with get_conn() as conn, conn.cursor() as cur:
+            cur.execute("""
+                UPDATE friends
+                   SET previous_public_key_hex = public_key_hex,
+                       public_key_hex = %s,
+                       invite_code = %s
+                 WHERE id = %s
+            """, (new_public_key_hex, new_invite_code, friend_id))
+        self._boxes.pop(old_public_key_hex, None)
 
     # -- friends ------------------------------------------------------------
 
@@ -267,6 +309,12 @@ class PeerChatService:
 _service: Optional[PeerChatService] = None
 
 
+def forget_service() -> None:
+    """After a key rotation: the next get_peer_chat() builds on the new key."""
+    global _service
+    _service = None
+
+
 def get_peer_chat() -> Optional[PeerChatService]:
     """Lazy singleton bound to the account identity; None when the node has
     no account (chat endpoints then answer 503)."""
@@ -286,5 +334,9 @@ def get_peer_chat() -> Optional[PeerChatService]:
         format=serialization.PrivateFormat.Raw,
         encryption_algorithm=serialization.NoEncryption(),
     )
-    _service = PeerChatService(seed, identity["public_key_hex"])
+    from desktop.node_identity import load_previous_seeds
+    from p2p_identity import identity_dir
+    d = identity_dir(settings)
+    previous = load_previous_seeds(d) if d else []
+    _service = PeerChatService(seed, identity["public_key_hex"], tuple(previous))
     return _service

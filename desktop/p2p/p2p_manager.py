@@ -91,6 +91,7 @@ class P2PManager:
         self._mb_dump_version: Optional[str] = None
         self._running = False
         self._on_message_cb: Optional[Callable] = None
+        self._on_identity_rotated_cb: Optional[Callable] = None
         # Peer address cache: friend_id -> peers_list
         # Persists until connection failure triggers refresh.
         self._friend_peer_cache: dict[int, list[tuple]] = {}
@@ -113,6 +114,13 @@ class P2PManager:
     def set_on_message_callback(self, cb: Callable):
         """Set callback for incoming chat messages (called from P2P thread)."""
         self._on_message_cb = cb
+
+    def set_identity_rotated_callback(self, cb: Callable):
+        """Set the callback for a key rotation done by the backend (Profile →
+        name / password); called from the P2P thread. Everything this
+        manager holds is built on the old key, so the launcher answers by
+        bringing it down and up again."""
+        self._on_identity_rotated_cb = cb
 
     def notify_new_message(self):
         """Wake up the chat delivery loop immediately (thread-safe)."""
@@ -232,11 +240,14 @@ class P2PManager:
         # Initialize chat service if account exists
         if account_info:
             try:
-                from desktop.node_identity import get_private_key_raw
+                from desktop.node_identity import (
+                    get_private_key_raw, load_previous_seeds,
+                )
                 self._chat_service = ChatService(
                     db_dsn=self.db_dsn,
                     private_key_raw=get_private_key_raw(),
                     public_key_hex=account_info["public_key_hex"],
+                    previous_seeds=tuple(load_previous_seeds()),
                 )
                 self._sync_server.set_chat_service(
                     self._chat_service, self._on_message_cb
@@ -1591,22 +1602,22 @@ class P2PManager:
     async def _reintroduce_after_identity_change(self) -> None:
         """Every friendship this node holds is built on its own key: the peer
         bound our invite code to the key it accepted, and re-checks it on
-        every friend-gated request. create_account() can replace that key in
-        place — a new account through the wizard — and nothing else moves.
-        The rows here still read as resolved, the resolver only ever walks
-        rows marked `pending:`, so the node never introduces itself again
-        and every peer answers 403 to chat, relay and support diagnostics
-        while the retries keep looking healthy in the log.
+        every friend-gated request. The identity those rows were bound under
+        is recorded beside them, and a mismatch at start means our friends
+        know a key we no longer hold.
 
-        So the identity those rows were bound under is recorded beside them.
-        A mismatch means our friends know a key we no longer hold: the rows
-        go back to `pending:` and the resolver introduces us again, carrying
-        the invite token that made the friendship in the first place. The
-        check sits here, at the observation point, rather than in each way a
-        key can change — a future rotation path (signed by the old key, so
-        it announces instead of re-introducing) updates the marker itself.
+        Two ways that happens. A ROTATION (Profile → name / password) left a
+        notice signed by the old key in the identity archive: friends the
+        direct path reaches apply it on the spot and keep the friendship
+        without a new handshake. A REPLACEMENT — a new account through the
+        wizard, or a rotation this node no longer holds the notice for —
+        has nothing to prove continuity with, so every row goes back to
+        `pending:` and the resolver introduces us again, carrying the invite
+        token that made the friendship in the first place. A friend the
+        notice cannot reach takes that same road. The check sits here, at
+        the observation point, rather than in each way a key can change.
         """
-        from desktop.node_identity import get_account_info
+        from desktop.node_identity import get_account_info, rotation_record
         account = get_account_info()
         if not account or not self._chat_service:
             return
@@ -1615,12 +1626,63 @@ class P2PManager:
         if bound == ours:
             return
         if bound is not None:
-            reset = self._chat_service.unbind_friendships()
-            logger.warning(
-                "Identity changed (%s… → %s…): %d friendship(s) queued for "
-                "re-introduction", bound[:16], ours[:16], reset)
+            rotation = rotation_record(bound)
+            if rotation and rotation["new_public_key"] == ours:
+                told, unreached = await self._announce_rotation(rotation)
+                logger.info(
+                    "Identity rotated (%s… → %s…): %d friend(s) told, %d "
+                    "queued for re-introduction", bound[:16], ours[:16],
+                    told, unreached)
+            else:
+                reset = self._chat_service.unbind_friendships()
+                logger.warning(
+                    "Identity changed (%s… → %s…): %d friendship(s) queued for "
+                    "re-introduction", bound[:16], ours[:16], reset)
         await asyncio.get_running_loop().run_in_executor(
             None, self._write_settings_blocking, {"p2p.bound_identity": ours})
+
+    async def _announce_rotation(self, rotation: dict) -> tuple:
+        """Hand every resolved friend the signed rotation notice over the
+        direct path; returns (told, unreached). A friend it does not reach is
+        unbound to `pending:` for the resolver — the relay carries chat
+        envelopes, not notices, and the re-introduction road already covers
+        an offline friend, so the notice is not queued anywhere."""
+        import aiohttp
+        payload = {
+            "rotation_message": rotation["message"],
+            "old_signature": rotation["old_signature"],
+            "new_signature": rotation["new_signature"],
+        }
+        told = unreached = 0
+        for friend in self._chat_service.get_friends():
+            pubkey = friend["public_key_hex"]
+            if pubkey.startswith("pending:"):
+                continue
+            delivered = False
+            peers = await self._find_friend_peers(friend)
+            if peers:
+                async with aiohttp.ClientSession(
+                    connector=aiohttp.TCPConnector(ssl=pinned_ssl_context(pubkey)),
+                    timeout=aiohttp.ClientTimeout(total=10),
+                ) as session:
+                    for ip, port in peers:
+                        url = f"https://{fmt_addr(ip, port)}/api/chat/key-rotation"
+                        try:
+                            async with session.post(url, json=payload) as resp:
+                                if resp.status == 200:
+                                    self._note_peer_alive(friend["id"], pubkey, ip, port)
+                                    delivered = True
+                                    break
+                                logger.debug("Rotation notice refused (%d) by %s:%s",
+                                             resp.status, ip, port)
+                        except (aiohttp.ClientError, asyncio.TimeoutError, OSError) as e:
+                            logger.debug("Rotation notice to %s:%s failed: %s", ip, port, e)
+            if delivered:
+                told += 1
+            else:
+                self._chat_service.unbind_friend(friend["id"])
+                unreached += 1
+        return told, unreached
 
     async def _ensure_master_contact(self) -> None:
         """Seed the shipped master contact as a pending friend — the
@@ -2723,6 +2785,7 @@ class P2PManager:
                 with conn.cursor() as cur:
                     cur.execute("LISTEN sautium_chat")
                     cur.execute("LISTEN sautium_diag")
+                    cur.execute("LISTEN sautium_identity_rotated")
 
                 while self._running:
                     # Block up to 5 s waiting for data on the socket
@@ -2739,6 +2802,9 @@ class P2PManager:
                             self._chat_notify.set()
                         if "sautium_diag" in channels:
                             self._diag_queue.put_nowait(("report",))
+                        if ("sautium_identity_rotated" in channels
+                                and self._on_identity_rotated_cb):
+                            self._on_identity_rotated_cb()
             except Exception as e:
                 logger.debug(f"DB LISTEN error: {e}")
                 await asyncio.sleep(5)

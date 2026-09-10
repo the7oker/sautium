@@ -1349,7 +1349,14 @@ class SyncServer:
     async def handle_chat_key_rotation(
         self, request: web.Request
     ) -> web.Response:
-        """POST /api/chat/key-rotation — receive key rotation notification."""
+        """POST /api/chat/key-rotation — a friend retired the key we know
+        them by. MIRRORS backend/routers/peer_chat.chat_key_rotation.
+
+        Every field comes out of the signed notice, never the body around
+        it, and both the old key (continuity) and the new one (possession)
+        must have signed it — node_identity.parse_rotation_notice. Applied
+        at once: the old key vouching is the consent, the same one a
+        password change on our side asks nobody for."""
         ip = request.remote or "unknown"
         if not self._check_rate_limit(ip):
             return self._json_response(
@@ -1361,31 +1368,25 @@ class SyncServer:
                 request, {"error": "chat not available"}, status=503
             )
 
+        import base64
         try:
             body = await request.json()
-            old_pubkey = body.get("old_public_key", "")
-            new_pubkey = body.get("new_public_key", "")
-            new_invite = body.get("new_invite_code", "")
-            rotation_msg_b64 = body.get("rotation_message", "")
-            signature_b64 = body.get("signature", "")
-        except (json.JSONDecodeError, Exception):
+            rotation_msg = base64.b64decode(body.get("rotation_message", ""))
+            old_signature = bytes.fromhex(body.get("old_signature", ""))
+            new_signature = bytes.fromhex(body.get("new_signature", ""))
+        except (ValueError, TypeError, AttributeError):
             return self._json_response(
                 request, {"error": "invalid JSON"}, status=400
             )
 
-        # Verify the rotation is signed by the old key
-        import base64
-        from desktop.node_identity import verify_signature
-        rotation_msg = base64.b64decode(rotation_msg_b64)
-        signature = base64.b64decode(signature_b64)
-
-        if not verify_signature(rotation_msg, signature, old_pubkey):
+        from desktop.node_identity import parse_rotation_notice
+        notice = parse_rotation_notice(rotation_msg, old_signature, new_signature)
+        if notice is None:
             return self._json_response(
                 request, {"error": "invalid signature"}, status=403
             )
 
-        # Find friend by old public key
-        friend = self._chat_service.get_friend_by_public_key(old_pubkey)
+        friend = self._chat_service.get_friend_by_public_key(notice["old_public_key"])
         if not friend:
             return self._json_response(
                 request, {"error": "unknown sender"}, status=404
@@ -1393,19 +1394,17 @@ class SyncServer:
 
         self._chat_service.store_key_rotation(
             friend_id=friend["id"],
-            old_public_key_hex=old_pubkey,
-            new_public_key_hex=new_pubkey,
-            new_invite_code=new_invite,
+            old_public_key_hex=notice["old_public_key"],
+            new_public_key_hex=notice["new_public_key"],
+            new_invite_code=notice["new_invite_code"],
             rotation_message=rotation_msg,
-            signature=signature,
+            signature=old_signature,
         )
-
-        # Auto-apply key rotation
         self._chat_service.apply_key_rotation(friend["id"])
         logger.info(
-            f"Key rotation applied for {friend.get('username', '?')}"
+            f"Key rotation applied for {friend.get('username', '?')}: "
+            f"{notice['old_public_key'][:16]}… → {notice['new_public_key'][:16]}…"
         )
-
         return self._json_response(request, {"status": "accepted"})
 
     async def handle_trigger_send(self, request: web.Request) -> web.Response:

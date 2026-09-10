@@ -472,6 +472,43 @@ def mailbox_import(m: dict) -> None:
         logger.info("mailbox: message %s from %s rejected", (m.get("message_uuid") or "")[:8], sender_pubkey[:8])
 
 
+@chat_router.post("/key-rotation")
+async def chat_key_rotation(request: Request):
+    """A friend retired the key we know them by. MIRRORS
+    desktop/p2p/sync_server.handle_chat_key_rotation: every field comes out
+    of the signed notice, both the old key (continuity) and the new one
+    (possession) must have signed it, and it is applied at once."""
+    import base64
+
+    from desktop.node_identity import parse_rotation_notice
+
+    svc = get_peer_chat()
+    if svc is None:
+        return _err("chat not available", 503)
+    try:
+        body = await request.json()
+        rotation_msg = base64.b64decode(body.get("rotation_message", ""))
+        old_signature = bytes.fromhex(body.get("old_signature", ""))
+        new_signature = bytes.fromhex(body.get("new_signature", ""))
+    except (ValueError, TypeError, AttributeError):
+        return _err("invalid JSON", 400)
+
+    notice = parse_rotation_notice(rotation_msg, old_signature, new_signature)
+    if notice is None:
+        return _err("invalid signature", 403)
+    friend = svc.get_friend_by_public_key(notice["old_public_key"])
+    if friend is None:
+        return _err("unknown sender", 404)
+    if friend["public_key_hex"] == notice["new_public_key"]:
+        return JSONResponse({"status": "accepted"})       # already applied
+    svc.apply_key_rotation(friend["id"], notice["old_public_key"],
+                           notice["new_public_key"], notice["new_invite_code"])
+    logger.info("Key rotation applied for %s: %s… → %s…",
+                friend.get("username", "?"), notice["old_public_key"][:16],
+                notice["new_public_key"][:16])
+    return JSONResponse({"status": "accepted"})
+
+
 @chat_router.post("/history")
 async def chat_history(request: Request):
     svc = get_peer_chat()

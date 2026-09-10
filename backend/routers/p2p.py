@@ -178,6 +178,12 @@ _WORKER_HEADERS = {"User-Agent": "Sautium/1.0"}
 _cached_private_key = None
 
 
+def forget_identity() -> None:
+    """After a key rotation: the next Worker request signs with the new key."""
+    global _cached_private_key
+    _cached_private_key = None
+
+
 def _get_private_key():
     """Load or derive the Ed25519 private key for signing."""
     global _cached_private_key

@@ -74,12 +74,17 @@ def ed25519_to_curve25519_public(ed25519_public_hex: str) -> "PublicKey":
 class ChatService:
     """Manages encrypted messaging with friends."""
 
-    def __init__(self, db_dsn: str, private_key_raw: bytes, public_key_hex: str):
+    def __init__(self, db_dsn: str, private_key_raw: bytes, public_key_hex: str,
+                 previous_seeds: tuple = ()):
         """
         Args:
             db_dsn: PostgreSQL connection string
             private_key_raw: 32-byte Ed25519 seed
             public_key_hex: hex-encoded Ed25519 public key
+            previous_seeds: seeds of keys this node retired (node_identity
+                rotation archive), newest first — a friend who has not
+                applied the rotation notice yet still encrypts to one of
+                them, and that message is not lost.
         """
         if not HAS_NACL:
             raise RuntimeError("PyNaCl required for chat")
@@ -87,6 +92,7 @@ class ChatService:
         self.db_dsn = db_dsn
         self.public_key_hex = public_key_hex
         self._curve_private = ed25519_to_curve25519_private(private_key_raw)
+        self._previous_curve = [ed25519_to_curve25519_private(s) for s in previous_seeds]
         # Cache Box instances per friend public key
         self._boxes: dict[str, Box] = {}
         # Persistent DB connection (avoids 2s connect overhead per call)
@@ -108,11 +114,28 @@ class ChatService:
         return base64.b64encode(encrypted).decode("ascii")
 
     def decrypt_message(self, encrypted_b64: str, sender_public_key_hex: str) -> str:
-        """Decrypt a message from a friend. Returns plaintext string."""
-        box = self._get_box(sender_public_key_hex)
+        """Decrypt a message from a friend. Returns plaintext string.
+
+        Tries the live key first, then every retired one: the sender may
+        still hold the key this node rotated away from."""
         encrypted = base64.b64decode(encrypted_b64)
-        plaintext = box.decrypt(encrypted)
-        return plaintext.decode("utf-8")
+        try:
+            return self._get_box(sender_public_key_hex).decrypt(encrypted).decode("utf-8")
+        except CryptoError:
+            if not self._previous_curve:
+                raise
+        friend_curve_pub = ed25519_to_curve25519_public(sender_public_key_hex)
+        for index, curve_private in enumerate(self._previous_curve):
+            try:
+                plaintext = Box(curve_private, friend_curve_pub).decrypt(encrypted)
+            except CryptoError:
+                if index == len(self._previous_curve) - 1:
+                    raise
+                continue
+            logger.info("Message from %s… was encrypted to a retired key — "
+                        "they have not applied the rotation yet",
+                        sender_public_key_hex[:16])
+            return plaintext.decode("utf-8")
 
     # -------------------------------------------------------------------
     # Friend management (DB operations)
@@ -227,6 +250,21 @@ class ChatService:
                        AND invite_code <> ''
                 """)
                 return cur.rowcount
+        finally:
+            self._return_db(conn)
+
+    def unbind_friend(self, friend_id: int) -> None:
+        """One friendship back to `pending:<invite_code>` — for a friend the
+        rotation notice could not reach; see unbind_friendships."""
+        conn = self._get_db()
+        try:
+            with conn.cursor() as cur:
+                cur.execute("""
+                    UPDATE friends
+                       SET public_key_hex = 'pending:' || invite_code
+                     WHERE id = %s AND public_key_hex NOT LIKE 'pending:%%'
+                       AND invite_code <> ''
+                """, (friend_id,))
         finally:
             self._return_db(conn)
 

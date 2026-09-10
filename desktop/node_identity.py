@@ -11,6 +11,7 @@ Identity files are stored in %APPDATA%/Sautium/node_identity/.
 Requires: `cryptography`, `argon2-cffi` (for accounts), `PyNaCl` (for chat encryption).
 """
 
+import base64
 import datetime
 import hashlib
 import json
@@ -57,9 +58,9 @@ def _identity_dir() -> Path:
     return d
 
 
-def _save_keypair(private_key, info: dict) -> str:
+def _save_keypair(private_key, info: dict, identity_dir: Optional[Path] = None) -> str:
     """Save Ed25519 keypair and info to disk. Returns node_id."""
-    d = _identity_dir()
+    d = identity_dir or _identity_dir()
     public_key = private_key.public_key()
 
     priv_pem = private_key.private_bytes(
@@ -308,72 +309,175 @@ def get_invite_code() -> Optional[str]:
 
 
 # ---------------------------------------------------------------------------
-# Key rotation (password change)
+# Key rotation — a new name and/or password
 # ---------------------------------------------------------------------------
+# The name and the password are both KDF inputs, so changing either IS a new
+# key. The old identity is not discarded: its key still decrypts what friends
+# who have not heard yet send to it, still signs the notice that names the
+# successor, and is what a succession claim would ever be argued from.
+# Everything a key owned lives in one archive directory beside the live files.
 
-def rotate_keys(username: str, new_password: str) -> dict:
-    """
-    Change password → new keypair. Returns key rotation message
-    that should be sent to all friends (signed by old key).
+PREVIOUS_DIRNAME = "previous"
+ROTATION_FILENAME = "rotation.json"
+_PUBKEY_RE = re.compile(r"[0-9a-f]{64}")
+_ARCHIVED_FILES = ("node_ed25519.key", "node_ed25519.pub", "node_info.json",
+                   "birth_certificate.json", "identity_proof.json")
 
-    Safety: derives new keys and signs rotation message BEFORE
-    overwriting disk.  Old keys are preserved until the signed
-    message is ready, so a crash at any point before _save_keypair
-    leaves the old identity intact.
 
-    Returns: {new_info, rotation_message, old_signature}
-    """
+def _canonical_notice(payload: dict) -> bytes:
+    return json.dumps(payload, separators=(",", ":"), sort_keys=True).encode("utf-8")
+
+
+def parse_rotation_notice(message: bytes, old_signature: bytes,
+                          new_signature: bytes) -> Optional[dict]:
+    """The notice's fields, or None unless BOTH keys vouch for it: the old
+    one (continuity — only its holder may name a successor) and the new one
+    (possession — a stolen old key cannot point the friendship at a key its
+    thief does not hold). Receivers take every field from the signed bytes,
+    never from the request that carried them."""
+    try:
+        payload = json.loads(message.decode("utf-8"))
+    except (UnicodeDecodeError, ValueError):
+        return None
+    if not isinstance(payload, dict) or payload.get("type") != "key_rotation":
+        return None
+    old_pub, new_pub = payload.get("old_public_key"), payload.get("new_public_key")
+    if not (isinstance(old_pub, str) and _PUBKEY_RE.fullmatch(old_pub)
+            and isinstance(new_pub, str) and _PUBKEY_RE.fullmatch(new_pub)
+            and old_pub != new_pub
+            and isinstance(payload.get("new_invite_code"), str)
+            and len(old_signature) == 64 and len(new_signature) == 64):
+        return None
+    if _canonical_notice(payload) != message:
+        return None
+    if not verify_signature(message, old_signature, old_pub):
+        return None
+    if not verify_signature(message, new_signature, new_pub):
+        return None
+    return payload
+
+
+def rotate_identity(identity_dir: Path, username: str, password: str,
+                    anonymous: bool) -> dict:
+    """Replace the identity in `identity_dir` with the one (username,
+    password) derives, archiving the old one under previous/.
+
+    Returns {"info": new node_info, "rotation": the signed notice}. The
+    notice is written into the archive too — delivery to friends happens
+    later, from the P2P layer, and may need retrying across restarts.
+    Nothing is written before the new key and both signatures exist in
+    memory, so a crash mid-way leaves the old identity whole."""
     if not HAS_CRYPTO:
         raise RuntimeError("cryptography package required")
+    validate_username(username)
 
-    # 1. Load old key (still on disk, untouched)
-    old_private = _load_private_key()
-    old_pub_raw = old_private.public_key().public_bytes(
-        encoding=serialization.Encoding.Raw,
-        format=serialization.PublicFormat.Raw,
-    )
-    old_public_key_hex = old_pub_raw.hex()
+    old_info = json.loads((identity_dir / "node_info.json").read_text(encoding="utf-8"))
+    old_private = serialization.load_pem_private_key(
+        (identity_dir / "node_ed25519.key").read_bytes(), password=None)
+    old_pub = old_info["public_key_hex"].lower()
 
-    # 2. Derive new keypair in memory (DO NOT write to disk yet)
-    new_seed = derive_seed(username, new_password)
-    new_private = Ed25519PrivateKey.from_private_bytes(new_seed)
+    new_private = Ed25519PrivateKey.from_private_bytes(derive_seed(username, password))
     new_pub_raw = new_private.public_key().public_bytes(
-        encoding=serialization.Encoding.Raw,
-        format=serialization.PublicFormat.Raw,
-    )
-    new_public_key_hex = new_pub_raw.hex()
-    new_invite_code = make_invite_code(username, new_pub_raw)
+        encoding=serialization.Encoding.Raw, format=serialization.PublicFormat.Raw)
+    new_pub = new_pub_raw.hex()
+    if new_pub == old_pub:
+        raise ValueError("That name and password are this identity already")
+    new_invite = make_invite_code(username, new_pub_raw)
+    rotated_at = datetime.datetime.now(datetime.timezone.utc).replace(microsecond=0)
 
-    # 3. Build and sign rotation message with OLD key
-    rotation_msg = json.dumps({
+    message = _canonical_notice({
         "type": "key_rotation",
-        "old_public_key": old_public_key_hex,
-        "new_public_key": new_public_key_hex,
-        "new_invite_code": new_invite_code,
-    }, separators=(",", ":")).encode("utf-8")
+        "v": 1,
+        "old_public_key": old_pub,
+        "new_public_key": new_pub,
+        "new_invite_code": new_invite,
+        "rotated_at": rotated_at.isoformat().replace("+00:00", "Z"),
+    })
+    rotation = {
+        "old_public_key": old_pub,
+        "new_public_key": new_pub,
+        "new_invite_code": new_invite,
+        "rotated_at": rotated_at.isoformat().replace("+00:00", "Z"),
+        "message": base64.b64encode(message).decode("ascii"),
+        "old_signature": old_private.sign(message).hex(),
+        "new_signature": new_private.sign(message).hex(),
+    }
 
-    old_signature = old_private.sign(rotation_msg)
+    archive = identity_dir / PREVIOUS_DIRNAME / (
+        rotated_at.strftime("%Y%m%dT%H%M%SZ") + "-" + old_pub[:12])
+    archive.mkdir(parents=True, exist_ok=False)
+    for name in _ARCHIVED_FILES:
+        path = identity_dir / name
+        if path.exists():
+            path.rename(archive / name)
+    (archive / ROTATION_FILENAME).write_text(json.dumps(rotation, indent=2),
+                                             encoding="utf-8")
 
-    # 4. Only NOW persist new keys to disk (point of no return)
     new_info = {
-        "node_id": new_public_key_hex,
-        "public_key_hex": new_public_key_hex,
+        "node_id": new_pub,
+        "public_key_hex": new_pub,
         "algorithm": "Ed25519",
         "username": username,
-        "invite_code": new_invite_code,
-        # Whatever the password was before, this one was typed by its owner —
-        # so the password door opens from here on, even for an account that
-        # kept its `anonymous-XXXX` name.
-        "anonymous": False,
+        "invite_code": new_invite,
+        # The Worker maps invite code → mailbox; a new code is unmapped until
+        # the owner verifies again — from the new key, which is what makes the
+        # notary name the old one as predecessor.
+        "email": old_info.get("email", ""),
+        "email_verified": False,
+        "anonymous": anonymous,
+        "previous": old_info.get("previous", []) + [{
+            "public_key_hex": old_pub,
+            "username": old_info.get("username", ""),
+            "invite_code": old_info.get("invite_code", ""),
+            "retired_at": rotation["rotated_at"],
+            "dir": archive.name,
+        }],
     }
-    _save_keypair(new_private, new_info)
+    _save_keypair(new_private, new_info, identity_dir)
+    logger.info("Identity rotated: %s… → %s… (%s)", old_pub[:16], new_pub[:16], username)
+    return {"info": new_info, "rotation": rotation}
 
-    logger.info(f"Key rotation: {old_public_key_hex[:16]}... → {new_public_key_hex[:16]}...")
-    return {
-        "new_info": new_info,
-        "rotation_message": rotation_msg,
-        "old_signature": old_signature,
-    }
+
+def previous_identities(identity_dir: Optional[Path] = None) -> list:
+    """The retired identities recorded in node_info.json, oldest first."""
+    info_path = (identity_dir or _identity_dir()) / "node_info.json"
+    if not info_path.exists():
+        return []
+    try:
+        return list(json.loads(info_path.read_text(encoding="utf-8")).get("previous", []))
+    except (OSError, ValueError):
+        return []
+
+
+def load_previous_seeds(identity_dir: Optional[Path] = None) -> list:
+    """Raw Ed25519 seeds of every archived key, newest first — what a
+    message encrypted to a retired key is still opened with."""
+    d = identity_dir or _identity_dir()
+    seeds = []
+    for entry in reversed(previous_identities(d)):
+        key_path = d / PREVIOUS_DIRNAME / entry["dir"] / "node_ed25519.key"
+        if not key_path.exists():
+            continue
+        key = serialization.load_pem_private_key(key_path.read_bytes(), password=None)
+        seeds.append(key.private_bytes(
+            encoding=serialization.Encoding.Raw,
+            format=serialization.PrivateFormat.Raw,
+            encryption_algorithm=serialization.NoEncryption()))
+    return seeds
+
+
+def rotation_record(old_public_key_hex: str,
+                    identity_dir: Optional[Path] = None) -> Optional[dict]:
+    """The signed notice that retired `old_public_key_hex`, if this node
+    holds it."""
+    d = identity_dir or _identity_dir()
+    for entry in previous_identities(d):
+        if entry["public_key_hex"] != old_public_key_hex.lower():
+            continue
+        path = d / PREVIOUS_DIRNAME / entry["dir"] / ROTATION_FILENAME
+        if path.exists():
+            return json.loads(path.read_text(encoding="utf-8"))
+    return None
 
 
 # ---------------------------------------------------------------------------
