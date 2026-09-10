@@ -84,7 +84,7 @@ def derive_identity(username: str, password: str, email: str = "") -> dict:
 
     if not USERNAME_RE.match(username):
         raise ValueError(
-            "P2P username must be 3-32 characters: letters, digits, '-' or '_'")
+            "Nickname: 3-32 Latin letters, digits, '-' or '_'")
 
     # Derive seed (same algorithm as desktop)
     salt = f"{username}:sautium".encode("utf-8")

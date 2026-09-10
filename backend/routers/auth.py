@@ -125,7 +125,7 @@ async def change_identity(req: ChangeIdentityRequest) -> dict:
     host can rotate."""
     username = req.username.strip()
     if not username:
-        raise HTTPException(status_code=422, detail="Name required")
+        raise HTTPException(status_code=422, detail="Nickname required")
     if req.password and len(req.password) < 8:
         raise HTTPException(status_code=422, detail="Password: 8+ characters")
     try:

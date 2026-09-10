@@ -231,7 +231,7 @@
       });
       if (r.ok) { setToken((await r.json()).token); return true; }
       if (r.status === 409) return "This node already has an account — reload.";
-      if (r.status === 422) return "Name: 3-32 letters, digits, - or _. Password: 8+ characters.";
+      if (r.status === 422) return "Nickname: 3-32 Latin letters, digits, - or _. Password: 8+ characters.";
       try {
         return (await r.json()).detail || "Could not create the account.";
       } catch { return "Could not create the account."; }
@@ -315,12 +315,13 @@
         // login, so it also switches on sync, chat and analysis signing.
         overlay.querySelector(".confirm-title").textContent = "Set up Sautium";
         msg.innerHTML =
-          "Choose an account name and password. This is your identity on the " +
-          "Sautium network, not just a local login.<br><br>" +
+          "Choose a nickname and password. This is your identity on the " +
+          "Sautium network, not just a local login — the nickname sits inside " +
+          "your invite code, so Latin letters, digits, - or _.<br><br>" +
           "<b>The password is never stored</b> — it derives your keys. If you " +
           "lose it you get a new identity, and your invite code and friends " +
           "with it.";
-        fields.innerHTML = input("auth-user", "text", "account name") +
+        fields.innerHTML = input("auth-user", "text", "nickname") +
                            input("auth-pass", "password", "password (8+ characters)");
         submit.textContent = "Create account";
       } else if (mode === "password") {

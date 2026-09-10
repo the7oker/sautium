@@ -250,7 +250,7 @@ class SetupWizard(ctk.CTkToplevel):
                     # retype on another device — the password would buy
                     # nothing.
                     self._account_error.configure(
-                        text="Choose a name to go with the password")
+                        text="Choose a nickname to go with the password")
                     return False
                 if len(password) < 8:
                     self._account_error.configure(
@@ -516,7 +516,7 @@ class SetupWizard(ctk.CTkToplevel):
         ctk.CTkLabel(
             self.content_frame,
             text=(
-                "Nothing is signed up anywhere: the name and password themselves\n"
+                "Nothing is signed up anywhere: the nickname and password themselves\n"
                 "are the identity. The same pair on any device is the same you."
             ),
             justify="center",
@@ -555,30 +555,33 @@ class SetupWizard(ctk.CTkToplevel):
         # An empty field invites a name; one pre-filled with the minted
         # value invites accepting it — and an anonymous friend is a cost
         # every one of their friends pays in chat.
-        label(0, "Name (what friends see)")
+        label(0, "Nickname (what friends see)")
         self._account_user = entry(
             1, getattr(self, "_account_user_val", ""),
             placeholder_text=f"{self._minted_credentials()['username']} "
                              "if left empty")
-        self._account_user.grid_configure(pady=(0, 10))
+        # The alphabet is stated where the typing happens: a human name in
+        # Cyrillic is the natural thing to try, and "letters" in an error
+        # afterwards reads as a contradiction.
+        hint(2, "Latin letters, digits, - or _ — it sits inside your invite code.")
 
-        label(2, "Password — optional")
+        label(3, "Password — optional")
         self._account_pass = entry(
-            3, getattr(self, "_account_pass_val", ""), show="*",
+            4, getattr(self, "_account_pass_val", ""), show="*",
             placeholder_text="min 8 characters")
-        hint(4, "Makes this name yours on any device. Without it, the "
+        hint(5, "Makes this nickname yours on any device. Without it, the "
                 "identity lives only on this machine.")
 
-        confirm_label = label(5, "Confirm password")
+        confirm_label = label(6, "Confirm password")
         self._account_pass2 = entry(
-            6, getattr(self, "_account_pass2_val", ""), show="*")
+            7, getattr(self, "_account_pass2_val", ""), show="*")
         self._account_pass2.grid_configure(pady=(0, 10))
 
-        label(7, "Email — optional")
+        label(8, "Email — optional")
         self._account_email = entry(
-            8, getattr(self, "_account_email_val", ""),
+            9, getattr(self, "_account_email_val", ""),
             placeholder_text="you@example.com")
-        hint(9, "Friends find you by it, and the network admits you at once "
+        hint(10, "Friends find you by it, and the network admits you at once "
                 "— no proof of work to mine — with priority access when it "
                 "is busy. If this machine is ever lost, the mailbox carries "
                 "your standing to the next identity.")
