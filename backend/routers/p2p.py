@@ -300,7 +300,25 @@ async def set_account_email(req: SetEmailRequest) -> Dict[str, Any]:
 
     _db_execute("UPDATE user_profile SET email_verified = FALSE WHERE id = 1")
 
-    return {"email": email, "email_verified": False}
+    # The step the wizard takes before it sends a code: a mailbox this
+    # identity verified before — a reinstall with the same pair, an address
+    # removed and re-added — is still mapped on the Worker, and asking is
+    # what keeps the code dialog from opening for nothing. The mtime bump
+    # above is what makes _get_identity() read the new address. A Worker
+    # that is busy leaves the flag False: /email/status re-derives it on
+    # the next Profile render, and the Verify row stays.
+    try:
+        result = await _worker_check_email(_get_identity())
+    except HTTPException as e:
+        logger.warning(f"check-email after email change: {e.detail}")
+        result = None
+    verified = bool(result and result.get("verified"))
+    if verified:
+        data["email_verified"] = True
+        info_path.write_text(json.dumps(data, indent=2), encoding="utf-8")
+        _db_execute("UPDATE user_profile SET email_verified = TRUE WHERE id = 1")
+
+    return {"email": email, "email_verified": verified}
 
 
 # One server-side truth for "online" — imported by routers/settings.py's

@@ -9608,14 +9608,17 @@
           msg.textContent = await r.text();
           return;
         }
+        const saved = await r.json();
         msg.style.color = 'var(--color-positive)';
-        msg.textContent = 'Saved — sending the code…';
+        msg.textContent = saved.email_verified ? 'Saved — already verified.' : 'Saved — sending the code…';
         // A freshly entered address goes straight into verification: the
         // code is sent and its dialog opens without a second tap on
-        // "Verify" (that row stays for retries). The screen re-renders
+        // "Verify" (that row stays for retries) — unless the Worker still
+        // holds it verified for this identity (a reinstall, an address
+        // re-added), the same check the wizard makes. The screen re-renders
         // afterwards either way, so the row reflects the outcome.
         close();
-        await openEmailVerifyFlow();
+        if (!saved.email_verified) await openEmailVerifyFlow();
         render();
       } catch (err) {
         msg.style.color = 'var(--color-negative)';
