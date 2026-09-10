@@ -559,8 +559,8 @@ class HardwareProfile(NamedTuple):
     name: str            # full | standard | lite
     device: str          # cuda | mps | cpu
     accel_name: Optional[str]   # GPU / chip as reported, None without one
-    accel_gb: float      # VRAM, or unified memory on Apple Silicon
-    ram_gb: float
+    accel_gb: float      # VRAM, or unified memory on Apple Silicon — GiB
+    ram_gb: float        # GiB
     cores: int
     ml_available: bool   # PyTorch publishes wheels for this platform
 
@@ -575,17 +575,13 @@ def detect_hardware_profile() -> HardwareProfile:
     gpu_available, accel_name, vram_gb = detect_gpu()
     apple_silicon = sys.platform == "darwin" and platform.machine() == "arm64"
     device = "mps" if apple_silicon else "cuda" if gpu_available else "cpu"
-    ram_gb = psutil.virtual_memory().total / 1e9
+    ram_gb = psutil.virtual_memory().total / 1024 ** 3
     cores = os.cpu_count() or 4
     # Unified memory IS system RAM, and a CPU node works out of RAM anyway.
     accel_gb = vram_gb if device == "cuda" else ram_gb
 
     if device == "cuda":
-        # nvidia-smi reports MiB, the backend tiers on torch's decimal GB
-        # (mem_get_info / 1e9) — compare on its scale so a card near a
-        # boundary lands in the same tier here and there.
-        tier_gb = accel_gb * 1024 ** 3 / 1e9
-        name = "full" if tier_gb >= 7.5 else "standard" if tier_gb >= 5.5 else "lite"
+        name = "full" if accel_gb >= 7.5 else "standard" if accel_gb >= 5.5 else "lite"
     elif device == "mps":
         name = "full" if accel_gb >= 23 else "standard" if accel_gb >= 15 else "lite"
     else:

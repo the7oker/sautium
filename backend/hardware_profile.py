@@ -12,9 +12,11 @@ weaker machine (mirrors SAUTIUM_ACCEL_MEMORY_GB). Resolution happens
 once per process.
 
 Auto-detection keys off TOTAL accelerator memory, not free — tiers
-describe the machine, not the moment:
-- CUDA:  >=7.5 GB VRAM -> full, >=5.5 GB -> standard, else lite
-- MPS:   >=23 GB unified -> full, >=15 GB -> standard, else lite
+describe the machine, not the moment. Every figure is in GiB, the unit
+the box and the spec sheet use: a "16 GB" card is 16 GiB, and printing
+it as 17.2 decimal GB made the owner ask where the number came from.
+- CUDA:  >=7.5 GiB VRAM -> full, >=5.5 GiB -> standard, else lite
+- MPS:   >=23 GiB unified -> full, >=15 GiB -> standard, else lite
 - CPU-only -> lite (bulk analysis at 30-100x GPU time is not a product)
 A machine with <12 GB system RAM is demoted one tier: on CUDA the
 whole-track audio buffers live in system RAM, and the model set +
@@ -32,10 +34,12 @@ import functools
 import logging
 import os
 from dataclasses import dataclass
+from typing import Optional
 
 logger = logging.getLogger(__name__)
 
 PROFILES = ("full", "standard", "lite")
+_GIB = 1024 ** 3
 
 _IO_WORKER_CAP = {"full": 16, "standard": 8, "lite": 4}
 _PREFETCH_CAP = {"full": 4, "standard": 4, "lite": 2}
@@ -55,8 +59,9 @@ class HardwareProfile:
     name: str                    # full | standard | lite
     source: str                  # 'auto' | 'user' | 'env'
     device: str                  # cuda | mps | cpu
-    accel_memory_gb: float       # total VRAM / unified memory / RAM
-    ram_gb: float
+    accel_name: Optional[str]    # the GPU / chip as the driver names it
+    accel_memory_gb: float       # total VRAM / unified memory / RAM, GiB
+    ram_gb: float                # GiB
     cores: int
     ml_available: bool           # torch imports — the model stack can run
 
@@ -124,6 +129,7 @@ class HardwareProfile:
             "source": self.source,
             "detected": {
                 "device": self.device,
+                "accel_name": self.accel_name,
                 "accel_memory_gb": round(self.accel_memory_gb, 1),
                 "ram_gb": round(self.ram_gb, 1),
                 "cores": self.cores,
@@ -145,12 +151,12 @@ def _total_ram_gb() -> float:
     doesn't ship it; the desktop venv does)."""
     try:
         import psutil
-        return psutil.virtual_memory().total / 1e9
+        return psutil.virtual_memory().total / _GIB
     except ImportError:
         pass
     try:
         # POSIX (Linux container, macOS)
-        return os.sysconf("SC_PAGE_SIZE") * os.sysconf("SC_PHYS_PAGES") / 1e9
+        return os.sysconf("SC_PAGE_SIZE") * os.sysconf("SC_PHYS_PAGES") / _GIB
     except (ValueError, OSError, AttributeError):
         pass
     try:
@@ -171,14 +177,15 @@ def _total_ram_gb() -> float:
         status = _MemStatus()
         status.dwLength = ctypes.sizeof(_MemStatus)
         ctypes.windll.kernel32.GlobalMemoryStatusEx(ctypes.byref(status))
-        return status.ullTotalPhys / 1e9
+        return status.ullTotalPhys / _GIB
     except Exception:
         logger.warning("RAM detection failed — assuming 16 GB")
         return 16.0
 
 
 def _detect_hardware() -> tuple:
-    """(device, total accel memory GB, total RAM GB, cores, torch present)."""
+    """(device, accelerator name, total accel memory GiB, total RAM GiB,
+    cores, torch present)."""
     ram_gb = _total_ram_gb()
     cores = os.cpu_count() or 4
     try:
@@ -187,14 +194,13 @@ def _detect_hardware() -> tuple:
         device = get_device()
     except Exception:
         # torch-less install — every ML feature is unavailable anyway.
-        return "cpu", ram_gb, ram_gb, cores, False
+        return "cpu", None, ram_gb, ram_gb, cores, False
     if device == "cuda":
         _free, total = torch.cuda.mem_get_info()
-        accel_gb = total / 1e9
-    else:
-        # MPS unified memory == system RAM; CPU works out of RAM anyway.
-        accel_gb = ram_gb
-    return device, accel_gb, ram_gb, cores, True
+        return device, torch.cuda.get_device_name(0), total / _GIB, ram_gb, cores, True
+    # MPS unified memory == system RAM; CPU works out of RAM anyway.
+    name = "Apple Silicon (Metal)" if device == "mps" else None
+    return device, name, ram_gb, ram_gb, cores, True
 
 
 def _auto_tier(device: str, accel_gb: float, ram_gb: float) -> str:
@@ -220,7 +226,7 @@ def _configured_profile() -> tuple:
 @functools.lru_cache(maxsize=1)
 def resolve() -> HardwareProfile:
     """Process-lifetime profile. First call logs the decision."""
-    device, accel_gb, ram_gb, cores, ml_available = _detect_hardware()
+    device, accel_name, accel_gb, ram_gb, cores, ml_available = _detect_hardware()
     configured, source = _configured_profile()
     if configured == "auto":
         name = _auto_tier(device, accel_gb, ram_gb)
@@ -228,12 +234,12 @@ def resolve() -> HardwareProfile:
     else:
         name = configured
     profile = HardwareProfile(
-        name=name, source=source, device=device,
+        name=name, source=source, device=device, accel_name=accel_name,
         accel_memory_gb=accel_gb, ram_gb=ram_gb, cores=cores,
         ml_available=ml_available,
     )
     logger.info(
-        "Hardware profile: %s (%s; %s %.1fGB accel, %.1fGB RAM, %d cores, "
+        "Hardware profile: %s (%s; %s %.1fGiB accel, %.1fGiB RAM, %d cores, "
         "ml=%s) — prewarm=%s local_analysis=%s stream=%s",
         profile.name, profile.source, profile.device, profile.accel_memory_gb,
         profile.ram_gb, profile.cores, "yes" if ml_available else "no",
