@@ -1379,7 +1379,12 @@ CREATE TABLE IF NOT EXISTS friends (
     added_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP,
     last_seen TIMESTAMPTZ,
     is_blocked BOOLEAN DEFAULT FALSE,
-    previous_public_key_hex VARCHAR(128)
+    previous_public_key_hex VARCHAR(128),
+    -- Which of OUR keys this friend binds our invite code to, as far as we
+    -- know: set when the friendship is made under it, advanced when the
+    -- friend accepts a rotation notice. NULL = unknown (a row from before
+    -- the column) — the notice chain is walked until one is accepted.
+    bound_identity VARCHAR(128)
 );
 
 CREATE TABLE IF NOT EXISTS p2p_messages (
