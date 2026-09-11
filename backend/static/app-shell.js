@@ -5408,6 +5408,7 @@
       }
 
       screen.innerHTML = `
+        <div class="album-side">
         <div class="album-hero">
           ${heroImg}
           <div class="album-hero-scrim"></div>
@@ -5446,6 +5447,7 @@
               <span class="btn-icon">${SVG_PLUS}</span><span class="btn-label">Queue</span>
             </button>
           `}
+        </div>
         </div>
         <div class="album-tracklist">${tracksHtml}</div>
         <div class="album-similar" data-similar-slot hidden></div>
@@ -5550,6 +5552,7 @@
     }).join('');
 
     screen.innerHTML = `
+      <div class="album-side">
       <div class="album-hero">
         ${heroImg}
         <div class="album-hero-scrim"></div>
@@ -5565,6 +5568,7 @@
         <div class="album-meta-row">
           <span class="am-dur" style="margin-left: 0;">${editions.length} editions</span>
         </div>
+      </div>
       </div>
       <div class="section-sep"></div>
       <div class="section-head"><h3>Editions</h3></div>
@@ -5748,6 +5752,7 @@
     const when = fmtSessionDate(d.started_at);
     const kind = d.origin === 'radio' ? 'Radio' : d.origin === 'mix' ? 'Mix' : '';
     screen.innerHTML = `
+      <div class="album-side">
       <div class="album-hero">
         ${heroImg}
         <div class="album-hero-scrim"></div>
@@ -5774,6 +5779,7 @@
         <button class="btn-secondary album-queue-btn" type="button" data-action="queue-session"${count ? '' : ' disabled'}>
           <span class="btn-icon">${SVG_PLUS}</span><span class="btn-label">Queue</span>
         </button>
+      </div>
       </div>
       <div class="album-tracklist">${
         count ? trackParts.join('')

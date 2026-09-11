@@ -6317,6 +6317,11 @@ select.add-gear-input {
   .guide-puck svg { animation: none; }
 }
 
+/* The album, release-group and session headers (cover, metadata, actions)
+   are grouped in .album-side so the tablet can lay them out as one block;
+   on the phone the wrapper takes no part in layout. */
+.album-side { display: contents; }
+
 /* More-section windows exist only on the tablet, but a browser window can
    shrink beneath 768px with one open: then it is simply the section,
    full-screen, the way the phone shows it. */
@@ -6495,21 +6500,21 @@ select.add-gear-input {
      the tracklist below — the phone's full-width square would be 688px
      tall here. Prose keeps a readable measure; form-like screens sit
      in a centred column. */
-  .detail-screen:has(> .album-hero) {
+  .album-side {
     display: grid;
     grid-template-columns: calc(280 * var(--px)) minmax(0, 1fr);
     column-gap: var(--space-5);
     padding: var(--space-5) var(--space-5) 0;
     align-items: start;
   }
-  .detail-screen:has(> .album-hero) > .album-hero {
+  .album-side > .album-hero {
     grid-column: 1;
     grid-row: 1 / span 2;
     border-radius: var(--radius-md);
   }
-  .detail-screen:has(> .album-hero) > .album-meta-block { grid-column: 2; grid-row: 1; }
-  .detail-screen:has(> .album-hero) > .album-actions { grid-column: 2; grid-row: 2; }
-  .detail-screen:has(> .album-hero) > :nth-child(n + 4) { grid-column: 1 / -1; }
+  .album-side > .album-meta-block { grid-column: 2; grid-row: 1; }
+  .album-side > .album-actions { grid-column: 2; grid-row: 2; }
+  .album-side > :not(.album-hero):not(.album-meta-block):not(.album-actions) { grid-column: 1 / -1; }
   .detail-screen > .bio { max-width: calc(640 * var(--px)); }
   .friends-screen {
     max-width: calc(640 * var(--px) + 2 * var(--space-4));
@@ -6540,14 +6545,25 @@ select.add-gear-input {
 /* Landscape tablet: the album's cover column stays put on the left while
  * the tracklist scrolls on the right. */
 @media (min-width: 1024px) {
-  .detail-screen:has(> .album-hero) {
+  .detail-screen:has(> .album-side) {
+    display: grid;
     grid-template-columns: calc(320 * var(--px)) minmax(0, 1fr);
-    grid-template-rows: auto auto 1fr auto auto;
+    column-gap: var(--space-5);
+    padding: var(--space-5) var(--space-5) 0;
+    align-items: start;
   }
-  .detail-screen:has(> .album-hero) > .album-hero { grid-row: 1; }
-  .detail-screen:has(> .album-hero) > .album-meta-block { grid-column: 1; grid-row: 2; }
-  .detail-screen:has(> .album-hero) > .album-actions { grid-column: 1; grid-row: 3; align-self: start; }
-  .detail-screen:has(> .album-hero) > .album-tracklist { grid-column: 2; grid-row: 1 / span 3; }
-  .detail-screen:has(> .album-hero) > .album-similar { grid-column: 2; grid-row: 4; }
-  .detail-screen:has(> .album-hero) > :nth-child(n + 6) { grid-column: 2; grid-row: 5; }
+  /* The side stays put while the tracklist scrolls; taller than the
+     viewport it scrolls on its own rather than hiding its buttons. */
+  .album-side {
+    display: block;
+    grid-column: 1;
+    grid-row: 1 / span 3;
+    position: sticky;
+    top: var(--space-5);
+    max-height: calc(100dvh - var(--chrome-bottom) - 2 * var(--space-5));
+    overflow-y: auto;
+    padding: 0;
+  }
+  .album-side > .album-hero { border-radius: var(--radius-md); }
+  .detail-screen:has(> .album-side) > :not(.album-side) { grid-column: 2; }
 }
