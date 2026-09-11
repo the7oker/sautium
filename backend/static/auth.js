@@ -283,7 +283,7 @@
   function showLoginGate() {
     if (document.getElementById("auth-gate")) return;
 
-    const overlay = document.createElement("div");
+    const overlay = document.createElement("dialog");
     overlay.id = "auth-gate";
     overlay.className = "confirm-overlay";
     overlay.innerHTML = `
@@ -292,10 +292,21 @@
         <p class="confirm-message" id="auth-gate-msg">Checking…</p>
         <div id="auth-gate-fields"></div>
         <div class="confirm-actions single">
-          <button class="profile-btn primary" id="auth-gate-submit">Continue</button>
+          <button class="profile-btn primary" type="button" id="auth-gate-submit">Continue</button>
         </div>
       </div>`;
     document.body.appendChild(overlay);
+    // showModal() raises the gate into the browser's top layer, above any
+    // sheet that happened to be open when the token died — a z-index could
+    // not promise that. The gate has no dismiss path (nothing behind it is
+    // usable without a token), so Escape has to be refused twice over:
+    // preventDefault covers the cancelable close request, and the re-open
+    // covers the one Chrome grants outright because the dialog was raised
+    // without user activation. The only way out is a successful sign-in,
+    // which reloads the page.
+    overlay.addEventListener("cancel", (e) => e.preventDefault());
+    overlay.addEventListener("close", () => overlay.showModal());
+    overlay.showModal();
 
     const msg = overlay.querySelector("#auth-gate-msg");
     const fields = overlay.querySelector("#auth-gate-fields");

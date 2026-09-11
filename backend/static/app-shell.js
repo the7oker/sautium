@@ -938,7 +938,7 @@
         });
       }
       document.addEventListener('keydown', e => {
-        if (e.key === 'Escape' && this.isOpen) this.hide();
+        if (e.key === 'Escape' && this.isOpen && !modalIsOpen()) this.hide();
       });
     },
 
@@ -1502,7 +1502,7 @@
 
       this.closeBtn.addEventListener('click', () => this.hide());
       document.addEventListener('keydown', e => {
-        if (e.key === 'Escape' && this.isOpen) this.hide();
+        if (e.key === 'Escape' && this.isOpen && !modalIsOpen()) this.hide();
       });
 
       // `np-update` carries track_index, position, length on every
@@ -2051,7 +2051,7 @@
       });
 
       document.addEventListener('keydown', e => {
-        if (e.key !== 'Escape' || !this.isOpen) return;
+        if (e.key !== 'Escape' || !this.isOpen || modalIsOpen()) return;
         // Inside the sheet: list → chat (so users with an active
         // session can get back without losing context). Then chat
         // → close. Plain × in either view exits the sheet entirely.
@@ -5043,10 +5043,6 @@
   }
 
   function openAlbumsSortPicker(currentSort, onPick) {
-    const overlay = document.createElement('div');
-    overlay.className = 'confirm-overlay';
-    overlay.setAttribute('role', 'dialog');
-    overlay.setAttribute('aria-modal', 'true');
     const rows = ALBUMS_SORTS.map(s => `
       <button class="sort-row${s.id === currentSort ? ' active' : ''}"
               type="button"
@@ -5060,25 +5056,14 @@
         <span class="sort-check">${ALBUMS_SORT_CHECK_SVG}</span>
       </button>
     `).join('');
-    overlay.innerHTML = `
+    const { el, close } = openModal(`
       <div class="confirm-sheet">
         <div class="sheet-handle" aria-hidden="true"></div>
         <h4 class="sheet-title">Sort albums by</h4>
         <div class="sort-list">${rows}</div>
       </div>
-    `;
-    document.body.appendChild(overlay);
-    const close = (picked) => {
-      overlay.remove();
-      document.removeEventListener('keydown', onKey);
-      if (typeof onPick === 'function') onPick(picked);
-    };
-    const onKey = (e) => { if (e.key === 'Escape') close(null); };
-    document.addEventListener('keydown', onKey);
-    overlay.addEventListener('click', e => {
-      if (e.target === overlay) close(null);
-    });
-    overlay.querySelectorAll('[data-sort-id]').forEach(btn => {
+    `, (picked) => { if (typeof onPick === 'function') onPick(picked); }, null);
+    el.querySelectorAll('[data-sort-id]').forEach(btn => {
       btn.addEventListener('click', () => close(btn.dataset.sortId));
     });
   }
@@ -5099,10 +5084,6 @@
   }
 
   function openVariantPicker(variants, currentVid, onPick) {
-    const overlay = document.createElement('div');
-    overlay.className = 'confirm-overlay';
-    overlay.setAttribute('role', 'dialog');
-    overlay.setAttribute('aria-modal', 'true');
     const rows = variants.map(v => {
       const active = v.variant_id === currentVid;
       return `
@@ -5118,25 +5099,16 @@
         </button>
       `;
     }).join('');
-    overlay.innerHTML = `
+    const { el, close } = openModal(`
       <div class="confirm-sheet">
         <div class="sheet-handle" aria-hidden="true"></div>
         <h4 class="sheet-title">Pick variant</h4>
         <div class="sort-list">${rows}</div>
       </div>
-    `;
-    document.body.appendChild(overlay);
-    const close = (picked) => {
-      overlay.remove();
-      document.removeEventListener('keydown', onKey);
+    `, (picked) => {
       if (typeof onPick === 'function' && picked !== null) onPick(picked);
-    };
-    const onKey = (e) => { if (e.key === 'Escape') close(null); };
-    document.addEventListener('keydown', onKey);
-    overlay.addEventListener('click', e => {
-      if (e.target === overlay) close(null);
-    });
-    overlay.querySelectorAll('[data-variant-id]').forEach(btn => {
+    }, null);
+    el.querySelectorAll('[data-variant-id]').forEach(btn => {
       btn.addEventListener('click', () => close(parseInt(btn.dataset.variantId, 10)));
     });
   }
@@ -9307,36 +9279,59 @@
     });
   }
 
+  /* Modal shell behind every dialog in the app — the two below, the
+     sort/variant pickers, and (its own copy, since it loads first) the
+     sign-in gate in auth.js.
+
+     showModal() puts the element in the browser's top layer, which paints
+     above every stacking context in the document and makes the rest of the
+     page inert. That is what lets a dialog opened from inside a full-screen
+     sheet be seen at all: as a plain div this shell carried z-index 70 and
+     the Now Playing sheet (100), the Queue sheet (110) and the AI sheet
+     (100) each drew straight over it — tapping Radio on Now Playing armed a
+     confirm the user could only find by collapsing the sheet.
+
+     `settle` runs exactly once, whichever way the dialog goes away; it gets
+     `dismissValue` when that way was Escape or a tap on the ground. */
+  function openModal(innerHTML, settle, dismissValue) {
+    const el = document.createElement('dialog');
+    el.className = 'confirm-overlay';
+    el.innerHTML = innerHTML;
+    document.body.appendChild(el);
+    let value = dismissValue;
+    el.addEventListener('click', e => { if (e.target === el) el.close(); });
+    el.addEventListener('close', () => { el.remove(); settle(value); });
+    el.showModal();
+    return { el, close: (v) => { value = v; el.close(); } };
+  }
+
+  /* An open dialog owns the Escape key. The sheets listen for it on
+     document, so without this one press both answered the dialog and shut
+     the sheet underneath it. */
+  function modalIsOpen() {
+    return document.querySelector('dialog.confirm-overlay[open]') !== null;
+  }
+
   /* Destructive-action confirm dialog. Replaces window.confirm so
      the prompt sits inside our visual language (warm dark sheet,
      terracotta primary). Returns a Promise<boolean>. */
   function confirmDestructive({ title, message, confirmText = 'Remove', cancelText = 'Cancel', confirmKind = 'destructive' }) {
     return new Promise(resolve => {
-      const overlay = document.createElement('div');
-      overlay.className = 'confirm-overlay';
       const confirmCls = confirmKind === 'destructive'
         ? 'profile-btn destructive' : 'profile-btn primary';
-      overlay.innerHTML = `
-        <div class="confirm-sheet" role="dialog" aria-modal="true">
+      const { el, close } = openModal(`
+        <div class="confirm-sheet">
           <h2 class="confirm-title">${escapeProfileHtml(title)}</h2>
           <p class="confirm-message">${message}</p>
           <div class="confirm-actions">
-            <button class="profile-btn secondary" data-cancel>${escapeProfileHtml(cancelText)}</button>
-            <button class="${confirmCls}" data-confirm>${escapeProfileHtml(confirmText)}</button>
+            <button class="profile-btn secondary" type="button" data-cancel>${escapeProfileHtml(cancelText)}</button>
+            <button class="${confirmCls}" type="button" data-confirm>${escapeProfileHtml(confirmText)}</button>
           </div>
         </div>
-      `;
-      document.body.appendChild(overlay);
-      const close = (result) => { overlay.remove(); document.removeEventListener('keydown', onKey); resolve(result); };
-      const onKey = (e) => {
-        if (e.key === 'Escape') close(false);
-        if (e.key === 'Enter')  close(true);
-      };
-      document.addEventListener('keydown', onKey);
-      overlay.addEventListener('click', e => { if (e.target === overlay) close(false); });
-      overlay.querySelector('[data-cancel]').addEventListener('click', () => close(false));
-      overlay.querySelector('[data-confirm]').addEventListener('click', () => close(true));
-      setTimeout(() => overlay.querySelector('[data-confirm]').focus(), 50);
+      `, resolve, false);
+      el.querySelector('[data-cancel]').addEventListener('click', () => close(false));
+      el.querySelector('[data-confirm]').addEventListener('click', () => close(true));
+      el.querySelector('[data-confirm]').focus();
     });
   }
 
@@ -9352,29 +9347,20 @@
      (escapeProfileHtml is exported on window for that). */
   function notifyDialog({ title, message, kind = 'info', dismissText = 'OK' } = {}) {
     return new Promise(resolve => {
-      const overlay = document.createElement('div');
-      overlay.className = 'confirm-overlay';
       const titleHtml = title
         ? `<h2 class="confirm-title ${kind}">${escapeProfileHtml(title)}</h2>`
         : '';
-      overlay.innerHTML = `
-        <div class="confirm-sheet" role="dialog" aria-modal="true">
+      const { el, close } = openModal(`
+        <div class="confirm-sheet">
           ${titleHtml}
           <p class="confirm-message">${message || ''}</p>
           <div class="confirm-actions single">
-            <button class="profile-btn primary" data-confirm>${escapeProfileHtml(dismissText)}</button>
+            <button class="profile-btn primary" type="button" data-confirm>${escapeProfileHtml(dismissText)}</button>
           </div>
         </div>
-      `;
-      document.body.appendChild(overlay);
-      const close = () => { overlay.remove(); document.removeEventListener('keydown', onKey); resolve(); };
-      const onKey = (e) => {
-        if (e.key === 'Escape' || e.key === 'Enter') close();
-      };
-      document.addEventListener('keydown', onKey);
-      overlay.addEventListener('click', e => { if (e.target === overlay) close(); });
-      overlay.querySelector('[data-confirm]').addEventListener('click', close);
-      setTimeout(() => overlay.querySelector('[data-confirm]').focus(), 50);
+      `, resolve);
+      el.querySelector('[data-confirm]').addEventListener('click', () => close());
+      el.querySelector('[data-confirm]').focus();
     });
   }
 
