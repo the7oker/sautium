@@ -92,6 +92,42 @@
       "h": 768
     },
     {
+      "file": "AlbumPortrait.dc.html",
+      "title": "Portrait · Album",
+      "page": "tablet",
+      "x": 0,
+      "y": 4064,
+      "w": 768,
+      "h": 1024
+    },
+    {
+      "file": "AlbumLandscape.dc.html",
+      "title": "Landscape · Album, two panes",
+      "page": "tablet",
+      "x": 848,
+      "y": 4064,
+      "w": 1024,
+      "h": 768
+    },
+    {
+      "file": "ArtistPortrait.dc.html",
+      "title": "Portrait · Artist",
+      "page": "tablet",
+      "x": 1952,
+      "y": 4064,
+      "w": 768,
+      "h": 1024
+    },
+    {
+      "file": "GenrePortrait.dc.html",
+      "title": "Portrait · Genre",
+      "page": "tablet",
+      "x": 2800,
+      "y": 4064,
+      "w": 768,
+      "h": 1024
+    },
+    {
       "file": "Main.dc.html",
       "title": "A · Sidebar + docked Now Playing",
       "page": "desktop",
@@ -159,6 +195,14 @@
       "y": 2976,
       "w": 620,
       "text": "QUEUE and AI CHAT — the phone sheets verbatim in the 360px card; drawn schematically, the implementation reuses the phone CSS unchanged. Accepted 2026-09-11."
+    },
+    {
+      "id": "set2-note",
+      "page": "tablet",
+      "x": 0,
+      "y": 3804,
+      "w": 660,
+      "text": "Screen set 2 — detail screens. ALBUM: the one change is the header — on the phone the cover is a full-width square; at 688px that would be a 688px cover, so the cover sits beside the title, edition picker, year, chips and buttons (280px in portrait); in landscape the cover column stays put on the left while the tracklist scrolls on the right. Track rows, disc labels and the Similar albums shelf are the phone's. ARTIST and GENRE: nothing moves — the hero, chips and bio (capped at a 640px measure), shelves under the right edge, track rows; the genre's artist grid simply gains columns (auto-fill of 96px tiles)."
     },
     {
       "id": "desktop-brief",
