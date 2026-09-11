@@ -388,9 +388,12 @@
   // stack holds the hashes the open window walked through, so Back pops
   // and a fresh section pushes; its length is the history depth to unwind.
   let _windowRoot = null;
-  let _windowStack = [];
-  let _windowIntent = 'back';      // how the window is being left: 'back' | 'close'
+  let _windowHash = '';            // the section the open window shows
+  let _windowDepth = 0;            // in-app history entries the window stack holds
+  let _windowIntent = 'back';      // how the window is being left: 'back' | 'close' | 'navigate'
+  let _windowLeaving = false;      // a history unwind is in flight
   const WIDE_WINDOW_ROUTE = /^more\/(gear-system|gear-advisor|gear\/)/;
+  const ENTITY_KINDS = new Set(['artist', 'album', 'release-group', 'chat', 'genre', 'session']);
 
   function layoutMode() {
     return getComputedStyle(document.documentElement)
@@ -438,14 +441,26 @@
   function removeWindow() {
     if (_windowRoot) _windowRoot.remove();
     _windowRoot = null;
-    _windowStack = [];
+    _windowHash = '';
+    _windowDepth = 0;
+    _windowLeaving = false;
   }
 
+  // Each in-app window entry is stamped with its depth (history.state
+  // survives reloads and Back), so leaving unwinds exactly the entries
+  // that are ours. A deep link carries depth 0 — nothing of ours behind
+  // it — and is swapped for the screen beneath instead of leaving the app.
   function leaveWindow(intent) {
+    if (_windowLeaving) return;
     _windowIntent = intent;
-    const depth = _windowStack.length;
-    if (depth && history.length > depth) history.go(-depth);
-    else navigate('home');   // a deep link with nothing behind it
+    const depth = history.state && history.state.win;
+    if (depth > 0) {
+      _windowLeaving = true;
+      history.go(-depth);
+      return;
+    }
+    history.replaceState(null, '', '#' + (_lastRenderedHash || 'home'));
+    render();
   }
   // null = unknown / still loading — keep the FAB hidden so we don't
   // flash it on every page load only to immediately retract it once
@@ -463,6 +478,7 @@
 
   function navigate(hash) {
     const target = '#' + hash;
+    if (_windowRoot) _windowIntent = 'navigate';
     if (location.hash !== target) {
       location.hash = target;  // hashchange event will trigger render()
     } else {
@@ -500,18 +516,33 @@
     const app = document.getElementById('app');
     if (!app) return;
 
-    if (layoutMode() === 'tablet' && route === 'more' && segments.length >= 2) {
-      const stack = _windowStack;
-      const top = stack[stack.length - 1];
-      const reuse = top === hash;                       // an in-place refresh
-      if (!reuse && stack.length >= 2 && stack[stack.length - 2] === hash) stack.pop();
-      else if (!reuse) stack.push(hash);
+    if (layoutMode() === 'tablet' && route === 'more' && segments.length >= 2
+        && !ENTITY_KINDS.has(segments[1])) {
+      _windowLeaving = false;
+      const deepLink = !_routeRoot;
+      if (deepLink) {
+        // Straight into a section: mount Home beneath so the scrim has a
+        // screen to return to.
+        _lastRenderedHash = 'home';
+        _routeRoot = document.createElement('div');
+        app.replaceChildren(_routeRoot);
+        routes.home(_routeRoot, 'home');
+      }
+      const reuse = _windowHash === hash;               // an in-place refresh
+      const marked = history.state && Number.isInteger(history.state.win);
+      if (marked) _windowDepth = history.state.win;      // Back, Forward or a reload
+      else if (!reuse) {
+        _windowDepth = deepLink ? 0 : _windowDepth + 1;  // a fresh in-app push
+        history.replaceState({ win: _windowDepth }, '', location.href);
+      }
+      _windowHash = hash;
       const body = mountWindowBody(hash, reuse);
       if (!reuse) body.scrollTop = 0;
       const work = routes.more(body, hash);
       updateNavActive('more');
       updateFabVisibility('more');
-      window.sautiumRendered = Promise.resolve(work).catch(() => {}).then(() => hash);
+      window.sautiumRendered = Promise.resolve(work)
+        .catch(err => console.error('render failed:', err)).then(() => hash);
       return;
     }
     if (_windowRoot) {
@@ -577,7 +608,8 @@
     // so tooling (scripts/ui-shots.mjs) can wait for "this route is on
     // screen" instead of guessing from DOM quiet; resolves to the hash it
     // painted, even when the renderer failed.
-    window.sautiumRendered = Promise.resolve(work).catch(() => {}).then(() => hash);
+    window.sautiumRendered = Promise.resolve(work)
+      .catch(err => console.error('render failed:', err)).then(() => hash);
   }
 
   function updateNavActive(route) {
@@ -2508,11 +2540,16 @@
         this.thread.appendChild(errRow);
         this.scrollToBottom();
       } finally {
-        this.sending = false;
-        this._streamSession = null;
-        this._streamAbort = null;
-        this.sendBtn.disabled = false;
-        this.input.focus();
+        // Only the session this send belongs to releases the lock: a
+        // stream that outlives a switch must not unlock the chat now on
+        // screen, which may be generating on its own.
+        if (this._streamSession === sessionId) {
+          this.sending = false;
+          this._streamSession = null;
+          this._streamAbort = null;
+          this.sendBtn.disabled = false;
+          this.input.focus();
+        }
       }
     },
 
@@ -2910,10 +2947,12 @@
         if (typing.parentNode) typing.remove();
         console.warn('reattach failed:', err);
       } finally {
-        this.sending = false;
-        this._streamSession = null;
-        this._streamAbort = null;
-        this.sendBtn.disabled = false;
+        if (this._streamSession === sessionId) {
+          this.sending = false;
+          this._streamSession = null;
+          this._streamAbort = null;
+          this.sendBtn.disabled = false;
+        }
       }
     },
 
@@ -3654,7 +3693,7 @@
     `;
     root.replaceChildren(screen);
 
-    fetchShuffle(screen);
+    const shuffle = Promise.resolve(fetchShuffle(screen));
     wireDiscoverySearch(screen);
     wireDiscoveryFilters(screen);
 
@@ -3663,13 +3702,16 @@
     // = disabled with a download hint on tap. Kept current via the
     // /api/events stream ('sautium:mb-changed') — the old one-shot fetch
     // left a fresh node's chip dead until a page reload.
-    fetch('/api/discovery/mb-status')
+    const mbStatus = fetch('/api/discovery/mb-status')
       .then(r => r.ok ? r.json() : { available: false, state: 'none' })
       .then(s => {
         const chip = screen.querySelector('#discoveryMbChip');
         if (chip) applyMbChipState(chip, s);
       })
-      .catch(() => {});
+      .catch(err => console.warn('mb-status failed:', err));
+    // The screen is painted once the shuffle shelf and the chip have
+    // landed — render() publishes this as window.sautiumRendered.
+    return Promise.all([shuffle, mbStatus]);
   }
 
   function applyMbChipState(chip, s) {
@@ -8011,7 +8053,8 @@
       </div>
     `;
     screen.querySelector('[data-action="back"]').addEventListener('click', () => {
-      navigate('more');
+      if (history.length > 1) history.back();
+      else navigate('home');
     });
     screen.querySelector('[data-action="refresh"]').addEventListener('click', () => {
       load();

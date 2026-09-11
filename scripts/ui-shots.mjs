@@ -129,7 +129,10 @@ const IMAGES_READY = `new Promise(resolve => {
 // afterwards is the new route's.
 const GO_TO = hash => `new Promise(resolve => {
   const target = ${JSON.stringify('#' + hash)};
-  const done = () => resolve(window.sautiumRendered ? window.sautiumRendered.then(() => 'rendered') : 'quiet');
+  // A renderer whose promise never settles must not hang the run: after
+  // 15 s the quiet-DOM settle that follows is the only signal left.
+  const capped = p => Promise.race([p.then(() => 'rendered'), new Promise(r => setTimeout(() => r('timeout'), 15000))]);
+  const done = () => resolve(window.sautiumRendered ? capped(window.sautiumRendered) : 'quiet');
   if (location.hash === target) return done();
   addEventListener('hashchange', done, { once: true });
   location.hash = target;

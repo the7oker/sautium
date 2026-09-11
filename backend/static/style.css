@@ -6317,6 +6317,19 @@ select.add-gear-input {
   .guide-puck svg { animation: none; }
 }
 
+/* More-section windows exist only on the tablet, but a browser window can
+   shrink beneath 768px with one open: then it is simply the section,
+   full-screen, the way the phone shows it. */
+.route-window {
+  position: fixed;
+  inset: 0;
+  z-index: 90;
+  background: var(--color-foundation);
+  overflow-y: auto;
+}
+.route-window-card { min-height: 100%; }
+.route-window-close { display: none; }
+
 /* =====================================================================
  * Tablet layout mode (>= 768px) — backend/static/CLAUDE.md §"Layout
  * modes". The same DOM: the tab bar becomes a nav rail, the mini-player
@@ -6437,6 +6450,7 @@ select.add-gear-input {
     position: relative;
     width: var(--window-w);
     max-width: 100%;
+    min-height: 0;
     max-height: 100%;
     display: flex;
     flex-direction: column;

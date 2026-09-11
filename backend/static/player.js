@@ -166,6 +166,7 @@
   }
 
   async function processStatusEvent(data, seq) {
+    if (seq !== _statusSeq) return;   // superseded while queued — the newest speaks
     currentState = data.state;
     if (data.ui_build) maybeReloadForUpdate(data.ui_build);
     // Browser-output renderer lifecycle: THIS tab renders audio only while
@@ -189,7 +190,7 @@
       // every consumer reading a stale queue until the next mutation.
       if (await fetchPlaylist()) lastPlaylistVersion = data.playlist_version;
     }
-    if (seq !== _statusSeq) return;
+    if (seq !== _statusSeq) return;   // a newer event arrived during the fetch
     // After the playlist settles, so the fallback reads the queue this
     // status belongs to. process_speed is HQPlayer's realtime DSP factor
     // (0.0 when unknown) — carried straight through, like everything else
