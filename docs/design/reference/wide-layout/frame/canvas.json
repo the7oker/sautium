@@ -146,6 +146,42 @@
       "h": 1024
     },
     {
+      "file": "DiscoveryPortrait.dc.html",
+      "title": "Portrait · Discovery with results",
+      "page": "tablet",
+      "x": 0,
+      "y": 5208,
+      "w": 768,
+      "h": 1024
+    },
+    {
+      "file": "FriendsPortrait.dc.html",
+      "title": "Portrait · Friends",
+      "page": "tablet",
+      "x": 848,
+      "y": 5208,
+      "w": 768,
+      "h": 1024
+    },
+    {
+      "file": "ChatLandscape.dc.html",
+      "title": "Landscape · Chat thread",
+      "page": "tablet",
+      "x": 1696,
+      "y": 5208,
+      "w": 1024,
+      "h": 768
+    },
+    {
+      "file": "SessionPortrait.dc.html",
+      "title": "Portrait · Listening session",
+      "page": "tablet",
+      "x": 2800,
+      "y": 5208,
+      "w": 768,
+      "h": 1024
+    },
+    {
       "file": "Main.dc.html",
       "title": "A · Sidebar + docked Now Playing",
       "page": "desktop",
@@ -221,6 +257,14 @@
       "y": 3804,
       "w": 660,
       "text": "Screen set 2 — detail screens. ALBUM: the one change is the header — on the phone the cover is a full-width square; at 688px that would be a 688px cover, so the cover sits beside the title, edition picker, year, chips and buttons (280px in portrait); in landscape the cover column stays put on the left while the tracklist scrolls on the right. Track rows, disc labels and the Similar albums shelf are the phone's. ARTIST and GENRE: nothing moves — the hero, chips and bio (capped at a 640px measure), shelves under the right edge, track rows; the genre's artist grid simply gains columns (auto-fill of 96px tiles)."
+    },
+    {
+      "id": "set3-note",
+      "page": "tablet",
+      "x": 0,
+      "y": 4988,
+      "w": 660,
+      "text": "Screen set 3. DISCOVERY: the phone screen at content width — search, Advanced filters, results (or the shuffle mosaic when the field is empty); landscape is the same, wider. FRIENDS: form-like, so it sits in a centred 640px column rather than stretching inputs across the tablet. CHAT: a centred 720px column, bubbles capped at 60%; the list + thread split stays a later option. SESSION: the album header pattern (cover beside title, meta and Play / Album / Queue), the phone's track rows below. The remaining More sections (HQPlayer, Audio output, Streaming library, AI, Sync) are covered by the window pattern and need no boards."
     },
     {
       "id": "desktop-brief",
