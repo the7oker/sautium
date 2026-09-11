@@ -625,58 +625,66 @@ archived in git history; no need to keep both.
 
 ## Layout modes — tablet / desktop
 
-Decided 2026-09-11, replacing the April plan of "separate HTML files
-per form factor". That plan predates the rebuild that turned every
-screen into a renderer inside `app-shell.js`; forking those renderers
-per form factor would triple the maintenance surface for no product
-gain. Instead the **same DOM** is laid out differently per viewport
-width. The **type scale stays locked** (`--px == 1px` above 360, so
-13 / 15 / 20 / 32 px render 1:1 on a monitor — the same range native
-desktop players use); what changes is the frame and the columns.
+Decided 2026-09-11 (the tablet frame was settled the same evening),
+replacing the April plan of "separate HTML files per form factor".
+That plan predates the rebuild that turned every screen into a
+renderer inside `app-shell.js`; forking those renderers per form factor
+would triple the maintenance surface for no product gain. Instead the
+**same DOM** is laid out differently per viewport width. The **type
+scale stays locked** (`--px == 1px` above 360, so 13 / 15 / 20 / 32 px
+render 1:1 on a tablet or a monitor); what changes is the frame.
 
 | Mode | Width | Catches | Frame |
 |---|---|---|---|
 | `compact` | < 768 | every phone portrait, small landscape phones | this document's mobile chrome, unchanged |
-| `medium` | 768–1199 | iPad portrait (768–1024) and landscape (1024–1194), large phones landscape | left **nav rail** (80), bottom **player bar**, overlays become **centred cards** over a scrim |
-| `expanded` | ≥ 1200 | 13" iPad landscape, every laptop and monitor | left **sidebar** (240) with the More rows inline, player bar, a **docked right panel** (380) for Now Playing / Queue / AI |
+| `tablet` | ≥ 768 | iPad portrait 768–1024 and landscape 1024–1366, large phones landscape | left **nav rail** (80, icon + caption), the **mini-player** as a bar right of the rail, the AI FAB above it; every sheet opens as a **centred card** over a scrim |
+| `desktop` | later | laptops and monitors | not designed yet — three directions are parked on the frame canvas; the frame reserves a docked right panel (`--panel-w`) for it |
 
-768 is the narrowest iPad; 1200 keeps every iPad-landscape width out
-of the docked layout (sidebar + panel would leave 404–574 px of
-content). Worst case with a panel open is 1200 − 240 − 380 = 580 px of
-content, wider than the 468 px column the old centred layout allowed.
+Tablet artboards are drawn at 768×1024 and 1024×768 (the smallest
+iPad): wider iPads get more content, never more chrome. Portrait and
+landscape share one frame; only the content width differs. A
+permanently docked Now Playing panel was tried for landscape and
+rejected as visually overloaded at 1024.
 
 Chrome mapping:
 
-| Surface | `compact` | `medium` | `expanded` |
-|---|---|---|---|
-| Bottom nav | tab bar | nav rail (icon + caption) | sidebar (icon + label) |
-| More drawer | bottom drawer | popover beside the rail | sidebar section; More tab hidden |
-| Mini-player | bar above the nav | player bar right of the rail | player bar |
-| AI FAB | bottom-right | stays | gone — sidebar entry + shortcut |
-| Now Playing | full-screen sheet | centred card | docked panel *or* centred card (design decides; the frame supports both) |
-| Queue | full-screen over Now Playing | centred card | same panel slot, stacks over Now Playing |
-| AI (master-detail) | full-screen, list ⇄ chat | centred card | docked panel, list ⇄ chat unchanged |
-| Bottom sheets (add-gear style, HQP pickers) | bottom sheet | centred dialog | centred dialog |
-| `<dialog>` confirms | centred, top layer | same | same |
+| Surface | `compact` | `tablet` |
+|---|---|---|
+| Bottom nav | tab bar | nav rail (icon + caption) — same `<nav>` / `.nav-tab` DOM |
+| More drawer | bottom drawer | popover beside the rail (drawn with the first tablet screen set); same rows, one DOM node |
+| Mini-player | bar above the nav | bar at the bottom, right of the rail |
+| AI FAB | bottom-right | bottom-right, above the bar |
+| Now Playing | full-screen sheet | the same sheet at its native 360px as a centred card over a scrim; the chevron, a scrim tap or Escape closes it; it scrolls as a whole, cover included, exactly like the phone |
+| Queue | full-screen over Now Playing | centred card in the same slot, stacked over Now Playing |
+| AI (master-detail) | full-screen, list ⇄ chat | centred card, list ⇄ chat unchanged |
+| Bottom sheets (add-gear style, HQP pickers) | bottom sheet | centred dialog |
+| `<dialog>` confirms | centred, top layer | same |
+| Shelves (Home, Artist) | run under the right edge | the same — a cut tile is the scroll affordance, never a gutter |
 
-Rules that keep this one UI rather than three:
+Floating cards sit on a fourth elevation step, `--shadow-4` (a warm
+ambient drop plus a 1px light rim so the edge reads on the dark scrim),
+added to `tokens.css` with the frame.
+
+Rules that keep this one UI rather than two:
 
 - **CSS owns the mode.** Breakpoints are raw-px media queries in
   `tokens.css`; every chrome offset derives from one set of per-mode
   variables (the contract is in `backend/static/CLAUDE.md` §"Layout
   modes"). No `matchMedia`, no resize listener.
-- **JS asks, never decides.** The only reads of the live mode are
-  where `[hidden]` would otherwise force a mobile-only behaviour
-  (closing a docked panel before navigating, pinning Discovery
-  filters open). Everything else is the same code path in every mode.
+- **JS asks, never decides.** A read of the live mode is allowed only
+  where `[hidden]` would otherwise force a mobile-only behaviour;
+  the tablet cycle needs none — a scrim tap closing a card is the
+  same listener in every mode (in `compact` the screen covers the
+  scrim, so it never fires).
 - **One DOM per chrome element.** The nav, the More rows, the
   mini-player and each sheet exist once; a mode repositions them.
 - **Document scroll stays.** The frame is fixed chrome plus
   variables, not a grid with an inner scroller — the scroll model,
   sticky elements and iOS behaviour of the compact layout are
   untouched.
-- Every screen is verified at 360 and at the medium / expanded
-  widths of its artboards; the compact rendering must not change.
+- Every screen is verified at 360 and at the widths of its tablet
+  artboards; the compact rendering must not change
+  (`scripts/ui-shots.mjs --compare` against a baseline is the proof).
 
 Known costs of the unified approach (accepted): a true list + detail
 split (Friends list beside a chat thread) needs a renderer extracted
