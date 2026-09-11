@@ -111,7 +111,8 @@
   .t56 { width: 56px; height: 56px; border-radius: 50%; display: grid; place-items: center; color: var(--text); }
   .t56 svg { width: 28px; height: 28px; }
   .t68 { width: 68px; height: 68px; border-radius: 50%; background: var(--amber); color: var(--foundation); display: grid; place-items: center; }
-  .t68 svg { width: 32px; height: 32px; }
+  .t68 svg { width: 28px; height: 28px; }
+  .t56.sec svg { width: 22px; height: 22px; }
   .simhead { display: flex; justify-content: space-between; align-items: baseline; margin: 24px 0 12px; padding-bottom: 8px;
              border-bottom: 1px solid var(--divider); font-size: 15px; font-weight: 600; letter-spacing: 0.06em; }
   .simhead span { font-family: "JetBrains Mono", ui-monospace, monospace; font-size: 11px; font-weight: 400; color: var(--muted); letter-spacing: 0.06em; }
@@ -120,9 +121,17 @@
   .sim .t { font-size: 15px; font-weight: 500; }
   .sim .s { font-size: 13px; color: var(--muted); }
   .sim .score { font-family: "JetBrains Mono", ui-monospace, monospace; font-size: 13px; color: var(--blue); }
-  .sim .add { width: 44px; height: 44px; display: grid; place-items: center; color: var(--text); }
+  .sim .add { width: 44px; height: 44px; display: grid; place-items: center; color: var(--muted); }
+  .sim .add svg { width: 20px; height: 20px; }
 
   .scrim { position: absolute; inset: 0; background: var(--scrim); }
+  .sheet { position: absolute; top: 0; right: 0; bottom: 0; width: 360px; background: var(--foundation);
+           border-left: 1px solid var(--divider); overflow: hidden; }
+  .sheet.centred { right: auto; left: 50%; transform: translateX(-50%); top: 24px; bottom: 24px;
+                   border: 0; border-radius: 14px; box-shadow: var(--shadow-3); }
+  .sheet .chev { position: absolute; top: 4px; left: 8px; width: 44px; height: 44px; display: grid; place-items: center;
+                 color: var(--text); background: linear-gradient(rgba(14,10,8,.55), rgba(14,10,8,0)); border-radius: 50%; }
+  .sheet .chev svg { width: 28px; height: 28px; }
   .card { position: absolute; left: 50%; top: 50%; transform: translate(-50%, -50%); width: 560px; background: var(--foundation);
           border-radius: 14px; box-shadow: var(--shadow-3); overflow: hidden; }
   .card .top { display: flex; gap: 20px; padding: 20px; }

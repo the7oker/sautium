@@ -144,42 +144,36 @@
          font-weight: 700; font-size: 13px; display: grid; place-items: center; box-shadow: var(--shadow-2); }
 </style>
 </helmet>
-<div class="frame" style="width: 1440px; height: 900px;">
+<div class="frame" style="width: 1024px; height: 768px;">
   
-  <nav class="nav" style="width: {{navW}}px; bottom: 72px;">
-    <div class="brand">Sautium<span class="dot">.</span></div>
-    <div class="nav-row active"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M3 11l9-8 9 8v10a1 1 0 0 1-1 1h-5v-7H10v7H4a1 1 0 0 1-1-1V11z" fill="none" stroke="currentColor" stroke-width="2" stroke-linejoin="round"/></svg><span>Home</span></div>
-    <div class="nav-row"><svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="11" cy="11" r="6" fill="none" stroke="currentColor" stroke-width="2"/><line x1="16" y1="16" x2="21" y2="21" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg><span>Discovery</span></div>
-    <div class="nav-row"><svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="9" cy="8" r="3.5" fill="none" stroke="currentColor" stroke-width="2"/><path d="M3 20c0-3 2.5-5 6-5s6 2 6 5" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"/><circle cx="17" cy="9" r="2.5" fill="none" stroke="currentColor" stroke-width="2"/><path d="M14 17c0-2 1.7-3.5 4-3.5s4 1.5 4 3.5" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg><span>Friends</span></div>
-    <div class="nav-row" style="color: var(--amber);"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3l1.8 5.2L19 10l-5.2 1.8L12 17l-1.8-5.2L5 10l5.2-1.8L12 3z" fill="none" stroke="currentColor" stroke-width="2" stroke-linejoin="round"/><path d="M18.5 15.5l.8 2.2 2.2.8-2.2.8-.8 2.2-.8-2.2-2.2-.8 2.2-.8.8-2.2z" fill="currentColor"/></svg><span>Ask AI</span></div>
-    <div class="nav-sect">Settings</div>
-    <div class="nav-row small"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M3 12h3l2-6 3 12 3-9 2 3h5" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg><span>HQPlayer</span></div>
-    <div class="nav-row small"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 9v6h4l5 4V5L8 9H4z" fill="none" stroke="currentColor" stroke-width="2" stroke-linejoin="round"/><path d="M16 9a4 4 0 0 1 0 6M18.5 6.5a8 8 0 0 1 0 11" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg><span>Audio output</span></div>
-    <div class="nav-row small"><svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="8" r="4" fill="none" stroke="currentColor" stroke-width="2"/><path d="M4 21c0-4 3.5-6.5 8-6.5s8 2.5 8 6.5" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg><span>Profile</span></div>
-    <div class="nav-row small"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 7h10M18 7h2M4 17h4M12 17h8" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"/><circle cx="16" cy="7" r="2.5" fill="none" stroke="currentColor" stroke-width="2"/><circle cx="10" cy="17" r="2.5" fill="none" stroke="currentColor" stroke-width="2"/></svg><span>My gear</span></div>
-    <div class="nav-row small"><svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="9" fill="none" stroke="currentColor" stroke-width="2"/><path d="M15.5 8.5l-2 5-5 2 2-5 5-2z" fill="none" stroke="currentColor" stroke-width="2" stroke-linejoin="round"/></svg><span>Gear advisor</span></div>
-    <div class="nav-row small"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M3 6h6l2 2h10v10a1 1 0 0 1-1 1H4a1 1 0 0 1-1-1V6z" fill="none" stroke="currentColor" stroke-width="2" stroke-linejoin="round"/></svg><span>Library</span></div>
-    <div class="nav-row small"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M7 18a4 4 0 0 1-.5-8A6 6 0 0 1 18 9a4 4 0 0 1 0 9H7z" fill="none" stroke="currentColor" stroke-width="2" stroke-linejoin="round"/></svg><span>Streaming library</span></div>
-    <div class="nav-row small"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3l1.8 5.2L19 10l-5.2 1.8L12 17l-1.8-5.2L5 10l5.2-1.8L12 3z" fill="none" stroke="currentColor" stroke-width="2" stroke-linejoin="round"/><path d="M18.5 15.5l.8 2.2 2.2.8-2.2.8-.8 2.2-.8-2.2-2.2-.8 2.2-.8.8-2.2z" fill="currentColor"/></svg><span>AI assistant</span></div>
-    <div class="nav-row small"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 12a8 8 0 0 1 14-5.3M20 12a8 8 0 0 1-14 5.3" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"/><path d="M18 3v4h-4M6 21v-4h4" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg><span>Sync</span></div>
-  </nav>
-  <main class="content" style="left: {{navW}}px; right: {{panelW}}px; bottom: 72px;">
+  <nav class="rail" style="bottom: 72px;">
+    <div class="mark">S<span style="color: var(--amber);">.</span></div>
+    <div class="rail-tab active"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M3 11l9-8 9 8v10a1 1 0 0 1-1 1h-5v-7H10v7H4a1 1 0 0 1-1-1V11z" fill="none" stroke="currentColor" stroke-width="2" stroke-linejoin="round"/></svg><span>Home</span></div>
+    <div class="rail-tab"><svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="11" cy="11" r="6" fill="none" stroke="currentColor" stroke-width="2"/><line x1="16" y1="16" x2="21" y2="21" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg><span>Discovery</span></div>
+    <div class="rail-tab"><svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="9" cy="8" r="3.5" fill="none" stroke="currentColor" stroke-width="2"/><path d="M3 20c0-3 2.5-5 6-5s6 2 6 5" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"/><circle cx="17" cy="9" r="2.5" fill="none" stroke="currentColor" stroke-width="2"/><path d="M14 17c0-2 1.7-3.5 4-3.5s4 1.5 4 3.5" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg><span>Friends</span></div>
+    <div class="rail-tab"><svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="6" r="1.6" fill="currentColor"/><circle cx="12" cy="12" r="1.6" fill="currentColor"/><circle cx="12" cy="18" r="1.6" fill="currentColor"/></svg><span>More</span></div>
+    <div class="spacer"></div>
     
-    <section class="sec"><h2>Favourite artists</h2><div class="row"><div class="artist"><div class="avatar"></div><div class="name">Hidden Orchestra</div></div><div class="artist"><div class="avatar"></div><div class="name">Klaus Schulze</div></div><div class="artist"><div class="avatar"></div><div class="name">Vangelis</div></div><div class="artist"><div class="avatar"></div><div class="name">Portico Quartet</div></div><div class="artist"><div class="avatar"></div><div class="name">David Gilmour</div></div><div class="artist"><div class="avatar"></div><div class="name">Ludovico Einaudi</div></div><div class="artist"><div class="avatar"></div><div class="name">Tangerine Dream</div></div></div></section>
-    <section class="sec"><h2>Recommendations</h2><div class="row"><div class="album"><div class="cover"></div><div class="t">Immunity</div><div class="s">Jon Hopkins</div></div><div class="album"><div class="cover"></div><div class="t">Moonlake</div><div class="s">Klaus Schulze</div></div><div class="album"><div class="cover"></div><div class="t">Phaedra</div><div class="s">Tangerine Dream</div></div><div class="album"><div class="cover"></div><div class="t">Archipelago</div><div class="s">Hidden Orchestra</div></div><div class="album"><div class="cover"></div><div class="t">Blade Runner</div><div class="s">Vangelis</div></div></div></section>
-    <section class="sec"><h2>New in my collection</h2><div class="row"><div class="album"><div class="cover"></div><div class="t">После Stereo</div><div class="s">Mamanet</div></div><div class="album"><div class="cover"></div><div class="t">Легко</div><div class="s">Mamanet</div></div><div class="album"><div class="cover"></div><div class="t">Patterns</div><div class="s">Gai Barone</div></div><div class="album"><div class="cover"></div><div class="t">Echoes</div><div class="s">Ludovico Einaudi</div></div><div class="album"><div class="cover"></div><div class="t">Remember That Night</div><div class="s">David Gilmour</div></div></div></section>
-    <section class="sec"><h2>Listening history</h2><div class="row"><div class="album"><div class="cover"></div><div class="t">The Turn Of A Friendly Card</div><div class="s">The Alan Parsons Project</div></div><div class="album"><div class="cover"></div><div class="t">Portico Quartet</div><div class="s">Portico Quartet</div></div><div class="album"><div class="cover"></div><div class="t">Live at the Royal Albert Hall</div><div class="s">David Gilmour</div></div><div class="album"><div class="cover"></div><div class="t">Echoes</div><div class="s">Ludovico Einaudi</div></div><div class="album"><div class="cover"></div><div class="t">Immunity</div><div class="s">Jon Hopkins</div></div></div></section></main>
+  </nav>
+  <main class="content" style="left: 80px; right: 0; bottom: 72px;">
+    <h1 class="brand" style="padding: 0 0 8px">Sautium<span class="dot">.</span></h1>
+    <section class="sec"><h2>Favourite artists</h2><div class="row"><div class="artist"><div class="avatar"></div><div class="name">Hidden Orchestra</div></div><div class="artist"><div class="avatar"></div><div class="name">Klaus Schulze</div></div><div class="artist"><div class="avatar"></div><div class="name">Vangelis</div></div><div class="artist"><div class="avatar"></div><div class="name">Portico Quartet</div></div><div class="artist"><div class="avatar"></div><div class="name">David Gilmour</div></div><div class="artist"><div class="avatar"></div><div class="name">Ludovico Einaudi</div></div><div class="artist"><div class="avatar"></div><div class="name">Tangerine Dream</div></div><div class="artist"><div class="avatar"></div><div class="name">Jon Hopkins</div></div><div class="artist"><div class="avatar"></div><div class="name">Gai Barone</div></div><div class="artist"><div class="avatar"></div><div class="name">Mamanet</div></div></div></section>
+    <section class="sec"><h2>Recommendations</h2><div class="row"><div class="album"><div class="cover"></div><div class="t">Immunity</div><div class="s">Jon Hopkins</div></div><div class="album"><div class="cover"></div><div class="t">Moonlake</div><div class="s">Klaus Schulze</div></div><div class="album"><div class="cover"></div><div class="t">Phaedra</div><div class="s">Tangerine Dream</div></div><div class="album"><div class="cover"></div><div class="t">Archipelago</div><div class="s">Hidden Orchestra</div></div><div class="album"><div class="cover"></div><div class="t">Blade Runner</div><div class="s">Vangelis</div></div><div class="album"><div class="cover"></div><div class="t">Isla</div><div class="s">Portico Quartet</div></div><div class="album"><div class="cover"></div><div class="t">Singularity</div><div class="s">Jon Hopkins</div></div></div></section>
+    <section class="sec"><h2>New in my collection</h2><div class="row"><div class="album"><div class="cover"></div><div class="t">После Stereo</div><div class="s">Mamanet</div></div><div class="album"><div class="cover"></div><div class="t">Легко</div><div class="s">Mamanet</div></div><div class="album"><div class="cover"></div><div class="t">Patterns</div><div class="s">Gai Barone</div></div><div class="album"><div class="cover"></div><div class="t">Echoes</div><div class="s">Ludovico Einaudi</div></div><div class="album"><div class="cover"></div><div class="t">Remember That Night</div><div class="s">David Gilmour</div></div><div class="album"><div class="cover"></div><div class="t">Night Walks</div><div class="s">Hidden Orchestra</div></div><div class="album"><div class="cover"></div><div class="t">Art of Chill</div><div class="s">Portico Quartet</div></div></div></section>
+    <section class="sec"><h2>Listening history</h2><div class="row"><div class="album"><div class="cover"></div><div class="t">The Turn Of A Friendly Card</div><div class="s">The Alan Parsons Project</div></div><div class="album"><div class="cover"></div><div class="t">Portico Quartet</div><div class="s">Portico Quartet</div></div><div class="album"><div class="cover"></div><div class="t">Live at the Royal Albert Hall</div><div class="s">David Gilmour</div></div><div class="album"><div class="cover"></div><div class="t">Echoes</div><div class="s">Ludovico Einaudi</div></div><div class="album"><div class="cover"></div><div class="t">Immunity</div><div class="s">Jon Hopkins</div></div><div class="album"><div class="cover"></div><div class="t">Moonlake</div><div class="s">Klaus Schulze</div></div><div class="album"><div class="cover"></div><div class="t">Phaedra</div><div class="s">Tangerine Dream</div></div></div></section></main>
   
-  <div class="bar mini" style="left: {{navW}}px;">
+  <div class="bar mini" style="left: 80px;">
     <div class="cov"></div>
     <div><div class="ti">High Hopes</div><div class="ar">David Gilmour · Remember That Night: Live at the Royal Albert Hall</div></div>
     <div class="btn"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M8 5v14l11-7z" fill="currentColor"/></svg></div>
     <div class="btn"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M6 18l8.5-6L6 6v12zm10-12v12h2V6h-2z" fill="currentColor"/></svg></div>
   </div>
+  <div class="fab" style="bottom: 88px; right: 16px;">AI</div>
   
-  <aside class="panel" style="width: {{panelW}}px; bottom: 72px;">
-    <div class="head"><span>Now playing</span><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M6 6l12 12M18 6L6 18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg></div>
+  <div class="scrim"></div>
+  <aside class="sheet centred">
     <div class="npcover"></div>
+    <div class="chev"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M6 9l6 6 6-6" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg></div>
     <div class="npbody">
       <h3 class="npt">High Hopes</h3>
       <p class="npa">David Gilmour</p>
@@ -200,17 +194,9 @@
       <div class="simhead">SIMILAR TRACKS <span>CLAP · 7 MATCHES</span></div>
       <div class="sim"><div class="c"></div><div><div class="t">Coming Back To Life</div><div class="s">David Gilmour · 2007</div></div><span class="score">0.94</span><div class="add"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 5v14M5 12h14" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round"/></svg></div></div>
       <div class="sim"><div class="c"></div><div><div class="t">Shine On You Crazy Diamond</div><div class="s">David Gilmour · 2007</div></div><span class="score">0.93</span><div class="add"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 5v14M5 12h14" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round"/></svg></div></div>
-      <div class="sim"><div class="c"></div><div><div class="t">Wish You Were Here</div><div class="s">David Gilmour · 2007</div></div><span class="score">0.91</span><div class="add"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 5v14M5 12h14" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round"/></svg></div></div>
     </div>
   </aside>
 </div>
 </x-dc>
-<script data-dc-script data-props='{"navW":{"editor":"int","default":240,"min":200,"max":320,"unit":"px","section":"Frame"},"panelW":{"editor":"int","default":380,"min":320,"max":440,"unit":"px","section":"Frame"},"$preview":{"width":1440,"height":900}}'>
-class Component extends DCLogic {
-  renderVals() {
-    return { navW: this.props.navW ?? 240, panelW: this.props.panelW ?? 380 };
-  }
-}
-</script>
 </body>
 </html>
