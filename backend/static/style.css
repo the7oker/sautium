@@ -28,44 +28,35 @@ a { color: inherit; text-decoration: none; }
    elements visible with empty content. */
 [hidden] { display: none !important; }
 
-:root {
-  /* App-shell layout heights, derived from per-component sizing in
-     this file. Centralised so the mini-player offset, FAB position,
-     and #app padding stay consistent. */
-  --nav-h: calc(56 * var(--px));   /* bottom-nav button-row height */
-  --mp-h:  calc(60 * var(--px));   /* mini-player height (cover + padding) */
-  --fab-clear: calc(72 * var(--px)); /* AI FAB height (56) + breathing (16) */
+/* Chrome geometry is derived once, here, from the layout-mode variables
+   in tokens.css and the two body states JS sets (has-miniplayer from
+   mp.update(), no-fab from updateFabVisibility()). Every chrome element
+   positions itself from --chrome-bottom and --nav-w; none carries its
+   own copy of the sum. */
+body {
+  --player-h-active: 0px;
+  --fab-clear-active: var(--fab-clear);
+  --chrome-bottom: calc(var(--nav-h) + var(--player-h-active) + var(--safe-bottom));
 }
+body.has-miniplayer { --player-h-active: var(--player-h); }
+body.no-fab { --fab-clear-active: 0px; }
 
 body.sautium-base {
   min-height: 100vh;
   min-height: 100dvh;
 }
 
-/* `#app` reserves bottom padding for: bottom-nav, optional mini-player,
-   AND the AI FAB (which floats above both). Without the FAB clearance,
-   the bottom-right "+" / icon button on the last list row sits behind
-   the FAB and can't be tapped. The FAB is always 56px tall plus a
-   16px breathing buffer = 72px. Mini-player adds its own 60px when
-   visible. See .ai-fab and body.has-miniplayer .ai-fab for the
-   matching positioning rules. */
+/* `#app` reserves the chrome: the bottom nav, the mini-player when one
+   is showing, the AI FAB (56px + 16px breathing — without it the
+   bottom-right "+" on the last list row sits behind the FAB) and, on
+   the tablet, the nav rail on the left. Routes without a FAB drop its
+   clearance (body.no-fab): on a full-height screen (chat) the unused
+   72px would push the document past the viewport. */
 #app {
-  padding-bottom: calc(var(--nav-h) + var(--fab-clear) + var(--safe-bottom));
+  padding-bottom: calc(var(--chrome-bottom) + var(--fab-clear-active));
+  padding-left: var(--nav-w);
   min-height: 100vh;
   min-height: 100dvh;
-}
-body.has-miniplayer #app {
-  padding-bottom: calc(var(--nav-h) + var(--mp-h) + var(--fab-clear) + var(--safe-bottom));
-}
-/* Routes without a FAB must not reserve its clearance: on a full-height
-   screen (chat) the unused 72 px push the document past the viewport,
-   so the page scrolls and blanks out below the pinned input row. Set
-   from updateFabVisibility() — route-level, not overlay-level. */
-body.no-fab #app {
-  padding-bottom: calc(var(--nav-h) + var(--safe-bottom));
-}
-body.no-fab.has-miniplayer #app {
-  padding-bottom: calc(var(--nav-h) + var(--mp-h) + var(--safe-bottom));
 }
 
 /* =====================================================================
@@ -364,6 +355,8 @@ body.no-fab.has-miniplayer #app {
   font-weight: 500;
   letter-spacing: var(--tracking-label);
 }
+/* The brand mark at the top of the nav rail; not a grid item on the phone. */
+.nav-mark { display: none; }
 
 .nav-tab[aria-current="page"] { color: var(--color-amber); }
 .nav-tab:active { background: var(--color-amber-weak); }
@@ -374,7 +367,7 @@ body.no-fab.has-miniplayer #app {
 
 .mini-player {
   position: fixed;
-  left: 0; right: 0;
+  left: var(--nav-w); right: 0;
   bottom: calc(var(--nav-h) + var(--safe-bottom));
   z-index: 49;
   display: grid;
@@ -440,7 +433,7 @@ body.no-fab.has-miniplayer #app {
 .ai-fab {
   position: fixed;
   right: var(--space-4);
-  bottom: calc(var(--nav-h) + var(--safe-bottom) + var(--space-4));
+  bottom: calc(var(--chrome-bottom) + var(--space-4));
   z-index: 60;
   width: calc(56 * var(--px));
   height: calc(56 * var(--px));
@@ -461,9 +454,6 @@ body.no-fab.has-miniplayer #app {
 .ai-fab:hover { background: var(--color-amber-hover); }
 .ai-fab:active { transform: scale(0.96); background: var(--color-amber-press); }
 
-body.has-miniplayer .ai-fab {
-  bottom: calc(var(--nav-h) + var(--mp-h) + var(--safe-bottom) + var(--space-3));
-}
 
 /* =====================================================================
  * Now Playing — full-screen modal sheet
@@ -534,6 +524,14 @@ body.has-miniplayer .ai-fab {
   margin: 0 calc(2 * var(--px));
 }
 
+/* The queue's one inner wrapper — the card on the tablet; on the phone it
+   just carries the sheet's column layout through. */
+.queue-screen {
+  display: flex;
+  flex-direction: column;
+  flex: 1;
+  min-height: 0;
+}
 .queue-list {
   flex: 1;
   min-height: 0;
@@ -3288,7 +3286,7 @@ body.has-miniplayer .ai-fab {
    (updateFabVisibility). */
 .discovery-screen .filter-actions {
   position: sticky;
-  bottom: calc(var(--nav-h) + var(--safe-bottom));
+  bottom: var(--chrome-bottom);
   z-index: 20;
   display: flex;
   gap: calc(8 * var(--px));
@@ -3297,9 +3295,6 @@ body.has-miniplayer .ai-fab {
   background: var(--color-surface-lo);
   border-top: 1px solid var(--color-divider);
   border-radius: 0 0 calc(7 * var(--px)) calc(7 * var(--px));
-}
-body.has-miniplayer .discovery-screen .filter-actions {
-  bottom: calc(var(--nav-h) + var(--mp-h) + var(--safe-bottom));
 }
 .discovery-screen .filter-reset {
   height: calc(44 * var(--px));
@@ -3807,12 +3802,9 @@ body.has-miniplayer .discovery-screen .filter-actions {
      bottom nav + miniplayer + safe-area padding). Matches the
      body.no-fab padding exactly — the chat route drops the FAB
      clearance, so nothing is left over to scroll. */
-  min-height: calc(100dvh - var(--nav-h) - var(--safe-bottom));
+  min-height: calc(100dvh - var(--chrome-bottom));
   padding: 0;
   gap: 0;
-}
-body.has-miniplayer .chat-screen {
-  min-height: calc(100dvh - var(--nav-h) - var(--mp-h) - var(--safe-bottom));
 }
 .chat-header {
   height: calc(64 * var(--px));
@@ -4050,27 +4042,21 @@ body.has-miniplayer .chat-screen {
 .more-scrim {
   position: absolute;
   top: 0; left: 0; right: 0;
-  bottom: calc(var(--nav-h) + var(--safe-bottom));
+  bottom: var(--chrome-bottom);
   background: rgba(0, 0, 0, 0.55);
   cursor: pointer;
   pointer-events: auto;
 }
-body.has-miniplayer .more-scrim {
-  bottom: calc(var(--nav-h) + var(--mp-h) + var(--safe-bottom));
-}
 .more-overlay .drawer {
   position: absolute;
   left: 0; right: 0;
-  bottom: calc(var(--nav-h) + var(--safe-bottom));
+  bottom: var(--chrome-bottom);
   background: var(--color-surface);
   border-top-left-radius: calc(16 * var(--px));
   border-top-right-radius: calc(16 * var(--px));
   display: flex; flex-direction: column;
   box-shadow: 0 calc(-16 * var(--px)) calc(40 * var(--px)) rgba(0, 0, 0, 0.45);
   pointer-events: auto;
-}
-body.has-miniplayer .more-overlay .drawer {
-  bottom: calc(var(--nav-h) + var(--mp-h) + var(--safe-bottom));
 }
 .drawer-handle {
   width: calc(36 * var(--px));
@@ -4082,6 +4068,7 @@ body.has-miniplayer .more-overlay .drawer {
 .drawer-title-row {
   padding: calc(14 * var(--px)) calc(20 * var(--px)) calc(10 * var(--px));
 }
+.drawer-close { display: none; }   /* the tablet card's close; the phone drawer has the handle */
 .drawer-title {
   margin: 0;
   font-size: calc(22 * var(--px));
@@ -6304,7 +6291,7 @@ select.add-gear-input {
 /* Rides the same line as the AI FAB, so the two float as one row. */
 .guide-puck {
   position: sticky;
-  bottom: calc(var(--nav-h) + var(--safe-bottom) + var(--space-4));
+  bottom: calc(var(--chrome-bottom) + var(--space-4));
   pointer-events: auto;
   width: calc(44 * var(--px));
   height: calc(44 * var(--px));
@@ -6317,9 +6304,6 @@ select.add-gear-input {
   box-shadow: var(--shadow-3);
   cursor: pointer;
 }
-body.has-miniplayer .guide-puck {
-  bottom: calc(var(--nav-h) + var(--mp-h) + var(--safe-bottom) + var(--space-3));
-}
 .guide-puck:active { background: var(--color-amber-weak); }
 
 /* The glyph moves, never the box: a transform on the sticky element
@@ -6331,4 +6315,216 @@ body.has-miniplayer .guide-puck {
 }
 @media (prefers-reduced-motion: reduce) {
   .guide-puck svg { animation: none; }
+}
+
+/* =====================================================================
+ * Tablet layout mode (>= 768px) — backend/static/CLAUDE.md §"Layout
+ * modes". The same DOM: the tab bar becomes a nav rail, the mini-player
+ * a bar beside it, every sheet the phone screen in a centred card over
+ * a scrim. Nothing here changes a size; only where the chrome sits.
+ * ===================================================================== */
+@media (min-width: 768px) {
+  .bottom-nav {
+    top: 0;
+    bottom: 0;
+    right: auto;
+    width: var(--nav-w);
+    grid-template-columns: 1fr;
+    grid-auto-rows: max-content;
+    align-content: start;
+    padding: calc(12 * var(--px)) 0 var(--safe-bottom);
+    border-top: 0;
+    border-right: 1px solid var(--color-divider);
+  }
+  .nav-mark {
+    display: block;
+    text-align: center;
+    font-size: calc(24 * var(--px));
+    font-weight: 700;
+    letter-spacing: var(--tracking-display);
+    line-height: var(--lh-tight);
+    padding: calc(4 * var(--px)) 0 calc(12 * var(--px));
+    color: var(--color-text);
+  }
+  .nav-mark .dot { color: var(--color-amber); }
+
+  /* Sheets: the fixed inset:0 element is the scrim, its inner screen the
+     card. The card scrolls as a whole, cover included, like the phone. */
+  .np-sheet,
+  .queue-sheet,
+  .ai-sheet {
+    background: rgba(14, 10, 8, 0.65);
+    overflow: hidden;
+    align-items: center;
+    justify-content: center;
+    padding: calc(24 * var(--px));
+  }
+  .np-sheet > .np-screen,
+  .queue-sheet > .queue-screen,
+  .ai-sheet > .ai-view {
+    width: var(--window-w);
+    max-width: 100%;
+    max-height: 100%;
+    flex: 0 1 auto;
+    border-radius: var(--radius-lg);
+    box-shadow: var(--shadow-4);
+    background: var(--color-foundation);
+    overflow: hidden;
+  }
+  .np-sheet > .np-screen {
+    overflow-y: auto;
+    -webkit-overflow-scrolling: touch;
+  }
+  .ai-sheet > .ai-view { height: 100%; }
+
+  /* More: the drawer becomes a content-height centred card with the
+     card header (title, close); the handle is a phone gesture. */
+  .more-scrim { bottom: 0; }
+  .more-overlay .drawer {
+    left: 50%;
+    right: auto;
+    top: 50%;
+    bottom: auto;
+    transform: translate(-50%, -50%);
+    width: var(--window-w);
+    max-height: calc(100% - 48px);
+    border-radius: var(--radius-lg);
+    box-shadow: var(--shadow-4);
+    overflow: hidden;
+  }
+  .drawer-handle { display: none; }
+  .drawer-title-row {
+    display: grid;
+    grid-template-columns: calc(44 * var(--px)) 1fr calc(44 * var(--px));
+    align-items: center;
+    min-height: calc(52 * var(--px));
+    padding: calc(2 * var(--px)) calc(16 * var(--px)) calc(6 * var(--px));
+  }
+  .drawer-title {
+    grid-column: 2;
+    text-align: center;
+    font-size: var(--text-heading);
+    font-weight: 600;
+    letter-spacing: var(--tracking-heading);
+  }
+  .drawer-close {
+    display: grid;
+    grid-column: 3;
+    place-items: center;
+    width: calc(44 * var(--px));
+    height: calc(44 * var(--px));
+    background: none;
+    border: 0;
+    padding: 0;
+    color: var(--color-text);
+    cursor: pointer;
+  }
+
+  /* More sections as windows (the modal-route branch in render()):
+     the element is the scrim, the card scrolls as a whole, the close
+     sits in the section header's empty right cell. */
+  .route-window {
+    position: fixed;
+    inset: 0;
+    z-index: 90;
+    background: rgba(14, 10, 8, 0.65);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    padding: calc(24 * var(--px));
+  }
+  .route-window-card {
+    position: relative;
+    width: var(--window-w);
+    max-width: 100%;
+    max-height: 100%;
+    display: flex;
+    flex-direction: column;
+    background: var(--color-foundation);
+    border-radius: var(--radius-lg);
+    box-shadow: var(--shadow-4);
+    overflow: hidden;
+  }
+  .route-window-card.wide { width: var(--window-w-wide); }
+  .route-window-body {
+    flex: 1;
+    min-height: 0;
+    overflow-y: auto;
+    -webkit-overflow-scrolling: touch;
+  }
+  .route-window-close {
+    position: absolute;
+    top: calc(6 * var(--px));      /* the .profile-header row's empty right cell */
+    right: calc(4 * var(--px));
+    z-index: 1;
+    width: calc(44 * var(--px));
+    height: calc(44 * var(--px));
+    display: grid;
+    place-items: center;
+    background: none;
+    border: 0;
+    padding: 0;
+    color: var(--color-text);
+    cursor: pointer;
+  }
+
+  /* Album, release group, session: the cover sits beside its metadata,
+     the tracklist below — the phone's full-width square would be 688px
+     tall here. Prose keeps a readable measure; form-like screens sit
+     in a centred column. */
+  .detail-screen:has(> .album-hero) {
+    display: grid;
+    grid-template-columns: calc(280 * var(--px)) minmax(0, 1fr);
+    column-gap: var(--space-5);
+    padding: var(--space-5) var(--space-5) 0;
+    align-items: start;
+  }
+  .detail-screen:has(> .album-hero) > .album-hero {
+    grid-column: 1;
+    grid-row: 1 / span 2;
+    border-radius: var(--radius-md);
+  }
+  .detail-screen:has(> .album-hero) > .album-meta-block { grid-column: 2; grid-row: 1; }
+  .detail-screen:has(> .album-hero) > .album-actions { grid-column: 2; grid-row: 2; }
+  .detail-screen:has(> .album-hero) > :nth-child(n + 4) { grid-column: 1 / -1; }
+  .detail-screen > .bio { max-width: calc(640 * var(--px)); }
+  .friends-screen {
+    max-width: calc(640 * var(--px) + 2 * var(--space-4));
+    margin-inline: auto;
+  }
+  .chat-screen {
+    width: 100%;
+    max-width: calc(720 * var(--px));
+    margin-inline: auto;
+  }
+  .chat-screen .bubble { max-width: 60%; }
+
+  /* Bottom sheets (add-gear style) become centred dialogs. */
+  .add-gear-overlay {
+    align-items: center;
+    justify-content: center;
+    padding: calc(24 * var(--px));
+  }
+  .add-gear-sheet {
+    width: var(--window-w);
+    max-width: 100%;
+    max-height: 100%;
+    border-radius: var(--radius-lg);
+    box-shadow: var(--shadow-4);
+  }
+}
+
+/* Landscape tablet: the album's cover column stays put on the left while
+ * the tracklist scrolls on the right. */
+@media (min-width: 1024px) {
+  .detail-screen:has(> .album-hero) {
+    grid-template-columns: calc(320 * var(--px)) minmax(0, 1fr);
+    grid-template-rows: auto auto 1fr auto auto;
+  }
+  .detail-screen:has(> .album-hero) > .album-hero { grid-row: 1; }
+  .detail-screen:has(> .album-hero) > .album-meta-block { grid-column: 1; grid-row: 2; }
+  .detail-screen:has(> .album-hero) > .album-actions { grid-column: 1; grid-row: 3; align-self: start; }
+  .detail-screen:has(> .album-hero) > .album-tracklist { grid-column: 2; grid-row: 1 / span 3; }
+  .detail-screen:has(> .album-hero) > .album-similar { grid-column: 2; grid-row: 4; }
+  .detail-screen:has(> .album-hero) > :nth-child(n + 6) { grid-column: 2; grid-row: 5; }
 }

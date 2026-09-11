@@ -380,6 +380,73 @@
   let currentRoute = null;
   let _lastRenderedHash = '';
   let _routeRoot = null;
+
+  // Tablet: a More section (#more/<section>) is a modal route — the screen
+  // beneath stays mounted, the section renders into a window appended to
+  // body, and leaving the route removes the window without re-rendering
+  // what is beneath (backend/static/CLAUDE.md §"Layout modes"). The
+  // stack holds the hashes the open window walked through, so Back pops
+  // and a fresh section pushes; its length is the history depth to unwind.
+  let _windowRoot = null;
+  let _windowStack = [];
+  let _windowIntent = 'back';      // how the window is being left: 'back' | 'close'
+  const WIDE_WINDOW_ROUTE = /^more\/(gear-system|gear-advisor|gear\/)/;
+
+  function layoutMode() {
+    return getComputedStyle(document.documentElement)
+      .getPropertyValue('--layout-mode').trim();
+  }
+
+  // Where the screen currently on top renders: the open window's body,
+  // else the route root. In-place refreshers target this, never #app.
+  function screenRoot() {
+    return _windowRoot ? _windowRoot.querySelector('.route-window-body') : _routeRoot;
+  }
+
+  function mountWindowBody(hash, reuse) {
+    if (!_windowRoot) {
+      _windowRoot = document.createElement('div');
+      _windowRoot.className = 'route-window';
+      _windowRoot.innerHTML = `
+        <div class="route-window-card">
+          <button class="route-window-close" type="button" aria-label="Close">
+            <svg width="22" height="22" viewBox="0 0 24 24" fill="none"
+                 stroke="currentColor" stroke-width="1.8" stroke-linecap="round"
+                 stroke-linejoin="round" aria-hidden="true"><path d="M6 6l12 12M18 6L6 18"/></svg>
+          </button>
+          <div class="route-window-body"></div>
+        </div>`;
+      _windowRoot.addEventListener('click', e => {
+        if (e.target === _windowRoot) leaveWindow('close');
+      });
+      _windowRoot.querySelector('.route-window-close')
+        .addEventListener('click', () => leaveWindow('close'));
+      document.body.appendChild(_windowRoot);
+    }
+    const card = _windowRoot.querySelector('.route-window-card');
+    card.classList.toggle('wide', WIDE_WINDOW_ROUTE.test(hash));
+    let body = card.querySelector('.route-window-body');
+    if (!reuse) {
+      const fresh = document.createElement('div');
+      fresh.className = 'route-window-body';
+      body.replaceWith(fresh);
+      body = fresh;
+    }
+    return body;
+  }
+
+  function removeWindow() {
+    if (_windowRoot) _windowRoot.remove();
+    _windowRoot = null;
+    _windowStack = [];
+  }
+
+  function leaveWindow(intent) {
+    _windowIntent = intent;
+    const depth = _windowStack.length;
+    if (depth && history.length > depth) history.go(-depth);
+    else navigate('home');   // a deep link with nothing behind it
+  }
   // null = unknown / still loading — keep the FAB hidden so we don't
   // flash it on every page load only to immediately retract it once
   // /api/chat/providers comes back empty. 0 = no providers configured;
@@ -432,6 +499,36 @@
     currentRoute = route;
     const app = document.getElementById('app');
     if (!app) return;
+
+    if (layoutMode() === 'tablet' && route === 'more' && segments.length >= 2) {
+      const stack = _windowStack;
+      const top = stack[stack.length - 1];
+      const reuse = top === hash;                       // an in-place refresh
+      if (!reuse && stack.length >= 2 && stack[stack.length - 2] === hash) stack.pop();
+      else if (!reuse) stack.push(hash);
+      const body = mountWindowBody(hash, reuse);
+      if (!reuse) body.scrollTop = 0;
+      const work = routes.more(body, hash);
+      updateNavActive('more');
+      updateFabVisibility('more');
+      window.sautiumRendered = Promise.resolve(work).catch(() => {}).then(() => hash);
+      return;
+    }
+    if (_windowRoot) {
+      const intent = _windowIntent;
+      _windowIntent = 'back';
+      removeWindow();
+      if (hash === _lastRenderedHash && _routeRoot) {
+        // Back to the screen beneath — it never left. Leaving by the
+        // section's own back chevron (or the hardware key) returns to the
+        // menu the section was opened from; close and the scrim do not.
+        updateNavActive(route);
+        updateFabVisibility(route);
+        if (intent === 'back') moreDrawer.open();
+        window.sautiumRendered = Promise.resolve(hash);
+        return;
+      }
+    }
     // Every navigation mounts a fresh root and detaches the previous one:
     // a renderer still awaiting its fetch when the user moves on paints
     // into a node nobody sees, never over the new screen. A same-hash
@@ -514,11 +611,12 @@
     const npOpen = sheet && sheet.isOpen;
     const aiOpen = ai && ai.isOpen;
     const drawerOpen = typeof moreDrawer !== 'undefined' && moreDrawer.isOpen;
+    const windowOpen = !!_windowRoot;
     // Discovery's advanced filters end in a sticky Apply bar pinned to
     // the same corner the FAB floats in. Read the panel itself rather
     // than mirroring its open state in a flag that can outlive the screen.
     const filtersOpen = !!document.querySelector('#discoveryFiltersPanel:not([hidden])');
-    fab.hidden = !routeHasFab || !!(npOpen || aiOpen || drawerOpen || filtersOpen);
+    fab.hidden = !routeHasFab || !!(npOpen || aiOpen || drawerOpen || windowOpen || filtersOpen);
   }
 
   async function refreshAiAvailability() {
@@ -783,6 +881,7 @@
       this.similarCount = document.getElementById('npSimilarCount');
 
       this.close.addEventListener('click', () => this.hide());
+      this.el.addEventListener('click', e => { if (e.target === this.el) this.hide(); });
       this.playPause.addEventListener('click', e => {
         e.stopPropagation();
         if (typeof window.togglePlayPause === 'function') window.togglePlayPause();
@@ -1455,6 +1554,7 @@
       this.closeBtn = document.getElementById('queueCloseBtn');
 
       this.closeBtn.addEventListener('click', () => this.hide());
+      this.el.addEventListener('click', e => { if (e.target === this.el) this.hide(); });
       document.addEventListener('keydown', e => {
         if (e.key === 'Escape' && this.isOpen && !modalIsOpen()) this.hide();
       });
@@ -1985,6 +2085,7 @@
       this.newBtn.addEventListener('click', () => this.newSession());
       this.emptyNewBtn.addEventListener('click', () => this.newSession());
       this.closeBtnChat.addEventListener('click', () => this.hide());
+      this.el.addEventListener('click', e => { if (e.target === this.el) this.hide(); });
       this.closeBtnList.addEventListener('click', () => this.hide());
       this.form.addEventListener('submit', e => {
         e.preventDefault();
@@ -7598,6 +7699,8 @@
         .addEventListener('click', () => this.close());
       overlay.querySelector('.drawer-handle')
         .addEventListener('click', () => this.close());
+      overlay.querySelector('.drawer-close')
+        .addEventListener('click', () => this.close());
       overlay.querySelectorAll('[data-go]').forEach(btn => {
         btn.addEventListener('click', () => {
           this.close();
@@ -7734,7 +7837,14 @@
         <div class="more-scrim"></div>
         <div class="drawer">
           <div class="drawer-handle"></div>
-          <div class="drawer-title-row"><h1 class="drawer-title">More</h1></div>
+          <div class="drawer-title-row">
+            <h1 class="drawer-title">More</h1>
+            <button class="drawer-close" type="button" aria-label="Close">
+              <svg width="22" height="22" viewBox="0 0 24 24" fill="none"
+                   stroke="currentColor" stroke-width="1.8" stroke-linecap="round"
+                   stroke-linejoin="round" aria-hidden="true"><path d="M6 6l12 12M18 6L6 18"/></svg>
+            </button>
+          </div>
           <div class="more-list">
             <button class="more-row" type="button" data-go="more/hqplayer">
               <span class="more-icon">${ICON_HQP}</span>
@@ -8967,11 +9077,12 @@
   }
 
   async function refreshGearScreenLive(renderer, hashPrefix) {
-    if (!_routeRoot) return;
+    const root = screenRoot();
+    if (!root) return;
     const y = window.scrollY;
     // The root belongs to this screen; a navigation during the fetch
     // detaches it, so a late paint lands where nobody sees it.
-    await renderer(_routeRoot);
+    await renderer(root);
     if (parseHash().startsWith(hashPrefix)) window.scrollTo(0, y);
   }
 
@@ -12364,7 +12475,7 @@
         _stopClaudeStream();
         return;
       }
-      renderAI(_routeRoot);
+      renderAI(screenRoot());
     }, (_err) => {
       // sseStream auto-reconnects with backoff; nothing to do here.
     });
@@ -12391,7 +12502,7 @@
         _stopCodexStream();
         return;
       }
-      renderAI(_routeRoot);
+      renderAI(screenRoot());
     }, (_err) => {});
   }
   async function _fetchCodexState() {
@@ -12414,7 +12525,7 @@
     _aiCanonStreamCtrl = window.sseStream('/api/settings/ai/canonization/stream', () => {
       if (!primed) { primed = true; return; }
       if (!parseHash().startsWith('more/ai')) { _stopAiCanonStream(); return; }
-      renderAI(_routeRoot);
+      renderAI(screenRoot());
     }, (_err) => {});
   }
   // Pull a human-readable message out of a FastAPI error response.
@@ -12737,6 +12848,11 @@
     // no longer needs a re-poke because media_file_id is in np-update.
     document.addEventListener('playlist-loaded', updatePlayingHighlight);
     window.addEventListener('hashchange', render);
+    document.addEventListener('keydown', e => {
+      if (e.key !== 'Escape' || !_windowRoot || modalIsOpen()) return;
+      if (sheet.isOpen || queue.isOpen || ai.isOpen) return;
+      leaveWindow('close');
+    });
 
     // Research-state transitions (queued → researching → cached/failed)
     // repaint gear surfaces live. Delivered over the single /api/events

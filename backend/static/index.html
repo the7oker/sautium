@@ -12,8 +12,8 @@
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
   <link href="https://fonts.googleapis.com/css2?family=Inter+Tight:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet">
 
-  <link rel="stylesheet" href="/static/tokens.css?v=3">
-  <link rel="stylesheet" href="/static/style.css?v=91">
+  <link rel="stylesheet" href="/static/tokens.css?v=4">
+  <link rel="stylesheet" href="/static/style.css?v=92">
 </head>
 <body class="sautium-base">
 
@@ -179,6 +179,7 @@
        claude-design-bundle/project/Session 2 v3.html (Queue screen). -->
   <div id="queueSheet" class="queue-sheet" role="dialog"
        aria-label="Queue" hidden>
+    <div class="queue-screen">
     <div class="queue-title-row">
       <button class="ai-icon-btn" type="button" id="queueCloseBtn"
               aria-label="Close">
@@ -198,6 +199,7 @@
       <p class="placeholder-body" style="padding: var(--space-6);">
         Queue is empty. Pick something to play.
       </p>
+    </div>
     </div>
   </div>
 
@@ -285,6 +287,7 @@
   </div>
 
   <nav id="bottomNav" class="bottom-nav" role="navigation" aria-label="Primary">
+    <div class="nav-mark" aria-hidden="true">S<span class="dot">.</span></div>
     <button class="nav-tab" type="button" data-route="home" aria-label="Home">
       <svg class="nav-icon" viewBox="0 0 24 24" aria-hidden="true">
         <path d="M3 11l9-8 9 8v10a1 1 0 0 1-1 1h-5v-7H10v7H4a1 1 0 0 1-1-1V11z" fill="none" stroke="currentColor" stroke-width="2" stroke-linejoin="round"/>
@@ -319,7 +322,7 @@
   </nav>
 
   <script src="/static/auth.js?v=8"></script>
-  <script src="/static/app-shell.js?v=222"></script>
+  <script src="/static/app-shell.js?v=223"></script>
   <script src="/static/player.js?v=8"></script>
 </body>
 </html>
