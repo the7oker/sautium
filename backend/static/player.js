@@ -1,7 +1,7 @@
 /* Sautium — player layer.
  *
- * Slim replacement for the legacy app.js. Owns the four bits the new
- * shell (app-shell.js) actually consumes from the player domain:
+ * Owns the four bits the shell (app-shell.js) consumes from the
+ * player domain:
  *
  *   * SSE subscription to /api/events (single multiplexed stream)
  *     → dispatches `np-update` CustomEvents that the mini-player,
