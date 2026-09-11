@@ -17,6 +17,7 @@
     --shadow-1: 0 1px 0 0 rgba(14,10,8,.40), 0 2px 6px -1px rgba(14,10,8,.45);
     --shadow-2: 0 2px 1px 0 rgba(14,10,8,.35), 0 8px 20px -4px rgba(14,10,8,.55), 0 1px 0 0 rgba(237,226,212,.03) inset;
     --shadow-3: 0 4px 2px 0 rgba(14,10,8,.30), 0 20px 48px -12px rgba(14,10,8,.70), 0 1px 0 0 rgba(237,226,212,.04) inset;
+    --shadow-4: 0 8px 4px 0 rgba(14,10,8,.35), 0 40px 96px -12px rgba(14,10,8,.9), 0 0 0 1px rgba(237,226,212,.06), 0 1px 0 0 rgba(237,226,212,.05) inset;
   }
   body { margin: 0; background: var(--foundation); color: var(--text);
          font-family: "Inter Tight", ui-sans-serif, system-ui, sans-serif; font-size: 15px; line-height: 1.5;
@@ -128,10 +129,12 @@
   .sheet { position: absolute; top: 0; right: 0; bottom: 0; width: 360px; background: var(--foundation);
            border-left: 1px solid var(--divider); overflow: hidden; }
   .sheet.centred { right: auto; left: 50%; transform: translateX(-50%); top: 24px; bottom: 24px;
-                   border: 0; border-radius: 14px; box-shadow: var(--shadow-3); }
-  .sheet .chev { position: absolute; top: 4px; left: 8px; width: 44px; height: 44px; display: grid; place-items: center;
-                 color: var(--text); background: linear-gradient(rgba(14,10,8,.55), rgba(14,10,8,0)); border-radius: 50%; }
-  .sheet .chev svg { width: 28px; height: 28px; }
+                   border: 0; border-radius: 14px; box-shadow: var(--shadow-4); }
+  .sheet .scroller { position: absolute; inset: 0; }
+  .sheet .chev { position: absolute; top: 2px; left: 16px; width: 44px; height: 44px; display: grid; place-items: center;
+                 color: var(--text); filter: drop-shadow(0 0 1px rgba(0,0,0,.9)) drop-shadow(0 1px 2px rgba(0,0,0,.6)); }
+  .sheet .chev svg { width: 22px; height: 22px; }
+  .sheet .thumb { position: absolute; right: 3px; width: 4px; border-radius: 2px; background: rgba(237,226,212,.28); }
   .card { position: absolute; left: 50%; top: 50%; transform: translate(-50%, -50%); width: 560px; background: var(--foundation);
           border-radius: 14px; box-shadow: var(--shadow-3); overflow: hidden; }
   .card .top { display: flex; gap: 20px; padding: 20px; }
@@ -171,30 +174,33 @@
   <div class="fab" style="bottom: 88px; right: 16px;">AI</div>
   
   <div class="scrim"></div>
-  <aside class="sheet">
-    <div class="npcover"></div>
-    <div class="chev"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M6 9l6 6 6-6" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg></div>
-    <div class="npbody">
-      <h3 class="npt">High Hopes</h3>
-      <p class="npa">David Gilmour</p>
-      <p class="npal">Remember That Night: Live at the Royal Albert Hall · 2007</p>
-      
+  <aside class="sheet centred">
+    <div class="scroller" style="top: -0px;">
+      <div class="npcover"></div>
+      <div class="chev"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M6 9l6 6 6-6" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg></div>
+      <div class="npbody">
+        <h3 class="npt">High Hopes</h3>
+        <p class="npa">David Gilmour</p>
+        <p class="npal">Remember That Night: Live at the Royal Albert Hall · 2007</p>
+        
       <div class="meta">
         <span class="pill hires">HI-RES</span><span class="pill">D# MAJ</span>
         <span class="bpm">78<small>BPM</small></span>
         <span class="energy">ENERGY <span class="dots"><i class="on"></i><i class="on"></i><i></i><i></i><i></i></span></span>
       </div>
-      
+        
       <div class="npprog"><div class="prog"><i></i><b></b></div><div class="times"><span class="tm">05:51</span><span class="tm total">09:18</span></div></div>
-      
+        
       <div class="transport">
         <div class="t56 sec"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 7h16M4 12h16M4 17h10" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg></div><div class="t56"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M18 18l-8.5-6L18 6v12zM8 18V6H6v12h2z" fill="currentColor"/></svg></div><div class="t68"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M8 5v14l11-7z" fill="currentColor"/></svg></div><div class="t56"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M6 18l8.5-6L6 6v12zm10-12v12h2V6h-2z" fill="currentColor"/></svg></div><div class="t56 sec"><svg viewBox="0 0 24 24" aria-hidden="true"><rect x="3" y="9" width="18" height="11" rx="2" fill="none" stroke="currentColor" stroke-width="2"/><path d="M7 9l10-5" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"/><circle cx="8" cy="14.5" r="2" fill="none" stroke="currentColor" stroke-width="2"/><path d="M13 13h5M13 16h5" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg></div>
       </div>
-      
+        
       <div class="simhead">SIMILAR TRACKS <span>CLAP · 7 MATCHES</span></div>
       <div class="sim"><div class="c"></div><div><div class="t">Coming Back To Life</div><div class="s">David Gilmour · 2007</div></div><span class="score">0.94</span><div class="add"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 5v14M5 12h14" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round"/></svg></div></div>
       <div class="sim"><div class="c"></div><div><div class="t">Shine On You Crazy Diamond</div><div class="s">David Gilmour · 2007</div></div><span class="score">0.93</span><div class="add"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 5v14M5 12h14" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round"/></svg></div></div>
+      </div>
     </div>
+    
   </aside>
 </div>
 </x-dc>

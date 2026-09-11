@@ -30,6 +30,7 @@ const STYLE = `
     --shadow-1: 0 1px 0 0 rgba(14,10,8,.40), 0 2px 6px -1px rgba(14,10,8,.45);
     --shadow-2: 0 2px 1px 0 rgba(14,10,8,.35), 0 8px 20px -4px rgba(14,10,8,.55), 0 1px 0 0 rgba(237,226,212,.03) inset;
     --shadow-3: 0 4px 2px 0 rgba(14,10,8,.30), 0 20px 48px -12px rgba(14,10,8,.70), 0 1px 0 0 rgba(237,226,212,.04) inset;
+    --shadow-4: 0 8px 4px 0 rgba(14,10,8,.35), 0 40px 96px -12px rgba(14,10,8,.9), 0 0 0 1px rgba(237,226,212,.06), 0 1px 0 0 rgba(237,226,212,.05) inset;
   }
   body { margin: 0; background: var(--foundation); color: var(--text);
          font-family: "Inter Tight", ui-sans-serif, system-ui, sans-serif; font-size: 15px; line-height: 1.5;
@@ -141,10 +142,12 @@ const STYLE = `
   .sheet { position: absolute; top: 0; right: 0; bottom: 0; width: 360px; background: var(--foundation);
            border-left: 1px solid var(--divider); overflow: hidden; }
   .sheet.centred { right: auto; left: 50%; transform: translateX(-50%); top: 24px; bottom: 24px;
-                   border: 0; border-radius: 14px; box-shadow: var(--shadow-3); }
-  .sheet .chev { position: absolute; top: 4px; left: 8px; width: 44px; height: 44px; display: grid; place-items: center;
-                 color: var(--text); background: linear-gradient(rgba(14,10,8,.55), rgba(14,10,8,0)); border-radius: 50%; }
-  .sheet .chev svg { width: 28px; height: 28px; }
+                   border: 0; border-radius: 14px; box-shadow: var(--shadow-4); }
+  .sheet .scroller { position: absolute; inset: 0; }
+  .sheet .chev { position: absolute; top: 2px; left: 16px; width: 44px; height: 44px; display: grid; place-items: center;
+                 color: var(--text); filter: drop-shadow(0 0 1px rgba(0,0,0,.9)) drop-shadow(0 1px 2px rgba(0,0,0,.6)); }
+  .sheet .chev svg { width: 22px; height: 22px; }
+  .sheet .thumb { position: absolute; right: 3px; width: 4px; border-radius: 2px; background: rgba(237,226,212,.28); }
   .card { position: absolute; left: 50%; top: 50%; transform: translate(-50%, -50%); width: 560px; background: var(--foundation);
           border-radius: 14px; box-shadow: var(--shadow-3); overflow: hidden; }
   .card .top { display: flex; gap: 20px; padding: 20px; }
@@ -314,21 +317,26 @@ function panelMobile(width) {
 
 // The phone's Now Playing sheet at its native 360px, opened from the
 // mini-player: chevron over the cover closes it, body scrolls under the fold.
-function npSheet(centred) {
+function npSheet(centred, { scrolled = 0, viewport = 720, content = 1180 } = {}) {
+  const thumbH = Math.round(viewport * viewport / content);
+  const thumbY = Math.round(scrolled * viewport / content);
   return `
   <div class="scrim"></div>
   <aside class="sheet${centred ? ' centred' : ''}">
-    <div class="npcover"></div>
-    <div class="chev">${I.chevron}</div>
-    <div class="npbody">
-      <h3 class="npt">High Hopes</h3>
-      <p class="npa">David Gilmour</p>
-      <p class="npal">Remember That Night: Live at the Royal Albert Hall · 2007</p>
-      ${npMeta}
-      ${npProgress}
-      ${npTransport}
-      ${npSimilar(2)}
+    <div class="scroller" style="top: -${scrolled}px;">
+      <div class="npcover"></div>
+      <div class="chev">${I.chevron}</div>
+      <div class="npbody">
+        <h3 class="npt">High Hopes</h3>
+        <p class="npa">David Gilmour</p>
+        <p class="npal">Remember That Night: Live at the Royal Albert Hall · 2007</p>
+        ${npMeta}
+        ${npProgress}
+        ${npTransport}
+        ${npSimilar(scrolled ? 4 : 2)}
+      </div>
     </div>
+    ${scrolled ? `<div class="thumb" style="top: ${thumbY}px; height: ${thumbH}px;"></div>` : ''}
   </aside>`;
 }
 
@@ -395,13 +403,13 @@ const boards = {
   ${fab(BAR_H + 16)}`,
   },
   'PortraitNowPlaying.dc.html': {
-    title: 'Portrait · Now Playing open (side sheet)', w: 768, h: 1024,
+    title: 'Portrait · Now Playing open (centred card)', w: 768, h: 1024,
     body: () => `
   ${rail({ withAi: false })}
   <main class="content" style="left: 80px; right: 0; bottom: ${BAR_H}px;">${home({ artists: 7, albums: 5, brandInContent: true })}</main>
   ${miniBar('80px')}
   ${fab(BAR_H + 16)}
-  ${npSheet(false)}`,
+  ${npSheet(true, { viewport: 976 })}`,
   },
   'TabletLandscape.dc.html': {
     title: 'Tablet landscape 1024 · rail + mini-player', w: 1024, h: 768,
@@ -411,23 +419,23 @@ const boards = {
   ${miniBar('80px')}
   ${fab(BAR_H + 16)}`,
   },
-  'LandscapeNowPlayingSide.dc.html': {
-    title: 'Landscape · Now Playing open as a side sheet (recommended)', w: 1024, h: 768,
-    body: () => `
-  ${rail({ withAi: false })}
-  <main class="content" style="left: 80px; right: 0; bottom: ${BAR_H}px;">${home({ artists: 10, albums: 7, brandInContent: true })}</main>
-  ${miniBar('80px')}
-  ${fab(BAR_H + 16)}
-  ${npSheet(false)}`,
-  },
   'LandscapeNowPlayingCentred.dc.html': {
-    title: 'Landscape · Now Playing open as a centred card', w: 1024, h: 768,
+    title: 'Landscape · Now Playing open (centred card)', w: 1024, h: 768,
     body: () => `
   ${rail({ withAi: false })}
   <main class="content" style="left: 80px; right: 0; bottom: ${BAR_H}px;">${home({ artists: 10, albums: 7, brandInContent: true })}</main>
   ${miniBar('80px')}
   ${fab(BAR_H + 16)}
   ${npSheet(true)}`,
+  },
+  'LandscapeNowPlayingScrolled.dc.html': {
+    title: 'Landscape · Now Playing scrolled inside the card', w: 1024, h: 768,
+    body: () => `
+  ${rail({ withAi: false })}
+  <main class="content" style="left: 80px; right: 0; bottom: ${BAR_H}px;">${home({ artists: 10, albums: 7, brandInContent: true })}</main>
+  ${miniBar('80px')}
+  ${fab(BAR_H + 16)}
+  ${npSheet(true, { scrolled: 300 })}`,
   },
 };
 
@@ -491,19 +499,19 @@ const canvas = {
     { file: 'TabletPortrait.dc.html', title: boards['TabletPortrait.dc.html'].title, page: 'tablet', x: 0, y: 0, w: 768, h: 1024 },
     { file: 'PortraitNowPlaying.dc.html', title: boards['PortraitNowPlaying.dc.html'].title, page: 'tablet', x: 768 + GAP_X, y: 0, w: 768, h: 1024 },
     { file: 'TabletLandscape.dc.html', title: boards['TabletLandscape.dc.html'].title, page: 'tablet', x: 0, y: 1024 + GAP_Y, w: 1024, h: 768 },
-    { file: 'LandscapeNowPlayingSide.dc.html', title: boards['LandscapeNowPlayingSide.dc.html'].title, page: 'tablet', x: 1024 + GAP_X, y: 1024 + GAP_Y, w: 1024, h: 768 },
-    { file: 'LandscapeNowPlayingCentred.dc.html', title: boards['LandscapeNowPlayingCentred.dc.html'].title, page: 'tablet', x: 2 * (1024 + GAP_X), y: 1024 + GAP_Y, w: 1024, h: 768 },
+    { file: 'LandscapeNowPlayingCentred.dc.html', title: boards['LandscapeNowPlayingCentred.dc.html'].title, page: 'tablet', x: 1024 + GAP_X, y: 1024 + GAP_Y, w: 1024, h: 768 },
+    { file: 'LandscapeNowPlayingScrolled.dc.html', title: boards['LandscapeNowPlayingScrolled.dc.html'].title, page: 'tablet', x: 2 * (1024 + GAP_X), y: 1024 + GAP_Y, w: 1024, h: 768 },
     { file: 'Main.dc.html', title: boards['Main.dc.html'].title, page: 'desktop', x: 0, y: 0, w: 1440, h: 900 },
     { file: 'DirectionB.dc.html', title: boards['DirectionB.dc.html'].title, page: 'desktop', x: 1440 + GAP_X, y: 0, w: 1440, h: 900 },
     { file: 'DirectionC.dc.html', title: boards['DirectionC.dc.html'].title, page: 'desktop', x: 2 * (1440 + GAP_X), y: 0, w: 1440, h: 900 },
   ],
   annotations: [
     { id: 'tablet-brief', page: 'tablet', x: 0, y: -240, w: 620, text:
-      'Tablet first. Same DOM and tokens as the phone; base sizes 768×1024 / 1024×768 (the smallest iPad). Both orientations keep the mini-player; the big Now Playing is the phone sheet itself, opened on demand from the mini-player and closed by its chevron — no permanent panel. Shelves run under the right edge as on the phone. Icon sizes as in the app: + 20, prev/next 28, play 28, queue/radio 22.' },
-    { id: 'portrait-note', page: 'tablet', x: 848, y: -240, w: 400, text:
-      'Portrait: the sheet slides in from the right at its native 360px over a scrim; the rest of the screen stays where you left it. On the phone the same sheet is full-screen.' },
-    { id: 'choose-note', page: 'tablet', x: 1104, y: 1024 + GAP_Y - 240, w: 560, text:
-      'Landscape — pick how Now Playing opens. SIDE SHEET (recommended): the phone screen verbatim at 360px, the content stays visible left of it, and the same sheet becomes the docked panel on desktop later without a redesign. CENTRED CARD: symmetric, reads as a dialog, but hides the middle of the content and the cover eats half its height.' },
+      'Tablet frame — decided 2026-09-11. Same DOM and tokens as the phone; base sizes 768×1024 / 1024×768. Both orientations keep the mini-player; Now Playing is the phone sheet itself as a centred 360px card over a scrim, opened from the mini-player, closed by its chevron, a tap on the scrim or Escape. Shelves run under the right edge as on the phone. Icon sizes as in the app.' },
+    { id: 'shadow-note', page: 'tablet', x: 848, y: -240, w: 400, text:
+      'The card floats on a new elevation step, --shadow-4 (warm, like the other three): a wide ambient drop plus a 1px light rim so the edge reads on the dark scrim. Proposed for tokens.css alongside --shadow-1…3.' },
+    { id: 'scroll-note', page: 'tablet', x: 2 * (1024 + GAP_X), y: 1024 + GAP_Y - 240, w: 460, text:
+      'Scrolling: the whole card scrolls exactly like the phone sheet — the cover and its chevron ride up with the content, Similar tracks come into view, the rounded corners clip the content. A thin overlay scrollbar shows position. Closing while scrolled: tap the scrim or Escape (the chevron is back at the top after a scroll up).' },
     { id: 'desktop-brief', page: 'desktop', x: 0, y: -200, w: 560, text:
       'Desktop directions — parked. Kept for the later desktop cycle; nothing here is being built now. A: sidebar + docked NP · B: sidebar + full player bar + NP card · C: rail + docked NP.' },
   ],
