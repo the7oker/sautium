@@ -93,6 +93,14 @@ body { --chrome-bottom: calc(var(--nav-h) + var(--player-h-active) + var(--safe-
 #app { padding: 0 var(--panel-w-active) calc(var(--chrome-bottom) + var(--fab-clear-active)) var(--nav-w); }
 ```
 
+On the tablet `#more/<section>` routes are **modal**: `render()` keeps
+the underlying route root mounted and renders the section into a window
+(scrim + centred card, `--window-w` 360px for the seven first-level
+sections, `--window-w-wide` ~560px for the gear screens) appended to
+`body`; Back removes the window without re-rendering what is beneath.
+The More drawer is the same DOM as on the phone, styled as a
+content-height centred card with the card header (title + close).
+
 On the tablet the three sheets keep `inset: 0` (that is the scrim) and
 their inner screen becomes the card: `width: calc(360 * var(--px))`,
 `max-height: calc(100% - 48px)`, centred, `border-radius: var(--radius-lg)`,
