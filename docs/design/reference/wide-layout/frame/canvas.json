@@ -21,7 +21,7 @@
     },
     {
       "file": "PortraitNowPlaying.dc.html",
-      "title": "Portrait · Now Playing open (side sheet)",
+      "title": "Portrait · Now Playing open (centred card)",
       "page": "tablet",
       "x": 848,
       "y": 0,
@@ -38,8 +38,8 @@
       "h": 768
     },
     {
-      "file": "LandscapeNowPlayingSide.dc.html",
-      "title": "Landscape · Now Playing open as a side sheet (recommended)",
+      "file": "LandscapeNowPlayingCentred.dc.html",
+      "title": "Landscape · Now Playing open (centred card)",
       "page": "tablet",
       "x": 1104,
       "y": 1144,
@@ -47,8 +47,8 @@
       "h": 768
     },
     {
-      "file": "LandscapeNowPlayingCentred.dc.html",
-      "title": "Landscape · Now Playing open as a centred card",
+      "file": "LandscapeNowPlayingScrolled.dc.html",
+      "title": "Landscape · Now Playing scrolled inside the card",
       "page": "tablet",
       "x": 2208,
       "y": 1144,
@@ -90,23 +90,23 @@
       "x": 0,
       "y": -240,
       "w": 620,
-      "text": "Tablet first. Same DOM and tokens as the phone; base sizes 768×1024 / 1024×768 (the smallest iPad). Both orientations keep the mini-player; the big Now Playing is the phone sheet itself, opened on demand from the mini-player and closed by its chevron — no permanent panel. Shelves run under the right edge as on the phone. Icon sizes as in the app: + 20, prev/next 28, play 28, queue/radio 22."
+      "text": "Tablet frame — decided 2026-09-11. Same DOM and tokens as the phone; base sizes 768×1024 / 1024×768. Both orientations keep the mini-player; Now Playing is the phone sheet itself as a centred 360px card over a scrim, opened from the mini-player, closed by its chevron, a tap on the scrim or Escape. Shelves run under the right edge as on the phone. Icon sizes as in the app."
     },
     {
-      "id": "portrait-note",
+      "id": "shadow-note",
       "page": "tablet",
       "x": 848,
       "y": -240,
       "w": 400,
-      "text": "Portrait: the sheet slides in from the right at its native 360px over a scrim; the rest of the screen stays where you left it. On the phone the same sheet is full-screen."
+      "text": "The card floats on a new elevation step, --shadow-4 (warm, like the other three): a wide ambient drop plus a 1px light rim so the edge reads on the dark scrim. Proposed for tokens.css alongside --shadow-1…3."
     },
     {
-      "id": "choose-note",
+      "id": "scroll-note",
       "page": "tablet",
-      "x": 1104,
+      "x": 2208,
       "y": 904,
-      "w": 560,
-      "text": "Landscape — pick how Now Playing opens. SIDE SHEET (recommended): the phone screen verbatim at 360px, the content stays visible left of it, and the same sheet becomes the docked panel on desktop later without a redesign. CENTRED CARD: symmetric, reads as a dialog, but hides the middle of the content and the cover eats half its height."
+      "w": 460,
+      "text": "Scrolling: the whole card scrolls exactly like the phone sheet — the cover and its chevron ride up with the content, Similar tracks come into view, the rounded corners clip the content. A thin overlay scrollbar shows position. Closing while scrolled: tap the scrim or Escape (the chevron is back at the top after a scroll up)."
     },
     {
       "id": "desktop-brief",
