@@ -15,15 +15,15 @@ and interaction patterns for the mobile-first Sautium web UI. It is
 
 ## Scope
 
-- Mobile web UI (target baseline 360 × 760, fluid scaling per
-  `backend/static/tokens.css`).
-- Desktop is **Phase 2**: for now desktop browsers see the
-  mobile layout centred at ~420px. Dedicated tablet / desktop
-  form factors may ship as separate HTML files later, selected
-  by user-agent / viewport size.
-- Business logic in `backend/static/app.js` stays intact
-  (HQPlayer commands, search, P2P, chat) — this document only
-  defines the new view layer.
+- Mobile web UI (target baseline 360 × 760, locked design-pixel
+  scaling per `backend/static/tokens.css`).
+- Tablet and desktop are **layout modes of the same UI**, not
+  separate pages: one set of screen renderers, CSS breakpoints in
+  raw px select `compact` (< 768), `medium` (768–1199) and
+  `expanded` (≥ 1200). See §"Layout modes — tablet / desktop".
+- The view layer is `index.html` + `style.css` + `app-shell.js`
+  (routing and every screen) + `player.js` (transport / SSE) — see
+  `backend/static/CLAUDE.md` §"View-layer architecture".
 
 ---
 
@@ -135,8 +135,10 @@ Sheet is dismissed with drag-down or tap-outside. Detail screens
 behind as a return-to-overview anchor, or slides away if the detail
 is nav-heavy.
 
-Right-to-left drawer variant reserved for Phase-2 tablet/desktop
-layouts.
+The drawer's rows are one DOM node in every layout mode: `compact`
+shows them as this bottom drawer, `medium` as a popover beside the
+nav rail, `expanded` as a permanent section of the sidebar (the More
+tab itself disappears there). See §"Layout modes — tablet / desktop".
 
 ---
 
@@ -156,7 +158,7 @@ back/forward and refresh work natively:
 #discovery/genre/<id>        → Genre detail, pushed from Discovery
 #friends                     → Friends list
 #friends/chat/<peer>         → Friend chat thread
-#more                        → More drawer open
+#more                        → redirects to #home (the drawer toggles in place, it is not a route)
 #more/hqplayer               → HQPlayer config screen
 #more/dsp                    → DSP / Signal Chain screen
 #more/profile                → Profile (own — identity, account, audio chain)
@@ -594,6 +596,10 @@ MVP.
 
 ## Migration strategy — Option D (keep app.js)
 
+_Historical — completed by 2026-05. `app.js` was retired once every
+screen had been rebuilt; the view layer is now the three files listed
+under Scope (`backend/static/CLAUDE.md` §"View-layer architecture")._
+
 Recommended migration approach for this IA:
 
 1. **Keep `backend/static/app.js`** — API calls, state management,
@@ -617,20 +623,67 @@ archived in git history; no need to keep both.
 
 ---
 
-## Phase 2 — Desktop / Tablet
+## Layout modes — tablet / desktop
 
-Explicitly deferred:
+Decided 2026-09-11, replacing the April plan of "separate HTML files
+per form factor". That plan predates the rebuild that turned every
+screen into a renderer inside `app-shell.js`; forking those renderers
+per form factor would triple the maintenance surface for no product
+gain. Instead the **same DOM** is laid out differently per viewport
+width. The **type scale stays locked** (`--px == 1px` above 360, so
+13 / 15 / 20 / 32 px render 1:1 on a monitor — the same range native
+desktop players use); what changes is the frame and the columns.
 
-- Separate HTML files per form factor, not a responsive unified
-  layout — per `POSITIONING.md` pragmatic trade-off.
-- Desktop layout: likely sidebar navigation + two-pane detail view
-  (list + detail), richer content density.
-- Tablet: may share mobile layout centred, or get its own landscape
-  variant.
-- Selection via user-agent / viewport-size probe on server OR client
-  redirect.
+| Mode | Width | Catches | Frame |
+|---|---|---|---|
+| `compact` | < 768 | every phone portrait, small landscape phones | this document's mobile chrome, unchanged |
+| `medium` | 768–1199 | iPad portrait (768–1024) and landscape (1024–1194), large phones landscape | left **nav rail** (80), bottom **player bar**, overlays become **centred cards** over a scrim |
+| `expanded` | ≥ 1200 | 13" iPad landscape, every laptop and monitor | left **sidebar** (240) with the More rows inline, player bar, a **docked right panel** (380) for Now Playing / Queue / AI |
 
-Do not architect Phase-2 UI concerns into Phase-1 code.
+768 is the narrowest iPad; 1200 keeps every iPad-landscape width out
+of the docked layout (sidebar + panel would leave 404–574 px of
+content). Worst case with a panel open is 1200 − 240 − 380 = 580 px of
+content, wider than the 468 px column the old centred layout allowed.
+
+Chrome mapping:
+
+| Surface | `compact` | `medium` | `expanded` |
+|---|---|---|---|
+| Bottom nav | tab bar | nav rail (icon + caption) | sidebar (icon + label) |
+| More drawer | bottom drawer | popover beside the rail | sidebar section; More tab hidden |
+| Mini-player | bar above the nav | player bar right of the rail | player bar |
+| AI FAB | bottom-right | stays | gone — sidebar entry + shortcut |
+| Now Playing | full-screen sheet | centred card | docked panel *or* centred card (design decides; the frame supports both) |
+| Queue | full-screen over Now Playing | centred card | same panel slot, stacks over Now Playing |
+| AI (master-detail) | full-screen, list ⇄ chat | centred card | docked panel, list ⇄ chat unchanged |
+| Bottom sheets (add-gear style, HQP pickers) | bottom sheet | centred dialog | centred dialog |
+| `<dialog>` confirms | centred, top layer | same | same |
+
+Rules that keep this one UI rather than three:
+
+- **CSS owns the mode.** Breakpoints are raw-px media queries in
+  `tokens.css`; every chrome offset derives from one set of per-mode
+  variables (the contract is in `backend/static/CLAUDE.md` §"Layout
+  modes"). No `matchMedia`, no resize listener.
+- **JS asks, never decides.** The only reads of the live mode are
+  where `[hidden]` would otherwise force a mobile-only behaviour
+  (closing a docked panel before navigating, pinning Discovery
+  filters open). Everything else is the same code path in every mode.
+- **One DOM per chrome element.** The nav, the More rows, the
+  mini-player and each sheet exist once; a mode repositions them.
+- **Document scroll stays.** The frame is fixed chrome plus
+  variables, not a grid with an inner scroller — the scroll model,
+  sticky elements and iOS behaviour of the compact layout are
+  untouched.
+- Every screen is verified at 360 and at the medium / expanded
+  widths of its artboards; the compact rendering must not change.
+
+Known costs of the unified approach (accepted): a true list + detail
+split (Friends list beside a chat thread) needs a renderer extracted
+from the screen that owns `#app`; horizontal shelves that become
+wrapping grids must drop the shelf-rooted infinite-scroll observer;
+three container conventions (`.screen`, `.discovery-screen`,
+`.detail-screen`) each carry their own `--content-max`.
 
 ---
 
