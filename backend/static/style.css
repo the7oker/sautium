@@ -6446,6 +6446,11 @@ select.add-gear-input {
     overflow: hidden;
   }
   .route-window-card.wide { width: var(--window-w-wide); }
+  /* A section whose header already puts a control in the right cell
+     (HQPlayer's refresh, Profile's edit) keeps it; the window is then
+     left by its back chevron, the scrim or Escape. */
+  .route-window-card:has(.profile-header > button:last-child) .route-window-close,
+  .route-window-card:has(.hqp-head > button:last-child) .route-window-close { display: none; }
   .route-window-body {
     flex: 1;
     min-height: 0;
