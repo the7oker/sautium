@@ -651,7 +651,8 @@ Chrome mapping:
 | Surface | `compact` | `tablet` |
 |---|---|---|
 | Bottom nav | tab bar | nav rail (icon + caption) — same `<nav>` / `.nav-tab` DOM |
-| More drawer | bottom drawer | popover beside the rail (drawn with the first tablet screen set); same rows, one DOM node |
+| More drawer | bottom drawer | centred card (content-height, the card header: title + close); same rows, one DOM node |
+| More sections (`#more/*`) | full screens | **windows** (form sheets) that replace the More card: the phone screen in a centred window — 360px for the seven first-level sections, wider (~560px) for the gear screens reached from Profile; back returns to the menu, close dismisses, the content behind stays. These routes are *modal* on the tablet: the underlying screen stays mounted and Back removes the window |
 | Mini-player | bar above the nav | bar at the bottom, right of the rail |
 | AI FAB | bottom-right | bottom-right, above the bar |
 | Now Playing | full-screen sheet | the same sheet at its native 360px as a centred card over a scrim; the chevron, a scrim tap or Escape closes it; it scrolls as a whole, cover included, exactly like the phone |
@@ -661,9 +662,23 @@ Chrome mapping:
 | `<dialog>` confirms | centred, top layer | same |
 | Shelves (Home, Artist) | run under the right edge | the same — a cut tile is the scroll affordance, never a gutter |
 
-Floating cards sit on a fourth elevation step, `--shadow-4` (a warm
-ambient drop plus a 1px light rim so the edge reads on the dark scrim),
-added to `tokens.css` with the frame.
+Floating cards and windows sit on a fourth elevation step, `--shadow-4`
+(a warm ambient drop plus a 1px light rim so the edge reads on the
+dark scrim), added to `tokens.css` with the frame.
+
+Screens on the tablet (decided with the artboards under
+`docs/design/reference/wide-layout/frame/`):
+
+| Screen | Tablet treatment |
+|---|---|
+| Home | unchanged; shelves run under the right edge |
+| Album / Release group | the header changes: the cover (280px) sits beside the title, edition picker, year, chips and Play / Queue; in landscape that column stays on the left while the tracklist scrolls on the right. Track rows, disc labels and Similar albums are the phone's |
+| Listening session | the album header pattern (cover beside title, meta, Play / Album / Queue), track rows below |
+| Artist, Genre | unchanged: hero, chips, bio at a 640px measure, shelves under the right edge, track rows; the genre's artist grid gains columns (auto-fill of 96px tiles) |
+| Discovery | unchanged at content width |
+| Friends | a centred 640px column (form-like content must not stretch) |
+| Chat thread | a centred 720px column, bubbles capped at 60% of it |
+| More sections | windows, see above |
 
 Rules that keep this one UI rather than two:
 
