@@ -61,14 +61,15 @@ spec and horizontal layout predictable.
 _Contract decided 2026-09-11 (`docs/design/INFORMATION-ARCHITECTURE.md`
 §"Layout modes" has the chrome mapping and the reasoning). Status: the
 compact chrome is what is implemented today; the frame PR turns this
-section into code. Artboards for the wide modes live under
-`docs/design/reference/wide-layout/` once drawn._
+section into code. Tablet artboards live under
+`docs/design/reference/wide-layout/`; the desktop is a later cycle._
 
-One DOM, three modes selected purely by raw-px media queries:
-`compact` (< 768, today's mobile chrome), `medium` (768–1199: left nav
-rail, bottom player bar, overlays as centred cards), `expanded`
-(≥ 1200: sidebar with the More rows inline, player bar, a docked right
-panel for Now Playing / Queue / AI). The type scale stays locked.
+One DOM, modes selected purely by raw-px media queries: `compact`
+(< 768, today's mobile chrome) and `tablet` (≥ 768: left nav rail, the
+mini-player as a bar right of the rail, the AI FAB above it, every
+sheet as a centred 360px card over a scrim). The type scale stays
+locked. A `desktop` mode (docked right panel, `--panel-w`) is reserved,
+not designed.
 
 Every chrome offset derives from one set of per-mode variables — this
 is the only place the breakpoint numbers and the chrome geometry live:
@@ -76,23 +77,30 @@ is the only place the breakpoint numbers and the chrome geometry live:
 ```css
 :root {                                  /* defaults = compact */
   --layout-mode: compact;                /* read by JS, never by CSS layout */
-  --nav-h: calc(56 * var(--px));         /* bottom nav; 0 in medium/expanded */
-  --nav-w: 0px;                          /* rail / sidebar; 0 in compact */
-  --player-h: calc(60 * var(--px));      /* mini-player / player bar */
-  --fab-clear: calc(72 * var(--px));     /* 0 where the FAB is not in the layout */
-  --panel-w: 0px;                        /* docked right panel */
+  --nav-h: calc(56 * var(--px));         /* bottom nav; 0 on the tablet */
+  --nav-w: 0px;                          /* nav rail; 80 on the tablet */
+  --player-h: calc(60 * var(--px));      /* mini-player bar */
+  --fab-clear: calc(72 * var(--px));     /* the FAB stays on the tablet */
+  --panel-w: 0px;                        /* reserved for the desktop's docked panel */
   --content-max: none;
 }
-@media (min-width: 768px)  { :root { --layout-mode: medium;   --nav-h: 0px; --nav-w: calc(80 * var(--px)); } }
-@media (min-width: 1200px) { :root { --layout-mode: expanded; --nav-w: calc(240 * var(--px)); --panel-w: calc(380 * var(--px)); --fab-clear: 0px; } }
+@media (min-width: 768px) { :root { --layout-mode: tablet; --nav-h: 0px; --nav-w: calc(80 * var(--px)); } }
 
 body { --player-h-active: 0px; --fab-clear-active: var(--fab-clear); --panel-w-active: 0px; }
 body.has-miniplayer { --player-h-active: var(--player-h); }
 body.no-fab         { --fab-clear-active: 0px; }
-body:has(#npSheet:not([hidden]), #queueSheet:not([hidden]), #aiSheet:not([hidden])) { --panel-w-active: var(--panel-w); }
 body { --chrome-bottom: calc(var(--nav-h) + var(--player-h-active) + var(--safe-bottom)); }
 #app { padding: 0 var(--panel-w-active) calc(var(--chrome-bottom) + var(--fab-clear-active)) var(--nav-w); }
 ```
+
+On the tablet the three sheets keep `inset: 0` (that is the scrim) and
+their inner screen becomes the card: `width: calc(360 * var(--px))`,
+`max-height: calc(100% - 48px)`, centred, `border-radius: var(--radius-lg)`,
+`box-shadow: var(--shadow-4)`, and `overflow-y: auto` moves from the
+sheet to the screen so the card scrolls as a whole, cover included,
+exactly like the phone. `--shadow-4` is the fourth elevation step
+(warm ambient drop plus a 1px light rim), added to `tokens.css` with
+the frame.
 
 Rules:
 
@@ -100,18 +108,17 @@ Rules:
   positioned against the chrome (FAB, guide puck, sticky filter bar,
   drawer, chat screen height) references `--chrome-bottom` /
   `--nav-w` / `--panel-w-active` — never its own copy of the sum.
-- **"Panel open" has one source of truth**: the `hidden` attribute the
-  sheets' `show()/hide()` already flip. No parallel body class.
-- **JS asks, never decides.** The only reads of the live mode
+- **JS asks, never decides.** A read of the live mode
   (`getComputedStyle(document.documentElement).getPropertyValue('--layout-mode')`)
-  are where `[hidden]` would otherwise force a mobile-only behaviour —
-  closing a docked panel before navigating, pinning Discovery filters
-  open. Everything else is one code path in every mode.
+  is allowed only where `[hidden]` would otherwise force a mobile-only
+  behaviour. The tablet cycle needs none: a scrim tap closing a card is
+  the same listener in every mode (in `compact` the screen covers the
+  scrim, so it never fires).
 - **One DOM per chrome element.** The nav, the More rows, the
   mini-player and each sheet exist once; a mode repositions them.
 - **Document scroll stays.** The frame is fixed chrome plus variables,
   not a grid with an inner scroller.
-- The compact rendering must not change when a wide mode is added:
+- The compact rendering must not change when a wider mode is added:
   `scripts/ui-shots.mjs --compare` against the 360 baseline is the
   proof.
 
