@@ -61,7 +61,7 @@ const STYLE = `
   .rail-tab svg { width: 22px; height: 22px; }
   .rail .spacer { flex: 1; }
 
-  .content { position: absolute; top: 0; overflow: hidden; padding: 24px 24px 0;
+  .content { position: absolute; top: 0; overflow: hidden; padding: 24px 0 0 24px;
              display: flex; flex-direction: column; gap: 32px; }
   .sec { display: flex; flex-direction: column; gap: 12px; }
   .sec h2 { margin: 0; font-size: 20px; font-weight: 600; letter-spacing: -0.01em; }
@@ -285,6 +285,24 @@ function panel(width) {
   </aside>`;
 }
 
+// The mobile Now Playing screen, verbatim, as a permanent panel: cover at the
+// top (no chevron — nothing to close), the body scrolls under the fold.
+function panelMobile(width) {
+  return `
+  <aside class="panel" style="width: ${width}; bottom: 0;">
+    <div class="npcover"></div>
+    <div class="npbody">
+      <h3 class="npt">High Hopes</h3>
+      <p class="npa">David Gilmour</p>
+      <p class="npal">Remember That Night: Live at the Royal Albert Hall · 2007</p>
+      ${npMeta}
+      ${npProgress}
+      ${npTransport}
+      ${npSimilar(2)}
+    </div>
+  </aside>`;
+}
+
 function card() {
   return `
   <div class="scrim"></div>
@@ -307,7 +325,7 @@ function card() {
   </div>`;
 }
 
-const fab = bottom => `<div class="fab" style="bottom: ${bottom}px;">AI</div>`;
+const fab = (bottom, right = 16) => `<div class="fab" style="bottom: ${bottom}px; right: ${right}px;">AI</div>`;
 
 /* ---------- artboards ---------- */
 const boards = {
@@ -340,7 +358,7 @@ const boards = {
   ${panel(v.panelW)}`,
   },
   'TabletPortrait.dc.html': {
-    title: 'Tablet portrait 834 · rail + player bar', w: 834, h: 1194,
+    title: 'Tablet portrait 768 · rail + mini-player', w: 768, h: 1024,
     body: () => `
   ${rail({ withAi: false })}
   <main class="content" style="left: 80px; right: 0; bottom: ${BAR_H}px;">${home({ artists: 7, albums: 5, brandInContent: true })}</main>
@@ -348,13 +366,12 @@ const boards = {
   ${fab(BAR_H + 16)}`,
   },
   'TabletLandscape.dc.html': {
-    title: 'Tablet landscape 1194 · rail + Now Playing card', w: 1194, h: 834,
+    title: 'Tablet landscape 1024 · rail + Now Playing docked, no mini-player', w: 1024, h: 768,
     body: () => `
   ${rail({ withAi: false })}
-  <main class="content" style="left: 80px; right: 0; bottom: ${BAR_H}px;">${home({ artists: 10, albums: 7, brandInContent: true })}</main>
-  ${miniBar('80px')}
-  ${fab(BAR_H + 16)}
-  ${card()}`,
+  <main class="content" style="left: 80px; right: 360px; bottom: 0;">${home({ artists: 6, albums: 4, brandInContent: true })}</main>
+  ${fab(16, 360 + 16)}
+  ${panelMobile('360px')}`,
   },
 };
 
@@ -410,26 +427,28 @@ for (const [name, b] of Object.entries(boards)) {
 
 const GAP_X = 80, GAP_Y = 120;
 const canvas = {
+  pages: [
+    { id: 'tablet', name: 'Tablet' },
+    { id: 'desktop', name: 'Desktop (later)' },
+  ],
   artboards: [
-    { file: 'Main.dc.html', title: boards['Main.dc.html'].title, x: 0, y: 0, w: 1440, h: 900 },
-    { file: 'DirectionB.dc.html', title: boards['DirectionB.dc.html'].title, x: 1440 + GAP_X, y: 0, w: 1440, h: 900 },
-    { file: 'DirectionC.dc.html', title: boards['DirectionC.dc.html'].title, x: 2 * (1440 + GAP_X), y: 0, w: 1440, h: 900 },
-    { file: 'TabletPortrait.dc.html', title: boards['TabletPortrait.dc.html'].title, x: 0, y: 900 + GAP_Y, w: 834, h: 1194 },
-    { file: 'TabletLandscape.dc.html', title: boards['TabletLandscape.dc.html'].title, x: 834 + GAP_X, y: 900 + GAP_Y, w: 1194, h: 834 },
+    { file: 'TabletPortrait.dc.html', title: boards['TabletPortrait.dc.html'].title, page: 'tablet', x: 0, y: 0, w: 768, h: 1024 },
+    { file: 'TabletLandscape.dc.html', title: boards['TabletLandscape.dc.html'].title, page: 'tablet', x: 768 + GAP_X, y: 0, w: 1024, h: 768 },
+    { file: 'Main.dc.html', title: boards['Main.dc.html'].title, page: 'desktop', x: 0, y: 0, w: 1440, h: 900 },
+    { file: 'DirectionB.dc.html', title: boards['DirectionB.dc.html'].title, page: 'desktop', x: 1440 + GAP_X, y: 0, w: 1440, h: 900 },
+    { file: 'DirectionC.dc.html', title: boards['DirectionC.dc.html'].title, page: 'desktop', x: 2 * (1440 + GAP_X), y: 0, w: 1440, h: 900 },
   ],
   annotations: [
-    { id: 'brief', x: 0, y: -200, w: 560, text:
-      'Frame directions for tablet + desktop — pick ONE. Same DOM as the phone app, type scale locked at 13px; only the frame changes. Compact (<768) stays exactly as it is today. Medium (768–1199, both tablet boards) is shared by every direction: rail + player bar + overlays as cards.' },
-    { id: 'a-note', x: 620, y: -200, w: 400, text:
-      'A · Sidebar (240) + docked Now Playing (380).\nWhy: cover + similar tracks stay on screen while you browse — the discovery loop never closes a modal. Costs 380px of content; transport lives in the panel, the bar stays a mini-player.' },
-    { id: 'b-note', x: 1520, y: -200, w: 400, text:
-      'B · Sidebar (240) + full player bar, Now Playing as a centred card.\nWhy: zero new states — the card is the phone sheet in a box; content gets the full width. Costs: Now Playing needs its own re-layout (cover beside meta), and the card hides what you were browsing.' },
-    { id: 'c-note', x: 3040, y: -200, w: 400, text:
-      'C · Rail (80) + docked Now Playing (380).\nWhy: most content width with a panel open; the rail is the phone tab bar rotated, so medium and expanded look alike. Costs: settings live behind a More popover, no labels on nav.' },
-    { id: 'tablet-note', x: 2110, y: 1020, w: 400, text:
-      'Tablet (medium): rail + player bar + the AI FAB it keeps; sheets open as centred cards. At 1194 landscape a docked 380 panel would leave 734px — the frame allows it, but the default is the card.' },
+    { id: 'tablet-brief', page: 'tablet', x: 0, y: -220, w: 560, text:
+      'Tablet first (2026-09-11). Same DOM and tokens as the phone app; only the frame changes. Base sizes: 768×1024 portrait, 1024×768 landscape (the smallest iPad — wider iPads get more room, never more chrome). Shelves run under the right edge exactly as on the phone: a cut tile is the scroll affordance, not a gutter.' },
+    { id: 'portrait-note', page: 'tablet', x: 620, y: -220, w: 380, text:
+      'Portrait: rail (80) + Home + mini-player bar at the bottom + AI FAB. Tapping the mini-player opens the mobile Now Playing sheet as a centred card over a scrim.' },
+    { id: 'landscape-note', page: 'tablet', x: 1020, y: -220, w: 420, text:
+      'Landscape: rail (80) + content + the mobile Now Playing screen docked at its native 360px — always on, so no mini-player. The Queue opens in the same slot over it, as on the phone. The FAB sits left of the panel. Content gets 584px at 1024 (more on wider iPads).' },
+    { id: 'desktop-brief', page: 'desktop', x: 0, y: -200, w: 560, text:
+      'Desktop directions — parked. Kept for the later desktop cycle; nothing here is being built now. A: sidebar + docked NP · B: sidebar + full player bar + NP card · C: rail + docked NP.' },
   ],
-  launch: { view: 'canvas' },
+  launch: { view: 'canvas', page: 'tablet' },
 };
 writeFileSync(join(here, 'canvas.json'), JSON.stringify(canvas, null, 2) + '\n');
 console.log(`wrote ${Object.keys(boards).length} artboards + canvas.json${previewDir ? ` + previews in ${previewDir}` : ''}`);
