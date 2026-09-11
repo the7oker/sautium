@@ -74,11 +74,20 @@
       "h": 1024
     },
     {
-      "file": "LandscapeQueue.dc.html",
-      "title": "Landscape · Queue card",
+      "file": "PortraitLibrary.dc.html",
+      "title": "Portrait · after tapping Library: the screen opens in the content area, as on the phone",
       "page": "tablet",
       "x": 1696,
       "y": 2032,
+      "w": 768,
+      "h": 1024
+    },
+    {
+      "file": "LandscapeQueue.dc.html",
+      "title": "Landscape · Queue card",
+      "page": "tablet",
+      "x": 0,
+      "y": 3176,
       "w": 1024,
       "h": 768
     },
@@ -86,8 +95,8 @@
       "file": "LandscapeAI.dc.html",
       "title": "Landscape · AI chat card",
       "page": "tablet",
-      "x": 2800,
-      "y": 2032,
+      "x": 1104,
+      "y": 3176,
       "w": 1024,
       "h": 768
     },
@@ -148,9 +157,17 @@
       "id": "more-note",
       "page": "tablet",
       "x": 0,
-      "y": 1792,
+      "y": 1772,
       "w": 620,
-      "text": "Screen set 1 — the frame in action. MORE: a menu, not a task — pick: a popover anchored beside the rail (recommended: it opens where you tapped, dims nothing but a whisper, and the phone drawer rows are reused as they are) or the same centred card as every sheet (consistent, but a menu that dims the whole screen feels heavy). QUEUE and AI are the phone sheets verbatim in the 360px card — drawn schematically here; the implementation reuses the phone CSS unchanged."
+      "text": "MORE — exactly the phone drawer: the same seven rows, same order, same live hints (HQPlayer, Audio output). Its rows are routes, not windows: tapping one closes the menu and the screen opens in the content area, as on the phone (third board — Library). The rail keeps More highlighted while you are inside a More screen. Decision: popover beside the rail (opens where you tapped, barely dims) or a centred card like every sheet (consistent, but a menu that dims the whole screen feels heavier)."
+    },
+    {
+      "id": "set1-note",
+      "page": "tablet",
+      "x": 0,
+      "y": 2976,
+      "w": 620,
+      "text": "QUEUE and AI CHAT — the phone sheets verbatim in the 360px card; drawn schematically, the implementation reuses the phone CSS unchanged. Accepted 2026-09-11."
     },
     {
       "id": "desktop-brief",

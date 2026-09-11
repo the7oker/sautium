@@ -178,6 +178,26 @@
                   display: flex; align-items: center; color: var(--dim); font-size: 15px; }
   .composer .send { width: 44px; height: 44px; border-radius: 50%; background: var(--amber); color: var(--foundation); display: grid; place-items: center; }
   .composer .send svg { width: 22px; height: 22px; }
+  .set { padding: 24px 24px 0; max-width: 720px; display: flex; flex-direction: column; gap: 20px; }
+  .set-hd { display: grid; grid-template-columns: 44px 1fr 44px; align-items: center; }
+  .set-hd h1 { margin: 0; text-align: center; font-size: 20px; font-weight: 600; letter-spacing: -0.01em; }
+  .set-hd .b { width: 44px; height: 44px; display: grid; place-items: center; color: var(--text); }
+  .set-hd .b svg { width: 22px; height: 22px; }
+  .grp { background: var(--surface); border-radius: 14px; overflow: hidden; }
+  .grp .r { display: flex; justify-content: space-between; align-items: center; gap: 16px; padding: 16px 20px; border-bottom: 1px solid var(--divider); font-size: 15px; }
+  .grp .r:last-child { border-bottom: 0; }
+  .grp .r small { display: block; font-size: 13px; color: var(--muted); margin-top: 2px; }
+  .grp .r .v { font-family: "JetBrains Mono", ui-monospace, monospace; font-size: 15px; color: var(--blue); white-space: nowrap; }
+  .grp .r .v.ok { color: #8DA77B; } .grp .r .v.part { color: var(--amber); }
+  .grp .r .v .pct { color: var(--muted); font-size: 13px; margin-left: 6px; }
+  .grp .note { padding: 16px 20px; font-size: 13px; color: var(--muted); line-height: 1.45; }
+  .lbl { font-family: "JetBrains Mono", ui-monospace, monospace; font-size: 12px; letter-spacing: 0.12em; text-transform: uppercase; color: var(--muted); margin: 4px 0 -8px; }
+  .stats { display: grid; grid-template-columns: 1fr 1fr; gap: 16px 24px; padding: 20px; }
+  .stat .k { font-size: 15px; color: var(--muted); } .stat .n { font-family: "JetBrains Mono", ui-monospace, monospace; font-size: 15px; color: var(--blue); }
+  .btns { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; }
+  .btn-p, .btn-s { height: 56px; border-radius: 12px; display: grid; place-items: center; font-size: 15px; font-weight: 600; }
+  .btn-p { background: var(--amber); color: var(--foundation); }
+  .btn-s { border: 1px solid var(--divider); color: var(--text); }
   .fab { position: absolute; right: 16px; width: 56px; height: 56px; border-radius: 50%; background: var(--amber); color: var(--foundation);
          font-weight: 700; font-size: 13px; display: grid; place-items: center; box-shadow: var(--shadow-2); }
 </style>

@@ -191,6 +191,26 @@ const STYLE = `
                   display: flex; align-items: center; color: var(--dim); font-size: 15px; }
   .composer .send { width: 44px; height: 44px; border-radius: 50%; background: var(--amber); color: var(--foundation); display: grid; place-items: center; }
   .composer .send svg { width: 22px; height: 22px; }
+  .set { padding: 24px 24px 0; max-width: 720px; display: flex; flex-direction: column; gap: 20px; }
+  .set-hd { display: grid; grid-template-columns: 44px 1fr 44px; align-items: center; }
+  .set-hd h1 { margin: 0; text-align: center; font-size: 20px; font-weight: 600; letter-spacing: -0.01em; }
+  .set-hd .b { width: 44px; height: 44px; display: grid; place-items: center; color: var(--text); }
+  .set-hd .b svg { width: 22px; height: 22px; }
+  .grp { background: var(--surface); border-radius: 14px; overflow: hidden; }
+  .grp .r { display: flex; justify-content: space-between; align-items: center; gap: 16px; padding: 16px 20px; border-bottom: 1px solid var(--divider); font-size: 15px; }
+  .grp .r:last-child { border-bottom: 0; }
+  .grp .r small { display: block; font-size: 13px; color: var(--muted); margin-top: 2px; }
+  .grp .r .v { font-family: "JetBrains Mono", ui-monospace, monospace; font-size: 15px; color: var(--blue); white-space: nowrap; }
+  .grp .r .v.ok { color: #8DA77B; } .grp .r .v.part { color: var(--amber); }
+  .grp .r .v .pct { color: var(--muted); font-size: 13px; margin-left: 6px; }
+  .grp .note { padding: 16px 20px; font-size: 13px; color: var(--muted); line-height: 1.45; }
+  .lbl { font-family: "JetBrains Mono", ui-monospace, monospace; font-size: 12px; letter-spacing: 0.12em; text-transform: uppercase; color: var(--muted); margin: 4px 0 -8px; }
+  .stats { display: grid; grid-template-columns: 1fr 1fr; gap: 16px 24px; padding: 20px; }
+  .stat .k { font-size: 15px; color: var(--muted); } .stat .n { font-family: "JetBrains Mono", ui-monospace, monospace; font-size: 15px; color: var(--blue); }
+  .btns { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; }
+  .btn-p, .btn-s { height: 56px; border-radius: 12px; display: grid; place-items: center; font-size: 15px; font-weight: 600; }
+  .btn-p { background: var(--amber); color: var(--foundation); }
+  .btn-s { border: 1px solid var(--divider); color: var(--text); }
   .fab { position: absolute; right: 16px; width: 56px; height: 56px; border-radius: 50%; background: var(--amber); color: var(--foundation);
          font-weight: 700; font-size: 13px; display: grid; place-items: center; box-shadow: var(--shadow-2); }
 `;
@@ -237,8 +257,10 @@ const HISTORY = [['The Turn Of A Friendly Card', 'The Alan Parsons Project'], ['
   ['Live at the Royal Albert Hall', 'David Gilmour'], ['Echoes', 'Ludovico Einaudi'], ['Immunity', 'Jon Hopkins'],
   ['Moonlake', 'Klaus Schulze'], ['Phaedra', 'Tangerine Dream'], ['Archipelago', 'Hidden Orchestra'], ['Isla', 'Portico Quartet']];
 
-const SETTINGS = [['hqp', 'HQPlayer'], ['output', 'Audio output'], ['profile', 'Profile'], ['gear', 'My gear'],
-  ['advisor', 'Gear advisor'], ['library', 'Library'], ['phantoms', 'Streaming library'], ['ai', 'AI assistant'], ['sync', 'Sync']];
+// Exactly the phone drawer's rows (app-shell.js moreDrawer._html): the
+// gear screens are reached from inside Profile, not from here.
+const SETTINGS = [['hqp', 'HQPlayer'], ['output', 'Audio output'], ['profile', 'Profile'], ['library', 'Library'],
+  ['phantoms', 'Streaming library'], ['ai', 'AI assistant'], ['sync', 'Sync &amp; P2P']];
 
 const artistRow = n => `<div class="row">${ARTISTS.slice(0, n).map(a =>
   `<div class="artist"><div class="avatar"></div><div class="name">${a}</div></div>`).join('')}</div>`;
@@ -267,14 +289,15 @@ function sidebar(width, { withAi }) {
   </nav>`;
 }
 
-function rail({ withAi }) {
+function rail({ withAi, active = 'home' }) {
+  const cls = t => `rail-tab${t === active ? ' active' : ''}`;
   return `
   <nav class="rail" style="bottom: ${BAR_H}px;">
     <div class="mark">S<span style="color: var(--amber);">.</span></div>
-    <div class="rail-tab active">${I.home}<span>Home</span></div>
-    <div class="rail-tab">${I.discovery}<span>Discovery</span></div>
-    <div class="rail-tab">${I.friends}<span>Friends</span></div>
-    <div class="rail-tab">${I.more}<span>More</span></div>
+    <div class="${cls('home')}">${I.home}<span>Home</span></div>
+    <div class="${cls('discovery')}">${I.discovery}<span>Discovery</span></div>
+    <div class="${cls('friends')}">${I.friends}<span>Friends</span></div>
+    <div class="${cls('more')}">${I.more}<span>More</span></div>
     <div class="spacer"></div>
     ${withAi ? `<div class="rail-tab" style="color: var(--amber);">${I.ai}<span>AI</span></div>` : ''}
   </nav>`;
@@ -401,7 +424,7 @@ function card() {
   </div>`;
 }
 
-const MORE_HINTS = { hqp: 'Connected · 192 kHz', output: 'HQPlayer', profile: '', gear: '5 items', advisor: '', library: '34 837 tracks', phantoms: '2.9 M', ai: 'Claude', sync: '3 peers' };
+const MORE_HINTS = { hqp: 'Connected', output: 'HQPlayer' };   // the two live hints the drawer has
 const moreRows = () => SETTINGS.map(([ic, label]) =>
   `<div class="more-row">${I[ic]}<span class="l">${label}</span><span class="h">${MORE_HINTS[ic] || ''}</span><span class="c">${I.chevR}</span></div>`).join('\n');
 
@@ -411,7 +434,7 @@ const morePopover = () => `
 
 const moreCard = () => `
   <div class="scrim"></div>
-  <div class="card360"><div class="more-title">More</div>${moreRows()}</div>`;
+  <div class="card360" style="bottom: auto;"><div class="more-title">More</div>${moreRows()}</div>`;
 
 const QUEUE = [['High Hopes', 'David Gilmour · Remember That Night', '9:18', true], ['Coming Back To Life', 'David Gilmour · Remember That Night', '6:24'],
   ['Shine On You Crazy Diamond', 'David Gilmour · Remember That Night', '11:52'], ['Wish You Were Here', 'David Gilmour · Remember That Night', '5:40'],
@@ -435,6 +458,33 @@ const aiCard = () => `
       <div class="msg ai">Queued Isla. After it: Moonlake — the calmest Schulze you own.</div>
     </div>
     <div class="composer"><div class="in">Message…</div><div class="send">${I.send}</div></div>
+  </div>`;
+
+const libraryScreen = () => `
+  <div class="set">
+    <div class="set-hd"><span class="b">${I.back}</span><h1>Library</h1><span></span></div>
+    <div class="grp">
+      <div class="r"><div>Music path<small>Configured in the launcher.</small></div><span class="v">E:\\Music</span></div>
+      <div class="r"><div>Storage</div><span class="v">1.91 TB</span></div>
+      <div class="r"><div>Last scan<small class="v" style="color: var(--muted); font-size: 13px;">2026-09-05 · 18:14</small></div><span>6 days ago</span></div>
+    </div>
+    <div class="lbl">Library</div>
+    <div class="grp"><div class="stats">
+      <div class="stat"><div class="k">Tracks</div><div class="n">37 101</div></div>
+      <div class="stat"><div class="k">Artists</div><div class="n">3 454</div></div>
+      <div class="stat"><div class="k">Albums</div><div class="n">3 755</div></div>
+      <div class="stat"><div class="k">Genres</div><div class="n">540</div></div>
+    </div></div>
+    <div class="btns"><div class="btn-p">Scan for new</div><div class="btn-s">Rescan</div></div>
+    <div class="lbl">Enrichment</div>
+    <div class="grp">
+      <div class="r"><div>Embeddings</div><span class="v ok">37 101 / 37 101<span class="pct">· 100%</span></span></div>
+      <div class="r"><div>Features</div><span class="v ok">37 101 / 37 101<span class="pct">· 100%</span></span></div>
+      <div class="r"><div>Last.fm</div><span class="v part">4 156 / 4 215<span class="pct">· 98%</span></span></div>
+      <div class="r"><div>Lyrics</div><span class="v part">31 262 / 37 101<span class="pct">· 84%</span></span></div>
+      <div class="note">Analyse library computes embeddings and features on this machine. Last.fm, lyrics and the text embeddings are handled on their own by Background enrichment (Sync &amp; P2P).</div>
+    </div>
+    <div class="btn-s">Analyse library</div>
   </div>`;
 
 const fab = (bottom, right = 16) => `<div class="fab" style="bottom: ${bottom}px; right: ${right}px;">AI</div>`;
@@ -530,6 +580,14 @@ const boards = {
   ${fab(BAR_H + 16)}
   ${moreCard()}`,
   },
+  'PortraitLibrary.dc.html': {
+    title: 'Portrait · after tapping Library: the screen opens in the content area, as on the phone', w: 768, h: 1024,
+    body: () => `
+  ${rail({ withAi: false, active: 'more' })}
+  <main class="content" style="left: 80px; right: 0; bottom: ${BAR_H}px; padding: 0;">${libraryScreen()}</main>
+  ${miniBar('80px')}
+  ${fab(BAR_H + 16)}`,
+  },
   'LandscapeQueue.dc.html': {
     title: 'Landscape · Queue card', w: 1024, h: 768,
     body: () => `
@@ -614,8 +672,9 @@ const canvas = {
     { file: 'LandscapeNowPlayingScrolled.dc.html', title: boards['LandscapeNowPlayingScrolled.dc.html'].title, page: 'tablet', x: 2 * (1024 + GAP_X), y: 1024 + GAP_Y, w: 1024, h: 768 },
     { file: 'PortraitMorePopover.dc.html', title: boards['PortraitMorePopover.dc.html'].title, page: 'tablet', x: 0, y: 1024 + GAP_Y + 768 + GAP_Y, w: 768, h: 1024 },
     { file: 'PortraitMoreCard.dc.html', title: boards['PortraitMoreCard.dc.html'].title, page: 'tablet', x: 768 + GAP_X, y: 1024 + GAP_Y + 768 + GAP_Y, w: 768, h: 1024 },
-    { file: 'LandscapeQueue.dc.html', title: boards['LandscapeQueue.dc.html'].title, page: 'tablet', x: 2 * (768 + GAP_X), y: 1024 + GAP_Y + 768 + GAP_Y, w: 1024, h: 768 },
-    { file: 'LandscapeAI.dc.html', title: boards['LandscapeAI.dc.html'].title, page: 'tablet', x: 2 * (768 + GAP_X) + 1024 + GAP_X, y: 1024 + GAP_Y + 768 + GAP_Y, w: 1024, h: 768 },
+    { file: 'PortraitLibrary.dc.html', title: boards['PortraitLibrary.dc.html'].title, page: 'tablet', x: 2 * (768 + GAP_X), y: 1024 + GAP_Y + 768 + GAP_Y, w: 768, h: 1024 },
+    { file: 'LandscapeQueue.dc.html', title: boards['LandscapeQueue.dc.html'].title, page: 'tablet', x: 0, y: 2 * (1024 + GAP_Y) + 768 + GAP_Y, w: 1024, h: 768 },
+    { file: 'LandscapeAI.dc.html', title: boards['LandscapeAI.dc.html'].title, page: 'tablet', x: 1024 + GAP_X, y: 2 * (1024 + GAP_Y) + 768 + GAP_Y, w: 1024, h: 768 },
     { file: 'Main.dc.html', title: boards['Main.dc.html'].title, page: 'desktop', x: 0, y: 0, w: 1440, h: 900 },
     { file: 'DirectionB.dc.html', title: boards['DirectionB.dc.html'].title, page: 'desktop', x: 1440 + GAP_X, y: 0, w: 1440, h: 900 },
     { file: 'DirectionC.dc.html', title: boards['DirectionC.dc.html'].title, page: 'desktop', x: 2 * (1440 + GAP_X), y: 0, w: 1440, h: 900 },
@@ -627,8 +686,10 @@ const canvas = {
       'The card floats on a new elevation step, --shadow-4 (warm, like the other three): a wide ambient drop plus a 1px light rim so the edge reads on the dark scrim. Proposed for tokens.css alongside --shadow-1…3.' },
     { id: 'scroll-note', page: 'tablet', x: 2 * (1024 + GAP_X), y: 1024 + GAP_Y - 240, w: 460, text:
       'Scrolling: the whole card scrolls exactly like the phone sheet — the cover and its chevron ride up with the content, Similar tracks come into view, the rounded corners clip the content. A thin overlay scrollbar shows position. Closing while scrolled: tap the scrim or Escape (the chevron is back at the top after a scroll up).' },
-    { id: 'more-note', page: 'tablet', x: 0, y: 1024 + GAP_Y + 768 + GAP_Y - 240, w: 620, text:
-      'Screen set 1 — the frame in action. MORE: a menu, not a task — pick: a popover anchored beside the rail (recommended: it opens where you tapped, dims nothing but a whisper, and the phone drawer rows are reused as they are) or the same centred card as every sheet (consistent, but a menu that dims the whole screen feels heavy). QUEUE and AI are the phone sheets verbatim in the 360px card — drawn schematically here; the implementation reuses the phone CSS unchanged.' },
+    { id: 'more-note', page: 'tablet', x: 0, y: 1024 + GAP_Y + 768 + GAP_Y - 260, w: 620, text:
+      'MORE — exactly the phone drawer: the same seven rows, same order, same live hints (HQPlayer, Audio output). Its rows are routes, not windows: tapping one closes the menu and the screen opens in the content area, as on the phone (third board — Library). The rail keeps More highlighted while you are inside a More screen. Decision: popover beside the rail (opens where you tapped, barely dims) or a centred card like every sheet (consistent, but a menu that dims the whole screen feels heavier).' },
+    { id: 'set1-note', page: 'tablet', x: 0, y: 2 * (1024 + GAP_Y) + 768 + GAP_Y - 200, w: 620, text:
+      'QUEUE and AI CHAT — the phone sheets verbatim in the 360px card; drawn schematically, the implementation reuses the phone CSS unchanged. Accepted 2026-09-11.' },
     { id: 'desktop-brief', page: 'desktop', x: 0, y: -200, w: 560, text:
       'Desktop directions — parked. Kept for the later desktop cycle; nothing here is being built now. A: sidebar + docked NP · B: sidebar + full player bar + NP card · C: rail + docked NP.' },
   ],
