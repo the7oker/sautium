@@ -23,6 +23,9 @@
  *   --chrome    Chrome binary (default: newest under ~/.cache/puppeteer/chrome)
  *   --libs      directory holding usr/lib/x86_64-linux-gnu (LD_LIBRARY_PATH)
  *   --token     device token (else $SAUTIUM_TOKEN, else `docker exec`)
+ *   --quiet     ms of DOM silence that counts as settled (default 500;
+ *               raise it for a build that does not publish
+ *               window.sautiumRendered)
  *
  * Never waits for network idle: the SSE stream keeps a connection open
  * forever. A route counts as rendered when fonts are ready and the DOM has
@@ -31,9 +34,11 @@
  */
 
 import { execFileSync, spawn } from 'node:child_process';
+import { inflateSync } from 'node:zlib';
 import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { homedir, tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
+import { pathToFileURL } from 'node:url';
 
 const DEFAULTS = {
   url: 'https://localhost:8800',
@@ -50,6 +55,7 @@ const DEFAULTS = {
   chrome: '',
   libs: '',
   token: process.env.SAUTIUM_TOKEN || '',
+  quiet: '500',
 };
 
 const OVERLAYS = {
@@ -77,8 +83,8 @@ const OVERLAYS = {
 
 const TOKEN_KEY = 'sautium.device_token';
 
-const SETTLE = `new Promise(resolve => {
-  const QUIET = 500, CAP = 8000, started = performance.now();
+const SETTLE = quiet => `new Promise(resolve => {
+  const QUIET = ${quiet}, CAP = 8000, started = performance.now();
   const ignore = '#miniPlayer, #npProgressTrack, #npTimeCurrent, #npTimeTotal';
   let timer = null;
   const finish = () => {
@@ -95,6 +101,38 @@ const SETTLE = `new Promise(resolve => {
     { subtree: true, childList: true, attributes: true, characterData: true });
   const cap = setTimeout(finish, CAP);
   document.fonts.ready.then(arm);
+})`;
+
+// Cover art arrives without a DOM mutation (<img> decode, CSS background
+// fetch), so the quiet DOM says nothing about it. Wait for every <img> and
+// every background-image URL in the document before capturing.
+const IMAGES_READY = `new Promise(resolve => {
+  const urls = new Set();
+  for (const el of document.querySelectorAll('*')) {
+    const bg = getComputedStyle(el).backgroundImage;
+    const m = bg && bg.match(/url\\("?([^")]+)"?\\)/);
+    if (m) urls.add(m[1]);
+  }
+  for (const i of document.images) if (i.loading === 'lazy') i.loading = 'eager';
+  const waits = [...document.images].filter(i => !i.complete)
+    .map(i => new Promise(r => { i.addEventListener('load', r, { once: true }); i.addEventListener('error', r, { once: true }); }));
+  for (const u of urls) waits.push(new Promise(r => { const i = new Image(); i.onload = i.onerror = r; i.src = u; }));
+  const cap = setTimeout(resolve, 10000);
+  Promise.all(waits).then(() => { clearTimeout(cap); resolve(); });
+})`;
+
+// Navigate by hash and wait for the app's own "route painted" promise
+// (window.sautiumRendered, set by render() on hashchange) when the build
+// publishes one; older builds fall back to the quiet-DOM settle alone.
+// The hashchange listener is registered before the hash moves, and the
+// app's listener (registered at boot) runs first, so the promise read
+// afterwards is the new route's.
+const GO_TO = hash => `new Promise(resolve => {
+  const target = ${JSON.stringify('#' + hash)};
+  const done = () => resolve(window.sautiumRendered ? window.sautiumRendered.then(() => 'rendered') : 'quiet');
+  if (location.hash === target) return done();
+  addEventListener('hashchange', done, { once: true });
+  location.hash = target;
 })`;
 
 const TWO_FRAMES = 'new Promise(r => requestAnimationFrame(() => requestAnimationFrame(r)))';
@@ -192,6 +230,12 @@ class Cdp {
     });
   }
 
+  on(method, sessionId, fn) {
+    const key = `${sessionId || ''}:${method}`;
+    if (!this.listeners.has(key)) this.listeners.set(key, []);
+    this.listeners.get(key).push(fn);
+  }
+
   once(method, sessionId) {
     const key = `${sessionId || ''}:${method}`;
     if (!this.listeners.has(key)) this.listeners.set(key, []);
@@ -206,7 +250,21 @@ class Cdp {
 }
 
 class Page {
-  constructor(cdp, sessionId) { this.cdp = cdp; this.sessionId = sessionId; }
+  constructor(cdp, sessionId) {
+    this.cdp = cdp;
+    this.sessionId = sessionId;
+    this.errors = [];
+    cdp.on('Runtime.exceptionThrown', sessionId, ({ exceptionDetails: d }) => {
+      const text = d.exception?.description || d.text;
+      this.errors.push(`${text}${d.url ? ` (${d.url}:${d.lineNumber})` : ''}`);
+    });
+    cdp.on('Runtime.consoleAPICalled', sessionId, ({ type, args }) => {
+      if (type !== 'error') return;
+      this.errors.push(`console.error: ${args.map(a => a.value ?? a.description ?? '').join(' ')}`);
+    });
+  }
+
+  takeErrors() { const list = this.errors; this.errors = []; return list; }
 
   send(method, params) { return this.cdp.send(method, params, this.sessionId); }
 
@@ -219,7 +277,7 @@ class Page {
     return result.value;
   }
 
-  settle() { return this.eval(SETTLE, true); }
+  settle() { return this.eval(SETTLE(this.quiet), true); }
 
   async navigate(url) {
     const loaded = this.cdp.once('Page.loadEventFired', this.sessionId);
@@ -250,6 +308,7 @@ class Page {
       height = Math.min(Math.max(scrollHeight, vp.height), 6000);
     }
     if (height !== vp.height) await this.metrics({ width: vp.width, height });
+    await this.eval(IMAGES_READY, true);
     await this.eval(TWO_FRAMES, true);
     const { data } = await this.send('Page.captureScreenshot', { format: 'png' });
     writeFileSync(file, Buffer.from(data, 'base64'));
@@ -262,7 +321,7 @@ const slugOf = route => route.replace(/\//g, '_');
 async function shootRoute(page, route, vp, out) {
   const [base, overlay] = route.split('+');
   const file = join(out, `${slugOf(route)}@${vp.width}x${vp.height}.png`);
-  await page.eval(`location.hash = ${JSON.stringify('#' + base)}`);
+  await page.eval(GO_TO(base), true);
   let ms = await page.settle();
   if (overlay) {
     const ov = OVERLAYS[overlay];
@@ -276,7 +335,7 @@ async function shootRoute(page, route, vp, out) {
     await page.eval(OVERLAYS[overlay].close);
     await page.settle();
   }
-  return { route, vp, ms };
+  return { route, vp, ms, errors: page.takeErrors() };
 }
 
 function writeContactSheet(out, routes, widths, artboards) {
@@ -315,15 +374,70 @@ ${rows}
 `);
 }
 
+// Minimal PNG reader for Chrome's own output (8-bit RGB/RGBA, no interlace).
+function decodePng(buf) {
+  let pos = 8, width = 0, height = 0, channels = 0;
+  const idat = [];
+  while (pos < buf.length) {
+    const len = buf.readUInt32BE(pos), type = buf.toString('ascii', pos + 4, pos + 8);
+    const data = buf.subarray(pos + 8, pos + 8 + len);
+    if (type === 'IHDR') {
+      width = data.readUInt32BE(0); height = data.readUInt32BE(4);
+      const depth = data[8], colour = data[9];
+      if (depth !== 8 || data[12] !== 0) throw new Error(`unsupported PNG (depth ${depth}, interlace ${data[12]})`);
+      channels = { 0: 1, 2: 3, 4: 2, 6: 4 }[colour];
+    } else if (type === 'IDAT') idat.push(data);
+    pos += 12 + len;
+  }
+  const raw = inflateSync(Buffer.concat(idat));
+  const stride = width * channels, px = Buffer.alloc(stride * height);
+  for (let y = 0; y < height; y++) {
+    const filter = raw[y * (stride + 1)], src = y * (stride + 1) + 1, dst = y * stride;
+    for (let x = 0; x < stride; x++) {
+      const a = x >= channels ? px[dst + x - channels] : 0;
+      const b = y > 0 ? px[dst - stride + x] : 0;
+      const c = (x >= channels && y > 0) ? px[dst - stride + x - channels] : 0;
+      let v = raw[src + x];
+      if (filter === 1) v += a;
+      else if (filter === 2) v += b;
+      else if (filter === 3) v += (a + b) >> 1;
+      else if (filter === 4) { const p = a + b - c, pa = Math.abs(p - a), pb = Math.abs(p - b), pc = Math.abs(p - c); v += (pa <= pb && pa <= pc) ? a : (pb <= pc ? b : c); }
+      px[dst + x] = v & 255;
+    }
+  }
+  return { width, height, channels, px };
+}
+
+function pixelDiff(a, b) {
+  if (a.width !== b.width || a.height !== b.height) return { size: `${a.width}x${a.height} vs ${b.width}x${b.height}` };
+  const ch = Math.min(a.channels, b.channels);
+  let count = 0, x0 = Infinity, y0 = Infinity, x1 = -1, y1 = -1;
+  for (let y = 0; y < a.height; y++) {
+    for (let x = 0; x < a.width; x++) {
+      const ia = (y * a.width + x) * a.channels, ib = (y * b.width + x) * b.channels;
+      let differs = false;
+      for (let c = 0; c < ch; c++) if (a.px[ia + c] !== b.px[ib + c]) { differs = true; break; }
+      if (!differs) continue;
+      count++;
+      if (x < x0) x0 = x; if (x > x1) x1 = x; if (y < y0) y0 = y; if (y > y1) y1 = y;
+    }
+  }
+  return { count, box: count ? `x ${x0}–${x1}, y ${y0}–${y1}` : '' };
+}
+
 function compare(dirA, dirB) {
   const files = readdirSync(dirA).filter(f => f.endsWith('.png')).sort();
   let differing = 0;
   for (const file of files) {
     const other = join(dirB, file);
     if (!existsSync(other)) { console.log(`MISSING  ${file}`); differing++; continue; }
-    const same = readFileSync(join(dirA, file)).equals(readFileSync(other));
-    if (!same) differing++;
-    console.log(`${same ? 'same   ' : 'DIFF   '}  ${file}`);
+    const bufA = readFileSync(join(dirA, file)), bufB = readFileSync(other);
+    if (bufA.equals(bufB)) { console.log(`same     ${file}`); continue; }
+    const d = pixelDiff(decodePng(bufA), decodePng(bufB));
+    if (d.size) { console.log(`DIFF     ${file}  size ${d.size}`); differing++; continue; }
+    if (!d.count) { console.log(`same     ${file}  (bytes differ, pixels equal)`); continue; }
+    differing++;
+    console.log(`DIFF     ${file}  ${d.count} px  ${d.box}`);
   }
   console.log(`${files.length} compared, ${differing} differ`);
   process.exitCode = differing ? 1 : 0;
@@ -354,6 +468,7 @@ async function main() {
     const { targetId } = await cdp.send('Target.createTarget', { url: 'about:blank' });
     const { sessionId } = await cdp.send('Target.attachToTarget', { targetId, flatten: true });
     const page = new Page(cdp, sessionId);
+    page.quiet = Number(opts.quiet);
     await page.send('Page.enable');
     await page.send('Runtime.enable');
     for (const vp of widths) {
@@ -362,10 +477,12 @@ async function main() {
       await page.eval(`localStorage.setItem(${JSON.stringify(TOKEN_KEY)}, ${JSON.stringify(token)})`);
       await page.reload();
       await page.settle();
+      page.takeErrors();
       for (const route of routes) {
         const result = await shootRoute(page, route, vp, out);
         results.push(result);
-        console.log(`${vp.width}x${vp.height}  ${route.padEnd(28)} ${result.note || `${result.ms} ms`}`);
+        const errs = result.errors?.length ? `  !! ${result.errors.length} js error(s)` : '';
+        console.log(`${vp.width}x${vp.height}  ${route.padEnd(28)} ${result.note || `${result.ms} ms`}${errs}`);
       }
     }
   } finally {
@@ -376,7 +493,17 @@ async function main() {
     rmSync(userData, { recursive: true, force: true });
   }
   writeContactSheet(out, routes, widths, opts.artboards);
-  console.log(`${results.filter(r => !r.note).length} shots in ${out} — open ${join(out, 'index.html')}`);
+  const errorLog = results.filter(r => r.errors?.length)
+    .map(r => `## ${r.route} @ ${r.vp.width}x${r.vp.height}\n${r.errors.join('\n')}\n`).join('\n');
+  writeFileSync(join(out, 'errors.log'), errorLog);
+  console.log(`${results.filter(r => !r.note).length} shots in ${out} — open ${join(out, 'index.html')}`
+    + (errorLog ? `\nJS errors were thrown — see ${join(out, 'errors.log')}` : '\nno JS errors'));
 }
 
-main().catch(err => { console.error(err.stack || err); process.exit(1); });
+// Importable as a library for ad-hoc probes (the CDP plumbing, Chrome
+// launch, token derivation); runs the CLI only when executed directly.
+export { Cdp, Page, launchChrome, findChrome, deriveToken, GO_TO, IMAGES_READY, TWO_FRAMES };
+
+if (import.meta.url === pathToFileURL(process.argv[1]).href) {
+  main().catch(err => { console.error(err.stack || err); process.exit(1); });
+}
