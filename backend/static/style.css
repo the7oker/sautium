@@ -5654,22 +5654,43 @@ select.add-gear-input {
 .notes-area.placeholder { color: var(--color-text-dim); font-style: italic; }
 
 /* =====================================================================
- * Dialog shell — backs both confirmDestructive() (binary choice) and
- * notifyDialog() (single-button alert replacement). Native
- * alert/confirm/prompt are banned (see CLAUDE.md); these live inside
- * the design system instead.
+ * Dialog shell — backs confirmDestructive() (binary choice),
+ * notifyDialog() (single-button alert replacement), the sort/variant
+ * pickers and the sign-in gate. Native alert/confirm/prompt are banned
+ * (see CLAUDE.md); these live inside the design system instead.
+ *
+ * Every one of them is a <dialog> raised with showModal(), so it paints
+ * in the browser's TOP LAYER — above every stacking context in the
+ * document, whatever z-index anything else carries. Hence no z-index
+ * here: as a plain div at 70 this shell opened *behind* the Now Playing
+ * sheet (100), and any number written here would only postpone the next
+ * sheet that outbids it.
  * ===================================================================== */
 .confirm-overlay {
   position: fixed;
   inset: 0;
-  z-index: 70;
+  /* A dialog's UA size is fit-content with a max-width — both have to go
+     for inset:0 to mean "fill the viewport". */
+  width: 100%;
+  height: 100%;
+  max-width: none;
+  max-height: none;
+  margin: 0;
+  border: 0;
+  background: rgba(14, 10, 8, 0.65);
+  color: var(--color-text);
+  padding: calc(20 * var(--px));
+}
+/* The UA hides a dialog that is not open; our display must not override
+   that, so it applies only once showModal() has set [open]. */
+.confirm-overlay[open] {
   display: flex;
   align-items: center;
   justify-content: center;
-  background: rgba(14, 10, 8, 0.65);
-  padding: calc(20 * var(--px));
 }
-.confirm-overlay[hidden] { display: none !important; }
+/* The element itself paints the ground over the whole viewport — the UA
+   backdrop must not darken it a second time. */
+.confirm-overlay::backdrop { background: transparent; }
 .confirm-sheet {
   width: 100%;
   max-width: calc(320 * var(--px));
