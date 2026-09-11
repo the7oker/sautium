@@ -1,15 +1,8 @@
 /* =====================================================================
- * Sautium view layer (Phase 1, Step 1.1).
- *
- * Replaces the legacy prototype styles. Tokens come from tokens.css;
- * this file defines the new app shell, Home screen, mini-player,
- * bottom navigation, AI FAB, and placeholder screens.
- *
- * Legacy stubs (#legacy-stubs in index.html) stay invisible to keep
- * app.js polling code happy until each screen is migrated.
+ * Sautium view layer. Tokens come from tokens.css; this file holds the
+ * app shell chrome (nav, mini-player, AI FAB, sheets, dialogs) and
+ * every screen's styles.
  * ===================================================================== */
-
-#legacy-stubs { display: none !important; }
 
 /* ---------------------------------------------------------------------
  * Minimal modern reset (Josh-Comeau-style, focused).
@@ -3402,7 +3395,7 @@ body.has-miniplayer .discovery-screen .filter-actions {
 }
 
 /* =====================================================================
- * Placeholder screen (Friends / More — not yet rebuilt)
+ * Empty and not-found states
  * ===================================================================== */
 
 .placeholder-screen {
@@ -3417,13 +3410,6 @@ body.has-miniplayer .discovery-screen .filter-actions {
   min-height: 60dvh;
 }
 
-.placeholder-title {
-  font-size: var(--text-heading);
-  font-weight: 600;
-  color: var(--color-text);
-  margin: 0;
-}
-
 .placeholder-body {
   font-size: var(--text-body);
   color: var(--color-text-muted);
@@ -3432,7 +3418,7 @@ body.has-miniplayer .discovery-screen .filter-actions {
   margin: 0;
 }
 
-.legacy-link {
+.back-link {
   display: inline-block;
   margin-top: var(--space-3);
   padding: var(--space-2) var(--space-4);
@@ -3444,7 +3430,7 @@ body.has-miniplayer .discovery-screen .filter-actions {
   font-size: var(--text-label);
   font-weight: 500;
 }
-.legacy-link:hover { background: var(--color-amber-weak); }
+.back-link:hover { background: var(--color-amber-weak); }
 
 /* ---- Friends screen ----
    Reference: docs/design/reference/claude-design-bundle/project/

@@ -1,11 +1,8 @@
 /* =====================================================================
- * Sautium app shell — router + screen registry + mini-player adapter.
- * Phase 1, Step 1.1.
- *
- * Loaded BEFORE app.js so the shell exists when legacy bootstrap code
- * runs. The shell listens for `np-update` CustomEvents emitted by
- * app.js's updateNowPlaying() and renders the mini-player accordingly.
- * Other UI surfaces are owned by individual screen renderers.
+ * Sautium app shell — hash router, screen registry, every screen
+ * renderer, the overlays (Now Playing, Queue, AI, More drawer) and the
+ * mini-player adapter. Transport and SSE primitives live in player.js;
+ * the shell renders the `np-update` CustomEvents it emits.
  * ===================================================================== */
 
 (function () {
@@ -1482,13 +1479,11 @@
   const queue = {
     el: null, list: null, summary: null, empty: null, closeBtn: null,
     isOpen: false,
-    // Queue keeps its own cache because `currentPlaylist` and
-    // `_latest_status_cache` are module-level `let` bindings in
-    // app.js — they are NOT on `window`, so we can't read them from
-    // here. We mirror them via events: `playlist-loaded.detail.tracks`
-    // and `np-update.detail.track_index`. Show() also refetches the
-    // playlist directly to guarantee fresh data even if no event
-    // has fired yet in this session.
+    // Queue mirrors player.js state through its events
+    // (`playlist-loaded.detail.tracks`, `np-update.detail.track_index`)
+    // so it always shows what the mini-player rendered. Show() also
+    // refetches the playlist directly to guarantee fresh data even if
+    // no event has fired yet in this session.
     tracks: [],
     trackIndex: 0,
 
@@ -1525,7 +1520,7 @@
           if (stateChanged) this.updateGlyphState();
         }
       });
-      // Mirror the playlist whenever app.js refetches it.
+      // Mirror the playlist whenever player.js refetches it.
       document.addEventListener('playlist-loaded', e => {
         this.tracks = (e.detail && e.detail.tracks) || [];
         if (this.isOpen) this.render();
@@ -2920,23 +2915,7 @@
 
   /* ---------- Screen renderers ---------- */
 
-  function placeholderScreen(label) {
-    return (root) => {
-      const div = document.createElement('div');
-      div.className = 'placeholder-screen';
-      div.innerHTML = `
-        <h2 class="placeholder-title">${escapeHtml(label)}</h2>
-        <p class="placeholder-body">
-          This screen is being rebuilt in the new design system.
-          The current full version is still available below.
-        </p>
-        <a class="legacy-link" href="/static/legacy.html">Open legacy UI →</a>
-      `;
-      root.appendChild(div);
-    };
-  }
-
-  /* ---------- Home (placeholder data; real wiring in Step 1.2) ---------- */
+  /* ---------- Home ---------- */
 
   function renderArtistTile(item) {
     const name = item.name || '';
@@ -4727,7 +4706,7 @@
     } catch (err) {
       screen.innerHTML = `<div class="placeholder-screen">
         <p class="placeholder-body">Artist not found.</p>
-        <button class="legacy-link" onclick="history.back()">← Back</button>
+        <button class="back-link" onclick="history.back()">← Back</button>
       </div>`;
       return;
     }
@@ -5179,7 +5158,7 @@
       } catch (err) {
         screen.innerHTML = `<div class="placeholder-screen">
           <p class="placeholder-body">Album not found.</p>
-          <button class="legacy-link" onclick="history.back()">← Back</button>
+          <button class="back-link" onclick="history.back()">← Back</button>
         </div>`;
         return;
       }
@@ -5407,7 +5386,7 @@
     } catch (err) {
       screen.innerHTML = `<div class="placeholder-screen">
         <p class="placeholder-body">Release group not found.</p>
-        <button class="legacy-link" onclick="history.back()">← Back</button>
+        <button class="back-link" onclick="history.back()">← Back</button>
       </div>`;
       return;
     }
@@ -5514,7 +5493,7 @@
     } catch (err) {
       screen.innerHTML = `<div class="placeholder-screen">
         <p class="placeholder-body">Session not found.</p>
-        <button class="legacy-link" onclick="history.back()">← Back</button>
+        <button class="back-link" onclick="history.back()">← Back</button>
       </div>`;
       return;
     }
@@ -6495,7 +6474,7 @@
     } catch (err) {
       screen.innerHTML = `<div class="placeholder-screen">
         <p class="placeholder-body">Genre not found.</p>
-        <button class="legacy-link" onclick="history.back()">← Back</button>
+        <button class="back-link" onclick="history.back()">← Back</button>
       </div>`;
       return;
     }
@@ -9364,8 +9343,8 @@
     });
   }
 
-  // Cross-file API — app.js (non-IIFE legacy bootstrap) and any future
-  // module needs the same dialogs to avoid native alert/confirm.
+  // Cross-file API — player.js and anything else loaded outside this
+  // IIFE need the same dialogs to avoid native alert/confirm.
   window.confirmDestructive = confirmDestructive;
   window.notifyDialog       = notifyDialog;
   window.escapeProfileHtml  = escapeProfileHtml;
