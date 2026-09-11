@@ -156,6 +156,41 @@ const STYLE = `
   .card .below { padding: 0 20px 20px; }
   .card .transport { margin-top: 12px; }
 
+  .more-row { display: grid; grid-template-columns: 28px 1fr auto 24px; gap: 14px; align-items: center; min-height: 56px;
+              padding: 8px 20px; border-bottom: 1px solid var(--divider); }
+  .more-row svg { width: 22px; height: 22px; color: var(--text); }
+  .more-row .l { font-size: 15px; font-weight: 500; }
+  .more-row .h { font-size: 13px; color: var(--muted); }
+  .more-row .c { color: var(--dim); }
+  .more-title { font-size: 22px; font-weight: 700; letter-spacing: -0.02em; padding: 16px 20px 8px; }
+  .popover { position: absolute; left: 88px; top: 16px; width: 320px; background: var(--surface); border-radius: 14px;
+             box-shadow: var(--shadow-4); overflow: hidden; }
+  .card360 { position: absolute; left: 50%; top: 24px; bottom: 24px; transform: translateX(-50%); width: 360px;
+             background: var(--foundation); border-radius: 14px; box-shadow: var(--shadow-4); overflow: hidden;
+             display: flex; flex-direction: column; }
+  .card360 .hd { display: grid; grid-template-columns: 44px 1fr 44px; align-items: center; padding: 2px 16px 6px; min-height: 52px; }
+  .card360 .hd h2 { margin: 0; font-size: 20px; font-weight: 600; letter-spacing: -0.01em; text-align: center; }
+  .card360 .hd .x { width: 44px; height: 44px; display: grid; place-items: center; color: var(--text); }
+  .card360 .hd .x svg { width: 22px; height: 22px; }
+  .card360 .sub { font-size: 13px; color: var(--muted); padding: 0 20px 12px; text-align: center; }
+  .q-row { display: grid; grid-template-columns: 44px 1fr auto 44px; gap: 12px; align-items: center; padding: 8px 20px; }
+  .q-row.now { background: rgba(232, 176, 111, 0.06); box-shadow: inset 3px 0 0 var(--amber); }
+  .q-row > div { min-width: 0; }
+  .q-row .c { width: 44px; height: 44px; border-radius: 4px; background: var(--surface-hi); }
+  .q-row .t { font-size: 15px; font-weight: 500; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .q-row .s { font-size: 13px; color: var(--muted); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .q-row .d { font-family: "JetBrains Mono", ui-monospace, monospace; font-size: 13px; color: var(--blue); }
+  .q-row .g { width: 44px; height: 44px; display: grid; place-items: center; color: var(--dim); }
+  .q-row .g svg { width: 20px; height: 20px; }
+  .thread { flex: 1; padding: 8px 16px; display: flex; flex-direction: column; gap: 12px; overflow: hidden; }
+  .msg { max-width: 86%; padding: 10px 14px; border-radius: 14px; font-size: 15px; line-height: 1.4; }
+  .msg.me { align-self: flex-end; background: var(--amber-weak); border-bottom-right-radius: 4px; }
+  .msg.ai { align-self: flex-start; background: var(--surface); border-bottom-left-radius: 4px; }
+  .composer { display: grid; grid-template-columns: 1fr 44px; gap: 8px; align-items: center; padding: 12px 16px 16px; border-top: 1px solid var(--divider); }
+  .composer .in { height: 44px; border-radius: 22px; background: var(--surface-lo); border: 1px solid var(--divider); padding: 0 16px;
+                  display: flex; align-items: center; color: var(--dim); font-size: 15px; }
+  .composer .send { width: 44px; height: 44px; border-radius: 50%; background: var(--amber); color: var(--foundation); display: grid; place-items: center; }
+  .composer .send svg { width: 22px; height: 22px; }
   .fab { position: absolute; right: 16px; width: 56px; height: 56px; border-radius: 50%; background: var(--amber); color: var(--foundation);
          font-weight: 700; font-size: 13px; display: grid; place-items: center; box-shadow: var(--shadow-2); }
 `;
@@ -172,7 +207,11 @@ const I = {
   prev: '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M18 18l-8.5-6L18 6v12zM8 18V6H6v12h2z" fill="currentColor"/></svg>',
   queue: '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 7h16M4 12h16M4 17h10" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg>',
   radio: '<svg viewBox="0 0 24 24" aria-hidden="true"><rect x="3" y="9" width="18" height="11" rx="2" fill="none" stroke="currentColor" stroke-width="2"/><path d="M7 9l10-5" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"/><circle cx="8" cy="14.5" r="2" fill="none" stroke="currentColor" stroke-width="2"/><path d="M13 13h5M13 16h5" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg>',
-  chevron: '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M6 9l6 6 6-6" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>',
+  chevron: '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M6 9l6 6 6-6" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/></svg>',
+  back: '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M15 6l-6 6 6 6" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/></svg>',
+  chevR: '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M9 6l6 6-6 6" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/></svg>',
+  drag: '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M5 9h14M5 15h14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg>',
+  send: '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 12l16-8-6 16-2-6-8-2z" fill="none" stroke="currentColor" stroke-width="2" stroke-linejoin="round"/></svg>',
   close: '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M6 6l12 12M18 6L6 18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg>',
   plus: '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 5v14M5 12h14" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round"/></svg>',
   hqp: '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M3 12h3l2-6 3 12 3-9 2 3h5" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>',
@@ -362,6 +401,42 @@ function card() {
   </div>`;
 }
 
+const MORE_HINTS = { hqp: 'Connected · 192 kHz', output: 'HQPlayer', profile: '', gear: '5 items', advisor: '', library: '34 837 tracks', phantoms: '2.9 M', ai: 'Claude', sync: '3 peers' };
+const moreRows = () => SETTINGS.map(([ic, label]) =>
+  `<div class="more-row">${I[ic]}<span class="l">${label}</span><span class="h">${MORE_HINTS[ic] || ''}</span><span class="c">${I.chevR}</span></div>`).join('\n');
+
+const morePopover = () => `
+  <div class="scrim" style="background: rgba(14,10,8,.35);"></div>
+  <div class="popover"><div class="more-title">More</div>${moreRows()}</div>`;
+
+const moreCard = () => `
+  <div class="scrim"></div>
+  <div class="card360"><div class="more-title">More</div>${moreRows()}</div>`;
+
+const QUEUE = [['High Hopes', 'David Gilmour · Remember That Night', '9:18', true], ['Coming Back To Life', 'David Gilmour · Remember That Night', '6:24'],
+  ['Shine On You Crazy Diamond', 'David Gilmour · Remember That Night', '11:52'], ['Wish You Were Here', 'David Gilmour · Remember That Night', '5:40'],
+  ['On an Island', 'David Gilmour · On an Island', '6:47'], ['The Blue', 'David Gilmour · On an Island', '5:26'], ['Take a Breath', 'David Gilmour · On an Island', '6:19']];
+const queueCard = () => `
+  <div class="scrim"></div>
+  <div class="card360">
+    <div class="hd"><span></span><h2>Queue</h2><span class="x">${I.close}</span></div>
+    <div class="sub">7 tracks · 51 min · HQPlayer</div>
+    ${QUEUE.map(([t, s, d, now]) => `<div class="q-row${now ? ' now' : ''}"><div class="c"></div><div><div class="t">${t}</div><div class="s">${s}</div></div><span class="d">${d}</span><span class="g">${I.drag}</span></div>`).join('\n    ')}
+  </div>`;
+
+const aiCard = () => `
+  <div class="scrim"></div>
+  <div class="card360">
+    <div class="hd"><span class="x">${I.back}</span><h2>Late-night ambient</h2><span class="x">${I.close}</span></div>
+    <div class="thread">
+      <div class="msg me">Something like Hidden Orchestra but calmer, for late night.</div>
+      <div class="msg ai">Try Portico Quartet's Isla and Jon Hopkins' Immunity — both sit near Hidden Orchestra in your library on the CLAP map, slower and more spacious. Want me to queue Isla?</div>
+      <div class="msg me">Queue it, then something from my Klaus Schulze.</div>
+      <div class="msg ai">Queued Isla. After it: Moonlake — the calmest Schulze you own.</div>
+    </div>
+    <div class="composer"><div class="in">Message…</div><div class="send">${I.send}</div></div>
+  </div>`;
+
 const fab = (bottom, right = 16) => `<div class="fab" style="bottom: ${bottom}px; right: ${right}px;">AI</div>`;
 
 /* ---------- artboards ---------- */
@@ -437,6 +512,42 @@ const boards = {
   ${fab(BAR_H + 16)}
   ${npSheet(true, { scrolled: 300 })}`,
   },
+  'PortraitMorePopover.dc.html': {
+    title: 'Portrait · More as a popover beside the rail (recommended)', w: 768, h: 1024,
+    body: () => `
+  ${rail({ withAi: false })}
+  <main class="content" style="left: 80px; right: 0; bottom: ${BAR_H}px;">${home({ artists: 7, albums: 5, brandInContent: true })}</main>
+  ${miniBar('80px')}
+  ${fab(BAR_H + 16)}
+  ${morePopover()}`,
+  },
+  'PortraitMoreCard.dc.html': {
+    title: 'Portrait · More as a centred card', w: 768, h: 1024,
+    body: () => `
+  ${rail({ withAi: false })}
+  <main class="content" style="left: 80px; right: 0; bottom: ${BAR_H}px;">${home({ artists: 7, albums: 5, brandInContent: true })}</main>
+  ${miniBar('80px')}
+  ${fab(BAR_H + 16)}
+  ${moreCard()}`,
+  },
+  'LandscapeQueue.dc.html': {
+    title: 'Landscape · Queue card', w: 1024, h: 768,
+    body: () => `
+  ${rail({ withAi: false })}
+  <main class="content" style="left: 80px; right: 0; bottom: ${BAR_H}px;">${home({ artists: 10, albums: 7, brandInContent: true })}</main>
+  ${miniBar('80px')}
+  ${fab(BAR_H + 16)}
+  ${queueCard()}`,
+  },
+  'LandscapeAI.dc.html': {
+    title: 'Landscape · AI chat card', w: 1024, h: 768,
+    body: () => `
+  ${rail({ withAi: false })}
+  <main class="content" style="left: 80px; right: 0; bottom: ${BAR_H}px;">${home({ artists: 10, albums: 7, brandInContent: true })}</main>
+  ${miniBar('80px')}
+  ${fab(BAR_H + 16)}
+  ${aiCard()}`,
+  },
 };
 
 const FONTS = '<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Inter+Tight:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap">';
@@ -501,6 +612,10 @@ const canvas = {
     { file: 'TabletLandscape.dc.html', title: boards['TabletLandscape.dc.html'].title, page: 'tablet', x: 0, y: 1024 + GAP_Y, w: 1024, h: 768 },
     { file: 'LandscapeNowPlayingCentred.dc.html', title: boards['LandscapeNowPlayingCentred.dc.html'].title, page: 'tablet', x: 1024 + GAP_X, y: 1024 + GAP_Y, w: 1024, h: 768 },
     { file: 'LandscapeNowPlayingScrolled.dc.html', title: boards['LandscapeNowPlayingScrolled.dc.html'].title, page: 'tablet', x: 2 * (1024 + GAP_X), y: 1024 + GAP_Y, w: 1024, h: 768 },
+    { file: 'PortraitMorePopover.dc.html', title: boards['PortraitMorePopover.dc.html'].title, page: 'tablet', x: 0, y: 1024 + GAP_Y + 768 + GAP_Y, w: 768, h: 1024 },
+    { file: 'PortraitMoreCard.dc.html', title: boards['PortraitMoreCard.dc.html'].title, page: 'tablet', x: 768 + GAP_X, y: 1024 + GAP_Y + 768 + GAP_Y, w: 768, h: 1024 },
+    { file: 'LandscapeQueue.dc.html', title: boards['LandscapeQueue.dc.html'].title, page: 'tablet', x: 2 * (768 + GAP_X), y: 1024 + GAP_Y + 768 + GAP_Y, w: 1024, h: 768 },
+    { file: 'LandscapeAI.dc.html', title: boards['LandscapeAI.dc.html'].title, page: 'tablet', x: 2 * (768 + GAP_X) + 1024 + GAP_X, y: 1024 + GAP_Y + 768 + GAP_Y, w: 1024, h: 768 },
     { file: 'Main.dc.html', title: boards['Main.dc.html'].title, page: 'desktop', x: 0, y: 0, w: 1440, h: 900 },
     { file: 'DirectionB.dc.html', title: boards['DirectionB.dc.html'].title, page: 'desktop', x: 1440 + GAP_X, y: 0, w: 1440, h: 900 },
     { file: 'DirectionC.dc.html', title: boards['DirectionC.dc.html'].title, page: 'desktop', x: 2 * (1440 + GAP_X), y: 0, w: 1440, h: 900 },
@@ -512,6 +627,8 @@ const canvas = {
       'The card floats on a new elevation step, --shadow-4 (warm, like the other three): a wide ambient drop plus a 1px light rim so the edge reads on the dark scrim. Proposed for tokens.css alongside --shadow-1…3.' },
     { id: 'scroll-note', page: 'tablet', x: 2 * (1024 + GAP_X), y: 1024 + GAP_Y - 240, w: 460, text:
       'Scrolling: the whole card scrolls exactly like the phone sheet — the cover and its chevron ride up with the content, Similar tracks come into view, the rounded corners clip the content. A thin overlay scrollbar shows position. Closing while scrolled: tap the scrim or Escape (the chevron is back at the top after a scroll up).' },
+    { id: 'more-note', page: 'tablet', x: 0, y: 1024 + GAP_Y + 768 + GAP_Y - 240, w: 620, text:
+      'Screen set 1 — the frame in action. MORE: a menu, not a task — pick: a popover anchored beside the rail (recommended: it opens where you tapped, dims nothing but a whisper, and the phone drawer rows are reused as they are) or the same centred card as every sheet (consistent, but a menu that dims the whole screen feels heavy). QUEUE and AI are the phone sheets verbatim in the 360px card — drawn schematically here; the implementation reuses the phone CSS unchanged.' },
     { id: 'desktop-brief', page: 'desktop', x: 0, y: -200, w: 560, text:
       'Desktop directions — parked. Kept for the later desktop cycle; nothing here is being built now. A: sidebar + docked NP · B: sidebar + full player bar + NP card · C: rail + docked NP.' },
   ],

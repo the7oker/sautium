@@ -143,6 +143,41 @@
   .card .below { padding: 0 20px 20px; }
   .card .transport { margin-top: 12px; }
 
+  .more-row { display: grid; grid-template-columns: 28px 1fr auto 24px; gap: 14px; align-items: center; min-height: 56px;
+              padding: 8px 20px; border-bottom: 1px solid var(--divider); }
+  .more-row svg { width: 22px; height: 22px; color: var(--text); }
+  .more-row .l { font-size: 15px; font-weight: 500; }
+  .more-row .h { font-size: 13px; color: var(--muted); }
+  .more-row .c { color: var(--dim); }
+  .more-title { font-size: 22px; font-weight: 700; letter-spacing: -0.02em; padding: 16px 20px 8px; }
+  .popover { position: absolute; left: 88px; top: 16px; width: 320px; background: var(--surface); border-radius: 14px;
+             box-shadow: var(--shadow-4); overflow: hidden; }
+  .card360 { position: absolute; left: 50%; top: 24px; bottom: 24px; transform: translateX(-50%); width: 360px;
+             background: var(--foundation); border-radius: 14px; box-shadow: var(--shadow-4); overflow: hidden;
+             display: flex; flex-direction: column; }
+  .card360 .hd { display: grid; grid-template-columns: 44px 1fr 44px; align-items: center; padding: 2px 16px 6px; min-height: 52px; }
+  .card360 .hd h2 { margin: 0; font-size: 20px; font-weight: 600; letter-spacing: -0.01em; text-align: center; }
+  .card360 .hd .x { width: 44px; height: 44px; display: grid; place-items: center; color: var(--text); }
+  .card360 .hd .x svg { width: 22px; height: 22px; }
+  .card360 .sub { font-size: 13px; color: var(--muted); padding: 0 20px 12px; text-align: center; }
+  .q-row { display: grid; grid-template-columns: 44px 1fr auto 44px; gap: 12px; align-items: center; padding: 8px 20px; }
+  .q-row.now { background: rgba(232, 176, 111, 0.06); box-shadow: inset 3px 0 0 var(--amber); }
+  .q-row > div { min-width: 0; }
+  .q-row .c { width: 44px; height: 44px; border-radius: 4px; background: var(--surface-hi); }
+  .q-row .t { font-size: 15px; font-weight: 500; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .q-row .s { font-size: 13px; color: var(--muted); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .q-row .d { font-family: "JetBrains Mono", ui-monospace, monospace; font-size: 13px; color: var(--blue); }
+  .q-row .g { width: 44px; height: 44px; display: grid; place-items: center; color: var(--dim); }
+  .q-row .g svg { width: 20px; height: 20px; }
+  .thread { flex: 1; padding: 8px 16px; display: flex; flex-direction: column; gap: 12px; overflow: hidden; }
+  .msg { max-width: 86%; padding: 10px 14px; border-radius: 14px; font-size: 15px; line-height: 1.4; }
+  .msg.me { align-self: flex-end; background: var(--amber-weak); border-bottom-right-radius: 4px; }
+  .msg.ai { align-self: flex-start; background: var(--surface); border-bottom-left-radius: 4px; }
+  .composer { display: grid; grid-template-columns: 1fr 44px; gap: 8px; align-items: center; padding: 12px 16px 16px; border-top: 1px solid var(--divider); }
+  .composer .in { height: 44px; border-radius: 22px; background: var(--surface-lo); border: 1px solid var(--divider); padding: 0 16px;
+                  display: flex; align-items: center; color: var(--dim); font-size: 15px; }
+  .composer .send { width: 44px; height: 44px; border-radius: 50%; background: var(--amber); color: var(--foundation); display: grid; place-items: center; }
+  .composer .send svg { width: 22px; height: 22px; }
   .fab { position: absolute; right: 16px; width: 56px; height: 56px; border-radius: 50%; background: var(--amber); color: var(--foundation);
          font-weight: 700; font-size: 13px; display: grid; place-items: center; box-shadow: var(--shadow-2); }
 </style>
