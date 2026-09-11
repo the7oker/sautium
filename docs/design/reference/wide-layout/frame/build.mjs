@@ -265,6 +265,39 @@ const STYLE = `
   .grid .artist { width: auto; }
   .two { display: grid; grid-template-columns: 320px 1fr; gap: 0 24px; padding: 24px 24px 0; align-items: start; }
   .two .alb-meta { position: sticky; top: 24px; }
+  .win { position: absolute; left: 50%; top: 24px; bottom: 24px; transform: translateX(-50%); background: var(--foundation);
+         border-radius: 14px; box-shadow: var(--shadow-4); overflow: hidden; display: flex; flex-direction: column; }
+  .win .hd { display: grid; grid-template-columns: 44px 1fr 44px; align-items: center; padding: 2px 16px 6px; min-height: 52px; flex-shrink: 0; }
+  .win .hd h2 { margin: 0; font-size: 20px; font-weight: 600; letter-spacing: -0.01em; text-align: center; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .win .hd .x { width: 44px; height: 44px; display: grid; place-items: center; color: var(--text); }
+  .win .hd .x svg { width: 22px; height: 22px; }
+  .win .body { flex: 1; overflow: hidden; }
+  .win .set { padding: 8px 16px 0; gap: 16px; }
+  .intro { padding: 4px 16px 0; font-size: 15px; line-height: 1.5; color: var(--muted); }
+  .pair { margin: 0 16px 12px; padding: 14px 16px 4px; background: var(--surface); border-radius: 12px; border-left: 3px solid #8DA77B; }
+  .pair.warn { border-left-color: var(--amber); } .pair.none { border-left-color: var(--dim); }
+  .pair h3 { margin: 0 0 8px; font-size: 17px; font-weight: 600; display: flex; gap: 10px; align-items: baseline; }
+  .pair h3 .ok { color: #8DA77B; font-size: 14px; } .pair h3 .no { color: var(--dim); font-size: 14px; }
+  .pr { padding: 10px 0; border-top: 1px solid var(--divider); }
+  .pr .k { display: flex; justify-content: space-between; align-items: center; font-size: 12px; letter-spacing: 0.04em; text-transform: uppercase; color: var(--muted); }
+  .pr .k b { font-family: "JetBrains Mono", ui-monospace, monospace; font-size: 10px; font-weight: 500; padding: 2px 6px; border-radius: 4px; background: rgba(74,127,167,.18); color: var(--blue); }
+  .pr .v { font-family: "JetBrains Mono", ui-monospace, monospace; font-size: 13px; line-height: 1.45; color: var(--blue); margin-top: 4px; }
+  .pr .v.dim { color: var(--dim); } .pr .n { font-size: 13px; color: var(--muted); margin-top: 4px; }
+  .pf-top { display: flex; flex-direction: column; align-items: center; gap: 6px; padding: 4px 16px 8px; text-align: center; }
+  .pf-top .av { width: 120px; height: 120px; border-radius: 50%; background: var(--surface-hi); box-shadow: var(--shadow-1); position: relative; margin-bottom: 8px; }
+  .pf-top .av i { position: absolute; right: 4px; bottom: 4px; width: 28px; height: 28px; border-radius: 50%; background: var(--amber); }
+  .pf-top h3 { margin: 0; font-size: 28px; font-weight: 700; letter-spacing: -0.02em; }
+  .pf-top .id { font-family: "JetBrains Mono", ui-monospace, monospace; font-size: 13px; letter-spacing: 0.04em; color: var(--muted); }
+  .pf-top .id span { color: var(--blue); }
+  .pf-top .city { font-size: 15px; color: var(--muted); } .pf-top .bio { font-size: 15px; line-height: 1.45; }
+  .gear-row { display: grid; grid-template-columns: 1fr 24px; align-items: center; padding: 12px 16px; border-bottom: 1px solid var(--divider); gap: 8px; }
+  .gear-row .nm { font-size: 17px; font-weight: 600; } .gear-row .nm span { font-weight: 400; margin-left: 6px; }
+  .gear-row .tags { display: flex; gap: 8px; margin-top: 6px; align-items: center; }
+  .tag { font-family: "JetBrains Mono", ui-monospace, monospace; font-size: 11px; letter-spacing: 0.06em; padding: 3px 8px; border-radius: 999px; }
+  .tag.want { border: 1px solid var(--amber); color: var(--amber); } .tag.own { background: rgba(141,167,123,.25); color: #8DA77B; }
+  .tag.spec { background: rgba(74,127,167,.18); color: var(--blue); border-radius: 4px; }
+  .toggle { width: 52px; height: 30px; border-radius: 15px; background: var(--amber); position: relative; }
+  .toggle i { position: absolute; right: 3px; top: 3px; width: 24px; height: 24px; border-radius: 50%; background: var(--foundation); }
   .fab { position: absolute; right: 16px; width: 56px; height: 56px; border-radius: 50%; background: var(--amber); color: var(--foundation);
          font-weight: 700; font-size: 13px; display: grid; place-items: center; box-shadow: var(--shadow-2); }
 `;
@@ -590,9 +623,9 @@ const genrePortrait = () => `
     <div class="grid">${GENRE_ARTISTS.map(a => `<div class="artist"><div class="avatar" style="display: grid; place-items: center; font-size: 24px; font-weight: 600;">${a.split(' ').slice(0, 2).map(w => w[0]).join('')}</div><div class="name">${a}</div></div>`).join('')}</div>
   </div>`;
 
-const libraryScreen = () => `
+const libraryScreen = ({ header = true } = {}) => `
   <div class="set">
-    <div class="set-hd"><span class="b">${I.back}</span><h1>Library</h1><span></span></div>
+    ${header ? `<div class="set-hd"><span class="b">${I.back}</span><h1>Library</h1><span></span></div>` : ''}
     <div class="grp">
       <div class="r"><div>Music path<small>Configured in the launcher.</small></div><span class="v">E:\\Music</span></div>
       <div class="r"><div>Storage</div><span class="v">1.91 TB</span></div>
@@ -615,6 +648,61 @@ const libraryScreen = () => `
       <div class="note">Analyse library computes embeddings and features on this machine. Last.fm, lyrics and the text embeddings are handled on their own by Background enrichment (Sync &amp; P2P).</div>
     </div>
     <div class="btn-s">Analyse library</div>
+  </div>`;
+
+// A More section as an iPad-style form sheet: the phone screen in a centred
+// window that replaces the menu card; back returns to the menu, × closes.
+const windowCard = (width, title, body, { back = true } = {}) => `
+  <div class="scrim"></div>
+  <div class="win" style="width: ${width};">
+    <div class="hd"><span class="x">${back ? I.back : ''}</span><h2>${title}</h2><span class="x">${I.close}</span></div>
+    <div class="body">${body}</div>
+  </div>`;
+
+const gearSystemBody = () => `
+  <div class="intro">Peak target 110 dB SPL · your library DR p50 18.7 / p90 31.5 dB. Deterministic layer only — spec math with audibility thresholds; community sentiment lives on each model's sheet.</div>
+  <div class="lbl" style="padding: 16px 16px 8px; margin: 0;">Source → Amplifier</div>
+  <div class="pair">
+    <h3><span class="ok">✓</span>Holo Audio Cyan 2 → Holo Audio Bliss KTE</h3>
+    <div class="pr" style="border-top: 0;"><div class="k">Impedance bridging <b>M</b></div><div class="v">balanced: out-Z 40 Ω → in-Z 12400 Ω (1:310, rule ≥1:10)</div></div>
+    <div class="pr"><div class="k">Gain staging <b>DS</b></div><div class="v">balanced 5 Vrms vs amp max input 16.8 Vrms → +10.5 dB input headroom; gain +12 dB max</div></div>
+    <div class="pr"><div class="k">Measured <b>M</b></div><div class="v">Holo Audio Cyan 2: In NOS mode the high-frequency response rolls off by roughly 3dB approaching 20kHz at low (44.1kHz-class) sample rates, an expected consequence of running without a digital reconstruction filter; response flattens out with higher native sample rates.</div></div>
+  </div>
+  <div class="pair none">
+    <h3><span class="no">⌀</span>Astell&amp;Kern KANN Ultra → Holo Audio Bliss KTE</h3>
+    <div class="pr" style="border-top: 0;"><div class="k">Impedance bridging <b>D</b></div><div class="v dim">missing: source balanced line out-Z (unpublished)</div><div class="n">line out-Z of portable sources is typically ≤200 Ω — bridging into a 10 kΩ-class input is rarely a real risk</div></div>
+    <div class="pr"><div class="k">Gain staging <b>DS</b></div><div class="v">balanced 4 Vrms vs amp max input 16.8 Vrms → +12.5 dB input headroom; gain +12 dB max</div></div>
+  </div>
+  <div class="lbl" style="padding: 8px 16px 8px; margin: 0;">Astell&amp;Kern KANN Ultra → Headphones</div>
+  <div class="pair warn">
+    <h3><span style="color: var(--amber); font-size: 14px;">⚠</span>Ambient Acoustics AM5LE</h3>
+    <div class="pr" style="border-top: 0;"><div class="k">SPL headroom <b>DS</b></div><div class="v">110 dB peaks need 0.04 Vrms; available ~16.0 Vrms → +52 dB</div></div>
+  </div>`;
+
+const GEAR = [['HiFiMan', 'SUSVARA UNVEILED', 'want', 'Planar Magne… · $8000'], ['HiFiMan', 'SUSVARA', 'want', 'Planar Magne… · $6000'], ['Meze', 'ARTA', 'want', 'Planar Magne… · $6000'],
+  ['Meze', 'Liric II', 'want', 'Planar Magne… · $2000'], ['Meze', 'Elite', 'own', 'Planar Magne… · $4000']];
+const profileBody = () => `
+  <div class="pf-top">
+    <div class="av"><i></i></div>
+    <h3>Sautium</h3>
+    <div class="id">Sautium · <span>FBE3-7BA9-57CE</span></div>
+    <div class="city" style="display: flex; align-items: center; gap: 6px;"><svg viewBox="0 0 24 24" style="width: 16px; height: 16px;" aria-hidden="true"><path d="M12 21s-6-5.3-6-10a6 6 0 0 1 12 0c0 4.7-6 10-6 10z" fill="none" stroke="currentColor" stroke-width="1.8"/><circle cx="12" cy="11" r="2.2" fill="none" stroke="currentColor" stroke-width="1.8"/></svg>Kyiv, Ukraine</div>
+    <div class="bio">Sautium official. Reach out with bug reports, suggestions, or audiophile chatter. Evening listeners welcome.</div>
+  </div>
+  <div class="set">
+    <div class="lbl">Account</div>
+    <div class="grp">
+      <div class="r"><div>Email</div><span style="display: flex; gap: 10px; align-items: center;">hub@sautium.net <span class="v" style="color: #8DA77B; font-size: 13px;">✓ verified</span> ${I.chevR.replace('<svg', '<svg style="width: 18px; height: 18px; color: var(--dim);"')}</span></div>
+      <div class="r"><div>Nickname &amp; password</div><span style="color: var(--amber); font-weight: 600;">Change</span></div>
+      <div class="r"><div>Sign out</div><span style="color: var(--amber); font-weight: 600;">All devices</span></div>
+      <div class="r"><div>Last.fm</div><span style="display: flex; gap: 10px; align-items: center;">the7oker <span class="v" style="color: #8DA77B; font-size: 13px;">✓ connected</span></span></div>
+      <div class="r"><div>Scrobbling</div><span class="toggle"><i></i></span></div>
+    </div>
+    <div class="lbl">Hardware profile</div>
+    <div class="grp"><div class="r"><div>Active</div><span>full</span></div><div class="note">Auto-selected from this machine: NVIDIA GeForce RTX 4090 Laptop GPU · 16 GB VRAM · 15.5 GB RAM · 32 cores.</div></div>
+    <div class="lbl" style="display: flex; justify-content: space-between; align-items: baseline;">My setup <span style="color: var(--amber); text-transform: none; letter-spacing: 0; font-family: 'Inter Tight', sans-serif; font-size: 15px; font-weight: 600;">+ Add gear</span></div>
+    <div style="font-size: 17px; font-weight: 600;">Headphones <span style="color: var(--muted); font-weight: 400; font-size: 13px;">5</span></div>
+    <div class="grp">${GEAR.map(([b, m, st, sp]) => `<div class="gear-row"><div><div class="nm">${b}<span>${m}</span></div><div class="tags"><span class="tag ${st}">${st.toUpperCase()}</span><span class="tag spec">${sp}</span></div></div><span style="color: var(--dim);">${I.chevR}</span></div>`).join('')}</div>
   </div>`;
 
 const fab = (bottom, right = 16) => `<div class="fab" style="bottom: ${bottom}px; right: ${right}px;">AI</div>`;
@@ -702,12 +790,34 @@ const boards = {
   ${moreCard()}`,
   },
   'PortraitLibrary.dc.html': {
-    title: 'Portrait · after tapping Library: the screen opens in the content area, as on the phone', w: 768, h: 1024,
-    body: () => `
+    title: 'Portrait · More › Library as a window', w: 768, h: 1024,
+    props: { sectionW: { editor: 'int', default: 360, min: 320, max: 480, unit: 'px', section: 'Windows' } },
+    body: v => `
   ${rail({ withAi: false, active: 'more' })}
-  <main class="content" style="left: 80px; right: 0; bottom: ${BAR_H}px; padding: 0;">${libraryScreen()}</main>
+  <main class="content" style="left: 80px; right: 0; bottom: ${BAR_H}px;">${home({ artists: 7, albums: 5, brandInContent: true })}</main>
   ${miniBar('80px')}
-  ${fab(BAR_H + 16)}`,
+  ${fab(BAR_H + 16)}
+  ${windowCard(v.sectionW, 'Library', libraryScreen({ header: false }))}`,
+  },
+  'PortraitProfile.dc.html': {
+    title: 'Portrait · More › Profile as a window (gear opens from here)', w: 768, h: 1024,
+    props: { sectionW: { editor: 'int', default: 360, min: 320, max: 480, unit: 'px', section: 'Windows' } },
+    body: v => `
+  ${rail({ withAi: false, active: 'more' })}
+  <main class="content" style="left: 80px; right: 0; bottom: ${BAR_H}px;">${home({ artists: 7, albums: 5, brandInContent: true })}</main>
+  ${miniBar('80px')}
+  ${fab(BAR_H + 16)}
+  ${windowCard(v.sectionW, 'Profile', profileBody())}`,
+  },
+  'LandscapeGearSystem.dc.html': {
+    title: 'Landscape · Profile › System analysis as a wider window', w: 1024, h: 768,
+    props: { gearW: { editor: 'int', default: 560, min: 440, max: 720, unit: 'px', section: 'Windows' } },
+    body: v => `
+  ${rail({ withAi: false, active: 'more' })}
+  <main class="content" style="left: 80px; right: 0; bottom: ${BAR_H}px;">${home({ artists: 10, albums: 7, brandInContent: true })}</main>
+  ${miniBar('80px')}
+  ${fab(BAR_H + 16)}
+  ${windowCard(v.gearW, 'System analysis', gearSystemBody())}`,
   },
   'AlbumPortrait.dc.html': {
     title: 'Portrait · Album', w: 768, h: 1024,
@@ -825,6 +935,8 @@ const canvas = {
     { file: 'LandscapeNowPlayingScrolled.dc.html', title: boards['LandscapeNowPlayingScrolled.dc.html'].title, page: 'tablet', x: 2 * (1024 + GAP_X), y: 1024 + GAP_Y, w: 1024, h: 768 },
     { file: 'PortraitMoreCard.dc.html', title: boards['PortraitMoreCard.dc.html'].title, page: 'tablet', x: 0, y: 1024 + GAP_Y + 768 + GAP_Y, w: 768, h: 1024 },
     { file: 'PortraitLibrary.dc.html', title: boards['PortraitLibrary.dc.html'].title, page: 'tablet', x: 768 + GAP_X, y: 1024 + GAP_Y + 768 + GAP_Y, w: 768, h: 1024 },
+    { file: 'PortraitProfile.dc.html', title: boards['PortraitProfile.dc.html'].title, page: 'tablet', x: 2 * (768 + GAP_X), y: 1024 + GAP_Y + 768 + GAP_Y, w: 768, h: 1024 },
+    { file: 'LandscapeGearSystem.dc.html', title: boards['LandscapeGearSystem.dc.html'].title, page: 'tablet', x: 3 * (768 + GAP_X), y: 1024 + GAP_Y + 768 + GAP_Y, w: 1024, h: 768 },
     { file: 'LandscapeQueue.dc.html', title: boards['LandscapeQueue.dc.html'].title, page: 'tablet', x: 0, y: 2 * (1024 + GAP_Y) + 768 + GAP_Y, w: 1024, h: 768 },
     { file: 'LandscapeAI.dc.html', title: boards['LandscapeAI.dc.html'].title, page: 'tablet', x: 1024 + GAP_X, y: 2 * (1024 + GAP_Y) + 768 + GAP_Y, w: 1024, h: 768 },
     { file: 'AlbumPortrait.dc.html', title: boards['AlbumPortrait.dc.html'].title, page: 'tablet', x: 0, y: 2 * (1024 + GAP_Y) + 2 * (768 + GAP_Y), w: 768, h: 1024 },
@@ -843,7 +955,7 @@ const canvas = {
     { id: 'scroll-note', page: 'tablet', x: 2 * (1024 + GAP_X), y: 1024 + GAP_Y - 240, w: 460, text:
       'Scrolling: the whole card scrolls exactly like the phone sheet — the cover and its chevron ride up with the content, Similar tracks come into view, the rounded corners clip the content. A thin overlay scrollbar shows position. Closing while scrolled: tap the scrim or Escape (the chevron is back at the top after a scroll up).' },
     { id: 'more-note', page: 'tablet', x: 0, y: 1024 + GAP_Y + 768 + GAP_Y - 260, w: 620, text:
-      'MORE — decided 2026-09-11: a centred card like every sheet, vertically centred, content-height, the card header pattern (title, close). Exactly the phone drawer\'s seven rows, same order, the two live hints. Rows are routes, not windows: tapping one closes the menu and the screen opens in the content area, as on the phone (next board — Library), with More highlighted on the rail.' },
+      'MORE — a centred card like every sheet, content-height, the card header pattern. Exactly the phone drawer\'s seven rows. Its sections open as WINDOWS (iPad form sheets): the phone screen in a centred window that replaces the menu card — back returns to the menu, × closes, the content behind stays where it was. First-level sections (Library, Profile, HQPlayer, Output, Streaming library, AI, Sync) use the same 360px as every card; the gear screens reached from Profile (System analysis, Upgrade advisor, gear sheet) get a wider window. Both widths are sliders above the boards.' },
     { id: 'set1-note', page: 'tablet', x: 0, y: 2 * (1024 + GAP_Y) + 768 + GAP_Y - 200, w: 620, text:
       'QUEUE and AI CHAT — the phone sheets verbatim in the 360px card; drawn schematically, the implementation reuses the phone CSS unchanged. Accepted 2026-09-11.' },
     { id: 'set2-note', page: 'tablet', x: 0, y: 2 * (1024 + GAP_Y) + 2 * (768 + GAP_Y) - 260, w: 660, text:
