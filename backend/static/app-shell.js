@@ -379,6 +379,7 @@
   const routes = {};
   let currentRoute = null;
   let _lastRenderedHash = '';
+  let _routeRoot = null;
   // null = unknown / still loading — keep the FAB hidden so we don't
   // flash it on every page load only to immediately retract it once
   // /api/chat/providers comes back empty. 0 = no providers configured;
@@ -415,7 +416,12 @@
     // overlay covering it.
     if (typeof ai !== 'undefined' && ai && ai.isOpen) ai.hide();
     if (typeof sheet !== 'undefined' && sheet && sheet.isOpen) sheet.hide();
-    const tab = currentRoute || 'home';
+    // Entity routes nest under a tab. The peer profile (#profile/<hex>) is
+    // the one top-level route that is not a tab; it belongs to Friends,
+    // the tab render() highlights for it — prefixing with "profile" would
+    // hit the peer-profile branch and show "Peer not found".
+    const tab = routes[currentRoute] ? currentRoute
+      : (currentRoute === 'profile' ? 'friends' : 'home');
     navigate(`${tab}/${kind}/${id}`);
   }
 
@@ -426,81 +432,55 @@
     currentRoute = route;
     const app = document.getElementById('app');
     if (!app) return;
-    // Wipe app only when navigating to a *different* hash. Same-hash
-    // re-renders (poll ticks on Library, cancel action) skip the wipe
-    // so the renderer can do an atomic innerHTML swap without an
-    // intermediate blank flash. Cross-route navigation still wipes
-    // because most screen renderers append (not overwrite) their
-    // section into root.
+    // Every navigation mounts a fresh root and detaches the previous one:
+    // a renderer still awaiting its fetch when the user moves on paints
+    // into a node nobody sees, never over the new screen. A same-hash
+    // render() (an action refreshing the screen it is on) keeps the root
+    // so the renderer's atomic swap shows no blank frame — which is why
+    // every renderer owns its root's content (replaceChildren /
+    // innerHTML) and never appends beside what is there.
     const sameHash = hash === _lastRenderedHash;
     _lastRenderedHash = hash;
-    if (!sameHash) app.innerHTML = '';
+    if (!sameHash || !_routeRoot) {
+      _routeRoot = document.createElement('div');
+      app.replaceChildren(_routeRoot);
+    }
+    const root = _routeRoot;
 
-    // Top-level peer-profile route — #profile/<16-hex-prefix>. Portable
-    // URL: same prefix works on any node since it's the friend's public
-    // key, not a local SERIAL id.
+    // Nested entity routes — #<tab>/artist/<uuid>, #<tab>/album/<uuid> …
+    // The peer profile (#profile/<16-hex-prefix>) is the one top-level
+    // route that is not a tab: a portable URL, since the prefix is the
+    // friend's public key, not a local SERIAL id; Friends is its tab.
+    const kind = segments.length >= 3 ? segments[1] : null;
+    const id = kind ? segments.slice(2).join('/') : null;
+    let tab = route, work;
     if (route === 'profile' && segments[1]) {
-      renderProfileOther(app, segments[1]);
-      updateNavActive('friends');
-      updateFabVisibility('friends');
-      window.scrollTo(0, 0);
-      return;
+      tab = 'friends';
+      work = renderProfileOther(root, segments[1]);
+    } else if (kind === 'artist') {
+      // Optional 4th segment selects a namesake — #<tab>/artist/<uuid>/<mbid>.
+      work = renderArtist(root, segments[2], segments[3] || null);
+    } else if (kind === 'album') {
+      work = renderAlbum(root, id);
+    } else if (kind === 'release-group') {
+      work = renderReleaseGroup(root, id);
+    } else if (kind === 'chat') {
+      work = renderChatThread(root, id);
+    } else if (kind === 'genre') {
+      work = renderGenre(root, id);
+    } else if (kind === 'session') {
+      work = renderSession(root, id);
+    } else {
+      work = (routes[route] || routes.home)(root, hash);
     }
-
-    // Nested entity routes — #<tab>/artist/<uuid>, #<tab>/album/<uuid>
-    if (segments.length >= 3) {
-      const kind = segments[1];
-      const id = segments.slice(2).join('/');
-      if (kind === 'artist') {
-        // Optional 4th segment selects a namesake — #<tab>/artist/<uuid>/<mbid>.
-        renderArtist(app, segments[2], segments[3] || null);
-        updateNavActive(route);
-        updateFabVisibility(route);
-        window.scrollTo(0, 0);
-        return;
-      }
-      if (kind === 'album') {
-        renderAlbum(app, id);
-        updateNavActive(route);
-        updateFabVisibility(route);
-        window.scrollTo(0, 0);
-        return;
-      }
-      if (kind === 'release-group') {
-        renderReleaseGroup(app, id);
-        updateNavActive(route);
-        updateFabVisibility(route);
-        window.scrollTo(0, 0);
-        return;
-      }
-      if (kind === 'chat') {
-        renderChatThread(app, id);
-        updateNavActive(route);
-        updateFabVisibility(route);
-        window.scrollTo(0, 0);
-        return;
-      }
-      if (kind === 'genre') {
-        renderGenre(app, id);
-        updateNavActive(route);
-        updateFabVisibility(route);
-        window.scrollTo(0, 0);
-        return;
-      }
-      if (kind === 'session') {
-        renderSession(app, id);
-        updateNavActive(route);
-        updateFabVisibility(route);
-        window.scrollTo(0, 0);
-        return;
-      }
-    }
-
-    const renderer = routes[route] || routes.home;
-    if (renderer) renderer(app, hash);
-    updateNavActive(route);
-    updateFabVisibility(route);
+    updateNavActive(tab);
+    updateFabVisibility(tab);
     window.scrollTo(0, 0);
+    // A renderer's promise settles once its sections are painted. Published
+    // so tooling (scripts/ui-shots.mjs) can wait for "this route is on
+    // screen" instead of guessing from DOM quiet; resolves to the hash it
+    // painted, even when the renderer failed.
+    window.sautiumRendered = Promise.resolve(work).catch(() => {}).then(() => hash);
   }
 
   function updateNavActive(route) {
@@ -755,12 +735,19 @@
     similar: null, similarList: null, similarCount: null,
     isOpen: false,
     lastTrackKey: null,
-    lastDetailFetchedMfId: null,
-    inflightMfId: null,
-    lastDetailFetchedKey: null,   // preview detail identity — see _previewDetailKey
-    inflightKey: null,
+    // What is playing has ONE identity per status tick — 'mf:<media_file_id>'
+    // for an owned file, 'tid:<track uuid>|<album id>' for a streamed phantom
+    // (the same canonical track queued from another album is another
+    // screen). Detail, similar, the radio seed and every stale-result guard
+    // key on it, so an owned track and a phantom never inherit each other's
+    // detail and nothing sticks past the tick that named it.
+    _identity: null,
+    _detailKey: null,        // identity lastDetail belongs to
+    _inflightKey: null,      // identity being fetched
+    _npMfId: null,
     _npPreviewTid: null,
     _npProvider: null,
+    _npAlbumId: null,
     lastDetail: null,
 
     init() {
@@ -828,9 +815,8 @@
           // Off → On. Radio replaces the queue, so warn the user if
           // there's more than just the current track to lose. Seed by owned
           // media_file_id, or — for a streamed phantom track — its track UUID.
-          const seedMf = (this.lastDetail && this.lastDetail.media_file_id)
-                       || (this._npMfId || null);
-          const seedTid = this._npPreviewTid || null;
+          const seedMf = this._npMfId;
+          const seedTid = this._npPreviewTid;
           if (!seedMf && !seedTid) return;
           const playlistLen = (window.currentPlaylist || []).length;
           if (playlistLen > 1) {
@@ -943,7 +929,9 @@
       if (!this.el) return;
       this.el.hidden = false;
       this.isOpen = true;
-      if (this.lastDetail) this.renderDetail(this.lastDetail);
+      if (this.lastDetail && this._detailKey === this._identity) {
+        this.renderDetail(this.lastDetail);
+      }
       const fab = document.getElementById('aiFab');
       if (fab) fab.hidden = true;
     },
@@ -1057,15 +1045,12 @@
         const btn = this.playPauseIcon.closest('button');
         if (btn) btn.classList.toggle('is-loading', data.state === 'loading');
       }
-      // Radio toggle visual reflects backend flag every tick. Stashed
-      // mfId so the radio start handler can use the current seed
-      // without waiting on a detail fetch.
+      // Radio toggle visual reflects backend flag every tick.
       if (this.radioBtn) {
         this.radioBtn.setAttribute(
           'data-state', data.radio_mode ? 'on' : 'off',
         );
       }
-      this._npMfId = data.media_file_id || this._npMfId;
 
       if (!data.song) return;
 
@@ -1104,59 +1089,31 @@
         // renderSimilar replace them atomically once media_file_id moves.
       }
 
-      // Detail + similar are keyed by media_file_id, not trackKey: on Next,
-      // `song` leads media_file_id by one SSE tick, so fetching on song-change
-      // locks onto the previous track's media_file_id and never corrects.
-      // Refetch whenever the resolved media_file_id actually changes.
-      // A streamed phantom track has no media_file_id — fetch the same rich
-      // detail (+ similar) by its preview track UUID instead, so the screen
-      // matches an owned track. Stash the tid/provider for the enrichment-driven
-      // refresh (key/BPM/similar land after analysis, not on the track change).
-      this._npPreviewTid = data.preview ? (data.preview_track_id || null) : null;
-      this._npProvider = data.preview ? (data.provider || null) : null;
-      // The album the slot was queued from. A canonical track sits on every
-      // album that lists it, so without this the screen picks one and links
-      // the listener to a reissue they never played.
-      this._npAlbumId = data.album_id || null;
-      if (data.media_file_id && this.lastDetailFetchedMfId !== data.media_file_id) {
-        this.tryFetchDetail(data.media_file_id);
-      } else if (this._npPreviewTid
-                 && this.lastDetailFetchedKey !== this._previewDetailKey()) {
-        this.tryFetchDetailByTrack(this._npPreviewTid, this._npProvider);
+      // Detail + similar are keyed by the identity, not by song: on Next,
+      // `song` leads media_file_id by one SSE tick, so keying on the song
+      // would lock onto the previous track's file and never correct. A
+      // streamed phantom has no media_file_id — its identity is the preview
+      // track UUID plus the album the slot was queued from (a canonical
+      // track sits on every album that lists it; without the album the
+      // screen picks one and links the listener to a reissue they never
+      // played). A tick that names neither (the queue not loaded yet) keeps
+      // the previous identity; the next tick that names one corrects it.
+      if (data.preview) {
+        if (data.preview_track_id) {
+          this._npMfId = null;
+          this._npPreviewTid = data.preview_track_id;
+          this._npProvider = data.provider || null;
+          this._npAlbumId = data.album_id || null;
+          this._identity = 'tid:' + this._npPreviewTid + '|' + (this._npAlbumId || '');
+        }
+      } else if (data.media_file_id) {
+        this._npMfId = data.media_file_id;
+        this._npPreviewTid = null;
+        this._npProvider = null;
+        this._npAlbumId = data.album_id || null;
+        this._identity = 'mf:' + this._npMfId;
       }
-    },
-
-    // A preview detail is identified by the track AND the album it was queued
-    // from: the same canonical track re-queued from another album is a new
-    // screen (other cover, other album link), so a track-only key kept the
-    // previous album up.
-    _previewDetailKey() {
-      return this._npPreviewTid
-        ? this._npPreviewTid + '|' + (this._npAlbumId || '') : null;
-    },
-
-    async tryFetchDetailByTrack(tid, provider) {
-      const key = this._previewDetailKey();
-      if (!tid || !key || this.inflightKey === key) return;
-      this.inflightKey = key;
-      try {
-        const params = new URLSearchParams({ track_id: tid });
-        if (provider) params.set('provider', provider);
-        if (this._npAlbumId) params.set('album_id', this._npAlbumId);
-        const resp = await fetch('/api/player/now-playing-detail?' + params);
-        if (!resp.ok) return;
-        const detail = await resp.json();
-        if (this._previewDetailKey() !== key) return;   // moved on while fetching
-        this.lastDetail = detail;
-        this.lastDetailFetchedKey = key;
-        this.renderDetail(detail);
-        this.fetchSimilarByTrack(tid);
-        document.dispatchEvent(new CustomEvent('np-detail', { detail }));
-      } catch (err) {
-        console.warn('preview now-playing-detail failed:', err);
-      } finally {
-        if (this.inflightKey === key) this.inflightKey = null;
-      }
+      if (this._identity !== this._detailKey) this.tryFetchDetail();
     },
 
     // One similar path for owned AND preview tracks: the two-tier scorer
@@ -1176,34 +1133,36 @@
       }
     },
 
-    fetchSimilarByTrack(tid) {
-      return this.fetchSimilarSeed(tid);
-    },
-
     // Enrichment landed (key/BPM/embedding) for the streamed track — re-fetch its
     // detail + similar so the meta row and Similar block fill in live, without
     // waiting for a track change. Forces past the fetched-guard.
     refreshPreviewDetail() {
-      const tid = this._npPreviewTid;
-      if (!tid) return;
-      this.lastDetailFetchedKey = null;
-      this.tryFetchDetailByTrack(tid, this._npProvider);
+      if (!this._npPreviewTid) return;
+      this._detailKey = null;
+      this.tryFetchDetail();
     },
 
-    async tryFetchDetail(mfId) {
-      if (!mfId) return;  // playlist not yet loaded — retry on next status
-      if (this.inflightMfId === mfId) return; // already fetching this track
-      this.inflightMfId = mfId;
+    async tryFetchDetail() {
+      const key = this._identity;
+      if (!key || this._inflightKey === key) return;
+      this._inflightKey = key;
       try {
-        const resp = await fetch('/api/player/now-playing-detail?media_file_id=' + mfId);
+        const params = new URLSearchParams();
+        if (this._npMfId) {
+          params.set('media_file_id', this._npMfId);
+        } else {
+          params.set('track_id', this._npPreviewTid);
+          if (this._npProvider) params.set('provider', this._npProvider);
+          if (this._npAlbumId) params.set('album_id', this._npAlbumId);
+        }
+        const resp = await fetch('/api/player/now-playing-detail?' + params);
         if (!resp.ok) return;
         const detail = await resp.json();
-        // Drop a stale result: the played track moved on while we fetched.
-        if (this._npMfId !== mfId) return;
+        if (this._identity !== key) return;   // moved on while fetching
         this.lastDetail = detail;
-        this.lastDetailFetchedMfId = mfId;
+        this._detailKey = key;
         this.renderDetail(detail);
-        this.fetchSimilarSeed(detail.track_id
+        this.fetchSimilarSeed(detail.track_id || this._npPreviewTid
           || (window.currentStatus && window.currentStatus.track_id));
         // Share detail with other surfaces (mini-player needs cover_id
         // which is not in the SSE status payload).
@@ -1211,7 +1170,7 @@
       } catch (err) {
         console.warn('now-playing-detail failed:', err);
       } finally {
-        if (this.inflightMfId === mfId) this.inflightMfId = null;
+        if (this._inflightKey === key) this._inflightKey = null;
       }
     },
 
@@ -2002,6 +1961,7 @@
     sending: false,
     _streamCtx: null,        // render state of the reply being streamed
     _streamAbort: null,      // aborts the reader when the socket is stale
+    _streamSession: null,    // session of the send / stream in flight
 
     init() {
       this.el = document.getElementById('aiSheet');
@@ -2256,6 +2216,7 @@
         });
         if (!resp.ok) throw new Error('HTTP ' + resp.status);
         const session = await resp.json();
+        this._detachStream(session.id);
         this.activeSessionId = session.id;
         this.chatTitle.textContent = 'New chat';
         this.thread.innerHTML = '';
@@ -2273,7 +2234,18 @@
       }
     },
 
+    // A reply streams into the thread of the session it was sent from.
+    // Leaving that session — switch, new chat, delete — aborts the visible
+    // consumer: the backend run keeps going and switchToSession re-attaches
+    // on return, so no delta lands in another chat's thread and the
+    // composer is locked only while the chat on screen is generating.
+    _detachStream(nextSessionId) {
+      if (!this._streamAbort || this._streamSession === nextSessionId) return;
+      this._streamAbort.abort();
+    },
+
     async switchToSession(id) {
+      this._detachStream(id);
       this.activeSessionId = id;
       this.openChatView();
       this.thread.innerHTML = '<p class="ai-empty">Loading…</p>';
@@ -2385,7 +2357,9 @@
         await this.newSession();
         if (this.activeSessionId === null) return;
       }
+      const sessionId = this.activeSessionId;
       this.sending = true;
+      this._streamSession = sessionId;
       this.sendBtn.disabled = true;
       this.input.value = '';
 
@@ -2423,6 +2397,7 @@
         // Pre-stream failure only — stream-time errors are rendered
         // by consumeStream next to the partial output.
         if (typing.parentNode) typing.remove();
+        if (this.activeSessionId !== sessionId) return;   // left this chat
         console.warn('send failed:', err);
         const errRow = document.createElement('div');
         errRow.className = 'ai-msg-row';
@@ -2433,6 +2408,8 @@
         this.scrollToBottom();
       } finally {
         this.sending = false;
+        this._streamSession = null;
+        this._streamAbort = null;
         this.sendBtn.disabled = false;
         this.input.focus();
       }
@@ -2451,7 +2428,7 @@
     // explicit `error` event.
     async consumeStream(resp, typing) {
       const sessionId = this.activeSessionId;
-      const ctx = this._newStreamCtx(typing);
+      const ctx = this._newStreamCtx(typing, sessionId);
       this._streamCtx = ctx;
       let stream = resp;
       let reconnects = 0;
@@ -2555,7 +2532,10 @@
     // blocks, model tag and tool pip. It outlives a reconnect, so the
     // replayed stream repaints the same nodes instead of stacking a
     // second bubble under the first.
-    _newStreamCtx(typing) {
+    _newStreamCtx(typing, sessionId) {
+      // Everything this context paints belongs to one session: once another
+      // chat is on screen the reply row is built detached and never appended.
+      const live = () => this.activeSessionId === sessionId;
       let aiRow = null, aiBody = null, proseDiv = null, blocksDiv = null;
       let modelTag = null, proseText = '';
       let pendingModelLabel = '';   // remembered between meta and bubble creation
@@ -2572,7 +2552,7 @@
         proseDiv.className = 'ai-msg-prose';
         aiBody.appendChild(proseDiv);
         aiRow.appendChild(aiBody);
-        this.thread.appendChild(aiRow);
+        if (live()) this.thread.appendChild(aiRow);
         if (pendingModelLabel) applyModelLabel();
       };
 
@@ -2669,6 +2649,7 @@
         // Stamped on every chunk read; the visibility hook compares it
         // against the server's keepalive cadence to spot a socket that
         // died without the reader ever noticing.
+        sessionId,
         lastEventAt: Date.now(),
 
         onModel, onDelta, onBlocks, showPip,
@@ -2701,7 +2682,7 @@
             errP.style.color = 'var(--color-text-muted)';
             errP.innerHTML = '— ' + escapeHtml(String(err.message || err)) + actionHtml;
             proseDiv.appendChild(errP);
-          } else {
+          } else if (live()) {
             const errRow = document.createElement('div');
             errRow.className = 'ai-msg-row';
             errRow.innerHTML =
@@ -2810,6 +2791,7 @@
     async reattachStream() {
       const sessionId = this.activeSessionId;
       this.sending = true;
+      this._streamSession = sessionId;
       this.sendBtn.disabled = true;
       const typing = this.typingIndicator();
       this.thread.appendChild(typing);
@@ -2828,6 +2810,8 @@
         console.warn('reattach failed:', err);
       } finally {
         this.sending = false;
+        this._streamSession = null;
+        this._streamAbort = null;
         this.sendBtn.disabled = false;
       }
     },
@@ -2844,6 +2828,7 @@
       // we'll mount a new thread.
       this.sessions = this.sessions.filter(s => s.id !== id);
       if (id === this.activeSessionId) {
+        this._detachStream(null);
         this.activeSessionId = null;
         this.thread.innerHTML = '';
         this.chatTitle.textContent = 'AI';
@@ -3179,7 +3164,7 @@
         <h1 class="screen-title">Sautium<span class="dot">.</span></h1>
       </header>
     `;
-    root.appendChild(screen);
+    root.replaceChildren(screen);
 
     const favSec = createHomeSection(screen, 'Favourite artists');
     const recSec = createHomeSection(screen, 'Recommendations');
@@ -3208,6 +3193,9 @@
       sec.row.appendChild(empty);
     };
 
+    // The screen counts as painted once all four sections have settled —
+    // render() publishes this promise as window.sautiumRendered.
+    return Promise.all([
     fetch('/api/home/listening-history?limit=20')
       .then(r => { if (!r.ok) throw new Error('HTTP ' + r.status); return r.json(); })
       .then(data => {
@@ -3218,12 +3206,12 @@
         histSec.section.hidden = false;
         fillHomeRow(histSec.row, data.sessions, renderSessionTile);
       })
-      .catch(sectionFailure(histSec, 'listening-history'));
+      .catch(sectionFailure(histSec, 'listening-history')),
 
     fetch('/api/home/favourite-artists?limit=100')
       .then(r => { if (!r.ok) throw new Error('HTTP ' + r.status); return r.json(); })
       .then(data => fillHomeRow(favSec.row, data.artists, 'artist'))
-      .catch(sectionFailure(favSec, 'favourite-artists'));
+      .catch(sectionFailure(favSec, 'favourite-artists')),
 
     fetch('/api/home/new-in-library?limit=20')
       .then(r => { if (!r.ok) throw new Error('HTTP ' + r.status); return r.json(); })
@@ -3237,12 +3225,13 @@
         attachInfiniteScroll(newSec.row, '/api/home/new-in-library',
           data.next_cursor, 'album');
       })
-      .catch(sectionFailure(newSec, 'new-in-library'));
+      .catch(sectionFailure(newSec, 'new-in-library')),
 
     fetch('/api/home/recommendations?limit=20')
       .then(r => { if (!r.ok) throw new Error('HTTP ' + r.status); return r.json(); })
       .then(data => fillHomeRow(recSec.row, data.albums, 'album'))
-      .catch(sectionFailure(recSec, 'recommendations'));
+      .catch(sectionFailure(recSec, 'recommendations')),
+    ]);
   }
 
   /* ---------- Discovery screen (Step 1.5b) ----------
@@ -3562,7 +3551,7 @@
         </div>
       </section>
     `;
-    root.appendChild(screen);
+    root.replaceChildren(screen);
 
     fetchShuffle(screen);
     wireDiscoverySearch(screen);
@@ -4689,10 +4678,9 @@
   }
 
   async function renderArtist(root, artistId, selectedMbid) {
-    root.innerHTML = '';
     const screen = document.createElement('div');
     screen.className = 'detail-screen';
-    root.appendChild(screen);
+    root.replaceChildren(screen);
 
     const sort = await _fetchAlbumsSort();
     let d;
@@ -5093,10 +5081,9 @@
   }
 
   async function renderAlbum(root, albumId) {
-    root.innerHTML = '';
     const screen = document.createElement('div');
     screen.className = 'detail-screen';
-    root.appendChild(screen);
+    root.replaceChildren(screen);
 
     // Local screen state. selectedVariantId is null until the user picks
     // a specific rip; the server then falls back to its DISTINCT ON
@@ -5373,10 +5360,9 @@
   // group). Mirrors renderAlbum's hero + meta, then an "Editions" shelf reusing
   // renderAlbumRow with the track count as each card's subline.
   async function renderReleaseGroup(root, groupId) {
-    root.innerHTML = '';
     const screen = document.createElement('div');
     screen.className = 'detail-screen';
-    root.appendChild(screen);
+    root.replaceChildren(screen);
 
     let d;
     try {
@@ -5479,10 +5465,9 @@
   // each row when they don't. Play / Queue replay the stored slots
   // server-side.
   async function renderSession(root, sessionId) {
-    root.innerHTML = '';
     const screen = document.createElement('div');
     screen.className = 'detail-screen';
-    root.appendChild(screen);
+    root.replaceChildren(screen);
 
     let d;
     try {
@@ -6461,10 +6446,9 @@
      question without forcing a specific album/artist into the role. */
 
   async function renderGenre(root, genreId) {
-    root.innerHTML = '';
     const screen = document.createElement('div');
     screen.className = 'detail-screen';
-    root.appendChild(screen);
+    root.replaceChildren(screen);
 
     let d;
     try {
@@ -6743,7 +6727,7 @@
       </div>
       <div id="friendsMore"></div>
     `;
-    root.appendChild(screen);
+    root.replaceChildren(screen);
 
     const codeEl = screen.querySelector('#myInviteCode');
     const listEl = screen.querySelector('#friendsList');
@@ -7445,7 +7429,7 @@
         </form>
       </div>
     `;
-    root.appendChild(screen);
+    root.replaceChildren(screen);
 
     const threadEl = screen.querySelector('#chatThread');
     const nameEl = screen.querySelector('#chatName');
@@ -7896,10 +7880,9 @@
   }
 
   async function renderHqplayerSettings(root) {
-    root.innerHTML = '';
     const screen = document.createElement('div');
     screen.className = 'screen hqp-screen';
-    root.appendChild(screen);
+    root.replaceChildren(screen);
     screen.innerHTML = `
       <header class="hqp-head">
         <button class="icon-btn" type="button" data-action="back" aria-label="Back">${SVG_BACK}</button>
@@ -8984,14 +8967,12 @@
   }
 
   async function refreshGearScreenLive(renderer, hashPrefix) {
-    const app = document.getElementById('app');
-    if (!app) return;
+    if (!_routeRoot) return;
     const y = window.scrollY;
-    await renderer(app);
-    // A navigation during the fetch would leave the renderer's stale
-    // output in #app — repaint the real current screen instead.
-    if (!parseHash().startsWith(hashPrefix)) { render(); return; }
-    window.scrollTo(0, y);
+    // The root belongs to this screen; a navigation during the fetch
+    // detaches it, so a late paint lands where nobody sees it.
+    await renderer(_routeRoot);
+    if (parseHash().startsWith(hashPrefix)) window.scrollTo(0, y);
   }
 
   async function renderProfile(root) {
@@ -12383,7 +12364,7 @@
         _stopClaudeStream();
         return;
       }
-      renderAI(document.getElementById('app'));
+      renderAI(_routeRoot);
     }, (_err) => {
       // sseStream auto-reconnects with backoff; nothing to do here.
     });
@@ -12410,7 +12391,7 @@
         _stopCodexStream();
         return;
       }
-      renderAI(document.getElementById('app'));
+      renderAI(_routeRoot);
     }, (_err) => {});
   }
   async function _fetchCodexState() {
@@ -12433,7 +12414,7 @@
     _aiCanonStreamCtrl = window.sseStream('/api/settings/ai/canonization/stream', () => {
       if (!primed) { primed = true; return; }
       if (!parseHash().startsWith('more/ai')) { _stopAiCanonStream(); return; }
-      renderAI(document.getElementById('app'));
+      renderAI(_routeRoot);
     }, (_err) => {});
   }
   // Pull a human-readable message out of a FastAPI error response.
@@ -12584,13 +12565,13 @@
       await fetch('/api/settings/ai/canonization', {
         method: 'PUT', headers: {'Content-Type':'application/json'},
         body: JSON.stringify({ enabled: !enabled }) });
-      renderAI(document.getElementById('app'));
+      renderAI(root);
     });
     onAction('[data-action="run-canon"]', async () => {
       try {
         await fetch('/api/settings/ai/canonization/run', { method: 'POST' });
       } catch (_) {}
-      renderAI(document.getElementById('app'));   // picks up running state + stream
+      renderAI(root);   // picks up running state + stream
     });
 
     if (ai.provider === 'claude_code') _subscribeClaudeStream();
@@ -12777,9 +12758,12 @@
       if (chip) applyMbChipState(chip, e.detail || {});
     });
 
-    if (!location.hash) {
-      // Setting hash to #home won't fire hashchange when current is empty,
-      // so call render() explicitly after.
+    // A hash that names no screen — empty, or the launcher's one-time
+    // `#pair=<code>`, which auth.js has already read and will scrub — must
+    // not become the current route. replaceState fires no hashchange, so
+    // render() is called explicitly after.
+    const top = parseHash().split('/')[0];
+    if (!location.hash || !(routes[top] || top === 'profile')) {
       history.replaceState(null, '', '#home');
     }
     render();

@@ -103,6 +103,7 @@
         _disconnectPaint = setTimeout(() => {
           _disconnectPaint = null;
           console.debug('events stream still down; painting disconnected');
+          _statusSeq++;
           currentState = 'disconnected';
           document.dispatchEvent(new CustomEvent('np-update', {
             detail: { state: 'disconnected' },
@@ -116,13 +117,20 @@
   // the handler async directly, two rapid playlist mutations would race
   // their fetchPlaylist() calls. Chain each event onto a promise so the
   // playlist-aware step stays strictly serial.
+  // Every status event takes a sequence number and paints only if nothing
+  // newer arrived while it awaited the playlist: a fetch hanging on a
+  // black-holed network can outlive the disconnect grace, and the
+  // "disconnected" paint bumps the sequence so the pre-drop status that
+  // finally resolves is dropped instead of repainted over it.
   let _sseChain = Promise.resolve();
+  let _statusSeq = 0;
   function handleStatusEvent(data) {
     // A real message means the stream is back — the pending
     // "disconnected" paint is no longer true.
     if (_disconnectPaint) { clearTimeout(_disconnectPaint); _disconnectPaint = null; }
+    const seq = ++_statusSeq;
     _sseChain = _sseChain
-      .then(() => processStatusEvent(data))
+      .then(() => processStatusEvent(data, seq))
       .catch((e) => console.error('SSE handler error:', e));
   }
 
@@ -157,7 +165,7 @@
              provider_cover_url: first.provider_cover_url };
   }
 
-  async function processStatusEvent(data) {
+  async function processStatusEvent(data, seq) {
     currentState = data.state;
     if (data.ui_build) maybeReloadForUpdate(data.ui_build);
     // Browser-output renderer lifecycle: THIS tab renders audio only while
@@ -176,12 +184,12 @@
     }
     if (data.playlist_version !== undefined &&
         data.playlist_version !== lastPlaylistVersion) {
-      // Update marker first so a duplicate event doesn't trigger a
-      // second refetch while this one is in flight.
-      lastPlaylistVersion = data.playlist_version;
-      try { await fetchPlaylist(); }
-      catch (e) { console.warn('fetchPlaylist failed during SSE handling:', e); }
+      // The marker moves only once the playlist actually arrived: a failed
+      // fetch leaves it behind, so the next status event retries instead of
+      // every consumer reading a stale queue until the next mutation.
+      if (await fetchPlaylist()) lastPlaylistVersion = data.playlist_version;
     }
+    if (seq !== _statusSeq) return;
     // After the playlist settles, so the fallback reads the queue this
     // status belongs to. process_speed is HQPlayer's realtime DSP factor
     // (0.0 when unknown) — carried straight through, like everything else
@@ -196,12 +204,17 @@
   async function fetchPlaylist() {
     try {
       const resp = await fetch('/api/player/playlist');
-      if (!resp.ok) return;
+      if (!resp.ok) {
+        console.warn('fetchPlaylist: HTTP', resp.status);
+        return false;
+      }
       const data = await resp.json();
       window.currentPlaylist = data.tracks || [];
       document.dispatchEvent(new CustomEvent('playlist-loaded', { detail: data }));
+      return true;
     } catch (e) {
       console.warn('fetchPlaylist error:', e);
+      return false;
     }
   }
 
@@ -827,6 +840,5 @@
 
   window.addEventListener('beforeunload', () => {
     if (_sseSource) _sseSource.abort();
-    if (_previewSSE) _previewSSE.abort();
   });
 })();
