@@ -434,7 +434,10 @@ const morePopover = () => `
 
 const moreCard = () => `
   <div class="scrim"></div>
-  <div class="card360" style="bottom: auto;"><div class="more-title">More</div>${moreRows()}</div>`;
+  <div class="card360" style="top: 50%; bottom: auto; transform: translate(-50%, -50%);">
+    <div class="hd"><span></span><h2>More</h2><span class="x">${I.close}</span></div>
+    ${moreRows()}
+  </div>`;
 
 const QUEUE = [['High Hopes', 'David Gilmour · Remember That Night', '9:18', true], ['Coming Back To Life', 'David Gilmour · Remember That Night', '6:24'],
   ['Shine On You Crazy Diamond', 'David Gilmour · Remember That Night', '11:52'], ['Wish You Were Here', 'David Gilmour · Remember That Night', '5:40'],
@@ -562,17 +565,8 @@ const boards = {
   ${fab(BAR_H + 16)}
   ${npSheet(true, { scrolled: 300 })}`,
   },
-  'PortraitMorePopover.dc.html': {
-    title: 'Portrait · More as a popover beside the rail (recommended)', w: 768, h: 1024,
-    body: () => `
-  ${rail({ withAi: false })}
-  <main class="content" style="left: 80px; right: 0; bottom: ${BAR_H}px;">${home({ artists: 7, albums: 5, brandInContent: true })}</main>
-  ${miniBar('80px')}
-  ${fab(BAR_H + 16)}
-  ${morePopover()}`,
-  },
   'PortraitMoreCard.dc.html': {
-    title: 'Portrait · More as a centred card', w: 768, h: 1024,
+    title: 'Portrait · More (centred card)', w: 768, h: 1024,
     body: () => `
   ${rail({ withAi: false })}
   <main class="content" style="left: 80px; right: 0; bottom: ${BAR_H}px;">${home({ artists: 7, albums: 5, brandInContent: true })}</main>
@@ -670,9 +664,8 @@ const canvas = {
     { file: 'TabletLandscape.dc.html', title: boards['TabletLandscape.dc.html'].title, page: 'tablet', x: 0, y: 1024 + GAP_Y, w: 1024, h: 768 },
     { file: 'LandscapeNowPlayingCentred.dc.html', title: boards['LandscapeNowPlayingCentred.dc.html'].title, page: 'tablet', x: 1024 + GAP_X, y: 1024 + GAP_Y, w: 1024, h: 768 },
     { file: 'LandscapeNowPlayingScrolled.dc.html', title: boards['LandscapeNowPlayingScrolled.dc.html'].title, page: 'tablet', x: 2 * (1024 + GAP_X), y: 1024 + GAP_Y, w: 1024, h: 768 },
-    { file: 'PortraitMorePopover.dc.html', title: boards['PortraitMorePopover.dc.html'].title, page: 'tablet', x: 0, y: 1024 + GAP_Y + 768 + GAP_Y, w: 768, h: 1024 },
-    { file: 'PortraitMoreCard.dc.html', title: boards['PortraitMoreCard.dc.html'].title, page: 'tablet', x: 768 + GAP_X, y: 1024 + GAP_Y + 768 + GAP_Y, w: 768, h: 1024 },
-    { file: 'PortraitLibrary.dc.html', title: boards['PortraitLibrary.dc.html'].title, page: 'tablet', x: 2 * (768 + GAP_X), y: 1024 + GAP_Y + 768 + GAP_Y, w: 768, h: 1024 },
+    { file: 'PortraitMoreCard.dc.html', title: boards['PortraitMoreCard.dc.html'].title, page: 'tablet', x: 0, y: 1024 + GAP_Y + 768 + GAP_Y, w: 768, h: 1024 },
+    { file: 'PortraitLibrary.dc.html', title: boards['PortraitLibrary.dc.html'].title, page: 'tablet', x: 768 + GAP_X, y: 1024 + GAP_Y + 768 + GAP_Y, w: 768, h: 1024 },
     { file: 'LandscapeQueue.dc.html', title: boards['LandscapeQueue.dc.html'].title, page: 'tablet', x: 0, y: 2 * (1024 + GAP_Y) + 768 + GAP_Y, w: 1024, h: 768 },
     { file: 'LandscapeAI.dc.html', title: boards['LandscapeAI.dc.html'].title, page: 'tablet', x: 1024 + GAP_X, y: 2 * (1024 + GAP_Y) + 768 + GAP_Y, w: 1024, h: 768 },
     { file: 'Main.dc.html', title: boards['Main.dc.html'].title, page: 'desktop', x: 0, y: 0, w: 1440, h: 900 },
@@ -687,7 +680,7 @@ const canvas = {
     { id: 'scroll-note', page: 'tablet', x: 2 * (1024 + GAP_X), y: 1024 + GAP_Y - 240, w: 460, text:
       'Scrolling: the whole card scrolls exactly like the phone sheet — the cover and its chevron ride up with the content, Similar tracks come into view, the rounded corners clip the content. A thin overlay scrollbar shows position. Closing while scrolled: tap the scrim or Escape (the chevron is back at the top after a scroll up).' },
     { id: 'more-note', page: 'tablet', x: 0, y: 1024 + GAP_Y + 768 + GAP_Y - 260, w: 620, text:
-      'MORE — exactly the phone drawer: the same seven rows, same order, same live hints (HQPlayer, Audio output). Its rows are routes, not windows: tapping one closes the menu and the screen opens in the content area, as on the phone (third board — Library). The rail keeps More highlighted while you are inside a More screen. Decision: popover beside the rail (opens where you tapped, barely dims) or a centred card like every sheet (consistent, but a menu that dims the whole screen feels heavier).' },
+      'MORE — decided 2026-09-11: a centred card like every sheet, vertically centred, content-height, the card header pattern (title, close). Exactly the phone drawer\'s seven rows, same order, the two live hints. Rows are routes, not windows: tapping one closes the menu and the screen opens in the content area, as on the phone (next board — Library), with More highlighted on the rail.' },
     { id: 'set1-note', page: 'tablet', x: 0, y: 2 * (1024 + GAP_Y) + 768 + GAP_Y - 200, w: 620, text:
       'QUEUE and AI CHAT — the phone sheets verbatim in the 360px card; drawn schematically, the implementation reuses the phone CSS unchanged. Accepted 2026-09-11.' },
     { id: 'desktop-brief', page: 'desktop', x: 0, y: -200, w: 560, text:

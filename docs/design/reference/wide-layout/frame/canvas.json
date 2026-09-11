@@ -56,19 +56,10 @@
       "h": 768
     },
     {
-      "file": "PortraitMorePopover.dc.html",
-      "title": "Portrait · More as a popover beside the rail (recommended)",
+      "file": "PortraitMoreCard.dc.html",
+      "title": "Portrait · More (centred card)",
       "page": "tablet",
       "x": 0,
-      "y": 2032,
-      "w": 768,
-      "h": 1024
-    },
-    {
-      "file": "PortraitMoreCard.dc.html",
-      "title": "Portrait · More as a centred card",
-      "page": "tablet",
-      "x": 848,
       "y": 2032,
       "w": 768,
       "h": 1024
@@ -77,7 +68,7 @@
       "file": "PortraitLibrary.dc.html",
       "title": "Portrait · after tapping Library: the screen opens in the content area, as on the phone",
       "page": "tablet",
-      "x": 1696,
+      "x": 848,
       "y": 2032,
       "w": 768,
       "h": 1024
@@ -159,7 +150,7 @@
       "x": 0,
       "y": 1772,
       "w": 620,
-      "text": "MORE — exactly the phone drawer: the same seven rows, same order, same live hints (HQPlayer, Audio output). Its rows are routes, not windows: tapping one closes the menu and the screen opens in the content area, as on the phone (third board — Library). The rail keeps More highlighted while you are inside a More screen. Decision: popover beside the rail (opens where you tapped, barely dims) or a centred card like every sheet (consistent, but a menu that dims the whole screen feels heavier)."
+      "text": "MORE — decided 2026-09-11: a centred card like every sheet, vertically centred, content-height, the card header pattern (title, close). Exactly the phone drawer's seven rows, same order, the two live hints. Rows are routes, not windows: tapping one closes the menu and the screen opens in the content area, as on the phone (next board — Library), with More highlighted on the rail."
     },
     {
       "id": "set1-note",
