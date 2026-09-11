@@ -66,12 +66,30 @@
     },
     {
       "file": "PortraitLibrary.dc.html",
-      "title": "Portrait · after tapping Library: the screen opens in the content area, as on the phone",
+      "title": "Portrait · More › Library as a window",
       "page": "tablet",
       "x": 848,
       "y": 2032,
       "w": 768,
       "h": 1024
+    },
+    {
+      "file": "PortraitProfile.dc.html",
+      "title": "Portrait · More › Profile as a window (gear opens from here)",
+      "page": "tablet",
+      "x": 1696,
+      "y": 2032,
+      "w": 768,
+      "h": 1024
+    },
+    {
+      "file": "LandscapeGearSystem.dc.html",
+      "title": "Landscape · Profile › System analysis as a wider window",
+      "page": "tablet",
+      "x": 2544,
+      "y": 2032,
+      "w": 1024,
+      "h": 768
     },
     {
       "file": "LandscapeQueue.dc.html",
@@ -186,7 +204,7 @@
       "x": 0,
       "y": 1772,
       "w": 620,
-      "text": "MORE — decided 2026-09-11: a centred card like every sheet, vertically centred, content-height, the card header pattern (title, close). Exactly the phone drawer's seven rows, same order, the two live hints. Rows are routes, not windows: tapping one closes the menu and the screen opens in the content area, as on the phone (next board — Library), with More highlighted on the rail."
+      "text": "MORE — a centred card like every sheet, content-height, the card header pattern. Exactly the phone drawer's seven rows. Its sections open as WINDOWS (iPad form sheets): the phone screen in a centred window that replaces the menu card — back returns to the menu, × closes, the content behind stays where it was. First-level sections (Library, Profile, HQPlayer, Output, Streaming library, AI, Sync) use the same 360px as every card; the gear screens reached from Profile (System analysis, Upgrade advisor, gear sheet) get a wider window. Both widths are sliders above the boards."
     },
     {
       "id": "set1-note",
