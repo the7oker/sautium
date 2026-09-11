@@ -211,6 +211,60 @@ const STYLE = `
   .btn-p, .btn-s { height: 56px; border-radius: 12px; display: grid; place-items: center; font-size: 15px; font-weight: 600; }
   .btn-p { background: var(--amber); color: var(--foundation); }
   .btn-s { border: 1px solid var(--divider); color: var(--text); }
+  /* detail screens */
+  .det { display: flex; flex-direction: column; gap: 24px; padding: 0 0 24px; }
+  .alb-head { display: grid; grid-template-columns: 280px 1fr; gap: 24px; padding: 24px 24px 0; align-items: start; }
+  .alb-cover { width: 100%; aspect-ratio: 1 / 1; border-radius: 8px; background: #3A2F27; box-shadow: var(--shadow-2); }
+  .alb-meta { display: flex; flex-direction: column; gap: 10px; min-width: 0; }
+  .alb-meta h1 { margin: 0; font-size: 28px; font-weight: 700; letter-spacing: -0.02em; line-height: 1.15; }
+  .alb-meta .ar { font-size: 15px; font-weight: 500; }
+  .tech { display: inline-flex; align-items: center; gap: 6px; padding: 6px 12px; border-radius: 6px; background: var(--surface);
+          font-family: "JetBrains Mono", ui-monospace, monospace; font-size: 11px; letter-spacing: 0.06em; color: var(--muted); align-self: flex-start;
+          max-width: 100%; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .tech svg { flex-shrink: 0; }
+  .det .back { display: grid; place-items: center; width: 44px; height: 44px; color: var(--text); margin: 8px 0 -20px 12px; }
+  .det .back svg { width: 22px; height: 22px; }
+  .tech svg { width: 12px; height: 12px; }
+  .yr { display: flex; align-items: center; gap: 12px; font-family: "JetBrains Mono", ui-monospace, monospace; font-size: 11px; letter-spacing: 0.06em; color: var(--blue); }
+  .yr .badge { margin-left: auto; padding: 4px 8px; border: 1px solid var(--divider); border-radius: 4px; color: var(--muted); }
+  .chips { display: flex; flex-wrap: wrap; gap: 8px; }
+  .chip { padding: 6px 12px; border-radius: 999px; border: 1px solid var(--divider); font-size: 13px; color: var(--text); }
+  .acts { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
+  .acts .btn-p, .acts .btn-s { height: 48px; border-radius: 12px; display: flex; align-items: center; justify-content: center; gap: 8px; font-size: 15px; font-weight: 600; }
+  .acts svg { width: 20px; height: 20px; }
+  .tracks { padding: 0 24px; }
+  .disc { font-family: "JetBrains Mono", ui-monospace, monospace; font-size: 11px; letter-spacing: 0.12em; text-transform: uppercase; color: var(--text); padding: 4px 0 8px; }
+  .trk { display: grid; grid-template-columns: 28px 1fr auto 44px; gap: 12px; align-items: center; padding: 10px 0; border-bottom: 1px solid var(--divider); }
+  .trk .n { font-family: "JetBrains Mono", ui-monospace, monospace; font-size: 13px; color: var(--blue); }
+  .trk .t { font-size: 15px; font-weight: 500; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .trk .m { font-family: "JetBrains Mono", ui-monospace, monospace; font-size: 11px; letter-spacing: 0.06em; color: var(--dim); }
+  .trk .d { font-family: "JetBrains Mono", ui-monospace, monospace; font-size: 13px; color: var(--muted); }
+  .trk .a { width: 44px; height: 44px; display: grid; place-items: center; color: var(--muted); }
+  .trk .a svg { width: 20px; height: 20px; }
+  .trk > div { min-width: 0; }
+  .shelf-h { display: flex; justify-content: space-between; align-items: baseline; padding: 0 24px; }
+  .shelf-h h2 { margin: 0; font-size: 20px; font-weight: 600; letter-spacing: -0.01em; }
+  .shelf-h .sort { display: flex; align-items: center; gap: 6px; font-size: 13px; color: var(--muted); }
+  .shelf-h .sort svg { width: 16px; height: 16px; }
+  .shelf { display: flex; gap: 12px; padding: 0 24px; overflow: hidden; }
+  .tile { width: 104px; flex-shrink: 0; display: flex; flex-direction: column; gap: 6px; }
+  .tile .cv { width: 104px; height: 104px; border-radius: 4px; background: var(--surface-hi); box-shadow: var(--shadow-1); position: relative; }
+  .tile .cv i { position: absolute; top: 6px; right: 6px; padding: 2px 6px; border-radius: 4px; background: rgba(14,10,8,.7);
+                font-family: "JetBrains Mono", ui-monospace, monospace; font-size: 11px; color: var(--amber); font-style: normal; }
+  .tile .cv.ph { background: var(--surface); box-shadow: none; }
+  .tile .t { font-size: 12px; font-weight: 500; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .tile .s { font-family: "JetBrains Mono", ui-monospace, monospace; font-size: 11px; color: var(--blue); }
+  .tile .s.dim { color: var(--dim); }
+  .ahero { position: relative; height: 200px; background: linear-gradient(180deg, #4A3A33 0%, #2A2420 70%, var(--foundation) 100%); }
+  .ahero h1 { position: absolute; left: 24px; bottom: 16px; margin: 0; font-size: 32px; font-weight: 700; letter-spacing: -0.02em; }
+  .ahero .b { position: absolute; top: 8px; left: 12px; width: 44px; height: 44px; display: grid; place-items: center; color: var(--text); }
+  .ahero .b svg { width: 22px; height: 22px; }
+  .bio { padding: 0 24px; font-size: 15px; line-height: 1.5; color: var(--text); max-width: 640px; }
+  .bio .more { color: var(--muted); }
+  .grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(96px, 1fr)); gap: 16px 12px; padding: 0 24px; }
+  .grid .artist { width: auto; }
+  .two { display: grid; grid-template-columns: 320px 1fr; gap: 0 24px; padding: 24px 24px 0; align-items: start; }
+  .two .alb-meta { position: sticky; top: 24px; }
   .fab { position: absolute; right: 16px; width: 56px; height: 56px; border-radius: 50%; background: var(--amber); color: var(--foundation);
          font-weight: 700; font-size: 13px; display: grid; place-items: center; box-shadow: var(--shadow-2); }
 `;
@@ -463,6 +517,79 @@ const aiCard = () => `
     <div class="composer"><div class="in">Message…</div><div class="send">${I.send}</div></div>
   </div>`;
 
+const sortIcon = '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 7h10M4 12h7M4 17h4M17 6v12m0 0l-3-3m3 3l3-3" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/></svg>';
+const DISC1 = [['In The Flesh', 'A MAJ · 152 BPM', '3:20'], ['The Thin Ice', 'C MAJ · 129 BPM', '2:26'], ['Another Brick In The Wall (Part 1)', 'D MIN · 199 BPM', '3:11'],
+  ['The Happiest Days Of Our Lives', 'A MIN · 103 BPM', '1:50'], ['Another Brick in the Wall, Part 2', 'D MIN · 103 BPM', '3:58'], ['Mother', 'G MAJ · 136 BPM', '5:34'],
+  ['Goodbye Blue Sky', 'A MIN · 108 BPM', '2:47'], ['Empty Spaces', 'B MAJ · 96 BPM', '2:07'], ['Young Lust', 'E MIN · 96 BPM', '3:29'], ['One of My Turns', 'C MAJ · 99 BPM', '3:36'],
+  ['Don\'t Leave Me Now', 'G MIN · 117 BPM', '4:15'], ['Another Brick In The Wall (Part 3)', 'D MIN · 103 BPM', '1:14'], ['Goodbye Cruel World', 'D MAJ · 199 BPM', '1:17']];
+const DISC2 = [['Hey You', 'E MIN · 112 BPM', '4:40'], ['Is There Anybody Out There?', 'A MIN · 117 BPM', '2:41'], ['Nobody Home', 'C MAJ · 103 BPM', '3:22'],
+  ['Vera', 'E MIN · 103 BPM', '1:33'], ['Bring The Boys Back Home', 'E MIN · 78 BPM', '1:27'], ['Comfortably Numb', 'B MIN · 129 BPM', '6:22']];
+const trackRows = (list, n) => list.slice(0, n).map(([t, m, d], i) =>
+  `<div class="trk"><span class="n">${i + 1}</span><div><div class="t">${t}</div><div class="m">${m}</div></div><span class="d">${d}</span><span class="a">${I.plus}</span></div>`).join('\n');
+const albumMeta = () => `
+  <div class="alb-meta">
+    <h1>The Wall</h1>
+    <div class="ar">Pink Floyd</div>
+    <span class="tech">96 kHz · 24-bit · FLAC · [Vinyl]/The Wall ${I.chevron}</span>
+    <div class="yr">1979 · 1:16:53 <span class="badge">LOSSLESS</span></div>
+    <div class="chips"><span class="chip">Rock</span><span class="chip">Progressive Rock</span><span class="chip">Art Rock</span></div>
+    <div class="acts"><div class="btn-p">${I.play} Play all</div><div class="btn-s">${I.plus} Queue</div></div>
+  </div>`;
+const SIMILAR_ALBUMS = [['Is There Anybody Out There?', 'Pink Floyd', '1.00'], ['The Wall (Alt)', 'Pink Floyd', '1.00'], ['A Foot in the Door', 'Pink Floyd', '0.97'],
+  ['The Final Cut', 'Pink Floyd', '0.95'], ['Animals', 'Pink Floyd', '0.94'], ['Wish You Were Here', 'Pink Floyd', '0.93'], ['The Division Bell', 'Pink Floyd', '0.91']];
+const similarAlbums = n => `
+  <div class="shelf-h"><h2>Similar albums</h2></div>
+  <div class="shelf">${SIMILAR_ALBUMS.slice(0, n).map(([t, a, sc]) => `<div class="tile"><div class="cv"><i>${sc}</i></div><div class="t">${t}</div><div class="t" style="color: var(--muted); font-weight: 400;">${a}</div></div>`).join('')}</div>`;
+
+const albumPortrait = () => `
+  <div class="det">
+    <span class="back">${I.back}</span>
+    <div class="alb-head"><div class="alb-cover"></div>${albumMeta()}</div>
+    <div class="tracks"><div class="disc">Disc 1</div>${trackRows(DISC1, 8)}</div>
+  </div>`;
+const albumLandscape = () => `
+  <div class="det" style="gap: 0;"><span class="back">${I.back}</span></div>
+  <div class="two" style="padding-top: 8px;">
+    <div class="alb-meta" style="gap: 14px;"><div class="alb-cover"></div>${albumMeta().replace('<div class="alb-meta">', '<div class="alb-meta" style="position: static;">')}</div>
+    <div class="det" style="gap: 16px;">
+      <div class="tracks" style="padding: 0;"><div class="disc">Disc 1</div>${trackRows(DISC1, 9)}</div>
+    </div>
+  </div>`;
+
+const ALBUMS = [['Add Violence', '1m'], ['And All That Could Have Been', '—'], ['Broken', '—'], ['The Downward Spiral', '—'], ['Hesitation Marks', '—'], ['With Teeth', '—'], ['Year Zero', '—']];
+const MISSING = [['Bad Witch', '2018'], ['Lights in the Sky: Over North America', '2008'], ['Still', '2002'], ['Ghosts V: Together', '2020'], ['Not the Actual Events', '2016'], ['Ghosts I–IV', '2008']];
+const POPULAR = [['Closer', 'The Downward Spiral', '6:13'], ['The Hand That Feeds', 'The Hand That Feeds', '3:38'], ['Hurt', 'The Downward Spiral', '6:14'], ['Head Like a Hole', 'Pretty Hate Machine', '5:00'], ['March Of The Pigs', 'March of the Pigs', '2:54']];
+const SIMILAR_ARTISTS = ['How To Destroy Angels', 'Trent Reznor', 'Filter', 'Black Light Burns', 'Marilyn Manson', 'Ministry', 'Skinny Puppy'];
+const artistPortrait = () => `
+  <div class="det">
+    <div class="ahero"><span class="b">${I.back}</span><h1>Nine Inch Nails</h1></div>
+    <div class="chips" style="padding: 0 24px;"><span class="chip">Industrial</span><span class="chip">Industrial Rock</span><span class="chip">Electronic</span><span class="chip">Alternative</span></div>
+    <div class="bio">Nine Inch Nails, commonly abbreviated as NIN (stylized as NIИ), is an American industrial rock band formed in 1988 in Cleveland, Ohio. Singer, songwriter, multi-instrumentalist, and producer Trent Reznor was the only permanent member of the band until the official addition of English musician Atticus Ross in 2016. <span class="more">See more ▾</span></div>
+    <div class="shelf-h"><h2>Albums</h2><span class="sort">${sortIcon} Time listened ${I.chevron}</span></div>
+    <div class="shelf">${ALBUMS.map(([t, l]) => `<div class="tile"><div class="cv"></div><div class="t">${t}</div><div class="s${l === '—' ? ' dim' : ''}">◷ ${l}</div></div>`).join('')}</div>
+    <div class="shelf-h"><h2>Missing albums</h2></div>
+    <div class="shelf">${MISSING.map(([t, y]) => `<div class="tile"><div class="cv ph"></div><div class="t" style="color: var(--muted);">${t}</div><div class="s dim">${y}</div></div>`).join('')}</div>
+    <div class="shelf-h"><h2>Popular tracks</h2></div>
+    <div class="tracks">${POPULAR.map(([t, al, d], i) => `<div class="trk"><span class="n">${i + 1}</span><div><div class="t">${t}</div><div class="m" style="font-family: inherit; letter-spacing: 0; font-size: 13px; color: var(--muted);">${al}</div></div><span class="d">${d}</span><span class="a">${I.plus}</span></div>`).join('')}</div>
+    <div class="shelf-h"><h2>Similar artists</h2></div>
+    <div class="shelf">${SIMILAR_ARTISTS.map(a => `<div class="artist"><div class="avatar" style="display: grid; place-items: center; font-size: 24px; font-weight: 600;">${a.split(' ').slice(0, 2).map(w => w[0]).join('')}</div><div class="name">${a}</div></div>`).join('')}</div>
+  </div>`;
+
+const GENRE_ARTISTS = ['Klaus Schulze', 'Vangelis', 'Jean-Michel Jarre', 'Yello', 'Boris Blank', 'Orbital', 'Moby', 'Radio Massacre International', 'Björk', 'The Chemical Brothers',
+  'The Prodigy', 'Redshift', 'Goldfrapp', 'Junkie XL', 'The Crystal Method', 'Daft Punk', 'Tangerine Dream', 'Edgar Froese', 'The Toxic Avenger', 'Fatboy Slim', 'Faithless',
+  'Depeche Mode', 'Peter Baumann', 'Goose'];
+const GENRE_TRACKS = [['Numb', 'Linkin Park · Meteora', '3:07'], ['Faint', 'Linkin Park · Meteora', '2:43'], ['Wish You Were Here', 'Pink Floyd · A Foot in the Door', '5:45'], ['Cry', 'Cigarettes After Sex · Cry', '4:16'], ['Take on Me', 'Grabbitz · Hunting High and Low', '3:46']];
+const genrePortrait = () => `
+  <div class="det">
+    <div class="ahero" style="background: linear-gradient(180deg, #33302C 0%, #2A2420 70%, var(--foundation) 100%);"><span class="b">${I.back}</span><h1>Electronic</h1></div>
+    <div class="bio" style="font-family: 'JetBrains Mono', ui-monospace, monospace; font-size: 11px; letter-spacing: 0.06em; color: var(--muted);">32 942 TRACKS · 3 845 ALBUMS · 7 348 ARTISTS</div>
+    <div class="bio">Electronic music refers to music that emphasizes the use of electronic musical instruments or electronic music technology as a central aspect of the sound of the music. Historically, electronic music was considered to be any music created with the use of electronic musical instruments or electronic processing. <span class="more">See more ▾</span></div>
+    <div class="shelf-h"><h2>Popular tracks</h2></div>
+    <div class="tracks">${GENRE_TRACKS.map(([t, al, d], i) => `<div class="trk"><span class="n">${i + 1}</span><div><div class="t">${t}</div><div class="m" style="font-family: inherit; letter-spacing: 0; font-size: 13px; color: var(--muted);">${al}</div></div><span class="d">${d}</span><span class="a">${I.plus}</span></div>`).join('')}</div>
+    <div class="shelf-h"><h2>Artists</h2></div>
+    <div class="grid">${GENRE_ARTISTS.map(a => `<div class="artist"><div class="avatar" style="display: grid; place-items: center; font-size: 24px; font-weight: 600;">${a.split(' ').slice(0, 2).map(w => w[0]).join('')}</div><div class="name">${a}</div></div>`).join('')}</div>
+  </div>`;
+
 const libraryScreen = () => `
   <div class="set">
     <div class="set-hd"><span class="b">${I.back}</span><h1>Library</h1><span></span></div>
@@ -582,6 +709,38 @@ const boards = {
   ${miniBar('80px')}
   ${fab(BAR_H + 16)}`,
   },
+  'AlbumPortrait.dc.html': {
+    title: 'Portrait · Album', w: 768, h: 1024,
+    body: () => `
+  ${rail({ withAi: false })}
+  <main class="content" style="left: 80px; right: 0; bottom: ${BAR_H}px; padding: 0;">${albumPortrait()}</main>
+  ${miniBar('80px')}
+  ${fab(BAR_H + 16)}`,
+  },
+  'AlbumLandscape.dc.html': {
+    title: 'Landscape · Album, two panes', w: 1024, h: 768,
+    body: () => `
+  ${rail({ withAi: false })}
+  <main class="content" style="left: 80px; right: 0; bottom: ${BAR_H}px; padding: 0;">${albumLandscape()}</main>
+  ${miniBar('80px')}
+  ${fab(BAR_H + 16)}`,
+  },
+  'ArtistPortrait.dc.html': {
+    title: 'Portrait · Artist', w: 768, h: 1024,
+    body: () => `
+  ${rail({ withAi: false })}
+  <main class="content" style="left: 80px; right: 0; bottom: ${BAR_H}px; padding: 0;">${artistPortrait()}</main>
+  ${miniBar('80px')}
+  ${fab(BAR_H + 16)}`,
+  },
+  'GenrePortrait.dc.html': {
+    title: 'Portrait · Genre', w: 768, h: 1024,
+    body: () => `
+  ${rail({ withAi: false })}
+  <main class="content" style="left: 80px; right: 0; bottom: ${BAR_H}px; padding: 0;">${genrePortrait()}</main>
+  ${miniBar('80px')}
+  ${fab(BAR_H + 16)}`,
+  },
   'LandscapeQueue.dc.html': {
     title: 'Landscape · Queue card', w: 1024, h: 768,
     body: () => `
@@ -668,6 +827,10 @@ const canvas = {
     { file: 'PortraitLibrary.dc.html', title: boards['PortraitLibrary.dc.html'].title, page: 'tablet', x: 768 + GAP_X, y: 1024 + GAP_Y + 768 + GAP_Y, w: 768, h: 1024 },
     { file: 'LandscapeQueue.dc.html', title: boards['LandscapeQueue.dc.html'].title, page: 'tablet', x: 0, y: 2 * (1024 + GAP_Y) + 768 + GAP_Y, w: 1024, h: 768 },
     { file: 'LandscapeAI.dc.html', title: boards['LandscapeAI.dc.html'].title, page: 'tablet', x: 1024 + GAP_X, y: 2 * (1024 + GAP_Y) + 768 + GAP_Y, w: 1024, h: 768 },
+    { file: 'AlbumPortrait.dc.html', title: boards['AlbumPortrait.dc.html'].title, page: 'tablet', x: 0, y: 2 * (1024 + GAP_Y) + 2 * (768 + GAP_Y), w: 768, h: 1024 },
+    { file: 'AlbumLandscape.dc.html', title: boards['AlbumLandscape.dc.html'].title, page: 'tablet', x: 768 + GAP_X, y: 2 * (1024 + GAP_Y) + 2 * (768 + GAP_Y), w: 1024, h: 768 },
+    { file: 'ArtistPortrait.dc.html', title: boards['ArtistPortrait.dc.html'].title, page: 'tablet', x: 768 + GAP_X + 1024 + GAP_X, y: 2 * (1024 + GAP_Y) + 2 * (768 + GAP_Y), w: 768, h: 1024 },
+    { file: 'GenrePortrait.dc.html', title: boards['GenrePortrait.dc.html'].title, page: 'tablet', x: 2 * (768 + GAP_X) + 1024 + GAP_X, y: 2 * (1024 + GAP_Y) + 2 * (768 + GAP_Y), w: 768, h: 1024 },
     { file: 'Main.dc.html', title: boards['Main.dc.html'].title, page: 'desktop', x: 0, y: 0, w: 1440, h: 900 },
     { file: 'DirectionB.dc.html', title: boards['DirectionB.dc.html'].title, page: 'desktop', x: 1440 + GAP_X, y: 0, w: 1440, h: 900 },
     { file: 'DirectionC.dc.html', title: boards['DirectionC.dc.html'].title, page: 'desktop', x: 2 * (1440 + GAP_X), y: 0, w: 1440, h: 900 },
@@ -683,6 +846,8 @@ const canvas = {
       'MORE — decided 2026-09-11: a centred card like every sheet, vertically centred, content-height, the card header pattern (title, close). Exactly the phone drawer\'s seven rows, same order, the two live hints. Rows are routes, not windows: tapping one closes the menu and the screen opens in the content area, as on the phone (next board — Library), with More highlighted on the rail.' },
     { id: 'set1-note', page: 'tablet', x: 0, y: 2 * (1024 + GAP_Y) + 768 + GAP_Y - 200, w: 620, text:
       'QUEUE and AI CHAT — the phone sheets verbatim in the 360px card; drawn schematically, the implementation reuses the phone CSS unchanged. Accepted 2026-09-11.' },
+    { id: 'set2-note', page: 'tablet', x: 0, y: 2 * (1024 + GAP_Y) + 2 * (768 + GAP_Y) - 260, w: 660, text:
+      'Screen set 2 — detail screens. ALBUM: the one change is the header — on the phone the cover is a full-width square; at 688px that would be a 688px cover, so the cover sits beside the title, edition picker, year, chips and buttons (280px in portrait); in landscape the cover column stays put on the left while the tracklist scrolls on the right. Track rows, disc labels and the Similar albums shelf are the phone\'s. ARTIST and GENRE: nothing moves — the hero, chips and bio (capped at a 640px measure), shelves under the right edge, track rows; the genre\'s artist grid simply gains columns (auto-fill of 96px tiles).' },
     { id: 'desktop-brief', page: 'desktop', x: 0, y: -200, w: 560, text:
       'Desktop directions — parked. Kept for the later desktop cycle; nothing here is being built now. A: sidebar + docked NP · B: sidebar + full player bar + NP card · C: rail + docked NP.' },
   ],
