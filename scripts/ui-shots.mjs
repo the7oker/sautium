@@ -490,7 +490,13 @@ async function main() {
     const exited = new Promise(resolvePromise => proc.once('exit', resolvePromise));
     proc.kill();
     await exited;
-    rmSync(userData, { recursive: true, force: true });
+    try {
+      rmSync(userData, { recursive: true, force: true, maxRetries: 50, retryDelay: 200 });
+    } catch (err) {
+      // Chrome's renderers can outlive the browser process by a moment;
+      // a leftover profile in the temp dir is not worth failing the run.
+      console.warn(`profile dir not removed: ${userData} (${err.code})`);
+    }
   }
   writeContactSheet(out, routes, widths, opts.artboards);
   const errorLog = results.filter(r => r.errors?.length)
@@ -502,7 +508,7 @@ async function main() {
 
 // Importable as a library for ad-hoc probes (the CDP plumbing, Chrome
 // launch, token derivation); runs the CLI only when executed directly.
-export { Cdp, Page, launchChrome, findChrome, deriveToken, GO_TO, IMAGES_READY, TWO_FRAMES };
+export { Cdp, Page, launchChrome, findChrome, deriveToken, GO_TO, IMAGES_READY, TWO_FRAMES, decodePng, pixelDiff };
 
 if (import.meta.url === pathToFileURL(process.argv[1]).href) {
   main().catch(err => { console.error(err.stack || err); process.exit(1); });
