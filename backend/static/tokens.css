@@ -2,22 +2,22 @@
  * Sautium Design System v1 — Canonical tokens.
  *
  * Source of truth: docs/design/POSITIONING.md §"Colour palette (v1)"
- * Reference implementation: docs/design/reference/now-playing-bundle/
+ * Reference implementation: docs/design/reference/claude-design-bundle/
  *     project/Design System v1.html
  *
  * ----- SCALING MODEL -------------------------------------------------
- * Mobile-first fluid proportional scaling with a single knob (--base).
+ * Locked design-pixels with a single knob (--base).
  *
- *   root font-size = 100vw ÷ design-viewport × --base  (in px)
+ *   below 360px: root font-size = 100vw ÷ design-viewport × --base
+ *   at and above 360px: root font-size = --base px (13px), locked
  *
- * On a 360px-wide viewport, 1rem == --base px. On 720px, 1rem == 2×base.
- * Every size token uses --px (= 1rem / --base) so tokens read as
- * "design-pixels" and the entire scale reflows when --base changes.
- *
- * On tablet and up we lock the root font-size and centre the layout
- * at a comfortable reading width so the UI does not bloat on wide
- * monitors. --base itself is unchanged — the proportional language
- * stays the same.
+ * Every size token uses --px (= 1rem / --base), so tokens read as
+ * "design-pixels" and, above 360, 1 * --px is exactly one screen
+ * pixel on every phone, tablet and monitor. Wider viewports get a
+ * different LAYOUT (nav rail / sidebar, docked panels, more columns —
+ * the layout modes in backend/static/CLAUDE.md), never a bigger copy
+ * of the phone design. A future "larger text" preference is a --base
+ * change, nothing else.
  *
  * ----- USAGE ---------------------------------------------------------
  * Never write raw `16px` for layout — write `calc(16 * var(--px))` or

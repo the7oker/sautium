@@ -43,8 +43,11 @@ any phone width — a 19px design title is 19px on a 360 device, on a
 with the viewport, so wider phones get more breathing room around the
 same-sized typography and controls.
 
-At ≥ 768px the body is centred at ~468px (`360 × 1.3`) so the design
-does not float in a sea of empty desktop background.
+Above 768px the **frame** changes, not the scale — see "Layout modes"
+below. (Until the frame ships, `tokens.css` still centres `body` at
+468px there; that rule goes away with the frame, because `max-width`
+on `body` never contained the fixed chrome — on a monitor the nav and
+the sheets spanned the whole viewport around a 468px column.)
 
 **Why not pure fluid scaling?** Fluid scaling at all widths inflates
 the design on phones wider than the 360 baseline (a 19px reference
@@ -52,6 +55,65 @@ title becomes ~23px on a 443px viewport), which contradicts pixel-
 perfect parity with the reference HTML and pushes meta-row content
 past the screen edge. Locking the size keeps both the typography
 spec and horizontal layout predictable.
+
+### Layout modes — tablet / desktop
+
+_Contract decided 2026-09-11 (`docs/design/INFORMATION-ARCHITECTURE.md`
+§"Layout modes" has the chrome mapping and the reasoning). Status: the
+compact chrome is what is implemented today; the frame PR turns this
+section into code. Artboards for the wide modes live under
+`docs/design/reference/wide-layout/` once drawn._
+
+One DOM, three modes selected purely by raw-px media queries:
+`compact` (< 768, today's mobile chrome), `medium` (768–1199: left nav
+rail, bottom player bar, overlays as centred cards), `expanded`
+(≥ 1200: sidebar with the More rows inline, player bar, a docked right
+panel for Now Playing / Queue / AI). The type scale stays locked.
+
+Every chrome offset derives from one set of per-mode variables — this
+is the only place the breakpoint numbers and the chrome geometry live:
+
+```css
+:root {                                  /* defaults = compact */
+  --layout-mode: compact;                /* read by JS, never by CSS layout */
+  --nav-h: calc(56 * var(--px));         /* bottom nav; 0 in medium/expanded */
+  --nav-w: 0px;                          /* rail / sidebar; 0 in compact */
+  --player-h: calc(60 * var(--px));      /* mini-player / player bar */
+  --fab-clear: calc(72 * var(--px));     /* 0 where the FAB is not in the layout */
+  --panel-w: 0px;                        /* docked right panel */
+  --content-max: none;
+}
+@media (min-width: 768px)  { :root { --layout-mode: medium;   --nav-h: 0px; --nav-w: calc(80 * var(--px)); } }
+@media (min-width: 1200px) { :root { --layout-mode: expanded; --nav-w: calc(240 * var(--px)); --panel-w: calc(380 * var(--px)); --fab-clear: 0px; } }
+
+body { --player-h-active: 0px; --fab-clear-active: var(--fab-clear); --panel-w-active: 0px; }
+body.has-miniplayer { --player-h-active: var(--player-h); }
+body.no-fab         { --fab-clear-active: 0px; }
+body:has(#npSheet:not([hidden]), #queueSheet:not([hidden]), #aiSheet:not([hidden])) { --panel-w-active: var(--panel-w); }
+body { --chrome-bottom: calc(var(--nav-h) + var(--player-h-active) + var(--safe-bottom)); }
+#app { padding: 0 var(--panel-w-active) calc(var(--chrome-bottom) + var(--fab-clear-active)) var(--nav-w); }
+```
+
+Rules:
+
+- **CSS owns the mode.** No `matchMedia`, no resize listener. Anything
+  positioned against the chrome (FAB, guide puck, sticky filter bar,
+  drawer, chat screen height) references `--chrome-bottom` /
+  `--nav-w` / `--panel-w-active` — never its own copy of the sum.
+- **"Panel open" has one source of truth**: the `hidden` attribute the
+  sheets' `show()/hide()` already flip. No parallel body class.
+- **JS asks, never decides.** The only reads of the live mode
+  (`getComputedStyle(document.documentElement).getPropertyValue('--layout-mode')`)
+  are where `[hidden]` would otherwise force a mobile-only behaviour —
+  closing a docked panel before navigating, pinning Discovery filters
+  open. Everything else is one code path in every mode.
+- **One DOM per chrome element.** The nav, the More rows, the
+  mini-player and each sheet exist once; a mode repositions them.
+- **Document scroll stays.** The frame is fixed chrome plus variables,
+  not a grid with an inner scroller.
+- The compact rendering must not change when a wide mode is added:
+  `scripts/ui-shots.mjs --compare` against the 360 baseline is the
+  proof.
 
 ### How to write sizes
 
@@ -110,9 +172,13 @@ amber's job.
    prefer the token. When the reference uses `19px` (no token),
    write `calc(19 * var(--px))` explicitly — do not silently snap
    to the nearest token.
-5. **Visual verify before declaring done.** Open both screens in
-   browser at 360px viewport, compare side by side. The user
-   expects pixel-perfect parity; "approximately right" is a bug.
+5. **Visual verify before declaring done.** Open both screens in a
+   browser at 360px, and at the width of every tablet / desktop
+   artboard the screen has, compare side by side. The user expects
+   pixel-perfect parity; "approximately right" is a bug.
+   `scripts/ui-shots.mjs` renders every route at each width into a
+   contact sheet; `--compare` against a baseline proves the 360
+   rendering did not move when only a wider mode was meant to change.
 
 This rule exists because building from memory produced a Now
 Playing screen that missed eight visible elements (lyrics btn,

@@ -125,8 +125,10 @@ library**, served visually.
 
 ## Design principles (DS-level directives)
 
-1. **Mobile-first.** Baseline 360–390px; desktop is an enhancement.
-   Touch targets ≥ 44pt. One-handed reach matters.
+1. **Mobile-first.** Baseline 360–390px; tablet and desktop are
+   layout modes of the same design (a wider frame, side navigation,
+   docked panels), never a different product. Touch targets ≥ 44pt.
+   One-handed reach matters.
 2. **Warm dark foundation.** Dark with a warm undertone (coffee /
    cognac / amber-tinged), **not** obsidian black.
 3. **Typography bi-family.** One sans for UI prose; one mono for numeric
@@ -244,8 +246,12 @@ so that the implementation can render it pixel-perfectly.
 - Containers (`100%`, `aspect-ratio`) still expand naturally with the
   viewport, so wider phones get more breathing room around same-sized
   typography.
-- At ≥ 768px the body is centred at ~468px (`360 × 1.3`) so the
-  design does not float in a sea of empty desktop background.
+- Above 768px the frame changes, not the scale: a nav rail
+  (768–1199) or a sidebar (≥ 1200) takes the left edge, overlays
+  become cards or a docked panel, and content grows into columns.
+  Modes and chrome mapping: `INFORMATION-ARCHITECTURE.md` §"Layout
+  modes"; the variable contract: `backend/static/CLAUDE.md` §"Layout
+  modes".
 
 ### Sizing rules
 
@@ -369,5 +375,7 @@ _Next artifacts to produce inside Claude Design:_
   DS format.
 - Component library v1 (buttons, chips, cards, album tile, track row,
   metadata pill, slider, toggle, tab bar).
-- Discovery tab mobile + desktop comp set.
+- Tablet / desktop comp set — drafted from 2026-09 as Claude Design
+  canvases built from the live tokens; working artboards under
+  `docs/design/reference/wide-layout/`.
 - Now Playing / HQPlayer remote mobile comp set.
