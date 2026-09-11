@@ -298,6 +298,50 @@ const STYLE = `
   .tag.spec { background: rgba(74,127,167,.18); color: var(--blue); border-radius: 4px; }
   .toggle { width: 52px; height: 30px; border-radius: 15px; background: var(--amber); position: relative; }
   .toggle i { position: absolute; right: 3px; top: 3px; width: 24px; height: 24px; border-radius: 50%; background: var(--foundation); }
+  /* discovery / friends / chat */
+  .col { max-width: 640px; margin: 0 auto; padding: 24px 24px 0; display: flex; flex-direction: column; gap: 20px; }
+  .h1 { margin: 0; font-size: 32px; font-weight: 700; letter-spacing: -0.02em; line-height: 1.15; }
+  .search { height: 56px; border-radius: 12px; border: 1px solid var(--divider); background: var(--surface-lo); display: flex; align-items: center; gap: 14px;
+            padding: 0 20px; font-size: 17px; color: var(--text); }
+  .search svg { width: 22px; height: 22px; color: var(--muted); flex-shrink: 0; }
+  .search.empty { color: var(--dim); }
+  .adv { display: flex; align-items: center; gap: 8px; font-size: 15px; color: var(--muted); }
+  .adv svg { width: 18px; height: 18px; }
+  .res { display: grid; grid-template-columns: 44px 1fr auto 44px; gap: 12px; align-items: center; padding: 8px 0; border-bottom: 1px solid var(--divider); }
+  .res > div { min-width: 0; } .res .c { width: 44px; height: 44px; border-radius: 4px; background: var(--surface-hi); }
+  .res .t { font-size: 15px; font-weight: 500; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .res .s { font-size: 13px; color: var(--muted); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .res .d { font-family: "JetBrains Mono", ui-monospace, monospace; font-size: 13px; color: var(--muted); }
+  .res .a { width: 44px; height: 44px; display: grid; place-items: center; color: var(--muted); } .res .a svg { width: 20px; height: 20px; }
+  .idc { background: var(--surface); border-radius: 14px; padding: 16px 20px; display: grid; grid-template-columns: 1fr 44px; align-items: center; gap: 12px; }
+  .idc .k { font-size: 15px; color: var(--muted); } .idc .code { font-family: "JetBrains Mono", ui-monospace, monospace; font-size: 17px; color: var(--blue); margin-top: 6px; }
+  .idc .cp { width: 44px; height: 44px; border: 1px solid var(--divider); border-radius: 10px; display: grid; place-items: center; color: var(--text); }
+  .idc .cp svg { width: 20px; height: 20px; }
+  .rowlink { background: var(--surface); border-radius: 14px; padding: 16px 20px; display: flex; justify-content: space-between; align-items: center; font-size: 17px; }
+  .rowlink svg { width: 18px; height: 18px; color: var(--dim); }
+  .inp { height: 56px; border-radius: 12px; border: 1px solid var(--divider); background: var(--surface-lo); display: flex; align-items: center; padding: 0 20px; font-size: 17px; color: var(--dim); }
+  .inp.mono { font-family: "JetBrains Mono", ui-monospace, monospace; font-size: 15px; }
+  .addrow { display: grid; grid-template-columns: 1fr auto; gap: 12px; }
+  .addrow .btn-p, .addrow .btn-s { height: 56px; padding: 0 24px; border-radius: 12px; display: grid; place-items: center; font-size: 17px; font-weight: 600; }
+  .hint { font-size: 15px; color: var(--muted); }
+  .fr { display: grid; grid-template-columns: 52px 1fr 44px 44px; gap: 12px; align-items: center; padding: 12px 16px; border-bottom: 1px solid var(--divider); }
+  .fr .av { width: 52px; height: 52px; border-radius: 50%; display: grid; place-items: center; font-size: 20px; font-weight: 600; background: #3A2A3A; }
+  .fr .nm { font-size: 17px; font-weight: 600; } .fr .nm i { color: var(--amber); font-style: normal; font-size: 13px; margin-left: 6px; }
+  .fr .ls { font-size: 13px; color: var(--muted); margin-top: 2px; }
+  .fr .ic { width: 44px; height: 44px; display: grid; place-items: center; color: var(--dim); } .fr .ic svg { width: 22px; height: 22px; } .fr .ic.bub { color: var(--amber); }
+  .ch { position: absolute; left: 80px; right: 0; top: 0; display: flex; flex-direction: column; }
+  .ch-in { width: 100%; max-width: 720px; margin: 0 auto; display: flex; flex-direction: column; flex: 1; min-height: 0; }
+  .ch-hd { display: grid; grid-template-columns: 44px 44px 1fr 44px; gap: 12px; align-items: center; padding: 8px 12px; }
+  .ch-hd .b { width: 44px; height: 44px; display: grid; place-items: center; color: var(--text); } .ch-hd .b svg { width: 22px; height: 22px; }
+  .ch-hd .av { width: 44px; height: 44px; border-radius: 50%; background: #4A3A33; display: grid; place-items: center; font-weight: 600; }
+  .ch-hd .nm { font-size: 17px; font-weight: 600; } .ch-hd .ls { font-size: 13px; color: var(--muted); }
+  .e2e { margin: 8px 16px; padding: 12px 16px; border-radius: 12px; background: var(--surface-lo); border: 1px solid var(--divider); font-size: 13px; color: var(--muted); display: flex; gap: 10px; align-items: center; }
+  .e2e svg { width: 16px; height: 16px; } .e2e b { font-family: "JetBrains Mono", ui-monospace, monospace; font-weight: 400; color: var(--blue); }
+  .day { text-align: center; font-family: "JetBrains Mono", ui-monospace, monospace; font-size: 11px; letter-spacing: 0.12em; color: var(--muted); padding: 12px 0 4px; }
+  .cthread { flex: 1; padding: 8px 16px; display: flex; flex-direction: column; gap: 10px; overflow: hidden; }
+  .msg.in { align-self: flex-start; background: var(--surface); border-bottom-left-radius: 4px; }
+  .msg.out { align-self: flex-end; background: var(--surface-hi); border-bottom-right-radius: 4px; }
+  .msg { max-width: 60%; }
   .fab { position: absolute; right: 16px; width: 56px; height: 56px; border-radius: 50%; background: var(--amber); color: var(--foundation);
          font-weight: 700; font-size: 13px; display: grid; place-items: center; box-shadow: var(--shadow-2); }
 `;
@@ -623,6 +667,72 @@ const genrePortrait = () => `
     <div class="grid">${GENRE_ARTISTS.map(a => `<div class="artist"><div class="avatar" style="display: grid; place-items: center; font-size: 24px; font-weight: 600;">${a.split(' ').slice(0, 2).map(w => w[0]).join('')}</div><div class="name">${a}</div></div>`).join('')}</div>
   </div>`;
 
+const RESULTS = [['Nocturne No. 2 in E-flat major, Op. 9', 'Frédéric Chopin · Nocturnes', '4:31'], ['Una Mattina', 'Ludovico Einaudi · Una Mattina', '3:23'],
+  ['Comptine d\'un autre été', 'Yann Tiersen · Amélie', '2:20'], ['Nuvole Bianche', 'Ludovico Einaudi · Una Mattina', '5:57'], ['River Flows in You', 'Yiruma · First Love', '3:10'],
+  ['Gymnopédie No. 1', 'Erik Satie · Piano Works', '3:05'], ['Experience', 'Ludovico Einaudi · In a Time Lapse', '5:15'], ['Clair de lune', 'Claude Debussy · Suite bergamasque', '5:02']];
+const discoveryScreen = () => `
+  <div class="col" style="max-width: none; margin: 0;">
+    <h1 class="h1">Discovery</h1>
+    <div class="search">${I.discovery}piano</div>
+    <div class="adv">${I.chevR} Advanced filters</div>
+    <div>${RESULTS.map(([t, s2, d]) => `<div class="res"><div class="c"></div><div><div class="t">${t}</div><div class="s">${s2}</div></div><span class="d">${d}</span><span class="a">${I.plus}</span></div>`).join('')}</div>
+  </div>`;
+
+const copyIcon = '<svg viewBox="0 0 24 24" aria-hidden="true"><rect x="9" y="9" width="11" height="11" rx="2" fill="none" stroke="currentColor" stroke-width="1.8"/><path d="M5 15V6a2 2 0 0 1 2-2h9" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/></svg>';
+const bubbleIcon = '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 12a8 8 0 1 1 4 6.9L4 20l1.1-3.6A8 8 0 0 1 4 12z" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linejoin="round"/></svg>';
+const lockIcon = '<svg viewBox="0 0 24 24" aria-hidden="true"><rect x="5" y="11" width="14" height="10" rx="2" fill="none" stroke="currentColor" stroke-width="1.8"/><path d="M8 11V8a4 4 0 0 1 8 0v3" fill="none" stroke="currentColor" stroke-width="1.8"/></svg>';
+const friendsScreen = () => `
+  <div class="col">
+    <h1 class="h1">Friends</h1>
+    <div class="lbl">My identity</div>
+    <div class="idc"><div><div class="k">My invite code</div><div class="code">Sautium#FBE3-7BA9-57CE</div></div><span class="cp">${copyIcon}</span></div>
+    <div class="rowlink">Invite links ${I.chevR}</div>
+    <div class="lbl">Add a friend</div>
+    <div class="addrow"><div class="inp mono">Paste invite code or link</div><div class="btn-p">Add</div></div>
+    <div class="addrow"><div class="inp">Or invite by email</div><div class="btn-s">Send</div></div>
+    <div class="hint">Send invite — they get a verified email with a link.</div>
+    <div class="lbl">Friends</div>
+    <div class="inp">Search friends</div>
+    <div class="grp">
+      <div class="fr"><div class="av">M</div><div><div class="nm">Marat<i>★</i></div><div class="ls">last seen 8/27/2026</div></div><span class="ic">${I.more}</span><span class="ic bub">${bubbleIcon}</span></div>
+      <div class="fr" style="border-bottom: 0;"><div class="av" style="background: #4A2A2A;">W</div><div><div class="nm">win</div><div class="ls">last seen 6h ago</div></div><span class="ic">${I.more}</span><span class="ic bub">${bubbleIcon}</span></div>
+    </div>
+  </div>`;
+
+const chatScreen = () => `
+  <div class="ch" style="bottom: ${BAR_H}px;">
+    <div class="ch-in">
+      <div class="ch-hd"><span class="b">${I.back}</span><span class="av">W</span><div><div class="nm">win</div><div class="ls">last seen 6h ago</div></div><span class="b">${I.more}</span></div>
+      <div class="e2e">${lockIcon} messages are end-to-end encrypted via <b>NaCl</b></div>
+      <div class="cthread">
+        <div class="day">YESTERDAY · 21:48</div>
+        <div class="msg out">Welcome to Sautium! This is the support channel: write here if something breaks, confuses you, or you have an idea — the maintainer reads every message. Replies arrive while your node is online.</div>
+        <div class="msg in">привіт! я win</div>
+        <div class="msg out">привіт! я sautium!</div>
+        <div class="msg in">привіт! я знову тут!!!</div>
+        <div class="msg out">круто!</div>
+      </div>
+      <div class="composer"><div class="in">Message…</div><div class="send">${I.send.replace('M4 12l16-8-6 16-2-6-8-2z', 'M12 19V5m0 0l-6 6m6-6l6 6')}</div></div>
+    </div>
+  </div>`;
+
+const SESSION_TRACKS = [['Sounds Like a Melody (Chamber Version MMXXIII)', 'C MIN · 99 BPM', '4:18'], ['Big in Japan (Bassroque Version)', 'A MIN · 99 BPM', '3:43'], ['Forever Young (Petite Version)', 'G MAJ · 136 BPM', '3:57']];
+const albumIcon = '<svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="8.5" fill="none" stroke="currentColor" stroke-width="1.8"/><circle cx="12" cy="12" r="2.5" fill="none" stroke="currentColor" stroke-width="1.8"/></svg>';
+const sessionScreen = () => `
+  <div class="det">
+    <span class="back">${I.back}</span>
+    <div class="alb-head">
+      <div class="alb-cover" style="background: #1E2430;"></div>
+      <div class="alb-meta">
+        <h1>Sounds Like a Melody (Chamber Version MMXXIII)</h1>
+        <div class="ar">Alphaville</div>
+        <div class="yr" style="padding-top: 10px; border-top: 1px solid var(--divider);">4 Jul · 3 tracks · 12:00</div>
+        <div class="acts" style="grid-template-columns: 1fr 1fr 1fr;"><div class="btn-p">${I.play} Play</div><div class="btn-s">${albumIcon} Album</div><div class="btn-s">${I.plus} Queue</div></div>
+      </div>
+    </div>
+    <div class="tracks">${trackRows(SESSION_TRACKS, 3)}</div>
+  </div>`;
+
 const libraryScreen = ({ header = true } = {}) => `
   <div class="set">
     ${header ? `<div class="set-hd"><span class="b">${I.back}</span><h1>Library</h1><span></span></div>` : ''}
@@ -851,6 +961,36 @@ const boards = {
   ${miniBar('80px')}
   ${fab(BAR_H + 16)}`,
   },
+  'DiscoveryPortrait.dc.html': {
+    title: 'Portrait · Discovery with results', w: 768, h: 1024,
+    body: () => `
+  ${rail({ withAi: false, active: 'discovery' })}
+  <main class="content" style="left: 80px; right: 0; bottom: ${BAR_H}px; padding: 0;">${discoveryScreen()}</main>
+  ${miniBar('80px')}
+  ${fab(BAR_H + 16)}`,
+  },
+  'FriendsPortrait.dc.html': {
+    title: 'Portrait · Friends', w: 768, h: 1024,
+    body: () => `
+  ${rail({ withAi: false, active: 'friends' })}
+  <main class="content" style="left: 80px; right: 0; bottom: ${BAR_H}px; padding: 0;">${friendsScreen()}</main>
+  ${miniBar('80px')}`,
+  },
+  'ChatLandscape.dc.html': {
+    title: 'Landscape · Chat thread', w: 1024, h: 768,
+    body: () => `
+  ${rail({ withAi: false, active: 'friends' })}
+  ${chatScreen()}
+  ${miniBar('80px')}`,
+  },
+  'SessionPortrait.dc.html': {
+    title: 'Portrait · Listening session', w: 768, h: 1024,
+    body: () => `
+  ${rail({ withAi: false })}
+  <main class="content" style="left: 80px; right: 0; bottom: ${BAR_H}px; padding: 0;">${sessionScreen()}</main>
+  ${miniBar('80px')}
+  ${fab(BAR_H + 16)}`,
+  },
   'LandscapeQueue.dc.html': {
     title: 'Landscape · Queue card', w: 1024, h: 768,
     body: () => `
@@ -943,6 +1083,10 @@ const canvas = {
     { file: 'AlbumLandscape.dc.html', title: boards['AlbumLandscape.dc.html'].title, page: 'tablet', x: 768 + GAP_X, y: 2 * (1024 + GAP_Y) + 2 * (768 + GAP_Y), w: 1024, h: 768 },
     { file: 'ArtistPortrait.dc.html', title: boards['ArtistPortrait.dc.html'].title, page: 'tablet', x: 768 + GAP_X + 1024 + GAP_X, y: 2 * (1024 + GAP_Y) + 2 * (768 + GAP_Y), w: 768, h: 1024 },
     { file: 'GenrePortrait.dc.html', title: boards['GenrePortrait.dc.html'].title, page: 'tablet', x: 2 * (768 + GAP_X) + 1024 + GAP_X, y: 2 * (1024 + GAP_Y) + 2 * (768 + GAP_Y), w: 768, h: 1024 },
+    { file: 'DiscoveryPortrait.dc.html', title: boards['DiscoveryPortrait.dc.html'].title, page: 'tablet', x: 0, y: 3 * (1024 + GAP_Y) + 2 * (768 + GAP_Y), w: 768, h: 1024 },
+    { file: 'FriendsPortrait.dc.html', title: boards['FriendsPortrait.dc.html'].title, page: 'tablet', x: 768 + GAP_X, y: 3 * (1024 + GAP_Y) + 2 * (768 + GAP_Y), w: 768, h: 1024 },
+    { file: 'ChatLandscape.dc.html', title: boards['ChatLandscape.dc.html'].title, page: 'tablet', x: 2 * (768 + GAP_X), y: 3 * (1024 + GAP_Y) + 2 * (768 + GAP_Y), w: 1024, h: 768 },
+    { file: 'SessionPortrait.dc.html', title: boards['SessionPortrait.dc.html'].title, page: 'tablet', x: 2 * (768 + GAP_X) + 1024 + GAP_X, y: 3 * (1024 + GAP_Y) + 2 * (768 + GAP_Y), w: 768, h: 1024 },
     { file: 'Main.dc.html', title: boards['Main.dc.html'].title, page: 'desktop', x: 0, y: 0, w: 1440, h: 900 },
     { file: 'DirectionB.dc.html', title: boards['DirectionB.dc.html'].title, page: 'desktop', x: 1440 + GAP_X, y: 0, w: 1440, h: 900 },
     { file: 'DirectionC.dc.html', title: boards['DirectionC.dc.html'].title, page: 'desktop', x: 2 * (1440 + GAP_X), y: 0, w: 1440, h: 900 },
@@ -960,6 +1104,8 @@ const canvas = {
       'QUEUE and AI CHAT — the phone sheets verbatim in the 360px card; drawn schematically, the implementation reuses the phone CSS unchanged. Accepted 2026-09-11.' },
     { id: 'set2-note', page: 'tablet', x: 0, y: 2 * (1024 + GAP_Y) + 2 * (768 + GAP_Y) - 260, w: 660, text:
       'Screen set 2 — detail screens. ALBUM: the one change is the header — on the phone the cover is a full-width square; at 688px that would be a 688px cover, so the cover sits beside the title, edition picker, year, chips and buttons (280px in portrait); in landscape the cover column stays put on the left while the tracklist scrolls on the right. Track rows, disc labels and the Similar albums shelf are the phone\'s. ARTIST and GENRE: nothing moves — the hero, chips and bio (capped at a 640px measure), shelves under the right edge, track rows; the genre\'s artist grid simply gains columns (auto-fill of 96px tiles).' },
+    { id: 'set3-note', page: 'tablet', x: 0, y: 3 * (1024 + GAP_Y) + 2 * (768 + GAP_Y) - 220, w: 660, text:
+      'Screen set 3. DISCOVERY: the phone screen at content width — search, Advanced filters, results (or the shuffle mosaic when the field is empty); landscape is the same, wider. FRIENDS: form-like, so it sits in a centred 640px column rather than stretching inputs across the tablet. CHAT: a centred 720px column, bubbles capped at 60%; the list + thread split stays a later option. SESSION: the album header pattern (cover beside title, meta and Play / Album / Queue), the phone\'s track rows below. The remaining More sections (HQPlayer, Audio output, Streaming library, AI, Sync) are covered by the window pattern and need no boards.' },
     { id: 'desktop-brief', page: 'desktop', x: 0, y: -200, w: 560, text:
       'Desktop directions — parked. Kept for the later desktop cycle; nothing here is being built now. A: sidebar + docked NP · B: sidebar + full player bar + NP card · C: rail + docked NP.' },
   ],
