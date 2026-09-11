@@ -56,6 +56,42 @@
       "h": 768
     },
     {
+      "file": "PortraitMorePopover.dc.html",
+      "title": "Portrait · More as a popover beside the rail (recommended)",
+      "page": "tablet",
+      "x": 0,
+      "y": 2032,
+      "w": 768,
+      "h": 1024
+    },
+    {
+      "file": "PortraitMoreCard.dc.html",
+      "title": "Portrait · More as a centred card",
+      "page": "tablet",
+      "x": 848,
+      "y": 2032,
+      "w": 768,
+      "h": 1024
+    },
+    {
+      "file": "LandscapeQueue.dc.html",
+      "title": "Landscape · Queue card",
+      "page": "tablet",
+      "x": 1696,
+      "y": 2032,
+      "w": 1024,
+      "h": 768
+    },
+    {
+      "file": "LandscapeAI.dc.html",
+      "title": "Landscape · AI chat card",
+      "page": "tablet",
+      "x": 2800,
+      "y": 2032,
+      "w": 1024,
+      "h": 768
+    },
+    {
       "file": "Main.dc.html",
       "title": "A · Sidebar + docked Now Playing",
       "page": "desktop",
@@ -107,6 +143,14 @@
       "y": 904,
       "w": 460,
       "text": "Scrolling: the whole card scrolls exactly like the phone sheet — the cover and its chevron ride up with the content, Similar tracks come into view, the rounded corners clip the content. A thin overlay scrollbar shows position. Closing while scrolled: tap the scrim or Escape (the chevron is back at the top after a scroll up)."
+    },
+    {
+      "id": "more-note",
+      "page": "tablet",
+      "x": 0,
+      "y": 1792,
+      "w": 620,
+      "text": "Screen set 1 — the frame in action. MORE: a menu, not a task — pick: a popover anchored beside the rail (recommended: it opens where you tapped, dims nothing but a whisper, and the phone drawer rows are reused as they are) or the same centred card as every sheet (consistent, but a menu that dims the whole screen feels heavy). QUEUE and AI are the phone sheets verbatim in the 360px card — drawn schematically here; the implementation reuses the phone CSS unchanged."
     },
     {
       "id": "desktop-brief",
