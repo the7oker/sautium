@@ -124,7 +124,8 @@ const STYLE = `
   .t56 { width: 56px; height: 56px; border-radius: 50%; display: grid; place-items: center; color: var(--text); }
   .t56 svg { width: 28px; height: 28px; }
   .t68 { width: 68px; height: 68px; border-radius: 50%; background: var(--amber); color: var(--foundation); display: grid; place-items: center; }
-  .t68 svg { width: 32px; height: 32px; }
+  .t68 svg { width: 28px; height: 28px; }
+  .t56.sec svg { width: 22px; height: 22px; }
   .simhead { display: flex; justify-content: space-between; align-items: baseline; margin: 24px 0 12px; padding-bottom: 8px;
              border-bottom: 1px solid var(--divider); font-size: 15px; font-weight: 600; letter-spacing: 0.06em; }
   .simhead span { font-family: "JetBrains Mono", ui-monospace, monospace; font-size: 11px; font-weight: 400; color: var(--muted); letter-spacing: 0.06em; }
@@ -133,9 +134,17 @@ const STYLE = `
   .sim .t { font-size: 15px; font-weight: 500; }
   .sim .s { font-size: 13px; color: var(--muted); }
   .sim .score { font-family: "JetBrains Mono", ui-monospace, monospace; font-size: 13px; color: var(--blue); }
-  .sim .add { width: 44px; height: 44px; display: grid; place-items: center; color: var(--text); }
+  .sim .add { width: 44px; height: 44px; display: grid; place-items: center; color: var(--muted); }
+  .sim .add svg { width: 20px; height: 20px; }
 
   .scrim { position: absolute; inset: 0; background: var(--scrim); }
+  .sheet { position: absolute; top: 0; right: 0; bottom: 0; width: 360px; background: var(--foundation);
+           border-left: 1px solid var(--divider); overflow: hidden; }
+  .sheet.centred { right: auto; left: 50%; transform: translateX(-50%); top: 24px; bottom: 24px;
+                   border: 0; border-radius: 14px; box-shadow: var(--shadow-3); }
+  .sheet .chev { position: absolute; top: 4px; left: 8px; width: 44px; height: 44px; display: grid; place-items: center;
+                 color: var(--text); background: linear-gradient(rgba(14,10,8,.55), rgba(14,10,8,0)); border-radius: 50%; }
+  .sheet .chev svg { width: 28px; height: 28px; }
   .card { position: absolute; left: 50%; top: 50%; transform: translate(-50%, -50%); width: 560px; background: var(--foundation);
           border-radius: 14px; box-shadow: var(--shadow-3); overflow: hidden; }
   .card .top { display: flex; gap: 20px; padding: 20px; }
@@ -162,7 +171,7 @@ const I = {
   radio: '<svg viewBox="0 0 24 24" aria-hidden="true"><rect x="3" y="9" width="18" height="11" rx="2" fill="none" stroke="currentColor" stroke-width="2"/><path d="M7 9l10-5" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"/><circle cx="8" cy="14.5" r="2" fill="none" stroke="currentColor" stroke-width="2"/><path d="M13 13h5M13 16h5" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg>',
   chevron: '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M6 9l6 6 6-6" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>',
   close: '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M6 6l12 12M18 6L6 18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg>',
-  plus: '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 5v14M5 12h14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg>',
+  plus: '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 5v14M5 12h14" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round"/></svg>',
   hqp: '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M3 12h3l2-6 3 12 3-9 2 3h5" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>',
   output: '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 9v6h4l5 4V5L8 9H4z" fill="none" stroke="currentColor" stroke-width="2" stroke-linejoin="round"/><path d="M16 9a4 4 0 0 1 0 6M18.5 6.5a8 8 0 0 1 0 11" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg>',
   profile: '<svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="8" r="4" fill="none" stroke="currentColor" stroke-width="2"/><path d="M4 21c0-4 3.5-6.5 8-6.5s8 2.5 8 6.5" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg>',
@@ -261,7 +270,7 @@ const npProgress = `
       <div class="npprog"><div class="prog"><i></i><b></b></div><div class="times"><span class="tm">05:51</span><span class="tm total">09:18</span></div></div>`;
 const npTransport = `
       <div class="transport">
-        <div class="t56">${I.queue}</div><div class="t56">${I.prev}</div><div class="t68">${I.play}</div><div class="t56">${I.next}</div><div class="t56">${I.radio}</div>
+        <div class="t56 sec">${I.queue}</div><div class="t56">${I.prev}</div><div class="t68">${I.play}</div><div class="t56">${I.next}</div><div class="t56 sec">${I.radio}</div>
       </div>`;
 const npSimilar = (n = 3) => `
       <div class="simhead">SIMILAR TRACKS <span>CLAP · 7 MATCHES</span></div>
@@ -291,6 +300,26 @@ function panelMobile(width) {
   return `
   <aside class="panel" style="width: ${width}; bottom: 0;">
     <div class="npcover"></div>
+    <div class="npbody">
+      <h3 class="npt">High Hopes</h3>
+      <p class="npa">David Gilmour</p>
+      <p class="npal">Remember That Night: Live at the Royal Albert Hall · 2007</p>
+      ${npMeta}
+      ${npProgress}
+      ${npTransport}
+      ${npSimilar(2)}
+    </div>
+  </aside>`;
+}
+
+// The phone's Now Playing sheet at its native 360px, opened from the
+// mini-player: chevron over the cover closes it, body scrolls under the fold.
+function npSheet(centred) {
+  return `
+  <div class="scrim"></div>
+  <aside class="sheet${centred ? ' centred' : ''}">
+    <div class="npcover"></div>
+    <div class="chev">${I.chevron}</div>
     <div class="npbody">
       <h3 class="npt">High Hopes</h3>
       <p class="npa">David Gilmour</p>
@@ -365,13 +394,40 @@ const boards = {
   ${miniBar('80px')}
   ${fab(BAR_H + 16)}`,
   },
-  'TabletLandscape.dc.html': {
-    title: 'Tablet landscape 1024 · rail + Now Playing docked, no mini-player', w: 1024, h: 768,
+  'PortraitNowPlaying.dc.html': {
+    title: 'Portrait · Now Playing open (side sheet)', w: 768, h: 1024,
     body: () => `
   ${rail({ withAi: false })}
-  <main class="content" style="left: 80px; right: 360px; bottom: 0;">${home({ artists: 6, albums: 4, brandInContent: true })}</main>
-  ${fab(16, 360 + 16)}
-  ${panelMobile('360px')}`,
+  <main class="content" style="left: 80px; right: 0; bottom: ${BAR_H}px;">${home({ artists: 7, albums: 5, brandInContent: true })}</main>
+  ${miniBar('80px')}
+  ${fab(BAR_H + 16)}
+  ${npSheet(false)}`,
+  },
+  'TabletLandscape.dc.html': {
+    title: 'Tablet landscape 1024 · rail + mini-player', w: 1024, h: 768,
+    body: () => `
+  ${rail({ withAi: false })}
+  <main class="content" style="left: 80px; right: 0; bottom: ${BAR_H}px;">${home({ artists: 10, albums: 7, brandInContent: true })}</main>
+  ${miniBar('80px')}
+  ${fab(BAR_H + 16)}`,
+  },
+  'LandscapeNowPlayingSide.dc.html': {
+    title: 'Landscape · Now Playing open as a side sheet (recommended)', w: 1024, h: 768,
+    body: () => `
+  ${rail({ withAi: false })}
+  <main class="content" style="left: 80px; right: 0; bottom: ${BAR_H}px;">${home({ artists: 10, albums: 7, brandInContent: true })}</main>
+  ${miniBar('80px')}
+  ${fab(BAR_H + 16)}
+  ${npSheet(false)}`,
+  },
+  'LandscapeNowPlayingCentred.dc.html': {
+    title: 'Landscape · Now Playing open as a centred card', w: 1024, h: 768,
+    body: () => `
+  ${rail({ withAi: false })}
+  <main class="content" style="left: 80px; right: 0; bottom: ${BAR_H}px;">${home({ artists: 10, albums: 7, brandInContent: true })}</main>
+  ${miniBar('80px')}
+  ${fab(BAR_H + 16)}
+  ${npSheet(true)}`,
   },
 };
 
@@ -433,18 +489,21 @@ const canvas = {
   ],
   artboards: [
     { file: 'TabletPortrait.dc.html', title: boards['TabletPortrait.dc.html'].title, page: 'tablet', x: 0, y: 0, w: 768, h: 1024 },
-    { file: 'TabletLandscape.dc.html', title: boards['TabletLandscape.dc.html'].title, page: 'tablet', x: 768 + GAP_X, y: 0, w: 1024, h: 768 },
+    { file: 'PortraitNowPlaying.dc.html', title: boards['PortraitNowPlaying.dc.html'].title, page: 'tablet', x: 768 + GAP_X, y: 0, w: 768, h: 1024 },
+    { file: 'TabletLandscape.dc.html', title: boards['TabletLandscape.dc.html'].title, page: 'tablet', x: 0, y: 1024 + GAP_Y, w: 1024, h: 768 },
+    { file: 'LandscapeNowPlayingSide.dc.html', title: boards['LandscapeNowPlayingSide.dc.html'].title, page: 'tablet', x: 1024 + GAP_X, y: 1024 + GAP_Y, w: 1024, h: 768 },
+    { file: 'LandscapeNowPlayingCentred.dc.html', title: boards['LandscapeNowPlayingCentred.dc.html'].title, page: 'tablet', x: 2 * (1024 + GAP_X), y: 1024 + GAP_Y, w: 1024, h: 768 },
     { file: 'Main.dc.html', title: boards['Main.dc.html'].title, page: 'desktop', x: 0, y: 0, w: 1440, h: 900 },
     { file: 'DirectionB.dc.html', title: boards['DirectionB.dc.html'].title, page: 'desktop', x: 1440 + GAP_X, y: 0, w: 1440, h: 900 },
     { file: 'DirectionC.dc.html', title: boards['DirectionC.dc.html'].title, page: 'desktop', x: 2 * (1440 + GAP_X), y: 0, w: 1440, h: 900 },
   ],
   annotations: [
-    { id: 'tablet-brief', page: 'tablet', x: 0, y: -220, w: 560, text:
-      'Tablet first (2026-09-11). Same DOM and tokens as the phone app; only the frame changes. Base sizes: 768×1024 portrait, 1024×768 landscape (the smallest iPad — wider iPads get more room, never more chrome). Shelves run under the right edge exactly as on the phone: a cut tile is the scroll affordance, not a gutter.' },
-    { id: 'portrait-note', page: 'tablet', x: 620, y: -220, w: 380, text:
-      'Portrait: rail (80) + Home + mini-player bar at the bottom + AI FAB. Tapping the mini-player opens the mobile Now Playing sheet as a centred card over a scrim.' },
-    { id: 'landscape-note', page: 'tablet', x: 1020, y: -220, w: 420, text:
-      'Landscape: rail (80) + content + the mobile Now Playing screen docked at its native 360px — always on, so no mini-player. The Queue opens in the same slot over it, as on the phone. The FAB sits left of the panel. Content gets 584px at 1024 (more on wider iPads).' },
+    { id: 'tablet-brief', page: 'tablet', x: 0, y: -240, w: 620, text:
+      'Tablet first. Same DOM and tokens as the phone; base sizes 768×1024 / 1024×768 (the smallest iPad). Both orientations keep the mini-player; the big Now Playing is the phone sheet itself, opened on demand from the mini-player and closed by its chevron — no permanent panel. Shelves run under the right edge as on the phone. Icon sizes as in the app: + 20, prev/next 28, play 28, queue/radio 22.' },
+    { id: 'portrait-note', page: 'tablet', x: 848, y: -240, w: 400, text:
+      'Portrait: the sheet slides in from the right at its native 360px over a scrim; the rest of the screen stays where you left it. On the phone the same sheet is full-screen.' },
+    { id: 'choose-note', page: 'tablet', x: 1104, y: 1024 + GAP_Y - 240, w: 560, text:
+      'Landscape — pick how Now Playing opens. SIDE SHEET (recommended): the phone screen verbatim at 360px, the content stays visible left of it, and the same sheet becomes the docked panel on desktop later without a redesign. CENTRED CARD: symmetric, reads as a dialog, but hides the middle of the content and the cover eats half its height.' },
     { id: 'desktop-brief', page: 'desktop', x: 0, y: -200, w: 560, text:
       'Desktop directions — parked. Kept for the later desktop cycle; nothing here is being built now. A: sidebar + docked NP · B: sidebar + full player bar + NP card · C: rail + docked NP.' },
   ],

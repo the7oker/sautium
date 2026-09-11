@@ -20,11 +20,38 @@
       "h": 1024
     },
     {
-      "file": "TabletLandscape.dc.html",
-      "title": "Tablet landscape 1024 · rail + Now Playing docked, no mini-player",
+      "file": "PortraitNowPlaying.dc.html",
+      "title": "Portrait · Now Playing open (side sheet)",
       "page": "tablet",
       "x": 848,
       "y": 0,
+      "w": 768,
+      "h": 1024
+    },
+    {
+      "file": "TabletLandscape.dc.html",
+      "title": "Tablet landscape 1024 · rail + mini-player",
+      "page": "tablet",
+      "x": 0,
+      "y": 1144,
+      "w": 1024,
+      "h": 768
+    },
+    {
+      "file": "LandscapeNowPlayingSide.dc.html",
+      "title": "Landscape · Now Playing open as a side sheet (recommended)",
+      "page": "tablet",
+      "x": 1104,
+      "y": 1144,
+      "w": 1024,
+      "h": 768
+    },
+    {
+      "file": "LandscapeNowPlayingCentred.dc.html",
+      "title": "Landscape · Now Playing open as a centred card",
+      "page": "tablet",
+      "x": 2208,
+      "y": 1144,
       "w": 1024,
       "h": 768
     },
@@ -61,25 +88,25 @@
       "id": "tablet-brief",
       "page": "tablet",
       "x": 0,
-      "y": -220,
-      "w": 560,
-      "text": "Tablet first (2026-09-11). Same DOM and tokens as the phone app; only the frame changes. Base sizes: 768×1024 portrait, 1024×768 landscape (the smallest iPad — wider iPads get more room, never more chrome). Shelves run under the right edge exactly as on the phone: a cut tile is the scroll affordance, not a gutter."
+      "y": -240,
+      "w": 620,
+      "text": "Tablet first. Same DOM and tokens as the phone; base sizes 768×1024 / 1024×768 (the smallest iPad). Both orientations keep the mini-player; the big Now Playing is the phone sheet itself, opened on demand from the mini-player and closed by its chevron — no permanent panel. Shelves run under the right edge as on the phone. Icon sizes as in the app: + 20, prev/next 28, play 28, queue/radio 22."
     },
     {
       "id": "portrait-note",
       "page": "tablet",
-      "x": 620,
-      "y": -220,
-      "w": 380,
-      "text": "Portrait: rail (80) + Home + mini-player bar at the bottom + AI FAB. Tapping the mini-player opens the mobile Now Playing sheet as a centred card over a scrim."
+      "x": 848,
+      "y": -240,
+      "w": 400,
+      "text": "Portrait: the sheet slides in from the right at its native 360px over a scrim; the rest of the screen stays where you left it. On the phone the same sheet is full-screen."
     },
     {
-      "id": "landscape-note",
+      "id": "choose-note",
       "page": "tablet",
-      "x": 1020,
-      "y": -220,
-      "w": 420,
-      "text": "Landscape: rail (80) + content + the mobile Now Playing screen docked at its native 360px — always on, so no mini-player. The Queue opens in the same slot over it, as on the phone. The FAB sits left of the panel. Content gets 584px at 1024 (more on wider iPads)."
+      "x": 1104,
+      "y": 904,
+      "w": 560,
+      "text": "Landscape — pick how Now Playing opens. SIDE SHEET (recommended): the phone screen verbatim at 360px, the content stays visible left of it, and the same sheet becomes the docked panel on desktop later without a redesign. CENTRED CARD: symmetric, reads as a dialog, but hides the middle of the content and the cover eats half its height."
     },
     {
       "id": "desktop-brief",
