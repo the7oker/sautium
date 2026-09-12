@@ -2,11 +2,11 @@
 identity into HQPlayer-playable audio.
 
 The contract is deliberately tiny and VERSIONED so external "bring-your-own"
-provider modules (e.g. a closed-repo Deezer module) implement it against a
+provider modules (e.g. an out-of-tree lossless provider) implement it against a
 stable boundary — that stability is the future-proofing, not a generic plugin
 framework. The registry routes by ``type``; only ``stream_provider`` exists
 today (MCP and other module kinds are separate subsystems, intentionally not
-unified). See the ``project_spotify_preview`` design notes.
+unified). See the streaming-preview design notes.
 """
 from __future__ import annotations
 
@@ -28,7 +28,7 @@ def norm_key(s: str) -> str:
     channel through.
 
     Accents fold because catalogs drop them and we cannot tell which spelling
-    a given one kept: MusicBrainz's "Tsegué-Maryam Guebrou" is Deezer's
+    a given one kept: MusicBrainz's "Tsegué-Maryam Guebrou" is a catalog's
     "Tsegue-maryam Guebrou", and holding the artist gate to the accent
     rejected an exact title at an exact length. This is a comparison key
     only — identity keys on uuid_utils.normalize, which is a different
@@ -184,7 +184,7 @@ class TrackQuery:
                                        # a catalog may file the slot's recording under
     barcodes: tuple = ()               # MB barcodes of the editions carrying this very
                                        # tracklist — the release itself, where a catalog answers
-                                       # to a barcode (Deezer /album/upc:); no search to second-guess
+                                       # to a barcode lookup; no search to second-guess
     performers: tuple = ()             # who PLAYS this album, when the credit names them apart
                                        # from who wrote it ("Steve Reich; Ensemble Contrechamps &
                                        # Eklekto"). A work has many readings and they run to
@@ -201,7 +201,7 @@ class FetchedAudio:
     data: bytes
     mime: str          # "audio/flac" | "audio/mpeg"
     # ACTUAL quality of THIS fetch, not the provider's best — a provider may
-    # degrade within its own tiers (Deezer FLAC→320 when no FLAC for the region),
+    # degrade within its own tiers (lossless→lossy when the region has no lossless tier),
     # so enrichment provenance reads this, not manifest.lossless.
     lossless: bool = False
 
@@ -247,7 +247,7 @@ class StreamProvider(ABC):
     # fan-out exists for YouTube — a yt-dlp search is ~1.4 s of process and
     # network, eight abreast is the difference between a minute and eight for
     # an album. A JSON API answers in ~150 ms and meters requests per address:
-    # measured 2026-08-29, Deezer at one thread runs 161 ms/track, at two 136,
+    # measured 2026-08-29, the lossless provider at one thread runs 161 ms/track, at two 136,
     # at eight 130 — the extra threads buy nothing and burn the quota. Each
     # provider states what it can use.
     resolve_workers: int = 8

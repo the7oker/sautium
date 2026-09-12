@@ -251,7 +251,7 @@ composition (shortest, dedup of shared tables) runs BFS over the declared edges.
 all→both), not just a WHERE filter. Any path through `media_files` is owned-only,
 so a file-level tool (quality) is physically inapplicable to phantoms — dropped for
 now; it returns as a **two-source** tool (file-tier for owned, stream-tier for
-phantom: YouTube lossy / Deezer lossless).
+phantom: YouTube lossy / a lossless provider).
 
 **`corpus='all'` branches only at the `media_files` boundary, not the whole query.**
 The owned/phantom split is LOCAL — only `track↔album` differs; `artist↔track`,
@@ -278,12 +278,12 @@ relevance-source set** — delete only if bio + genre-desc prove to cover it.
 ## Streaming search (future)
 
 Streaming has **zero schema footprint** (100% runtime: `backend/streaming/`,
-YouTube core + Deezer BYO-plugin lossless). The future *"search Deezer for a
+YouTube core + a lossless BYO plugin). The future *"search the provider for a
 track/album/artist"* idea needs **no new engine**: the `StreamProvider` contract
 gains a `search()` method; results are **minted as phantom rows on-demand** (the
 way `_store_similar_artists` mints phantoms today); the engine then searches them
 as ordinary phantoms. Lay an **"entity source = DB vs provider"** abstraction now
-so this slots in later without rework. The Deezer catalog is huge — mint top-N
+so this slots in later without rework. A provider catalog is huge — mint top-N
 per query, never en masse.
 
 ## Proposed phasing

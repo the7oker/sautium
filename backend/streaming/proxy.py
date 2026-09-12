@@ -59,7 +59,7 @@ class _Entry:
     # Lossless-first fallback chain of (provider, source_id). source_id is the
     # pre-resolved id (skip re-resolution) or None (the provider resolves inside
     # fetch). Tried in order: a provider that RESOLVED but fails to DOWNLOAD (e.g.
-    # Deezer has the track but no FLAC for this account/region) cascades to the
+    # the lossless provider has the track but no lossless tier for this account/region) cascades to the
     # next, so a resolvable-but-undownloadable track still streams from YouTube.
     chain: list = field(default_factory=list)
     provider: Optional[StreamProvider] = None   # chain[0]'s provider; the actual one once fetched
@@ -89,7 +89,7 @@ class MediaProxy:
         # (enqueue order == playlist order). The next-to-play track gets the full
         # pipe (best keep-up on a slow link), and one-at-a-time traffic looks like
         # normal listening — a parallel bulk pull is a classic scraping/piracy
-        # signal that trips provider abuse detection (ARL flag / YouTube 403).
+        # signal that trips provider abuse detection (account flags / YouTube 403).
         self._fetch_q: list[str] = []
         self._fetch_cv = threading.Condition(self._lock)
         self._fetch_worker = False
@@ -573,7 +573,7 @@ class MediaProxy:
             e._claimed = True
         try:
             # Walk the lossless-first chain: a provider that RESOLVED but can't
-            # DOWNLOAD (Deezer has the track but no FLAC for this account) falls
+            # DOWNLOAD (the lossless provider has the track but no lossless tier for this account) falls
             # through to the next provider (e.g. YouTube) instead of dropping it.
             last_err = None
             for prov, sid in e.chain:

@@ -5,7 +5,7 @@ artist into phantom entities.
 The dump (optional, ~19GB) holds the whole catalog — 2.9M artists, 4.4M
 release groups — so a user can search BEYOND their library and stream what
 they find (the built-in YouTube provider needs a title + duration, which
-only materialized phantom entities carry; the closed Deezer module is not
+only materialized phantom entities carry; a lossless provider is not
 in the distribution). Flow: search → click → the artist's whole slice runs
 through the UNCHANGED canon pipeline (discography.sync_artist_discography:
 phantom albums + tracklists with durations + genres + CAA covers) → the

@@ -9,7 +9,7 @@ AST/PaSST instruments), keyed to the phantom's track_id.
 Provenance: the streamed bytes are content-addressed exactly like a local file
 (analysis_sources row with origin='deezer'|'youtube', media_file_id NULL,
 pcm_hash + chromaprint of the fetched audio) — this is what makes a
-Deezer-lossless analysis signable against the STREAM's material without
+lossless-stream analysis signable against the STREAM's material without
 claiming possession of any local rip (tier 3 in P2P-SYNC-INTEGRITY.md). The
 origin rank (local > deezer > youtube) means an owned rip later OVERWRITES a
 preview analysis, and a preview never overwrites a real-file one.
@@ -79,7 +79,7 @@ class PreviewEnricher:
         """Queue a previewed track for enrichment. No-ops without a track_id,
         catalog lengths (unverified match — see GATE) or audio, or if already
         queued. In trickle mode a full backlog drops the track instead of
-        queueing. ``lossless`` is the ACTUAL fetch quality (Deezer FLAC=True,
+        queueing. ``lossless`` is the ACTUAL fetch quality (lossless provider fetch=True,
         degraded tiers/YouTube=False); ``provider_id`` (manifest id,
         'deezer'|'youtube') becomes the provenance origin."""
         if not track_id or not lengths or not flac:

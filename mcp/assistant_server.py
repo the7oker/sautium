@@ -877,7 +877,7 @@ def play_track(track_id: str) -> str:
 
     Args:
         track_id: Track UUID. A track with no file in the library plays too —
-            it streams (Deezer lossless / YouTube), which takes a few seconds
+            it streams through the configured providers, which takes a few seconds
             longer to start.
     """
     try:

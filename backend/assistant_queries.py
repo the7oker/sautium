@@ -344,7 +344,7 @@ def format_track_info(row: dict, features: dict | None) -> str:
         if row.get("sample_rate"):
             lines.append(f"Sample rate: {row['sample_rate']} Hz / {row.get('bit_depth', '?')}-bit")
     else:
-        lines.append("NOT in the library — plays by streaming (Deezer lossless / YouTube)")
+        lines.append("NOT in the library — plays by streaming through the configured providers")
     lines.append(f"ID: {row['track_id']}")
 
     if features:

@@ -635,7 +635,7 @@ The short version of the hard-learned lessons:
   onefile, and brew's macOS formula is stable-channel and cannot self-update at
   all. **deno** ships as the sandboxed JS runtime for the player-challenge
   solver — the runtime-less extraction path is deprecated upstream and is the
-  one that breaks. A node with a working Deezer plugin masks a dead YouTube
+  one that breaks. A node with a working lossless plugin masks a dead YouTube
   provider: grep the log for `preview fetch failed … via youtube`.
 - **Time to first sound is not dominated by the network.** Measured on the
   Windows launcher, 4.5-min YouTube track: 6.1 s before, 2.6 s after, and only
@@ -649,12 +649,9 @@ The short version of the hard-learned lessons:
   with a growing buffer), which the HTTP layer, the pre-buffer policy and the
   CLAP hook are all written against — and whose real unknown is HQPlayer's
   HEAD/Range behaviour without a Content-Length.
-- **streamrip `--no-db` disables only the downloads db.** The Deezer plugin's
-  config template carries the dump node's `/root/.config/streamrip/*.db`
-  paths; the failed-downloads db still opened at that path → "unable to open
-  database file" on every rip from the Windows launcher, reported as a bare
-  `rc=1` because streamrip writes its tracebacks to STDOUT (rich). The plugin
-  now switches both dbs off in its per-process config and reads stdout.
+- **A BYO plugin's fetch tool writes its tracebacks to STDOUT.** Every failure
+  on the Windows launcher surfaced as a bare `rc=1`; the lossless plugin now
+  runs its tool with a per-process config and reads stdout for the real error.
 
 ---
 

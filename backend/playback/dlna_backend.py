@@ -961,7 +961,7 @@ class DlnaBackend(PlayerBackend):
             from playback.queue import resolved_artwork
             # Same order as the web UI's coverUrl(): the queued album's own
             # art first, the provider's matched release only as a fallback.
-            # Deezer resolves a track to whichever release carries it — a
+            # A provider resolves a track to whichever release carries it — a
             # compilation, another edition — so its cover can be the same
             # artist's OTHER album (seen live: renderer and Now Playing
             # disagreeing on the first two tracks of a streamed queue).
