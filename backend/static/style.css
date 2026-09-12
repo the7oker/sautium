@@ -6527,6 +6527,13 @@ select.add-gear-input {
   .album-side > .album-meta-block { grid-column: 2; grid-row: 1; }
   .album-side > .album-actions { grid-column: 2; grid-row: 2; }
   .album-side > :not(.album-hero):not(.album-meta-block):not(.album-actions) { grid-column: 1 / -1; }
+  /* Beside the cover or stacked under it, the text, the prose and the
+     buttons fill their column edge to edge: the 20px side inset is the
+     phone's screen margin, and the grid gap already parts them from
+     the cover. */
+  .album-side > .album-meta-block,
+  .album-side > .bio,
+  .album-side > .album-actions { padding-left: 0; padding-right: 0; }
   .detail-screen > .bio { max-width: calc(640 * var(--px)); }
   .friends-screen {
     max-width: calc(640 * var(--px) + 2 * var(--space-4));
@@ -6597,10 +6604,5 @@ select.add-gear-input {
     padding: 0;
   }
   .album-side > .album-hero { border-radius: var(--radius-md); }
-  /* Stacked under the cover, the text, the prose and the buttons share
-     its edges: the 20px side inset is the phone's screen margin. */
-  .album-side > .album-meta-block,
-  .album-side > .bio,
-  .album-side > .album-actions { padding-left: 0; padding-right: 0; }
   .detail-screen:has(> .album-side) > :not(.album-side) { grid-column: 2; }
 }
