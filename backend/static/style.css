@@ -6597,5 +6597,10 @@ select.add-gear-input {
     padding: 0;
   }
   .album-side > .album-hero { border-radius: var(--radius-md); }
+  /* Stacked under the cover, the text, the prose and the buttons share
+     its edges: the 20px side inset is the phone's screen margin. */
+  .album-side > .album-meta-block,
+  .album-side > .bio,
+  .album-side > .album-actions { padding-left: 0; padding-right: 0; }
   .detail-screen:has(> .album-side) > :not(.album-side) { grid-column: 2; }
 }
