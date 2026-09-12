@@ -26,7 +26,7 @@ import logging
 import re
 from difflib import SequenceMatcher
 
-from unidecode import unidecode
+from anyascii import anyascii
 
 from database import SessionLocal
 from db_pool import db_query
@@ -49,7 +49,7 @@ _BATCH = 12   # artists per AI call
 # ─── name-correspondence guard (the model-tier-robustness layer) ──────────
 
 def _latin(s: str) -> str:
-    return re.sub(r"[^a-z0-9 ]", " ", unidecode(s or "").lower())
+    return re.sub(r"[^a-z0-9 ]", " ", anyascii(s or "").lower())
 
 
 def _toks(s: str) -> set:
