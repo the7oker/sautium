@@ -895,17 +895,7 @@ peer ──TLS──▶ host :8801  Caddy (scripts/master-front/): terminates th
   existing port-based firewall rule covers Caddy; the router forward is the
   same port. `-Uninstall` reverses the service part.
 
-**Verified live 2026-08-19** (install.ps1 elevated via UAC from WSL, transcript
-in `scripts/master-front/install.log`): Caddy holds `0.0.0.0:8801` + `[::]:8801`,
-the old portproxy is gone, `/health` through the front answers 200; contact
-events now carry one token per source (LAN address, `::1` from the host's own
-curl, the WSL NAT address), a client-supplied `X-Forwarded-For: 9.9.9.9` left
-no trace, and the bridge-gateway token stopped appearing for outside traffic.
-Found on the way: `mb_slice_queries.addr_uuid` parsed a bare IPv6 as a URL
-(`"2001:db8::1"` → host `2001`, `"::1"` → no host), so the identity registry
-would have folded every IPv6 peer into one token while contact_log kept them
-apart — fixed at the shared formula (bare IPs bypass the URL parser); IPv4
-tokens are unchanged.
+Verification transcript and rollback steps: `docs/private/DEPLOYMENT.md`.
 
 **What the address is for — and not.** Signals only: pricing, backstops,
 similarity, the registry's addr axes, probe-connect's call-back target. Never
@@ -913,11 +903,6 @@ auth (CLAUDE.md Security Posture rule #5 still stands). Consequence to accept:
 the master's per-IP 60/min limiter stops being an accidental global cap and
 becomes per-peer, like on every launcher node; the global `mb/search` window,
 the load meter and the gate's backstops remain the node-wide protection.
-
-**Rollback.** `install.ps1 -Uninstall`; remove the two `.env` lines;
-`docker compose up -d backend`; re-add `netsh interface portproxy add v4tov4
-listenport=8801 listenaddress=0.0.0.0 connectport=8801 connectaddress=<WSL VM
-IP>`.
 
 ### Support diagnostics — SHIPPED 2026-08-26
 
