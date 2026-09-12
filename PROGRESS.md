@@ -479,6 +479,21 @@ The short version of the hard-learned lessons:
   the old commit (requirements, migrations, launcher code), which read that
   commit; the first draft compacted inside the reset and those diffs
   silently answered "nothing changed".
+- **One update at a time — the button is the flow's state.** The first
+  live rollout (2026-09-12, a macOS node 121 commits behind) produced
+  "Update failed" for an update that had succeeded: stopping services took
+  25 s (the P2P loop's 15 s join timeout, then the backend's 10 s graceful
+  kill), the "Check for Updates" button had been re-enabled the moment the
+  dialog opened, a second click opened a second dialog, and two `git pull`s
+  ran at once — concurrent fetches each append to FETCH_HEAD, two merge
+  heads are never a fast-forward, so one pull died with `Need to specify
+  how to reconcile divergent branches` while the other fast-forwarded.
+  `launcher.py` now has `_update_flow_busy/_update_flow_idle`: the button
+  is taken from the start of a check until the flow ends (no update, Later,
+  the dialog's close box, failure, services ready), the startup check's
+  verdict is painted only while idle, the tray menu enters through
+  `ui_call` (pystray fires on its own thread), and a check whose git call
+  raises hands the button back instead of dying on "Checking...".
 - **Order of a rewrite.** The mirror updater must be ON the nodes before the
   force-push — the old `git pull` is what runs otherwise. Ship it, confirm on
   the support desk that every live node's `node.started` report carries the

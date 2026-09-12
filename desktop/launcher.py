@@ -68,6 +68,7 @@ class LauncherApp(ctk.CTk):
         self._p2p_starting = False
         self.tray = None
         self._update_thread = None
+        self._update_in_progress = False
         self._shutting_down = False   # gates the stats worker from touching Tk after the loop is torn down
         # Cross-thread UI marshaling (see ui_call): started before any worker
         # thread exists, drained on the Tk thread's own timer.
@@ -227,9 +228,10 @@ class LauncherApp(ctk.CTk):
         packaged = installed_build()
         if packaged:
             self.title(f"Sautium {packaged}")
+        self._update_idle_label = "Refresh Registries" if packaged else "Check for Updates"
         self._btn_update = ctk.CTkButton(
             btn_frame,
-            text="Refresh Registries" if packaged else "Check for Updates",
+            text=self._update_idle_label,
             width=200,
             command=self._check_updates,
             fg_color="transparent", border_width=1,
@@ -1050,25 +1052,59 @@ class LauncherApp(ctk.CTk):
 
         threading.Thread(target=_restart, daemon=True).start()
 
+    # The update button IS the update flow's state: one flow at a time, and
+    # every entry — the button, the tray menu, the startup check — moves it
+    # on the Tk thread. Without that a second "Update Now", clicked while the
+    # first was still stopping services, ran two `git pull`s at once: one died
+    # on the FETCH_HEAD both fetches had written and the node showed "Update
+    # failed" for an update that had succeeded (2026-09-12).
+    def _update_flow_busy(self, label: str) -> None:
+        self._update_in_progress = True
+        self._btn_update.configure(state="disabled", text=label)
+
+    def _update_flow_idle(self, label: Optional[str] = None, highlight: bool = False) -> None:
+        self._update_in_progress = False
+        self._btn_update.configure(
+            state="normal", text=label or self._update_idle_label,
+            fg_color="#3b82f6" if highlight else "transparent")
+
+    def _note_update_available(self, count: int) -> None:
+        """The startup check's verdict — only worth painting while nothing
+        else owns the button; a flow in progress paints its own."""
+        if not self._update_in_progress:
+            self._update_flow_idle(f"Update Available ({count} commits)", highlight=True)
+
     def _check_updates(self):
-        """Manual update check."""
-        self._btn_update.configure(state="disabled", text="Checking...")
+        """Manual update check — the button and the tray menu."""
+        if self._update_in_progress:
+            return
+        self._update_flow_busy("Checking...")
 
         def _check():
             from desktop.updater import check_for_updates, installed_build
 
-            if installed_build():
-                # No remote to compare against — "You're up to date!" would be
-                # a guess worn as a fact. The registry refresh below is the
-                # whole of what this button does on a packaged install.
-                self.ui_call(lambda: self._btn_update.configure(
-                    state="normal", text="Refresh Registries"))
-            else:
-                has_updates, count, old_hash = check_for_updates()
-                if not has_updates:
-                    self.ui_call(lambda: self._show_update_result(False, 0))
+            try:
+                if installed_build():
+                    # No remote to compare against — "You're up to date!" would be
+                    # a guess worn as a fact. The registry refresh below is the
+                    # whole of what this button does on a packaged install.
+                    self.ui_call(self._update_flow_idle)
                 else:
-                    self.ui_call(lambda: self._show_update_dialog(count, old_hash))
+                    has_updates, count, _ = check_for_updates()
+                    if has_updates:
+                        self.ui_call(lambda: self._show_update_dialog(count))
+                    else:
+                        self.ui_call(self._update_flow_idle)
+                        self.ui_call(lambda: self._progress_text.configure(text="You're up to date!"))
+                        self.ui_call(lambda: self.after(
+                            3000, lambda: self._progress_text.configure(text="")))
+            except Exception as e:
+                # git itself failing (a timeout, no git on PATH) used to kill
+                # this thread and leave the button on "Checking..." for good.
+                logger.error(f"Update check failed: {e}")
+                self.ui_call(self._update_flow_idle)
+                self.ui_call(lambda: self._progress_text.configure(text="Update check failed"))
+                return
 
             # Same button also freshens the measurement registries —
             # best-effort: needs a running backend, and the server-side
@@ -1111,27 +1147,18 @@ class LauncherApp(ctk.CTk):
                     return
                 has_updates, count, _ = check_for_updates()
                 if has_updates:
-                    self.ui_call(lambda: self._btn_update.configure(
-                        text=f"Update Available ({count} commits)",
-                        fg_color="#3b82f6",
-                    ))
+                    self.ui_call(lambda: self._note_update_available(count))
             except Exception as e:
                 logger.debug(f"Background update check failed: {e}")
 
         self._update_thread = threading.Thread(target=_check, daemon=True)
         self._update_thread.start()
 
-    def _show_update_result(self, has_updates: bool, count: int):
-        self._btn_update.configure(state="normal", text="Check for Updates",
-                                   fg_color="transparent")
-        if not has_updates:
-            self._progress_text.configure(text="You're up to date!")
-            self.after(3000, lambda: self._progress_text.configure(text=""))
-
-    def _show_update_dialog(self, count: int, old_hash: str):
-        """Show update confirmation dialog."""
-        self._btn_update.configure(state="normal", text="Check for Updates",
-                                   fg_color="transparent")
+    def _show_update_dialog(self, count: int):
+        """Show update confirmation dialog. The button stays taken until the
+        dialog resolves — "Later" and the window's close button hand it back,
+        "Update Now" hands it to the update."""
+        self._update_flow_busy("Update available")
 
         dialog = ctk.CTkToplevel(self)
         dialog.title("Update Available")
@@ -1158,6 +1185,12 @@ class LauncherApp(ctk.CTk):
             dialog.destroy()
             self._perform_update()
 
+        def _later():
+            dialog.destroy()
+            self._update_flow_idle(f"Update Available ({count} commits)", highlight=True)
+
+        dialog.protocol("WM_DELETE_WINDOW", _later)
+
         ctk.CTkButton(
             btn_frame, text="Update Now", width=120,
             command=_do_update,
@@ -1165,12 +1198,13 @@ class LauncherApp(ctk.CTk):
 
         ctk.CTkButton(
             btn_frame, text="Later", width=120,
-            command=dialog.destroy,
+            command=_later,
             fg_color="transparent", border_width=1,
         ).pack(side="left", padx=10)
 
     def _perform_update(self):
         """Execute the update."""
+        self._update_flow_busy("Updating...")
         self._set_status("updating", "Updating...")
 
         def _update():
@@ -1187,11 +1221,13 @@ class LauncherApp(ctk.CTk):
 
             if not success:
                 self.ui_call(lambda: self._set_status("error", "Update failed"))
+                self.ui_call(self._update_flow_idle)
             elif relaunch:
                 self.ui_call(lambda: self._restart_self(changelog))
             else:
                 self.ui_call(lambda: self._show_changelog(changelog))
                 self.ui_call(self._on_services_ready)
+                self.ui_call(self._update_flow_idle)
 
         threading.Thread(target=_update, daemon=True).start()
 
@@ -1239,7 +1275,7 @@ class LauncherApp(ctk.CTk):
             self.tray = create_tray(
                 on_show=self._show_from_tray,
                 on_open_ui=self._open_web_ui,
-                on_check_updates=self._check_updates,
+                on_check_updates=lambda: self.ui_call(self._check_updates),
                 on_quit=self._quit,
             )
 
@@ -1322,6 +1358,7 @@ class LauncherApp(ctk.CTk):
                 self._shutting_down = False
                 self.ui_call(lambda: self._set_status(
                     "error", "Restart failed — the update applies on the next start"))
+                self.ui_call(self._update_flow_idle)
                 return
             self.ui_call(self._final_quit)
 
