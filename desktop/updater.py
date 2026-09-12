@@ -21,6 +21,15 @@ logger = logging.getLogger(__name__)
 
 REMOTE_BRANCH = "origin/main"
 
+# The repository moved on 2026-09-12 (history rewritten before going public).
+# A checkout still pointing at the old address is switched to the new one
+# before it fetches, so an installed node follows the move on its own — the
+# last commit on the old repository carries this very code. Any other origin
+# (a fork, a mirror) is left alone.
+ORIGIN_MOVES = {
+    "github.com/the7oker/ai.djai": "https://github.com/the7oker/sautium.git",
+}
+
 # The tip this checkout last received from origin. A checkout whose HEAD is
 # that tip carries nothing of its own and may be moved wherever origin goes,
 # a rewritten history included; any other HEAD is somebody's work — the
@@ -54,6 +63,23 @@ def _is_ancestor(commit: str, of: str) -> bool:
 
 def _record_mirrored(tip: str) -> None:
     _git_cmd(["update-ref", MIRRORED_REF, tip])
+
+
+def _migrate_origin() -> None:
+    """Point origin at the repository's current address if it still names a
+    former one. Runs before every fetch; a no-op for every other origin."""
+    result = _git_cmd(["remote", "get-url", "origin"])
+    if result.returncode != 0:
+        return
+    url = result.stdout.strip()
+    for old, new in ORIGIN_MOVES.items():
+        if old in url and url != new:
+            moved = _git_cmd(["remote", "set-url", "origin", new])
+            if moved.returncode == 0:
+                logger.info(f"origin moved: {url} -> {new}")
+            else:
+                logger.warning(f"origin move failed: {moved.stderr.strip()}")
+            return
 
 
 def get_project_root() -> Path:
@@ -126,6 +152,7 @@ def check_for_updates() -> Tuple[bool, int, str]:
 
     # The first fetch after a history rewrite transfers the whole repository
     # again, not a delta.
+    _migrate_origin()
     result = _git_cmd(["fetch", "origin", "main"], timeout=120)
     if result.returncode != 0:
         logger.warning(f"git fetch failed: {result.stderr}")
@@ -204,6 +231,7 @@ def reset_to_origin() -> Tuple[str, Optional[str]]:
     if status.returncode != 0 or status.stdout.strip():
         return old_hash, "the checkout has local modifications"
 
+    _migrate_origin()
     result = _git_cmd(["fetch", "origin", "main"], timeout=120)
     if result.returncode != 0:
         return old_hash, f"git fetch failed: {result.stderr.strip()}"
