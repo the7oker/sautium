@@ -317,10 +317,12 @@ See:
 
 ## Security Posture (read before touching network/auth)
 
-The full picture — what is deployed today, the threat model, the Docker
-peer surface, and the master/relay/carry topology — lives in the
-`security-posture` skill: invoke it before touching ports, auth, TLS,
-UPnP, or the peer surface. The hard rules below bind with or without it.
+The public model — surfaces, threat model, accepted limits — is in
+`SECURITY.md`. The full picture (what is deployed today, the master/relay/
+carry topology, host specifics) lives in the maintainer-private
+`security-posture` skill and `docs/private/` (not in git): invoke the skill
+before touching ports, auth, TLS, UPnP, or the peer surface. The hard rules
+below bind with or without it.
 
 **Hard rules — do not break without asking Valerii first:**
 
@@ -337,13 +339,9 @@ UPnP, or the peer surface. The hard rules below bind with or without it.
    discovery probes*, never for UPnP. If you ever combine them,
    you must add app-level auth to the backend first.
 3. **Plain-HTTP media surfaces (8830, 8831) are LAN-only by design.**
-   On this host, Docker Desktop's published ports listen IPv6-only on
-   the Windows side: LAN IPv4 reachability rides `netsh portproxy`
-   rules (0.0.0.0:PORT → WSL-VM IP) plus inbound firewall allows —
-   "Music AI DJ" covers 8800; "Sautium Media (DLNA)" covers 8830-8831
-   (profile=any, added 2026-07-12 — without it DLNA renderers accepted
-   commands but could never fetch the audio bytes). If the WSL VM IP
-   changes (reboot), the portproxy `connectaddress` must be updated.
+   On a Windows host with Docker Desktop the published ports need a
+   host-side forward plus firewall allows to be reachable over LAN IPv4
+   (the maintainer's setup: `docs/private/DEPLOYMENT.md`).
    The media proxy (8830) serves phantom-preview buffers AND — since the
    DLNA output — owned-file bytes at `/file/{token}` plus cover art at
    `/art/{token}`; all gated by unguessable per-queue tokens (never the
@@ -352,7 +350,7 @@ UPnP, or the peer surface. The hard rules below bind with or without it.
    GENA event listener (renderer → backend callbacks). The launcher
    node uses its own pair — 8832 (media) / 8833 (GENA), `ports.media`/
    `ports.gena` in config.json → `MEDIA_PROXY_PORT`/`DLNA_GENA_PORT` —
-   because the Docker portproxy holds 0.0.0.0:8830-8831 even while the
+   because the Docker node's forward holds 8830-8831 even while the
    container is down; the launcher auto-creates its firewall rule
    "Sautium (TCP 8832,8833)" (profile=any). Same LAN-only rules apply.
    None of these ports may ever be UPnP-forwarded or otherwise exposed

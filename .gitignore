@@ -14,6 +14,9 @@ ENV/
 build/
 develop-eggs/
 docs/marketing/
+# Maintainer-private notes: deployment specifics, defense status
+docs/private/
+.claude/skills/security-posture/
 dist/
 downloads/
 eggs/
