@@ -28,7 +28,7 @@ def test_internet_vantage_is_a_globally_routable_source():
     # Loopback, RFC 1918, the Docker bridge, link-local, carrier NAT, v6
     # ULA/link-local, names and junk: a request from there proves nothing
     # about reachability from the internet.
-    for src in ["127.0.0.1", "192.168.1.188", "10.0.0.1", "172.22.0.1",
+    for src in ["127.0.0.1", "192.168.1.10", "10.0.0.1", "172.22.0.1",
                 "169.254.1.1", "100.64.3.4", "::1", "fe80::1%eth0", "fd00::1",
                 "host.docker.internal", "", None]:
         assert not is_internet_vantage(src), src

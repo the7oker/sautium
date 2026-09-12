@@ -49,7 +49,7 @@ DB_PORT = os.getenv("DB_PORT", "5432")
 DB_USER = os.getenv("DB_USER", "musicai")
 DB_PASSWORD = os.getenv("DB_PASSWORD", "supervisor")
 DB_NAME = os.getenv("DB_NAME", "music_ai")
-HQPLAYER_HOST = os.getenv("HQPLAYER_HOST", "172.26.80.1")
+HQPLAYER_HOST = os.getenv("HQPLAYER_HOST", "127.0.0.1")
 HQPLAYER_PORT = int(os.getenv("HQPLAYER_PORT", "4321"))
 BACKEND_URL = os.getenv("BACKEND_URL", "https://localhost:8000")
 

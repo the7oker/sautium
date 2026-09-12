@@ -12,7 +12,7 @@ The basic HQPlayer Desktop 5 integration is implemented and tested.
 
 ### 2. Run the automated test from WSL
 ```bash
-cd /mnt/d/ai/djai/backend
+cd <repo>/backend
 python3 test_hqplayer_auto.py
 ```
 
@@ -21,7 +21,7 @@ Expected output:
 ✅ All tests completed successfully!
 
 📋 Summary:
-   • HQPlayer is accessible at 172.26.80.1:4321
+   • HQPlayer is accessible at <windows-host-ip>:4321
    • Version: 5 / Engine: 5.34.14
    • Control API working correctly
 ```
@@ -53,7 +53,7 @@ with HQPlayerConnection(host=settings.hqplayer_host) as hqp:
 
 ### .env file
 ```env
-HQPLAYER_HOST=172.26.80.1  # Windows host IP as seen from WSL
+HQPLAYER_HOST=<windows-host-ip>  # Windows host IP as seen from WSL
 HQPLAYER_PORT=4321
 HQPLAYER_ENABLED=true
 ```
@@ -103,11 +103,11 @@ docs/
 ```bash
 # Find the Windows host IP
 ip route show | grep default
-# Output: default via 172.26.80.1 ...
+# Output: default via <windows-host-ip> ...
 
 # Check the port is reachable
-nc -zv 172.26.80.1 4321
-# Output: Connection to 172.26.80.1 4321 port [tcp/*] succeeded!
+nc -zv <windows-host-ip> 4321
+# Output: Connection to <windows-host-ip> 4321 port [tcp/*] succeeded!
 ```
 
 ### From Docker (once the container is running)
@@ -125,7 +125,7 @@ docker exec sautium-backend nc -zv host.docker.internal 4321
 ### No connection from Docker
 1. Add `extra_hosts` to docker-compose.yml (already there)
 2. Use `host.docker.internal` for HQPLAYER_HOST
-3. Or pin the address: `172.26.80.1`
+3. Or pin the address: `<windows-host-ip>`
 
 ## Next steps
 

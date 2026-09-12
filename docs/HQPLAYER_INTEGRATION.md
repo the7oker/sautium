@@ -30,7 +30,7 @@ either desktop version.
 - **HQPlayer**: Desktop 5.16.3 (also runs against HQPlayer Desktop 6)
 - **Engine**: 5.34.14
 - **Platform**: Windows
-- **Connection**: WSL2 → Windows (172.26.80.1:4321)
+- **Connection**: WSL2 → Windows (<windows-host-ip>:4321)
 
 ### HQP6-only additions
 HQPlayer 6 exposes two extra fields that Sautium now uses when present. Both degrade
@@ -120,7 +120,7 @@ unchanged without them.
 from hqplayer_client import HQPlayerConnection
 
 # Context manager (recommended)
-with HQPlayerConnection(host="172.26.80.1") as hqp:
+with HQPlayerConnection(host="<windows-host-ip>") as hqp:
     # Get info
     info = hqp.get_info()
     print(f"Connected to {info['product']} {info['version']}")
@@ -136,7 +136,7 @@ with HQPlayerConnection(host="172.26.80.1") as hqp:
 ```python
 from hqplayer_client import HQPlayerClient
 
-hqp = HQPlayerClient(host="172.26.80.1", port=4321)
+hqp = HQPlayerClient(host="<windows-host-ip>", port=4321)
 if hqp.connect():
     status = hqp.get_status()
     hqp.disconnect()
@@ -150,7 +150,7 @@ from hqplayer_client import HQPlayerConnection, file_path_to_uri
 track_path = "E:\\Music\\Artist\\Album\\Track.flac"
 uri = file_path_to_uri(track_path)
 
-with HQPlayerConnection(host="172.26.80.1") as hqp:
+with HQPlayerConnection(host="<windows-host-ip>") as hqp:
     # Clear playlist and add track
     hqp.playlist_add(uri, clear=True)
 
@@ -175,7 +175,7 @@ with get_db_context() as db:
     track = db.query(Track).filter(Track.id == track_id).first()
 
     # Play in HQPlayer
-    with HQPlayerConnection(host="172.26.80.1") as hqp:
+    with HQPlayerConnection(host="<windows-host-ip>") as hqp:
         uri = file_path_to_uri(track.file_path)
         hqp.playlist_add(uri, clear=True)
         hqp.play()
@@ -186,7 +186,7 @@ with get_db_context() as db:
 ### From WSL2
 ```python
 # Use Windows host IP (usually 172.x.x.1)
-HOST = "172.26.80.1"  # Check with: ip route show | grep default
+HOST = "<windows-host-ip>"  # Check with: ip route show | grep default
 ```
 
 ### From Docker Container
@@ -195,7 +195,7 @@ HOST = "172.26.80.1"  # Check with: ip route show | grep default
 HOST = "host.docker.internal"
 
 # Option 2: Use Windows host IP
-HOST = "172.26.80.1"
+HOST = "<windows-host-ip>"
 ```
 
 **Note**: For Docker, you may need to add to docker-compose.yml:
@@ -209,13 +209,13 @@ backend:
 Ensure port 4321 is accessible:
 1. Open Windows Firewall settings
 2. Allow inbound connections on TCP port 4321
-3. Verify with: `nc -zv 172.26.80.1 4321` from WSL
+3. Verify with: `nc -zv <windows-host-ip> 4321` from WSL
 
 ## Testing
 
 ### Run Automatic Test
 ```bash
-cd /mnt/d/ai/djai/backend
+cd <repo>/backend
 python3 test_hqplayer_auto.py
 ```
 
@@ -224,7 +224,7 @@ Expected output:
 ✅ All tests completed successfully!
 
 📋 Summary:
-   • HQPlayer is accessible at 172.26.80.1:4321
+   • HQPlayer is accessible at <windows-host-ip>:4321
    • Version: 5 / Engine: 5.34.14
    • Control API working correctly
 ```
@@ -279,14 +279,14 @@ Allows testing:
 
 ### Connection Refused
 ```
-Failed to connect to HQPlayer at 172.26.80.1:4321
+Failed to connect to HQPlayer at <windows-host-ip>:4321
 ```
 
 **Solutions**:
 1. Ensure HQPlayer Desktop is running on Windows
 2. Check Windows firewall allows port 4321
 3. Verify host IP: `ip route show | grep default`
-4. Test connection: `nc -zv 172.26.80.1 4321`
+4. Test connection: `nc -zv <windows-host-ip> 4321`
 
 ### Commands Not Working
 ```

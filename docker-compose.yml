@@ -148,7 +148,7 @@ services:
       # phone over LAN does not work; HTTPS does.
       # SAUTIUM_HOST_IPS lists extra private IPs to add to the cert SAN
       # (the host's LAN address — Docker can't auto-detect this from inside
-      # the container). Set in .env, e.g.: SAUTIUM_HOST_IPS=192.168.1.188
+      # the container). Set in .env, e.g.: SAUTIUM_HOST_IPS=192.168.1.10
       SAUTIUM_HOST_IPS: ${SAUTIUM_HOST_IPS:-}
       # Intra-container backend self-calls (Claude Code tools, MCP server).
       BACKEND_URL: https://localhost:8000

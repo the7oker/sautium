@@ -694,7 +694,7 @@ const friendsScreen = () => `
     <div class="lbl">Friends</div>
     <div class="inp">Search friends</div>
     <div class="grp">
-      <div class="fr"><div class="av">M</div><div><div class="nm">Marat<i>★</i></div><div class="ls">last seen 8/27/2026</div></div><span class="ic">${I.more}</span><span class="ic bub">${bubbleIcon}</span></div>
+      <div class="fr"><div class="av">M</div><div><div class="nm">Roman<i>★</i></div><div class="ls">last seen 8/27/2026</div></div><span class="ic">${I.more}</span><span class="ic bub">${bubbleIcon}</span></div>
       <div class="fr" style="border-bottom: 0;"><div class="av" style="background: #4A2A2A;">W</div><div><div class="nm">win</div><div class="ls">last seen 6h ago</div></div><span class="ic">${I.more}</span><span class="ic bub">${bubbleIcon}</span></div>
     </div>
   </div>`;
