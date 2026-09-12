@@ -452,6 +452,43 @@ The short version of the hard-learned lessons:
   with the CLI's client id ourselves is neither. The CLI-driven login is the
   supported surface and needs none of it.
 
+### The updater mirrors origin/main (2026-09-12)
+
+- **A node's checkout is a mirror, not a branch.** It never authors a
+  commit, so "update" means "make my tree equal to origin/main": `git fetch`
+  + `git reset --hard origin/main` (`desktop/updater.py`). The former
+  `git pull` merged the remote into a local branch and died on the first
+  rewritten history — `fatal: Need to specify how to reconcile divergent
+  branches` (git ≥ 2.33 with no `pull.rebase`) — leaving the node with
+  "Update failed" forever and a person running the reset by hand. Reproduced
+  in a sandbox for both shapes of rewrite: `filter-repo` (early commits keep
+  their SHA) and a single orphan "initial" commit. Purging files from history
+  is now an ordinary update.
+- **Only a tip origin handed us may be moved anywhere.** `refs/sautium/mirrored`
+  records the tip the checkout last received (minted whenever HEAD is level
+  with `origin/main` before a fetch — clones and hand pulls qualify — and
+  after every reset). A fast-forward loses nothing and is always taken; any
+  other move is taken only when HEAD equals that marker. The developer's tree
+  runs the same launcher as a test stand, and its unpushed commits would
+  otherwise be one click from a `reset --hard`. A tracked file edited by hand
+  refuses the update before the fetch, as `git pull` did.
+- **The purge reaches the node's disk last.** A move that was not a
+  fast-forward ends with `reflog expire --expire=now --all` + `gc
+  --prune=now`: without it the reflog keeps the old commits — and the blobs
+  upstream just purged — for 90 days. It runs AFTER the tree diffs against
+  the old commit (requirements, migrations, launcher code), which read that
+  commit; the first draft compacted inside the reset and those diffs
+  silently answered "nothing changed".
+- **Order of a rewrite.** The mirror updater must be ON the nodes before the
+  force-push — the old `git pull` is what runs otherwise. Ship it, confirm on
+  the support desk that every live node's `node.started` report carries the
+  commit, then rewrite. A node that skipped that window needs the manual
+  reset. Moving the repository to another account is a second break on top:
+  the remote URL sits in every clone's `.git/config`, in
+  `desktop/macos/bootstrap.py` and in the installer — that needs a bridge
+  commit on the old remote that repoints `origin`, and the old repository
+  left alive as a frozen redirect.
+
 ---
 
 ## Known Gotchas
