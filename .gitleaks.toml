@@ -13,14 +13,17 @@ paths = [
 
 [[allowlists]]
 description = "shipped master pins are public by design"
+regexTarget = "line"
 regexes = ['''MASTER_TOKEN_ID = "[0-9a-f-]{36}"''']
 
 [[allowlists]]
 description = "Last.fm desktop-app credentials ship in source by design (backend/app_keys.py)"
 condition = "AND"
+regexTarget = "line"
 paths = ['''^backend/app_keys\.py$''']
 regexes = ['''LASTFM_API_(KEY|SECRET) = "[0-9a-f]{32}"''']
 
 [[allowlists]]
 description = "type annotations, not keys"
+regexTarget = "line"
 regexes = ['''key: Ed25519PrivateKey''']
