@@ -89,22 +89,57 @@ _CAA_CACHE_ENTRIES = 256        # ≈ 15 MB of JPEG at CAA's front-500 size
 _caa_cache: "OrderedDict[str, tuple[int, str, bytes]]" = OrderedDict()
 _caa_inflight: Dict[str, asyncio.Future] = {}
 
+# Circuit breaker for the upstream. The images live on archive.org, which
+# goes offline for hours at a time (2026-09-12: 503 "Temporarily Offline",
+# 30 s connect stalls). Without a breaker every phantom cover on a cold
+# node cost a 10 s upstream timeout, held one of the browser's ~6
+# connections to the origin meanwhile (artist photos share that pool), and
+# was retried a minute later. Tripped by _CAA_TRIP_FAILURES failures in a
+# row — archive.org throws sporadic 503s while healthy, one proves nothing
+# — the breaker lets ONE request through at a time as the probe and answers
+# every other miss at once with the deferred 404; the first definite answer
+# closes it. No timer and no api_cooldown row: a probe is the recovery
+# signal here, whereas a rate-limit ban is what api_cooldown waits out.
+_CAA_TRIP_FAILURES = 3
+_caa_failures = 0               # consecutive upstream failures; a definite answer resets
+_caa_open = False
+
 
 async def _caa_fetch(rg: str) -> tuple[int, str, bytes]:
     """(status, mime, body): 200 with the image, 404 for a release group
-    without art, 502 for anything else (unreachable, a 5xx) — never raises."""
+    without art, 502 for anything else (unreachable, a 5xx) — never raises.
+    While the breaker is open every probe fails the same way: the state
+    change is the warning, the probes are debug noise."""
     try:
         async with httpx.AsyncClient(timeout=10.0, follow_redirects=True) as client:
             resp = await client.get(_CAA_FRONT.format(rg=rg))
     except httpx.HTTPError as e:
-        logger.warning("CAA fetch failed for %s: %s", rg, e)
+        logger.log(logging.DEBUG if _caa_open else logging.WARNING,
+                   "CAA fetch failed for %s: %s %s", rg, type(e).__name__, e)
         return 502, "", b""
     if resp.status_code == 200 and resp.content:
         return 200, resp.headers.get("content-type", "image/jpeg"), resp.content
     if resp.status_code == 404:
         return 404, "", b""
-    logger.warning("CAA answered %s for %s", resp.status_code, rg)
+    logger.log(logging.DEBUG if _caa_open else logging.WARNING,
+               "CAA answered %s for %s", resp.status_code, rg)
     return 502, "", b""
+
+
+def _caa_settle(status: int) -> None:
+    """Feed one upstream outcome to the breaker."""
+    global _caa_failures, _caa_open
+    if status in (200, 404):
+        if _caa_open:
+            logger.info("CAA reachable again after %d failed fetches", _caa_failures)
+        _caa_failures = 0
+        _caa_open = False
+        return
+    _caa_failures += 1
+    if not _caa_open and _caa_failures >= _CAA_TRIP_FAILURES:
+        _caa_open = True
+        logger.warning("CAA unreachable (%d fetches failed in a row) — "
+                       "probing one request at a time", _caa_failures)
 
 
 async def _caa_lookup(rg: str) -> tuple[int, str, bytes]:
@@ -117,12 +152,15 @@ async def _caa_lookup(rg: str) -> tuple[int, str, bytes]:
     fut = _caa_inflight.get(rg)
     if fut is not None:
         return await fut
+    if _caa_open and _caa_inflight:
+        return 503, "", b""     # the probe is already in flight
     fut = asyncio.get_running_loop().create_future()
     _caa_inflight[rg] = fut
     try:
         result = await _caa_fetch(rg)
     finally:
         del _caa_inflight[rg]
+    _caa_settle(result[0])
     if result[0] in (200, 404):
         _caa_cache[rg] = result
         while len(_caa_cache) > _CAA_CACHE_ENTRIES:
