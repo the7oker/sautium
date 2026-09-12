@@ -38,10 +38,13 @@ wheels/
 .vscode/
 
 # Data directories (keep structure, exclude content)
-data/postgres/*
-!data/postgres/.gitkeep
+# Docker volume, root-owned on the host — compose creates it; no keep-file
+data/postgres/
 data/cache/*
 !data/cache/.gitkeep
+# Runtime caches and generated presets
+data/registry/
+data/generated_eq/
 # TLS cert + key — generated per-host on first backend start
 data/tls/
 data/authority/
@@ -99,7 +102,9 @@ backend/mcp-wsl.json
 
 # PyInstaller
 *.spec
-/worker/.wrangler/cache/
+# Wrangler local state and secrets
+/worker/.wrangler/
+/worker/.dev.vars
 
 # Bring-your-own streaming provider plugins (closed-repo, §1201 — Deezer etc.).
 # Each is the user's OWN private repo cloned in here; never tracked by Sautium.
