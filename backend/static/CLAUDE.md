@@ -288,7 +288,11 @@ for it. It is `position: sticky`, never a scroll listener: the rail
 is an out-of-flow strip from the top of the screen down to the
 target's centre, and a sticky box cannot leave its containing block,
 so the puck physically cannot drift past the target. The one
-measurement is the rail's height, re-read by a `ResizeObserver`.
+measurement is the rail's height, re-read by a `ResizeObserver`. The
+scrollport is whatever scrolls the screen — the document on the phone,
+the section window's body on the tablet — so inside a window the puck
+rests above the window's own edge (`.route-window .guide-puck`) and the
+tap scrolls that body, not the document.
 The guided control needs an opaque background for the tuck to read
 (see `.btn-secondary.is-guided`).
 
