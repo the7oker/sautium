@@ -1,7 +1,12 @@
 """
 Git-based auto-updater for Sautium.
 
-The application is a git clone. Updates are done via git pull.
+The application is a git clone that MIRRORS origin/main. A node never
+authors commits, so an update makes the checkout equal to the remote tip
+(fetch + reset --hard) instead of merging the remote into a local branch:
+`git pull` dies the moment upstream history is rewritten ("Need to specify
+how to reconcile divergent branches") and would have stranded every node on
+the first force-push; a mirror does not care how the tip got where it is.
 After update: check requirements.txt changes, run pip install if needed,
 run pending DB migrations, restart backend+tracker.
 """
@@ -13,6 +18,14 @@ from pathlib import Path
 from typing import Optional, Callable, Tuple, List
 
 logger = logging.getLogger(__name__)
+
+REMOTE_BRANCH = "origin/main"
+
+# The tip this checkout last received from origin. A checkout whose HEAD is
+# that tip carries nothing of its own and may be moved wherever origin goes,
+# a rewritten history included; any other HEAD is somebody's work — the
+# developer's tree runs this launcher too — and is never overwritten.
+MIRRORED_REF = "refs/sautium/mirrored"
 
 
 def _git_cmd(args: list, cwd: Optional[str] = None, timeout: int = 30) -> subprocess.CompletedProcess:
@@ -28,6 +41,19 @@ def _git_cmd(args: list, cwd: Optional[str] = None, timeout: int = 30) -> subpro
     if sys.platform == "win32":
         kwargs["creationflags"] = subprocess.CREATE_NO_WINDOW
     return subprocess.run(cmd, **kwargs)
+
+
+def _rev(ref: str) -> Optional[str]:
+    result = _git_cmd(["rev-parse", "--verify", "--quiet", ref])
+    return result.stdout.strip() if result.returncode == 0 else None
+
+
+def _is_ancestor(commit: str, of: str) -> bool:
+    return _git_cmd(["merge-base", "--is-ancestor", commit, of]).returncode == 0
+
+
+def _record_mirrored(tip: str) -> None:
+    _git_cmd(["update-ref", MIRRORED_REF, tip])
 
 
 def get_project_root() -> Path:
@@ -71,7 +97,7 @@ def is_git_repo() -> bool:
     `--is-inside-work-tree` answers for the nearest repository ABOVE the
     directory too, and a packaged install lives under $HOME, which plenty of
     people keep in git for their dotfiles. Answering "yes" there would point
-    every later git call — `fetch`, and then `pull` — at that repository.
+    every later git call — `fetch`, and then `reset` — at that repository.
     """
     result = _git_cmd(["rev-parse", "--show-toplevel"])
     if result.returncode != 0:
@@ -89,17 +115,25 @@ def check_for_updates() -> Tuple[bool, int, str]:
     if not is_git_repo():
         return False, 0, ""
 
-    # Fetch latest from remote
-    result = _git_cmd(["fetch", "origin", "main"], timeout=30)
+    current_hash = _rev("HEAD") or ""
+
+    # Learned BEFORE the fetch moves origin/main: a HEAD level with the tip
+    # last fetched (or pushed) is a mirror; afterwards the two differ on
+    # every node that is merely behind. Checkouts made by clone and the
+    # former `git pull` get their marker this way.
+    if current_hash and current_hash == _rev(REMOTE_BRANCH):
+        _record_mirrored(current_hash)
+
+    # The first fetch after a history rewrite transfers the whole repository
+    # again, not a delta.
+    result = _git_cmd(["fetch", "origin", "main"], timeout=120)
     if result.returncode != 0:
         logger.warning(f"git fetch failed: {result.stderr}")
         return False, 0, ""
 
-    # Get current HEAD
-    current = _git_cmd(["rev-parse", "HEAD"])
-    current_hash = current.stdout.strip() if current.returncode == 0 else ""
-
-    # Count commits ahead of us
+    # Commits origin has that we don't: zero for a checkout level with or
+    # ahead of origin (the developer's unpushed work), the whole new history
+    # for one whose upstream was rewritten.
     result = _git_cmd(["rev-list", "HEAD..origin/main", "--count"])
     if result.returncode != 0:
         return False, 0, current_hash
@@ -109,7 +143,13 @@ def check_for_updates() -> Tuple[bool, int, str]:
 
 
 def get_update_changelog(old_hash: str) -> List[str]:
-    """Get commit messages between old hash and current HEAD."""
+    """Commit messages between old hash and current HEAD. A rewritten history
+    has no such range — every commit is new to this checkout — so a note and
+    the newest commits stand in for it."""
+    if not _is_ancestor(old_hash, "HEAD"):
+        result = _git_cmd(["log", "--oneline", "-n", "15"])
+        latest = [line.strip() for line in result.stdout.strip().split("\n") if line.strip()]
+        return ["Upstream history was rewritten; the checkout now mirrors it. Latest commits:"] + latest
     result = _git_cmd(["log", "--oneline", f"{old_hash}..HEAD"])
     if result.returncode != 0:
         return []
@@ -151,25 +191,50 @@ def has_launcher_changes(old_hash: str) -> bool:
     return any(f.startswith("desktop/") for f in changed)
 
 
-def pull_updates() -> Tuple[bool, str]:
+def reset_to_origin() -> Tuple[str, Optional[str]]:
     """
-    Pull updates from origin/main.
+    Make the checkout equal to origin/main.
 
     Returns:
-        (success, old_hash before pull)
+        (old_hash before the move, error or None)
     """
-    # Save current hash
-    current = _git_cmd(["rev-parse", "HEAD"])
-    old_hash = current.stdout.strip() if current.returncode == 0 else ""
+    old_hash = _rev("HEAD") or ""
 
-    # Pull
-    result = _git_cmd(["pull", "origin", "main"], timeout=120)
+    status = _git_cmd(["status", "--porcelain", "--untracked-files=no"])
+    if status.returncode != 0 or status.stdout.strip():
+        return old_hash, "the checkout has local modifications"
+
+    result = _git_cmd(["fetch", "origin", "main"], timeout=120)
     if result.returncode != 0:
-        logger.error(f"git pull failed: {result.stderr}")
-        return False, old_hash
+        return old_hash, f"git fetch failed: {result.stderr.strip()}"
 
-    logger.info(f"git pull successful: {result.stdout.strip()}")
-    return True, old_hash
+    # A fast-forward loses nothing and is always taken; any other move is
+    # taken only from a tip origin itself handed us (MIRRORED_REF).
+    fast_forward = _is_ancestor("HEAD", REMOTE_BRANCH)
+    if not fast_forward and old_hash != _rev(MIRRORED_REF):
+        return old_hash, "the checkout carries commits of its own and upstream history has moved"
+
+    result = _git_cmd(["reset", "--hard", REMOTE_BRANCH], timeout=120)
+    if result.returncode != 0:
+        return old_hash, f"git reset failed: {result.stderr.strip()}"
+    new_hash = _rev("HEAD")
+    _record_mirrored(new_hash)
+    logger.info(f"checkout moved {old_hash[:12]} -> {new_hash[:12]}")
+    return old_hash, None
+
+
+def forget_old_history(progress_cb: Optional[Callable] = None) -> None:
+    """After a move that was not a fast-forward the old commits are
+    unreachable, but the reflog keeps them — and their blobs — for 90 days.
+    Upstream rewrote its history to purge something, and the purge has to
+    reach every node's disk. Runs LAST in an update: the tree diffs against
+    the old commit (requirements, migrations, launcher code) read it first."""
+    if progress_cb:
+        progress_cb("Compacting repository...")
+    _git_cmd(["reflog", "expire", "--expire=now", "--all"], timeout=120)
+    gc = _git_cmd(["gc", "--prune=now", "--quiet"], timeout=600)
+    if gc.returncode != 0:
+        logger.warning(f"git gc after a history rewrite failed: {gc.stderr.strip()}")
 
 
 def install_requirements(progress_cb: Optional[Callable] = None) -> bool:
@@ -207,11 +272,11 @@ def perform_update(
     config: dict,
     progress_cb: Optional[Callable] = None,
     p2p_manager=None,
-) -> Tuple[bool, List[str]]:
+) -> Tuple[bool, List[str], bool]:
     """
     Full update sequence:
     1. Stop backend + tracker + P2P (keep PostgreSQL)
-    2. git pull
+    2. Make the checkout equal to origin/main (fetch + reset --hard)
     3. pip install if requirements changed
     4. Run migrations if new ones exist
     5. Restart backend + tracker — UNLESS the launcher itself has to come
@@ -234,14 +299,14 @@ def perform_update(
     service_manager.stop_tracker()
     service_manager.stop_backend()
 
-    # Pull
     if progress_cb:
         progress_cb("Downloading updates...")
 
-    success, old_hash = pull_updates()
-    if not success:
-        _update_failed(config, "pull", "git pull failed")
-        # Restart services even if pull failed
+    old_hash, error = reset_to_origin()
+    if error:
+        logger.error(f"update failed: {error}")
+        _update_failed(config, "checkout", error)
+        # Restart services even if the checkout could not be moved
         service_manager.start_backend(progress_cb)
         service_manager.start_tracker(progress_cb)
         return False, [], False
@@ -267,7 +332,12 @@ def perform_update(
             logger.error(f"Migration after update failed: {e}")
             _update_failed(config, "migration", str(e))
 
-    if has_launcher_changes(old_hash):
+    relaunch = has_launcher_changes(old_hash)
+
+    if not _is_ancestor(old_hash, "HEAD"):
+        forget_old_history(progress_cb)
+
+    if relaunch:
         # The launcher is about to be replaced by a successor process that
         # starts the services itself — bringing them up here would only be
         # to stop them again a second later.
