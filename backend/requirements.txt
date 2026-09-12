@@ -88,7 +88,6 @@ python-json-logger>=2.0.7
 # Development
 pytest>=7.4.4
 pytest-asyncio>=0.23.3
-Unidecode>=1.3.8
 
 # Streaming preview — phantom-album resolution (non-DRM; ffmpeg already in image).
 # [default] pulls yt-dlp-ejs, the YouTube player-challenge solver. Pinned to no
