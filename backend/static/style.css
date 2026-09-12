@@ -6324,11 +6324,14 @@ select.add-gear-input {
 
 /* More-section windows exist only on the tablet, but a browser window can
    shrink beneath 768px with one open: then it is simply the section,
-   full-screen, the way the phone shows it. */
+   full-screen, the way the phone shows it. The window is a screen-level
+   layer: above the chrome (rail 50, mini-player 49, More card 45), below
+   every task overlay a section opens (add-gear sheets 60, the cards
+   100+, dialogs in the top layer). */
 .route-window {
   position: fixed;
   inset: 0;
-  z-index: 90;
+  z-index: 55;
   background: var(--color-foundation);
   overflow-y: auto;
 }
@@ -6448,7 +6451,7 @@ select.add-gear-input {
   .route-window {
     position: fixed;
     inset: 0;
-    z-index: 90;
+    z-index: 55;
     background: rgba(14, 10, 8, 0.65);
     display: flex;
     align-items: center;
