@@ -126,6 +126,12 @@ Rules:
   mini-player and each sheet exist once; a mode repositions them.
 - **Document scroll stays.** The frame is fixed chrome plus variables,
   not a grid with an inner scroller.
+- **Tablet layers, bottom up:** mini-player 49, rail 50, More card 52,
+  section window 55, then the task overlays a section opens — add-gear
+  sheets 60, the three cards 100/110, the HQPlayer filter picker 200,
+  `<dialog>` in the top layer. Anything opened from inside a window
+  sits at 60 or above; the ladder lives next to `.route-window` in
+  `style.css`.
 - The compact rendering must not change when a wider mode is added:
   `scripts/ui-shots.mjs --compare` against the 360 baseline is the
   proof.
