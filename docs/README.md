@@ -19,13 +19,11 @@
   - Algorithms for choosing settings automatically
   - ~18 KB of structured information
 
-### 📖 Original manual
+### 📖 Official manuals
 
-- **[hqplayer5desktop-manual.pdf](hqplayer5desktop-manual.pdf)** — the official
-  HQPlayer 5 Desktop v5.16.0 manual
-  - 63 pages of complete documentation
-  - Detailed descriptions of every function
-  - Technical specifications
+- **[HQPLAYER_MANUALS.md](HQPLAYER_MANUALS.md)** — where to get the HQPlayer 5
+  and 6 Desktop user manuals (Signalyst's documents, not redistributed here)
+  and the version notes that matter to Sautium
 
 ### 🚀 Quick-start guides
 
@@ -56,7 +54,7 @@ The agent has access to:
    - Which filter serves which purpose
    - How to choose settings
 
-3. **The original documentation** (PDF manual)
+3. **The official manual** (see HQPLAYER_MANUALS.md)
    - Detailed technical descriptions
    - Algorithm specifications
 
@@ -65,7 +63,7 @@ The agent has access to:
 1. **First**: HQPLAYER_QUICKSTART.md (quick orientation)
 2. **Then**: HQPLAYER_KNOWLEDGE_BASE.md (detailed knowledge)
 3. **If needed**: HQPLAYER_INTEGRATION.md (technical implementation)
-4. **For reference**: hqplayer5desktop-manual.pdf (the full documentation)
+4. **For reference**: the official manual (see HQPLAYER_MANUALS.md)
 
 ## Key concepts
 
@@ -154,7 +152,7 @@ def play_track_optimized(track_id: int):
 ## Keeping the documentation current
 
 When a new HQPlayer version appears:
-1. Update hqplayer5desktop-manual.pdf
+1. Note the new manual version in HQPLAYER_MANUALS.md
 2. Review HQPLAYER_KNOWLEDGE_BASE.md
 3. Add new functions to HQPLAYER_INTEGRATION.md
 4. Refresh the code examples
