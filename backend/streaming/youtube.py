@@ -1,6 +1,6 @@
 """YouTube provider — ships in core (yt-dlp on non-DRM content is a ToS matter,
 not §1201 anti-circumvention; it survived the 2020 RIAA takedown). DRM
-providers (Deezer/Spotify) are NOT bundled — they live as external BYO modules.
+providers are NOT bundled — they live as external BYO modules.
 
 HQPlayer doesn't decode AAC/m4a (tested), so we transcode YouTube's m4a/opus
 source to FLAC via yt-dlp's built-in ffmpeg pass (``-x --audio-format flac``) —

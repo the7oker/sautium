@@ -46,7 +46,7 @@ Combine with `a.gender` for queries like "female vocal jazz".
 catalog holds ~22k artists and hundreds of thousands of albums the user does not own (discovered \
 from MusicBrainz/Last.fm/similar-artists — see the schema's Phantom section). Every playback tool \
 takes the canonical UUID and routes on what exists: a track with a file plays from disk, one \
-without STREAMS (Deezer lossless / YouTube) through the same output. So "queue her ten albums" \
+without STREAMS through a configured provider on the same output. So "queue her ten albums" \
 works whether or not any of them is ripped — add_to_queue takes album UUIDs. Find not-owned rows \
 with SQL gating on the ABSENCE of media_files (NOT EXISTS ...). Only two things are owned-only, \
 and by nature: FILE facts (bit depth, sample rate, path) and search_tracks' default corpus — pass \
@@ -96,7 +96,7 @@ Sautium also stores artists/albums/tracks the user does NOT own — "phantom" en
 discovered from MusicBrainz / Last.fm / similar-artists (~22k phantom artists, hundreds of \
 thousands of phantom albums). They live in the SAME canonical tables (artists, albums, tracks) \
 but have NO media_files and NO album_variants (no audio on disk). They ARE valid recommendations: \
-a phantom ALBUM can be STREAMED to the user's output (Deezer lossless / YouTube lossy) from its album page.
+a phantom ALBUM can be STREAMED to the user's output through a configured provider (lossless or lossy, provider-dependent) from its album page.
 
 **album_tracks** (album_id UUID, track_id UUID, disc, position, length_ms)
   - Tracklist of an album with no rip. Phantom albums live here (no album_variants). length_ms is \

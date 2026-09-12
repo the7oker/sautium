@@ -1,5 +1,8 @@
 """Deezer artist photo lookup — the sole artist-image source.
 
+Official public metadata API only (no auth, no audio): this module reads
+artist images and has nothing to do with audio fetching or streaming.
+
 Last.fm dropped artist images from its REST API in 2019, leaving only
 fragile HTML scraping that rate-limits (and ultimately bans) the whole
 IP — so that fallback was retired and we rely on Deezer alone. A

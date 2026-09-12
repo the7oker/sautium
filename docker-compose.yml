@@ -118,7 +118,7 @@ services:
       P2P_PASSWORD: ${P2P_PASSWORD:-}
       P2P_EMAIL: ${P2P_EMAIL:-}
 
-      # Phantom streaming preview (Deezer/YouTube → in-memory proxy → player).
+      # Phantom streaming preview (provider → in-memory proxy → player).
       # Parity with docker-compose.wsl.yml — this block was missing here, so a
       # container recreated from this file silently lost streaming (2026-07-10).
       STREAMING_PREVIEW_ENABLED: ${STREAMING_PREVIEW_ENABLED:-true}

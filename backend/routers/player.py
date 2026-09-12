@@ -1686,7 +1686,7 @@ def _parallel_resolve(provider, queries: list, wanted: list) -> list:
 
     The rest of `queries` is the albums the wanted tracks sit on. A provider
     that declares `resolve_batch` reads all of it: a tracklist corroborates
-    what a single track cannot — Deezer lines the album up against the
+    what a single track cannot — the lossless provider lines the album up against the
     catalog's, YouTube gates an unnamed channel on the album vouching for it.
     Acceptance stays here either way — a batch result is held to the same
     length test `resolve()` applies."""
@@ -1725,7 +1725,7 @@ def _parallel_resolve(provider, queries: list, wanted: list) -> list:
 def _album_context(queries: list, pending: list) -> list:
     """The rest of every album a pending query sits on — its tracklist rows
     that are not among `queries` — appended to a resolve pass as EVIDENCE for
-    the providers' batch tier, never as work: a Deezer album lookup lines a
+    the providers' batch tier, never as work: a provider's album lookup lines a
     whole tracklist up against the catalog's, and a YouTube archive channel
     is vouched for by the album's other tracks. Nothing here is returned or
     cached; a context row resolves on its own request, with its own album."""
@@ -1743,7 +1743,7 @@ def _album_context(queries: list, pending: list) -> list:
 # that second one sitting squarely in front of the first sound. Source ids are
 # stable catalogue facts, so one resolve serves both readers; a stale id simply
 # fails its download and cascades down the chain. Keyed on the provider order
-# too: a Deezer cooldown demotes/drops it (providers_preferred), and those
+# too: a provider cooldown demotes/drops it (providers_preferred), and those
 # thinner chains must not outlive the cooldown.
 _chain_cache: dict[tuple, tuple] = {}
 _CHAIN_TTL_S = 3600.0
@@ -1751,9 +1751,9 @@ _CHAIN_TTL_S = 3600.0
 
 def _resolve_waterfall(queries: list) -> list:
     """Per-track lossless-first fallback CHAIN ``[(provider, source_id), ...]``.
-    Each track resolves to its best provider (Deezer FLAC before YouTube lossy);
+    Each track resolves to its best provider (lossless before YouTube lossy);
     the chain then appends LOWER-preference providers (source_id=None, resolved
-    lazily inside fetch) as DOWNLOAD-failure fallbacks — so a track Deezer has but
+    lazily inside fetch) as DOWNLOAD-failure fallbacks — so a track the lossless provider has but
     can't serve in FLAC (region/licensing) still streams from YouTube instead of
     just dropping. An empty chain == no provider resolved it (truly unavailable).
     Cached per track (see _chain_cache) — including the empty chain, or every
@@ -1949,9 +1949,9 @@ def _album_performers(album_ids: list) -> dict:
 def _album_barcodes(album_ids: list) -> dict:
     """MB barcodes per album id — those of the release group's editions that
     carry exactly this many tracks, i.e. the tracklist the phantom shows. A
-    catalog that answers to a barcode (Deezer's /album/upc:) then names the
+    catalog that answers to a barcode then names the
     edition outright, with no search to second-guess. Digital editions first:
-    that is the one a streaming catalog stocks (Deezer's Protection is MB's
+    that is the one a streaming catalog stocks (a catalog's Protection is MB's
     Digital Media release, barcode for barcode). Empty without the local MB
     dump (optional layer), or for an album MB never barcoded."""
     import mb_backend as mb
@@ -2185,8 +2185,8 @@ def play_phantom_album(req: PlayPhantomAlbumRequest):
     proxy = streaming_service.get_proxy()
 
     # Per-track resolve waterfall → a lossless-first fallback CHAIN per track
-    # (Deezer FLAC, then YouTube). The UI greys out only tracks NO provider can
-    # stream; the chain also covers download-time failures (Deezer resolves but
+    # (lossless, then YouTube). The UI greys out only tracks NO provider can
+    # stream; the chain also covers download-time failures (a provider resolves but
     # serves no FLAC) by falling through to YouTube during fetch.
     chains = _resolve_waterfall(queries)
     items = [(q, ch) for q, ch in zip(queries, chains) if ch]
@@ -2299,7 +2299,7 @@ def play_phantom_track(req: PlayPhantomTrackRequest):
     if q is None:
         raise HTTPException(status_code=404, detail="Phantom track not found")
     missing = [{"track_id": req.track_id, "title": q.title}]
-    chain = _resolve_waterfall([q])[0]        # Deezer lossless first, YouTube fallback
+    chain = _resolve_waterfall([q])[0]        # lossless first, YouTube fallback
     if not chain:
         return {"ok": True, "provider": None,
                 "track_count": 0, "requested": 1, "missing": missing}
@@ -2351,7 +2351,7 @@ def queue_phantom_track(req: PlayPhantomTrackRequest):
     q = _phantom_track_query(req.track_id, req.album_id)
     if q is None:
         raise HTTPException(status_code=404, detail="Phantom track not found")
-    chain = _resolve_waterfall([q])[0]        # Deezer lossless first, YouTube fallback
+    chain = _resolve_waterfall([q])[0]        # lossless first, YouTube fallback
     if not chain:
         return {"ok": True, "provider": None, "track_count": 0, "requested": 1,
                 "missing": [{"track_id": req.track_id, "title": q.title}]}
@@ -2382,7 +2382,7 @@ def queue_phantom_album(req: PlayPhantomAlbumRequest):
 
     proxy = streaming_service.get_proxy()
 
-    chains = _resolve_waterfall(queries)      # Deezer lossless first, YouTube fallback
+    chains = _resolve_waterfall(queries)      # lossless first, YouTube fallback
     items = [(q, ch) for q, ch in zip(queries, chains) if ch]
     missing = [q for q, ch in zip(queries, chains) if not ch]
     missing_payload = [{"track_id": q.track_id, "title": q.title} for q in missing]

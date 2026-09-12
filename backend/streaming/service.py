@@ -49,8 +49,8 @@ def init(settings) -> bool:
                        "unavailable until it is and the backend restarted",
                        sys.executable)
 
-    # Bring-your-own providers (e.g. a lossless Deezer bridge) drop into the
-    # local providers directory — NOT bundled here (§1201). Core has no
+    # Bring-your-own providers (e.g. a lossless provider) drop into the
+    # local providers directory — NOT bundled here (DRM providers stay out of tree). Core has no
     # knowledge of them; a missing/broken plugin is skipped, never fatal.
     from pathlib import Path
     from .loader import load_external_providers
@@ -200,13 +200,13 @@ def get_proxy() -> Optional[MediaProxy]:
 
 
 def providers_preferred() -> list:
-    """All enabled providers, lossless-first (Deezer FLAC before YouTube lossy).
+    """All enabled providers, lossless-first (lossless before lossy).
     The per-track resolve waterfall tries each in order, so a track absent from
-    Deezer still streams from YouTube instead of showing up as unavailable.
+    the lossless provider still streams from YouTube instead of showing up as unavailable.
 
-    Deezer stream shares api.deezer.com with photo enrichment, so a 429 there
+    A lossless provider may share its API host with photo enrichment, so a 429 there
     (from a photo backfill or our own resolve) surfaces as an armed 'deezer'
-    cooldown. We react by ROUTING, never blocking: while Deezer is cooling,
+    cooldown. We react by ROUTING, never blocking: while that provider is cooling,
     demote it below the lossy fallback so playback starts immediately on
     YouTube; if it's chronically banned (>=3 strikes), drop it this round
     entirely. Consumer-side policy over api_cooldown — enrichment pauses on
@@ -216,7 +216,7 @@ def providers_preferred() -> list:
     provs = sorted(_registry.enabled(),
                    key=lambda p: (not p.manifest.lossless, p.manifest.id))
     # cooling_down() is the cheap cache gate; only read the richer status()
-    # (a DB hit) on the rare occasions Deezer is actually cooling.
+    # (a DB hit) on the rare occasions the provider is actually cooling.
     if api_cooldown.cooling_down('deezer'):
         st = api_cooldown.status('deezer')
         deezer = [p for p in provs if p.manifest.id == 'deezer']
@@ -227,7 +227,7 @@ def providers_preferred() -> list:
 
 def get_provider(provider_id: Optional[str] = None) -> Optional[StreamProvider]:
     """A specific provider by id, or — with no id — the preferred one: a lossless
-    source (e.g. Deezer FLAC) ranks above a lossy one (YouTube)."""
+    source ranks above a lossy one (YouTube)."""
     if _registry is None:
         return None
     if provider_id:

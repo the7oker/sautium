@@ -579,7 +579,7 @@ def _provenance_item(r: dict) -> Optional[dict]:
     a local rip and a lossless stream indistinguishable on the wire, which
     is the same possession-privacy line the three-tier signing policy draws.
     None of the three is part of the signed payload, so seals are unaffected.
-    `is_lossless` stays: Deezer FLAC is lossless too, so it grades analysis
+    `is_lossless` stays: a lossless stream fetch is lossless too, so it grades analysis
     quality without implying a file."""
     if r.get("p_pcm_hash") is None:
         return None

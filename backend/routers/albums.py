@@ -77,7 +77,7 @@ def _phantom_album(album_id: str) -> dict:
     album["cover_id"] = None
     album["media_file_id"] = None
     album["quality"] = None
-    # Streaming quality is PER-TRACK (lossless where Deezer has it, lossy via the
+    # Streaming quality is PER-TRACK (lossless where a provider has it, lossy via the
     # YouTube fallback), so it can't be known without resolving the tracklist.
     # Left null; the album page fills the badge from /phantom-availability once it
     # knows the real mix — avoids briefly claiming "Lossless" for a mostly-lossy album.

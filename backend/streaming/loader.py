@@ -1,7 +1,7 @@
 """Discovery of bring-your-own StreamProvider plugins.
 
 Sautium core ships ONE provider (YouTube — non-DRM). Additional providers, e.g.
-a lossless Deezer bridge, are NOT bundled (§1201 — see project_spotify_preview):
+a lossless provider, are NOT bundled (DRM providers stay out of tree):
 they live in the user's own closed repos, cloned into the local providers
 directory (gitignored, empty in the public tree). This loader imports each plugin
 package there and registers the StreamProvider its top-level ``provider()``
@@ -14,9 +14,9 @@ credentials, an uninstalled backend tool) is logged and skipped, never fatal.
 A plugin is a Python *package*: a sub-directory ``<name>/`` with an
 ``__init__.py`` exposing ``def provider() -> StreamProvider``. It imports the
 host contract from ``streaming.base`` (same class objects → ``isinstance`` holds)
-and reads its own config (e.g. a Deezer ARL) from the environment itself. Each is
+and reads its own config (e.g. its account credential) from the environment itself. Each is
 imported under a private ``sautium_ext_<name>`` module name so a plugin directory
-can share a name with a pip package (e.g. ``deezer``) without shadowing it.
+can share a name with a pip package without shadowing it.
 """
 from __future__ import annotations
 

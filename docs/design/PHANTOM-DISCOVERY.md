@@ -4,7 +4,7 @@
 > record, not an open proposal.** Live: Phases 0–3 (phantom artists, albums,
 > tracks), the MB-anchored canonicalization foundation, missing-albums,
 > phantom tracklists (`album_tracks`), CAA covers, phantom similar-artist
-> discovery, the Deezer/YouTube→HQPlayer streaming preview (D4 / Phase 6,
+> discovery, the provider→HQPlayer streaming preview (D4 / Phase 6,
 > shipped 2026-06-28), and source-agnostic listening tracking of streamed
 > phantom plays (history/stats/scrobble + Home-shelf sessions, 2026-06-30).
 > **Remaining:** Phase 4 (P2P propagation of phantom rows — partial), Phase 5
@@ -141,85 +141,26 @@ millions of phantom rows and an enormous external-API bill.
 | Listening counts        | Last.fm            | `track_stats` already models this. |
 
 Last.fm tags/tracklists are noisy and duplicated — **do not** use
-Last.fm for tracklists. Spotify is intentionally **not** a
-data-storage source (OAuth + ToS restricts retaining their
-metadata); Spotify appears only in the *preview* path (D4), not the
-*metadata* path.
+Last.fm for tracklists. Streaming services are intentionally **not**
+data-storage sources (their ToS restrict retaining metadata); they
+appear only in the *preview* path (D4), never the *metadata* path.
 
 Reuse the **global throttle + cooldown** already protecting Deezer
 in `routers/covers.py` — Deezer/Last.fm ban the IP under concurrent
 load. (See `reference_artist_photos.md`; do not remove that throttle.)
 
-### D4. Phantom preview: stream Spotify → HQPlayer (not a deep-link)
+### D4. Phantom preview: audition through the user's own chain
 
-The current playback path is `file:// URI → HQPlayer playlist`
-(`mcp/assistant_server.py:772,779` via `file_path_to_uri`). A phantom
-track has no file path, so it **cannot** enter the Sautium queue.
-
-Instead of a passive "Listen on Spotify" deep-link, route a preview
-stream into the user's own hi-fi chain. Concrete architecture
-(grounded in capabilities HQPlayer already exposes):
-
-```
-go-librespot (headless, Premium creds, local HTTP/WS control API)
-   → virtual audio device (e.g. VB-CABLE on Windows)
-   → HQPlayer live input  (selected via our control protocol)
-   → upsampling + mp3-cleanup filter → DAC
-```
-
-This closes the loop **discover → preview in your real DAC chain →
-buy** without violating the audiophile ethos (the user auditions in
-their own room, on their own filters).
-
-**Zero-touch is the design goal — no manual HQP interaction.** The
-orchestration is fully automatic because the HQPlayer control
-protocol already exposes both input selection (`get_inputs()`,
-`docs/HQPLAYER_INTEGRATION.md:111`) and filter selection (Sautium
-already drives filters). On *enter preview*: backend switches
-HQPlayer to the virtual input + applies the lossy-cleanup filter
-(`poly-sinc-mqa/mp3-lp`, `HQPLAYER_KNOWLEDGE_BASE.md:652`), and tells
-go-librespot to `play <uri>`. On *exit*: revert HQPlayer to its
-normal pipeline. Sautium's play/stop buttons map to go-librespot's
-local API — no Spotify app, no walking over to HQPlayer.
-
-**Control layer is certain; the audio path needs a spike.** The
-"play/pause/stop a specific track without opening Spotify" half is
-solidly realizable via go-librespot's local API (or Spotify Web API).
-The uncertain half is the live-input route — verify HQPlayer Desktop 6
-exposes the virtual capture device as a selectable input on Windows
-(1-2h spike) before building. The SpotConnect→UPnP-renderer
-alternative is shakier: HQPlayer is Roon Ready (`KB:19`, a network
-*endpoint* for Roon) but **not** a generic UPnP DMR — prefer the
-virtual-cable + live-input route.
-
-**Boundaries and open questions (must resolve before building D4):**
-
-- This is a **separate, out-of-band audio transport**. It does **not**
-  pass through Sautium's queue or the `/api/player/status/stream`
-  SSE — Now Playing will not track it. Treat preview as a distinct
-  transport surface, not an extension of the local queue.
-- Requires a **Spotify Premium** account + credentials for librespot.
-- librespot streams **lossy** (Ogg ~320 kbps). This is **accepted by
-  design** — preview is for *getting acquainted* with the music
-  before buying, not for permanent listening. No need to chase
-  Spotify's lossless tier. Still flag "preview quality" in the UI so
-  it's not mistaken for the hi-res local experience.
-- **Verify HQP6 live input on Windows** (the 1-2h spike above) before
-  committing to the audio path.
-- **VB-CABLE install:** silent CLI install is possible but the driver
-  needs a **one-time admin elevation** — bundle it into the launcher's
-  existing setup step (same pattern as the OpenSSL DLL + firewall-rule
-  installs). **Open question: VB-CABLE redistribution license**
-  (donationware — bundling in an installer may need permission);
-  evaluate alternative virtual-audio drivers if not redistributable.
-- librespot is reverse-engineered (Spotify ToS gray area, widely
-  used). Note it; this is a personal single-user appliance.
-
-D4 is the highest-upside, highest-uncertainty piece. **Sequence it
-last** (Phase 6) — phantom discovery is fully valuable with just a
-"Buy on Bandcamp" button and no preview at all. **Decision
-(2026-06-01): do not research the audio path further until the
-minimal phantom-albums functionality (Phases 1-3) is working.**
+A phantom track has no file, so it cannot enter the queue as a `file://`
+URI. Instead of a passive deep-link to a streaming service, the preview
+routes the audio into the user's own hi-fi chain: audition transport is
+**provider-based** — a `StreamProvider` fetches the audio, the in-memory
+proxy serves it to the output (HQPlayer, DLNA or the browser), and Now
+Playing tracks it like any owned file. YouTube ships in core; DRM
+providers are bring-your-own and out of tree (`backend/streaming/`).
+Preview quality is flagged in the UI (lossless / lossy) so it is never
+mistaken for the local hi-res experience. Shipped 2026-06-28; the earlier
+virtual-cable / live-input design is superseded.
 Premature to spike HQP live-input now.
 
 ### D5. Acquisition: "Buy on Bandcamp", not a wishlist
@@ -262,7 +203,7 @@ score (`DISCOVERY-SEARCH-ENGINE.md` §4).
 - **Genre screen**: same — locals first, phantoms dimmed after.
 - **Phantom artist screen**: bio + (lazily-fetched) albums/tracks.
   **No transport/Play** (nothing local to play). Instead:
-  - `[▶ Preview via Spotify → HQPlayer]` (D4, when shipped),
+  - `[▶ Preview → HQPlayer]` (D4),
   - `[Buy on Bandcamp]` (D5).
 - **Local artist screen → new releases**: a "New albums you don't
   own" shelf, diffed from the fetched discography (see Phase 1).
@@ -277,7 +218,7 @@ score (`DISCOVERY-SEARCH-ENGINE.md` §4).
 | **3** | **Phantom albums/tracks (lazy).** On phantom-artist-screen open, fetch + cache discography. | med | Storage-safe via laziness. |
 | **4** | **P2P propagation.** Relax sync inventory joins; `source='p2p:*'`; post-import handling. | med | Network effect; depends on phantom data existing. |
 | **5** | **Phantom semantic search.** BGE-M3 text embeddings for phantoms; wire into Discovery engine. | med | Depends on Discovery engine landing. |
-| **6** | **Spotify→HQPlayer preview (D4).** | high | Most uncertainty; ship last, after open questions resolved. |
+| **6** | **Provider→HQPlayer preview (D4).** | high | Most uncertainty; ship last, after open questions resolved. |
 
 ## Implementation status
 

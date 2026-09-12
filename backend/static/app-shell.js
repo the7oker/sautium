@@ -5317,7 +5317,7 @@
         + '&item_type=a';
 
       // Streaming source quality for the phantom badge — the preferred provider
-      // (Deezer lossless > YouTube lossy), reported by the album endpoint.
+      // (lossless provider > YouTube lossy), reported by the album endpoint.
       const streamQual = d.stream_quality || null;   // 'lossless' | 'lossy' | null
       const streamQualClass = streamQual === 'lossless' ? 'is-lossless' : 'is-lossy';
       const streamQualLabel = streamQual === 'lossless' ? 'Lossless' : 'Lossy';
@@ -5928,7 +5928,7 @@
   }
 
   // Refine the phantom album's quality badge to the ACTUAL streamed mix once the
-  // availability resolve knows each track's provider (lossless = Deezer, lossy =
+  // availability resolve knows each track's provider (lossless = external provider, lossy =
   // YouTube). Initial render shows the best case; this corrects it to Lossy /
   // Mostly lossy / Mostly lossless so the badge can't overstate the quality.
   function updateStreamQualityBadge(screen, quality) {

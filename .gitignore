@@ -106,7 +106,7 @@ backend/mcp-wsl.json
 /worker/.wrangler/
 /worker/.dev.vars
 
-# Bring-your-own streaming provider plugins (closed-repo, §1201 — Deezer etc.).
+# Bring-your-own streaming provider plugins — out of tree; DRM providers are never bundled.
 # Each is the user's OWN private repo cloned in here; never tracked by Sautium.
 backend/streaming/providers/
 

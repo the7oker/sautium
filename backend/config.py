@@ -92,7 +92,7 @@ class Settings(BaseSettings):
     # so phantom tracks enter the audio-similarity space. Off → previews still
     # play, just don't enrich.
     streaming_preview_analyze: bool = True
-    # Directory for bring-your-own provider plugins (closed-repo Deezer etc.).
+    # Directory for bring-your-own provider plugins (out-of-tree DRM providers).
     # None → <streaming pkg>/providers. Gitignored; empty in the public tree.
     streaming_providers_dir: Optional[str] = None
     # RAM ceiling for fetched preview/transcode buffers. Beyond it the manager

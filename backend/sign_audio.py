@@ -11,9 +11,9 @@ the scanner / stream enricher — never recomputed here) is signable material:
     off), or
   - origin='deezer' / 'youtube' — tier 3: a streamed source signs against
     the STREAM's pcm_hash, claiming no possession of any local rip. Until
-    2026-09-02 only a lossless Deezer fetch qualified (decode-varying
+    2026-09-02 only a lossless external-provider fetch qualified (decode-varying
     pcm_hash, lossy master); lossy streams sign too now — the analysis
-    loses nothing measurable at lossy rates, the Deezer provider ships
+    loses nothing measurable at lossy rates, the lossless provider ships
     outside the distribution so YouTube is the only stream most nodes
     ever analyse, and a network where none of that signs carries nothing.
     The seal binds the author's OWN decode; is_lossless rides in the
