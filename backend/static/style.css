@@ -6541,6 +6541,19 @@ select.add-gear-input {
      grid has no row gap to part them. */
   .album-side > .bio { padding-top: var(--space-4); }
   .detail-screen > .bio { max-width: calc(640 * var(--px)); }
+  /* The photo band: at 688–944px wide the phone's 200px strip keeps a
+     sliver of the portrait, so the band grows with its width (2.4:1,
+     capped) and the name with it. The genre banner is the same band. */
+  .artist-hero, .genre-hero {
+    height: auto;
+    aspect-ratio: 2.4 / 1;
+    max-height: calc(320 * var(--px));
+  }
+  .artist-hero-scrim-bottom { height: calc(120 * var(--px)); }
+  .artist-hero-name, .genre-hero-name {
+    font-size: calc(36 * var(--px));
+    bottom: calc(18 * var(--px));
+  }
   .friends-screen {
     max-width: calc(640 * var(--px) + 2 * var(--space-4));
     margin-inline: auto;
