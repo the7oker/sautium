@@ -1,0 +1,26 @@
+# gitleaks configuration: the default rule set plus allowlists for values that
+# match a secret pattern and are not secrets.
+[extend]
+useDefault = true
+
+[[allowlists]]
+description = "test vectors and fixtures"
+paths = [
+  '''^tests/p2p/vectors/''',
+  '''^tests/p2p/test_diag_protocol\.py$''',
+  '''^\.env\.example$''',
+]
+
+[[allowlists]]
+description = "shipped master pins are public by design"
+regexes = ['''MASTER_TOKEN_ID = "[0-9a-f-]{36}"''']
+
+[[allowlists]]
+description = "Last.fm desktop-app credentials ship in source by design (backend/app_keys.py)"
+condition = "AND"
+paths = ['''^backend/app_keys\.py$''']
+regexes = ['''LASTFM_API_(KEY|SECRET) = "[0-9a-f]{32}"''']
+
+[[allowlists]]
+description = "type annotations, not keys"
+regexes = ['''key: Ed25519PrivateKey''']
