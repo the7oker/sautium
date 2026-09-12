@@ -8353,6 +8353,7 @@
     const sheet = document.createElement('div');
     sheet.className = 'hqp-sheet';
     sheet.innerHTML = `
+      <div class="hqp-sheet-card">
       <div class="hqp-sheet-bar">
         <button class="icon-btn" type="button" data-action="close" aria-label="Close">
           <svg width="22" height="22" viewBox="0 0 24 24" fill="none"
@@ -8365,6 +8366,7 @@
         <input class="hqp-sheet-search" type="search" placeholder="Search…">
       </div>
       <div class="hqp-sheet-body" id="hqpSheetBody"></div>
+      </div>
     `;
     document.body.appendChild(sheet);
 
@@ -8455,6 +8457,8 @@
     }
 
     sheet.querySelector('[data-action="close"]').addEventListener('click', close);
+    // The sheet itself is only reachable as the tablet's scrim.
+    sheet.addEventListener('click', e => { if (e.target === sheet) close(); });
     search.addEventListener('input', paint);
     paint();
   }

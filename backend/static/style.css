@@ -4405,6 +4405,9 @@ body.sautium-base {
   background: var(--color-foundation);
   display: flex; flex-direction: column;
 }
+/* The picker's bar and body are grouped so the tablet can make them a
+   card; on the phone the wrapper takes no part in layout. */
+.hqp-sheet-card { display: contents; }
 .hqp-sheet-bar {
   display: grid;
   grid-template-columns: calc(44 * var(--px)) auto 1fr;
@@ -6325,9 +6328,11 @@ select.add-gear-input {
 /* More-section windows exist only on the tablet, but a browser window can
    shrink beneath 768px with one open: then it is simply the section,
    full-screen, the way the phone shows it. The window is a screen-level
-   layer: above the chrome (rail 50, mini-player 49, More card 45), below
-   every task overlay a section opens (add-gear sheets 60, the cards
-   100+, dialogs in the top layer). */
+   layer. Tablet layer order, bottom up: mini-player 49, rail 50, the More
+   card 52 (over the chrome, as drawn), the window 55, then every task
+   overlay a section opens — add-gear sheets 60, the three cards 100/110,
+   the HQPlayer filter picker 200, dialogs in the top layer. Anything
+   opened from inside a window sits at 60 or above. */
 .route-window {
   position: fixed;
   inset: 0;
@@ -6405,6 +6410,10 @@ select.add-gear-input {
   /* More: the drawer becomes a content-height centred card with the
      card header (title, close); the handle is a phone gesture. */
   .more-scrim { bottom: 0; }
+  /* On the phone the drawer and its scrim stop above the chrome, so the
+     drawer's 45 never meets the mini-player (49) or the nav (50); the
+     card's scrim covers the viewport and has to dim both. */
+  .more-overlay { z-index: 52; }
   .more-overlay .drawer {
     left: 50%;
     right: auto;
@@ -6543,6 +6552,26 @@ select.add-gear-input {
     border-radius: var(--radius-lg);
     box-shadow: var(--shadow-4);
   }
+  /* The HQPlayer filter picker: the phone's full-screen sheet is the
+     scrim, its bar and body a centred card like the add-gear dialogs. */
+  .hqp-sheet {
+    background: rgba(14, 10, 8, 0.55);
+    align-items: center;
+    justify-content: center;
+    padding: calc(24 * var(--px));
+  }
+  .hqp-sheet-card {
+    display: flex;
+    flex-direction: column;
+    width: var(--window-w);
+    max-width: 100%;
+    max-height: 100%;
+    background: var(--color-foundation);
+    border-radius: var(--radius-lg);
+    box-shadow: var(--shadow-4);
+    overflow: hidden;
+  }
+  .hqp-sheet-card .hqp-sheet-body { padding-bottom: calc(12 * var(--px)); }
 }
 
 /* Landscape tablet: the album's cover column stays put on the left while
