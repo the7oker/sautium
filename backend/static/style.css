@@ -6342,6 +6342,9 @@ select.add-gear-input {
 }
 .route-window-card { min-height: 100%; }
 .route-window-close { display: none; }
+/* Inside a section window nothing sits beneath the scroller's edge: the
+   puck rests above the window's own bottom, not the chrome's. */
+.route-window .guide-puck { bottom: var(--space-4); }
 
 /* =====================================================================
  * Tablet layout mode (>= 768px) — backend/static/CLAUDE.md §"Layout

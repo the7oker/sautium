@@ -776,6 +776,16 @@
 
   const _guidePucks = new WeakMap();
 
+  /* The nearest ancestor that scrolls, or null for the document: the phone
+     scrolls the document, the tablet's section window its own body. */
+  function scrollParentOf(el) {
+    for (let p = el.parentElement; p && p !== document.body; p = p.parentElement) {
+      const { overflowY } = getComputedStyle(p);
+      if (overflowY === 'auto' || overflowY === 'scroll') return p;
+    }
+    return null;
+  }
+
   function attachGuidePuck(target) {
     const existing = _guidePucks.get(target);
     if (existing) { existing.measure(); return; }
@@ -799,10 +809,12 @@
     measure();
 
     puck.addEventListener('click', () => {
+      const scroller = scrollParentOf(target);
       const rest = parseFloat(getComputedStyle(puck).bottom) + puck.offsetHeight / 2;
       const t = target.getBoundingClientRect();
-      window.scrollTo({
-        top: window.scrollY + t.top + t.height / 2 - (window.innerHeight - rest),
+      const viewBottom = scroller ? scroller.getBoundingClientRect().bottom : window.innerHeight;
+      (scroller || window).scrollBy({
+        top: t.top + t.height / 2 - (viewBottom - rest),
         behavior: 'smooth',
       });
     });
