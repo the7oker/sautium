@@ -155,14 +155,13 @@ class Settings(BaseSettings):
     )
 
     def model_post_init(self, __context) -> None:
-        """Fill in built-in app keys when not provided via env."""
-        from app_keys import LASTFM_API_KEY, LASTFM_API_SECRET, GENIUS_ACCESS_TOKEN
+        """Fill in the built-in Last.fm keys when not provided via env. Genius
+        is bring-your-own (GENIUS_ACCESS_TOKEN) and stays off when unset."""
+        from app_keys import LASTFM_API_KEY, LASTFM_API_SECRET
         if not self.lastfm_api_key:
             self.lastfm_api_key = LASTFM_API_KEY
         if not self.lastfm_api_secret:
             self.lastfm_api_secret = LASTFM_API_SECRET
-        if not self.genius_access_token:
-            self.genius_access_token = GENIUS_ACCESS_TOKEN
 
     @property
     def database_url(self) -> str:
