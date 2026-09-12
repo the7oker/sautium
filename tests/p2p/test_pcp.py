@@ -21,12 +21,12 @@ def _fake_response(req: bytes, result=0, lifetime=120, external_ip="91.227.181.1
 
 
 def test_v4_request_uses_mapped_address_and_round_trips():
-    req = pcp.build_map_request("192.168.1.188", 8801, external_port=8801,
+    req = pcp.build_map_request("192.168.1.10", 8801, external_port=8801,
                                 lifetime=7200, nonce=b"n" * 12)
     assert len(req) == 60
     assert req[0] == 2 and req[1] == pcp.OP_MAP
     assert struct.unpack("!I", req[4:8])[0] == 7200
-    assert req[8:24] == b"\x00" * 10 + b"\xff\xff" + bytes([192, 168, 1, 188])
+    assert req[8:24] == b"\x00" * 10 + b"\xff\xff" + bytes([192, 168, 1, 10])
     assert req[24:36] == b"n" * 12
     res = pcp.parse_map_response(_fake_response(req))
     assert res.success and res.result_name == "SUCCESS"
@@ -45,7 +45,7 @@ def test_v6_request_is_a_pinhole_for_the_own_address():
 
 
 def test_result_codes_and_malformed_responses():
-    req = pcp.build_map_request("192.168.1.188", 8801)
+    req = pcp.build_map_request("192.168.1.10", 8801)
     denied = pcp.parse_map_response(_fake_response(req, result=2, lifetime=0, external_port=0))
     assert not denied.success and denied.result_name == "NOT_AUTHORIZED"
     with pytest.raises(ValueError):

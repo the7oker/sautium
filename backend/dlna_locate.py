@@ -5,8 +5,8 @@ A companion to the Output picker's scan, for the addresses a scan cannot
 reach: a renderer on another subnet, or one joined to the same VPN rather
 than the same LAN.
 
-    python3 backend/dlna_locate.py 192.168.1.235      # one device
-    python3 backend/dlna_locate.py 100.66.130.110     # one over the tunnel
+    python3 backend/dlna_locate.py 192.168.1.50      # one device
+    python3 backend/dlna_locate.py 100.100.1.2     # one over the tunnel
     python3 backend/dlna_locate.py                    # sweep the local /24
     python3 backend/dlna_locate.py 192.168.7          # sweep another /24
 

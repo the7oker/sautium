@@ -111,7 +111,7 @@ inputs = hqp.get_inputs()
 ```python
 from hqplayer_client import HQPlayerConnection
 
-with HQPlayerConnection(host="172.26.80.1") as hqp:
+with HQPlayerConnection(host="<windows-host-ip>") as hqp:
     # Read the available options
     modes = hqp.get_modes()
     filters = hqp.get_filters()
@@ -131,7 +131,7 @@ with HQPlayerConnection(host="172.26.80.1") as hqp:
 
 ### Example 2: DSD512 with ASDM7EC-super
 ```python
-with HQPlayerConnection(host="172.26.80.1") as hqp:
+with HQPlayerConnection(host="<windows-host-ip>") as hqp:
     # DSD mode
     modes = hqp.get_modes()
     dsd_mode = next(m for m in modes if 'DSD' in m['name'])
@@ -202,7 +202,7 @@ def auto_configure_for_track(hqp, track):
 
 ```bash
 # Automated test of every DSP setting
-cd /mnt/d/ai/djai/backend
+cd <repo>/backend
 python3 test_hqplayer_settings.py
 
 # Usage examples
