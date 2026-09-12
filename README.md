@@ -85,7 +85,7 @@ bind to loopback. The P2P DHT listens on `19001/udp`.
 ### 1. Clone
 
 ```bash
-git clone <repository-url> sautium
+git clone https://github.com/the7oker/sautium.git sautium
 cd sautium
 ```
 

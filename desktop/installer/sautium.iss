@@ -43,7 +43,7 @@ Filename: "netsh"; Parameters: "advfirewall firewall delete rule name=""Sautium 
 Filename: "netsh"; Parameters: "advfirewall firewall add rule name=""Sautium P2P"" dir=in action=allow protocol=UDP localport=19002 profile=private"; StatusMsg: "Adding firewall rule (UDP)..."; Flags: runhidden waituntilterminated
 Filename: "netsh"; Parameters: "advfirewall firewall add rule name=""Sautium P2P"" dir=in action=allow protocol=TCP localport=20000-29999 profile=private"; StatusMsg: "Adding firewall rule (TCP)..."; Flags: runhidden waituntilterminated
 ; Clone repository on first install
-Filename: "git"; Parameters: "clone https://github.com/user/sautium.git ""{app}\repo"""; StatusMsg: "Cloning repository..."; Flags: runhidden waituntilterminated
+Filename: "git"; Parameters: "clone https://github.com/the7oker/sautium.git ""{app}\repo"""; StatusMsg: "Cloning repository..."; Flags: runhidden waituntilterminated
 ; Install PyTorch with CUDA support (PyPI default is CPU-only on Windows).
 ; Pins must match backend/requirements.txt; cu126 is the oldest index that
 ; carries this trio (cu124 stopped at torch 2.6 — unpinned installs from it
