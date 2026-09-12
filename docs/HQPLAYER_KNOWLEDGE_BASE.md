@@ -1212,7 +1212,7 @@ prefs = {'dac_type': 'Delta-Sigma', 'cpu_power': 'extreme', 'focus': 'space'}
 ## Sources
 
 - **Official manual**: HQPlayer 5 Desktop User Manual v5.16.0
-- **SDK**: hqp-control-5292-src (engine 5.29.2)
+- **SDK**: HQPlayer Control SDK (hqp-control 5.29.2, Signalyst)
 - **Forum**: HQPlayer Community Forum
 - **Developer**: Jussi Laako / Signalyst
 

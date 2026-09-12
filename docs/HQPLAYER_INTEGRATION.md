@@ -18,9 +18,10 @@ version with no version switch.
 - **Authentication**: Not required for basic commands (optional for advanced features)
 
 ### SDK Version
-Based on the HQPlayer SDK from Signalyst. Both SDK generations are supported:
-- **HQP5**: engine version 5.29.2 (`sdk/hqp-control-5292-src/`)
-- **HQP6**: SDK 6.0.1 (`sdk/hqp-control-601-src/`)
+Based on Signalyst's HQPlayer Control SDK (`hqp-control-*-src`, obtained from
+Signalyst — not vendored here). Both SDK generations are supported:
+- **HQP5**: engine version 5.29.2 (hqp-control 5.29.2)
+- **HQP6**: SDK 6.0.1 (hqp-control 6.0.1)
 
 The control protocol is the same on both, so a single client implementation talks to
 either desktop version.
@@ -54,7 +55,8 @@ unchanged without them.
 - `backend/test_hqplayer_auto.py` - Automatic test script
 
 ### SDK Reference
-- `sdk/hqp-control-5292-src/` - Original C++ SDK source code
+- HQPlayer Control SDK (`hqp-control-*-src`, C++) — Signalyst's reference code,
+  available from https://www.signalyst.com/; it is not linked into Sautium
 
 ## Features Implemented
 
@@ -306,7 +308,7 @@ Failed to connect to HQPlayer at 172.26.80.1:4321
 
 ## API Reference
 
-See SDK documentation in `sdk/hqp-control-5292-src/` for full XML protocol specification.
+See the HQPlayer Control SDK documentation (Signalyst, `hqp-control-*-src`) for the full XML protocol specification.
 
 ### Key Data Structures
 

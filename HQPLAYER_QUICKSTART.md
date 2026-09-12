@@ -95,9 +95,6 @@ backend/
 
 docs/
   └── HQPLAYER_INTEGRATION.md     # Full documentation
-
-sdk/
-  └── hqp-control-5292-src/       # HQPlayer SDK (C++)
 ```
 
 ## Checking connectivity
