@@ -461,19 +461,14 @@
         if (!a.src) return;
         // A parked network killed the streaming src mid-track — the fully
         // fetched blob takes over at the same position instead of dying.
-        if (this._swapToBlob({ resume: this.playingNow || this.pendingPlay })) {
+        if (this._swapToBlob()) {
           this.networkParked = true;
           return;
         }
         this._post('error');
       });
       const starving = () => {
-        // currentTime > 2 filters the routine waiting at every track start
-        // (no data for the first ~100ms) from a drained mid-track readahead
-        // — track starts are guarded by the boundary watchdog instead.
-        if (!a.paused && a.readyState < 3 && a.currentTime > 2) {
-          if (this._swapToBlob({ resume: true })) this.networkParked = true;
-        }
+        if (this._starving() && this._swapToBlob()) this.networkParked = true;
       };
       a.addEventListener('waiting', starving);
       a.addEventListener('stalled', starving);
@@ -519,15 +514,6 @@
         if (!held) {
           this._fetchBlob(this.queueIndex, url, this.currentMediaId);
         }
-        if (play) {
-          // Boundary watchdog: if the stream produced no data within the
-          // pre-latch window (timers still fire there), fall to the blob.
-          this._watchdog = setTimeout(() => {
-            if (a.readyState < 3 && !a.paused && this._swapToBlob({ resume: true })) {
-              this.networkParked = true;
-            }
-          }, 2000);
-        }
       }
       if (startPos > 0) {
         // Resume point from a re-prime (page reload mid-track): seek once
@@ -563,9 +549,7 @@
           // streaming src — take over the moment the bytes are local.
           if (index === this.queueIndex) {
             const a = this.audio;
-            if (a && (a.error || (!a.paused && a.readyState < 3 && !a.ended))) {
-              this._swapToBlob({ resume: this.playingNow || this.pendingPlay });
-            }
+            if (a && (a.error || this._starving())) this._swapToBlob();
           }
           if (onDone) onDone();
         })
@@ -575,10 +559,35 @@
         });
     },
 
+    // Starvation: the play intent is live but the stream has nothing to go
+    // on (readyState below HAVE_FUTURE_DATA) — outside the routine no-data
+    // window at a track start, where a media element reports nothing while
+    // it opens its stream. That window is the boundary grace after the
+    // last play attempt; currentTime > 2 marks a track that has audibly
+    // played past its start. One rule for every probe: `waiting`/`stalled`,
+    // the boundary watchdog and a landing blob. The landing-blob probe used
+    // to skip the window, so on a fast link the whole file landed before
+    // the first frame decoded and its swap paused the track (the phantom
+    // proxy serves from RAM — on a LAN the blob lands in ~100 ms).
+    _BOUNDARY_GRACE_MS: 2000,
+    _playStartedAt: 0,
+
+    _starving() {
+      const a = this.audio;
+      return !a.paused && !a.ended && a.readyState < 3
+        && (a.currentTime > 2
+            || Date.now() - this._playStartedAt >= this._BOUNDARY_GRACE_MS);
+    },
+
     _swapToBlob(opts) {
       const a = this.audio;
       const blobUrl = this._heldBlob(this.queueIndex, this.currentMediaId);
       if (!a || !blobUrl || a.src === blobUrl) return false;
+      // Read the play intent BEFORE the src change: loading a new resource
+      // sets `paused` and aborts a pending play(), so a swap that consulted
+      // the element afterwards left the track parked on its blob. A play
+      // tap (resumeLocal) is the intent by itself.
+      const resume = (opts && opts.resume) || !a.paused || this.pendingPlay;
       const pos = a.currentTime || 0;
       a.src = blobUrl;
       if (pos > 0) {
@@ -586,7 +595,7 @@
           if (a.src === blobUrl) a.currentTime = pos;
         }, { once: true });
       }
-      if (opts && opts.resume) this._tryPlay();
+      if (resume) this._tryPlay();
       return true;
     },
 
@@ -747,11 +756,22 @@
     },
 
     _tryPlay() {
+      this._playStartedAt = Date.now();
+      // Boundary watchdog: the stream produced no data within the grace
+      // (timers still fire in the pre-latch window) — fall to the blob.
+      clearTimeout(this._watchdog);
+      this._watchdog = setTimeout(() => {
+        if (this._starving() && this._swapToBlob()) this.networkParked = true;
+      }, this._BOUNDARY_GRACE_MS);
       const p = this.audio.play();
       if (p && p.catch) {
-        p.catch(() => {
-          // Autoplay policy rejected a directive outside a user gesture —
-          // the next play tap goes through resumeLocal (gesture context).
+        p.catch((err) => {
+          // Interrupted by a newer load or a pause: whichever did that owns
+          // the state now (a load with play intent calls play() again, a
+          // pause fires `pause`). Anything else is the autoplay policy
+          // rejecting a directive outside a user gesture — the next play
+          // tap goes through resumeLocal (gesture context).
+          if (err && err.name === 'AbortError') return;
           this.pendingPlay = true;
           this._post('paused');
         });
