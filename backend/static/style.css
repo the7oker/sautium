@@ -6534,6 +6534,9 @@ select.add-gear-input {
   .album-side > .album-meta-block,
   .album-side > .bio,
   .album-side > .album-actions { padding-left: 0; padding-right: 0; }
+  /* The description spans both columns right under the cover, and the
+     grid has no row gap to part them. */
+  .album-side > .bio { padding-top: var(--space-4); }
   .detail-screen > .bio { max-width: calc(640 * var(--px)); }
   .friends-screen {
     max-width: calc(640 * var(--px) + 2 * var(--space-4));
@@ -6604,5 +6607,7 @@ select.add-gear-input {
     padding: 0;
   }
   .album-side > .album-hero { border-radius: var(--radius-md); }
+  /* Stacked, the description follows the metadata block as on the phone. */
+  .album-side > .bio { padding-top: calc(2 * var(--px)); }
   .detail-screen:has(> .album-side) > :not(.album-side) { grid-column: 2; }
 }
