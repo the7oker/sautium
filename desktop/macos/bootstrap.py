@@ -37,7 +37,7 @@ PAYLOAD = RESOURCES / "payload"
 # restart the backend — and that path is exercised daily on the maintainer's
 # own machine. The bundled payload seeds an install that cannot reach GitHub;
 # once a clone exists, git owns the directory and the DMG stops touching it.
-REPO_URL = "https://github.com/the7oker/ai.djai.git"
+REPO_URL = "https://github.com/the7oker/sautium.git"
 REPO_BRANCH = "main"
 
 BREW_INSTALL_CMD = (
