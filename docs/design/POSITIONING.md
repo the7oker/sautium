@@ -25,8 +25,8 @@ Brand work should foreground the _medium_ aspect.
 ### Primary — Mature Collector
 
 - 30+, Windows-first, owns an offline FLAC library of 5k–50k tracks.
-- Walked the path: cassettes → MP3 piracy → FLAC pirating → paid
-  Bandcamp / label direct purchases.
+- Walked the path: cassettes → MP3 downloads → FLAC → paid Bandcamp /
+  label direct purchases.
 - Audiophile-savvy: knows the difference between DSD and PCM, tunes
   HQPlayer themselves, owns a DAC + amplifier + streamer.
 - Does **not** use Spotify as a primary listening source.
