@@ -69,6 +69,17 @@ EXPOSE 8000
 EXPOSE 19001/udp
 
 # Set environment variables
+# PostgreSQL 18 client — pg_dump / pg_restore for node backups (backup.py);
+# bookworm's own client is the 15 series, which cannot dump an 18 server.
+RUN apt-get update && apt-get install -y --no-install-recommends gnupg ca-certificates curl \
+    && curl -fsSL https://www.postgresql.org/media/keys/ACCC4CF8.asc \
+         | gpg --dearmor -o /usr/share/keyrings/postgresql.gpg \
+    && echo "deb [signed-by=/usr/share/keyrings/postgresql.gpg] https://apt.postgresql.org/pub/repos/apt bookworm-pgdg main" \
+         > /etc/apt/sources.list.d/pgdg.list \
+    && apt-get update && apt-get install -y --no-install-recommends postgresql-client-18 \
+    && apt-get clean && rm -rf /var/lib/apt/lists/*
+ENV PG_BIN=/usr/lib/postgresql/18/bin
+
 ENV PYTHONUNBUFFERED=1
 ENV PYTHONDONTWRITEBYTECODE=1
 

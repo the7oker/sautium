@@ -21,11 +21,12 @@ class SettingsDialog(ctk.CTkToplevel):
     keeping a single source of truth instead of two parallel configs."""
 
     def __init__(self, parent, config: dict, on_save: Optional[Callable] = None,
-                 api_client: Optional[BackendAPIClient] = None):
+                 api_client: Optional[BackendAPIClient] = None,
+                 on_restore: Optional[Callable] = None):
         super().__init__(parent)
 
         self.title("Settings")
-        self.geometry("550x500")
+        self.geometry("550x600")
         self.resizable(False, False)
         self.transient(parent)
         self.grab_set()
@@ -33,11 +34,15 @@ class SettingsDialog(ctk.CTkToplevel):
         self.config = config.copy()
         self.on_save = on_save
         self.api_client = api_client
+        # LauncherApp._restore_from_backup: stops the services, replaces the
+        # database and identity, starts them again. The dialog only collects
+        # the file and the password and hands over.
+        self.on_restore = on_restore
 
         # Single-tab tabview kept so the UI's vertical rhythm matches
         # the wizard. If more launcher-only sections appear later
         # (proxy, GPU/CPU mode override) they slot in here.
-        self.tabview = ctk.CTkTabview(self, width=510, height=400)
+        self.tabview = ctk.CTkTabview(self, width=510, height=500)
         self.tabview.pack(padx=20, pady=(10, 0))
 
         self.tabview.add("General")
@@ -126,6 +131,36 @@ class SettingsDialog(ctk.CTkToplevel):
             command=self._import_birth_cert,
             fg_color="transparent", border_width=1,
         ).pack(side="left")
+
+        # Maintenance — restore is a launcher operation because it replaces
+        # the database the backend serves (docs/design/BACKUP.md). Backups
+        # themselves are made in the Web UI, where the account password is
+        # typed on the device that holds the session.
+        ctk.CTkLabel(tab, text="Maintenance", font=ctk.CTkFont(weight="bold")).pack(
+            anchor="w", pady=(12, 3)
+        )
+        ctk.CTkLabel(
+            tab, text_color="gray", font=ctk.CTkFont(size=11), anchor="w",
+            justify="left", wraplength=480,
+            text=("Backups are made in the Web UI (Settings › Library › Backup). "
+                  "Restoring replaces this node's database and identity with the "
+                  "file's; the current database is kept as sautium__previous."),
+        ).pack(anchor="w", padx=10)
+        ctk.CTkButton(
+            tab, text="Restore from backup…", width=200,
+            command=self._restore_from_backup,
+            fg_color="transparent", border_width=1,
+        ).pack(anchor="w", padx=10, pady=4)
+
+    def _restore_from_backup(self):
+        from desktop.restore import RestoreDialog
+
+        def ready(path, password, manifest):
+            self.destroy()
+            if self.on_restore:
+                self.on_restore(path, password, manifest)
+
+        RestoreDialog(self, on_ready=ready, confirm_replace=True)
 
     def _cert_status_text(self) -> str:
         from desktop.p2p.birth_cert import load_certificate, load_proof

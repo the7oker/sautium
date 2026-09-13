@@ -312,13 +312,20 @@ async def verify_password(password: str) -> bool:
     if not expected or not username or not password:
         return False
     from p2p_identity import derive_identity
-    async with _derive_semaphore:
-        try:
-            got = await asyncio.to_thread(derive_identity, username, password)
-        except Exception as e:
-            logger.info("password verification failed: %s", e)
-            return False
+    try:
+        got = await derive_guarded(derive_identity, username, password)
+    except Exception as e:
+        logger.info("password verification failed: %s", e)
+        return False
     return hmac.compare_digest(got.get("public_key_hex", ""), expected)
+
+
+async def derive_guarded(fn, *args):
+    """Run one Argon2id derivation off the loop, under the memory semaphore
+    (module doc, BRUTE FORCE) — every request-path derivation goes through
+    here: login, and the backup key that shares the password."""
+    async with _derive_semaphore:
+        return await asyncio.to_thread(fn, *args)
 
 
 # ---------------------------------------------------------------------------

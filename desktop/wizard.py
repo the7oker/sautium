@@ -81,6 +81,10 @@ class SetupWizard(ctk.CTkToplevel):
         # The name/password this node gets when the human types none — see
         # _minted_credentials.
         self._minted: Optional[dict] = None
+        # "Restore from a backup…" on the identity step: {path, password,
+        # manifest}. The account then comes from the file, and the restore
+        # itself runs in _finish once the fresh cluster exists.
+        self._restore: Optional[dict] = None
         # Claude Code state is computed on-demand via _claude_state()
         # because it can change during the wizard (install, sign-in).
         self._claude_install_thread: Optional[threading.Thread] = None
@@ -218,6 +222,18 @@ class SetupWizard(ctk.CTkToplevel):
                 self.config["_account"]["email"] = self._account_email_val
                 self.config["_account"]["email_verified"] = True
                 self._account_verify_phase = False
+                return True
+
+            if self._restore:
+                # The account is the backup's: its password opened the file,
+                # so the pair derives the key the data is signed with.
+                node = self._restore["manifest"]["node"]
+                self.config["_account"] = {
+                    "username": node["username"],
+                    "password": self._restore["password"],
+                    "anonymous": False,
+                    "restore": True,
+                }
                 return True
 
             # Phase 1: account fields
@@ -498,6 +514,19 @@ class SetupWizard(ctk.CTkToplevel):
             }
         return self._minted
 
+    def _restore_text(self) -> str:
+        from desktop.restore import describe
+        return describe(self._restore["manifest"]) if self._restore else ""
+
+    def _pick_backup(self):
+        from desktop.restore import RestoreDialog
+
+        def ready(path, password, manifest):
+            self._restore = {"path": path, "password": password, "manifest": manifest}
+            self._show_step()
+
+        RestoreDialog(self, on_ready=ready, confirm_replace=False)
+
     def _step_account(self):
         # Two-phase step: phase 1 = fields, phase 2 = email verification
         if getattr(self, "_account_verify_phase", False):
@@ -586,6 +615,23 @@ class SetupWizard(ctk.CTkToplevel):
                 "— no proof of work to mine — with priority access when it "
                 "is busy. If this machine is ever lost, the mailbox carries "
                 "your standing to the next identity.")
+
+        # The other way in: a backup of an existing node. Its identity and
+        # database replace whatever the fields above would have created.
+        restore_row = ctk.CTkFrame(fields, fg_color="transparent")
+        restore_row.grid(row=11, column=0, sticky="ew", pady=(4, 0))
+        self._restore_status = ctk.CTkLabel(
+            restore_row, anchor="w", height=0, font=ctk.CTkFont(size=12),
+            justify="left", wraplength=330,
+            text=("Restoring: " + self._restore_text()) if self._restore
+            else "Already have a Sautium backup?",
+            text_color="#22c55e" if self._restore else "gray")
+        self._restore_status.pack(side="left", fill="x", expand=True)
+        ctk.CTkButton(
+            restore_row, width=170,
+            text="Choose another…" if self._restore else "Restore from a backup…",
+            command=self._pick_backup, fg_color="transparent", border_width=1,
+        ).pack(side="right")
 
         # A confirmation means nothing until there is a password, and a
         # login form never asks for one: its arrival is what tells the
@@ -1624,9 +1670,12 @@ class SetupWizard(ctk.CTkToplevel):
         summary_frame.pack(fill="x", padx=20, pady=10)
 
         account = self.config["_account"]
-        account_text = account["username"] + (
-            " — this machine only" if account["anonymous"]
-            else " — any device with the password")
+        if account.get("restore"):
+            account_text = f"{account['username']} — restored from backup ({self._restore_text()})"
+        else:
+            account_text = account["username"] + (
+                " — this machine only" if account["anonymous"]
+                else " — any device with the password")
         if account.get("email"):
             account_text += (" · email verified" if account.get("email_verified")
                              else " · email unverified")
@@ -1870,7 +1919,11 @@ class SetupWizard(ctk.CTkToplevel):
                     )
 
                 # Create account identity (or random if skipped)
-                if account_data:
+                if account_data and account_data.get("restore"):
+                    # The identity is written by the restore below, from the
+                    # backup, once the database exists to restore into.
+                    pass
+                elif account_data:
                     progress("Creating account identity...")
                     from desktop.node_identity import create_account
                     info = create_account(
@@ -1910,6 +1963,22 @@ class SetupWizard(ctk.CTkToplevel):
                 port = self.config.get("ports", {}).get("postgres", 5432)
 
                 full_init(password, port=port, progress_cb=progress)
+
+                if account_data and account_data.get("restore"):
+                    from desktop.restore import restore_launcher_node
+                    progress("Restoring from backup...")
+                    # full_init just created an empty database, so nothing is
+                    # replaced; identity=True writes the node's documents and
+                    # re-derives its key from the pair that opened the file.
+                    restore_launcher_node(
+                        self._restore["path"], self._restore["password"],
+                        config=self.config, replace=True, identity=True,
+                        progress=progress)
+                    progress("Fetching birth certificate...")
+                    from desktop.p2p.birth_cert import ensure_certificate
+                    if ensure_certificate() is None:
+                        logger.warning("Birth certificate fetch failed (offline?) — "
+                                       "will retry at P2P start")
 
                 self.ui_call(self._init_complete)
             except Exception as e:

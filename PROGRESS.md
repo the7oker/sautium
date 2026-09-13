@@ -506,6 +506,41 @@ The short version of the hard-learned lessons:
 
 ---
 
+### Node backup and restore (2026-09-13)
+
+Product A of `docs/design/BACKUP.md`: one encrypted `.sbk` per node — the
+`pg_dump` of everything but the `mb_*` data plus the identity documents —
+keyed by the account password through Argon2id in a salt domain of its own
+(`sautium-backup:v1:<username>`, never the identity seed's). What building
+it taught:
+
+- **SecretBox has no associated data.** "Header authenticated as AAD" needs
+  an AEAD; libsodium's XChaCha20-Poly1305 through `nacl.bindings` is in the
+  stack already. Every chunk carries the header digest as AAD, so a header
+  edit fails chunk 0 — and the KDF parameters are pinned, so a header cannot
+  ask the reader for 16 GiB before the password is even tried.
+- **A tar cannot stream an unknown-length member.** pg_dump's size is
+  known when it exits; a tar header wants it first. Framed records inside
+  the encrypted stream (`MEMBER_START / DATA / MEMBER_END / END`) write and
+  read sequentially with no spool, and truncation is detected because `END`
+  is authenticated plaintext.
+- **Counts and dump from one snapshot.** `pg_export_snapshot()` in a
+  `REPEATABLE READ` transaction + `pg_dump --snapshot=<id>`: the manifest's
+  row counts match the restored tables exactly even while the node writes.
+- **jammy's `postgresql-client` is PG 14** and refuses to dump an 18 server
+  ("server version mismatch") — the image installs `postgresql-client-18`
+  from PGDG and pins `PG_BIN`. The launcher passes its own `pgsql/bin`.
+- **A non-superuser restore** (the launcher's `sautium`) needs the
+  extensions pre-created by the admin role and `--no-comments`: `COMMENT ON
+  EXTENSION` from the dump is owner-only and would abort
+  `--exit-on-error`. `--no-owner --no-privileges` do the rest.
+- **Stage, then swap.** Restore into `<db>__restore`, apply newer
+  migrations there, terminate sessions, rename; a database with own data
+  survives as `<db>__previous`. Nothing is dropped that was not confirmed.
+- **The private seed never enters the file** — re-derived from username +
+  password at restore and written only when it reproduces the recorded
+  public key. The rotation archive's private keys are the accepted loss.
+
 ## Known Gotchas
 
 - **A dead SSE socket is silent, and painting its death is a UI lie.** Two

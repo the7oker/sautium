@@ -1,10 +1,12 @@
 # Backup, restore and portable data
 
-> **Status: DESIGN (2026-09-13), nothing built.** Origin: Valerii's idea
-> 2026-09-13 — make the database backup a Sautium feature, split it by data
-> class (MusicBrainz / enrichment / life data), make the enrichment part
-> mergeable into another user's database, and protect the personal part
-> with a key derived from what the user already has.
+> **Status: Phase 1 (Product A) BUILT 2026-09-13; Phases 2–3 DESIGN.** Origin:
+> Valerii's idea 2026-09-13 — make the database backup a Sautium feature,
+> split it by data class (MusicBrainz / enrichment / life data), make the
+> enrichment part mergeable into another user's database, and protect the
+> personal part with a key derived from what the user already has. Where
+> the build departed from the sketch below, § "Phase 1 as built" says how
+> and why; the sketch is kept as the record of the decision.
 > **Relates to:** `P2P-SYNC-INTEGRITY.md` (signed records, the import gate —
 > the merge machinery this reuses), `P2P_NETWORK.md` § carry (the selection
 > gates), `backend/seed_export.py` / `backend/seed_import.py` (the existing
@@ -228,25 +230,122 @@ merged this way — it goes through Product B's gate like anyone else's.
 
 ---
 
+## Phase 1 as built (2026-09-13)
+
+The format and the drivers live in **`desktop/node_backup.py`** — shared by
+the launcher (its own process restores) and the backend (which imports it
+the way `db_migrate` imports `db_init`), not in `backend/backup.py` as
+sketched; that module is the backend binding (job, SSE, CLI). Departures
+from the sketch above, each for a reason found while building:
+
+- **AEAD with associated data, not SecretBox.** The header must be
+  authenticated as AAD, and `nacl.secret.SecretBox` has no AAD slot. The
+  chunks use libsodium's XChaCha20-Poly1305 (`nacl.bindings.
+  crypto_aead_xchacha20poly1305_ietf_*`, 24-byte nonce = 16-byte random
+  prefix ‖ u64 counter) with the sha256 of the header bytes as AAD on
+  **every** chunk, so an edited header fails the first chunk. The wrapped
+  data key is the same AEAD under the KEK with the identity fields
+  (username, pubkey) as AAD. KDF parameters are pinned: a header asking for
+  more memory is refused before any derivation runs (a crafted file cannot
+  turn "try the password" into a 16 GiB allocation).
+- **Framed members, not a tar.** A tar header carries the member size up
+  front; pg_dump's size is unknown until it exits, and spooling it would be
+  the plaintext temp file the design forbids. Each chunk's plaintext is one
+  record — `MEMBER_START {name}`, `DATA`, `MEMBER_END {size, sha256}`,
+  `END` — so the stream is written and read strictly sequentially, member
+  digests are verified as they pass, and a file cut short fails as
+  "truncated" because `END` is authenticated plaintext the reader insists
+  on. Member order: `manifest.json`, `db.dump`, `identity/…`.
+- **One snapshot for counts and dump.** The manifest's per-table row counts
+  are taken in a `REPEATABLE READ` transaction that exports its snapshot
+  (`pg_export_snapshot`), and `pg_dump --snapshot=<id>` dumps that same
+  snapshot — so a restore is checked against the counts exactly, on a node
+  that keeps writing (listens, sync imports) throughout.
+- **`mb_*` data is excluded whole** (`--exclude-table-data=mb_*`), the
+  slice cache included: MusicBrainz facts are network-replicated, the
+  loader / slice fetch refill them. The manifest records which tables were
+  excluded, the server version, the extensions and the database's locale
+  settings, and the restore recreates the database with them (falling back
+  to the cluster default when the OS lacks the locale — a Docker
+  `en_US.utf8` dump on Windows; indexes are rebuilt by the restore anyway).
+- **Identity: the seed is never in the file, at any depth.**
+  `node_ed25519.key` / `.pub` and the TLS pair are excluded from the live
+  dir *and* from `previous/` archives; the live key is re-derived at
+  restore from username + password and written only when it reproduces the
+  recorded public key. A rotation archive therefore loses its private keys
+  in a restore (messages to a retired key can no longer be opened) — the
+  accepted v1 limit of "the seed never leaves". `.api_secret` rides along
+  so paired browsers keep working.
+- **Restore is staged and reversible.** The dump lands in
+  `<db>__restore`; only a complete, migrated restore is swapped in. A
+  database holding own data (owned files, listens, friends, chat, gear) is
+  replaced only on an explicit confirm / `--replace` and is kept as
+  `<db>__previous` (one copy; the next restore drops the older one); a
+  fresh database (schema, seed, settings only) is dropped. Other sessions
+  on the target are terminated at the swap; the backend must be stopped
+  first (the CLI refuses when it sees them, `--yes` overrides). The
+  restore runs as the app role with `--no-owner --no-privileges
+  --no-comments --exit-on-error`, extensions pre-created by the admin role
+  (the launcher's `sautium` is not a superuser; `COMMENT ON EXTENSION`
+  would otherwise abort it). Newer migrations apply via `db_init.
+  apply_migrations` before the swap; a dump from **newer** code (an
+  unknown `NNN_*.sql`, or a higher `identity_rule_v*`) is refused with
+  "update first".
+- **Identity move.** `write_identity` moves a *different* live identity to
+  `replaced-<time>/` (never deletes), overwrites the same key's files in
+  place. A backup from an env-credential Docker node carries no
+  `node_info.json`; the launcher then runs `create_account` with the pair
+  that opened the file — the same key.
+- **Playback wins.** pg_dump runs at below-normal priority and the writer
+  loop pauses while the load meter reports playback (the miner's hold),
+  driven by the meter's subscribe callback, not a poll; pg_dump keeps its
+  snapshot across the pause. The Web UI says "Paused while playing".
+- **Docker needs the PG 18 client.** jammy's `postgresql-client` is 14 and
+  refuses an 18 server; both Dockerfiles install `postgresql-client-18`
+  from PGDG and pin `PG_BIN=/usr/lib/postgresql/18/bin`. The launcher
+  passes its `pgsql/bin` (or Homebrew's) as `PG_BIN` in `backend.env`, and
+  `BACKUP_DIR=<data_dir>/backup`; Docker mounts `./data/backup`.
+- **Anonymous identities cannot back up**: the key is the account password
+  and a minted one was never seen. The Settings card says so and points at
+  Profile.
+
+Entry points: Web UI Settings › Library › Backup (`GET/POST
+/api/settings/backup`, `/cancel`, `/reveal`; progress in the `backup` block
+of `/api/settings/library` on the library wake channel); launcher Settings ›
+Maintenance › "Restore from backup…" and the wizard's identity step
+("Restore from a backup…", the restore runs after `full_init`);
+`python -m backup create|inspect|restore|selftest` in the container
+(`docker compose run --rm --no-deps backend python -m backup restore
+/app/data/backup/<file> [--db music_ai_test] [--replace] [--identity]`).
+Tests: `tests/test_node_backup.py` (17 cases: KDF domain vector, round trip,
+manifest-first, wrong password, pinned KDF parameters, edited header,
+flipped byte, truncation at four points, reorder / duplicate / drop,
+trailing bytes, compatibility refusals, identity file selection, identity
+write with archive); the database half is `python -m backup selftest`.
+
 ## Code layout
 
-- `backend/backup.py` — format v1: KDF, envelope, chunked cipher, tar
-  writer/reader, `pg_dump` / `pg_restore` drivers, `--selftest`, the
-  `python -m backup` CLI (`create`, `restore`, `inspect`).
+- `desktop/node_backup.py` — format v1: KDF, envelope, chunked AEAD,
+  member framing (writer / reader), `pg_dump` / `pg_restore` drivers,
+  `restore_database`, `write_identity`, `selftest`.
+- `backend/backup.py` — the backend binding: the job (password check under
+  the login semaphore, load-meter hold, SSE progress), the listing, and the
+  `python -m backup` CLI (`create`, `inspect`, `restore`, `selftest`).
 - `backend/routers/settings.py` — `GET/POST /api/settings/backup`,
-  `POST /api/settings/backup/export`, `POST /api/settings/backup/import`;
-  events on the library SSE channel.
-- `desktop/restore.py` — launcher restore flow (stop services, restore,
-  migrations, identity, start) used by Settings › Maintenance and the
-  wizard.
+  `/backup/cancel`, `/backup/reveal`; the `backup` block of `/library`.
+  Phase 2 adds `POST /api/settings/backup/export` and `/import`.
+- `desktop/restore.py` — launcher restore flow (`restore_launcher_node`:
+  database, migrations, identity) and the `RestoreDialog` used by
+  Settings › Maintenance and the wizard; `desktop/launcher.py` stops and
+  restarts the services around it.
 - `backend/seed_export.py` / `seed_import.py` — grow into the share
   export/import (pick list → scope selector); the seed bundle stays a
   caller.
-- `backend/static/app-shell.js` — the Backup card under Settings › Library,
-  next to "Remove phantom layer"; dialogs via `notifyDialog` /
+- `backend/static/app-shell.js` — the Backup block on Settings › Library
+  (`_backupBlockHTML`, the password sheet); dialogs via `notifyDialog` /
   `confirmDestructive`, never `alert`/`confirm`.
-- Docker image: `postgresql-client-18` (pg_dump/pg_restore in the backend
-  container); launcher: `pgsql/bin` on `PG_BIN`.
+- Docker image: `postgresql-client-18` from PGDG, `PG_BIN` pinned; launcher:
+  `pgsql/bin` on `PG_BIN`, `BACKUP_DIR=<data_dir>/backup`.
 
 ## Phases and acceptance
 
@@ -254,6 +353,14 @@ merged this way — it goes through Product B's gate like anyone else's.
    fresh `music_ai_test` with identical row counts for every non-`mb_*`
    table, the node starts on it, the identity matches, newer migrations
    apply, and the format tests fail closed on tamper / wrong password.
+   **Built and verified 2026-09-13** — `python -m backup selftest` on the
+   master: dump 3.30 GB (11 GB live, 78 own tables) in ~5 min, restore into
+   `music_ai_test` in 418 s (the HNSW index build is most of it), 78/78 row
+   counts identical, `db_migrate.apply_pending()` on the restored database a
+   no-op, 313 indexes like the live one; the API job (start / duplicate 409 /
+   wrong password 401 / cancel with the `.part` removed) exercised on the
+   restarted backend. Tk flows (launcher Settings › Maintenance, wizard)
+   are written, not yet run on the stand.
 2. **Share export + import.** Done when an export from the Docker node
    imports on the launcher stand through the gate with the expected
    counts, a re-import changes nothing, and a tampered record is refused.

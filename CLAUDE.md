@@ -502,6 +502,9 @@ break the design language. Use `window.notifyDialog()` and
 | `mcp/assistant_server.py` | MCP server exposing the assistant tools to Claude Code / Codex (search, playback, MB catalog, HQP device) |
 | `backend/assistant_queries.py` | Catalog queries + result formatting SHARED by both assistant tool surfaces (MCP + `backend/tools/definitions.py`) — one copy, so neither drifts owned-only |
 | `backend/notary.py` + `backend/sign_audio.py` | The sealing owner (one thread, woken by every producer of signable state) and its two stages: `sign()` author-signs at once, `stamp()` Merkle-batches + Worker-timestamps on the notary's cadence |
+| `desktop/node_backup.py` | Node backup format v1 (`.sbk`: Argon2id KEK in its own salt domain, per-file data key, chunked XChaCha20-Poly1305 with the header as AAD, framed members) + `pg_dump`/`pg_restore` drivers, staged restore, identity write, selftest — shared by launcher and backend (`docs/design/BACKUP.md`) |
+| `backend/backup.py` | The backend binding: Settings › Library › Backup job (password check under the login semaphore, load-meter playback hold, SSE progress) and the `python -m backup create\|inspect\|restore\|selftest` CLI |
+| `desktop/restore.py` | Launcher restore flow (`restore_launcher_node`) + `RestoreDialog` for Settings › Maintenance and the wizard; the launcher stops P2P + backend around it |
 
 ---
 
