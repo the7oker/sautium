@@ -56,7 +56,11 @@ class BrowserBackend(PlayerBackend):
         self._volume = 100.0
         # Bumped on every server-initiated track start; events stamped with
         # an older epoch are stale (they raced a newer load directive) and
-        # must not resync the index or position.
+        # must not resync the index or position. 0 means THIS process has
+        # issued no directive yet — nothing can be stale relative to it, so
+        # the first event after a backend restart hands its epoch over (see
+        # on_client_event): the tab kept playing through the restart and is
+        # the only one who knows the slot and the position.
         self._epoch = 0
         # A play intent that arrived while NO renderer tab was attached
         # (e.g. the previous renderer closed): honored the moment a tab
@@ -190,9 +194,19 @@ class BrowserBackend(PlayerBackend):
             logger.info("renderer event ignored (displaced tab %s): %s", tab[:8], event)
             return None   # a displaced tab still flushing events
         if epoch is not None and epoch != self._epoch:
-            logger.info("renderer event ignored (stale epoch %s != %s): %s",
-                        epoch, self._epoch, event)
-            return None   # stale event raced a newer load directive
+            if self._epoch == 0 and epoch > 0:
+                # No directive since this process started (a backend
+                # restart under a playing tab): the tab's epoch is the
+                # newest there is. Adopting it lets the slot/position/state
+                # resync below happen instead of dropping every event and
+                # reporting "stopped" over audible music.
+                logger.info("renderer resynced after restart: epoch %s, slot %s, %s",
+                            epoch, queue_index, event)
+                self._epoch = int(epoch)
+            else:
+                logger.info("renderer event ignored (stale epoch %s != %s): %s",
+                            epoch, self._epoch, event)
+                return None   # stale event raced a newer load directive
         if event != "timeupdate":
             # The renderer is a black box on the other side of an SSE
             # channel: without this line a track that quietly refuses to
