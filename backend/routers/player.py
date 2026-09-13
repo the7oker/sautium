@@ -1813,6 +1813,7 @@ def _resolve_waterfall(queries: list) -> list:
     sids, durs, arts = {}, {}, {}
     unanswered = set()                      # a provider gave no answer — not a miss
     silence = {}                            # provider id -> the first reason it gave none
+    answered = set()                        # provider ids that gave a definite answer
     unresolved = list(pending)
     for pi, prov in enumerate(provs):
         if not unresolved:
@@ -1827,10 +1828,22 @@ def _resolve_waterfall(queries: list) -> list:
                 still.append(i)
                 silence.setdefault(prov.manifest.id, str(r))
             elif r is not None:
+                answered.add(prov.manifest.id)
                 best[i], sids[i], durs[i], arts[i] = pi, r.source_id, r.duration, r.artwork_url
             else:
+                answered.add(prov.manifest.id)
                 still.append(i)
         unresolved = still
+
+    if pending:
+        # A provider silent for the WHOLE pass is a condition the user should
+        # see (rows grey out with no reason otherwise); one that answered
+        # anything is back. Transitions wake the notices channel.
+        silent_all = {pid: reason for pid, reason in silence.items()
+                      if pid not in answered}
+        if streaming_service.note_provider_health(silent_all, answered):
+            from db_pool import db_execute
+            db_execute("NOTIFY sautium_notices")
 
     if pending:
         # One line per pass, so a catalog that quietly stops answering (quota,

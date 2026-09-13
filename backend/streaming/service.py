@@ -199,6 +199,31 @@ def get_proxy() -> Optional[MediaProxy]:
     return _proxy
 
 
+# Provider health as the notices channel sees it: a provider that answered
+# every query of a resolve pass with "unavailable" (quota, outage, a gate)
+# is silent from that pass until one where it answers. Written by the
+# resolve waterfall (routers/player.py), read by routers/settings.
+provider_health: dict = {}          # id -> {"silent_since": iso, "reason": str}
+
+
+def note_provider_health(silent: dict, answered: set) -> bool:
+    """`silent`: id -> reason for providers that answered nothing this
+    pass; `answered`: ids that gave at least one definite answer. Returns
+    True on a transition either way — the caller wakes the channel."""
+    from datetime import datetime, timezone
+    changed = False
+    for pid, reason in silent.items():
+        if pid not in provider_health:
+            provider_health[pid] = {
+                "silent_since": datetime.now(timezone.utc).isoformat(),
+                "reason": reason[:200]}
+            changed = True
+    for pid in answered:
+        if provider_health.pop(pid, None) is not None:
+            changed = True
+    return changed
+
+
 def providers_preferred() -> list:
     """All enabled providers, lossless-first (lossless before lossy).
     The per-track resolve waterfall tries each in order, so a track absent from

@@ -411,9 +411,13 @@ visual language:
 The active set comes from the server as a **snapshot** on
 `/api/events` (`{"t": "notice"}`), derived in
 `backend/routers/settings.py::_notices_state()` from the cooldown
-ledger and the launcher's `mb_slice.status` row — the rule for WHEN a
-condition exists lives there, the words and the clock (local time,
-mono) live in `NOTICE_COPY` here. The client diffs snapshots: a key
+ledger, the launcher's `mb_slice.status` row, the music folder (owned
+files known but the path empty), the media binaries on PATH and the
+stream providers' health (`streaming.service.provider_health`) — the
+rule for WHEN a condition exists lives there, the words and the clock
+(local time, mono) live in `NOTICE_COPY` here. A condition with no ledger
+keeps its `since` in `_derived_since`; its producers wake the channel on
+the bad AND the good transition (`notices_recheck`). The client diffs snapshots: a key
 that appears or re-arms toasts once; the connect-time snapshot is
 `initial` and paints state only, so a tab that slept through a change
 wakes to the rows, never to a burst of stale toasts. Wake the channel

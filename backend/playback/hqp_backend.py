@@ -220,6 +220,11 @@ def _add_uris_with_retry(uris: list[str], *, clear_first: bool = False) -> int:
             added += 1
         else:
             logger.warning(f"playlist_add failed after reconnect: {uri}")
+    if added < len(uris):
+        # HQPlayer refuses a file it cannot open — a dropped music mount
+        # looks exactly like this; the notices channel re-derives.
+        from db_pool import db_execute
+        db_execute("NOTIFY sautium_notices")
     return added
 
 

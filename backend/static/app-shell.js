@@ -9697,12 +9697,28 @@
       }
     },
   };
+  NOTICE_COPY['library.mount_missing'] = n => ({
+    title: 'Music folder unreachable',
+    text: `<span class="num">${escapeHtml((n.data && n.data.path) || '')}</span> is empty or not mounted — your own tracks cannot play until it is back.`,
+  });
+  NOTICE_COPY['tools.missing'] = n => ({
+    title: 'Media tools missing',
+    text: `${escapeHtml(((n.data && n.data.tools) || []).join(', '))} not found — audio analysis and fingerprinting are skipped until installed.`,
+  });
+  const PROVIDER_NAMES = { deezer: 'Deezer', youtube: 'YouTube' };
   function noticeCopy(n) {
     const fn = NOTICE_COPY[n.key];
     if (fn) return fn(n);
     if (n.key.startsWith('cooldown.')) {
       return { title: `${escapeHtml((n.data && n.data.source) || n.key.slice(9))} paused`,
                text: `Rate-limited — resumes ${fmtUntil(n.until)}.` };
+    }
+    if (n.key.startsWith('streaming.silent.')) {
+      const pid = (n.data && n.data.provider) || n.key.slice(17);
+      const name = PROVIDER_NAMES[pid] || pid;
+      const reason = (n.data && n.data.reason) ? ` (${escapeHtml(n.data.reason)})` : '';
+      return { title: `${escapeHtml(name)} is not answering`,
+               text: `Streamed tracks fall back to another provider or wait${reason}; your own files are unaffected.` };
     }
     return { title: escapeHtml(n.key), text: '' };
   }

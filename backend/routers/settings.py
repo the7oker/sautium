@@ -14,7 +14,9 @@ need to know about them directly.
 import asyncio
 import json
 import logging
+import os
 import select
+import shutil
 import threading
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -1078,6 +1080,46 @@ def _guidance_state() -> Dict[str, Any]:
     return {"tasks": tasks}
 
 
+# Conditions with no ledger of their own (a vanished music folder, a missing
+# binary, a silent stream provider) keep their `since` here from the moment
+# they are first observed until they are not — process memory, which is
+# enough: after a restart the condition is either gone or freshly observed.
+_derived_since: Dict[str, str] = {}
+# The binaries THIS process shells out to (analysis + provenance). `flac`
+# is launcher-side only — the Docker image never ships it, and a check
+# there would light every Docker node for nothing.
+_MEDIA_TOOLS = ("ffmpeg", "fpcalc")
+
+
+def _derived(key: str, active: bool) -> Optional[str]:
+    from datetime import datetime, timezone
+    if not active:
+        _derived_since.pop(key, None)
+        return None
+    return _derived_since.setdefault(key, datetime.now(timezone.utc).isoformat())
+
+
+def notices_recheck(key: str) -> None:
+    """A producer saw the good state again (a file served, a scan ran):
+    re-derive only if the condition is currently shown, so a healthy node
+    never pays for this."""
+    if key in _derived_since:
+        db_execute("NOTIFY sautium_notices")
+
+
+def _music_root_empty() -> bool:
+    """The library path is there but holds nothing while the catalog knows
+    owned files: a drvfs mount that dropped under a running node, a
+    forgotten drive. An unreadable path counts as empty."""
+    if not db_query_one("SELECT 1 AS x FROM media_files LIMIT 1"):
+        return False
+    try:
+        with os.scandir(app_settings.music_library_path) as it:
+            return next(it, None) is None
+    except OSError:
+        return True
+
+
 def _notices_state() -> Dict[str, Any]:
     """Active conditions that change what the user sees without any action
     of theirs: an external API that cooled us down, catalog data the
@@ -1117,6 +1159,21 @@ def _notices_state() -> Dict[str, Any]:
                      ("unserved", "pending", "pending_capped", "served",
                       "reason", "sources")},
         })
+    since = _derived("library.mount_missing", _music_root_empty())
+    if since:
+        items.append({"key": "library.mount_missing", "kind": "error",
+                      "since": since, "until": None,
+                      "data": {"path": app_settings.music_library_path}})
+    missing = [t for t in _MEDIA_TOOLS if not shutil.which(t)]
+    since = _derived("tools.missing", bool(missing))
+    if since:
+        items.append({"key": "tools.missing", "kind": "warning",
+                      "since": since, "until": None, "data": {"tools": missing}})
+    from streaming import service as streaming_service
+    for pid, health in sorted(streaming_service.provider_health.items()):
+        items.append({"key": f"streaming.silent.{pid}", "kind": "warning",
+                      "since": health["silent_since"], "until": None,
+                      "data": {"provider": pid, "reason": health["reason"]}})
     seen = _read("notice.seen") or {}
     for item in items:
         item["seen"] = seen.get(item["key"]) == item["since"]
