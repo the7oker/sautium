@@ -488,6 +488,19 @@
     return (location.hash || '').replace(/^#/, '') || 'home';
   }
 
+  /* Back is a browser mutation that lands asynchronously: the second tap
+     of a double-tap used to fire a second history.back() before the first
+     had arrived, and the user went two screens up. The latch is released
+     by the navigation itself (popstate), never by a timer. */
+  let _backPending = false;
+  window.addEventListener('popstate', () => { _backPending = false; });
+  function goBack(fallback) {
+    if (_backPending) return;
+    if (history.length > 1) { _backPending = true; history.back(); }
+    else if (fallback) navigate(fallback);
+  }
+  window.goBack = goBack;
+
   function navigate(hash) {
     const target = '#' + hash;
     if (_windowRoot) _windowIntent = 'navigate';
@@ -958,48 +971,52 @@
         });
       }
       if (this.radioBtn) {
-        this.radioBtn.addEventListener('click', async e => {
+        this.radioBtn.addEventListener('click', e => {
           e.stopPropagation();
+          // One flow per tap, dialog included: the confirm is opened from
+          // inside the latch, so a double-tap cannot stack two of them.
+          onceInFlight(this.radioBtn, async () => {
           const isOn = this.radioBtn.getAttribute('data-state') === 'on';
-          if (isOn) {
-            try {
-              await fetch('/api/player/radio/stop', { method: 'POST' });
-            } catch (err) { console.warn('radio stop failed', err); }
-            return;
-          }
-          // Off → On. Radio replaces the queue, so warn the user if
-          // there's more than just the current track to lose. Seed by owned
-          // media_file_id, or — for a streamed phantom track — its track UUID.
-          const seedMf = this._npMfId;
-          const seedTid = this._npPreviewTid;
-          if (!seedMf && !seedTid) return;
-          const playlistLen = (window.currentPlaylist || []).length;
-          if (playlistLen > 1) {
-            const ok = await window.confirmDestructive({
-              title: 'Start radio?',
-              message: 'Your current queue will be replaced with this track plus similar ones.',
-              confirmText: 'Start radio',
-              cancelText: 'Cancel',
-            });
-            if (!ok) return;
-          }
-          window.maybeClaimRenderer();
-          try {
-            const resp = await fetch('/api/player/radio/start', {
-              method: 'POST',
-              headers: { 'Content-Type': 'application/json' },
-              body: JSON.stringify(seedMf ? { track_id: seedMf } : { track_uuid: seedTid }),
-            });
-            if (!resp.ok) {
-              let msg = 'Could not start radio.';
-              try { const b = await resp.json(); if (b && b.detail) msg = b.detail; } catch (_) {}
-              if (resp.status === 503) {
-                await reportOutputUnavailable(msg);
-              } else {
-                notices.toast({ kind: 'error', title: 'Radio', text: escapeProfileHtml(msg) });
-              }
+            if (isOn) {
+              try {
+                await fetch('/api/player/radio/stop', { method: 'POST' });
+              } catch (err) { console.warn('radio stop failed', err); }
+              return;
             }
-          } catch (err) { console.warn('radio start failed', err); }
+            // Off → On. Radio replaces the queue, so warn the user if
+            // there's more than just the current track to lose. Seed by owned
+            // media_file_id, or — for a streamed phantom track — its track UUID.
+            const seedMf = this._npMfId;
+            const seedTid = this._npPreviewTid;
+            if (!seedMf && !seedTid) return;
+            const playlistLen = (window.currentPlaylist || []).length;
+            if (playlistLen > 1) {
+              const ok = await window.confirmDestructive({
+                title: 'Start radio?',
+                message: 'Your current queue will be replaced with this track plus similar ones.',
+                confirmText: 'Start radio',
+                cancelText: 'Cancel',
+              });
+              if (!ok) return;
+            }
+            window.maybeClaimRenderer();
+            try {
+              const resp = await fetch('/api/player/radio/start', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify(seedMf ? { track_id: seedMf } : { track_uuid: seedTid }),
+              });
+              if (!resp.ok) {
+                let msg = 'Could not start radio.';
+                try { const b = await resp.json(); if (b && b.detail) msg = b.detail; } catch (_) {}
+                if (resp.status === 503) {
+                  await reportOutputUnavailable(msg);
+                } else {
+                  notices.toast({ kind: 'error', title: 'Radio', text: escapeProfileHtml(msg) });
+                }
+              }
+            } catch (err) { console.warn('radio start failed', err); }
+          });
         });
       }
       // Tap artist / album text → open the corresponding detail screen.
@@ -1276,11 +1293,13 @@
     // near-noise. Rows come in renderSimilar's mixed contract already.
     async fetchSimilarSeed(tid) {
       if (!tid) return;
+      this._similarTid = tid;
       try {
         const resp = await fetch('/api/player/similar/'
           + encodeURIComponent(tid) + '?limit=7');
         if (!resp.ok) return;
         const data = await resp.json();
+        if (this._similarTid !== tid) return;   // the deck moved on meanwhile
         this.renderSimilar(data.results || []);
       } catch (err) {
         console.warn('similar fetch failed:', err);
@@ -1791,7 +1810,10 @@
         btn.addEventListener('click', e => {
           e.stopPropagation();
           const idx = parseInt(btn.dataset.index, 10);
-          if (idx) this.removeAt(idx);
+          // The list is the busy unit, not the button: the optimistic
+          // re-render puts the NEXT row's × under the finger, and the
+          // second tap of a double-tap must not remove that one too.
+          if (idx) onceInFlight(this.list, () => this.removeAt(idx));
         });
       });
       // Drag handles → reorder. See attachDrag for the gesture
@@ -2037,15 +2059,19 @@
       // the next playlist-loaded event from the SSE poller will
       // overwrite our optimistic copy with the authoritative HQP
       // state.
+      const victim = this.tracks[index - 1];
       const optimistic = this.tracks.slice(0, index - 1)
         .concat(this.tracks.slice(index));
       this.tracks = optimistic;
       this.render();
       try {
+        // The slot's identity rides along: a queue that moved under us
+        // (radio refill, another device) makes the server refuse rather
+        // than remove whatever now sits at that index.
         await fetch('/api/player/remove', {
           method: 'POST',
           headers: {'Content-Type': 'application/json'},
-          body: JSON.stringify({index}),
+          body: JSON.stringify({index, track_id: (victim && victim.track_id) || null}),
         });
         // Force a refresh — the SSE poller picks up the change
         // within ~1s but tapping refresh removes the visible delay.
@@ -2329,13 +2355,15 @@
       const wasActive = row.classList.contains('is-active');
       row.classList.remove('is-active');
       row.classList.add('is-confirming');
+      // Cancel sits flush right — exactly where the trash icon was — so the
+      // second tap of a double-tap restores the row instead of deleting it.
       row.innerHTML = `
         <div class="ai-confirm-bar">
           <span class="ai-confirm-ask">Delete this chat?</span>
-          <button type="button" class="ai-confirm-btn"
-                  data-action="cancel">Cancel</button>
           <button type="button" class="ai-confirm-btn is-danger"
                   data-action="delete">Delete</button>
+          <button type="button" class="ai-confirm-btn"
+                  data-action="cancel">Cancel</button>
         </div>
       `;
       const restore = () => {
@@ -2359,11 +2387,19 @@
       });
       row.querySelector('[data-action="delete"]').addEventListener('click', e => {
         e.stopPropagation();
-        this.deleteSession(session.id);
+        onceInFlight(row, () => this.deleteSession(session.id));
       });
     },
 
-    async newSession() {
+    // Single-flight: both "+ New" buttons and send() on a fresh sheet call
+    // this, and a double-tap must open ONE chat, not two orphans.
+    newSession() {
+      if (this._creating) return this._creating;
+      this._creating = this._newSession().finally(() => { this._creating = null; });
+      return this._creating;
+    },
+
+    async _newSession() {
       try {
         const resp = await fetch('/api/chat/sessions', {
           method: 'POST',
@@ -2414,6 +2450,7 @@
         const resp = await fetch('/api/chat/sessions/' + id + '/messages');
         if (!resp.ok) throw httpError(resp);
         const data = await resp.json();
+        if (this.activeSessionId !== id) return;   // a newer switch owns the thread
         const messages = data.messages || [];
         this.thread.innerHTML = '';
         if (messages.length === 0 && !data.generating) {
@@ -2510,7 +2547,12 @@
       const text = (this.input.value || '').trim();
       if (!text || this.sending) return;
       if (this.activeSessionId === null) {
-        await this.newSession();
+        // Latched BEFORE the await: a second submit during session
+        // creation used to pass the check above and post the text twice.
+        this.sending = true;
+        this.sendBtn.disabled = true;
+        try { await this.newSession(); }
+        finally { this.sending = false; this.sendBtn.disabled = false; }
         if (this.activeSessionId === null) return;
       }
       const sessionId = this.activeSessionId;
@@ -4867,7 +4909,7 @@
     } catch (err) {
       screen.innerHTML = `<div class="placeholder-screen">
         <p class="placeholder-body">${unreachableCopy(err, 'Artist not found.')}</p>
-        <button class="back-link" onclick="history.back()">← Back</button>
+        <button class="back-link" onclick="goBack()">← Back</button>
       </div>`;
       return;
     }
@@ -5313,7 +5355,9 @@
       fillSimilar(slot);
     };
 
+    let loadSeq = 0;
     const loadAndRender = async () => {
+      const mySeq = ++loadSeq;
       let d;
       try {
         const url = '/api/albums/' + encodeURIComponent(albumId)
@@ -5321,10 +5365,12 @@
         const resp = await fetch(url);
         if (!resp.ok) throw httpError(resp);
         d = await resp.json();
+        if (mySeq !== loadSeq) return;    // a later variant pick owns the screen
       } catch (err) {
+        if (mySeq !== loadSeq) return;
         screen.innerHTML = `<div class="placeholder-screen">
           <p class="placeholder-body">${unreachableCopy(err, 'Album not found.')}</p>
-          <button class="back-link" onclick="history.back()">← Back</button>
+          <button class="back-link" onclick="goBack()">← Back</button>
         </div>`;
         return;
       }
@@ -5553,7 +5599,7 @@
     } catch (err) {
       screen.innerHTML = `<div class="placeholder-screen">
         <p class="placeholder-body">${unreachableCopy(err, 'Release group not found.')}</p>
-        <button class="back-link" onclick="history.back()">← Back</button>
+        <button class="back-link" onclick="goBack()">← Back</button>
       </div>`;
       return;
     }
@@ -5613,7 +5659,7 @@
     `;
 
     screen.querySelector('[data-action="back"]')
-      .addEventListener('click', () => history.back());
+      .addEventListener('click', () => goBack());
     const artistBtn = screen.querySelector('[data-artist-id]');
     if (artistBtn) artistBtn.addEventListener('click', () =>
       navigateToEntity('artist', artistBtn.getAttribute('data-artist-id')));
@@ -5661,7 +5707,7 @@
     } catch (err) {
       screen.innerHTML = `<div class="placeholder-screen">
         <p class="placeholder-body">${unreachableCopy(err, 'Session not found.')}</p>
-        <button class="back-link" onclick="history.back()">← Back</button>
+        <button class="back-link" onclick="goBack()">← Back</button>
       </div>`;
       return;
     }
@@ -5844,6 +5890,30 @@
     el.dataset.busy = '1';
     try { await fn(); }
     finally { delete el.dataset.busy; }
+  }
+
+  /* Per-key write chain: rapid writes to one setting land in tap order, so
+     the last tap is the last write and the server ends where the user
+     left the switch — two PUTs in flight at once could land either way. */
+  const _writeChains = new Map();
+  function serialized(key, fn) {
+    const prev = _writeChains.get(key) || Promise.resolve();
+    const next = prev.catch(() => {}).then(fn);
+    _writeChains.set(key, next);
+    next.catch(() => {}).then(() => {
+      if (_writeChains.get(key) === next) _writeChains.delete(key);
+    });
+    return next;
+  }
+
+  /* Per-key freshness for refreshers: a response paints only if no newer
+     request for the same key started while it was in flight — otherwise a
+     slow earlier fetch repaints over the state the user just changed. */
+  const _freshSeq = new Map();
+  function claimFresh(key) {
+    const n = (_freshSeq.get(key) || 0) + 1;
+    _freshSeq.set(key, n);
+    return () => _freshSeq.get(key) === n;
   }
 
   // Playback 503 = the configured output can't take the command (a dozing
@@ -6082,7 +6152,7 @@
   function wireDetailHandlers(screen, ctx = {}) {
     // Back chevron
     screen.querySelectorAll('[data-action="back"]').forEach(btn => {
-      btn.addEventListener('click', () => history.back());
+      btn.addEventListener('click', () => goBack());
     });
     // Artist tile / similar artist / album-artist link
     screen.querySelectorAll('[data-artist-id]').forEach(el => {
@@ -6141,9 +6211,13 @@
     // /reorder call to slot the new track right after the current
     // one — HQPlayer has no insert primitive, so the seamless-
     // rebuild reorder is the cleanest path.
+    // Open/close toggles read the click count: the second click of a
+    // desktop double-click (e.detail 2) is the same intent as the first,
+    // not a request to close what just opened.
     screen.querySelectorAll('.track-row:not(.is-phantom-track) .track-add').forEach(btn => {
       btn.addEventListener('click', (e) => {
         e.stopPropagation();
+        if (e.detail > 1) return;
         const row = btn.closest('[data-media-file-id]');
         if (!row) return;
         if (row.classList.contains('is-confirming')) {
@@ -6158,6 +6232,7 @@
     screen.querySelectorAll('.track-row.is-phantom-track .track-add').forEach(btn => {
       btn.addEventListener('click', (e) => {
         e.stopPropagation();
+        if (e.detail > 1) return;
         const row = btn.closest('.track-row');
         if (!row) return;
         if (row.classList.contains('is-confirming')) closeQueueConfirm(row);
@@ -6167,7 +6242,8 @@
     // Phantom [+ Queue] → toggles the album-wide "Add album to: [Next] [End]"
     // confirm; the chosen position streams via queue-phantom-album.
     screen.querySelectorAll('[data-action="queue-phantom-album"]').forEach(btn => {
-      btn.addEventListener('click', () => {
+      btn.addEventListener('click', (e) => {
+        if (e.detail > 1) return;
         const wrap = btn.closest('.album-actions');
         if (!wrap) return;
         if (wrap.classList.contains('is-confirming')) closeAlbumQueueConfirm(wrap);
@@ -6203,8 +6279,8 @@
       });
     });
     screen.querySelectorAll('[data-action="queue-session"]').forEach(btn => {
-      btn.addEventListener('click', () => {
-        if (btn.disabled || !ctx.sessionId) return;
+      btn.addEventListener('click', (e) => {
+        if (e.detail > 1 || btn.disabled || !ctx.sessionId) return;
         const wrap = btn.closest('.album-actions');
         if (!wrap) return;
         if (wrap.classList.contains('is-confirming')) { closeAlbumQueueConfirm(wrap); return; }
@@ -6316,8 +6392,8 @@
     // it 45° in confirming state. Play all is hidden under the bar
     // so the bar can stretch into its column.
     screen.querySelectorAll('[data-action="queue-album"]').forEach(btn => {
-      btn.addEventListener('click', () => {
-        if (!ctx.tracks || !ctx.tracks.length) return;
+      btn.addEventListener('click', (e) => {
+        if (e.detail > 1 || !ctx.tracks || !ctx.tracks.length) return;
         const ids = ctx.tracks.map(t => t.media_file_id).filter(Boolean);
         if (!ids.length) return;
         const wrap = btn.closest('.album-actions');
@@ -6562,8 +6638,10 @@
       <button class="track-confirm-btn" type="button" data-confirm="end">End</button>`;
     const addBtn = row.querySelector('.track-add');
     if (addBtn) row.insertBefore(bar, addBtn); else row.appendChild(bar);
-    const go = async (position) => {
-      closeQueueConfirm(row);
+    // The bar stays up (buttons disabled) until the request settles: closing
+    // it first put the row body — a play target — under the second tap.
+    const go = (position) => onceInFlight(bar, async () => {
+      bar.querySelectorAll('.track-confirm-btn').forEach(b => { b.disabled = true; });
       setTrackBuffering(screen, tid, true);
       const resp = await fetch('/api/player/queue-phantom-track', {
         method: 'POST', headers: { 'Content-Type': 'application/json' },
@@ -6572,17 +6650,20 @@
       let body = null;
       try { body = resp ? await resp.json() : null; } catch (_) {}
       setTrackBuffering(screen, tid, false);
-      if (!resp || !resp.ok) { await reportPlaybackResult(resp); return; }
+      closeQueueConfirm(row);
+      if (!resp || !resp.ok) { await reportPlaybackResult(resp, body); return; }
       if (body && body.track_count === 0) applyPhantomMissing(screen, body.missing);
-    };
+    });
     bar.querySelector('[data-confirm="next"]').addEventListener('click', e => { e.stopPropagation(); go('next'); });
     bar.querySelector('[data-confirm="end"]').addEventListener('click', e => { e.stopPropagation(); go('end'); });
   }
 
   // The album-wide "Add … to: [Next] [End]" bar for actions the SERVER
   // positions (a phantom album, a history snapshot): `go(position)` makes the
-  // request once the bar is closed. opts.next=false leaves End alone when the
-  // server can only append; opts.ask replaces the "Add album to:" label.
+  // request while the bar stays up with its buttons disabled — closing it
+  // first brought Play/Stream all back under the second tap of a double-tap,
+  // which then replaced the queue just extended. opts.next=false leaves End
+  // alone when the server can only append; opts.ask replaces the label.
   function openAlbumQueueBar(wrap, go, opts = {}) {
     wrap.classList.add('is-confirming');
     const bar = document.createElement('div');
@@ -6595,8 +6676,11 @@
     if (queueBtn) wrap.insertBefore(bar, queueBtn); else wrap.appendChild(bar);
     bar.querySelectorAll('[data-confirm]').forEach(b => b.addEventListener('click', e => {
       e.stopPropagation();
-      closeAlbumQueueConfirm(wrap);
-      go(b.getAttribute('data-confirm'));
+      onceInFlight(bar, async () => {
+        bar.querySelectorAll('.track-confirm-btn').forEach(x => { x.disabled = true; });
+        try { await go(b.getAttribute('data-confirm')); }
+        finally { closeAlbumQueueConfirm(wrap); }
+      });
     }));
   }
   function openPhantomAlbumQueueConfirm(screen, wrap, albumId) {
@@ -6633,7 +6717,7 @@
     } catch (err) {
       screen.innerHTML = `<div class="placeholder-screen">
         <p class="placeholder-body">${unreachableCopy(err, 'Genre not found.')}</p>
-        <button class="back-link" onclick="history.back()">← Back</button>
+        <button class="back-link" onclick="goBack()">← Back</button>
       </div>`;
       return;
     }
@@ -6725,9 +6809,7 @@
       ` : ''}
     `;
 
-    screen.querySelector('[data-action="back"]')?.addEventListener('click', () => {
-      history.back();
-    });
+    screen.querySelector('[data-action="back"]')?.addEventListener('click', () => goBack());
     screen.querySelectorAll('.artist-tile[data-artist-id]').forEach(el => {
       el.addEventListener('click', () =>
         navigateToEntity('artist', el.getAttribute('data-artist-id')));
@@ -7015,8 +7097,10 @@
     }
 
     async function refreshFriends(patch) {
+      const fresh = claimFresh('friends.list');
       try {
         const page = await fetchFriendsPage('', state.q);
+        if (!fresh()) return;          // a newer search/refresh owns the list
         rememberRows(page);
         const fresh = [...page.pinned, ...page.items];
         if (patch) {
@@ -7126,11 +7210,12 @@
     });
 
     // Add by code.
-    screen.querySelector('[data-action="add-by-code"]').addEventListener('submit', async e => {
+    screen.querySelector('[data-action="add-by-code"]').addEventListener('submit', e => {
       e.preventDefault();
       const input = e.target.querySelector('input[name="code"]');
       const code = (input.value || '').trim();
       if (!code) return;
+      onceInFlight(e.target, async () => {
       showHint('Adding…', false);
       try {
         const resp = await fetch('/api/p2p/friends/add', {
@@ -7149,14 +7234,19 @@
       } catch (err) {
         showHint('Network error.', true);
       }
+      });
     });
 
-    // Invite by email.
+    // Invite by email. The Worker sends a mail per call, so the form is
+    // frozen for the whole round trip — a double-tap sent two invites.
     emailRow.addEventListener('submit', async e => {
       e.preventDefault();
       if (emailInput.disabled) return;
       const email = (emailInput.value || '').trim();
       if (!email) return;
+      emailInput.disabled = true;
+      const sendBtn = emailRow.querySelector('button[type="submit"], button');
+      if (sendBtn) sendBtn.disabled = true;
       showHint('Sending…', false);
       try {
         const resp = await fetch('/api/p2p/invite-by-email', {
@@ -7173,6 +7263,9 @@
         showHint('Invite sent.', true);
       } catch (err) {
         showHint('Network error.', true);
+      } finally {
+        emailInput.disabled = false;
+        if (sendBtn) sendBtn.disabled = false;
       }
     });
   }
@@ -7235,8 +7328,10 @@
         close(); onChanged && onChanged();
       } catch (e) { msg.style.color = 'var(--color-negative)'; msg.textContent = String(e.message || e); }
     });
-    overlay.querySelector('[data-act="delete"]').addEventListener('click', async () => {
-      close();
+    // The sheet stays (inert under the dialog) until the decision is made:
+    // closing it first put the friends list under the second tap of a
+    // double-tap, and one tap in the dialog is not a tap on the list.
+    overlay.querySelector('[data-act="delete"]').addEventListener('click', () => onceInFlight(overlay, async () => {
       const ok = await window.confirmDestructive({
         title: 'Delete friend?',
         message: isMaster
@@ -7244,10 +7339,11 @@
           : `Chat history with <b>${escapeProfileHtml(name)}</b> will be deleted on this device.`,
         confirmText: 'Delete',
       });
-      if (!ok) return;
+      if (!ok) { close(); return; }
       const r = await fetch(`/api/p2p/friends/${friend.id}`, {method: 'DELETE'});
       if (r.ok && onChanged) onChanged();
-    });
+      close();
+    }));
   }
 
   const TOKEN_EXPIRY_PRESETS = [
@@ -7403,7 +7499,7 @@
     overlay.querySelector('[data-cancel]').addEventListener('click', close);
     const msg = overlay.querySelector('#tkMsgLine');
 
-    overlay.querySelector('[data-confirm]').addEventListener('click', async () => {
+    overlay.querySelector('[data-confirm]').addEventListener('click', () => onceInFlight(overlay, async () => {
       const rights = [];
       if (overlay.querySelector('#tkMsg').checked) rights.push('can_message');
       if (overlay.querySelector('#tkSearch').checked) rights.push('can_search');
@@ -7458,21 +7554,21 @@
         msg.style.color = 'var(--color-negative)';
         msg.textContent = String(err);
       }
-    });
+    }));
 
     const revokeBtn = overlay.querySelector('[data-revoke]');
     if (revokeBtn) {
-      revokeBtn.addEventListener('click', async () => {
-        close();
+      revokeBtn.addEventListener('click', () => onceInFlight(overlay, async () => {
         const ok = await window.confirmDestructive({
           title: 'Revoke invite link?',
           message: 'Nobody will be able to join with this link anymore. Friends who already joined keep their access.',
           confirmText: 'Revoke',
         });
+        close();
         if (!ok) return;
         await fetch(`/api/p2p/tokens/${token.id}/revoke`, {method: 'POST'});
         if (onSaved) onSaved();
-      });
+      }));
     }
   }
 
@@ -8085,8 +8181,7 @@
       </div>
     `;
     screen.querySelector('[data-action="back"]').addEventListener('click', () => {
-      if (history.length > 1) history.back();
-      else navigate('home');
+      goBack('home');
     });
     screen.querySelector('[data-action="refresh"]').addEventListener('click', () => {
       load();
@@ -8095,6 +8190,7 @@
     let lastState = null;
 
     async function load() {
+      const fresh = claimFresh('hqp.load');
       const body = screen.querySelector('#hqpBody');
       // First-time render shows the Loading placeholder; subsequent
       // refreshes (filter pick, refresh button) keep current content
@@ -8114,9 +8210,11 @@
         if (!r.ok) throw new Error('HTTP ' + r.status);
         s = await r.json();
       } catch (err) {
+        if (!fresh()) return;
         body.innerHTML = `<div class="hqp-error">Could not reach HQPlayer.</div>`;
         return;
       }
+      if (!fresh()) return;          // a later load owns the panel
       lastState = s;
       renderBody(body, s);
     }
@@ -8294,57 +8392,68 @@
       `;
 
       // Wire dropdowns: each select calls /config with one knob.
+      // Every knob write rides one chain: HQPlayer applies them in tap
+      // order, and the reload after each one paints only if it is still
+      // the latest (claimFresh in load()).
       body.querySelectorAll('select[data-knob]').forEach(sel => {
-        sel.addEventListener('change', async () => {
+        sel.addEventListener('change', () => {
           const knob = sel.dataset.knob;
           const raw = sel.value;
           const payload = {};
           payload[knob] = (knob === 'matrix_profile') ? raw : parseInt(raw, 10);
           if (knob === 'matrix_profile' && raw === '') return;
-          try {
-            const r = await fetch('/api/hqplayer/config', {
-              method: 'POST',
-              headers: {'Content-Type': 'application/json'},
-              body: JSON.stringify(payload),
-            });
-            const out = await r.json();
-            if (!r.ok || !out.ok) {
-              console.warn('hqp config rejected:', out);
-            }
-          } catch (err) { console.warn('hqp config failed', err); }
-          // Reload to reconcile (server-side change may cascade —
-          // e.g. mode flip changes filter availability).
-          load();
+          serialized('hqp.config', async () => {
+            try {
+              const r = await fetch('/api/hqplayer/config', {
+                method: 'POST',
+                headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify(payload),
+              });
+              const out = await r.json();
+              if (!r.ok || !out.ok) {
+                console.warn('hqp config rejected:', out);
+              }
+            } catch (err) { console.warn('hqp config failed', err); }
+            // Reload to reconcile (server-side change may cascade —
+            // e.g. mode flip changes filter availability).
+            await load();
+          });
         });
       });
 
       body.querySelectorAll('.hqp-fav-chip').forEach(btn => {
-        btn.addEventListener('click', async () => {
+        btn.addEventListener('click', () => {
           const name = btn.dataset.fav;
           const filt = (s.filters || []).find(f => f.name === name);
           if (!filt) return;
-          try {
-            await fetch('/api/hqplayer/config', {
-              method: 'POST',
-              headers: {'Content-Type': 'application/json'},
-              body: JSON.stringify({filter: filt.index, filter1x: filt.index}),
-            });
-          } catch (err) { console.warn('filter switch failed', err); }
-          load();
+          serialized('hqp.config', async () => {
+            try {
+              await fetch('/api/hqplayer/config', {
+                method: 'POST',
+                headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify({filter: filt.index, filter1x: filt.index}),
+              });
+            } catch (err) { console.warn('filter switch failed', err); }
+            await load();
+          });
         });
       });
 
+      // Volume is tap-tap-tap by design (±1 dB per tap); the chain keeps
+      // the nudges in order, it does not swallow them.
       body.querySelectorAll('[data-vol]').forEach(btn => {
-        btn.addEventListener('click', async () => {
+        btn.addEventListener('click', () => {
           const delta = parseFloat(btn.dataset.vol);
-          try {
-            await fetch('/api/hqplayer/volume', {
-              method: 'POST',
-              headers: {'Content-Type': 'application/json'},
-              body: JSON.stringify({delta}),
-            });
-          } catch (err) { console.warn('volume nudge failed', err); }
-          load();
+          serialized('hqp.config', async () => {
+            try {
+              await fetch('/api/hqplayer/volume', {
+                method: 'POST',
+                headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify({delta}),
+              });
+            } catch (err) { console.warn('volume nudge failed', err); }
+            await load();
+          });
         });
       });
 
@@ -8356,7 +8465,7 @@
       }
 
       body.querySelector('[data-action="open-filter"]').addEventListener('click', () => {
-        openFilterPicker(s, async (chosen) => {
+        openFilterPicker(s, (chosen) => serialized('hqp.config', async () => {
           try {
             await fetch('/api/hqplayer/config', {
               method: 'POST',
@@ -8364,8 +8473,8 @@
               body: JSON.stringify({filter: chosen.index, filter1x: chosen.index}),
             });
           } catch (err) { console.warn('filter switch failed', err); }
-          load();
-        });
+          await load();
+        }));
       });
     }
 
@@ -8465,15 +8574,17 @@
           const action = favs.has(name) ? 'remove' : 'add';
           if (action === 'add') favs.add(name); else favs.delete(name);
           btn.classList.toggle('is-on');
-          try {
-            await fetch('/api/hqplayer/favorites/filter', {
-              method: 'POST',
-              headers: {'Content-Type': 'application/json'},
-              body: JSON.stringify({name, action}),
-            });
-          } catch (err) {
-            console.warn('favourite update failed', err);
-          }
+          await serialized('hqp.fav', async () => {
+            try {
+              await fetch('/api/hqplayer/favorites/filter', {
+                method: 'POST',
+                headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify({name, action}),
+              });
+            } catch (err) {
+              console.warn('favourite update failed', err);
+            }
+          });
         });
       });
     }
@@ -8878,8 +8989,7 @@
       </section>`;
     const back = root.querySelector('[data-gsys-back]');
     if (back) back.addEventListener('click', () => {
-      if (history.length > 1) history.back();
-      else navigate('more/profile');
+      goBack('more/profile');
     });
     root.querySelectorAll('[data-gear-nav]').forEach(el =>
       el.addEventListener('click', () => navigate('more/gear/' + el.dataset.gearNav)));
@@ -9101,8 +9211,7 @@
       </section>`;
     const back = root.querySelector('[data-gadv-back]');
     if (back) back.addEventListener('click', () => {
-      if (history.length > 1) history.back();
-      else navigate('more/profile');
+      goBack('more/profile');
     });
     root.querySelectorAll('[data-gear-nav]').forEach(el =>
       el.addEventListener('click', () => navigate('more/gear/' + el.dataset.gearNav)));
@@ -9347,8 +9456,7 @@
     _loadHwBlock(root);
 
     root.querySelector('[data-back]').addEventListener('click', () => {
-      if (history.length > 1) history.back();
-      else navigate('home');
+      goBack('home');
     });
     root.querySelectorAll('[data-gear-id]').forEach(btn => {
       btn.addEventListener('click', () => {
@@ -9376,7 +9484,7 @@
     if (identityRow) identityRow.addEventListener('click', () => openChangeIdentityFlow(account));
 
     const signOutRow = root.querySelector('[data-action="logout-all"]');
-    if (signOutRow) signOutRow.addEventListener('click', async () => {
+    if (signOutRow) signOutRow.addEventListener('click', () => onceInFlight(signOutRow, async () => {
       const ok = await confirmDestructive({
         title: 'Sign out everywhere?',
         message: 'Every phone, tablet and browser will have to sign in again. '
@@ -9388,23 +9496,25 @@
       await notifyDialog(done
         ? { title: 'Done', kind: 'success', message: 'All other devices were signed out.' }
         : { title: 'Failed', kind: 'error', message: 'Could not sign devices out.' });
-    });
+    }));
 
     const scrobBtn = root.querySelector('[data-action="scrobble-toggle"]');
     if (scrobBtn) {
-      scrobBtn.addEventListener('click', async () => {
+      scrobBtn.addEventListener('click', () => {
         const next = !scrobBtn.classList.contains('on');
         scrobBtn.classList.toggle('on', next); // optimistic
-        try {
-          const r = await fetch('/api/profile/scrobbling', {
-            method: 'PUT',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ enabled: next }),
-          });
-          if (!r.ok) scrobBtn.classList.toggle('on', !next); // rollback
-        } catch (_) {
-          scrobBtn.classList.toggle('on', !next);
-        }
+        serialized('profile.scrobbling', async () => {
+          try {
+            const r = await fetch('/api/profile/scrobbling', {
+              method: 'PUT',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({ enabled: next }),
+            });
+            if (!r.ok) scrobBtn.classList.toggle('on', !next); // rollback
+          } catch (_) {
+            scrobBtn.classList.toggle('on', !next);
+          }
+        });
       });
     }
 
@@ -9750,7 +9860,17 @@
      account's email; POST /api/p2p/email/verify-code redeems it
      and registers the email on the Cloudflare Worker so future
      invites can claim the ✅ Verified badge. */
-  async function openEmailVerifyFlow() {
+  // One flow at a time: each call mails a code and the Worker keeps only
+  // the latest hash per invite code, so a double-tap killed its own code.
+  let _emailVerifyFlow = null;
+  function openEmailVerifyFlow() {
+    if (!_emailVerifyFlow) {
+      _emailVerifyFlow = _openEmailVerifyFlow().finally(() => { _emailVerifyFlow = null; });
+    }
+    return _emailVerifyFlow;
+  }
+
+  async function _openEmailVerifyFlow() {
     let sentTo = '';
     try {
       const r = await fetch('/api/p2p/email/send-code', { method: 'POST' });
@@ -10051,6 +10171,7 @@
 
     const fail = (text) => { msg.style.color = 'var(--color-negative)'; msg.textContent = text; };
     const submit = async () => {
+      if (confirmBtn.disabled) return;   // Enter arrives here too — same latch as the button
       const username = nameInput.value.trim();
       const password = passInput.value;
       if (!/^[A-Za-z0-9_-]{3,32}$/.test(username)) return fail('Nickname: 3-32 Latin letters, digits, - or _.');
@@ -10113,7 +10234,7 @@
     const finishRow = overlay.querySelector('#lfmFinishRow');
     const reopen = overlay.querySelector('#lfmReopen');
 
-    overlay.querySelector('[data-start]').addEventListener('click', async () => {
+    overlay.querySelector('[data-start]').addEventListener('click', (e) => onceInFlight(e.currentTarget, async () => {
       msg.style.color = 'var(--color-text-muted)';
       msg.textContent = 'Requesting authorisation URL…';
       try {
@@ -10139,9 +10260,9 @@
         msg.style.color = 'var(--color-negative)';
         msg.textContent = String(err);
       }
-    });
+    }));
 
-    overlay.querySelector('[data-finish]').addEventListener('click', async () => {
+    overlay.querySelector('[data-finish]').addEventListener('click', (e) => onceInFlight(e.currentTarget, async () => {
       msg.style.color = 'var(--color-text-muted)';
       msg.textContent = 'Confirming…';
       try {
@@ -10161,7 +10282,7 @@
         msg.style.color = 'var(--color-negative)';
         msg.textContent = String(err);
       }
-    });
+    }));
   }
 
   function openInlineProfileEditor(profile) {
@@ -10274,6 +10395,7 @@
           const r = await fetch('/api/gear-models/brands/search?q=' + encodeURIComponent(q) + '&limit=8');
           if (!r.ok) throw new Error();
           const rows = await r.json();
+          if (brandInput.value.trim() !== q) return;   // typed on — stale list
           if (rows.length === 0 ||
               (rows.length === 1 && rows[0].name.toLowerCase() === q.toLowerCase())) {
             suggest.style.display = 'none';
@@ -10403,7 +10525,7 @@
       const msg = detail ? 'This device is not in your chain.' : 'Could not load the device.';
       root.innerHTML = `<section class="screen screen-gear-detail"><div class="profile-header"><button class="icon-btn" aria-label="back" data-gear-back>${PROFILE_ICONS.back}</button><h1>Gear</h1><span></span></div><div class="placeholder">${msg}</div></section>`;
       const b = root.querySelector('[data-gear-back]');
-      if (b) b.addEventListener('click', () => { if (history.length > 1) history.back(); else navigate('more/profile'); });
+      if (b) b.addEventListener('click', () => { goBack('more/profile'); });
       return;
     }
     // detail.id is gear_models.id (canonical); status / notes / DELETE key off
@@ -10613,7 +10735,7 @@
       `;
 
       root.querySelector('[data-gear-back]').addEventListener('click', () => {
-        if (history.length > 1) history.back(); else navigate('more/profile');
+        goBack('more/profile');
       });
       const renameBtn = root.querySelector('[data-rename]');
       if (renameBtn) renameBtn.addEventListener('click',
@@ -10635,19 +10757,22 @@
         let notesTimer = null;
         notes.addEventListener('input', () => {
           clearTimeout(notesTimer);
-          notesTimer = setTimeout(async () => {
-            try {
-              await fetch('/api/profile/gear/' + g.id, {
-                method: 'PUT', headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ notes: notes.value }),
-              });
-              g.notes = notes.value;
-            } catch (_) {}
+          notesTimer = setTimeout(() => {
+            const value = notes.value;
+            serialized('gear.notes', async () => {
+              try {
+                await fetch('/api/profile/gear/' + g.id, {
+                  method: 'PUT', headers: { 'Content-Type': 'application/json' },
+                  body: JSON.stringify({ notes: value }),
+                });
+                g.notes = value;
+              } catch (_) {}
+            });
           }, 600);
         });
       }
       const removeBtn = root.querySelector('[data-remove]');
-      if (removeBtn) removeBtn.addEventListener('click', async () => {
+      if (removeBtn) removeBtn.addEventListener('click', () => onceInFlight(removeBtn, async () => {
         const ok = await confirmDestructive({
           title: 'Remove from chain?',
           message: `<b>${escapeProfileHtml(g.brand + ' ' + g.model)}</b> leaves your audio chain. Your notes and its research are kept — re-add it anytime to restore.`,
@@ -10658,8 +10783,8 @@
           const r = await fetch('/api/profile/gear/' + g.id, { method: 'DELETE' });
           if (!r.ok) { console.error('delete gear failed', r.status, await r.text()); return; }
         } catch (err) { console.error('delete gear error', err); return; }
-        if (history.length > 1) history.back(); else navigate('more/profile');
-      });
+        goBack('more/profile');
+      }));
       const retryBtn = root.querySelector('[data-retry-research]');
       if (retryBtn) retryBtn.addEventListener('click', async () => {
         retryBtn.disabled = true;
@@ -10707,6 +10832,7 @@
           const r = await fetch('/api/gear-models/brands/search?q=' + encodeURIComponent(q) + '&limit=8');
           if (!r.ok) throw new Error();
           const rows = await r.json();
+          if (brandInput.value.trim() !== q) return;   // typed on — stale list
           if (rows.length === 0 || (rows.length === 1 && rows[0].name.toLowerCase() === q.toLowerCase())) {
             suggest.style.display = 'none';
             return;
@@ -10819,8 +10945,7 @@
     `;
 
     root.querySelector('[data-back]').addEventListener('click', () => {
-      if (history.length > 1) history.back();
-      else navigate('friends');
+      goBack('friends');
     });
     root.querySelector('[data-action="message"]').addEventListener('click', () => {
       if (profile.public_key_hex) navigate('friends/chat/' + profile.public_key_hex.slice(0, 16));
@@ -11807,11 +11932,13 @@
   // rescan: true = full (PortAudio reinit + fresh DLNA cache, the button);
   // 'soft' = re-render only (post-auto-scan refresh); falsy = initial mount.
   async function renderOutputSettings(root, rescan) {
+    const fresh = claimFresh('output.render');
     let data = null;
     try {
       const r = await fetch('/api/player/outputs' + (rescan === true ? '?rescan=1' : ''));
       if (r.ok) data = await r.json();
     } catch (_) {}
+    if (!fresh()) return;            // a newer render owns the screen
     if (!data) {
       root.innerHTML = `<section class="screen screen-settings">${_settingsHeader('Audio output')}<div class="placeholder">Could not load the settings.</div></section>`;
       _wireBack(root);
@@ -12038,7 +12165,10 @@
   }
 
   function _wireOutputActions(root) {
-    const putOutput = async (body) => {
+    // Every PUT tears the active backend down and rebuilds it, so two in
+    // flight would end on whichever the server applied last: the chain
+    // makes that the last tap.
+    const putOutput = (body) => serialized('output', async () => {
       try {
         const r = await fetch('/api/settings/output', {
           method: 'PUT',
@@ -12047,15 +12177,12 @@
         });
         if (!r.ok) {
           const err = await r.json().catch(() => ({}));
-          await window.notifyDialog({
-            title: 'Audio output',
-            message: escapeProfileHtml(err.detail || 'Failed to switch output'),
-            kind: 'error',
-          });
+          notices.toast({ kind: 'error', key: 'output.switch', title: 'Audio output',
+                          text: escapeProfileHtml(err.detail || 'Failed to switch output') });
         }
       } catch (_) {}
-      renderOutputSettings(root);
-    };
+      await renderOutputSettings(root);
+    });
     root.querySelectorAll('[data-action="select-hqp"]').forEach(el =>
       el.addEventListener('click', async () => {
         // Always select. Sending the tap to the settings screen instead —
@@ -12093,7 +12220,7 @@
     }
     const redetect = root.querySelector('[data-action="redetect-devices"]');
     if (redetect) {
-      redetect.addEventListener('click', () => renderOutputSettings(root, true));
+      redetect.addEventListener('click', () => onceInFlight(redetect, () => renderOutputSettings(root, true)));
     }
     root.querySelectorAll('[data-action="set-quality"]').forEach(el =>
       el.addEventListener('click', () =>
@@ -12218,8 +12345,7 @@
 
   function _wireBack(root) {
     root.querySelector('[data-back]').addEventListener('click', () => {
-      if (history.length > 1) history.back();
-      else navigate('home');
+      goBack('home');
     });
   }
 
@@ -12316,7 +12442,7 @@
       if (wrap) wrap.innerHTML = `<div class="action-progress" data-progress-for="mb">Starting…</div><div class="enrich-bar indeterminate" data-mb-bar><div class="fill"></div></div>`;
       await fetch('/api/settings/musicbrainz/update', { method: 'POST' });
     });
-    onA('[data-action="mb-delete"]', async () => {
+    onA('[data-action="mb-delete"]', (e) => onceInFlight(e.currentTarget, async () => {
       const ok = await window.confirmDestructive({
         title: 'Delete the catalogue?',
         message: 'Removes the MusicBrainz tables and the downloaded archives. '
@@ -12333,13 +12459,13 @@
         return;
       }
       render();
-    });
-    onA('[data-action="mb-auto"]', async (e) => {
+    }));
+    onA('[data-action="mb-auto"]', (e) => {
       const btn = e.currentTarget;
       const want = !btn.classList.contains('on');
       btn.classList.toggle('on', want);                 // optimistic flip, no render
       btn.setAttribute('aria-pressed', want ? 'true' : 'false');
-      await fetch('/api/settings/musicbrainz', { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ auto_update: want }) });
+      serialized('mb.auto', () => fetch('/api/settings/musicbrainz', { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ auto_update: want }) }));
     });
   }
 
@@ -12425,8 +12551,9 @@
         const want = !el.classList.contains('on');
         el.classList.toggle('on', want);                 // optimistic flip, no render
         el.setAttribute('aria-pressed', want ? 'true' : 'false');
-        await fetch('/api/settings/phantoms', { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ enabled: want }) });
+        await serialized('phantom.layer', () => fetch('/api/settings/phantoms', { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ enabled: want }) }));
       } else if (action === 'phantom-prune') {
+        await onceInFlight(el, async () => {
         const ph = _phantomsLast || {};
         const ok = await window.confirmDestructive({
           title: 'Remove the streaming library?',
@@ -12439,12 +12566,15 @@
         const wrap = block.querySelector('[data-phantom-actions]');
         if (wrap) wrap.innerHTML = `<div class="btn-row single"><button class="btn btn-danger" data-action="phantom-cancel">Cancel</button></div><div class="action-progress" data-progress-for="phantoms">Starting…</div><div class="enrich-bar indeterminate" data-phantom-bar><div class="fill"></div></div>`;
         const r = await fetch('/api/settings/phantoms/prune', { method: 'POST' });
-        if (!r.ok) {
+        if (!r.ok && r.status !== 409) {
+          // 409 = already running: the progress UI just painted is right,
+          // and the wake refresh keeps it current.
           const d = await r.json().catch(() => ({}));
-          await window.notifyDialog({ title: 'Could not start', kind: 'error',
-            message: escapeProfileHtml(d.detail || 'Unknown error') });
+          notices.toast({ kind: 'error', title: 'Could not start',
+                          text: escapeProfileHtml(d.detail || 'Unknown error') });
           block.innerHTML = _phantomBlockHTML(ph);
         }
+        });
       } else if (action === 'phantom-cancel') {
         el.disabled = true;
         el.textContent = 'Cancelling…';
@@ -12670,6 +12800,7 @@
       setTimeout(() => passInput.focus(), 100);
       const fail = (text) => { confirmBtn.disabled = false; msg.style.color = 'var(--color-negative)'; msg.textContent = text; };
       const submit = async () => {
+        if (confirmBtn.disabled) return;   // Enter arrives here too
         const password = passInput.value;
         if (!password) return fail('Type the account password.');
         confirmBtn.disabled = true;
@@ -13151,12 +13282,17 @@
     });
 
     // AI canonization toggle + "Run now"
-    onAction('[data-action="toggle-canon"]', async () => {
-      const enabled = !!(ai.canonization && ai.canonization.enabled);
-      await fetch('/api/settings/ai/canonization', {
-        method: 'PUT', headers: {'Content-Type':'application/json'},
-        body: JSON.stringify({ enabled: !enabled }) });
-      renderAI(root);
+    onAction('[data-action="toggle-canon"]', (e) => {
+      const btn = e.currentTarget;
+      const want = !btn.classList.contains('on');
+      btn.classList.toggle('on', want);
+      btn.setAttribute('aria-pressed', want ? 'true' : 'false');
+      return serialized('ai.canon', async () => {
+        await fetch('/api/settings/ai/canonization', {
+          method: 'PUT', headers: {'Content-Type':'application/json'},
+          body: JSON.stringify({ enabled: want }) });
+        renderAI(root);
+      });
     });
     onAction('[data-action="run-canon"]', async () => {
       try {
@@ -13209,11 +13345,21 @@
       render();
     };
 
-    onAction('[data-action="toggle-p2p"]',       () => putSync({ p2p_enabled: !sync.p2p_enabled }));
-    onAction('[data-action="toggle-bg-enrich"]', () => putSync({ background_enrichment: !sync.background_enrichment }));
-    onAction('[data-action="toggle-reanalyze"]', () => putSync({ reanalyze_imported: !sync.reanalyze_imported }));
-    onAction('[data-action="toggle-relay"]', () => putSync({ relay_enabled: !sync.relay_enabled }));
-    onAction('[data-action="toggle-support"]', () => putSync({ diagnostics_enabled: !(sync.support && sync.support.enabled) }));
+    // The value comes from the switch itself, not from the state captured
+    // at render: a second tap before the re-render used to send the same
+    // value again and be silently dropped. Writes are chained so rapid
+    // on-off-on ends where the finger left it.
+    const toggle = (sel, key) => onAction(sel, (e) => {
+      const el = e.currentTarget;
+      const want = !el.classList.contains('on');
+      el.classList.toggle('on', want);
+      return serialized('sync.settings', () => putSync({ [key]: want }));
+    });
+    toggle('[data-action="toggle-p2p"]',       'p2p_enabled');
+    toggle('[data-action="toggle-bg-enrich"]', 'background_enrichment');
+    toggle('[data-action="toggle-reanalyze"]', 'reanalyze_imported');
+    toggle('[data-action="toggle-relay"]',     'relay_enabled');
+    toggle('[data-action="toggle-support"]',   'diagnostics_enabled');
     onAction('[data-action="pick-interval"]', async () => {
       const id = await openSettingsPicker({ title: 'Auto-sync interval', options: AUTO_SYNC_OPTIONS, currentId: sync.auto_interval_min || 0 });
       if (id != null) await putSync({ auto_interval_min: Number(id) });

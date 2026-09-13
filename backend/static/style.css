@@ -5710,6 +5710,17 @@ select.add-gear-input {
   background: color-mix(in srgb, var(--color-negative) 88%, white);
 }
 
+/* A tap is a tap: no double-tap-to-zoom anywhere in the app (pinch still
+   zooms), and a desktop double-click on a row or tile selects no words.
+   touch-action composes down the tree, so one declaration covers every
+   control; the drag handles keep their own stricter values. */
+html, body { touch-action: manipulation; }
+.track-row, .friend-row, .more-row, .nav-tab, .artist-tile, .album-tile,
+.q-row, .album-actions, .ai-chat-row {
+  user-select: none;
+  -webkit-user-select: none;
+}
+
 /* =====================================================================
  * Notices — toasts, the status strip, the rows.
  *

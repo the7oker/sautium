@@ -289,8 +289,22 @@ async def list_sessions(limit: int = 50):
 
 @router.post("/sessions")
 async def create_session(req: CreateSessionRequest = None):
-    """Create a new chat session."""
+    """Create a new chat session — or hand back the newest one that is
+    still empty: "+ New" pressed twice (or a send racing it) must open ONE
+    chat, and an untitled session with no messages is that chat, not an
+    orphan for the list."""
     title = (req.title if req and req.title else None)
+    if title is None:
+        row = _db_query_one("""
+            SELECT s.id, s.title, s.created_at
+            FROM chat_sessions s
+            WHERE s.title IS NULL
+              AND NOT EXISTS (SELECT 1 FROM chat_messages m WHERE m.session_id = s.id)
+            ORDER BY s.created_at DESC
+            LIMIT 1
+        """)
+        if row:
+            return row
     row = _db_execute("""
         INSERT INTO chat_sessions (title) VALUES (%(title)s)
         RETURNING id, title, created_at

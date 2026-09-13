@@ -359,6 +359,7 @@
     });
 
     async function attempt() {
+      if (submit.disabled) return;      // Enter arrives here too
       submit.disabled = true;
       const prev = submit.textContent;
       submit.textContent = "Checking…";

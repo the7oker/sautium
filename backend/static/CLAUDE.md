@@ -335,6 +335,49 @@ before passing into `message` (both dialogs render `message` as
 HTML so a `<b>highlight</b>` works — XSS is the caller's
 responsibility).
 
+### A double-tap is one tap
+
+Users bring the double-click habit from the desktop, and a tap on a slow
+network gets repeated. Every side-effecting handler therefore makes a
+second activation impossible while the first is in flight — never
+"detect and skip" as the primary fix. The primitives, all in
+`app-shell.js`:
+
+- **`onceInFlight(el, fn)`** — the busy latch (`data-busy` on the
+  element). Wrap the WHOLE flow, dialog included
+  (`onceInFlight(trigger, async () => { const ok = await
+  confirmDestructive(…); … })`): a double-tap on a row that opens a
+  confirm must produce one dialog, not two stacked ones. Choose the unit
+  that the second tap would land on: the queue's `×` latches the LIST,
+  because the optimistic re-render puts the next row's `×` under the
+  finger. Enter/keydown paths call the same guarded `submit()` and check
+  the button's `disabled` first. `playerCmd`/`playTrack` in `player.js`
+  carry their own per-command latch.
+- **`serialized(key, fn)`** — a per-key write chain for settings and
+  toggles, so rapid on-off-on lands in tap order and the server ends
+  where the finger left the switch. A toggle reads its own DOM state
+  (`el.classList.contains('on')`), never the value captured at render.
+- **`claimFresh(key)`** — a freshness token for refreshers (`const fresh
+  = claimFresh('hqp.load'); … if (!fresh()) return;`): a slow earlier
+  response never repaints over a newer one. Same idea as Discovery's
+  `_activeQueryId`.
+- **`goBack(fallback)`** — the only way to go back. It latches until the
+  browser's `popstate` lands, so a double-tap on the chevron is one step.
+- **Open/close toggles check `e.detail > 1`**: the second click of a
+  desktop double-click repeats the first intent, it does not close what
+  just opened.
+- **Confirm bars stay up until the request settles**, buttons disabled;
+  closing the bar first brought the play target back under the second
+  tap. Where a confirm replaces the trigger in place (the chat row's
+  trash → Delete/Cancel), the harmless button sits where the trigger was.
+- `html, body { touch-action: manipulation }` and `user-select: none` on
+  tap rows: no double-tap zoom, no selected words.
+
+Server side, a create that a double-tap could duplicate is made
+idempotent instead (an empty chat is reused, a radio start is
+single-flight, a pending Last.fm flow is handed back, a queue slot is
+removed by index AND track identity).
+
 ### Notices — messages that need no decision
 
 A dialog is for a decision, or for an instruction that must not be

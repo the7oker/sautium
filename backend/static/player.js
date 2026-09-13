@@ -250,7 +250,13 @@
     browserRenderer.unlock();
   }
 
+  // One request per command in flight: the second tap of a double-tap on
+  // next/previous used to become a second skip. A tap after the reply is
+  // a new intent and goes through.
+  const _cmdInFlight = new Set();
   async function playerCmd(cmd) {
+    if (_cmdInFlight.has(cmd)) return;
+    _cmdInFlight.add(cmd);
     if (cmd === 'play') maybeClaimRenderer();
     try {
       const resp = await fetch('/api/player/' + cmd, { method: 'POST' });
@@ -265,6 +271,7 @@
         window.reportOutputUnavailable(err.detail || '');
       }
     } catch (e) { console.error('Player command failed:', e); }
+    finally { _cmdInFlight.delete(cmd); }
   }
 
   function togglePlayPause() {
@@ -823,7 +830,10 @@
     },
   };
 
+  let _playTrackInFlight = false;
   async function playTrack(mediaFileId) {
+    if (_playTrackInFlight) return;      // a replace-queue in flight; rows latch too
+    _playTrackInFlight = true;
     maybeClaimRenderer();
     try {
       const resp = await fetch('/api/player/play-track', {
@@ -848,7 +858,7 @@
       }
     } catch (e) {
       console.error('Play track failed:', e);
-    }
+    } finally { _playTrackInFlight = false; }
   }
 
   // --- Public API ------------------------------------------------------

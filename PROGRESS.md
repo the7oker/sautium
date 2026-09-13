@@ -573,6 +573,35 @@ for a Last.fm cooldown (30 min doubling to 24 h) that reads as "Idle".
   same 429 awareness in the pull walk, a slice loop on dump-less Docker
   nodes, and the remaining silent states (music mount, media tools).
 
+### A double-tap is one tap (2026-09-13)
+
+The same audit listed twenty-odd handlers a double-tap could double:
+queue `×` removed two tracks (index-based API plus an optimistic
+re-render that put the next `×` under the finger), the chat trash
+swapped in a Delete exactly where the trash was, album bars closed
+before their request and brought Play back under the second tap, "+ New"
+minted two chats, invite/send-code mailed twice, Enter bypassed disabled
+buttons, dialogs stacked, back went two screens up, and settings toggles
+either dropped or crossed their writes.
+
+- **Make the second activation impossible, per flow.** One latch
+  (`onceInFlight`) around the whole flow including its dialog; the unit
+  is whatever the second tap would land on. Time-based "ignore taps for
+  300 ms" was rejected: it hides the slow cases and breaks intentional
+  repeats (volume nudges).
+- **Order writes, drop stale reads.** `serialized(key)` chains writes so
+  the last tap is the last write; `claimFresh(key)` lets only the newest
+  refresh paint. Toggles read their own DOM, never the state captured at
+  render (that is what silently dropped the second tap).
+- **Geometry is part of the fix.** What appears under the finger after
+  the first tap must be harmless: bars stay up (disabled) until settled,
+  the inline confirm puts Cancel where the trigger was.
+- **Idempotent creates on the server** where a duplicate is a real row:
+  an empty chat is reused, radio start is single-flight, a fresh Last.fm
+  flow is handed back, queue removal carries the slot's track identity
+  and refuses (409) when the queue moved.
+- The browser knows a double-click: `e.detail > 1` on open/close toggles.
+
 ## Known Gotchas
 
 - **A dead SSE socket is silent, and painting its death is a UI lie.** Two
