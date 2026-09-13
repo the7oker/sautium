@@ -147,6 +147,13 @@ class Settings(BaseSettings):
     p2p_identity_dir: str = "/app/data/node_identity"
     p2p_listen_port: int = 0   # Desktop sync server port (direct chat delivery)
 
+    # Node backups (docs/design/BACKUP.md): where the .sbk files land — the
+    # bind-mounted data dir on Docker, <data_dir>/backup under the launcher —
+    # and the PostgreSQL client tools (pg_dump / pg_restore) that write and
+    # read them; empty = whatever PATH resolves.
+    backup_dir: str = "/app/data/backup"
+    pg_bin: str = ""
+
     model_config = SettingsConfigDict(
         env_file=".env",
         env_file_encoding="utf-8",

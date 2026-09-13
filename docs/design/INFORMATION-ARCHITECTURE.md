@@ -120,7 +120,9 @@ A **bottom-up sheet** with a vertical list of entries:
 - DSP / Signal Chain (filter, matrix, dither, digital attenuation)
 - Profile (identity, account, hardware profile, audio chain)
 - Library (`#more/library`) — music path, owned counts, enrichment
-  coverage, scan/enrich actions
+  coverage, scan/enrich actions, and the Backup block (last backup,
+  folder, "Back up now" behind the account password — `BACKUP.md`;
+  restore lives in the launcher)
 - Streaming library (`#more/phantoms`) — the catalog the node knows but
   does not own; its own screen because it is its own catalog, with the
   owner's `discovery.phantom_layer` switch, the one explicit removal,
@@ -814,7 +816,7 @@ All Genre blocks roll up into a single `(new endpoint)` GET
 | HQPlayer status | existing HQP state poll | — |
 | HQPlayer config (host/port) | existing settings persistence | + save profiles per location |
 | DSP / Signal Chain | existing HQP filter / matrix / dither endpoints | + per-genre auto-profile |
-| Library | `/api/settings/library` — owned counts + enrichment coverage over the ENGAGED artist set (`sql_queries.ARTIST_ENGAGED`), so the ratio names the same population the pipeline queues | — |
+| Library | `/api/settings/library` — owned counts + enrichment coverage over the ENGAGED artist set (`sql_queries.ARTIST_ENGAGED`), so the ratio names the same population the pipeline queues; its `backup` block + `/api/settings/backup` (start / cancel / reveal) drive the Backup card, progress on the same wake channel | — |
 | Streaming library | `/api/settings/phantoms` — its own endpoint: the counts cost ~0.4 s and the library screen wakes on every scan/enrich tick. Enrichment there is a COUNT, never a ratio: a phantom track has no file, so audio analysis only arrives over P2P and there is no total to complete | + per-source breakdown (MB vs Last.fm) |
 | MusicBrainz catalogue | `/api/settings/musicbrainz/*` — status, auto-update toggle, download/update/delete. Sits on the Phantom screen because the dump is what mints phantom discographies; deleting it stops them updating and touches nothing owned | — |
 

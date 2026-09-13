@@ -128,6 +128,20 @@ RUN pip install --no-cache-dir -U --pre "yt-dlp[default]" \
 RUN apt-get update && apt-get install -y lbzip2 \
     && apt-get clean && rm -rf /var/lib/apt/lists/*
 
+# PostgreSQL 18 client — pg_dump / pg_restore for node backups (backup.py).
+# jammy's postgresql-client is the 14 series, which refuses to dump an 18
+# server ("server version mismatch"), so the tools come from PGDG. Same
+# late standalone layer as lbzip2; PG_BIN pins the 18 binaries for the
+# backend whatever pg_wrapper would pick.
+RUN apt-get update && apt-get install -y --no-install-recommends gnupg ca-certificates \
+    && curl -fsSL https://www.postgresql.org/media/keys/ACCC4CF8.asc \
+         | gpg --dearmor -o /usr/share/keyrings/postgresql.gpg \
+    && echo "deb [signed-by=/usr/share/keyrings/postgresql.gpg] https://apt.postgresql.org/pub/repos/apt jammy-pgdg main" \
+         > /etc/apt/sources.list.d/pgdg.list \
+    && apt-get update && apt-get install -y --no-install-recommends postgresql-client-18 \
+    && apt-get clean && rm -rf /var/lib/apt/lists/*
+ENV PG_BIN=/usr/lib/postgresql/18/bin
+
 # Copy application code
 COPY . .
 

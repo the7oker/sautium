@@ -38,6 +38,12 @@ analytics between collectors.
   Worker acting as a CA. See `P2P_NETWORK.md`.
 - **Windows desktop launcher** — CustomTkinter app (PyInstaller `.exe`, Inno
   Setup installer) that manages the backend, P2P layer and account.
+- **Node backup and restore** — one encrypted `.sbk` file per node (the
+  database without the MusicBrainz layer, plus the identity documents),
+  keyed by the account password through Argon2id in its own salt domain and
+  streamed through chunked XChaCha20-Poly1305. Settings › Library › Backup
+  writes it; the launcher (Settings › Maintenance, or the setup wizard) and
+  `python -m backup restore` bring a node back. See `docs/design/BACKUP.md`.
 
 ## Architecture
 
@@ -296,6 +302,19 @@ It is auto-applied on first container start. Highlights:
   compilations/features/collaborations work without nullable FKs.
 - **`ON UPDATE CASCADE`** on track/album UUID FKs so artist-name normalization
   can safely rewrite UUIDs.
+
+Backups are a product feature, not a hand-run `pg_dump`: Settings › Library ›
+Backup writes `./data/backup/sautium-backup-<node>-<date>.sbk`, and
+
+```bash
+docker compose stop backend
+docker compose run --rm --no-deps backend python -m backup restore /app/data/backup/<file> --replace --identity
+docker compose start backend
+```
+
+rebuilds the node from it (`--db music_ai_test` restores beside the live
+database; `python -m backup selftest` round-trips and compares row counts).
+The `mb_*` tables come back empty — the MusicBrainz dump loader refills them.
 
 ## Development
 

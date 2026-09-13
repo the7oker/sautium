@@ -1034,7 +1034,57 @@ class LauncherApp(ctk.CTk):
     def _open_settings(self):
         from desktop.settings import SettingsDialog
         SettingsDialog(self, self.config, on_save=self._on_settings_saved,
-                       api_client=self.api_client)
+                       api_client=self.api_client,
+                       on_restore=self._restore_from_backup)
+
+    def _restore_from_backup(self, path, password, manifest):
+        """Settings › Maintenance: this node becomes the one in the backup.
+        The database is renamed under whoever holds a connection to it, so
+        everything that talks to it stops first — P2P, the backend — and
+        comes back on the restored database with the restored identity."""
+        self._set_status("starting", "Restoring from backup...")
+        for btn in (self._btn_open, self._btn_scan, self._btn_settings):
+            btn.configure(state="disabled")
+
+        def progress(msg):
+            self.ui_call(lambda: self._progress_text.configure(text=msg))
+
+        def _run():
+            from desktop import api_client as api_client_mod
+            from desktop.restore import restore_launcher_node
+            if self.p2p_manager:
+                try:
+                    self.p2p_manager.stop()
+                except Exception as e:
+                    logger.debug(f"P2P stop error: {e}")
+                self.p2p_manager = None
+            self.service_manager.stop_tracker()
+            self.service_manager.stop_backend()
+            try:
+                result = restore_launcher_node(path, password, config=self.config,
+                                               replace=True, identity=True,
+                                               progress=progress)
+            except Exception as e:
+                logger.error(f"Restore failed: {e}", exc_info=True)
+                message = str(e)[:200]
+                self.ui_call(lambda: self._set_status("error", "Restore failed"))
+                self.ui_call(lambda: self._progress_text.configure(text=message))
+            else:
+                # The file may carry another node's .api_secret — re-read it
+                # before the first signed call to the restarted backend.
+                api_client_mod.forget_secret()
+                who = manifest["node"]["username"]
+                note = (f"Restored {who}'s node from {manifest['created_at'][:10]}"
+                        + (" — the previous database is kept as sautium__previous"
+                           if result.get("previous") else ""))
+                logger.info(note)
+                self.ui_call(lambda: self._progress_text.configure(text=note))
+            self.service_manager.start_backend(progress_cb=progress)
+            self.service_manager.start_tracker()
+            self.ui_call(self._on_services_ready)
+            self.ui_call(lambda: self._btn_settings.configure(state="normal"))
+
+        threading.Thread(target=_run, daemon=True).start()
 
     def _on_settings_saved(self, new_config):
         self.config = new_config

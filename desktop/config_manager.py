@@ -189,6 +189,14 @@ def update_config(updates: dict) -> dict:
     return config
 
 
+def _pg_bin_dir() -> str:
+    from desktop.db_init import get_pg_bin_dir
+    try:
+        return str(get_pg_bin_dir())
+    except FileNotFoundError:
+        return ""
+
+
 def generate_env_file(config: dict, env_path: Path) -> None:
     """
     Generate a .env file for the backend based on current config.
@@ -252,6 +260,11 @@ def generate_env_file(config: dict, env_path: Path) -> None:
         "# P2P Identity",
         f"P2P_IDENTITY_DIR={identity_dir}",
         f"P2P_LISTEN_PORT={config.get('p2p', {}).get('listen_port', 0)}",
+        "",
+        "# Node backups (Settings > Library > Backup) and the PostgreSQL client",
+        "# tools that write them — the bin dir the launcher runs the cluster from.",
+        f"BACKUP_DIR={get_data_dir() / 'backup'}",
+        f"PG_BIN={_pg_bin_dir()}",
         "",
         "# Application",
         "LOG_LEVEL=INFO",
