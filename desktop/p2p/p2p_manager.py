@@ -331,6 +331,9 @@ class P2PManager:
         self._chat_notify = asyncio.Event()
         self._walk.bind()
         self._mb_slice_lock = asyncio.Lock()
+        # When the periodic cycle fires next — what a deferred slice
+        # batch is honestly waiting for (published with mb_slice.status).
+        self._mb_slice_next_at: Optional[float] = None
         self._mb_probe_lock = asyncio.Lock()
         # Support diagnostics: one sequential worker fed by the master's
         # wake stream (warrants), its reconnects (resume) and LISTEN
@@ -2987,7 +2990,12 @@ class P2PManager:
     async def _mb_slice_loop(self):
         """Periodic MB slice fetch for dump-less nodes. The post-sync trigger
         covers the common case (new content arrives via sync/scan); this loop
-        is the fallback cadence and the retry path after peer failures."""
+        is the fallback cadence and the retry path after peer failures.
+
+        The deadline of the NEXT timed run is set before each run and
+        published with every cycle's status: it is the one honest answer
+        to "when will the albums appear" for names a cycle could not serve."""
+        self._mb_slice_next_at = time.time() + 120
         try:
             await asyncio.sleep(120)
         except asyncio.CancelledError:
@@ -2996,12 +3004,14 @@ class P2PManager:
         while self._running:
             interval_min = self._read_mb_slice_interval()
             if interval_min and interval_min > 0:
+                self._mb_slice_next_at = time.time() + interval_min * 60
                 try:
                     await self._request_mb_slices()
                 except Exception:
                     logger.exception("MB slice cycle failed")
-                sleep_for = interval_min * 60
+                sleep_for = max(1.0, self._mb_slice_next_at - time.time())
             else:
+                self._mb_slice_next_at = None
                 sleep_for = 300  # disabled — re-check the setting later
             try:
                 await asyncio.sleep(sleep_for)
@@ -3203,10 +3213,16 @@ class P2PManager:
             if not names:
                 logger.info("MB slice: no pending names — all canon inputs "
                             "already fetched")
+                await self._publish_mb_slice_status(
+                    pending=0, served=0, unserved=0, reason="idle",
+                    sources=len(peers))
                 return {}
 
             if not peers:
                 logger.info("MB slice: no slice sources reachable")
+                await self._publish_mb_slice_status(
+                    pending=len(names), served=0, unserved=len(names),
+                    reason="no_sources", sources=0)
                 return {}
 
             batch_size = max(1, min(int(cfg.get("batch_size", 20)),
@@ -3219,6 +3235,7 @@ class P2PManager:
             imported_any = False
             last_client = None
             remaining = list(names)
+            reasons: set[str] = set()
             # Source by source: each takes what it can, the leftovers
             # (a replica's `missing` plus outright failures) carry to the
             # next candidate. Provenance is written per verified name, so
@@ -3230,12 +3247,33 @@ class P2PManager:
                                        source_node=node,
                                        backend_api=backend_api)
                 leftovers: list[str] = []
+                waited = False
                 for i in range(0, len(remaining), batch_size):
                     batch = remaining[i:i + batch_size]
                     stats = await loop.run_in_executor(
                         None, client.run, batch)
+                    if "retry_after" in stats and not waited:
+                        # The peer's per-IP window is full — usually our own
+                        # sync walk just spent it. Retry-After says when the
+                        # oldest stamp leaves the window; wait that out ONCE
+                        # per source and re-ask. Parking the batch instead
+                        # used to mean the next timed cycle, hours away.
+                        wait = min(int(stats.get("retry_after") or 60), 120)
+                        logger.info(f"MB slice: {node} rate-limited — "
+                                    f"re-asking in {wait}s")
+                        waited = True
+                        await asyncio.sleep(wait)
+                        stats = await loop.run_in_executor(
+                            None, client.run, batch)
                     if "error" in stats:
                         leftovers.extend(batch)
+                        if "retry_after" in stats:
+                            # Still limited after the wait: every further
+                            # batch on this source would 429 too.
+                            reasons.add("rate_limited")
+                            leftovers.extend(remaining[i + batch_size:])
+                            break
+                        reasons.add("error")
                         continue
                     imported_any = True
                     for k in total:
@@ -3256,7 +3294,47 @@ class P2PManager:
                 # ANALYZE + backend POST /canonicalize — once per run
                 await loop.run_in_executor(None, last_client.finalize)
                 logger.info(f"MB slice run done: {total}")
+            await self._publish_mb_slice_status(
+                pending=len(names), served=len(names) - len(remaining),
+                unserved=len(remaining),
+                reason=("rate_limited" if "rate_limited" in reasons
+                        else "error" if "error" in reasons
+                        else "missing" if remaining else "ok"),
+                sources=len(peers))
             return total
+
+    async def _publish_mb_slice_status(self, *, pending: int, served: int,
+                                       unserved: int, reason: str,
+                                       sources: int) -> None:
+        """One row, `mb_slice.status`, is the whole of what the UI knows
+        about this cycle: how many names canon waits on, how many a peer
+        served, why the rest stayed pending and when the timed loop asks
+        again. Written on every cycle — including an all-clear — so the
+        condition the backend derives from it (`mb_slice.deferred`) ends
+        the moment it stops being true. The NOTIFY wakes the backend's
+        notices channel; the row rides the same bus as p2p.identity."""
+        next_at = self._mb_slice_next_at
+        state = {
+            "at": datetime.now(timezone.utc).isoformat(),
+            "pending": pending,
+            # pending_slice_names is capped at 200 per cycle: at the cap the
+            # true backlog is unknown, and the copy says "200+".
+            "pending_capped": pending >= 200,
+            "served": served,
+            "unserved": unserved,
+            "reason": reason,
+            "sources": sources,
+            "next_attempt_at": (datetime.fromtimestamp(next_at, timezone.utc).isoformat()
+                                if next_at else None),
+        }
+        loop = asyncio.get_event_loop()
+        try:
+            await loop.run_in_executor(
+                None, self._write_settings_blocking, {"mb_slice.status": state})
+            await loop.run_in_executor(
+                None, self._notify_blocking, "sautium_notices")
+        except Exception as e:
+            logger.warning(f"MB slice: status publish failed: {e}")
 
     # ------------------------------------------------------------------
     # Support diagnostics (desktop/p2p/diag_protocol.py)

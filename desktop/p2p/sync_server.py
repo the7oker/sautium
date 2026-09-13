@@ -444,7 +444,7 @@ class SyncServer:
         quote (wire format v1 § 4). Dormant → n = 0."""
         ip = request.remote or "unknown"
         if not self._check_rate_limit(ip):
-            return self._json_response(request, {"error": "rate limited"}, status=429)
+            return self._rate_limited(request, ip)
         pubkey = (request.query.get("pubkey") or "").lower()
         try:
             if len(bytes.fromhex(pubkey)) != 32:
@@ -543,6 +543,20 @@ class SyncServer:
         self._search_global = glob
         return True
 
+    def _rate_limited(self, request: web.Request, ip: str,
+                      bucket: Optional[dict] = None) -> web.Response:
+        """The 429 for `ip`, with Retry-After = when the oldest stamp in
+        its bucket leaves the window — the first moment a retry can
+        succeed. A requester that reads it waits a minute at most instead
+        of parking its work until its own timer (mirrors
+        backend/p2p_app.py)."""
+        stamps = (bucket if bucket is not None else self._request_counts).get(ip) or []
+        wait = int(RATE_LIMIT_WINDOW - (time.time() - stamps[0])) + 1 if stamps else RATE_LIMIT_WINDOW
+        wait = max(1, wait)
+        return self._json_response(
+            request, {"error": "rate limited", "retry_after": wait}, status=429,
+            headers={"Retry-After": str(wait)})
+
     def _check_rate_limit(self, ip: str) -> bool:
         """Return True if the request is allowed, False if rate-limited."""
         now = time.time()
@@ -623,9 +637,7 @@ class SyncServer:
         """POST /api/sync/inventory — check available enrichment data."""
         ip = request.remote or "unknown"
         if not self._check_rate_limit(ip):
-            return self._json_response(
-                request, {"error": "rate limited"}, status=429
-            )
+            return self._rate_limited(request, ip)
 
         if not self._sharing_enabled():
             return self._json_response(
@@ -665,9 +677,7 @@ class SyncServer:
         inventory only about the hits."""
         ip = request.remote or "unknown"
         if not self._check_rate_limit(ip):
-            return self._json_response(
-                request, {"error": "rate limited"}, status=429
-            )
+            return self._rate_limited(request, ip)
         if not self._sharing_enabled():
             return self._json_response(
                 request, {"error": "sharing disabled"}, status=403)
@@ -686,9 +696,7 @@ class SyncServer:
         """POST /api/sync/pull/{category} — pull enrichment data."""
         ip = request.remote or "unknown"
         if not self._check_rate_limit(ip):
-            return self._json_response(
-                request, {"error": "rate limited"}, status=429
-            )
+            return self._rate_limited(request, ip)
 
         if not self._sharing_enabled():
             return self._json_response(
@@ -756,8 +764,7 @@ class SyncServer:
         track to send blind."""
         ip = request.remote or "unknown"
         if not self._check_rate_limit(ip):
-            return self._json_response(
-                request, {"error": "rate limited"}, status=429)
+            return self._rate_limited(request, ip)
         if not self._sharing_enabled():
             return self._json_response(
                 request, {"error": "sharing disabled"}, status=403)
@@ -786,8 +793,7 @@ class SyncServer:
         drops it."""
         ip = request.remote or "unknown"
         if not self._check_rate_limit(ip):
-            return self._json_response(
-                request, {"error": "rate limited"}, status=429)
+            return self._rate_limited(request, ip)
         if not self._sharing_enabled():
             return self._json_response(
                 request, {"error": "sharing disabled"}, status=403)
@@ -834,9 +840,7 @@ class SyncServer:
         from the main per-IP bucket — see SEARCH_RATE_* rationale."""
         ip = request.remote or "unknown"
         if not self._check_search_limit(ip):
-            return self._json_response(
-                request, {"error": "rate limited"}, status=429
-            )
+            return self._rate_limited(request, ip, getattr(self, "_search_counts", {}))
         if not self._sharing_enabled():
             return self._json_response(
                 request, {"error": "sharing disabled"}, status=403)
@@ -869,9 +873,7 @@ class SyncServer:
         author's signature either way."""
         ip = request.remote or "unknown"
         if not self._check_rate_limit(ip):
-            return self._json_response(
-                request, {"error": "rate limited"}, status=429
-            )
+            return self._rate_limited(request, ip)
 
         if not self._sharing_enabled():
             return self._json_response(
@@ -955,9 +957,7 @@ class SyncServer:
         """
         ip = request.remote or "unknown"
         if not self._check_rate_limit(ip):
-            return self._json_response(
-                request, {"error": "rate limited"}, status=429
-            )
+            return self._rate_limited(request, ip)
 
         if not self.account_info or not self._chat_service:
             return self._json_response(
@@ -1155,9 +1155,7 @@ class SyncServer:
         """POST /api/chat/message — receive an encrypted message."""
         ip = request.remote or "unknown"
         if not self._check_rate_limit(ip):
-            return self._json_response(
-                request, {"error": "rate limited"}, status=429
-            )
+            return self._rate_limited(request, ip)
 
         if not self._chat_service:
             return self._json_response(
@@ -1235,9 +1233,7 @@ class SyncServer:
         """
         ip = request.remote or "unknown"
         if not self._check_rate_limit(ip):
-            return self._json_response(
-                request, {"error": "rate limited"}, status=429
-            )
+            return self._rate_limited(request, ip)
 
         if not self._chat_service:
             return self._json_response(
@@ -1359,9 +1355,7 @@ class SyncServer:
         password change on our side asks nobody for."""
         ip = request.remote or "unknown"
         if not self._check_rate_limit(ip):
-            return self._json_response(
-                request, {"error": "rate limited"}, status=429
-            )
+            return self._rate_limited(request, ip)
 
         if not self._chat_service:
             return self._json_response(
@@ -1445,8 +1439,7 @@ class SyncServer:
         """GET /api/relay/wake-stream?pubkey=&ts=&sig= — SSE wake channel."""
         ip = request.remote or "unknown"
         if not self._check_rate_limit(ip):
-            return self._json_response(
-                request, {"error": "rate limited"}, status=429)
+            return self._rate_limited(request, ip)
         if not self.account_info or not self._chat_service:
             return self._json_response(
                 request, {"error": "relay not available"}, status=503)
@@ -1594,8 +1587,7 @@ class SyncServer:
         (mirrors backend/routers/peer_chat.py)."""
         ip = request.remote or "unknown"
         if not self._check_rate_limit(ip):
-            return self._json_response(
-                request, {"error": "rate limited"}, status=429)
+            return self._rate_limited(request, ip)
         if not self.account_info or not self._chat_service:
             return self._json_response(
                 request, {"error": "relay not available"}, status=503)
@@ -1693,8 +1685,7 @@ class SyncServer:
         recipient and return their signed receipt."""
         ip = request.remote or "unknown"
         if not self._check_rate_limit(ip):
-            return self._json_response(
-                request, {"error": "rate limited"}, status=429)
+            return self._rate_limited(request, ip)
         if not self.account_info or not self._chat_service:
             return self._json_response(
                 request, {"error": "relay not available"}, status=503)
@@ -1784,8 +1775,7 @@ class SyncServer:
         answer with here — and the sender drops the candidate."""
         ip = request.remote or "unknown"
         if not self._check_rate_limit(ip):
-            return self._json_response(
-                request, {"error": "rate limited"}, status=429)
+            return self._rate_limited(request, ip)
         invite = request.query.get("invite", "")
         for pubkey, rec in self._relay_clients.items():
             if rec["invite_code"] == invite:
@@ -1804,8 +1794,7 @@ class SyncServer:
         """POST /api/relay/ack — the recipient's signed receipt."""
         ip = request.remote or "unknown"
         if not self._check_rate_limit(ip):
-            return self._json_response(
-                request, {"error": "rate limited"}, status=429)
+            return self._rate_limited(request, ip)
         if not self._chat_service:
             return self._json_response(
                 request, {"error": "relay not available"}, status=503)
@@ -1869,9 +1858,7 @@ class SyncServer:
         """
         ip = request.remote or "unknown"
         if not self._check_rate_limit(ip):
-            return self._json_response(
-                request, {"error": "rate limited"}, status=429
-            )
+            return self._rate_limited(request, ip)
 
         if not self.account_info:
             return self._json_response(

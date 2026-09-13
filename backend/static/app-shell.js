@@ -37,6 +37,18 @@
 
   /* ---------- HTML escape ---------- */
 
+  // A fetch that failed to reach the node and a 404 read the same in a
+  // catch block; only the status tells them apart — and the copy must,
+  // or a backend restart paints "Artist not found." over a real artist.
+  function httpError(resp) {
+    return Object.assign(new Error('HTTP ' + resp.status), { status: resp.status });
+  }
+  function unreachableCopy(err, notFound) {
+    if (err && err.status === 404) return notFound;
+    if (err && err.status) return `The node answered with an error (HTTP ${err.status}).`;
+    return 'The node is not answering right now — reconnecting…';
+  }
+
   function escapeHtml(s) {
     return String(s == null ? '' : s)
       .replace(/&/g, '&amp;')
@@ -984,8 +996,7 @@
               if (resp.status === 503) {
                 await reportOutputUnavailable(msg);
               } else {
-                await window.notifyDialog({
-                  title: 'Radio', message: window.escapeProfileHtml(msg), kind: 'error' });
+                notices.toast({ kind: 'error', title: 'Radio', text: escapeProfileHtml(msg) });
               }
             }
           } catch (err) { console.warn('radio start failed', err); }
@@ -2221,7 +2232,7 @@
     async loadSessions() {
       try {
         const resp = await fetch('/api/chat/sessions?limit=50');
-        if (!resp.ok) throw new Error('HTTP ' + resp.status);
+        if (!resp.ok) throw httpError(resp);
         this.sessions = await resp.json() || [];
       } catch (err) {
         console.warn('sessions load failed:', err);
@@ -2359,7 +2370,7 @@
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({}),
         });
-        if (!resp.ok) throw new Error('HTTP ' + resp.status);
+        if (!resp.ok) throw httpError(resp);
         const session = await resp.json();
         this._detachStream(session.id);
         this.activeSessionId = session.id;
@@ -2401,7 +2412,7 @@
         (cached && cached.title) || 'New chat';
       try {
         const resp = await fetch('/api/chat/sessions/' + id + '/messages');
-        if (!resp.ok) throw new Error('HTTP ' + resp.status);
+        if (!resp.ok) throw httpError(resp);
         const data = await resp.json();
         const messages = data.messages || [];
         this.thread.innerHTML = '';
@@ -2657,7 +2668,7 @@
     async _finishFromDb(sessionId, ctx) {
       try {
         const resp = await fetch('/api/chat/sessions/' + sessionId + '/messages');
-        if (!resp.ok) throw new Error('HTTP ' + resp.status);
+        if (!resp.ok) throw httpError(resp);
         const data = await resp.json();
         const msgs = data.messages || [];
         const last = msgs[msgs.length - 1];
@@ -3222,7 +3233,7 @@
             if (v != null) params.set(k, String(v));
           }
           const resp = await fetch(`${endpoint}?${params}`);
-          if (!resp.ok) throw new Error('HTTP ' + resp.status);
+          if (!resp.ok) throw httpError(resp);
           const data = await resp.json();
           if (data.next_cursor) state.cursor = data.next_cursor;
           else state.exhausted = true;
@@ -4402,15 +4413,22 @@
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(body),
     })
-      .then(r => r.ok ? r.json() : Promise.reject(r.status))
+      .then(async r => {
+        if (r.ok) return r.json();
+        const b = await r.json().catch(() => ({}));
+        throw Object.assign(new Error('HTTP ' + r.status), { status: r.status, detail: b.detail });
+      })
       .then(out => {
         if (rgGid && out.album_id) navigateToEntity('album', out.album_id);
         else if (out.artist_id) navigateToEntity('artist', out.artist_id);
       })
       .catch(err => {
         console.warn('mb mint failed:', err);
-        window.notifyDialog({ title: 'Import failed', kind: 'error',
-          message: 'Could not import this MusicBrainz entity.' });
+        // A 503 carries the honest reason (the catalog nodes are rate-
+        // limited, retry in N s); anything else is the generic failure.
+        notices.toast({ kind: 'error', title: 'Import failed',
+          text: escapeHtml((typeof err.detail === 'string' && err.detail)
+                           || 'Could not import this MusicBrainz entity.') });
       })
       .finally(() => el.classList.remove('is-minting'));
   }
@@ -4664,7 +4682,7 @@
     row.innerHTML = '';
     try {
       const resp = await fetch('/api/discovery/shuffle?limit=14');
-      if (!resp.ok) throw new Error('HTTP ' + resp.status);
+      if (!resp.ok) throw httpError(resp);
       const data = await resp.json();
       const albums = data.albums || [];
       if (albums.length === 0) {
@@ -4844,11 +4862,11 @@
                   + '?sort=' + encodeURIComponent(sort)
                   + (selectedMbid ? '&mbid=' + encodeURIComponent(selectedMbid) : '');
       const resp = await fetch(url);
-      if (!resp.ok) throw new Error('HTTP ' + resp.status);
+      if (!resp.ok) throw httpError(resp);
       d = await resp.json();
     } catch (err) {
       screen.innerHTML = `<div class="placeholder-screen">
-        <p class="placeholder-body">Artist not found.</p>
+        <p class="placeholder-body">${unreachableCopy(err, 'Artist not found.')}</p>
         <button class="back-link" onclick="history.back()">← Back</button>
       </div>`;
       return;
@@ -5032,6 +5050,11 @@
             <span class="chev">${ALBUMS_SORT_CHEV_SVG}</span>
           </button>
         </div>`;
+    // A bare card on a dump-less node: the slice for this name has not
+    // landed, so the shelf is empty for a reason the card can state. Updated
+    // in place as the notice moves (sautium:notices-changed).
+    const pendingHtml = (d.discography_pending && !albumsList.length && !(d.new_albums || []).length)
+      ? `<p class="card-note" data-discography-pending>${discographyPendingText()}</p>` : '';
     // Albums / Missing / Popular / Similar are identical in both layouts; each
     // hides when empty (the backend already nulls bio off the dominant and
     // empties similar off any non-external namesake).
@@ -5093,6 +5116,7 @@
         ${tagsHtml ? `<div class="tag-row">${tagsHtml}</div>` : ''}
         ${bioHtml}
         ${pointerHtml}
+        ${pendingHtml}
         ${sectionsHtml}
         <div style="height: calc(24 * var(--px));"></div>`;
     }
@@ -5295,11 +5319,11 @@
         const url = '/api/albums/' + encodeURIComponent(albumId)
           + (selectedVariantId != null ? '?variant_id=' + selectedVariantId : '');
         const resp = await fetch(url);
-        if (!resp.ok) throw new Error('HTTP ' + resp.status);
+        if (!resp.ok) throw httpError(resp);
         d = await resp.json();
       } catch (err) {
         screen.innerHTML = `<div class="placeholder-screen">
-          <p class="placeholder-body">Album not found.</p>
+          <p class="placeholder-body">${unreachableCopy(err, 'Album not found.')}</p>
           <button class="back-link" onclick="history.back()">← Back</button>
         </div>`;
         return;
@@ -5524,11 +5548,11 @@
     let d;
     try {
       const resp = await fetch('/api/release-groups/' + encodeURIComponent(groupId));
-      if (!resp.ok) throw new Error('HTTP ' + resp.status);
+      if (!resp.ok) throw httpError(resp);
       d = await resp.json();
     } catch (err) {
       screen.innerHTML = `<div class="placeholder-screen">
-        <p class="placeholder-body">Release group not found.</p>
+        <p class="placeholder-body">${unreachableCopy(err, 'Release group not found.')}</p>
         <button class="back-link" onclick="history.back()">← Back</button>
       </div>`;
       return;
@@ -5632,11 +5656,11 @@
     try {
       const resp = await fetch('/api/home/listening-history/'
         + encodeURIComponent(sessionId));
-      if (!resp.ok) throw new Error('HTTP ' + resp.status);
+      if (!resp.ok) throw httpError(resp);
       d = await resp.json();
     } catch (err) {
       screen.innerHTML = `<div class="placeholder-screen">
-        <p class="placeholder-body">Session not found.</p>
+        <p class="placeholder-body">${unreachableCopy(err, 'Session not found.')}</p>
         <button class="back-link" onclick="history.back()">← Back</button>
       </div>`;
       return;
@@ -5823,18 +5847,17 @@
   }
 
   // Playback 503 = the configured output can't take the command (a dozing
-  // renderer, a closed HQPlayer, no output at all). One dialog, one useful
-  // action: jump straight to the Output picker.
+  // renderer, a closed HQPlayer, no output at all). Nothing to decide, so
+  // no dialog: the toast with the one useful action — the Output picker.
   async function reportOutputUnavailable(detail) {
-    const go = await confirmDestructive({
+    notices.toast({
+      kind: 'error',
+      key: 'player.output',
       title: 'Audio output unavailable',
-      message: escapeProfileHtml(detail ||
+      text: escapeProfileHtml(detail ||
         'The playback device is not responding. Wake it, or pick another output.'),
-      confirmText: 'Audio output',
-      cancelText: 'Close',
-      confirmKind: 'primary',
+      action: { label: 'Audio output', run: () => { location.hash = '#more/output'; } },
     });
-    if (go) location.hash = '#more/output';
   }
   window.reportOutputUnavailable = reportOutputUnavailable;
 
@@ -5852,11 +5875,8 @@
     if (!err) { lastPlayerErrorShown = null; return; }
     if (err === lastPlayerErrorShown) return;
     lastPlayerErrorShown = err;
-    notifyDialog({
-      title: 'Playback error',
-      message: escapeProfileHtml(err),
-      kind: 'error',
-    });
+    notices.toast({ kind: 'error', key: 'player.error', title: 'Playback error',
+                    text: escapeProfileHtml(err) });
   });
 
   async function reportPlaybackResult(resp, body) {
@@ -5872,11 +5892,8 @@
     if (detail && typeof detail === 'object') {
       const msg = detail.message || '';
       if (detail.reason === 'streaming') {
-        await notifyDialog({
-          title: 'Streaming unavailable',
-          message: escapeProfileHtml(msg || 'Streaming is not available on this node.'),
-          kind: 'error',
-        });
+        notices.toast({ kind: 'error', key: 'player.streaming', title: 'Streaming unavailable',
+                        text: escapeProfileHtml(msg || 'Streaming is not available on this node.') });
         return false;
       }
       detail = msg;
@@ -5885,12 +5902,9 @@
       await reportOutputUnavailable(detail);
       return false;
     }
-    await notifyDialog({
-      title: 'Playback unavailable',
-      message: escapeProfileHtml(
-        detail || 'The playback output is not responding. Check it in Settings → Audio output, then try again.'),
-      kind: 'error',
-    });
+    notices.toast({ kind: 'error', key: 'player.error', title: 'Playback unavailable',
+                    text: escapeProfileHtml(
+                      detail || 'The playback output is not responding. Check it in Settings → Audio output, then try again.') });
     return false;
   }
 
@@ -6614,11 +6628,11 @@
     let d;
     try {
       const resp = await fetch('/api/genres/' + encodeURIComponent(genreId));
-      if (!resp.ok) throw new Error('HTTP ' + resp.status);
+      if (!resp.ok) throw httpError(resp);
       d = await resp.json();
     } catch (err) {
       screen.innerHTML = `<div class="placeholder-screen">
-        <p class="placeholder-body">Genre not found.</p>
+        <p class="placeholder-body">${unreachableCopy(err, 'Genre not found.')}</p>
         <button class="back-link" onclick="history.back()">← Back</button>
       </div>`;
       return;
@@ -7942,7 +7956,7 @@
               <span class="more-hint"></span>
               <span class="more-chev">${CHEV}</span>
             </button>
-            <button class="more-row" type="button" data-go="more/sync">
+            <button class="more-row" type="button" data-go="more/sync" data-guide="notices">
               <span class="more-icon">${ICON_SYNC}</span>
               <span class="more-label">Sync &amp; P2P</span>
               <span class="more-hint"></span>
@@ -9436,7 +9450,7 @@
     document.body.appendChild(el);
     let value = dismissValue;
     el.addEventListener('click', e => { if (e.target === el) el.close(); });
-    el.addEventListener('close', () => { el.remove(); settle(value); });
+    el.addEventListener('close', () => { el.remove(); settle(value); notices.flush(); });
     el.showModal();
     return { el, close: (v) => { value = v; el.close(); } };
   }
@@ -9505,6 +9519,231 @@
   window.confirmDestructive = confirmDestructive;
   window.notifyDialog       = notifyDialog;
   window.escapeProfileHtml  = escapeProfileHtml;
+
+  /* ---------- Notices: toasts, the strip, the rows ----------
+     A toast is a signal that a condition began (or that something the
+     user did finished off-screen), never where the fact lives: the rows
+     on Sync & P2P hold it and the guidance trail leads there, so a toast
+     nobody saw costs nothing. That is why the passive toast takes no
+     pointer events — a tap goes to whatever is beneath it, and the second
+     tap of a double-tap cannot land on it — and only a toast with an
+     action opts back in. Long-lived conditions never float: the strip
+     sits in flow above #app and pushes it down.
+
+     The server publishes the whole ACTIVE SET on /api/events ('notice')
+     — a snapshot, never single events — and this side diffs it: a key
+     that appears, or re-arms with a newer `since`, toasts once; a key that
+     goes away just leaves the rows. The connect-time snapshot is flagged
+     `initial` and paints state only, so a tab that slept through a change
+     wakes to the rows and the trail, not to a burst of stale toasts.
+
+     Copy lives here, facts come from the server: a notice carries `key`,
+     `kind`, `since`, `until` (ISO, or null) and `data`; NOTICE_COPY turns
+     that into words, with the clock rendered in the viewer's local time.
+     `title` and `text` are HTML — escape anything user-controlled. */
+  function fmtUntil(iso) {
+    if (!iso) return 'soon';
+    const d = new Date(iso);
+    if (isNaN(d)) return 'soon';
+    const now = new Date();
+    const hm = d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+    const tomorrow = new Date(now); tomorrow.setDate(now.getDate() + 1);
+    const prefix = d.toDateString() === now.toDateString() ? 'at '
+      : d.toDateString() === tomorrow.toDateString() ? 'tomorrow at '
+      : `on ${d.toLocaleDateString([], { month: 'short', day: 'numeric' })} at `;
+    return `${prefix}<span class="num">${escapeHtml(hm)}</span>`;
+  }
+  function noticeStrikes(n) {
+    const k = n.data && n.data.strikes;
+    return k > 1 ? ` (${k}× in a row)` : '';
+  }
+  const NOTICE_COPY = {
+    'cooldown.lastfm': n => ({
+      title: 'Last.fm paused',
+      text: `Rate-limited${noticeStrikes(n)} — bios, tags and similar artists resume ${fmtUntil(n.until)}.`,
+    }),
+    'cooldown.deezer': n => ({
+      title: 'Artist photos paused',
+      text: `Deezer rate-limited${noticeStrikes(n)} — photos resume ${fmtUntil(n.until)}.`,
+    }),
+    'mb_slice.deferred': n => {
+      const d = n.data || {};
+      const capped = d.pending_capped && d.unserved === d.pending;
+      const who = `<span class="num">${fmtNum(d.unserved || 0)}${capped ? '+' : ''}</span> artist${d.unserved === 1 ? '' : 's'}`;
+      const next = `Next attempt ${fmtUntil(n.until)}.`;
+      switch (d.reason) {
+        case 'rate_limited':
+          return { title: 'Catalog data delayed',
+                   text: `The network budget is used up — ${who} still wait for their albums. ${next}` };
+        case 'no_sources':
+          return { title: 'No catalog node reachable',
+                   text: `${who} wait for their albums until a node holding the MusicBrainz catalog is online. ${next}` };
+        case 'missing':
+          return { title: 'Catalog data not found yet',
+                   text: `No reachable node holds the catalog entries for ${who}. ${next}` };
+        default:
+          return { title: 'Catalog data delayed',
+                   text: `A catalog node did not answer — ${who} still wait for their albums. ${next}` };
+      }
+    },
+  };
+  function noticeCopy(n) {
+    const fn = NOTICE_COPY[n.key];
+    if (fn) return fn(n);
+    if (n.key.startsWith('cooldown.')) {
+      return { title: `${escapeHtml((n.data && n.data.source) || n.key.slice(9))} paused`,
+               text: `Rate-limited — resumes ${fmtUntil(n.until)}.` };
+    }
+    return { title: escapeHtml(n.key), text: '' };
+  }
+
+  const notices = {
+    items: new Map(),
+    _strips: new Map(),
+    _queue: [],
+    _shown: [],
+
+    get(key) { return this.items.get(key) || null; },
+    list() { return [...this.items.values()]; },
+
+    apply(snapshot) {
+      const next = new Map((snapshot.items || []).map(n => [n.key, n]));
+      if (!snapshot.initial) {
+        next.forEach((n, key) => {
+          const prev = this.items.get(key);
+          if (prev && prev.since === n.since) return;
+          const c = noticeCopy(n);
+          this.toast({ kind: n.kind, title: c.title, text: c.text, key });
+        });
+      }
+      this.items = next;
+      window.dispatchEvent(new CustomEvent('sautium:notices-changed'));
+    },
+
+    /* The rows were on screen: retire the trail for exactly these
+       armings. Straight to the server — guide.seen() gates on the trail
+       it last read, which may not have caught up with this snapshot yet. */
+    async markSeen() {
+      if (!this.list().some(n => !n.seen)) return;
+      this.list().forEach(n => { n.seen = true; });
+      try {
+        const r = await fetch('/api/settings/guidance/notices/seen', { method: 'POST' });
+        if (r.ok) guide._apply((await r.json()).tasks);
+      } catch (_) { /* the next wake repaints the trail */ }
+    },
+
+    /* kind: info | warning | error | success. `action` = { label, run }
+       makes it the tappable shape (with a close); `key` coalesces — a
+       repeat updates the live toast in place instead of stacking. */
+    toast({ kind = 'info', title = '', text = '', action = null, key = null, ttl = null } = {}) {
+      const live = key && this._shown.find(t => t.key === key);
+      if (live) { this._fill(live, { kind, title, text, action }); this._arm(live); return; }
+      const queued = key && this._queue.find(t => t.key === key);
+      if (queued) { Object.assign(queued, { kind, title, text, action }); return; }
+      this._queue.push({ kind, title, text, action, key, ttl, el: null, timer: null });
+      this._pump();
+    },
+
+    flush() { this._pump(); },
+
+    _cap() { return layoutMode() === 'tablet' ? 3 : 1; },
+
+    _pump() {
+      if (modalIsOpen()) return;          // never compete with a decision
+      while (this._queue.length && this._shown.length < this._cap()) {
+        this._show(this._queue.shift());
+      }
+    },
+
+    _fill(t, { kind, title, text, action }) {
+      Object.assign(t, { kind, title, text, action });
+      const el = t.el;
+      const wasIn = el.classList.contains('is-in');
+      el.className = `toast kind-${kind}${action ? ' is-actionable' : ''}${wasIn ? ' is-in' : ''}`;
+      el.setAttribute('role', action && kind === 'error' ? 'alert' : 'status');
+      el.innerHTML = `
+        <div class="toast-body">
+          ${title ? `<div class="toast-title">${title}</div>` : ''}
+          ${text ? `<div class="toast-text">${text}</div>` : ''}
+        </div>
+        ${action ? `<div class="toast-side">
+          <button class="toast-action" type="button">${escapeHtml(action.label)}</button>
+          <button class="toast-close" type="button" aria-label="Dismiss">×</button>
+        </div>` : ''}`;
+      if (action) {
+        el.querySelector('.toast-action').addEventListener('click', () => { this._dismiss(t); action.run(); });
+        el.querySelector('.toast-close').addEventListener('click', () => this._dismiss(t));
+        el.addEventListener('pointerenter', () => clearTimeout(t.timer));
+        el.addEventListener('pointerleave', () => this._arm(t));
+      }
+    },
+
+    _show(t) {
+      t.el = document.createElement('div');
+      this._fill(t, t);
+      document.getElementById('toastStack').appendChild(t.el);
+      this._shown.push(t);
+      t.el.getBoundingClientRect();       // commit the resting transform, then move in
+      t.el.classList.add('is-in');
+      this._arm(t);
+    },
+
+    _arm(t) {
+      clearTimeout(t.timer);
+      const chars = `${t.title} ${t.text}`.replace(/<[^>]+>/g, '').length;
+      const ttl = t.ttl || (t.action ? 10000 : Math.min(8000, 4000 + 50 * chars));
+      t.timer = setTimeout(() => this._dismiss(t), ttl);
+    },
+
+    _dismiss(t) {
+      clearTimeout(t.timer);
+      const i = this._shown.indexOf(t);
+      if (i < 0) return;
+      this._shown.splice(i, 1);
+      t.el.classList.remove('is-in');
+      // The leave transition is --dur-base; reduced-motion has none.
+      setTimeout(() => { t.el.remove(); this._pump(); }, 220);
+    },
+
+    /* A long-lived condition: shown in flow, never floating. Keyed, so
+       the party that raised it is the one that clears it. */
+    strip(key, html) {
+      if (html) this._strips.set(key, html); else this._strips.delete(key);
+      const el = document.getElementById('noticeStrip');
+      const first = this._strips.values().next();
+      el.hidden = first.done;
+      el.innerHTML = first.done ? '' : first.value;
+    },
+  };
+  window.notices = notices;
+
+  /* Rows for Sync & P2P — the place the facts live. */
+  function _renderNoticeRows() {
+    const items = notices.list();
+    if (!items.length) return '';
+    return `
+      <div class="form-group" data-notice-rows>
+        ${items.map(n => {
+          const c = noticeCopy(n);
+          return `
+          <div class="form-row stacked notice-row kind-${escapeHtml(n.kind)}">
+            <div class="row-stack">
+              <span class="row-stack-label">${c.title}</span>
+              <span></span>
+            </div>
+            <div class="row-stack-sub">${c.text}</div>
+          </div>`;
+        }).join('')}
+      </div>`;
+  }
+
+  /* The in-place note on a bare artist card — the consequence explained
+     where it is seen (routers/artists.py discography_pending). */
+  function discographyPendingText() {
+    const n = notices.get('mb_slice.deferred');
+    if (!n) return 'Discography is on its way — the catalog data arrives with the next network pass.';
+    return `Discography is on its way. ${noticeCopy(n).text}`;
+  }
 
   /* Email verification — two-step Worker-mediated flow.
      POST /api/p2p/email/send-code sends a 6-char code to the
@@ -11346,6 +11585,10 @@
   }
 
   function _renderSync(sync) {
+    return _renderNoticeRows() + _renderSyncSettings(sync);
+  }
+
+  function _renderSyncSettings(sync) {
     const on = !!sync.p2p_enabled;
     const interval = sync.auto_interval_min;
     const intervalLabel = (AUTO_SYNC_OPTIONS.find(o => o.id === (interval || 0)) || AUTO_SYNC_OPTIONS[0]).label;
@@ -12948,6 +13191,7 @@
     _wireBack(root);
     _wireSyncActions(root, sync);
     _subscribeSyncStream(root);
+    notices.markSeen();
   }
 
   async function _fetchSyncState() {
@@ -13066,6 +13310,27 @@
     refreshAiAvailability();
     guide.refresh();
     libraryWake.on(() => guide.refresh());
+    // Notices ride /api/events (player.js re-dispatches the snapshot); the
+    // link state comes from the same stream's transport.
+    window.addEventListener('sautium:notice', e => notices.apply(e.detail || {}));
+    window.addEventListener('sautium:link', e => {
+      notices.strip('link', e.detail && e.detail.up ? null
+        : 'Connection to the node lost — reconnecting…');
+    });
+    window.addEventListener('sautium:notices-changed', () => {
+      // Targeted updates only — the open screen keeps its DOM.
+      const note = document.querySelector('[data-discography-pending]');
+      if (note) note.innerHTML = discographyPendingText();
+      if (parseHash().startsWith('more/sync')) {
+        const content = screenRoot() && screenRoot().querySelector('[data-sync-content]');
+        if (content) {
+          const rows = content.querySelector('[data-notice-rows]');
+          const html = _renderNoticeRows();
+          if (rows) rows.outerHTML = html; else content.insertAdjacentHTML('afterbegin', html);
+        }
+        notices.markSeen();
+      }
+    });
     document.addEventListener('np-update', e => {
       const d = e.detail || {};
       _lastNpMediaFileId = d.media_file_id != null ? d.media_file_id : null;

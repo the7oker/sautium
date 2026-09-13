@@ -454,8 +454,11 @@ split (`app-shell.js` / `player.js`) — live in
 
 One rule is binding everywhere, so it stays here: **never call
 `alert()`, `confirm()`, or `prompt()`** — they render in OS chrome and
-break the design language. Use `window.notifyDialog()` and
-`window.confirmDestructive()` instead.
+break the design language. Use `window.confirmDestructive()` for a
+decision, `window.notifyDialog()` for an instruction that must not be
+missed, and `window.notices.toast()` for everything else — a passive
+toast takes no pointer events and never blocks the user (see
+`backend/static/CLAUDE.md` § Notices).
 
 ---
 

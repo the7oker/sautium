@@ -13,10 +13,11 @@
   <link href="https://fonts.googleapis.com/css2?family=Inter+Tight:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet">
 
   <link rel="stylesheet" href="/static/tokens.css?v=4">
-  <link rel="stylesheet" href="/static/style.css?v=98">
+  <link rel="stylesheet" href="/static/style.css?v=99">
 </head>
 <body class="sautium-base">
 
+  <div id="noticeStrip" class="notice-strip" role="status" hidden></div>
   <main id="app" role="main"></main>
 
   <button id="aiFab" class="ai-fab" type="button" aria-label="Open AI assistant" hidden>AI</button>
@@ -321,8 +322,9 @@
     </button>
   </nav>
 
+  <div id="toastStack" class="toast-stack" aria-live="polite"></div>
   <script src="/static/auth.js?v=8"></script>
-  <script src="/static/app-shell.js?v=225"></script>
-  <script src="/static/player.js?v=8"></script>
+  <script src="/static/app-shell.js?v=226"></script>
+  <script src="/static/player.js?v=9"></script>
 </body>
 </html>

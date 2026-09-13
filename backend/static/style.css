@@ -5711,6 +5711,149 @@ select.add-gear-input {
 }
 
 /* =====================================================================
+ * Notices — toasts, the status strip, the rows.
+ *
+ * A toast is a signal that a condition began or an action finished off-
+ * screen, never the place the fact lives: the Sync & P2P rows hold it and
+ * the guidance trail leads there. So a PASSIVE toast takes no pointer
+ * events at all — a tap goes to whatever is beneath, and the second tap
+ * of a double-tap cannot land on it — and it is narrower than the screen
+ * header so the corner buttons (back, menu) stay uncovered as well as
+ * tappable. Only a toast with an action opts back in. Long-lived
+ * conditions never float: the strip sits in flow above #app and pushes
+ * it down, so nothing is ever covered for minutes.
+ *
+ * Layer: 300 — above the HQPlayer picker (200); <dialog> stays in the top
+ * layer, and the queue defers toasts while one is open anyway.
+ * ===================================================================== */
+.toast-stack {
+  position: fixed;
+  top: calc(var(--safe-top) + 8 * var(--px));
+  left: var(--nav-w);
+  right: var(--panel-w);           /* reserved desktop panel; 0 today */
+  z-index: 300;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: var(--space-2);
+  padding: 0 calc(44 * var(--px));      /* the corner buttons' lane */
+  pointer-events: none;
+}
+.toast {
+  pointer-events: none;
+  box-sizing: border-box;
+  width: 100%;
+  max-width: calc(272 * var(--px));
+  display: grid;
+  grid-template-columns: 1fr;
+  padding: calc(10 * var(--px)) calc(14 * var(--px));
+  background: var(--color-surface-hi);
+  border: 1px solid var(--color-divider);
+  border-radius: var(--radius-md);
+  box-shadow: var(--shadow-2);
+  color: var(--color-text);
+  font-size: calc(13 * var(--px));
+  line-height: var(--lh-snug);
+  opacity: 0;
+  transform: translateY(calc(-8 * var(--px)));
+  transition: opacity var(--dur-base) var(--ease-standard),
+              transform var(--dur-base) var(--ease-standard);
+}
+.toast.is-in { opacity: 1; transform: none; }
+.toast.is-actionable { pointer-events: auto; }
+.toast-body { min-width: 0; }
+.toast-title {
+  font-weight: 600;
+  letter-spacing: -0.005em;
+}
+/* Same accent rule as .confirm-title: only outcomes are tinted. */
+.toast.kind-error   .toast-title { color: var(--color-negative); }
+.toast.kind-success .toast-title { color: var(--color-positive); }
+.toast-text {
+  margin-top: calc(2 * var(--px));
+  color: var(--color-text-muted);
+  font-size: calc(12.5 * var(--px));
+  text-wrap: pretty;
+  word-break: break-word;
+}
+.toast-text .num {
+  font-family: var(--font-mono);
+  color: var(--color-blue);
+  font-size: calc(12 * var(--px));
+  letter-spacing: 0.02em;
+}
+.toast-side {
+  display: flex;
+  justify-content: flex-end;
+  align-items: center;
+  gap: calc(6 * var(--px));
+  margin-top: calc(8 * var(--px));
+}
+.toast-action {
+  height: calc(28 * var(--px));
+  padding: 0 calc(10 * var(--px));
+  border-radius: var(--radius-sm);
+  border: 1px solid var(--color-divider);
+  background: var(--color-surface);
+  color: var(--color-text);
+  font-family: var(--font-sans);
+  font-size: calc(12.5 * var(--px));
+  font-weight: 600;
+  white-space: nowrap;
+  cursor: pointer;
+}
+.toast-action:hover { background: var(--color-amber-weak); }
+.toast-close {
+  width: calc(28 * var(--px));
+  height: calc(28 * var(--px));
+  border: 0;
+  border-radius: var(--radius-sm);
+  background: transparent;
+  color: var(--color-text-muted);
+  font-size: calc(18 * var(--px));
+  line-height: 1;
+  cursor: pointer;
+}
+.toast-close:hover { color: var(--color-text); background: var(--color-surface); }
+@media (prefers-reduced-motion: reduce) {
+  .toast { transition: none; transform: none; }
+}
+
+/* The strip: in flow, pushes #app down, gone the moment the condition
+   ends. Starts right of the nav rail on the tablet. */
+.notice-strip {
+  margin-left: var(--nav-w);
+  padding: calc(9 * var(--px)) calc(20 * var(--px));
+  background: var(--color-surface-lo);
+  border-bottom: 1px solid var(--color-divider);
+  color: var(--color-text-muted);
+  font-size: calc(12.5 * var(--px));
+  line-height: 1.4;
+  text-align: center;
+}
+.notice-strip .num { font-family: var(--font-mono); color: var(--color-blue); }
+
+/* Rows on Sync & P2P and the in-place note on an artist card reuse the
+   settings row-stack and the Discovery notice paragraph respectively;
+   only the accents are new. */
+.notice-row.kind-error   .row-stack-label { color: var(--color-negative); }
+.notice-row.kind-success .row-stack-label { color: var(--color-positive); }
+.notice-row .row-stack-sub .num,
+.card-note .num {
+  font-family: var(--font-mono);
+  color: var(--color-blue);
+  letter-spacing: 0.02em;
+}
+.card-note {
+  margin: 0;
+  padding: calc(4 * var(--px)) calc(20 * var(--px)) calc(12 * var(--px));
+  font-size: calc(12.5 * var(--px));
+  color: var(--color-text-muted);
+  line-height: 1.4;
+  text-wrap: pretty;
+}
+
+/* =====================================================================
  * Settings (#more/settings)
  * Mirrors docs/design/reference/claude-design-bundle/project/Settings.html.
  * Reuses .form-group / .form-row / .toggle from the Profile section

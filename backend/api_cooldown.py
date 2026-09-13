@@ -131,6 +131,9 @@ def arm(source: str, reason: str = "") -> datetime:
         "%s rate-limited (strike %d) — cooling down %s, until %s UTC: %s",
         source, strikes, _fmt_dur(dur), deadline.strftime("%Y-%m-%d %H:%M"), reason,
     )
+    # A cooldown is a user-visible condition (bios, photos, similars stop
+    # arriving): the notices channel repaints from the table on this wake.
+    db_execute("NOTIFY sautium_notices")
     return deadline
 
 
@@ -139,6 +142,7 @@ def clear(source: str) -> None:
     source was never armed (pure dict check → cheap on the hot path)."""
     if _cache.pop(source, None) is not None:
         db_execute("DELETE FROM external_api_cooldown WHERE source = %(s)s", {"s": source})
+        db_execute("NOTIFY sautium_notices")
 
 
 def load_from_db() -> None:

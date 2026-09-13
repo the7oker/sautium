@@ -386,18 +386,29 @@ def _search_allowed(ip: str, now: float) -> bool:
     return True
 
 
+def _rate_limited(stamps: list, now: float) -> JSONResponse:
+    """The 429 carries Retry-After = when the oldest stamp leaves the
+    window, i.e. the first moment a retry can succeed. A requester that
+    reads it waits a minute at most instead of parking its work until its
+    own timer (the launcher's slice cycle used to wait six hours)."""
+    wait = int(RATE_LIMIT_WINDOW - (now - stamps[0])) + 1 if stamps else RATE_LIMIT_WINDOW
+    return JSONResponse({"error": "rate limited", "retry_after": wait},
+                        status_code=429,
+                        headers={"Retry-After": str(max(1, wait))})
+
+
 @app.middleware("http")
 async def rate_limit(request: Request, call_next):
     ip = request.client.host if request.client else "unknown"
     now = time.time()
     if request.url.path == "/api/mb/search":
         if not _search_allowed(ip, now):
-            return JSONResponse({"error": "rate limited"}, status_code=429)
+            return _rate_limited(_search_hits.get(ip, []), now)
         return await call_next(request)
     recent = [t for t in _hits.get(ip, ()) if now - t < RATE_LIMIT_WINDOW]
     if len(recent) >= RATE_LIMIT_PER_MINUTE:
         _hits[ip] = recent
-        return JSONResponse({"error": "rate limited"}, status_code=429)
+        return _rate_limited(recent, now)
     recent.append(now)
     _hits[ip] = recent
     if len(_hits) > 10_000:                    # bound the table under a flood

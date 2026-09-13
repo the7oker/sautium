@@ -88,7 +88,12 @@ class MBSliceClient:
         if not resp or "error" in resp or "detail" in resp:
             err = (resp or {}).get("error") or (resp or {}).get("detail") or "no response"
             logger.warning(f"MB slice fetch failed ({self.source_node}): {err}")
-            return {"error": err}
+            out = {"error": err}
+            if "retry_after" in (resp or {}):
+                # A 429: the peer's per-IP window is full. The caller waits
+                # it out and re-asks instead of parking the batch.
+                out["retry_after"] = resp["retry_after"]
+            return out
         if resp.get("v") != 2:
             logger.warning(f"MB slice from {self.source_node}: incompatible "
                            f"protocol (no v2) — rejected")
