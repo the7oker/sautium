@@ -544,11 +544,20 @@ class SyncClient:
                 if result and "items" in result:
                     break
                 if attempt == 1:
-                    logger.warning(
-                        f"Pull {cat_key} batch {batch_idx} failed "
-                        f"(attempt 1), retrying in 2s"
-                    )
-                    time.sleep(2)
+                    # A 429 names when the peer's window frees (Retry-After);
+                    # retrying after 2 s landed inside the same window and
+                    # failed again, and the batch was skipped for a cycle.
+                    wait = 2
+                    if result and result.get("retry_after"):
+                        wait = min(int(result["retry_after"]), 120)
+                        logger.info(
+                            f"Pull {cat_key} batch {batch_idx}: peer rate-limited, "
+                            f"re-asking in {wait}s")
+                    else:
+                        logger.warning(
+                            f"Pull {cat_key} batch {batch_idx} failed "
+                            f"(attempt 1), retrying in {wait}s")
+                    time.sleep(wait)
             if not result or "items" not in result:
                 logger.warning(
                     f"Pull {cat_key} batch {batch_idx} failed after retry, "

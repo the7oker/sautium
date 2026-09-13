@@ -139,6 +139,11 @@ class JumpRequest(BaseModel):
 
 class RemoveRequest(BaseModel):
     index: int  # 1-based — HQPlayer's PlaylistRemove convention
+    # The identity the client saw in that slot. A queue that moved under
+    # the tap (radio refill, another device, the client's own optimistic
+    # re-render) makes the removal refuse instead of taking whatever now
+    # sits at the index — an index alone cannot be made idempotent.
+    track_id: Optional[str] = None
 
 class ReorderRequest(BaseModel):
     # Full new order of universal track UUIDs (owned + phantom), current
@@ -1270,10 +1275,12 @@ def remove(req: RemoveRequest):
     if req.index < 1:
         raise HTTPException(status_code=400, detail="index must be >= 1")
     try:
-        ok = manager.remove(req.index)
-        return {"ok": ok, "index": req.index}
+        ok = manager.remove(req.index, track_id=req.track_id)
     except Exception as e:
         raise HTTPException(status_code=503, detail=str(e))
+    if not ok and req.track_id:
+        raise HTTPException(status_code=409, detail="queue changed — refresh and try again")
+    return {"ok": ok, "index": req.index}
 
 
 @router.post("/reorder")
@@ -3151,6 +3158,11 @@ class RadioStartRequest(BaseModel):
     track_uuid: Optional[str] = None  # track UUID of a phantom (streamed) seed
 
 
+# One start at a time: a second start racing the first cleared the queue
+# again and left two fill threads on one generation (double batch).
+_radio_start_lock = threading.Lock()
+
+
 @router.post("/radio/start")
 def radio_start(req: RadioStartRequest):
     """Start drifting radio from a seed: keep the current track playing, clear what
@@ -3158,6 +3170,17 @@ def radio_start(req: RadioStartRequest):
     phantom) CLAP-similar batch. The poller refills near the end so it runs on.
     Async — the phantom resolve + buffer is slow; the toggle returns at once and the
     queue grows behind the seed (owned instantly, phantoms as they buffer)."""
+    global _radio_played, _radio_refilling, _radio_last_artist
+
+    if not _radio_start_lock.acquire(blocking=False):
+        raise HTTPException(status_code=409, detail="Radio is already starting.")
+    try:
+        return _radio_start(req)
+    finally:
+        _radio_start_lock.release()
+
+
+def _radio_start(req: RadioStartRequest):
     global _radio_played, _radio_refilling, _radio_last_artist
 
     # Seed by track UUID (a streamed phantom row has no media_file) or by

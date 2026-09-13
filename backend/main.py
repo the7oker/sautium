@@ -10,6 +10,7 @@ import asyncio
 import logging
 import logging.config
 import threading
+import time
 from contextlib import asynccontextmanager
 from typing import Dict, Any, Optional
 
@@ -1663,8 +1664,16 @@ def _load_lastfm_from_db() -> None:
 
 @app.post("/lastfm/auth/start")
 async def lastfm_auth_start() -> Dict[str, str]:
-    """Start Last.fm OAuth flow. Returns auth URL to open in browser."""
+    """Start Last.fm OAuth flow. Returns auth URL to open in browser.
+
+    A flow started in the last ten minutes is handed back as-is: a second
+    start overwrote the token the first tab was authorising, so "Finish"
+    failed for the tab the user actually used."""
     import pylast
+
+    if (_lastfm_auth_state.get("url")
+            and time.time() - _lastfm_auth_state.get("started_at", 0) < 600):
+        return {"auth_url": _lastfm_auth_state["url"]}
 
     network = pylast.LastFMNetwork(
         api_key=settings.lastfm_api_key,
@@ -1674,6 +1683,7 @@ async def lastfm_auth_start() -> Dict[str, str]:
     url = skg.get_web_auth_url()
     _lastfm_auth_state["skg"] = skg
     _lastfm_auth_state["url"] = url
+    _lastfm_auth_state["started_at"] = time.time()
     return {"auth_url": url}
 
 

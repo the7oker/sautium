@@ -551,9 +551,12 @@ class PlaybackManager:
                 self._emit_idle_status()
             return added
 
-    def remove(self, index: int) -> bool:
+    def remove(self, index: int, track_id: Optional[str] = None) -> bool:
+        """`track_id`, when given, is a precondition: the slot must still
+        hold that track, else nothing is removed and False comes back."""
         with self._mutate_lock:
-            if self.queue.item_at(index) is None:
+            item = self.queue.item_at(index)
+            if item is None or (track_id and item.track_id != track_id):
                 return False
             backend = self._active
             ok = backend.queue_remove(index) if backend else True
