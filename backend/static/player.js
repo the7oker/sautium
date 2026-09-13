@@ -42,6 +42,14 @@
   // three escalating attempts before we concede the link is really down.
   const DISCONNECT_GRACE_MS = 10000;
   let _disconnectPaint = null;
+  // Mirrors the painted state for the shell's strip: down once the grace
+  // ran out, up again on the first message the reconnect delivers.
+  let _linkDown = false;
+  function announceLink(up) {
+    if (_linkDown === !up) return;
+    _linkDown = !up;
+    window.dispatchEvent(new CustomEvent('sautium:link', { detail: { up } }));
+  }
 
   // Exposed for legacy reads in some code paths (the shell prefers the
   // detail on np-update; this is a fallback for synchronous callers).
@@ -90,6 +98,11 @@
           // found/lost) — payload carries the fresh mb-status shape.
           window.dispatchEvent(new CustomEvent('sautium:mb-changed',
             { detail: msg.d }));
+        } else if (msg.t === 'notice') {
+          // The active-conditions snapshot (cooldowns, deferred catalog
+          // data) — the shell diffs it into toasts and rows.
+          window.dispatchEvent(new CustomEvent('sautium:notice',
+            { detail: msg.d }));
         }
       },
       () => {
@@ -108,6 +121,7 @@
           document.dispatchEvent(new CustomEvent('np-update', {
             detail: { state: 'disconnected' },
           }));
+          announceLink(false);
         }, DISCONNECT_GRACE_MS);
       }
     );
@@ -128,6 +142,7 @@
     // A real message means the stream is back — the pending
     // "disconnected" paint is no longer true.
     if (_disconnectPaint) { clearTimeout(_disconnectPaint); _disconnectPaint = null; }
+    announceLink(true);
     const seq = ++_statusSeq;
     _sseChain = _sseChain
       .then(() => processStatusEvent(data, seq))
@@ -823,12 +838,11 @@
         const err = await resp.json().catch(() => ({}));
         if (resp.status === 503 && window.reportOutputUnavailable) {
           window.reportOutputUnavailable(err.detail || '');
-        } else if (window.notifyDialog) {
+        } else if (window.notices) {
           const esc = window.escapeProfileHtml || ((s) => s);
-          window.notifyDialog({
-            title: 'Playback unavailable',
-            message: esc(err.detail || 'Could not play the track.'),
-            kind: 'error',
+          window.notices.toast({
+            kind: 'error', key: 'player.error', title: 'Playback unavailable',
+            text: esc(err.detail || 'Could not play the track.'),
           });
         }
       }

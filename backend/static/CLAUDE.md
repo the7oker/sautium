@@ -334,3 +334,48 @@ Always escape user-controlled data with `window.escapeProfileHtml()`
 before passing into `message` (both dialogs render `message` as
 HTML so a `<b>highlight</b>` works — XSS is the caller's
 responsibility).
+
+### Notices — messages that need no decision
+
+A dialog is for a decision, or for an instruction that must not be
+missed. Everything else goes through `window.notices` in
+`app-shell.js`, which lives next to the dialogs and shares their
+visual language:
+
+- **`notices.toast({ kind, title, text, action?, key? })`** — the
+  passive toast (no `action`) takes **no pointer events**: a tap goes
+  to whatever is beneath it, so it never blocks a control and the
+  second tap of a double-tap cannot land on it. It is narrower than
+  the screen header (272 design-px, centred) so the corner buttons
+  stay uncovered. One at a time on the phone, three on the tablet;
+  the rest queue. A toast never competes with a decision: while a
+  `<dialog>` is open the queue waits and drains on its close. `key`
+  coalesces — a repeat updates the live toast instead of stacking.
+  Only a toast **with** an action (`{ label, run }`) opts back into
+  pointer events and gets a close button and a hover pause.
+- **`notices.strip(key, html | null)`** — a long-lived condition
+  (the link is down). In flow above `#app`, pushes it down, gone the
+  moment the party that raised it clears its key. Nothing long-lived
+  ever floats.
+- **The rows on Sync & P2P** — where the fact lives. Toasts are
+  signals, not storage; a toast nobody saw costs nothing because the
+  row and the guidance trail (`data-guide="notices"` on the More tab
+  and the Sync row) still lead there. Visiting the screen retires
+  the trail for exactly the armings shown.
+- **Explain at the point of consequence** where one exists: the bare
+  artist card carries `[data-discography-pending]`, not only a toast.
+
+The active set comes from the server as a **snapshot** on
+`/api/events` (`{"t": "notice"}`), derived in
+`backend/routers/settings.py::_notices_state()` from the cooldown
+ledger and the launcher's `mb_slice.status` row — the rule for WHEN a
+condition exists lives there, the words and the clock (local time,
+mono) live in `NOTICE_COPY` here. The client diffs snapshots: a key
+that appears or re-arms toasts once; the connect-time snapshot is
+`initial` and paints state only, so a tab that slept through a change
+wakes to the rows, never to a burst of stale toasts. Wake the channel
+with `NOTIFY sautium_notices` after changing a source.
+
+`title` and `text` are HTML — escape anything user-controlled, exactly
+as for the dialogs. Transport commands (next, previous, volume) get no
+toast: their feedback is the control's own pressed state.

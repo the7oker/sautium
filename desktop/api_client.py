@@ -271,11 +271,20 @@ class BackendAPIClient:
                 return self._post_json(path, body, timeout, _paid=True)   # priced: pay once and retry
             try:
                 body_resp = _read_json_body(e)
-                logger.warning(f"API POST {url} returned {e.code}: {body_resp}")
-                return body_resp
             except Exception:
-                logger.warning(f"API POST {url} returned {e.code}")
-                return {"detail": f"HTTP {e.code}"}
+                body_resp = {"detail": f"HTTP {e.code}"}
+            if e.code == 429:
+                # The peer says when the oldest stamp leaves its window —
+                # the earliest a retry can succeed. A peer on older code
+                # sends neither the header nor the body field; the caller
+                # then falls back to the window length.
+                try:
+                    body_resp.setdefault(
+                        "retry_after", int(e.headers.get("Retry-After") or 0) or None)
+                except (TypeError, ValueError):
+                    body_resp.setdefault("retry_after", None)
+            logger.warning(f"API POST {url} returned {e.code}: {body_resp}")
+            return body_resp
         except Exception as e:
             logger.debug(f"API POST failed: {url} — {e}")
             return None

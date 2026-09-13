@@ -541,6 +541,38 @@ it taught:
   password at restore and written only when it reproduces the recorded
   public key. The rotation archive's private keys are the accepted loss.
 
+### Notices: a toast is a signal, the row is the fact (2026-09-13)
+
+The silent-events audit found background conditions that change what the
+user sees with no word from the UI: a fresh node's slice fetch hit the
+peer's per-IP window (60 requests/min, shared with the sync walk that had
+just spent it), the batch was parked until the SIX-HOUR timer, and every
+phantom artist stayed a bare card — "looks broken" for hours. Same shape
+for a Last.fm cooldown (30 min doubling to 24 h) that reads as "Idle".
+
+- **Three layers, not one.** A toast on the transition, a row on Sync & P2P
+  lit by the guidance trail until visited, and the consequence explained
+  where it shows (the bare card says the discography is on its way and
+  when the network is asked next). A toast that nobody saw costs nothing
+  because the other two layers still hold the fact.
+- **`pointer-events: none` for the passive toast.** A tap goes to what is
+  beneath, so a toast never blocks a control and the second tap of a
+  double-tap cannot be hijacked into "open Sync". The toast is narrower
+  than the header so the corner buttons stay uncovered; only a toast with
+  an action opts back in. Long-lived conditions never float: the
+  reconnecting strip sits in flow and pushes the app down.
+- **Snapshots, not events.** The server publishes the whole active set on
+  `/api/events` and the client diffs it; the connect-time copy paints state
+  only. Conditions are DERIVED (cooldown ledger, the launcher's
+  `mb_slice.status` row), never stored as a list, so one ends the moment
+  its source does.
+- **The honest number came from fixing the cause.** `Retry-After` on the
+  peer surfaces' 429 and a one-minute wait-and-retry in the slice cycle
+  turned "next attempt in six hours" into "about a minute"; the published
+  `next_attempt_at` is the timed loop's real deadline. Left for later: the
+  same 429 awareness in the pull walk, a slice loop on dump-less Docker
+  nodes, and the remaining silent states (music mount, media tools).
+
 ## Known Gotchas
 
 - **A dead SSE socket is silent, and painting its death is a UI lie.** Two

@@ -138,6 +138,36 @@ def _aicanon_worker(limit: Optional[int], since=None) -> None:
         _notify_aicanon()
 
 
+# /api/events subscribers waiting for a fresh notices snapshot. Registered
+# by the multiplexed stream in routers/player.py; woken by the
+# sautium_notices NOTIFY (api_cooldown arm/clear, the launcher's slice
+# cycle) through the sync listener above.
+_notice_sse_clients: List[Tuple[asyncio.Event, asyncio.AbstractEventLoop]] = []
+_notice_sse_lock = threading.Lock()
+
+
+def notices_sse_register(evt, loop) -> None:
+    with _notice_sse_lock:
+        _notice_sse_clients.append((evt, loop))
+
+
+def notices_sse_unregister(evt, loop) -> None:
+    with _notice_sse_lock:
+        try:
+            _notice_sse_clients.remove((evt, loop))
+        except ValueError:
+            pass
+
+
+def notify_notice_subscribers() -> None:
+    with _notice_sse_lock:
+        for evt, loop in list(_notice_sse_clients):
+            try:
+                loop.call_soon_threadsafe(evt.set)
+            except RuntimeError:
+                continue
+
+
 def notify_library_subscribers() -> None:
     """Thread-safe wake of every connected Library SSE client.
     Workers call this after start / phase transition / completion."""
@@ -195,6 +225,7 @@ def _sync_db_listener() -> None:
             with conn.cursor() as cur:
                 cur.execute("LISTEN sautium_sync_done")
                 cur.execute("LISTEN sautium_identity")     # identity proof progress
+                cur.execute("LISTEN sautium_notices")      # a condition began or ended
 
             while _sync_listener_running:
                 ready = select.select([conn], [], [], 5)
@@ -209,6 +240,8 @@ def _sync_db_listener() -> None:
                             # enrichment pass that follows fetches the rest.
                             import background_enrichment
                             background_enrichment.wake("P2P sync finished")
+                        if "sautium_notices" in channels:
+                            notify_notice_subscribers()
                         notify_library_subscribers()
         except Exception as e:
             logger.debug(f"Sync DB listener error: {e}")
@@ -971,7 +1004,7 @@ def _audio_output_state() -> Dict[str, Any]:
 # control itself) and a trail whose steps disagree points nowhere.
 # The client owns only the route each id maps to.
 
-_GUIDANCE_DISMISSIBLE = {"audio_output"}
+_GUIDANCE_DISMISSIBLE = {"audio_output", "notices"}
 
 
 def _analysis_pending() -> bool:
@@ -1036,12 +1069,68 @@ def _guidance_state() -> Dict[str, Any]:
                 and _synced_since_scan() and _analysis_pending()):
             tasks.append("analyse_library")
 
+    # A background condition the user has not been shown yet — the More
+    # tab and the Sync & P2P row light up until the screen with the rows
+    # is visited. A re-armed condition (new `since`) lights it again.
+    if any(not n["seen"] for n in _notices_state()["items"]):
+        tasks.append("notices")
+
     return {"tasks": tasks}
+
+
+def _notices_state() -> Dict[str, Any]:
+    """Active conditions that change what the user sees without any action
+    of theirs: an external API that cooled us down, catalog data the
+    network has not served yet. Like the guidance trail, the rule for WHEN
+    a condition exists lives here next to the workers that create it; the
+    view layer owns the words and the clock. Derived, never stored — the
+    cooldown ledger and the launcher's `mb_slice.status` row are the
+    sources, so a condition ends the moment its source does.
+
+    Each item: `key` (stable — what toasts coalesce on), `kind`, `since`
+    (a re-arm bumps it, which re-lights the trail), `until` (when the
+    condition clears or is retried, or null), `data` (facts for the copy),
+    `seen` (the trail already led the user to it)."""
+    items: List[Dict[str, Any]] = []
+    for row in db_query("""
+        SELECT source, strikes, updated_at, cooldown_until, reason
+        FROM external_api_cooldown
+        WHERE cooldown_until > now()
+        ORDER BY source
+    """):
+        items.append({
+            "key": f"cooldown.{row['source']}",
+            "kind": "warning",
+            "since": row["updated_at"].isoformat(),
+            "until": row["cooldown_until"].isoformat(),
+            "data": {"source": row["source"], "strikes": row["strikes"],
+                     "reason": row["reason"] or ""},
+        })
+    slices = _read("mb_slice.status") or {}
+    if slices.get("unserved"):
+        items.append({
+            "key": "mb_slice.deferred",
+            "kind": "info",
+            "since": slices.get("at"),
+            "until": slices.get("next_attempt_at"),
+            "data": {k: slices.get(k) for k in
+                     ("unserved", "pending", "pending_capped", "served",
+                      "reason", "sources")},
+        })
+    seen = _read("notice.seen") or {}
+    for item in items:
+        item["seen"] = seen.get(item["key"]) == item["since"]
+    return {"items": items}
 
 
 @router.get("/guidance")
 def get_guidance() -> Dict[str, Any]:
     return _guidance_state()
+
+
+@router.get("/notices")
+def get_notices() -> Dict[str, Any]:
+    return _notices_state()
 
 
 @router.post("/guidance/{task}/seen")
@@ -1050,7 +1139,14 @@ def post_guidance_seen(task: str) -> Dict[str, Any]:
     completion is a human's judgement rather than a state we can read."""
     if task not in _GUIDANCE_DISMISSIBLE:
         raise HTTPException(status_code=400, detail=f"not dismissible: {task}")
-    _write(f"guidance.{task}_seen", True)
+    if task == "notices":
+        # Seen is per condition AND per arming: the map keeps the `since`
+        # that was shown, so the same key re-armed later lights the trail
+        # again while a lingering row stays retired.
+        _write("notice.seen", {n["key"]: n["since"]
+                               for n in _notices_state()["items"]})
+    else:
+        _write(f"guidance.{task}_seen", True)
     notify_library_subscribers()
     return _guidance_state()
 

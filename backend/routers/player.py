@@ -883,6 +883,8 @@ async def events_stream():
     from routers.gear_models import (research_sse_register,
                                      research_sse_unregister)
     from routers.p2p import chat_sse_register, chat_sse_unregister
+    from routers.settings import (_notices_state, notices_sse_register,
+                                  notices_sse_unregister)
     from streaming.events import preview_events
 
     loop = asyncio.get_event_loop()
@@ -890,6 +892,7 @@ async def events_stream():
     research_evt = asyncio.Event()
     mb_evt = asyncio.Event()
     chat_evt = asyncio.Event()
+    notice_evt = asyncio.Event()
 
     async def event_generator():
         last_version = -1
@@ -898,17 +901,27 @@ async def events_stream():
         research_sse_register(research_evt, loop)
         mb_sse_register(mb_evt, loop)
         chat_sse_register(chat_evt, loop)
+        notices_sse_register(notice_evt, loop)
         try:
             yield ("data: "
                    + json.dumps({"t": "status", "d": manager.latest_status})
                    + "\n\n")
             last_version = manager.status_version
+            # Notices travel as the whole active set, never as single
+            # events: the client diffs it, so a tab that was asleep learns
+            # what is true now rather than replaying what happened. The
+            # connect-time copy is flagged so it paints state, not toasts.
+            yield ("data: "
+                   + json.dumps({"t": "notice",
+                                 "d": {**_notices_state(), "initial": True}})
+                   + "\n\n")
             while True:
                 waiters = {
                     asyncio.create_task(status_evt.wait()): "status",
                     asyncio.create_task(research_evt.wait()): "research",
                     asyncio.create_task(mb_evt.wait()): "mb",
                     asyncio.create_task(chat_evt.wait()): "chat",
+                    asyncio.create_task(notice_evt.wait()): "notice",
                     asyncio.create_task(preview_q.get()): "preview",
                 }
                 done, pending = await asyncio.wait(
@@ -946,6 +959,11 @@ async def events_stream():
                     yield ("data: "
                            + json.dumps({"t": "mb", "d": mb_discovery.state()})
                            + "\n\n")
+                if "notice" in kinds:
+                    notice_evt.clear()
+                    yield ("data: "
+                           + json.dumps({"t": "notice", "d": _notices_state()})
+                           + "\n\n")
         except asyncio.CancelledError:
             pass
         finally:
@@ -953,6 +971,7 @@ async def events_stream():
             research_sse_unregister(research_evt, loop)
             mb_sse_unregister(mb_evt, loop)
             chat_sse_unregister(chat_evt, loop)
+            notices_sse_unregister(notice_evt, loop)
             preview_events.unsubscribe(preview_q)
 
     return StreamingResponse(

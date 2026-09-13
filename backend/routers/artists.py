@@ -484,6 +484,12 @@ def get_artist(
     else:
         artist["new_albums"] = fetch_new_albums(artist_id)
     artist["new_albums_stale"] = _is_discography_stale(last_album_sync)
+    # A dump-less node shelves an artist only once a peer served its MB
+    # slice; until then the discography sync answers no_source and the
+    # card stays bare. Say so on the card instead of looking broken — the
+    # notices channel carries when the network is asked next.
+    from discography import _mb_source_covers
+    artist["discography_pending"] = not _mb_source_covers(artist["name"])
 
     # Namesake split metadata for the screen: the selected namesake's caption +
     # flags (dominant landing? owns the external photo/similar block?), plus the

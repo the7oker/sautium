@@ -283,19 +283,24 @@ def search(q: str, limit: int = 20) -> dict:
     }
 
 
-def _fetch_remote_slice(artist_name: str) -> bool:
+def _fetch_remote_slice(artist_name: str) -> dict:
     """Pull one name's signed slice from peer sources and import it locally.
 
     Replicas first — the slice serve-order philosophy (spreads entry-load
     off the few dump nodes; a miss falls through to a full holder). After a
     successful import mb_backend.refresh() flips LOCAL_DUMP so the regular
-    mint/discography path reads the freshly-landed rows."""
+    mint/discography path reads the freshly-landed rows.
+
+    Returns {"ok": True} on import, else {"ok": False, "retry_after": s}
+    where `retry_after` is set when every source that answered was
+    rate-limited — the UI then says "busy, try in N s" instead of "not in
+    the dump", which is a lie about the catalog."""
     try:
         from desktop.api_client import BackendAPIClient
         from desktop.mb_slice_client import MBSliceClient
     except ImportError as e:
         logger.warning(f"MB slice client unavailable in this runtime: {e}")
-        return False
+        return {"ok": False}
     from config import settings as app_settings
     from p2p_identity import peer_identity
 
@@ -303,19 +308,25 @@ def _fetch_remote_slice(artist_name: str) -> bool:
     ordered = ([s["url"] for s in sources if s.get("kind") == "replica"]
                + [s["url"] for s in sources if s.get("kind") == "dump"])
     identity = peer_identity(app_settings)
+    retry_after = None
     for url in ordered:
         client = MBSliceClient(BackendAPIClient(url, peer=identity),
                                db_dsn=app_settings.database_url,
                                source_node=url)
         try:
             stats = client.run([artist_name])
-            if stats.get("error") or artist_name in (stats.get("missing") or []):
+            if stats.get("error"):
+                if "retry_after" in stats:
+                    retry_after = min(x for x in (retry_after, stats["retry_after"] or 60)
+                                      if x is not None)
+                continue
+            if artist_name in (stats.get("missing") or []):
                 continue
             client.finalize()          # ANALYZE the hot canon tables
             import mb_backend as mb
             mb.refresh()
             logger.info(f"MB remote mint: slice for {artist_name!r} via {url}")
-            return True
+            return {"ok": True}
         except Exception as e:
             logger.info(f"MB slice fetch via {url} failed: {e}")
         finally:
@@ -323,7 +334,7 @@ def _fetch_remote_slice(artist_name: str) -> bool:
                 client.close()
             except Exception:
                 pass
-    return False
+    return {"ok": False, "retry_after": retry_after}
 
 
 def mint(artist_gid: str, rg_gid: Optional[str] = None,
@@ -345,10 +356,13 @@ def mint(artist_gid: str, rg_gid: Optional[str] = None,
     row = db_query_one(
         "SELECT name FROM mb_artist WHERE gid = %(g)s::uuid", {"g": artist_gid})
     if not row and artist_name and remote_sources():
-        if _fetch_remote_slice(artist_name):
+        fetched = _fetch_remote_slice(artist_name)
+        if fetched["ok"]:
             row = db_query_one(
                 "SELECT name FROM mb_artist WHERE gid = %(g)s::uuid",
                 {"g": artist_gid})
+        elif fetched.get("retry_after"):
+            return {"status": "rate_limited", "retry_after": fetched["retry_after"]}
     if not row:
         return {"status": "unknown_artist"}
     name = row["name"]

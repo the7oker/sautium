@@ -352,6 +352,12 @@ def mb_mint(body: dict = Body(...)):
                             artist_name=str(body.get("artist_name") or "") or None)
     if out["status"] == "unknown_artist":
         raise HTTPException(status_code=404, detail="artist not in the dump")
+    if out["status"] == "rate_limited":
+        wait = out.get("retry_after") or 60
+        raise HTTPException(
+            status_code=503,
+            detail=f"The catalog nodes are busy — try again in about {wait} s.",
+            headers={"Retry-After": str(wait)})
     return out
 
 
