@@ -438,6 +438,34 @@ Public exposure needs: real per-user credentials, a CA-signed cert
 
 ---
 
+## Public repository rules (the tree is public — every commit ships)
+
+1. **Provider vocabulary.** Never name a DRM streaming service (Deezer,
+   Spotify, Tidal, Qobuz) in prose, comments, docstrings, UI copy, docs or
+   commit messages. Say "a lossless provider", "a provider plugin",
+   "lossless before lossy". Data literals stay as they are (`origin='deezer'`,
+   provider ids, enum values, `PROVIDER_NAMES`) — never rename stored values.
+   The one allowed prose use: "Deezer public API — artist images, no auth, no
+   audio" (`deezer_photos.py`, `covers.py`).
+2. **No host specifics in tracked files.** No LAN / WSL / Tailscale addresses,
+   tailnet hosts, checkout paths, machine or third-party names. Use
+   `<windows-host-ip>`, `<lan-ip>`, `<repo>`, fictional names in mocks.
+3. **No secrets, ever.** Keys, tokens, ARLs, passwords (other than the
+   documented loopback default) never enter the tree; `gitleaks git` with
+   `.gitleaks.toml` must be clean before every push.
+4. **No vendored third-party material.** Manuals, artwork, photos and SDK
+   sources are linked, not committed; design references use the placeholders
+   in `placeholders/`. A new dependency gets a line in
+   `THIRD_PARTY_NOTICES.md`; no GPL Python library without asking Valerii.
+5. **Commit trailers.** `Co-Authored-By` is fine; `Claude-Session:` is
+   stripped by the commit-msg hook (`scripts/git-hooks/commit-msg`, enabled
+   with `git config core.hooksPath scripts/git-hooks`) — never bypass it.
+6. **Private material** (deployment specifics, defense status, marketing,
+   secrets) lives in `docs/private/` or `docs/marketing/` — both junctions
+   into the private repo and gitignored — never in the public tree.
+
+---
+
 ## UI / Frontend Conventions
 
 The web UI lives in `backend/static/`, served directly by FastAPI.
