@@ -62,6 +62,14 @@ MINGIT_URL = (
     f"MinGit-{MINGIT_VERSION}-64-bit.zip"
 )
 
+# rcedit (Electron's resource editor, MIT — build tooling, not shipped)
+# rewrites the copied stub's icon and version strings, so every surface that
+# reads them — Task Manager's Processes tab, the firewall dialog's title,
+# Explorer — says Sautium rather than Python, and OriginalFilename matches
+# the file name (the mismatch is what "renamed binary" heuristics look for).
+RCEDIT_VERSION = "2.0.0"
+RCEDIT_URL = f"https://github.com/electron/rcedit/releases/download/v{RCEDIT_VERSION}/rcedit-x64.exe"
+
 # Shown by Setup after the files are in place (InfoAfterFile): the moment the
 # user is about to press "Launch Sautium" and the last screen before the app
 # has to explain itself.
@@ -109,11 +117,44 @@ Models (%USERPROFILE%\.cache\huggingface) and pip's cache are left alone.
 def stage_runtime() -> None:
     runtime = STAGE / "runtime"
     unpack_runtime(RUNTIME_TARGET, runtime, RUNTIME_PRUNE_DIRS, RUNTIME_PRUNE_GLOBS)
-    # A pythonw by another name. CPython's exe finds python312.dll and the
-    # stdlib beside itself, so a copy runs identically — and the launcher
-    # then appears as Sautium.exe in Task Manager, the firewall dialog and
-    # the taskbar instead of pythonw.exe.
-    shutil.copy2(runtime / "pythonw.exe", runtime / f"{APP_NAME}.exe")
+    # A pythonw by another name — what every Electron app is to electron.exe.
+    # CPython's exe is a stub that finds python312.dll and the stdlib beside
+    # itself, so a copy runs identically, and the launcher then appears as
+    # Sautium.exe in Task Manager, the firewall dialog and the taskbar
+    # instead of pythonw.exe.
+    launcher = runtime / f"{APP_NAME}.exe"
+    shutil.copy2(runtime / "pythonw.exe", launcher)
+    brand_launcher(launcher)
+
+
+def fetch_rcedit() -> Path:
+    CACHE_DIR.mkdir(parents=True, exist_ok=True)
+    tool = CACHE_DIR / "rcedit-x64.exe"
+    if not tool.exists():
+        print(f"rcedit: downloading {RCEDIT_URL}")
+        urllib.request.urlretrieve(RCEDIT_URL, tool)
+        tool.chmod(0o755)
+    return tool
+
+
+def brand_launcher(launcher: Path) -> None:
+    """The stub's icon and version strings become Sautium's. LegalCopyright
+    stays: the binary is CPython's, and the PSF licence keeps its notice on
+    every copy."""
+    if sys.platform != "win32" and not _under_wsl():
+        print("  ! rcedit needs Windows or WSL — Sautium.exe keeps Python's icon and version strings")
+        return
+    ico = write_ico(STAGE / f"{APP_NAME}.ico")
+    run([fetch_rcedit(), windows_path(launcher),
+         "--set-icon", windows_path(ico),
+         "--set-version-string", "FileDescription", APP_NAME,
+         "--set-version-string", "ProductName", APP_NAME,
+         "--set-version-string", "InternalName", APP_NAME,
+         "--set-version-string", "CompanyName", APP_NAME,
+         "--set-version-string", "OriginalFilename", f"{APP_NAME}.exe",
+         "--set-file-version", VERSION,
+         "--set-product-version", VERSION])
+    print(f"Runtime: {launcher.name} branded (icon + version strings)")
 
 
 def fetch_mingit() -> Path:

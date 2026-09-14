@@ -9,10 +9,12 @@ Nothing here is modified or statically linked into Sautium: command-line
 tools run as separate processes, Python packages are installed by `pip` on
 the user's machine, models are downloaded from Hugging Face on first use.
 
-## Tools the installer or launcher downloads
+## Carried by the installers, or downloaded by the launcher
 
 | Component | Source | Licence | Notes |
 |---|---|---|---|
+| CPython 3.12 (python-build-standalone) | github.com/astral-sh/python-build-standalone | PSF-2.0; statically linked components (OpenSSL, Tcl/Tk, libffi, SQLite, zlib, bzip2, xz) under their own licences, see the distribution's `LICENSE.txt` | the launcher's interpreter, carried by the macOS bundle and the Windows installer; on Windows a copy of its `pythonw.exe` runs as `Sautium.exe` with Sautium's icon and version strings, the PSF copyright notice retained |
+| MinGit (Git for Windows) | github.com/git-for-windows/git | GPL-2.0-only | carried by the Windows installer; run as a separate process to clone and update the tree |
 | PostgreSQL | get.enterprisedb.com (Windows zip) / Homebrew (macOS) | PostgreSQL License | database server |
 | pgvector | github.com/andreiramani/pgvector_pgsql_windows / Homebrew | PostgreSQL License | vector index extension |
 | Python 3.12 (embeddable) | python.org | PSF-2.0 | the backend's interpreter on Windows |
@@ -28,9 +30,8 @@ Optional, user-installed, not redistributed: Claude Code CLI
 (`@anthropic-ai/claude-code`, Anthropic's commercial terms) and OpenAI Codex
 CLI (Apache-2.0) — the two selectable assistant agents.
 
-Build tooling (not shipped): PyInstaller (GPL-2.0 with the bootloader
-exception, which covers bundled applications), Inno Setup (Inno Setup
-License).
+Build tooling (not shipped): Inno Setup (Inno Setup License), rcedit (MIT,
+edits the resources of the copied `pythonw.exe`).
 
 ## Models (downloaded from Hugging Face on first use)
 
@@ -44,16 +45,16 @@ License).
 
 ## Python packages
 
-### Launcher (`desktop/requirements.txt`, bundled by PyInstaller)
+### Launcher (`desktop/requirements.txt`, installed by pip into the carried interpreter)
 
 customtkinter (MIT) · pystray (LGPL-3.0) · Pillow (MIT-CMU) · qrcode (BSD) ·
 psutil (BSD-3-Clause) · psycopg2-binary (LGPL with exceptions) · cryptography
 (Apache-2.0 OR BSD-3-Clause) · aiohttp (Apache-2.0 AND MIT) · libtorrent (BSD) ·
 argon2-cffi (MIT) · PyNaCl (Apache-2.0).
 
-pystray and psycopg2-binary are LGPL. Inside the PyInstaller bundle they
-remain separate, replaceable modules (not statically linked); their sources
-are at https://github.com/moses-palmer/pystray and
+pystray and psycopg2-binary are LGPL. They are installed by pip on the
+user's machine as separate, replaceable modules (not statically linked);
+their sources are at https://github.com/moses-palmer/pystray and
 https://github.com/psycopg/psycopg2.
 
 ### Backend (`backend/requirements.txt`, installed by pip on the user's machine)
