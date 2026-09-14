@@ -810,40 +810,62 @@ def _rename_database(admin_conn, old: str, new: str) -> None:
                 raise
 
 
-def _create_database(admin_conn, dbname: str, owner: str, locale: Optional[dict]) -> None:
+def _locale_clause(locale: Optional[dict]):
+    if not locale:
+        return None
+    prov = locale.get("provider")
+    if prov == "i":
+        return sql.SQL(" LOCALE_PROVIDER icu ICU_LOCALE {} LC_COLLATE {} LC_CTYPE {}").format(
+            sql.Literal(locale.get("locale") or "und"),
+            sql.Literal(locale.get("collate") or "C"),
+            sql.Literal(locale.get("ctype") or "C"))
+    if prov == "b":
+        return sql.SQL(" LOCALE_PROVIDER builtin BUILTIN_LOCALE {}").format(
+            sql.Literal(locale.get("locale") or "C.UTF-8"))
+    if prov == "c" and locale.get("collate"):
+        return sql.SQL(" LC_COLLATE {} LC_CTYPE {}").format(
+            sql.Literal(locale["collate"]), sql.Literal(locale.get("ctype") or locale["collate"]))
+    return None
+
+
+def _database_locale(admin_conn, dbname: str) -> Optional[dict]:
+    with admin_conn.cursor() as cur:
+        cur.execute("""SELECT datlocprovider, datcollate, datctype, datlocale
+                         FROM pg_database WHERE datname = %s""", (dbname,))
+        row = cur.fetchone()
+    if row is None:
+        return None
+    return {"provider": row[0], "collate": row[1], "ctype": row[2], "locale": row[3]}
+
+
+def _create_database(admin_conn, dbname: str, owner: str, locale: Optional[dict],
+                     fallback: Optional[dict] = None) -> None:
     """The dump carries no CREATE DATABASE (it is restored under whatever
     name the caller picked), so the collation comes from the manifest — a
     clone keeps its sort order. A locale the target OS does not have (a
     Docker `en_US.utf8` dump restored on Windows) falls back to the
-    cluster's default; indexes are rebuilt by the restore either way."""
+    database being replaced (the launcher's ICU `und`, which is what makes
+    lower() fold Cyrillic there), then to the cluster default; indexes are
+    rebuilt by the restore either way."""
     base = sql.SQL("CREATE DATABASE {} OWNER {} TEMPLATE template0 ENCODING 'UTF8'").format(
         sql.Identifier(dbname), sql.Identifier(owner))
-    attempts = []
-    if locale:
-        prov = locale.get("provider")
-        if prov == "i":
-            attempts.append(base + sql.SQL(
-                " LOCALE_PROVIDER icu ICU_LOCALE {} LC_COLLATE {} LC_CTYPE {}").format(
-                sql.Literal(locale.get("locale") or "und"),
-                sql.Literal(locale.get("collate") or "C"),
-                sql.Literal(locale.get("ctype") or "C")))
-        elif prov == "b":
-            attempts.append(base + sql.SQL(" LOCALE_PROVIDER builtin BUILTIN_LOCALE {}").format(
-                sql.Literal(locale.get("locale") or "C.UTF-8")))
-        elif prov == "c" and locale.get("collate"):
-            attempts.append(base + sql.SQL(" LC_COLLATE {} LC_CTYPE {}").format(
-                sql.Literal(locale["collate"]), sql.Literal(locale.get("ctype") or locale["collate"])))
-    attempts.append(base)
+    attempts = [(base + clause, label) for clause, label in
+                ((_locale_clause(locale), "the dump's locale"),
+                 (_locale_clause(fallback), "the replaced database's locale"))
+                if clause is not None]
+    attempts.append((base, "the cluster default"))
     with admin_conn.cursor() as cur:
-        for i, stmt in enumerate(attempts):
+        for i, (stmt, label) in enumerate(attempts):
             try:
                 cur.execute(stmt)
+                if i:
+                    logger.info("database %s created with %s", dbname, label)
                 return
             except psycopg2.Error as e:
                 if i == len(attempts) - 1:
                     raise
-                logger.warning("CREATE DATABASE with the dump's locale failed (%s) — "
-                               "using the cluster default", str(e).strip().splitlines()[0])
+                logger.warning("CREATE DATABASE with %s failed (%s) — trying %s", label,
+                               str(e).strip().splitlines()[0], attempts[i + 1][1])
 
 
 def restore_database(reader: BackupReader, target: PgTarget, *, manifest: Optional[dict] = None,
@@ -887,7 +909,8 @@ def restore_database(reader: BackupReader, target: PgTarget, *, manifest: Option
 
         progress("preparing")
         _drop_database(admin, staging)
-        _create_database(admin, staging, target.user, (manifest.get("database") or {}).get("locale"))
+        _create_database(admin, staging, target.user, (manifest.get("database") or {}).get("locale"),
+                         fallback=_database_locale(admin, target.dbname) if exists else None)
         stage_admin = target.connect(staging, admin=True)
         stage_admin.autocommit = True
         try:
