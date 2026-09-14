@@ -62,6 +62,12 @@ class SettingsDialog(ctk.CTkToplevel):
         self.on_export_plan = on_export_plan
         self.on_import = on_import
         self._rows: dict = {}
+        # One voice per section: while a job runs its row speaks; otherwise
+        # only the most recently started job keeps its result line — a
+        # finished export must not read as the output of the import that
+        # follows it (Valerii, 2026-09-14). Insertion order = start order.
+        self._groups = {"backup": ("backup",), "sharing": ("export", "import")}
+        self._states: dict = {}
         self._unsubscribe_job = subscribe_job(self._on_job_event) if subscribe_job else None
         self.protocol("WM_DELETE_WINDOW", self.destroy)
 
@@ -168,10 +174,8 @@ class SettingsDialog(ctk.CTkToplevel):
         ctk.CTkButton(row, text="Import certificate…", width=170, command=self._import_birth_cert,
                       fg_color="transparent", border_width=1).pack(side="left")
 
-        state = (self.backup_state() or {}) if self.backup_state else {}
-        for kind, job_row in self._rows.items():
-            job_row.render(state.get(kind))
-        self._sync_restore_button()
+        self._states = dict((self.backup_state() or {}) if self.backup_state else {})
+        self._render_rows()
 
     @staticmethod
     def _section(tab, title: str, *, first: bool = False) -> None:
@@ -198,8 +202,19 @@ class SettingsDialog(ctk.CTkToplevel):
             anchor="w", justify="left", wraplength=470,
         ).pack(anchor="w", padx=10)
 
-    def _sync_restore_button(self) -> None:
-        """A restore replaces the database under every job — none may run."""
+    def _render_rows(self) -> None:
+        """Every row from self._states under the one-voice-per-section rule,
+        then the restore button (a restore replaces the database under every
+        job — none may run)."""
+        for kinds in self._groups.values():
+            running = [k for k in kinds if (self._states.get(k) or {}).get("running")]
+            if running:
+                shown = set(running)
+            else:
+                finished = [k for k in self._states if k in kinds and self._states[k].get("last_event")]
+                shown = {finished[-1]} if finished else set()
+            for k in kinds:
+                self._rows[k].render(self._states.get(k) if k in shown else None)
         busy = any(r.running for r in self._rows.values())
         self._restore_button.configure(state="disabled" if busy else "normal")
 
@@ -207,14 +222,15 @@ class SettingsDialog(ctk.CTkToplevel):
         if not self.winfo_exists() or kind not in self._rows:
             return
         running = ev.get("phase") not in ("done", "plan", "cancelled", "error")
-        self._rows[kind].render({"running": running, "last_event": ev})
-        self._sync_restore_button()
+        self._states[kind] = {"running": running, "last_event": ev}
+        self._render_rows()
         if kind == "backup" and not running:
             self._backup_status.configure(text=self._backup_status_text())
 
     def _started(self, kind: str) -> None:
-        self._rows[kind].render({"running": True, "last_event": None})
-        self._sync_restore_button()
+        self._states.pop(kind, None)                     # newest start goes last
+        self._states[kind] = {"running": True, "last_event": None}
+        self._render_rows()
 
     def _cancel(self, kind: str) -> None:
         if self.on_cancel:
