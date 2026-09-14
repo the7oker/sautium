@@ -176,7 +176,8 @@ services:
       - ./data/node_identity:/app/data/node_identity   # identity certificate + mined proof (survive recreation)
       - ./data/mbdump:/app/data/mbdump   # MusicBrainz dump (download + stream-load)
       - ./data/support:/app/data/support # support desk — bundles user nodes sent, unpacked on demand (master only)
-      - ./data/backup:/app/data/backup   # node backups (Settings > Library > Backup; backend/backup.py)
+      - ./data/backup:/app/data/backup   # node backups (python -m backup create; the weekly task)
+      - ./data/export:/app/data/export   # share exports for other collectors (python -m backup export)
       # Single-source P2P slice module (desktop/p2p owns it; the launcher sync
       # server imports the same file) — lets the Docker backend serve
       # /api/mb/slice to dump-less peers. Directory mount on purpose: a

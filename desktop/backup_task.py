@@ -33,6 +33,11 @@ def backup_dir() -> Path:
     return get_data_dir() / "backup"
 
 
+def export_dir() -> Path:
+    from desktop.config_manager import get_data_dir
+    return get_data_dir() / "export"
+
+
 def latest_backup(directory: Optional[Path] = None) -> Optional[dict]:
     """Header facts of the newest .sbk in the launcher's backup dir, or None."""
     d = directory or backup_dir()

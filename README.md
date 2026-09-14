@@ -320,6 +320,7 @@ docker compose start backend
 rebuilds the node from it (`--db music_ai_test` restores beside the live
 database; `python -m backup selftest` round-trips and compares row counts).
 The `mb_*` tables come back empty — the MusicBrainz dump loader refills them.
+Share exports (`python -m backup export`) go to `./data/export/`.
 
 ## Development
 

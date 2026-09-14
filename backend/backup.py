@@ -486,7 +486,7 @@ def _cmd_export(args) -> int:
         conn = pg_target().connect()
         try:
             result = share.export_file(
-                conn, Path(args.out) if args.out else backup_dir(), kind=kind,
+                conn, Path(args.out) if args.out else Path(settings.export_dir), kind=kind,
                 exporter=exporter, sign=sign, artists=args.artist, albums=args.album,
                 app=app_version(), progress=printer, cancel=token.event)
         finally:
@@ -604,7 +604,7 @@ def main(argv: Optional[List[str]] = None) -> int:
                    help="export this artist's albums instead (repeatable)")
     x.add_argument("--album", action="append", metavar="UUID",
                    help="export this album instead (repeatable)")
-    x.add_argument("--out", help="directory (default: the node's backup dir)")
+    x.add_argument("--out", help="directory (default: the node's export dir, EXPORT_DIR)")
     x.add_argument("--progress-json", action="store_true")
     x.add_argument("--cancel-on-stdin", action="store_true")
     m = sub.add_parser("import", help="merge another collector's export through the gate")
