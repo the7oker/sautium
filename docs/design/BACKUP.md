@@ -373,6 +373,21 @@ from the sketch above, each for a reason found while building:
   place. A backup from an env-credential Docker node carries no
   `node_info.json`; the launcher then runs `create_account` with the pair
   that opened the file — the same key.
+- **Docker → launcher (and back) works on the same account.** The KEK is
+  username + password, so the file opens on any machine that knows the
+  pair; the launcher's wizard ("Restore from a backup…") builds the fresh
+  cluster, restores the dump under its own database name and owner, writes
+  the identity documents and derives the key — the new node IS the old one
+  (stop the old node first: two live nodes on one key confuse the DHT, the
+  relays and the support desk). What travels: the whole catalog, the
+  sealed enrichment, listens, friends, chat, settings. What does not: the
+  `mb_*` layer (re-load the dump or let slices fill it), machine-specific
+  settings (`hqplayer.host` is `host.docker.internal` on Docker — re-pick
+  the output), and file paths are the native ones the Docker node stored
+  (`E:/Music/...`), so the same machine finds its files at once and another
+  machine needs a rescan. The database is created with the dump's locale
+  when the OS has it, else with the replaced database's (the launcher's
+  ICU `und`), else the cluster default.
 - **Playback wins, across processes.** pg_dump runs at below-normal
   priority and the writer loop pauses while the node plays. Since
   2026-09-14 the job never runs inside the backend, so the signal crosses
