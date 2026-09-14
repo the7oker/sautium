@@ -55,7 +55,7 @@ own data ≈ 11 GB live, ≈ 3 GB as a compressed dump.
 | **Node settings** | `user_settings` | yes (in the dump) | no | allowlist only |
 | **Runtime, re-creatable** | `p2p_gate_pool`, `p2p_contact_events`, `p2p_action_costs`, `p2p_dht_state`, `p2p_nodes_seen`, `external_api_cooldown`, `_gap`, `_schema_migrations` (travels with the dump, see restore) | in the dump, harmless | no | no |
 | **Files** | identity dir: `info.json`, `birth_certificate.json`, `identity_proof.json`, `previous/` (rotation archive), `.api_secret` | yes, encrypted | no | — |
-| **Files, elsewhere** | `.env`, MCP config, launcher `config.json`, the Deezer plugin's `secrets.json` | **not here** — the maintainer's private repo / the user's own secret store | no | no |
+| **Files, elsewhere** | `.env`, MCP config, launcher `config.json`, a provider plugin's `secrets.json` | **not here** — the maintainer's private repo / the user's own secret store | no | no |
 
 The private Ed25519 seed is never written to a backup: it derives from
 username + password (`node_identity.derive_seed`), which the restore asks
