@@ -7,8 +7,8 @@ authors commits, so an update makes the checkout equal to the remote tip
 `git pull` dies the moment upstream history is rewritten ("Need to specify
 how to reconcile divergent branches") and would have stranded every node on
 the first force-push; a mirror does not care how the tip got where it is.
-After update: check requirements.txt changes, run pip install if needed,
-run pending DB migrations, restart backend+tracker.
+After update: run pending DB migrations, restart backend+tracker. Dependency
+installs are not done here — see perform_update.
 """
 
 import logging
@@ -90,9 +90,11 @@ def get_project_root() -> Path:
 
 
 def installed_build() -> Optional[str]:
-    """The build id of a packaged install (the macOS .app writes it beside the
-    tree it unpacks), or None for a git checkout. A packaged tree has no remote
-    to compare against — it is replaced by the next disk image, not pulled."""
+    """The build id of a packaged install (a bootstrap that could not clone
+    writes it beside the copy it unpacks — desktop/macos/bootstrap.py,
+    desktop/windows/bootstrap.py), or None for a git checkout. A packaged
+    tree has no remote to compare against — the next start that reaches
+    GitHub replaces it with a clone, and the next package with a newer copy."""
     stamp = get_project_root() / ".sautium_build"
     if not stamp.exists():
         return None
@@ -228,15 +230,6 @@ def get_update_changelog(old_hash: str) -> List[str]:
     return [line.strip() for line in result.stdout.strip().split("\n") if line.strip()]
 
 
-def requirements_changed(old_hash: str) -> bool:
-    """Check if requirements.txt changed between old hash and current HEAD."""
-    result = _git_cmd(["diff", "--name-only", old_hash, "HEAD"])
-    if result.returncode != 0:
-        return False
-    changed_files = result.stdout.strip().split("\n")
-    return any("requirements" in f for f in changed_files)
-
-
 def has_new_migrations(old_hash: str) -> bool:
     """Check if new migration files were added since old_hash."""
     result = _git_cmd(["diff", "--name-only", "--diff-filter=A", old_hash, "HEAD"])
@@ -310,36 +303,6 @@ def forget_old_history(progress_cb: Optional[Callable] = None) -> None:
         logger.warning(f"git gc after a history rewrite failed: {gc.stderr.strip()}")
 
 
-def install_requirements(progress_cb: Optional[Callable] = None) -> bool:
-    """Run pip install -r requirements.txt for the backend."""
-    if progress_cb:
-        progress_cb("Installing updated dependencies...")
-
-    project_root = get_project_root()
-    req_file = project_root / "backend" / "requirements.txt"
-    if not req_file.exists():
-        return True
-
-    python = sys.executable
-    cmd = [python, "-m", "pip", "install", "-r", str(req_file), "--quiet"]
-
-    kwargs = {
-        "capture_output": True,
-        "text": True,
-        "timeout": 300,
-    }
-    if sys.platform == "win32":
-        kwargs["creationflags"] = subprocess.CREATE_NO_WINDOW
-
-    result = subprocess.run(cmd, **kwargs)
-    if result.returncode != 0:
-        logger.error(f"pip install failed: {result.stderr}")
-        return False
-
-    logger.info("Dependencies updated")
-    return True
-
-
 def perform_update(
     service_manager,
     config: dict,
@@ -350,10 +313,19 @@ def perform_update(
     Full update sequence:
     1. Stop backend + tracker + P2P (keep PostgreSQL)
     2. Make the checkout equal to origin/main (fetch + reset --hard)
-    3. pip install if requirements changed
-    4. Run migrations if new ones exist
-    5. Restart backend + tracker — UNLESS the launcher itself has to come
+    3. Run migrations if new ones exist
+    4. Restart backend + tracker — UNLESS the launcher itself has to come
        back as a new process, which starts them on its own
+
+    Dependencies are not installed here: each interpreter's owner does that
+    from the requirements hash it keeps. The backend start installs
+    backend/requirements.txt into the backend's interpreter
+    (service_manager._ensure_backend_deps — on Windows not the one this code
+    runs on), and a packaged install's bootstrap installs
+    desktop/requirements.txt on the relaunch a desktop/ change always
+    triggers. The step that used to sit here pip-installed the backend file
+    into sys.executable with a five-minute cap: the wrong interpreter on
+    Windows, a timeout on every torch bump anywhere.
 
     Returns:
         (success, changelog_lines, relaunch_launcher)
@@ -385,12 +357,6 @@ def perform_update(
         return False, [], False
 
     changelog = get_update_changelog(old_hash)
-
-    # Check if requirements changed
-    if requirements_changed(old_hash):
-        if not install_requirements(progress_cb):
-            logger.warning("pip install failed, continuing anyway")
-            _update_failed(config, "pip", "pip install failed")
 
     # Check for new migrations
     if has_new_migrations(old_hash):

@@ -846,8 +846,9 @@ class SetupWizard(ctk.CTkToplevel):
 
     def _claude_state(self) -> str:
         """Return one of 'node_missing' | 'claude_missing' | 'not_authed' | 'ready'."""
+        from desktop.db_init import NODE_MIN_MAJOR
         node_ver = detect_node_version()
-        if node_ver is None or node_ver[0] < 18:
+        if node_ver is None or node_ver[0] < NODE_MIN_MAJOR:
             return "node_missing"
         if get_claude_executable() is None:
             return "claude_missing"
@@ -1012,44 +1013,35 @@ class SetupWizard(ctk.CTkToplevel):
 
     def _render_node_missing(self, on_refresh) -> None:
         """Both agents are npm packages, so both stall on the same missing
-        Node — one panel serves both. macOS installs it the way this setup
-        installs PostgreSQL and ffmpeg: by asking Homebrew, not by asking the
-        user to open a terminal and paste."""
+        Node — one panel serves both. Setup installs it the way it installs
+        PostgreSQL and ffmpeg — Homebrew on macOS, the official zip beside
+        the other tools on Windows (db_init.install_node) — not by asking
+        the user to open a terminal and paste."""
         ctk.CTkLabel(
             self._provider_fields_frame,
             text="Node.js 18+ is required.",
             text_color="orange",
             font=ctk.CTkFont(size=13, weight="bold"),
         ).pack(anchor="w")
-
-        if sys.platform == "darwin":
-            ctk.CTkLabel(
-                self._provider_fields_frame,
-                text="Sautium installs it through Homebrew - about a minute.",
-                text_color="gray",
-            ).pack(anchor="w", pady=(2, 5))
-            self._node_install_status = ctk.CTkLabel(
-                self._provider_fields_frame, text="", text_color="gray",
-                wraplength=420, justify="left",
-            )
-            self._node_install_status.pack(anchor="w", pady=(0, 5))
-            self._node_install_btn = ctk.CTkButton(
-                self._provider_fields_frame,
-                text="Install Node.js",
-                width=200,
-                command=lambda: self._install_node_clicked(on_refresh),
-            )
-            self._node_install_btn.pack(anchor="w", pady=(0, 5))
-        else:
-            ctk.CTkLabel(
-                self._provider_fields_frame,
-                text=(
-                    "The installer should have placed Node next to Sautium.\n"
-                    "Re-run the Sautium installer to repair, then click Refresh."
-                ),
-                text_color="gray",
-                justify="left",
-            ).pack(anchor="w", pady=(2, 5))
+        ctk.CTkLabel(
+            self._provider_fields_frame,
+            text=("Sautium installs it through Homebrew - about a minute."
+                  if sys.platform == "darwin" else
+                  "Sautium downloads it from nodejs.org - about 35 MB."),
+            text_color="gray",
+        ).pack(anchor="w", pady=(2, 5))
+        self._node_install_status = ctk.CTkLabel(
+            self._provider_fields_frame, text="", text_color="gray",
+            wraplength=420, justify="left",
+        )
+        self._node_install_status.pack(anchor="w", pady=(0, 5))
+        self._node_install_btn = ctk.CTkButton(
+            self._provider_fields_frame,
+            text="Install Node.js",
+            width=200,
+            command=lambda: self._install_node_clicked(on_refresh),
+        )
+        self._node_install_btn.pack(anchor="w", pady=(0, 5))
 
         ctk.CTkButton(
             self._provider_fields_frame,
@@ -1059,7 +1051,7 @@ class SetupWizard(ctk.CTkToplevel):
         ).pack(anchor="w")
 
     def _install_node_clicked(self, on_refresh):
-        """`brew install node` in a worker thread; re-render when it lands."""
+        """db_init.install_node in a worker thread; re-render when it lands."""
         if self._node_install_thread and self._node_install_thread.is_alive():
             return
         self._node_install_btn.configure(state="disabled", text="Installing...")
@@ -1081,7 +1073,10 @@ class SetupWizard(ctk.CTkToplevel):
             return
         self._node_install_btn.configure(state="normal", text="Install Node.js")
         self._node_install_status.configure(
-            text="Install failed. Run `brew install node` in Terminal, then Refresh.",
+            text=("Install failed. Run `brew install node` in Terminal, then Refresh."
+                  if sys.platform == "darwin" else
+                  "Install failed. Check the connection, or install Node.js 18+ "
+                  "from nodejs.org, then Refresh."),
             text_color="red",
         )
 
@@ -1255,8 +1250,9 @@ class SetupWizard(ctk.CTkToplevel):
 
     def _codex_state(self) -> str:
         """Return one of 'node_missing' | 'codex_missing' | 'not_authed' | 'ready'."""
+        from desktop.db_init import NODE_MIN_MAJOR
         node_ver = detect_node_version()
-        if node_ver is None or node_ver[0] < 18:
+        if node_ver is None or node_ver[0] < NODE_MIN_MAJOR:
             return "node_missing"
         if get_codex_executable() is None:
             return "codex_missing"

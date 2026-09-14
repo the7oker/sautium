@@ -1,78 +1,152 @@
-; Sautium - Inno Setup Installer Script
-; Requires: Inno Setup 6.x
+; Sautium — Inno Setup 6 script.
+;
+; Compiled by desktop/build_windows.py, which stages everything [Files] names
+; into build\windows and passes the defines below. From the Inno Setup IDE it
+; compiles too, after a `--stage-only` run, with the defaults.
+;
+; The installer is a carrier: a private CPython, a MinGit and a snapshot of
+; the tree. Sautium itself is cloned on first run (bootstrap.py), so a new
+; Setup.exe is only ever a new runtime — see build_windows.py.
+
+#ifndef StageDir
+  #define StageDir "..\..\build\windows"
+#endif
+#ifndef Version
+  #define Version "0.0.0"
+#endif
+#ifndef OutputDir
+  #define OutputDir "..\..\dist"
+#endif
 
 [Setup]
+; Stable across versions: it is how Setup finds the previous install to
+; upgrade and how Apps & Features lists exactly one Sautium.
+AppId={{7F0C3D3E-5B1C-4E9A-9C8E-2D6C5A1F0B77}
 AppName=Sautium
-AppVersion=0.1.0
+AppVersion={#Version}
 AppPublisher=Sautium
-DefaultDirName={autopf}\Sautium
-DefaultGroupName=Sautium
-OutputBaseFilename=Sautium-Setup
-Compression=lzma2
+AppPublisherURL=https://github.com/the7oker/sautium
+AppSupportURL=https://github.com/the7oker/sautium
+; Per-user, never elevated: the runtime under {app} has to stay writable —
+; pip installs the launcher's packages into it — and an unsigned installer
+; asking for administrator rights is the worst first impression Windows can
+; give. No override to a per-machine install for the same reason.
+PrivilegesRequired=lowest
+DefaultDirName={userpf}\Sautium
+DisableProgramGroupPage=yes
+OutputDir={#OutputDir}
+OutputBaseFilename=Sautium-{#Version}-Setup
+SetupIconFile={#StageDir}\Sautium.ico
+UninstallDisplayIcon={app}\Sautium.ico
+UninstallDisplayName=Sautium
+Compression=lzma2/max
 SolidCompression=yes
 WizardStyle=modern
-PrivilegesRequired=admin
-; Don't delete user data on uninstall
-UninstallFilesOnly=yes
+ArchitecturesAllowed=x64compatible
+ArchitecturesInstallIn64BitMode=x64compatible
+MinVersion=10.0
+; The launcher holds this mutex (desktop/utils.py); Setup and Uninstall wait
+; for it to go before touching the runtime it runs from.
+AppMutex=SautiumLauncher
+InfoAfterFile={#StageDir}\First launch.txt
 
 [Files]
-; Launcher executable
-Source: "..\..\dist\Sautium.exe"; DestDir: "{app}"; Flags: ignoreversion
+Source: "{#StageDir}\runtime\*"; DestDir: "{app}\runtime"; Flags: recursesubdirs createallsubdirs ignoreversion
+Source: "{#StageDir}\git\*"; DestDir: "{app}\git"; Flags: recursesubdirs createallsubdirs ignoreversion
+Source: "{#StageDir}\payload\*"; DestDir: "{app}\payload"; Flags: recursesubdirs createallsubdirs ignoreversion
+Source: "{#StageDir}\bootstrap.py"; DestDir: "{app}"; Flags: ignoreversion
+Source: "{#StageDir}\Sautium.ico"; DestDir: "{app}"; Flags: ignoreversion
 
-; Portable PostgreSQL (pre-downloaded)
-Source: "pgsql\*"; DestDir: "{app}\pgsql"; Flags: ignoreversion recursesubdirs
+[InstallDelete]
+; An upgrade lays the three trees down fresh: pip's packages and bytecode
+; caches in the old runtime, files an older payload had — all go with them.
+; The bootstrap finds its dependency marker gone and reinstalls the
+; launcher's packages on the next start.
+Type: filesandordirs; Name: "{app}\runtime"
+Type: filesandordirs; Name: "{app}\git"
+Type: filesandordirs; Name: "{app}\payload"
 
-; Embedded Python 3.12 (pre-downloaded, or auto-downloaded on first launch)
-Source: "python312\*"; DestDir: "{app}\python312"; Flags: ignoreversion recursesubdirs skipifsourcedoesntexist
-
-; Portable Node.js — populated by prepare_node.ps1 before compiling.
-; Used by the wizard to install @anthropic-ai/claude-code into a per-user prefix.
-Source: "node-portable\*"; DestDir: "{app}\node"; Flags: ignoreversion recursesubdirs skipifsourcedoesntexist
-
-; Assets
-Source: "..\assets\*"; DestDir: "{app}\desktop\assets"; Flags: ignoreversion
+[Tasks]
+Name: "desktopicon"; Description: "{cm:CreateDesktopIcon}"; GroupDescription: "{cm:AdditionalIcons}"; Flags: unchecked
 
 [Icons]
-Name: "{group}\Sautium"; Filename: "{app}\Sautium.exe"
-Name: "{commondesktop}\Sautium"; Filename: "{app}\Sautium.exe"
-Name: "{group}\Uninstall Sautium"; Filename: "{uninstallexe}"
+; Sautium.exe is the runtime's pythonw under the app's name (build_windows.py).
+; The AppUserModelID is the one the launcher sets on its own process
+; (desktop/utils.py), so a pinned shortcut and the running window share a
+; taskbar button.
+Name: "{userprograms}\Sautium"; Filename: "{app}\runtime\Sautium.exe"; Parameters: """{app}\bootstrap.py"""; WorkingDir: "{app}"; IconFilename: "{app}\Sautium.ico"; AppUserModelID: "Sautium.Launcher"
+Name: "{userdesktop}\Sautium"; Filename: "{app}\runtime\Sautium.exe"; Parameters: """{app}\bootstrap.py"""; WorkingDir: "{app}"; IconFilename: "{app}\Sautium.ico"; AppUserModelID: "Sautium.Launcher"; Tasks: desktopicon
 
 [Run]
-; Firewall rules for P2P (UDP broadcast + TCP sync on any port in range)
-Filename: "netsh"; Parameters: "advfirewall firewall delete rule name=""Sautium P2P"""; StatusMsg: "Updating firewall rules..."; Flags: runhidden waituntilterminated; Check: not IsUninstaller
-Filename: "netsh"; Parameters: "advfirewall firewall add rule name=""Sautium P2P"" dir=in action=allow protocol=UDP localport=19002 profile=private"; StatusMsg: "Adding firewall rule (UDP)..."; Flags: runhidden waituntilterminated
-Filename: "netsh"; Parameters: "advfirewall firewall add rule name=""Sautium P2P"" dir=in action=allow protocol=TCP localport=20000-29999 profile=private"; StatusMsg: "Adding firewall rule (TCP)..."; Flags: runhidden waituntilterminated
-; Clone repository on first install
-Filename: "git"; Parameters: "clone https://github.com/the7oker/sautium.git ""{app}\repo"""; StatusMsg: "Cloning repository..."; Flags: runhidden waituntilterminated
-; Install PyTorch with CUDA support (PyPI default is CPU-only on Windows).
-; Pins must match backend/requirements.txt; cu126 is the oldest index that
-; carries this trio (cu124 stopped at torch 2.6 — unpinned installs from it
-; ended up replaced by the CPU wheel when requirements.txt forced ==2.12.0).
-; service_manager re-checks the build at startup and self-heals a CPU build
-; on a CUDA machine, so a failed/skipped step here is recoverable.
-Filename: "{app}\python312\python.exe"; Parameters: "-m pip install torch==2.12.0 torchvision==0.27.0 torchaudio==2.11.0 --index-url https://download.pytorch.org/whl/cu126 --quiet"; StatusMsg: "Installing PyTorch with CUDA..."; Flags: runhidden waituntilterminated
-; Install base Python requirements
-Filename: "{app}\python312\python.exe"; Parameters: "-m pip install -r ""{app}\repo\backend\requirements-base.txt"" --quiet"; StatusMsg: "Installing dependencies..."; Flags: runhidden waituntilterminated
-; Install desktop requirements
-Filename: "{app}\python312\python.exe"; Parameters: "-m pip install -r ""{app}\repo\desktop\requirements.txt"" --quiet"; StatusMsg: "Installing launcher dependencies..."; Flags: runhidden waituntilterminated
-
-[UninstallRun]
-; Remove firewall rules on uninstall
-Filename: "netsh"; Parameters: "advfirewall firewall delete rule name=""Sautium P2P"""; Flags: runhidden waituntilterminated
+Filename: "{app}\runtime\Sautium.exe"; Parameters: """{app}\bootstrap.py"""; WorkingDir: "{app}"; Description: "{cm:LaunchProgram,Sautium}"; Flags: nowait postinstall skipifsilent
 
 [UninstallDelete]
-; Clean up generated files but NOT %APPDATA%/Sautium
-Type: filesandordirs; Name: "{app}\repo"
+; pip's packages and __pycache__ are not Setup's files; take the folder whole.
+Type: filesandordirs; Name: "{app}"
 
 [Code]
-// Check for Git availability
-function InitializeSetup(): Boolean;
+// The uninstaller removes the program. The node — database, settings,
+// account key, the app's own clone with the components it downloaded — is
+// the user's, so it asks; a silent uninstall keeps it.
+
+procedure StopCluster();
+var
+  ResultCode: Integer;
+  PgCtl, PgData: String;
 begin
-  if not FileExists(ExpandConstant('{sys}\git.exe')) and
-     not FileExists(ExpandConstant('{pf}\Git\cmd\git.exe')) then
+  // Never delete a data directory under a live postmaster: it keeps running
+  // against nothing and holds the port for the next install.
+  PgCtl := ExpandConstant('{localappdata}\Sautium\app\pgsql\bin\pg_ctl.exe');
+  PgData := ExpandConstant('{localappdata}\Sautium\pgdata');
+  if FileExists(PgCtl) and FileExists(PgData + '\PG_VERSION') then
+    Exec(PgCtl, '-D "' + PgData + '" -m fast stop', '', SW_HIDE,
+         ewWaitUntilTerminated, ResultCode);
+end;
+
+procedure RemoveTree(Dir: String);
+var
+  ResultCode: Integer;
+begin
+  // rmdir, not DelTree: git marks its pack files read-only and DelTree stops
+  // at the first one.
+  if DirExists(Dir) then
+    Exec(ExpandConstant('{cmd}'), '/c rmdir /s /q "' + Dir + '"', '', SW_HIDE,
+         ewWaitUntilTerminated, ResultCode);
+end;
+
+procedure RemoveFirewallRules();
+var
+  ResultCode: Integer;
+begin
+  // The launcher opened these with an elevation of its own (one UAC prompt
+  // per rule); closing them takes one more. Declining leaves the rules and
+  // finishes the uninstall.
+  ShellExec('runas', 'powershell.exe',
+    '-NoProfile -NonInteractive -WindowStyle Hidden -Command "Get-NetFirewallRule -DisplayName ''Sautium (*'' | Remove-NetFirewallRule"',
+    '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
+end;
+
+procedure CurUninstallStepChanged(CurUninstallStep: TUninstallStep);
+var
+  DataDir, ConfigDir, CertDir: String;
+begin
+  if CurUninstallStep <> usUninstall then
+    exit;
+  // The elevation prompt would stall a silent uninstall with nobody to answer it.
+  if not UninstallSilent then
+    RemoveFirewallRules();
+  DataDir := ExpandConstant('{localappdata}\Sautium');
+  ConfigDir := ExpandConstant('{userappdata}\Sautium');
+  CertDir := ExpandConstant('{%USERPROFILE}\.sautium');
+  if SuppressibleMsgBox(
+       'Also delete the database, settings and account key?' + #13#10#13#10 +
+       DataDir + #13#10 + ConfigDir + #13#10 + CertDir + #13#10#13#10 +
+       'Choose No to keep them for a later reinstall.',
+       mbConfirmation, MB_YESNO or MB_DEFBUTTON2, IDNO) = IDYES then
   begin
-    MsgBox('Git is required but was not found. Please install Git first from https://git-scm.com/', mbError, MB_OK);
-    Result := False;
-  end else
-    Result := True;
+    StopCluster();
+    RemoveTree(DataDir);
+    RemoveTree(ConfigDir);
+    RemoveTree(CertDir);
+  end;
 end;

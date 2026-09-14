@@ -6,6 +6,7 @@ Minimizes to system tray on close.
 """
 
 import logging
+import os
 import queue
 import subprocess
 import sys
@@ -48,6 +49,8 @@ class LauncherApp(ctk.CTk):
         super().__init__()
 
         self.title("Sautium")
+        if sys.platform == "win32":
+            self.iconbitmap()   # the mark, and the default for every dialog (desktop/icon.py)
         self._pin_window_size()
 
         self.config = load_config()
@@ -1555,9 +1558,11 @@ class LauncherApp(ctk.CTk):
         does not report an unclean shutdown; by the time it reaches Tk and
         binds anything, this process is long gone.
 
-        A packaged Windows install runs a frozen exe whose launcher code is
-        baked in at build time (desktop/build.py) — the relaunch is harmless
-        there but changes nothing until the exe itself is replaced."""
+        A packaged install comes back through its bootstrap (SAUTIUM_BOOTSTRAP
+        — desktop/macos/bootstrap.py, desktop/windows/bootstrap.py), which
+        installs a changed desktop/requirements.txt before the new launcher
+        code imports from it; a checkout comes back as `python -m desktop`,
+        its owner keeps that environment."""
         if changelog:
             logger.info("Update applied: %s", "; ".join(changelog))
             # The successor is the one that can show it: a dialog here would
@@ -1571,7 +1576,8 @@ class LauncherApp(ctk.CTk):
 
         def _relaunch():
             self._stop_everything()
-            cmd = ([sys.executable, *sys.argv[1:]] if getattr(sys, "frozen", False)
+            bootstrap = os.environ.get("SAUTIUM_BOOTSTRAP")
+            cmd = ([sys.executable, bootstrap] if bootstrap
                    else [sys.executable, "-m", "desktop"])
             logger.info("Relaunching: %s (cwd=%s)", " ".join(cmd),
                         get_project_root())
@@ -1614,13 +1620,17 @@ class LauncherApp(ctk.CTk):
 
 def main():
     """Entry point for the launcher."""
+    from desktop.config_manager import get_data_dir
+
     # A GUI launch (Finder .app, Explorer shortcut) inherits stdout/stderr on
-    # /dev/null, so every P2P line — the only record of sync, DHT and relay
-    # work, which no other process keeps — used to vanish. The file handler is
-    # the launcher's log; the stream handler still serves a terminal run.
-    handlers: list[logging.Handler] = [logging.StreamHandler()]
+    # /dev/null — or, on a windowed interpreter, nothing at all — so every P2P
+    # line — the only record of sync, DHT and relay work, which no other
+    # process keeps — used to vanish. The file handler is the launcher's log;
+    # the stream handler still serves a terminal run.
+    handlers: list[logging.Handler] = []
+    if sys.stderr is not None:
+        handlers.append(logging.StreamHandler())
     try:
-        from desktop.config_manager import get_data_dir
         handlers.append(RotatingFileHandler(
             get_data_dir() / "launcher.log",
             maxBytes=8 * 1024 * 1024, backupCount=3, encoding="utf-8",
@@ -1635,8 +1645,13 @@ def main():
     )
 
     # Before anything looks for a tool: a GUI launch has no Homebrew on PATH.
-    from desktop.utils import repair_gui_path
+    from desktop.utils import claim_windows_app_identity, repair_gui_path
     repair_gui_path()
+    # Before the first window: the taskbar identity the installer's shortcut
+    # carries, the mutex Setup waits on, the icon every window gets.
+    claim_windows_app_identity()
+    from desktop.icon import brand_windows
+    brand_windows(get_data_dir())
 
     app = LauncherApp()
     app.mainloop()

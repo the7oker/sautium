@@ -14,7 +14,7 @@ implementation details live in the code, DB and git history.
 | **P3.1** | Audio feature extraction (librosa + CLAP zero-shot, no essentia) | DONE |
 | **P3.2** | HQPlayer control via XML protocol (port 4321) | DONE |
 | **P3.3** | MCP server for HQPlayer + PostgreSQL + search (22 tools) | DONE |
-| **P3.4** | Windows desktop launcher (CustomTkinter + PyInstaller) | DONE |
+| **P3.4** | Desktop launcher (CustomTkinter; Windows installer + macOS bundle as carriers) | DONE |
 | **P2P-P0..P4** | Launcher↔backend bridge, UUID v5 refactor, P2P sync, NAT traversal, account system, E2E chat, email CA | DONE — see `P2P_NETWORK.md` |
 | **P4 voice** | Whisper input + TTS output + voice conversation loop | TODO |
 | **P5 files** | BitTorrent file sharing for legal content (CC, indie) | TODO |
@@ -405,6 +405,80 @@ The short version of the hard-learned lessons:
   command line tools, invoking it pops the Xcode installer. New builds arrive
   as a new DMG.
 
+### Desktop packaging (Windows, 2026-09-14)
+
+- **Same carrier, Windows shape.** `desktop/build_windows.py` stages a
+  python-build-standalone CPython (Tk 8.6; the `.pdb`s — half the archive —
+  pruned), a MinGit and the git-tracked payload into `build/windows`, and Inno
+  Setup wraps them (`desktop/installer/sautium.iss`) into
+  `Sautium-<version>-Setup.exe`. `desktop/windows/bootstrap.py` mirrors the
+  macOS one: clone `main` into `%LOCALAPPDATA%\Sautium\app`, fall back to the
+  payload offline, pip-install `desktop/requirements.txt`, start
+  `python -m desktop`. The PyInstaller build (`desktop/build.py`) and the
+  `.iss` that wrapped a frozen exe are gone, and `get_project_root()` lost its
+  `sys.frozen` branch with them. `desktop/build_common.py` holds what the two
+  builds share (version, the CPython pin, payload staging, the secret sweep);
+  `desktop/icon.py` the mark — one renderer for the .icns, the .ico, the tray
+  and every launcher window.
+- **Per-user, never elevated, runtime used in place.** The runtime under
+  `%LOCALAPPDATA%\Programs\Sautium\runtime` takes pip's packages directly (the
+  macOS copy-out exists only because a signed bundle must not be written
+  into), so the install folder has to be the user's own:
+  `PrivilegesRequired=lowest`, no per-machine override. An upgrade wipes and
+  re-lays runtime, git and payload (`[InstallDelete]`); the deps marker lives
+  inside the runtime so it goes too, and the bootstrap reinstalls. Unsigned +
+  per-user also spares the user the UAC prompt for an unknown publisher —
+  SmartScreen's "More info → Run anyway" on the download is the one warning
+  left, and the README says so. Firewall rules stay the launcher's job (one
+  elevation per rule, as before); the uninstaller offers to close them with
+  one more, skipped when silent.
+- **The clone is made in place.** `git init` + `fetch` + `checkout -B main
+  origin/main` in the app dir, not `git clone` into it: on Windows the
+  launcher downloads PostgreSQL, the backend's Python and the audio tools
+  BESIDE the tree (`pgsql/`, `python312/`, `ffmpeg/`…), so the folder an
+  offline first start left behind is never empty, and a clone that needs it
+  empty would throw those gigabytes away. The bundled git runs with
+  `GIT_CONFIG_NOSYSTEM=1`: MinGit's own system config switches on autocrlf and
+  the credential manager and includes a Git for Windows installed beside it,
+  and the checkout must look the same on every machine (measured: HTTPS to
+  GitHub works without it — the CA bundle is found by the compiled path, not
+  through the config).
+- **Task Manager, the taskbar and Setup all need to know which process is
+  Sautium.** `pythonw.exe` copied as `Sautium.exe` gives the process its name
+  (CPython finds its DLL and stdlib beside the exe, whatever it is called);
+  `SetCurrentProcessExplicitAppUserModelID` plus the same `AppUserModelID` on
+  the installer's shortcut make the pinned tile and the running window one
+  taskbar button; a named mutex (`AppMutex`) is how Setup and Uninstall refuse
+  to rewrite a runtime that is in use. The three constants live in
+  `desktop/utils.py` and are repeated in the bootstrap and the `.iss`, which
+  cannot import it.
+- **CustomTkinter owns the window icon unless told otherwise.** Both CTk and
+  CTkToplevel stamp their own icon 200 ms after creation (the Toplevel
+  unconditionally), so an icon set once was overwritten on every dialog.
+  `desktop/icon.brand_windows` points both classes' `iconbitmap` at the
+  rendered .ico — one place, not an `after(250)` at every Toplevel site.
+- **Node is the launcher's to install, on Windows too.** The old installer
+  bundled a portable Node beside the frozen exe; there is no "beside the exe"
+  any more, and Node is only needed when an agent is picked.
+  `db_init.install_node` downloads the pinned LTS zip into `<root>/node` (the
+  path `get_bundled_node_dir` already looked at), and the wizard's panel
+  offers the same button on both platforms.
+- **Dependency installs have exactly one owner per interpreter.** The updater
+  used to `pip install -r backend/requirements.txt` into `sys.executable` with
+  a 300 s cap after a pull — on Windows that is the launcher's interpreter,
+  not the backend's, and anywhere a torch bump blew the cap. Removed: the
+  backend start already installs its own file from a requirements hash
+  (`_ensure_backend_deps`, 3600 s), and the bootstrap installs
+  `desktop/requirements.txt` — which is why `_restart_self` now relaunches
+  THROUGH the bootstrap (`SAUTIUM_BOOTSTRAP`) on both platforms instead of
+  `python -m desktop` directly.
+- **Testing beside the checkout.** The installed app and the launcher
+  checkout share `%LOCALAPPDATA%\Sautium` (pgdata, config), like the two
+  runtimes on macOS. `scripts/test-node.ps1 run` points LOCALAPPDATA and
+  APPDATA at a sandbox with shifted ports and `reset` deletes it; the launcher
+  cannot be told apart by path (every install runs the same `Sautium.exe`),
+  so `reset` asks for it to be quit first.
+
 ### CLI agent sign-in without a console (2026-09-09)
 
 - **The console was the only interactive thing about either login.** Both
@@ -500,7 +574,8 @@ The short version of the hard-learned lessons:
   commit, then rewrite. A node that skipped that window needs the manual
   reset. Moving the repository to another account is a second break on top:
   the remote URL sits in every clone's `.git/config`, in
-  `desktop/macos/bootstrap.py` and in the installer — that needs a bridge
+  `desktop/macos/bootstrap.py`, `desktop/windows/bootstrap.py` and
+  `desktop/updater.py` — that needs a bridge
   commit on the old remote that repoints `origin`, and the old repository
   left alive as a frozen redirect.
 

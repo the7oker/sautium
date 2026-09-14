@@ -21,18 +21,16 @@ logger = logging.getLogger(__name__)
 
 
 def get_project_root() -> Path:
-    """Get project root directory, works in both dev and PyInstaller mode."""
-    if getattr(sys, "frozen", False):
-        # PyInstaller exe — project root is where the exe lives
-        return Path(sys.executable).parent
-    else:
-        # Dev mode — desktop/ is one level below project root
-        return Path(__file__).parent.parent
+    """The checkout this launcher runs from — desktop/ is one level below it.
+    A packaged install is a checkout too: the macOS bundle and the Windows
+    installer both put a clone in the data root and run `python -m desktop`
+    there."""
+    return Path(__file__).parent.parent
 
 
 def get_bundled_node_dir() -> Optional[Path]:
-    """Return path to the portable Node directory bundled by the installer
-    (Windows only). None if not present or not on Windows."""
+    """The portable Node the launcher unpacked beside the tree (Windows only,
+    db_init.install_node). None if not present or not on Windows."""
     if sys.platform != "win32":
         return None
     candidate = get_project_root() / "node"
@@ -67,6 +65,30 @@ def repair_gui_path() -> None:
     if missing:
         os.environ["PATH"] = os.pathsep.join(missing + current)
         logger.info("PATH repaired for GUI launch: added %s", ", ".join(missing))
+
+
+# Shared with the installer (desktop/installer/sautium.iss) and its bootstrap
+# (desktop/windows/bootstrap.py): the shortcut carries the AppUserModelID, so
+# its taskbar button and the running window are one; AppMutex is what Setup
+# and Uninstall wait on before replacing the runtime this process runs from.
+APP_USER_MODEL_ID = "Sautium.Launcher"
+APP_MUTEX = "SautiumLauncher"
+
+_app_mutex = None
+
+
+def claim_windows_app_identity() -> None:
+    """Windows only, before the first window. Without the explicit
+    AppUserModelID the taskbar files a pythonw-hosted window under the
+    interpreter's identity — a second button, its icon, "pin" pinning
+    python — and without the mutex an upgrade could rewrite a runtime that
+    is in use."""
+    if sys.platform != "win32":
+        return
+    import ctypes
+    global _app_mutex
+    ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID(APP_USER_MODEL_ID)
+    _app_mutex = ctypes.windll.kernel32.CreateMutexW(None, False, APP_MUTEX)
 
 
 def get_node_executable() -> Optional[Path]:

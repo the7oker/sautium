@@ -130,7 +130,9 @@ def load_config() -> dict:
 
     if config_path.exists():
         try:
-            with open(config_path, "r", encoding="utf-8") as f:
+            # utf-8-sig: a config written by a Windows tool may carry a BOM,
+            # and the failure path below replaces the file with the defaults.
+            with open(config_path, "r", encoding="utf-8-sig") as f:
                 saved = json.load(f)
             config = _deep_merge(DEFAULT_CONFIG.copy(), saved)
         except (json.JSONDecodeError, OSError) as e:

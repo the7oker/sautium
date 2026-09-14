@@ -8,212 +8,42 @@ Build Sautium.app and its DMG.
 
 The bundle is NOT a frozen launcher. It carries a private CPython plus a
 snapshot of the tree, and `Contents/Resources/bootstrap.py` installs both into
-the launcher's data root on first run (see that file for why). PyInstaller was
-the other candidate and loses on the thing that matters here: the launcher
-provisions and then RUNS a Python — pip-installing torch, spawning uvicorn and
-the MCP server — and inside a frozen bundle `sys.executable` is the bundle, not
-an interpreter that can do any of that.
+the launcher's data root on first run — see that file for why, and
+build_common.py for the pieces the Windows installer shares with this.
 """
 
 import argparse
-import hashlib
 import plistlib
 import shutil
-import subprocess
 import sys
-import tarfile
-import urllib.request
 from pathlib import Path
 
-PROJECT_ROOT = Path(__file__).resolve().parent.parent
-BUILD_DIR = PROJECT_ROOT / "build" / "macos"
-CACHE_DIR = PROJECT_ROOT / "build" / "cache"
-DIST_DIR = PROJECT_ROOT / "dist"
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-APP_NAME = "Sautium"
-BUNDLE_ID = "net.sautium.launcher"
-VERSION = "0.1.0"
-MIN_MACOS = "12.0"
-
-# python-build-standalone: relocatable CPython with tkinter and its own OpenSSL.
-# Bump both together — the URL embeds each.
-#
-# Pinned to the last release built against Tcl/Tk 8.6. CustomTkinter draws its
-# rounded widgets as canvas polygons, and 5.2 does that in a way Tk 9.0 does not
-# survive: from a terminal it raises `expected floating-point number but got
-# "None"` out of canvas coords, and launched through LaunchServices the same
-# state reaches C and segfaults in ConfigurePolygon — the app dies before its
-# window appears. Homebrew's python@3.12 (what the launcher is developed on)
-# carries Tk 8.6, so this pin is also what keeps the shipped app and the
-# maintainer's own runs on the same toolkit.
-PBS_RELEASE = "20251209"
-PBS_PYTHON = "3.12.12"
-
-# What the launcher and the backend import at runtime. `mcp/` is not optional:
-# config_manager points the assistant MCP server at <project_root>/mcp.
-PAYLOAD_ROOTS = ("backend", "desktop", "mcp")
-
-# Never ship a maintainer's credentials in a friend's DMG. git-tracked
-# enumeration already excludes these (all are gitignored); the sweep is the
-# assertion that says so out loud if that ever stops being true.
-SECRET_PATTERNS = (
-    ".env", ".api_secret", ".node_key", "mcp-windows.json",
-    "birth_certificate.json", "identity_proof.json", "*.pem", "*.key",
+from desktop.build_common import (  # noqa: E402
+    APP_NAME, BUILD_DIR, DIST_DIR, VERSION, run, stage_payload, unpack_runtime,
 )
+from desktop.icon import render_icon  # noqa: E402
+
+BUILD = BUILD_DIR / "macos"
+BUNDLE_ID = "net.sautium.launcher"
+MIN_MACOS = "12.0"
 
 RUNTIME_PRUNE = ("lib/python3.12/idlelib", "lib/python3.12/turtledemo",
                  "lib/python3.12/test", "share/man")
 
 
-def run(cmd: list, **kwargs) -> subprocess.CompletedProcess:
-    print("  $", " ".join(str(part) for part in cmd))
-    return subprocess.run([str(part) for part in cmd], check=True, **kwargs)
-
-
 # ================================================================
-# Runtime
+# Bundle contents
 # ================================================================
-
-def runtime_url(arch: str) -> str:
-    machine = "aarch64" if arch == "arm64" else "x86_64"
-    return (
-        f"https://github.com/astral-sh/python-build-standalone/releases/download/"
-        f"{PBS_RELEASE}/cpython-{PBS_PYTHON}+{PBS_RELEASE}-{machine}-apple-darwin-"
-        f"install_only.tar.gz"
-    )
-
-
-def fetch_runtime(arch: str) -> Path:
-    CACHE_DIR.mkdir(parents=True, exist_ok=True)
-    archive = CACHE_DIR / f"cpython-{PBS_PYTHON}-{arch}.tar.gz"
-    if archive.exists():
-        print(f"Runtime: cached {archive.name}")
-        return archive
-    url = runtime_url(arch)
-    print(f"Runtime: downloading {url}")
-    urllib.request.urlretrieve(url, archive)
-    return archive
-
 
 def stage_runtime(app: Path, arch: str) -> None:
-    target = app / "Contents" / "Resources" / "runtime"
-    with tarfile.open(fetch_runtime(arch)) as tar:
-        tar.extractall(target.parent, filter="data")
-    (target.parent / "python").rename(target)
-    for relative in RUNTIME_PRUNE:
-        shutil.rmtree(target / relative, ignore_errors=True)
-    for cache in target.rglob("__pycache__"):
-        shutil.rmtree(cache, ignore_errors=True)
-    # What bootstrap.py compares against its installed copy.
-    (target / "runtime.version").write_text(f"{PBS_PYTHON}+{PBS_RELEASE}\n", encoding="utf-8")
-    print(f"Runtime: staged CPython {PBS_PYTHON} ({arch})")
-
-
-# ================================================================
-# Payload
-# ================================================================
-
-def tracked_files() -> list:
-    """git-tracked paths under the payload roots, read from the WORKING tree.
-
-    Tracking is the filter — everything a build must not ship (secrets, caches,
-    pgdata, the maintainer's mcp-windows.json) is already gitignored — while the
-    content comes from disk so an uncommitted fix still makes it into the DMG.
-    """
-    result = run(["git", "-C", PROJECT_ROOT, "ls-files", "--", *PAYLOAD_ROOTS],
-                 capture_output=True, text=True)
-    return [line for line in result.stdout.splitlines() if line]
-
-
-def warn_untracked() -> None:
-    result = run(["git", "-C", PROJECT_ROOT, "ls-files", "--others",
-                  "--exclude-standard", "--", *PAYLOAD_ROOTS],
-                 capture_output=True, text=True)
-    untracked = [line for line in result.stdout.splitlines() if line]
-    if untracked:
-        print("  ! untracked, NOT shipped:")
-        for path in untracked:
-            print(f"      {path}")
-
-
-def stage_payload(app: Path) -> str:
-    payload = app / "Contents" / "Resources" / "payload"
-    digest = hashlib.sha256()
-    count = 0
-    for relative in tracked_files():
-        source = PROJECT_ROOT / relative
-        if not source.exists():          # deleted in the working tree
-            continue
-        destination = payload / relative
-        destination.parent.mkdir(parents=True, exist_ok=True)
-        shutil.copy2(source, destination)
-        digest.update(relative.encode())
-        digest.update(source.read_bytes())
-        count += 1
-    warn_untracked()
-
-    for pattern in SECRET_PATTERNS:
-        found = list(payload.rglob(pattern))
-        if found:
-            raise SystemExit(f"refusing to ship secrets: {found}")
-
-    build_id = f"{VERSION}+{digest.hexdigest()[:12]}"
-    (payload / ".sautium_build").write_text(build_id + "\n", encoding="utf-8")
-    print(f"Payload: {count} files, build {build_id}")
-    return build_id
-
-
-# ================================================================
-# Icon
-# ================================================================
-
-def _blend(low: str, high: str, t: float) -> tuple:
-    a = tuple(int(low[i:i + 2], 16) for i in (1, 3, 5))
-    b = tuple(int(high[i:i + 2], 16) for i in (1, 3, 5))
-    return tuple(round(a[i] + (b[i] - a[i]) * t) for i in range(3))
-
-
-def render_icon(size: int = 1024):
-    from PIL import Image, ImageDraw
-
-    plate = Image.new("RGBA", (size, size), (0, 0, 0, 0))
-    gradient = Image.new("RGB", (1, size))
-    for y in range(size):
-        gradient.putpixel((0, y), _blend("#332B26", "#1B1714", y / (size - 1)))
-    gradient = gradient.resize((size, size))
-
-    margin = round(size * 0.098)
-    mask = Image.new("L", (size, size), 0)
-    ImageDraw.Draw(mask).rounded_rectangle(
-        (margin, margin, size - margin - 1, size - margin - 1),
-        radius=round(size * 0.185), fill=255,
-    )
-    plate.paste(gradient, (0, 0), mask)
-
-    draw = ImageDraw.Draw(plate)
-    bar_width = size * 0.062
-    gap = size * 0.043
-    heights = (0.20, 0.33, 0.47, 0.29, 0.21)
-    # Depth comes from pre-blended colour, not alpha: ImageDraw writes RGBA
-    # straight into the pixel, so a translucent bar would be translucent in the
-    # finished icon and take its shade from whatever wallpaper sits behind it.
-    depths = (0.45, 0.8, 1.0, 0.8, 0.45)
-    total = len(heights) * bar_width + (len(heights) - 1) * gap
-    x = (size - total) / 2
-    centre = size / 2
-    for height, depth in zip(heights, depths):
-        half = size * height / 2
-        draw.rounded_rectangle(
-            (x, centre - half, x + bar_width, centre + half),
-            radius=bar_width / 2,
-            fill=_blend("#241F1B", "#E8B06F", depth) + (255,),
-        )
-        x += bar_width + gap
-    return plate
+    target = "aarch64-apple-darwin" if arch == "arm64" else "x86_64-apple-darwin"
+    unpack_runtime(target, app / "Contents" / "Resources" / "runtime", RUNTIME_PRUNE)
 
 
 def stage_icon(app: Path) -> None:
-    iconset = BUILD_DIR / f"{APP_NAME}.iconset"
+    iconset = BUILD / f"{APP_NAME}.iconset"
     shutil.rmtree(iconset, ignore_errors=True)
     iconset.mkdir(parents=True)
     master = render_icon()
@@ -226,10 +56,6 @@ def stage_icon(app: Path) -> None:
          "-o", app / "Contents" / "Resources" / f"{APP_NAME}.icns"])
     shutil.rmtree(iconset, ignore_errors=True)
 
-
-# ================================================================
-# Bundle
-# ================================================================
 
 def write_plist(app: Path, build_id: str) -> None:
     info = {
@@ -354,7 +180,7 @@ it completely:
 
 def make_dmg(app: Path, arch: str) -> Path:
     DIST_DIR.mkdir(parents=True, exist_ok=True)
-    stage = BUILD_DIR / "dmg"
+    stage = BUILD / "dmg"
     shutil.rmtree(stage, ignore_errors=True)
     stage.mkdir(parents=True)
     shutil.copytree(app, stage / app.name, symlinks=True)
@@ -389,16 +215,16 @@ def main() -> None:
     args = parser.parse_args()
 
     if sys.platform != "darwin":
-        raise SystemExit("macOS only — use desktop/build.py for the Windows exe")
+        raise SystemExit("macOS only — use desktop/build_windows.py for the Windows installer")
     if args.notarize and args.sign == "-":
         raise SystemExit("notarization needs a Developer ID identity (--sign)")
 
-    app = BUILD_DIR / f"{APP_NAME}.app"
+    app = BUILD / f"{APP_NAME}.app"
     shutil.rmtree(app, ignore_errors=True)
     (app / "Contents" / "MacOS").mkdir(parents=True)
     (app / "Contents" / "Resources").mkdir(parents=True)
 
-    build_id = stage_payload(app)
+    build_id = stage_payload(app / "Contents" / "Resources" / "payload")
     stage_runtime(app, args.arch)
     stage_bootstrap(app)
     stage_icon(app)

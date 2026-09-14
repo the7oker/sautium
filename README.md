@@ -36,8 +36,9 @@ analytics between collectors.
   over a libtorrent DHT; deterministic identity (Argon2id → Ed25519); E2E
   encrypted chat (NaCl Box); optional email verification via a Cloudflare
   Worker acting as a CA. See `P2P_NETWORK.md`.
-- **Windows desktop launcher** — CustomTkinter app (PyInstaller `.exe`, Inno
-  Setup installer) that manages the backend, P2P layer and account.
+- **Desktop launcher** — CustomTkinter app that manages the backend, P2P
+  layer and account; ships as a Windows installer and a macOS bundle, both
+  carriers for a git clone that updates itself.
 - **Node backup and restore** — one encrypted `.sbk` file per node (the
   database without the MusicBrainz layer, plus the identity documents),
   keyed by the account password through Argon2id in its own salt domain and
@@ -81,7 +82,7 @@ bind to loopback. The P2P DHT listens on `19001/udp`.
 - **anthropic SDK** + Claude Code & MCP for the AI assistant
 - **libtorrent** for the DHT (and future file sharing)
 - **aiohttp + PyNaCl + miniupnpc** for the P2P layer
-- **CustomTkinter + PyInstaller + Inno Setup** for the Windows launcher/installer
+- **CustomTkinter** for the launcher; **Inno Setup** wraps it on Windows, a DMG on macOS
 
 ## Prerequisites
 
@@ -157,31 +158,56 @@ The launcher runs the whole stack without Docker — PostgreSQL, backend, P2P an
 the account system. From a checkout it is `python -m desktop`; for other people
 it ships as a native app:
 
-- **Windows** — `python desktop/build.py` builds the PyInstaller `.exe`, wrapped
-  by the Inno Setup script in `desktop/installer/`.
+- **Windows** — `python desktop/build_windows.py` builds
+  `dist/Sautium-<version>-Setup.exe`. Needs Inno Setup 6 (a per-user install
+  is enough) and Pillow; runs on Windows or under WSL, where it finds the
+  Windows-side compiler itself.
 - **macOS** — `python desktop/build_macos.py` builds `Sautium.app` and
   `dist/Sautium-<version>-<arch>.dmg`. Needs Xcode Command Line Tools (`clang`,
   `iconutil`) and Pillow.
 
-The macOS bundle is not a frozen launcher. It carries a private CPython 3.12
-(python-build-standalone, Tk included) plus a snapshot of the git-tracked tree,
-and `Contents/Resources/bootstrap.py` installs both into `~/.local/share/Sautium`
-on first run — after which the launcher runs exactly as it does from a checkout,
-because it is one: the tree is cloned from `main`, so **Check for Updates** in
-the launcher pulls, reinstalls changed requirements, runs new migrations and
-restarts the backend, the same path a checkout uses. The bundled snapshot is
-the fallback for an install that cannot reach GitHub. Two consequences: what
-lands on `main` reaches every installed app, and a schema change only travels
-as a NEW numbered migration — editing `001_initial.sql` in place never re-runs. Freezing was rejected: the launcher provisions and then RUNS
-a Python (pip-installing torch, spawning uvicorn and the MCP server), and inside
-a frozen bundle `sys.executable` is the bundle.
+Neither package is a frozen launcher. Each carries a private CPython 3.12
+(python-build-standalone, Tk included) plus a snapshot of the git-tracked tree
+— the Windows one a MinGit as well — and a bootstrap installs the tree into the
+data root on first run (`~/.local/share/Sautium/app`,
+`%LOCALAPPDATA%\Sautium\app`), after which the launcher runs exactly as it does
+from a checkout, because it is one: the tree is cloned from `main`, so
+**Check for Updates** in the launcher pulls, runs new migrations and restarts
+the backend, the same path a checkout uses. The bundled snapshot is the
+fallback for an install that cannot reach GitHub. Two consequences: what lands
+on `main` reaches every installed app, and a schema change only travels as a
+NEW numbered migration — editing `001_initial.sql` in place never re-runs.
+Freezing was rejected: the launcher provisions and then RUNS a Python
+(pip-installing torch, spawning uvicorn and the MCP server), and inside a
+frozen bundle `sys.executable` is the bundle. A new package is therefore only
+ever a new runtime; `desktop/build_common.py` holds what the two builds share.
 
-Builds are ad-hoc signed by default. With a Developer ID:
+The Windows build is unsigned and the macOS build ad-hoc signed by default.
+With a Developer ID:
 
 ```bash
 python desktop/build_macos.py --sign "Developer ID Application: ..." \
                               --notarize <keychain-profile>
 ```
+
+#### Installing the Windows build
+
+1. Run `Sautium-<version>-Setup.exe`. SmartScreen warns that the publisher is
+   unknown — there is no code-signing certificate — so choose **More info →
+   Run anyway**. The install is per-user, without an administrator prompt,
+   into `%LOCALAPPDATA%\Programs\Sautium`.
+2. The first launch clones the current `main` into `%LOCALAPPDATA%\Sautium\app`
+   (the bundled copy is the offline fallback), installs the launcher's packages
+   into the bundled Python and starts the launcher, which then downloads
+   PostgreSQL 18, a Python for the backend, ffmpeg, flac, fpcalc and deno
+   beside the tree. Windows asks for administrator permission once per
+   firewall rule the launcher opens (web player, media surfaces, P2P).
+3. The setup wizard creates the account and the database, as on macOS below.
+   Node.js is downloaded from nodejs.org when an AI agent is picked.
+4. Uninstalling (Apps & Features) removes the program and asks whether to
+   delete the node too: `%LOCALAPPDATA%\Sautium` (database, logs, the app and
+   its downloaded components), `%APPDATA%\Sautium` (settings, account key),
+   `%USERPROFILE%\.sautium` (the browser-trusted certificate).
 
 #### Installing the macOS build
 
@@ -202,14 +228,17 @@ python desktop/build_macos.py --sign "Developer ID Application: ..." \
 
 #### Testing installs
 
-`scripts/test-node.sh run` starts the installed app against a throwaway data
-root — its own wizard, database and ports, leaving the node this machine
-already runs alone — and `reset` deletes it. It launches the way the Dock does,
-with LANG stripped, because that is where a locale-less PostgreSQL start fails
-and a terminal never will. `wipe --yes` deletes the real node on this machine:
-`~/.config/Sautium` (settings, account key), `~/.local/share/Sautium` (database,
-logs, the app's Python) and `~/.sautium` (the browser certificate). Homebrew
-packages, the pip cache and `~/.cache/huggingface` are left alone.
+`scripts/test-node.sh run` (macOS) and `scripts/test-node.ps1 run` (Windows)
+start the installed app against a throwaway data root — its own wizard,
+database and ports, leaving the node this machine already runs alone — and
+`reset` deletes it. The macOS script launches the way the Dock does, with LANG
+stripped, because that is where a locale-less PostgreSQL start fails and a
+terminal never will. `wipe --yes` (`wipe -Yes`) deletes the real node on this
+machine: `~/.config/Sautium` (settings, account key), `~/.local/share/Sautium`
+(database, logs, the app's Python) and `~/.sautium` (the browser certificate)
+— on Windows `%APPDATA%\Sautium`, `%LOCALAPPDATA%\Sautium` and
+`%USERPROFILE%\.sautium`. Homebrew packages, the installed program, the pip
+cache and `~/.cache/huggingface` are left alone.
 
 ## Project Structure
 
@@ -238,11 +267,12 @@ sautium/
 │   ├── routers/                    # FastAPI route modules
 │   └── static/                     # Web UI (vanilla HTML/CSS/JS, no build)
 ├── desktop/
-│   ├── launcher.py                 # Windows launcher (CustomTkinter)
+│   ├── launcher.py                 # desktop launcher (CustomTkinter)
 │   ├── node_identity.py            # Ed25519 identity + account (Argon2id)
 │   ├── sync_client.py              # import from remote + post-import classifiers
 │   ├── migrations/001_initial.sql  # canonical schema (single source of truth)
-│   ├── installer/                  # Inno Setup installer
+│   ├── installer/                  # Inno Setup script (build_windows.py compiles it)
+│   ├── windows/, macos/            # first-run bootstraps of the two packages
 │   └── p2p/                        # sync server, DHT, chat, NAT traversal
 ├── mcp/
 │   └── assistant_server.py         # MCP server (37 tools for Claude Code)

@@ -87,12 +87,13 @@ htmlcov/
 /tmp/
 /pgsql/
 /python312/
-# Media tools the launcher bootstraps into the project root (desktop/db_init.py)
+# Media tools and Node the launcher bootstraps into the project root (desktop/db_init.py)
 /ffmpeg/
 /fpcalc/
 /flac/
 /yt-dlp/
 /deno/
+/node/
 
 # MCP configs (contain passwords and API keys)
 .mcp.json

@@ -241,6 +241,9 @@ def launch() -> None:
     os.chdir(APP_DIR)
     env = dict(os.environ)
     env["PYTHONNOUSERSITE"] = "1"
+    # The launcher relaunches itself through here after an update, so a
+    # changed desktop/requirements.txt is installed before the new code runs.
+    env["SAUTIUM_BOOTSTRAP"] = str(Path(__file__).resolve())
     log(f"exec {RUNTIME_PYTHON} -m desktop")
     os.execve(str(RUNTIME_PYTHON), [str(RUNTIME_PYTHON), "-m", "desktop"], env)
 
