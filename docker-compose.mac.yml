@@ -111,7 +111,8 @@ services:
       - ./data/generated_eq:/app/generated_eq
       - ./data/mbdump:/app/data/mbdump   # MusicBrainz dump (download + stream-load)
       - ./data/support:/app/data/support # support desk — bundles user nodes sent, unpacked on demand (master only)
-      - ./data/backup:/app/data/backup   # node backups (Settings > Library > Backup; backend/backup.py)
+      - ./data/backup:/app/data/backup   # node backups (python -m backup create; the weekly task)
+      - ./data/export:/app/data/export   # share exports for other collectors (python -m backup export)
       # Mount music library as read-only
       # Mac path example: /Users/username/Music -> /music in container
       - ${MUSIC_LIBRARY_PATH:-/Users/Shared/Music}:/music:ro

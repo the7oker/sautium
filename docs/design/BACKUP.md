@@ -252,6 +252,11 @@ launcher runs the CLI, as for backups). Departures from the sketch above:
 - **Scope.** `--scope engaged` (albums owned or with a completed listen —
   the carry gate; default), `--scope owned`, `--artist NAME` (name, uuid or
   a Latin alias; repeatable), `--album UUID`. Never the phantom layer.
+- **Its own folder.** Exports land in `EXPORT_DIR` — `./data/export` on
+  Docker (bind mount), `<data_dir>/export` under the launcher — not beside
+  the backups: a backup is for this node's return, an export is a file
+  handed to someone else, and the weekly task prunes the backup folder by
+  age. Each row in the launcher has a "Folder" button.
 - **Import = the gate.** Structural sections through
   `seed_import.insert_structural` (ON CONFLICT DO NOTHING — a node keeps
   its own rows), envelopes through `SyncClient._import_items` (seal
@@ -379,11 +384,15 @@ from the sketch above, each for a reason found while building:
   the very CLI a Docker node's weekly task runs (`desktop/backup_task.py`
   spawns `python -m backup create --password-env SAUTIUM_BACKUP_PASSWORD
   --progress-json --cancel-on-stdin` on the backend interpreter with
-  `service_manager.backend_env()`), shows its JSON events in the tab's
-  Activity panel (job, progress bar, destination folder, Cancel — the
-  window stays open; the launcher's progress line mirrors it) and cancels
-  through the child's stdin — a quit mid-backup cancels too, so no half
-  file is left. The child never spawns git: `updater.current_commit`
+  `service_manager.backend_env()`), shows its JSON events in the action's
+  own row — the button that started the job turns into its red Cancel, a
+  progress line and a thin bar appear beneath the section and the result
+  line stays (the launcher's scan button is the pattern; the window stays
+  open, the launcher's progress line mirrors it) and cancels through the
+  child's stdin — a quit mid-backup cancels too, so no half file is left.
+  Backup, export and import are independent jobs and may overlap (pg_dump
+  reads a snapshot, the export reads, the import writes through the gate);
+  only a restore needs the field clear, and its button waits for them. The child never spawns git: `updater.current_commit`
   reads `.git/HEAD` by hand, after a launcher-spawned CLI hung forever in
   `git rev-parse` on Windows (git's own child held the pipes past
   `run()`'s timeout). `python -m backup` itself runs on either

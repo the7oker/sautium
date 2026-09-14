@@ -77,8 +77,8 @@ class LauncherApp(ctk.CTk):
         self._streams_started = False
         self._scan_active = False     # a Library wake is only ours while a scan we started runs
         self._qr_timer = None
-        self._backup_run = None       # desktop/backup_task.CliRun: backup / export / import in flight
-        self._job_listeners: list = []  # Settings & Tools windows watching that job (Tk thread)
+        self._jobs: dict = {}         # kind ("backup" | "export" | "import") -> desktop/backup_task.CliRun
+        self._job_listeners: list = []  # Settings & Tools windows watching those jobs (Tk thread)
         self._settings_dialog = None
 
         # Check first run
@@ -1043,14 +1043,14 @@ class LauncherApp(ctk.CTk):
             api_client=self.api_client,
             on_restore=self._restore_from_backup,
             on_backup=self._create_backup,
-            on_backup_cancel=self._cancel_backup,
+            on_cancel=self._cancel_job,
             backup_state=self._backup_state,
             on_export=self._export_share,
             on_import=self._import_share,
             subscribe_job=self._subscribe_job)
 
     def _subscribe_job(self, cb):
-        """`cb(job, event)` on the Tk thread for every event of the running
+        """`cb(kind, event)` on the Tk thread for every event of a running
         backup-CLI job; returns the unsubscribe."""
         self._job_listeners.append(cb)
         return lambda: cb in self._job_listeners and self._job_listeners.remove(cb)
@@ -1061,22 +1061,25 @@ class LauncherApp(ctk.CTk):
         dlg = self._settings_dialog
         return dlg if (dlg is not None and dlg.winfo_exists()) else self
 
-    def _run_cli(self, run, on_terminal=None) -> None:
-        """One backup-CLI child at a time (desktop/backup_task.CliRun). Its
-        events reach the progress line, every subscribed Settings & Tools
-        window (the Activity panel) and, for the terminal one, the log and
-        `on_terminal` — all on the Tk thread."""
+    def _run_cli(self, kind: str, run, on_terminal=None) -> None:
+        """One backup-CLI child per KIND (desktop/backup_task.CliRun) — a
+        backup, an export and an import may overlap: pg_dump reads its own
+        snapshot, the export reads, the import writes through the gate with
+        per-category commits, so none can corrupt another; the machine just
+        works harder. Events reach the progress line, every subscribed
+        Settings & Tools window (the job's own row) and, for the terminal
+        one, the log and `on_terminal` — all on the Tk thread."""
         from desktop.backup_task import describe_event
-        if self._backup_run is not None and self._backup_run.running:
-            self._progress_text.configure(text=f"{self._backup_run.job} still running")
-            return
+        current = self._jobs.get(kind)
+        if current is not None and current.running:
+            return                                      # the button is its Cancel now
 
         def dispatch(ev):
             text = describe_event(ev, run.job)
             self._progress_text.configure(text=text)
             for cb in list(self._job_listeners):
                 try:
-                    cb(run.job, ev)
+                    cb(kind, ev)
                 except Exception as e:                  # a closed window must not stop the job
                     logger.debug(f"job listener failed: {e}")
             if ev.get("phase") in ("done", "plan", "cancelled", "error"):
@@ -1085,24 +1088,24 @@ class LauncherApp(ctk.CTk):
                     on_terminal(ev)
 
         run._on_event = lambda ev: self.ui_call(lambda: dispatch(ev))
-        self._backup_run = run
+        self._jobs[kind] = run
         try:
             run.start()
         except OSError as e:
             logger.error(f"{run.job} could not start: {e}")
-            self._backup_run = None
+            self._jobs.pop(kind, None)
             dispatch({"phase": "error", "message": f"could not start: {e}"})
 
     def _create_backup(self, password: str):
         """Settings & Tools › Backup & Restore › Create backup…: the CLI on the backend
-        interpreter, its events on the progress line. The backend keeps
-        serving — pg_dump reads a snapshot."""
+        interpreter, its events in the tab's row and on the progress line.
+        The backend keeps serving — pg_dump reads a snapshot."""
         from desktop.backup_task import CliRun
-        self._run_cli(CliRun.backup(self.service_manager, password, lambda _ev: None))
+        self._run_cli("backup", CliRun.backup(self.service_manager, password, lambda _ev: None))
 
     def _export_share(self, scope: str, artists: list):
         from desktop.backup_task import CliRun
-        self._run_cli(CliRun.export(self.service_manager, scope, artists, lambda _ev: None))
+        self._run_cli("export", CliRun.export(self.service_manager, scope, artists, lambda _ev: None))
 
     def _import_share(self, path: str):
         """Two runs of the CLI: a dry run that verifies the file and says what
@@ -1127,7 +1130,7 @@ class LauncherApp(ctk.CTk):
             self._confirm_import(path, "\n".join(lines),
                                  layer_off=bool(ev.get("phantom_layer_off")))
 
-        self._run_cli(CliRun.plan_import(self.service_manager, path, lambda _ev: None),
+        self._run_cli("import", CliRun.plan_import(self.service_manager, path, lambda _ev: None),
                       on_terminal=planned)
 
     def _confirm_import(self, path: str, message: str, *, layer_off: bool):
@@ -1165,28 +1168,31 @@ class LauncherApp(ctk.CTk):
         def go():
             existing_only = mode.get() == "existing"
             dialog.destroy()
-            self._run_cli(CliRun.apply_import(self.service_manager, path, lambda _ev: None,
-                                              existing_only=existing_only))
+            self._run_cli("import", CliRun.apply_import(self.service_manager, path, lambda _ev: None,
+                                                        existing_only=existing_only))
 
         ctk.CTkButton(btns, text="Import", width=120, command=go).pack(side="right")
         ctk.CTkButton(btns, text="Cancel", width=100, command=dialog.destroy,
                       fg_color="transparent", border_width=1).pack(side="right", padx=(0, 8))
 
-    def _cancel_backup(self):
-        if self._backup_run is not None:
-            self._backup_run.cancel()
+    def _cancel_job(self, kind: str):
+        run = self._jobs.get(kind)
+        if run is not None and run.running:
+            run.cancel()
 
-    def _backup_state(self):
-        run = self._backup_run
-        if run is None:
-            return None
-        return {"running": run.running, "job": run.job, "last_event": run.last_event}
+    def _backup_state(self) -> dict:
+        """{kind: {"running", "last_event"}} for every job started this session."""
+        return {kind: {"running": run.running, "last_event": run.last_event}
+                for kind, run in self._jobs.items()}
 
     def _restore_from_backup(self, path, password, manifest):
         """Settings & Tools › Backup & Restore: this node becomes the one in the backup.
         The database is renamed under whoever holds a connection to it, so
         everything that talks to it stops first — P2P, the backend — and
         comes back on the restored database with the restored identity."""
+        if any(run.running for run in self._jobs.values()):
+            self._progress_text.configure(text="Wait for the running backup, export or import to finish")
+            return
         self._set_status("starting", "Restoring from backup...")
         for btn in (self._btn_open, self._btn_scan, self._btn_settings):
             btn.configure(state="disabled")
@@ -1500,11 +1506,13 @@ class LauncherApp(ctk.CTk):
         """Stop P2P and every service, then clear the session marker so the
         next start does not report an unclean shutdown. Worker-thread only —
         both quitting and the update relaunch go through it."""
-        if self._backup_run is not None and self._backup_run.running:
-            # The child removes its .part on cancel; give it the moment that
+        running = [run for run in self._jobs.values() if run.running]
+        for run in running:
+            # A child removes its .part on cancel; give it the moment that
             # takes before PostgreSQL goes away under its pg_dump.
-            self._backup_run.cancel()
-            self._backup_run.wait(15)
+            run.cancel()
+        for run in running:
+            run.wait(15)
         if self.p2p_manager:
             try:
                 self.p2p_manager.stop()

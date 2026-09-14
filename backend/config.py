@@ -152,6 +152,10 @@ class Settings(BaseSettings):
     # and the PostgreSQL client tools (pg_dump / pg_restore) that write and
     # read them; empty = whatever PATH resolves.
     backup_dir: str = "/app/data/backup"
+    # Share exports (BACKUP.md Product B) get their own folder: a backup is
+    # for this node's return, an export is a file handed to someone else,
+    # and the weekly task prunes *.sbk in the backup dir by age.
+    export_dir: str = "/app/data/export"
     pg_bin: str = ""
 
     model_config = SettingsConfigDict(
