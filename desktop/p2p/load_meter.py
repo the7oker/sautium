@@ -236,11 +236,6 @@ class LoadMeter:
         with self._lock:
             self._subs.append(cb)
 
-    def unsubscribe(self, cb: Callable[[dict], None]) -> None:
-        with self._lock:
-            if cb in self._subs:
-                self._subs.remove(cb)
-
     def subscribe_samples(self, cb: Callable[[Optional[dict]], None]) -> None:
         """Fires on EVERY sample (for integrators such as the pricer's
         siege term) — unlike subscribe(), which fires on band changes."""

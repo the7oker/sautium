@@ -114,6 +114,10 @@ plaintext inside the stream = a tar:
 
 ### Creating a backup (backend job)
 
+_Superseded 2026-09-14: there is no Web UI surface — the backup is a
+launcher function and a CLI, see § "Phase 1 as built". The sketch stays as
+the record of the job's policy, which is unchanged._
+
 `POST /api/settings/backup` `{password}` → the job:
 
 1. Verify the password derives this node's pubkey (`derive_account_identity`
@@ -296,10 +300,45 @@ from the sketch above, each for a reason found while building:
   place. A backup from an env-credential Docker node carries no
   `node_info.json`; the launcher then runs `create_account` with the pair
   that opened the file — the same key.
-- **Playback wins.** pg_dump runs at below-normal priority and the writer
-  loop pauses while the load meter reports playback (the miner's hold),
-  driven by the meter's subscribe callback, not a poll; pg_dump keeps its
-  snapshot across the pause. The Web UI says "Paused while playing".
+- **Playback wins, across processes.** pg_dump runs at below-normal
+  priority and the writer loop pauses while the node plays. Since
+  2026-09-14 the job never runs inside the backend, so the signal crosses
+  through PostgreSQL: the backend holds a session advisory lock
+  (`backup.PLAYBACK_LOCK_KEY`, `PlaybackSignal`, reconciled on every load
+  meter sample) while its meter reports playback, and the job's dedicated
+  session waits on it between reads (`PlaybackHold`) — `pg_advisory_lock`
+  blocks in the server until the holder releases, an event rather than a
+  poll, and a backend that dies takes the lock with it, so no stale flag
+  can ever hang a backup. A cancel aborts a blocked wait by cancelling the
+  statement. pg_dump keeps its snapshot across the pause.
+- **Launcher and CLI only — no Web UI (2026-09-14).** A browser cannot
+  receive a 3 GB file and the password that keys it belongs where the file
+  lands, so the Settings › Library card and `/api/settings/backup*` were
+  removed. The launcher's Settings › Maintenance › "Create backup…" runs
+  the very CLI a Docker node's weekly task runs (`desktop/backup_task.py`
+  spawns `python -m backup create --password-env SAUTIUM_BACKUP_PASSWORD
+  --progress-json --cancel-on-stdin` on the backend interpreter with
+  `service_manager.backend_env()`), shows its JSON events on the progress
+  line and cancels through the child's stdin — a quit mid-backup cancels
+  too, so no half file is left. `python -m backup` itself runs on either
+  interpreter: under the launcher it loads `<data_dir>/backend.env` into
+  its environment before `config` builds Settings (`_bootstrap_launcher_env`),
+  so the DSN, identity dir, `BACKUP_DIR=<data_dir>/backup` and
+  `PG_BIN=pgsql/bin` are the backend's own; in launcher mode `pg_target()`
+  adds the cluster's `postgres` role as the admin a restore needs. The
+  embedded Windows interpreter (`python312/`) ignores the current directory
+  and PYTHONPATH (`python312._pth`), so the launcher provisions
+  `Lib/site-packages/sautium-project.pth` with `backend/` and the project
+  root (`python_env.ensure_project_pth`, every start) — which is also what
+  makes the backend's own `desktop.*` imports explicit there instead of a
+  side effect of `routers/sync.py`.
+- **The weekly task's contract** (sautium-private/scripts/backup.sh):
+  `docker exec sautium-backend python -m backup create --password-env
+  P2P_PASSWORD`, the password from the container's environment, the file
+  under `/app/data/backup` (bind mount `./data/backup`) with the `.sbk`
+  suffix, a non-zero exit on any failure, and a terminal counter whose
+  `counting…` / `dumping…` / `identity…` lines the script's log filter
+  strips. Changing any of it means changing that script.
 - **Docker needs the PG 18 client.** jammy's `postgresql-client` is 14 and
   refuses an 18 server; both Dockerfiles install `postgresql-client-18`
   from PGDG and pin `PG_BIN=/usr/lib/postgresql/18/bin`. The launcher
@@ -309,43 +348,50 @@ from the sketch above, each for a reason found while building:
   and a minted one was never seen. The Settings card says so and points at
   Profile.
 
-Entry points: Web UI Settings › Library › Backup (`GET/POST
-/api/settings/backup`, `/cancel`, `/reveal`; progress in the `backup` block
-of `/api/settings/library` on the library wake channel); launcher Settings ›
-Maintenance › "Restore from backup…" and the wizard's identity step
-("Restore from a backup…", the restore runs after `full_init`);
-`python -m backup create|inspect|restore|selftest` in the container
-(`docker compose run --rm --no-deps backend python -m backup restore
-/app/data/backup/<file> [--db music_ai_test] [--replace] [--identity]`).
+Entry points: launcher Settings › Maintenance › "Create backup…" and
+"Restore from backup…", the wizard's identity step ("Restore from a
+backup…", the restore runs after `full_init`); `python -m backup
+create|inspect|restore|selftest` in the container (`docker compose run
+--rm --no-deps backend python -m backup restore /app/data/backup/<file>
+[--db music_ai_test] [--replace] [--identity]`) or on the launcher's
+interpreter (`python312\python.exe -m backup …` from `backend/`).
 Tests: `tests/test_node_backup.py` (17 cases: KDF domain vector, round trip,
 manifest-first, wrong password, pinned KDF parameters, edited header,
 flipped byte, truncation at four points, reorder / duplicate / drop,
 trailing bytes, compatibility refusals, identity file selection, identity
-write with archive); the database half is `python -m backup selftest`.
+write with archive) and `tests/test_backup_cli.py` (the JSON event lines,
+the terminal counter's words, stdin cancel, the env-file bootstrap, the
+launcher helpers); the database half is `python -m backup selftest`.
 
 ## Code layout
 
 - `desktop/node_backup.py` — format v1: KDF, envelope, chunked AEAD,
   member framing (writer / reader), `pg_dump` / `pg_restore` drivers,
   `restore_database`, `write_identity`, `selftest`.
-- `backend/backup.py` — the backend binding: the job (password check under
-  the login semaphore, load-meter hold, SSE progress), the listing, and the
-  `python -m backup` CLI (`create`, `inspect`, `restore`, `selftest`).
-- `backend/routers/settings.py` — `GET/POST /api/settings/backup`,
-  `/backup/cancel`, `/backup/reveal`; the `backup` block of `/library`.
-  Phase 2 adds `POST /api/settings/backup/export` and `/import`.
+- `backend/backup.py` — the node binding and the ONE "make a backup": the
+  `python -m backup` CLI (`create`, `inspect`, `restore`, `selftest`) on
+  either interpreter (backend.env bootstrap under the launcher), password
+  verification through `device_auth.verify_password`, the playback signal
+  (`PlaybackSignal` held by the backend, `PlaybackHold` waited on by the
+  job), `--progress-json` / `--cancel-on-stdin` for the launcher.
+- `desktop/backup_task.py` — the launcher's "Create backup…": runs that
+  CLI on the backend interpreter with `service_manager.backend_env()`,
+  streams its events, cancels via stdin; `latest_backup()` for the
+  Maintenance status line.
 - `desktop/restore.py` — launcher restore flow (`restore_launcher_node`:
   database, migrations, identity) and the `RestoreDialog` used by
   Settings › Maintenance and the wizard; `desktop/launcher.py` stops and
   restarts the services around it.
+- `desktop/settings.py` — Settings › Maintenance: status line, "Create
+  backup…" / "Cancel backup", "Restore from backup…", `PasswordDialog`.
+- `backend/main.py` — wires `PlaybackSignal` to the load meter's samples.
+  No router, no Web UI: the Phase 2 share export/import decides its own
+  surface when it is built.
 - `backend/seed_export.py` / `seed_import.py` — grow into the share
   export/import (pick list → scope selector); the seed bundle stays a
   caller.
-- `backend/static/app-shell.js` — the Backup block on Settings › Library
-  (`_backupBlockHTML`, the password sheet); dialogs via `notifyDialog` /
-  `confirmDestructive`, never `alert`/`confirm`.
 - Docker image: `postgresql-client-18` from PGDG, `PG_BIN` pinned; launcher:
-  `pgsql/bin` on `PG_BIN`, `BACKUP_DIR=<data_dir>/backup`.
+  `pgsql/bin` on `PG_BIN`, `BACKUP_DIR=<data_dir>/backup` in `backend.env`.
 
 ## Phases and acceptance
 
@@ -357,10 +403,13 @@ write with archive); the database half is `python -m backup selftest`.
    master: dump 3.30 GB (11 GB live, 78 own tables) in ~5 min, restore into
    `music_ai_test` in 418 s (the HNSW index build is most of it), 78/78 row
    counts identical, `db_migrate.apply_pending()` on the restored database a
-   no-op, 313 indexes like the live one; the API job (start / duplicate 409 /
-   wrong password 401 / cancel with the `.part` removed) exercised on the
-   restarted backend. Tk flows (launcher Settings › Maintenance, wizard)
-   are written, not yet run on the stand.
+   no-op, 313 indexes like the live one. Re-run after the 2026-09-14
+   refactor (launcher + CLI only): dump 3,300 MB in 293 s, restore 413 s,
+   78/78 again; the same CLI on the launcher's python312 with
+   `pgsql\bin\pg_dump.exe` wrote the 3.3 GB file against the Docker
+   database in ~7 min, and the weekly `backup.sh` ran end to end. Tk flows
+   (launcher Settings › Maintenance, wizard) are written, not yet run on
+   the stand.
 2. **Share export + import.** Done when an export from the Docker node
    imports on the launcher stand through the gate with the expected
    counts, a re-import changes nothing, and a tampered record is refused.

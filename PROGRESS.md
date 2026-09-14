@@ -540,6 +540,14 @@ it taught:
 - **The private seed never enters the file** — re-derived from username +
   password at restore and written only when it reproduces the recorded
   public key. The rotation archive's private keys are the accepted loss.
+- **Launcher and CLI, not the Web UI (2026-09-14).** The first cut had a
+  Backup card in Settings › Library with a job inside the backend. Removed
+  the day after: a browser cannot receive the file and the password belongs
+  where the file lands. The launcher button now runs the same
+  `python -m backup create` the weekly task runs, so there is one
+  implementation; the playback hold survived the move as a PostgreSQL
+  session advisory lock the backend holds while playing and the job waits
+  on — event-driven and self-releasing when the backend dies.
 
 ### Notices: a toast is a signal, the row is the fact (2026-09-13)
 

@@ -77,6 +77,7 @@ class LauncherApp(ctk.CTk):
         self._streams_started = False
         self._scan_active = False     # a Library wake is only ours while a scan we started runs
         self._qr_timer = None
+        self._backup_run = None       # desktop/backup_task.BackupRun while a backup runs
 
         # Check first run
         if not self.config.get("first_run_complete"):
@@ -1035,7 +1036,42 @@ class LauncherApp(ctk.CTk):
         from desktop.settings import SettingsDialog
         SettingsDialog(self, self.config, on_save=self._on_settings_saved,
                        api_client=self.api_client,
-                       on_restore=self._restore_from_backup)
+                       on_restore=self._restore_from_backup,
+                       on_backup=self._create_backup,
+                       on_backup_cancel=self._cancel_backup,
+                       backup_state=self._backup_state)
+
+    def _create_backup(self, password: str):
+        """Settings › Maintenance › Create backup…: the CLI on the backend
+        interpreter (desktop/backup_task.py), its events on the progress
+        line. The backend keeps serving — pg_dump reads a snapshot."""
+        from desktop.backup_task import BackupRun, describe_event
+        if self._backup_run is not None and self._backup_run.running:
+            return
+
+        def on_event(ev):
+            text = describe_event(ev)
+            self.ui_call(lambda: self._progress_text.configure(text=text))
+            if ev.get("phase") in ("done", "cancelled", "error"):
+                logger.info(text)
+
+        self._backup_run = BackupRun(self.service_manager, password, on_event)
+        try:
+            self._backup_run.start()
+        except OSError as e:
+            logger.error(f"Backup could not start: {e}")
+            self._progress_text.configure(text=f"Backup could not start: {e}")
+            self._backup_run = None
+
+    def _cancel_backup(self):
+        if self._backup_run is not None:
+            self._backup_run.cancel()
+
+    def _backup_state(self):
+        run = self._backup_run
+        if run is None:
+            return None
+        return {"running": run.running, "last_event": run.last_event}
 
     def _restore_from_backup(self, path, password, manifest):
         """Settings › Maintenance: this node becomes the one in the backup.
@@ -1355,6 +1391,11 @@ class LauncherApp(ctk.CTk):
         """Stop P2P and every service, then clear the session marker so the
         next start does not report an unclean shutdown. Worker-thread only —
         both quitting and the update relaunch go through it."""
+        if self._backup_run is not None and self._backup_run.running:
+            # The child removes its .part on cancel; give it the moment that
+            # takes before PostgreSQL goes away under its pg_dump.
+            self._backup_run.cancel()
+            self._backup_run.wait(15)
         if self.p2p_manager:
             try:
                 self.p2p_manager.stop()
