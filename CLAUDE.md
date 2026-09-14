@@ -508,7 +508,7 @@ toast takes no pointer events and never blocks the user (see
 | `desktop/node_backup.py` | Node backup format v1 (`.sbk`: Argon2id KEK in its own salt domain, per-file data key, chunked XChaCha20-Poly1305 with the header as AAD, framed members) + `pg_dump`/`pg_restore` drivers, staged restore, identity write, selftest — shared by launcher and backend (`docs/design/BACKUP.md`) |
 | `backend/backup.py` | The node binding and the ONE "make a backup": `python -m backup create\|inspect\|restore\|selftest` on either interpreter (loads `<data_dir>/backend.env` under the launcher), password check via `device_auth.verify_password`, the playback signal as a PostgreSQL session advisory lock (`PlaybackSignal` held by the backend, `PlaybackHold` waited on by the job). The weekly task calls `create --password-env P2P_PASSWORD` — a contract. No Web UI |
 | `desktop/backup_task.py` | Launcher "Create backup…": runs that CLI on the backend interpreter (`--progress-json --cancel-on-stdin`), streams events to the progress line, cancels through stdin |
-| `desktop/restore.py` | Launcher restore flow (`restore_launcher_node`) + `RestoreDialog` for Settings › Maintenance and the wizard; the launcher stops P2P + backend around it |
+| `desktop/restore.py` | Launcher restore flow (`restore_launcher_node`) + `RestoreDialog` for Settings & Tools › Backup & Restore and the wizard; the launcher stops P2P + backend around it |
 
 ---
 

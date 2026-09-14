@@ -42,7 +42,7 @@ analytics between collectors.
   database without the MusicBrainz layer, plus the identity documents),
   keyed by the account password through Argon2id in its own salt domain and
   streamed through chunked XChaCha20-Poly1305. The launcher writes and
-  restores it (Settings › Maintenance; the setup wizard restores too); a
+  restores it (Settings & Tools › Backup & Restore; the setup wizard restores too); a
   Docker node uses `python -m backup create|restore`. See `docs/design/BACKUP.md`.
 
 ## Architecture
@@ -306,7 +306,7 @@ It is auto-applied on first container start. Highlights:
 Backups are a product feature, not a hand-run `pg_dump`: `docker exec
 sautium-backend python -m backup create --password-env P2P_PASSWORD` writes
 `./data/backup/sautium-backup-<node>-<date>.sbk` (the launcher has the same
-under Settings › Maintenance), and
+under Settings & Tools › Backup & Restore), and
 
 ```bash
 docker compose stop backend

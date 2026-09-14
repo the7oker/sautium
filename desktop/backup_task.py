@@ -1,7 +1,7 @@
 """Create a backup from the launcher — by running the CLI, never beside it.
 
-The launcher owns no backup code of its own: Settings › Maintenance ›
-"Create backup…" runs the same `python -m backup create` a Docker node's
+The launcher owns no backup code of its own: Settings & Tools › Backup &
+Restore › "Create backup…" runs the same `python -m backup create` a Docker node's
 weekly task runs (backend/backup.py), on the backend interpreter with the
 backend's own environment (service_manager.backend_env → backend.env: the
 DSN, the identity dir, BACKUP_DIR=<data_dir>/backup, PG_BIN=pgsql/bin), and

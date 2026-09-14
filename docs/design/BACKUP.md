@@ -147,7 +147,7 @@ runs at below-normal priority and yields to the load meter like the miner.
 Restore is a **launcher / CLI** operation with the backend stopped, because
 it replaces the database the backend is serving:
 
-- Launcher: Settings › Maintenance › "Restore from backup…" and the wizard's
+- Launcher: Settings & Tools › Backup & Restore › "Restore from backup…" and the wizard's
   first-run screen ("Restore from a backup" beside "Create account").
 - Docker: `python -m backup restore <file>` inside the backend container
   with the app stopped (`docker compose stop backend`), or on the host
@@ -314,7 +314,7 @@ from the sketch above, each for a reason found while building:
 - **Launcher and CLI only — no Web UI (2026-09-14).** A browser cannot
   receive a 3 GB file and the password that keys it belongs where the file
   lands, so the Settings › Library card and `/api/settings/backup*` were
-  removed. The launcher's Settings › Maintenance › "Create backup…" runs
+  removed. The launcher's Settings & Tools › Backup & Restore › "Create backup…" runs
   the very CLI a Docker node's weekly task runs (`desktop/backup_task.py`
   spawns `python -m backup create --password-env SAUTIUM_BACKUP_PASSWORD
   --progress-json --cancel-on-stdin` on the backend interpreter with
@@ -348,7 +348,7 @@ from the sketch above, each for a reason found while building:
   and a minted one was never seen. The Settings card says so and points at
   Profile.
 
-Entry points: launcher Settings › Maintenance › "Create backup…" and
+Entry points: launcher Settings & Tools › Backup & Restore › "Create backup…" and
 "Restore from backup…", the wizard's identity step ("Restore from a
 backup…", the restore runs after `full_init`); `python -m backup
 create|inspect|restore|selftest` in the container (`docker compose run
@@ -380,10 +380,12 @@ launcher helpers); the database half is `python -m backup selftest`.
   Maintenance status line.
 - `desktop/restore.py` — launcher restore flow (`restore_launcher_node`:
   database, migrations, identity) and the `RestoreDialog` used by
-  Settings › Maintenance and the wizard; `desktop/launcher.py` stops and
+  Settings & Tools › Backup & Restore and the wizard; `desktop/launcher.py` stops and
   restarts the services around it.
-- `desktop/settings.py` — Settings › Maintenance: status line, "Create
-  backup…" / "Cancel backup", "Restore from backup…", `PasswordDialog`.
+- `desktop/settings.py` — the Settings & Tools dialog: General (ports) and
+  Backup & Restore (node backup status line, "Create backup…" / "Cancel
+  backup", "Restore from backup…", the identity certificate transfer),
+  `PasswordDialog`.
 - `backend/main.py` — wires `PlaybackSignal` to the load meter's samples.
   No router, no Web UI: the Phase 2 share export/import decides its own
   surface when it is built.
@@ -408,7 +410,7 @@ launcher helpers); the database half is `python -m backup selftest`.
    78/78 again; the same CLI on the launcher's python312 with
    `pgsql\bin\pg_dump.exe` wrote the 3.3 GB file against the Docker
    database in ~7 min, and the weekly `backup.sh` ran end to end. Tk flows
-   (launcher Settings › Maintenance, wizard) are written, not yet run on
+   (launcher Settings & Tools › Backup & Restore, wizard) are written, not yet run on
    the stand.
 2. **Share export + import.** Done when an export from the Docker node
    imports on the launcher stand through the gate with the expected

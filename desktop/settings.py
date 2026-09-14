@@ -1,7 +1,12 @@
-"""
-Settings dialog for Sautium.
+"""Settings & Tools — the launcher's dialog for what only the launcher can do.
 
-A tabbed CTkToplevel dialog for modifying application settings.
+Two tabs. "General" holds the launcher-only settings (ports), saved with
+Save. "Backup & Restore" holds actions, not settings: the node backup and
+its restore (docs/design/BACKUP.md — the file lands on this machine, the
+password that keys it is typed here, and a restore replaces the database
+the backend serves) and the identity certificate transfer. AI provider,
+HQPlayer connection and Last.fm scrobbling live in the Web UI, so there is
+one source of truth for each of them, not two parallel configs.
 """
 
 import logging
@@ -10,16 +15,16 @@ from typing import Callable, Optional
 import customtkinter as ctk
 
 from desktop.api_client import BackendAPIClient
-from desktop.config_manager import load_config, save_config
+from desktop.config_manager import save_config
 
 logger = logging.getLogger(__name__)
 
+DIALOG_TITLE = "Settings & Tools"
+TAB_GENERAL = "General"
+TAB_BACKUP = "Backup & Restore"
+
 
 class SettingsDialog(ctk.CTkToplevel):
-    """Settings dialog for launcher-only options (ports). AI provider,
-    HQPlayer connection and Last.fm scrobbling now live in the Web UI —
-    keeping a single source of truth instead of two parallel configs."""
-
     def __init__(self, parent, config: dict, on_save: Optional[Callable] = None,
                  api_client: Optional[BackendAPIClient] = None,
                  on_restore: Optional[Callable] = None,
@@ -28,8 +33,8 @@ class SettingsDialog(ctk.CTkToplevel):
                  backup_state: Optional[Callable] = None):
         super().__init__(parent)
 
-        self.title("Settings")
-        self.geometry("550x600")
+        self.title(DIALOG_TITLE)
+        self.geometry("550x560")
         self.resizable(False, False)
         self.transient(parent)
         self.grab_set()
@@ -37,66 +42,51 @@ class SettingsDialog(ctk.CTkToplevel):
         self.config = config.copy()
         self.on_save = on_save
         self.api_client = api_client
-        # LauncherApp._restore_from_backup: stops the services, replaces the
-        # database and identity, starts them again. The dialog only collects
-        # the file and the password and hands over. Same for the backup:
-        # _create_backup runs the CLI (desktop/backup_task.py) and shows its
-        # progress in the launcher window; backup_state() says whether one
-        # is running so this dialog can offer Cancel instead of Create.
+        # LauncherApp does the work behind the Backup & Restore tab: _create_backup
+        # runs the CLI (desktop/backup_task.py) and shows its progress in the
+        # launcher window, backup_state() says whether one is running so the tab
+        # offers Cancel instead of Create, _restore_from_backup stops the services,
+        # replaces the database and identity, starts them again. This dialog only
+        # collects the file and the password and hands over.
         self.on_restore = on_restore
         self.on_backup = on_backup
         self.on_backup_cancel = on_backup_cancel
         self.backup_state = backup_state
 
-        # Single-tab tabview kept so the UI's vertical rhythm matches
-        # the wizard. If more launcher-only sections appear later
-        # (proxy, GPU/CPU mode override) they slot in here.
-        self.tabview = ctk.CTkTabview(self, width=510, height=500)
+        self.tabview = ctk.CTkTabview(self, width=510, height=460)
         self.tabview.pack(padx=20, pady=(10, 0))
-
-        self.tabview.add("General")
+        self.tabview.add(TAB_GENERAL)
+        self.tabview.add(TAB_BACKUP)
         self._build_general_tab()
+        self._build_backup_tab()
 
-        # Buttons
         btn_frame = ctk.CTkFrame(self, fg_color="transparent")
         btn_frame.pack(fill="x", padx=20, pady=10)
-
         ctk.CTkButton(
             btn_frame, text="Save", width=100,
             command=self._save,
         ).pack(side="right", padx=5)
-
         ctk.CTkButton(
-            btn_frame, text="Cancel", width=100,
+            btn_frame, text="Close", width=100,
             command=self.destroy,
             fg_color="transparent", border_width=1,
         ).pack(side="right", padx=5)
 
-        self._restart_warning = ctk.CTkLabel(
-            btn_frame, text="", text_color="#f59e0b",
-            font=ctk.CTkFont(size=11),
-        )
-        self._restart_warning.pack(side="left")
-
     # ================================================================
-    # General tab
+    # General — launcher-only settings
     # ================================================================
 
     def _build_general_tab(self):
-        tab = self.tabview.tab("General")
+        tab = self.tabview.tab(TAB_GENERAL)
         ports = self.config.get("ports", {})
 
-        ctk.CTkLabel(tab, text="Ports", font=ctk.CTkFont(weight="bold")).pack(
-            anchor="w", pady=(5, 3)
-        )
-
+        self._section(tab, "Ports", first=True)
         port_frame = ctk.CTkFrame(tab, fg_color="transparent")
         port_frame.pack(fill="x", padx=10)
 
         self._pg_port_var = ctk.StringVar(value=str(ports.get("postgres", 5432)))
         self._web_port_var = ctk.StringVar(value=str(ports.get("web", 8000)))
         self._tracker_port_var = ctk.StringVar(value=str(ports.get("tracker", 8765)))
-
         for label, var in [
             ("PostgreSQL:", self._pg_port_var),
             ("Web Server:", self._web_port_var),
@@ -106,80 +96,86 @@ class SettingsDialog(ctk.CTkToplevel):
             row.pack(fill="x", pady=2)
             ctk.CTkLabel(row, text=label, width=100, anchor="w").pack(side="left")
             ctk.CTkEntry(row, textvariable=var, width=80).pack(side="left")
+        self._hint(tab, "Changing ports requires a restart; Save applies them.")
 
-        ctk.CTkLabel(
-            tab,
-            text="Changing ports requires a restart.",
-            text_color="gray", font=ctk.CTkFont(size=11),
-        ).pack(anchor="w", padx=10, pady=5)
+    # ================================================================
+    # Backup & Restore — actions on this node
+    # ================================================================
 
-        # Identity — birth certificate transfer. The certificate is a public
-        # fact and re-fetchable from the Worker (idempotent issuance), so
-        # export/import is the offline fallback, not the primary path.
-        ctk.CTkLabel(tab, text="Identity", font=ctk.CTkFont(weight="bold")).pack(
-            anchor="w", pady=(12, 3)
-        )
+    def _build_backup_tab(self):
+        tab = self.tabview.tab(TAB_BACKUP)
+        running = bool((self.backup_state() or {}).get("running")) if self.backup_state else False
 
-        self._cert_status = ctk.CTkLabel(
-            tab, text=self._cert_status_text(),
-            text_color="gray", font=ctk.CTkFont(size=11),
-        )
-        self._cert_status.pack(anchor="w", padx=10)
-
-        cert_btns = ctk.CTkFrame(tab, fg_color="transparent")
-        cert_btns.pack(fill="x", padx=10, pady=4)
-
-        ctk.CTkButton(
-            cert_btns, text="Export Birth Certificate…", width=200,
-            command=self._export_birth_cert,
-            fg_color="transparent", border_width=1,
-        ).pack(side="left", padx=(0, 6))
-
-        ctk.CTkButton(
-            cert_btns, text="Import…", width=90,
-            command=self._import_birth_cert,
-            fg_color="transparent", border_width=1,
-        ).pack(side="left")
-
-        # Maintenance — backup and restore are launcher operations
-        # (docs/design/BACKUP.md): the file lands on this machine, the
-        # password that keys it is typed here, and a restore replaces the
-        # database the backend serves. "Create backup…" runs the same CLI a
-        # Docker node's weekly task runs (desktop/backup_task.py).
-        ctk.CTkLabel(tab, text="Maintenance", font=ctk.CTkFont(weight="bold")).pack(
-            anchor="w", pady=(12, 3)
-        )
+        # Node backup: "Create backup…" runs the same CLI a Docker node's weekly
+        # task runs (desktop/backup_task.py); the restore replaces the database
+        # and identity with the file's (desktop/restore.py).
+        self._section(tab, "Node backup", first=True)
         self._backup_status = ctk.CTkLabel(
             tab, text=self._backup_status_text(),
             text_color="gray", font=ctk.CTkFont(size=11), anchor="w",
             justify="left", wraplength=480,
         )
         self._backup_status.pack(anchor="w", padx=10)
-
-        running = bool((self.backup_state() or {}).get("running")) if self.backup_state else False
-        maint_btns = ctk.CTkFrame(tab, fg_color="transparent")
-        maint_btns.pack(fill="x", padx=10, pady=4)
+        backup_btns = ctk.CTkFrame(tab, fg_color="transparent")
+        backup_btns.pack(fill="x", padx=10, pady=4)
         ctk.CTkButton(
-            maint_btns, width=170,
+            backup_btns, width=170,
             text="Cancel backup" if running else "Create backup…",
             command=self._cancel_backup if running else self._create_backup,
             fg_color="transparent", border_width=1,
         ).pack(side="left", padx=(0, 6))
         ctk.CTkButton(
-            maint_btns, text="Restore from backup…", width=170,
+            backup_btns, text="Restore from backup…", width=170,
             command=self._restore_from_backup,
             fg_color="transparent", border_width=1,
             state="disabled" if running else "normal",
         ).pack(side="left")
-        ctk.CTkLabel(
-            tab, text_color="gray", font=ctk.CTkFont(size=11), anchor="w",
+        self._hint(tab, (
+            "One encrypted file: the database (without the MusicBrainz catalogue) "
+            "and this node's identity, keyed by the account password, written to "
+            "the launcher's data folder — keep a copy elsewhere. Restoring replaces "
+            "this node's database and identity with the file's; the current "
+            "database is kept as sautium__previous."))
+
+        # Identity certificate transfer. The certificate is a public fact and
+        # re-fetchable from the Worker (idempotent issuance), so export/import
+        # is the offline fallback, not the primary path — and a node backup
+        # carries it anyway.
+        self._section(tab, "Identity certificate")
+        self._cert_status = ctk.CTkLabel(
+            tab, text=self._cert_status_text(),
+            text_color="gray", font=ctk.CTkFont(size=11), anchor="w",
             justify="left", wraplength=480,
-            text=("A backup is the database (without the MusicBrainz catalogue) and "
-                  "this node's identity in one file, encrypted with the account "
-                  "password, written to the launcher's data folder — keep a copy "
-                  "elsewhere. Restoring replaces this node's database and identity "
-                  "with the file's; the current database is kept as sautium__previous."),
-        ).pack(anchor="w", padx=10)
+        )
+        self._cert_status.pack(anchor="w", padx=10)
+        cert_btns = ctk.CTkFrame(tab, fg_color="transparent")
+        cert_btns.pack(fill="x", padx=10, pady=4)
+        ctk.CTkButton(
+            cert_btns, text="Export certificate…", width=170,
+            command=self._export_birth_cert,
+            fg_color="transparent", border_width=1,
+        ).pack(side="left", padx=(0, 6))
+        ctk.CTkButton(
+            cert_btns, text="Import certificate…", width=170,
+            command=self._import_birth_cert,
+            fg_color="transparent", border_width=1,
+        ).pack(side="left")
+        self._hint(tab, (
+            "The birth certificate is the network's record of when this identity "
+            "was issued. It is fetched automatically and included in every node "
+            "backup; export/import is the offline fallback."))
+
+    @staticmethod
+    def _section(tab, title: str, *, first: bool = False) -> None:
+        ctk.CTkLabel(tab, text=title, font=ctk.CTkFont(weight="bold")).pack(
+            anchor="w", pady=((5, 3) if first else (14, 3)))
+
+    @staticmethod
+    def _hint(tab, text: str) -> None:
+        ctk.CTkLabel(
+            tab, text=text, text_color="gray", font=ctk.CTkFont(size=11),
+            anchor="w", justify="left", wraplength=480,
+        ).pack(anchor="w", padx=10, pady=(2, 0))
 
     def _backup_status_text(self) -> str:
         from desktop.backup_task import backup_dir, fmt_bytes, latest_backup
@@ -231,9 +227,8 @@ class SettingsDialog(ctk.CTkToplevel):
                 work = "proof ready"
             else:
                 work = "proof pending (mined in the background while P2P runs)"
-            return (f"Identity certificate: issued {cert['issued_at']}"
-                    f" ({cert['method']}) — {work}")
-        return "Identity certificate: none (fetched automatically at P2P start)"
+            return (f"Issued {cert['issued_at']} ({cert['method']}) — {work}")
+        return "None yet (fetched automatically at P2P start)"
 
     def _export_birth_cert(self):
         from tkinter import filedialog
@@ -272,7 +267,7 @@ class SettingsDialog(ctk.CTkToplevel):
         )
 
     # ================================================================
-    # Save
+    # Save — the General tab
     # ================================================================
 
     def _save(self):
