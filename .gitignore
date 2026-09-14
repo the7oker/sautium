@@ -101,7 +101,7 @@ backend/mcp-docker.json
 backend/mcp-wsl.json
 
 # Claude Code local settings (contain permissions with passwords)
-.claude/settings.local.json
+**/.claude/settings.local.json
 
 # PyInstaller
 *.spec
