@@ -30,6 +30,30 @@ def get_python_dir() -> Path:
     return get_project_root() / "python312"
 
 
+PROJECT_PTH = "sautium-project.pth"
+
+
+def ensure_project_pth() -> None:
+    """Put the backend dir and the project root on the embedded interpreter's
+    sys.path. Its `python312._pth` pins the path to the interpreter's own
+    dirs — the current directory and PYTHONPATH are ignored — so neither
+    `python -m backup` run from backend/ nor the backend's own `desktop.*`
+    imports resolve by themselves (the backend has ridden on routers/sync.py
+    inserting the project root at import time). A .pth in site-packages is
+    the one place a ._pth interpreter still takes extra paths from; entries
+    are relative to the site-packages dir, so the checkout can move.
+    Idempotent; a no-op for a non-embedded interpreter."""
+    python_dir = get_python_dir()
+    site = python_dir / "Lib" / "site-packages"
+    if not list(python_dir.glob("python*._pth")) or not site.is_dir():
+        return
+    content = "..\\..\\..\\backend\n..\\..\\..\n"
+    path = site / PROJECT_PTH
+    if not path.exists() or path.read_text(encoding="utf-8") != content:
+        path.write_text(content, encoding="utf-8")
+        logger.info("Wrote %s (backend + project root on the embedded sys.path)", path.name)
+
+
 def get_backend_python() -> str:
     """Return path to the Python executable for the backend.
 
@@ -95,8 +119,10 @@ def download_embedded_python(progress_cb: Optional[Callable] = None) -> bool:
 
             logger.info(f"Python 3.12 extracted to {python_dir}")
 
-        # Step 2: Enable site-packages by editing ._pth file
+        # Step 2: Enable site-packages by editing ._pth file, and put the
+        # project on the path the ._pth would otherwise pin shut.
         _enable_site_packages(python_dir)
+        ensure_project_pth()
 
         # Step 3: Install pip
         if progress_cb:

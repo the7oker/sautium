@@ -189,6 +189,23 @@ def update_config(updates: dict) -> dict:
     return config
 
 
+def load_env_file(path: Path) -> dict:
+    """KEY=VALUE lines of a generated env file (comments and blanks skipped)
+    — what service_manager hands the backend process, and what a hand-run
+    `python -m backup` under the launcher applies to itself (backend/backup.py)."""
+    out: dict = {}
+    if not path.exists():
+        return out
+    with open(path, "r", encoding="utf-8") as f:
+        for line in f:
+            line = line.strip()
+            if not line or line.startswith("#") or "=" not in line:
+                continue
+            key, _, value = line.partition("=")
+            out[key.strip()] = value.strip()
+    return out
+
+
 def _pg_bin_dir() -> str:
     from desktop.db_init import get_pg_bin_dir
     try:

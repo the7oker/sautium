@@ -1,62 +1,87 @@
-"""Node backup on the backend — the job behind Settings > Library > Backup and
-the `python -m backup` CLI (create / restore / inspect / selftest).
+"""Node backup on the backend — `python -m backup create|inspect|restore|selftest`.
 
-The format and the database drivers live in `desktop/node_backup.py`, shared
-with the launcher's restore flow; this module binds them to THIS process:
-its settings (database, identity dir, backup dir, PG_BIN), its password
-check (`device_auth.verify_password` — the account is the KDF, nothing is
-stored), its Argon2id semaphore, its load meter and its Library SSE channel.
+The format and the database drivers are `desktop/node_backup.py`; this module
+binds them to a node — its database, identity dir, backup dir and PostgreSQL
+tools — and is the ONE implementation of "make a backup" for every caller:
 
-The job. One at a time. The password is verified and turned into the KEK on
-the request path (under the same semaphore as login: 256 MiB per derivation,
-never unbounded), so the worker thread only ever holds a key. Progress is
-bytes encrypted; the writer loop is the event source — every progress tick
-wakes the library SSE subscribers (rate-limited to one wake a second, the
-Library screen re-fetches on each), and `backup.done` / `backup.failed` are
-the terminal states of the same job record.
+  * the Docker node's weekly task: `docker exec sautium-backend python -m
+    backup create --password-env P2P_PASSWORD` (sautium-private/scripts/
+    backup.sh). Entry point, subcommand, `--password-env`, the default
+    output dir (BACKUP_DIR, `/app/data/backup`) and the `.sbk` suffix are a
+    contract that script relies on; a non-zero exit is its failure signal;
+  * the launcher's Settings › Maintenance › "Create backup…", which runs
+    this same CLI on the backend interpreter (desktop/backup_task.py) with
+    `--progress-json --cancel-on-stdin`;
+  * a hand-run CLI on either interpreter.
 
-Playback wins. The job runs pg_dump at below-normal priority and pauses
-while the load meter reports playback (`mining_hold`, the identity miner's
-rule): the subscribe callback flips a resume Event, the writer loop waits on
-it between reads — an event from the meter, not a poll. pg_dump keeps its
-snapshot open across the pause, so the file that results is still one
-consistent picture of the database.
+Two runtimes, one module. Under the launcher the backend's configuration is
+`<data_dir>/backend.env` — service_manager hands it to the backend process,
+but a hand-run `python -m backup` has no such parent — so the module loads
+that file into its environment BEFORE `config` builds its Settings: the same
+DSN, identity dir, BACKUP_DIR and PG_BIN (pgsql/bin) the backend runs with.
+In a container there is no such file and compose has set the environment.
+
+The policy is the same everywhere. The account password is verified by
+re-deriving the identity (device_auth.verify_password — the login path, under
+its Argon2id semaphore), pg_dump runs at below-normal priority, and the job
+pauses while the node plays music. Playback is known to the backend process
+and the job runs in another, so the signal crosses through PostgreSQL: the
+backend holds a session advisory lock (PLAYBACK_LOCK_KEY) for as long as its
+load meter reports playback (PlaybackSignal, driven by the meter's samples),
+and the job waits on that lock between reads (PlaybackHold) —
+`pg_advisory_lock` blocks in the server until the holder releases, so the
+wait is an event, not a poll, and a backend that dies takes its lock with
+it, so the job can never hang on a stale flag.
+
+There is deliberately no Web UI surface (removed 2026-09-14): a browser
+cannot receive a 3 GB file, and the password that keys it is typed where the
+file lands — the launcher, or the shell that owns the node.
 """
 
 import argparse
+import asyncio
 import getpass
+import json
 import logging
 import os
 import shutil
-import subprocess
 import sys
 import threading
-import time
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Callable, Dict, List, Optional
 
-from config import settings
-from desktop import node_backup as nb
+import psycopg2
+import psycopg2.errors
+
+
+def _bootstrap_launcher_env() -> None:
+    """A hand-run CLI under the launcher: the backend's generated environment
+    (DSN, identity dir, BACKUP_DIR, PG_BIN), applied before `config` reads
+    it. Values already in the environment win (the backend process itself,
+    an explicit override); a container has no such file."""
+    if Path("/.dockerenv").exists() or Path("/run/.containerenv").exists():
+        return
+    try:
+        from desktop.config_manager import get_data_dir, load_env_file
+    except ImportError:
+        return
+    path = get_data_dir() / "backend.env"
+    if path.exists():
+        for key, value in load_env_file(path).items():
+            os.environ.setdefault(key, value)
+
+
+_bootstrap_launcher_env()
+
+from config import settings  # noqa: E402
+from desktop import node_backup as nb  # noqa: E402
 
 logger = logging.getLogger(__name__)
 
 MIN_FREE_BYTES = 3 * 1024 ** 3
-NOTIFY_INTERVAL = 1.0
-
-_state: Dict[str, Any] = {
-    "running": False, "phase": "", "progress": "", "pct": None, "bytes": 0,
-    "paused": None, "cancel_requested": False, "error": None, "done": None,
-    "started_at": None,
-}
-_lock = threading.Lock()
-_cancel = threading.Event()
-_resume = threading.Event()
-
-
-class JobError(Exception):
-    def __init__(self, status: int, message: str):
-        super().__init__(message)
-        self.status = status
+# One key, one meaning: "this node is playing". Held by the backend's session
+# while its load meter reports playback; waited on by a running backup.
+PLAYBACK_LOCK_KEY = 0x53415554        # "SAUT"
 
 
 # ---------------------------------------------------------------------------
@@ -68,13 +93,18 @@ def backup_dir() -> Path:
 
 
 def pg_target(dbname: Optional[str] = None) -> nb.PgTarget:
-    """The node's database through the backend's own credentials. On Docker
-    that role is the superuser; under the launcher it is `sautium`, which is
-    all a dump needs — the launcher's restore brings its own admin role."""
+    """The node's database. Docker's role is a superuser already; the
+    launcher's cluster has `postgres` (superuser) and `sautium` (the app)
+    under one password (desktop/db_init.create_database), and a restore
+    needs the former to create and swap databases."""
+    from claude_code import is_launcher_mode
+    launcher = is_launcher_mode()
     return nb.PgTarget(
         host=settings.postgres_host, port=settings.postgres_port,
         dbname=dbname or settings.postgres_db,
         user=settings.postgres_user, password=settings.postgres_password,
+        admin_user="postgres" if launcher else None,
+        admin_password=settings.postgres_password if launcher else None,
         pg_bin=Path(settings.pg_bin) if settings.pg_bin else None)
 
 
@@ -104,229 +134,180 @@ def app_version() -> dict:
         return {"commit": None, "build": None}
 
 
-def availability() -> Dict[str, Any]:
-    """Whether this node can make a backup at all, and why not."""
-    import device_auth
-    if node() is None:
-        return {"available": False, "reason": "no_account"}
-    if device_auth.account_anonymous():
-        # The key is the account password; a minted password nobody has
-        # ever seen can neither be typed here nor at a restore.
-        return {"available": False, "reason": "anonymous"}
-    try:
-        pg_target().tool("pg_dump")
-    except nb.BackupError:
-        return {"available": False, "reason": "no_pg_dump"}
-    return {"available": True, "reason": None}
-
-
-def list_backups() -> List[dict]:
-    """Every .sbk in the backup dir, newest first, with its header facts."""
-    d = backup_dir()
-    if not d.is_dir():
-        return []
-    me = node()
-    out = []
-    for path in sorted(d.glob("*" + nb.FILE_SUFFIX), key=lambda p: p.stat().st_mtime, reverse=True):
-        entry: Dict[str, Any] = {"name": path.name, "size": path.stat().st_size}
-        try:
-            with open(path, "rb") as fp:
-                header, _ = nb.read_header(fp)
-            entry.update(created_at=header.get("created_at"),
-                         username=header["node"]["username"], pubkey=header["node"]["pubkey"],
-                         same_node=bool(me and me["pubkey"] == header["node"]["pubkey"]))
-        except nb.BackupError as e:
-            entry["error"] = str(e)
-        out.append(entry)
-    return out
-
-
-def status() -> Dict[str, Any]:
-    d = backup_dir()
-    try:
-        free = shutil.disk_usage(d if d.exists() else d.parent).free
-    except OSError:
-        free = None
-    with _lock:
-        job = dict(_state)
-    from claude_code import is_launcher_mode
-    return {"dir": str(d), "free_bytes": free, **availability(),
-            "can_reveal": is_launcher_mode(), "files": list_backups(), "job": job}
-
-
-# ---------------------------------------------------------------------------
-# The job
-# ---------------------------------------------------------------------------
-
-def _notify() -> None:
-    from routers.settings import notify_library_subscribers
-    notify_library_subscribers()
-
-
 def _fmt_bytes(n: int) -> str:
     if n >= 1024 ** 3:
         return f"{n / 1024 ** 3:.1f} GB"
     return f"{n / 1024 ** 2:.0f} MB"
 
 
-async def start_from_request(password: str) -> None:
-    """Settings > Library > Back up now. Raises JobError with the HTTP status
-    the router should answer: 409 busy / not available, 401 password,
-    507 disk."""
-    import device_auth
-    with _lock:
-        if _state["running"]:
-            raise JobError(409, "A backup is already running")
-    avail = availability()
-    if not avail["available"]:
-        raise JobError(409, {"no_account": "This node has no account yet",
-                             "anonymous": "Set a password for this identity first — the "
-                                          "backup is encrypted with it",
-                             "no_pg_dump": "pg_dump was not found (PG_BIN)"}[avail["reason"]])
-    if not await device_auth.verify_password(password):
-        raise JobError(401, "Wrong password")
-    ident = node()
-    d = backup_dir()
-    d.mkdir(parents=True, exist_ok=True)
-    files = list_backups()
-    last = files[0]["size"] if files else 0
-    need = max(2 * last, MIN_FREE_BYTES) if last else MIN_FREE_BYTES
-    free = shutil.disk_usage(d).free
-    if free < need:
-        raise JobError(507, f"Not enough space in {d}: {_fmt_bytes(free)} free, "
-                            f"{_fmt_bytes(need)} needed")
-    kek = await device_auth.derive_guarded(nb.derive_kek, password, ident["username"])
-    start(kek, ident["username"], ident["pubkey"], estimate=last)
+# ---------------------------------------------------------------------------
+# Playback signal — backend side (holder) and job side (waiter)
+# ---------------------------------------------------------------------------
+
+class PlaybackSignal:
+    """Owned by the backend (main.py): mirrors the load meter's playback
+    flag into a session advisory lock. Reconciled on every meter sample, so
+    a `pg_try_advisory_lock` that lost to a waiter's momentary hold is retried
+    two seconds later; nothing happens on a sample that changes nothing."""
+
+    def __init__(self, dsn: str):
+        self._dsn = dsn
+        self._conn = None
+        self._held = False
+        self._lock = threading.Lock()
+
+    def reconcile(self, playing: bool) -> None:
+        with self._lock:
+            if playing == self._held:
+                return
+            try:
+                if self._conn is None or self._conn.closed:
+                    self._conn = psycopg2.connect(self._dsn)
+                    self._conn.autocommit = True
+                    self._held = False
+                    if not playing:
+                        return
+                with self._conn.cursor() as cur:
+                    if playing:
+                        cur.execute("SELECT pg_try_advisory_lock(%s)", (PLAYBACK_LOCK_KEY,))
+                        self._held = bool(cur.fetchone()[0])
+                    else:
+                        cur.execute("SELECT pg_advisory_unlock(%s)", (PLAYBACK_LOCK_KEY,))
+                        self._held = False
+            except psycopg2.Error as e:
+                logger.debug("playback signal: %s", e)
+                self._drop()
+
+    def _drop(self) -> None:
+        if self._conn is not None:
+            try:
+                self._conn.close()
+            except psycopg2.Error:
+                pass
+        self._conn = None
+        self._held = False
+
+    def close(self) -> None:
+        with self._lock:
+            self._drop()
 
 
-def start(kek: bytes, username: str, pubkey: str, *, estimate: int = 0) -> None:
-    with _lock:
-        if _state["running"]:
-            raise JobError(409, "A backup is already running")
-        _state.update(running=True, phase="starting", progress="Starting…", pct=None,
-                      bytes=0, paused=None, cancel_requested=False, error=None, done=None,
-                      started_at=time.time())
-    _cancel.clear()
-    _resume.set()
-    # A .part is a job that died with its process (one job per process, and
-    # a live one removes its own on failure) — never a file worth keeping.
-    for stale in backup_dir().glob("*" + nb.PART_SUFFIX):
-        stale.unlink(missing_ok=True)
-    threading.Thread(target=_worker, args=(kek, username, pubkey, estimate),
-                     daemon=True, name="node-backup").start()
+class PlaybackHold:
+    """The job's side: a dedicated session that returns at once while nobody
+    plays and otherwise blocks on the lock until the backend releases it.
+    `cancel()` from another thread aborts a blocked wait (the server cancels
+    the statement) so a cancelled job does not outlive the music."""
+
+    def __init__(self, dsn: str):
+        self._conn = psycopg2.connect(dsn)
+        self._conn.autocommit = True
+
+    def wait(self, on_pause: Optional[Callable[[], None]] = None) -> None:
+        with self._conn.cursor() as cur:
+            cur.execute("SELECT pg_try_advisory_lock(%s)", (PLAYBACK_LOCK_KEY,))
+            if cur.fetchone()[0]:
+                cur.execute("SELECT pg_advisory_unlock(%s)", (PLAYBACK_LOCK_KEY,))
+                return
+            if on_pause is not None:
+                on_pause()
+            try:
+                cur.execute("SELECT pg_advisory_lock(%s)", (PLAYBACK_LOCK_KEY,))
+            except psycopg2.errors.QueryCanceled:
+                raise nb.Cancelled("backup cancelled")
+            cur.execute("SELECT pg_advisory_unlock(%s)", (PLAYBACK_LOCK_KEY,))
+
+    def cancel(self) -> None:
+        try:
+            self._conn.cancel()
+        except psycopg2.Error:
+            pass
+
+    def close(self) -> None:
+        try:
+            self._conn.close()
+        except psycopg2.Error:
+            pass
 
 
-def cancel() -> None:
-    with _lock:
-        if not _state["running"]:
-            raise JobError(409, "No backup running")
-        _state["cancel_requested"] = True
-    _cancel.set()
-    _resume.set()          # a paused job must wake to notice
-    _notify()
+class CancelToken:
+    """Request-from-anywhere cancellation: sets the flag the writer loop
+    checks between reads and aborts a wait blocked on the playback lock."""
 
+    def __init__(self):
+        self.event = threading.Event()
+        self._hold: Optional[PlaybackHold] = None
 
-def _worker(kek: bytes, username: str, pubkey: str, estimate: int) -> None:
-    from desktop.p2p import load_meter
-    meter = load_meter.current()
-    last_notify = [0.0]
-
-    def publish(force: bool = False) -> None:
-        now = time.monotonic()
-        if force or now - last_notify[0] >= NOTIFY_INTERVAL:
-            last_notify[0] = now
-            _notify()
-
-    def on_load(snap: dict) -> None:
-        # Playback is the priority signal; the miner pauses on it and so do we.
-        playing = bool(snap.get("playback"))
-        with _lock:
-            _state["paused"] = "playback" if playing else None
-            if _state["running"]:
-                _state["progress"] = ("Paused while playing — resumes when playback stops"
-                                      if playing else _state["progress"])
-        if playing:
-            _resume.clear()
-        else:
-            _resume.set()
-        publish(force=True)
-
-    def wait_ok() -> None:
-        _resume.wait()
-
-    def progress(phase: str, **f) -> None:
-        with _lock:
-            _state["phase"] = phase
-            if phase == "counting":
-                _state["progress"] = "Taking a snapshot and counting rows…"
-            elif phase == "dumping":
-                b = int(f.get("bytes") or 0)
-                _state["bytes"] = b
-                _state["pct"] = min(99, int(b * 100 / estimate)) if estimate else None
-                if _state["paused"] is None:
-                    _state["progress"] = f"Backing up… {_fmt_bytes(b)}"
-            elif phase == "identity":
-                _state["progress"] = "Adding identity documents…"
-        publish()
-
-    if meter is not None:
-        if meter.playback_active:
-            _resume.clear()
-            with _lock:
-                _state["paused"] = "playback"
-        meter.subscribe(on_load)
-    version = app_version()
-    try:
-        result = nb.create_backup(
-            backup_dir(), target=pg_target(), kek=kek, username=username, pubkey=pubkey,
-            identity_dir=identity_dir(), app_commit=version["commit"], app_build=version["build"],
-            progress=progress, cancel=_cancel, wait_ok=wait_ok)
-        with _lock:
-            _state.update(phase="done", pct=100, bytes=result["dump_size"],
-                          progress=f"Done — {_fmt_bytes(result['size'])}",
-                          done={"name": result["path"].name, "size": result["size"],
-                                "sha256": result["sha256"],
-                                "created_at": result["manifest"]["created_at"]})
-        logger.info("backup done: %s (%d bytes)", result["path"], result["size"])
-    except nb.Cancelled:
-        with _lock:
-            _state.update(phase="cancelled", progress="Cancelled", pct=None)
-        logger.info("backup cancelled")
-    except Exception as e:
-        with _lock:
-            _state.update(phase="failed", error=str(e), progress=f"Failed: {e}")
-        logger.error("backup failed: %s", e, exc_info=True)
-    finally:
-        if meter is not None:
-            meter.unsubscribe(on_load)
-        with _lock:
-            _state["running"] = False
-            _state["paused"] = None
-        publish(force=True)
-
-
-def reveal_dir() -> None:
-    """Open the backup folder in the host's file manager — launcher mode only
-    (a container has no desktop to open it on)."""
-    from claude_code import is_launcher_mode
-    if not is_launcher_mode():
-        raise JobError(409, "The folder is on the host: " + str(backup_dir()))
-    d = backup_dir()
-    d.mkdir(parents=True, exist_ok=True)
-    if sys.platform == "win32":
-        os.startfile(str(d))                       # type: ignore[attr-defined]
-    elif sys.platform == "darwin":
-        subprocess.Popen(["open", str(d)])
-    else:
-        subprocess.Popen(["xdg-open", str(d)])
+    def request(self) -> None:
+        self.event.set()
+        if self._hold is not None:
+            self._hold.cancel()
 
 
 # ---------------------------------------------------------------------------
-# CLI — `python -m backup ...` inside the container (or any backend env)
+# Create — the one entry every caller goes through
+# ---------------------------------------------------------------------------
+
+def create(password: str, *, out_dir: Optional[Path] = None,
+           progress: Optional[nb.ProgressFn] = None,
+           cancel: Optional[CancelToken] = None) -> dict:
+    """Verify the password against this node's identity, then write the
+    backup. Raises node_backup errors (WrongPassword, Refused, Cancelled,
+    BackupError); returns node_backup.create_backup's result."""
+    import device_auth
+
+    progress = progress or (lambda *_a, **_k: None)
+    cancel = cancel or CancelToken()
+    ident = node()
+    if ident is None:
+        raise nb.Refused("this node has no account — nothing to key the backup on")
+    if device_auth.account_anonymous():
+        raise nb.Refused("this identity's password was minted and never shown — "
+                         "set one (Profile) before backing up")
+    if not asyncio.run(device_auth.verify_password(password)):
+        raise nb.WrongPassword("wrong password")
+    kek = nb.derive_kek(password, ident["username"])
+
+    out = Path(out_dir) if out_dir else backup_dir()
+    out.mkdir(parents=True, exist_ok=True)
+    # A .part is a job that died with its process (a live one removes its own
+    # on failure) — never a file worth keeping.
+    for stale in out.glob("*" + nb.PART_SUFFIX):
+        stale.unlink(missing_ok=True)
+    have = sorted(out.glob("*" + nb.FILE_SUFFIX), key=lambda p: p.stat().st_mtime)
+    last = have[-1].stat().st_size if have else 0
+    need = max(2 * last, MIN_FREE_BYTES) if last else MIN_FREE_BYTES
+    free = shutil.disk_usage(out).free
+    if free < need:
+        raise nb.Refused(f"not enough space in {out}: {_fmt_bytes(free)} free, "
+                         f"{_fmt_bytes(need)} needed")
+
+    hold = PlaybackHold(settings.database_url)
+    cancel._hold = hold
+    version = app_version()
+
+    def wait_ok() -> None:
+        if cancel.event.is_set():
+            return                                   # create_backup raises Cancelled next
+        hold.wait(on_pause=lambda: progress("paused", reason="playback"))
+
+    try:
+        return nb.create_backup(
+            out, target=pg_target(), kek=kek, username=ident["username"],
+            pubkey=ident["pubkey"], identity_dir=identity_dir(),
+            app_commit=version["commit"], app_build=version["build"],
+            progress=progress, cancel=cancel.event, wait_ok=wait_ok)
+    finally:
+        cancel._hold = None
+        hold.close()
+
+
+# ---------------------------------------------------------------------------
+# CLI
 # ---------------------------------------------------------------------------
 
 def _password(args, *, prompt: str) -> str:
-    var = args.password_env or ("SAUTIUM_BACKUP_PASSWORD" if os.environ.get("SAUTIUM_BACKUP_PASSWORD") else None)
+    var = args.password_env or ("SAUTIUM_BACKUP_PASSWORD"
+                                if os.environ.get("SAUTIUM_BACKUP_PASSWORD") else None)
     if var:
         value = os.environ.get(var)
         if not value:
@@ -335,37 +316,88 @@ def _password(args, *, prompt: str) -> str:
     return getpass.getpass(prompt)
 
 
-def _print_progress(phase: str, **f) -> None:
-    if phase in ("dumping", "restoring"):
-        b = f.get("bytes") or 0
-        total = f.get("total")
-        line = f"\r{phase}… {b / 1e6:,.0f} MB" + (f" / {total / 1e6:,.0f} MB" if total else "")
-        sys.stdout.write(line.ljust(60))
-    else:
-        sys.stdout.write(f"\n{phase}…")
-    sys.stdout.flush()
+class HumanProgress:
+    """The terminal form: a redrawn byte counter (the weekly task's log filter
+    strips `counting…` / `dumping…` / `identity…` lines — keep those words)."""
+
+    def __call__(self, phase: str, **f) -> None:
+        if phase in ("dumping", "restoring"):
+            b = f.get("bytes") or 0
+            total = f.get("total")
+            line = f"\r{phase}… {b / 1e6:,.0f} MB" + (f" / {total / 1e6:,.0f} MB" if total else "")
+            sys.stdout.write(line.ljust(60))
+        elif phase == "paused":
+            sys.stdout.write(f"\npaused while playing…")
+        else:
+            sys.stdout.write(f"\n{phase}…")
+        sys.stdout.flush()
+
+    def done(self, result: dict) -> None:
+        print(f"\n{result['path']}  {result['size']:,} bytes  sha256 {result['sha256']}")
+
+    def failed(self, message: str) -> None:
+        print(f"\nerror: {message}", file=sys.stderr)
+
+    def cancelled(self) -> None:
+        print("\ncancelled")
+
+
+class JsonProgress:
+    """One JSON object per line on stdout — what the launcher reads."""
+
+    def _emit(self, obj: dict) -> None:
+        sys.stdout.write(json.dumps(obj) + "\n")
+        sys.stdout.flush()
+
+    def __call__(self, phase: str, **f) -> None:
+        self._emit({"phase": phase, **{k: v for k, v in f.items() if v is not None}})
+
+    def done(self, result: dict) -> None:
+        self._emit({"phase": "done", "path": str(result["path"]), "name": result["path"].name,
+                    "size": result["size"], "sha256": result["sha256"],
+                    "dump_size": result["dump_size"]})
+
+    def failed(self, message: str) -> None:
+        self._emit({"phase": "error", "message": message})
+
+    def cancelled(self) -> None:
+        self._emit({"phase": "cancelled"})
+
+
+def watch_stdin_for_cancel(token: CancelToken, stream=None) -> threading.Thread:
+    """`--cancel-on-stdin`: a line saying `cancel` — or the end of the stream,
+    which is the parent going away — cancels the job. Off by default: the
+    weekly task's stdin is /dev/null and must not count as a cancel."""
+    def watch() -> None:
+        for line in (stream or sys.stdin):
+            if line.strip().lower() == "cancel":
+                break
+        token.request()
+    t = threading.Thread(target=watch, daemon=True, name="backup-stdin")
+    t.start()
+    return t
 
 
 def _cmd_create(args) -> int:
-    ident = node()
-    if ident is None:
-        sys.exit("this node has no account — nothing to key the backup on")
-    password = _password(args, prompt=f"Account password for {ident['username']}: ")
-    from p2p_identity import derive_identity
-    if derive_identity(ident["username"], password)["public_key_hex"].lower() != ident["pubkey"]:
-        sys.exit("wrong password")
-    out_dir = Path(args.out) if args.out else backup_dir()
-    version = app_version()
-    result = nb.create_backup(out_dir, target=pg_target(), kek=nb.derive_kek(password, ident["username"]),
-                              username=ident["username"], pubkey=ident["pubkey"],
-                              identity_dir=identity_dir(), app_commit=version["commit"],
-                              app_build=version["build"], progress=_print_progress)
-    print(f"\n{result['path']}  {result['size']:,} bytes  sha256 {result['sha256']}")
+    password = _password(args, prompt="Account password: ")
+    printer = JsonProgress() if args.progress_json else HumanProgress()
+    token = CancelToken()
+    if args.cancel_on_stdin:
+        watch_stdin_for_cancel(token)
+    try:
+        result = create(password, out_dir=Path(args.out) if args.out else None,
+                        progress=printer, cancel=token)
+    except nb.Cancelled:
+        printer.cancelled()
+        return 1
+    except nb.BackupError as e:
+        printer.failed(str(e))
+        return 1
+    printer.done(result)
     return 0
 
 
 def _cmd_inspect(args) -> int:
-    import json
     password = None if args.no_password else _password(args, prompt="Backup password (Enter to skip): ")
     info = nb.inspect_file(Path(args.file), password or None)
     print(json.dumps(info, indent=2, default=str))
@@ -387,6 +419,7 @@ def _cmd_restore(args) -> int:
     path = Path(args.file)
     target = pg_target(args.db)
     password = _password(args, prompt="Backup password: ")
+    printer = HumanProgress()
     with open(path, "rb") as fp:
         reader = nb.BackupReader(fp)
         reader.unlock(password)
@@ -406,7 +439,7 @@ def _cmd_restore(args) -> int:
                 return 1
         identity: Dict[str, bytes] = {}
         result = nb.restore_database(reader, target, manifest=manifest, replace=args.replace,
-                                     progress=_print_progress, file_size=path.stat().st_size,
+                                     progress=printer, file_size=path.stat().st_size,
                                      identity_sink=identity.__setitem__)
     print(f"\nrestored {result['database']}; {result['migrations_applied']} newer migration(s) applied"
           + (f"; previous database kept as {result['previous']}" if result["previous"] else ""))
@@ -432,6 +465,12 @@ def _cmd_selftest(args) -> int:
 
 def main(argv: Optional[List[str]] = None) -> int:
     logging.basicConfig(level=logging.INFO, format="%(levelname)s %(name)s: %(message)s")
+    # A Windows console on a legacy code page cannot encode the arrows and
+    # ellipses in the help and progress text; a hand-run CLI must not die on
+    # its own output (the launcher's child runs with PYTHONUTF8=1 anyway).
+    for stream in (sys.stdout, sys.stderr):
+        if hasattr(stream, "reconfigure"):
+            stream.reconfigure(errors="replace")
     ap = argparse.ArgumentParser(prog="backup", description=__doc__.split("\n\n")[0])
     sub = ap.add_subparsers(dest="cmd", required=True)
     pw = argparse.ArgumentParser(add_help=False)
@@ -440,6 +479,10 @@ def main(argv: Optional[List[str]] = None) -> int:
                          "(default: SAUTIUM_BACKUP_PASSWORD when set, else prompt)")
     c = sub.add_parser("create", parents=[pw], help="write a backup of this node")
     c.add_argument("--out", help="directory (default: the node's backup dir)")
+    c.add_argument("--progress-json", action="store_true",
+                   help="one JSON object per line on stdout instead of the terminal counter")
+    c.add_argument("--cancel-on-stdin", action="store_true",
+                   help="a `cancel` line (or EOF) on stdin cancels the job")
     i = sub.add_parser("inspect", parents=[pw], help="show what a backup holds")
     i.add_argument("file")
     i.add_argument("--no-password", action="store_true", help="header only")

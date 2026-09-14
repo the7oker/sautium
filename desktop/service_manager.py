@@ -171,6 +171,10 @@ class ServiceManager:
         # Ensure embedded Python 3.12 is available
         if not self._ensure_backend_python(progress_cb):
             return False
+        # Installs provisioned before the .pth existed get it here, every
+        # start — cheap, and the backend's `desktop.*` imports depend on it.
+        from desktop.python_env import ensure_project_pth
+        ensure_project_pth()
 
         python = self._get_backend_python()
         logger.info(f"Backend Python for deps: {python}")
@@ -363,7 +367,7 @@ class ServiceManager:
         # the launcher's random P2P port, and p2p_identity_dir pointing at a
         # Windows path. Two runtimes cannot share one config file.
         #
-        # The launcher's backend does not need the file found — _load_env_file
+        # The launcher's backend does not need the file found — backend_env
         # below puts every key into the child's real environment, which
         # pydantic prefers over any file anyway.
         from desktop.config_manager import (generate_env_file, generate_mcp_config,
@@ -379,18 +383,6 @@ class ServiceManager:
         generate_env_file(self.config, env_path)
         generate_mcp_config(self.config, self._backend_dir / "mcp-windows.json")
 
-        env = os.environ.copy()
-        # backend_dir for the backend's own flat imports; project root so
-        # `import desktop.*` works like it does under Docker (/app holds
-        # both) — mb_discovery pulls desktop.mb_slice_client for the
-        # click-to-mint slice fetch on dump-less nodes.
-        env["PYTHONPATH"] = os.pathsep.join(
-            [str(self._backend_dir), str(self._project_root)])
-        # backend.log is opened as UTF-8 by us but written by the child
-        # through its console encoding — on Windows that is a legacy code
-        # page, and every em dash in a log line reached the support bundle
-        # as U+FFFD. UTF-8 mode makes the child's stdout match the file.
-        env["PYTHONUTF8"] = "1"
         # Ensure the media binaries (ffmpeg/fpcalc/flac/deno) resolve for the
         # backend even when the launcher was started as a GUI .app (minimal
         # PATH without Homebrew/bundled bins). The audio pipeline shells out
@@ -411,16 +403,7 @@ class ServiceManager:
                 "fingerprinting will be degraded until installed",
                 ", ".join(missing),
             )
-        tool_dirs = media_tool_dirs()
-        if tool_dirs:
-            env["PATH"] = os.pathsep.join(tool_dirs + [env.get("PATH", "")])
-        # Load .env vars into environment
-        self._load_env_file(env_path, env)
-        # CUDA caching-allocator: expandable segments curb the VRAM
-        # fragmentation that otherwise balloons reserved memory over a
-        # long-lived backend (measured −71% frag gap). setdefault so an
-        # explicit .env / shell override still wins.
-        env.setdefault("PYTORCH_CUDA_ALLOC_CONF", "expandable_segments:True")
+        env = self.backend_env(media_tool_dirs())
 
         # Generate (or reuse) self-signed TLS cert. Browsers gate
         # crypto.subtle behind a secure context, so HMAC request signing
@@ -906,16 +889,30 @@ class ServiceManager:
                 except psutil.NoSuchProcess:
                     pass
 
-    @staticmethod
-    def _load_env_file(env_path: Path, env: dict) -> None:
-        """Load a .env file into an environment dict."""
-        if not env_path.exists():
-            return
-        with open(env_path, "r", encoding="utf-8") as f:
-            for line in f:
-                line = line.strip()
-                if not line or line.startswith("#"):
-                    continue
-                if "=" in line:
-                    key, _, value = line.partition("=")
-                    env[key.strip()] = value.strip()
+    def backend_env(self, tool_dirs: Optional[list] = None) -> dict:
+        """Environment for a process on the backend interpreter — the backend
+        itself and the one-off commands the launcher runs beside it
+        (`python -m backup`, desktop/backup_task.py): the generated
+        backend.env (DSN, identity dir, BACKUP_DIR, PG_BIN, …) over the
+        launcher's own environment, PYTHONPATH for the backend's flat
+        imports plus `desktop.*` (mb_discovery pulls desktop.mb_slice_client;
+        db_migrate pulls desktop.db_init — like /app under Docker; the
+        embedded Windows interpreter ignores PYTHONPATH and takes the same
+        two paths from python_env.ensure_project_pth's .pth instead), UTF-8
+        stdout (backend.log is read as UTF-8; a Windows console code page
+        turned every em dash into U+FFFD in support bundles), and the media
+        tool dirs on PATH."""
+        from desktop.config_manager import get_data_dir, load_env_file
+        env = os.environ.copy()
+        env["PYTHONPATH"] = os.pathsep.join(
+            [str(self._backend_dir), str(self._project_root)])
+        env["PYTHONUTF8"] = "1"
+        if tool_dirs:
+            env["PATH"] = os.pathsep.join(list(tool_dirs) + [env.get("PATH", "")])
+        env.update(load_env_file(get_data_dir() / "backend.env"))
+        # CUDA caching-allocator: expandable segments curb the VRAM
+        # fragmentation that otherwise balloons reserved memory over a
+        # long-lived backend (measured −71% frag gap). setdefault so an
+        # explicit .env / shell override still wins.
+        env.setdefault("PYTORCH_CUDA_ALLOC_CONF", "expandable_segments:True")
+        return env

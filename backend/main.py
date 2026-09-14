@@ -75,6 +75,7 @@ _identity_task: asyncio.Task | None = None
 _identity_stop: threading.Event | None = None
 _mailbox_task: asyncio.Task | None = None
 _load_meter = None
+_playback_signal = None
 _sync_walk = None                          # the pull side (desktop/p2p/sync_walk.py)
 _sync_walk_tasks: list[asyncio.Task] = []
 
@@ -382,7 +383,7 @@ async def lifespan(app: FastAPI):
     # playback as a priority signal — headroom/dormancy for everything
     # discretionary (miner hold, DHT pacing, later the gate). Published to
     # user_settings['p2p.load'] on band changes for the Web UI.
-    global _load_meter
+    global _load_meter, _playback_signal
     try:
         from desktop.p2p import load_meter as _lm
         import hardware_profile as _hp
@@ -402,6 +403,13 @@ async def lifespan(app: FastAPI):
             except Exception as e:
                 logger.debug(f"load publish failed: {e}")
         _load_meter.subscribe(_publish_load)
+        # Playback also becomes a session advisory lock in PostgreSQL — the
+        # signal a backup running in another process (python -m backup)
+        # waits on; a dead backend releases it (backup.PlaybackSignal).
+        from backup import PlaybackSignal
+        _playback_signal = PlaybackSignal(settings.database_url)
+        _load_meter.subscribe_samples(
+            lambda _s: _playback_signal.reconcile(_load_meter.playback_active))
         _load_meter.start()
         # The gate price unit w (one 64 MiB task) — measured on this machine
         # once, off the hot path, before the peer surface prices anything.
@@ -702,6 +710,8 @@ async def lifespan(app: FastAPI):
     # Shutdown
     if _load_meter is not None:
         _load_meter.stop()
+    if _playback_signal is not None:
+        _playback_signal.close()
     if _identity_stop:
         _identity_stop.set()
     if _identity_task:

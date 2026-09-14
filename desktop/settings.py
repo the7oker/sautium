@@ -22,7 +22,10 @@ class SettingsDialog(ctk.CTkToplevel):
 
     def __init__(self, parent, config: dict, on_save: Optional[Callable] = None,
                  api_client: Optional[BackendAPIClient] = None,
-                 on_restore: Optional[Callable] = None):
+                 on_restore: Optional[Callable] = None,
+                 on_backup: Optional[Callable] = None,
+                 on_backup_cancel: Optional[Callable] = None,
+                 backup_state: Optional[Callable] = None):
         super().__init__(parent)
 
         self.title("Settings")
@@ -36,8 +39,14 @@ class SettingsDialog(ctk.CTkToplevel):
         self.api_client = api_client
         # LauncherApp._restore_from_backup: stops the services, replaces the
         # database and identity, starts them again. The dialog only collects
-        # the file and the password and hands over.
+        # the file and the password and hands over. Same for the backup:
+        # _create_backup runs the CLI (desktop/backup_task.py) and shows its
+        # progress in the launcher window; backup_state() says whether one
+        # is running so this dialog can offer Cancel instead of Create.
         self.on_restore = on_restore
+        self.on_backup = on_backup
+        self.on_backup_cancel = on_backup_cancel
+        self.backup_state = backup_state
 
         # Single-tab tabview kept so the UI's vertical rhythm matches
         # the wizard. If more launcher-only sections appear later
@@ -132,25 +141,75 @@ class SettingsDialog(ctk.CTkToplevel):
             fg_color="transparent", border_width=1,
         ).pack(side="left")
 
-        # Maintenance — restore is a launcher operation because it replaces
-        # the database the backend serves (docs/design/BACKUP.md). Backups
-        # themselves are made in the Web UI, where the account password is
-        # typed on the device that holds the session.
+        # Maintenance — backup and restore are launcher operations
+        # (docs/design/BACKUP.md): the file lands on this machine, the
+        # password that keys it is typed here, and a restore replaces the
+        # database the backend serves. "Create backup…" runs the same CLI a
+        # Docker node's weekly task runs (desktop/backup_task.py).
         ctk.CTkLabel(tab, text="Maintenance", font=ctk.CTkFont(weight="bold")).pack(
             anchor="w", pady=(12, 3)
         )
+        self._backup_status = ctk.CTkLabel(
+            tab, text=self._backup_status_text(),
+            text_color="gray", font=ctk.CTkFont(size=11), anchor="w",
+            justify="left", wraplength=480,
+        )
+        self._backup_status.pack(anchor="w", padx=10)
+
+        running = bool((self.backup_state() or {}).get("running")) if self.backup_state else False
+        maint_btns = ctk.CTkFrame(tab, fg_color="transparent")
+        maint_btns.pack(fill="x", padx=10, pady=4)
+        ctk.CTkButton(
+            maint_btns, width=170,
+            text="Cancel backup" if running else "Create backup…",
+            command=self._cancel_backup if running else self._create_backup,
+            fg_color="transparent", border_width=1,
+        ).pack(side="left", padx=(0, 6))
+        ctk.CTkButton(
+            maint_btns, text="Restore from backup…", width=170,
+            command=self._restore_from_backup,
+            fg_color="transparent", border_width=1,
+            state="disabled" if running else "normal",
+        ).pack(side="left")
         ctk.CTkLabel(
             tab, text_color="gray", font=ctk.CTkFont(size=11), anchor="w",
             justify="left", wraplength=480,
-            text=("Backups are made in the Web UI (Settings › Library › Backup). "
-                  "Restoring replaces this node's database and identity with the "
-                  "file's; the current database is kept as sautium__previous."),
+            text=("A backup is the database (without the MusicBrainz catalogue) and "
+                  "this node's identity in one file, encrypted with the account "
+                  "password, written to the launcher's data folder — keep a copy "
+                  "elsewhere. Restoring replaces this node's database and identity "
+                  "with the file's; the current database is kept as sautium__previous."),
         ).pack(anchor="w", padx=10)
-        ctk.CTkButton(
-            tab, text="Restore from backup…", width=200,
-            command=self._restore_from_backup,
-            fg_color="transparent", border_width=1,
-        ).pack(anchor="w", padx=10, pady=4)
+
+    def _backup_status_text(self) -> str:
+        from desktop.backup_task import backup_dir, fmt_bytes, latest_backup
+        state = self.backup_state() if self.backup_state else None
+        if state and state.get("running"):
+            return "Backup running — progress in the launcher window."
+        last = latest_backup()
+        if last is None:
+            return f"No backups yet. Folder: {backup_dir()}"
+        when = (last.get("created_at") or "")[:10]
+        return f"Last backup: {when} · {fmt_bytes(last['size'])} · {last['name']}"
+
+    def _create_backup(self):
+        if not self.on_backup:
+            return
+
+        def ready(password: str):
+            self.destroy()
+            self.on_backup(password)
+
+        PasswordDialog(
+            self, title="Create backup",
+            text=("The account password encrypts the file and opens it again on "
+                  "restore. The backup pauses while music plays."),
+            on_ok=ready)
+
+    def _cancel_backup(self):
+        if self.on_backup_cancel:
+            self.on_backup_cancel()
+        self.destroy()
 
     def _restore_from_backup(self):
         from desktop.restore import RestoreDialog
@@ -234,3 +293,41 @@ class SettingsDialog(ctk.CTkToplevel):
             self.on_save(self.config)
 
         self.destroy()
+
+
+class PasswordDialog(ctk.CTkToplevel):
+    """A masked entry and two buttons; `on_ok(password)` on Enter or OK."""
+
+    def __init__(self, parent, *, title: str, text: str, on_ok: Callable[[str], None]):
+        super().__init__(parent)
+        self.title(title)
+        self.geometry("460x230")
+        self.resizable(False, False)
+        self.transient(parent)
+        self.grab_set()
+        self._on_ok = on_ok
+
+        ctk.CTkLabel(self, text=title, font=ctk.CTkFont(size=18, weight="bold")).pack(pady=(16, 4))
+        ctk.CTkLabel(self, text=text, text_color="gray", justify="left",
+                     wraplength=410).pack(padx=24, anchor="w")
+        ctk.CTkLabel(self, text="Account password", anchor="w").pack(padx=24, anchor="w", pady=(10, 0))
+        self._entry = ctk.CTkEntry(self, show="*", width=410)
+        self._entry.pack(padx=24, pady=(2, 4))
+        self._entry.bind("<Return>", lambda _e: self._submit())
+        self._error = ctk.CTkLabel(self, text="", text_color="#ef4444")
+        self._error.pack(padx=24, anchor="w")
+
+        btns = ctk.CTkFrame(self, fg_color="transparent")
+        btns.pack(fill="x", padx=24, pady=(4, 14), side="bottom")
+        ctk.CTkButton(btns, text="Start", width=120, command=self._submit).pack(side="right")
+        ctk.CTkButton(btns, text="Cancel", width=100, command=self.destroy,
+                      fg_color="transparent", border_width=1).pack(side="right", padx=(0, 8))
+        self.after(100, self._entry.focus_set)
+
+    def _submit(self):
+        password = self._entry.get()
+        if not password:
+            self._error.configure(text="Type the account password")
+            return
+        self.destroy()
+        self._on_ok(password)

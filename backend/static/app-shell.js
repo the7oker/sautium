@@ -12689,159 +12689,6 @@
     _phantomStreamCtrl = libraryWake.on(refresh);
   }
 
-  /* ============ Library screen — Backup block ============ */
-  // Node backup (backend/backup.py, docs/design/BACKUP.md): one encrypted
-  // file of the database and the identity, keyed by the account password.
-  // Same in-place contract as the phantom block: the delegated listener
-  // survives an innerHTML swap, progress rides the library wake channel.
-  const BACKUP_UNAVAILABLE = {
-    anonymous:  'This identity has no password yet — set one in Profile; the backup is encrypted with it.',
-    no_account: 'This node has no account yet.',
-    no_pg_dump: 'pg_dump was not found on this node (PG_BIN).',
-  };
-
-  function _backupBlockHTML(b) {
-    b = b || {};
-    const job = b.job || {};
-    const running = !!job.running;
-    const cancelling = running && !!job.cancel_requested;
-    const progress = String(job.progress || '');
-    const pct = typeof job.pct === 'number' ? job.pct : null;
-    const err = (!running && job.error) ? job.error : '';
-    const files = Array.isArray(b.files) ? b.files : [];
-    const last = files.find(f => f.same_node) || files[0] || null;
-    const unavailable = b.available === false;
-    const dirFull = fmtPathForDisplay(b.dir || '');
-    const actions = running ? `
-      <div class="btn-row single">
-        <button class="btn btn-danger" data-action="backup-cancel" ${cancelling ? 'disabled' : ''}>${cancelling ? 'Cancelling…' : 'Cancel backup'}</button>
-      </div>
-      <div class="action-progress" data-progress-for="backup">${escapeProfileHtml(progress || 'Starting…')}</div>
-      <div class="enrich-bar${pct == null ? ' indeterminate' : ''}" data-backup-bar><div class="fill"${pct == null ? '' : ` style="width:${pct}%;"`}></div></div>
-    ` : `
-      ${err ? `<div class="action-progress failed">${escapeProfileHtml('Failed: ' + err)}</div>` : ''}
-      ${unavailable ? '' : b.can_reveal ? `
-      <div class="btn-row">
-        <button class="btn btn-primary" data-action="backup-start">Back up now</button>
-        <button class="btn btn-secondary" data-action="backup-reveal">Show folder</button>
-      </div>` : `
-      <div class="btn-row single"><button class="btn btn-secondary" data-action="backup-start">Back up now</button></div>`}`;
-    return `
-      <div class="profile-group-label">Backup</div>
-      <div class="form-group">
-        <div class="form-row stacked">
-          <div class="row-stack">
-            <span class="row-stack-label">Last backup</span>
-            <span class="row-stack-value">${last ? escapeProfileHtml(fmtRelative(last.created_at)) + ' · ' + escapeProfileHtml(fmtBytes(last.size)) : 'None yet'}</span>
-          </div>
-          ${last ? `<div class="row-stack-sub" style="font-family:var(--font-mono);letter-spacing:0.02em;word-break:break-all;">${escapeProfileHtml(last.name)}</div>` : ''}
-        </div>
-        <div class="form-row stacked">
-          <div class="row-stack">
-            <span class="row-stack-label">Folder</span>
-            <span class="path-value" title="${escapeProfileHtml(dirFull)}">${escapeProfileHtml(fmtPathTruncatedFromStart(dirFull))}</span>
-          </div>
-          <div class="row-stack-sub">${unavailable
-            ? escapeProfileHtml(BACKUP_UNAVAILABLE[b.reason] || 'Backups are not available on this node.')
-            : 'The database (without the MusicBrainz catalogue) and this node\'s identity, encrypted with the account password. Keep a copy on another disk; restoring is done in the launcher.'}${b.free_bytes != null ? ' ' + escapeProfileHtml(fmtBytes(b.free_bytes)) + ' free.' : ''}</div>
-        </div>
-      </div>
-      <div data-backup-actions>${actions}</div>`;
-  }
-
-  function _wireBackup(root) {
-    const block = root.querySelector('[data-backup-block]');
-    if (!block || block.dataset.wired) return;
-    block.dataset.wired = '1';
-    block.addEventListener('click', async (e) => {
-      const el = e.target.closest('[data-action]');
-      if (!el || !block.contains(el)) return;
-      const action = el.getAttribute('data-action');
-      if (action === 'backup-start') {
-        const started = await openBackupPasswordFlow();
-        if (started) {
-          const wrap = block.querySelector('[data-backup-actions]');
-          if (wrap) wrap.innerHTML = `<div class="btn-row single"><button class="btn btn-danger" data-action="backup-cancel">Cancel backup</button></div><div class="action-progress" data-progress-for="backup">Starting…</div><div class="enrich-bar indeterminate" data-backup-bar><div class="fill"></div></div>`;
-        }
-      } else if (action === 'backup-cancel') {
-        el.disabled = true;
-        el.textContent = 'Cancelling…';
-        await fetch('/api/settings/backup/cancel', { method: 'POST' });
-      } else if (action === 'backup-reveal') {
-        const r = await fetch('/api/settings/backup/reveal', { method: 'POST' });
-        if (!r.ok) {
-          const d = await r.json().catch(() => ({}));
-          await window.notifyDialog({ title: 'Backup folder', kind: 'info',
-            message: escapeProfileHtml(d.detail || 'Could not open the folder.') });
-        }
-      }
-    });
-  }
-
-  // The account password keys the file, so it is asked for right here and
-  // sent once; the backend verifies it by deriving the identity (nothing is
-  // stored) and starts the job. Resolves true once the job is running.
-  function openBackupPasswordFlow() {
-    return new Promise(resolve => {
-      const overlay = document.createElement('div');
-      overlay.className = 'add-gear-overlay';
-      overlay.innerHTML = `
-        <div class="add-gear-sheet">
-          <div class="sheet-handle"></div>
-          <div class="add-gear-head">
-            <h2 class="add-gear-title">Back up this node</h2>
-            <button class="icon-btn" data-cancel aria-label="close">${PROFILE_ICONS.close}</button>
-          </div>
-          <div class="add-gear-row">
-            <p style="margin:0;color:var(--color-text-muted);font-size:calc(13*var(--px));line-height:1.5;">
-              The file is encrypted with your account password — the same one that opens it on restore. Playback keeps priority: the backup pauses while music plays.
-            </p>
-            <label style="display:flex;flex-direction:column;gap:calc(4*var(--px));">
-              <span style="color:var(--color-text-muted);font-size:calc(12*var(--px));">Account password</span>
-              <input class="add-gear-input" id="bkPass" type="password" autocomplete="current-password">
-            </label>
-            <button class="profile-btn primary" data-confirm>Start backup</button>
-            <div id="bkMsg" style="font-size:calc(12*var(--px));color:var(--color-text-dim);min-height:calc(16*var(--px));"></div>
-          </div>
-        </div>
-      `;
-      document.body.appendChild(overlay);
-      let settled = false;
-      const close = (v) => { if (settled) return; settled = true; overlay.remove(); resolve(v); };
-      overlay.addEventListener('click', e => { if (e.target === overlay) close(false); });
-      overlay.querySelector('[data-cancel]').addEventListener('click', () => close(false));
-      const passInput = overlay.querySelector('#bkPass');
-      const msg = overlay.querySelector('#bkMsg');
-      const confirmBtn = overlay.querySelector('[data-confirm]');
-      setTimeout(() => passInput.focus(), 100);
-      const fail = (text) => { confirmBtn.disabled = false; msg.style.color = 'var(--color-negative)'; msg.textContent = text; };
-      const submit = async () => {
-        if (confirmBtn.disabled) return;   // Enter arrives here too
-        const password = passInput.value;
-        if (!password) return fail('Type the account password.');
-        confirmBtn.disabled = true;
-        msg.style.color = 'var(--color-text-muted)';
-        msg.textContent = 'Checking the password…';
-        let r;
-        try {
-          r = await fetch('/api/settings/backup', {
-            method: 'POST', headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ password }),
-          });
-        } catch (err) {
-          return fail('Could not reach the backend: ' + err);
-        }
-        if (!r.ok) {
-          const d = await r.json().catch(() => ({}));
-          return fail(d.detail || `HTTP ${r.status}`);
-        }
-        close(true);
-      };
-      confirmBtn.addEventListener('click', submit);
-      passInput.addEventListener('keydown', e => { if (e.key === 'Enter') { e.preventDefault(); submit(); } });
-    });
-  }
-
   /* ============ Library screen — #more/library ============ */
   async function renderLibrary(root) {
     let lib = null;
@@ -12984,12 +12831,10 @@
 
         ${libraryStats}
         ${emptyState}
-        <div data-backup-block>${_backupBlockHTML(lib.backup)}</div>
         ${actions}
       </section>
     `;
     _wireBack(root);
-    _wireBackup(root);
 
     const onAction = (sel, fn) => root.querySelectorAll(sel).forEach(el => el.addEventListener('click', fn));
     onAction('[data-action="scan"]',       async () => { await fetch('/api/settings/library/scan',          { method: 'POST' }); render(); });
@@ -13044,24 +12889,6 @@
       _refreshEnrichRow(root, 'features',   lib.features_done,   lib.total_tracks);
       _refreshEnrichRow(root, 'lastfm',     lib.lastfm_done,     lib.lastfm_total);
       _refreshEnrichRow(root, 'lyrics',     lib.lyrics_done,     lib.total_tracks);
-
-      // Backup job: the writer loop wakes this channel; move the line and the
-      // bar in place, and swap the block only on a start/finish edge — a job
-      // another device started shows up here too.
-      const bk = lib.backup || {};
-      const bkJob = bk.job || {};
-      const bkLine = root.querySelector('[data-progress-for="backup"]');
-      if (bkLine && bkJob.progress && bkLine.textContent !== bkJob.progress) bkLine.textContent = bkJob.progress;
-      const bkBar = root.querySelector('[data-backup-bar]');
-      if (bkBar) {
-        const pct = typeof bkJob.pct === 'number' ? bkJob.pct : null;
-        const fill = bkBar.querySelector('.fill');
-        if (pct == null) { bkBar.classList.add('indeterminate'); if (fill) fill.style.width = ''; }
-        else { bkBar.classList.remove('indeterminate'); if (fill) fill.style.width = pct + '%'; }
-      }
-      const bkBlock = root.querySelector('[data-backup-block]');
-      const bkWasRunning = !!root.querySelector('[data-action="backup-cancel"]');
-      if (bkBlock && bkWasRunning !== !!bkJob.running) bkBlock.innerHTML = _backupBlockHTML(bk);
 
       // Scan/enrich finishing → full re-render, which flips the Cancel row back.
       const scanEnrichWasRunning = !!root.querySelector('[data-cancel-scan], [data-cancel-enrich]');

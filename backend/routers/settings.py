@@ -679,7 +679,6 @@ async def _library_state() -> Dict[str, Any]:
     The Library screen is where these numbers live — Tracks / Artists /
     Albums / Genres on the Library side, Embeddings / Features /
     Last.fm / Lyrics on the Enrichment side."""
-    import backup
     from main import get_stats, _scan_state, _enrich_state
 
     try:
@@ -725,9 +724,6 @@ async def _library_state() -> Dict[str, Any]:
         "last_scan_at":       _read("library.last_scan_at"),
         "scan":               scan,
         "enrich":             enrich,
-        # Node backups (backend/backup.py): the files on disk and the one
-        # running job — it wakes this channel, so the block rides here.
-        "backup":             backup.status(),
     }
 
 
@@ -2178,53 +2174,6 @@ def phantom_prune_cancel() -> Dict[str, Any]:
                                 detail="No phantom layer removal running")
         _phantom_state["cancel_requested"] = True
     notify_library_subscribers()
-    return {"success": True}
-
-
-# ============================================================
-# Node backup — Settings > Library > Backup (backend/backup.py)
-# ============================================================
-
-class BackupStart(BaseModel):
-    # The account password: verified by re-deriving the identity, then it
-    # keys the file (docs/design/BACKUP.md). Never stored.
-    password: str = Field(default="", max_length=256)
-
-
-@router.get("/backup")
-def get_backup_state() -> Dict[str, Any]:
-    import backup
-    return backup.status()
-
-
-@router.post("/backup")
-async def start_backup(req: BackupStart) -> Dict[str, Any]:
-    import backup
-    try:
-        await backup.start_from_request(req.password)
-    except backup.JobError as e:
-        raise HTTPException(status_code=e.status, detail=str(e))
-    notify_library_subscribers()
-    return backup.status()
-
-
-@router.post("/backup/cancel")
-def cancel_backup() -> Dict[str, Any]:
-    import backup
-    try:
-        backup.cancel()
-    except backup.JobError as e:
-        raise HTTPException(status_code=e.status, detail=str(e))
-    return {"success": True}
-
-
-@router.post("/backup/reveal")
-def reveal_backup_dir() -> Dict[str, Any]:
-    import backup
-    try:
-        backup.reveal_dir()
-    except backup.JobError as e:
-        raise HTTPException(status_code=e.status, detail=str(e))
     return {"success": True}
 
 
