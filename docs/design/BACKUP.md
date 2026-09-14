@@ -322,9 +322,11 @@ for a reason found while building:
   the history they summarise (567 of 2,205 tracks carried a skip's seconds
   as listening time — the first row for a track being a skip landed in the
   INSERT branch of the upsert). The tracker now runs the same statement
-  (`backend/play_stats.PLAY_STATS_SQL`) after every listen, so the stats
-  are a function of the history on every node, and two histories merged in
-  either order give one answer.
+  (`backend/play_stats.PLAY_STATS_SQL`) after every listen, and a one-time
+  startup step (`db_migrate`, marker `play_stats_derived_v1`) re-derives
+  the rows every node already has, so the stats are a function of the
+  history everywhere, and two histories merged in either order give one
+  answer.
 - **A scratch schema inside the live database, no scratch database.**
   PostgreSQL cannot query across databases, and a plaintext dump on disk
   is what the format forbids. The dump member streams once through
