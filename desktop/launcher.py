@@ -1089,6 +1089,7 @@ class LauncherApp(ctk.CTk):
                     on_terminal(ev)
 
         run._on_event = lambda ev: self.ui_call(lambda: dispatch(ev))
+        self._jobs.pop(kind, None)                      # dict order = start order (the dialog relies on it)
         self._jobs[kind] = run
         try:
             run.start()
