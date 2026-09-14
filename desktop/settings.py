@@ -1,6 +1,6 @@
 """Settings & Tools — the launcher's dialog for what only the launcher can do.
 
-Two tabs. "General" holds the launcher-only settings (ports), saved with
+Two tabs. "General" holds the launcher-only settings (ports) and their own
 Save. "Backup & Restore" holds actions, not settings: the node backup and
 its restore (docs/design/BACKUP.md — the file lands on this machine, the
 password that keys it is typed here, and a restore replaces the database
@@ -34,7 +34,7 @@ class SettingsDialog(ctk.CTkToplevel):
         super().__init__(parent)
 
         self.title(DIALOG_TITLE)
-        self.geometry("550x560")
+        self.geometry("550x520")
         self.resizable(False, False)
         self.transient(parent)
         self.grab_set()
@@ -53,24 +53,15 @@ class SettingsDialog(ctk.CTkToplevel):
         self.on_backup_cancel = on_backup_cancel
         self.backup_state = backup_state
 
-        self.tabview = ctk.CTkTabview(self, width=510, height=460)
-        self.tabview.pack(padx=20, pady=(10, 0))
+        # No button row under the tabs: Save belongs to the settings it
+        # applies to and sits inside General; the tools act at once, and
+        # the window closes like any other.
+        self.tabview = ctk.CTkTabview(self, width=510, height=470)
+        self.tabview.pack(padx=20, pady=(10, 14))
         self.tabview.add(TAB_GENERAL)
         self.tabview.add(TAB_BACKUP)
         self._build_general_tab()
         self._build_backup_tab()
-
-        btn_frame = ctk.CTkFrame(self, fg_color="transparent")
-        btn_frame.pack(fill="x", padx=20, pady=10)
-        ctk.CTkButton(
-            btn_frame, text="Save", width=100,
-            command=self._save,
-        ).pack(side="right", padx=5)
-        ctk.CTkButton(
-            btn_frame, text="Close", width=100,
-            command=self.destroy,
-            fg_color="transparent", border_width=1,
-        ).pack(side="right", padx=5)
 
     # ================================================================
     # General — launcher-only settings
@@ -96,7 +87,9 @@ class SettingsDialog(ctk.CTkToplevel):
             row.pack(fill="x", pady=2)
             ctk.CTkLabel(row, text=label, width=100, anchor="w").pack(side="left")
             ctk.CTkEntry(row, textvariable=var, width=80).pack(side="left")
-        self._hint(tab, "Changing ports requires a restart; Save applies them.")
+        self._hint(tab, "Save restarts the backend on the new ports.")
+        ctk.CTkButton(tab, text="Save", width=100, command=self._save).pack(
+            anchor="w", padx=10, pady=(8, 0))
 
     # ================================================================
     # Backup & Restore — actions on this node
@@ -266,12 +259,9 @@ class SettingsDialog(ctk.CTkToplevel):
             text_color="#22c55e" if ok else "#ef4444",
         )
 
-    # ================================================================
-    # Save — the General tab
-    # ================================================================
-
     def _save(self):
-        """Persist port changes and notify the parent launcher."""
+        """Persist port changes and notify the parent launcher (which restarts
+        the backend); the dialog closes so the progress line is in view."""
         try:
             self.config["ports"] = {
                 "postgres": int(self._pg_port_var.get()),
