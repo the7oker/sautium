@@ -192,19 +192,25 @@ def read_export(path: Path) -> Iterator[dict]:
 
 def verify_export(path: Path, *, progress: Optional[ProgressFn] = None) -> dict:
     """Pass one: the whole file through read_export. Returns {"header",
-    "summary", "size"}; the summary is what the import will do."""
+    "summary", "size", "ids"} — the summary is what the import will do, the
+    ids ({"artists", "albums", "tracks"} the structure names) are what the
+    import checks against the local database; gathered here so a
+    gigabyte file is decompressed once to plan and once to apply."""
     progress = progress or (lambda *_a, **_k: None)
     header = summary = None
+    ids = {t: set() for t in _ENTITY_TABLES}
     for i, obj in enumerate(read_export(path)):
         if i == 0:
             header = obj
         elif "summary" in obj:
             summary = obj["summary"]
+        elif obj.get("section") in ids:
+            ids[obj["section"]].update(r["id"] for r in obj["rows"])
         if i % 50 == 0:
             progress("verifying", lines=i)
     if summary is None:
         raise ShareError("the file has no summary line")
-    return {"header": header, "summary": summary, "size": path.stat().st_size}
+    return {"header": header, "summary": summary, "size": path.stat().st_size, "ids": ids}
 
 
 # ---------------------------------------------------------------------------
@@ -425,15 +431,6 @@ _ITEM_REFS = {
 }
 
 
-def collect_entity_ids(path: Path) -> dict:
-    """{"artists", "albums", "tracks"} → the ids the file's structure names."""
-    ids = {t: set() for t in _ENTITY_TABLES}
-    for obj in read_export(path):
-        if obj.get("section") in ids:
-            ids[obj["section"]].update(r["id"] for r in obj["rows"])
-    return ids
-
-
 def existing_entities(conn, ids: dict) -> dict:
     """The subset of `ids` this database already holds, per table."""
     have = {}
@@ -460,7 +457,7 @@ def plan_import(path: Path, db_dsn: str, *, progress: Optional[ProgressFn] = Non
     import seed_import
 
     info = verify_export(path, progress=progress)
-    ids = collect_entity_ids(path)
+    ids = info.pop("ids")
     conn = psycopg2.connect(db_dsn)
     try:
         budget = carry_budget(conn)
@@ -472,7 +469,8 @@ def plan_import(path: Path, db_dsn: str, *, progress: Optional[ProgressFn] = Non
     info.update(budget=budget, over_budget=analysed > budget, phantom_layer_off=layer_off,
                 needs_confirm=analysed > budget,
                 existing={t: len(have[t]) for t in _ENTITY_TABLES},
-                named={t: len(ids[t]) for t in _ENTITY_TABLES})
+                named={t: len(ids[t]) for t in _ENTITY_TABLES},
+                have=have)
     return info
 
 
@@ -502,10 +500,10 @@ def apply_import(path: Path, db_dsn: str, *, confirmed: bool = False,
     total_tracks = int(plan["summary"].get("tracks") or 0)
     imported: dict = {}
     artist_ids: list = []
+    have = plan.pop("have")
     conn = psycopg2.connect(db_dsn)
     client = SyncClient(api_client=None, db_dsn=db_dsn)
     try:
-        have = existing_entities(conn, collect_entity_ids(path)) if existing_only else None
         done = 0
         for obj in read_export(path):
             if cancel.is_set():

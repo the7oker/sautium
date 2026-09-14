@@ -547,6 +547,7 @@ def _cmd_import(args) -> int:
     try:
         if args.dry_run:
             plan = share.plan_import(path, dsn, progress=printer)
+            plan.pop("have", None)
         else:
             plan = share.apply_import(path, dsn, confirmed=args.yes,
                                       existing_only=args.existing_only,
