@@ -445,7 +445,17 @@ The short version of the hard-learned lessons:
   through the config).
 - **Task Manager, the taskbar and Setup all need to know which process is
   Sautium.** `pythonw.exe` copied as `Sautium.exe` gives the process its name
-  (CPython finds its DLL and stdlib beside the exe, whatever it is called);
+  (CPython finds its DLL and stdlib beside the exe, whatever it is called —
+  what every Electron app is to `electron.exe`), and rcedit then rewrites
+  the copy's icon and version strings: a renamed stub still said
+  `FileDescription: Python` where Windows shows that instead of the file
+  name (Task Manager's Processes tab, the firewall dialog), and its
+  `OriginalFilename: pythonw.exe` is the mismatch "renamed binary" EDR
+  heuristics look for. Nothing here is signed either way — the
+  python-build-standalone binaries carry no Authenticode signature, and a
+  signature is over the image, not the name; a certificate would sign
+  `Setup.exe` (the one file SmartScreen judges, as the only one downloaded)
+  and this copy in the same step.
   `SetCurrentProcessExplicitAppUserModelID` plus the same `AppUserModelID` on
   the installer's shortcut make the pinned tile and the running window one
   taskbar button; a named mutex (`AppMutex`) is how Setup and Uninstall refuse
