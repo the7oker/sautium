@@ -1149,12 +1149,12 @@ class LauncherApp(ctk.CTk):
         from desktop.backup_task import CliRun
         parent = self._dialog_parent()
         dialog = ctk.CTkToplevel(parent)
-        dialog.title("Import from file")
+        dialog.title("Import enrichment")
         dialog.geometry("480x330")
         dialog.resizable(False, False)
         dialog.transient(parent)
         dialog.grab_set()
-        ctk.CTkLabel(dialog, text="Import from file",
+        ctk.CTkLabel(dialog, text="Import enrichment",
                      font=ctk.CTkFont(size=18, weight="bold")).pack(pady=(16, 4))
         ctk.CTkLabel(dialog, text=message, justify="left", wraplength=430,
                      text_color="gray").pack(padx=24, anchor="w")

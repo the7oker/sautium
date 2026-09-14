@@ -38,7 +38,7 @@ class SettingsDialog(ctk.CTkToplevel):
         super().__init__(parent)
 
         self.title(DIALOG_TITLE)
-        self.geometry("550x520")
+        self.geometry("550x620")
         self.resizable(False, False)
         self.transient(parent)
         self.grab_set()
@@ -74,7 +74,7 @@ class SettingsDialog(ctk.CTkToplevel):
         # No button row under the tabs: Save belongs to the settings it
         # applies to and sits inside General; the tools act at once, and
         # the window closes like any other.
-        self.tabview = ctk.CTkTabview(self, width=510, height=470)
+        self.tabview = ctk.CTkTabview(self, width=510, height=570)
         self.tabview.pack(padx=20, pady=(10, 14))
         self.tabview.add(TAB_GENERAL)
         self.tabview.add(TAB_BACKUP)
@@ -143,24 +143,25 @@ class SettingsDialog(ctk.CTkToplevel):
         # Sharing: every sealed record this node holds, as a file another
         # collector merges through the same verify-and-import gate a P2P
         # pull goes through — adding the albums, or enriching only theirs.
-        self._section(tab, "Sharing")
+        self._section(tab, "Share enrichment with friends")
         row = self._button_row(tab)
         self._rows["export"] = _JobRow(
-            tab, ctk.CTkButton(row, text="Export for a friend…", width=150, command=self._export_share,
+            tab, ctk.CTkButton(row, text="Export enrichment…", width=150, command=self._export_share,
                                fg_color="transparent", border_width=1),
             cancel_text="Cancel export", on_cancel=lambda: self._cancel("export"))
         self._rows["export"].button.pack(side="left", padx=(0, 6))
         self._rows["import"] = _JobRow(
-            tab, ctk.CTkButton(row, text="Import from file…", width=170, command=self._import_share,
+            tab, ctk.CTkButton(row, text="Import enrichment…", width=170, command=self._import_share,
                                fg_color="transparent", border_width=1),
             cancel_text="Cancel import", on_cancel=lambda: self._cancel("import"))
         self._rows["import"].button.pack(side="left", padx=(0, 6))
         ctk.CTkButton(row, text="Folder", width=80, command=lambda: self._open(export_dir()),
                       fg_color="transparent", border_width=1).pack(side="left")
         self._hint(tab, (
-            "Every sealed record this node holds, signed by your node key, for the "
-            "albums you own or listen to or for named artists. A friend merges it "
-            "through the sync gate — adding your albums, or enriching only theirs."))
+            "Audio analysis, bios and tags this node holds — every sealed record, signed "
+            "by your node key — for the albums you own or listen to, or for named "
+            "artists. A friend merges the file through the sync gate, adding your "
+            "albums or enriching only theirs."))
         self._rows["export"].mount(tab)
         self._rows["import"].mount(tab)
 
@@ -180,7 +181,7 @@ class SettingsDialog(ctk.CTkToplevel):
     @staticmethod
     def _section(tab, title: str, *, first: bool = False) -> None:
         ctk.CTkLabel(tab, text=title, font=ctk.CTkFont(weight="bold")).pack(
-            anchor="w", pady=((5, 2) if first else (12, 2)))
+            anchor="w", pady=((5, 2) if first else (18, 2)))
 
     @staticmethod
     def _status(tab, text: str):
@@ -192,7 +193,7 @@ class SettingsDialog(ctk.CTkToplevel):
     @staticmethod
     def _button_row(tab):
         row = ctk.CTkFrame(tab, fg_color="transparent")
-        row.pack(fill="x", padx=10, pady=(4, 2))
+        row.pack(fill="x", padx=10, pady=(6, 8))
         return row
 
     @staticmethod
@@ -421,10 +422,10 @@ class _JobRow:
             self.bar.pack_forget()
             return
         self.line.configure(text=text)
-        self.line.pack(anchor="w", padx=10, pady=(4, 0), after=self._anchor)
+        self.line.pack(anchor="w", padx=10, pady=(6, 0), after=self._anchor)
         fraction = self._fraction(ev)
         if running:
-            self.bar.pack(anchor="w", padx=10, pady=(3, 0), after=self.line)
+            self.bar.pack(anchor="w", padx=10, pady=(4, 0), after=self.line)
             if fraction is None:
                 if self.bar.cget("mode") != "indeterminate":
                     self.bar.configure(mode="indeterminate")
@@ -503,14 +504,14 @@ class ExportDialog(ctk.CTkToplevel):
 
     def __init__(self, parent, *, on_ok: Callable[[str, list], None], folder: str = ""):
         super().__init__(parent)
-        self.title("Export for a friend")
+        self.title("Export enrichment")
         self.geometry("480x390")
         self.resizable(False, False)
         self.transient(parent)
         self.grab_set()
         self._on_ok = on_ok
 
-        ctk.CTkLabel(self, text="Export for a friend",
+        ctk.CTkLabel(self, text="Export enrichment",
                      font=ctk.CTkFont(size=18, weight="bold")).pack(pady=(16, 4))
         ctk.CTkLabel(
             self, text_color="gray", justify="left", wraplength=430,

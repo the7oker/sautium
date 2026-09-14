@@ -202,7 +202,7 @@ not invent a format.
   `p2p:<sender pubkey>`. Size guard: refuse a file above the carry budget
   unless the user confirms.
 - UI: Settings › Library › "Export for sharing…" (pick scope) and
-  "Import from file…"; both report through the same SSE events.
+  "Import enrichment…"; both report through the same SSE events.
 
 Side benefits: offline transfer between two of one's own nodes, and
 distribution of curated bundles (the seed bundle becomes one instance).
@@ -212,7 +212,7 @@ distribution of curated bundles (the seed bundle becomes one instance).
 ### Phase 2 as built (2026-09-14)
 
 `backend/share.py`, the `export` / `import` subcommands of `python -m
-backup`, the "Sharing" section of the launcher's Backup & Restore tab
+backup`, the "Share enrichment with friends" section of the launcher's Backup & Restore tab
 (desktop/backup_task.CliRun.export / plan_import / apply_import — the
 launcher runs the CLI, as for backups). Departures from the sketch above:
 
