@@ -1,7 +1,7 @@
 """Run the backup CLI from the launcher — never a second implementation.
 
-The launcher owns no backup, export or import code of its own: Settings &
-Tools › Backup & Restore runs `python -m backup create|export|import`
+The launcher owns no backup, export, import or merge code of its own: Settings &
+Tools › Backup & Restore runs `python -m backup create|export|import|merge`
 (backend/backup.py) — the same CLI a Docker node's weekly task runs — on the
 backend interpreter with the backend's own environment
 (service_manager.backend_env → backend.env: the DSN, the identity dir,
@@ -87,6 +87,15 @@ def describe_event(ev: dict, job: str = "Backup") -> str:
         return f"{job} paused while music plays — resumes when playback stops"
     if phase == "identity":
         return f"{job}: adding identity documents…"
+    if phase == "unlocking":
+        return f"{job}: opening the backup…"
+    if phase == "reading":
+        b, total = int(ev.get("bytes") or 0), ev.get("total")
+        return f"{job}: {fmt_bytes(b)}" + (f" / {fmt_bytes(int(total))}" if total else "") + " read…"
+    if phase == "loading":
+        return f"{job}: {ev.get('rows', 0):,} rows of {ev.get('table')} read…"
+    if phase == "merging":
+        return f"{job}: merging {ev.get('what')}…" if ev.get("what") else f"{job}: merging…"
     if phase == "scope":
         return (f"{job}: {ev.get('albums', 0):,} albums, {ev.get('tracks', 0):,} tracks…"
                 if ev.get("albums") is not None else f"{job}: selecting…")
@@ -100,6 +109,8 @@ def describe_event(ev: dict, job: str = "Backup") -> str:
                 f"{sc.get('engaged', 0):,} owned or listened to, {sc.get('owned', 0):,} owned")
     if phase == "classifying":
         return f"{job}: updating artist classifiers…"
+    if phase in ("done", "plan") and "merged" in ev:
+        return _describe_merge(ev, job)
     if phase == "done":
         summ = ev.get("summary")
         if summ and "imported" in ev:
@@ -115,6 +126,23 @@ def describe_event(ev: dict, job: str = "Backup") -> str:
     if phase == "error":
         return f"{job} failed: {ev.get('message')}"
     return f"{job}: {phase}"
+
+
+_MERGE_LABELS = (("listens", "listens"), ("sessions", "sessions"), ("friends", "friends"),
+                 ("messages", "messages"), ("chats", "AI chats"), ("gear", "gear"),
+                 ("settings", "settings"), ("rotations", "rotation records"))
+
+
+def _describe_merge(ev: dict, job: str) -> str:
+    got = ev.get("merged") or {}
+    parts = [f"{got[k]:,} {label}" for k, label in _MERGE_LABELS if got.get(k)]
+    verb = "would add" if ev.get("phase") == "plan" else "added"
+    text = f"{job} done: {verb} " + ", ".join(parts) if parts else f"{job} done: nothing new here"
+    w = ev.get("waiting") or {}
+    if w.get("listens") or w.get("sessions"):
+        text += (f" · {w.get('listens', 0):,} listens and {w.get('sessions', 0):,} sessions wait for "
+                 f"tracks this node does not know yet")
+    return text
 
 
 class CliRun:
@@ -145,6 +173,11 @@ class CliRun:
         args = ["export"] + ([a for name in artists for a in ("--artist", name)]
                              if artists else ["--scope", scope])
         return cls(service_manager, args, on_event, job="Export")
+
+    @classmethod
+    def merge(cls, service_manager, path, password: str, on_event) -> "CliRun":
+        return cls(service_manager, ["merge", str(path), "--password-env", PASSWORD_ENV],
+                   on_event, password=password, job="Merge")
 
     @classmethod
     def plan_export(cls, service_manager, on_event) -> "CliRun":

@@ -34,11 +34,12 @@ class SettingsDialog(ctk.CTkToplevel):
                  on_export: Optional[Callable] = None,
                  on_export_plan: Optional[Callable] = None,
                  on_import: Optional[Callable] = None,
+                 on_merge: Optional[Callable] = None,
                  subscribe_job: Optional[Callable] = None):
         super().__init__(parent)
 
         self.title(DIALOG_TITLE)
-        self.geometry("550x620")
+        self.geometry("550x730")
         self.resizable(False, False)
         self.transient(parent)
         self.grab_set()
@@ -48,7 +49,7 @@ class SettingsDialog(ctk.CTkToplevel):
         self.api_client = api_client
         # LauncherApp does the work behind the Backup & Restore tab. It runs
         # the backup CLI (desktop/backup_task.py) as one job per KIND —
-        # "backup", "export", "import" can overlap, each in its own row here
+        # "backup", "merge", "export", "import" can overlap, each in its own row here
         # — and _restore_from_backup stops the services, replaces the
         # database and identity, starts them again. This dialog collects
         # the file and the password, hands over, and stays open: the button
@@ -61,12 +62,13 @@ class SettingsDialog(ctk.CTkToplevel):
         self.on_export = on_export
         self.on_export_plan = on_export_plan
         self.on_import = on_import
+        self.on_merge = on_merge
         self._rows: dict = {}
         # One voice per section: while a job runs its row speaks; otherwise
         # only the most recently started job keeps its result line — a
         # finished export must not read as the output of the import that
         # follows it (Valerii, 2026-09-14). Insertion order = start order.
-        self._groups = {"backup": ("backup",), "sharing": ("export", "import")}
+        self._groups = {"backup": ("backup",), "merge": ("merge",), "sharing": ("export", "import")}
         self._states: dict = {}
         self._unsubscribe_job = subscribe_job(self._on_job_event) if subscribe_job else None
         self.protocol("WM_DELETE_WINDOW", self.destroy)
@@ -74,7 +76,7 @@ class SettingsDialog(ctk.CTkToplevel):
         # No button row under the tabs: Save belongs to the settings it
         # applies to and sits inside General; the tools act at once, and
         # the window closes like any other.
-        self.tabview = ctk.CTkTabview(self, width=510, height=570)
+        self.tabview = ctk.CTkTabview(self, width=510, height=680)
         self.tabview.pack(padx=20, pady=(10, 14))
         self.tabview.add(TAB_GENERAL)
         self.tabview.add(TAB_BACKUP)
@@ -139,6 +141,22 @@ class SettingsDialog(ctk.CTkToplevel):
             "encrypted with the account password. Restoring replaces this node's; "
             "the current database is kept as sautium__previous."))
         self._rows["backup"].mount(tab)
+
+        # Product C: what the owner did on another machine of the same account
+        # — a keyed union out of that machine's backup (desktop/backup_task.py
+        # → `backup merge`); a second merge changes nothing.
+        self._section(tab, "Merge my data from another node")
+        row = self._button_row(tab)
+        self._rows["merge"] = _JobRow(
+            tab, ctk.CTkButton(row, text="Merge from backup…", width=150, command=self._merge_life,
+                               fg_color="transparent", border_width=1),
+            cancel_text="Cancel merge", on_cancel=lambda: self._cancel("merge"))
+        self._rows["merge"].button.pack(side="left")
+        self._hint(tab, (
+            "Listening history and sessions, friends and messages, AI chats, gear and a few "
+            "preferences from a backup of this account made on another machine — added to what "
+            "is here, nothing replaced. Enrichment travels as a share export instead."))
+        self._rows["merge"].mount(tab)
 
         # Sharing: every sealed record this node holds, as a file another
         # collector merges through the same verify-and-import gate a P2P
@@ -302,6 +320,39 @@ class SettingsDialog(ctk.CTkToplevel):
             return
         self._started("import")
         self.on_import(chosen)
+
+    def _merge_life(self):
+        from tkinter import filedialog
+
+        from desktop import node_backup as nb
+        from desktop.backup_task import backup_dir
+        if not self.on_merge:
+            return
+        chosen = filedialog.askopenfilename(
+            title="Backup of this account", parent=self, initialdir=str(backup_dir()),
+            filetypes=[("Sautium backup", "*" + nb.FILE_SUFFIX), ("All files", "*.*")])
+        if not chosen:
+            return
+        try:
+            with open(chosen, "rb") as fp:
+                header, _ = nb.read_header(fp)
+        except (nb.BackupError, OSError) as e:
+            self._states["merge"] = {"running": False,
+                                     "last_event": {"phase": "error", "message": str(e)}}
+            self._render_rows()
+            return
+
+        def ready(password: str):
+            self._started("merge")
+            self.on_merge(chosen, password)
+
+        who, when = header["node"]["username"], (header.get("created_at") or "")[:10]
+        PasswordDialog(
+            self, title="Merge from backup",
+            text=(f"Backup of {who} from {when}. Its listens, sessions, friends, messages, chats, "
+                  "gear and preferences are added to this node — nothing here is replaced, and "
+                  "merging the same file twice changes nothing. The account password opens it."),
+            on_ok=ready)
 
     def _restore_from_backup(self):
         from desktop.restore import RestoreDialog

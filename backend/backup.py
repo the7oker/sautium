@@ -1,5 +1,6 @@
 """Node backup on the backend — `python -m backup create|inspect|restore|selftest`,
-plus the share export / import (`export`, `import` — backend/share.py).
+plus the share export / import (`export`, `import` — backend/share.py) and the
+life-data merge out of one's own backup (`merge` — backend/life_merge.py).
 
 The format and the database drivers are `desktop/node_backup.py`; this module
 binds them to a node — its database, identity dir, backup dir and PostgreSQL
@@ -322,7 +323,7 @@ class HumanProgress:
     strips `counting…` / `dumping…` / `identity…` lines — keep those words)."""
 
     def __call__(self, phase: str, **f) -> None:
-        if phase in ("dumping", "restoring"):
+        if phase in ("dumping", "restoring", "reading"):
             b = f.get("bytes") or 0
             total = f.get("total")
             line = f"\r{phase}… {b / 1e6:,.0f} MB" + (f" / {total / 1e6:,.0f} MB" if total else "")
@@ -334,6 +335,10 @@ class HumanProgress:
                              f"{f.get('artists', 0):,} artists")
         elif phase == "verifying":
             sys.stdout.write(f"\rverifying… {f.get('lines', 0):,} lines".ljust(60))
+        elif phase == "loading":
+            sys.stdout.write(f"\n{f.get('table')}: {f.get('rows', 0):,} rows")
+        elif phase == "merging" and f.get("what"):
+            sys.stdout.write(f"\nmerging {f['what']}…")
         elif phase == "paused":
             sys.stdout.write("\npaused while playing…")
         else:
@@ -590,6 +595,62 @@ def _cmd_import(args) -> int:
     return 0
 
 
+MERGE_LABELS = (("listens", "listens"), ("sessions", "listening sessions"), ("friends", "friends"),
+                ("rights", "friend rights"), ("messages", "messages"), ("chats", "AI chats"),
+                ("chat_messages", "chat messages"), ("gear", "gear"), ("pair_notes", "gear pair notes"),
+                ("tokens", "invite tokens"), ("identities", "identities"), ("bans", "bans"),
+                ("settings", "settings"), ("profile", "profile fields"), ("rotations", "rotation records"))
+
+
+def _cmd_merge(args) -> int:
+    import life_merge
+    from desktop.node_identity import previous_identities
+    path = Path(args.file)
+    password = _password(args, prompt="Backup password: ")
+    printer = JsonProgress() if args.progress_json else HumanProgress()
+    token = CancelToken()
+    if args.cancel_on_stdin:
+        watch_stdin_for_cancel(token)
+    ident = node()
+    if ident is None:
+        printer.failed("this node has no account — nothing to match the backup against")
+        return 1
+    idir = identity_dir()
+    previous = [str(e.get("public_key_hex", "")) for e in previous_identities(idir)] if idir else []
+    try:
+        result = life_merge.merge_backup(
+            path, password, target=pg_target(), pubkey=ident["pubkey"], previous=previous,
+            identity_dir=idir, progress=printer, cancel=token.event, dry_run=args.dry_run)
+    except nb.Cancelled:
+        printer.cancelled()
+        return 1
+    except nb.BackupError as e:
+        printer.failed(str(e))
+        return 1
+    except psycopg2.Error as e:
+        printer.failed(_db_error(e))
+        return 1
+    manifest = result["manifest"]
+    if args.progress_json:
+        printer._emit({"phase": "plan" if args.dry_run else "done",
+                       "merged": result["merged"], "waiting": result["waiting"],
+                       "backup": {"username": manifest["node"]["username"],
+                                  "pubkey": manifest["node"]["pubkey"],
+                                  "created_at": manifest["created_at"]}})
+    else:
+        got = result["merged"]
+        parts = [f"{got[k]:,} {label}" for k, label in MERGE_LABELS if got.get(k)]
+        print(f"\nbackup of {manifest['node']['username']} from {manifest['created_at'][:10]}: "
+              + (("would add " if args.dry_run else "added ") + ", ".join(parts) if parts
+                 else "nothing new here"))
+        w = result["waiting"]
+        if w.get("listens") or w.get("sessions"):
+            print(f"waiting for tracks this node does not know yet: {w.get('listens', 0):,} listens "
+                  f"({w.get('tracks', 0):,} tracks), {w.get('sessions', 0):,} sessions — merge again "
+                  "after they arrive (sync, or a share import)")
+    return 0
+
+
 def _cmd_selftest(args) -> int:
     ident = node() or {"username": "selftest", "pubkey": "00" * 32}
     ok = nb.selftest(pg_target(), test_db=args.db, identity_dir=identity_dir(),
@@ -651,6 +712,13 @@ def main(argv: Optional[List[str]] = None) -> int:
                    help="enrich only artists, albums and tracks already here; create none")
     m.add_argument("--progress-json", action="store_true")
     m.add_argument("--cancel-on-stdin", action="store_true")
+    g = sub.add_parser("merge", parents=[pw],
+                       help="union my own life data (listens, friends, chats, gear…) from a backup "
+                            "of this account made elsewhere; nothing here is replaced")
+    g.add_argument("file")
+    g.add_argument("--dry-run", action="store_true", help="count what would be added, change nothing")
+    g.add_argument("--progress-json", action="store_true")
+    g.add_argument("--cancel-on-stdin", action="store_true")
     s = sub.add_parser("selftest", help="dump → restore into a test database → compare counts")
     s.add_argument("--db", default="music_ai_test")
     s.add_argument("--out", help="where the temporary backup file goes")
@@ -659,7 +727,8 @@ def main(argv: Optional[List[str]] = None) -> int:
     try:
         return {"create": _cmd_create, "inspect": _cmd_inspect,
                 "restore": _cmd_restore, "selftest": _cmd_selftest,
-                "export": _cmd_export, "import": _cmd_import}[args.cmd](args)
+                "export": _cmd_export, "import": _cmd_import,
+                "merge": _cmd_merge}[args.cmd](args)
     except nb.BackupError as e:
         sys.exit(f"error: {e}")
 
