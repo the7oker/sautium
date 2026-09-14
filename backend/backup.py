@@ -503,7 +503,7 @@ def _cmd_export(args) -> int:
                        "size": result["size"], "summary": summ})
     else:
         print(f"\n{result['path']}  {result['size']:,} bytes  {summ['albums']:,} albums, "
-              f"{summ['tracks']:,} tracks, {summ['analysed_tracks']:,} with first-hand analysis")
+              f"{summ['tracks']:,} tracks, {summ['analysed_tracks']:,} with audio analysis")
     return 0
 
 
@@ -519,8 +519,9 @@ def _cmd_import(args) -> int:
         if args.dry_run:
             plan = share.plan_import(path, dsn, progress=printer)
         else:
-            plan = share.apply_import(path, dsn, confirmed=args.yes, progress=printer,
-                                      cancel=token.event)
+            plan = share.apply_import(path, dsn, confirmed=args.yes,
+                                      existing_only=args.existing_only,
+                                      progress=printer, cancel=token.event)
     except share.ShareError as e:
         if token.event.is_set():
             printer.cancelled()
@@ -535,11 +536,16 @@ def _cmd_import(args) -> int:
                        "summary": summ, "budget": plan["budget"],
                        "needs_confirm": plan["needs_confirm"],
                        "phantom_layer_off": plan["phantom_layer_off"],
+                       "existing": plan["existing"], "named": plan["named"],
+                       "existing_only": plan.get("existing_only", False),
                        "imported": plan.get("imported")})
     else:
+        ex_, nm = plan["existing"], plan["named"]
         print(f"\npacked by {ex.get('username')} ({str(ex.get('pubkey'))[:16]}…) on "
               f"{str(ex.get('created_at'))[:10]}: {summ['albums']:,} albums, {summ['tracks']:,} "
               f"tracks, {summ['analysed_tracks']:,} with analysis (carry budget {plan['budget']:,})")
+        print(f"already here: {ex_['artists']:,}/{nm['artists']:,} artists, "
+              f"{ex_['albums']:,}/{nm['albums']:,} albums, {ex_['tracks']:,}/{nm['tracks']:,} tracks")
         if args.dry_run:
             print("needs confirmation" if plan["needs_confirm"] else "ready to import")
         else:
@@ -605,6 +611,8 @@ def main(argv: Optional[List[str]] = None) -> int:
     m.add_argument("file")
     m.add_argument("--dry-run", action="store_true", help="verify and describe, apply nothing")
     m.add_argument("--yes", action="store_true", help="import even above the carry budget")
+    m.add_argument("--existing-only", action="store_true",
+                   help="enrich only artists, albums and tracks already here; create none")
     m.add_argument("--progress-json", action="store_true")
     m.add_argument("--cancel-on-stdin", action="store_true")
     s = sub.add_parser("selftest", help="dump → restore into a test database → compare counts")

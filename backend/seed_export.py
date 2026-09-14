@@ -321,20 +321,20 @@ def _envelope(pull_result: dict) -> dict:
 
 
 def envelope_chunks(conn, track_ids: list[str], artist_ids: list[str], *,
-                    first_hand: bool = False, chunk: int = sq.SEGMENTS_MAX_UUIDS):
+                    chunk: int = sq.SEGMENTS_MAX_UUIDS):
     """Yield (group, category, envelope) — the VERBATIM output of the pull
     handlers in desktop/p2p/sync_queries.py, per chunk of `chunk` entities,
     so the importer replays it through the ordinary verify-and-import gate.
-    `first_hand` restricts the records to this node's own observations
-    (the share export); the seed ships everything sealed the master holds."""
+    Every sealed record the node holds, under its author's seal — what the
+    node serves on the network is what it ships in a file."""
     for i in range(0, len(artist_ids), chunk):
         part = artist_ids[i:i + chunk]
         for category, pull in ENRICHMENT_CATEGORIES:
-            yield "enrichment", category, _envelope(pull(conn, part, first_hand=first_hand))
+            yield "enrichment", category, _envelope(pull(conn, part))
     for i in range(0, len(track_ids), chunk):
         part = track_ids[i:i + chunk]
         for category, pull in ANALYSIS_CATEGORIES:
-            yield "analysis", category, _envelope(pull(conn, part, first_hand=first_hand))
+            yield "analysis", category, _envelope(pull(conn, part))
 
 
 def build_bundle(conn, picks: list[dict]) -> dict:

@@ -129,8 +129,9 @@ class CliRun:
         return cls(service_manager, ["import", str(path), "--dry-run"], on_event, job="Import")
 
     @classmethod
-    def apply_import(cls, service_manager, path, on_event) -> "CliRun":
-        return cls(service_manager, ["import", str(path), "--yes"], on_event, job="Import")
+    def apply_import(cls, service_manager, path, on_event, *, existing_only: bool = False) -> "CliRun":
+        args = ["import", str(path), "--yes"] + (["--existing-only"] if existing_only else [])
+        return cls(service_manager, args, on_event, job="Import")
 
     @property
     def running(self) -> bool:

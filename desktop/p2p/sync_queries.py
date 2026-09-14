@@ -403,14 +403,6 @@ def _pull_simple(conn, category: str, sql: str, uuids: list[str],
 # payload column changes, so "has a signature" also means "unmodified".
 _SEALED_ONLY = " AND {t}.signature IS NOT NULL AND {t}.batch_root IS NOT NULL"
 
-# The share export (backend/share.py, docs/design/BACKUP.md Product B) serves
-# FIRST-HAND records only: what this node observed itself, never a re-export
-# of what it pulled from others — sign_audio's _SIGNABLE_SRC for analysis,
-# the row's own `imported` flag for enrichment. The network pulls (default
-# first_hand=False) keep re-serving everything sealed, as they always did.
-_FIRST_HAND_ANALYSIS = " AND s.id IS NOT NULL AND NOT s.imported AND s.origin IS NOT NULL"
-_FIRST_HAND_ROW = " AND NOT {t}.imported"
-
 _SEAL_COLS = """{t}.fetched_at, {t}.author_pubkey, {t}.signature,
                 {t}.batch_root, {t}.merkle_proof"""
 
@@ -509,7 +501,7 @@ def _batches_map(conn, roots: set) -> dict:
     }
 
 
-def pull_segments(conn, uuids: list[str], first_hand: bool = False) -> dict:
+def pull_segments(conn, uuids: list[str]) -> dict:
     """Per-track CLAP segment bundles with their seals — the signed, synced
     unit (the importer derives the mean locally; see record_sig.py). Vectors
     travel as base64 of the canonical float32-LE bytes so vector_hash verifies
@@ -536,7 +528,6 @@ def pull_segments(conn, uuids: list[str], first_hand: bool = False) -> dict:
             LEFT JOIN analysis_sources s ON s.id = e.analysis_source_id
             WHERE e.track_id = ANY(%s::uuid[])
               AND es.signature IS NOT NULL AND es.batch_root IS NOT NULL
-              {_FIRST_HAND_ANALYSIS if first_hand else ''}
             ORDER BY e.track_id, es.segment_index""",
         [uuids],
     )
@@ -605,7 +596,7 @@ def pull_embeddings(conn, uuids: list[str]) -> dict:
     return {"category": "embeddings", "items": items}
 
 
-def pull_audio_features(conn, uuids: list[str], first_hand: bool = False) -> dict:
+def pull_audio_features(conn, uuids: list[str]) -> dict:
     """Feature rows travel WITH their seals (author sig + Merkle proof) and a
     `batches` map for the Worker timestamps — imported rows stay verifiable
     and re-servable with authorship intact."""
@@ -625,8 +616,7 @@ def pull_audio_features(conn, uuids: list[str], first_hand: bool = False) -> dic
             FROM audio_features a
             LEFT JOIN analysis_sources s ON s.id = a.analysis_source_id
             WHERE a.track_id = ANY(%s::uuid[])
-              AND a.signature IS NOT NULL AND a.batch_root IS NOT NULL
-              {_FIRST_HAND_ANALYSIS if first_hand else ''}""",
+              AND a.signature IS NOT NULL AND a.batch_root IS NOT NULL""",
         [uuids],
     )
     items, roots = [], set()
@@ -652,7 +642,7 @@ def pull_track_stats(conn, uuids: list[str]) -> dict:
     )
 
 
-def pull_artist_bios(conn, uuids: list[str], first_hand: bool = False) -> dict:
+def pull_artist_bios(conn, uuids: list[str]) -> dict:
     return _pull_simple(
         conn, "artist_bios",
         f"""SELECT ab.artist_id::text AS artist_uuid, a.name AS artist_name,
@@ -662,13 +652,12 @@ def pull_artist_bios(conn, uuids: list[str], first_hand: bool = False) -> dict:
             FROM artist_bios ab
             INNER JOIN artists a ON a.id = ab.artist_id
             WHERE ab.artist_id = ANY(%s::uuid[])
-            {_SEALED_ONLY.format(t='ab')}
-            {_FIRST_HAND_ROW.format(t='ab') if first_hand else ''}""",
+            {_SEALED_ONLY.format(t='ab')}""",
         uuids,
     )
 
 
-def pull_artist_tags(conn, uuids: list[str], first_hand: bool = False) -> dict:
+def pull_artist_tags(conn, uuids: list[str]) -> dict:
     return _pull_simple(
         conn, "artist_tags",
         f"""SELECT at2.artist_id::text AS artist_uuid,
@@ -678,13 +667,12 @@ def pull_artist_tags(conn, uuids: list[str], first_hand: bool = False) -> dict:
             FROM artist_tags at2
             INNER JOIN tags t ON t.id = at2.tag_id
             WHERE at2.artist_id = ANY(%s::uuid[])
-            {_SEALED_ONLY.format(t='at2')}
-            {_FIRST_HAND_ROW.format(t='at2') if first_hand else ''}""",
+            {_SEALED_ONLY.format(t='at2')}""",
         uuids,
     )
 
 
-def pull_similar_artists(conn, uuids: list[str], first_hand: bool = False) -> dict:
+def pull_similar_artists(conn, uuids: list[str]) -> dict:
     return _pull_simple(
         conn, "similar_artists",
         f"""SELECT sa.artist_id::text AS artist_uuid,
@@ -695,8 +683,7 @@ def pull_similar_artists(conn, uuids: list[str], first_hand: bool = False) -> di
             FROM similar_artists sa
             INNER JOIN artists a ON a.id = sa.similar_artist_id
             WHERE sa.artist_id = ANY(%s::uuid[])
-            {_SEALED_ONLY.format(t='sa')}
-            {_FIRST_HAND_ROW.format(t='sa') if first_hand else ''}""",
+            {_SEALED_ONLY.format(t='sa')}""",
         uuids,
     )
 
@@ -715,7 +702,7 @@ def pull_genre_descriptions(conn, uuids: list[str]) -> dict:
     )
 
 
-def pull_track_mbids(conn, track_uuids: list[str], first_hand: bool = False) -> dict:
+def pull_track_mbids(conn, track_uuids: list[str]) -> dict:
     """Sealed track↔recording bindings (carry v3)."""
     return _pull_simple(
         conn, "track_mbids",
@@ -726,8 +713,7 @@ def pull_track_mbids(conn, track_uuids: list[str], first_hand: bool = False) -> 
                    tm.signature, tm.batch_root, tm.merkle_proof
             FROM track_mbids tm
             WHERE tm.track_id = ANY(%s::uuid[])
-            {_SEALED_ONLY.format(t='tm')}
-            {_FIRST_HAND_ROW.format(t='tm') if first_hand else ''}""",
+            {_SEALED_ONLY.format(t='tm')}""",
         track_uuids,
     )
 
