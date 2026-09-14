@@ -27,13 +27,22 @@ the trailer, the second applies — a streamed import can take nothing back,
 so nothing is applied from a file that has not passed whole.
 
 Content: the structural rows the records need (like the seed: albums,
-tracklists, credits, genres, descriptions), then FIRST-HAND sealed records
-per sync category — what this node observed itself, never a re-export of
-what it pulled from others (sync_queries' first_hand filter: sign_audio's
-_SIGNABLE_SRC for analysis, the row's `imported` flag for enrichment).
-Scope: the carry gates — albums this node owns a file of, or is engaged
-with (a completed listen), or an explicit artist / album list; never the
-whole phantom layer.
+tracklists, credits, genres, descriptions), then EVERY sealed record the
+node holds per sync category — its own and what it received, each under
+its author's seal, exactly what the node serves on the network. "What I
+know" is more than "what I analysed", and the seals keep authorship
+straight whoever carries the file (Valerii, 2026-09-14). Scope: the carry
+gates — albums this node owns a file of, or is engaged with (a completed
+listen), or an explicit artist / album list; never the whole phantom layer.
+
+Import has two modes. The default adds what the file names — new artists,
+albums and tracks land as phantoms (no files) so their records have
+something to attach to, like the seed and a carry push. `existing_only`
+enriches what the node already has: no new artist, album or track row is
+created (the similar-artist stubs the gate would mint included), link rows
+and records land only where every entity they reference already exists,
+the rest of the file is dropped. The plan reports how much of the file the
+node already holds, so the choice is an informed one.
 """
 
 import gzip
@@ -331,7 +340,7 @@ def export_file(conn, out_dir: Path, *, kind: str, exporter: dict,
                 writer.section(section, rows)
             done_tracks = 0
             for group, category, env in seed_export.envelope_chunks(
-                    conn, track_ids, artist_ids, first_hand=True):
+                    conn, track_ids, artist_ids):
                 check_cancel()
                 if env["items"]:
                     writer.envelope(group, category, env)
@@ -369,41 +378,99 @@ def carry_budget(conn) -> int:
     return sq.CARRY_DEFAULT_BUDGET
 
 
+# Which local entity each structural row / record hangs off. A row lands in
+# existing_only mode when every referenced entity is already here.
+_ENTITY_TABLES = ("artists", "albums", "tracks")
+_ROW_REFS = {
+    "album_tracks": (("album_id", "albums"), ("track_id", "tracks")),
+    "track_artists": (("track_id", "tracks"), ("artist_id", "artists")),
+    "album_artists": (("album_id", "albums"), ("artist_id", "artists")),
+    "artist_mbids": (("artist_id", "artists"),),
+    "album_genres": (("album_id", "albums"),),
+    "album_descriptions": (("album_id", "albums"),),
+    "seed_picks": (("album_id", "albums"),),
+}
+_ITEM_REFS = {
+    "segments": (("track_uuid", "tracks"),),
+    "audio_features": (("track_uuid", "tracks"),),
+    "track_mbids": (("track_uuid", "tracks"),),
+    "artist_bios": (("artist_uuid", "artists"),),
+    "artist_tags": (("artist_uuid", "artists"),),
+    # both ends: the gate would otherwise mint the neighbour as a stub artist
+    "similar_artists": (("artist_uuid", "artists"), ("similar_artist_uuid", "artists")),
+}
+
+
+def collect_entity_ids(path: Path) -> dict:
+    """{"artists", "albums", "tracks"} → the ids the file's structure names."""
+    ids = {t: set() for t in _ENTITY_TABLES}
+    for obj in read_export(path):
+        if obj.get("section") in ids:
+            ids[obj["section"]].update(r["id"] for r in obj["rows"])
+    return ids
+
+
+def existing_entities(conn, ids: dict) -> dict:
+    """The subset of `ids` this database already holds, per table."""
+    have = {}
+    for table, wanted in ids.items():
+        if not wanted:
+            have[table] = set()
+            continue
+        rows = sq.db_query(conn, f"SELECT id::text AS id FROM {table} WHERE id = ANY(%s::uuid[])",
+                           [sorted(wanted)])
+        have[table] = {r["id"] for r in rows}
+    return have
+
+
+def keep_existing(refs: tuple, rows: list, have: dict) -> list:
+    """Rows whose every reference names an entity in `have`."""
+    return [r for r in rows if all(r.get(col) in have[table] for col, table in refs)]
+
+
 def plan_import(path: Path, db_dsn: str, *, progress: Optional[ProgressFn] = None) -> dict:
-    """Pass one plus what the node thinks of it: the header and summary, the
-    carry budget, and whether the file needs an explicit yes (more analysed
-    tracks than the budget, or the streaming library switched off)."""
+    """Pass one plus what the node thinks of it: the header and summary, how
+    much of the file's structure is already here, the carry budget, and
+    whether the file needs an explicit yes (more analysed tracks than the
+    budget, or the streaming library switched off)."""
     import seed_import
 
     info = verify_export(path, progress=progress)
+    ids = collect_entity_ids(path)
     conn = psycopg2.connect(db_dsn)
     try:
         budget = carry_budget(conn)
         layer_off = seed_import.phantom_layer_off(conn)
+        have = existing_entities(conn, ids)
     finally:
         conn.close()
     analysed = int(info["summary"].get("analysed_tracks") or 0)
     info.update(budget=budget, over_budget=analysed > budget, phantom_layer_off=layer_off,
-                needs_confirm=analysed > budget)
+                needs_confirm=analysed > budget,
+                existing={t: len(have[t]) for t in _ENTITY_TABLES},
+                named={t: len(ids[t]) for t in _ENTITY_TABLES})
     return info
 
 
 def apply_import(path: Path, db_dsn: str, *, confirmed: bool = False,
-                 progress: Optional[ProgressFn] = None,
+                 existing_only: bool = False, progress: Optional[ProgressFn] = None,
                  cancel: Optional[threading.Event] = None) -> dict:
     """Verify (pass one), then apply (pass two): structural sections through
     seed_import.insert_structural, envelopes through the sync client's
     verify-and-import gate, then the post-import classifiers on the artists
-    the file named. Returns the plan plus per-category imported counts."""
+    the file touched. `existing_only` creates no artist, album or track and
+    keeps only what attaches to ones already here (module doc). Returns the
+    plan plus per-category counts as the gate reports them."""
     import seed_import
     from desktop.sync_client import SyncClient
 
     progress = progress or (lambda *_a, **_k: None)
     cancel = cancel or threading.Event()
     plan = plan_import(path, db_dsn, progress=progress)
-    if plan["phantom_layer_off"]:
+    if plan["phantom_layer_off"] and not existing_only:
         raise ShareError("the streaming library (discovery.phantom_layer) is switched off "
-                         "— albums you do not own could not be added; switch it on to import")
+                         "— albums you do not own could not be added; switch it on, or "
+                         "import into what you already have (--existing-only)")
     if plan["needs_confirm"] and not confirmed:
         raise ShareError(f"{plan['summary']['analysed_tracks']:,} analysed tracks exceed this "
                          f"node's carry budget of {plan['budget']:,} — confirm to import anyway")
@@ -414,21 +481,31 @@ def apply_import(path: Path, db_dsn: str, *, confirmed: bool = False,
     conn = psycopg2.connect(db_dsn)
     client = SyncClient(api_client=None, db_dsn=db_dsn)
     try:
+        have = existing_entities(conn, collect_entity_ids(path)) if existing_only else None
         done = 0
         for obj in read_export(path):
             if cancel.is_set():
                 raise ShareError("import cancelled")
             if "section" in obj:
-                if obj["section"] == "artists":
-                    artist_ids.extend(r["id"] for r in obj["rows"])
-                seed_import.insert_structural(conn, {obj["section"]: obj["rows"]})
+                section, rows = obj["section"], obj["rows"]
+                if existing_only and section in _ENTITY_TABLES:
+                    continue
+                if existing_only and section in _ROW_REFS:
+                    rows = keep_existing(_ROW_REFS[section], rows, have)
+                if section == "artists":
+                    artist_ids.extend(r["id"] for r in rows)
+                seed_import.insert_structural(conn, {section: rows})
             elif "envelope" in obj:
-                category = obj["envelope"]
-                n = client._import_items(category, obj["data"])
+                category, data = obj["envelope"], obj["data"]
+                if existing_only:
+                    data = {**data, "items": keep_existing(_ITEM_REFS[category], data["items"], have)}
+                n = client._import_items(category, data) if data["items"] else 0
                 imported[category] = imported.get(category, 0) + n
                 if category == "segments":
                     done = min(done + sq.SEGMENTS_MAX_UUIDS, total_tracks)
                     progress("importing", tracks_done=done, tracks=total_tracks)
+        if existing_only:
+            artist_ids = sorted(have["artists"])
         if artist_ids:
             progress("classifying")
             client._update_artist_gender(artist_ids)
@@ -437,5 +514,6 @@ def apply_import(path: Path, db_dsn: str, *, confirmed: bool = False,
         client._close_conn()
         conn.close()
     plan["imported"] = imported
-    logger.info("share import applied from %s: %s", path.name, imported)
+    plan["existing_only"] = existing_only
+    logger.info("share import applied from %s (existing_only=%s): %s", path.name, existing_only, imported)
     return plan

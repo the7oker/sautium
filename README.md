@@ -44,8 +44,9 @@ analytics between collectors.
   streamed through chunked XChaCha20-Poly1305. The launcher writes and
   restores it (Settings & Tools › Backup & Restore; the setup wizard restores too); a
   Docker node uses `python -m backup create|restore`. The same place exports
-  your own sealed records for another collector (`python -m backup export`)
-  and merges theirs through the P2P sync gate (`import`). See `docs/design/BACKUP.md`.
+  the node's sealed records for another collector (`python -m backup export`)
+  and merges theirs through the P2P sync gate (`import`, adding their albums
+  or enriching only what you have). See `docs/design/BACKUP.md`.
 
 ## Architecture
 

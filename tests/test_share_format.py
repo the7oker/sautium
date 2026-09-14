@@ -117,3 +117,23 @@ def test_export_filename():
     from datetime import datetime, timezone
     when = datetime(2026, 9, 14, 12, 0, tzinfo=timezone.utc)
     assert share.export_filename("ab" * 32, when) == "sautium-export-abababababab-2026-09-14.jsonl.gz"
+
+
+def test_keep_existing_filters_rows_and_items_by_local_entities():
+    have = {"artists": {"a1"}, "albums": {"b1"}, "tracks": {"t1"}}
+    rows = [{"album_id": "b1", "track_id": "t1"}, {"album_id": "b1", "track_id": "t9"},
+            {"album_id": "b9", "track_id": "t1"}]
+    assert share.keep_existing(share._ROW_REFS["album_tracks"], rows, have) == [rows[0]]
+    assert share.keep_existing(share._ROW_REFS["album_descriptions"],
+                               [{"album_id": "b1"}, {"album_id": "b2"}], have) == [{"album_id": "b1"}]
+    items = [{"artist_uuid": "a1", "similar_artist_uuid": "a1"},
+             {"artist_uuid": "a1", "similar_artist_uuid": "a2"},     # would mint a2 — dropped
+             {"artist_uuid": "a2", "similar_artist_uuid": "a1"}]
+    assert share.keep_existing(share._ITEM_REFS["similar_artists"], items, have) == [items[0]]
+    assert share.keep_existing(share._ITEM_REFS["segments"],
+                               [{"track_uuid": "t1"}, {"track_uuid": "t2"}], have) == [{"track_uuid": "t1"}]
+    # every structural link table and every category has a reference rule
+    assert set(share._ROW_REFS) >= {"album_tracks", "track_artists", "album_artists",
+                                    "artist_mbids", "album_genres", "album_descriptions"}
+    assert set(share._ITEM_REFS) == {"segments", "audio_features", "track_mbids",
+                                     "artist_bios", "artist_tags", "similar_artists"}

@@ -1092,49 +1092,62 @@ class LauncherApp(ctk.CTk):
                 return
             summ = ev.get("summary") or {}
             ex = ev.get("exporter") or {}
+            have, named = ev.get("existing") or {}, ev.get("named") or {}
             lines = [f"Packed by {ex.get('username')} ({str(ex.get('pubkey'))[:12]}…) on "
                      f"{str(ex.get('created_at'))[:10]}.",
                      f"{summ.get('albums', 0):,} albums, {summ.get('tracks', 0):,} tracks, "
-                     f"{summ.get('analysed_tracks', 0):,} with audio analysis."]
-            if ev.get("phantom_layer_off"):
-                lines.append("The streaming library is switched off — albums you do not "
-                             "own cannot be added. Switch it on first.")
-            elif ev.get("needs_confirm"):
-                lines.append(f"That is more than this node's carry budget of "
-                             f"{ev.get('budget', 0):,} analysed tracks. Import anyway?")
-            else:
-                lines.append("Import through the sync gate? Your own records are never "
-                             "overwritten.")
-            self.ui_call(lambda: self._confirm_import(path, "\n".join(lines),
-                                                      blocked=bool(ev.get("phantom_layer_off"))))
+                     f"{summ.get('analysed_tracks', 0):,} with audio analysis. Already here: "
+                     f"{have.get('artists', 0):,} of {named.get('artists', 0):,} artists, "
+                     f"{have.get('albums', 0):,} of {named.get('albums', 0):,} albums."]
+            if ev.get("needs_confirm"):
+                lines.append(f"More than this node's carry budget of {ev.get('budget', 0):,} "
+                             "analysed tracks — import anyway?")
+            self.ui_call(lambda: self._confirm_import(
+                path, "\n".join(lines), layer_off=bool(ev.get("phantom_layer_off"))))
 
         self._run_cli(CliRun.plan_import(self.service_manager, path, lambda _ev: None),
                       on_terminal=planned)
 
-    def _confirm_import(self, path: str, message: str, *, blocked: bool):
+    def _confirm_import(self, path: str, message: str, *, layer_off: bool):
+        """The two ways in: add the file's artists and albums (phantoms, the
+        default) or enrich only what is already here. With the streaming
+        library switched off only the second is possible."""
         from desktop.backup_task import CliRun
         dialog = ctk.CTkToplevel(self)
         dialog.title("Import from file")
-        dialog.geometry("460x240")
+        dialog.geometry("480x330")
         dialog.resizable(False, False)
         dialog.transient(self)
         dialog.grab_set()
         ctk.CTkLabel(dialog, text="Import from file",
                      font=ctk.CTkFont(size=18, weight="bold")).pack(pady=(16, 4))
-        ctk.CTkLabel(dialog, text=message, justify="left", wraplength=410,
+        ctk.CTkLabel(dialog, text=message, justify="left", wraplength=430,
                      text_color="gray").pack(padx=24, anchor="w")
+        mode = ctk.StringVar(value="existing" if layer_off else "add")
+        ctk.CTkRadioButton(
+            dialog, variable=mode, value="add",
+            text="Add new artists and albums to my streaming library",
+            state="disabled" if layer_off else "normal").pack(padx=24, anchor="w", pady=(10, 0))
+        ctk.CTkRadioButton(
+            dialog, variable=mode, value="existing",
+            text="Enrich only what I already have").pack(padx=24, anchor="w", pady=(6, 0))
+        if layer_off:
+            ctk.CTkLabel(dialog, text="The streaming library is switched off, so nothing new "
+                                      "can be added.", text_color="gray",
+                         font=ctk.CTkFont(size=11), wraplength=430,
+                         justify="left").pack(padx=24, anchor="w", pady=(6, 0))
         btns = ctk.CTkFrame(dialog, fg_color="transparent")
         btns.pack(fill="x", padx=24, pady=(4, 14), side="bottom")
 
         def go():
+            existing_only = mode.get() == "existing"
             dialog.destroy()
-            self._run_cli(CliRun.apply_import(self.service_manager, path, lambda _ev: None))
+            self._run_cli(CliRun.apply_import(self.service_manager, path, lambda _ev: None,
+                                              existing_only=existing_only))
 
-        if not blocked:
-            ctk.CTkButton(btns, text="Import", width=120, command=go).pack(side="right")
-        ctk.CTkButton(btns, text="Close" if blocked else "Cancel", width=100,
-                      command=dialog.destroy, fg_color="transparent",
-                      border_width=1).pack(side="right", padx=(0, 8))
+        ctk.CTkButton(btns, text="Import", width=120, command=go).pack(side="right")
+        ctk.CTkButton(btns, text="Cancel", width=100, command=dialog.destroy,
+                      fg_color="transparent", border_width=1).pack(side="right", padx=(0, 8))
 
     def _cancel_backup(self):
         if self._backup_run is not None:

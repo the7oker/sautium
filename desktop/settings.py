@@ -155,11 +155,12 @@ class SettingsDialog(ctk.CTkToplevel):
             state="disabled" if running else "normal",
         ).pack(side="left")
         self._hint(tab, (
-            "An export holds your own sealed records — audio analysis, bios, tags "
-            "— for the albums you own or listen to, or for named artists; it is "
-            "signed by your node key, not encrypted. A friend imports it through "
-            "the same gate P2P sync uses, so nothing lands unverified and their "
-            "own records are never overwritten."))
+            "An export holds every sealed record this node has — audio analysis, "
+            "bios, tags, each under its author's seal — for the albums you own or "
+            "listen to, or for named artists; signed by your node key, not "
+            "encrypted. A friend imports it through the same gate P2P sync uses, "
+            "either adding your artists and albums to their streaming library or "
+            "enriching only what they already have."))
 
         # Identity certificate transfer. The certificate is a public fact and
         # re-fetchable from the Worker (idempotent issuance), so export/import

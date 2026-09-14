@@ -555,6 +555,10 @@ it taught:
   export through memory. Two-pass import — verify the whole file, then
   apply — since a streamed import cannot take anything back. A record
   altered inside a re-signed file dies at the seal, exactly as designed.
+  The first cut exported first-hand records only; Valerii: "what I know"
+  is more than "what I analysed" — the file carries everything sealed the
+  node holds, the seals keep authorship straight. Import offers "add new
+  artists and albums" (phantoms, the default) or "enrich only what I have".
 
 ### Notices: a toast is a signal, the row is the fact (2026-09-13)
 

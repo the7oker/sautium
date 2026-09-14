@@ -49,7 +49,7 @@ own data ≈ 11 GB live, ≈ 3 GB as a compressed dump.
 |---|---|---|---|---|
 | **MusicBrainz layer** | `mb_*` | no (re-load) | no | no |
 | **Catalog** (identity graph, owned + phantom) | `artists`, `albums`, `tracks`, `media_files`, `track_artists`, `album_artists`, `album_tracks`, `album_variants`, `artist_mbids`, `track_mbids`, `artist_name_aliases`, `artist_members`, `genres`, `tags`, `embedding_models`, `seed_picks` | yes | structural rows ride with the enrichment they carry (as the seed bundle does) | — |
-| **Enrichment** (first-hand, sealed) | `analysis_sources`, `embeddings`, `embedding_segments`, `audio_features`, `signing_batches`, `artist_bios`, `artist_tags`, `similar_artists`, `track_stats`, `track_lyrics`, `text_embeddings`, `artist_bio_embeddings`, `lyrics_embeddings`, `genre_descriptions`, `genre_desc_embeddings`, `external_metadata`, `covers` | yes | **yes — signed records only** (`_SIGNABLE_SRC`: first-hand, never re-exported P2P imports) | — |
+| **Enrichment** (sealed) | `analysis_sources`, `embeddings`, `embedding_segments`, `audio_features`, `signing_batches`, `artist_bios`, `artist_tags`, `similar_artists`, `track_stats`, `track_lyrics`, `text_embeddings`, `artist_bio_embeddings`, `lyrics_embeddings`, `genre_descriptions`, `genre_desc_embeddings`, `external_metadata`, `covers` | yes | **yes — sealed records only**, own and received alike, each under its author's seal (decided 2026-09-14; the sketch said first-hand only) | — |
 | **Local-only enrichment** | `album_descriptions`, `album_genres` (never sync by design) | yes | no | — |
 | **Life data** (personal) | `listening_history`, `listening_sessions`, `session_tracks`, `local_play_stats`, `friends`, `friend_rights`, `friend_grants`, `friend_grant_rights`, `invite_tokens`, `invite_token_rights`, `sent_invites`, `p2p_messages`, `chat_sessions`, `chat_messages`, `user_profile`, `user_gear`, `gear_pair_notes`, `pending_key_rotations`, `p2p_identities`, `p2p_node_bans`, `support_*`, `diag_*` | yes, encrypted | no | **yes, keyed dedup** (§ Phase 3) |
 | **Node settings** | `user_settings` | yes (in the dump) | no | allowlist only |
@@ -235,10 +235,20 @@ launcher runs the CLI, as for backups). Departures from the sketch above:
   sections` / `envelope_chunks` are generators now; `build_bundle` (the
   seed) collects them into its dict, `share.export_file` streams them.
   Verified byte-identical against the previous code on the master.
-- **First-hand only through the pull handlers.** `sync_queries.pull_*`
-  gained `first_hand=` (sign_audio's `_SIGNABLE_SRC` for analysis, the
-  row's `imported` flag for enrichment); the network pulls keep the
-  default and re-serve everything sealed as before.
+- **Full export, not first-hand only.** The sketch restricted the file to
+  this node's own observations; Valerii's call (2026-09-14): "what I know"
+  is more than "what I analysed" — the file carries every sealed record
+  the node holds, own and received, each under its author's seal, exactly
+  what the node serves on the network. The pull handlers are untouched.
+- **Two import modes.** Default: add what the file names — new artists,
+  albums and tracks land as phantoms so their records attach (like the
+  seed and a carry push). `--existing-only` (launcher: "Enrich only what I
+  already have"): no artist, album or track row is created, the
+  similar-artist stubs the gate would mint included; link rows and records
+  land only where every entity they reference already exists, the rest is
+  dropped (`share.keep_existing`). The plan reports how much of the file
+  is already here (`existing` / `named` per table), and with the streaming
+  library switched off only this mode is offered.
 - **Scope.** `--scope engaged` (albums owned or with a completed listen —
   the carry gate; default), `--scope owned`, `--artist NAME` (name, uuid or
   a Latin alias; repeatable), `--album UUID`. Never the phantom layer.
@@ -247,9 +257,8 @@ launcher runs the CLI, as for backups). Departures from the sketch above:
   its own rows), envelopes through `SyncClient._import_items` (seal
   verification, first-hand precedence — a receiving node's own records
   are never overwritten), then the gender / vocalist classifiers on the
-  artists the file named. Provenance is what the seals say: `imported`
-  rows under the author's pubkey. Refused when the streaming library is
-  switched off (the albums could not be added); above the carry budget
+  artists the file touched. Provenance is what the seals say: `imported`
+  rows under the author's pubkey. Above the carry budget
   (`sync.carry_limit`) only with `--yes` / the launcher's confirm.
 
 Acceptance run 2026-09-14: three artists exported from the Docker master
@@ -442,7 +451,8 @@ launcher helpers); the database half is `python -m backup selftest`.
   No router, no Web UI.
 - `backend/share.py` — Product B: the JSON-lines file (writer, reader,
   signed trailer), scope selection, `export_file`, `plan_import`,
-  `apply_import`; `python -m backup export|import` in backend/backup.py.
+  `apply_import` (default / `existing_only`); `python -m backup
+  export|import [--existing-only]` in backend/backup.py.
 - `backend/seed_export.py` / `seed_import.py` — the shared section and
   envelope generators and the structural importer; the seed bundle is one
   caller of them.
