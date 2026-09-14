@@ -25,17 +25,8 @@ def create_tray(
     import pystray
     from PIL import Image
 
-    # Create a simple icon (blue circle)
-    icon_image = _create_default_icon()
-
-    # Try loading custom icon
-    from pathlib import Path
-    icon_path = Path(__file__).parent / "assets" / "icon.ico"
-    if icon_path.exists():
-        try:
-            icon_image = Image.open(icon_path)
-        except Exception:
-            pass
+    from desktop.icon import render_icon
+    icon_image = render_icon().resize((64, 64), Image.LANCZOS)
 
     menu = pystray.Menu(
         pystray.MenuItem("Show", on_show, default=True),
@@ -58,33 +49,3 @@ def create_tray(
     tray_thread.start()
 
     return icon
-
-
-def _create_default_icon():
-    """Create a simple default icon (blue circle on transparent background)."""
-    from PIL import Image, ImageDraw
-
-    size = 64
-    img = Image.new("RGBA", (size, size), (0, 0, 0, 0))
-    draw = ImageDraw.Draw(img)
-
-    # Blue circle
-    margin = 4
-    draw.ellipse(
-        [margin, margin, size - margin, size - margin],
-        fill=(59, 130, 246, 255),
-    )
-
-    # Music note symbol (simple)
-    cx, cy = size // 2, size // 2
-    draw.ellipse(
-        [cx - 8, cy + 2, cx, cy + 10],
-        fill=(255, 255, 255, 255),
-    )
-    draw.line(
-        [(cx, cy + 6), (cx, cy - 12)],
-        fill=(255, 255, 255, 255),
-        width=2,
-    )
-
-    return img

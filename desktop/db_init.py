@@ -515,30 +515,58 @@ def ensure_media_tools(progress_cb: Optional[Callable] = None) -> dict:
     return result
 
 
-def install_node(progress_cb: Optional[Callable] = None) -> bool:
-    """Node for the AI agents — Claude Code and Codex both ship as npm
-    packages. Deliberately NOT in _MEDIA_TOOLS: it is only needed when the user
-    picks an agent, and a node install is a minute the rest of setup should not
-    spend on everyone. On Windows the installer bundles Node beside the app, so
-    there is nothing to do here."""
-    if _which_tool("node"):
-        return True
-    if IS_MACOS:
-        return _brew_install("node", "node", progress_cb)
-    return False
+# Node for the AI agents — Claude Code and Codex both ship as npm packages.
+# On Windows the official zip, unpacked beside the other tools as
+# <project_root>/node (utils.get_bundled_node_dir looks there first). Pinned
+# like PostgreSQL: the current LTS at the time of the bump.
+NODE_MIN_MAJOR = 18
+NODE_VERSION = "22.23.2"
+NODE_DOWNLOAD_URL = f"https://nodejs.org/dist/v{NODE_VERSION}/node-v{NODE_VERSION}-win-x64.zip"
 
 
 def install_node(progress_cb: Optional[Callable] = None) -> bool:
-    """Node for the AI agents — Claude Code and Codex both ship as npm
-    packages. Deliberately NOT in _MEDIA_TOOLS: it is only needed when the user
-    picks an agent, and a node install is a minute the rest of setup should not
-    spend on everyone. On Windows the installer bundles Node beside the app, so
-    there is nothing to do here."""
-    if _which_tool("node"):
+    """Deliberately NOT in _MEDIA_TOOLS: Node is only needed when the user
+    picks an agent, and a node install is a minute the rest of setup should
+    not spend on everyone. Homebrew on macOS, the official zip on Windows."""
+    from desktop.utils import detect_node_version
+    version = detect_node_version()
+    if version and version[0] >= NODE_MIN_MAJOR:
         return True
     if IS_MACOS:
         return _brew_install("node", "node", progress_cb)
+    if IS_WINDOWS:
+        return _download_win_node(progress_cb)
     return False
+
+
+def _download_win_node(progress_cb: Optional[Callable] = None) -> bool:
+    import tempfile
+    from desktop.utils import get_project_root
+    root = get_project_root()
+    target = root / "node"
+    zip_path = root / "_node_download.zip"
+    try:
+        if progress_cb:
+            progress_cb(f"Downloading Node.js {NODE_VERSION} (~35 MB)...")
+        urllib.request.urlretrieve(NODE_DOWNLOAD_URL, str(zip_path))
+        # Unpacked beside its destination so the final move is a rename.
+        with tempfile.TemporaryDirectory(dir=root) as tmp:
+            with zipfile.ZipFile(zip_path, "r") as zf:
+                zf.extractall(tmp)
+            unpacked = next(Path(tmp).glob("node-v*-win-x64"), None)
+            if unpacked is None:
+                raise RuntimeError("node-v*-win-x64 not found in the archive")
+            shutil.rmtree(target, ignore_errors=True)
+            shutil.move(str(unpacked), str(target))
+        logger.info("Node.js %s installed to %s", NODE_VERSION, target)
+        return (target / "node.exe").exists()
+    except Exception as e:
+        logger.error("Failed to download Node.js: %s", e)
+        if progress_cb:
+            progress_cb(f"Node.js download failed: {e}")
+        return False
+    finally:
+        zip_path.unlink(missing_ok=True)
 
 
 def _brew_install(binary: str, formula: str, progress_cb: Optional[Callable] = None) -> bool:
