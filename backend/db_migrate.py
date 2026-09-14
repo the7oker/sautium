@@ -15,7 +15,10 @@ rule. Two layers, one tracking table (`_schema_migrations`):
      when the recorded rule is older than the code's. Idempotent, so a fresh
      node just records the marker; a node with old-rule data is rewritten
      here, before it can mint on the new rule beside old rows. That rewrite
-     sheds every seal — the node's own sign_audio cadence re-seals.
+     sheds every seal — the node's own sign_audio cadence re-seals. The
+     play-stats step (`play_stats_derived_v1`) re-derives `local_play_stats`
+     from `listening_history` once, the day the table became a function of
+     it (backend/play_stats.py) instead of counters kept in place.
 
 The launcher's own P2P sync server is a separate process: on a launcher
 node with old-rule data a peer import racing this rewrite is a known
@@ -55,6 +58,13 @@ def _renormalize_identities() -> dict:
         return renormalize_identities(db)
 
 
+def _rederive_play_stats(conn) -> int:
+    from play_stats import refresh_play_stats
+    with conn.cursor() as cur:
+        cur.execute("SELECT DISTINCT track_id::text FROM listening_history")
+        return refresh_play_stats(cur, [r[0] for r in cur.fetchall()])
+
+
 def apply_pending() -> dict:
     """Schema deltas, then data migrations. Returns what happened."""
     out = {"adopted_baseline": False, "sql_applied": 0, "identity_renormalized": False}
@@ -71,6 +81,10 @@ def apply_pending() -> dict:
             logger.info("identity re-normalization: %s", stats)
             _mark(conn, mark)
             out["identity_renormalized"] = True
+
+        if not _marked(conn, "play_stats_derived_v1"):
+            out["play_stats_rederived"] = _rederive_play_stats(conn)
+            _mark(conn, "play_stats_derived_v1")
 
         # Cold-start seed: after the identity pass, so the bundle's rule
         # check compares against a fully renormalized database. The marker

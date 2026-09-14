@@ -583,7 +583,9 @@ it taught:
   `local_play_stats` had drifted (567 of 2,205 tracks counted a skip's
   seconds as listening time), so the table is now derived from history by
   one shared statement (`backend/play_stats.py`) in the tracker and the
-  merge alike — two histories merged in either order give one answer.
+  merge alike, and a one-time `db_migrate` step (`play_stats_derived_v1`)
+  re-derives what every node already holds — two histories merged in either
+  order give one answer.
 
 ### Notices: a toast is a signal, the row is the fact (2026-09-13)
 
