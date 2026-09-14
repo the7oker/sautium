@@ -43,7 +43,9 @@ analytics between collectors.
   keyed by the account password through Argon2id in its own salt domain and
   streamed through chunked XChaCha20-Poly1305. The launcher writes and
   restores it (Settings & Tools › Backup & Restore; the setup wizard restores too); a
-  Docker node uses `python -m backup create|restore`. See `docs/design/BACKUP.md`.
+  Docker node uses `python -m backup create|restore`. The same place exports
+  your own sealed records for another collector (`python -m backup export`)
+  and merges theirs through the P2P sync gate (`import`). See `docs/design/BACKUP.md`.
 
 ## Architecture
 

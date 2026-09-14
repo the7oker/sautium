@@ -1,4 +1,5 @@
-"""Node backup on the backend — `python -m backup create|inspect|restore|selftest`.
+"""Node backup on the backend — `python -m backup create|inspect|restore|selftest`,
+plus the share export / import (`export`, `import` — backend/share.py).
 
 The format and the database drivers are `desktop/node_backup.py`; this module
 binds them to a node — its database, identity dir, backup dir and PostgreSQL
@@ -326,8 +327,15 @@ class HumanProgress:
             total = f.get("total")
             line = f"\r{phase}… {b / 1e6:,.0f} MB" + (f" / {total / 1e6:,.0f} MB" if total else "")
             sys.stdout.write(line.ljust(60))
+        elif phase in ("writing", "importing") and f.get("tracks"):
+            sys.stdout.write(f"\r{phase}… {f.get('tracks_done', 0):,} / {f['tracks']:,} tracks".ljust(60))
+        elif phase == "scope" and f:
+            sys.stdout.write(f"\nscope: {f.get('albums', 0):,} albums, {f.get('tracks', 0):,} tracks, "
+                             f"{f.get('artists', 0):,} artists")
+        elif phase == "verifying":
+            sys.stdout.write(f"\rverifying… {f.get('lines', 0):,} lines".ljust(60))
         elif phase == "paused":
-            sys.stdout.write(f"\npaused while playing…")
+            sys.stdout.write("\npaused while playing…")
         else:
             sys.stdout.write(f"\n{phase}…")
         sys.stdout.flush()
@@ -455,6 +463,94 @@ def _cmd_restore(args) -> int:
     return 0
 
 
+def _share_exporter() -> tuple:
+    """(exporter dict, sign function) — this node's account key names the
+    file's packer; without an account there is nothing to sign with."""
+    from p2p_identity import load_signing_key
+    ident = node()
+    key = load_signing_key(settings)
+    if ident is None or key is None:
+        raise nb.Refused("this node has no account — an export must be signed by one")
+    return {"pubkey": ident["pubkey"], "username": ident["username"]}, key.sign
+
+
+def _cmd_export(args) -> int:
+    import share
+    printer = JsonProgress() if args.progress_json else HumanProgress()
+    token = CancelToken()
+    if args.cancel_on_stdin:
+        watch_stdin_for_cancel(token)
+    kind = "artists" if args.artist else "albums" if args.album else args.scope
+    try:
+        exporter, sign = _share_exporter()
+        conn = pg_target().connect()
+        try:
+            result = share.export_file(
+                conn, Path(args.out) if args.out else backup_dir(), kind=kind,
+                exporter=exporter, sign=sign, artists=args.artist, albums=args.album,
+                app=app_version(), progress=printer, cancel=token.event)
+        finally:
+            conn.close()
+    except (share.ShareError, nb.BackupError) as e:
+        if token.event.is_set():
+            printer.cancelled()
+        else:
+            printer.failed(str(e))
+        return 1
+    summ = result["summary"]
+    if args.progress_json:
+        printer._emit({"phase": "done", "path": str(result["path"]), "name": result["path"].name,
+                       "size": result["size"], "summary": summ})
+    else:
+        print(f"\n{result['path']}  {result['size']:,} bytes  {summ['albums']:,} albums, "
+              f"{summ['tracks']:,} tracks, {summ['analysed_tracks']:,} with first-hand analysis")
+    return 0
+
+
+def _cmd_import(args) -> int:
+    import share
+    printer = JsonProgress() if args.progress_json else HumanProgress()
+    token = CancelToken()
+    if args.cancel_on_stdin:
+        watch_stdin_for_cancel(token)
+    path = Path(args.file)
+    dsn = settings.database_url
+    try:
+        if args.dry_run:
+            plan = share.plan_import(path, dsn, progress=printer)
+        else:
+            plan = share.apply_import(path, dsn, confirmed=args.yes, progress=printer,
+                                      cancel=token.event)
+    except share.ShareError as e:
+        if token.event.is_set():
+            printer.cancelled()
+        else:
+            printer.failed(str(e))
+        return 1
+    ex, summ = plan["header"]["exporter"], plan["summary"]
+    if args.progress_json:
+        printer._emit({"phase": "done" if not args.dry_run else "plan",
+                       "exporter": {"username": ex.get("username"), "pubkey": ex.get("pubkey"),
+                                    "created_at": ex.get("created_at")},
+                       "summary": summ, "budget": plan["budget"],
+                       "needs_confirm": plan["needs_confirm"],
+                       "phantom_layer_off": plan["phantom_layer_off"],
+                       "imported": plan.get("imported")})
+    else:
+        print(f"\npacked by {ex.get('username')} ({str(ex.get('pubkey'))[:16]}…) on "
+              f"{str(ex.get('created_at'))[:10]}: {summ['albums']:,} albums, {summ['tracks']:,} "
+              f"tracks, {summ['analysed_tracks']:,} with analysis (carry budget {plan['budget']:,})")
+        if args.dry_run:
+            print("needs confirmation" if plan["needs_confirm"] else "ready to import")
+        else:
+            # Counts per category as the gate reports them: new rows for the
+            # analysis categories, records passed through for enrichment
+            # (its upserts keep whatever local precedence says).
+            print("through the gate: " + ", ".join(f"{k} {v:,}" for k, v in sorted(plan["imported"].items()))
+                  if plan["imported"] else "through the gate: nothing")
+    return 0
+
+
 def _cmd_selftest(args) -> int:
     ident = node() or {"username": "selftest", "pubkey": "00" * 32}
     ok = nb.selftest(pg_target(), test_db=args.db, identity_dir=identity_dir(),
@@ -495,6 +591,22 @@ def main(argv: Optional[List[str]] = None) -> int:
     r.add_argument("--identity", action="store_true",
                    help="write the identity documents too — this machine becomes the node")
     r.add_argument("--yes", action="store_true", help="no questions; terminate other sessions")
+    x = sub.add_parser("export", help="write a share export for another collector")
+    x.add_argument("--scope", choices=("engaged", "owned"), default="engaged",
+                   help="albums you own or listened to (default) / only own")
+    x.add_argument("--artist", action="append", metavar="NAME",
+                   help="export this artist's albums instead (repeatable)")
+    x.add_argument("--album", action="append", metavar="UUID",
+                   help="export this album instead (repeatable)")
+    x.add_argument("--out", help="directory (default: the node's backup dir)")
+    x.add_argument("--progress-json", action="store_true")
+    x.add_argument("--cancel-on-stdin", action="store_true")
+    m = sub.add_parser("import", help="merge another collector's export through the gate")
+    m.add_argument("file")
+    m.add_argument("--dry-run", action="store_true", help="verify and describe, apply nothing")
+    m.add_argument("--yes", action="store_true", help="import even above the carry budget")
+    m.add_argument("--progress-json", action="store_true")
+    m.add_argument("--cancel-on-stdin", action="store_true")
     s = sub.add_parser("selftest", help="dump → restore into a test database → compare counts")
     s.add_argument("--db", default="music_ai_test")
     s.add_argument("--out", help="where the temporary backup file goes")
@@ -502,7 +614,8 @@ def main(argv: Optional[List[str]] = None) -> int:
     args = ap.parse_args(argv)
     try:
         return {"create": _cmd_create, "inspect": _cmd_inspect,
-                "restore": _cmd_restore, "selftest": _cmd_selftest}[args.cmd](args)
+                "restore": _cmd_restore, "selftest": _cmd_selftest,
+                "export": _cmd_export, "import": _cmd_import}[args.cmd](args)
     except nb.BackupError as e:
         sys.exit(f"error: {e}")
 

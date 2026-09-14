@@ -77,7 +77,7 @@ class LauncherApp(ctk.CTk):
         self._streams_started = False
         self._scan_active = False     # a Library wake is only ours while a scan we started runs
         self._qr_timer = None
-        self._backup_run = None       # desktop/backup_task.BackupRun while a backup runs
+        self._backup_run = None       # desktop/backup_task.CliRun: backup / export / import in flight
 
         # Check first run
         if not self.config.get("first_run_complete"):
@@ -1041,29 +1041,100 @@ class LauncherApp(ctk.CTk):
                        on_restore=self._restore_from_backup,
                        on_backup=self._create_backup,
                        on_backup_cancel=self._cancel_backup,
-                       backup_state=self._backup_state)
+                       backup_state=self._backup_state,
+                       on_export=self._export_share,
+                       on_import=self._import_share)
 
-    def _create_backup(self, password: str):
-        """Settings & Tools › Backup & Restore › Create backup…: the CLI on the backend
-        interpreter (desktop/backup_task.py), its events on the progress
-        line. The backend keeps serving — pg_dump reads a snapshot."""
-        from desktop.backup_task import BackupRun, describe_event
+    def _run_cli(self, run, on_terminal=None) -> None:
+        """One backup-CLI child at a time (desktop/backup_task.CliRun); its
+        events land on the progress line, the terminal one also in the log
+        and with `on_terminal` (reader thread — it marshals itself)."""
+        from desktop.backup_task import describe_event
         if self._backup_run is not None and self._backup_run.running:
+            self._progress_text.configure(text=f"{self._backup_run.job} still running")
             return
 
         def on_event(ev):
-            text = describe_event(ev)
+            text = describe_event(ev, run.job)
             self.ui_call(lambda: self._progress_text.configure(text=text))
-            if ev.get("phase") in ("done", "cancelled", "error"):
+            if ev.get("phase") in ("done", "plan", "cancelled", "error"):
                 logger.info(text)
+                if on_terminal:
+                    on_terminal(ev)
 
-        self._backup_run = BackupRun(self.service_manager, password, on_event)
+        run._on_event = on_event
+        self._backup_run = run
         try:
-            self._backup_run.start()
+            run.start()
         except OSError as e:
-            logger.error(f"Backup could not start: {e}")
-            self._progress_text.configure(text=f"Backup could not start: {e}")
+            logger.error(f"{run.job} could not start: {e}")
+            self._progress_text.configure(text=f"{run.job} could not start: {e}")
             self._backup_run = None
+
+    def _create_backup(self, password: str):
+        """Settings & Tools › Backup & Restore › Create backup…: the CLI on the backend
+        interpreter, its events on the progress line. The backend keeps
+        serving — pg_dump reads a snapshot."""
+        from desktop.backup_task import CliRun
+        self._run_cli(CliRun.backup(self.service_manager, password, lambda _ev: None))
+
+    def _export_share(self, scope: str, artists: list):
+        from desktop.backup_task import CliRun
+        self._run_cli(CliRun.export(self.service_manager, scope, artists, lambda _ev: None))
+
+    def _import_share(self, path: str):
+        """Two runs of the CLI: a dry run that verifies the file and says what
+        it holds, a confirmation (with the carry budget in view), the import."""
+        from desktop.backup_task import CliRun, fmt_bytes
+
+        def planned(ev):
+            if ev.get("phase") != "plan":
+                return
+            summ = ev.get("summary") or {}
+            ex = ev.get("exporter") or {}
+            lines = [f"Packed by {ex.get('username')} ({str(ex.get('pubkey'))[:12]}…) on "
+                     f"{str(ex.get('created_at'))[:10]}.",
+                     f"{summ.get('albums', 0):,} albums, {summ.get('tracks', 0):,} tracks, "
+                     f"{summ.get('analysed_tracks', 0):,} with audio analysis."]
+            if ev.get("phantom_layer_off"):
+                lines.append("The streaming library is switched off — albums you do not "
+                             "own cannot be added. Switch it on first.")
+            elif ev.get("needs_confirm"):
+                lines.append(f"That is more than this node's carry budget of "
+                             f"{ev.get('budget', 0):,} analysed tracks. Import anyway?")
+            else:
+                lines.append("Import through the sync gate? Your own records are never "
+                             "overwritten.")
+            self.ui_call(lambda: self._confirm_import(path, "\n".join(lines),
+                                                      blocked=bool(ev.get("phantom_layer_off"))))
+
+        self._run_cli(CliRun.plan_import(self.service_manager, path, lambda _ev: None),
+                      on_terminal=planned)
+
+    def _confirm_import(self, path: str, message: str, *, blocked: bool):
+        from desktop.backup_task import CliRun
+        dialog = ctk.CTkToplevel(self)
+        dialog.title("Import from file")
+        dialog.geometry("460x240")
+        dialog.resizable(False, False)
+        dialog.transient(self)
+        dialog.grab_set()
+        ctk.CTkLabel(dialog, text="Import from file",
+                     font=ctk.CTkFont(size=18, weight="bold")).pack(pady=(16, 4))
+        ctk.CTkLabel(dialog, text=message, justify="left", wraplength=410,
+                     text_color="gray").pack(padx=24, anchor="w")
+        btns = ctk.CTkFrame(dialog, fg_color="transparent")
+        btns.pack(fill="x", padx=24, pady=(4, 14), side="bottom")
+
+        def go():
+            dialog.destroy()
+            self._run_cli(CliRun.apply_import(self.service_manager, path, lambda _ev: None))
+
+        if not blocked:
+            ctk.CTkButton(btns, text="Import", width=120, command=go).pack(side="right")
+        ctk.CTkButton(btns, text="Close" if blocked else "Cancel", width=100,
+                      command=dialog.destroy, fg_color="transparent",
+                      border_width=1).pack(side="right", padx=(0, 8))
 
     def _cancel_backup(self):
         if self._backup_run is not None:
@@ -1073,7 +1144,7 @@ class LauncherApp(ctk.CTk):
         run = self._backup_run
         if run is None:
             return None
-        return {"running": run.running, "last_event": run.last_event}
+        return {"running": run.running, "job": run.job, "last_event": run.last_event}
 
     def _restore_from_backup(self, path, password, manifest):
         """Settings & Tools › Backup & Restore: this node becomes the one in the backup.
