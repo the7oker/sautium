@@ -401,8 +401,17 @@ def _cmd_create(args) -> int:
     except nb.BackupError as e:
         printer.failed(str(e))
         return 1
+    except psycopg2.Error as e:
+        printer.failed(_db_error(e))
+        return 1
     printer.done(result)
     return 0
+
+
+def _db_error(e: psycopg2.Error) -> str:
+    """The database's own first line — a stopped node reads as 'connection
+    refused', not as a traceback in the launcher's row."""
+    return "database: " + (str(e).strip().splitlines() or ["unavailable"])[0]
 
 
 def _cmd_inspect(args) -> int:
@@ -477,6 +486,23 @@ def _share_exporter() -> tuple:
 def _cmd_export(args) -> int:
     import share
     printer = JsonProgress() if args.progress_json else HumanProgress()
+    if args.plan:
+        try:
+            conn = pg_target().connect()
+            try:
+                scopes = share.scope_counts(conn)
+            finally:
+                conn.close()
+        except psycopg2.Error as e:
+            printer.failed(_db_error(e))
+            return 1
+        if args.progress_json:
+            printer._emit({"phase": "plan", "scopes": scopes, "export_dir": settings.export_dir})
+        else:
+            print(f"albums with audio analysis here: {scopes['analysed']:,}; owned or listened "
+                  f"to: {scopes['engaged']:,}; owned: {scopes['owned']:,}; exports go to "
+                  f"{settings.export_dir}")
+        return 0
     token = CancelToken()
     if args.cancel_on_stdin:
         watch_stdin_for_cancel(token)
@@ -496,6 +522,9 @@ def _cmd_export(args) -> int:
             printer.cancelled()
         else:
             printer.failed(str(e))
+        return 1
+    except psycopg2.Error as e:
+        printer.failed(_db_error(e))
         return 1
     summ = result["summary"]
     if args.progress_json:
@@ -527,6 +556,9 @@ def _cmd_import(args) -> int:
             printer.cancelled()
         else:
             printer.failed(str(e))
+        return 1
+    except psycopg2.Error as e:
+        printer.failed(_db_error(e))
         return 1
     ex, summ = plan["header"]["exporter"], plan["summary"]
     if args.progress_json:
@@ -598,13 +630,16 @@ def main(argv: Optional[List[str]] = None) -> int:
                    help="write the identity documents too — this machine becomes the node")
     r.add_argument("--yes", action="store_true", help="no questions; terminate other sessions")
     x = sub.add_parser("export", help="write a share export for another collector")
-    x.add_argument("--scope", choices=("engaged", "owned"), default="engaged",
-                   help="albums you own or listened to (default) / only own")
+    x.add_argument("--scope", choices=("analysed", "engaged", "owned"), default="engaged",
+                   help="every album with sealed audio analysis here / albums you own or "
+                        "listened to (default) / only own")
     x.add_argument("--artist", action="append", metavar="NAME",
                    help="export this artist's albums instead (repeatable)")
     x.add_argument("--album", action="append", metavar="UUID",
                    help="export this album instead (repeatable)")
     x.add_argument("--out", help="directory (default: the node's export dir, EXPORT_DIR)")
+    x.add_argument("--plan", action="store_true",
+                   help="count the albums each broad scope covers here; export nothing")
     x.add_argument("--progress-json", action="store_true")
     x.add_argument("--cancel-on-stdin", action="store_true")
     m = sub.add_parser("import", help="merge another collector's export through the gate")

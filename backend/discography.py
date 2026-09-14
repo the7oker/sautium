@@ -69,7 +69,7 @@ _DISQUALIFYING_SECONDARY = {
 # Cover Art Archive front image by release-group MBID, written verbatim into
 # `albums.cover_url`. The CAA image API has no rate limit, so the browser
 # resolves it directly (the tile's onerror hides a 404's broken image).
-_CAA_FRONT_URL = "https://coverartarchive.org/release-group/{rg}/front-500"
+from caa import CAA_FRONT_URL as _CAA_FRONT_URL
 
 # Edition/reissue markers — same album, different packaging; stripped so
 # variants collapse. Deliberately EXCLUDES 'live', 'remix', 'acoustic',

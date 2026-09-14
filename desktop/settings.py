@@ -32,6 +32,7 @@ class SettingsDialog(ctk.CTkToplevel):
                  on_cancel: Optional[Callable] = None,
                  backup_state: Optional[Callable] = None,
                  on_export: Optional[Callable] = None,
+                 on_export_plan: Optional[Callable] = None,
                  on_import: Optional[Callable] = None,
                  subscribe_job: Optional[Callable] = None):
         super().__init__(parent)
@@ -58,6 +59,7 @@ class SettingsDialog(ctk.CTkToplevel):
         self.on_cancel = on_cancel
         self.backup_state = backup_state
         self.on_export = on_export
+        self.on_export_plan = on_export_plan
         self.on_import = on_import
         self._rows: dict = {}
         self._unsubscribe_job = subscribe_job(self._on_job_event) if subscribe_job else None
@@ -264,7 +266,11 @@ class SettingsDialog(ctk.CTkToplevel):
             self.on_export(scope, artists)
 
         from desktop.backup_task import export_dir
-        ExportDialog(self, on_ok=ready, folder=str(export_dir()))
+        dialog = ExportDialog(self, on_ok=ready, folder=str(export_dir()))
+        # The counts come from the CLI's `export --plan` (the launcher runs
+        # it): an empty scope is shown as such instead of failing afterwards.
+        if self.on_export_plan:
+            self.on_export_plan(dialog.set_counts)
 
     def _import_share(self):
         from tkinter import filedialog
@@ -469,6 +475,11 @@ class PasswordDialog(ctk.CTkToplevel):
         self._on_ok(password)
 
 
+_EXPORT_SCOPES = (("analysed", "Every album with audio analysis here"),
+                  ("engaged", "Albums I own or have listened to"),
+                  ("owned", "Only albums I own"))
+
+
 class ExportDialog(ctk.CTkToplevel):
     """What goes into a share export: the carry gates as three choices —
     what this node listens to, what it owns, or named artists. `on_ok(scope,
@@ -477,7 +488,7 @@ class ExportDialog(ctk.CTkToplevel):
     def __init__(self, parent, *, on_ok: Callable[[str, list], None], folder: str = ""):
         super().__init__(parent)
         self.title("Export for a friend")
-        self.geometry("480x360")
+        self.geometry("480x390")
         self.resizable(False, False)
         self.transient(parent)
         self.grab_set()
@@ -494,11 +505,13 @@ class ExportDialog(ctk.CTkToplevel):
         ).pack(padx=24, anchor="w")
 
         self._scope = ctk.StringVar(value="engaged")
-        for value, label in (("engaged", "Albums I own or have listened to"),
-                             ("owned", "Only albums I own"),
-                             ("artists", "These artists:")):
-            ctk.CTkRadioButton(self, text=label, variable=self._scope, value=value,
-                               command=self._sync).pack(padx=24, anchor="w", pady=(8, 0))
+        self._radios = {}
+        for value, label in _EXPORT_SCOPES + (("artists", "These artists:"),):
+            radio = ctk.CTkRadioButton(
+                self, text=label + (" (counting…)" if value != "artists" else ""),
+                variable=self._scope, value=value, command=self._sync)
+            radio.pack(padx=24, anchor="w", pady=(8, 0))
+            self._radios[value] = radio
         self._artists = ctk.CTkEntry(self, width=430, placeholder_text="Comma-separated names")
         self._artists.pack(padx=24, pady=(4, 0))
         self._artists.bind("<Return>", lambda _e: self._submit())
@@ -508,9 +521,35 @@ class ExportDialog(ctk.CTkToplevel):
 
         btns = ctk.CTkFrame(self, fg_color="transparent")
         btns.pack(fill="x", padx=24, pady=(4, 14), side="bottom")
-        ctk.CTkButton(btns, text="Export", width=120, command=self._submit).pack(side="right")
+        self._export_btn = ctk.CTkButton(btns, text="Export", width=120, command=self._submit,
+                                         state="disabled")
+        self._export_btn.pack(side="right")
         ctk.CTkButton(btns, text="Cancel", width=100, command=self.destroy,
                       fg_color="transparent", border_width=1).pack(side="right", padx=(0, 8))
+        self._sync()
+
+    def set_counts(self, ev: dict) -> None:
+        """The `export --plan` result (Tk thread): album counts on the two
+        broad scopes; an empty one cannot be picked; the default moves to the
+        first scope with anything in it. A failed plan leaves the counts
+        unknown and the choice to the user."""
+        if not self.winfo_exists():
+            return
+        scopes = (ev or {}).get("scopes") if ev.get("phase") == "plan" else None
+        if scopes is None:
+            for value, base in _EXPORT_SCOPES:
+                self._radios[value].configure(text=base)
+        else:
+            for value, base in _EXPORT_SCOPES:
+                n = int(scopes.get(value) or 0)
+                self._radios[value].configure(
+                    text=f"{base} ({n:,})" if n else f"{base} (none)",
+                    state="normal" if n else "disabled")
+            # the narrower human scope first, the whole enrichment when a
+            # streaming-only node has nothing owned or listened to
+            first = next((v for v in ("engaged", "analysed", "owned") if scopes.get(v)), "artists")
+            self._scope.set(first)
+        self._export_btn.configure(state="normal")
         self._sync()
 
     def _sync(self):
