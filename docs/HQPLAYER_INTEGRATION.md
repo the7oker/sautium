@@ -51,8 +51,7 @@ unchanged without them.
   - Helper functions for URI conversion and time formatting
 
 ### Testing
-- `backend/test_hqplayer.py` - Interactive test script
-- `backend/test_hqplayer_auto.py` - Automatic test script
+- the assistant tools (`hqplayer_get_status`, `hqplayer_get_settings`, …) against a running HQPlayer; `/health` reports the connection state
 
 ### SDK Reference
 - HQPlayer Control SDK (`hqp-control-*-src`, C++) — Signalyst's reference code,
@@ -213,31 +212,11 @@ Ensure port 4321 is accessible:
 
 ## Testing
 
-### Run Automatic Test
-```bash
-cd <repo>/backend
-python3 test_hqplayer_auto.py
-```
-
-Expected output:
-```
-✅ All tests completed successfully!
-
-📋 Summary:
-   • HQPlayer is accessible at <windows-host-ip>:4321
-   • Version: 5 / Engine: 5.34.14
-   • Control API working correctly
-```
-
-### Run Interactive Test
-```bash
-python3 test_hqplayer.py
-```
-
-Allows testing:
-- Connection and info
-- Playback controls (pause/play)
-- Adding tracks to playlist
+Check the port from WSL (`nc -zv <windows-host-ip> 4321`), then use the
+assistant tools against the running instance: `hqplayer_get_status`
+(version, engine, playback state), `hqplayer_get_settings`,
+`hqplayer_set_filter`, `hqplayer_play` / `hqplayer_pause`. The backend's
+`/health` reports the HQPlayer connection state.
 
 ## Known Limitations
 

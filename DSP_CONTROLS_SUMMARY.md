@@ -200,14 +200,9 @@ def auto_configure_for_track(hqp, track):
 
 ## Testing
 
-```bash
-# Automated test of every DSP setting
-cd <repo>/backend
-python3 test_hqplayer_settings.py
-
-# Usage examples
-python3 examples_hqplayer_dsp.py
-```
+Live checks run through the assistant tools against a running HQPlayer
+(`hqplayer_get_status`, `hqplayer_get_settings`, `hqplayer_set_filter`, …);
+the backend's `/health` reports the HQPlayer connection state.
 
 ---
 

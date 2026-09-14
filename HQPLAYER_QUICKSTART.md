@@ -10,21 +10,12 @@ The basic HQPlayer Desktop 5 integration is implemented and tested.
 - Start HQPlayer Desktop 5
 - Confirm it is up (port 4321 open)
 
-### 2. Run the automated test from WSL
+### 2. Check the connection from WSL
 ```bash
-cd <repo>/backend
-python3 test_hqplayer_auto.py
+nc -zv <windows-host-ip> 4321
 ```
-
-Expected output:
-```
-✅ All tests completed successfully!
-
-📋 Summary:
-   • HQPlayer is accessible at <windows-host-ip>:4321
-   • Version: 5 / Engine: 5.34.14
-   • Control API working correctly
-```
+The backend's `/health` then reports the HQPlayer state, and the assistant
+tool `hqplayer_get_status` returns version, engine and playback state.
 
 ### 3. Using it from code
 
@@ -89,9 +80,7 @@ HQPLAYER_HOST=host.docker.internal
 
 ```
 backend/
-  ├── hqplayer_client.py          # The client
-  ├── test_hqplayer_auto.py       # Automated test
-  └── test_hqplayer.py            # Interactive test
+  └── hqplayer_client.py          # The client
 
 docs/
   └── HQPLAYER_INTEGRATION.md     # Full documentation
