@@ -1,15 +1,16 @@
-"""Create a backup from the launcher — by running the CLI, never beside it.
+"""Run the backup CLI from the launcher — never a second implementation.
 
-The launcher owns no backup code of its own: Settings & Tools › Backup &
-Restore › "Create backup…" runs the same `python -m backup create` a Docker node's
-weekly task runs (backend/backup.py), on the backend interpreter with the
-backend's own environment (service_manager.backend_env → backend.env: the
-DSN, the identity dir, BACKUP_DIR=<data_dir>/backup, PG_BIN=pgsql/bin), and
-reads its progress as JSON lines. The account password travels in the
-child's environment (`--password-env`), never on a command line where a
-process list would show it; cancel is a line on the child's stdin
-(`--cancel-on-stdin`), and the end of that pipe — the launcher going away —
-ends the job too, so a quit mid-backup leaves no half-written file.
+The launcher owns no backup, export or import code of its own: Settings &
+Tools › Backup & Restore runs `python -m backup create|export|import`
+(backend/backup.py) — the same CLI a Docker node's weekly task runs — on the
+backend interpreter with the backend's own environment
+(service_manager.backend_env → backend.env: the DSN, the identity dir,
+BACKUP_DIR=<data_dir>/backup, PG_BIN=pgsql/bin), and reads its progress as
+JSON lines. The account password travels in the child's environment
+(`--password-env`), never on a command line where a process list would show
+it; cancel is a line on the child's stdin (`--cancel-on-stdin`), and the end
+of that pipe — the launcher going away — ends the job too, so a quit
+mid-backup leaves no half-written file.
 """
 
 import json
@@ -57,41 +58,79 @@ def fmt_bytes(n: int) -> str:
     return f"{n / 1024 ** 2:.0f} MB"
 
 
-def describe_event(ev: dict) -> str:
-    """One line of launcher UI per CLI event."""
+def describe_event(ev: dict, job: str = "Backup") -> str:
+    """One line of launcher UI per CLI event; `job` names the task."""
     phase = ev.get("phase")
     if phase == "counting":
-        return "Backup: taking a snapshot and counting rows…"
+        return f"{job}: taking a snapshot and counting rows…"
     if phase == "dumping":
-        return f"Backup: {fmt_bytes(int(ev.get('bytes') or 0))} written…"
+        return f"{job}: {fmt_bytes(int(ev.get('bytes') or 0))} written…"
     if phase == "paused":
-        return "Backup paused while music plays — resumes when playback stops"
+        return f"{job} paused while music plays — resumes when playback stops"
     if phase == "identity":
-        return "Backup: adding identity documents…"
+        return f"{job}: adding identity documents…"
+    if phase == "scope":
+        return (f"{job}: {ev.get('albums', 0):,} albums, {ev.get('tracks', 0):,} tracks…"
+                if ev.get("albums") is not None else f"{job}: selecting…")
+    if phase in ("writing", "importing"):
+        return f"{job}: {ev.get('tracks_done', 0):,} / {ev.get('tracks', 0):,} tracks…"
+    if phase == "verifying":
+        return f"{job}: verifying the file…"
+    if phase == "classifying":
+        return f"{job}: updating artist classifiers…"
     if phase == "done":
-        return f"Backup done: {ev.get('name')} ({fmt_bytes(int(ev.get('size') or 0))})"
+        summ = ev.get("summary")
+        if summ and "imported" in ev:
+            got = ev.get("imported") or {}
+            return (f"{job} done: {sum(got.values()):,} records through the gate from "
+                    f"{summ.get('albums', 0):,} albums" if got else f"{job} done: nothing to merge")
+        if summ:
+            return (f"{job} done: {ev.get('name')} ({fmt_bytes(int(ev.get('size') or 0))}, "
+                    f"{summ.get('albums', 0):,} albums, {summ.get('analysed_tracks', 0):,} analysed)")
+        return f"{job} done: {ev.get('name')} ({fmt_bytes(int(ev.get('size') or 0))})"
     if phase == "cancelled":
-        return "Backup cancelled"
+        return f"{job} cancelled"
     if phase == "error":
-        return f"Backup failed: {ev.get('message')}"
-    return f"Backup: {phase}"
+        return f"{job} failed: {ev.get('message')}"
+    return f"{job}: {phase}"
 
 
-class BackupRun:
-    """One `python -m backup create` child: start, stream its events to
+class CliRun:
+    """One `python -m backup <args>` child: start, stream its JSON events to
     `on_event` (reader-thread context — marshal to Tk yourself), cancel.
-    Terminal events are `done`, `cancelled` and `error`; a child that dies
-    without one gets an `error` synthesised from its exit code."""
+    Terminal events are `done` / `plan`, `cancelled` and `error`; a child
+    that dies without one gets an `error` synthesised from its exit code."""
 
-    def __init__(self, service_manager, password: str,
-                 on_event: Callable[[dict], None]):
+    def __init__(self, service_manager, args: list, on_event: Callable[[dict], None],
+                 *, password: Optional[str] = None, job: str = "Backup"):
         self._sm = service_manager
+        self._args = list(args)
         self._password = password
         self._on_event = on_event
+        self.job = job
         self._proc: Optional[subprocess.Popen] = None
         self._thread: Optional[threading.Thread] = None
         self.last_event: Optional[dict] = None
         self.result: Optional[dict] = None
+
+    @classmethod
+    def backup(cls, service_manager, password: str, on_event) -> "CliRun":
+        return cls(service_manager, ["create", "--password-env", PASSWORD_ENV],
+                   on_event, password=password, job="Backup")
+
+    @classmethod
+    def export(cls, service_manager, scope: str, artists: list, on_event) -> "CliRun":
+        args = ["export"] + ([a for name in artists for a in ("--artist", name)]
+                             if artists else ["--scope", scope])
+        return cls(service_manager, args, on_event, job="Export")
+
+    @classmethod
+    def plan_import(cls, service_manager, path, on_event) -> "CliRun":
+        return cls(service_manager, ["import", str(path), "--dry-run"], on_event, job="Import")
+
+    @classmethod
+    def apply_import(cls, service_manager, path, on_event) -> "CliRun":
+        return cls(service_manager, ["import", str(path), "--yes"], on_event, job="Import")
 
     @property
     def running(self) -> bool:
@@ -99,10 +138,11 @@ class BackupRun:
 
     def start(self) -> None:
         env = self._sm.backend_env()
-        env[PASSWORD_ENV] = self._password
-        self._password = ""
-        cmd = [self._sm._get_backend_python(), "-m", "backup", "create",
-               "--password-env", PASSWORD_ENV, "--progress-json", "--cancel-on-stdin"]
+        if self._password is not None:
+            env[PASSWORD_ENV] = self._password
+            self._password = None
+        cmd = ([self._sm._get_backend_python(), "-m", "backup"] + self._args
+               + ["--progress-json", "--cancel-on-stdin"])
         kwargs = {"cwd": str(self._sm._backend_dir), "env": env,
                   "stdin": subprocess.PIPE, "stdout": subprocess.PIPE,
                   "stderr": subprocess.PIPE, "text": True, "encoding": "utf-8",
@@ -110,8 +150,8 @@ class BackupRun:
         if sys.platform == "win32":
             kwargs["creationflags"] = subprocess.CREATE_NO_WINDOW
         self._proc = subprocess.Popen(cmd, **kwargs)
-        logger.info("backup started (PID %d)", self._proc.pid)
-        self._thread = threading.Thread(target=self._pump, daemon=True, name="backup-run")
+        logger.info("%s started (PID %d): backup %s", self.job, self._proc.pid, self._args[0])
+        self._thread = threading.Thread(target=self._pump, daemon=True, name="backup-cli")
         self._thread.start()
 
     def _emit(self, ev: dict) -> None:
@@ -133,20 +173,20 @@ class BackupRun:
             except ValueError:
                 logger.debug("backup: %s", line)
                 continue
-            if ev.get("phase") == "done":
+            if ev.get("phase") in ("done", "plan"):
                 self.result = ev
-            if ev.get("phase") in ("done", "cancelled", "error"):
+            if ev.get("phase") in ("done", "plan", "cancelled", "error"):
                 terminal = True
             self._emit(ev)
         stderr = proc.stderr.read()
         rc = proc.wait()
         if stderr.strip():
-            logger.log(logging.ERROR if rc else logging.DEBUG, "backup stderr: %s", stderr.strip()[-2000:])
+            logger.log(logging.ERROR if rc else logging.DEBUG, "%s stderr: %s", self.job, stderr.strip()[-2000:])
         if not terminal:
             self._emit({"phase": "error",
-                        "message": f"backup process exited with code {rc}"
+                        "message": f"{self.job.lower()} process exited with code {rc}"
                                    + (f": {stderr.strip().splitlines()[-1]}" if stderr.strip() else "")})
-        logger.info("backup finished (exit %d)", rc)
+        logger.info("%s finished (exit %d)", self.job, rc)
 
     def cancel(self) -> None:
         if not self.running:
@@ -155,7 +195,7 @@ class BackupRun:
             self._proc.stdin.write("cancel\n")
             self._proc.stdin.flush()
         except (OSError, ValueError) as e:
-            logger.debug("backup cancel write failed: %s", e)
+            logger.debug("%s cancel write failed: %s", self.job, e)
 
     def wait(self, timeout: Optional[float] = None) -> None:
         if self._thread is not None:

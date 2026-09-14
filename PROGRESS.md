@@ -548,6 +548,13 @@ it taught:
   implementation; the playback hold survived the move as a PostgreSQL
   session advisory lock the backend holds while playing and the job waits
   on — event-driven and self-releasing when the backend dies.
+- **Share export = the sync payload in a file (2026-09-14).** Product B
+  reuses the seed bundle's builders and the sync client's import gate; the
+  only new thing is the container: gzip'd JSON lines with a signed trailer,
+  because a single JSON document cannot carry a 1.7 GB "everything I own"
+  export through memory. Two-pass import — verify the whole file, then
+  apply — since a streamed import cannot take anything back. A record
+  altered inside a re-signed file dies at the seal, exactly as designed.
 
 ### Notices: a toast is a signal, the row is the fact (2026-09-13)
 

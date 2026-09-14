@@ -1,6 +1,6 @@
 # Backup, restore and portable data
 
-> **Status: Phase 1 (Product A) BUILT 2026-09-13; Phases 2–3 DESIGN.** Origin:
+> **Status: Phases 1–2 (Products A, B) BUILT 2026-09-13/14; Phase 3 DESIGN.** Origin:
 > Valerii's idea 2026-09-13 — make the database backup a Sautium feature,
 > split it by data class (MusicBrainz / enrichment / life data), make the
 > enrichment part mergeable into another user's database, and protect the
@@ -209,6 +209,58 @@ distribution of curated bundles (the seed bundle becomes one instance).
 
 ---
 
+### Phase 2 as built (2026-09-14)
+
+`backend/share.py`, the `export` / `import` subcommands of `python -m
+backup`, the "Sharing" section of the launcher's Backup & Restore tab
+(desktop/backup_task.CliRun.export / plan_import / apply_import — the
+launcher runs the CLI, as for backups). Departures from the sketch above:
+
+- **JSON lines, not one JSON document.** An "everything I own" export of
+  the master is 36.6k analysed tracks × ~46 KB ≈ 1.7 GB of segment
+  bundles; a single document would have to be held whole on both ends.
+  The file is gzip'd lines — header, structural sections in FK order
+  (`batches` first, ≤500 rows per line), one line per pull-handler
+  envelope (≤500 entities), a summary, then a trailer `{"end", "sha256",
+  "signature"}`: the exporter's node key over the running digest of every
+  byte above. **The signature is inside the file**, not detached: one
+  thing to hand over, the same guarantee (who packed it, nothing cut or
+  edited). Both ends stream; memory is one chunk.
+- **Two passes on import.** A streamed import can take nothing back, so
+  pass one reads the whole file — hash, trailer, header (format, version,
+  identity rule), summary — and only a file that passes is applied in pass
+  two. The launcher shows pass one's summary and the carry budget before
+  asking; `import --dry-run` is the same step on the CLI.
+- **One builder for the seed and the export.** `seed_export.structural_
+  sections` / `envelope_chunks` are generators now; `build_bundle` (the
+  seed) collects them into its dict, `share.export_file` streams them.
+  Verified byte-identical against the previous code on the master.
+- **First-hand only through the pull handlers.** `sync_queries.pull_*`
+  gained `first_hand=` (sign_audio's `_SIGNABLE_SRC` for analysis, the
+  row's `imported` flag for enrichment); the network pulls keep the
+  default and re-serve everything sealed as before.
+- **Scope.** `--scope engaged` (albums owned or with a completed listen —
+  the carry gate; default), `--scope owned`, `--artist NAME` (name, uuid or
+  a Latin alias; repeatable), `--album UUID`. Never the phantom layer.
+- **Import = the gate.** Structural sections through
+  `seed_import.insert_structural` (ON CONFLICT DO NOTHING — a node keeps
+  its own rows), envelopes through `SyncClient._import_items` (seal
+  verification, first-hand precedence — a receiving node's own records
+  are never overwritten), then the gender / vocalist classifiers on the
+  artists the file named. Provenance is what the seals say: `imported`
+  rows under the author's pubkey. Refused when the streaming library is
+  switched off (the albums could not be added); above the carry budget
+  (`sync.carry_limit`) only with `--yes` / the launcher's confirm.
+
+Acceptance run 2026-09-14: three artists exported from the Docker master
+(55 albums, 447 tracks, 373 analysed, 12.5 MB) and imported on the
+launcher stand through the gate — every album, track, artist, feature,
+segment bundle and track_mbid present afterwards; a copy with one bio
+record altered and the file re-signed with the exporter's own key passed
+the outer check and lost exactly that record at the gate (16 of 17 bios);
+the clean file then landed the 17th; a second import of the clean file
+changed no row count.
+
 ## Product C — merge my own life data (Phase 3)
 
 For the "two nodes, one person" case (laptop + desktop, or an old backup
@@ -387,8 +439,13 @@ launcher helpers); the database half is `python -m backup selftest`.
   backup", "Restore from backup…", the identity certificate transfer),
   `PasswordDialog`.
 - `backend/main.py` — wires `PlaybackSignal` to the load meter's samples.
-  No router, no Web UI: the Phase 2 share export/import decides its own
-  surface when it is built.
+  No router, no Web UI.
+- `backend/share.py` — Product B: the JSON-lines file (writer, reader,
+  signed trailer), scope selection, `export_file`, `plan_import`,
+  `apply_import`; `python -m backup export|import` in backend/backup.py.
+- `backend/seed_export.py` / `seed_import.py` — the shared section and
+  envelope generators and the structural importer; the seed bundle is one
+  caller of them.
 - `backend/seed_export.py` / `seed_import.py` — grow into the share
   export/import (pick list → scope selector); the seed bundle stays a
   caller.
@@ -415,6 +472,7 @@ launcher helpers); the database half is `python -m backup selftest`.
 2. **Share export + import.** Done when an export from the Docker node
    imports on the launcher stand through the gate with the expected
    counts, a re-import changes nothing, and a tampered record is refused.
+   **Built and verified 2026-09-14** — see § "Phase 2 as built".
 3. **Own life-data merge.** Done when two clones with divergent listening
    histories merge to the union in either order, and `local_play_stats`
    recomputes to the same numbers as a single history would give.

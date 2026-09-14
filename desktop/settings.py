@@ -30,7 +30,9 @@ class SettingsDialog(ctk.CTkToplevel):
                  on_restore: Optional[Callable] = None,
                  on_backup: Optional[Callable] = None,
                  on_backup_cancel: Optional[Callable] = None,
-                 backup_state: Optional[Callable] = None):
+                 backup_state: Optional[Callable] = None,
+                 on_export: Optional[Callable] = None,
+                 on_import: Optional[Callable] = None):
         super().__init__(parent)
 
         self.title(DIALOG_TITLE)
@@ -52,6 +54,10 @@ class SettingsDialog(ctk.CTkToplevel):
         self.on_backup = on_backup
         self.on_backup_cancel = on_backup_cancel
         self.backup_state = backup_state
+        # Sharing (docs/design/BACKUP.md Product B) rides the same CLI:
+        # _export_share / _import_share in the launcher.
+        self.on_export = on_export
+        self.on_import = on_import
 
         # No button row under the tabs: Save belongs to the settings it
         # applies to and sits inside General; the tools act at once, and
@@ -130,6 +136,31 @@ class SettingsDialog(ctk.CTkToplevel):
             "this node's database and identity with the file's; the current "
             "database is kept as sautium__previous."))
 
+        # Sharing: what this node found out first-hand — sealed audio analysis,
+        # bios, tags — as a file another collector merges through the same
+        # verify-and-import gate a P2P pull goes through.
+        self._section(tab, "Sharing")
+        share_btns = ctk.CTkFrame(tab, fg_color="transparent")
+        share_btns.pack(fill="x", padx=10, pady=4)
+        ctk.CTkButton(
+            share_btns, text="Export for a friend…", width=170,
+            command=self._export_share,
+            fg_color="transparent", border_width=1,
+            state="disabled" if running else "normal",
+        ).pack(side="left", padx=(0, 6))
+        ctk.CTkButton(
+            share_btns, text="Import from file…", width=170,
+            command=self._import_share,
+            fg_color="transparent", border_width=1,
+            state="disabled" if running else "normal",
+        ).pack(side="left")
+        self._hint(tab, (
+            "An export holds your own sealed records — audio analysis, bios, tags "
+            "— for the albums you own or listen to, or for named artists; it is "
+            "signed by your node key, not encrypted. A friend imports it through "
+            "the same gate P2P sync uses, so nothing lands unverified and their "
+            "own records are never overwritten."))
+
         # Identity certificate transfer. The certificate is a public fact and
         # re-fetchable from the Worker (idempotent issuance), so export/import
         # is the offline fallback, not the primary path — and a node backup
@@ -199,6 +230,28 @@ class SettingsDialog(ctk.CTkToplevel):
         if self.on_backup_cancel:
             self.on_backup_cancel()
         self.destroy()
+
+    def _export_share(self):
+        if not self.on_export:
+            return
+
+        def ready(scope: str, artists: list):
+            self.destroy()
+            self.on_export(scope, artists)
+
+        ExportDialog(self, on_ok=ready)
+
+    def _import_share(self):
+        from tkinter import filedialog
+        if not self.on_import:
+            return
+        chosen = filedialog.askopenfilename(
+            title="Sautium export", parent=self,
+            filetypes=[("Sautium export", "*.jsonl.gz"), ("All files", "*.*")])
+        if not chosen:
+            return
+        self.destroy()
+        self.on_import(chosen)
 
     def _restore_from_backup(self):
         from desktop.restore import RestoreDialog
@@ -316,3 +369,60 @@ class PasswordDialog(ctk.CTkToplevel):
             return
         self.destroy()
         self._on_ok(password)
+
+
+class ExportDialog(ctk.CTkToplevel):
+    """What goes into a share export: the carry gates as three choices —
+    what this node listens to, what it owns, or named artists. `on_ok(scope,
+    artists)`; `artists` non-empty means the artists scope."""
+
+    def __init__(self, parent, *, on_ok: Callable[[str, list], None]):
+        super().__init__(parent)
+        self.title("Export for a friend")
+        self.geometry("480x330")
+        self.resizable(False, False)
+        self.transient(parent)
+        self.grab_set()
+        self._on_ok = on_ok
+
+        ctk.CTkLabel(self, text="Export for a friend",
+                     font=ctk.CTkFont(size=18, weight="bold")).pack(pady=(16, 4))
+        ctk.CTkLabel(
+            self, text_color="gray", justify="left", wraplength=430,
+            text=("Your own sealed records for the chosen albums, as one file a friend "
+                  "imports. Everything you own can be gigabytes; a few artists is a "
+                  "quick file to send."),
+        ).pack(padx=24, anchor="w")
+
+        self._scope = ctk.StringVar(value="engaged")
+        for value, label in (("engaged", "Albums I own or have listened to"),
+                             ("owned", "Only albums I own"),
+                             ("artists", "These artists:")):
+            ctk.CTkRadioButton(self, text=label, variable=self._scope, value=value,
+                               command=self._sync).pack(padx=24, anchor="w", pady=(8, 0))
+        self._artists = ctk.CTkEntry(self, width=430, placeholder_text="Comma-separated names")
+        self._artists.pack(padx=24, pady=(4, 0))
+        self._artists.bind("<Return>", lambda _e: self._submit())
+        self._artists.bind("<Key>", lambda _e: self._scope.set("artists"))
+        self._error = ctk.CTkLabel(self, text="", text_color="#ef4444")
+        self._error.pack(padx=24, anchor="w")
+
+        btns = ctk.CTkFrame(self, fg_color="transparent")
+        btns.pack(fill="x", padx=24, pady=(4, 14), side="bottom")
+        ctk.CTkButton(btns, text="Export", width=120, command=self._submit).pack(side="right")
+        ctk.CTkButton(btns, text="Cancel", width=100, command=self.destroy,
+                      fg_color="transparent", border_width=1).pack(side="right", padx=(0, 8))
+        self._sync()
+
+    def _sync(self):
+        self._artists.configure(state="normal" if self._scope.get() == "artists" else "disabled")
+
+    def _submit(self):
+        scope = self._scope.get()
+        artists = [a.strip() for a in self._artists.get().split(",") if a.strip()] \
+            if scope == "artists" else []
+        if scope == "artists" and not artists:
+            self._error.configure(text="Name at least one artist")
+            return
+        self.destroy()
+        self._on_ok(scope, artists)

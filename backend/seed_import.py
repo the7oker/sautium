@@ -102,7 +102,7 @@ def _load_bundle() -> dict | None:
         return json.load(fh)
 
 
-def _phantom_layer_off(conn) -> bool:
+def phantom_layer_off(conn) -> bool:
     """True only when the owner EXPLICITLY switched the phantom layer off —
     a missing row is the default (on), per settings._DEFAULTS."""
     with conn.cursor() as cur:
@@ -111,7 +111,11 @@ def _phantom_layer_off(conn) -> bool:
     return row is not None and row[0] is False
 
 
-def _insert_structural(conn, structural: dict) -> None:
+def insert_structural(conn, structural: dict) -> None:
+    """Structural rows in FK order, batches first; every statement is
+    ON CONFLICT DO NOTHING (a node that holds a row keeps its own). Shared
+    with the share import (backend/share.py), which feeds it one section
+    chunk at a time."""
     from desktop.sync_client import SyncClient
     with conn.cursor() as cur:
         batches = structural.get("batches") or {}
@@ -201,13 +205,13 @@ def apply_seed(conn, db_dsn: str) -> dict:
             bundle.get("identity_rule"), IDENTITY_RULE)
         return {"complete": False, "skipped": "identity_rule_mismatch"}
 
-    if _phantom_layer_off(conn):
+    if phantom_layer_off(conn):
         logger.info("seed: discovery.phantom_layer is explicitly off — skipping")
         return {"complete": False, "skipped": "phantom_layer_off"}
 
     out: dict = {"complete": False}
     try:
-        _insert_structural(conn, bundle["structural"])
+        insert_structural(conn, bundle["structural"])
     except psycopg2.Error as e:
         conn.rollback()
         logger.error("seed: structural import failed, will retry next start: %s", e)

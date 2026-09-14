@@ -209,8 +209,8 @@ def _coverage(conn, picks: list[dict]) -> tuple[list[str], list[str], list[dict]
     return fatal, warns, report
 
 
-def _collect_ids(conn, album_ids: list[str]) -> tuple[list[str], list[str]]:
-    """(track_ids, artist_ids) referenced by the picked albums."""
+def collect_ids(conn, album_ids: list[str]) -> tuple[list[str], list[str]]:
+    """(track_ids, artist_ids) referenced by the albums, sorted."""
     tracks = sq.db_query(
         conn,
         """SELECT DISTINCT track_id::text AS id FROM album_tracks
@@ -228,79 +228,74 @@ def _collect_ids(conn, album_ids: list[str]) -> tuple[list[str], list[str]]:
     return track_ids, [r["id"] for r in artists]
 
 
-def _structural(conn, picks: list[dict], album_ids: list[str],
-                track_ids: list[str], artist_ids: list[str]) -> dict:
+def structural_sections(conn, album_ids: list[str], track_ids: list[str],
+                        artist_ids: list[str], *, picks: list[dict] = None):
+    """Yield (section, rows) — the structural half in FK order, `batches`
+    first because the importer inserts signing_batches before the sealed
+    rows that name them. Shared by the seed bundle (a dict of all of it)
+    and the share export (one line per chunk, backend/share.py)."""
     q = sq.db_query
     caa_pre, caa_suf = _CAA_FRONT_URL.split("{rg}")
-    out = {
-        "artists": q(conn, """
-            SELECT id::text AS id, name, raw_name, name_latin,
-                   artist_type::text AS artist_type, gender::text AS gender,
-                   is_vocalist::text AS is_vocalist
-            FROM artists WHERE id = ANY(%s::uuid[]) ORDER BY id""", [artist_ids]),
-        "albums": q(conn, """
-            SELECT id::text AS id, title, title_latin, release_year, label,
-                   catalog_number, total_tracks, musicbrainz_id::text AS musicbrainz_id,
-                   mb_match_confidence::text AS mb_match_confidence,
-                   COALESCE(cover_url, %(caa_pre)s || musicbrainz_id::text || %(caa_suf)s) AS cover_url,
-                   author_pubkey, signature, batch_root, merkle_proof
-            FROM albums WHERE id = ANY(%(ids)s::uuid[]) ORDER BY id""",
-            {"ids": album_ids, "caa_pre": caa_pre, "caa_suf": caa_suf}),
-        "tracks": q(conn, """
-            SELECT id::text AS id, title, title_latin
-            FROM tracks WHERE id = ANY(%s::uuid[]) ORDER BY id""", [track_ids]),
-        "album_tracks": q(conn, """
-            SELECT album_id::text AS album_id, track_id::text AS track_id,
-                   disc, position, recording_mbid::text AS recording_mbid, length_ms,
-                   author_pubkey, signature, batch_root, merkle_proof
-            FROM album_tracks WHERE album_id = ANY(%s::uuid[])
-            ORDER BY album_id, disc, position""", [album_ids]),
-        "track_artists": q(conn, """
-            SELECT track_id::text AS track_id, artist_id::text AS artist_id,
-                   role::text AS role
-            FROM track_artists WHERE track_id = ANY(%s::uuid[])
-            ORDER BY track_id, artist_id, role""", [track_ids]),
-        "album_artists": q(conn, """
-            SELECT album_id::text AS album_id, artist_id::text AS artist_id,
-                   role::text AS role, mbid::text AS mbid
-            FROM album_artists WHERE album_id = ANY(%s::uuid[])
-            ORDER BY album_id, artist_id, role""", [album_ids]),
-        "artist_mbids": q(conn, """
-            SELECT mbid::text AS mbid, artist_id::text AS artist_id,
-                   confidence::text AS confidence, name, about
-            FROM artist_mbids WHERE artist_id = ANY(%s::uuid[])
-            ORDER BY mbid""", [artist_ids]),
-        "genres": q(conn, """
-            SELECT DISTINCT g.id::text AS id, g.name
-            FROM genres g JOIN album_genres ag ON ag.genre_id = g.id
-            WHERE ag.album_id = ANY(%s::uuid[]) ORDER BY id""", [album_ids]),
-        "album_genres": q(conn, """
-            SELECT album_id::text AS album_id, genre_id::text AS genre_id,
-                   source, count
-            FROM album_genres WHERE album_id = ANY(%s::uuid[])
-            ORDER BY album_id, genre_id, source""", [album_ids]),
-        "album_descriptions": q(conn, """
-            SELECT album_id::text AS album_id, source, summary, content, url
-            FROM album_descriptions WHERE album_id = ANY(%s::uuid[])
-            ORDER BY album_id, source""", [album_ids]),
-        "seed_picks": [
+    albums = q(conn, """
+        SELECT id::text AS id, title, title_latin, release_year, label,
+               catalog_number, total_tracks, musicbrainz_id::text AS musicbrainz_id,
+               mb_match_confidence::text AS mb_match_confidence,
+               COALESCE(cover_url, %(caa_pre)s || musicbrainz_id::text || %(caa_suf)s) AS cover_url,
+               author_pubkey, signature, batch_root, merkle_proof
+        FROM albums WHERE id = ANY(%(ids)s::uuid[]) ORDER BY id""",
+        {"ids": album_ids, "caa_pre": caa_pre, "caa_suf": caa_suf})
+    album_tracks = q(conn, """
+        SELECT album_id::text AS album_id, track_id::text AS track_id,
+               disc, position, recording_mbid::text AS recording_mbid, length_ms,
+               author_pubkey, signature, batch_root, merkle_proof
+        FROM album_tracks WHERE album_id = ANY(%s::uuid[])
+        ORDER BY album_id, disc, position""", [album_ids])
+    roots = {r["batch_root"] for r in albums if r["batch_root"]}
+    roots |= {r["batch_root"] for r in album_tracks if r["batch_root"]}
+    yield "batches", sq._batches_map(conn, roots)
+    yield "artists", q(conn, """
+        SELECT id::text AS id, name, raw_name, name_latin,
+               artist_type::text AS artist_type, gender::text AS gender,
+               is_vocalist::text AS is_vocalist
+        FROM artists WHERE id = ANY(%s::uuid[]) ORDER BY id""", [artist_ids])
+    yield "albums", albums
+    yield "tracks", q(conn, """
+        SELECT id::text AS id, title, title_latin
+        FROM tracks WHERE id = ANY(%s::uuid[]) ORDER BY id""", [track_ids])
+    yield "album_tracks", album_tracks
+    yield "track_artists", q(conn, """
+        SELECT track_id::text AS track_id, artist_id::text AS artist_id,
+               role::text AS role
+        FROM track_artists WHERE track_id = ANY(%s::uuid[])
+        ORDER BY track_id, artist_id, role""", [track_ids])
+    yield "album_artists", q(conn, """
+        SELECT album_id::text AS album_id, artist_id::text AS artist_id,
+               role::text AS role, mbid::text AS mbid
+        FROM album_artists WHERE album_id = ANY(%s::uuid[])
+        ORDER BY album_id, artist_id, role""", [album_ids])
+    yield "artist_mbids", q(conn, """
+        SELECT mbid::text AS mbid, artist_id::text AS artist_id,
+               confidence::text AS confidence, name, about
+        FROM artist_mbids WHERE artist_id = ANY(%s::uuid[])
+        ORDER BY mbid""", [artist_ids])
+    yield "genres", q(conn, """
+        SELECT DISTINCT g.id::text AS id, g.name
+        FROM genres g JOIN album_genres ag ON ag.genre_id = g.id
+        WHERE ag.album_id = ANY(%s::uuid[]) ORDER BY id""", [album_ids])
+    yield "album_genres", q(conn, """
+        SELECT album_id::text AS album_id, genre_id::text AS genre_id,
+               source, count
+        FROM album_genres WHERE album_id = ANY(%s::uuid[])
+        ORDER BY album_id, genre_id, source""", [album_ids])
+    yield "album_descriptions", q(conn, """
+        SELECT album_id::text AS album_id, source, summary, content, url
+        FROM album_descriptions WHERE album_id = ANY(%s::uuid[])
+        ORDER BY album_id, source""", [album_ids])
+    if picks is not None:
+        yield "seed_picks", [
             {"album_id": p["album_id"], "tier": p["tier"], "rank": p["rank"]}
             for p in sorted(picks, key=lambda p: p["rank"])
-        ],
-    }
-    roots = {r["batch_root"] for r in out["albums"] if r["batch_root"]}
-    roots |= {r["batch_root"] for r in out["album_tracks"] if r["batch_root"]}
-    out["batches"] = sq._batches_map(conn, roots)
-    return out
-
-
-def _pull_segments_chunked(conn, track_ids: list[str]) -> dict:
-    merged = {"category": "segments", "items": [], "batches": {}}
-    for i in range(0, len(track_ids), sq.SEGMENTS_MAX_UUIDS):
-        part = sq.pull_segments(conn, track_ids[i:i + sq.SEGMENTS_MAX_UUIDS])
-        merged["items"].extend(part["items"])
-        merged["batches"].update(part["batches"])
-    return merged
+        ]
 
 
 _ENVELOPE_SORT_KEYS = {
@@ -312,15 +307,48 @@ _ENVELOPE_SORT_KEYS = {
     "similar_artists": lambda i: (i["artist_uuid"], i["similar_artist_uuid"], i["source"]),
 }
 
+ENRICHMENT_CATEGORIES = (("artist_bios", sq.pull_artist_bios),
+                         ("artist_tags", sq.pull_artist_tags),
+                         ("similar_artists", sq.pull_similar_artists))
+ANALYSIS_CATEGORIES = (("segments", sq.pull_segments),
+                       ("audio_features", sq.pull_audio_features),
+                       ("track_mbids", sq.pull_track_mbids))
+
 
 def _envelope(pull_result: dict) -> dict:
     pull_result["items"].sort(key=_ENVELOPE_SORT_KEYS[pull_result["category"]])
     return pull_result
 
 
+def envelope_chunks(conn, track_ids: list[str], artist_ids: list[str], *,
+                    first_hand: bool = False, chunk: int = sq.SEGMENTS_MAX_UUIDS):
+    """Yield (group, category, envelope) — the VERBATIM output of the pull
+    handlers in desktop/p2p/sync_queries.py, per chunk of `chunk` entities,
+    so the importer replays it through the ordinary verify-and-import gate.
+    `first_hand` restricts the records to this node's own observations
+    (the share export); the seed ships everything sealed the master holds."""
+    for i in range(0, len(artist_ids), chunk):
+        part = artist_ids[i:i + chunk]
+        for category, pull in ENRICHMENT_CATEGORIES:
+            yield "enrichment", category, _envelope(pull(conn, part, first_hand=first_hand))
+    for i in range(0, len(track_ids), chunk):
+        part = track_ids[i:i + chunk]
+        for category, pull in ANALYSIS_CATEGORIES:
+            yield "analysis", category, _envelope(pull(conn, part, first_hand=first_hand))
+
+
 def build_bundle(conn, picks: list[dict]) -> dict:
     album_ids = sorted(p["album_id"] for p in picks)
-    track_ids, artist_ids = _collect_ids(conn, album_ids)
+    track_ids, artist_ids = collect_ids(conn, album_ids)
+    groups: dict = {"enrichment": {}, "analysis": {}}
+    for group, category, env in envelope_chunks(conn, track_ids, artist_ids):
+        merged = groups[group].setdefault(
+            category, {"category": category, "items": [], "batches": {}})
+        merged["items"].extend(env["items"])
+        merged["batches"].update(env["batches"])
+    for envelopes in groups.values():
+        for env in envelopes.values():
+            _envelope(env)
     return {
         "format": BUNDLE_FORMAT,
         "version": BUNDLE_VERSION,
@@ -331,17 +359,10 @@ def build_bundle(conn, picks: list[dict]) -> dict:
              "owned_on_master": p["owned_on_master"]}
             for p in sorted(picks, key=lambda p: p["rank"])
         ],
-        "structural": _structural(conn, picks, album_ids, track_ids, artist_ids),
-        "enrichment": {
-            "artist_bios": _envelope(sq.pull_artist_bios(conn, artist_ids)),
-            "artist_tags": _envelope(sq.pull_artist_tags(conn, artist_ids)),
-            "similar_artists": _envelope(sq.pull_similar_artists(conn, artist_ids)),
-        },
-        "analysis": {
-            "segments": _envelope(_pull_segments_chunked(conn, track_ids)),
-            "audio_features": _envelope(sq.pull_audio_features(conn, track_ids)),
-            "track_mbids": _envelope(sq.pull_track_mbids(conn, track_ids)),
-        },
+        "structural": dict(structural_sections(conn, album_ids, track_ids,
+                                               artist_ids, picks=picks)),
+        "enrichment": groups["enrichment"],
+        "analysis": groups["analysis"],
     }
 
 
