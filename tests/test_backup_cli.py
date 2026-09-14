@@ -104,3 +104,28 @@ def test_describe_event_and_latest_backup(tmp_path):
     os.utime(tmp_path / "old.sbk", (time.time() - 100, time.time() - 100))
     last = backup_task.latest_backup(tmp_path)
     assert last["name"] == "new.sbk" and last["username"] == "vale" and last["created_at"] == "2026-09-14T00:00:00Z"
+
+
+def test_head_commit_reads_git_files_without_spawning(tmp_path):
+    from desktop import updater
+    sha = "0123456789abcdef0123456789abcdef01234567"
+    git = tmp_path / ".git"
+    (git / "refs" / "heads").mkdir(parents=True)
+    (git / "HEAD").write_text("ref: refs/heads/main\n")
+    assert updater.head_commit(tmp_path) is None            # ref not written yet
+    (git / "refs" / "heads" / "main").write_text(sha + "\n")
+    assert updater.head_commit(tmp_path) == sha[:12]
+    (git / "refs" / "heads" / "main").unlink()
+    (git / "packed-refs").write_text("# pack-refs with: peeled fully-peeled sorted \n"
+                                     f"{sha} refs/heads/main\n^deadbeef\n")
+    assert updater.head_commit(tmp_path) == sha[:12]
+    (git / "HEAD").write_text(sha.replace("0", "f") + "\n")   # detached
+    assert updater.head_commit(tmp_path) == sha.replace("0", "f")[:12]
+    (git / "HEAD").write_text("garbage")
+    assert updater.head_commit(tmp_path) is None
+    assert updater.head_commit(tmp_path / "nowhere") is None
+    # a linked worktree: .git is a file pointing at the real gitdir
+    wt = tmp_path / "wt"; wt.mkdir()
+    (wt / ".git").write_text(f"gitdir: {git}\n")
+    (git / "HEAD").write_text("ref: refs/heads/main\n")
+    assert updater.head_commit(wt) == sha[:12]

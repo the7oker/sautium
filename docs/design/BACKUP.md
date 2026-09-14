@@ -379,9 +379,14 @@ from the sketch above, each for a reason found while building:
   the very CLI a Docker node's weekly task runs (`desktop/backup_task.py`
   spawns `python -m backup create --password-env SAUTIUM_BACKUP_PASSWORD
   --progress-json --cancel-on-stdin` on the backend interpreter with
-  `service_manager.backend_env()`), shows its JSON events on the progress
-  line and cancels through the child's stdin — a quit mid-backup cancels
-  too, so no half file is left. `python -m backup` itself runs on either
+  `service_manager.backend_env()`), shows its JSON events in the tab's
+  Activity panel (job, progress bar, destination folder, Cancel — the
+  window stays open; the launcher's progress line mirrors it) and cancels
+  through the child's stdin — a quit mid-backup cancels too, so no half
+  file is left. The child never spawns git: `updater.current_commit`
+  reads `.git/HEAD` by hand, after a launcher-spawned CLI hung forever in
+  `git rev-parse` on Windows (git's own child held the pipes past
+  `run()`'s timeout). `python -m backup` itself runs on either
   interpreter: under the launcher it loads `<data_dir>/backend.env` into
   its environment before `config` builds Settings (`_bootstrap_launcher_env`),
   so the DSN, identity dir, `BACKUP_DIR=<data_dir>/backup` and

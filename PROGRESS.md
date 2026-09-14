@@ -559,6 +559,16 @@ it taught:
   is more than "what I analysed" — the file carries everything sealed the
   node holds, the seals keep authorship straight. Import offers "add new
   artists and albums" (phantoms, the default) or "enrich only what I have".
+- **A launcher-spawned child must not spawn git (2026-09-14).** The
+  first export from the Settings window hung forever: the CLI's manifest
+  stamp called `updater.current_commit` → `subprocess.run(["git",
+  "rev-parse", …], timeout=30)`, and on Windows git's own child kept the
+  pipes open past the timeout, so `communicate()` waited on the reader
+  threads for good (py-spy showed it). `current_commit` now reads
+  `.git/HEAD` / refs / packed-refs itself — no process, no git needed.
+  Same session, same lesson for the runner: the child's stderr rides the
+  stdout pipe, because a second pipe nobody drains until the first closes
+  is a 4 KB deadlock waiting for a chatty child.
 
 ### Notices: a toast is a signal, the row is the fact (2026-09-13)
 
