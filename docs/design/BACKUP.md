@@ -249,9 +249,16 @@ launcher runs the CLI, as for backups). Departures from the sketch above:
   dropped (`share.keep_existing`). The plan reports how much of the file
   is already here (`existing` / `named` per table), and with the streaming
   library switched off only this mode is offered.
-- **Scope.** `--scope engaged` (albums owned or with a completed listen —
-  the carry gate; default), `--scope owned`, `--artist NAME` (name, uuid or
-  a Latin alias; repeatable), `--album UUID`. Never the phantom layer.
+- **Scope.** `--scope analysed` (every album with at least one track
+  carrying sealed audio analysis here — own, seeded or synced: a
+  streaming-only node owns nothing and may have listened to nothing, yet
+  holds the seed's picks and what the network gave it, and that IS its
+  enrichment — Valerii, 2026-09-14), `--scope engaged` (albums owned or
+  with a completed listen — the carry gate; the CLI default), `--scope
+  owned`, `--artist NAME` (name, uuid or a Latin alias; repeatable),
+  `--album UUID`. Never the minted catalog itself. The launcher's dialog
+  runs `export --plan` first and shows each scope's album count; an empty
+  scope cannot be picked.
 - **Its own folder.** Exports land in `EXPORT_DIR` — `./data/export` on
   Docker (bind mount), `<data_dir>/export` under the launcher — not beside
   the backups: a backup is for this node's return, an export is a file

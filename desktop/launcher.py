@@ -1046,6 +1046,7 @@ class LauncherApp(ctk.CTk):
             on_cancel=self._cancel_job,
             backup_state=self._backup_state,
             on_export=self._export_share,
+            on_export_plan=self._export_plan,
             on_import=self._import_share,
             subscribe_job=self._subscribe_job)
 
@@ -1102,6 +1103,13 @@ class LauncherApp(ctk.CTk):
         The backend keeps serving — pg_dump reads a snapshot."""
         from desktop.backup_task import CliRun
         self._run_cli("backup", CliRun.backup(self.service_manager, password, lambda _ev: None))
+
+    def _export_plan(self, on_plan):
+        """`export --plan` for the export dialog: how many albums each broad
+        scope covers here. Its own kind, so the Export row stays idle."""
+        from desktop.backup_task import CliRun
+        self._run_cli("export-plan", CliRun.plan_export(self.service_manager, lambda _ev: None),
+                      on_terminal=on_plan)
 
     def _export_share(self, scope: str, artists: list):
         from desktop.backup_task import CliRun

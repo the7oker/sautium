@@ -91,6 +91,9 @@ def test_describe_event_and_latest_backup(tmp_path):
     assert "paused" in backup_task.describe_event({"phase": "paused", "reason": "playback"})
     assert backup_task.describe_event({"phase": "done", "name": "a.sbk", "size": 5 * 1024 ** 2}) == "Backup done: a.sbk (5 MB)"
     assert backup_task.describe_event({"phase": "error", "message": "x"}) == "Backup failed: x"
+    assert backup_task.describe_event({"phase": "plan", "scopes": {"analysed": 5000, "engaged": 4237, "owned": 3757}},
+                                      "Export") == ("Export: 5,000 albums with analysis here, 4,237 owned or "
+                                                    "listened to, 3,757 owned")
     assert backup_task.latest_backup(tmp_path) is None
     from desktop import node_backup as nb
     kdf = nb.KdfParams(time_cost=1, memory_cost=8 * 1024, parallelism=1)

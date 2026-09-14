@@ -43,7 +43,7 @@ import psycopg2
 
 from config import settings
 from desktop.p2p import sync_queries as sq
-from discography import _CAA_FRONT_URL
+from caa import CAA_FRONT_URL as _CAA_FRONT_URL
 from uuid_utils import IDENTITY_RULE, album_uuid, artist_uuid
 
 SEED_DIR = Path(__file__).resolve().parent / "seed"

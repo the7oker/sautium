@@ -169,7 +169,7 @@ def remote_search(q: str, limit: int = 10) -> dict:
         logger.debug(f"mb sources re-probe notify failed: {e}")
     return {"status": "no_peers"}
 
-_CAA_FRONT_URL = "https://coverartarchive.org/release-group/{rg}/front-500"
+from caa import CAA_FRONT_URL as _CAA_FRONT_URL
 
 _ARTIST_SQL = """
 WITH cand AS (

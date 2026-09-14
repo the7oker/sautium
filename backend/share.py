@@ -31,9 +31,11 @@ tracklists, credits, genres, descriptions), then EVERY sealed record the
 node holds per sync category — its own and what it received, each under
 its author's seal, exactly what the node serves on the network. "What I
 know" is more than "what I analysed", and the seals keep authorship
-straight whoever carries the file (Valerii, 2026-09-14). Scope: the carry
-gates — albums this node owns a file of, or is engaged with (a completed
-listen), or an explicit artist / album list; never the whole phantom layer.
+straight whoever carries the file (Valerii, 2026-09-14). Scope: every album
+with sealed audio analysis here (own, seeded or synced — a streaming-only
+node's whole enrichment), the carry gates — albums this node owns a file
+of, or is engaged with (a completed listen) — or an explicit artist / album
+list; never the minted catalog itself.
 
 Import has two modes. The default adds what the file names — new artists,
 albums and tracks land as phantoms (no files) so their records have
@@ -66,7 +68,7 @@ VERSION = 1
 FILE_SUFFIX = ".jsonl.gz"
 SIGN_PREFIX = b"sautium-export:v1:"
 ROWS_PER_LINE = 500
-SCOPES = ("engaged", "owned", "artists", "albums")
+SCOPES = ("analysed", "engaged", "owned", "artists", "albums")
 
 ProgressFn = Callable[..., None]
 
@@ -222,6 +224,31 @@ _ENGAGED_ALBUMS = """
                      JOIN listening_history lh ON lh.track_id = at2.track_id
                     WHERE at2.album_id = al.id AND lh.completed AND NOT lh.skipped)"""
 
+# Every album with at least one track that carries sealed audio analysis
+# here — own, seeded or synced. A streaming-only node owns nothing and may
+# have listened to nothing, yet holds the seed's picks and whatever the
+# network gave it; that is its enrichment, and this is the scope that
+# exports it. Bounded by what has analysis, never the minted catalog.
+_ANALYSED_ALBUMS = """
+    SELECT DISTINCT at2.album_id::text AS id
+      FROM album_tracks at2
+     WHERE at2.track_id IN (
+               SELECT e.track_id FROM embeddings e
+                 JOIN embedding_segments es ON es.embedding_id = e.id
+                WHERE es.signature IS NOT NULL
+               UNION
+               SELECT af.track_id FROM audio_features af WHERE af.signature IS NOT NULL)"""
+
+_BROAD_SCOPES = {"analysed": _ANALYSED_ALBUMS, "engaged": _ENGAGED_ALBUMS, "owned": _OWNED_ALBUMS}
+
+
+def scope_counts(conn) -> dict:
+    """How many albums each broad scope covers here — what the launcher's
+    export dialog shows before anything runs, so an empty scope is a fact
+    on screen, not a failure afterwards."""
+    return {kind: int(sq.db_query(conn, f"SELECT count(*) AS n FROM ({sql}) x")[0]["n"])
+            for kind, sql in _BROAD_SCOPES.items()}
+
 
 def resolve_artists(conn, names: List[str]) -> tuple[list[dict], list[str]]:
     """Names (or uuids) → artists rows; the names nothing matched come back
@@ -247,12 +274,9 @@ def resolve_artists(conn, names: List[str]) -> tuple[list[dict], list[str]]:
 def scope_albums(conn, kind: str, *, artists: Optional[List[str]] = None,
                  albums: Optional[List[str]] = None) -> tuple[list[str], dict]:
     """Album ids for a scope + the description the header carries."""
-    if kind == "owned":
-        rows = sq.db_query(conn, _OWNED_ALBUMS + " ORDER BY 1")
-        return [r["id"] for r in rows], {"kind": "owned"}
-    if kind == "engaged":
-        rows = sq.db_query(conn, _ENGAGED_ALBUMS + " ORDER BY 1")
-        return [r["id"] for r in rows], {"kind": "engaged"}
+    if kind in _BROAD_SCOPES:
+        rows = sq.db_query(conn, _BROAD_SCOPES[kind] + " ORDER BY 1")
+        return [r["id"] for r in rows], {"kind": kind}
     if kind == "artists":
         found, missing = resolve_artists(conn, artists or [])
         if missing:
