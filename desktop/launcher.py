@@ -216,8 +216,10 @@ class LauncherApp(ctk.CTk):
         # continues, not to the one after it.
         self._folder_caption.pack(pady=(0, 14))
 
+        # Settings AND the node's tools (backup, restore, identity papers)
+        # live behind one button — the label says both.
         self._btn_settings = ctk.CTkButton(
-            btn_frame, text="Settings", width=200,
+            btn_frame, text="Settings & Tools", width=200,
             command=self._open_settings,
             fg_color="transparent", border_width=1,
         )
@@ -1042,7 +1044,7 @@ class LauncherApp(ctk.CTk):
                        backup_state=self._backup_state)
 
     def _create_backup(self, password: str):
-        """Settings › Maintenance › Create backup…: the CLI on the backend
+        """Settings & Tools › Backup & Restore › Create backup…: the CLI on the backend
         interpreter (desktop/backup_task.py), its events on the progress
         line. The backend keeps serving — pg_dump reads a snapshot."""
         from desktop.backup_task import BackupRun, describe_event
@@ -1074,7 +1076,7 @@ class LauncherApp(ctk.CTk):
         return {"running": run.running, "last_event": run.last_event}
 
     def _restore_from_backup(self, path, password, manifest):
-        """Settings › Maintenance: this node becomes the one in the backup.
+        """Settings & Tools › Backup & Restore: this node becomes the one in the backup.
         The database is renamed under whoever holds a connection to it, so
         everything that talks to it stops first — P2P, the backend — and
         comes back on the restored database with the restored identity."""

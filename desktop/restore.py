@@ -5,7 +5,7 @@ it to the launcher's bundled PostgreSQL (role `postgres` for the maintenance
 work, `sautium` for the data — both under the config's postgres_password),
 its identity dir and its config, and gives the two entry points one dialog:
 
-  * Settings > Maintenance > "Restore from backup…" on a running node — the
+  * Settings & Tools > Backup & Restore > "Restore from backup…" on a running node — the
     launcher stops P2P and the backend, this module replaces the database
     (the old one is kept as `sautium__previous`) and writes the identity,
     the launcher starts everything again;

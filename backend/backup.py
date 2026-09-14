@@ -9,7 +9,7 @@ tools — and is the ONE implementation of "make a backup" for every caller:
     backup.sh). Entry point, subcommand, `--password-env`, the default
     output dir (BACKUP_DIR, `/app/data/backup`) and the `.sbk` suffix are a
     contract that script relies on; a non-zero exit is its failure signal;
-  * the launcher's Settings › Maintenance › "Create backup…", which runs
+  * the launcher's Settings & Tools › Backup & Restore › "Create backup…", which runs
     this same CLI on the backend interpreter (desktop/backup_task.py) with
     `--progress-json --cancel-on-stdin`;
   * a hand-run CLI on either interpreter.
