@@ -569,6 +569,21 @@ it taught:
   Same session, same lesson for the runner: the child's stderr rides the
   stdout pipe, because a second pipe nobody drains until the first closes
   is a 4 KB deadlock waiting for a chatty child.
+- **Life-data merge = keyed union, and play stats are derived
+  (2026-09-14).** Product C (`backend/life_merge.py`, `python -m backup
+  merge`) unions one account's listens, sessions, friends, messages, chats,
+  gear, allowlisted preferences and rotation records out of a backup made
+  on another machine. The dump streams once through `pg_restore
+  --data-only -t <life tables> -f -` (one pass over a non-seekable stream
+  selects twenty tables in ~20 s for 3.3 GB) into a scratch schema inside
+  the live database, so the union and its rollback are one transaction and
+  nothing decrypted touches the disk. Two findings: sessions cannot be
+  recomputed from history (no session column there) — they merge by uuid,
+  closed ones with all tracks known; and the incrementally kept
+  `local_play_stats` had drifted (567 of 2,205 tracks counted a skip's
+  seconds as listening time), so the table is now derived from history by
+  one shared statement (`backend/play_stats.py`) in the tracker and the
+  merge alike — two histories merged in either order give one answer.
 
 ### Notices: a toast is a signal, the row is the fact (2026-09-13)
 

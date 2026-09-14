@@ -1048,6 +1048,7 @@ class LauncherApp(ctk.CTk):
             on_export=self._export_share,
             on_export_plan=self._export_plan,
             on_import=self._import_share,
+            on_merge=self._merge_life,
             subscribe_job=self._subscribe_job)
 
     def _subscribe_job(self, cb):
@@ -1064,10 +1065,11 @@ class LauncherApp(ctk.CTk):
 
     def _run_cli(self, kind: str, run, on_terminal=None) -> None:
         """One backup-CLI child per KIND (desktop/backup_task.CliRun) — a
-        backup, an export and an import may overlap: pg_dump reads its own
-        snapshot, the export reads, the import writes through the gate with
-        per-category commits, so none can corrupt another; the machine just
-        works harder. Events reach the progress line, every subscribed
+        backup, a merge, an export and an import may overlap: pg_dump reads
+        its own snapshot, the export reads, the import writes through the
+        gate with per-category commits, the merge adds keyed rows in one
+        transaction, so none can corrupt another; the machine just works
+        harder. Events reach the progress line, every subscribed
         Settings & Tools window (the job's own row) and, for the terminal
         one, the log and `on_terminal` — all on the Tk thread."""
         from desktop.backup_task import describe_event
@@ -1104,6 +1106,14 @@ class LauncherApp(ctk.CTk):
         The backend keeps serving — pg_dump reads a snapshot."""
         from desktop.backup_task import CliRun
         self._run_cli("backup", CliRun.backup(self.service_manager, password, lambda _ev: None))
+
+    def _merge_life(self, path: str, password: str):
+        """Settings & Tools › Backup & Restore › Merge from backup…: `backup merge`
+        on the backend interpreter — the keyed union of this account's life
+        data out of another machine's backup. The backend keeps serving: the
+        merge only adds rows and recomputes play stats from history."""
+        from desktop.backup_task import CliRun
+        self._run_cli("merge", CliRun.merge(self.service_manager, path, password, lambda _ev: None))
 
     def _export_plan(self, on_plan):
         """`export --plan` for the export dialog: how many albums each broad

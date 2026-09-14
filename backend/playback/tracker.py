@@ -22,6 +22,7 @@ from typing import Optional
 
 from api_cooldown import cooling_down
 from db_pool import db_execute as _db_execute
+from play_stats import PLAY_STATS_SQL
 
 logger = logging.getLogger(__name__)
 
@@ -143,7 +144,9 @@ def _play_identity(item) -> Optional[dict]:
 
 
 def _save_play_session(s: "_PlaySession") -> None:
-    """Persist a finished session to listening_history + local_play_stats and
+    """Persist a finished session to listening_history, re-derive the track's
+    local_play_stats row from its history (play_stats.PLAY_STATS_SQL — the
+    stats are a function of the history, never counters of their own) and
     scrobble. Source-agnostic: keys on the track UUID, so phantom plays persist
     exactly like owned (media_file_id is NULL for phantoms)."""
     try:
@@ -159,23 +162,8 @@ def _save_play_session(s: "_PlaySession") -> None:
              "dur": s.max_position, "pct": s.percent_listened,
              "comp": completed, "skip": skipped},
         )
+        _db_execute(PLAY_STATS_SQL, {"ids": [s.track_id]})
         if completed:
-            _db_execute(
-                "INSERT INTO local_play_stats "
-                "(track_id, play_count, skip_count, total_listen_time, "
-                " avg_percent_listened, last_played_at) "
-                "VALUES (%(tid)s::uuid, 1, 0, %(dur)s, %(pct)s, now()) "
-                "ON CONFLICT (track_id) DO UPDATE SET "
-                "  play_count = local_play_stats.play_count + 1, "
-                "  total_listen_time = local_play_stats.total_listen_time "
-                "                      + EXCLUDED.total_listen_time, "
-                "  avg_percent_listened = (local_play_stats.avg_percent_listened "
-                "      * local_play_stats.play_count + EXCLUDED.avg_percent_listened) "
-                "      / (local_play_stats.play_count + 1), "
-                "  last_played_at = EXCLUDED.last_played_at, "
-                "  updated_at = now()",
-                {"tid": s.track_id, "dur": s.max_position, "pct": s.percent_listened},
-            )
             if not s.scrobbled and _scrobbling_enabled():
                 _scrobble_async(
                     "scrobble", artist=s.artist, title=s.title,
@@ -185,16 +173,6 @@ def _save_play_session(s: "_PlaySession") -> None:
             logger.info("play: %s — %s (%.0f%%) track=%s",
                         s.artist, s.title, s.percent_listened, s.track_id)
         else:
-            _db_execute(
-                "INSERT INTO local_play_stats "
-                "(track_id, play_count, skip_count, total_listen_time, "
-                " avg_percent_listened, last_played_at) "
-                "VALUES (%(tid)s::uuid, 0, 1, %(dur)s, %(pct)s, now()) "
-                "ON CONFLICT (track_id) DO UPDATE SET "
-                "  skip_count = local_play_stats.skip_count + 1, "
-                "  updated_at = now()",
-                {"tid": s.track_id, "dur": s.max_position, "pct": s.percent_listened},
-            )
             logger.info("skip: %s — %s (%.0f%%) track=%s",
                         s.artist, s.title, s.percent_listened, s.track_id)
     except Exception as e:

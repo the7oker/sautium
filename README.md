@@ -46,7 +46,10 @@ analytics between collectors.
   Docker node uses `python -m backup create|restore`. The same place exports
   the node's sealed records for another collector (`python -m backup export`)
   and merges theirs through the P2P sync gate (`import`, adding their albums
-  or enriching only what you have). See `docs/design/BACKUP.md`.
+  or enriching only what you have). Two machines, one account: "Merge from
+  backup…" (`python -m backup merge`) unions your listening history,
+  friends, chats and gear out of the other machine's backup, keyed so a
+  second merge changes nothing. See `docs/design/BACKUP.md`.
 
 ## Architecture
 

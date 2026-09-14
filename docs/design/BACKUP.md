@@ -289,23 +289,75 @@ after a rebuild): union, keyed so that a second import changes nothing.
 
 | Table | Key | Rule |
 |---|---|---|
-| `listening_history` | `(track_id, started_at)` | insert missing rows only |
-| `listening_sessions`, `session_tracks`, `local_play_stats` | — | **recompute** from history after the merge, never merge counters |
-| `friends`, `friend_rights`, `friend_grants` | friend pubkey | insert missing; rights = union |
+| `listening_history` | `(track_id, started_at)` | insert missing rows only; the other machine's `media_file_id` becomes this machine's file for the track, or NULL |
+| `local_play_stats` | — | **recompute** from history for every track the merge touched, never merge counters |
+| `listening_sessions`, `session_tracks` | session uuid | insert missing **closed** sessions whose tracks are all known here (an open one is the other machine's live queue; a partial card would never complete) |
+| `friends`, `friend_rights`, `friend_grants` | friend pubkey | insert missing; rights = union; blocked on either side = blocked; a friend who rotated is one row under the newer key; a `pending:<invite>` row binds when the other side has the key |
 | `p2p_messages` | `message_uuid` | insert missing (already the dedup key) |
-| `chat_sessions`, `chat_messages` | session uuid, message uuid | insert missing |
-| `user_gear`, `gear_pair_notes`, `user_profile` | natural keys | insert missing |
-| `p2p_identities`, `p2p_node_bans` | pubkey | insert missing; a ban on either side is a ban |
-| `user_settings` | key | **allowlist only** (`discovery.*`, `sync.*`, `p2p.gate_mode`); never machine-specific keys (`hqplayer.host`, ports, paths) |
-| identity `previous/` | pubkey | union of rotation records |
+| `chat_sessions`, `chat_messages` | session `created_at`, message `(created_at, role)` | insert missing — the tables have no uuid; the agent session ids (`claude_session_id`, `codex_thread_id`) stay behind, they name a session on the other machine |
+| `invite_tokens`, `sent_invites` | token uuid, `(email, sent_at)` | insert missing; revoked on either side = revoked (tokens are parents of `friends.source_token_id`) |
+| `gear_brands`, `gear_models`, `user_gear`, `gear_pair_notes` | deterministic ids | insert missing (the catalogue rows the chain needs come along; a model already here keeps its own research) |
+| `user_profile` | the one row | fields empty here fill in |
+| `p2p_identities`, `p2p_node_bans` | pubkey, `(pubkey, addr)` | insert missing; a ban on either side is a ban |
+| `user_settings` | key | **allowlist only** (`life_merge.SETTINGS_ALLOWLIST`: phantom layer, sync switches and budgets, gate mode, enrichment switches, scrobbling, album sort, language, diagnostics); a key set here wins; never machine state or machine-specific keys (`hqplayer.host`, ports, paths, `sync.last_at`, secrets) |
+| identity `previous/` | pubkey | union of rotation records (the notice, certificate and proof of each retired identity the backup lists and this node does not) |
 
 Input = a Product-A file of one's own (same account: the password unwraps
-it, the manifest pubkey matches or is a `previous/` key). The merge reads
-the life-data tables out of the dump via `pg_restore` into a scratch
-schema, then runs the keyed inserts. Enrichment inside such a file is not
-merged this way — it goes through Product B's gate like anyone else's.
+it, the manifest pubkey matches or is a `previous/` key). Enrichment inside
+such a file is not merged this way — it goes through Product B's gate like
+anyone else's.
 
----
+### Phase 3 as built (2026-09-14)
+
+`backend/life_merge.py`, `python -m backup merge <file.sbk> [--dry-run]`,
+and "Merge from backup…" in the launcher's Backup & Restore tab (the same
+CLI, `desktop/backup_task.CliRun.merge`). Departures from the sketch, each
+for a reason found while building:
+
+- **Sessions are not derivable from history.** `listening_history` has no
+  session column; a session is a queue snapshot with an origin, a card and
+  positions. So sessions merge by their uuid like everything else, and only
+  `local_play_stats` is recomputed. Recomputing is also the *right* thing:
+  measured on the master, the incrementally kept counters had drifted from
+  the history they summarise (567 of 2,205 tracks carried a skip's seconds
+  as listening time — the first row for a track being a skip landed in the
+  INSERT branch of the upsert). The tracker now runs the same statement
+  (`backend/play_stats.PLAY_STATS_SQL`) after every listen, so the stats
+  are a function of the history on every node, and two histories merged in
+  either order give one answer.
+- **A scratch schema inside the live database, no scratch database.**
+  PostgreSQL cannot query across databases, and a plaintext dump on disk
+  is what the format forbids. The dump member streams once through
+  `pg_restore --data-only -t <life tables> -f -` — pg_restore selects the
+  twenty tables out of a non-seekable stream in one pass (3.3 GB in ~20 s
+  on the master) — and the `COPY … FROM stdin` blocks of the script it
+  emits are parsed and COPY'd into `_merge.<table>` (`LIKE public.<table>
+  INCLUDING DEFAULTS`, dump-only columns added as text). The keyed inserts
+  run in the same transaction; `--dry-run` is that transaction rolled back,
+  reporting the same counts. A crash leaves nothing behind: the schema was
+  never committed.
+- **Unknown tracks wait.** A listen or a session naming a track this node
+  has never seen (a phantom listened to on the other machine) is neither
+  inserted under a foreign FK nor invented structurally — the merge reports
+  it as waiting, and the next merge of the same file lands it once the
+  track has arrived (sync, or a share import). Keyed idempotence makes
+  "merge again later" free.
+- **Concurrency.** The backend keeps serving: the merge only adds rows and
+  recomputes stats from history, so a listen recorded during the merge is
+  not lost and not double counted — both writers derive, neither
+  increments.
+
+Acceptance run 2026-09-14 (`tests/test_life_merge.py`, two databases built
+from the migrations on the container's cluster): clones with divergent
+histories, sessions, friends, messages, chats, gear, settings and identity
+rows merged to the union in either order; `local_play_stats` identical on
+both for every shared track and equal to what one history gives; the open
+session and the session naming an unknown track stayed out (reported as
+waiting); the machine-specific settings stayed out; a second merge of the
+same file added nothing; another identity's file was refused before a row
+was read. A dry run of the master's own latest backup into the master
+loaded 3,894 listens, 657 sessions, 5,729 session tracks and the rest in
+~20 s and found nothing new.
 
 ## Phase 1 as built (2026-09-13)
 
@@ -466,23 +518,26 @@ launcher helpers); the database half is `python -m backup selftest`.
   member framing (writer / reader), `pg_dump` / `pg_restore` drivers,
   `restore_database`, `write_identity`, `selftest`.
 - `backend/backup.py` — the node binding and the ONE "make a backup": the
-  `python -m backup` CLI (`create`, `inspect`, `restore`, `selftest`) on
+  `python -m backup` CLI (`create`, `inspect`, `restore`, `selftest`,
+  `export`, `import`, `merge`) on
   either interpreter (backend.env bootstrap under the launcher), password
   verification through `device_auth.verify_password`, the playback signal
   (`PlaybackSignal` held by the backend, `PlaybackHold` waited on by the
   job), `--progress-json` / `--cancel-on-stdin` for the launcher.
-- `desktop/backup_task.py` — the launcher's "Create backup…": runs that
-  CLI on the backend interpreter with `service_manager.backend_env()`,
-  streams its events, cancels via stdin; `latest_backup()` for the
-  Maintenance status line.
+- `desktop/backup_task.py` — the launcher's "Create backup…", "Merge from
+  backup…", "Export enrichment…", "Import enrichment…": runs that CLI on
+  the backend interpreter with `service_manager.backend_env()`, streams its
+  events into the action's row, cancels via stdin; `latest_backup()` for
+  the status line.
 - `desktop/restore.py` — launcher restore flow (`restore_launcher_node`:
   database, migrations, identity) and the `RestoreDialog` used by
   Settings & Tools › Backup & Restore and the wizard; `desktop/launcher.py` stops and
   restarts the services around it.
 - `desktop/settings.py` — the Settings & Tools dialog: General (ports) and
   Backup & Restore (node backup status line, "Create backup…" / "Cancel
-  backup", "Restore from backup…", the identity certificate transfer),
-  `PasswordDialog`.
+  backup", "Restore from backup…"; "Merge from backup…"; the share export /
+  import; the identity certificate transfer), `PasswordDialog`,
+  `ExportDialog`.
 - `backend/main.py` — wires `PlaybackSignal` to the load meter's samples.
   No router, no Web UI.
 - `backend/share.py` — Product B: the JSON-lines file (writer, reader,
@@ -492,9 +547,12 @@ launcher helpers); the database half is `python -m backup selftest`.
 - `backend/seed_export.py` / `seed_import.py` — the shared section and
   envelope generators and the structural importer; the seed bundle is one
   caller of them.
-- `backend/seed_export.py` / `seed_import.py` — grow into the share
-  export/import (pick list → scope selector); the seed bundle stays a
-  caller.
+- `backend/life_merge.py` — Product C: the same-account rule, the
+  pg_restore script → scratch schema loader, the keyed union
+  (`merge_life`), the rotation-archive union, `merge_backup`; `python -m
+  backup merge [--dry-run]` in backend/backup.py.
+- `backend/play_stats.py` — `local_play_stats` as a function of
+  `listening_history`: the one statement the tracker and the merge share.
 - Docker image: `postgresql-client-18` from PGDG, `PG_BIN` pinned; launcher:
   `pgsql/bin` on `PG_BIN`, `BACKUP_DIR=<data_dir>/backup` in `backend.env`.
 
@@ -522,6 +580,7 @@ launcher helpers); the database half is `python -m backup selftest`.
 3. **Own life-data merge.** Done when two clones with divergent listening
    histories merge to the union in either order, and `local_play_stats`
    recomputes to the same numbers as a single history would give.
+   **Built and verified 2026-09-14** — see § "Phase 3 as built".
 
 ## Open questions
 
@@ -534,4 +593,7 @@ launcher helpers); the database half is `python -m backup selftest`.
 - `covers` (471 MB of art in the database) stays in the dump for now;
   moving art to files is a separate question.
 - Restore into a node that already has data: v1 refuses (fresh database
-  only); merge is Product C.
+  only); merge is Product C (built). A merge from a *different* account's
+  backup (the same person under two names without a rotation record) is
+  refused today; a "listens and preferences only" mode for that case is
+  a possible follow-up.
