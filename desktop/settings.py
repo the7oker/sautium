@@ -32,11 +32,12 @@ class SettingsDialog(ctk.CTkToplevel):
                  on_backup_cancel: Optional[Callable] = None,
                  backup_state: Optional[Callable] = None,
                  on_export: Optional[Callable] = None,
-                 on_import: Optional[Callable] = None):
+                 on_import: Optional[Callable] = None,
+                 subscribe_job: Optional[Callable] = None):
         super().__init__(parent)
 
         self.title(DIALOG_TITLE)
-        self.geometry("550x520")
+        self.geometry("550x610")
         self.resizable(False, False)
         self.transient(parent)
         self.grab_set()
@@ -58,11 +59,18 @@ class SettingsDialog(ctk.CTkToplevel):
         # _export_share / _import_share in the launcher.
         self.on_export = on_export
         self.on_import = on_import
+        # The job's events, on the Tk thread, while this window is open: the
+        # Activity panel on the Backup & Restore tab is where a running
+        # backup / export / import shows its progress, its destination and
+        # its Cancel — the window that started it stays open to show it.
+        self._unsubscribe_job = subscribe_job(self._on_job_event) if subscribe_job else None
+        self._action_buttons: list = []
+        self.protocol("WM_DELETE_WINDOW", self.destroy)
 
         # No button row under the tabs: Save belongs to the settings it
         # applies to and sits inside General; the tools act at once, and
         # the window closes like any other.
-        self.tabview = ctk.CTkTabview(self, width=510, height=470)
+        self.tabview = ctk.CTkTabview(self, width=510, height=560)
         self.tabview.pack(padx=20, pady=(10, 14))
         self.tabview.add(TAB_GENERAL)
         self.tabview.add(TAB_BACKUP)
@@ -102,8 +110,11 @@ class SettingsDialog(ctk.CTkToplevel):
     # ================================================================
 
     def _build_backup_tab(self):
-        tab = self.tabview.tab(TAB_BACKUP)
-        running = bool((self.backup_state() or {}).get("running")) if self.backup_state else False
+        # Four sections and an activity panel: more than one fixed height
+        # holds on every font scale, so the tab scrolls.
+        tab = ctk.CTkScrollableFrame(self.tabview.tab(TAB_BACKUP), fg_color="transparent",
+                                     width=480, height=540)
+        tab.pack(fill="both", expand=True)
 
         # Node backup: "Create backup…" runs the same CLI a Docker node's weekly
         # task runs (desktop/backup_task.py); the restore replaces the database
@@ -112,23 +123,23 @@ class SettingsDialog(ctk.CTkToplevel):
         self._backup_status = ctk.CTkLabel(
             tab, text=self._backup_status_text(),
             text_color="gray", font=ctk.CTkFont(size=11), anchor="w",
-            justify="left", wraplength=480,
+            justify="left", wraplength=450,
         )
         self._backup_status.pack(anchor="w", padx=10)
         backup_btns = ctk.CTkFrame(tab, fg_color="transparent")
         backup_btns.pack(fill="x", padx=10, pady=4)
-        ctk.CTkButton(
-            backup_btns, width=170,
-            text="Cancel backup" if running else "Create backup…",
-            command=self._cancel_backup if running else self._create_backup,
+        self._action_buttons.append(ctk.CTkButton(
+            backup_btns, text="Create backup…", width=170,
+            command=self._create_backup,
             fg_color="transparent", border_width=1,
-        ).pack(side="left", padx=(0, 6))
-        ctk.CTkButton(
+        ))
+        self._action_buttons[-1].pack(side="left", padx=(0, 6))
+        self._action_buttons.append(ctk.CTkButton(
             backup_btns, text="Restore from backup…", width=170,
             command=self._restore_from_backup,
             fg_color="transparent", border_width=1,
-            state="disabled" if running else "normal",
-        ).pack(side="left")
+        ))
+        self._action_buttons[-1].pack(side="left")
         self._hint(tab, (
             "One encrypted file: the database (without the MusicBrainz catalogue) "
             "and this node's identity, keyed by the account password, written to "
@@ -142,18 +153,18 @@ class SettingsDialog(ctk.CTkToplevel):
         self._section(tab, "Sharing")
         share_btns = ctk.CTkFrame(tab, fg_color="transparent")
         share_btns.pack(fill="x", padx=10, pady=4)
-        ctk.CTkButton(
+        self._action_buttons.append(ctk.CTkButton(
             share_btns, text="Export for a friend…", width=170,
             command=self._export_share,
             fg_color="transparent", border_width=1,
-            state="disabled" if running else "normal",
-        ).pack(side="left", padx=(0, 6))
-        ctk.CTkButton(
+        ))
+        self._action_buttons[-1].pack(side="left", padx=(0, 6))
+        self._action_buttons.append(ctk.CTkButton(
             share_btns, text="Import from file…", width=170,
             command=self._import_share,
             fg_color="transparent", border_width=1,
-            state="disabled" if running else "normal",
-        ).pack(side="left")
+        ))
+        self._action_buttons[-1].pack(side="left")
         self._hint(tab, (
             "An export holds every sealed record this node has — audio analysis, "
             "bios, tags, each under its author's seal — for the albums you own or "
@@ -170,7 +181,7 @@ class SettingsDialog(ctk.CTkToplevel):
         self._cert_status = ctk.CTkLabel(
             tab, text=self._cert_status_text(),
             text_color="gray", font=ctk.CTkFont(size=11), anchor="w",
-            justify="left", wraplength=480,
+            justify="left", wraplength=450,
         )
         self._cert_status.pack(anchor="w", padx=10)
         cert_btns = ctk.CTkFrame(tab, fg_color="transparent")
@@ -190,6 +201,33 @@ class SettingsDialog(ctk.CTkToplevel):
             "was issued. It is fetched automatically and included in every node "
             "backup; export/import is the offline fallback."))
 
+        # Activity: the one running job (backup, export or import) — what it
+        # is doing, how far along, where its file goes, and Cancel. Fed by
+        # the launcher's job events while this window is open; on open it
+        # shows whatever is in flight.
+        self._section(tab, "Activity")
+        self._job_title = ctk.CTkLabel(tab, text="", anchor="w", font=ctk.CTkFont(weight="bold"))
+        self._job_title.pack(anchor="w", padx=10)
+        self._job_line = ctk.CTkLabel(
+            tab, text="", text_color="gray", font=ctk.CTkFont(size=11), anchor="w",
+            justify="left", wraplength=450)
+        self._job_line.pack(anchor="w", padx=10)
+        self._job_bar = ctk.CTkProgressBar(tab, width=450)
+        self._job_bar.pack(anchor="w", padx=10, pady=(6, 2))
+        self._job_bar.set(0)
+        job_btns = ctk.CTkFrame(tab, fg_color="transparent")
+        job_btns.pack(fill="x", padx=10, pady=4)
+        self._job_cancel = ctk.CTkButton(
+            job_btns, text="Cancel", width=110, command=self._cancel_backup,
+            fg_color="transparent", border_width=1)
+        self._job_cancel.pack(side="left", padx=(0, 6))
+        ctk.CTkButton(
+            job_btns, text="Show folder", width=110, command=self._show_folder,
+            fg_color="transparent", border_width=1).pack(side="left")
+        from desktop.backup_task import backup_dir
+        self._hint(tab, f"Files are written to {backup_dir()}")
+        self._render_job(self.backup_state() if self.backup_state else None)
+
     @staticmethod
     def _section(tab, title: str, *, first: bool = False) -> None:
         ctk.CTkLabel(tab, text=title, font=ctk.CTkFont(weight="bold")).pack(
@@ -199,8 +237,83 @@ class SettingsDialog(ctk.CTkToplevel):
     def _hint(tab, text: str) -> None:
         ctk.CTkLabel(
             tab, text=text, text_color="gray", font=ctk.CTkFont(size=11),
-            anchor="w", justify="left", wraplength=480,
+            anchor="w", justify="left", wraplength=450,
         ).pack(anchor="w", padx=10, pady=(2, 0))
+
+    def _render_job(self, state: Optional[dict]) -> None:
+        """The Activity panel and the action buttons from a job state
+        ({"running", "job", "last_event"}) — idle when there is none."""
+        from desktop.backup_task import describe_event
+        running = bool(state and state.get("running"))
+        job = (state or {}).get("job") or "Backup"
+        ev = (state or {}).get("last_event")
+        for btn in self._action_buttons:
+            btn.configure(state="disabled" if running else "normal")
+        self._job_cancel.configure(state="normal" if running else "disabled")
+        if running:
+            self._job_title.configure(text=f"{job} running")
+            self._job_line.configure(text=describe_event(ev, job) if ev else f"{job}: starting…")
+        elif ev:
+            self._job_title.configure(text={"done": f"{job} done", "plan": f"{job} checked",
+                                            "cancelled": f"{job} cancelled",
+                                            "error": f"{job} failed"}.get(ev.get("phase"), job))
+            self._job_line.configure(text=describe_event(ev, job))
+        else:
+            self._job_title.configure(text="Idle")
+            self._job_line.configure(text="No backup, export or import running.")
+        self._render_bar(ev, running)
+
+    def _render_bar(self, ev: Optional[dict], running: bool) -> None:
+        """Determinate when the event carries a total (tracks) or an estimate
+        (a backup's bytes against the last backup's size), indeterminate for
+        the phases that have none, still when nothing runs."""
+        bar = self._job_bar
+        fraction = None
+        if ev:
+            if ev.get("tracks"):
+                fraction = min(1.0, (ev.get("tracks_done") or 0) / ev["tracks"])
+            elif ev.get("phase") == "dumping" and ev.get("bytes") is not None:
+                from desktop.backup_task import latest_backup
+                last = latest_backup()
+                if last and last.get("size"):
+                    fraction = min(0.99, ev["bytes"] / last["size"])
+            elif ev.get("phase") == "done":
+                fraction = 1.0
+            elif ev.get("phase") in ("cancelled", "error", "plan"):
+                fraction = 0.0
+        if not running:
+            bar.stop()
+            bar.configure(mode="determinate")
+            bar.set(fraction if fraction is not None else 0.0)
+        elif fraction is None:
+            if bar.cget("mode") != "indeterminate":
+                bar.configure(mode="indeterminate")
+                bar.start()
+        else:
+            bar.stop()
+            bar.configure(mode="determinate")
+            bar.set(fraction)
+
+    def _on_job_event(self, job: str, ev: dict) -> None:
+        if not self.winfo_exists():
+            return
+        running = ev.get("phase") not in ("done", "plan", "cancelled", "error")
+        self._render_job({"running": running, "job": job, "last_event": ev})
+        if not running:
+            self._backup_status.configure(text=self._backup_status_text())
+
+    def _job_started(self, job: str) -> None:
+        self._render_job({"running": True, "job": job, "last_event": None})
+
+    def _show_folder(self):
+        from desktop.backup_task import backup_dir, open_folder
+        open_folder(backup_dir())
+
+    def destroy(self):
+        if self._unsubscribe_job:
+            self._unsubscribe_job()
+            self._unsubscribe_job = None
+        super().destroy()
 
     def _backup_status_text(self) -> str:
         from desktop.backup_task import backup_dir, fmt_bytes, latest_backup
@@ -218,29 +331,30 @@ class SettingsDialog(ctk.CTkToplevel):
             return
 
         def ready(password: str):
-            self.destroy()
+            self._job_started("Backup")
             self.on_backup(password)
 
+        from desktop.backup_task import backup_dir
         PasswordDialog(
             self, title="Create backup",
             text=("The account password encrypts the file and opens it again on "
-                  "restore. The backup pauses while music plays."),
+                  f"restore. The backup pauses while music plays. Written to {backup_dir()}"),
             on_ok=ready)
 
     def _cancel_backup(self):
         if self.on_backup_cancel:
             self.on_backup_cancel()
-        self.destroy()
 
     def _export_share(self):
         if not self.on_export:
             return
 
         def ready(scope: str, artists: list):
-            self.destroy()
+            self._job_started("Export")
             self.on_export(scope, artists)
 
-        ExportDialog(self, on_ok=ready)
+        from desktop.backup_task import backup_dir
+        ExportDialog(self, on_ok=ready, folder=str(backup_dir()))
 
     def _import_share(self):
         from tkinter import filedialog
@@ -251,7 +365,7 @@ class SettingsDialog(ctk.CTkToplevel):
             filetypes=[("Sautium export", "*.jsonl.gz"), ("All files", "*.*")])
         if not chosen:
             return
-        self.destroy()
+        self._job_started("Import")
         self.on_import(chosen)
 
     def _restore_from_backup(self):
@@ -377,10 +491,10 @@ class ExportDialog(ctk.CTkToplevel):
     what this node listens to, what it owns, or named artists. `on_ok(scope,
     artists)`; `artists` non-empty means the artists scope."""
 
-    def __init__(self, parent, *, on_ok: Callable[[str, list], None]):
+    def __init__(self, parent, *, on_ok: Callable[[str, list], None], folder: str = ""):
         super().__init__(parent)
         self.title("Export for a friend")
-        self.geometry("480x330")
+        self.geometry("480x360")
         self.resizable(False, False)
         self.transient(parent)
         self.grab_set()
@@ -390,9 +504,10 @@ class ExportDialog(ctk.CTkToplevel):
                      font=ctk.CTkFont(size=18, weight="bold")).pack(pady=(16, 4))
         ctk.CTkLabel(
             self, text_color="gray", justify="left", wraplength=430,
-            text=("Your own sealed records for the chosen albums, as one file a friend "
-                  "imports. Everything you own can be gigabytes; a few artists is a "
-                  "quick file to send."),
+            text=("Every sealed record this node holds for the chosen albums, as one "
+                  "file a friend imports. Everything you own can be gigabytes; a few "
+                  "artists is a quick file to send."
+                  + (f" Written to {folder}" if folder else "")),
         ).pack(padx=24, anchor="w")
 
         self._scope = ctk.StringVar(value="engaged")

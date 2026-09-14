@@ -12,6 +12,7 @@ run pending DB migrations, restart backend+tracker.
 """
 
 import logging
+import re
 import subprocess
 import sys
 from pathlib import Path
@@ -98,14 +99,58 @@ def installed_build() -> Optional[str]:
     return stamp.read_text(encoding="utf-8").strip() or None
 
 
+_HEX40 = re.compile(r"[0-9a-f]{40}")
+
+
 def current_commit() -> Optional[str]:
-    """HEAD of our checkout, no network — the build identity a support
-    report carries. None for a packaged tree (see installed_build)."""
+    """HEAD of our checkout — the build identity a support report and a
+    backup manifest carry. Read from .git by hand, never by spawning git:
+    a launcher-spawned CLI that shelled out here hung forever on Windows
+    (2026-09-14 — git's own child kept the pipes open past run()'s timeout,
+    and communicate() waited on them for good). None for a packaged tree
+    (see installed_build)."""
+    return head_commit(get_project_root())
+
+
+def head_commit(root: Path) -> Optional[str]:
+    """The first 12 hex digits of HEAD under `root`, from the files git keeps
+    them in: a detached HEAD, a loose ref, a packed ref; a linked worktree's
+    `.git` file and `commondir` are followed."""
+    git_dir = root / ".git"
     try:
-        result = _git_cmd(["rev-parse", "--short=12", "HEAD"])
-    except (OSError, subprocess.TimeoutExpired):
-        return None                      # no git on a packaged install
-    return result.stdout.strip() if result.returncode == 0 else None
+        if git_dir.is_file():
+            text = git_dir.read_text(encoding="utf-8").strip()
+            if not text.startswith("gitdir:"):
+                return None
+            git_dir = Path(text[len("gitdir:"):].strip())
+            if not git_dir.is_absolute():
+                git_dir = (root / git_dir).resolve()
+        head = (git_dir / "HEAD").read_text(encoding="utf-8").strip()
+    except OSError:
+        return None
+    if not head.startswith("ref:"):
+        return head[:12] if _HEX40.fullmatch(head) else None
+    ref = head[len("ref:"):].strip()
+    common = git_dir
+    try:
+        common = (git_dir / (git_dir / "commondir").read_text(encoding="utf-8").strip()).resolve()
+    except OSError:
+        pass
+    for candidate in (git_dir / ref, common / ref):
+        try:
+            value = candidate.read_text(encoding="utf-8").strip()
+        except OSError:
+            continue
+        if _HEX40.fullmatch(value):
+            return value[:12]
+    try:
+        for line in (common / "packed-refs").read_text(encoding="utf-8").splitlines():
+            parts = line.split()
+            if len(parts) == 2 and parts[1] == ref and _HEX40.fullmatch(parts[0]):
+                return parts[0][:12]
+    except OSError:
+        pass
+    return None
 
 
 def _update_failed(config: dict, step: str, error: str) -> None:

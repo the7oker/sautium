@@ -78,6 +78,8 @@ class LauncherApp(ctk.CTk):
         self._scan_active = False     # a Library wake is only ours while a scan we started runs
         self._qr_timer = None
         self._backup_run = None       # desktop/backup_task.CliRun: backup / export / import in flight
+        self._job_listeners: list = []  # Settings & Tools windows watching that job (Tk thread)
+        self._settings_dialog = None
 
         # Check first run
         if not self.config.get("first_run_complete"):
@@ -1036,40 +1038,60 @@ class LauncherApp(ctk.CTk):
 
     def _open_settings(self):
         from desktop.settings import SettingsDialog
-        SettingsDialog(self, self.config, on_save=self._on_settings_saved,
-                       api_client=self.api_client,
-                       on_restore=self._restore_from_backup,
-                       on_backup=self._create_backup,
-                       on_backup_cancel=self._cancel_backup,
-                       backup_state=self._backup_state,
-                       on_export=self._export_share,
-                       on_import=self._import_share)
+        self._settings_dialog = SettingsDialog(
+            self, self.config, on_save=self._on_settings_saved,
+            api_client=self.api_client,
+            on_restore=self._restore_from_backup,
+            on_backup=self._create_backup,
+            on_backup_cancel=self._cancel_backup,
+            backup_state=self._backup_state,
+            on_export=self._export_share,
+            on_import=self._import_share,
+            subscribe_job=self._subscribe_job)
+
+    def _subscribe_job(self, cb):
+        """`cb(job, event)` on the Tk thread for every event of the running
+        backup-CLI job; returns the unsubscribe."""
+        self._job_listeners.append(cb)
+        return lambda: cb in self._job_listeners and self._job_listeners.remove(cb)
+
+    def _dialog_parent(self):
+        """A dialog opened by a job belongs over the Settings & Tools window
+        when it is open — that is where the user is."""
+        dlg = self._settings_dialog
+        return dlg if (dlg is not None and dlg.winfo_exists()) else self
 
     def _run_cli(self, run, on_terminal=None) -> None:
-        """One backup-CLI child at a time (desktop/backup_task.CliRun); its
-        events land on the progress line, the terminal one also in the log
-        and with `on_terminal` (reader thread — it marshals itself)."""
+        """One backup-CLI child at a time (desktop/backup_task.CliRun). Its
+        events reach the progress line, every subscribed Settings & Tools
+        window (the Activity panel) and, for the terminal one, the log and
+        `on_terminal` — all on the Tk thread."""
         from desktop.backup_task import describe_event
         if self._backup_run is not None and self._backup_run.running:
             self._progress_text.configure(text=f"{self._backup_run.job} still running")
             return
 
-        def on_event(ev):
+        def dispatch(ev):
             text = describe_event(ev, run.job)
-            self.ui_call(lambda: self._progress_text.configure(text=text))
+            self._progress_text.configure(text=text)
+            for cb in list(self._job_listeners):
+                try:
+                    cb(run.job, ev)
+                except Exception as e:                  # a closed window must not stop the job
+                    logger.debug(f"job listener failed: {e}")
             if ev.get("phase") in ("done", "plan", "cancelled", "error"):
                 logger.info(text)
                 if on_terminal:
                     on_terminal(ev)
 
-        run._on_event = on_event
+        run._on_event = lambda ev: self.ui_call(lambda: dispatch(ev))
         self._backup_run = run
         try:
             run.start()
         except OSError as e:
             logger.error(f"{run.job} could not start: {e}")
-            self._progress_text.configure(text=f"{run.job} could not start: {e}")
             self._backup_run = None
+            dispatch({"phase": "error", "message": f"could not start: {e}"})
 
     def _create_backup(self, password: str):
         """Settings & Tools › Backup & Restore › Create backup…: the CLI on the backend
@@ -1102,8 +1124,8 @@ class LauncherApp(ctk.CTk):
             if ev.get("needs_confirm"):
                 lines.append(f"More than this node's carry budget of {ev.get('budget', 0):,} "
                              "analysed tracks — import anyway?")
-            self.ui_call(lambda: self._confirm_import(
-                path, "\n".join(lines), layer_off=bool(ev.get("phantom_layer_off"))))
+            self._confirm_import(path, "\n".join(lines),
+                                 layer_off=bool(ev.get("phantom_layer_off")))
 
         self._run_cli(CliRun.plan_import(self.service_manager, path, lambda _ev: None),
                       on_terminal=planned)
@@ -1113,11 +1135,12 @@ class LauncherApp(ctk.CTk):
         default) or enrich only what is already here. With the streaming
         library switched off only the second is possible."""
         from desktop.backup_task import CliRun
-        dialog = ctk.CTkToplevel(self)
+        parent = self._dialog_parent()
+        dialog = ctk.CTkToplevel(parent)
         dialog.title("Import from file")
         dialog.geometry("480x330")
         dialog.resizable(False, False)
-        dialog.transient(self)
+        dialog.transient(parent)
         dialog.grab_set()
         ctk.CTkLabel(dialog, text="Import from file",
                      font=ctk.CTkFont(size=18, weight="bold")).pack(pady=(16, 4))
