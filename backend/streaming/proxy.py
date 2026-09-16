@@ -273,22 +273,39 @@ class MediaProxy:
 
     # ---- session API (called by the player endpoint) --------------------
     def start_session(self, items: list) -> list[str]:
-        """Replace the current preview with an ordered track list. Each item is a
-        ``(query, chain)`` pair where chain is the lossless-first fallback list of
-        ``(provider, source_id)`` (see _Entry). Returns the per-track tokens; build
-        URLs with ``url_for``. The tokens start UNBOUND — the caller binds them to
-        the queue generation it goes on to build (see ``bind``)."""
-        reused = 0
+        """Open a new album session — the ordered set a phantom play pre-buffers
+        and then rolls into the queue. Each item is a ``(query, chain)`` pair
+        where chain is the lossless-first fallback list of ``(provider,
+        source_id)`` (see _Entry). Returns the per-track tokens; build URLs with
+        ``url_for``. The tokens start UNBOUND — the caller binds them to the
+        queue generation it goes on to build (see ``bind``).
+
+        Whatever serves the live queue is left alone. The request opening a
+        session spends tens of seconds resolving and buffering before it
+        replaces the queue, and the previous queue plays on through that
+        window — a track boundary inside it used to land on tokens this call
+        had dropped, and the output ran off the end of its queue reporting
+        nonsense. Bound entries die with their generation
+        (``retire_generation``, which replace_queue reports) and the budget
+        owns their audio. Only the previous session's still-UNBOUND fetches
+        are superseded here: they belong to a request that never reached the
+        queue (an earlier tap still pre-buffering), so nothing will ever place
+        them."""
+        reused = superseded = 0
         with self._lock:
             in_ram = self._ram_index()
-            for e in self._entries.values():
-                if not e.ready.is_set():
-                    # Wake every waiter on the dropped set (fillers block
-                    # unbounded) — "superseded" is an event, not a timeout.
-                    e.error = "superseded by a new preview session"
-                    e.ready.set()
-            self._entries.clear()
-            self._fetch_q.clear()        # drop the previous session's pending fetches
+            for tok in self._session:
+                e = self._entries.get(tok)
+                if e is None or e.generation is not None or e.ready.is_set():
+                    continue
+                if tok in self._fetch_q:
+                    self._fetch_q.remove(tok)
+                del self._entries[tok]
+                # Wake every waiter on the dropped set (fillers block
+                # unbounded) — "superseded" is an event, not a timeout.
+                e.error = "superseded by a new preview session"
+                e.ready.set()
+                superseded += 1
             self._session = []
             for i, (q, chain) in enumerate(items):
                 tok = secrets.token_urlsafe(12)
@@ -297,35 +314,29 @@ class MediaProxy:
                     reused += 1
                 self._entries[tok] = e
                 self._session.append(tok)
-        # Priority start: fetch ONLY track 0 now (full bandwidth → fastest first
-        # track), unless it was reused from RAM. The caller measures its
-        # throughput, then calls prefetch_from(1) to fan out the rest
-        # concurrently while track 0 buffers and plays. This is rolling-append:
-        # HQPlayer HEAD-probes each URI at ADD time, so we add the ready
-        # prefix, play, then append the tail as each track lands.
-        if self._session and not self._entries[self._session[0]].ready.is_set():
-            self._prefetch(self._session[0])
-        logger.info("preview session: %d tracks (%d reused from RAM)",
-                    len(items), reused)
+            session = list(self._session)
+        # The whole session lines up at the HEAD of the pipe, in order. The
+        # worker is strictly sequential, so track 0 still gets the full pipe
+        # first, and the previous queue's background fills — queued behind
+        # until its generation retires — cannot delay the album the user just
+        # started. Tokens reused from RAM are no-ops. This is rolling-append:
+        # HQPlayer HEAD-probes each URI at ADD time, so the caller adds the
+        # ready prefix, plays, then appends the tail as each track lands.
+        for tok in reversed(session):
+            self._prefetch(tok, front=True)
+        logger.info("preview session: %d tracks (%d reused from RAM, %d unbound "
+                    "fetch(es) superseded)", len(items), reused, superseded)
         preview_events.ping()   # new buffering set → open album page re-fetches
-        return list(self._session)
-
-    def prefetch_from(self, start_index: int) -> None:
-        """Fan out concurrent (semaphore-bounded) prefetch of the session tail —
-        called once track 0 is in hand so the rest download while it plays."""
-        with self._lock:
-            tail = self._session[start_index:]
-        for tok in tail:
-            self._prefetch(tok)
+        return session
 
     def add_tracks(self, items: list, *, front: bool = False) -> list:
         """Add tracks to the served pool WITHOUT replacing the current album
         session — for queue-appends, so the album and the queued tracks are
         served at once. Each item is a ``(query, chain)`` pair (see start_session).
         Returns the new tokens (prefetched); the caller waits and places them.
-        They are NOT part of the rolling-append `_session`; the next
-        start_session (a replace-queue play) clears them together with the album,
-        and ``bind`` ties them to the queue generation that will hold them.
+        They are NOT part of the rolling-append `_session`; ``bind`` ties them
+        to the queue generation that will hold them, and retiring that
+        generation is what cancels them.
 
         ``front`` fetches them AHEAD of everything already pending: a 'play next'
         block is wanted before the current track ends, so it cannot sit behind an
@@ -420,14 +431,6 @@ class MediaProxy:
                 playable.append(tok)
                 secs += e.query.duration or 0.0
             return playable, secs, used
-
-    def ready_lead(self, from_index: int) -> tuple[list[str], float, int]:
-        """`ready_run` over the rolling album session, returning the session
-        index to resume filling at."""
-        with self._lock:
-            tail = self._session[from_index:]
-        playable, secs, used = self.ready_run(tail)
-        return playable, secs, from_index + used
 
     def is_buffering(self, track_id: str) -> bool:
         """True if a track with this id is still in-flight in the served pool (an

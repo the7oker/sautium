@@ -2242,31 +2242,30 @@ def play_phantom_album(req: PlayPhantomAlbumRequest):
         }
 
     avail_q = [q for q, _ch in items]
-    tokens = proxy.start_session(items)        # priority-fetches track 0
+    tokens = proxy.start_session(items)        # the whole set queued, track 0 first
 
-    # Adaptive rolling buffer. Track 0 is fetched alone (full bandwidth) for the
-    # fastest safe start; its measured real-time factor sizes how much audio we
-    # pre-buffer before playing so transitions don't gap on a slow channel; the
-    # tail then streams in via a background filler that appends each track as it
-    # lands. The UI shows a buffering state until this returns.
+    # Adaptive rolling buffer. Track 0 lands first (the fetch pipe is sequential)
+    # for the fastest safe start; its measured real-time factor sizes how much
+    # audio we pre-buffer before playing so transitions don't gap on a slow
+    # channel; the tail then streams in via a background filler that appends
+    # each track as it lands. The UI shows a buffering state until this returns.
     try:
         proxy.wait_ready(tokens[0])
     except (TimeoutError, KeyError):
         pass
     rtf = proxy.fetch_rtf(tokens[0]) or 1.0
-    proxy.prefetch_from(1)                     # fan out the tail concurrently
     lead_target = _phantom_lead_seconds(rtf, avail_q)
 
     # Event-driven pre-buffer: block on each boundary track's ready event in
     # order until the contiguous buffered audio covers the lead (or the album
     # ends, or a track is too slow — then start with what we have).
-    prefix, buffered, next_index = proxy.ready_lead(0)
+    prefix, buffered, next_index = proxy.ready_run(tokens)
     while (not prefix or buffered < lead_target) and next_index < len(tokens):
         try:
             proxy.wait_ready(tokens[next_index], timeout=_PHANTOM_LEAD_TRACK_TIMEOUT)
         except (TimeoutError, KeyError):
             break
-        prefix, buffered, next_index = proxy.ready_lead(0)
+        prefix, buffered, next_index = proxy.ready_run(tokens)
 
     logger.info("phantom buffer: rtf=%.2f lead=%.0fs → start %d/%d (avail %d, missing %d)",
                 rtf, lead_target, len(prefix), len(queries), len(avail_q), len(missing))

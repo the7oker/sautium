@@ -1028,8 +1028,9 @@ class DlnaBackend(PlayerBackend):
             finally:
                 self._loading = False
 
-    def _unplayable_reason(self, skipped: int) -> str:
-        """Why a queue of adopted items has nothing this renderer can play.
+    def _unplayable_reason(self, first: int, skipped: int) -> str:
+        """Why slots ``first`` .. ``first + skipped - 1`` had nothing this
+        renderer could play.
 
         The two cases are not the same problem and must not read the same. A
         file UNDER the library root with no media_files row is an indexing gap
@@ -1042,7 +1043,7 @@ class DlnaBackend(PlayerBackend):
         norm = lambda p: p.replace("\\", "/").rstrip("/").lower()
         inside = outside = streamed = 0
         for i in range(skipped):
-            item = self._queue.item_at(self._index + i)
+            item = self._queue.item_at(first + i)
             src = (item.source or {}) if item else {}
             if src.get("kind") == "proxy":
                 streamed += 1
@@ -1083,7 +1084,7 @@ class DlnaBackend(PlayerBackend):
             # this library has no media_files row for, so no token can be
             # minted and no renderer but HQPlayer itself can be handed them.
             if skipped:
-                self._error = self._unplayable_reason(skipped)
+                self._error = self._unplayable_reason(index - skipped, skipped)
             self._emit_now("stopped")
             return False
         # url_override (a seek) carries the currently-playing stream's URL,
