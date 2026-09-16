@@ -28,6 +28,13 @@ a { color: inherit; text-decoration: none; }
    elements visible with empty content. */
 [hidden] { display: none !important; }
 
+/* The status strip (#noticeStrip) is fixed to the top of the viewport so
+   a phone waking mid-page still sees that the link is down. Its height is
+   the one measurement JS takes (a ResizeObserver in app-shell's init);
+   the page, the toast lane and programmatic scrolls start beneath it. */
+:root { --strip-h: 0px; }
+html { scroll-padding-top: var(--strip-h); }
+
 /* Chrome geometry is derived once, here, from the layout-mode variables
    in tokens.css and the two body states JS sets (has-miniplayer from
    mp.update(), no-fab from updateFabVisibility()). Every chrome element
@@ -53,6 +60,7 @@ body.sautium-base {
    clearance (body.no-fab): on a full-height screen (chat) the unused
    72px would push the document past the viewport. */
 #app {
+  padding-top: var(--strip-h);
   padding-bottom: calc(var(--chrome-bottom) + var(--fab-clear-active));
   padding-left: var(--nav-w);
   min-height: 100vh;
@@ -5730,16 +5738,18 @@ html, body { touch-action: manipulation; }
  * events at all — a tap goes to whatever is beneath, and the second tap
  * of a double-tap cannot land on it — and it is narrower than the screen
  * header so the corner buttons (back, menu) stay uncovered as well as
- * tappable. Only a toast with an action opts back in. Long-lived
- * conditions never float: the strip sits in flow above #app and pushes
- * it down, so nothing is ever covered for minutes.
+ * tappable. Only a toast with an action opts back in. A long-lived
+ * condition is the strip: fixed to the top of the viewport with #app
+ * reserving its height beneath it (--strip-h), so it covers nothing for
+ * minutes and stays in view at any scroll position; the toast lane
+ * starts beneath it.
  *
  * Layer: 300 — above the HQPlayer picker (200); <dialog> stays in the top
  * layer, and the queue defers toasts while one is open anyway.
  * ===================================================================== */
 .toast-stack {
   position: fixed;
-  top: calc(var(--safe-top) + 8 * var(--px));
+  top: calc(var(--safe-top) + var(--strip-h) + 8 * var(--px));
   left: var(--nav-w);
   right: var(--panel-w);           /* reserved desktop panel; 0 today */
   z-index: 300;
@@ -5830,10 +5840,18 @@ html, body { touch-action: manipulation; }
   .toast { transition: none; transform: none; }
 }
 
-/* The strip: in flow, pushes #app down, gone the moment the condition
-   ends. Starts right of the nav rail on the tablet. */
+/* The strip: fixed to the top of the viewport, so it stays in view at any
+   scroll position (a phone waking mid-page must still see the link is
+   down); #app reserves its height beneath it (--strip-h), so it covers
+   nothing. Gone the moment the condition ends. Starts right of the nav
+   rail on the tablet; above in-page pinned things (the filter bar, the
+   puck, the genre suggest list), beneath the chrome and every overlay. */
 .notice-strip {
-  margin-left: var(--nav-w);
+  position: fixed;
+  top: 0;
+  left: var(--nav-w);
+  right: var(--panel-w);
+  z-index: 40;
   padding: calc(9 * var(--px)) calc(20 * var(--px));
   background: var(--color-surface-lo);
   border-bottom: 1px solid var(--color-divider);
@@ -6771,8 +6789,8 @@ html, body { touch-action: manipulation; }
     grid-column: 1;
     grid-row: 1 / span 3;
     position: sticky;
-    top: var(--space-5);
-    max-height: calc(100dvh - var(--chrome-bottom) - 2 * var(--space-5));
+    top: calc(var(--strip-h) + var(--space-5));
+    max-height: calc(100dvh - var(--strip-h) - var(--chrome-bottom) - 2 * var(--space-5));
     overflow-y: auto;
     padding: 0;
   }

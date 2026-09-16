@@ -9832,8 +9832,9 @@
       setTimeout(() => { t.el.remove(); this._pump(); }, 220);
     },
 
-    /* A long-lived condition: shown in flow, never floating. Keyed, so
-       the party that raised it is the one that clears it. */
+    /* A long-lived condition: fixed to the top of the viewport, the page
+       reserving its height beneath it (--strip-h, measured in init).
+       Keyed, so the party that raised it is the one that clears it. */
     strip(key, html) {
       if (html) this._strips.set(key, html); else this._strips.delete(key);
       const el = document.getElementById('noticeStrip');
@@ -13307,6 +13308,13 @@
       notices.strip('link', e.detail && e.detail.up ? null
         : 'Connection to the node lost — reconnecting…');
     });
+    // The strip's height is the one measurement the frame takes: the page,
+    // the toast lane and programmatic scrolls start beneath it (CSS owns
+    // the rest). Re-read when the text wraps differently — a rotation.
+    const strip = document.getElementById('noticeStrip');
+    new ResizeObserver(() => {
+      document.documentElement.style.setProperty('--strip-h', `${strip.offsetHeight}px`);
+    }).observe(strip);
     window.addEventListener('sautium:notices-changed', () => {
       // Targeted updates only — the open screen keeps its DOM.
       const note = document.querySelector('[data-discography-pending]');

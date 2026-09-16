@@ -397,9 +397,12 @@ visual language:
   Only a toast **with** an action (`{ label, run }`) opts back into
   pointer events and gets a close button and a hover pause.
 - **`notices.strip(key, html | null)`** — a long-lived condition
-  (the link is down). In flow above `#app`, pushes it down, gone the
-  moment the party that raised it clears its key. Nothing long-lived
-  ever floats.
+  (the link is down). Fixed to the top of the viewport so it stays in
+  view at any scroll position (a phone waking mid-page must still see
+  it); `#app`, the toast lane and programmatic scrolls start beneath it
+  through `--strip-h`, the one measurement (a `ResizeObserver` in
+  `init`), so it covers nothing. Gone the moment the party that raised
+  it clears its key.
 - **The rows on Sync & P2P** — where the fact lives. Toasts are
   signals, not storage; a toast nobody saw costs nothing because the
   row and the guidance trail (`data-guide="notices"` on the More tab
