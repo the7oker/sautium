@@ -405,67 +405,22 @@ class ServiceManager:
             )
         env = self.backend_env(media_tool_dirs())
 
-        # Generate (or reuse) self-signed TLS cert. Browsers gate
-        # crypto.subtle behind a secure context, so HMAC request signing
-        # in the Web UI doesn't work over plain HTTP from a phone on LAN.
-        # Backend listens HTTPS-only.
-        #
-        # Cert lives under ~/.sautium/tls/<account-pubkey-prefix>/ rather
-        # than the per-install %APPDATA%\Sautium dir so a typical
-        # reinstall (which scrubs APPDATA + LOCALAPPDATA + the bundled
-        # Python) leaves the cert in place — the browser keeps the
-        # one-time trust decision. The pubkey-prefix subdir keeps
-        # different accounts on the same machine isolated. Path.home()
-        # resolves to %USERPROFILE% on Windows, $HOME on macOS / Linux,
-        # so the layout is identical cross-platform. Falls back to the
-        # legacy data-dir location if no account is set up yet (first
-        # launch of the wizard).
-        tls_dir = None
-        try:
-            from desktop.node_identity import has_account, get_account_info
-            if has_account():
-                acct = get_account_info() or {}
-                pub = (acct.get("public_key_hex") or "").lower()
-                if pub:
-                    tls_dir = Path.home() / ".sautium" / "tls" / pub[:16]
-        except Exception as e:
-            logger.debug(f"Account lookup for TLS dir failed: {e}")
-        if tls_dir is None:
-            from desktop.config_manager import get_data_dir
-            tls_dir = get_data_dir() / "tls"
-        tls_dir.mkdir(parents=True, exist_ok=True)
-        cert_path = tls_dir / "cert.pem"
-        key_path = tls_dir / "key.pem"
-
-        try:
-            subprocess.run(
-                [backend_python, str(self._backend_dir / "tls_gen.py"),
-                 "--data-dir", str(tls_dir)],
-                cwd=str(self._backend_dir),
-                env=env,
-                check=True,
-                capture_output=True,
-                text=True,
-            )
-            logger.info(f"TLS cert ready at {cert_path}")
-        except subprocess.CalledProcessError as e:
-            logger.error(f"TLS cert generation failed: {e.stderr or e.stdout}")
-            return False
-
+        # Plain HTTP (PROGRESS.md "HTTP on the LAN"): no certificate a phone
+        # would trust can exist for a LAN address, so there is none, and the
+        # credential exchange is boxed end to end instead.
         cmd = [
             backend_python, "-m", "uvicorn",
             "main:app",
             "--host", "0.0.0.0",
             "--port", str(port),
-            "--ssl-keyfile", str(key_path),
-            "--ssl-certfile", str(cert_path),
             "--timeout-graceful-shutdown", "5",
         ]
 
-        # The peer surface (backend/p2p_app.py) runs as a second uvicorn
-        # inside that process and mints its cert itself — point it at the
-        # same directory, or it would look for the container path.
-        env["SAUTIUM_TLS_DIR"] = str(tls_dir)
+        # The backend's own peer surface (p2p_app.py), when this install runs
+        # one, mints its pinned TLS cert itself — point it at the data dir, or
+        # it would look for the container path.
+        from desktop.config_manager import get_data_dir
+        env["SAUTIUM_TLS_DIR"] = str(get_data_dir() / "tls")
 
         # Ensure Windows Firewall allows LAN access
         self._ensure_firewall_rule(port)
@@ -580,15 +535,10 @@ class ServiceManager:
 
     def _wait_for_backend(self, port: int, timeout: int = 120) -> bool:
         """Wait for the backend /health endpoint to respond."""
-        import ssl
         import urllib.request
         import urllib.error
 
-        # Backend serves HTTPS with a self-signed cert (see start_backend).
-        ssl_ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
-        ssl_ctx.check_hostname = False
-        ssl_ctx.verify_mode = ssl.CERT_NONE
-        url = f"https://127.0.0.1:{port}/health"
+        url = f"http://127.0.0.1:{port}/health"
         for i in range(timeout):
             # Check if process died
             if self.backend_proc and self.backend_proc.poll() is not None:
@@ -596,7 +546,7 @@ class ServiceManager:
                 logger.error(f"Backend exited early: {err_msg}")
                 return False
             try:
-                req = urllib.request.urlopen(url, timeout=5, context=ssl_ctx)
+                req = urllib.request.urlopen(url, timeout=5)
                 if req.status == 200:
                     # Safety net behind the orphan sweep: a 200 from a
                     # process that is not our child means someone else owns

@@ -174,7 +174,7 @@ it completely:
 
    ~/.local/share/Sautium    database, logs, the app's own Python
    ~/.config/Sautium         settings and your account key
-   ~/.sautium                the certificate your browser trusted
+   ~/.sautium                the browser certificate of earlier versions
 """
 
 

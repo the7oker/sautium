@@ -4,6 +4,13 @@ Unauthenticated by necessity (a client with no token cannot sign yet), so
 every route here is either read-only about *how* to log in, or itself the
 credential check. See backend/device_auth.py for the model and for why the
 brute-force defences differ between password and PIN.
+
+Every route that carries a credential — a password or PIN in, a token out —
+speaks the boxed envelope (`BoxedRequest` in, `{nonce, box}` out): the Web UI
+rides plain HTTP, and the box is what keeps a LAN sniffer from reading the
+exchange. `GET /handshake` mints the server half of one exchange; the
+credential request that quotes it consumes it (device_auth "Credential
+channel").
 """
 
 import asyncio
@@ -11,7 +18,7 @@ import logging
 
 from fastapi import APIRouter, HTTPException
 from fastapi.responses import StreamingResponse
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, ValidationError
 
 import device_auth
 from auth_hmac import ensure_secret
@@ -42,6 +49,37 @@ class ChangeIdentityRequest(BaseModel):
     password: str = Field(default="", max_length=256)
 
 
+class BoxedRequest(BaseModel):
+    """One sealed credential exchange: the handshake it answers (`eph`), the
+    browser's own box key, and the nonce + ciphertext of the JSON payload."""
+    eph: str = Field(max_length=64)
+    client: str = Field(max_length=64)
+    nonce: str = Field(max_length=64)
+    box: str = Field(max_length=4096)
+
+
+def _open(req: BoxedRequest, model):
+    """The payload inside the box, validated as `model`, plus the reply
+    sealer. A box that does not open is a 400; a payload of the wrong shape
+    is the 422 the plain body used to get."""
+    try:
+        payload, reply = device_auth.unbox(req.eph, req.client, req.nonce, req.box)
+    except device_auth.ChannelError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    try:
+        return model.model_validate(payload), reply
+    except ValidationError as e:
+        raise HTTPException(status_code=422, detail=e.errors(include_url=False))
+
+
+@router.get("/handshake")
+async def handshake() -> dict:
+    """The server half of one credential exchange, signed by the node's
+    identity key so a browser that knows this node can tell it from something
+    answering in its place. Unsigned while the node has no identity yet."""
+    return device_auth.open_channel()
+
+
 @router.get("/status")
 async def auth_status() -> dict:
     """What this node accepts, so the UI knows which form to show. Says
@@ -68,7 +106,7 @@ class CreateAccountRequest(BaseModel):
 
 
 @router.post("/create-account")
-async def create_account(req: CreateAccountRequest) -> dict:
+async def create_account(boxed: BoxedRequest) -> dict:
     """First-run setup for a node with no identity — the Docker case, where
     there is no launcher to show a pairing code and no password to know.
 
@@ -79,6 +117,7 @@ async def create_account(req: CreateAccountRequest) -> dict:
 
     The account is the node's P2P identity, not a local login — so this also
     turns on sync, chat and analysis signing, which stay dark without one."""
+    req, reply = _open(boxed, CreateAccountRequest)
     try:
         # The check lives inside create_account, under its lock — testing it
         # out here as well would only re-open the race it exists to close.
@@ -90,30 +129,33 @@ async def create_account(req: CreateAccountRequest) -> dict:
     except Exception as e:
         logger.error(f"account creation failed: {e}")
         raise HTTPException(status_code=500, detail="could not create account")
-    return {"token": device_auth.current_token(_secret()),
-            "invite_code": info.get("invite_code"),
-            "username": info.get("username")}
+    return reply({"token": device_auth.current_token(_secret()),
+                  "invite_code": info.get("invite_code"),
+                  "username": info.get("username"),
+                  "public_key_hex": info.get("public_key_hex")})
 
 
 @router.post("/login")
-async def login(req: LoginRequest) -> dict:
+async def login(boxed: BoxedRequest) -> dict:
     """Exchange the account password for a device token."""
+    req, reply = _open(boxed, LoginRequest)
     if not await device_auth.verify_password(req.password):
         raise HTTPException(status_code=401, detail="invalid credentials")
-    return {"token": device_auth.current_token(_secret())}
+    return reply({"token": device_auth.current_token(_secret())})
 
 
 @router.post("/pair")
-async def pair(req: PairRequest) -> dict:
+async def pair(boxed: BoxedRequest) -> dict:
     """Exchange a host-displayed PIN for a device token. The PIN is one-shot;
     a wrong code costs one of MAX_PIN_ATTEMPTS."""
+    req, reply = _open(boxed, PairRequest)
     if not await device_auth.redeem_pin(req.code):
         raise HTTPException(status_code=401, detail="invalid or expired code")
-    return {"token": device_auth.current_token(_secret())}
+    return reply({"token": device_auth.current_token(_secret())})
 
 
 @router.post("/change-identity")
-async def change_identity(req: ChangeIdentityRequest) -> dict:
+async def change_identity(boxed: BoxedRequest) -> dict:
     """A new name and/or password. The name and the password are both KDF
     inputs, so either change IS a new key: friends are told by a notice the
     old key signed (P2P layer), a verified email has to be verified again
@@ -122,7 +164,9 @@ async def change_identity(req: ChangeIdentityRequest) -> dict:
     — this one gets a fresh token in the reply, like logout-all.
 
     Signature-protected (not whitelisted): only a paired browser or the
-    host can rotate."""
+    host can rotate. Boxed all the same — the new password goes in and the
+    new token comes out."""
+    req, reply = _open(boxed, ChangeIdentityRequest)
     username = req.username.strip()
     if not username:
         raise HTTPException(status_code=422, detail="Nickname required")
@@ -135,7 +179,7 @@ async def change_identity(req: ChangeIdentityRequest) -> dict:
     except RuntimeError as e:
         raise HTTPException(status_code=409, detail=str(e))
     from config import settings
-    return {
+    return reply({
         "token": device_auth.current_token(_secret()),
         "username": info["username"],
         "invite_code": info["invite_code"],
@@ -146,17 +190,22 @@ async def change_identity(req: ChangeIdentityRequest) -> dict:
         # node serves its peer surface from this process, bound to the key
         # it started with.
         "restart_required": not settings.p2p_listen_port,
-    }
+    })
+
+
+class EmptyPayload(BaseModel):
+    pass
 
 
 @router.post("/logout-all")
-async def logout_all() -> dict:
+async def logout_all(boxed: BoxedRequest) -> dict:
     """Invalidate every device token, including the caller's — then hand the
     caller a fresh one so the browser that pressed the button stays signed in.
     Requires a valid signature, so only an already-authenticated client (or
-    the host) can trigger it."""
+    the host) can trigger it. The fresh token rides back in the box."""
+    _, reply = _open(boxed, EmptyPayload)
     device_auth.bump_epoch()
-    return {"token": device_auth.current_token(_secret())}
+    return reply({"token": device_auth.current_token(_secret())})
 
 
 @router.get("/pin")

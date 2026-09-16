@@ -104,7 +104,7 @@ and asks about the others:
   %LOCALAPPDATA%\Programs\Sautium   this program: Python, git, the seed copy
   %LOCALAPPDATA%\Sautium            the app, database, logs, downloaded components
   %APPDATA%\Sautium                 settings and your account key
-  %USERPROFILE%\.sautium            the certificate your browser trusted
+  %USERPROFILE%\.sautium            the browser certificate of earlier versions
 
 Models (%USERPROFILE%\.cache\huggingface) and pip's cache are left alone.
 """

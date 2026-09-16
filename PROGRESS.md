@@ -733,6 +733,62 @@ either dropped or crossed their writes.
   and refuses (409) when the queue moved.
 - The browser knows a double-click: `e.detail > 1` on open/close toggles.
 
+### HTTP on the LAN (2026-09-17)
+
+The Web UI served HTTPS with a self-signed certificate, and every phone met
+the browser's interstitial first. Looking for a way around it ended in a
+structural answer: a certificate a stock phone trusts **cannot** exist for
+a LAN address. Public CAs may not issue for private addresses or `.local`
+(CA/B Forum Baseline Requirements, since 2015 — such a cert would be a
+skeleton key for every network on earth), a public name that resolves to
+a private address is what DNS-rebinding protection blocks by default on
+Fritz!Box, OpenWrt, pfSense/OPNsense and Unbound-with-Pi-hole setups
+(Plex lives with exactly this and falls back to plain HTTP), a private CA
+on the phone is a worse first run than the warning, and the phone has no
+hosts file. The industry's answer for LAN appliances (Jellyfin, Navidrome,
+Home Assistant, Volumio) is plain HTTP, with TLS only through a name the
+user brings.
+
+- **HTTPS was never a security requirement here.** It existed because
+  `crypto.subtle`, which the request signer used for HMAC, is withheld
+  from an http origin. The signer never needed the transport — the token
+  never travels, only signatures with a 60 s life. `sha256.js` (plain-JS
+  SHA-256 + HMAC, checked against hashlib) replaced the Web Crypto call
+  and HTTPS became optional; then it went, because a self-signed listener
+  adds a warning and no protection.
+- **Credentials get their own envelope.** The exchanges that DO carry a
+  secret — password or PIN in, the device token out, on login, pair,
+  create-account, logout-all and change-identity — ride a NaCl box
+  (tweetnacl in the browser, PyNaCl on the node) to a per-exchange X25519
+  key that `GET /api/auth/handshake` mints and the credential request
+  consumes: no replay, no key that outlives its exchange, and nothing a
+  listener on the Wi-Fi can read. The handshake is signed by the node's
+  identity key; the browser pins that identity on its first sign-in
+  (`sautium.node_pubkey` in localStorage) and, when a different one
+  answers later, the gate asks before going on — SSH's known_hosts as a
+  dialog. What stays out of scope is an active attacker present at a
+  browser's very first sign-in, exactly as with SSH.
+- **What is accepted.** API and media traffic on the LAN is readable by a
+  device on the same network; the threat model already drew the bar at
+  "no random scanner", not "no targeted LAN attacker" (SECURITY.md).
+  Secure-context APIs are gone on the http origin: `navigator.clipboard`
+  got an `execCommand` fallback (`copyText`), `crypto.randomUUID` already
+  had one, service workers were never available on the bypassed cert
+  either. A microphone (`getUserMedia`) for the voice roadmap will need
+  the TLS front below.
+- **TLS is a deployment front with a real name**, never a `tls_gen` job:
+  `tailscale serve` terminates with a real Let's Encrypt cert for the
+  `.ts.net` name and proxies to the HTTP port (MagicDNS resolves it on
+  the phone, no router in the chain — the one reliable path, and free);
+  a reverse proxy does the same on a LAN. The name goes in
+  `SAUTIUM_ALLOWED_HOSTS` for the Host guard. `tls_gen.py` shrank to the
+  Docker peer-surface cert (pinned to the node key, static SAN), the
+  launcher no longer mints a certificate, `~/.sautium/tls` of earlier
+  installs is just a leftover.
+- **Found on the way:** `portmap._serves_web_ui` still looked for the
+  inlined-secret marker of the 2026-08 page, so it recognised no port as
+  the Web UI; it now reads the `sautium-webui` health type.
+
 ## Known Gotchas
 
 - **A dead SSE socket is silent, and painting its death is a UI lie.** Two

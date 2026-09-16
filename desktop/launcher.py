@@ -185,14 +185,6 @@ class LauncherApp(ctk.CTk):
         ctk.CTkLabel(placeholder, text="", width=QR_SIZE, height=QR_SIZE).pack()
         ctk.CTkLabel(placeholder, text="", font=ctk.CTkFont(size=11)).pack()
 
-        # First-visit hint about self-signed certificate. Hidden until
-        # services are running — see _on_services_ready.
-        self._url_hint_label = ctk.CTkLabel(
-            self, text="", text_color="gray",
-            font=ctk.CTkFont(size=11),   # matches the QR captions below it
-        )
-        self._url_hint_label.pack(pady=(0, 5))
-
         # Buttons
         btn_frame = ctk.CTkFrame(self, fg_color="transparent")
         btn_frame.pack(fill="x", padx=20, pady=5)
@@ -407,9 +399,6 @@ class LauncherApp(ctk.CTk):
             gpu_text = "GPU: check failed"
 
         self._set_status("running", "All services running")
-        self._url_hint_label.configure(
-            text="First visit shows a browser security warning — accept it to continue (self-signed cert)."
-        )
         self._btn_open.configure(state="normal")
         self._btn_scan.configure(state="normal", text=self._scan_button_label())
         self._folder_caption.configure(text=self._folder_caption_text())
@@ -551,11 +540,11 @@ class LauncherApp(ctk.CTk):
             widget = self._qr_labels.get(caption)
             if widget is None:
                 continue
-            img = generate_qr_ctk(f"https://{ip}:{port}/{fragment}", size=QR_SIZE)
+            img = generate_qr_ctk(f"http://{ip}:{port}/{fragment}", size=QR_SIZE)
             if img:
                 widget.configure(image=img, text="")
             else:
-                widget.configure(text=f"Scan: https://{ip}:{port}")
+                widget.configure(text=f"Scan: http://{ip}:{port}")
 
         # Redraw at 80% of the code's life, so what is on screen is never the
         # code that just died.
@@ -905,7 +894,7 @@ class LauncherApp(ctk.CTk):
             self._progress_text.configure(
                 text="No pairing code — the browser will ask for your password")
             self.after(8000, lambda: self._progress_text.configure(text=""))
-        webbrowser.open(f"https://localhost:{port}/{fragment}")
+        webbrowser.open(f"http://localhost:{port}/{fragment}")
 
     def _scan_button_label(self) -> str:
         """The button picks a folder first and scans second. Before any

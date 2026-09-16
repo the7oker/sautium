@@ -3074,7 +3074,7 @@ class P2PManager:
         port = self.config.get("ports", {}).get("web", 0)
         if not port:
             return None
-        return BackendAPIClient(f"https://127.0.0.1:{port}")
+        return BackendAPIClient(f"http://127.0.0.1:{port}")
 
     def _load_p2p_bans(self) -> tuple[set, set]:
         """Local ban list: (pubkeys, addr uuids). The pubkey ban is the

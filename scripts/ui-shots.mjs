@@ -41,7 +41,7 @@ import { join, resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
 
 const DEFAULTS = {
-  url: 'https://localhost:8800',
+  url: 'http://localhost:8800',
   out: 'tmp/ui-shots',
   widths: '360x800,834x1194,1194x834,1280x800,1440x900',
   routes: [
@@ -178,7 +178,7 @@ function launchChrome(chromePath, libs) {
   }
   const proc = spawn(chromePath, [
     '--headless=new', '--no-sandbox', '--disable-gpu', '--disable-dev-shm-usage',
-    '--ignore-certificate-errors', '--hide-scrollbars', '--no-first-run',
+    '--hide-scrollbars', '--no-first-run',
     '--no-default-browser-check', `--user-data-dir=${userData}`,
     '--remote-debugging-port=0', '--window-size=1440,900', 'about:blank',
   ], { env, stdio: ['ignore', 'ignore', 'pipe'] });

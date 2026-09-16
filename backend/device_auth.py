@@ -27,6 +27,13 @@ is bound to an origin, so a rebinding attacker on evil.com opens *their own*
 empty storage. The vector that made the inlined secret reachable from the
 internet closes on its own.
 
+THE WIRE. The Web UI rides plain HTTP on the LAN (PROGRESS.md "HTTP on the
+LAN"), so the transport hides nothing. Every exchange that carries a
+credential — a password or PIN in, a device token out — is boxed end to end
+instead (NaCl box: X25519 + XSalsa20-Poly1305) between the browser and a
+per-exchange server key that the node's identity key signs. See "Credential
+channel" below.
+
 BRUTE FORCE. The two doors need different locks:
   * PIN — small enough to guess, so it expires in minutes, dies after
     MAX_PIN_ATTEMPTS, and every check passes through a lock. Sleeping
@@ -39,12 +46,14 @@ BRUTE FORCE. The two doors need different locks:
 """
 
 import asyncio
+import base64
 import hmac
+import json
 import logging
 import secrets
 import threading
 import time
-from typing import Optional
+from typing import Callable, Optional
 
 logger = logging.getLogger(__name__)
 
@@ -439,3 +448,103 @@ async def redeem_pin(code: str) -> bool:
         # which used to walk the counter to the edge of the limit for free.
         _pin["attempts"] = 0
         return True
+
+
+# ---------------------------------------------------------------------------
+# Credential channel
+# ---------------------------------------------------------------------------
+#
+# A browser and this node agree on a box key for ONE exchange: /handshake
+# mints an X25519 key, the credential request quotes its public half and
+# consumes it. A recorded exchange therefore cannot be replayed and no key
+# outlives the exchange it was minted for. The handshake carries the node's
+# identity signature over the key, so a browser that already knows this node
+# (auth.js pins the identity key on first sign-in) can tell the node from
+# something answering in its place — trust on first use, as SSH does it.
+# Without an identity (first-run setup) the handshake goes out unsigned: the
+# node has no owner yet, and whoever sets it up becomes one.
+
+CHANNEL_TTL_SECONDS = 120
+# Outstanding handshakes. A LAN can fill this, never memory; the oldest goes.
+CHANNEL_CAP = 64
+_CHANNEL_CONTEXT = b"sautium-pair:v1"
+
+_channels: dict = {}                 # eph pubkey bytes → (PrivateKey, expires_at)
+_channels_lock = threading.Lock()
+
+
+class ChannelError(Exception):
+    """The envelope does not open: unknown or expired handshake, a box that
+    fails to authenticate, or a payload that is not a JSON object."""
+
+
+def open_channel() -> dict:
+    """Mint the server half of one exchange. The browser answers with a box
+    to `eph`; `sig` is the identity key's signature over
+    context || eph || expires (big-endian seconds), empty without identity."""
+    from nacl.public import PrivateKey
+
+    from config import settings
+    from p2p_identity import load_signing_key
+
+    key = PrivateKey.generate()
+    pub = bytes(key.public_key)
+    expires = int(time.time()) + CHANNEL_TTL_SECONDS
+    with _channels_lock:
+        now = time.time()
+        for stale in [k for k, (_, exp) in _channels.items() if exp < now]:
+            del _channels[stale]
+        while len(_channels) >= CHANNEL_CAP:
+            del _channels[next(iter(_channels))]        # insertion order = age
+        _channels[pub] = (key, expires)
+    signing_key = load_signing_key(settings)
+    signed = _CHANNEL_CONTEXT + pub + expires.to_bytes(8, "big")
+    return {
+        "eph": base64.b64encode(pub).decode("ascii"),
+        "expires": expires,
+        "node_pubkey": _expected_pubkey() or "",
+        "sig": signing_key.sign(signed).hex() if signing_key is not None else "",
+    }
+
+
+def unbox(eph: str, client: str, nonce: str, box: str
+          ) -> tuple[dict, Callable[[dict], dict]]:
+    """Open a boxed credential request. Returns (payload, reply): the JSON
+    object the browser sealed, and a function that seals an answer to the
+    same client key. The server key is consumed here, whatever the request
+    then turns out to be worth — a wrong password costs a new handshake."""
+    from nacl.exceptions import CryptoError
+    from nacl.public import Box, PublicKey
+    from nacl.utils import random as nacl_random
+
+    try:
+        eph_raw = base64.b64decode(eph, validate=True)
+        client_key = PublicKey(base64.b64decode(client, validate=True))
+        nonce_raw = base64.b64decode(nonce, validate=True)
+        sealed = base64.b64decode(box, validate=True)
+    except (ValueError, TypeError):
+        raise ChannelError("malformed envelope")
+    with _channels_lock:
+        entry = _channels.pop(eph_raw, None)
+    if entry is None or entry[1] < time.time():
+        raise ChannelError("unknown or expired handshake")
+    channel = Box(entry[0], client_key)
+    try:
+        plain = channel.decrypt(sealed, nonce_raw)
+    except CryptoError:
+        raise ChannelError("box does not open")
+    try:
+        payload = json.loads(plain.decode("utf-8"))
+    except ValueError:
+        raise ChannelError("payload is not JSON")
+    if not isinstance(payload, dict):
+        raise ChannelError("payload is not an object")
+
+    def reply(obj: dict) -> dict:
+        reply_nonce = nacl_random(Box.NONCE_SIZE)
+        sealed_reply = channel.encrypt(
+            json.dumps(obj).encode("utf-8"), reply_nonce).ciphertext
+        return {"nonce": base64.b64encode(reply_nonce).decode("ascii"),
+                "box": base64.b64encode(sealed_reply).decode("ascii")}
+
+    return payload, reply

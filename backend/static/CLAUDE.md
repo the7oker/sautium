@@ -233,10 +233,15 @@ it before touching UI routing or screen layout.
 
 The top-down rebuild against the new design system and information
 architecture is **done**, and the legacy single-file prototype
-`app.js` is **gone**. The frontend is now three files in
+`app.js` is **gone**. The frontend is these files in
 `backend/static/`, loaded by `index.html` in this order:
 
-- **`auth.js`** — HMAC `fetch` monkey-patch (see Security Posture).
+- **`vendor/nacl-fast.min.js`** (TweetNaCl.js, public domain, vendored
+  verbatim) and **`sha256.js`** — the primitives `auth.js` needs on a
+  plain-HTTP origin, where `crypto.subtle` does not exist.
+- **`auth.js`** — HMAC `fetch` monkey-patch, the boxed credential
+  exchange (handshake → sealed login/pair → sealed token) with the
+  node-identity pin, and the login gate (see Security Posture).
 - **`app-shell.js`** — the bulk of the app: hash routing (`render`,
   `navigateToEntity`, `registerScreen`), every screen renderer (Home,
   Discovery, Artist/Album/Genre detail, Friends, chat, Now Playing,

@@ -356,7 +356,7 @@ below bind with or without it.
    None of these ports may ever be UPnP-forwarded or otherwise exposed
    beyond the LAN.
    The browser output adds NO new port: `<audio>` media rides the
-   existing HTTPS origin at `/api/player/media/{kind}/{id}` behind
+   Web UI origin at `/api/player/media/{kind}/{id}` behind
    short-lived signed query params (`backend/media_urls.py`, 4 h TTL,
    HMAC from the same shared secret) because audio elements can't set
    the signing headers — that prefix is whitelisted in `auth_hmac.py`
@@ -414,27 +414,41 @@ below bind with or without it.
    bugs, user clicks "Public" by mistake) — a profile-locked rule
    would silently break phone access at the worst moment. The
    bind-address layer is enough.
-8. **TLS cert SAN — only private IPs.** `backend/tls_gen.py`
-   filters auto-detected and explicit (`SAUTIUM_HOST_IPS` env)
-   addresses through `ipaddress.ip_address().is_private`. Never
-   add a public IP or DNS name to the SAN — a valid cert for a
-   public hostname would make accidental internet exposure feel
-   "safe" when it isn't (HMAC + LAN bind are still the actual
-   defence). Static SAN entries: `localhost`, `host.docker.internal`,
-   `127.0.0.1`, `::1`. Cert lives in `data/tls/` (Docker bind-mount)
-   or `<launcher data_dir>/tls/` (launcher mode); the two runtimes
-   are isolated and have separate certs — phone accepts one warning
-   per mode, then both stick.
+8. **The Web UI is plain HTTP — no browser certificate, ever.**
+   A certificate a stock phone trusts cannot exist for a LAN address
+   (public CAs may not issue one since 2015; a public name resolving
+   to a private address is blocked by Fritz!Box/OpenWrt/pfSense-class
+   routers), and the self-signed one only produced the warning that
+   this replaced (PROGRESS.md § "HTTP on the LAN", 2026-09-17). What
+   protects the credentials instead is the boxed exchange in
+   `device_auth.py` ("Credential channel") + `auth.js`: password or
+   PIN in and the token out ride a NaCl box to a per-exchange key the
+   node's identity signs, and the browser pins that identity on first
+   sign-in (a different one raises the known-hosts dialog). Signing
+   itself never needed the transport — the token never travels. Do
+   not add a self-signed listener back "for security": it adds a
+   warning and no protection the box does not give. TLS for the Web
+   UI is a deployment front with a real name (Tailscale Serve, a
+   reverse proxy) in front of the HTTP port, its name listed in
+   `SAUTIUM_ALLOWED_HOSTS`. `backend/tls_gen.py` now mints only the
+   Docker peer-surface cert (pinned to the node key; the SAN is static
+   because peers never read it), and the launcher never generates a
+   certificate for the backend. Secure-context browser APIs
+   (`crypto.subtle`, `navigator.clipboard`, `getUserMedia`, service
+   workers) are unavailable on the http origin: HMAC comes from
+   `sha256.js`, copy has an `execCommand` fallback, and a microphone
+   for the voice roadmap will need the TLS front.
 
 **Before any public release, multi-user deployment, or remote-access
 feature** (Tailscale exposure, "headless mode", reverse proxy), the
-rules above are no longer sufficient. HMAC + HTTPS as currently
-deployed are LAN-only by design: the cert is self-signed, and a node
-has exactly ONE account — device tokens tell browsers apart, never
-people, so there is nothing to grant, revoke or audit per user.
-Public exposure needs: real per-user credentials, a CA-signed cert
-(Let's Encrypt or similar), and a token lifetime shorter than
-"forever, until someone bumps the epoch". Revisit this section then.
+rules above are no longer sufficient. HMAC over plain HTTP as
+currently deployed is LAN-only by design: a node has exactly ONE
+account — device tokens tell browsers apart, never people, so there
+is nothing to grant, revoke or audit per user. Public exposure needs:
+real per-user credentials, TLS from a front with a real name
+(Tailscale Serve, a reverse proxy, a CA-signed cert), and a token
+lifetime shorter than "forever, until someone bumps the epoch".
+Revisit this section then.
 
 ---
 
@@ -497,6 +511,7 @@ toast takes no pointer events and never blocks the user (see
 | `backend/playback/` | Output-backend abstraction: PlaybackManager + canonical queue, HQPlayer backend, play tracker, listening sessions (HARDWARE-TIERS §2.6) |
 | `backend/lastfm.py` | Last.fm enrichment + bio-derived classifiers |
 | `backend/assistant_prompt.py` | System prompt + schema description for Claude Code + API variants |
+| `backend/device_auth.py` | Device tokens (derived from the epoch + node key, never stored) and the boxed credential channel every login/pair/create-account/logout-all/change-identity exchange rides — the Web UI has no TLS (rule 8) |
 | `desktop/agent_login.py` | Headless CLI sign-in driver (`claude auth login`, `codex login [--device-auth]` over pipes) shared by the wizard and the backend's `/api/settings/ai/<agent>/signin` — no console, completion is an event |
 | `backend/ensemble_instruments.py` | AST + PaSST instrument multi-label tagger (replaces CLAP zero-shot) |
 | `docs/design/POSITIONING.md` | Product positioning + UI design principles (source of truth) |

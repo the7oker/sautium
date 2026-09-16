@@ -75,7 +75,7 @@ class Settings(BaseSettings):
     # modules). On by default: YouTube ships with the distribution and must
     # work out of the box on every node — disabling is an explicit override.
     # The media proxy is a SEPARATE plain-http server (HQPlayer can't sign
-    # HMAC nor trust the backend's self-signed TLS) on its own port.
+    # HMAC) on its own port.
     # advertised_host is the address HQPlayer puts in the URL: 127.0.0.1 works
     # single-machine (Docker publishes the port to the host; launcher runs
     # native) — a real IP is only needed if HQPlayer is remote.

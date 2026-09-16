@@ -10,21 +10,24 @@ where:
 
     canonical = METHOD + "\n" + PATH_AND_QUERY + "\n" + TS + "\n" + sha256_hex(body)
 
-The shared secret lives beside the node's identity (``<identity dir>/
-.api_secret``, 32 bytes, mode 0600) — it is part of who this node IS, not
-of the code it runs. It used to sit in ``backend/data/`` inside the checkout,
-which made it survive deleting the node and made the launcher and Docker
-nodes on one machine share a credential (compose bind-mounts ./backend);
-the file is created on first startup if missing. Native launcher
-clients and the JS frontend read the same file (frontend gets it
-inlined into the HTML at GET / so it never travels through a
-separate fetch).
+The server secret lives beside the node's identity (``<identity dir>/
+.api_secret``, 32 bytes) — it is part of who this node IS, not of the code
+it runs. It used to sit in ``backend/data/`` inside the checkout, which made
+it survive deleting the node and made the launcher and Docker nodes on one
+machine share a credential (compose bind-mounts ./backend); the file is
+created on first startup if missing. Callers on the host (launcher, MCP
+server) read it and sign with it directly; a browser signs with the DEVICE
+TOKEN it earned through routers/auth.py (device_auth.py has the model).
+
+The Web UI rides plain HTTP on the LAN. Signing does not need the transport
+(the key never travels — only signatures with a 60 s life), and the one
+exchange that does carry a credential, earning the token, is boxed end to
+end by device_auth's credential channel.
 
 Whitelisted paths (no signature required):
 
     /health              (Docker healthcheck)
-    /                    (HTML root — must be unauthenticated so the
-                          page can load and read the inlined secret)
+    /                    (HTML root — the page carries no key)
     /static/*            (CSS, JS, fonts)
     /api/covers/*        (album cover art — loaded via <img src>,
                           which cannot attach custom headers)
@@ -32,6 +35,7 @@ Whitelisted paths (no signature required):
                           own Ed25519 auth in sync_server.py)
     /sync/*              (legacy P2P sync)
     /api/p2p/chat/wake   (loopback-only "ping" from sync_server)
+    /api/auth/*          (the credential checks themselves — see below)
 
 Replay window: ±60 seconds. A request older than 60s or 60s in the
 future is rejected even with a valid signature.
@@ -74,6 +78,7 @@ WHITELIST_EXACT = {
     # /create-account only answers while the node has no identity at all
     # (first-run setup) and refuses every call after that.
     "/api/auth/status",
+    "/api/auth/handshake",
     "/api/auth/login",
     "/api/auth/pair",
     "/api/auth/create-account",

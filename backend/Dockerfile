@@ -156,9 +156,8 @@ EXPOSE 19001/udp
 ENV PYTHONUNBUFFERED=1
 ENV PYTHONDONTWRITEBYTECODE=1
 
-# Health check (HTTPS, self-signed — -k skips cert verification)
 HEALTHCHECK --interval=30s --timeout=10s --start-period=40s --retries=3 \
-    CMD curl -f -k https://localhost:8000/ || exit 1
+    CMD curl -f http://localhost:8000/ || exit 1
 
 # Default command (can be overridden in docker-compose.yml)
 CMD ["python", "entrypoint.py"]

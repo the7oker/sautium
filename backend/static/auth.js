@@ -1,8 +1,8 @@
-// Sautium request signing.
+// Sautium request signing and the credential channel.
 //
 // Every privileged request to the backend carries:
 //   X-Sautium-Ts   unix seconds
-//   X-Sautium-Sig  hex(HMAC-SHA256(secret, METHOD\nPATH_AND_QUERY\nTS\nsha256_hex(body)))
+//   X-Sautium-Sig  hex(HMAC-SHA256(token, METHOD\nPATH_AND_QUERY\nTS\nsha256_hex(body)))
 //
 // The signing key is a DEVICE TOKEN this browser earned once — by the
 // account password or a pairing PIN shown on the host — and keeps in
@@ -12,6 +12,15 @@
 //
 // localStorage is bound to an origin, which is the point: a rebinding
 // attacker on evil.com opens their own empty storage.
+//
+// The page rides plain HTTP on the LAN (PROGRESS.md "HTTP on the LAN"), so
+// the transport hides nothing, and two things follow. HMAC comes from
+// sha256.js rather than crypto.subtle, which browsers withhold from an http
+// origin. And every exchange that carries a credential — password or PIN
+// in, token out — is boxed end to end (tweetnacl, vendor/) to a
+// per-exchange server key that the node's identity key signs; the browser
+// pins that identity on its first sign-in and, when a different one answers
+// later, asks before going on (SSH's known_hosts, as a dialog).
 //
 // This module:
 //   • monkey-patches window.fetch so all in-app calls auto-sign,
@@ -27,9 +36,11 @@
 
 (function () {
   const TOKEN_KEY = "sautium.device_token";
+  // The identity key of the node this browser signed in to (hex).
+  const NODE_KEY = "sautium.node_pubkey";
   const enc = new TextEncoder();
-  let _key = null;
-  let _keyToken = "";          // the token _key was imported from
+  const dec = new TextDecoder();
+  const { sha256, hmacSha256, toHex } = window.Sautium.hash;
 
   function storedToken() {
     try {
@@ -44,53 +55,20 @@
       if (tok) localStorage.setItem(TOKEN_KEY, tok);
       else localStorage.removeItem(TOKEN_KEY);
     } catch { /* nothing to do — auth degrades to "log in every load" */ }
-    _key = null;               // force re-import on next signature
-    _keyToken = "";
   }
 
-  // Storage is read on every signature, and the imported key is a cache OF
-  // that read rather than a copy that outlives it. localStorage belongs to
-  // the origin, not to this tab: a second tab redeeming a pairing link
-  // replaces the token underneath us, and a key kept from before that point
-  // signs requests the server correctly rejects — which was then read as
-  // "the token is dead" and logged every tab out, the freshly paired one
-  // included.
-  //
-  // Returns {key, token} — the pair, never the key alone, so a signature
-  // stays attributable to the token that made it even when a concurrent
-  // request re-imports the cache in between.
-  async function getKey() {
-    const tok = storedToken();
-    if (!tok) {
-      _key = null;
-      _keyToken = "";
-      return null;
+  function pinnedNode() {
+    try {
+      return localStorage.getItem(NODE_KEY) || "";
+    } catch {
+      return "";
     }
-    if (_key && _keyToken === tok) return { key: _key, token: tok };
-    const key = await crypto.subtle.importKey(
-      "raw",
-      enc.encode(tok),
-      { name: "HMAC", hash: "SHA-256" },
-      false,
-      ["sign"]
-    );
-    _key = key;
-    _keyToken = tok;
-    return { key, token: tok };
   }
 
-  function toHex(buf) {
-    const arr = new Uint8Array(buf);
-    let s = "";
-    for (let i = 0; i < arr.length; i++) {
-      s += arr[i].toString(16).padStart(2, "0");
-    }
-    return s;
-  }
-
-  async function sha256Hex(bytes) {
-    const buf = await crypto.subtle.digest("SHA-256", bytes);
-    return toHex(buf);
+  function pinNode(pubkey) {
+    try {
+      localStorage.setItem(NODE_KEY, pubkey);
+    } catch { /* no storage — the next sign-in is a first sign-in again */ }
   }
 
   // Returns Uint8Array view of the body for hashing.
@@ -108,18 +86,23 @@
     throw new Error("Sautium auth: unsupported body type " + typeof body);
   }
 
+  // Storage is read on every signature. localStorage belongs to the origin,
+  // not to this tab: a second tab redeeming a pairing link replaces the
+  // token underneath us, and a signature made with the old one is one the
+  // server correctly rejects — which was then read as "the token is dead"
+  // and logged every tab out, the freshly paired one included.
+  //
+  // Returns {ts, sig, token} — the token rides with the signature, so a
+  // signature stays attributable to the token that made it even when
+  // storage changes in between.
   async function signRequest(method, pathAndQuery, body) {
-    const signer = await getKey();
-    if (!signer) return null;  // not paired yet — send the request unsigned
+    const token = storedToken();
+    if (!token) return null;   // not paired yet — send the request unsigned
     const ts = Math.floor(Date.now() / 1000).toString();
-    const bodyHash = await sha256Hex(await bodyBytes(body));
+    const bodyHash = toHex(sha256(await bodyBytes(body)));
     const canonical = `${method}\n${pathAndQuery}\n${ts}\n${bodyHash}`;
-    const sigBuf = await crypto.subtle.sign("HMAC", signer.key,
-                                            enc.encode(canonical));
-    // The token rides back with the signature: a 401 has to be attributable
-    // to the key that actually produced it, not to whatever is in storage by
-    // the time the answer lands.
-    return { ts, sig: toHex(sigBuf), token: signer.token };
+    const sig = toHex(hmacSha256(enc.encode(token), enc.encode(canonical)));
+    return { ts, sig, token };
   }
 
   // -- fetch override --------------------------------------------------------
@@ -204,74 +187,137 @@
     return resp;
   };
 
+  // -- credential channel ----------------------------------------------------
+
+  // One exchange: GET /handshake hands out the server half of a box key,
+  // signed by the node's identity; the request that answers it is sealed to
+  // that key and consumes it, and the reply comes back sealed to ours.
+  // Nothing about the transport is relied on. See device_auth.py.
+
+  const b64 = (bytes) => btoa(String.fromCharCode.apply(null, bytes));
+  const unb64 = (s) => Uint8Array.from(atob(s), (c) => c.charCodeAt(0));
+  const unhex = (h) => Uint8Array.from(h.match(/../g) || [], (b) => parseInt(b, 16));
+
+  // The node answering on this address is not the one this browser signed
+  // in to. Raised from the handshake; the gate turns it into a question.
+  class NodeChanged extends Error {
+    constructor(seen) {
+      super("node identity changed");
+      this.seen = seen;
+    }
+  }
+
+  async function handshake() {
+    const r = await _origFetch("/api/auth/handshake", { cache: "no-store" });
+    if (!r.ok) throw new Error("handshake HTTP " + r.status);
+    const hs = await r.json();
+    const eph = unb64(hs.eph);
+    if (hs.node_pubkey) {
+      const expires = new Uint8Array(8);
+      new DataView(expires.buffer).setBigUint64(0, BigInt(hs.expires));
+      const signed = new Uint8Array([
+        ...enc.encode("sautium-pair:v1"), ...eph, ...expires]);
+      if (!nacl.sign.detached.verify(signed, unhex(hs.sig), unhex(hs.node_pubkey))) {
+        throw new Error("handshake signature invalid");
+      }
+    }
+    // A pinned identity the answer does not carry — a different key, or no
+    // key where a signed one is expected — is the case the pin exists for.
+    const pinned = pinnedNode();
+    if (pinned && pinned !== hs.node_pubkey) throw new NodeChanged(hs.node_pubkey);
+    return { eph, ephB64: hs.eph, nodePubkey: hs.node_pubkey };
+  }
+
+  // POST `payload` sealed to a fresh handshake and open the sealed reply.
+  // `viaSigned` sends it through the signing wrapper, for the routes that
+  // want a signature on top of the box (logout-all, change-identity).
+  // Resolves {ok:true, data, nodePubkey} or {ok:false, status, resp}.
+  async function boxedPost(path, payload, viaSigned) {
+    const hs = await handshake();
+    const kp = nacl.box.keyPair();
+    const nonce = nacl.randomBytes(nacl.box.nonceLength);
+    const sealed = nacl.box(enc.encode(JSON.stringify(payload)), nonce,
+                            hs.eph, kp.secretKey);
+    const r = await (viaSigned ? fetch : _origFetch)(path, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ eph: hs.ephB64, client: b64(kp.publicKey),
+                             nonce: b64(nonce), box: b64(sealed) }),
+    });
+    if (!r.ok) return { ok: false, status: r.status, resp: r };
+    const env = await r.json();
+    const plain = nacl.box.open(unb64(env.box), unb64(env.nonce), hs.eph, kp.secretKey);
+    if (!plain) throw new Error("reply box does not open");
+    return { ok: true, data: JSON.parse(dec.decode(plain)), nodePubkey: hs.nodePubkey };
+  }
+
+  async function errorDetail(r, fallback) {
+    try {
+      return (await r.resp.json()).detail || fallback;
+    } catch {
+      return fallback;
+    }
+  }
+
   // -- login surface ---------------------------------------------------------
 
   // status / login / pair / create-account go out through the ORIGINAL fetch.
   // They are whitelisted server-side (a client with no token cannot sign), and
   // the wrapper would make them wait on a boot that is waiting on them.
+  //
+  // login / pair / createAccount resolve false (or a message) on a refusal
+  // and throw NodeChanged when the node answering is not the one this
+  // browser knows; the gate asks the user and retries.
   window.Sautium = window.Sautium || {};
   window.Sautium.auth = {
     hasToken: () => !!storedToken(),
     forget: () => setToken(""),
     status: async () => (await _origFetch("/api/auth/status")).json(),
+    // The gate's answer to NodeChanged: this is the node from now on.
+    acceptNode: (pubkey) => pinNode(pubkey),
     async login(password) {
-      const r = await _origFetch("/api/auth/login", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ password }),
-      });
+      const r = await boxedPost("/api/auth/login", { password });
       if (!r.ok) return false;
-      setToken((await r.json()).token);
+      setToken(r.data.token);
+      pinNode(r.nodePubkey);
       return true;
     },
     async createAccount(username, password) {
-      const r = await _origFetch("/api/auth/create-account", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ username, password }),
-      });
-      if (r.ok) { setToken((await r.json()).token); return true; }
+      const r = await boxedPost("/api/auth/create-account", { username, password });
+      if (r.ok) {
+        setToken(r.data.token);
+        pinNode(r.data.public_key_hex);
+        return true;
+      }
       if (r.status === 409) return "This node already has an account — reload.";
       if (r.status === 422) return "Nickname: 3-32 Latin letters, digits, - or _. Password: 8+ characters.";
-      try {
-        return (await r.json()).detail || "Could not create the account.";
-      } catch { return "Could not create the account."; }
+      return errorDetail(r, "Could not create the account.");
     },
     async pair(code) {
-      const r = await _origFetch("/api/auth/pair", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ code }),
-      });
+      const r = await boxedPost("/api/auth/pair", { code });
       if (!r.ok) return false;
-      setToken((await r.json()).token);
+      setToken(r.data.token);
+      pinNode(r.nodePubkey);
       return true;
     },
     async logoutEverywhere() {
       // The server hands back a fresh token so the browser that pressed the
       // button is not logged out by its own action.
-      const r = await fetch("/api/auth/logout-all", { method: "POST" });
+      const r = await boxedPost("/api/auth/logout-all", {}, true);
       if (!r.ok) return false;
-      setToken((await r.json()).token);
+      setToken(r.data.token);
       return true;
     },
     async changeIdentity(username, password) {
       // A new name or password is a new key, and the token is bound to the
       // key — every paired browser is out, this one takes the fresh token
-      // from the same reply. Returns the reply, or {ok:false, error}.
-      const r = await fetch("/api/auth/change-identity", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ username, password }),
-      });
-      if (!r.ok) {
-        let error = `HTTP ${r.status}`;
-        try { error = (await r.json()).detail || error; } catch {}
-        return { ok: false, error };
-      }
-      const data = await r.json();
-      setToken(data.token);
-      return { ok: true, ...data };
+      // from the same reply and pins the new key. Returns the reply, or
+      // {ok:false, error}.
+      const r = await boxedPost("/api/auth/change-identity", { username, password }, true);
+      if (!r.ok) return { ok: false, error: await errorDetail(r, `HTTP ${r.status}`) };
+      setToken(r.data.token);
+      pinNode(r.data.public_key_hex);
+      return { ok: true, ...r.data };
     },
   };
 
@@ -281,7 +327,11 @@
   // everywhere", or after a password change. Built here rather than in
   // app-shell because auth.js loads first — the app must not start issuing
   // 401s before the user has a way to sign in.
-  function showLoginGate() {
+  //
+  // `changed` + `retry`: the boot found a pairing code in the URL but the
+  // node answering is not the one this browser knows. The gate opens on the
+  // question, and "Continue" pins the new node and redeems the code.
+  function showLoginGate({ changed, retry } = {}) {
     if (document.getElementById("auth-gate")) return;
 
     const overlay = document.createElement("dialog");
@@ -292,8 +342,12 @@
         <h3 class="confirm-title">Sign in</h3>
         <p class="confirm-message" id="auth-gate-msg">Checking…</p>
         <div id="auth-gate-fields"></div>
-        <div class="confirm-actions single">
+        <div class="confirm-actions single" id="auth-gate-form-actions">
           <button class="profile-btn primary" type="button" id="auth-gate-submit">Continue</button>
+        </div>
+        <div class="confirm-actions" id="auth-gate-node-actions" hidden>
+          <button class="profile-btn secondary" type="button" id="auth-gate-stop">Stop</button>
+          <button class="profile-btn primary" type="button" id="auth-gate-accept">Continue</button>
         </div>
       </div>`;
     document.body.appendChild(overlay);
@@ -309,8 +363,11 @@
     overlay.addEventListener("close", () => overlay.showModal());
     overlay.showModal();
 
+    const title = overlay.querySelector(".confirm-title");
     const msg = overlay.querySelector("#auth-gate-msg");
     const fields = overlay.querySelector("#auth-gate-fields");
+    const formActions = overlay.querySelector("#auth-gate-form-actions");
+    const nodeActions = overlay.querySelector("#auth-gate-node-actions");
     const submit = overlay.querySelector("#auth-gate-submit");
     const input = (id, type, ph, value) =>
       `<input class="add-gear-input" id="${id}" type="${type}" placeholder="${ph}"
@@ -318,14 +375,24 @@
               spellcheck="false" style="width:100%;margin-bottom:calc(10*var(--px));">`;
 
     let mode = "pin";
+    let username = "";
+    const escapeText = (s) => s.replace(/[&<>"']/g,
+      (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
 
-    window.Sautium.auth.status().then((st) => {
-      mode = st.onboarding ? "create" : (st.password_login ? "password" : "pin");
+    function showForm() {
+      title.textContent = mode === "create" ? "Set up Sautium" : "Sign in";
+      fields.hidden = false;
+      formActions.hidden = false;
+      nodeActions.hidden = true;
+      const first = fields.querySelector("input");
+      if (first) first.focus();
+    }
+
+    function buildForm() {
       if (mode === "create") {
         // No identity at all — a fresh node. What is created here is the P2P
         // account (username+password -> Argon2id -> Ed25519), not a local
         // login, so it also switches on sync, chat and analysis signing.
-        overlay.querySelector(".confirm-title").textContent = "Set up Sautium";
         msg.innerHTML =
           "Choose a nickname and password. This is your identity on the " +
           "Sautium network, not just a local login — the nickname sits inside " +
@@ -338,8 +405,8 @@
         submit.textContent = "Create account";
       } else if (mode === "password") {
         // The username is shown, not asked for — a node has one account.
-        msg.textContent = st.username
-          ? `Signing in as ${st.username}. Enter the account password.`
+        msg.textContent = username
+          ? `Signing in as ${username}. Enter the account password.`
           : "Enter the account password.";
         fields.innerHTML = input("auth-pass", "password", "password");
       } else {
@@ -353,32 +420,85 @@
           "there with this device.";
         fields.innerHTML = input("auth-pin", "text", "XXXX-XXXX");
       }
-      const first = fields.querySelector("input");
-      if (first) first.focus();
+      showForm();
+    }
+
+    // The known_hosts moment. The typed values stay in the hidden fields, so
+    // "Continue" needs nothing typed again; "Stop" is a refusal that leaves
+    // the browser signed out, and a later submit asks again.
+    function askNodeChanged(err, onAccept) {
+      title.textContent = "A different node";
+      msg.innerHTML =
+        "The node answering at this address is not the one this browser " +
+        "signed in to before" +
+        (username ? ` — it calls itself <b>${escapeText(username)}</b>.` : ".") +
+        " If you changed the account or set the node up again, continue. " +
+        "If you did not, stop: something else is answering on this network.";
+      fields.hidden = true;
+      formActions.hidden = true;
+      nodeActions.hidden = false;
+      overlay.querySelector("#auth-gate-stop").onclick = () => showForm();
+      overlay.querySelector("#auth-gate-accept").onclick = () => {
+        window.Sautium.auth.acceptNode(err.seen);
+        showForm();
+        onAccept();
+      };
+    }
+
+    window.Sautium.auth.status().then((st) => {
+      mode = st.onboarding ? "create" : (st.password_login ? "password" : "pin");
+      username = st.username || "";
+      buildForm();
+      if (changed) askNodeChanged(changed, redeem);
     }).catch(() => {
       msg.textContent = "Cannot reach the server.";
     });
 
+    // A pairing code from the URL, once the user has accepted the new node.
+    async function redeem() {
+      submit.disabled = true;
+      let ok = false;
+      try {
+        ok = await retry();
+      } catch (e) {
+        if (!(e instanceof NodeChanged)) throw e;
+        askNodeChanged(e, redeem);
+        return;
+      } finally {
+        submit.disabled = false;
+      }
+      if (ok) { location.reload(); return; }
+      msg.textContent = "That code is wrong or has expired — get a new one on the host.";
+    }
+
     async function attempt() {
-      if (submit.disabled) return;      // Enter arrives here too
+      if (submit.disabled || !nodeActions.hidden) return;   // Enter arrives here too
       submit.disabled = true;
       const prev = submit.textContent;
       submit.textContent = "Checking…";
       let ok = false, why = "";
-      if (mode === "create") {
-        const res = await window.Sautium.auth.createAccount(
-          overlay.querySelector("#auth-user").value.trim(),
-          overlay.querySelector("#auth-pass").value);
-        ok = res === true;
-        why = typeof res === "string" ? res : "Could not create the account.";
-      } else if (mode === "password") {
-        ok = await window.Sautium.auth.login(
-          overlay.querySelector("#auth-pass").value);
-        why = "Wrong password.";
-      } else {
-        ok = await window.Sautium.auth.pair(
-          overlay.querySelector("#auth-pin").value.trim());
-        why = "That code is wrong or has expired — get a new one on the host.";
+      try {
+        if (mode === "create") {
+          const res = await window.Sautium.auth.createAccount(
+            overlay.querySelector("#auth-user").value.trim(),
+            overlay.querySelector("#auth-pass").value);
+          ok = res === true;
+          why = typeof res === "string" ? res : "Could not create the account.";
+        } else if (mode === "password") {
+          ok = await window.Sautium.auth.login(
+            overlay.querySelector("#auth-pass").value);
+          why = "Wrong password.";
+        } else {
+          ok = await window.Sautium.auth.pair(
+            overlay.querySelector("#auth-pin").value.trim());
+          why = "That code is wrong or has expired — get a new one on the host.";
+        }
+      } catch (e) {
+        submit.disabled = false;
+        submit.textContent = prev;
+        if (e instanceof NodeChanged) { askNodeChanged(e, attempt); return; }
+        msg.textContent = "Cannot reach the server.";
+        throw e;
       }
       if (ok) { location.reload(); return; }
       submit.disabled = false;
@@ -393,7 +513,7 @@
   }
 
   window.Sautium.auth.showLoginGate = showLoginGate;
-  window.addEventListener("sautium:auth-required", showLoginGate);
+  window.addEventListener("sautium:auth-required", () => showLoginGate());
 
   // The token belongs to the origin, so signing in or out is news for every
   // other tab of it — and the tab that learns it by failing a request has
@@ -413,14 +533,15 @@
   // code aloud. The fragment never reaches the server (so the one-time code
   // stays out of access logs and Referer), and it is stripped from the address
   // bar the moment it is redeemed.
-  async function redeemFragmentCode() {
+  function fragmentCode() {
     const m = /(?:^|[#&])pair=([A-Za-z0-9-]+)/.exec(location.hash || "");
-    if (!m) return false;
-    const ok = await window.Sautium.auth.pair(m[1]);
+    return m ? m[1] : "";
+  }
+
+  function stripFragmentCode() {
     const clean = (location.hash || "").replace(/(?:^|[#&])pair=[A-Za-z0-9-]+/, "");
     history.replaceState(null, "", location.pathname + location.search +
                          (clean && clean !== "#" ? clean : ""));
-    return ok;
   }
 
   async function bootAuth() {
@@ -432,7 +553,24 @@
       // deliberate act ("sign this browser in") into a no-op in precisely the
       // case it exists for: the page went on signing with the dead token, ate
       // a 401, and raised the password dialog the button is there to avoid.
-      if (await redeemFragmentCode()) return;
+      const code = fragmentCode();
+      if (code) {
+        let ok = false;
+        try {
+          ok = await window.Sautium.auth.pair(code);
+        } catch (e) {
+          if (!(e instanceof NodeChanged)) throw e;
+          // The code stays in the URL until the gate redeems it.
+          showLoginGate({ changed: e, retry: async () => {
+            const done = await window.Sautium.auth.pair(code);
+            if (done) stripFragmentCode();
+            return done;
+          } });
+          return;
+        }
+        stripFragmentCode();
+        if (ok) return;
+      }
       if (storedToken()) return;
       showLoginGate();
     } finally {

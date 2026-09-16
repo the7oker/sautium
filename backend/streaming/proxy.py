@@ -1,7 +1,6 @@
 """In-memory media proxy: serves provider-fetched audio to HQPlayer over plain
-http (HQPlayer can't sign HMAC nor trust the backend's self-signed TLS, so this
-is a SEPARATE plain-http endpoint, localhost/LAN-reachable, gated by per-track
-ephemeral tokens).
+http (HQPlayer can't sign HMAC, so this is a SEPARATE plain-http endpoint,
+localhost/LAN-reachable, gated by per-track ephemeral tokens).
 
 Design points proven during bring-up:
 - HQPlayer plays http FLAC sustained in its NATIVE playlist (alongside file://

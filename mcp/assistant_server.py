@@ -51,7 +51,7 @@ DB_PASSWORD = os.getenv("DB_PASSWORD", "supervisor")
 DB_NAME = os.getenv("DB_NAME", "music_ai")
 HQPLAYER_HOST = os.getenv("HQPLAYER_HOST", "127.0.0.1")
 HQPLAYER_PORT = int(os.getenv("HQPLAYER_PORT", "4321"))
-BACKEND_URL = os.getenv("BACKEND_URL", "https://localhost:8000")
+BACKEND_URL = os.getenv("BACKEND_URL", "http://localhost:8000")
 
 
 # -- Signed backend HTTP -------------------------------------------------------
@@ -83,7 +83,7 @@ def _backend_get(path: str, params: dict) -> dict:
     ts = str(int(time.time()))
     canonical = f"GET\n{path_q}\n{ts}\n{hashlib.sha256(b'').hexdigest()}"
     sig = hmac.new(_api_secret(), canonical.encode("utf-8"), hashlib.sha256).hexdigest()
-    with httpx.Client(base_url=BACKEND_URL, timeout=30.0, verify=False) as client:
+    with httpx.Client(base_url=BACKEND_URL, timeout=30.0) as client:
         resp = client.get(path_q, headers={"x-sautium-ts": ts, "x-sautium-sig": sig})
         resp.raise_for_status()
         return resp.json()
@@ -95,7 +95,7 @@ def _backend_post(path: str, body: dict, timeout: float = 30.0) -> dict:
     ts = str(int(time.time()))
     canonical = f"POST\n{path}\n{ts}\n{hashlib.sha256(payload).hexdigest()}"
     sig = hmac.new(_api_secret(), canonical.encode("utf-8"), hashlib.sha256).hexdigest()
-    with httpx.Client(base_url=BACKEND_URL, timeout=timeout, verify=False) as client:
+    with httpx.Client(base_url=BACKEND_URL, timeout=timeout) as client:
         resp = client.post(path, content=payload,
                            headers={"x-sautium-ts": ts, "x-sautium-sig": sig,
                                     "content-type": "application/json"})

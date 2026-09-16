@@ -2,7 +2,7 @@
 Minimal HTTP/HTTPS client for communicating with the Sautium backend.
 
 Uses only urllib (no extra dependencies) to fetch stats and health info.
-Supports HTTPS with self-signed certificates for P2P connections.
+The local backend is plain HTTP; a peer is HTTPS pinned to its node key.
 
 Two signing modes, chosen at construction:
 
@@ -58,10 +58,6 @@ def forget_secret() -> None:
     global _cached_secret
     _cached_secret = None
 
-# SSL context for self-signed P2P certificates
-_p2p_ssl_ctx: Optional[ssl.SSLContext] = None
-
-
 def _load_secret() -> Optional[bytes]:
     """Read the HMAC secret, retrying briefly if the backend hasn't
     written it yet (startup race window)."""
@@ -106,40 +102,22 @@ def _read_json_body(resp) -> dict:
     return json.loads(data.decode("utf-8"))
 
 
-def _get_ssl_context() -> ssl.SSLContext:
-    """SSL context for the LOCAL backend only (loopback, HMAC-signed): the
-    self-signed Web UI cert is accepted blind because the far end is this
-    machine. Never use for a peer — peer mode builds a pinned context that
-    verifies the node-key binding (peer_auth.pinned_ssl_context)."""
-    global _p2p_ssl_ctx
-    if _p2p_ssl_ctx is None:
-        _p2p_ssl_ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
-        _p2p_ssl_ctx.check_hostname = False
-        _p2p_ssl_ctx.verify_mode = ssl.CERT_NONE
-        _p2p_ssl_ctx.minimum_version = ssl.TLSVersion.TLSv1_2
-    return _p2p_ssl_ctx
-
-
 class BackendAPIClient:
-    """HTTP/HTTPS client for the backend API (local) or a peer node."""
+    """Client for the local backend API (plain HTTP on loopback, HMAC-signed)
+    or a peer node (HTTPS pinned to the node key)."""
 
-    def __init__(self, base_url: str = "https://127.0.0.1:8000",
+    def __init__(self, base_url: str = "http://127.0.0.1:8000",
                  peer: Optional[peer_auth.PeerIdentity] = None,
                  expected_pubkey: Optional[str] = None):
         self.base_url = base_url.rstrip("/")
-        if peer is not None:
-            # A peer channel must authenticate as a node: the pinning
-            # context refuses certs without a valid node-key binding, and
-            # locks onto the first verified key when the caller has no
-            # expectation (DHT-discovered strangers).
-            self._ssl_ctx = (
-                peer_auth.pinned_ssl_context(expected_pubkey)
-                if self.base_url.startswith("https://") else None
-            )
-        else:
-            self._ssl_ctx = (
-                _get_ssl_context() if self.base_url.startswith("https://") else None
-            )
+        # A peer channel must authenticate as a node: the pinning context
+        # refuses certs without a valid node-key binding, and locks onto the
+        # first verified key when the caller has no expectation
+        # (DHT-discovered strangers).
+        self._ssl_ctx = (
+            peer_auth.pinned_ssl_context(expected_pubkey)
+            if peer is not None and self.base_url.startswith("https://") else None
+        )
         self._streams: list = []
         self._stream_closed = False
         self.peer = peer
@@ -217,8 +195,7 @@ class BackendAPIClient:
 
     def set_port(self, port: int):
         """Update the backend port."""
-        self.base_url = f"https://127.0.0.1:{port}"
-        self._ssl_ctx = _get_ssl_context()
+        self.base_url = f"http://127.0.0.1:{port}"
 
     def _get_json(self, path: str, timeout: int = 5, _paid: bool = False) -> Optional[dict]:
         """GET request returning parsed JSON, or None on failure."""

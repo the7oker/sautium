@@ -8,8 +8,8 @@
 # The launcher reads its locations from the profile variables, so the sandbox
 # is those variables pointed at one folder: LOCALAPPDATA (data root, the
 # app's own clone) and APPDATA (settings, account key). USERPROFILE stays
-# real — %USERPROFILE%\.sautium keeps the browser-trusted certificate and the
-# model cache, which are shared on purpose — and so does pip's cache, which
+# real — %USERPROFILE%\.cache keeps the model cache, shared on purpose (and
+# .sautium the browser certificate of earlier versions) — and so does pip's cache, which
 # LOCALAPPDATA would otherwise drag along. Ports are shifted off the
 # defaults so the test node never claims what the node this machine already
 # runs is using.

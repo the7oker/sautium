@@ -121,7 +121,7 @@ services:
       OPENAI_COMPAT_NAME: ${OPENAI_COMPAT_NAME:-}
       DEFAULT_PROVIDER: ${DEFAULT_PROVIDER:-claude_code}
       SAUTIUM_HOST_IPS: ${SAUTIUM_HOST_IPS:-}
-      BACKEND_URL: https://localhost:8000
+      BACKEND_URL: http://localhost:8000
       MB_DUMP_DIR: /app/data/mbdump        # writable mount for the MusicBrainz dump
       # Disable uvicorn auto-reload — see docker-compose.yml for rationale
       # (drvfs inotify EIO crashes watchfiles).

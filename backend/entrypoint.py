@@ -1,8 +1,9 @@
-"""Docker entrypoint: ensure TLS cert exists, then start uvicorn over HTTPS.
+"""Docker entrypoint: start uvicorn on plain HTTP.
 
-Cert is materialised in /app/data/tls (mounted from ./data/tls on the host)
-so it survives container rebuilds. Extra LAN IPs to include in the SAN
-are read from SAUTIUM_HOST_IPS (comma-separated).
+The Web UI rides HTTP on the LAN (PROGRESS.md "HTTP on the LAN"): a
+certificate a phone would trust cannot exist for a private address, and
+every credential exchange is boxed end to end instead. The peer surface
+(p2p_app.py, port 8801) keeps its own TLS, pinned to the node key.
 """
 
 import os
@@ -11,9 +12,6 @@ from pathlib import Path
 
 import uvicorn
 
-from tls_gen import ensure_cert
-
-DATA_DIR = Path("/app/data/tls")
 HOST = os.getenv("UVICORN_HOST", "0.0.0.0")
 PORT = int(os.getenv("UVICORN_PORT", "8000"))
 RELOAD = os.getenv("UVICORN_RELOAD", "true").lower() in ("1", "true", "yes")
@@ -24,11 +22,6 @@ HF_REQUIRED_MODELS = (
     "models--BAAI--bge-m3",
     "models--MIT--ast-finetuned-audioset-10-10-0.4593",
 )
-
-
-def _parse_extra_ips() -> list[str]:
-    raw = os.getenv("SAUTIUM_HOST_IPS", "")
-    return [s.strip() for s in raw.split(",") if s.strip()]
 
 
 def _enable_hf_offline_if_cached() -> None:
@@ -54,23 +47,13 @@ def _enable_hf_offline_if_cached() -> None:
 
 
 def main() -> int:
-    # The peer channel binding (node key over the TLS SPKI) rides in this
-    # same cert — it is what the master's Caddy front serves too. Argon2id
-    # for an env-derived identity costs ~1-2 s, once per boot.
-    from config import settings
-    from p2p_identity import tls_binding
-    cert_path, key_path = ensure_cert(DATA_DIR, _parse_extra_ips(),
-                                      binding=tls_binding(settings))
     _enable_hf_offline_if_cached()
-    print(f"[entrypoint] TLS cert: {cert_path}", flush=True)
-    print(f"[entrypoint] uvicorn HTTPS on {HOST}:{PORT} (reload={RELOAD})", flush=True)
+    print(f"[entrypoint] uvicorn HTTP on {HOST}:{PORT} (reload={RELOAD})", flush=True)
     uvicorn.run(
         "main:app",
         host=HOST,
         port=PORT,
         reload=RELOAD,
-        ssl_keyfile=str(key_path),
-        ssl_certfile=str(cert_path),
     )
     return 0
 

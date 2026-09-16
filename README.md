@@ -67,9 +67,10 @@ Sautium node
 └── Cloudflare Worker      email-verification CA + signed invite delivery
 ```
 
-The backend serves **HTTPS only** on `0.0.0.0:8800` (LAN access from phones is
-the primary workflow). PostgreSQL (`5432`) and the playback tracker (`8765`)
-bind to loopback. The P2P DHT listens on `19001/udp`.
+The backend serves plain HTTP on `0.0.0.0:8800` (LAN access from phones is
+the primary workflow; `PROGRESS.md` § "HTTP on the LAN" is why there is no
+TLS on it). PostgreSQL (`5432`) binds to loopback. The P2P DHT listens on
+`19001/udp`.
 
 ## Tech Stack
 
@@ -136,8 +137,7 @@ docker compose -f docker-compose.mac.yml up -d --build
 ```
 
 This starts PostgreSQL (schema auto-applied from
-`desktop/migrations/001_initial.sql`), the FastAPI backend (which generates a
-self-signed TLS cert on first run), and the playback tracker.
+`desktop/migrations/001_initial.sql`) and the FastAPI backend.
 
 ### 4. Verify
 
@@ -146,11 +146,11 @@ docker compose ps
 docker compose logs -f backend     # wait for "Application startup complete"
 ```
 
-- **Web UI:** `https://localhost:8800/` (accept the self-signed cert once).
-- **API docs:** `https://localhost:8800/docs`
+- **Web UI:** `http://localhost:8800/`
+- **API docs:** `http://localhost:8800/docs`
 
 The backend is also reachable from phones/tablets on the same Wi-Fi at
-`https://<host-LAN-IP>:8800/`.
+`http://<host-LAN-IP>:8800/` — list that address in `SAUTIUM_HOST_IPS`.
 
 ### Desktop launcher (optional)
 
@@ -207,7 +207,7 @@ python desktop/build_macos.py --sign "Developer ID Application: ..." \
 4. Uninstalling (Apps & Features) removes the program and asks whether to
    delete the node too: `%LOCALAPPDATA%\Sautium` (database, logs, the app and
    its downloaded components), `%APPDATA%\Sautium` (settings, account key),
-   `%USERPROFILE%\.sautium` (the browser-trusted certificate).
+   `%USERPROFILE%\.sautium` (the browser certificate of earlier versions).
 
 #### Installing the macOS build
 
@@ -224,7 +224,7 @@ python desktop/build_macos.py --sign "Developer ID Application: ..." \
    background) — untick it for a quick trial. Finishing the wizard starts the
    backend, which installs the ML stack on first run (~1.3 GB, once).
 5. In the launcher: **Scan Library** picks the music folder, **Open Web UI**
-   opens `https://localhost:18000` (accept the self-signed cert once).
+   opens `http://localhost:18000`.
 
 #### Testing installs
 
@@ -235,7 +235,8 @@ database and ports, leaving the node this machine already runs alone — and
 stripped, because that is where a locale-less PostgreSQL start fails and a
 terminal never will. `wipe --yes` (`wipe -Yes`) deletes the real node on this
 machine: `~/.config/Sautium` (settings, account key), `~/.local/share/Sautium`
-(database, logs, the app's Python) and `~/.sautium` (the browser certificate)
+(database, logs, the app's Python) and `~/.sautium` (the browser certificate
+of earlier versions)
 — on Windows `%APPDATA%\Sautium`, `%LOCALAPPDATA%\Sautium` and
 `%USERPROFILE%\.sautium`. Homebrew packages, the installed program, the pip
 cache and `~/.cache/huggingface` are left alone.
@@ -261,7 +262,7 @@ sautium/
 │   ├── audio_analysis.py           # librosa features + CLAP embeddings
 │   ├── ensemble_instruments.py     # AST + PaSST instrument tagger
 │   ├── hqplayer_client.py          # HQPlayer XML control client
-│   ├── auth_hmac.py / tls_gen.py   # HMAC request signing + self-signed TLS
+│   ├── auth_hmac.py / device_auth.py  # request signing, device tokens, boxed credential exchange
 │   ├── assistant_prompt.py         # AI assistant system prompt + schema description
 │   ├── providers/                  # pluggable LLM providers
 │   ├── routers/                    # FastAPI route modules
@@ -292,17 +293,20 @@ isolation:
 - Backend `8800` listens on `0.0.0.0` **by design** (phone/tablet use over home
   Wi-Fi) but is **never exposed to the public internet** — no port is forwarded
   and the P2P UPnP layer never maps it.
-- All API requests are signed with **HMAC-SHA256** (`backend/auth_hmac.py`); the
-  shared secret is injected into the page at `/` and `auth.js` signs every
-  `fetch`. HTTPS is mandatory because browsers gate `crypto.subtle` (needed to
-  compute the HMAC) behind secure contexts.
-- TLS is **self-signed**, with only private IPs in the cert SAN.
+- All API requests are signed with **HMAC-SHA256** (`backend/auth_hmac.py`)
+  using a per-browser device token, earned once with the account password or a
+  pairing PIN; `auth.js` signs every `fetch`. The page carries no key.
+- The Web UI rides **plain HTTP**: no certificate a phone would trust can exist
+  for a LAN address, so the exchange that earns the token (password or PIN in,
+  token out) is boxed end to end to a per-exchange key the node's identity
+  signs, and the browser pins that identity on its first sign-in.
 - The **P2P sync server** is the only surface intended to face the internet
-  (random port, self-signed TLS + Ed25519 request signatures).
+  (random port, TLS pinned to the node key + Ed25519 request signatures).
 
 This is LAN-only by design. Public release / multi-user / remote-access would
-require per-user credentials, a CA-signed cert and CSRF-aware sessions — see the
-full **Security Posture** section in `CLAUDE.md` before changing any of it.
+require per-user credentials, TLS from a front with a real name (Tailscale
+Serve, a reverse proxy) and CSRF-aware sessions — see the full **Security
+Posture** section in `CLAUDE.md` before changing any of it.
 
 ## Music Library Structure
 
@@ -377,8 +381,8 @@ docker compose down
 - **GPU not detected** — verify the runtime:
   `docker run --rm --gpus all nvidia/cuda:12.0.0-base-ubuntu22.04 nvidia-smi`.
 - **Phone can't reach the Web UI** — confirm `SAUTIUM_HOST_IPS` lists the host's
-  LAN IP, then `docker restart sautium-backend` to regenerate the cert SAN, and
-  accept the certificate warning once per host.
+  LAN IP (the Host guard answers 421 to any address that is not the node's
+  own), then `docker restart sautium-backend`.
 - **`Claude Code error` on AI queries** — the mounted `~/.claude` credentials
   are stale or missing. Use the Compose variant that matches where you ran
   `claude /login` (Windows vs WSL).

@@ -7192,10 +7192,7 @@
     screen.querySelector('[data-action="copy-invite"]').addEventListener('click', async () => {
       const code = codeEl.textContent;
       if (!code || code.startsWith('—') || code === 'unavailable') return;
-      try {
-        await navigator.clipboard.writeText(code);
-        showHint('Invite code copied to clipboard.', true);
-      } catch (_) { /* user denied or insecure context — silent */ }
+      if (await copyText(code)) showHint('Invite code copied to clipboard.', true);
     });
 
     // Add by code.
@@ -7407,12 +7404,10 @@
       const token = tokens.find(t => t.id === row.dataset.id);
       if (!token) return;
       if (e.target.closest('[data-copy]')) {
-        try {
-          const acct = await (await fetch('/api/p2p/account')).json();
-          await navigator.clipboard.writeText(
-            `${acct.invite_code}#${token.id}`);
+        const acct = await (await fetch('/api/p2p/account')).json();
+        if (await copyText(`${acct.invite_code}#${token.id}`)) {
           e.target.closest('[data-copy]').classList.add('copied');
-        } catch (_) { /* clipboard denied — silent, same as invite copy */ }
+        }
         return;
       }
       openTokenEditor(token, async () => { await reload(); });
@@ -7532,9 +7527,7 @@
           const share = overlay.querySelector('#tkShare');
           share.hidden = false;
           overlay.querySelector('#tkShareCode').textContent = data.share_string;
-          overlay.querySelector('[data-share-copy]').onclick = async () => {
-            try { await navigator.clipboard.writeText(data.share_string); } catch (_) {}
-          };
+          overlay.querySelector('[data-share-copy]').onclick = () => copyText(data.share_string);
           overlay.querySelector('[data-confirm]').remove();
         } else {
           close();
@@ -9618,6 +9611,27 @@
   window.confirmDestructive = confirmDestructive;
   window.notifyDialog       = notifyDialog;
   window.escapeProfileHtml  = escapeProfileHtml;
+
+  /* Copy to the clipboard, true on success. navigator.clipboard exists only
+     in secure contexts, and the app is served over plain HTTP on the LAN;
+     the selection-based command works on any origin from a user gesture. */
+  async function copyText(text) {
+    if (navigator.clipboard) {
+      try { await navigator.clipboard.writeText(text); return true; } catch (_) { /* denied — try the other way */ }
+    }
+    const area = document.createElement('textarea');
+    area.value = text;
+    area.setAttribute('readonly', '');
+    area.style.position = 'fixed';
+    area.style.opacity = '0';
+    document.body.appendChild(area);
+    area.select();
+    let ok = false;
+    try { ok = document.execCommand('copy'); } catch (_) { ok = false; }
+    area.remove();
+    return ok;
+  }
+  window.copyText = copyText;
 
   /* ---------- Notices: toasts, the strip, the rows ----------
      A toast is a signal that a condition began (or that something the

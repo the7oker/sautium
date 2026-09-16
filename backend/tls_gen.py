@@ -1,25 +1,27 @@
-"""Self-signed TLS certificate generator for the Sautium backend.
+"""TLS certificate for the Docker node's peer surface, plus the address
+detectors the backend shares with it.
 
-Used by both the Docker entrypoint and the desktop launcher to produce a
-cert covering loopback addresses, host.docker.internal, and any private
-(RFC 1918) host IPv4 addresses — auto-detected from local interfaces or
-passed explicitly via CLI / SAUTIUM_HOST_IPS env.
+The cert is self-signed ECDSA P-256 and carries the peer channel binding —
+the node key's signature over the TLS SPKI (desktop/p2p/peer_auth.py) — so a
+peer pins the channel to the node instead of trusting a CA or a name. The
+SAN is therefore static: nobody who verifies this cert reads it. The Web UI
+does not use TLS at all (PROGRESS.md "HTTP on the LAN"); the launcher's own
+peer surface mints its cert in desktop/node_identity.ensure_tls_cert.
 
-The cert is regenerated only when the set of detected private IPs is
-not yet covered by the existing cert's SAN. This keeps the cert stable
-across restarts so the phone doesn't have to re-accept the warning.
+The cert is regenerated only when the binding is absent or belongs to a
+previous identity, so peers see one TLS key for as long as the node keeps
+its identity.
 
-CLI:
-    python tls_gen.py --data-dir /path/to/tls [--host-ips 1.2.3.4,5.6.7.8]
+`detect_private_host_ips` / `detect_reachable_host_ips` answer "which
+addresses are this host's" for the Host guard (auth_hmac), the media host a
+DLNA renderer is handed, and the launcher's QR.
 """
 
-import argparse
 import datetime
 import ipaddress
 import logging
 import os
 import socket
-import sys
 from pathlib import Path
 
 from cryptography import x509
@@ -140,49 +142,22 @@ def _detect_private_host_ips() -> list[str]:
     return sorted(found)
 
 
-def _read_existing_san_ips(cert_path: Path) -> set[str]:
-    try:
-        cert = x509.load_pem_x509_certificate(cert_path.read_bytes())
-    except (FileNotFoundError, ValueError) as e:
-        logger.debug("Cannot read existing cert %s: %s", cert_path, e)
-        return set()
-    try:
-        san = cert.extensions.get_extension_for_class(x509.SubjectAlternativeName)
-    except x509.ExtensionNotFound:
-        return set()
-    return {str(ip) for ip in san.value.get_values_for_type(x509.IPAddress)}
-
-
-def _build_san(extra_ips: list[str]) -> x509.SubjectAlternativeName:
+def _build_san() -> x509.SubjectAlternativeName:
     entries: list[x509.GeneralName] = [x509.DNSName(d) for d in STATIC_DNS_SAN]
-    seen: set[str] = set()
-    for ip in (*STATIC_IP_SAN, *extra_ips):
-        if ip in seen:
-            continue
-        try:
-            entries.append(x509.IPAddress(ipaddress.ip_address(ip)))
-            seen.add(ip)
-        except ValueError:
-            logger.warning("Skipping invalid IP for SAN: %r", ip)
+    entries += [x509.IPAddress(ipaddress.ip_address(ip)) for ip in STATIC_IP_SAN]
     return x509.SubjectAlternativeName(entries)
 
 
-def _generate_cert(extra_ips: list[str], cert_path: Path, key_path: Path,
+def _generate_cert(cert_path: Path, key_path: Path,
                    binding: tuple | None = None) -> None:
     """Render a self-signed ECDSA P-256 cert + key with random fields.
 
-    Browsers refuse to validate Ed25519 server certs (Chrome/Firefox
-    accept Ed25519 in TLS 1.3 protocol but not in cert path validation
-    as of 2026), so we stick with ECDSA. Stability across reinstalls
-    is achieved at the storage layer instead — service_manager keeps
-    cert + key in a per-account user-profile directory that survives
-    the typical reinstall scrub.
+    ECDSA rather than Ed25519 because the master's Caddy front serves this
+    same file and TLS stacks validate Ed25519 server certs unevenly.
 
     `binding` = (node_pubkey_hex, sign_fn): embeds the peer channel
     binding (desktop/p2p/peer_auth.py) — the node key's signature over
     this cert's SPKI — so peers can pin the TLS channel to the node.
-    Browsers ignore the extension; the peer surface (and the master's
-    Caddy front, which serves this same file) is what needs it.
     """
     key = ec.generate_private_key(ec.SECP256R1())
     subject = issuer = x509.Name([
@@ -200,7 +175,7 @@ def _generate_cert(extra_ips: list[str], cert_path: Path, key_path: Path,
         .serial_number(x509.random_serial_number())
         .not_valid_before(now - datetime.timedelta(minutes=5))
         .not_valid_after(now + datetime.timedelta(days=CERT_VALIDITY_DAYS))
-        .add_extension(_build_san(extra_ips), critical=False)
+        .add_extension(_build_san(), critical=False)
         .add_extension(x509.BasicConstraints(ca=False, path_length=None), critical=True)
         .add_extension(
             x509.KeyUsage(
@@ -267,11 +242,10 @@ def _binding_stale(cert_path: Path, binding: tuple | None) -> bool:
 
 def ensure_cert(
     data_dir: Path | str,
-    extra_host_ips: list[str] | None = None,
     binding: tuple | None = None,
 ) -> tuple[Path, Path]:
-    """Ensure a self-signed cert exists in data_dir; regen if the SAN or
-    the peer channel binding is stale.
+    """Ensure the peer-surface cert exists in data_dir; regenerate it when
+    the peer channel binding is absent or belongs to a previous identity.
 
     `binding` = (node_pubkey_hex, sign_fn) — see _generate_cert.
     Returns (cert_path, key_path).
@@ -281,21 +255,10 @@ def ensure_cert(
     cert_path = data_dir / CERT_FILENAME
     key_path = data_dir / KEY_FILENAME
 
-    # The SAN answers "which addresses may a browser have typed", so a tunnel
-    # address belongs in it. Filtering the explicit list through the LAN
-    # predicate used to drop it even when SAUTIUM_HOST_IPS named it outright,
-    # and the phone got a name-mismatch warning on top of the self-signed one.
-    needed_ips = detect_reachable_host_ips(extra_host_ips)
-
     if cert_path.exists() and key_path.exists():
-        existing = _read_existing_san_ips(cert_path)
-        missing = set(needed_ips) - existing
         # Drop any leftover Ed25519 cert from the abandoned
-        # deterministic-cert experiment. Browsers don't validate
-        # Ed25519 server certs (Chrome/Firefox accept the algorithm
-        # in TLS 1.3 but not in cert path validation), so they
-        # silently refuse to load https://localhost:18000 and the
-        # user gets "site can't be reached".
+        # deterministic-cert experiment: TLS stacks validate Ed25519
+        # server certs unevenly, and the master's front serves this file.
         is_legacy_ed25519 = False
         try:
             cert = x509.load_pem_x509_certificate(cert_path.read_bytes())
@@ -315,47 +278,10 @@ def ensure_cert(
                 "Regenerating cert: no peer channel binding for the current "
                 "node identity",
             )
-        elif not missing:
-            logger.debug("Cert %s already covers IPs: %s", cert_path, needed_ips)
-            return cert_path, key_path
         else:
-            logger.info(
-                "Regenerating cert: new private IPs %s not in current SAN %s",
-                sorted(missing), sorted(existing),
-            )
+            return cert_path, key_path
     else:
         logger.info("Generating new cert at %s", cert_path)
 
-    _generate_cert(needed_ips, cert_path, key_path, binding)
-    logger.info(
-        "Cert SAN — DNS: %s, IPs: %s",
-        list(STATIC_DNS_SAN), list(STATIC_IP_SAN) + needed_ips,
-    )
+    _generate_cert(cert_path, key_path, binding)
     return cert_path, key_path
-
-
-def _parse_ips(value: str | None) -> list[str]:
-    if not value:
-        return []
-    return [s.strip() for s in value.split(",") if s.strip()]
-
-
-def _main(argv: list[str]) -> int:
-    parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--data-dir", required=True, type=Path)
-    parser.add_argument(
-        "--host-ips",
-        default=os.getenv("SAUTIUM_HOST_IPS", ""),
-        help="Comma-separated extra private IPs (or env SAUTIUM_HOST_IPS)",
-    )
-    args = parser.parse_args(argv)
-
-    logging.basicConfig(level=logging.INFO, format="%(message)s")
-    cert, key = ensure_cert(args.data_dir, _parse_ips(args.host_ips))
-    print(f"cert={cert}")
-    print(f"key={key}")
-    return 0
-
-
-if __name__ == "__main__":
-    sys.exit(_main(sys.argv[1:]))

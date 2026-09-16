@@ -52,22 +52,17 @@ def _igd_or_exit():
 
 
 def _serves_web_ui(port: int) -> bool:
-    """True if the local port answers with the secret-carrying Web UI."""
-    ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
-    ctx.check_hostname = False
-    ctx.verify_mode = ssl.CERT_NONE
-    for scheme in ("https", "http"):
-        try:
-            kw = {"timeout": 3}
-            if scheme == "https":
-                kw["context"] = ctx
-            body = urllib.request.urlopen(
-                f"{scheme}://127.0.0.1:{port}/", **kw).read(65536)
-            if b"__SAUTIUM_SECRET" in body:
-                return True
-        except Exception:
-            continue
-    return False
+    """True if the local port answers as the Web UI (plain HTTP; its /health
+    says `sautium-webui`, and only the peer surface may say `sautium-peer`)."""
+    try:
+        body = urllib.request.urlopen(
+            f"http://127.0.0.1:{port}/health", timeout=3).read(65536)
+    except Exception:
+        return False
+    try:
+        return json.loads(body).get("type") == "sautium-webui"
+    except ValueError:
+        return False
 
 
 def _port_is_listening(port: int, host: str = "127.0.0.1") -> bool:

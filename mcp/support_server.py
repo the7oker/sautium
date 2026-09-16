@@ -33,7 +33,7 @@ logging.basicConfig(
 logger = logging.getLogger("support-mcp")
 
 backend_path = os.environ.get("BACKEND_PATH", os.path.join(os.path.dirname(__file__), "..", "backend"))
-BACKEND_URL = os.getenv("BACKEND_URL", "https://localhost:8800")
+BACKEND_URL = os.getenv("BACKEND_URL", "http://localhost:8800")
 # The master runs in Docker: /app/data is the repo's data/ on the host.
 CONTAINER_DATA = "/app/data"
 HOST_DATA = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "data"))
@@ -76,7 +76,7 @@ def _backend_get(path: str, params: Optional[dict] = None):
     clean = {k: v for k, v in (params or {}).items() if v not in (None, "", [], ())}
     qs = urllib.parse.urlencode(clean, doseq=True)
     path_q = f"{path}?{qs}" if qs else path
-    with httpx.Client(base_url=BACKEND_URL, timeout=60.0, verify=False) as client:
+    with httpx.Client(base_url=BACKEND_URL, timeout=60.0) as client:
         resp = client.get(path_q, headers=_signed("GET", path_q, b""))
         _raise_for(resp)
         return resp.json()
@@ -84,7 +84,7 @@ def _backend_get(path: str, params: Optional[dict] = None):
 
 def _backend_post(path: str, body: Optional[dict] = None, timeout: float = 120.0):
     payload = json.dumps(body or {}).encode("utf-8")
-    with httpx.Client(base_url=BACKEND_URL, timeout=timeout, verify=False) as client:
+    with httpx.Client(base_url=BACKEND_URL, timeout=timeout) as client:
         resp = client.post(path, content=payload, headers={
             **_signed("POST", path, payload), "content-type": "application/json"})
         _raise_for(resp)
@@ -92,7 +92,7 @@ def _backend_post(path: str, body: Optional[dict] = None, timeout: float = 120.0
 
 
 def _backend_delete(path: str):
-    with httpx.Client(base_url=BACKEND_URL, timeout=60.0, verify=False) as client:
+    with httpx.Client(base_url=BACKEND_URL, timeout=60.0) as client:
         resp = client.delete(path, headers=_signed("DELETE", path, b""))
         _raise_for(resp)
         return resp.json()

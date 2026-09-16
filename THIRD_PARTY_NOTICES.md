@@ -33,6 +33,15 @@ CLI (Apache-2.0) — the two selectable assistant agents.
 Build tooling (not shipped): Inno Setup (Inno Setup License), rcedit (MIT,
 edits the resources of the copied `pythonw.exe`).
 
+## Carried in the tree (Web UI)
+
+The one exception to "nothing is vendored": a single-file JavaScript library
+the browser loads as-is, because the Web UI has no build step.
+
+| Component | Source | Licence | Notes |
+|---|---|---|---|
+| TweetNaCl.js 1.0.3 (`nacl-fast.min.js`) | github.com/dchest/tweetnacl-js | Unlicense (public domain) | `backend/static/vendor/nacl-fast.min.js`, unmodified (SHA-256 `3ec535c0…a5131` matches the npm release); the browser side of the boxed credential exchange — X25519 + XSalsa20-Poly1305, Ed25519 verification |
+
 ## Models (downloaded from Hugging Face on first use)
 
 | Model | Licence | Use |

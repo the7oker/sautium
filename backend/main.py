@@ -153,8 +153,9 @@ def _default_gateway() -> Optional[str]:
 
 
 async def _serve_p2p(port: int) -> None:
-    """Serve the peer surface (p2p_app) on its own port, HTTPS with the same
-    self-signed cert as the Web UI. A second uvicorn in this process rather
+    """Serve the peer surface (p2p_app) on its own port, HTTPS pinned to the
+    node key (tls_gen) — the Web UI itself is plain HTTP. A second uvicorn in
+    this process rather
     than a second container: it shares the DB pool and the DHT service, and
     the split that matters is which ROUTES face the port, not which process
     serves them.
@@ -212,7 +213,6 @@ async def _serve_p2p(port: int) -> None:
         from p2p_identity import tls_binding
         cert_path, key_path = ensure_cert(
             _Path(os.getenv("SAUTIUM_TLS_DIR", "/app/data/tls")),
-            [s.strip() for s in os.getenv("SAUTIUM_HOST_IPS", "").split(",") if s.strip()],
             binding=tls_binding(settings),
         )
         config = uvicorn.Config(
@@ -1804,17 +1804,10 @@ async def no_cache_static(request, call_next):
 if __name__ == "__main__":
     import uvicorn
 
-    from p2p_identity import tls_binding
-    from tls_gen import ensure_cert
-
-    cert_path, key_path = ensure_cert(_Path(__file__).parent / "data" / "tls",
-                                      binding=tls_binding(settings))
     uvicorn.run(
         "main:app",
         host="127.0.0.1",
         port=8000,
         reload=True,
         log_config=LOGGING_CONFIG,
-        ssl_keyfile=str(key_path),
-        ssl_certfile=str(cert_path),
     )

@@ -363,7 +363,7 @@ def generate_mcp_config(config: dict, output_path: Path) -> None:
                     "DB_NAME": "sautium",
                     "HQPLAYER_HOST": hqp.get("host", "localhost"),
                     "HQPLAYER_PORT": str(hqp.get("port", 4321)),
-                    "BACKEND_URL": f"https://localhost:{ports.get('web', 8000)}",
+                    "BACKEND_URL": f"http://localhost:{ports.get('web', 8000)}",
                     # Where the server finds shared backend code — explicit,
                     # not derived from the script's own location.
                     "BACKEND_PATH": str(backend_dir),
