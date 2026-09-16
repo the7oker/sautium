@@ -7102,7 +7102,7 @@
         const page = await fetchFriendsPage('', state.q);
         if (!fresh()) return;          // a newer search/refresh owns the list
         rememberRows(page);
-        const fresh = [...page.pinned, ...page.items];
+        const rows = [...page.pinned, ...page.items];
         if (patch) {
           // Targeted update: same membership on screen → patch each
           // row's innerHTML in place (status dot, unread badge, name,
@@ -7115,10 +7115,10 @@
           const onScreen = [...screen.querySelectorAll('.friend-row')];
           const nodeById = new Map(
             onScreen.map(r => [Number(r.dataset.friendId), r]));
-          const sameSet = onScreen.length === fresh.length &&
-            fresh.every(f => nodeById.has(f.id));
+          const sameSet = onScreen.length === rows.length &&
+            rows.every(f => nodeById.has(f.id));
           if (sameSet) {
-            fresh.forEach(f => {
+            rows.forEach(f => {
               const rowEl = nodeById.get(f.id);
               rowEl.dataset.friendKey = friendUrlKey(f);
               rowEl.innerHTML = friendRowInner(f);
@@ -7127,17 +7127,18 @@
             return;
           }
         }
-        if (fresh.length === 0) {
+        if (rows.length === 0) {
           listEl.innerHTML = `<div class="friends-empty">
             ${state.q ? 'No friends match the search.'
                       : 'No friends yet. Share your invite code or send an email.'}
           </div>`;
         } else {
-          renderInto(listEl, fresh);
+          renderInto(listEl, rows);
         }
         state.cursor = page.next_cursor;
         renderShowMore();
       } catch (err) {
+        console.warn('friends load failed', err);
         listEl.innerHTML = `<div class="friends-empty">
           Could not load friends.</div>`;
       }
