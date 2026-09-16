@@ -17,7 +17,8 @@
 //   • monkey-patches window.fetch so all in-app calls auto-sign,
 //   • exports sseStream(path, onMessage, onError) — the EventSource
 //     replacement that uses fetch+ReadableStream so we can attach
-//     auth headers (EventSource API can't),
+//     auth headers (EventSource API can't), and awaitReconnectWindow(ms),
+//     the backoff wait every stream reconnect sits out,
 //   • exports Sautium.auth for the login screen (login / pair / forget).
 //
 // Whitelisted backend paths (see backend/auth_hmac.py) accept
@@ -497,14 +498,46 @@
     }
   }
 
+  // One reconnect wait. The timer is the schedule; the browser's own
+  // signals that the odds just changed end it early: `online`
+  // (connectivity is back) and the tab becoming visible (a phone woke —
+  // its retries ran on throttled timers while it slept, and the wait
+  // armed last may have most of its 30 s left, strip up, music playing).
+  // `navigator.onLine` stays true through most real drops (Wi-Fi/LTE
+  // handoff, NAT timeout, a router blip), so neither event can replace
+  // the schedule. Resolves with what ended the wait: "timer", "online"
+  // or "visible" — a cut-short wait means the schedule should restart.
+  window.awaitReconnectWindow = function (ms) {
+    return new Promise(resolve => {
+      const done = (why) => {
+        clearTimeout(timer);
+        window.removeEventListener("online", onOnline);
+        document.removeEventListener("visibilitychange", onVisible);
+        resolve(why);
+      };
+      const onOnline = () => done("online");
+      const onVisible = () => { if (!document.hidden) done("visible"); };
+      const timer = setTimeout(() => done("timer"), ms);
+      window.addEventListener("online", onOnline);
+      document.addEventListener("visibilitychange", onVisible);
+    });
+  };
+
   // Drop-in replacement for `new EventSource(path)` when you need
   // request signing. Returns an AbortController — call .abort() to
   // close the stream. Callbacks mirror EventSource semantics so we
-  // can swap call sites with minimal change.
+  // can swap call sites with minimal change. Reconnects with a doubling
+  // backoff (1 s … 30 s) that restarts from 1 s whenever a wake or
+  // `online` cut a wait short: the network that just came back needs a
+  // few quick tries, not one attempt and then the long tail.
   window.sseStream = function (path, onMessage, onError) {
     const ctrl = new AbortController();
     (async () => {
       let backoff = 1000;
+      const waitOut = async () => {
+        const why = await window.awaitReconnectWindow(backoff);
+        backoff = why === "timer" ? Math.min(backoff * 2, 30000) : 1000;
+      };
       while (!ctrl.signal.aborted) {
         try {
           const resp = await fetch(path, {
@@ -515,8 +548,7 @@
           });
           if (!resp.ok) {
             if (onError) onError(new Error("SSE HTTP " + resp.status));
-            await new Promise(r => setTimeout(r, backoff));
-            backoff = Math.min(backoff * 2, 30000);
+            await waitOut();
             continue;
           }
           backoff = 1000;
@@ -533,8 +565,7 @@
         } catch (e) {
           if (ctrl.signal.aborted) return;
           if (onError) onError(e);
-          await new Promise(r => setTimeout(r, backoff));
-          backoff = Math.min(backoff * 2, 30000);
+          await waitOut();
         }
       }
     })();

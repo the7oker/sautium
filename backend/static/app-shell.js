@@ -2113,20 +2113,8 @@
   // typing dots forever. Only ever checked when the tab comes back.
   const STREAM_SILENCE_MS = 45000;
 
-  // Wait out one reconnect delay, cut short the moment the browser
-  // says connectivity is back — so a phone that knows it went offline
-  // resumes immediately instead of sitting out the whole backoff.
-  function awaitReconnectWindow(ms) {
-    return new Promise(resolve => {
-      const done = () => {
-        clearTimeout(timer);
-        window.removeEventListener('online', done);
-        resolve();
-      };
-      const timer = setTimeout(done, ms);
-      window.addEventListener('online', done);
-    });
-  }
+  // Each delay is sat out through window.awaitReconnectWindow (auth.js),
+  // which ends it early on `online` or the tab coming back into view.
 
   const ai = {
     el: null, thread: null, input: null, form: null, sendBtn: null,
@@ -2662,7 +2650,7 @@
             return;
           }
           ctx.showPip('reconnecting…');
-          await awaitReconnectWindow(STREAM_RECONNECT_DELAYS_MS[reconnects++]);
+          await window.awaitReconnectWindow(STREAM_RECONNECT_DELAYS_MS[reconnects++]);
           if (this.activeSessionId !== sessionId) return;
 
           ctx.reset();
