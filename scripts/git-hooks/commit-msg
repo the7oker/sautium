@@ -1,0 +1,8 @@
+#!/bin/sh
+# commit-msg hook: strip the `Claude-Session:` trailer the harness appends.
+# Public history policy — CLAUDE.md § "Public repository rules". Portable
+# (no sed -i): works under Git for Windows, WSL and macOS alike.
+msg="$1"
+tmp="$msg.stripped"
+grep -v '^Claude-Session: ' "$msg" > "$tmp" && mv "$tmp" "$msg"
+exit 0

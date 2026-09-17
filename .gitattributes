@@ -1,0 +1,2 @@
+# Hooks are run by sh; a CRLF shebang breaks them under WSL and on macOS.
+scripts/git-hooks/* text eol=lf
