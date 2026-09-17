@@ -83,9 +83,9 @@ ENV PG_BIN=/usr/lib/postgresql/18/bin
 ENV PYTHONUNBUFFERED=1
 ENV PYTHONDONTWRITEBYTECODE=1
 
-# Health check (HTTPS, self-signed — -k skips cert verification)
+# Health check — the Web UI rides plain HTTP (no certificate to skip)
 HEALTHCHECK --interval=30s --timeout=10s --start-period=40s --retries=3 \
-    CMD curl -f -k https://localhost:8000/ || exit 1
+    CMD curl -f http://localhost:8000/ || exit 1
 
 # Default command (can be overridden in docker-compose.yml)
 CMD ["python", "entrypoint.py"]

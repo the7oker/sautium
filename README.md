@@ -117,8 +117,9 @@ Edit `.env`:
   files directly (e.g. `E:/Music`).
 - `POSTGRES_PASSWORD` — database password.
 - `LASTFM_API_KEY` / `LASTFM_API_SECRET` — for enrichment + scrobbling (optional).
-- `SAUTIUM_HOST_IPS` — your host's LAN IP, added to the TLS cert SAN so phones
-  can reach the Web UI over HTTPS (Docker can't auto-detect it from inside the
+- `SAUTIUM_HOST_IPS` — your host's LAN IP, so the backend accepts requests
+  addressed to it (the Host guard) and phones can open
+  `http://<lan-ip>:8800` (Docker can't auto-detect it from inside the
   container).
 
 ### 3. Start services
