@@ -121,10 +121,12 @@ class ServiceManager:
         """Wait for PostgreSQL to accept connections."""
         import psycopg2
 
+        from desktop.config_manager import LOOPBACK
+
         for _ in range(timeout):
             try:
                 conn = psycopg2.connect(
-                    host="localhost", port=port,
+                    host=LOOPBACK, port=port,
                     user="sautium", password=password,
                     dbname="sautium",
                     connect_timeout=2,

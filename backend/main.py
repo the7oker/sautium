@@ -28,6 +28,8 @@ from pathlib import Path as _Path
 from auth_hmac import HMACAuthMiddleware, ensure_secret
 from auth_hmac import secret_path as _secret_path
 from config import settings, get_settings, ui_build, LOGGING_CONFIG
+from db_pool import db_query_one
+import device_auth
 from dht_service import DHTService, HAS_LIBTORRENT
 
 _API_SECRET_PATH = _secret_path()
@@ -273,6 +275,10 @@ async def lifespan(app: FastAPI):
         # node — Docker or launcher-run — see backend/db_migrate.py.
         import db_migrate
         db_migrate.apply_pending()
+        # Every signed request derives its token from the epoch and the
+        # node key; load both now so the first request never reads the
+        # DB on the event loop (the auth middleware runs there).
+        await asyncio.to_thread(device_auth.prime)
 
     # Resolve the hardware profile (full/standard/lite — HARDWARE-TIERS.md).
     # Drives the pre-warm set below plus pool sizes, phantom minting and
@@ -871,9 +877,11 @@ async def health_check() -> Dict[str, Any]:
         "checks": {}
     }
 
-    # Database check
+    # Database check — through the pool and off the loop: the launcher and
+    # LAN discovery probe this endpoint, and a fresh connection opened
+    # inline stalled every other request for as long as it took.
     try:
-        test_db_connection()
+        await asyncio.to_thread(db_query_one, "SELECT 1 AS ok")
         health_status["checks"]["database"] = "ok"
     except Exception as e:
         health_status["checks"]["database"] = f"error: {str(e)}"

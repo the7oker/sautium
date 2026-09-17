@@ -852,6 +852,23 @@ channel is an acquaintance tool. A track streams from it in full at most
 
 ## Known Gotchas
 
+- **Loopback targets are addresses, never `localhost`.** Windows resolves the
+  name to `::1` first, and every listener the launcher runs is IPv4-only (the
+  bundled PostgreSQL on 127.0.0.1, uvicorn on 0.0.0.0, the media proxy), so a
+  fresh connection first waits out a REFUSED IPv6 attempt — measured 2.05 s
+  per connect on the launcher stand, 15 ms by address (2026-09-17). Three
+  things turned that into the Web UI stalling in 2-second steps on every
+  screen load: the psycopg2 pool keeps only `minconn` idle connections and
+  closes the rest on `putconn`, so a burst opened a fresh server backend per
+  request; the HMAC middleware read the token epoch from the DB on the event
+  loop for EVERY request, so one slow connect froze the whole server, in-memory
+  endpoints included; and `/health` opened its own connection inline. Docker
+  never saw it — `sautium-postgres` resolves to one IPv4 address. The rules
+  that came out of it: the launcher names loopback by
+  `config_manager.LOOPBACK` (env, DSN, MCP config, db_init); nothing on the
+  event loop touches psycopg2 (the epoch is a process cache primed at startup,
+  health goes through the pool in a thread); the pool keeps eight idle
+  connections. Chrome's own `localhost` handling was not measured.
 - **A dead SSE socket is silent, and painting its death is a UI lie.** Two
   distinct failure modes, both hit by phones: (1) a socket that dies without
   a FIN leaves `reader.read()` pending forever — every backend generator

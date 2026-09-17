@@ -25,6 +25,8 @@ from typing import Optional, Callable
 import psycopg2
 import psycopg2.extras
 
+from desktop.config_manager import LOOPBACK
+
 logger = logging.getLogger(__name__)
 
 # Migration tracking table
@@ -960,7 +962,7 @@ def start_postgres(port: int = 5432) -> bool:
     for i in range(30):
         try:
             conn = psycopg2.connect(
-                host="localhost", port=port,
+                host=LOOPBACK, port=port,
                 user="postgres", password="dummy",
                 dbname="postgres", connect_timeout=1,
             )
@@ -1024,7 +1026,7 @@ def create_database(
 
     # Connect as postgres superuser
     conn = psycopg2.connect(
-        host="localhost",
+        host=LOOPBACK,
         port=port,
         user="postgres",
         password=password,
@@ -1069,7 +1071,7 @@ def create_database(
 
     # Connect to sautium as postgres to install extension and grant privileges
     conn = psycopg2.connect(
-        host="localhost",
+        host=LOOPBACK,
         port=port,
         user="postgres",
         password=password,
@@ -1210,7 +1212,7 @@ def run_migrations(
     """Launcher entry point: apply pending migrations on the launcher's
     bundled PostgreSQL (see apply_migrations)."""
     conn = psycopg2.connect(
-        host="localhost",
+        host=LOOPBACK,
         port=port,
         user="sautium",
         password=password,
@@ -1256,7 +1258,7 @@ def full_init(
     for i in range(30):
         try:
             conn = psycopg2.connect(
-                host="localhost",
+                host=LOOPBACK,
                 port=port,
                 user="postgres",
                 password=password,

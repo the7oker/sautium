@@ -21,17 +21,26 @@ logger = logging.getLogger(__name__)
 
 _pool: Optional[psycopg2.pool.ThreadedConnectionPool] = None
 
+# psycopg2 keeps only `minconn` idle connections and CLOSES every other one
+# on putconn, so a burst (the Home screen fires nine queries at once) above
+# this count opens a fresh server backend per request and pays the whole
+# connect each time. Sized for that burst plus the background workers;
+# MAX_CONNECTIONS is the ceiling under load.
+IDLE_CONNECTIONS = 8
+MAX_CONNECTIONS = 20
+
 
 def _get_pool() -> psycopg2.pool.ThreadedConnectionPool:
     global _pool
     if _pool is None or _pool.closed:
         _pool = psycopg2.pool.ThreadedConnectionPool(
-            minconn=2,
-            maxconn=20,
+            minconn=IDLE_CONNECTIONS,
+            maxconn=MAX_CONNECTIONS,
             dsn=settings.database_url,
             options="-c timezone=UTC",
         )
-        logger.info("Database connection pool initialized (2-20 connections)")
+        logger.info("Database connection pool initialized (%d-%d connections)",
+                    IDLE_CONNECTIONS, MAX_CONNECTIONS)
     return _pool
 
 

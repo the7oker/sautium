@@ -6,11 +6,6 @@ Run from Windows:
     python -m desktop.diag_missing_embeddings
 """
 
-import json
-import sys
-from collections import Counter
-from pathlib import Path
-
 import psycopg2
 
 # Docker DB (source) — port 5432, password from .env
@@ -18,16 +13,8 @@ DOCKER_DSN = "postgresql://sautium:supervisor@localhost:5432/sautium"
 
 
 def get_launcher_dsn() -> str:
-    """Build DSN from launcher config."""
-    import os
-    cfg_path = Path(os.environ.get("APPDATA", Path.home() / "AppData" / "Roaming")) / "Sautium" / "config.json"
-    if cfg_path.exists():
-        with open(cfg_path) as f:
-            cfg = json.load(f)
-        pw = cfg.get("postgres_password", "changeme")
-        port = cfg.get("ports", {}).get("postgres", 15432)
-        return f"postgresql://sautium:{pw}@localhost:{port}/sautium"
-    return f"postgresql://sautium:changeme@localhost:15432/sautium"
+    from desktop.config_manager import load_config, local_db_dsn
+    return local_db_dsn(load_config())
 
 
 def main():

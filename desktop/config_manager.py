@@ -16,6 +16,15 @@ from typing import Any, Optional
 
 logger = logging.getLogger(__name__)
 
+# Loopback targets are named by ADDRESS, never "localhost". Windows resolves
+# the name to ::1 first, and every listener this install runs is IPv4-only
+# (the bundled PostgreSQL on 127.0.0.1, uvicorn on 0.0.0.0, the media proxy),
+# so a fresh connection first waits out a refused IPv6 attempt — measured
+# 2.05 s per connect against 15 ms by address (2026-09-17). The DB pool paid
+# it on every request above its idle count, the auth middleware on the
+# event loop, the MCP servers on every backend call.
+LOOPBACK = "127.0.0.1"
+
 # Default config schema version
 CONFIG_VERSION = 1
 
@@ -121,7 +130,7 @@ def local_db_dsn(config: dict) -> str:
     """DSN of the launcher's bundled PostgreSQL."""
     ports = config.get("ports", {})
     password = config.get("postgres_password", "changeme")
-    return f"postgresql://sautium:{password}@localhost:{ports.get('postgres', 15432)}/sautium"
+    return f"postgresql://sautium:{password}@{LOOPBACK}:{ports.get('postgres', 15432)}/sautium"
 
 
 def load_config() -> dict:
@@ -221,10 +230,9 @@ def generate_env_file(config: dict, env_path: Path) -> None:
     Generate a .env file for the backend based on current config.
 
     Key differences from Docker:
-    - POSTGRES_HOST = localhost (not 'postgres')
+    - POSTGRES_HOST = 127.0.0.1 (not 'postgres'; LOOPBACK, never a name)
     - MUSIC_LIBRARY_PATH = native Windows path (not '/music')
     - HQPLAYER_HOST = localhost (not 'host.docker.internal')
-    - TRACKER_URL = http://localhost:{port} (not 'http://playback-tracker:8765')
     """
     hqp = config.get("hqplayer", {})
     ports = config.get("ports", {})
@@ -240,7 +248,7 @@ def generate_env_file(config: dict, env_path: Path) -> None:
         "# Do not edit manually — changes will be overwritten",
         "",
         "# Database",
-        f"POSTGRES_HOST=localhost",
+        f"POSTGRES_HOST={LOOPBACK}",
         f"POSTGRES_PORT={ports.get('postgres', 5432)}",
         f"POSTGRES_DB=sautium",
         f"POSTGRES_USER=sautium",
@@ -253,7 +261,6 @@ def generate_env_file(config: dict, env_path: Path) -> None:
         f"HQPLAYER_HOST={hqp.get('host', 'localhost')}",
         f"HQPLAYER_PORT={hqp.get('port', 4321)}",
         f"HQPLAYER_ENABLED={'true' if hqp.get('enabled') else 'false'}",
-        f"TRACKER_URL=http://localhost:{ports.get('tracker', 8765)}",
         "",
         "# AI Providers",
         f"DEFAULT_PROVIDER={config.get('provider', 'anthropic')}",
@@ -316,7 +323,7 @@ def generate_env_file(config: dict, env_path: Path) -> None:
 
 
 def generate_mcp_config(config: dict, output_path: Path) -> None:
-    """Generate MCP config (mcp-windows.json) for Claude Code with localhost values."""
+    """Generate MCP config (mcp-windows.json) for Claude Code with loopback values."""
     ports = config.get("ports", {})
     hqp = config.get("hqplayer", {})
 
@@ -339,7 +346,7 @@ def generate_mcp_config(config: dict, output_path: Path) -> None:
                 "command": "npx",
                 "args": ["-y", "postgres-mcp-server"],
                 "env": {
-                    "DB_HOST": "localhost",
+                    "DB_HOST": LOOPBACK,
                     "DB_PORT": str(ports.get("postgres", 5432)),
                     "DB_USER": "sautium",
                     "DB_PASSWORD": config.get("postgres_password", "changeme"),
@@ -356,14 +363,14 @@ def generate_mcp_config(config: dict, output_path: Path) -> None:
                 "command": get_backend_python(),
                 "args": [str(project_root / "mcp" / "assistant_server.py")],
                 "env": {
-                    "DB_HOST": "localhost",
+                    "DB_HOST": LOOPBACK,
                     "DB_PORT": str(ports.get("postgres", 5432)),
                     "DB_USER": "sautium",
                     "DB_PASSWORD": config.get("postgres_password", "changeme"),
                     "DB_NAME": "sautium",
                     "HQPLAYER_HOST": hqp.get("host", "localhost"),
                     "HQPLAYER_PORT": str(hqp.get("port", 4321)),
-                    "BACKEND_URL": f"http://localhost:{ports.get('web', 8000)}",
+                    "BACKEND_URL": f"http://{LOOPBACK}:{ports.get('web', 8000)}",
                     # Where the server finds shared backend code — explicit,
                     # not derived from the script's own location.
                     "BACKEND_PATH": str(backend_dir),

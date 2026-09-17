@@ -94,12 +94,31 @@ _pin_sse_lock = threading.Lock()
 # Token
 # ---------------------------------------------------------------------------
 
+# Read on EVERY signed request — by the auth middleware, on the event loop —
+# so it is process memory, not a query. The only writer is bump_epoch()
+# below, in this process, so the cache cannot go stale; and a slow database
+# no longer freezes the loop for every caller (measured: one 2 s connect per
+# concurrent request, the Web UI stalling in 2-second steps, 2026-09-17).
+_epoch_cache: Optional[int] = None
+
+
 def _epoch() -> int:
-    from routers.settings import _read
-    try:
-        return int(_read(_EPOCH_KEY) or 0)
-    except (TypeError, ValueError):
-        return 0
+    global _epoch_cache
+    if _epoch_cache is None:
+        from routers.settings import _read
+        try:
+            _epoch_cache = int(_read(_EPOCH_KEY) or 0)
+        except (TypeError, ValueError):
+            _epoch_cache = 0
+    return _epoch_cache
+
+
+def prime() -> None:
+    """Load what every signed request derives its token from — the epoch (a
+    DB read) and the node key (a file parse) — before the first request
+    lands on the event loop."""
+    _epoch()
+    _expected_pubkey()
 
 
 def current_token(server_secret: bytes) -> str:
@@ -122,9 +141,11 @@ def current_token(server_secret: bytes) -> str:
 
 def bump_epoch() -> int:
     """Invalidate every issued token. Returns the new epoch."""
-    from routers.settings import _read, _write
+    global _epoch_cache
+    from routers.settings import _write
     nxt = _epoch() + 1
     _write(_EPOCH_KEY, nxt)
+    _epoch_cache = nxt
     logger.info("device tokens invalidated (epoch %d)", nxt)
     return nxt
 
