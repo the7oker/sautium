@@ -26,6 +26,7 @@ lib64/
 parts/
 sdist/
 var/
+Claude outputs/
 wheels/
 *.egg-info/
 .installed.cfg
