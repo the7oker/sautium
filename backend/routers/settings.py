@@ -514,6 +514,9 @@ def _mb_section() -> Dict[str, Any]:
     return {
         "loaded":          bool(st.get("loaded")),
         "catalogue":       st.get("catalogue") or {},
+        # Reference tables added since this dump landed — Update fetches
+        # just those (mb_dump_load.download_and_load).
+        "missing_tables":  st.get("missing_tables") or [],
         "version":         st.get("version"),
         "total_records":   st.get("total_records", 0),
         "size_bytes":      st.get("size_bytes", 0),
@@ -542,7 +545,9 @@ def maybe_auto_update() -> None:
             latest = mb_dump_load.latest_version()
             if not latest:
                 return
-            current = mb_dump_load.loaded_version() == latest and mb_dump_load.stats().get("loaded")
+            st = mb_dump_load.stats()
+            current = (mb_dump_load.loaded_version() == latest and st.get("loaded")
+                       and not st.get("missing_tables"))
             if current:
                 return
             with _mb_lock:

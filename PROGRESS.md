@@ -850,6 +850,51 @@ channel is an acquaintance tool. A track streams from it in full at most
   registered unconditionally, which is what makes a node without yt-dlp
   still preview.
 
+### Buy resolves through MusicBrainz (2026-09-17)
+
+The phantom album's Buy button opened a Bandcamp search built from the
+credits, which often landed on nothing. Measured before changing it:
+Bandcamp's official API (bandcamp.com/developer) is Account / Sales /
+Merch Orders for labels and fulfilment partners, OAuth by request, no
+catalogue search; the site's own JSON search, the HTML search page and
+the artist-subdomain album pages all answer a non-browser client with a
+JS "Client Challenge" (HTTP 200 and 3 KB of HTML — for a real page and
+a made-up one alike), so neither a lookup nor a URL existence check can
+run from a backend, and working around a bot challenge is not something
+a public product does. MusicBrainz has the exact pages as release-URL
+relationships: ~800k Bandcamp urls of ~22M (Beatport ~270k, 7digital
+~26k, HDtracks ~4.5k across three URL generations — MB's cleanup rules
+and importer userscripts exist for Bandcamp, not for the hi-res shops).
+
+- **Bandcamp only, by Valerii's call.** One store means one button
+  state, no store ENUM, no allowlist order; the space an allowlist would
+  have saved is under a percent of the dump either way — the saving
+  that matters is filtering `url` at all (22M rows → 0.8M).
+- **Filtered at COPY time, not after.** `mb_dump_load._ROW_FILTERS`
+  admits a `url` row only for `*.bandcamp.com` (editorial
+  `daily.bandcamp.com` excluded) and a link row only when its url
+  survived. The core archive delivers `l_artist_url` and `l_release_url`
+  BEFORE `url` (MB's `@CORE_TABLE_LIST` order), so those two members are
+  spooled to disk and loaded once the surviving ids are known.
+- **Tables added after a dump landed load alone.** `stats()` reports
+  `missing_tables` (empty TABLES behind the in-DB completion marker —
+  the marker, not the VERSION file, which a dev host shares with a
+  dump-less launcher); `download_and_load` fetches the same version's
+  archive and streams just those (`stream_load(tables=…)`), and the
+  Settings block turns Update amber. A dump older than the mirror's
+  newest takes the full path, which includes them.
+- **Slice format v3** — the artist's url subtree in the blob, receipt
+  context bumped, migration 016 empties both slice ledgers everywhere,
+  serving gated on the full wire table set (P2P_NETWORK.md § E).
+- **Four button states** from one query in `routers/albums.py`
+  (`_buy_link`): album page → artist page → disabled (`absent`: the
+  local facts cover the record — a dump with the url tables, or a slice
+  fetched after 016 — and name no page) → the old search fallback for
+  `unknown` (a carried phantom whose artist's slice has not landed, a
+  record newer than the dump). Deterministic pick — earliest-dated
+  release, `/album/` over `/track/`, then url — so every node lands on
+  the same page.
+
 ## Known Gotchas
 
 - **Loopback targets are addresses, never `localhost`.** Windows resolves the

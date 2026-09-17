@@ -111,6 +111,17 @@ SLICE_TABLES = {
         "id", "gid", "name", "artist_credit", "length", "comment",
         "edits_pending", "last_updated", "video",
     ],
+    # URL relationships, Bandcamp only (mb_dump_load._ROW_FILTERS) — the
+    # phantom album's Buy link, resolved offline on the requester. v3.
+    "mb_url": ["id", "gid", "url", "edits_pending", "last_updated"],
+    "mb_l_artist_url": [
+        "id", "link", "entity0", "entity1", "edits_pending", "last_updated",
+        "link_order", "entity0_credit", "entity1_credit",
+    ],
+    "mb_l_release_url": [
+        "id", "link", "entity0", "entity1", "edits_pending", "last_updated",
+        "link_order", "entity0_credit", "entity1_credit",
+    ],
     "mb_tag": ["id", "name", "ref_count"],
     "mb_artist_tag": ["artist", "tag", "count", "last_updated"],
     "mb_release_group_tag": ["release_group", "tag", "count", "last_updated"],
@@ -142,8 +153,14 @@ class DumpBusy(Exception):
 # served under a different one.
 
 # Domain-separation prefix — a receipt signature can never be replayed as
-# a chat/sync/birth signature and vice versa. v2 = per-name grain.
-RECEIPT_CONTEXT = b"sautium-mb-slice-v2:"
+# a chat/sync/birth signature and vice versa. v2 = per-name grain; v3
+# (2026-09-17) = the url subtree rides in the blob (SLICE_TABLES mb_url,
+# mb_l_artist_url, mb_l_release_url). The bump is deliberate: a v2 blob is
+# a signed statement WITHOUT those tables, and a signed hole closes a name
+# for good on the requester — so a v3 requester must not verify one.
+# Migration 016 empties every node's blob cache and provenance log.
+RECEIPT_CONTEXT = b"sautium-mb-slice-v3:"
+PROTOCOL_VERSION = 3
 
 
 def name_key(name: str) -> str:
@@ -248,12 +265,23 @@ def dump_version_file():
 # name it never saw (observed live: 'sade' on a slice-holding node).
 DB_VERSION_KEY = "musicbrainz.db_version"
 
+# Every wire table populated, in one round trip. A dump node serves only
+# when it holds EVERY table the wire format names: a dump loaded before a
+# table joined SLICE_TABLES (the url tables, 2026-09-17) would otherwise
+# sign slices with a hole in them, and a signed hole closes a name for good
+# on the requester. Until the loader adds the missing tables
+# (mb_dump_load.download_and_load loads just those) the node is a replica:
+# it re-serves what it cached and advertises no dump.
+_WIRE_TABLES_POPULATED_SQL = "SELECT " + " AND ".join(
+    f"EXISTS (SELECT 1 FROM {t})" for t in SLICE_TABLES)
+
 
 def local_dump_available(conn):
     """Dump version string if this node holds a COMPLETED full load on this
     DSN (serve-slices / serve-search / search-locally authority), else
-    None. The in-DB marker is the per-DSN truth; mb_artist rows are the
-    sanity check that the data was not dropped underneath it."""
+    None. The in-DB marker is the per-DSN truth; populated wire tables are
+    the sanity check that the data is all there and was not dropped
+    underneath it."""
     with conn.cursor() as cur:
         cur.execute("SELECT value FROM user_settings WHERE key = %s",
                     (DB_VERSION_KEY,))
@@ -261,8 +289,8 @@ def local_dump_available(conn):
         version = row[0] if row else None
         if not version:
             return None
-        cur.execute("SELECT 1 FROM mb_artist LIMIT 1")
-        if cur.fetchone() is None:
+        cur.execute(_WIRE_TABLES_POPULATED_SQL)
+        if not cur.fetchone()[0]:
             return None
     return version
 
@@ -498,6 +526,20 @@ def get_slice_one(conn, name: str) -> dict:
                 recordings.append(row)
         tables["mb_recording"] = recordings
 
+        # Bandcamp pages (the dump keeps no other store): release links for
+        # the whole subtree, artist links for the matched artists — a
+        # collaborator's own page rides in that artist's slice.
+        tables["mb_l_release_url"] = _fetch(
+            cur, "mb_l_release_url", "entity0 = ANY(%s)", (r_ids,), truncated)
+        tables["mb_l_artist_url"] = _fetch(
+            cur, "mb_l_artist_url", "entity0 = ANY(%s)", (a_ids,), truncated)
+        url_ids = sorted(
+            {row[SLICE_TABLES["mb_l_release_url"].index("entity1")]
+             for row in tables["mb_l_release_url"]} |
+            {row[SLICE_TABLES["mb_l_artist_url"].index("entity1")]
+             for row in tables["mb_l_artist_url"]})
+        tables["mb_url"] = _fetch(cur, "mb_url", "id = ANY(%s)", (url_ids,), truncated)
+
         tables["mb_artist_tag"] = _fetch(
             cur, "mb_artist_tag", "artist = ANY(%s) AND count > 0", (a_ids,), truncated)
         tables["mb_release_group_tag"] = _fetch(
@@ -677,7 +719,7 @@ def count_slice_blobs(conn) -> int:
 
 def serve_slices(conn, names: list, sign_fn=None,
                  author_pubkey: str = "") -> dict:
-    """The shared v2 server body for both surfaces.
+    """The shared v3 server body for both surfaces.
 
     Per name: cached blob wins (dump node's cache and replica's inventory
     are the same table); a dump node computes+signs+caches on a miss
@@ -718,7 +760,7 @@ def serve_slices(conn, names: list, sign_fn=None,
             "sig": entry["sig"],
             "blob_gz": base64.b64encode(entry["blob_gz"]).decode("ascii"),
         }
-    return {"v": 2, "slices": slices, "missing": missing}
+    return {"v": PROTOCOL_VERSION, "slices": slices, "missing": missing}
 
 
 def verify_slice_entry(name: str, entry: dict):

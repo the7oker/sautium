@@ -2289,6 +2289,46 @@ CREATE TABLE IF NOT EXISTS mb_release_label (
     last_updated   TIMESTAMPTZ
 );
 
+-- URL relationships, BANDCAMP ONLY. The Buy affordance on a phantom album
+-- (docs/design/PHANTOM-DISCOVERY.md D5) resolves through them offline: the
+-- album's release group → its releases → their Bandcamp page, else a credited
+-- artist's page. The loader keeps a url row only when it points at
+-- *.bandcamp.com and a link row only when its url survived — ~1/25 of MB's
+-- url table (mb_dump_load._ROW_FILTERS). Column order mirrors the dump. MB's
+-- link/link_type tables are not needed: the domain is the store. Empty on a
+-- dump loaded before 2026-09-17 until the next update adds them.
+CREATE TABLE IF NOT EXISTS mb_url (
+    id            INTEGER PRIMARY KEY,
+    gid           UUID,
+    url           TEXT,
+    edits_pending INTEGER,
+    last_updated  TIMESTAMPTZ
+);
+
+CREATE TABLE IF NOT EXISTS mb_l_artist_url (
+    id             INTEGER PRIMARY KEY,
+    link           INTEGER,
+    entity0        INTEGER,        -- mb_artist.id
+    entity1        INTEGER,        -- mb_url.id
+    edits_pending  INTEGER,
+    last_updated   TIMESTAMPTZ,
+    link_order     INTEGER,
+    entity0_credit TEXT,
+    entity1_credit TEXT
+);
+
+CREATE TABLE IF NOT EXISTS mb_l_release_url (
+    id             INTEGER PRIMARY KEY,
+    link           INTEGER,
+    entity0        INTEGER,        -- mb_release.id
+    entity1        INTEGER,        -- mb_url.id
+    edits_pending  INTEGER,
+    last_updated   TIMESTAMPTZ,
+    link_order     INTEGER,
+    entity0_credit TEXT,
+    entity1_credit TEXT
+);
+
 -- Folksonomy tags (mb_tag, mb_artist_tag) come from the mbdump-derived archive
 -- (column order MIRRORS the MB dump exactly — default COPY round-trips). The
 -- curated genre vocabulary (mb_genre) is NOT in the streamed archives; it's
@@ -2359,6 +2399,8 @@ CREATE INDEX IF NOT EXISTS idx_mb_artist_tag_artist     ON mb_artist_tag(artist)
 CREATE INDEX IF NOT EXISTS idx_mb_tag_id                ON mb_tag(id);
 CREATE INDEX IF NOT EXISTS idx_mb_rg_tag_rg             ON mb_release_group_tag(release_group);
 CREATE INDEX IF NOT EXISTS idx_mb_genre_name_lower      ON mb_genre(lower(name));
+CREATE INDEX IF NOT EXISTS idx_mb_l_artist_url_artist   ON mb_l_artist_url(entity0);
+CREATE INDEX IF NOT EXISTS idx_mb_l_release_url_release ON mb_l_release_url(entity0);
 
 -- P2P MB slices land via INSERT ... ON CONFLICT DO NOTHING, which needs a
 -- conflict target on every shipped table — these four have no PK in the dump

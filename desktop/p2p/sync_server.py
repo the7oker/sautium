@@ -864,7 +864,7 @@ class SyncServer:
             )
 
     async def handle_mb_slice(self, request: web.Request) -> web.Response:
-        """POST /api/mb/slice — per-name signed blobs (v2).
+        """POST /api/mb/slice — per-name signed blobs (v3).
 
         A dump holder computes+signs+caches misses; a REPLICA (no dump,
         mb_slice_blobs only) answers what it holds and lists the rest in

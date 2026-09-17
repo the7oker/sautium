@@ -289,7 +289,7 @@ def mb_search(q: str = Query(..., min_length=2, max_length=255)) -> dict:
 
 @mb_router.post("/slice")
 def mb_slice(req: MBSliceRequest) -> dict:
-    """Per-name signed blobs (v2) — mirrors
+    """Per-name signed blobs (v3) — mirrors
     desktop/p2p/sync_server.handle_mb_slice. Dump holders compute+sign+
     cache misses; a replica answers what it holds, misses land in
     `missing`. Blobs carry the ORIGINAL author's signature either way."""

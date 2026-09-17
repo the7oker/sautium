@@ -20,8 +20,9 @@ import psycopg2
 import psycopg2.extras
 
 from desktop.api_client import BackendAPIClient
-from desktop.p2p.mb_slice_queries import (MB_LOAD_LOCK_KEY, SLICE_TABLES,
-                                          addr_uuid, name_key as lower_key,
+from desktop.p2p.mb_slice_queries import (MB_LOAD_LOCK_KEY, PROTOCOL_VERSION,
+                                          SLICE_TABLES, addr_uuid,
+                                          name_key as lower_key,
                                           store_slice_blob,
                                           verify_slice_entry)
 
@@ -32,6 +33,7 @@ logger = logging.getLogger(__name__)
 _ANALYZE_TABLES = (
     "mb_artist", "mb_artist_alias", "mb_artist_credit", "mb_artist_credit_name",
     "mb_release_group", "mb_release", "mb_medium", "mb_track", "mb_recording",
+    "mb_url", "mb_l_artist_url", "mb_l_release_url",
 )
 
 
@@ -94,9 +96,9 @@ class MBSliceClient:
                 # it out and re-asks instead of parking the batch.
                 out["retry_after"] = resp["retry_after"]
             return out
-        if resp.get("v") != 2:
+        if resp.get("v") != PROTOCOL_VERSION:
             logger.warning(f"MB slice from {self.source_node}: incompatible "
-                           f"protocol (no v2) — rejected")
+                           f"protocol (no v{PROTOCOL_VERSION}) — rejected")
             return {"error": "incompatible slice protocol"}
 
         slices = resp.get("slices") or {}

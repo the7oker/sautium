@@ -186,9 +186,36 @@ is dropped when its listen ends; what an output has buffered for itself
 A wishlist needs its own management surface, and at $5–10/album on
 Bandcamp the friction of "save for later" is not worth a new screen.
 Replace the wishlist concept with a direct **[Buy on Bandcamp]**
-action on phantom album/track tiles (Bandcamp search deep-link
-keyed on artist + album). Acquisition is one click, not a list to
-curate.
+action on phantom album/track tiles. Acquisition is one click, not a
+list to curate.
+
+**The link is resolved, not searched (2026-09-17).** A search deep-link
+keyed on artist + album often landed on nothing, and there is nothing
+better to ask Bandcamp for: its official API serves labels and merch
+partners only, and the site — search, album pages, all of it — answers
+a non-browser client with a bot challenge. MusicBrainz carries the
+exact page as a release-URL relationship (~800k Bandcamp urls; the
+importer userscript is how most independent releases enter MB), so the
+dump keeps three tables filtered to `*.bandcamp.com` (`mb_url`,
+`mb_l_release_url`, `mb_l_artist_url`; a slice node receives them in
+the artist's v3 slice) and the album endpoint answers `buy.state`:
+
+- `album` — the release group's own page (earliest-dated release,
+  `/album/` over `/track/`, so every node picks the same link);
+- `artist` — no release link, but a credited artist has a Bandcamp
+  page: the shop's grid is one tap from the record;
+- `absent` — the local facts cover the record and name no page: the
+  button is disabled;
+- `unknown` — the facts are not here yet (a carried phantom whose
+  artist's slice has not landed, a record newer than the dump): the
+  search fallback stays.
+
+Bandcamp is the only store kept. MB links other download shops under
+the same generic relationship types (Beatport, 7digital, a few thousand
+HDtracks pages in three URL generations), but one store means one
+button state, and the space a store allowlist would save is under a
+percent of the dump — the saving that matters is filtering `url` at
+all (22M rows → 0.8M).
 
 ### D6. P2P propagation is the multiplier
 
@@ -258,7 +285,8 @@ background monthly + fetch-on-view daily, gated by `artists.last_album_sync`.
   `POST /{id}/sync-discography` is the daily-gated fetch-on-view refresh.
 - Frontend — dimmed `.is-unowned` "Missing albums" shelf after Albums
   (the artist's releases absent from the catalog, not just *new* ones),
-  amber "Buy ↗" → Bandcamp album search (`&item_type=a`), in-place stale
+  amber "Buy" → the MB-resolved Bandcamp page (D5; a search only while the
+  facts are not local, disabled when they name no page), in-place stale
   refresh (no flicker).
 
 **Observed on first run (the iteration signal):** `release_match_key`

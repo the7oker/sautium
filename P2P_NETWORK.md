@@ -839,6 +839,24 @@ action — that is what makes a bold default fair. The download starts once afte
 the first launch (the flag clears immediately, so a restart never repeats a
 multi-GB transfer).
 
+**v3 (2026-09-17): the url subtree rides in the slice.** The phantom album's
+Buy link resolves from MB's release-URL relationships (Bandcamp only — see
+`docs/design/PHANTOM-DISCOVERY.md` D5), so `SLICE_TABLES` gained `mb_url`,
+`mb_l_release_url` and `mb_l_artist_url` and the receipt context moved to
+`sautium-mb-slice-v3:`. The bump is deliberate: a v2 blob is a signed
+statement *without* those tables, and a signed hole closes a name for good on
+the requester, so a v3 requester must not verify one. The migration is one
+delta (`016_mb_bandcamp_urls.sql`): it empties `mb_slice_blobs` and
+`mb_slice_fetches` on every node — a dump node's cache is rebuilt on demand, a
+replica's inventory refills from its own re-fetch, and every name re-enters
+`pending_slice_names`, where the ordinary 200-per-cycle queue re-asks it; the
+rows already imported stay (`ON CONFLICT DO NOTHING`), only the url rows are
+new. Serving is gated on the whole wire table set (`local_dump_available`): a
+dump node whose dump predates the tables advertises no dump and answers
+`missing` until `download_and_load` adds them (the same version's archive when
+the mirror still has it, else the next full update), so a requester that
+updates first simply keeps its names pending.
+
 E2E: dump → client (2 matched, 12277 rows, zero-match closed) → a dump-less
 replica re-serves a verified blob → a second hop verifies it **against the dump
 node's key**; a flipped byte and a blob served under another name are both

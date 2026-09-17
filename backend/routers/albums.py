@@ -14,6 +14,8 @@ deterministic tiebreaker). The full variant list is always returned
 so the UI can render a selector without a second roundtrip.
 """
 
+from typing import Optional
+
 from fastapi import APIRouter, HTTPException, Query
 
 from db_pool import db_query, db_query_one
@@ -21,6 +23,87 @@ from genre_queries import album_genre_chips
 
 
 router = APIRouter(prefix="/api/albums", tags=["albums"])
+
+
+def _buy_link(rg_mbid: Optional[str], artist_name: Optional[str]) -> dict:
+    """The Buy affordance of a phantom album, resolved from the local MB facts
+    (docs/design/PHANTOM-DISCOVERY.md D5). Bandcamp is the only store the dump
+    keeps (mb_dump_load._ROW_FILTERS). Four states:
+
+      album   — a release of the group carries its Bandcamp page. The
+                earliest-dated release wins and an /album/ page beats a
+                /track/ page, so every node picks the same link.
+      artist  — no release link, but a credited artist has a Bandcamp page
+                (MB's artist-level `bandcamp` relationship): the shop's own
+                grid is one tap from the record.
+      absent  — the local facts cover this record and name no page; the UI
+                disables the button.
+      unknown — the facts are not here: a carried phantom whose artist's
+                slice has not landed, a record newer than the dump. The UI
+                keeps its search fallback.
+
+    "Covered" is discography._MB_SOURCE_COVERS_SQL's rule plus the url
+    tables themselves: a dump node whose loader has not added them yet must
+    not read its own gap as "not on Bandcamp". On a slice node every
+    provenance row postdates migration 016, i.e. names a v3 slice that
+    carried the url subtree."""
+    row = db_query_one("""
+        WITH rg AS (
+            SELECT id, artist_credit
+            FROM mb_release_group
+            WHERE gid = %(rg)s::uuid
+        ),
+        release_date AS (
+            SELECT d.release,
+                   MIN(make_date(COALESCE(NULLIF(d.date_year, 0), 9999),
+                                 COALESCE(d.date_month, 1),
+                                 COALESCE(d.date_day, 1))) AS first_date
+            FROM (SELECT release, date_year, date_month, date_day
+                  FROM mb_release_country
+                  UNION ALL
+                  SELECT release, date_year, date_month, date_day
+                  FROM mb_release_unknown_country) d
+            WHERE d.release IN (SELECT r.id FROM mb_release r
+                                JOIN rg ON r.release_group = rg.id)
+            GROUP BY d.release
+        ),
+        release_pages AS (
+            SELECT u.url,
+                   CASE WHEN u.url ~* '/album/' THEN 0
+                        WHEN u.url ~* '/track/' THEN 1
+                        ELSE 2 END AS kind,
+                   rd.first_date
+            FROM rg
+            JOIN mb_release r ON r.release_group = rg.id
+            JOIN mb_l_release_url l ON l.entity0 = r.id
+            JOIN mb_url u ON u.id = l.entity1
+            LEFT JOIN release_date rd ON rd.release = r.id
+        ),
+        artist_pages AS (
+            SELECT u.url, acn.position, (u.url ~* '/(album|track)/') AS deep
+            FROM rg
+            JOIN mb_artist_credit_name acn ON acn.artist_credit = rg.artist_credit
+            JOIN mb_l_artist_url l ON l.entity0 = acn.artist
+            JOIN mb_url u ON u.id = l.entity1
+        )
+        SELECT (SELECT url FROM release_pages
+                ORDER BY kind, first_date NULLS LAST, url LIMIT 1) AS album_url,
+               (SELECT url FROM artist_pages
+                ORDER BY position, deep, url LIMIT 1) AS artist_url,
+               EXISTS (SELECT 1 FROM rg) AS rg_known,
+               ((EXISTS (SELECT 1 FROM user_settings
+                         WHERE key = 'musicbrainz.db_version')
+                 AND EXISTS (SELECT 1 FROM mb_url))
+                OR EXISTS (SELECT 1 FROM mb_slice_fetches f
+                           WHERE f.name_key = lower(btrim(%(name)s)))) AS covered
+    """, {"rg": rg_mbid, "name": artist_name})
+    if row["album_url"]:
+        return {"state": "album", "url": row["album_url"]}
+    if row["artist_url"]:
+        return {"state": "artist", "url": row["artist_url"]}
+    if row["covered"] and row["rg_known"]:
+        return {"state": "absent", "url": None}
+    return {"state": "unknown", "url": None}
 
 
 def _album_description(album_id: str) -> dict:
@@ -65,12 +148,14 @@ def _phantom_album(album_id: str) -> dict:
         SELECT al.id::text AS id,
                al.title,
                al.release_year AS year,
-               al.cover_url
+               al.cover_url,
+               al.musicbrainz_id::text AS rg_mbid
         FROM albums al
         WHERE al.id = %(id)s::uuid
     """, {"id": album_id})
     if not album:
         raise HTTPException(status_code=404, detail="album not found")
+    rg_mbid = album.pop("rg_mbid")
 
     album["is_owned"] = False
     album.update(_album_description(album_id))
@@ -103,6 +188,10 @@ def _phantom_album(album_id: str) -> dict:
     album["genres"] = album_genre_chips(
         album_id,
         album["primary_artist"]["id"] if album["primary_artist"] else None)
+
+    album["buy"] = _buy_link(
+        rg_mbid,
+        album["primary_artist"]["name"] if album["primary_artist"] else None)
 
     # Tracklist from album_tracks. No media_file_id (no local audio → rows are
     # display-only, playback via play-phantom-album), but bpm/key/mode DO appear

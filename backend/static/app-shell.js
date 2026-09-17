@@ -5375,11 +5375,15 @@
       // phantom album by id and re-fetch it (no per-render listener to tear down).
       if (isPhantom) screen.dataset.phantomAlbumId = albumId;
       else delete screen.dataset.phantomAlbumId;
-      // Bandcamp search for the Buy CTA (no stored buy_url; built from credits).
-      const buyUrl = 'https://bandcamp.com/search?q='
+      // The Buy CTA — the backend resolves it from the local MusicBrainz facts
+      // (`buy.state`: the album's page, the artist's page, absent, unknown).
+      // A known absence disables the button; only an unknown falls back to a
+      // Bandcamp search built from the credits, which is a coin toss.
+      const buy = d.buy || { state: 'unknown', url: null };
+      const buyUrl = buy.url || ('https://bandcamp.com/search?q='
         + encodeURIComponent((((d.primary_artist && d.primary_artist.name) || '')
             + ' ' + (d.title || '')).trim())
-        + '&item_type=a';
+        + '&item_type=a');
 
       // Streaming source quality for the phantom badge — the preferred provider
       // (lossless provider > YouTube lossy), reported by the album endpoint.
@@ -5513,9 +5517,13 @@
         <div class="album-actions${isPhantom ? ' is-phantom' : ''}">
           ${isPhantom ? `
             <button class="btn-primary" type="button" data-action="play-phantom">${SVG_PLAY} Stream all</button>
-            <button class="btn-secondary album-buy-btn" type="button" data-buy-url="${escapeHtml(buyUrl)}">
+            ${buy.state === 'absent'
+              ? `<button class="btn-secondary album-buy-btn" type="button" disabled title="Not on Bandcamp">
               <span class="btn-label">Buy</span>
-            </button>
+            </button>`
+              : `<button class="btn-secondary album-buy-btn" type="button" data-buy-url="${escapeHtml(buyUrl)}">
+              <span class="btn-label">Buy</span>
+            </button>`}
             <button class="btn-secondary album-queue-btn" type="button" data-action="queue-phantom-album">
               <span class="btn-icon">${SVG_PLUS}</span><span class="btn-label">Queue</span>
             </button>
@@ -12423,13 +12431,17 @@
     const progress = String((mb.update && mb.update.progress) || '');
     const pct = (mb.update && typeof mb.update.pct === 'number') ? mb.update.pct : null;
     const err = (!running && mb.update && mb.update.error) ? mb.update.error : '';
+    // Reference tables the code gained after this dump was loaded: Update
+    // fetches just those, and the button asks for it like a first download.
+    const incomplete = mb.loaded && (mb.missing_tables || []).length > 0;
     const actions = running ? `
       <div class="action-progress" data-progress-for="mb">${escapeProfileHtml(progress || 'Working…')}</div>
       <div class="enrich-bar${pct == null ? ' indeterminate' : ''}" data-mb-bar><div class="fill"${pct == null ? '' : ` style="width:${pct}%;"`}></div></div>
     ` : `
       ${err ? `<div class="action-progress failed">${escapeProfileHtml('Failed: ' + err)}</div>` : ''}
+      ${incomplete ? `<div class="action-progress">New reference tables since this download — Update fetches just those.</div>` : ''}
       <div class="btn-row${mb.loaded ? '' : ' single'}">
-        <button class="btn ${mb.loaded ? 'btn-secondary' : 'btn-primary'}" data-action="mb-update">${mb.loaded ? 'Update' : 'Download'}</button>
+        <button class="btn ${mb.loaded && !incomplete ? 'btn-secondary' : 'btn-primary'}" data-action="mb-update">${mb.loaded ? 'Update' : 'Download'}</button>
         ${mb.loaded ? `<button class="btn btn-secondary" data-action="mb-delete">Delete catalogue</button>` : ''}
       </div>`;
     // The pitch names what the catalogue buys. Loaded → the dump's own
