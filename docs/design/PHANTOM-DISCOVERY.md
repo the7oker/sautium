@@ -203,7 +203,9 @@ the artist's v3 slice) and the album endpoint answers `buy.state`:
 - `album` — the release group's own page (earliest-dated release,
   `/album/` over `/track/`, so every node picks the same link);
 - `artist` — no release link, but a credited artist has a Bandcamp
-  page: the shop's grid is one tap from the record;
+  page: the link is the shop's `/music` grid, never the root MB stores,
+  because a root redirects to whatever release the artist featured
+  (Buy then "opened a different album");
 - `absent` — the local facts cover the record and name no page: the
   button is disabled;
 - `unknown` — the facts are not here yet (a carried phantom whose

@@ -893,7 +893,10 @@ and importer userscripts exist for Bandcamp, not for the hi-res shops).
   `unknown` (a carried phantom whose artist's slice has not landed, a
   record newer than the dump). Deterministic pick — earliest-dated
   release, `/album/` over `/track/`, then url — so every node lands on
-  the same page.
+  the same page. The artist state links the shop's `/music` grid, not
+  the root MB stores: a Bandcamp root redirects to the artist's
+  featured release, which read as "Buy opened a different album" on the
+  first live tap.
 
 ## Known Gotchas
 

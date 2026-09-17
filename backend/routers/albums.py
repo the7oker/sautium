@@ -34,8 +34,11 @@ def _buy_link(rg_mbid: Optional[str], artist_name: Optional[str]) -> dict:
                 earliest-dated release wins and an /album/ page beats a
                 /track/ page, so every node picks the same link.
       artist  — no release link, but a credited artist has a Bandcamp page
-                (MB's artist-level `bandcamp` relationship): the shop's own
-                grid is one tap from the record.
+                (MB's artist-level `bandcamp` relationship). The link is the
+                shop's /music grid, never the page MB stores: a shop's root
+                redirects to whatever release the artist featured, which
+                read as "Buy opened a different album" (Klaus Schulze,
+                2026-09-17), and the grid is where the record is found.
       absent  — the local facts cover this record and name no page; the UI
                 disables the button.
       unknown — the facts are not here: a carried phantom whose artist's
@@ -80,7 +83,8 @@ def _buy_link(rg_mbid: Optional[str], artist_name: Optional[str]) -> dict:
             LEFT JOIN release_date rd ON rd.release = r.id
         ),
         artist_pages AS (
-            SELECT u.url, acn.position, (u.url ~* '/(album|track)/') AS deep
+            SELECT regexp_replace(u.url, '^(https?://[^/]+).*$', '\\1') || '/music' AS url,
+                   acn.position
             FROM rg
             JOIN mb_artist_credit_name acn ON acn.artist_credit = rg.artist_credit
             JOIN mb_l_artist_url l ON l.entity0 = acn.artist
@@ -89,7 +93,7 @@ def _buy_link(rg_mbid: Optional[str], artist_name: Optional[str]) -> dict:
         SELECT (SELECT url FROM release_pages
                 ORDER BY kind, first_date NULLS LAST, url LIMIT 1) AS album_url,
                (SELECT url FROM artist_pages
-                ORDER BY position, deep, url LIMIT 1) AS artist_url,
+                ORDER BY position, url LIMIT 1) AS artist_url,
                EXISTS (SELECT 1 FROM rg) AS rg_known,
                ((EXISTS (SELECT 1 FROM user_settings
                          WHERE key = 'musicbrainz.db_version')

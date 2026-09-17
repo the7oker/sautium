@@ -5521,7 +5521,8 @@
               ? `<button class="btn-secondary album-buy-btn" type="button" disabled title="Not on Bandcamp">
               <span class="btn-label">Buy</span>
             </button>`
-              : `<button class="btn-secondary album-buy-btn" type="button" data-buy-url="${escapeHtml(buyUrl)}">
+              : `<button class="btn-secondary album-buy-btn" type="button" data-buy-url="${escapeHtml(buyUrl)}"
+                    title="${buy.state === 'album' ? 'Buy on Bandcamp' : buy.state === 'artist' ? "The artist's Bandcamp shop" : 'Search Bandcamp'}">
               <span class="btn-label">Buy</span>
             </button>`}
             <button class="btn-secondary album-queue-btn" type="button" data-action="queue-phantom-album">
