@@ -35,7 +35,7 @@ class LocalBackend(PlayerBackend):
         self._queue = queue
         self.label = ((device_id or "").partition("::")[2]
                       or "System default output")
-        self._engine = Engine(queue, emit, device_id, exclusive)
+        self._engine = Engine(queue, self._emit, device_id, exclusive)
         self._exclusive = exclusive
 
     # -- lifecycle -------------------------------------------------------

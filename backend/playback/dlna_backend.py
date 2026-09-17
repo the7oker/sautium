@@ -19,6 +19,7 @@ import asyncio
 import logging
 import threading
 import time
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import timedelta
 from typing import Optional
 from urllib.parse import parse_qs, unquote, urlparse
@@ -31,8 +32,10 @@ from playback.queue import CanonicalQueue, QueueItem
 logger = logging.getLogger(__name__)
 
 try:
+    from aiohttp import ClientConnectionError
     from async_upnp_client.aiohttp import AiohttpNotifyServer, AiohttpRequester
     from async_upnp_client.client_factory import UpnpFactory
+    from async_upnp_client.exceptions import UpnpError
     from async_upnp_client.profiles.dlna import DmrDevice, TransportState
     HAS_UPNP = True
 except ImportError:
@@ -40,6 +43,13 @@ except ImportError:
     logger.warning("async-upnp-client not installed — DLNA output disabled")
 
 _CMD_TIMEOUT = 10.0
+# The liveness probe's TCP-connect window. A phone or DAP in Wi-Fi power-save
+# answers the first packet after minutes of idle only once its radio wakes —
+# seen live on KANN: 2 s ran out with the device on and healthy, "offline"
+# was reported, and the retry a few seconds later attached in half a second.
+# The kernel resends the SYN at 1 s and 3 s, so 5 s gives a sleeping radio
+# three chances; a device that is really off costs those 5 s to diagnose.
+_PROBE_TIMEOUT = 5.0
 _TRACK_END_SLACK = 3.0      # STOPPED within this many seconds of the length = track finished
 _RELTIME_TOLERANCE = 3.0    # a RelTime this close to our clock is the renderer's word on it
 _PENDING_PLAY_DEADLINE = 20.0   # a Play unconfirmed this long stops claiming `loading`
@@ -135,7 +145,30 @@ def _transient_501(e: Exception) -> bool:
     return "upnp error: 501" in str(e)
 
 
-def renderer_reachable(location: str, timeout: float = 2.0) -> bool:
+def _connection_failure(e: Exception) -> bool:
+    """A failure below SOAP — the request got no answer at all: refused (the
+    renderer app is closed, its port has moved), timed out, unreachable.
+    That is the doze signature; a SOAP fault is the renderer answering.
+    async_upnp_client raises its own ClientConnectionError subclass for the
+    refused case, and that one is NOT an OSError — checking OSError alone
+    let a closed phone renderer pass as "answering"."""
+    return isinstance(e, (TimeoutError, OSError, ClientConnectionError))
+
+
+def _describe(e: Exception) -> str:
+    """One readable line for a failure. async_upnp_client wraps a transport
+    error as `UpnpError(repr(cause), None)`, whose str() is that tuple — the
+    whole aiohttp ConnectionKey repr — where the cause itself says "Cannot
+    connect to host …" in one line."""
+    cause = e.__cause__
+    if (isinstance(e, UpnpError) and cause is not None and e.args
+            and e.args[0] == repr(cause)):
+        e = cause
+    text = str(e).strip() or type(e).__name__
+    return text if len(text) <= 80 else text[:77] + "…"
+
+
+def renderer_reachable(location: str, timeout: float = _PROBE_TIMEOUT) -> bool:
     """Cheap TCP-connect liveness check on a renderer's description host:port.
     A powered-off renderer fails this in ~timeout s, so the play-intent gate
     can report it offline fast instead of eating stacked SOAP/attach
@@ -151,6 +184,32 @@ def renderer_reachable(location: str, timeout: float = 2.0) -> bool:
             return True
     except OSError:
         return False
+
+
+def known_locations(renderer: dict) -> list[str]:
+    """Every address the renderer was reached at, the current one first."""
+    known = []
+    for loc in [renderer.get("location")] + list(renderer.get("locations") or []):
+        if loc and loc not in known:
+            known.append(loc)
+    return known
+
+
+def renderer_online(renderer: dict, timeout: float = _PROBE_TIMEOUT) -> bool:
+    """Does the renderer answer at ANY address it was ever reached at? The
+    play-intent gate must not call a device offline because it moved
+    networks since we last saw it. The addresses are probed at once and the
+    first answer decides — a stale entry must not spend the whole window
+    before the live one is even tried."""
+    known = known_locations(renderer)
+    if not known:
+        return False
+    pool = ThreadPoolExecutor(max_workers=len(known))
+    try:
+        return any(f.result() for f in as_completed(
+            [pool.submit(renderer_reachable, loc, timeout) for loc in known]))
+    finally:
+        pool.shutdown(wait=False, cancel_futures=True)
 
 
 def _same_network(a: str, b: str) -> bool:
@@ -336,10 +395,7 @@ class DlnaBackend(PlayerBackend):
             logger.error("DLNA attach failed: %s", e)
             raise
         except Exception as e:
-            reason = str(e).strip() or type(e).__name__
-            if len(reason) > 80:      # raw aiohttp reprs are debug noise
-                reason = reason[:77] + "…"
-            msg = (f"'{self.label}' did not respond ({reason}) — "
+            msg = (f"'{self.label}' did not respond ({_describe(e)}) — "
                    "wake the device (phone renderers doze) and try again")
             logger.error("DLNA attach failed: %s", msg)
             raise RuntimeError(msg)
@@ -371,11 +427,7 @@ class DlnaBackend(PlayerBackend):
         return self._dmr is not None and not self._gone
 
     def reachable(self) -> bool:
-        # Any known address counts: the play-intent gate must not call a
-        # renderer offline just because it moved networks since we last saw it.
-        return any(renderer_reachable(loc) for loc in
-                   [self._renderer.get("location", "")]
-                   + list(self._renderer.get("locations") or []) if loc)
+        return renderer_online(self._renderer)
 
     def resume_at(self, index: int) -> None:
         if self._queue.item_at(index) is None:
@@ -392,19 +444,16 @@ class DlnaBackend(PlayerBackend):
         with a good prior, not a fact. Trying it first and the rest after
         costs nothing when the guess holds and is the difference between
         working and "device unavailable" when it does not."""
-        known = []
-        for loc in ([self._renderer.get("location")]
-                    + list(self._renderer.get("locations") or [])):
-            if loc and loc not in known:
-                known.append(loc)
+        known = known_locations(self._renderer)
 
         # Probe first, and all at once. A device that has left a network does
         # not refuse the connection, it swallows it, so walking the list with
         # full description fetches lets one dead address spend the entire
         # attach budget before a live one is ever tried — which is precisely
-        # how this failed. A TCP connect costs 2s worst case and they overlap.
+        # how this failed. A TCP connect costs the probe window worst case
+        # and they overlap.
         alive = [loc for loc, ok in zip(known, await asyncio.gather(
-            *(asyncio.to_thread(renderer_reachable, loc, 2.0) for loc in known)
+            *(asyncio.to_thread(renderer_reachable, loc) for loc in known)
         )) if ok]
 
         for loc in alive:
@@ -481,11 +530,10 @@ class DlnaBackend(PlayerBackend):
 
     def _emit_now(self, state: Optional[str] = None) -> None:
         if self._closed:
-            # A detached backend must never touch the manager's status —
-            # its GENA subscription rides the SHARED notify server and can
-            # deliver one more event after unsubscribe; without this guard
-            # the zombie and the live backend flap the status (observed:
-            # track_index oscillating between two slots, even paused).
+            # The manager no longer hears a detached backend (every tick
+            # names its sender); this only spares building the status for
+            # the GENA event the SHARED notify server can still deliver
+            # after unsubscribe.
             return
         if state is None and (self._loading or self._awaiting_play):
             # Poll/GENA ticks that land mid-track-change would report the
@@ -1322,29 +1370,31 @@ class DlnaBackend(PlayerBackend):
             return await self._avt(name, **kwargs)
 
     def _cmd_failed(self, e: Exception, what: str) -> None:
-        if isinstance(e, (TimeoutError, OSError)):
-            # Connection-level failure (hang / refused / unreachable) —
-            # the doze signature. Mark the instance so the next play
-            # intent re-attaches instead of hammering a ghost.
-            self._gone = True
-        reason = str(e).strip() or type(e).__name__
+        reason = _describe(e)
+        logger.warning("DLNA %s failed: %s", what, reason)
         # Surface it: a silently swallowed command is how "next" looked
         # like it worked while the renderer kept playing the old track.
-        # A SOAP fault is the renderer answering — KANN refuses a URI it
-        # cannot fetch with a 500 at SetAVTransportURI — so only the
-        # connection-level failures get the doze hint.
-        self._error = f"'{self.label}' {what} failed ({reason})" + (
-            " — the renderer may be asleep" if self._gone else "")
-        logger.warning("DLNA %s failed: %s", what, reason)
+        if _connection_failure(e):
+            # Mark the instance so the next play intent re-attaches instead
+            # of hammering a ghost. The transport detail is for the log;
+            # the user gets what to do about it.
+            self._gone = True
+            self._error = (f"'{self.label}' did not respond to {what} — "
+                           "wake the device (phone renderers doze) and try again")
+        else:
+            # A SOAP fault is the renderer answering — KANN refuses a URI it
+            # cannot fetch with a 500 at SetAVTransportURI.
+            self._error = f"'{self.label}' {what} failed ({reason})"
         self._emit_now()
 
     @staticmethod
     def _what(coro) -> str:
         """The backend method a command coroutine belongs to, for the log
-        ("pause", "seek", "_load_and_play") — `DlnaBackend.pause.<locals>._p`
-        says nothing at 2 a.m."""
+        and the status error ("pause", "seek", "load and play") —
+        `DlnaBackend.pause.<locals>._p` says nothing at 2 a.m."""
         parts = getattr(coro, "__qualname__", "").split(".")
-        return parts[1] if len(parts) > 1 else (parts[0] or "command")
+        name = parts[1] if len(parts) > 1 else (parts[0] or "command")
+        return name.strip("_").replace("_", " ")
 
     def _call(self, coro) -> bool:
         if self._loop is None:

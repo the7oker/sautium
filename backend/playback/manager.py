@@ -75,11 +75,12 @@ class PlaybackManager:
         using backend() and never wake a device."""
         with self._ensure_lock:
             b = self._active
-            # Fast offline-fail: a powered-off DLNA renderer must 503 in ~2s
-            # with a clear message, not after stacked SOAP + re-attach
-            # timeouts (34s, live) — and the first attempt must not silently
-            # accept (fire-and-forget commands return 200 while the failure
-            # is async). A dozing-but-networked renderer passes the probe.
+            # Fast offline-fail: a powered-off DLNA renderer must 503 within
+            # the probe window with a clear message, not after stacked SOAP +
+            # re-attach timeouts (34s, live) — and the first attempt must not
+            # silently accept (fire-and-forget commands return 200 while the
+            # failure is async). A dozing-but-networked renderer passes the
+            # probe: its window is sized for a sleeping radio.
             if b is not None and not b.reachable():
                 b._gone = True
                 raise ConnectionError(
@@ -95,8 +96,8 @@ class PlaybackManager:
                 renderer = _read("output.dlna_renderer")
                 if not renderer:
                     raise ConnectionError("No DLNA renderer configured")
-                from playback.dlna_backend import renderer_reachable
-                if not renderer_reachable(renderer.get("location", "")):
+                from playback.dlna_backend import renderer_online
+                if not renderer_online(renderer):
                     raise ConnectionError(
                         f"'{renderer.get('name', 'DLNA renderer')}' is offline "
                         "— turn it on, or pick another output in "
@@ -117,9 +118,10 @@ class PlaybackManager:
 
     def activate(self, output_type: Optional[str], *, stop_old: bool = True,
                  **cfg) -> None:
-        """Switch the active output. The old backend is stopped and shut
-        down; the canonical queue survives the switch; playback does NOT
-        auto-resume — the user presses play on the new output.
+        """Switch the active output. The old backend is stopped (while it
+        still believes its device reachable) and shut down; the canonical
+        queue survives the switch; playback does NOT auto-resume — the user
+        presses play on the new output.
 
         `stop_old=False` detaches without touching playback — app shutdown
         and clearing the HQPlayer host must leave an externally-running
@@ -135,11 +137,19 @@ class PlaybackManager:
             old = self._active
             if old is not None:
                 self._active = None
-                if stop_old:
+                if stop_old and old.healthy():
                     try:
                         old.stop()
                     except Exception as e:
                         logger.debug("stop on deactivate failed: %s", e)
+                elif stop_old:
+                    # The backend already believes its device off the
+                    # network: a Stop would fail exactly as the last command
+                    # did and burn the command timeout on a ghost (the
+                    # switch away from a vanished phone renderer waited out
+                    # its whole Stop + unsubscribe budget).
+                    logger.info("%s believed off the network — detached "
+                                "without a stop", old.id)
                 old.shutdown()
                 logger.info("playback backend deactivated: %s", old.id)
             if output_type is None:
@@ -377,11 +387,22 @@ class PlaybackManager:
         if proxy is not None:
             proxy.retire_generation(generation)
 
-    def _on_backend_status(self, s: PlaybackStatus) -> None:
+    def _on_backend_status(self, sender: PlayerBackend, s: PlaybackStatus) -> None:
         """One status tick from the active backend → SSE payload (exact
         legacy shape + `output`), play tracking, end-of-queue archival,
-        observers. Runs on the backend's status thread."""
-        backend = self._active
+        observers. Runs on the backend's status thread.
+
+        Only the ACTIVE backend is heard. activate() empties the slot before
+        it stops and shuts the old backend down, so whatever that one still
+        says — its own stop tick, the error of a stop that failed, a poll or
+        GENA event landing after unsubscribe — ends here rather than in the
+        UI as a "Playback error" for the output the user just left (seen
+        live: a phone renderer that had gone away refused the switch-away
+        Stop, and the new output came up under that toast). Nothing is lost
+        with its last tick: the listen it was in the middle of closes on the
+        new backend's first tick, and a switch is not an end of queue."""
+        if sender is not self._active:
+            return
         if s.state == "disconnected":
             self._push_status({"state": "disconnected"})
             return

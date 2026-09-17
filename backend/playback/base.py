@@ -4,7 +4,8 @@ PlayerBackend contract (HARDWARE-TIERS §2.6).
 A backend owns one playback output (HQPlayer / local device / DLNA /
 browser): transport commands, `capabilities()`, and STATUS ACQUISITION —
 each backend pushes `PlaybackStatus` events into the manager via the
-`emit` callback it was constructed with. No active backend ⇒ no status
+`emit` callback it was constructed with (every tick names its backend —
+the manager hears the active one only). No active backend ⇒ no status
 loop at all.
 
 The canonical queue lives in the manager (`playback.queue`). Backends
@@ -65,8 +66,12 @@ class PlayerBackend(ABC):
     id: str = ""
     label: str = ""
 
-    def __init__(self, emit: Callable[[PlaybackStatus], None]):
-        self._emit = emit
+    def __init__(self, emit: Callable[["PlayerBackend", PlaybackStatus], None]):
+        # Every tick names the backend it came from: the manager listens to
+        # the ACTIVE backend only, so one being detached — its stop during
+        # an output switch, a poll or GENA tick landing after unsubscribe —
+        # cannot write over the output that replaced it.
+        self._emit = lambda s: emit(self, s)
 
     # -- lifecycle -------------------------------------------------------
     @abstractmethod
