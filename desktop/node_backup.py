@@ -756,7 +756,7 @@ def create_backup(out_dir: Path, *, target: PgTarget, kek: bytes, username: str,
 # Restore
 # ---------------------------------------------------------------------------
 
-OWN_DATA_TABLES = ("media_files", "listening_history", "friends", "p2p_messages",
+OWN_DATA_TABLES = ("media_files", "listening_history", "demo_plays", "friends", "p2p_messages",
                    "chat_messages", "user_gear")
 
 

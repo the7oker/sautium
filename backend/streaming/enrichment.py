@@ -75,14 +75,20 @@ class PreviewEnricher:
 
     def submit(self, track_id: Optional[str], flac: Optional[bytes],
                lengths: tuple, lossless: bool = False,
-               provider_id: Optional[str] = None) -> None:
+               provider_id: Optional[str] = None, excerpt: bool = False) -> None:
         """Queue a previewed track for enrichment. No-ops without a track_id,
-        catalog lengths (unverified match — see GATE) or audio, or if already
-        queued. In trickle mode a full backlog drops the track instead of
-        queueing. ``lossless`` is the ACTUAL fetch quality (lossless provider fetch=True,
-        degraded tiers/YouTube=False); ``provider_id`` (manifest id,
-        'deezer'|'youtube') becomes the provenance origin."""
+        catalog lengths (unverified match — see GATE) or audio, for an
+        excerpt, or if already queued. In trickle mode a full backlog drops
+        the track instead of queueing. ``lossless`` is the ACTUAL fetch
+        quality (lossless provider fetch=True, degraded tiers/YouTube=False);
+        ``provider_id`` (manifest id, 'deezer'|'youtube') becomes the
+        provenance origin. An ``excerpt`` (a 30 s clip) is refused here,
+        before any decode or provenance row: it is not the recording, and
+        every first-hand stream analysis is signed and synced."""
         if not track_id or not lengths or not flac:
+            return
+        if excerpt:
+            logger.debug("preview enrich skip %s: excerpt, not the recording", track_id)
             return
         with self._lock:
             if track_id in self._inflight:

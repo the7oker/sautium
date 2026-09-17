@@ -151,6 +151,18 @@ class ProviderManifest:
     version: str = "1.0.0"
     type: str = "stream_provider"
     contract_version: int = CONTRACT_VERSION
+    # Serves 30 s excerpts, never the whole recording: ranked after every
+    # full-length provider, shown as [30s], never analysed, never a listen.
+    excerpt: bool = False
+    # The demo channel: a track streams from here in full at most once —
+    # streaming/demo.py keeps the ledger and drops the provider from a track's
+    # chain once its listen is spent. A product/legal policy, not a preference.
+    demo_limited: bool = False
+    # The api_cooldown source this provider's upstream is metered under, when
+    # it shares one with other callers (photo enrichment, another provider on
+    # the same host): its cooldown demotes every provider naming it, and its
+    # silence is reported once. None = the provider's own id.
+    cooldown_source: Optional[str] = None
 
 
 @dataclass(frozen=True)
@@ -204,6 +216,11 @@ class FetchedAudio:
     # degrade within its own tiers (lossless→lossy when the region has no lossless tier),
     # so enrichment provenance reads this, not manifest.lossless.
     lossless: bool = False
+    # A 30 s excerpt rather than the recording: not analysed, not tracked as a
+    # listen, and `seconds` (the audio's own length) is what the queue and the
+    # renderer are told — the catalog length would be a lie about this buffer.
+    excerpt: bool = False
+    seconds: Optional[float] = None
 
 
 @dataclass(frozen=True)
@@ -316,8 +333,8 @@ class ProviderRegistry:
             logger.warning("provider %s built for contract v%d, host is v%d",
                            m.id, m.contract_version, CONTRACT_VERSION)
         self._by_id[m.id] = provider
-        logger.info("registered stream provider: %s (%s, lossless=%s)",
-                    m.id, m.kind, m.lossless)
+        logger.info("registered stream provider: %s (%s, lossless=%s, excerpt=%s, "
+                    "demo_limited=%s)", m.id, m.kind, m.lossless, m.excerpt, m.demo_limited)
 
     def get(self, provider_id: str) -> Optional[StreamProvider]:
         return self._by_id.get(provider_id)

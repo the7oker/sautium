@@ -927,6 +927,7 @@
       this.albumText = document.getElementById('npAlbumText');
       this.year = document.getElementById('npYearText');
       this.qBadge = document.getElementById('npQBadge');
+      this.excerptBadge = document.getElementById('npExcerptBadge');
       this.keyPill = document.getElementById('npKeyPill');
       this.bpm = document.getElementById('npBpm');
       this.bpmNum = document.getElementById('npBpmNum');
@@ -1191,6 +1192,12 @@
 
     onStatus(data) {
       if (!data) return;
+
+      // [30s] rides the status, not the detail fetch: the stream's excerpt
+      // flag is a fact about the buffer playing NOW (a spent demo listen turns
+      // a replay into an excerpt), and the quality badge beside it stays the
+      // provider's tier from the detail.
+      if (this.excerptBadge) this.excerptBadge.hidden = !data.excerpt;
 
       // Track length for the scrub → seek-target math (seconds).
       this._trackLength = data.length || 0;
@@ -5425,7 +5432,7 @@
                 ${psub ? `<div class="track-sub">${escapeHtml(psub)}</div>` : ''}
                 <div class="track-buffering"${t.buffering ? '' : ' hidden'}>Buffering…</div>
               </div>
-              <span class="track-dur">${fmtDuration(t.duration)}</span>
+              <span class="track-dur"><span class="track-excerpt" hidden>30s</span><span class="track-dur-num">${fmtDuration(t.duration)}</span></span>
               <span class="track-add" aria-label="Add to queue">${SVG_PLUS}</span>
             </div>
           `);
@@ -5496,7 +5503,8 @@
             ${d.year ? `<span class="am-year">${d.year}</span><span class="am-dot"></span>` : ''}
             <span class="am-dur" style="margin-left: 0;">${totalDuration}</span>
             ${isPhantom
-              ? (streamQual ? `<span class="am-hires ${streamQualClass}" style="margin-left: auto;">${streamQualLabel}</span>` : '')
+              ? `<span class="am-demo">Demo</span>`
+                + (streamQual ? `<span class="am-hires ${streamQualClass}">${streamQualLabel}</span>` : '')
               : `<span class="am-hires ${qualClass}" style="margin-left: auto;">${qualLabel}</span>`}
           </div>
           ${genresHtml ? `<div class="tag-row" style="padding: calc(12 * var(--px)) 0 0;">${genresHtml}</div>` : ''}
@@ -5558,6 +5566,7 @@
               applyPhantomMissing(screen, body.unavailable);
               updateStreamQualityBadge(screen, body.quality);
               applyPhantomDurations(screen, body.durations, d);
+              applyPhantomExcerpts(screen, body.excerpt);
             }
           })
           .catch(() => {});
@@ -5976,6 +5985,22 @@
     });
   }
 
+  // Tag the phantom rows that will play as a 30 s excerpt — the track's demo
+  // listen is spent, or nothing full-length has it. Driven by the `excerpt`
+  // list of the availability and stream responses; matched by track_id and
+  // re-applied on each, so a listen spent mid-stream shows up on the next
+  // preview-events refresh.
+  function applyPhantomExcerpts(screen, excerpt) {
+    if (!screen || !Array.isArray(excerpt)) return;
+    const ids = new Set(excerpt.filter(Boolean));
+    screen.querySelectorAll('.track-row.is-phantom-track[data-track-id]').forEach(row => {
+      const on = ids.has(row.getAttribute('data-track-id'));
+      row.classList.toggle('is-excerpt', on);
+      const tag = row.querySelector('.track-excerpt');
+      if (tag) tag.hidden = !on;
+    });
+  }
+
   // Provider-resolved durations for tracks MusicBrainz had no length for. The
   // backend never persists these (length_ms stays MB-canonical), so they arrive
   // with the availability response and are patched in display-only — a full
@@ -5987,7 +6012,7 @@
       const sel = (window.CSS && CSS.escape) ? CSS.escape(tid) : tid;
       const durEl = screen.querySelector(
         `.track-row[data-track-id="${sel}"] .track-dur`);
-      if (durEl) durEl.textContent = fmtDuration(sec);
+      if (durEl) (durEl.querySelector('.track-dur-num') || durEl).textContent = fmtDuration(sec);
     }
     // Album total = MB lengths (already on the tracks) + the virtual ones; the
     // header rendered 0:00 because every MB length was NULL.
@@ -6021,8 +6046,7 @@
       const row = screen.querySelector('.album-meta-row');
       if (!row) return;
       el = document.createElement('span');
-      el.className = 'am-hires';
-      el.style.marginLeft = 'auto';
+      el.className = 'am-hires';   // placement is the stylesheet's: beside [demo]
       row.appendChild(el);
     }
     el.classList.remove('is-lossless', 'is-lossy', 'is-hires');
@@ -6085,6 +6109,19 @@
         t.bpm ? Math.round(t.bpm) + ' bpm' : null,
       ].filter(Boolean).join(' · '));
     }
+    // The availability verdict moves with the stream too: a demo listen spent
+    // mid-album turns that row into a 30 s excerpt, and the resolve behind it
+    // is cached, so re-reading it here costs one request.
+    let av;
+    try {
+      const resp = await fetch('/api/player/phantom-availability/' + encodeURIComponent(albumId));
+      if (!resp.ok) return;
+      av = await resp.json();
+    } catch (_) { return; }
+    if (!screen.isConnected) return;
+    applyPhantomMissing(screen, av.unavailable);
+    updateStreamQualityBadge(screen, av.quality);
+    applyPhantomExcerpts(screen, av.excerpt);
   }
 
   // (Re)load the "Similar albums" shelf for the open phantom album. Streaming
@@ -6330,8 +6367,10 @@
           await reportPlaybackResult(resp, body);
           return;
         }
-        // Grey out + disable the rows the provider couldn't find.
+        // Grey out + disable the rows the provider couldn't find; tag the
+        // ones that stream as excerpts.
         applyPhantomMissing(screen, body && body.missing);
+        applyPhantomExcerpts(screen, body && body.excerpt);
         if (body && body.track_count === 0) {
           // Whole album unavailable on this provider → keep the button disabled.
           btn.disabled = true;
@@ -9708,7 +9747,7 @@
     title: 'Media tools missing',
     text: `${escapeHtml(((n.data && n.data.tools) || []).join(', '))} not found — audio analysis and fingerprinting are skipped until installed.`,
   });
-  const PROVIDER_NAMES = { deezer: 'Deezer', youtube: 'YouTube' };
+  const PROVIDER_NAMES = { deezer: 'Deezer', deezer_preview: 'Deezer', youtube: 'YouTube' };
   function noticeCopy(n) {
     const fn = NOTICE_COPY[n.key];
     if (fn) return fn(n);

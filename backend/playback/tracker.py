@@ -217,6 +217,15 @@ def track_play_event(state_name: str, position: float, length: float,
             _play_session = None
         return
 
+    if item is not None and item.excerpt:
+        # A 30 s excerpt is not a listen: no history row (25 s of it would
+        # read as `completed`), no stats, no scrobble, no now-playing. It does
+        # end whatever listen was open — the track before it is over.
+        if _play_session is not None:
+            _save_play_session(_play_session)
+            _play_session = None
+        return
+
     if ident is None:
         if _play_session is not None:
             _play_session.update_position(position)

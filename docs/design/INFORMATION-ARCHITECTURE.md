@@ -95,8 +95,9 @@ Tap play/pause icon → toggles without expanding.
 Full-screen modal that slides up from the mini-player. Designed per
 the `docs/design/reference/claude-design-bundle/project/Now Playing
 v4.html` reference. Contains: album art, metadata row (Hi-Res badge,
-key, BPM, energy), transport, progress bar, lyrics toggle, similar
-tracks, queue button, HQPlayer quick-access.
+key, BPM, energy — and, for a streamed 30 s excerpt, a neutral `[30s]`
+badge beside the quality badge), transport, progress bar, lyrics
+toggle, similar tracks, queue button, HQPlayer quick-access.
 
 Dismiss: drag-down gesture or chevron-down in header. Sheet
 collapses back to mini-player bar.
@@ -212,7 +213,7 @@ current tab stack (changes hash).
 | Screen | Pushed by | Contents |
 |--------|-----------|----------|
 | **Artist** | Tap on artist name (anywhere) | Hero (name, photo if available), bio (Last.fm), tags, albums grid, popular tracks, similar artists |
-| **Album** | Tap on album cover / title | Cover hero, metadata row (year · duration · format badge), genre chips on a separate row (up to 3), tracklist, **Play all** + **+ Queue** actions |
+| **Album** | Tap on album cover / title | Cover hero, metadata row (year · duration · format badge), genre chips on a separate row (up to 3), tracklist, **Play all** + **+ Queue** actions. A streaming-library (phantom) album wears a neutral `[demo]` badge in the metadata row beside the streamed-quality badge, its actions are **Stream all** · **Buy** · **+ Queue**, and a row that will play as a 30 s excerpt carries a `30s` tag beside its duration |
 | **Genre** | Tap on a genre chip (from Album / Artist / Discovery) | Hero banner with genre name, description prose, top artists / albums / tracks in genre, related-genre chip strip |
 | **Queue** (current playlist) | Queue button on Now Playing sheet, or `#queue` direct | Current queue with playing-track highlighted, drag-reorder, swipe-remove, Clear queue, Shuffle queue (future), summary "N tracks · HH:MM". The full list is rendered — no "and N more" truncation. |
 | **Queue history item** | Tap on "Recent queues" row | Snapshot preview + Restore action (loads queue, does not auto-play) |
@@ -746,7 +747,7 @@ or is a thin query over existing data.
 |-------|------------|-----------|
 | Track title / artist / album | `tracks` + `track_artists` + `albums` joins | — |
 | Progress / duration | HQPlayer state poll (existing in app.js) | — |
-| Quality badge | `media_files.is_lossless` + `bit_depth` + `sample_rate` (Hi-Res = ≥ 96k/24bit lossless) | — |
+| Quality badge | `media_files.is_lossless` + `bit_depth` + `sample_rate` (Hi-Res = ≥ 96k/24bit lossless); a streamed track: the serving provider's tier (`/now-playing-detail`), plus `[30s]` from the status `excerpt` flag | — |
 | Key pill, BPM, energy | `audio_features.key`, `bpm`, `energy` | — |
 | Lyrics panel | `track_lyrics` table | + timed-LRC support already partly present |
 | Similar tracks | existing `/search/similar?track_id=` (CLAP embedding cosine) | + AI-rerank for diversity |
@@ -768,7 +769,7 @@ or is a thin query over existing data.
 | Block | MVP source | Evolution |
 |-------|------------|-----------|
 | Cover hero | `media_files` cover, embedded or via `cover_id` | — |
-| Metadata row | `albums.release_year`, sum of `media_files.duration_seconds`, `media_files.is_lossless` + `bit_depth` for badge | — |
+| Metadata row | `albums.release_year`, sum of `media_files.duration_seconds`, `media_files.is_lossless` + `bit_depth` for badge; a phantom album: `[demo]` always, the streamed mix (`/phantom-availability` `quality`) for the badge, its `excerpt` list for the row tags | — |
 | Genre chips | `track_genres` + `genres.name` aggregated, top 3 by occurrence count | — |
 | Tracklist | `tracks` ordered by `track_number` | — |
 | Play all / + Queue | existing transport calls in app.js | + queue history snapshot before replace |

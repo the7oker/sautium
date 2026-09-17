@@ -163,6 +163,24 @@ mistaken for the local hi-res experience. Shipped 2026-06-28; the earlier
 virtual-cable / live-input design is superseded.
 Premature to spike HQP live-input now.
 
+**The demo policy (2026-09-17).** The core channel is an acquaintance
+tool, not a free replacement for a streaming service: a track streams
+from it in full at most **once** — the listen is spent when playback
+passes 90 % (`demo_plays`, life data: backed up and merged, never synced)
+— and from then on the track plays as the catalog's own **30 s excerpt**
+(the core `deezer_preview` provider: Deezer public API, no auth), which
+is also what plays when the core channel is missing or has nothing.
+A bring-your-own full-length provider is not limited. Every phantom
+album page wears `[demo]`; a row that will play as an excerpt wears
+`30s`; Now Playing shows `[30s]` beside the quality badge while one
+plays. An excerpt is not the recording: it is never analysed
+(`PreviewEnricher` refuses it before any provenance row) and never a
+listen (no history, stats, scrobble or now-playing). The ledger governs
+what is FETCHED — the resolve leaves the spent channel out of the
+track's chain, the proxy refuses it at fetch time, and the spent buffer
+is dropped when its listen ends; what an output has buffered for itself
+(a browser blob, a renderer's cache) is beyond reach by design.
+
 ### D5. Acquisition: "Buy on Bandcamp", not a wishlist
 
 A wishlist needs its own management surface, and at $5–10/album on

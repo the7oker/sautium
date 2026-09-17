@@ -40,6 +40,21 @@ class _GatedProvider(StreamProvider):
             assert self.started_ev.wait_for(lambda: title in self.started, timeout=5)
 
 
+class _Instant(StreamProvider):
+    """Answers at once; the manifest flags and what it serves are the test's."""
+
+    def __init__(self, pid, *, excerpt=False, demo_limited=False, seconds=None):
+        self.manifest = ProviderManifest(id=pid, name=pid, kind="direct_url", lossless=False,
+                                         excerpt=excerpt, demo_limited=demo_limited)
+        self._seconds = seconds
+        self.fetched: list = []
+
+    def fetch(self, query: TrackQuery) -> FetchedAudio:
+        self.fetched.append(query.title)
+        return FetchedAudio(data=b"x" * 16, mime="audio/mpeg", lossless=False,
+                            excerpt=self.manifest.excerpt, seconds=self._seconds)
+
+
 def _q(title):
     return TrackQuery(artist="A", title=title, album="Alb", duration=100.0,
                       track_id=f"id-{title}")
@@ -122,6 +137,76 @@ def test_ready_run_scans_the_callers_tokens():
     proxy.wait_ready(a[1], timeout=5)
     playable, secs, used = proxy.ready_run(a)
     assert playable == [a[0], a[1]] and secs == 200.0 and used == 2
+
+
+def test_an_excerpt_reports_the_clips_own_length():
+    clip = _Instant("clip", excerpt=True, seconds=30.0)
+    proxy = _proxy()
+    tok = proxy.start_session([(_q("a1"), [(clip, None)])])[0]
+    proxy.wait_ready(tok, timeout=5)
+    meta = proxy.preview_meta(proxy.url_for(tok))
+    assert meta["excerpt"] is True and meta["duration"] == 30.0
+    assert meta["provider"] == "clip"
+    assert proxy.ready_run([tok])[1] == 30.0          # not the 100 s catalog length
+
+
+def test_the_link_gate_skips_refused_links_and_the_chain_cascades():
+    demo, clip = _Instant("demo", demo_limited=True), _Instant("clip", excerpt=True, seconds=30.0)
+    proxy = _proxy()
+    proxy.link_admissible = lambda provider, query: not provider.manifest.demo_limited
+    tok = proxy.start_session([(_q("a1"), [(demo, None), (clip, None)])])[0]
+    e = proxy.wait_ready(tok, timeout=5)
+    assert e.audio is not None and e.provider is clip and demo.fetched == []
+    # Every link refused: a fetch failure, not a hang.
+    proxy.link_admissible = lambda provider, query: False
+    tok2 = proxy.start_session([(_q("a2"), [(demo, None), (clip, None)])])[0]
+    e2 = proxy.wait_ready(tok2, timeout=5)
+    assert e2.audio is None and "demo listen spent" in (e2.error or "")
+
+
+def test_ram_audio_is_adopted_only_from_a_provider_the_new_chain_names():
+    demo, clip = _Instant("demo", demo_limited=True), _Instant("clip", excerpt=True, seconds=30.0)
+    proxy = _proxy()
+    first = proxy.start_session([(_q("a1"), [(demo, None), (clip, None)])])[0]
+    assert proxy.wait_ready(first, timeout=5).provider is demo
+    # Same track, same providers: the bytes in RAM are reused, nothing fetched.
+    again = proxy.start_session([(_q("a1"), [(demo, None), (clip, None)])])[0]
+    assert proxy._peek(again).ready.is_set() and demo.fetched == ["a1"]
+    # Same track, a chain without the demo channel (its listen spent): the
+    # demo channel's bytes must not come along — the excerpt is fetched.
+    spent = proxy.start_session([(_q("a1"), [(clip, None)])])[0]
+    e = proxy.wait_ready(spent, timeout=5)
+    assert e.provider is clip and clip.fetched == ["a1"]
+
+
+def test_drop_audio_rearms_the_demo_channels_entry_and_a_wait_refetches():
+    demo, clip = _Instant("demo", demo_limited=True), _Instant("clip", excerpt=True, seconds=30.0)
+    proxy = _proxy()
+    tok = proxy.start_session([(_q("a1"), [(demo, None), (clip, None)])])[0]
+    proxy.wait_ready(tok, timeout=5)
+    assert proxy.drop_audio("id-a1") == 1
+    assert proxy.drop_audio("id-a1") == 0               # nothing left to drop
+    assert not proxy._peek(tok).ready.is_set() and proxy._peek(tok).evicted
+    # The gate now refuses the demo channel: the refetch lands on the excerpt
+    # and preview_meta reads the clip.
+    proxy.link_admissible = lambda provider, query: not provider.manifest.demo_limited
+    e = proxy.wait_ready(tok, timeout=5)
+    assert e.provider is clip and e.audio.excerpt
+    assert proxy.preview_meta(proxy.url_for(tok))["excerpt"] is True
+    # An excerpt entry is never dropped: only the demo channel's bytes are.
+    assert proxy.drop_audio("id-a1") == 0
+
+
+def test_track_ready_hooks_all_run_before_the_entry_is_ready():
+    prov = _Instant("p")
+    proxy = _proxy()
+    seen = []
+    proxy.track_ready_hooks.append(lambda e: seen.append(("first", e.ready.is_set())))
+    proxy.track_ready_hooks.append(lambda e: 1 / 0)      # a failing hook stops nothing
+    proxy.track_ready_hooks.append(lambda e: seen.append(("third", e.ready.is_set())))
+    tok = proxy.start_session([(_q("a1"), [(prov, None)])])[0]
+    assert proxy.wait_ready(tok, timeout=5).audio is not None
+    assert seen == [("first", False), ("third", False)]
 
 
 def _streamed(i):

@@ -56,8 +56,12 @@ _WIPEOUT = object()
 
 
 class YouTubeProvider(StreamProvider):
+    # The demo channel: a track streams from here in full ONCE (see
+    # streaming/demo.py) — this is an acquaintance tool, not a free
+    # replacement for a streaming service.
     manifest = ProviderManifest(
         id="youtube", name="YouTube", kind="direct_url", lossless=False,
+        demo_limited=True,
     )
 
     def __init__(self, ffmpeg_location: str | None = None, timeout: float = 120.0):

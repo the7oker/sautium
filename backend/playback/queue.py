@@ -61,6 +61,9 @@ class QueueItem:
     cover_url: Optional[str] = None
     preview: bool = False
     provider: Optional[str] = None
+    # A 30 s excerpt, not the recording: shown as [30s], never a listen, and
+    # `duration_seconds` is the clip's own length.
+    excerpt: bool = False
 
 
 class CanonicalQueue:
@@ -100,6 +103,27 @@ class CanonicalQueue:
                 if it is item:
                     return i + 1
             return None
+
+    def refresh_proxy_items(self, token: str, *, provider: Optional[str],
+                            excerpt: bool, duration_seconds: Optional[float]) -> bool:
+        """Bring every slot streaming `token` up to date with what the proxy
+        actually holds for it (the media-proxy track-ready hook). A stream's
+        item is built once, when its buffer is first ready; a refetch may
+        land on another provider or, as an excerpt, another length — and an
+        output reads the item at load. True when anything changed (the
+        version is bumped, so the next status tick carries it)."""
+        with self._lock:
+            changed = False
+            for it in self._items:
+                if it.source.get("kind") != "proxy" or it.source.get("token") != token:
+                    continue
+                new = (provider, excerpt, duration_seconds)
+                if new != (it.provider, it.excerpt, it.duration_seconds):
+                    it.provider, it.excerpt, it.duration_seconds = new
+                    changed = True
+            if changed:
+                self._version += 1
+            return changed
 
     # -- mutations (serialized by the manager's mutate lock) ----------------
 
@@ -196,6 +220,7 @@ class CanonicalQueue:
                 "cover_id": None,
                 "preview": True,
                 "provider": item.provider,
+                "excerpt": item.excerpt,
                 "track_id": item.track_id,
                 "cover_url": item.cover_url,
                 "provider_cover_url": resolved_artwork.get(item.track_id),
@@ -303,4 +328,5 @@ def item_for_proxy_token(token: str) -> Optional[QueueItem]:
         cover_url=meta.get("cover_url"),
         preview=True,
         provider=meta.get("provider"),
+        excerpt=bool(meta.get("excerpt")),
     )

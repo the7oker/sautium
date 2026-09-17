@@ -452,6 +452,7 @@ class PlaybackManager:
             "radio_mode": self.radio_mode,
             "preview": preview,
             "provider": item.provider if preview else None,
+            "excerpt": bool(item.excerpt) if preview else False,
             "preview_track_id": item.track_id if preview else None,
             "output": self.output_info,
             # Stale-tab detection: tabs compare this against the build they
@@ -616,6 +617,7 @@ class PlaybackManager:
             "preview": bool(first.preview),
             "album_id": first.album_id,
             "provider": first.provider if first.preview else None,
+            "excerpt": bool(first.excerpt) if first.preview else False,
             "output": self.output_info,
             "ui_build": ui_build(),
         })

@@ -1169,6 +1169,11 @@ class DlnaBackend(PlayerBackend):
         if not await self._serve_ready(item, url, front=True):
             return await self._load_seq(index + 1, play=play,
                                         skipped=skipped + 1)
+        # The wait may have (re)fetched the stream — as an excerpt, or from
+        # another provider — and the proxy's track-ready hook has brought the
+        # item up to date; the DIDL below and the track-end detection read
+        # this length, so re-read it now.
+        self._length = item.duration_seconds or 0.0
         # Disarm the gapless auto-advance detector: a manual jump to the
         # very track that SetNext armed makes CurrentURI == _next_url and
         # looked exactly like an auto-advance — the index bumped one PAST

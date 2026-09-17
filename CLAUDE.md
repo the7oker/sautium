@@ -275,6 +275,17 @@ See:
   share one traversal lane in `dht_service` — one initiation per ≥3 s,
   alternating. Without a gate every hop multiplies by ~50 Last.fm entries
   and the pipeline walks all recorded music.
+- **Streaming is a demo channel, and an excerpt is nothing.** The core
+  provider (YouTube, `manifest.demo_limited`) streams a track in full at
+  most ONCE — the listen is spent past 90 % (`demo_plays`, life data;
+  `backend/streaming/demo.py`) — after which the track plays as the
+  catalog's 30 s clip (`deezer_preview`, `manifest.excerpt`), the same
+  fallback as when the core channel is missing or has nothing. A
+  bring-your-own full-length provider is never limited. An excerpt
+  (`FetchedAudio.excerpt`) is refused by `PreviewEnricher` before any
+  decode or provenance row and ignored by the play tracker: no analysis,
+  no listen, no scrobble. The ledger has no settings toggle — it is the
+  product's legal posture, not a preference.
 - **P2P-facing settings** (all in `user_settings`, defaults in
   `backend/routers/settings.py` `_DEFAULTS`): `sync.announce_limit` (rare
   artist DHT tail; 150 = half the traversal lane, announced only under the
@@ -459,8 +470,9 @@ Revisit this section then.
    commit messages. Say "a lossless provider", "a provider plugin",
    "lossless before lossy". Data literals stay as they are (`origin='deezer'`,
    provider ids, enum values, `PROVIDER_NAMES`) — never rename stored values.
-   The one allowed prose use: "Deezer public API — artist images, no auth, no
-   audio" (`deezer_photos.py`, `covers.py`).
+   The one allowed prose use: "Deezer public API — artist images, catalog
+   lookup and 30 s previews, no auth" (`deezer_photos.py`, `covers.py`,
+   `streaming/deezer_catalog.py`, `streaming/deezer_preview.py`).
 2. **No host specifics in tracked files.** No LAN / WSL / Tailscale addresses,
    tailnet hosts, checkout paths, machine or third-party names. Use
    `<windows-host-ip>`, `<lan-ip>`, `<repo>`, fictional names in mocks.
@@ -554,6 +566,8 @@ toast takes no pointer events and never blocks the user (see
 | `backend/share.py` | Share export/import (BACKUP.md Product B): gzip'd JSON lines with a signed trailer, streamed both ways; every sealed record the node holds under its author's seal, structural rows from the seed builders; import through `SyncClient._import_items` (the gate) after a verify pass, default (add phantoms) or `--existing-only` (create no artist/album/track) |
 | `backend/life_merge.py` | Own life-data merge (BACKUP.md Product C): `python -m backup merge <own .sbk>` — same-account rule, the dump streamed once through `pg_restore --data-only -t …` into a scratch schema in the live database, keyed union (listens, sessions, friends, messages, chats, gear, allowlisted settings, rotation records) in one transaction, unknown tracks wait; `--dry-run` = rollback |
 | `backend/play_stats.py` | `local_play_stats` is DERIVED from `listening_history` — the one statement the play tracker and the merge share; never increment those counters in place |
+| `backend/streaming/demo.py` | The demo policy: the `demo_plays` ledger (one full demo-channel listen per track), the resolve's per-track provider order, the proxy's fetch-time gate (`link_admissible`), the status observer that spends the listen past 90 % and drops the spent buffer |
+| `backend/streaming/deezer_catalog.py` + `deezer_preview.py` | Deezer public API in core: the catalog resolve (barcode → album tracklist → track gate, one pacer + memo per process) shared as `DeezerCatalogProvider` by the BYO lossless module and the core 30 s excerpt provider (`deezer_preview`, `manifest.excerpt`, always last in `providers_preferred()`) |
 | `desktop/restore.py` | Launcher restore flow (`restore_launcher_node`) + `RestoreDialog` for Settings & Tools › Backup & Restore and the wizard; the launcher stops P2P + backend around it |
 
 ---

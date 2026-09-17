@@ -177,7 +177,8 @@
     return { ...data, song: first.title, artist: first.artist,
              album: first.album || '', cover_id: first.cover_id,
              media_file_id: first.id, cover_url: first.cover_url,
-             provider_cover_url: first.provider_cover_url };
+             provider_cover_url: first.provider_cover_url,
+             excerpt: !!first.excerpt };
   }
 
   async function processStatusEvent(data, seq) {

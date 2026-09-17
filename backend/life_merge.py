@@ -45,7 +45,7 @@ SCRATCH = "_merge"
 # Every table the merge reads out of the dump; a backup written before one of
 # them existed simply yields it empty.
 LIFE_TABLES = (
-    "listening_history", "listening_sessions", "session_tracks",
+    "listening_history", "demo_plays", "listening_sessions", "session_tracks",
     "invite_tokens", "sent_invites",
     "friends", "friend_rights", "friend_grants", "friend_grant_rights", "p2p_messages",
     "chat_sessions", "chat_messages",
@@ -399,6 +399,19 @@ def merge_life(conn, *, progress: Optional[ProgressFn] = None) -> dict:
         cur.execute(f"""SELECT count(*), count(DISTINCT track_id) FROM {SCRATCH}.listening_history s
                          WHERE NOT EXISTS (SELECT 1 FROM tracks t WHERE t.id = s.track_id)""")
         waiting["listens"], waiting["tracks"] = (int(v) for v in cur.fetchone())
+
+        # --- demo plays by track: the one full demo stream of a track is spent
+        # on whichever machine heard it first, so the earlier listen wins.
+        merged["demo_plays"] = run("""
+            INSERT INTO demo_plays (track_id, provider, played_at)
+            SELECT s.track_id, s.provider, s.played_at FROM _S_.demo_plays s
+             WHERE EXISTS (SELECT 1 FROM tracks t WHERE t.id = s.track_id)
+            ON CONFLICT (track_id) DO UPDATE
+                    SET played_at = EXCLUDED.played_at, provider = EXCLUDED.provider
+                  WHERE EXCLUDED.played_at < demo_plays.played_at""")
+        run("""SELECT count(*) FROM _S_.demo_plays s
+                WHERE NOT EXISTS (SELECT 1 FROM tracks t WHERE t.id = s.track_id)""")
+        waiting["demo_plays"] = int(cur.fetchone()[0])
 
         # --- listening sessions by id: closed ones whose tracks are all known
         # here (an open one is the other machine's live queue; a partial card

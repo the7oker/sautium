@@ -247,7 +247,8 @@ architecture is **done**, and the legacy single-file prototype
   Discovery, Artist/Album/Genre detail, Friends, chat, Now Playing,
   Queue sheet), the AI overlay, and most screen-scoped `fetch` calls.
 - **`player.js`** — transport/SSE primitives shared across screens:
-  the `/api/player/status/stream` subscription plus `window.playerCmd`,
+  the `/api/events` subscription (one multiplexed stream per tab:
+  status, preview, notices, chat, research) plus `window.playerCmd`,
   `window.playTrack`, `window.togglePlayPause`, `window.fetchPlaylist`,
   `window.currentPlaylist`.
 

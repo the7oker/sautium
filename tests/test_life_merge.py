@@ -170,6 +170,11 @@ def _listen(track, at, *, completed, dur, pct):
             (str(track), at, at + timedelta(seconds=dur), dur, pct, completed, not completed))
 
 
+def _demo(track, at, provider="youtube"):
+    return ("INSERT INTO demo_plays (track_id, provider, played_at) VALUES (%s, %s, %s)",
+            (str(track), provider, at))
+
+
 def _session(sid, *, ended, tracks, origin="album", title="X"):
     out = [("INSERT INTO listening_sessions (id, origin, title, track_count, started_at, ended_at) "
             "VALUES (%s, %s, %s, %s, %s, %s)",
@@ -200,6 +205,7 @@ def _seed(clones):
         _listen(T1, T0, completed=True, dur=200, pct=100),
         _listen(T2, T0 + timedelta(minutes=5), completed=False, dur=10, pct=5),
         _listen(T1, T0 + timedelta(hours=2), completed=True, dur=180, pct=90),
+        _demo(T1, T0 + timedelta(hours=2)),
     ] + _session(S4, ended=True, tracks=[T2]) + [
         _friend(F1, "inv1"), _friend(F2, "inv2", blocked=True),
         ("INSERT INTO friend_rights (friend_id, p2p_right) SELECT id, 'can_message' FROM friends "
@@ -214,6 +220,7 @@ def _seed(clones):
         _listen(T3, T0 + timedelta(hours=1), completed=True, dur=300, pct=100),
         _listen(T4, T0 + timedelta(hours=1, minutes=10), completed=True, dur=100, pct=100),
         _listen(T1, T0 + timedelta(hours=3), completed=False, dur=20, pct=10),
+        _demo(T1, T0 + timedelta(hours=1)), _demo(T3, T0 + timedelta(hours=1)), _demo(T4, T0),
     ] + _session(S1, ended=True, tracks=[T1, T3]) + _session(S2, ended=False, tracks=[T2], origin="mix")
       + _session(S3, ended=True, tracks=[T4]) + [
         ("INSERT INTO invite_tokens (id, label, max_uses, use_count, created_at) VALUES (%s, 'friends', 5, 1, %s)",
@@ -305,13 +312,15 @@ def test_two_clones_merge_to_the_union_in_either_order(clones, tmp_path):
     assert (m["listens"], m["sessions"], m["friends"], m["rights"], m["messages"]) == (2, 1, 1, 1, 2)
     assert (m["chats"], m["chat_messages"], m["gear"], m["identities"], m["bans"]) == (1, 2, 1, 1, 1)
     assert (m["tokens"], m["invites"], m["settings"], m["profile"], m["rotations"]) == (1, 1, 0, 1, 0)
-    assert got["waiting"] == {"listens": 1, "tracks": 1, "sessions": 1}     # T4 is unknown to A
+    assert m["demo_plays"] == 2                          # T3 new, T1 spent earlier on B
+    assert got["waiting"] == {"listens": 1, "tracks": 1, "sessions": 1, "demo_plays": 1}  # T4 is unknown to A
 
     got_b = _merge(file_a, b)
     mb = got_b["merged"]
     assert (mb["listens"], mb["sessions"], mb["friends"], mb["rights"], mb["messages"]) == (2, 1, 0, 0, 0)
     assert (mb["settings"], mb["profile"]) == (1, 0)                          # carry_limit; profile was set
-    assert got_b["waiting"] == {"listens": 0, "tracks": 0, "sessions": 0}
+    assert mb["demo_plays"] == 0                         # A's T1 demo is later: B keeps its own
+    assert got_b["waiting"] == {"listens": 0, "tracks": 0, "sessions": 0, "demo_plays": 0}
 
     # The union, on what both know; stats recomputed to the same numbers.
     hist = lambda t: set(_rows(t, "SELECT track_id::text, started_at, completed FROM listening_history"))
@@ -323,6 +332,9 @@ def test_two_clones_merge_to_the_union_in_either_order(clones, tmp_path):
     assert all(sa[t] == sb[t] for t in both)
     assert sa[str(T1)][:2] == (2, 1) and sa[str(T1)][2] == 380 and sa[str(T2)][:2] == (0, 1)
     assert sa[str(T1)][4] == T0 + timedelta(hours=2, seconds=180)             # last COMPLETED listen
+    demos = lambda t: dict(_rows(t, "SELECT track_id::text, played_at FROM demo_plays"))
+    assert demos(a) == {str(T1): T0 + timedelta(hours=1), str(T3): T0 + timedelta(hours=1)}
+    assert demos(b) == {**demos(a), str(T4): T0}
 
     # Sessions: the closed, fully known one came over; the open one and the
     # one naming T4 did not; the other way every session of A is in B.
@@ -357,4 +369,4 @@ def test_two_clones_merge_to_the_union_in_either_order(clones, tmp_path):
     again = _merge(file_b, a)
     assert not any(again["merged"].values()), again["merged"]
     assert again["waiting"] == got["waiting"]
-    assert _stats(a) == sa and _friends(a) == fa and len(hist(a)) == 5
+    assert _stats(a) == sa and _friends(a) == fa and len(hist(a)) == 5 and len(demos(a)) == 2

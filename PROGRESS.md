@@ -789,6 +789,67 @@ user brings.
   inlined-secret marker of the 2026-08 page, so it recognised no port as
   the Web UI; it now reads the `sautium-webui` health type.
 
+### Streaming is a demo channel (2026-09-17)
+
+The core streaming provider (YouTube) streamed phantom albums without
+limit, which makes the product a free substitute for a streaming service
+— a legal exposure for its author. Decided: streaming from the core
+channel is an acquaintance tool. A track streams from it in full at most
+**once**; past that it plays as the catalog's own 30 s excerpt.
+
+- **The ledger is a table, not a stats flag.** `demo_plays(track_id PK,
+  provider, played_at)` — `local_play_stats` is re-derived wholesale from
+  `listening_history` (`play_stats.py`), so nothing sticky can live
+  there, and `listening_history` records no provider. Life data: in the
+  backup, merged by earliest `played_at`, never synced (a node-local fact
+  about this listener). No settings toggle: legal posture, not preference.
+- **A listen is spent by position, not by the tracker's rule.** The
+  status observer (`streaming/demo.py`, `manager.subscribe_status`)
+  writes the row the tick playback passes 90 % — the tracker's
+  `completed` (50 % or 4 min) is the scrobble rule and says nothing about
+  having heard the track. A seek into the last tenth counts: the listener
+  reached what they came for.
+- **The ledger governs what is fetched, at both ends.** The resolve
+  waterfall builds a spent track's chain from a provider order WITHOUT
+  the demo channel — the cache key is that order, so spending the listen
+  is a cache miss and the excerpt provider gives a real answer (a
+  post-filter of a cached chain would have left a lazy link availability
+  reports as streamable on a guess). The proxy asks `link_admissible`
+  before every link it fetches, because a chain is a plan and the bytes
+  are fetched later. When the spent listen ends, the demo channel's
+  buffer is dropped (`MediaProxy.drop_audio`) and `_mint` adopts RAM
+  audio only from a provider the new chain names — a replay refetches
+  and cascades to the excerpt. What an output already buffered for
+  itself (a browser blob, a renderer's cache) is beyond reach; documented,
+  not chased.
+- **An excerpt is not the recording, so it is nothing downstream.**
+  `FetchedAudio.excerpt` + `seconds` ride through `preview_meta` into the
+  queue item (`QueueItem.excerpt`, `duration_seconds` = the clip's length —
+  DLNA's `res@duration` and track-end detection read it) and the status
+  (`excerpt` → the `[30s]` badge). `PreviewEnricher.submit` refuses it
+  before any decode or provenance row (every first-hand stream analysis
+  signs and syncs now). The tracker opens no session for it: 25 s of a
+  30 s clip would have read as `completed`, and a clip over 30 s would
+  have opened the `ARTIST_ENGAGED` fan-out.
+- **The queue item follows the buffer.** A stream's item is built once,
+  when its buffer is first ready; a refetch (budget eviction, a spent
+  buffer) can change the provider and the length. The proxy's
+  `track_ready_hooks` now run BEFORE the entry is marked ready, and the
+  first hook (`CanonicalQueue.refresh_proxy_items`) patches every slot on
+  the token — so whoever wakes on `wait_ready` (DLNA, before it builds
+  the DIDL) reads an item that is already true.
+- **One catalog resolve for two providers.** The BYO lossless module and
+  the core excerpt provider are the same recording on the same catalog, so
+  its public-API resolve moved into core (`streaming/deezer_catalog.py`,
+  `DeezerCatalogProvider`): one pacer, one album memo, one preview-URL
+  memo per process; the closed module keeps only its config and the
+  streamrip download. Providers naming one `cooldown_source` are demoted
+  together under a cooldown and are one voice for the `streaming.silent`
+  notice. `providers_preferred()` ranks `(excerpt, not lossless, id)` —
+  the excerpt is always the last resort — and the excerpt provider is
+  registered unconditionally, which is what makes a node without yt-dlp
+  still preview.
+
 ## Known Gotchas
 
 - **A dead SSE socket is silent, and painting its death is a UI lie.** Two

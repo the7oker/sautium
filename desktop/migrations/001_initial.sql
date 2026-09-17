@@ -894,6 +894,16 @@ CREATE TABLE IF NOT EXISTS local_play_stats (
     CONSTRAINT chk_lps_avg_pct CHECK (avg_percent_listened >= 0 AND avg_percent_listened <= 100)
 );
 
+-- The demo channel (YouTube) streams a track in full at most ONCE: the row is
+-- written the moment a listen passes 90 %, and from then on the track streams
+-- only as a 30 s excerpt. One row per track; on a life-data merge the earliest
+-- listen wins. provider is VARCHAR, not an enum — provider ids are plugin ids.
+CREATE TABLE IF NOT EXISTS demo_plays (
+    track_id UUID PRIMARY KEY REFERENCES tracks(id) ON DELETE CASCADE ON UPDATE CASCADE,
+    provider VARCHAR(32) NOT NULL,
+    played_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
 -- ============================================================
 -- Listening sessions (queue-lifetime snapshots for the Home shelf)
 -- ============================================================

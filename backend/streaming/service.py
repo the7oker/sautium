@@ -48,6 +48,12 @@ def init(settings) -> bool:
         logger.warning("yt-dlp is not installed in %s — YouTube streaming is "
                        "unavailable until it is and the backend restarted",
                        sys.executable)
+    # The excerpt provider ships in core and needs no tool: 30 s clips from the
+    # public catalog API — the fallback when the demo channel is missing or a
+    # track's one demo listen is spent (streaming/demo.py), and why a node
+    # without yt-dlp still previews, as excerpts.
+    from .deezer_preview import DeezerPreviewProvider
+    _registry.register(DeezerPreviewProvider())
 
     # Bring-your-own providers (e.g. a lossless provider) drop into the
     # local providers directory — NOT bundled here (DRM providers stay out of tree). Core has no
@@ -68,6 +74,27 @@ def init(settings) -> bool:
     )
     _proxy.start()
 
+    # The canonical-queue item of a stream is built once, when its buffer is
+    # first ready; a REFETCH (a budget eviction, a spent demo buffer) may land
+    # on another provider or, as an excerpt, on another length — and DLNA
+    # reads the item's duration at load. The hook runs before the entry is
+    # marked ready (proxy._prepare), so whoever wakes on it sees the item true.
+    from playback.manager import manager as playback_manager
+    from . import demo
+
+    def _refresh_queue_item(e):
+        excerpt = bool(e.audio.excerpt)
+        playback_manager.queue.refresh_proxy_items(
+            e.token, provider=e.provider.manifest.id if e.provider else None,
+            excerpt=excerpt,
+            duration_seconds=(e.audio.seconds if excerpt and e.audio.seconds
+                              else e.query.duration))
+
+    _proxy.track_ready_hooks.append(_refresh_queue_item)
+    # The demo policy: the fetch-time gate and the listen observer.
+    _proxy.link_admissible = demo.link_admissible
+    playback_manager.subscribe_status(demo.status_observer)
+
     # Tee fetched previews through CLAP/feature analysis (gated on known
     # duration). The proxy stays CLAP-agnostic — it just fires the hook.
     global _enricher, _lyrics_enricher
@@ -78,19 +105,21 @@ def init(settings) -> bool:
         _lyrics_enricher = PreviewLyricsEnricher()
 
         def _on_track_ready(e):
-            # Audio features (GPU, gated on a known catalog length) + lyrics text
-            # and its embedding (network/text, metadata-derived, ungated — see
-            # the enricher docstrings for the gating rationale).
+            # Audio features (GPU, gated on a known catalog length; never on
+            # an excerpt) + lyrics text and its embedding (network/text,
+            # metadata-derived, ungated — see the enricher docstrings for the
+            # gating rationale).
             _enricher.submit(
                 e.query.track_id,
-                e.audio.data if e.audio else None,
+                e.audio.data,
                 attested_lengths(e.query),
-                e.audio.lossless if e.audio else False,   # ACTUAL fetch quality (may be a degraded tier)
+                e.audio.lossless,   # ACTUAL fetch quality (may be a degraded tier)
                 e.provider.manifest.id if e.provider else None,  # provenance origin
+                excerpt=e.audio.excerpt,
             )
             _lyrics_enricher.submit(e.query)
 
-        _proxy.on_track_ready = _on_track_ready
+        _proxy.track_ready_hooks.append(_on_track_ready)
         logger.info("preview enrichment enabled (analyze + lyrics on preview)")
 
     logger.info("streaming preview ready (proxy %s:%d, advertised %s)",
@@ -206,10 +235,17 @@ def get_proxy() -> Optional[MediaProxy]:
 provider_health: dict = {}          # id -> {"silent_since": iso, "reason": str}
 
 
+def health_key(provider) -> str:
+    """What a provider's silence is reported under: its upstream API when it
+    shares one (both providers on one catalog are one voice — one notice,
+    and either answering clears it), else its own id."""
+    return provider.manifest.cooldown_source or provider.manifest.id
+
+
 def note_provider_health(silent: dict, answered: set) -> bool:
-    """`silent`: id -> reason for providers that answered nothing this
-    pass; `answered`: ids that gave at least one definite answer. Returns
-    True on a transition either way — the caller wakes the channel."""
+    """`silent`: health key -> reason for providers that answered nothing
+    this pass; `answered`: keys that gave at least one definite answer.
+    Returns True on a transition either way — the caller wakes the channel."""
     from datetime import datetime, timezone
     changed = False
     for pid, reason in silent.items():
@@ -225,28 +261,37 @@ def note_provider_health(silent: dict, answered: set) -> bool:
 
 
 def providers_preferred() -> list:
-    """All enabled providers, lossless-first (lossless before lossy).
-    The per-track resolve waterfall tries each in order, so a track absent from
-    the lossless provider still streams from YouTube instead of showing up as unavailable.
+    """All enabled providers, best first: full-length before excerpts, and
+    lossless before lossy within that. The per-track resolve waterfall tries
+    each in order, so a track absent from the lossless provider still streams
+    from YouTube instead of showing up as unavailable, and one the demo
+    channel cannot serve still plays as a 30 s excerpt.
 
-    A lossless provider may share its API host with photo enrichment, so a 429 there
-    (from a photo backfill or our own resolve) surfaces as an armed 'deezer'
-    cooldown. We react by ROUTING, never blocking: while that provider is cooling,
-    demote it below the lossy fallback so playback starts immediately on
-    YouTube; if it's chronically banned (>=3 strikes), drop it this round
-    entirely. Consumer-side policy over api_cooldown — enrichment pauses on
-    cooling_down(), streaming reorders on status()."""
+    A provider may share its API host with photo enrichment (and with another
+    provider — `manifest.cooldown_source`), so a 429 there surfaces as an
+    armed cooldown for that source. We react by ROUTING, never blocking:
+    while a source is cooling, demote every provider on it to the end so
+    playback starts immediately on what is left; if it's chronically banned
+    (>=3 strikes), drop them this round entirely. Consumer-side policy over
+    api_cooldown — enrichment pauses on cooling_down(), streaming reorders on
+    status()."""
     if _registry is None:
         return []
     provs = sorted(_registry.enabled(),
-                   key=lambda p: (not p.manifest.lossless, p.manifest.id))
+                   key=lambda p: (p.manifest.excerpt, not p.manifest.lossless, p.manifest.id))
     # cooling_down() is the cheap cache gate; only read the richer status()
-    # (a DB hit) on the rare occasions the provider is actually cooling.
-    if api_cooldown.cooling_down('deezer'):
-        st = api_cooldown.status('deezer')
-        deezer = [p for p in provs if p.manifest.id == 'deezer']
-        others = [p for p in provs if p.manifest.id != 'deezer']
-        provs = others if (st and st.strikes >= 3) else others + deezer
+    # (a DB hit) on the rare occasions a source is actually cooling.
+    cooling = {p.manifest.cooldown_source for p in provs
+               if p.manifest.cooldown_source
+               and api_cooldown.cooling_down(p.manifest.cooldown_source)}
+    if cooling:
+        banned = set()
+        for source in cooling:
+            st = api_cooldown.status(source)
+            if st and st.strikes >= 3:
+                banned.add(source)
+        provs = ([p for p in provs if p.manifest.cooldown_source not in cooling]
+                 + [p for p in provs if p.manifest.cooldown_source in cooling - banned])
     return provs
 
 

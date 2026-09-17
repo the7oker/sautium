@@ -81,12 +81,34 @@ def test_payload_shapes():
 
     ph = rows[1]
     assert ph["preview"] is True and ph["provider"] == "deezer"
+    assert ph["excerpt"] is False
     assert ph["id"] is None and ph["track_id"] == "t-ph"
     assert "provider_cover_url" in ph and "cover_url" in ph
 
     foreign = rows[2]
     assert foreign["id"] is None and "album" not in foreign
     assert "preview" not in foreign and "track_id" not in foreign
+
+
+def test_refresh_proxy_items_patches_every_slot_on_the_token():
+    q = CanonicalQueue()
+    a, b = _item(None, "t-ph", "Phantom", preview=True, provider="youtube"), _item(3, "t3")
+    twice = _item(None, "t-ph", "Phantom", preview=True, provider="youtube")
+    q.replace([a, b, twice])
+    v = q.version
+    # A refetch landed on the excerpt provider: both slots streaming the token
+    # follow, the owned row is untouched, the version moves once.
+    assert q.refresh_proxy_items("tokt-ph", provider="deezer_preview", excerpt=True,
+                                 duration_seconds=30.0)
+    assert (a.provider, a.excerpt, a.duration_seconds) == ("deezer_preview", True, 30.0)
+    assert (twice.provider, twice.excerpt) == ("deezer_preview", True)
+    assert (b.provider, b.excerpt, b.duration_seconds) == (None, False, 100.0)
+    assert q.version == v + 1
+    assert q.payload()["tracks"][0]["excerpt"] is True
+    # Nothing new: no change, no version bump.
+    assert not q.refresh_proxy_items("tokt-ph", provider="deezer_preview", excerpt=True,
+                                     duration_seconds=30.0)
+    assert q.version == v + 1
 
 
 def test_index_of_is_identity_based():

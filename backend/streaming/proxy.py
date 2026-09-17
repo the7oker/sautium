@@ -102,9 +102,17 @@ class MediaProxy:
         self._blobs: dict[str, tuple[bytes, str]] = {}   # /art/{token} → (data, mime)
         self._blob_tokens_by_key: dict[str, str] = {}    # cover key → token
         self._httpd: Optional[ThreadingHTTPServer] = None
-        # Fired (with the _Entry) once a track is fetched, audio present — the
-        # preview-enrichment tee. Kept generic so the proxy stays CLAP-agnostic.
-        self.on_track_ready: Optional[Callable[["_Entry"], None]] = None
+        # Fired (with the _Entry) once a track is fetched, audio present, BEFORE
+        # the entry is marked ready — so a waiter that wakes on it finds the
+        # world the hooks maintain (the canonical-queue item) already true.
+        # Kept generic so the proxy stays CLAP-agnostic: the enrichment tee is
+        # one hook, the queue refresh another.
+        self.track_ready_hooks: list[Callable[["_Entry"], None]] = []
+        # Whether a chain link may be fetched NOW — the demo policy's gate
+        # (streaming/demo.py). A chain is a plan made at resolve time; a link
+        # the gate refuses is skipped and the chain cascades on.
+        self.link_admissible: Callable[[StreamProvider, TrackQuery], bool] = \
+            lambda provider, query: True
 
     # ---- lifecycle -------------------------------------------------------
     def start(self) -> None:
@@ -218,15 +226,41 @@ class MediaProxy:
                 if self._entry_keys(e) & keep:
                     continue
                 freed += len(e.audio.data)
-                e.audio = None
-                e.error = None
-                e.fetch_seconds = None
-                e.evicted = True
-                e._claimed = False
-                # Fresh event: late waiters on the old (set) one read audio=None
-                # and skip; new waits see un-ready and re-arm the fetch.
-                e.ready = threading.Event()
+                self._evict(e)
             return freed
+
+    @staticmethod
+    def _evict(e: _Entry) -> None:
+        """Drop an entry's audio and re-arm it: metadata + chain stay, the next
+        wait/GET refetches transparently. Caller holds _lock."""
+        e.audio = None
+        e.error = None
+        e.fetch_seconds = None
+        e.evicted = True
+        e._claimed = False
+        # Fresh event: late waiters on the old (set) one read audio=None
+        # and skip; new waits see un-ready and re-arm the fetch.
+        e.ready = threading.Event()
+
+    def drop_audio(self, track_id: str) -> int:
+        """Forget the fetched audio of every entry of `track_id` that a
+        demo-limited provider served — its one listen is spent (streaming/
+        demo.py). Evicted exactly like the budget does, so a replay refetches
+        and the admissibility gate routes it past the spent provider. Returns
+        the number of entries dropped."""
+        if not track_id:
+            return 0
+        n = 0
+        with self._lock:
+            for e in self._entries.values():
+                if (e.query.track_id == track_id and e.ready.is_set()
+                        and e.audio is not None and e.provider is not None
+                        and e.provider.manifest.demo_limited):
+                    self._evict(e)
+                    n += 1
+        if n:
+            preview_events.ping()
+        return n
 
     def ensure_buffered(self, keys: list) -> None:
         """Priority-(re)fetch the playback window, first key most urgent —
@@ -257,10 +291,13 @@ class MediaProxy:
     def _mint(self, token: str, query: TrackQuery, index: int, chain: list,
               in_ram: dict) -> _Entry:
         """A fresh entry, adopting `in_ram` audio when the same track is already
-        in hand (a re-streamed or re-queued album downloads nothing). Caller
-        holds _lock."""
+        in hand (a re-streamed or re-queued album downloads nothing) — from a
+        provider the new chain still names: a chain built without the demo
+        channel (its listen spent) must not inherit the demo channel's bytes.
+        Caller holds _lock."""
         prior = in_ram.get(query.track_id)
-        if prior is None or prior.audio is None:
+        if (prior is None or prior.audio is None
+                or prior.provider not in {p for p, _sid in chain}):
             return _Entry(token, query, index, chain=chain,
                           provider=chain[0][0] if chain else None)
         e = _Entry(token, query, index, chain=chain, provider=prior.provider)
@@ -407,9 +444,18 @@ class MediaProxy:
         None until the track is fetched and its duration is known."""
         with self._lock:
             e = self._entries.get(token)
-        if e is None or e.fetch_seconds is None or not e.query.duration:
+        secs = self._seconds(e) if e is not None else None
+        if e is None or e.fetch_seconds is None or not secs:
             return None
-        return e.fetch_seconds / e.query.duration
+        return e.fetch_seconds / secs
+
+    @staticmethod
+    def _seconds(e: _Entry) -> Optional[float]:
+        """How much audio the entry holds, in seconds: the clip's own length
+        for an excerpt, the catalog length otherwise."""
+        if e.audio is not None and e.audio.excerpt and e.audio.seconds:
+            return e.audio.seconds
+        return e.query.duration
 
     def ready_run(self, tokens: list) -> tuple[list, float, int]:
         """The leading run of already-fetched tokens, without blocking: the
@@ -428,7 +474,7 @@ class MediaProxy:
                 if e.audio is None:
                     continue                    # fetched-but-failed → skip, scan on
                 playable.append(tok)
-                secs += e.query.duration or 0.0
+                secs += self._seconds(e) or 0.0
             return playable, secs, used
 
     def is_buffering(self, track_id: str) -> bool:
@@ -514,11 +560,14 @@ class MediaProxy:
             e = self._entries.get(token)
         if e is None:
             return None
+        # An excerpt reports the clip's own length: the queue, the renderer's
+        # DIDL and the tracker are told about THIS buffer, not the recording.
         return {"artist": e.query.artist, "title": e.query.title,
                 "album": e.query.album, "album_id": e.query.album_id,
                 "provider": e.provider.manifest.id,
                 "track_id": e.query.track_id, "cover_url": e.query.cover_url,
-                "duration": e.query.duration, "media_file_id": e.query.media_file_id}
+                "duration": self._seconds(e), "media_file_id": e.query.media_file_id,
+                "excerpt": bool(e.audio is not None and e.audio.excerpt)}
 
     def wait_ready(self, token: str, timeout=_UNSET_TIMEOUT, *,
                    front: bool = False) -> _Entry:
@@ -579,6 +628,12 @@ class MediaProxy:
             # through to the next provider (e.g. YouTube) instead of dropping it.
             last_err = None
             for prov, sid in e.chain:
+                if not self.link_admissible(prov, e.query):
+                    last_err = last_err or ProviderError(
+                        f"{prov.manifest.id}: demo listen spent")
+                    logger.info("preview link refused [%d] %s — %s via %s: demo listen spent",
+                                e.index, e.query.artist, e.query.title, prov.manifest.id)
+                    continue
                 started = time.monotonic()
                 try:
                     e.audio = prov.download(sid) if sid else prov.fetch(e.query)
@@ -596,14 +651,14 @@ class MediaProxy:
             e.error = f"unexpected: {ex}"
             logger.error("preview fetch crashed [%d]: %s", e.index, ex, exc_info=True)
         finally:
+            if e.audio is not None:
+                for hook in list(self.track_ready_hooks):
+                    try:
+                        hook(e)
+                    except Exception:
+                        logger.exception("track-ready hook failed [%d]", e.index)
             e.ready.set()
             preview_events.ping()   # buffering ended → re-fetch picks up the change
-            hook = self.on_track_ready
-            if hook is not None and e.audio is not None:
-                try:
-                    hook(e)
-                except Exception:
-                    logger.exception("on_track_ready hook failed [%d]", e.index)
 
     def _peek(self, token: str) -> Optional[_Entry]:
         """Lookup without triggering a fetch or advancing — for cheap HEAD."""

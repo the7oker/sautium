@@ -1352,7 +1352,11 @@ body.sautium-base {
   margin-top: calc(10 * var(--px));
   padding-top: calc(10 * var(--px));
   border-top: 1px solid var(--color-divider);
-  flex-wrap: nowrap;
+  /* The reference row never wraps; with the [30s] badge beside the quality
+     badge on a track analysed earlier (key + BPM + energy all shown) it can
+     run past 360 — a second line beats a clipped one. */
+  flex-wrap: wrap;
+  row-gap: calc(6 * var(--px));
 }
 .np-q-badge {
   display: inline-flex;
@@ -1382,6 +1386,14 @@ body.sautium-base {
   color: var(--color-negative);
   border-color: rgba(193, 86, 78, 0.35);
   background: rgba(193, 86, 78, 0.06);
+}
+/* [30s] — the stream is the catalog's excerpt, not the recording. A status
+   tag, so the neutral muted recipe (never blue or amber); "30s" as written. */
+.np-q-badge.is-neutral {
+  color: var(--color-text-muted);
+  border-color: var(--color-divider);
+  background: rgba(237, 226, 212, 0.02);
+  text-transform: none;
 }
 
 .np-key-pill {
@@ -2207,6 +2219,25 @@ body.sautium-base {
   color: var(--color-text-muted);
   letter-spacing: 0.02em;
 }
+/* "30s" beside a phantom row's duration: the track will play as a 30 s excerpt
+   (its demo listen is spent, or nothing full-length has it). The duration cell
+   of a phantom row is a flex pair (tag · time) so the tag never adds a grid
+   column. */
+.track-row.is-phantom-track .track-dur {
+  display: inline-flex;
+  align-items: center;
+}
+.track-excerpt {
+  font-size: calc(9.5 * var(--px));
+  font-weight: 600;
+  letter-spacing: 0.08em;
+  color: var(--color-text-muted);
+  border: 1px solid var(--color-divider);
+  border-radius: calc(3 * var(--px));
+  padding: calc(1 * var(--px)) calc(5 * var(--px));
+  margin-right: calc(6 * var(--px));
+  flex-shrink: 0;
+}
 .track-add {
   width: calc(44 * var(--px));
   height: calc(44 * var(--px));
@@ -2594,7 +2625,8 @@ body.sautium-base {
   letter-spacing: 0.02em;
   margin-left: auto;
 }
-.am-hires {
+.am-hires,
+.am-demo {
   display: inline-flex;
   align-items: center;
   gap: calc(5 * var(--px));
@@ -2606,6 +2638,18 @@ body.sautium-base {
   letter-spacing: 0.08em;
   text-transform: uppercase;
   margin-left: auto;
+}
+/* [demo] — every phantom album page: streaming here is an acquaintance tool
+   (one full demo listen per track, then 30 s excerpts). Neutral/muted like the
+   lossless badge; it holds the right edge, and the quality badge — filled in
+   once the tracklist resolves — sits beside it instead of splitting the row. */
+.am-demo {
+  color: var(--color-text-muted);
+  border: 1px solid var(--color-divider);
+  background: rgba(237, 226, 212, 0.02);
+}
+.album-meta-row .am-demo ~ .am-hires {
+  margin-left: calc(6 * var(--px));
 }
 .am-hires.is-hires {
   color: var(--color-hires);

@@ -1787,11 +1787,23 @@ def _resolve_waterfall(queries: list) -> list:
     track some provider could not ANSWER for (timeout, quota) is not cached:
     its chain is built from the providers that did answer, and the next
     resolve asks the silent one again."""
+    from streaming import demo
     from streaming import service as streaming_service
     from streaming.base import ProviderUnavailable
 
     provs = streaming_service.providers_preferred()
-    order = tuple(p.manifest.id for p in provs)
+    # A track whose demo listen is spent (streaming/demo.py) has no
+    # demo-limited provider in ITS order: the pass asks only the providers
+    # that may still serve it, so its chain holds their real answer — never a
+    # lazy link the fetch would have refused, which is what a post-filter of
+    # a cached chain would leave, and what availability would then report as
+    # streamable on a guess. The order is the cache key, so spending the
+    # listen is a cache miss, not a stale chain.
+    spent = demo.consumed(q.track_id for q in queries)
+
+    def order_for(q) -> tuple:
+        return tuple(p.manifest.id for p in provs if demo.admits(p, q.track_id, spent))
+
     now = time.time()
     for key, (ts, _chain) in list(_chain_cache.items()):
         if now - ts >= _CHAIN_TTL_S:
@@ -1800,7 +1812,7 @@ def _resolve_waterfall(queries: list) -> list:
     chains = [None] * len(queries)
     pending = []                            # indices still to resolve
     for i, q in enumerate(queries):
-        hit = _chain_cache.get((q.track_id, order)) if q.track_id else None
+        hit = _chain_cache.get((q.track_id, order_for(q))) if q.track_id else None
         if hit is not None:
             chains[i] = hit[1]
         else:
@@ -1820,18 +1832,26 @@ def _resolve_waterfall(queries: list) -> list:
             break
         if not prov.supports_resolve:
             continue                        # can't pre-resolve; appears only as a lazy fallback
-        res = _parallel_resolve(prov, pool, unresolved)
+        wanted = [i for i in unresolved if demo.admits(prov, queries[i].track_id, spent)]
+        res = dict(zip(wanted, _parallel_resolve(prov, pool, wanted)))
+        # Two providers on one API are one voice for the notices channel: a
+        # silence is one notice, and either answering clears it.
+        voice = streaming_service.health_key(prov)
         still = []
-        for i, r in zip(unresolved, res):
+        for i in unresolved:
+            if i not in res:
+                still.append(i)             # not asked of this provider (demo spent)
+                continue
+            r = res[i]
             if isinstance(r, ProviderUnavailable):
                 unanswered.add(i)
                 still.append(i)
-                silence.setdefault(prov.manifest.id, str(r))
+                silence.setdefault(voice, str(r))
             elif r is not None:
-                answered.add(prov.manifest.id)
+                answered.add(voice)
                 best[i], sids[i], durs[i], arts[i] = pi, r.source_id, r.duration, r.artwork_url
             else:
-                answered.add(prov.manifest.id)
+                answered.add(voice)
                 still.append(i)
         unresolved = still
 
@@ -1852,9 +1872,10 @@ def _resolve_waterfall(queries: list) -> list:
         got = ", ".join(
             f"{prov.manifest.id} {sum(1 for i in pending if best.get(i) == pi)}"
             for pi, prov in enumerate(provs) if prov.supports_resolve)
-        logger.info("resolve pass: %d tracks — %s; nowhere %d; unanswered %d%s",
+        logger.info("resolve pass: %d tracks — %s; nowhere %d; unanswered %d; demo spent %d%s",
                     len(pending), got, sum(1 for i in pending if i not in best),
                     len(unanswered),
+                    sum(1 for i in pending if queries[i].track_id in spent),
                     "".join(f"; {k}: {v}" for k, v in silence.items()))
 
     for i in pending:
@@ -1869,13 +1890,27 @@ def _resolve_waterfall(queries: list) -> list:
 
         if i in best:
             chain = [(provs[best[i]], sids[i])]
-            chain += [(provs[pi], None) for pi in range(best[i] + 1, len(provs))]
+            chain += [(provs[pi], None) for pi in range(best[i] + 1, len(provs))
+                      if demo.admits(provs[pi], q.track_id, spent)]
         else:
-            chain = [(p, None) for p in provs if not p.supports_resolve]
+            chain = [(p, None) for p in provs
+                     if not p.supports_resolve and demo.admits(p, q.track_id, spent)]
         chains[i] = chain
         if q.track_id and i not in unanswered:
-            _chain_cache[(q.track_id, order)] = (now, chain)
+            _chain_cache[(q.track_id, order_for(q))] = (now, chain)
     return chains
+
+
+def _excerpt_ids(items: list) -> list:
+    """Track ids among ``(query, chain)`` items that will stream as a 30 s
+    excerpt: every chain the track resolved on is headed by the excerpt
+    provider (a demo listen spent, or nothing full-length has it)."""
+    full, clipped = set(), set()
+    for q, chain in items:
+        if not q.track_id or not chain:
+            continue
+        (clipped if chain[0][0].manifest.excerpt else full).add(q.track_id)
+    return sorted(clipped - full)
 
 
 def _provider_label(items: list) -> Optional[str]:
@@ -2163,7 +2198,10 @@ def phantom_availability(album_id: str) -> dict:
                  if t in _resolved_durations}
 
     return {"unavailable": [{"track_id": t} for t in unavailable],
-            "quality": quality, "durations": durations}
+            "quality": quality, "durations": durations,
+            # Rows that will play as a 30 s excerpt (an excerpt head counts as
+            # lossy in `quality` — it is).
+            "excerpt": _excerpt_ids(list(zip(queries, chains)))}
 
 
 class PlayPhantomAlbumRequest(BaseModel):
@@ -2308,6 +2346,7 @@ def play_phantom_album(req: PlayPhantomAlbumRequest):
             "buffering": max(0, len(avail_q) - added),   # rolling in via the filler
             "requested": len(queries),                   # tracklist size
             "missing": missing_payload,                  # not found on ANY provider
+            "excerpt": _excerpt_ids(items),              # streaming as 30 s excerpts
         }
     except HTTPException:
         raise
@@ -2369,7 +2408,8 @@ def play_phantom_track(req: PlayPhantomTrackRequest):
                 detail="The playback output did not accept the preview — try again.")
         return {"ok": True, "provider": e.provider.manifest.id, "track_count": 1,
                 "requested": 1, "missing": [], "title": q.title,
-                "artist": q.artist, "album": q.album}
+                "artist": q.artist, "album": q.album,
+                "excerpt": [req.track_id] if e.audio.excerpt else []}
     except HTTPException:
         raise
     except Exception as e:
@@ -2405,7 +2445,7 @@ def queue_phantom_track(req: PlayPhantomTrackRequest):
         threading.Thread(target=_phantom_filler, args=(proxy, list(tokens), 0, gen),
                          daemon=True, name="phantom-queue").start()
     return {"ok": True, "provider": chain[0][0].manifest.id, "track_count": 1,
-            "requested": 1, "missing": []}
+            "requested": 1, "missing": [], "excerpt": _excerpt_ids([(q, chain)])}
 
 
 @router.post("/queue-phantom-album")
@@ -2451,7 +2491,7 @@ def queue_phantom_album(req: PlayPhantomAlbumRequest):
                          daemon=True, name="phantom-queue").start()
     return {"ok": True, "provider": _provider_label(items),
             "track_count": len(avail_q), "requested": len(queries),
-            "missing": missing_payload}
+            "missing": missing_payload, "excerpt": _excerpt_ids(items)}
 
 
 # -- Mixed (owned + phantom) queueing -----------------------------------------

@@ -159,6 +159,8 @@ GIN-index retrieve branch only). A much higher score (0.3+) = high-confidence pr
 percent_listened, completed BOOLEAN, skipped BOOLEAN)
 **local_play_stats** (track_id UUID PRIMARY KEY, play_count, skip_count, total_listen_time, \
 avg_percent_listened, last_played_at) - aggregated local listening stats per track
+**demo_plays** (track_id UUID PRIMARY KEY, provider, played_at) - not-owned tracks whose ONE full demo \
+stream (YouTube) is used up; from then on the track streams only as a 30 s excerpt
 **track_stats** (track_id UUID, source VARCHAR, listeners INT, playcount BIGINT) - external popularity (Last.fm)
 
 ## IMPORTANT: a track's identity is tracks.id (UUID), for you and for every tool
