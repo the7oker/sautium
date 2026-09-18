@@ -593,7 +593,21 @@ def pending_slice_names(conn, limit: int = 200) -> list:
     thing that turns a curated pick into a discography. Within the phantom
     stub layer the tiers mirror discography.stale_canonized_artists —
     listened-to first, then artists similar to those, then the rest — so
-    the part of the discovery graph you actually touch resolves first."""
+    the part of the discovery graph you actually touch resolves first.
+
+    Last come canonized artists the ledger no longer vouches for: an
+    artist_mbids row and no mb_slice_fetches row. Their facts arrived in a
+    slice whose provenance row is gone (016 reset the ledger when the wire
+    format grew) or through a peer's sealed canon rather than a slice of
+    their own name. Canon is done for them, so no other tier lists them —
+    yet discography._mb_source_covers and the Buy resolver both read a
+    fetch row as "the local facts for this name are complete and current",
+    and without one they answer no_source / unknown for good. Re-asking
+    restores that invariant (measured on the macOS node after 016: 299 of
+    547 canonized names, 6 695 of 7 280 phantom albums stuck on unknown).
+    MB's special-purpose artists ([unknown], [traditional], Various
+    Artists…) are left out: their subtree is every record on Earth, capped
+    and useless."""
     with conn.cursor() as cur:
         cur.execute("""
             WITH listened AS (
@@ -632,6 +646,13 @@ def pending_slice_names(conn, limit: int = 200) -> list:
                                   WHERE ta.artist_id = a.id)
                   AND NOT EXISTS (SELECT 1 FROM artist_mbids am
                                   WHERE am.artist_id = a.id)
+                UNION ALL
+                SELECT a.name, 4 AS tier
+                FROM artists a
+                WHERE EXISTS (SELECT 1 FROM artist_mbids am
+                              WHERE am.artist_id = a.id)
+                  AND a.name !~ '^\\[.*\\]$'
+                  AND lower(a.name) <> 'various artists'
             )
             SELECT p.name FROM pending p
             WHERE p.name IS NOT NULL AND btrim(p.name) <> ''

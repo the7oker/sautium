@@ -850,10 +850,14 @@ statement *without* those tables, and a signed hole closes a name for good on
 the requester, so a v3 requester must not verify one. The migration is one
 delta (`016_mb_bandcamp_urls.sql`): it empties `mb_slice_blobs` and
 `mb_slice_fetches` on every node — a dump node's cache is rebuilt on demand, a
-replica's inventory refills from its own re-fetch, and every name re-enters
-`pending_slice_names`, where the ordinary 200-per-cycle queue re-asks it; the
-rows already imported stay (`ON CONFLICT DO NOTHING`), only the url rows are
-new. Serving is gated on the whole wire table set (`local_dump_available`): a
+replica's inventory refills from its own re-fetch, and the ordinary
+200-per-cycle queue re-asks the names: the canon tiers list what canon still
+waits on, and a last tier lists every canonized artist without a provenance
+row (the queue's first version had no such tier, so a node's already-shelved
+artists stayed on v2 facts for good — measured on the macOS node: 299 of 547
+canonized names, 6 695 of 7 280 phantom albums stuck on `unknown`). The rows
+already imported stay (`ON CONFLICT DO NOTHING`), only the url rows are new.
+Serving is gated on the whole wire table set (`local_dump_available`): a
 dump node whose dump predates the tables advertises no dump and answers
 `missing` until `download_and_load` adds them (the same version's archive when
 the mirror still has it, else the next full update), so a requester that

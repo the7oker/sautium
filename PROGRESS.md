@@ -947,7 +947,12 @@ and importer userscripts exist for Bandcamp, not for the hi-res shops).
   newest takes the full path, which includes them.
 - **Slice format v3** — the artist's url subtree in the blob, receipt
   context bumped, migration 016 empties both slice ledgers everywhere,
-  serving gated on the full wire table set (P2P_NETWORK.md § E).
+  serving gated on the full wire table set (P2P_NETWORK.md § E). A
+  fetch row is what `_mb_source_covers` and the Buy resolver read as
+  "facts complete and current", so `pending_slice_names` gained a last
+  tier — every canonized artist without one — or an already-shelved
+  artist would have stayed on its v2 facts for good (the macOS node
+  after 016: 6 695 of 7 280 phantoms stuck on `unknown`).
 - **Four button states** from one query in `routers/albums.py`
   (`_buy_link`): album page → artist page → disabled (`absent`: the
   local facts cover the record — a dump with the url tables, or a slice
