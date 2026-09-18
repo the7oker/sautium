@@ -12823,8 +12823,8 @@
 
       <div class="profile-group-label">Enrichment</div>
       <div class="form-group">
-        ${_enrichRow('embeddings', 'Embeddings', lib.embeddings_done, lib.total_tracks)}
-        ${_enrichRow('features',   'Features',   lib.features_done,   lib.total_tracks)}
+        ${_enrichRow('embeddings', 'Embeddings', lib.embeddings_done, lib.analysable_tracks)}
+        ${_enrichRow('features',   'Features',   lib.features_done,   lib.analysable_tracks)}
         ${_enrichRow('lastfm',     'Last.fm',    lib.lastfm_done,     lib.lastfm_total)}
         ${_enrichRow('lyrics',     'Lyrics',     lib.lyrics_done,     lib.total_tracks)}
         <div class="form-row stacked"><div class="row-stack-sub">${localAnalysis
@@ -12939,8 +12939,8 @@
       if (enrichLine && enrichProgress && enrichLine.textContent !== enrichProgress) {
         enrichLine.textContent = enrichProgress;
       }
-      _refreshEnrichRow(root, 'embeddings', lib.embeddings_done, lib.total_tracks);
-      _refreshEnrichRow(root, 'features',   lib.features_done,   lib.total_tracks);
+      _refreshEnrichRow(root, 'embeddings', lib.embeddings_done, lib.analysable_tracks);
+      _refreshEnrichRow(root, 'features',   lib.features_done,   lib.analysable_tracks);
       _refreshEnrichRow(root, 'lastfm',     lib.lastfm_done,     lib.lastfm_total);
       _refreshEnrichRow(root, 'lyrics',     lib.lyrics_done,     lib.total_tracks);
 

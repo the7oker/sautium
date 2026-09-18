@@ -993,7 +993,7 @@ async def get_stats() -> Dict[str, Any]:
         "tracks_with_lyrics": 0, "total_duration_seconds": 0,
         "total_file_size_bytes": 0, "unique_genres": 0,
         # Enrichment coverage
-        "tracks_with_features": 0,
+        "tracks_with_features": 0, "analysable_tracks": 0,
         "library_artists": 0, "artists_with_lastfm": 0,
         "library_albums": 0,
     }
@@ -1010,13 +1010,28 @@ async def get_stats() -> Dict[str, Any]:
 
             # Enrichment coverage stats
             enrichment_sql = f"""
+            -- The audio coverage population: owned tracks the audio passes
+            -- will ever analyse. Material under one grid window is not
+            -- analysed at all (provenance.MIN_MATERIAL_SECONDS, the queues'
+            -- own floor), so against total_tracks a 2.7 s jingle read as
+            -- "1 track left" forever, with the guidance trail lit for it.
+            -- Numerators come from the SAME set (this overrides the view's
+            -- tracks_with_embeddings): twenty sub-floor files analysed before
+            -- the floor existed would otherwise push the ratio past 100 %.
+            WITH analysable AS (
+                SELECT t.id FROM tracks t
+                 WHERE EXISTS (SELECT 1 FROM media_files mf
+                                WHERE mf.track_id = t.id AND mf.is_analysis_source
+                                  AND (mf.duration_seconds IS NULL
+                                       OR mf.duration_seconds >= :min_seconds))
+            )
             SELECT
-                -- Owned tracks only, like every other coverage figure — see
-                -- library_stats. A raw table count includes phantoms and
-                -- peer-imported analysis and reads as >100% coverage.
-                (SELECT COUNT(*) FROM tracks t
-                  WHERE EXISTS (SELECT 1 FROM media_files mf WHERE mf.track_id = t.id)
-                    AND EXISTS (SELECT 1 FROM audio_features af WHERE af.track_id = t.id)
+                (SELECT COUNT(*) FROM analysable) as analysable_tracks,
+                (SELECT COUNT(*) FROM analysable a
+                  WHERE EXISTS (SELECT 1 FROM embeddings e WHERE e.track_id = a.id)
+                ) as tracks_with_embeddings,
+                (SELECT COUNT(*) FROM analysable a
+                  WHERE EXISTS (SELECT 1 FROM audio_features af WHERE af.track_id = a.id)
                 ) as tracks_with_features,
                 -- Engaged artists only, for the same reason the track figures
                 -- are owned-only: a raw track_artists count is dominated by
@@ -1035,7 +1050,9 @@ async def get_stats() -> Dict[str, Any]:
                  JOIN media_files mf ON mf.album_variant_id = av.id
                 ) as library_albums
             """
-            enr = db.execute(text(enrichment_sql)).fetchone()
+            import provenance
+            enr = db.execute(text(enrichment_sql),
+                             {"min_seconds": provenance.MIN_MATERIAL_SECONDS}).fetchone()
             if enr:
                 row.update(dict(enr._mapping))
 

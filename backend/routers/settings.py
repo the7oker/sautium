@@ -717,7 +717,10 @@ async def _library_state() -> Dict[str, Any]:
         "total_albums":       stats.get("total_albums", 0),
         "total_genres":       stats.get("unique_genres", 0),
         "total_size_bytes":   stats.get("total_file_size_bytes", 0),
-        # Enrichment coverage (matches launcher's Enrichment 2×2)
+        # Enrichment coverage (matches launcher's Enrichment 2×2). The audio
+        # rows read against analysable_tracks — total_tracks minus material
+        # under the analysis floor — not the library total.
+        "analysable_tracks":  stats.get("analysable_tracks", 0),
         "embeddings_done":    stats.get("tracks_with_embeddings", 0),
         "features_done":      stats.get("tracks_with_features", 0),
         "lyrics_done":        stats.get("tracks_with_lyrics", 0),
@@ -1011,20 +1014,27 @@ _GUIDANCE_DISMISSIBLE = {"audio_output", "notices"}
 
 
 def _analysis_pending() -> bool:
-    """Any owned track without embeddings or without features. EXISTS,
+    """Any owned track the audio passes would still analyse: an analysis-
+    source file at or above the material floor (the queues' own predicate
+    — under one grid window nothing is analysed, provenance.
+    MIN_MATERIAL_SECONDS) without embeddings or without features. EXISTS,
     not a count — the trail is a boolean, so the query stops at the
     first hit. Driven from media_files, never from tracks: the phantom
     layer makes `tracks` three million rows, and the owned-first shape
     is the difference between 46 ms and 2.9 s (measured)."""
+    import provenance
     row = db_query_one("""
         SELECT EXISTS (
             SELECT 1 FROM media_files mf
-             WHERE NOT EXISTS (SELECT 1 FROM embeddings e
-                                WHERE e.track_id = mf.track_id)
-                OR NOT EXISTS (SELECT 1 FROM audio_features af
-                                WHERE af.track_id = mf.track_id)
+             WHERE mf.is_analysis_source
+               AND (mf.duration_seconds IS NULL
+                    OR mf.duration_seconds >= %(min_seconds)s)
+               AND (NOT EXISTS (SELECT 1 FROM embeddings e
+                                 WHERE e.track_id = mf.track_id)
+                    OR NOT EXISTS (SELECT 1 FROM audio_features af
+                                    WHERE af.track_id = mf.track_id))
         ) AS pending
-    """)
+    """, {"min_seconds": provenance.MIN_MATERIAL_SECONDS})
     return bool(row and row.get("pending"))
 
 
