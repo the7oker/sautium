@@ -291,6 +291,7 @@ def generate_env_file(config: dict, env_path: Path) -> None:
         "# tools that write them — the bin dir the launcher runs the cluster from.",
         f"BACKUP_DIR={get_data_dir() / 'backup'}",
         f"EXPORT_DIR={get_data_dir() / 'export'}",
+        f"SEED_DIR={get_data_dir() / 'seed'}",
         f"PG_BIN={_pg_bin_dir()}",
         "",
         "# Application",

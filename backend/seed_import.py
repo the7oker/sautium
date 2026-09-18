@@ -1,9 +1,19 @@
-"""Import the cold-start seed bundle (backend/seed/seed_v2.json.gz).
+"""Import the cold-start seed bundle.
 
-Runs once per node from db_migrate.apply_pending, keyed by the `seed_v2`
-marker row — the marker is written only after a COMPLETE import, so a
-partial landing (killed boot, transient DB error) retries on the next
-start. Every statement is idempotent: structural rows land with
+The bundle is not in the tree: a 17 MB artifact regenerated whenever the
+master re-signs, and every version once committed would sit in the history
+of every clone for good. backend/seed/bundle.json (tracked, written by
+seed_export.py) names the current version, its download URL — a GitHub
+Release asset — and its sha256; the file itself lives under
+settings.seed_dir and is fetched on the first start that needs it. A file
+whose digest does not match is discarded, and the import waits for the
+next start like any other transient failure here.
+
+Runs once per node from db_migrate.apply_pending, keyed by the `seed_v{N}`
+marker row (N from bundle.json) — the marker is written only after a
+COMPLETE import, so a partial landing (killed boot, transient DB error, no
+network yet) retries on the next start. Every statement is idempotent:
+structural rows land with
 ON CONFLICT DO NOTHING (a node that already holds a row keeps its own —
 the master and any owning node are no-ops by construction), and the
 enrichment/analysis half replays the bundle's verbatim pull envelopes
@@ -17,18 +27,24 @@ next boot instead of failing startup.
 """
 
 import gzip
+import hashlib
 import json
 import logging
+import os
+import tempfile
+import urllib.request
 from pathlib import Path
 
 import psycopg2
 import psycopg2.extras
 
+from config import settings
 from uuid_utils import IDENTITY_RULE
 
 logger = logging.getLogger(__name__)
 
-BUNDLE_PATH = Path(__file__).resolve().parent / "seed" / "seed_v2.json.gz"
+BUNDLE_INFO_PATH = Path(__file__).resolve().parent / "seed" / "bundle.json"
+DOWNLOAD_TIMEOUT_S = 60
 
 _ENRICHMENT_CATEGORIES = ("artist_bios", "artist_tags", "similar_artists")
 _ANALYSIS_CATEGORIES = ("segments", "audio_features", "track_mbids")
@@ -95,10 +111,64 @@ _STRUCTURAL_INSERTS = [
 _JSON_COLUMNS = {"merkle_proof"}
 
 
-def _load_bundle() -> dict | None:
-    if not BUNDLE_PATH.exists():
+def bundle_info() -> dict | None:
+    """The tracked description of the current bundle — version, url, sha256,
+    size; None in a tree that ships no seed."""
+    if not BUNDLE_INFO_PATH.exists():
         return None
-    with gzip.open(BUNDLE_PATH, "rt", encoding="utf-8") as fh:
+    return json.loads(BUNDLE_INFO_PATH.read_text(encoding="utf-8"))
+
+
+def bundle_path(info: dict) -> Path:
+    return Path(settings.seed_dir) / f"seed_v{info['version']}.json.gz"
+
+
+def _sha256(path: Path) -> str:
+    digest = hashlib.sha256()
+    with open(path, "rb") as fh:
+        while chunk := fh.read(1 << 20):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def ensure_bundle(info: dict) -> Path | None:
+    """The bundle file `info` describes, downloaded when absent; None when it
+    cannot be had right now (no network, a cut transfer, a digest mismatch)
+    — the caller skips and the next start tries again."""
+    path = bundle_path(info)
+    if path.exists():
+        if _sha256(path) == info["sha256"]:
+            return path
+        logger.warning("seed: %s does not match bundle.json — fetching again", path.name)
+        path.unlink()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = tempfile.NamedTemporaryFile(dir=path.parent, prefix=path.name + ".", delete=False)
+    tmp.close()
+    try:
+        logger.info("seed: downloading %s (%.1f MB)", info["url"], info["size"] / 1_048_576)
+        with urllib.request.urlopen(info["url"], timeout=DOWNLOAD_TIMEOUT_S) as resp, \
+                open(tmp.name, "wb") as out:
+            while chunk := resp.read(1 << 20):
+                out.write(chunk)
+        if _sha256(Path(tmp.name)) != info["sha256"]:
+            logger.error("seed: the downloaded bundle does not match the digest in "
+                         "bundle.json — discarded")
+            return None
+        os.replace(tmp.name, path)
+        return path
+    except OSError as e:          # urllib's URLError is one, as is a full disk
+        logger.warning("seed: download failed, will retry next start: %s", e)
+        return None
+    finally:
+        if os.path.exists(tmp.name):
+            os.unlink(tmp.name)
+
+
+def _load_bundle(info: dict) -> dict | None:
+    path = ensure_bundle(info)
+    if path is None:
+        return None
+    with gzip.open(path, "rt", encoding="utf-8") as fh:
         return json.load(fh)
 
 
@@ -190,13 +260,12 @@ def _check_completeness(conn, bundle: dict, envelopes: dict) -> dict:
     return out
 
 
-def apply_seed(conn, db_dsn: str) -> dict:
-    """Import the bundle. Returns {"complete": bool, ...}; the caller writes
-    the marker only on complete=True."""
-    bundle = _load_bundle()
+def apply_seed(conn, db_dsn: str, info: dict) -> dict:
+    """Import the bundle `info` describes. Returns {"complete": bool, ...};
+    the caller writes the marker only on complete=True."""
+    bundle = _load_bundle(info)
     if bundle is None:
-        logger.info("seed: no bundle at %s — skipping", BUNDLE_PATH)
-        return {"complete": False, "skipped": "no_bundle"}
+        return {"complete": False, "skipped": "bundle_unavailable"}
 
     if bundle.get("identity_rule") != IDENTITY_RULE:
         logger.error(

@@ -3,9 +3,15 @@
 Master-only CLI. The 52 curated picks (backend/seed/manifest_v1.json) are
 resolved to their minted rows through uuid_utils — never through SQL
 normalization, which cannot reproduce the identity rule's punctuation
-folding — and exported as backend/seed/seed_v2.json.gz for every node's
+folding — and exported as <seed_dir>/seed_v{N}.json.gz for every node's
 first-start import (backend/seed_import.py). The bundle version follows the
 audio record payload: v2 (2026-09-18) ships seals made under payload v3.
+
+The bundle never enters the tree (17 MB per version, for ever, in every
+clone): it is published as the asset of the GitHub release `seed-v{N}` by
+scripts/seed-publish.sh, and what the tree carries is backend/seed/
+bundle.json — version, URL, sha256, size — written here and read by the
+importer, which downloads and checks the file on a node's first start.
 
 The bundle has two halves. The structural half (albums, tracklists,
 artists, descriptions, picks) has no P2P wire representation — the v3
@@ -29,13 +35,16 @@ Deterministic output: rows sorted by primary key, canonical JSON, gzip
 mtime=0 — re-exporting unchanged data is byte-identical and makes no git
 churn.
 
-Run inside the backend container:
+Run inside the backend container, then publish from the host:
     docker exec sautium-backend python seed_export.py --report   # coverage only
     docker exec sautium-backend python seed_export.py            # export
+    scripts/seed-publish.sh                                      # release asset
+    git commit backend/seed/bundle.json
 """
 
 import argparse
 import gzip
+import hashlib
 import json
 import sys
 from pathlib import Path
@@ -49,10 +58,13 @@ from uuid_utils import IDENTITY_RULE, album_uuid, artist_uuid
 
 SEED_DIR = Path(__file__).resolve().parent / "seed"
 MANIFEST_PATH = SEED_DIR / "manifest_v1.json"
-BUNDLE_PATH = SEED_DIR / "seed_v2.json.gz"
+BUNDLE_INFO_PATH = SEED_DIR / "bundle.json"
 
 BUNDLE_FORMAT = "sautium-seed"
 BUNDLE_VERSION = 2
+BUNDLE_PATH = Path(settings.seed_dir) / f"seed_v{BUNDLE_VERSION}.json.gz"
+RELEASE_URL = ("https://github.com/the7oker/sautium/releases/download/"
+               f"seed-v{BUNDLE_VERSION}/{BUNDLE_PATH.name}")
 
 
 def _resolve_picks(conn, manifest: dict) -> list[dict]:
@@ -409,13 +421,25 @@ def main() -> int:
 
     raw = json.dumps(bundle, sort_keys=True, separators=(",", ":"),
                      ensure_ascii=False).encode("utf-8")
+    BUNDLE_PATH.parent.mkdir(parents=True, exist_ok=True)
     with open(BUNDLE_PATH, "wb") as fh:
         with gzip.GzipFile(fileobj=fh, mode="wb", mtime=0) as gz:
             gz.write(raw)
     seg_tracks = len(bundle["analysis"]["segments"]["items"])
+    info = {
+        "version": BUNDLE_VERSION,
+        "url": RELEASE_URL,
+        "sha256": hashlib.sha256(BUNDLE_PATH.read_bytes()).hexdigest(),
+        "size": BUNDLE_PATH.stat().st_size,
+        "picks": len(shipped),
+        "analyzed_tracks": seg_tracks,
+    }
+    BUNDLE_INFO_PATH.write_text(json.dumps(info, indent=2) + "\n", encoding="utf-8")
     print(f"exported {len(shipped)}/{len(picks)} picks, {seg_tracks} analyzed tracks: "
-          f"{BUNDLE_PATH} ({BUNDLE_PATH.stat().st_size / 1_048_576:.1f} MB gz, "
-          f"{len(raw) / 1_048_576:.1f} MB raw)")
+          f"{BUNDLE_PATH} ({info['size'] / 1_048_576:.1f} MB gz, "
+          f"{len(raw) / 1_048_576:.1f} MB raw)\n"
+          f"digest written to {BUNDLE_INFO_PATH.name} — publish with "
+          f"scripts/seed-publish.sh, then commit it")
     return 1 if excluded else 0
 
 

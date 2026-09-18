@@ -89,15 +89,18 @@ def apply_pending() -> dict:
         # Cold-start seed: after the identity pass, so the bundle's rule
         # check compares against a fully renormalized database. The marker
         # lands only on a COMPLETE import — a skip (no bundle yet, phantom
-        # layer off) or a shortfall re-evaluates on the next start. seed_v2
-        # (2026-09-18) carries the audio records under payload v3; a node
+        # layer off) or a shortfall re-evaluates on the next start. The
+        # marker follows the bundle version in backend/seed/bundle.json, so a
+        # new bundle is a new import with no code change: seed_v2
+        # (2026-09-18) carries the audio records under payload v3, and a node
         # that imported v1 lost those rows to migration 018 and takes them
         # again here.
-        if not _marked(conn, "seed_v2"):
-            import seed_import
-            out["seed"] = seed_import.apply_seed(conn, settings.database_url)
+        import seed_import
+        info = seed_import.bundle_info()
+        if info is not None and not _marked(conn, f"seed_v{info['version']}"):
+            out["seed"] = seed_import.apply_seed(conn, settings.database_url, info)
             if out["seed"].get("complete"):
-                _mark(conn, "seed_v2")
+                _mark(conn, f"seed_v{info['version']}")
     finally:
         conn.close()
     logger.info("db_migrate: %s", out)

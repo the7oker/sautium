@@ -156,6 +156,9 @@ class Settings(BaseSettings):
     # for this node's return, an export is a file handed to someone else,
     # and the weekly task prunes *.sbk in the backup dir by age.
     export_dir: str = "/app/data/export"
+    # The cold-start seed bundle (backend/seed_import.py) is downloaded here
+    # on the first start that needs it; the tree carries only its digest.
+    seed_dir: str = "/app/data/seed"
     pg_bin: str = ""
 
     model_config = SettingsConfigDict(

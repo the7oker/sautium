@@ -99,9 +99,14 @@ implementation details live in the code, DB and git history.
   audio record payload went to v3 (enrichment records stay v2 — no material
   hash in them, so those seals survive); every audio seal was re-made,
   foreign audio analysis deleted (its authors' v3 seals return over the
-  network), the seed bundle re-exported as v2. Material under one grid
-  window (10 s) is not analysed at all: fpcalc yields nothing for a few
-  seconds of audio, and no address means no analysis worth saving.
+  network), the seed bundle re-exported as v2 — and moved out of git: a
+  bundle is a 17 MB artifact regenerated on every re-sign, and two of them
+  made up ~90 % of the repository, so it is a GitHub Release asset now,
+  fetched on a node's first start and checked against the sha256 that
+  `backend/seed/bundle.json` pins (the history was rewritten once to shed
+  the two committed copies). Material under one grid window (10 s) is not
+  analysed at all: fpcalc yields nothing for a few seconds of audio, and
+  no address means no analysis worth saving.
 - **A hardware profile governs compute, never retention (2026-08-27)**. The
   lite tier used to auto-delete the phantom album/track layer after three
   consecutive lite boots (`hardware.lite_streak`, shipped 2026-07-10 as a

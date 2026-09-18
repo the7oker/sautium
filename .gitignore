@@ -127,3 +127,7 @@ scripts/master-front/*.log
 # pre-migration pg_dump snapshots (multi-GB) + node backups; share exports
 data/backup/
 data/export/
+# the cold-start seed bundle: a GitHub Release asset downloaded on first start,
+# never in the tree (backend/seed/bundle.json carries its digest)
+data/seed/
+backend/seed/*.json.gz
