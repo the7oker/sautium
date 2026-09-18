@@ -182,7 +182,7 @@ back/forward and refresh work natively:
 - Browser back button reverses hash-history as normal; the history
   includes tab switches and pushes intermixed.
 - This is a **deliberate simplification** vs per-tab stack
-  preservation (iOS/Spotify-style). Matches the flat web-navigation
+  preservation (iOS-style). Matches the flat web-navigation
   model and uses browser primitives.
 
 ### Now Playing overlay in routing

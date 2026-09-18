@@ -12,11 +12,16 @@ with large offline FLAC libraries can share metadata, audio embeddings and
 features, find kindred listeners and talk to each other — with no central
 server (public bootstrap resources only).
 
-**Shared**: metadata, CLAP embeddings, audio features, bios/tags, chat (P4),
-lyrics (P4+), audio files (P5, legal content only).
+**Shared** (the pull categories — `sync_queries.PULL_HANDLERS`): sealed CLAP
+segment bundles with their provenance, audio features, track↔recording
+bindings, artist bios/tags/similars, track stats, genre descriptions, chat
+(P4). Carry — the push channel — is narrower on purpose: audio analysis only
+(§ "Only audio analysis travels").
 
-**Never shared**: local paths, player state, private notes, listening history
-(unless the user opts in).
+**Never shared**: audio files; lyrics (the one category that is verbatim
+copyrighted text — every node fetches its own from the public sources); local
+paths; player state; private notes; listening history (unless the user opts
+in).
 
 ---
 
@@ -42,7 +47,7 @@ BitTorrent DHT.
 
 | Component | Library | Why |
 |-----------|---------|-----|
-| DHT + file transfer | **libtorrent** (C++ with Python bindings) | Access to the public BT DHT, file exchange built in, pip-installable |
+| DHT | **libtorrent** (C++ with Python bindings) | Access to the public BT DHT, pip-installable |
 | NAT traversal | **miniupnpc** (UPnP) + STUN | UPnP for the router, STUN to learn the external IP |
 | Transport | **HTTP + JSON + gzip** | The same protocol sync already speaks; no custom binary format |
 | Identity | **cryptography** (Ed25519) + **argon2-cffi** | Standard, compact 32-byte keys; Argon2id for deterministic identity |
@@ -59,8 +64,8 @@ BitTorrent DHT.
 > - Effectively creates a **separate private network** that has to be grown
 >   from zero
 
-libtorrent gives access to millions of existing nodes plus built-in file
-exchange for the future Phase P5, and is pip-installable on Windows/Linux/Mac.
+libtorrent gives access to millions of existing nodes and is pip-installable
+on Windows/Linux/Mac.
 
 ### "Serverless"
 
@@ -517,9 +522,6 @@ Phase 2 & 3: Embeddings + features (lazy, on demand, gzip)
   peers found, 5s timeout.
 - **P4b: Music recommendations** — broadcast "I recommend this album" to
   friends, shared playlists (track metadata lists, not files).
-- **P5: File sharing** — libtorrent BitTorrent for legal content (indie
-  artists, Creative Commons, self-released). Opt-in, with a licence tag system
-  (CC-BY, CC-SA, Public Domain, Self-Released).
 
 Deferred out of the shipped phases (deliberate pauses, not roadmap):
 uptime-ratio and passive uplink measurement as relay-selection criteria (no

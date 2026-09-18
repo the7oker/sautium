@@ -97,7 +97,7 @@ REASONING_EFFORT = "medium"
 INSTRUCTIONS_FILE = "instructions.md"
 # Codex surface the assistant has no use for, switched off per spawn. Each
 # name was measured to remove real roster/prompt noise: plugins — the
-# "plugins available but not installed" list (Spotify, Apple Music, ...)
+# "plugins available but not installed" list (streaming services, ...)
 # shown to the model on every session; apps — connector tools of the
 # ChatGPT account; multi_agent — the spawn/wait agent tools (terra keeps
 # injecting the "you are /root, the primary agent in a team" preamble

@@ -473,12 +473,11 @@ canonical artist identity*. Two things break that:
 
 ## Out of scope
 
-- **File sharing / P2P transfer of audio.** Deferred indefinitely
-  pending a clear read on legal safety — do **not** design around it
-  here. Phantom discovery stands on its own (enrichment + preview +
-  buy), independent of any file-transfer capability.
+- **P2P transfer of audio.** Not a capability of this project and
+  not a planned one. Phantom discovery stands on its own — enrichment,
+  preview and buy.
 - Recursive similarity graph (similar-of-similar) — see D2.
-- Spotify/other services as a *metadata storage* source — D3.
+- A streaming service as a *metadata storage* source — D3.
 
 ## References
 

@@ -660,7 +660,7 @@ Shaper (if PCM): NS1 or NS4
 sources
 **Avoid:** very steep filters (they can emphasize vinyl surface noise)
 
-### MP3 / lossy sources (Spotify, YouTube Music)
+### MP3 / lossy sources (lossy downloads, YouTube)
 ```
 Source: MP3 320 kbps or AAC 256 kbps
 Mode: PCM (recommended)

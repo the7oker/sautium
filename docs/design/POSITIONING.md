@@ -29,7 +29,8 @@ Brand work should foreground the _medium_ aspect.
   label direct purchases.
 - Audiophile-savvy: knows the difference between DSD and PCM, tunes
   HQPlayer themselves, owns a DAC + amplifier + streamer.
-- Does **not** use Spotify as a primary listening source.
+- Does **not** use a mainstream streaming service as a primary listening
+  source.
 
 ### Secondary — Entry Audiophile
 
@@ -46,7 +47,7 @@ Brand work should foreground the _medium_ aspect.
 
 ### Not for
 
-- Casual Spotify-style listeners who do not own a library.
+- Casual streaming-first listeners who do not own a library.
 - Social-media-driven "infinite feed" discoverers.
 - People who want gamified progress (streaks, points, badges).
 
@@ -302,7 +303,6 @@ visual upgrade second, new features (like the instrument filter) third.
   discovery only.
 - Voice interface (Whisper + TTS) — on the roadmap but not part of
   visual DS right now.
-- File-sharing UI (libtorrent, Phase P5) — also future.
 
 ---
 
@@ -354,15 +354,16 @@ visual upgrade second, new features (like the instrument filter) third.
 
 ### Inspiration for the mobile-remote feel
 
-10. **Spotify Car Thing** (discontinued) — minimal remote-only device.
-    Scale-up mental model: our web UI on a phone is a "Car Thing for the
-    couch".
-11. **Apple Music mobile** — touch target sizing, navigation hierarchy,
-    cover-art-first layout.
+10. **The car dashboard a streaming service shipped and discontinued** —
+    minimal remote-only device. Scale-up mental model: our web UI on a
+    phone is a "dashboard for the couch".
+11. **A platform-native mobile music app** — touch target sizing,
+    navigation hierarchy, cover-art-first layout.
 
 ### Anti-references (look and do the opposite)
 
-- **Spotify Home** — algorithm-feed overload, streaks, noise.
+- **The mainstream streaming home screen** — algorithm-feed overload,
+  streaks, noise.
 - **YouTube Music** — chaotic hierarchy, weak metadata layout.
 - **foobar2000** — functionally powerful, UI designed for 2005
   programmers.

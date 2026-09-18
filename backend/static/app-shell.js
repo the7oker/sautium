@@ -11135,8 +11135,8 @@
     return Number(n || 0).toLocaleString('en-US').replace(/,/g, '\u00A0');
   }
   // Counts in flowing prose, where "39 363 832" is noise: 39.4M. M for
-  // million is the ordinary UI shorthand (YouTube, Spotify), and the exact
-  // figure is never far — the MusicBrainz Status row carries it verbatim.
+  // million is the ordinary UI shorthand, and the exact figure is never
+  // far — the MusicBrainz Status row carries it verbatim.
   function fmtCompact(n) {
     n = Number(n) || 0;
     if (n >= 1e6) return (n / 1e6).toFixed(1).replace(/\.0$/, '') + 'M';

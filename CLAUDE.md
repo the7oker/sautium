@@ -8,8 +8,8 @@ Phases 1–3 (MVP + enrichment + audio analysis + HQPlayer + Web UI + launcher)
 and P2P phases P0–P4 (sync, NAT, account system, E2E chat) are **done**, as is
 the 2026-08 network run: relay forwarding, carry (push-seeding of sealed audio
 analysis), peer-relays, and MB-slice replication. Currently iterating on
-quality-of-life fixes and artist metadata enrichment. Voice interface
-(Whisper + TTS) and file sharing over libtorrent remain on the roadmap.
+quality-of-life fixes and artist metadata enrichment. A voice interface
+(Whisper + TTS) remains on the roadmap.
 
 See:
 - `PROGRESS.md` — design decisions and lessons learned (non-P2P).
@@ -465,19 +465,33 @@ Revisit this section then.
 
 ## Public repository rules (the tree is public — every commit ships)
 
-1. **Provider vocabulary.** Never name a DRM streaming service (Deezer,
-   Spotify, Tidal, Qobuz) in prose, comments, docstrings, UI copy, docs or
-   commit messages. Say "a lossless provider", "a provider plugin",
-   "lossless before lossy". Data literals stay as they are (`origin='deezer'`,
-   provider ids, enum values, `PROVIDER_NAMES`) — never rename stored values.
-   The one allowed prose use: "Deezer public API — artist images, catalog
-   lookup and 30 s previews, no auth" (`deezer_photos.py`, `covers.py`,
-   `streaming/deezer_catalog.py`, `streaming/deezer_preview.py`).
+1. **Provider vocabulary follows the architecture.** Streaming providers are
+   plugins behind a registry, so core code, UI copy and docs name the ROLE —
+   "a lossless provider", "a provider plugin", "lossless before lossy" —
+   because core genuinely is bound to none of them; a brand name there would
+   describe coupling that does not exist. Where an integration IS real, name
+   it plainly, with what it gives and on what terms: the **Deezer public API**
+   for artist images, catalog lookup and 30 s previews, no auth
+   (`deezer_photos.py`, `covers.py`, `streaming/deezer_catalog.py`,
+   `streaming/deezer_preview.py`); **YouTube** as the demo channel
+   (`streaming/demo.py`). Credit each one in `THIRD_PARTY_NOTICES.md` — a
+   lawful call to a public API is attribution, not exposure. Data literals
+   stay as they are (`origin='deezer'`, provider ids, enum values,
+   `PROVIDER_NAMES`) — never rename stored values.
+
+   What must stay out of the tree is a **capability, not a name**: credentials
+   for someone's paid account, stream decryption, or bulk retrieval of a
+   licensed catalog. This project does none of that — the ledger in
+   "Enrichment Pipeline Conventions" (one full demo listen per track, then a
+   30 s excerpt) is the posture, stated openly rather than worked around. A
+   bring-your-own module a user installs for themselves is reached through the
+   plugin contract and never mirrored here.
 2. **No host specifics in tracked files.** No LAN / WSL / Tailscale addresses,
    tailnet hosts, checkout paths, machine or third-party names. Use
    `<windows-host-ip>`, `<lan-ip>`, `<repo>`, fictional names in mocks.
-3. **No secrets, ever.** Keys, tokens, ARLs, passwords (other than the
-   documented loopback default) never enter the tree; `gitleaks git` with
+3. **No secrets, ever.** Keys, tokens, provider credentials, passwords
+   (other than the documented loopback default) never enter the tree;
+   `gitleaks git` with
    `.gitleaks.toml` must be clean before every push.
 4. **No vendored third-party material.** Manuals, artwork, photos and SDK
    sources are linked, not committed; design references use the placeholders

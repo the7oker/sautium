@@ -7,8 +7,8 @@ analytics between collectors.
 
 > Phases 1–3 (MVP + enrichment + audio analysis + HQPlayer + Web UI +
 > launcher) and P2P phases P0–P4 (sync, NAT traversal, account system, E2E
-> chat) are **done**. Voice interface (Whisper + TTS) and file sharing over
-> libtorrent remain on the roadmap.
+> chat) are **done**. A voice interface (Whisper + TTS) remains on the
+> roadmap.
 
 ## Features
 
@@ -81,7 +81,7 @@ TLS on it). PostgreSQL (`5432`) binds to loopback. The P2P DHT listens on
 - **NVIDIA RTX 4090** for GPU work (CLAP embeddings, BGE-M3 text encoding)
 - **CLAP** (audio, 512-d) + **BGE-M3** (text, 1024-d) + **librosa** + AST/PaSST
 - **anthropic SDK** + Claude Code & MCP for the AI assistant
-- **libtorrent** for the DHT (and future file sharing)
+- **libtorrent** for the DHT
 - **aiohttp + PyNaCl + miniupnpc** for the P2P layer
 - **CustomTkinter** for the launcher; **Inno Setup** wraps it on Windows, a DMG on macOS
 

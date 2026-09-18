@@ -3,8 +3,9 @@
 ## Overview
 
 Sautium uses a **hybrid approach** for metadata storage:
-- **Normalized tables** for well-understood, frequently-queried data
-- **Staging table** (`external_metadata`) for new/experimental metadata
+- **Normalized tables** for the metadata itself
+- **A fetch ledger** (`external_metadata`) recording which external source was
+  asked for what, and what it answered — including "nothing"
 
 ---
 
@@ -17,11 +18,12 @@ similar_artists:
   artist_id → artists (who)
   similar_artist_id → artists (similar to whom)
   match_score (0.0-1.0)
-  source ('lastfm', 'spotify', 'musicbrainz')
+  source ('lastfm', 'musicbrainz')
 ```
 
 **Purpose**: Many-to-many artist relationships with similarity scores
-**Sources**: Last.fm (current), Spotify (future)
+**Sources**: Last.fm (73,171 rows). Minted neighbours become phantom artists —
+see `docs/design/PHANTOM-DISCOVERY.md`
 **Use cases**:
 - "Find artists similar to X"
 - "Show me music like Y"
@@ -39,12 +41,12 @@ artist_tags:
   artist_id → artists
   tag_id → tags
   weight (0-100)  -- relevance score
-  source ('lastfm', 'spotify', 'user')
+  source ('lastfm', 'user')
 ```
 
 **Purpose**: Flexible tagging system for artists (can be extended to albums, tracks)
 **Tag types**: genres, moods, eras, styles, demographics
-**Sources**: Last.fm (current), Spotify genres (future), user tags (future)
+**Sources**: Last.fm (285,188 rows over 23,548 tags); user tags (future)
 **Use cases**:
 - "Find all artists tagged as 'psychedelic'"
 - "Show me 70s krautrock artists"
@@ -65,7 +67,7 @@ artist_bios:
 ```
 
 **Purpose**: Artist biographical information with popularity stats
-**Sources**: Last.fm (current), MusicBrainz (future), Wikipedia (future)
+**Sources**: Last.fm (36,843 rows); MusicBrainz, Wikipedia (future)
 **Use cases**:
 - Display artist info in UI
 - Rank by popularity (listeners/playcount)
@@ -78,7 +80,7 @@ artist_bios:
 ```sql
 genre_descriptions:
   genre_id → genres
-  source ('lastfm', 'wikipedia', 'spotify')
+  source ('lastfm', 'wikipedia')
   summary (short description)
   content (full description with history)
   url (source link)
@@ -86,7 +88,7 @@ genre_descriptions:
 ```
 
 **Purpose**: Detailed genre/style descriptions
-**Sources**: Last.fm (current), Wikipedia (future)
+**Sources**: Last.fm (2,308 rows); Wikipedia (future)
 **Use cases**:
 - Display genre info to users
 - Text embeddings for genre-based search
@@ -94,38 +96,46 @@ genre_descriptions:
 
 ---
 
-## Staging Table
+## Fetch Ledger
 
-### `external_metadata` - Experimental/New Metadata
+### `external_metadata` - what was asked, and what came back
 
 ```sql
 external_metadata:
-  entity_type ('artist', 'album', 'track', 'genre')
-  entity_id (FK to respective table)
-  source ('lastfm', 'spotify', 'musicbrainz', 'wikipedia')
-  metadata_type (e.g., 'audio_features', 'lyrics', 'credits')
-  data (JSONB - flexible structure)
-  fetch_status ('success', 'not_found', 'error')
+  entity_type metadata_entity_type  -- artist | album | track | genre
+  entity_id   TEXT                  -- polymorphic, NOT an FK: uuid for
+                                    -- artist/album/track, int for genre
+  source      VARCHAR(50)           -- 'lastfm' | 'genius' | 'lrclib' | ...
+  metadata_type metadata_kind       -- bio | info | stats | lyrics | description
+  data        JSONB                 -- the response, or what identifies it
+  fetch_status fetch_status         -- success | not_found | error
+  UNIQUE (entity_type, entity_id, source, metadata_type)
 ```
 
-**Purpose**:
-- Temporary storage for new metadata types
-- Quick integration of new API sources
-- Experiment with data structure before normalization
-- Iterate on schema design
+**Purpose**: the memory that keeps enrichment idempotent. The metadata itself
+lives in the normalized tables above; this table records the *call* — which
+source was asked about which entity, and whether it had anything. The value is
+mostly in the negatives: an artist with no Last.fm bio, a track LRCLIB has
+never heard of. Without the row, every pass of the background loop would ask
+again, and the rate limiter would spend its budget re-learning the same
+absence (CLAUDE.md § "Each step checks its own precondition").
 
-**Workflow**:
-```
-New API → external_metadata (JSONB) → analyze structure → design schema → migrate to normalized table
-```
+Written by `backend/lastfm.py`, `backend/lrclib.py`, `backend/genius.py`.
 
-**Current status**: Empty (0 records) - ready for new integrations
+**Measured 2026-09-18** — 79,118 rows, of which 42,984 are `not_found`:
 
-**Examples of future use**:
-- Spotify audio features (danceability, energy, tempo, etc.)
-- MusicBrainz detailed credits (producers, engineers, etc.)
-- Wikipedia structured data
-- Lyrics from various sources
+| source | metadata_type | success | not_found | error |
+|---|---|---|---|---|
+| lrclib | lyrics | 32,772 | 21,932 | 138 |
+| genius | lyrics | 2,993 | 17,881 | — |
+| lastfm | stats | — | 3,060 | — |
+| lastfm | bio | 83 | 111 | 40 |
+| lastfm | info | 92 | — | — |
+| lastfm | description | — | 16 | — |
+
+The ledger is node-local: it describes this node's own calls, so it rides in a
+node backup but in no share file and in no sync category
+(`docs/design/BACKUP.md` § Data classes).
 
 ---
 
@@ -140,14 +150,14 @@ New API → external_metadata (JSONB) → analyze structure → design schema �
 
 **Examples**: artist_bios, tags, similar_artists
 
-### When to use external_metadata (staging):
-✅ Exploring new API source
-✅ Structure not yet clear
-✅ Experimental features
-✅ Rapid prototyping
-✅ One-time data collection
+### When to write a ledger row:
+✅ An external source was asked about an entity
+✅ ...especially when it answered "nothing" — that is the row that saves the
+   next pass a call
+✅ The step that asked can read it back as its own precondition
 
-**Examples**: Initial Spotify integration, testing new API endpoints
+**Examples**: `lastfm.enrich_bios` marking an artist Last.fm has no bio for;
+`lrclib` / `genius` marking a track neither service carries.
 
 ---
 
@@ -162,10 +172,10 @@ All existing metadata has been normalized:
 | Artist bios | `external_metadata` JSONB | `artist_bios` |
 | Genre descriptions | `external_metadata` JSONB | `genre_descriptions` |
 
-**Result**:
-- `external_metadata`: 0 records (clean slate)
-- Normalized tables: 332 records total
-- Ready for Phase 2 (Spotify, MusicBrainz integration)
+**Result** (2026-09-18): the normalized tables hold the data — 285,188
+artist_tags, 73,171 similar_artists, 36,843 artist_bios, 36,358 track_stats,
+2,308 genre_descriptions — and `external_metadata` holds the 79,118 fetch
+records behind them.
 
 ---
 
@@ -176,7 +186,7 @@ All existing metadata has been normalized:
 3. **No Duplication**: Each tag/genre stored once
 4. **Type Safety**: Proper column types (INTEGER, DECIMAL, TEXT)
 5. **Multi-Source**: Can aggregate data from multiple sources
-6. **Flexibility**: `external_metadata` for rapid experimentation
+6. **Idempotence**: the `external_metadata` ledger, so a re-run costs no calls
 7. **Extensibility**: Easy to add new sources to existing tables
 8. **Clear Schema**: Self-documenting structure
 
@@ -234,20 +244,13 @@ AND EXISTS (
 
 ## Future Considerations
 
-### Phase 2 - Spotify Integration
-New metadata types to explore in `external_metadata`:
-- Audio features (danceability, energy, valence, tempo, etc.)
-- Spotify genres (different from Last.fm tags)
-- Track popularity scores
-- Album release types (album, single, compilation)
+Audio features are derived here, not bought: `audio_features` comes from
+librosa + CLAP over the file itself (`backend/audio_analysis.py`), and
+instruments from the AST + PaSST ensemble — no catalog API is in that path,
+and none is planned.
 
-Once structure is clear → normalize into dedicated tables:
-- `track_audio_features`
-- `spotify_genres` (or merge with `tags`)
-- `track_popularity`
-
-### Phase 3+ - Additional Sources
-- MusicBrainz: detailed credits, recording info
+Sources still open:
+- MusicBrainz: detailed credits, recording info (the `mb_*` dump layer)
 - Wikipedia: structured data, infoboxes
 - User-generated: custom tags, ratings, notes
 
@@ -255,7 +258,9 @@ Once structure is clear → normalize into dedicated tables:
 
 ## Summary
 
-**Current State**: Fully normalized database with staging table for future growth
-**Tables**: 5 normalized + 1 staging
-**Records**: 332 normalized, 0 staging
-**Status**: ✅ Ready for Phase 2 integrations
+**Current State**: normalized metadata tables plus the `external_metadata`
+fetch ledger that keeps their enrichment idempotent.
+
+This file covers the Last.fm enrichment layer only. The whole schema — every
+table, index and enum — is `desktop/migrations/001_initial.sql`, which is the
+single readable source of truth (CLAUDE.md § Migration & DB Workflow).

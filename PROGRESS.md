@@ -17,7 +17,6 @@ implementation details live in the code, DB and git history.
 | **P3.4** | Desktop launcher (CustomTkinter; Windows installer + macOS bundle as carriers) | DONE |
 | **P2P-P0..P4** | Launcher↔backend bridge, UUID v5 refactor, P2P sync, NAT traversal, account system, E2E chat, email CA | DONE — see `P2P_NETWORK.md` |
 | **P4 voice** | Whisper input + TTS output + voice conversation loop | TODO |
-| **P5 files** | BitTorrent file sharing for legal content (CC, indie) | TODO |
 
 ---
 
@@ -25,7 +24,7 @@ implementation details live in the code, DB and git history.
 
 ### Architecture & data model
 
-- **Normalized multi-source metadata**. Last.fm/Spotify/MusicBrainz data lives
+- **Normalized multi-source metadata**. Last.fm/MusicBrainz data lives
   in separate normalized tables (`artist_bios`, `artist_tags`, `similar_artists`,
   `album_descriptions`, `track_stats`), not JSONB blobs. Allows per-source re-fetch and
   provenance tracking. First iteration used JSONB in `external_metadata`, that
@@ -120,9 +119,9 @@ implementation details live in the code, DB and git history.
 
 ### Audio analysis
 
-- **No Spotify**. Audio Features API deprecated Nov 27, 2024 for new apps.
-  Replaced with own pipeline: librosa (tempo, spectral, MFCC) + CLAP zero-shot
-  (instruments, moods, danceability).
+- **No catalog audio-features API**. The industry one closed to new apps on
+  Nov 27, 2024. Replaced with own pipeline: librosa (tempo, spectral, MFCC) +
+  CLAP zero-shot (instruments, moods, danceability).
 - **CLAP zero-shot instead of essentia**. essentia brings TensorFlow dependency
   and trained models; CLAP already loaded, works out of the box with text
   prompts ("energetic rock song", "ambient pad"). Simpler, no TF.
@@ -287,8 +286,8 @@ implementation details live in the code, DB and git history.
   explicitly. Actual fences: `--disable shell_tool` (verified — the model
   has no shell), `--disable plugins/apps/multi_agent/tool_suggest/goals/
   image_generation` (each measured to remove roster or prompt noise — the
-  "plugins available but not installed" list alone was 3 KB of Spotify /
-  Apple Music bait per session), prompt-level prohibition. Known residual: the
+  "plugins available but not installed" list alone was 3 KB of
+  streaming-service bait per session), prompt-level prohibition. Known residual: the
   apply_patch file tool has no off switch (feature flag unknown,
   include_apply_patch_tool=false inert — both measured) and stays
   reachable behind the prompt fence. Auth is auth.json-ONLY — a bare

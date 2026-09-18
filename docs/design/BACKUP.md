@@ -48,9 +48,14 @@ own data ≈ 11 GB live, ≈ 3 GB as a compressed dump.
 | Class | Tables / files | Backup | Share | Merge own |
 |---|---|---|---|---|
 | **MusicBrainz layer** | `mb_*` | no (re-load) | no | no |
-| **Catalog** (identity graph, owned + phantom) | `artists`, `albums`, `tracks`, `media_files`, `track_artists`, `album_artists`, `album_tracks`, `album_variants`, `artist_mbids`, `track_mbids`, `artist_name_aliases`, `artist_members`, `genres`, `tags`, `embedding_models`, `seed_picks` | yes | structural rows ride with the enrichment they carry (as the seed bundle does) | — |
-| **Enrichment** (sealed) | `analysis_sources`, `embeddings`, `embedding_segments`, `audio_features`, `signing_batches`, `artist_bios`, `artist_tags`, `similar_artists`, `track_stats`, `track_lyrics`, `text_embeddings`, `artist_bio_embeddings`, `lyrics_embeddings`, `genre_descriptions`, `genre_desc_embeddings`, `external_metadata`, `covers` | yes | **yes — sealed records only**, own and received alike, each under its author's seal (decided 2026-09-14; the sketch said first-hand only) | — |
-| **Local-only enrichment** | `album_descriptions`, `album_genres` (never sync by design) | yes | no | — |
+| **Catalog** (identity graph, owned + phantom) | `artists`, `albums`, `tracks`, `album_tracks`, `track_artists`, `album_artists`, `artist_mbids`, `genres`, `tags`, `embedding_models` | yes | yes — the structural rows the records hang off, in FK order (`seed_export.structural_sections`; `tags` and `embedding_models` are minted by the import gate, not carried) | — |
+| **Catalog, node-local** | `media_files` (this node's files and their cue bounds), `album_variants`, `artist_name_aliases`, `artist_members`, `seed_picks` | yes | no — nothing here means anything on another node | — |
+| **Enrichment** (sealed, travels) | `embedding_segments`, `embeddings`, `analysis_sources`, `signing_batches`, `audio_features`, `track_mbids`, `artist_bios`, `artist_tags`, `similar_artists` | yes | **yes — sealed records only**, own and received alike, each under its author's seal (decided 2026-09-14; the sketch said first-hand only). Analysis travels as segments with their provenance and batch map; the track-level mean is derived by the importer | — |
+| **Enrichment** (sealed, network only) | `track_stats`, `genre_descriptions` | yes | no — the network serves both (`sync_queries.PULL_HANDLERS`); `seed_export`'s category lists never grew them | — |
+| **Album-grain enrichment** | `album_genres`, `album_descriptions` — outside the sync contour (albums never sync by UUID), but structural rows in a file, where albums do travel under their seal | yes | yes | — |
+| **Text vectors** (derived) | `text_embeddings`, `lyrics_embeddings`, `artist_bio_embeddings`, `genre_desc_embeddings` | yes | no — a BGE-M3 vector is a deterministic function of text the file already carries and of the local metadata composed around it; every node encodes its own in background enrichment, on every profile (`lite` on the CPU, smaller slices) | — |
+| **Local ledgers** | `external_metadata` (which source was asked for what and whether it answered — `not_found` included, so a step never re-asks), `covers` (fetched art) | yes | no — a record of this node's own fetches | — |
+| **Lyrics** | `track_lyrics` | yes | no — the one category that is verbatim copyrighted text; out of the sync protocol since 2026-07-11, every node fetches its own from the public sources | — |
 | **Life data** (personal) | `listening_history`, `demo_plays`, `listening_sessions`, `session_tracks`, `local_play_stats`, `friends`, `friend_rights`, `friend_grants`, `friend_grant_rights`, `invite_tokens`, `invite_token_rights`, `sent_invites`, `p2p_messages`, `chat_sessions`, `chat_messages`, `user_profile`, `user_gear`, `gear_pair_notes`, `pending_key_rotations`, `p2p_identities`, `p2p_node_bans`, `support_*`, `diag_*` | yes, encrypted | no | **yes, keyed dedup** (§ Phase 3) |
 | **Node settings** | `user_settings` | yes (in the dump) | no | allowlist only |
 | **Runtime, re-creatable** | `p2p_gate_pool`, `p2p_contact_events`, `p2p_action_costs`, `p2p_dht_state`, `p2p_nodes_seen`, `external_api_cooldown`, `_gap`, `_schema_migrations` (travels with the dump, see restore) | in the dump, harmless | no | no |
@@ -235,11 +240,21 @@ launcher runs the CLI, as for backups). Departures from the sketch above:
   sections` / `envelope_chunks` are generators now; `build_bundle` (the
   seed) collects them into its dict, `share.export_file` streams them.
   Verified byte-identical against the previous code on the master.
+  Structural means the album grain too: `album_genres` and
+  `album_descriptions` ride in a file although they stay out of the sync
+  contour — on the wire albums never travel by UUID, in a file they do,
+  under their seal.
 - **Full export, not first-hand only.** The sketch restricted the file to
   this node's own observations; Valerii's call (2026-09-14): "what I know"
   is more than "what I analysed" — the file carries every sealed record
   the node holds, own and received, each under its author's seal, exactly
   what the node serves on the network. The pull handlers are untouched.
+  "Every sealed record" is the seed bundle's six categories, though —
+  `artist_bios` / `artist_tags` / `similar_artists` per artist,
+  `segments` / `audio_features` / `track_mbids` per track
+  (`seed_export.ENRICHMENT_CATEGORIES` / `ANALYSIS_CATEGORIES`). The
+  network also serves `track_stats` and `genre_descriptions`; the file
+  builder inherited the seed's lists and never grew them.
 - **Two import modes.** Default: add what the file names — new artists,
   albums and tracks land as phantoms so their records attach (like the
   seed and a carry push). `--existing-only` (launcher: "Enrich only what I
