@@ -9,7 +9,7 @@ its id in the memo the first resolve filled — one API pass per track, one
 pacer for the quota the two share with photo enrichment (``covers.py``).
 
 Precision first. What streams from here is analysed, SIGNED against the
-stream's own pcm_hash and synced — a wrong recording does not merely play
+stream's own fingerprint and synced — a wrong recording does not merely play
 wrong: it is published as first-hand analysis of a track it is not. The audit
 of 2026-08-30 caught a search-and-score resolve handing back another artist's
 song at a fitting length (Björk's "Búkolla" → a Helgi Björnsson track sharing

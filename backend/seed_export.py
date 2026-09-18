@@ -3,8 +3,9 @@
 Master-only CLI. The 52 curated picks (backend/seed/manifest_v1.json) are
 resolved to their minted rows through uuid_utils — never through SQL
 normalization, which cannot reproduce the identity rule's punctuation
-folding — and exported as backend/seed/seed_v1.json.gz for every node's
-first-start import (backend/seed_import.py).
+folding — and exported as backend/seed/seed_v2.json.gz for every node's
+first-start import (backend/seed_import.py). The bundle version follows the
+audio record payload: v2 (2026-09-18) ships seals made under payload v3.
 
 The bundle has two halves. The structural half (albums, tracklists,
 artists, descriptions, picks) has no P2P wire representation — the v3
@@ -48,10 +49,10 @@ from uuid_utils import IDENTITY_RULE, album_uuid, artist_uuid
 
 SEED_DIR = Path(__file__).resolve().parent / "seed"
 MANIFEST_PATH = SEED_DIR / "manifest_v1.json"
-BUNDLE_PATH = SEED_DIR / "seed_v1.json.gz"
+BUNDLE_PATH = SEED_DIR / "seed_v2.json.gz"
 
 BUNDLE_FORMAT = "sautium-seed"
-BUNDLE_VERSION = 1
+BUNDLE_VERSION = 2
 
 
 def _resolve_picks(conn, manifest: dict) -> list[dict]:

@@ -568,7 +568,7 @@ async def pull_tracks(req: PullRequest) -> dict:
 
 def _provenance_item(r: dict) -> Optional[dict]:
     """Nested provenance payload from p_-prefixed LEFT JOIN columns; None for
-    rows not linked to an analysis_sources row (legacy / failed fingerprints).
+    rows not linked to an analysis_sources row (unlinked legacy rows).
 
     Carries the material declaration the signature commits to, and nothing
     that describes the author's copy of it. `provider_id`, `sample_rate` and
@@ -581,10 +581,9 @@ def _provenance_item(r: dict) -> Optional[dict]:
     None of the three is part of the signed payload, so seals are unaffected.
     `is_lossless` stays: a lossless stream fetch is lossless too, so it grades analysis
     quality without implying a file."""
-    if r.get("p_pcm_hash") is None:
+    if r.get("p_chromaprint") is None:
         return None
     return {
-        "pcm_hash": r["p_pcm_hash"],
         "chromaprint": r["p_chromaprint"],
         "duration_seconds": r["p_duration_seconds"],
         "grid_version": r["p_grid_version"],
@@ -592,8 +591,7 @@ def _provenance_item(r: dict) -> Optional[dict]:
     }
 
 
-_PROVENANCE_COLS = """s.pcm_hash AS p_pcm_hash,
-                      s.chromaprint AS p_chromaprint,
+_PROVENANCE_COLS = """s.chromaprint AS p_chromaprint,
                       s.duration_seconds AS p_duration_seconds,
                       s.grid_version AS p_grid_version,
                       s.is_lossless AS p_is_lossless"""

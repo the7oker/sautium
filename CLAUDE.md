@@ -182,7 +182,7 @@ See:
   The cue governs the image (scanner reconciliation supersedes whole-image
   rows + their analysis); a slice is always consumed as its own resource —
   ffmpeg `-ss/-t` locally, a cached FLAC cut (`flac_slice_path_for_file`)
-  for HQPlayer/DLNA/browser. pcm_hash/chromaprint are per-slice. See
+  for HQPlayer/DLNA/browser. The chromaprint is per-slice. See
   `PROGRESS.md` § CUE images.
 - **`audio_features.vocal_instrumental` is unreliable.** For vocal/
   instrumental queries, use `artists.is_vocalist` (classified from bio

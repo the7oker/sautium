@@ -10,15 +10,15 @@ the scanner / stream enricher — never recomputed here) is signable material:
     unsigned network breaks integrity testing and the sync verify chain;
     selective privacy policy is off), or
   - a stream (provider_id = the provider's manifest id) — tier 3: a streamed
-    source signs against the STREAM's pcm_hash, claiming no possession of any
-    local rip. Until
-    2026-09-02 only a lossless external-provider fetch qualified (decode-varying
-    pcm_hash, lossy master); lossy streams sign too now — the analysis
-    loses nothing measurable at lossy rates, the lossless provider ships
-    outside the distribution so YouTube is the only stream most nodes
-    ever analyse, and a network where none of that signs carries nothing.
-    The seal binds the author's OWN decode; is_lossless rides in the
-    provenance so a peer can still rank sources.
+    source signs against the STREAM's fingerprint, claiming no possession of
+    any local rip. Until 2026-09-02 only a lossless external-provider fetch
+    qualified (the PCM hash of the day varied per decode of a lossy master);
+    lossy streams sign too now — the analysis loses nothing measurable at
+    lossy rates, the lossless provider ships outside the distribution so
+    YouTube is the only stream most nodes ever analyse, and a network where
+    none of that signs carries nothing. The seal binds the author's OWN
+    decode; is_lossless rides in the provenance so a peer can still rank
+    sources.
 
 Each unsigned CLAP segment (via its embeddings row) and audio_features row is
 author-signed against that source's content-address; all new signatures batch
@@ -405,8 +405,7 @@ def sign(conn, full=False, limit=None, dry_run=False,
         cur.execute(f"""
             SELECT s.id, s.segment_index, s.vector::text AS vec,
                    e.model_id::text AS model,
-                   src.pcm_hash, src.chromaprint, src.duration_seconds,
-                   src.grid_version
+                   src.chromaprint, src.duration_seconds, src.grid_version
             FROM embedding_segments s
             JOIN embeddings e         ON e.id = s.embedding_id
             JOIN analysis_sources src ON src.id = e.analysis_source_id
@@ -416,15 +415,14 @@ def sign(conn, full=False, limit=None, dry_run=False,
         for seg in cur.fetchall():
             vh = rs.vector_hash(_vector_bytes(seg["vec"]))
             payload = rs.segment_payload(
-                author, tid, seg["pcm_hash"], seg["chromaprint"],
-                seg["duration_seconds"],
+                author, tid, seg["chromaprint"], seg["duration_seconds"],
                 seg["model"], seg["segment_index"], vh,
                 grid_version=seg["grid_version"])
             pending.append(("embedding_segments", seg["id"], rs.sign(payload, key), tid))
 
         cur.execute(f"""
             SELECT a.id, a.analysis_version, {', '.join(FEATURE_ORDER)},
-                   src.pcm_hash, src.chromaprint, src.duration_seconds
+                   src.chromaprint, src.duration_seconds
             FROM audio_features a
             JOIN analysis_sources src ON src.id = a.analysis_source_id
             WHERE a.track_id = %(tid)s AND a.signature IS NULL
@@ -432,8 +430,7 @@ def sign(conn, full=False, limit=None, dry_run=False,
         feat = cur.fetchone()
         if feat:
             fh = rs.blake2b_hex(canonical_features_blob(feat))
-            payload = rs.features_payload(author, tid, feat["pcm_hash"],
-                                          feat["chromaprint"],
+            payload = rs.features_payload(author, tid, feat["chromaprint"],
                                           feat["duration_seconds"],
                                           feat["analysis_version"], fh)
             pending.append(("audio_features", feat["id"], rs.sign(payload, key), tid))
@@ -644,8 +641,8 @@ def verify_all() -> bool:
     → Worker timestamp by a trusted authority). A signed row whose provenance
     link is missing counts as INVALID: the seal asserts a content-address the
     row no longer carries. Reports valid/invalid counts; returns True iff every
-    seal holds. (This is the seal check; a --deep audit that also re-decodes
-    the audio to confirm pcm_hash against the file is a separate, heavier pass.)"""
+    seal holds. (This is the seal check; a --deep audit that re-fingerprints
+    the file to confirm the address is a separate, heavier pass.)"""
     from birth_authority import TRUSTED_AUTHORITIES
 
     conn = psycopg2.connect(settings.database_url)
@@ -681,20 +678,19 @@ def verify_all() -> bool:
     seg_cur.execute("""SELECT s.author_pubkey, s.signature, s.merkle_proof, s.batch_root,
                           e.track_id::text tid, e.model_id::text model,
                           s.segment_index idx, s.vector::text vec,
-                          p.pcm_hash, p.chromaprint, p.duration_seconds,
-                          p.grid_version
+                          p.chromaprint, p.duration_seconds, p.grid_version
                    FROM embedding_segments s
                    JOIN embeddings e ON e.id = s.embedding_id
                    LEFT JOIN analysis_sources p ON p.id = e.analysis_source_id
                    WHERE s.signature IS NOT NULL""")
     for r in seg_cur:
-        if r["pcm_hash"] is None:
+        if r["chromaprint"] is None:
             bad += 1
             if len(bad_samples) < 5:
                 bad_samples.append(f"segment {r['tid'][:8]}#{r['idx']} UNLINKED")
             continue
         vh = rs.vector_hash(_vector_bytes(r["vec"]))
-        payload = rs.segment_payload(r["author_pubkey"], r["tid"], r["pcm_hash"],
+        payload = rs.segment_payload(r["author_pubkey"], r["tid"],
                                      r["chromaprint"], r["duration_seconds"],
                                      r["model"], r["idx"], vh,
                                      grid_version=r["grid_version"])
@@ -713,18 +709,18 @@ def verify_all() -> bool:
     feat_cur.execute(f"""SELECT a.author_pubkey, a.signature, a.merkle_proof, a.batch_root,
                            a.track_id::text tid, a.analysis_version,
                            {', '.join('a.' + c for c in FEATURE_ORDER)},
-                           p.pcm_hash, p.chromaprint, p.duration_seconds
+                           p.chromaprint, p.duration_seconds
                     FROM audio_features a
                     LEFT JOIN analysis_sources p ON p.id = a.analysis_source_id
                     WHERE a.signature IS NOT NULL""")
     for r in feat_cur:
-        if r["pcm_hash"] is None:
+        if r["chromaprint"] is None:
             bad += 1
             if len(bad_samples) < 5:
                 bad_samples.append(f"features {r['tid'][:8]} UNLINKED")
             continue
         fh = rs.blake2b_hex(canonical_features_blob(r))
-        payload = rs.features_payload(r["author_pubkey"], r["tid"], r["pcm_hash"],
+        payload = rs.features_payload(r["author_pubkey"], r["tid"],
                                       r["chromaprint"], r["duration_seconds"],
                                       r["analysis_version"], fh)
         if _seal_ok(payload, r):

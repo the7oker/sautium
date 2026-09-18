@@ -650,6 +650,8 @@ class TrackEnrichmentPipeline:
 
         Returns dict with step results (success/failed/skipped).
         """
+        import provenance
+
         track_id = track.id
         results = {}
 
@@ -666,6 +668,14 @@ class TrackEnrichmentPipeline:
                     results['audio_embedding'] = 'failed'
                 if status['needs_audio_features']:
                     results['audio_features'] = 'failed'
+                status['needs_audio_embedding'] = False
+                status['needs_audio_features'] = False
+            elif (analysis_file.duration_seconds is not None
+                  and analysis_file.duration_seconds < provenance.MIN_MATERIAL_SECONDS):
+                # Under one grid window: no fingerprint, no address, no
+                # analysis — the bulk passes exclude such material the same way.
+                results['audio_embedding'] = 'skipped'
+                results['audio_features'] = 'skipped'
                 status['needs_audio_embedding'] = False
                 status['needs_audio_features'] = False
             else:
@@ -740,7 +750,6 @@ class TrackEnrichmentPipeline:
                 else:
                     features = None
                 if features is not None:
-                    import provenance
                     from audio_analysis import ANALYSIS_VERSION
                     src_id = provenance.get_or_create_local(
                         db, track.id, analysis_file.id,
@@ -749,6 +758,8 @@ class TrackEnrichmentPipeline:
                         analysis_file.duration_seconds,
                         analysis_file.cue_start_seconds,
                         analysis_file.cue_end_seconds)
+                    if src_id is None:
+                        raise RuntimeError("no content address (fingerprint)")
                     existing_af = db.query(AudioFeature).filter(
                         AudioFeature.track_id == track.id
                     ).first()
@@ -885,6 +896,9 @@ class TrackEnrichmentPipeline:
         Returns:
             Statistics dict with counts per step
         """
+        if not (self.skip_embeddings and self.skip_audio_analysis):
+            import provenance
+            provenance.require_fpcalc()
         stats = {
             'processed': 0,
             'audio_embedding_success': 0,

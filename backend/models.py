@@ -21,7 +21,7 @@ from typing import Optional, List
 from sqlalchemy import (
     Column, Integer, String, Text, DateTime, Numeric, BigInteger, Float,
     Boolean, ForeignKey, CheckConstraint, Index, ARRAY, UniqueConstraint,
-    LargeBinary, SmallInteger, CHAR, Double, func, text, event,
+    LargeBinary, SmallInteger, CHAR, Double, Computed, func, text, event,
 )
 from sqlalchemy.dialects.postgresql import BYTEA, ENUM, JSONB, UUID
 from sqlalchemy.ext.declarative import declarative_base
@@ -631,10 +631,13 @@ class StreamProvider(Base):
 
 class AnalysisSource(Base):
     """Provenance of one audio-analysis pass: the physical source material
-    (local file or streamed provider audio) content-addressed by pcm_hash +
-    chromaprint. embeddings / audio_features rows link here; segments inherit
-    it through their embeddings row. Record signatures bind these values, so
-    a row is written once at analysis time and never mutated afterwards."""
+    (local file or streamed provider audio) content-addressed by the AcoustID
+    chromaprint of what was decoded. embeddings / audio_features rows link
+    here; segments inherit it through their embeddings row. Record signatures
+    bind the fingerprint and the duration, so a row is written once at
+    analysis time and never mutated afterwards. chromaprint_key is the
+    database's digest of the fingerprint — ~3 KB of text is too long for a
+    btree row — and the content key with track_id."""
     __tablename__ = "analysis_sources"
 
     id = Column(Integer, primary_key=True)
@@ -643,10 +646,10 @@ class AnalysisSource(Base):
     # file and for rows imported over P2P (the wire withholds file-vs-stream).
     provider_id = Column(String(32), ForeignKey("stream_providers.id"))
     media_file_id = Column(Integer, ForeignKey("media_files.id", ondelete="SET NULL"))
-    pcm_hash = Column(CHAR(64), nullable=False)
-    chromaprint = Column(Text)
-    # Whole seconds of the source material — with pcm_hash + chromaprint it
-    # forms the signed material declaration; receivers use it as the cheap
+    chromaprint = Column(Text, nullable=False)
+    chromaprint_key = Column(BYTEA, Computed("sha256(decode(chromaprint, 'escape'))", persisted=True))
+    # Whole seconds of the source material — with the chromaprint it forms
+    # the signed material declaration; receivers use it as the cheap
     # (no-decode) import gate against their own file's duration.
     duration_seconds = Column(Integer)
     grid_version = Column(SmallInteger, nullable=False, server_default="1")
@@ -660,7 +663,7 @@ class AnalysisSource(Base):
     computed_at = Column(DateTime(timezone=True), server_default=func.now())
 
     __table_args__ = (
-        UniqueConstraint("track_id", "pcm_hash"),
+        UniqueConstraint("track_id", "chromaprint_key", name="uq_asrc_track_chromaprint"),
         Index("idx_analysis_sources_media_file", "media_file_id"),
         CheckConstraint("provider_id IS NULL OR media_file_id IS NULL",
                         name="chk_asrc_stream_no_file"),

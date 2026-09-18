@@ -465,6 +465,7 @@ class AudioAnalyzer:
         import time
         from concurrent.futures import ThreadPoolExecutor, as_completed
 
+        provenance.require_fpcalc()
         stats = {"processed": 0, "success": 0, "failed": 0, "skipped": 0}
         start_time = time.time()
         clap_batch_size = 16
@@ -483,12 +484,15 @@ class AudioAnalyzer:
                     FROM media_files mf
                     JOIN tracks t ON t.id = mf.track_id
                     WHERE mf.is_analysis_source = true
+                      AND (mf.duration_seconds IS NULL
+                           OR mf.duration_seconds >= :min_seconds)
                 """
             else:
                 # Pending = no features yet, OR unlinked provenance (legacy
-                # rows and failed fingerprints), OR linked to material other
-                # than the current analysis source (source moved to a better
-                # rip, or a stream preview awaiting its owned upgrade).
+                # rows), OR linked to material other than the current
+                # analysis source (source moved to a better rip, or a stream
+                # preview awaiting its owned upgrade). Material under one
+                # grid window is never pending (provenance.MIN_MATERIAL_SECONDS).
                 # P2P-imported analysis re-enters only when the
                 # enrichment.reanalyze_imported toggle says so — see the
                 # policy comment in embeddings.py, which owns the flag.
@@ -503,13 +507,15 @@ class AudioAnalyzer:
                     LEFT JOIN audio_features af ON af.track_id = t.id
                     LEFT JOIN analysis_sources asrc ON asrc.id = af.analysis_source_id
                     WHERE mf.is_analysis_source = true
+                      AND (mf.duration_seconds IS NULL
+                           OR mf.duration_seconds >= :min_seconds)
                       AND (af.id IS NULL
                            OR af.analysis_source_id IS NULL
                            OR (asrc.media_file_id IS DISTINCT FROM mf.id
                                AND (:reanalyze OR NOT asrc.imported)))
                 """
 
-            params = {}
+            params = {"min_seconds": provenance.MIN_MATERIAL_SECONDS}
             if not force:
                 from embeddings import _reanalyze_imported
                 params["reanalyze"] = _reanalyze_imported()
@@ -639,15 +645,18 @@ class AudioAnalyzer:
 
                         savepoint = db.begin_nested()
                         try:
-                            # Registered before the results it describes; a
-                            # fingerprint failure saves unlinked (src_id NULL)
-                            # and the pending predicate retries next run.
+                            # Registered before the results it describes; no
+                            # fingerprint = no address, and the row is not
+                            # saved (the pending predicate retries next run,
+                            # as for a file that fails to decode).
                             src_id = provenance.get_or_create_local(
                                 db, row.track_id, row.media_file_id,
                                 row.file_path, row.mf_sample_rate,
                                 row.bit_depth, row.is_lossless,
                                 row.duration_seconds,
                                 row.cue_start_seconds, row.cue_end_seconds)
+                            if src_id is None:
+                                raise RuntimeError("no content address (fingerprint)")
                             existing = db.query(AudioFeature).filter(
                                 AudioFeature.track_id == row.track_id
                             ).first()

@@ -4,9 +4,11 @@
 > per-segment + audio_features author signatures, Merkle batches, Worker
 > `/timestamp` notary; **provenance refactor 2026-07-06** — content-address
 > captured AT ANALYSIS TIME into `analysis_sources` (one row per
-> track × physical material: pcm_hash + chromaprint + duration_seconds +
-> provider_id, NULL = own file — an origin enum until 2026-09-18; whole
-> owned library backfilled), records
+> track × physical material: chromaprint + duration_seconds +
+> provider_id, NULL = own file — an origin enum until 2026-09-18; a
+> BLAKE2b PCM hash stood beside the fingerprint until 2026-09-18, when
+> the fingerprint became the only address and the audio payload went to
+> **v3**; whole owned library backfilled), records
 > link via `analysis_source_id`, segments re-keyed onto `embeddings(id)`
 > so segments/mean/provenance can never diverge; seal-guard DB triggers
 > (payload change without new signature strips the seal — no writer can
@@ -107,7 +109,7 @@ but reassign their job: **attribution and evidence, not detection**.
    function of the audio. Whoever owns the same material can recompute
    and compare. Verification is semantic, not cryptographic.
 3. **Content-addressing.** A record binds to the *specific audio
-   material* it was computed from (PCM hash + acoustic fingerprint), not
+   material* it was computed from (acoustic fingerprint + duration), not
    just the logical track. "Legitimately different material" then stops
    being a false-positive source.
 4. **Default-deny, not blacklist.** Influence follows weight (friends,
@@ -133,7 +135,7 @@ root to the Worker, and gets back one signed `{root, date}` stamp — one
 HTTP request whether the day produced ten records or ten thousand, and
 the Worker never sees the data itself. Records then travel through
 ordinary sync sessions, each carrying its author signature, its content
-address (`pcm_hash` + chromaprint), and its Merkle path to the stamped
+address (chromaprint + duration), and its Merkle path to the stamped
 root — every record independently verifiable with no callbacks. An
 importing node checks signatures locally, quarantines by default, and
 spot-checks a sample via the recompute ladder on material it owns;
@@ -191,8 +193,8 @@ exposure) and pulling (poisoning exposure) may later split into two flags.
 ```
 {
   track_uuid,        -- logical identity (UUID v5)
-  pcm_hash,          -- BLAKE2b over decoded PCM samples (NOT file bytes)
   chromaprint,       -- acoustic fingerprint of the analyzed material
+  duration_seconds,  -- whole seconds of it (the cheap import gate)
   model_uuid,        -- EmbeddingModel UUID v5 (existing entity)
   payload,           -- the analysis values themselves
   version,           -- monotonic per (author, track_uuid, model); replay guard
@@ -202,14 +204,19 @@ exposure) and pulling (poisoning exposure) may later split into two flags.
 + optional endorsements: [ { endorser_pubkey, endorser_sig } ]
 ```
 
-- **`pcm_hash` is over decoded samples, not the file** — FLAC compression
-  level and tags change file bytes; PCM is invariant. Computed during
-  analysis, when the audio is already decoded — marginal cost ~zero
-  (BLAKE2b runs at ~1 GB/s).
+- **The fingerprint is the whole content address (2026-09-18).** Until
+  then a `pcm_hash` — BLAKE2b over the decoded PCM samples — stood beside
+  it as the exact-bytes key: invariant to FLAC compression level and tags,
+  deterministic for a lossless decode on one ffmpeg build, and nothing
+  else — a different build or any lossy decode gave the same material a
+  new address, and a seal over it was a possession proof of exact bytes.
+  Dropped for one anchor that converges.
 - **`chromaprint`** distinguishes "same recording, different rip"
-  (fingerprint matches, PCM differs) from "different edition/remaster"
-  (fingerprint close but different) from "entirely different audio"
-  (fingerprint far). New dependency: `fpcalc` (AcoustID toolchain).
+  (fingerprint matches) from "different edition/remaster" (fingerprint
+  close but different) from "entirely different audio" (fingerprint far).
+  Computed by `fpcalc` (AcoustID toolchain) at analysis time; material
+  fpcalc cannot fingerprint (a few seconds of audio) is not analysed at
+  all — the floor is one grid window.
 - **`model_uuid`** pins the model version so recompute-verification
   compares like with like.
 - **Per-record signatures, not batches.** Ed25519 signs at ~15–20k/s and
@@ -252,11 +259,11 @@ a *verified owner* recomputes and endorses it.
 3. **Streamed clean source** → the key move: enrichment computed from a
    streamed source (any provider tier or YouTube — lossless-only until
    2026-09-02) is signed against **the
-   stream's** `pcm_hash`, not the local file's. So a grey album gets
+   stream's** fingerprint, not the local file's. So a grey album gets
    *signed* enrichment via its clean digital master while the local file
    stays an unsigned vinyl rip — **no possession of the bootleg is ever
    claimed**, and a verifier who owns the official version recomputes and
-   confirms. Enrichment provenance (`pcm_hash`) is deliberately
+   confirms. Enrichment provenance (the fingerprint) is deliberately
    decoupled from the playback file: the signature attests to what was
    analyzed, not to what is played. This needs a provenance bit on the
    record (`origin ∈ {local, stream}`) so re-enrich knows what not to
@@ -276,40 +283,43 @@ sync segments, and let each node compute its own mean locally** from the
 union of segments it holds (own + pulled). P2P thereby densifies the grid
 — the "deepen analysis" path.
 
-**Content-address stays whole-track.** `pcm_hash` = BLAKE2b of the
-**natively-decoded** PCM (source rate & channels, f32le — *before* the
-`-ac1 -ar48000` analysis conversion), plus a track-level chromaprint
-(fpcalc), computed once. Hashing the native decode, not the resampled 48k
-frame, is deliberate (2026-07-05, Valerii): lossless decoding is
-deterministic across ffmpeg builds, whereas the resample to 48k is the one
-step that can differ (swresample/soxr version) — so the content-address is
-canonical for lossless material, and the resample non-determinism is
-confined to the segment *recompute*, where step-2 tolerance already lives.
-The 48k-mono analysis frame is a derivation defined by `grid_version`. It
-stays whole-track *even though we sign segments*, because `segment_index`
-is only definable in the whole-track frame. Per-slice hashing was rejected — a 10s fingerprint maps to no
-external recording identity and is too noisy for the step-2 tolerance
-check, and it multiplies cost 12–24× for no gain. No Merkle root either:
-nodes hold different subsets, so a per-track root is not shared — each
-segment is signed **independently** and is self-contained (atomic,
-syncable alone).
+**Content-address stays whole-track.** The material declaration is the
+track-level chromaprint (fpcalc) plus the duration in whole seconds,
+computed once at analysis time. Until 2026-09-18 a `pcm_hash` — BLAKE2b
+of the **natively-decoded** PCM, hashed *before* the `-ac1 -ar48000`
+analysis conversion (2026-07-05, Valerii: lossless decoding is
+deterministic across ffmpeg builds, the resample to 48k is the one step
+that can differ) — stood beside it as the exact-bytes key. It went
+(Valerii, 2026-09-18): one anchor instead of two, and one that converges.
+A hash of exact bytes changed with the decoder build and with every lossy
+decode, so two nodes analysing the same stream addressed two materials,
+and a seal over it was a possession proof of those bytes; the fingerprint
+is a public recording identity that any decode of the material
+reproduces. The resample non-determinism stays confined to the segment
+*recompute*, where step-2 tolerance already lives. The 48k-mono analysis
+frame is a derivation defined by `grid_version`. It stays whole-track
+*even though we sign segments*, because `segment_index` is only definable
+in the whole-track frame. Per-slice hashing was rejected — a 10s
+fingerprint maps to no external recording identity and is too noisy for
+the step-2 tolerance check, and it multiplies cost 12–24× for no gain. No
+Merkle root either: nodes hold different subsets, so a per-track root is
+not shared — each segment is signed **independently** and is
+self-contained (atomic, syncable alone).
 
 **Chromaprint is bound into the signature from the start — never added
-later (2026-07-05, Valerii).** `pcm_hash` is the brittle exact-bytes
-anchor (even a different ffmpeg build shifts it); chromaprint is the
-robust recording identity that makes step-2 cross-rip verification
-possible. Deferring it would be a trap: adding it later changes the
-payload → a new signature → a new, *later* Worker timestamp → the original
-authorship priority is forfeit. So the fingerprint must be present the
-first time a record is signed. (It is safe for grey material — an AcoustID
-fingerprint is a public fuzzy recording ID, not a possession proof of
-specific bytes; only `pcm_hash` ties to exact material, and streamed
-signing uses the stream's `pcm_hash`.)
+later (2026-07-05, Valerii).** Deferring it would be a trap: adding it
+later changes the payload → a new signature → a new, *later* Worker
+timestamp → the original authorship priority is forfeit. So the
+fingerprint must be present the first time a record is signed — and since
+2026-09-18 a record without one cannot exist: no fingerprint, no
+provenance row, no analysis saved. (It is safe for grey material — an
+AcoustID fingerprint is a public fuzzy recording ID, not a possession
+proof of specific bytes; streamed signing uses the stream's fingerprint.)
 
-The signed segment record:
+The signed segment record (audio payload v3, 2026-09-18):
 
 ```
-sautium-record:v1:segment:{author_pubkey}:{track_uuid}:{pcm_hash}:{chromaprint}
+sautium-record:v3:segment:{author_pubkey}:{track_uuid}:{chromaprint}:{duration_seconds}
   :{model_uuid}:{grid_version}:{segment_index}:{vector_hash}
 ```
 
@@ -317,9 +327,15 @@ sautium-record:v1:segment:{author_pubkey}:{track_uuid}:{pcm_hash}:{chromaprint}
 record under the same content-address:
 
 ```
-sautium-record:v1:features:{author_pubkey}:{track_uuid}:{pcm_hash}:{chromaprint}
+sautium-record:v3:features:{author_pubkey}:{track_uuid}:{chromaprint}:{duration_seconds}
   :{analysis_version}:{features_hash}
 ```
+
+Audio records and enrichment records are versioned separately
+(`AUDIO_RECORD_VERSION`, `ENRICHMENT_RECORD_VERSION` — the latter still
+v2, its grammar carries no material hash), so a change to one never
+invalidates the other's seals. No record carries its version: a bump is a
+corpus re-sign, and an older format has no verifier.
 
 **`author_pubkey` is bound INTO the payload (2026-07-05, Valerii)**, not
 left as an external column, so a signature is an intrinsic statement by a
@@ -368,12 +384,13 @@ read `batch_root` — so the stamp remains the admission signal that binds a
 free key to an address.
 
 **P2P replace (signed supersedes unsigned) — deferred design.** A signed
-record (typically stream-derived, official `pcm_hash`) should be able to
+record (typically stream-derived, official material) should be able to
 replace an unsigned same-track record locally and across sync. Open
 questions: the audio_features/embeddings tables are keyed by `track_id`
 (one row/track), so replacement is an in-place upgrade keyed on
-weight (signed > unsigned) — but the two carry *different* `pcm_hash`
-(stream vs rip), so "same track, better provenance" must be an explicit
+weight (signed > unsigned) — but the two may carry *different*
+fingerprints (a stream of one master vs a rip of another), so "same
+track, better provenance" must be an explicit
 upgrade rule, not a content-address match. Precedence, whether the
 superseded row is retained, and sync-time conflict resolution are TBD.
 
@@ -381,15 +398,17 @@ superseded row is retained, and sync-time conflict resolution are TBD.
 
 When a node holding the audio checks a foreign record:
 
-1. **My `pcm_hash` == record's `pcm_hash`** → recompute with
-   `model_uuid` is deterministic → any mismatch is a **proven lie**.
-   Strongest evidence; generates a flag report.
-2. **PCM differs, chromaprint matches** (different rip of the same
-   recording) → tolerance compare: cosine ≥ ~0.99 for embeddings
+1. **My fingerprint == record's fingerprint** (the same recording; a
+   bit-identical decode reproduces the result exactly, any other honest
+   decode of the same material lands within the step-2 tolerance) →
+   recompute with `model_uuid` → a mismatch beyond that tolerance is a
+   **proven lie**. Strongest evidence; generates a flag report.
+2. **Fingerprints similar, not equal** (a different rip or master of the
+   same recording) → tolerance compare: cosine ≥ ~0.99 for embeddings
    (empirically stable across lossless→lossy transcodes), exact or
    ±tolerance for discrete features. Mismatch → weak, cross-rip-labeled
    report.
-3. **Chromaprint differs** → different edition/remaster → **not a
+3. **Fingerprint differs** → different edition/remaster → **not a
    conflict**. Parallel records for different material coexist; no
    report. An honest author analyzing a remaster can never be framed as
    a poisoner by owners of the original.
@@ -401,7 +420,7 @@ plus quarantine-exit checks (below).
 
 **Network immune system:** the more owners a track has, the more
 independent verifiers exist — poisoning popular material is caught fast.
-A fake bound to a `pcm_hash` that nobody owns is **self-limiting**: it
+A fake bound to a fingerprint that nobody owns is **self-limiting**: it
 applies to material that doesn't exist in the network, so it influences
 no one's search or recommendations.
 
@@ -1364,7 +1383,7 @@ network's work.
 ### The plagiarism problem
 
 Deterministic computation makes content-authorship unprovable in
-principle: the correct result for `(pcm_hash, model_uuid)` is identical
+principle: the correct result for `(chromaprint, model_uuid)` is identical
 for everyone, so a copied record is indistinguishable from honest work.
 Re-signing someone else's valid records would give an attacker free
 "honest mass" to dilute with. Two mechanisms close this:
@@ -1373,13 +1392,13 @@ Re-signing someone else's valid records would give an attacker free
   `{merkle_root, date}` per published batch (RFC 3161-style, one request
   per batch). A plagiarist is provably later than the original author.
 - **Dedup: second author = endorser.** The network treats the first
-  published `(pcm_hash, model_uuid)` record as authorship; identical
+  published `(chromaprint, model_uuid)` record as authorship; identical
   later records are automatically counted as endorsements. Copying
   structurally cannot mint authorship karma.
 
 ### Priority conflicts: how "earlier" is discovered and resolved
 
-The dedup key `(pcm_hash, model_uuid)` is deterministic, so publication
+The dedup key `(chromaprint, model_uuid)` is deterministic, so publication
 naturally begins with an inventory check against peers / the master
 cache: if a stamped record already exists, the new computation is
 published as an endorsement in the first place. If two nodes published
@@ -1413,8 +1432,9 @@ else's work as your own), not to reward racing: the honest runner-up
 loses only the authorship label, not the reward — his identical work
 lands at the top of the verification scale.
 
-Practical softeners: different rips → different `pcm_hash` → **both are
-full authors** (cross-verified via the chromaprint bridge); every
+Practical softeners: different masters → different fingerprints → **both
+are full authors** (cross-verified via the fingerprint bridge; two rips
+of one master share the address and race like bit-identical material); every
 collector's rare tail guarantees uncontested authorship somewhere; a
 new `model_uuid` resets the race library-wide; trap batches pay
 regardless of priority. The honest limit, stated plainly: for
@@ -1523,8 +1543,7 @@ A verifier whose ladder check fails at step 1 (or 2, weakly) publishes:
 ```
 {
   accused_record,          -- full signed record (author's sig = the evidence)
-  reporter_pcm_hash,       -- what material the reporter checked against
-  reporter_chromaprint,
+  reporter_chromaprint,    -- what material the reporter checked against
   reporter_value,          -- the recomputed result
   reporter_pubkey, reporter_sig
 }
@@ -1534,7 +1553,7 @@ The author's own signature under the fake is **non-repudiable evidence**;
 he cannot recall it. Report consumers scale their response to what they
 can verify themselves:
 
-- Same `pcm_hash` owned → full independent recompute; the report is
+- Same fingerprint owned → full independent recompute; the report is
   self-verifying.
 - Same recording, other rip → tolerant recompute.
 - Material not owned → the report is testimony, weighted by the
@@ -1561,7 +1580,7 @@ cheapest attack — censoring a competitor is easier than poisoning data.
 A "ban" is an **emergent convergence of local decisions around
 self-verifying evidence**: nobody orders it, everybody arrives at it.
 
-**The catching node.** After a ladder step-1 mismatch (same `pcm_hash`,
+**The catching node.** After a ladder step-1 mismatch (same fingerprint,
 same model, different result), node `V`:
 
 1. Adds `X`'s pubkey to its local `banned_keys(pubkey, evidence, ts)`.

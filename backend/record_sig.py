@@ -16,13 +16,16 @@ PCM, the index and the model. So we sign per segment; a peer recomputes any
 segment and confirms it. Each node computes its own mean locally from the
 segments it holds.
 
-CONTENT-ADDRESS STAYS WHOLE-TRACK: pcm_hash = BLAKE2b of the NATIVELY-decoded
-PCM (source rate & channels, f32le — before the -ac1 -ar48000 analysis
-conversion; lossless decode is deterministic across ffmpeg builds where the
-48k resample is not). Whole-track because segment_index is only definable in
-the whole-track frame; the 48k-mono analysis frame is a derivation defined by
-grid_version. Per-segment signing needs no Merkle root — nodes hold different
-subsets, so each segment is signed independently and travels self-contained.
+CONTENT-ADDRESS STAYS WHOLE-TRACK: the material declaration is the AcoustID
+chromaprint of the analysed audio (fpcalc over the whole-track decode) plus
+its duration in whole seconds. The fingerprint is a public recording
+identity, not a possession proof of exact bytes — any node's decode of the
+same material reproduces it, where the BLAKE2b PCM hash that stood beside it
+until 2026-09-18 changed with the decoder build and with every lossy decode.
+Whole-track because segment_index is only definable in the whole-track
+frame; the 48k-mono analysis frame is a derivation defined by grid_version.
+Per-segment signing needs no Merkle root — nodes hold different subsets, so
+each segment is signed independently and travels self-contained.
 
 Only hashes and IDs enter the signed string — never raw floats — so the
 payload is byte-stable across signer and verifier. Float determinism lives
@@ -36,14 +39,22 @@ keep both copies in step, byte for byte below the header.
 import datetime
 import hashlib
 import json
+import re
 import struct
 from typing import Optional
 
-# Record payload format. v2 (2026-07-06): the source material's
-# duration_seconds joins the content-address section (after chromaprint) —
-# it feeds the receiver's cheap import gate, so it must be tamper-evident.
-# v1 records were re-signed as v2 pre-launch; no verifier supports v1.
-RECORD_VERSION = 2
+# Record payload formats. Audio records (segment, features) and enrichment
+# records are separate grammars under separate versions, so a change to one
+# never invalidates the other's seals. No record carries its version — every
+# verifier rebuilds the payload at the current constant, so a bump is a
+# corpus re-sign and an older format has no verifier.
+#   audio v2 (2026-07-06): duration_seconds joined the content-address section
+#   (the receiver's cheap import gate must be tamper-evident);
+#   audio v3 (2026-09-18): pcm_hash left it — the chromaprint alone is the
+#   material address (module docstring); every audio seal was re-made.
+#   enrichment v2: unchanged since the v2 re-sign — no material hash in it.
+AUDIO_RECORD_VERSION = 3
+ENRICHMENT_RECORD_VERSION = 2
 
 # The Worker timestamp string format. v2 (2026-07-10) appends the submitter's
 # ip_hash (uuid5(NAMESPACE, "ip:"+ip), computed by the Worker) after the date —
@@ -64,15 +75,6 @@ def blake2b_hex(data: bytes) -> str:
     return hashlib.blake2b(data, digest_size=32).hexdigest()
 
 
-def pcm_hash(pcm_bytes: bytes) -> str:
-    """Content-address of the material: hash of the NATIVELY-decoded PCM bytes
-    (source rate & channels, f32le) — NOT the file bytes and NOT the resampled
-    48k analysis frame. Lossless decode is deterministic across ffmpeg builds,
-    so this is stable where the resampled form is not (see the doc). The 48k
-    analysis derivation is defined by grid_version, tolerance-verified."""
-    return blake2b_hex(pcm_bytes)
-
-
 def vector_hash(vector_bytes: bytes) -> str:
     """Hash of a stored vector's raw float32 bytes (pgvector round-trips them
     exactly), binding the segment's actual values into its signature."""
@@ -91,11 +93,19 @@ def vector_from_bytes(raw: bytes) -> list:
     return list(struct.unpack(f"<{len(raw) // 4}f", raw))
 
 
+# fpcalc's compressed fingerprint is URL-safe base64 (standard base64 passes
+# too). The alphabet is load-bearing twice: the payload is ':'-joined, and the
+# database keys the row on decode(chromaprint, 'escape'), where a backslash
+# would read as an escape sequence instead of a byte of the text.
+_CHROMAPRINT_RE = re.compile(r"[A-Za-z0-9+/=_-]+")
+
+
 def _guard_chromaprint(chromaprint: Optional[str]) -> str:
-    if chromaprint is None:
-        return "-"
-    if ":" in chromaprint:                       # AcoustID base64 is ':'-free
-        raise ValueError("chromaprint must not contain ':'")
+    """The fingerprint of the material declaration: required, and in the
+    fingerprint alphabet. Anything else is not a record this format can
+    express — the caller drops it instead of signing or verifying it."""
+    if not chromaprint or not _CHROMAPRINT_RE.fullmatch(chromaprint):
+        raise ValueError("chromaprint missing or outside the fingerprint alphabet")
     return chromaprint
 
 
@@ -109,7 +119,6 @@ def _fmt_duration(duration_seconds: Optional[int]) -> str:
 def segment_payload(
     author_pubkey_hex: str,
     track_uuid: str,
-    pcm_hash_hex: str,
     chromaprint: Optional[str],
     duration_seconds: Optional[int],
     model_uuid: str,
@@ -122,10 +131,10 @@ def segment_payload(
     identity — evidence in a flag report names its author without relying on an
     external column. (It does not, and cannot, prevent re-signing deterministic
     public content; authorship theft is caught by timestamp priority.)
-    pcm_hash + chromaprint + duration form the material declaration."""
+    chromaprint + duration form the material declaration."""
     return ":".join([
-        "sautium-record", f"v{RECORD_VERSION}", "segment", author_pubkey_hex.lower(),
-        track_uuid.lower(), pcm_hash_hex.lower(), _guard_chromaprint(chromaprint),
+        "sautium-record", f"v{AUDIO_RECORD_VERSION}", "segment", author_pubkey_hex.lower(),
+        track_uuid.lower(), _guard_chromaprint(chromaprint),
         _fmt_duration(duration_seconds),
         model_uuid.lower(), str(grid_version), str(segment_index),
         vector_hash_hex.lower(),
@@ -135,7 +144,6 @@ def segment_payload(
 def features_payload(
     author_pubkey_hex: str,
     track_uuid: str,
-    pcm_hash_hex: str,
     chromaprint: Optional[str],
     duration_seconds: Optional[int],
     analysis_version: int,
@@ -144,8 +152,8 @@ def features_payload(
     """The bytes the author signs for a track's audio_features row — a
     parallel per-track record under the same whole-track content-address."""
     return ":".join([
-        "sautium-record", f"v{RECORD_VERSION}", "features", author_pubkey_hex.lower(),
-        track_uuid.lower(), pcm_hash_hex.lower(), _guard_chromaprint(chromaprint),
+        "sautium-record", f"v{AUDIO_RECORD_VERSION}", "features", author_pubkey_hex.lower(),
+        track_uuid.lower(), _guard_chromaprint(chromaprint),
         _fmt_duration(duration_seconds),
         str(analysis_version), features_hash_hex.lower(),
     ]).encode("utf-8")
@@ -240,7 +248,7 @@ def enrichment_payload(
     if kind not in ENRICHMENT_KINDS:
         raise ValueError(f"unknown enrichment kind: {kind}")
     return ":".join([
-        "sautium-record", f"v{RECORD_VERSION}", kind, author_pubkey_hex.lower(),
+        "sautium-record", f"v{ENRICHMENT_RECORD_VERSION}", kind, author_pubkey_hex.lower(),
         entity_uuid.lower(), (source or "").lower(),
         content_hash_hex.lower(), _fmt_fetched_at(fetched_at),
     ]).encode("utf-8")

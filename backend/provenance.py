@@ -2,24 +2,28 @@
 
 Every analysis pass — scanner embedding/feature runs and streamed preview
 enrichment alike — registers WHAT material it analyzed before its results are
-saved: pcm_hash (BLAKE2b of the natively-decoded PCM; deterministic for
-lossless across ffmpeg builds) plus the AcoustID chromaprint (the robust
-recording-identity anchor for cross-rip verification). Record signatures bind
-these values, so they must exist at analysis time, not be recomputed later —
-recomputing after the fact is exactly the design flaw this module replaced
-(sign_audio's lazy second decode could hash a different file than the one the
-analysis actually saw).
+saved: the AcoustID chromaprint of the decoded audio (fpcalc) plus its
+duration. Record signatures bind these values, so they must exist at analysis
+time, not be recomputed later — recomputing after the fact is exactly the
+design flaw this module replaced (sign_audio's lazy second decode could hash
+a different file than the one the analysis actually saw).
 
-Rows are content-keyed on (track_id, pcm_hash): re-analyzing unchanged
-material reuses the row, a re-rip mints a new one, and byte-identical copies
-in different folders collapse. A same-bytes stream row upgrades to an own-file
-row when the material turns out to be owned.
+The fingerprint is the whole content address (2026-09-18; a BLAKE2b hash of
+the decoded PCM stood beside it before): a public recording identity that any
+node's decode of the same material reproduces, where the PCM hash changed
+with the decoder build and with every lossy decode. Rows are keyed on
+(track_id, chromaprint_key) — the database's digest of the fingerprint, since
+~3 KB of base64 is too long for a btree row: re-analyzing unchanged material
+reuses the row, a different master mints a new one, two rips of one master
+collapse. No fingerprint means no address, and an analysis with no address is
+never saved — it could neither sign nor travel, and the pending predicates
+would re-derive it on every run.
 """
 
-import hashlib
 import json
 import logging
 import os
+import shutil
 import subprocess
 import tempfile
 from typing import Optional
@@ -30,6 +34,12 @@ from sqlalchemy.orm import Session
 from config import settings
 
 logger = logging.getLogger(__name__)
+
+# Material shorter than one grid window (embeddings.WINDOW_SECONDS) is not
+# analysed: one window is the smallest thing the analysis means, and fpcalc
+# needs a few seconds of audio for any fingerprint at all — the floor is what
+# guarantees an address (Valerii, 2026-09-18).
+MIN_MATERIAL_SECONDS = 10
 
 # Overwrite precedence between analysis passes of the same track, read from the
 # MATERIAL alone: the node's own file beats any stream, a lossless stream beats
@@ -54,92 +64,95 @@ def material_rank(provider_id: Optional[str], is_lossless: Optional[bool],
     return 1 if is_lossless else 0
 
 
-_UPSERT_SQL = sa_text("""
+def _rank_sql(row: str) -> str:
+    """MATERIAL_RANK_SQL over a row that exists — the upsert compares the
+    registration (EXCLUDED) against the row already holding the address."""
+    return (f"CASE WHEN {row}.imported THEN -1 "
+            f"WHEN {row}.provider_id IS NULL THEN 2 "
+            f"WHEN {row}.is_lossless THEN 1 ELSE 0 END")
+
+
+_UPSERT_SQL = sa_text(f"""
     INSERT INTO analysis_sources
-        (track_id, provider_id, media_file_id, pcm_hash, chromaprint,
+        (track_id, provider_id, media_file_id, chromaprint,
          duration_seconds, sample_rate, bit_depth, is_lossless)
-    VALUES (:tid, :pid, :mfid, :ph, :fp, :dur, :sr, :bd, :ll)
-    ON CONFLICT (track_id, pcm_hash) DO UPDATE
+    VALUES (:tid, :pid, :mfid, :fp, :dur, :sr, :bd, :ll)
+    ON CONFLICT (track_id, chromaprint_key) DO UPDATE
        SET provider_id = EXCLUDED.provider_id,
            media_file_id = EXCLUDED.media_file_id,
-           chromaprint = COALESCE(analysis_sources.chromaprint,
-                                  EXCLUDED.chromaprint),
-           duration_seconds = COALESCE(analysis_sources.duration_seconds,
-                                       EXCLUDED.duration_seconds),
+           duration_seconds = COALESCE(EXCLUDED.duration_seconds,
+                                       analysis_sources.duration_seconds),
+           sample_rate = EXCLUDED.sample_rate,
+           bit_depth = EXCLUDED.bit_depth,
+           is_lossless = EXCLUDED.is_lossless,
            -- any registration through this module means THIS node decoded
            -- the material itself: a previously synced-in row for the same
-           -- bytes becomes first-hand (and thus signable)
-           imported = false
-    -- an own-file registration upgrades any row; a stream never downgrades a
-    -- first-hand own-file row, but may claim a synced-in one
-    WHERE EXCLUDED.provider_id IS NULL
-       OR analysis_sources.provider_id IS NOT NULL
-       OR analysis_sources.imported
+           -- material becomes first-hand (and thus signable)
+           imported = false,
+           computed_at = now()
+    -- the row describes the best material this node has registered under the
+    -- address: an own-file registration upgrades any row, a stream never
+    -- downgrades one (own file > lossless stream > lossy stream > imported)
+    WHERE {_rank_sql('EXCLUDED')} >= {_rank_sql('analysis_sources')}
     RETURNING id
 """)
 
 
-def pcm_hash_file(local_path: str, cue_start=None, cue_end=None) -> str:
-    """BLAKE2b-256 of the natively-decoded PCM (source rate & channels,
-    f32le). Streamed chunk-wise — hi-res long-form tracks decode to >1 GB.
-    cue_start/cue_end bound a CUE image slice, whose PCM then equals a
-    properly split rip of the same disc — the cross-rip content address
-    converges across rip styles."""
-    h = hashlib.blake2b(digest_size=32)
-    cmd = ["ffmpeg", "-v", "error"]
-    if cue_start is not None:
-        cmd += ["-ss", f"{cue_start:.6f}"]
-    cmd += ["-i", local_path]
-    if cue_end is not None:
-        cmd += ["-t", f"{cue_end - (cue_start or 0.0):.6f}"]
-    cmd += ["-f", "f32le", "pipe:1"]
-    proc = subprocess.Popen(
-        cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-    total = 0
-    while chunk := proc.stdout.read(1 << 20):
-        h.update(chunk)
-        total += len(chunk)
-    proc.stdout.close()
-    err = proc.stderr.read().decode(errors="replace").strip()
-    proc.stderr.close()
-    if proc.wait(timeout=60) != 0:
-        raise RuntimeError(f"ffmpeg rc={proc.returncode}: {err[:200]}")
-    if total == 0:
-        raise ValueError("ffmpeg produced no samples")
-    return h.hexdigest()
+def require_fpcalc() -> None:
+    """Analysis passes call this first: without fpcalc nothing they compute
+    can be addressed, and unaddressed analysis is never saved — stop before
+    decoding a library rather than skip every track of it."""
+    if shutil.which("fpcalc") is None:
+        raise RuntimeError("fpcalc (Chromaprint) is not on PATH — audio analysis "
+                           "registers no material without it")
+
+
+def _fpcalc(path: str) -> Optional[str]:
+    try:
+        out = subprocess.run(["fpcalc", "-plain", path], capture_output=True,
+                             text=True, timeout=120, check=True)
+    except (subprocess.SubprocessError, OSError) as e:
+        logger.debug("fpcalc failed for %s: %s", path, e)
+        return None
+    return out.stdout.strip() or None
 
 
 def chromaprint_file(local_path: str, cue_start=None,
                      cue_end=None) -> Optional[str]:
-    """AcoustID fingerprint (fpcalc, default 120s window). None on failure —
-    the source row is still valid, records just sign without the cross-rip
-    anchor (and never gain it later: it is bound into signatures from the
-    start or not at all). fpcalc takes only a path, so a CUE slice is decoded
-    to a temp WAV first — fingerprinting the image would stamp every track of
-    the disc with one identical anchor."""
-    tmp_path = None
+    """AcoustID fingerprint (fpcalc, its default 120 s window) of a file or of
+    a CUE image slice. fpcalc takes only a path, so a slice is decoded to a
+    temp WAV first — fingerprinting the image would stamp every track of the
+    disc with one identical anchor. The same WAV path is the fallback when
+    fpcalc's own decoder rejects a whole file that ffmpeg can read. None when
+    neither yields a fingerprint: material with no address."""
+    if cue_start is None and cue_end is None:
+        fp = _fpcalc(local_path)
+        if fp:
+            return fp
+        logger.info("fpcalc could not read %s directly — decoding through ffmpeg",
+                    local_path)
+    tmp = tempfile.NamedTemporaryFile(suffix=".wav", delete=False)
+    tmp.close()
     try:
+        cmd = ["ffmpeg", "-v", "error", "-y"]
         if cue_start is not None:
-            tmp = tempfile.NamedTemporaryFile(suffix=".wav", delete=False)
-            tmp.close()
-            tmp_path = tmp.name
-            cmd = ["ffmpeg", "-v", "error", "-y", "-ss", f"{cue_start:.6f}",
-                   "-i", local_path]
-            if cue_end is not None:
-                cmd += ["-t", f"{cue_end - cue_start:.6f}"]
-            cmd += [tmp_path]
+            cmd += ["-ss", f"{cue_start:.6f}"]
+        cmd += ["-i", local_path]
+        if cue_end is not None:
+            cmd += ["-t", f"{cue_end - (cue_start or 0.0):.6f}"]
+        cmd += [tmp.name]
+        try:
             subprocess.run(cmd, capture_output=True, timeout=300, check=True)
-            local_path = tmp_path
-        out = subprocess.run(["fpcalc", "-plain", local_path],
-                             capture_output=True, text=True, timeout=120,
-                             check=True)
-        return out.stdout.strip() or None
-    except Exception as e:
-        logger.warning("fpcalc failed for %s: %s", local_path, e)
-        return None
+        except (subprocess.SubprocessError, OSError) as e:
+            logger.warning("ffmpeg decode for the fingerprint failed for %s: %s",
+                           local_path, e)
+            return None
+        fp = _fpcalc(tmp.name)
+        if fp is None:
+            logger.warning("no fingerprint for %s: fpcalc produced nothing", local_path)
+        return fp
     finally:
-        if tmp_path is not None:
-            os.unlink(tmp_path)
+        os.unlink(tmp.name)
 
 
 def get_or_create_local(db: Session, track_id, media_file_id: int,
@@ -149,10 +162,11 @@ def get_or_create_local(db: Session, track_id, media_file_id: int,
     """analysis_sources.id for a local analysis-source file, fingerprinting it
     on first sight. duration_seconds is the scan-known material duration
     (media_files.duration_seconds) — part of the signed material declaration.
-    cue_start/cue_end bound a CUE image slice so its hashes address the
-    track's material, not the whole disc. Returns None when the file can't be
-    decoded (the analysis row then saves unlinked and the staleness predicate
-    retries next run)."""
+    cue_start/cue_end bound a CUE image slice so its fingerprint addresses the
+    track's material, not the whole disc. None when the file yields no
+    fingerprint: the caller saves nothing (an analysis with no address could
+    neither sign nor travel) and the pending predicate retries next run, as
+    for any file that fails to decode."""
     sid = db.execute(sa_text(
         "SELECT id FROM analysis_sources "
         "WHERE track_id = :tid AND media_file_id = :mfid "
@@ -161,17 +175,14 @@ def get_or_create_local(db: Session, track_id, media_file_id: int,
     if sid is not None:
         return sid
 
-    local_path = settings.translate_to_local_path(file_path)
-    try:
-        ph = pcm_hash_file(local_path, cue_start, cue_end)
-    except Exception as e:
-        logger.warning("provenance decode failed for %s: %s", local_path, e)
+    fp = chromaprint_file(settings.translate_to_local_path(file_path),
+                          cue_start, cue_end)
+    if fp is None:
         return None
-    fp = chromaprint_file(local_path, cue_start, cue_end)
-
+    # An own-file registration ranks above every row, so the upsert always
+    # returns the id.
     return db.execute(_UPSERT_SQL, {
-        "tid": str(track_id), "pid": None, "mfid": media_file_id,
-        "ph": ph, "fp": fp,
+        "tid": str(track_id), "pid": None, "mfid": media_file_id, "fp": fp,
         "dur": int(round(float(duration_seconds))) if duration_seconds else None,
         "sr": sample_rate, "bd": bit_depth, "ll": is_lossless,
     }).scalar()
@@ -179,35 +190,37 @@ def get_or_create_local(db: Session, track_id, media_file_id: int,
 
 def create_stream_source(db: Session, track_id, audio_bytes: bytes,
                          provider_id: str, is_lossless: bool) -> Optional[int]:
-    """analysis_sources.id for streamed provider audio held in memory.
-    provider_id is the serving provider's manifest id — registered in
-    stream_providers at start, which is what the row's FK holds it to."""
+    """analysis_sources.id for streamed provider audio held in memory. None
+    when the bytes yield no fingerprint, or when the same material is already
+    registered here at a higher rank (the node's own file, or a lossless
+    stream over a lossy one) — the stream then has nothing to add and the
+    caller skips the analysis. provider_id is the serving provider's manifest
+    id — registered in stream_providers at start, which is what the row's FK
+    holds it to."""
     tmp = tempfile.NamedTemporaryFile(suffix=".audio", delete=False)
     try:
         tmp.write(audio_bytes)
         tmp.close()
-        ph = pcm_hash_file(tmp.name)
         fp = chromaprint_file(tmp.name)
-        sample_rate, bit_depth, duration = _probe_audio(tmp.name)
-    except Exception as e:
-        logger.warning("stream provenance failed for track %s (%s): %s",
-                       track_id, provider_id, e)
-        return None
+        if fp is None:
+            return None
+        try:
+            sample_rate, bit_depth, duration = _probe_audio(tmp.name)
+        except (subprocess.SubprocessError, OSError, ValueError, LookupError) as e:
+            logger.warning("stream provenance failed for track %s (%s): %s",
+                           track_id, provider_id, e)
+            return None
     finally:
         os.unlink(tmp.name)
 
     sid = db.execute(_UPSERT_SQL, {
-        "tid": str(track_id), "pid": provider_id, "mfid": None,
-        "ph": ph, "fp": fp, "dur": duration,
-        "sr": sample_rate, "bd": bit_depth, "ll": is_lossless,
+        "tid": str(track_id), "pid": provider_id, "mfid": None, "fp": fp,
+        "dur": duration, "sr": sample_rate, "bd": bit_depth, "ll": is_lossless,
     }).scalar()
     if sid is None:
-        # The upsert's anti-downgrade WHERE skipped the update: these exact
-        # bytes are already registered as the node's OWN FILE — reuse that row.
-        sid = db.execute(sa_text(
-            "SELECT id FROM analysis_sources "
-            "WHERE track_id = :tid AND pcm_hash = :ph"),
-            {"tid": str(track_id), "ph": ph}).scalar()
+        logger.info("stream provenance for track %s (%s): the material is already "
+                    "registered first-hand at a higher rank — nothing to add",
+                    track_id, provider_id)
     return sid
 
 

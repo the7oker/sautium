@@ -783,7 +783,7 @@ class SyncClient:
                 try:
                     payload = rs.segment_payload(
                         s.get("author_pubkey") or "", item["track_uuid"],
-                        prov.get("pcm_hash") or "", prov.get("chromaprint"),
+                        prov.get("chromaprint"),
                         prov.get("duration_seconds"),
                         item.get("model_uuid") or "", s["i"],
                         rs.vector_hash(raw),
@@ -896,42 +896,41 @@ class SyncClient:
     @staticmethod
     def _upsert_analysis_sources(cur, items: list[dict]) -> dict:
         """Upsert the distinct provenance rows carried by analysis items and
-        return {(track_uuid, pcm_hash): analysis_sources.id}. media_file_id is
-        always NULL and imported=true — the sender's material is not ours, so
-        these sources are never signable here (sign_audio excludes imported).
+        return {(track_uuid, chromaprint): analysis_sources.id}. media_file_id
+        is always NULL and imported=true — the sender's material is not ours,
+        so these sources are never signable here (sign_audio excludes
+        imported).
 
         `provider_id` stays NULL for imported rows, and honestly so: the wire
         does not say whether the author analysed a file or a stream (see
         _provenance_item), and the column exists only to rank OUR OWN
-        analysis. Local knowledge always wins on conflict; only missing
-        chromaprint/duration are filled in."""
+        analysis. Local knowledge always wins on conflict; only a missing
+        duration is filled in. Every item here passed its seal check, so the
+        fingerprint is in the alphabet the row key's decode() expects."""
         prov = {}
         for item in items:
             p = item.get("provenance")
-            if p and p.get("pcm_hash"):
-                prov[(item["track_uuid"], p["pcm_hash"])] = p
+            if p and p.get("chromaprint"):
+                prov[(item["track_uuid"], p["chromaprint"])] = p
         if not prov:
             return {}
         values = [
-            (tid, p["pcm_hash"], p.get("chromaprint"),
-             p.get("duration_seconds"),
+            (tid, p["chromaprint"], p.get("duration_seconds"),
              p.get("grid_version", 1), p.get("is_lossless"))
             for (tid, _), p in prov.items()
         ]
         rows = psycopg2.extras.execute_values(
             cur,
             """INSERT INTO analysis_sources
-               (track_id, pcm_hash, chromaprint, duration_seconds,
+               (track_id, chromaprint, duration_seconds,
                 grid_version, is_lossless, imported)
                VALUES %s
-               ON CONFLICT (track_id, pcm_hash) DO UPDATE SET
-                   chromaprint = COALESCE(analysis_sources.chromaprint,
-                                          EXCLUDED.chromaprint),
+               ON CONFLICT (track_id, chromaprint_key) DO UPDATE SET
                    duration_seconds = COALESCE(analysis_sources.duration_seconds,
                                                EXCLUDED.duration_seconds)
-               RETURNING id, track_id::text, pcm_hash""",
+               RETURNING id, track_id::text, chromaprint""",
             values,
-            template="(%s::uuid, %s, %s, %s, %s, %s, true)",
+            template="(%s::uuid, %s, %s, %s, %s, true)",
             fetch=True,
         )
         return {(r[1], r[2]): r[0] for r in rows}
@@ -954,9 +953,9 @@ class SyncClient:
     @staticmethod
     def _source_id(source_map: dict, item: dict):
         p = item.get("provenance")
-        if not p or not p.get("pcm_hash"):
+        if not p or not p.get("chromaprint"):
             return None
-        return source_map.get((item["track_uuid"], p["pcm_hash"]))
+        return source_map.get((item["track_uuid"], p["chromaprint"]))
 
     def _import_embeddings(self, conn, items: list[dict]) -> int:
         with conn.cursor() as cur:
@@ -1042,7 +1041,7 @@ class SyncClient:
             try:
                 payload = rs.features_payload(
                     item.get("author_pubkey") or "", item["track_uuid"],
-                    prov.get("pcm_hash") or "", prov.get("chromaprint"),
+                    prov.get("chromaprint"),
                     prov.get("duration_seconds"),
                     item.get("analysis_version", 1),
                     rs.blake2b_hex(rs.canonical_features_blob(item)))
@@ -1067,7 +1066,8 @@ class SyncClient:
         with conn.cursor() as cur:
             # Provenance registers for ALL items; the data write never
             # replaces a SIGNED row (overwriting would strip my seal via the
-            # guard trigger) nor my own first-hand local analysis.
+            # guard trigger) nor my own first-hand analysis — file or stream,
+            # the same line the segments importer draws.
             source_map = self._upsert_analysis_sources(cur, items)
             items = self._drop_protected(
                 cur, items,
@@ -1075,7 +1075,7 @@ class SyncClient:
                    LEFT JOIN analysis_sources s ON s.id = a.analysis_source_id
                    WHERE a.track_id = ANY(%s::uuid[])
                      AND (a.signature IS NOT NULL
-                          OR (s.provider_id IS NULL AND NOT s.imported))""",
+                          OR (s.id IS NOT NULL AND NOT s.imported))""",
                 "audio_features")
             if not items:
                 return 0

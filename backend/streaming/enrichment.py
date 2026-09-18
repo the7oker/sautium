@@ -8,12 +8,13 @@ AST/PaSST instruments), keyed to the phantom's track_id.
 
 Provenance: the streamed bytes are content-addressed exactly like a local file
 (analysis_sources row with provider_id = the serving provider's manifest id,
-media_file_id NULL, pcm_hash + chromaprint of the fetched audio) — this is
-what makes a stream analysis signable against the STREAM's material without
+media_file_id NULL, the chromaprint of the fetched audio) — this is what
+makes a stream analysis signable against the STREAM's material without
 claiming possession of any local rip (tier 3 in P2P-SYNC-INTEGRITY.md). The
 material rank (own file > lossless stream > lossy stream) means an owned rip
 later OVERWRITES a preview analysis, and a preview never overwrites a
-real-file one.
+real-file one. No fingerprint (fpcalc has a floor of a few seconds; under one
+grid window nothing is analysed at all) means no address and no analysis.
 
 GATE: only tracks with a known catalog length (TrackQuery.duration / .lengths,
 i.e. local album_tracks.length_ms) are enriched. Without it the provider match
@@ -31,6 +32,7 @@ from __future__ import annotations
 
 import io
 import logging
+import shutil
 import threading
 from concurrent.futures import ThreadPoolExecutor
 from typing import Optional
@@ -58,6 +60,12 @@ class PreviewEnricher:
         self._lock = threading.Lock()
         self._embedder = None
         self._analyzer = None
+        # Streamed audio with no fingerprint has no address and is never
+        # saved; without fpcalc that is every stream — say so once and accept
+        # nothing, rather than decode and drop every track.
+        self._fpcalc = shutil.which("fpcalc") is not None
+        if not self._fpcalc:
+            logger.error("preview enrichment disabled: fpcalc (Chromaprint) is not on PATH")
         # Trickle mode (CPU-only / lite profile — §2.7 HARDWARE-TIERS): the
         # per-track pipeline runs near listening pace there, so backlog is
         # bounded (1 running + 1 queued) and excess is DROPPED — enrichment
@@ -77,16 +85,16 @@ class PreviewEnricher:
     def submit(self, track_id: Optional[str], flac: Optional[bytes],
                lengths: tuple, lossless: bool, provider_id: str,
                excerpt: bool = False) -> None:
-        """Queue a previewed track for enrichment. No-ops without a track_id,
-        catalog lengths (unverified match — see GATE) or audio, for an
-        excerpt, or if already queued. In trickle mode a full backlog drops
+        """Queue a previewed track for enrichment. No-ops without fpcalc, a
+        track_id, catalog lengths (unverified match — see GATE) or audio, for
+        an excerpt, or if already queued. In trickle mode a full backlog drops
         the track instead of queueing. ``lossless`` is the ACTUAL fetch
         quality (lossless provider fetch=True, degraded tiers/YouTube=False);
         ``provider_id`` is the serving provider's manifest id — the row's
         provenance. An ``excerpt`` (a 30 s clip) is refused here,
         before any decode or provenance row: it is not the recording, and
         every first-hand stream analysis is signed and synced."""
-        if not track_id or not lengths or not flac:
+        if not self._fpcalc or not track_id or not lengths or not flac:
             return
         if excerpt:
             logger.debug("preview enrich skip %s: excerpt, not the recording", track_id)
@@ -173,20 +181,33 @@ class PreviewEnricher:
                 track_id, actual, "/".join(f"{w:.0f}s" for w in lengths))
             return
 
+        import provenance
+
+        if actual < provenance.MIN_MATERIAL_SECONDS:
+            logger.info("preview enrich SKIP %s: %.0fs of audio is under one grid window",
+                        track_id, actual)
+            return
+
+        # Content-address the STREAMED bytes before any model work: no
+        # fingerprint, or the material already registered here at a higher
+        # rank, means nothing to save — and nothing to spend GPU on. The row
+        # commits on its own; an analysis that then fails leaves a source
+        # nothing links to, which the next registration reuses.
+        with SessionLocal() as db:
+            src_id = provenance.create_stream_source(
+                db, track_id, flac, provider_id, lossless)
+            if src_id is None:
+                db.rollback()
+                return
+            db.commit()
+
         embedder, analyzer = self._models()
         # Full-track methodology, same as owned scans: amplitude block +
         # windowed instruments over the whole streamed audio, bpm/key from
         # its middle (analyze_from_array slices that itself).
         feats = analyzer.analyze_from_array(audio, sr=48000)   # dict | None
 
-        import provenance
-
         with SessionLocal() as db:
-            # Content-address the STREAMED bytes before saving anything they
-            # produced; a fingerprint failure saves unlinked (src_id NULL) and
-            # the owned-upgrade predicate eventually replaces the rows.
-            src_id = provenance.create_stream_source(
-                db, track_id, flac, provider_id, lossless)
             model = embedder._get_or_create_embedding_model(db)
             # Balanced-grid segments from the full streamed audio; the track
             # vector is their normalized mean. _persist_analysis decides the

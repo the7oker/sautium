@@ -1,6 +1,6 @@
-"""Import the cold-start seed bundle (backend/seed/seed_v1.json.gz).
+"""Import the cold-start seed bundle (backend/seed/seed_v2.json.gz).
 
-Runs once per node from db_migrate.apply_pending, keyed by the `seed_v1`
+Runs once per node from db_migrate.apply_pending, keyed by the `seed_v2`
 marker row — the marker is written only after a COMPLETE import, so a
 partial landing (killed boot, transient DB error) retries on the next
 start. Every statement is idempotent: structural rows land with
@@ -28,7 +28,7 @@ from uuid_utils import IDENTITY_RULE
 
 logger = logging.getLogger(__name__)
 
-BUNDLE_PATH = Path(__file__).resolve().parent / "seed" / "seed_v1.json.gz"
+BUNDLE_PATH = Path(__file__).resolve().parent / "seed" / "seed_v2.json.gz"
 
 _ENRICHMENT_CATEGORIES = ("artist_bios", "artist_tags", "similar_artists")
 _ANALYSIS_CATEGORIES = ("segments", "audio_features", "track_mbids")

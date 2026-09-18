@@ -84,10 +84,24 @@ implementation details live in the code, DB and git history.
   positions are track-relative everywhere and the tracker never learned CUE
   exists. Sheet defects are tolerated: FILE extension/casing lies resolve
   against the real dir listing, encodings fall back utf-8-sig→cp1251→cp1252,
-  multi-FILE cues (already-split rips) are skipped whole. pcm_hash/chromaprint
-  are computed per-slice, so a slice's content address equals a properly split
+  multi-FILE cues (already-split rips) are skipped whole. The chromaprint is
+  computed per-slice, so a slice's content address equals a properly split
   rip of the same disc — cross-rip P2P anchors converge; grid stays v1
   (windows are material-relative).
+- **The chromaprint is the only content address (2026-09-18)**. Until then
+  `analysis_sources` carried two anchors: a BLAKE2b hash of the decoded PCM
+  — the key, and a possession proof of exact bytes that changed with every
+  decoder build and every lossy decode, so two nodes analysing the same
+  stream addressed two materials — and the AcoustID fingerprint beside it.
+  One anchor, and one that converges: the fingerprint is a public recording
+  identity any decode reproduces. Its ~3 KB of text is too long for a btree
+  row, so the key is a stored generated digest (`chromaprint_key`). The
+  audio record payload went to v3 (enrichment records stay v2 — no material
+  hash in them, so those seals survive); every audio seal was re-made,
+  foreign audio analysis deleted (its authors' v3 seals return over the
+  network), the seed bundle re-exported as v2. Material under one grid
+  window (10 s) is not analysed at all: fpcalc yields nothing for a few
+  seconds of audio, and no address means no analysis worth saving.
 - **A hardware profile governs compute, never retention (2026-08-27)**. The
   lite tier used to auto-delete the phantom album/track layer after three
   consecutive lite boots (`hardware.lite_streak`, shipped 2026-07-10 as a

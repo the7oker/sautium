@@ -464,15 +464,19 @@ CREATE TABLE IF NOT EXISTS stream_providers (
 );
 
 -- Provenance of one audio-analysis pass: the physical source material (local
--- file or streamed provider audio), content-addressed by pcm_hash (BLAKE2b of
--- the NATIVELY-decoded PCM — source rate/channels, pre-resample; deterministic
--- for lossless across ffmpeg builds) + chromaprint (AcoustID fp — the robust
--- cross-rip recording anchor, bound INTO record signatures from the start).
--- Registered AT ANALYSIS TIME by the scanner / stream enricher; never
--- recomputed after the fact. Content-keyed on (track_id, pcm_hash): unchanged
--- material reuses its row, a re-rip mints a new one. media_file_id survives
--- file deletion as NULL — the row remains the durable statement of WHAT was
--- analyzed.
+-- file or streamed provider audio), content-addressed by the AcoustID
+-- chromaprint of what was decoded (fpcalc — a public recording identity that
+-- any node's decode of the material reproduces; a BLAKE2b PCM hash stood
+-- beside it until 2026-09-18 and changed with every decoder build and lossy
+-- decode). Registered AT ANALYSIS TIME by the analysis passes / stream
+-- enricher; never recomputed after the fact. Keyed on (track_id,
+-- chromaprint_key), the database's digest of the ~3 KB fingerprint (too long
+-- for a btree row): unchanged material reuses its row, a different master
+-- mints a new one, two rips of one master collapse. The row describes the
+-- best material this node registered under the address (own file > lossless
+-- stream > lossy stream); media_file_id survives file deletion as NULL — the
+-- row remains the durable statement of WHAT was analyzed. No fingerprint = no
+-- row = no analysis saved.
 CREATE TABLE IF NOT EXISTS analysis_sources (
     id            SERIAL PRIMARY KEY,
     track_id      UUID NOT NULL REFERENCES tracks(id) ON UPDATE CASCADE ON DELETE CASCADE,
@@ -489,8 +493,14 @@ CREATE TABLE IF NOT EXISTS analysis_sources (
                                           -- (overwrite ranking by material:
                                           -- own file > lossless stream > lossy).
     media_file_id INTEGER REFERENCES media_files(id) ON DELETE SET NULL,
-    pcm_hash      CHAR(64) NOT NULL,
-    chromaprint   TEXT,                   -- NULL only if fpcalc failed
+    chromaprint   TEXT NOT NULL,
+    chromaprint_key BYTEA GENERATED ALWAYS AS (sha256(decode(chromaprint, 'escape'))) STORED,
+                                          -- STORED, explicitly: PG18 defaults
+                                          -- to VIRTUAL, which no index may
+                                          -- cover. The fingerprint alphabet
+                                          -- (record_sig._guard_chromaprint)
+                                          -- has no backslash, so decode(…,
+                                          -- 'escape') is the bytes of the text.
     duration_seconds INTEGER,             -- whole seconds; part of the signed
                                           -- material declaration (cheap
                                           -- no-decode import gate)
@@ -505,7 +515,7 @@ CREATE TABLE IF NOT EXISTS analysis_sources (
     computed_at   TIMESTAMPTZ DEFAULT now(),
     CONSTRAINT chk_asrc_stream_no_file CHECK (provider_id IS NULL OR media_file_id IS NULL),
     CONSTRAINT chk_asrc_imported_anonymous CHECK (NOT (imported AND provider_id IS NOT NULL)),
-    UNIQUE (track_id, pcm_hash)
+    CONSTRAINT uq_asrc_track_chromaprint UNIQUE (track_id, chromaprint_key)
 );
 CREATE INDEX IF NOT EXISTS idx_analysis_sources_media_file ON analysis_sources(media_file_id);
 
@@ -602,7 +612,7 @@ CREATE TABLE IF NOT EXISTS audio_features (
 -- Signable material: every first-hand analysis with a known origin — a local
 -- rip (the per-album signing whitelist was dropped 2026-07-07 — an unsigned
 -- network breaks integrity testing and the sync verify chain) or a stream
--- (tier 3 — signs against the STREAM's pcm_hash, claiming no possession of
+-- (tier 3 — signs against the STREAM's fingerprint, claiming no possession of
 -- any local rip; lossy streams sign too since 2026-09-02, is_lossless rides
 -- in the provenance for ranking).
 -- ============================================================

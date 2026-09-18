@@ -305,6 +305,8 @@ class AudioEmbeddingGenerator:
             media_file.sample_rate, media_file.bit_depth,
             media_file.is_lossless, media_file.duration_seconds,
             media_file.cue_start_seconds, media_file.cue_end_seconds)
+        if src_id is None:
+            return False
         computed = self._compute_segments(audio_full)
         if computed is None:
             return False
@@ -335,6 +337,7 @@ class AudioEmbeddingGenerator:
         """
         import time
 
+        provenance.require_fpcalc()
         stats = {"processed": 0, "success": 0, "failed": 0, "skipped": 0}
         start_time = time.time()
 
@@ -342,9 +345,11 @@ class AudioEmbeddingGenerator:
             embedding_model = self._get_or_create_embedding_model(db)
 
             # Pending = no embedding yet, OR unlinked provenance (legacy rows
-            # and failed fingerprints — re-analysis links them), OR linked to
-            # material other than the current analysis source (source moved to
-            # a better rip, or a stream preview awaiting its owned upgrade).
+            # — re-analysis links them), OR linked to material other than the
+            # current analysis source (source moved to a better rip, or a
+            # stream preview awaiting its owned upgrade). Material under one
+            # grid window is never pending: no fingerprint, no address, no
+            # analysis (provenance.MIN_MATERIAL_SECONDS).
             # Analysis that arrived over P2P (asrc.imported) also matches that
             # third arm — its source has no media_file — but re-deriving it
             # from the owned file is a POLICY, not a repair: first-hand
@@ -365,8 +370,10 @@ class AudioEmbeddingGenerator:
                 LEFT JOIN embeddings e ON e.track_id = t.id
                 LEFT JOIN analysis_sources asrc ON asrc.id = e.analysis_source_id
                 WHERE mf.is_analysis_source = true
+                  AND (mf.duration_seconds IS NULL
+                       OR mf.duration_seconds >= :min_seconds)
             """
-            params = {}
+            params = {"min_seconds": provenance.MIN_MATERIAL_SECONDS}
             if not force:
                 query_sql += """
                   AND (e.id IS NULL
@@ -494,6 +501,11 @@ class AudioEmbeddingGenerator:
                             row.sample_rate, row.bit_depth, row.is_lossless,
                             row.duration_seconds,
                             row.cue_start_seconds, row.cue_end_seconds)
+                        if src_id is None:
+                            stats["failed"] += 1
+                            logger.warning(f"Skipping track {row.track_id}: "
+                                           "no content address (fingerprint)")
+                            continue
                         computed = self._compute_segments(audio)
                         if computed is None:
                             stats["failed"] += 1

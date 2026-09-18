@@ -140,20 +140,23 @@ def _shed_track_seals(db: Session, track_id: str) -> None:
 
 def _move_analysis(db: Session, old: str, new: str) -> None:
     """Re-home the old track's analysis (sources, embeddings + segments,
-    features) onto ``new``, which holds none. A same-pcm_hash source already
-    on the target is the same audio: the moving rows re-point at it and the
-    duplicate source is dropped (UNIQUE (track_id, pcm_hash))."""
+    features) onto ``new``, which holds none. A same-fingerprint source
+    already on the target is the same material: the moving rows re-point at
+    it and the duplicate source is dropped (UNIQUE (track_id,
+    chromaprint_key))."""
     p = {"old": old, "new": new}
     for tbl in ("embeddings", "audio_features"):
         db.execute(text(f"""
             UPDATE {tbl} x SET analysis_source_id = t.id
             FROM analysis_sources o
-            JOIN analysis_sources t ON t.track_id = :new AND t.pcm_hash = o.pcm_hash
+            JOIN analysis_sources t ON t.track_id = :new
+                                   AND t.chromaprint_key = o.chromaprint_key
             WHERE x.analysis_source_id = o.id AND o.track_id = :old"""), p)
     db.execute(text("""
         DELETE FROM analysis_sources o WHERE o.track_id = :old
           AND EXISTS (SELECT 1 FROM analysis_sources t
-                       WHERE t.track_id = :new AND t.pcm_hash = o.pcm_hash)"""), p)
+                       WHERE t.track_id = :new
+                         AND t.chromaprint_key = o.chromaprint_key)"""), p)
     db.execute(text("UPDATE analysis_sources SET track_id = :new WHERE track_id = :old"), p)
     db.execute(text("UPDATE embeddings SET track_id = :new WHERE track_id = :old"), p)
     db.execute(text("UPDATE audio_features SET track_id = :new WHERE track_id = :old"), p)
