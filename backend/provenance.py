@@ -12,10 +12,8 @@ analysis actually saw).
 
 Rows are content-keyed on (track_id, pcm_hash): re-analyzing unchanged
 material reuses the row, a re-rip mints a new one, and byte-identical copies
-in different folders collapse. A same-bytes stream row upgrades to 'local'
-when the material turns out to be owned. (backfill_analysis_sources.py, the
-one-shot pre-M2 pass, carries its own psycopg2 copy of the fingerprint
-helpers — it must run against the pre-cutover schema.)
+in different folders collapse. A same-bytes stream row upgrades to an own-file
+row when the material turns out to be owned.
 """
 
 import hashlib
@@ -33,19 +31,36 @@ from config import settings
 
 logger = logging.getLogger(__name__)
 
-# Overwrite precedence between analysis passes of the same track: a local file
-# beats any stream, a lossless stream beats a lossy one. Rows linked to no
-# source (legacy) rank below everything and are always upgradable.
-ORIGIN_RANK = {"local": 2, "deezer": 1, "youtube": 0}
+# Overwrite precedence between analysis passes of the same track, read from the
+# MATERIAL alone: the node's own file beats any stream, a lossless stream beats
+# a lossy one, an imported (second-hand) source and a record linked to no
+# source at all rank below everything and are always upgradable. Never the
+# provider's brand — the sync ranks peers' sources on is_lossless alone, and
+# this is the same rule. The SQL form expects analysis_sources aliased `s`
+# (LEFT JOINed or not: a missing row ranks -1).
+MATERIAL_RANK_SQL = ("CASE WHEN s.id IS NULL OR s.imported THEN -1 "
+                     "WHEN s.provider_id IS NULL THEN 2 "
+                     "WHEN s.is_lossless THEN 1 ELSE 0 END")
+
+
+def material_rank(provider_id: Optional[str], is_lossless: Optional[bool],
+                  imported: bool = False) -> int:
+    """MATERIAL_RANK_SQL for a pass about to be written (or a row already
+    read): provider_id None = the node's own file."""
+    if imported:
+        return -1
+    if provider_id is None:
+        return 2
+    return 1 if is_lossless else 0
+
 
 _UPSERT_SQL = sa_text("""
     INSERT INTO analysis_sources
-        (track_id, origin, media_file_id, pcm_hash, chromaprint,
+        (track_id, provider_id, media_file_id, pcm_hash, chromaprint,
          duration_seconds, sample_rate, bit_depth, is_lossless)
-    VALUES (:tid, CAST(:origin AS analysis_origin), :mfid, :ph, :fp,
-            :dur, :sr, :bd, :ll)
+    VALUES (:tid, :pid, :mfid, :ph, :fp, :dur, :sr, :bd, :ll)
     ON CONFLICT (track_id, pcm_hash) DO UPDATE
-       SET origin = EXCLUDED.origin,
+       SET provider_id = EXCLUDED.provider_id,
            media_file_id = EXCLUDED.media_file_id,
            chromaprint = COALESCE(analysis_sources.chromaprint,
                                   EXCLUDED.chromaprint),
@@ -55,7 +70,11 @@ _UPSERT_SQL = sa_text("""
            -- the material itself: a previously synced-in row for the same
            -- bytes becomes first-hand (and thus signable)
            imported = false
-    WHERE EXCLUDED.origin = 'local' OR analysis_sources.origin <> 'local'
+    -- an own-file registration upgrades any row; a stream never downgrades a
+    -- first-hand own-file row, but may claim a synced-in one
+    WHERE EXCLUDED.provider_id IS NULL
+       OR analysis_sources.provider_id IS NOT NULL
+       OR analysis_sources.imported
     RETURNING id
 """)
 
@@ -151,7 +170,7 @@ def get_or_create_local(db: Session, track_id, media_file_id: int,
     fp = chromaprint_file(local_path, cue_start, cue_end)
 
     return db.execute(_UPSERT_SQL, {
-        "tid": str(track_id), "origin": "local", "mfid": media_file_id,
+        "tid": str(track_id), "pid": None, "mfid": media_file_id,
         "ph": ph, "fp": fp,
         "dur": int(round(float(duration_seconds))) if duration_seconds else None,
         "sr": sample_rate, "bd": bit_depth, "ll": is_lossless,
@@ -161,13 +180,8 @@ def get_or_create_local(db: Session, track_id, media_file_id: int,
 def create_stream_source(db: Session, track_id, audio_bytes: bytes,
                          provider_id: str, is_lossless: bool) -> Optional[int]:
     """analysis_sources.id for streamed provider audio held in memory.
-    Unknown providers get no provenance (and their analysis stays unlinked)
-    rather than a guessed origin."""
-    if provider_id not in ORIGIN_RANK or provider_id == "local":
-        logger.warning("unknown stream provider %r — no provenance row",
-                       provider_id)
-        return None
-
+    provider_id is the serving provider's manifest id — registered in
+    stream_providers at start, which is what the row's FK holds it to."""
     tmp = tempfile.NamedTemporaryFile(suffix=".audio", delete=False)
     try:
         tmp.write(audio_bytes)
@@ -183,13 +197,13 @@ def create_stream_source(db: Session, track_id, audio_bytes: bytes,
         os.unlink(tmp.name)
 
     sid = db.execute(_UPSERT_SQL, {
-        "tid": str(track_id), "origin": provider_id, "mfid": None,
+        "tid": str(track_id), "pid": provider_id, "mfid": None,
         "ph": ph, "fp": fp, "dur": duration,
         "sr": sample_rate, "bd": bit_depth, "ll": is_lossless,
     }).scalar()
     if sid is None:
         # The upsert's anti-downgrade WHERE skipped the update: these exact
-        # bytes are already registered as a LOCAL source — reuse that row.
+        # bytes are already registered as the node's OWN FILE — reuse that row.
         sid = db.execute(sa_text(
             "SELECT id FROM analysis_sources "
             "WHERE track_id = :tid AND pcm_hash = :ph"),
@@ -218,10 +232,10 @@ def _probe_audio(local_path: str):
     return rate, bits, duration
 
 
-def origin_of(db: Session, analysis_source_id: Optional[int]) -> Optional[str]:
-    """Origin of a linked source; None for unlinked (legacy) rows."""
+def material_rank_of(db: Session, analysis_source_id: Optional[int]) -> Optional[int]:
+    """Material rank of a linked source; None for unlinked (legacy) rows."""
     if analysis_source_id is None:
         return None
     return db.execute(sa_text(
-        "SELECT origin::text FROM analysis_sources WHERE id = :sid"),
+        f"SELECT {MATERIAL_RANK_SQL} FROM analysis_sources s WHERE s.id = :sid"),
         {"sid": analysis_source_id}).scalar()

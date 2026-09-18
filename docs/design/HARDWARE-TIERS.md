@@ -187,7 +187,7 @@ Architecture sketch — an output-backend abstraction:
 ### 2.7 Stream enrichment is network contribution — do not shed it first
 
 When a node streams a phantom track, the post-buffer enrichment (CLAP + librosa
-+ AST/PaSST on the streamed bytes, tier-3 signed, `origin='deezer'/'youtube'`)
++ AST/PaSST on the streamed bytes, tier-3 signed, `provider_id` = the provider's manifest id)
 is how the network gains analysis for tracks **nobody owns**. Unlike library
 analysis — which a weak node can import from any peer who owns the same files —
 streamed-phantom analysis is produced exactly when someone cares enough to play

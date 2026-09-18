@@ -571,10 +571,10 @@ def _provenance_item(r: dict) -> Optional[dict]:
     rows not linked to an analysis_sources row (legacy / failed fingerprints).
 
     Carries the material declaration the signature commits to, and nothing
-    that describes the author's copy of it. `origin`, `sample_rate` and
+    that describes the author's copy of it. `provider_id`, `sample_rate` and
     `bit_depth` are deliberately NOT sent: a signature already says "I had
-    this audio", and those three would turn it into "I hold this FILE" —
-    origin says so outright, and a 96kHz/24-bit source says it just as
+    this audio", and those three would turn it into "I hold this FILE" — a
+    NULL provider_id says so outright, and a 96kHz/24-bit source says it just as
     plainly, since no streaming tier serves hi-res. Withholding them leaves
     a local rip and a lossless stream indistinguishable on the wire, which
     is the same possession-privacy line the three-tier signing policy draws.

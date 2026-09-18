@@ -611,11 +611,22 @@ class Cover(Base):
 # Embeddings & Analysis (linked to tracks, not files)
 # ───────────────────────────────────────────────────────────────────────────
 
-AnalysisOriginEnum = ENUM(
-    "local", "deezer", "youtube",
-    name="analysis_origin",
-    create_type=False,
-)
+class StreamProvider(Base):
+    """Persisted snapshot of a registered stream provider's manifest (core and
+    bring-your-own alike), upserted by streaming.service at every start.
+    analysis_sources rows reference it, so an analysis outlives its plugin
+    with the provider's name and tier intact. Capabilities only: the actual
+    quality of one fetch lives on the analysis_sources row."""
+    __tablename__ = "stream_providers"
+
+    id = Column(String(32), primary_key=True)
+    name = Column(Text, nullable=False)
+    lossless = Column(Boolean, nullable=False)
+    excerpt = Column(Boolean, nullable=False, server_default="false")
+    demo_limited = Column(Boolean, nullable=False, server_default="false")
+    version = Column(Text)
+    registered_at = Column(DateTime(timezone=True), nullable=False, server_default=func.now())
+    last_seen_at = Column(DateTime(timezone=True), nullable=False, server_default=func.now())
 
 
 class AnalysisSource(Base):
@@ -628,7 +639,9 @@ class AnalysisSource(Base):
 
     id = Column(Integer, primary_key=True)
     track_id = Column(UUID(as_uuid=True), ForeignKey("tracks.id", ondelete="CASCADE", onupdate="CASCADE"), nullable=False)
-    origin = Column(AnalysisOriginEnum, nullable=False)
+    # The stream provider that served the material; NULL for the node's own
+    # file and for rows imported over P2P (the wire withholds file-vs-stream).
+    provider_id = Column(String(32), ForeignKey("stream_providers.id"))
     media_file_id = Column(Integer, ForeignKey("media_files.id", ondelete="SET NULL"))
     pcm_hash = Column(CHAR(64), nullable=False)
     chromaprint = Column(Text)
@@ -649,12 +662,14 @@ class AnalysisSource(Base):
     __table_args__ = (
         UniqueConstraint("track_id", "pcm_hash"),
         Index("idx_analysis_sources_media_file", "media_file_id"),
-        CheckConstraint("origin = 'local' OR media_file_id IS NULL",
+        CheckConstraint("provider_id IS NULL OR media_file_id IS NULL",
                         name="chk_asrc_stream_no_file"),
+        CheckConstraint("NOT (imported AND provider_id IS NOT NULL)",
+                        name="chk_asrc_imported_anonymous"),
     )
 
     def __repr__(self):
-        return f"<AnalysisSource(id={self.id}, track_id={self.track_id}, origin={self.origin})>"
+        return f"<AnalysisSource(id={self.id}, track_id={self.track_id}, provider_id={self.provider_id})>"
 
 
 class Embedding(Base):

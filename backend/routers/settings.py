@@ -1174,7 +1174,9 @@ def _notices_state() -> Dict[str, Any]:
     for pid, health in sorted(streaming_service.provider_health.items()):
         items.append({"key": f"streaming.silent.{pid}", "kind": "warning",
                       "since": health["silent_since"], "until": None,
-                      "data": {"provider": pid, "reason": health["reason"]}})
+                      "data": {"provider": pid,
+                               "name": streaming_service.provider_name(pid),
+                               "reason": health["reason"]}})
     seen = _read("notice.seen") or {}
     for item in items:
         item["seen"] = seen.get(item["key"]) == item["since"]

@@ -9756,7 +9756,6 @@
     title: 'Media tools missing',
     text: `${escapeHtml(((n.data && n.data.tools) || []).join(', '))} not found — audio analysis and fingerprinting are skipped until installed.`,
   });
-  const PROVIDER_NAMES = { deezer: 'Deezer', deezer_preview: 'Deezer', youtube: 'YouTube' };
   function noticeCopy(n) {
     const fn = NOTICE_COPY[n.key];
     if (fn) return fn(n);
@@ -9765,8 +9764,7 @@
                text: `Rate-limited — resumes ${fmtUntil(n.until)}.` };
     }
     if (n.key.startsWith('streaming.silent.')) {
-      const pid = (n.data && n.data.provider) || n.key.slice(17);
-      const name = PROVIDER_NAMES[pid] || pid;
+      const name = (n.data && (n.data.name || n.data.provider)) || n.key.slice(17);
       const reason = (n.data && n.data.reason) ? ` (${escapeHtml(n.data.reason)})` : '';
       return { title: `${escapeHtml(name)} is not answering`,
                text: `Streamed tracks fall back to another provider or wait${reason}; your own files are unaffected.` };

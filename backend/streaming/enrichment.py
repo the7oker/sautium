@@ -7,12 +7,13 @@ analysis the scanner runs on owned files (CLAP 512-d embedding + librosa DSP +
 AST/PaSST instruments), keyed to the phantom's track_id.
 
 Provenance: the streamed bytes are content-addressed exactly like a local file
-(analysis_sources row with origin='deezer'|'youtube', media_file_id NULL,
-pcm_hash + chromaprint of the fetched audio) — this is what makes a
-lossless-stream analysis signable against the STREAM's material without
+(analysis_sources row with provider_id = the serving provider's manifest id,
+media_file_id NULL, pcm_hash + chromaprint of the fetched audio) — this is
+what makes a stream analysis signable against the STREAM's material without
 claiming possession of any local rip (tier 3 in P2P-SYNC-INTEGRITY.md). The
-origin rank (local > deezer > youtube) means an owned rip later OVERWRITES a
-preview analysis, and a preview never overwrites a real-file one.
+material rank (own file > lossless stream > lossy stream) means an owned rip
+later OVERWRITES a preview analysis, and a preview never overwrites a
+real-file one.
 
 GATE: only tracks with a known catalog length (TrackQuery.duration / .lengths,
 i.e. local album_tracks.length_ms) are enriched. Without it the provider match
@@ -74,15 +75,15 @@ class PreviewEnricher:
         self._idle_timer: Optional[threading.Timer] = None
 
     def submit(self, track_id: Optional[str], flac: Optional[bytes],
-               lengths: tuple, lossless: bool = False,
-               provider_id: Optional[str] = None, excerpt: bool = False) -> None:
+               lengths: tuple, lossless: bool, provider_id: str,
+               excerpt: bool = False) -> None:
         """Queue a previewed track for enrichment. No-ops without a track_id,
         catalog lengths (unverified match — see GATE) or audio, for an
         excerpt, or if already queued. In trickle mode a full backlog drops
         the track instead of queueing. ``lossless`` is the ACTUAL fetch
         quality (lossless provider fetch=True, degraded tiers/YouTube=False);
-        ``provider_id`` (manifest id, 'deezer'|'youtube') becomes the
-        provenance origin. An ``excerpt`` (a 30 s clip) is refused here,
+        ``provider_id`` is the serving provider's manifest id — the row's
+        provenance. An ``excerpt`` (a 30 s clip) is refused here,
         before any decode or provenance row: it is not the recording, and
         every first-hand stream analysis is signed and synced."""
         if not track_id or not lengths or not flac:
@@ -107,7 +108,7 @@ class PreviewEnricher:
 
     # ---- worker ----------------------------------------------------------
     def _run(self, track_id: str, flac: bytes, lengths: tuple, lossless: bool,
-             provider_id: Optional[str]) -> None:
+             provider_id: str) -> None:
         try:
             self._enrich(track_id, flac, lengths, lossless, provider_id)
         except Exception:
@@ -138,7 +139,7 @@ class PreviewEnricher:
             logger.info("preview enrich idle — instrument models released")
 
     def _enrich(self, track_id: str, flac: bytes, lengths: tuple,
-                lossless: bool, provider_id: Optional[str]) -> None:
+                lossless: bool, provider_id: str) -> None:
         import librosa
         from config import settings
         from database import SessionLocal
@@ -189,7 +190,7 @@ class PreviewEnricher:
             model = embedder._get_or_create_embedding_model(db)
             # Balanced-grid segments from the full streamed audio; the track
             # vector is their normalized mean. _persist_analysis decides the
-            # overwrite by origin rank BEFORE writing, so a preview never
+            # overwrite by material rank BEFORE writing, so a preview never
             # touches a real-file analysis (segments included).
             saved = False
             computed = embedder._compute_segments(audio)
@@ -197,9 +198,10 @@ class PreviewEnricher:
                 idxs, vecs, portrait = computed
                 saved = embedder._persist_analysis(
                     db, track_id, model, idxs, vecs, portrait, src_id,
-                    origin=provider_id or "", is_lossless=lossless)
+                    provider_id=provider_id, is_lossless=lossless)
             if feats:
-                self._save_features(db, track_id, feats, src_id, provider_id)
+                self._save_features(db, track_id, feats, src_id,
+                                    provider_id, lossless)
             db.commit()
 
         if saved or feats:
@@ -212,7 +214,7 @@ class PreviewEnricher:
 
     @staticmethod
     def _save_features(db, track_id: str, feats: dict, src_id,
-                       provider_id: Optional[str]) -> None:
+                       provider_id: str, lossless: bool) -> None:
         import provenance
         from audio_analysis import ANALYSIS_VERSION
         from models import AudioFeature
@@ -220,10 +222,9 @@ class PreviewEnricher:
         existing = db.query(AudioFeature).filter(
             AudioFeature.track_id == track_id).first()
         if existing and existing.analysis_source_id is not None:
-            old_origin = provenance.origin_of(db, existing.analysis_source_id)
-            if (provenance.ORIGIN_RANK.get(old_origin, -1)
-                    > provenance.ORIGIN_RANK.get(provider_id, -1)):
-                return   # never let a preview overwrite a better-origin analysis
+            old_rank = provenance.material_rank_of(db, existing.analysis_source_id)
+            if old_rank > provenance.material_rank(provider_id, lossless):
+                return   # never let a preview overwrite a better-material analysis
 
         cols = ("bpm", "key", "mode", "key_confidence", "energy", "energy_db",
                 "brightness", "dynamic_range_db", "zero_crossing_rate",

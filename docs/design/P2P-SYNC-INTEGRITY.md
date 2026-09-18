@@ -5,7 +5,8 @@
 > `/timestamp` notary; **provenance refactor 2026-07-06** — content-address
 > captured AT ANALYSIS TIME into `analysis_sources` (one row per
 > track × physical material: pcm_hash + chromaprint + duration_seconds +
-> origin local/deezer/youtube; whole owned library backfilled), records
+> provider_id, NULL = own file — an origin enum until 2026-09-18; whole
+> owned library backfilled), records
 > link via `analysis_source_id`, segments re-keyed onto `embeddings(id)`
 > so segments/mean/provenance can never diverge; seal-guard DB triggers
 > (payload change without new signature strips the seal — no writer can

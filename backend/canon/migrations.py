@@ -15,6 +15,7 @@ from sqlalchemy.orm import Session
 
 from uuid_utils import (artist_uuid, track_uuid, album_uuid, genre_uuid, tag_uuid,
                         gear_brand_uuid, gear_model_uuid, gear_caveat_uuid, gear_pair_uuid)
+from provenance import MATERIAL_RANK_SQL
 from canon.identity import (
     _SEAL_NULL, _clean_artist_name, _filter_parts, _ensure_artist,
     _update_track_uuid, _update_album_uuid, _merge_album_variants,
@@ -781,11 +782,9 @@ def _renormalize_tracks(db: Session, dry_run: bool) -> Dict:
             return stats
 
         def score(tid):
-            return tuple(db.execute(text("""
+            return tuple(db.execute(text(f"""
                 SELECT (SELECT count(*) FROM media_files WHERE track_id = :t),
-                       (SELECT coalesce(max(CASE s.origin::text WHEN 'local' THEN 2
-                                            WHEN 'deezer' THEN 1 WHEN 'youtube' THEN 0
-                                            ELSE -1 END), -2)
+                       (SELECT coalesce(max({MATERIAL_RANK_SQL}), -2)
                           FROM embeddings e LEFT JOIN analysis_sources s ON s.id = e.analysis_source_id
                          WHERE e.track_id = :t),
                        (SELECT count(*) FROM listening_history WHERE track_id = :t),

@@ -66,6 +66,7 @@ def init(settings) -> bool:
     n = load_external_providers(_registry, providers_dir)
     if n:
         logger.info("loaded %d external stream provider(s) from %s", n, providers_dir)
+    _persist_registry(_registry)
 
     _proxy = MediaProxy(
         port=settings.media_proxy_port,
@@ -114,7 +115,7 @@ def init(settings) -> bool:
                 e.audio.data,
                 attested_lengths(e.query),
                 e.audio.lossless,   # ACTUAL fetch quality (may be a degraded tier)
-                e.provider.manifest.id if e.provider else None,  # provenance origin
+                e.provider.manifest.id,  # the row's provenance (stream_providers)
                 excerpt=e.audio.excerpt,
             )
             _lyrics_enricher.submit(e.query)
@@ -233,6 +234,38 @@ def get_proxy() -> Optional[MediaProxy]:
 # is silent from that pass until one where it answers. Written by the
 # resolve waterfall (routers/player.py), read by routers/settings.
 provider_health: dict = {}          # id -> {"silent_since": iso, "reason": str}
+
+
+def _persist_registry(registry: ProviderRegistry) -> None:
+    """Upsert every registered manifest into stream_providers — the persisted
+    snapshot analysis_sources.provider_id references, so a row outlives its
+    plugin with the provider's name and tier intact. Capabilities only: the
+    actual quality of one fetch lives on the analysis_sources row."""
+    from db_pool import db_execute
+    manifests = [p.manifest for p in registry.enabled()]
+    if not manifests:
+        return
+    params = []
+    for m in manifests:
+        params += [m.id, m.name, m.lossless, m.excerpt, m.demo_limited, m.version]
+    db_execute(
+        "INSERT INTO stream_providers (id, name, lossless, excerpt, demo_limited, version) "
+        "VALUES " + ", ".join(["(%s, %s, %s, %s, %s, %s)"] * len(manifests)) + " "
+        "ON CONFLICT (id) DO UPDATE SET name = EXCLUDED.name, "
+        "lossless = EXCLUDED.lossless, excerpt = EXCLUDED.excerpt, "
+        "demo_limited = EXCLUDED.demo_limited, version = EXCLUDED.version, "
+        "last_seen_at = now()",
+        params)
+
+
+def provider_name(key: str) -> str:
+    """Display name behind a provider id or a health key (a shared upstream
+    reports under its cooldown_source): the manifest name of the provider it
+    names, else the key itself."""
+    for p in (_registry.enabled() if _registry is not None else []):
+        if p.manifest.id == key or health_key(p) == key:
+            return p.manifest.name
+    return key
 
 
 def health_key(provider) -> str:

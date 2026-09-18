@@ -14,6 +14,7 @@ from sqlalchemy import text
 from sqlalchemy.orm import Session
 
 from uuid_utils import artist_uuid, track_uuid, album_uuid
+from provenance import MATERIAL_RANK_SQL
 
 logger = logging.getLogger(__name__)
 
@@ -103,18 +104,13 @@ def elect_analysis_source(db: Session, track_id) -> None:
     """), {"tid": track_id})
 
 
-# Mirrors provenance.ORIGIN_RANK: a local rip beats a lossless stream beats a
-# lossy one; an unlinked (legacy) analysis ranks below all of them.
-_ORIGIN_RANK_SQL = ("CASE s.origin::text WHEN 'local' THEN 2 WHEN 'deezer' THEN 1 "
-                    "WHEN 'youtube' THEN 0 ELSE -1 END")
-
 _SEAL_NULL = "author_pubkey = NULL, signature = NULL, batch_root = NULL, merkle_proof = NULL"
 
 
 def _analysis_rank(db: Session, track_id: str) -> int:
     """Best provenance rank among a track's embeddings rows; -2 = none."""
     best = db.execute(text(f"""
-        SELECT MAX({_ORIGIN_RANK_SQL}) FROM embeddings e
+        SELECT MAX({MATERIAL_RANK_SQL}) FROM embeddings e
         LEFT JOIN analysis_sources s ON s.id = e.analysis_source_id
         WHERE e.track_id = :tid"""), {"tid": track_id}).scalar()
     return -2 if best is None else int(best)

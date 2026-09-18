@@ -454,7 +454,7 @@ def _provenance_item(r: dict):
 
     Carries the material declaration the signature commits to, and nothing
     that describes the author's copy of it — see the same function in
-    backend/routers/sync.py for why origin/sample_rate/bit_depth are held
+    backend/routers/sync.py for why provider_id/sample_rate/bit_depth are held
     back. None of the three is part of the signed payload."""
     if r.get("p_pcm_hash") is None:
         return None

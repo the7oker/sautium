@@ -332,6 +332,11 @@ class ProviderRegistry:
         if m.contract_version != CONTRACT_VERSION:
             logger.warning("provider %s built for contract v%d, host is v%d",
                            m.id, m.contract_version, CONTRACT_VERSION)
+        # The id is the provider's identity everywhere (provenance rows, the
+        # demo ledger, cooldowns, notices) — two plugins claiming one id is a
+        # configuration error to refuse, not a silent last-wins.
+        if m.id in self._by_id:
+            raise ValueError(f"stream provider id {m.id!r} is already registered")
         self._by_id[m.id] = provider
         logger.info("registered stream provider: %s (%s, lossless=%s, excerpt=%s, "
                     "demo_limited=%s)", m.id, m.kind, m.lossless, m.excerpt, m.demo_limited)

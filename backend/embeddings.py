@@ -235,28 +235,32 @@ class AudioEmbeddingGenerator:
     def _persist_analysis(
         self, db: Session, track_id, model: EmbeddingModel,
         idxs, vecs, portrait: np.ndarray,
-        analysis_source_id: Optional[int], origin: str,
+        analysis_source_id: Optional[int], provider_id: Optional[str],
         bit_depth: Optional[int] = None, is_lossless: Optional[bool] = None,
     ) -> bool:
         """Upsert the track's embedding row and REPLACE its segments, in one
         transaction unit. The overwrite decision happens before anything is
-        written — origin rank first (local > deezer > youtube; unlinked legacy
-        rows rank below everything), source quality within the same origin —
-        so a lower-ranked pass (e.g. a stream preview racing an owned scan)
-        can no longer clobber segments while the mean survives. Replaced
-        segments are deleted, not updated: fresh rows are unsigned by
+        written — material rank first (own file > lossless stream > lossy
+        stream; imported and unlinked legacy rows rank below everything),
+        source quality within the same rank — so a lower-ranked pass (e.g. a
+        stream preview racing an owned scan) can no longer clobber segments
+        while the mean survives. provider_id None = the node's own file.
+        Replaced segments are deleted, not updated: fresh rows are unsigned by
         construction, which is the seal-invalidation model for segments.
         Returns False when the existing row outranks the incoming analysis."""
         existing = db.execute(sa_text("""
-            SELECT e.id, s.origin::text AS origin, s.bit_depth, s.is_lossless
+            SELECT e.id, s.id AS source_id, s.imported, s.provider_id,
+                   s.bit_depth, s.is_lossless
             FROM embeddings e
             LEFT JOIN analysis_sources s ON s.id = e.analysis_source_id
             WHERE e.track_id = :tid AND e.model_id = :mid
         """), {"tid": str(track_id), "mid": str(model.id)}).first()
-        if existing and existing.origin is not None:
-            old_rank = (provenance.ORIGIN_RANK.get(existing.origin, -1),
+        if existing and existing.source_id is not None:
+            old_rank = (provenance.material_rank(existing.provider_id,
+                                                 existing.is_lossless,
+                                                 existing.imported),
                         self._quality_score(existing.bit_depth, existing.is_lossless))
-            new_rank = (provenance.ORIGIN_RANK.get(origin, -1),
+            new_rank = (provenance.material_rank(provider_id, is_lossless),
                         self._quality_score(bit_depth, is_lossless))
             if new_rank < old_rank:
                 return False
@@ -307,7 +311,7 @@ class AudioEmbeddingGenerator:
         idxs, vecs, portrait = computed
         return self._persist_analysis(
             db, track_id, model, idxs, vecs, portrait, src_id,
-            origin="local", bit_depth=media_file.bit_depth,
+            provider_id=None, bit_depth=media_file.bit_depth,
             is_lossless=media_file.is_lossless)
 
     def generate_embeddings(self, limit: Optional[int] = None, order_by_date: bool = False, max_duration_seconds: Optional[int] = None, track_ids: Optional[list] = None, worker_id: Optional[int] = None, worker_count: Optional[int] = None, cancel_flag=None, force: bool = False) -> Dict[str, int]:
@@ -498,7 +502,7 @@ class AudioEmbeddingGenerator:
                         idxs, vecs, portrait = computed
                         if self._persist_analysis(
                                 db, row.track_id, embedding_model, idxs, vecs,
-                                portrait, src_id, origin="local",
+                                portrait, src_id, provider_id=None,
                                 bit_depth=row.bit_depth,
                                 is_lossless=row.is_lossless):
                             stats["success"] += 1

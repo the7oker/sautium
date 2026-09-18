@@ -69,10 +69,6 @@ DO $$ BEGIN
 EXCEPTION WHEN duplicate_object THEN NULL; END $$;
 
 DO $$ BEGIN
-    CREATE TYPE analysis_origin AS ENUM ('local', 'deezer', 'youtube');
-EXCEPTION WHEN duplicate_object THEN NULL; END $$;
-
-DO $$ BEGIN
     CREATE TYPE audio_file_format AS ENUM ('FLAC', 'APE', 'WAV', 'AIFF', 'WV', 'TTA', 'DSF', 'DFF', 'MP3', 'OGG', 'M4A');
 EXCEPTION WHEN duplicate_object THEN NULL; END $$;
 
@@ -447,6 +443,26 @@ CREATE TABLE IF NOT EXISTS media_files (
 -- Embeddings & Analysis (linked to tracks)
 -- ============================================================
 
+-- Registered stream providers: the persisted snapshot of every provider
+-- manifest the backend has loaded (the core YouTube and excerpt providers and
+-- any bring-your-own plugin), upserted at every start. analysis_sources rows
+-- reference it, so an analysis outlives its plugin with the provider's name
+-- and tier intact, and a provider core has never heard of needs no schema
+-- change — the enum this replaced (2026-09-18) hardcoded a closed module's
+-- id. Capabilities only, as the manifest declares them: the actual quality
+-- of one fetch lives on the analysis_sources row, and playback order is
+-- computed from the live manifests (streaming/service.providers_preferred).
+CREATE TABLE IF NOT EXISTS stream_providers (
+    id            VARCHAR(32) PRIMARY KEY,     -- ProviderManifest.id
+    name          TEXT NOT NULL,               -- ProviderManifest.name (UI)
+    lossless      BOOLEAN NOT NULL,
+    excerpt       BOOLEAN NOT NULL DEFAULT false,
+    demo_limited  BOOLEAN NOT NULL DEFAULT false,
+    version       TEXT,
+    registered_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    last_seen_at  TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
 -- Provenance of one audio-analysis pass: the physical source material (local
 -- file or streamed provider audio), content-addressed by pcm_hash (BLAKE2b of
 -- the NATIVELY-decoded PCM — source rate/channels, pre-resample; deterministic
@@ -460,14 +476,18 @@ CREATE TABLE IF NOT EXISTS media_files (
 CREATE TABLE IF NOT EXISTS analysis_sources (
     id            SERIAL PRIMARY KEY,
     track_id      UUID NOT NULL REFERENCES tracks(id) ON UPDATE CASCADE ON DELETE CASCADE,
-    origin        analysis_origin,        -- NULL for rows imported over P2P:
-                                          -- the wire deliberately omits how a
-                                          -- peer obtained its audio (file vs
-                                          -- stream), since that turns "I
-                                          -- analysed this" into "I hold this
-                                          -- file". Only OUR OWN rows carry it,
-                                          -- and only they need it (overwrite
-                                          -- ranking + the signing gate).
+    provider_id   VARCHAR(32) REFERENCES stream_providers(id),
+                                          -- the stream provider that served
+                                          -- the material. NULL for the node's
+                                          -- own file AND for rows imported
+                                          -- over P2P: the wire deliberately
+                                          -- omits how a peer obtained its
+                                          -- audio (file vs stream), since that
+                                          -- turns "I analysed this" into "I
+                                          -- hold this file". Only OUR OWN rows
+                                          -- carry it, and only they need it
+                                          -- (overwrite ranking by material:
+                                          -- own file > lossless stream > lossy).
     media_file_id INTEGER REFERENCES media_files(id) ON DELETE SET NULL,
     pcm_hash      CHAR(64) NOT NULL,
     chromaprint   TEXT,                   -- NULL only if fpcalc failed
@@ -483,7 +503,8 @@ CREATE TABLE IF NOT EXISTS analysis_sources (
                                           -- signable here; a first-hand
                                           -- registration flips it back
     computed_at   TIMESTAMPTZ DEFAULT now(),
-    CONSTRAINT chk_asrc_stream_no_file CHECK (origin = 'local' OR media_file_id IS NULL),
+    CONSTRAINT chk_asrc_stream_no_file CHECK (provider_id IS NULL OR media_file_id IS NULL),
+    CONSTRAINT chk_asrc_imported_anonymous CHECK (NOT (imported AND provider_id IS NOT NULL)),
     UNIQUE (track_id, pcm_hash)
 );
 CREATE INDEX IF NOT EXISTS idx_analysis_sources_media_file ON analysis_sources(media_file_id);

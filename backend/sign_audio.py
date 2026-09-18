@@ -5,12 +5,13 @@ Phase 1 of enrichment signing (docs/design/P2P-SYNC-INTEGRITY.md). A record is
 signable when its LINKED analysis_sources row (registered at analysis time by
 the scanner / stream enricher — never recomputed here) is signable material:
 
-  - origin='local' — ALL first-hand local analysis signs (the per-album
-    signing_whitelist gate was dropped 2026-07-07: an unsigned network breaks
-    integrity testing and the sync verify chain; selective privacy policy is
-    off), or
-  - origin='deezer' / 'youtube' — tier 3: a streamed source signs against
-    the STREAM's pcm_hash, claiming no possession of any local rip. Until
+  - the node's own file (provider_id IS NULL) — ALL first-hand local analysis
+    signs (the per-album signing_whitelist gate was dropped 2026-07-07: an
+    unsigned network breaks integrity testing and the sync verify chain;
+    selective privacy policy is off), or
+  - a stream (provider_id = the provider's manifest id) — tier 3: a streamed
+    source signs against the STREAM's pcm_hash, claiming no possession of any
+    local rip. Until
     2026-09-02 only a lossless external-provider fetch qualified (decode-varying
     pcm_hash, lossy master); lossy streams sign too now — the analysis
     loses nothing measurable at lossy rates, the lossless provider ships
@@ -79,10 +80,10 @@ WORKER_URL = "https://sautium-verify.sautium.workers.dev"
 # Records per batch (audio + enrichment). ~1 GB peak at this size.
 MAX_RECORDS_PER_BATCH = 250_000
 
-# A record signs only when its linked source is signable-classed AND
-# first-hand (imported sources arrived over sync — signing analysis this node
-# never computed would be authorship theft in reverse).
-_SIGNABLE_SRC = "(NOT src.imported AND src.origin IS NOT NULL)"
+# A record signs only when its linked source is first-hand — own file or
+# stream alike (imported sources arrived over sync — signing analysis this
+# node never computed would be authorship theft in reverse).
+_SIGNABLE_SRC = "(NOT src.imported)"
 
 
 def _pubkey_hex(key) -> str:

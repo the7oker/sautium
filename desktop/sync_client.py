@@ -900,9 +900,9 @@ class SyncClient:
         always NULL and imported=true — the sender's material is not ours, so
         these sources are never signable here (sign_audio excludes imported).
 
-        `origin` is NULL for imported rows, and honestly so: the wire no
-        longer says whether the author analysed a file or a stream (see
-        _provenance_item), and the field exists only to rank OUR OWN
+        `provider_id` stays NULL for imported rows, and honestly so: the wire
+        does not say whether the author analysed a file or a stream (see
+        _provenance_item), and the column exists only to rank OUR OWN
         analysis. Local knowledge always wins on conflict; only missing
         chromaprint/duration are filled in."""
         prov = {}
@@ -1075,7 +1075,7 @@ class SyncClient:
                    LEFT JOIN analysis_sources s ON s.id = a.analysis_source_id
                    WHERE a.track_id = ANY(%s::uuid[])
                      AND (a.signature IS NOT NULL
-                          OR (s.origin = 'local' AND NOT s.imported))""",
+                          OR (s.provider_id IS NULL AND NOT s.imported))""",
                 "audio_features")
             if not items:
                 return 0

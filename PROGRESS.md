@@ -849,6 +849,50 @@ channel is an acquaintance tool. A track streams from it in full at most
   registered unconditionally, which is what makes a node without yt-dlp
   still preview.
 
+### Stream providers are a registry, not an enum (2026-09-18)
+
+`analysis_sources.origin` was `ENUM ('local', 'deezer', 'youtube')`: the
+id of a closed bring-your-own module hardcoded in the public schema, and
+the reason `create_stream_source` refused provenance for any provider it
+did not know — a new plugin's analysis stayed unlinked and never signed.
+The enum also conflated two things: WHAT was analysed (the node's own
+file vs a stream — the only distinction any rule reads: the file CHECK,
+the upsert's anti-downgrade, the sync's protected set, the signing gate)
+and WHICH plugin fetched it, which only the overwrite rank read, in three
+copies (`provenance.ORIGIN_RANK` and two SQL CASEs in `canon/`).
+
+- **`provider_id` references `stream_providers`**, the persisted snapshot
+  of every registered manifest (id, name, lossless, excerpt,
+  demo_limited, version) that `streaming.service` upserts at every start
+  — core writes it on the plugin's behalf, so the plugin contract stays
+  v1 and a row outlives its plugin with the name and tier intact. NULL
+  means the node's own file, or a row imported over P2P (the wire
+  withholds file-vs-stream; `chk_asrc_imported_anonymous` keeps it so).
+  Delta `017`: seeds the registry from the origins present, moves the
+  column, drops the enum — one transaction, no seal or wire change
+  (`origin` was in neither).
+- **Rank the material, not the brand.** Overwrite precedence is
+  `own file > lossless stream > lossy stream`, read from the row's
+  `is_lossless` (the ACTUAL fetch tier — a lossless provider degrades
+  to 320/128 where it has no lossless tier) — the same rule the sync
+  applies to peers' sources, in ONE place (`MATERIAL_RANK_SQL` /
+  `material_rank`). The one behavioural change: a lossy fetch from the
+  lossless provider no longer outranks YouTube by name; both are lossy,
+  the analysis loses nothing measurable at those rates, and the
+  enricher never re-analyses an embedded track anyway. Provider trust
+  ("catalog-resolved beats search-resolved") was considered and
+  rejected: `same_recording` already gates both providers' audio
+  before analysis, and a brand rank on top would be a second guard for
+  the same risk.
+- **Natural TEXT key, refused duplicates.** The manifest id is the
+  provider's identity everywhere (provenance, `demo_plays`, cooldowns,
+  notices) and never crosses the wire, so UUID v5 buys nothing and a
+  serial is opaque. A key type cannot prevent two plugins declaring one
+  id — `ProviderRegistry.register` now refuses the second (it was a
+  silent last-wins by directory order). The UI reads provider names
+  from the notice payload (`streaming.silent` carries `name`), not a
+  literal map.
+
 ### Buy resolves through MusicBrainz (2026-09-17)
 
 The phantom album's Buy button opened a Bandcamp search built from the
