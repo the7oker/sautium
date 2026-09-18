@@ -18,7 +18,10 @@ rule. Two layers, one tracking table (`_schema_migrations`):
      sheds every seal — the node's own sign_audio cadence re-seals. The
      play-stats step (`play_stats_derived_v1`) re-derives `local_play_stats`
      from `listening_history` once, the day the table became a function of
-     it (backend/play_stats.py) instead of counters kept in place.
+     it (backend/play_stats.py) instead of counters kept in place. The
+     sub-floor step (`sub_floor_analysis_v1`) drops the node's own analysis
+     of material under provenance.MIN_MATERIAL_SECONDS, computed before the
+     floor existed (2026-09-18).
 
 The launcher's own P2P sync server is a separate process: on a launcher
 node with old-rule data a peer import racing this rewrite is a known
@@ -65,6 +68,42 @@ def _rederive_play_stats(conn) -> int:
         return refresh_play_stats(cur, [r[0] for r in cur.fetchall()])
 
 
+def _drop_sub_floor_analysis(conn) -> dict:
+    """The node's own analysis of owned material under the floor — rows the
+    passes no longer produce and the coverage figures no longer count, left
+    from before the floor existed (twenty stings and intros on the master).
+    The track set is the queues' own rule (the analysis-source file under
+    MIN_MATERIAL_SECONDS); only file-backed first-hand rows and unlinked
+    legacy rows go — an imported row describes a peer's material, a stream
+    row its own. Deleting sealed rows is fine: a seal is per row, and a
+    signing batch stays valid for its other leaves."""
+    from provenance import MIN_MATERIAL_SECONDS
+    own_file = """(x.analysis_source_id IS NULL
+                   OR EXISTS (SELECT 1 FROM analysis_sources src
+                               WHERE src.id = x.analysis_source_id
+                                 AND NOT src.imported
+                                 AND src.media_file_id IS NOT NULL))"""
+    counts = {}
+    with conn.cursor() as cur:
+        cur.execute("""
+            CREATE TEMP TABLE sub_floor ON COMMIT DROP AS
+            SELECT DISTINCT mf.track_id FROM media_files mf
+             WHERE mf.is_analysis_source AND mf.duration_seconds < %(min)s
+        """, {"min": MIN_MATERIAL_SECONDS})
+        for table in ("embeddings", "audio_features"):
+            cur.execute(f"""
+                DELETE FROM {table} x USING sub_floor s
+                 WHERE x.track_id = s.track_id AND {own_file}""")
+            counts[table] = cur.rowcount
+        cur.execute("""
+            DELETE FROM analysis_sources src USING sub_floor s
+             WHERE src.track_id = s.track_id
+               AND NOT src.imported AND src.media_file_id IS NOT NULL""")
+        counts["analysis_sources"] = cur.rowcount
+    conn.commit()
+    return counts
+
+
 def apply_pending() -> dict:
     """Schema deltas, then data migrations. Returns what happened."""
     out = {"adopted_baseline": False, "sql_applied": 0, "identity_renormalized": False}
@@ -85,6 +124,10 @@ def apply_pending() -> dict:
         if not _marked(conn, "play_stats_derived_v1"):
             out["play_stats_rederived"] = _rederive_play_stats(conn)
             _mark(conn, "play_stats_derived_v1")
+
+        if not _marked(conn, "sub_floor_analysis_v1"):
+            out["sub_floor_dropped"] = _drop_sub_floor_analysis(conn)
+            _mark(conn, "sub_floor_analysis_v1")
 
         # Cold-start seed: after the identity pass, so the bundle's rule
         # check compares against a fully renormalized database. The marker
