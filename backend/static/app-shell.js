@@ -5978,9 +5978,15 @@
       await reportOutputUnavailable(detail);
       return false;
     }
+    // Past the 503 the audio output is not implicated: a thrown fetch (resp
+    // null) is the browser's link to the node — a phone tab thawing after
+    // sleep loses its first tap that way — and any other status is the
+    // route's own verdict. Blaming the output here sent the user to the
+    // Output picker for a Wi-Fi hiccup.
     notices.toast({ kind: 'error', key: 'player.error', title: 'Playback unavailable',
-                    text: escapeProfileHtml(
-                      detail || 'The playback output is not responding. Check it in Settings → Audio output, then try again.') });
+                    text: escapeProfileHtml(detail || (resp
+                      ? `The node answered with an error (HTTP ${resp.status}).`
+                      : 'The node is not answering right now. Check the connection, then try again.')) });
     return false;
   }
 
