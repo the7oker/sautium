@@ -260,19 +260,18 @@
     _cmdInFlight.add(cmd);
     if (cmd === 'play') maybeClaimRenderer();
     try {
-      const resp = await fetch('/api/player/' + cmd, { method: 'POST' });
-      // Play intents against an unreachable output (dozing renderer,
-      // closed HQPlayer) 503 — surface the one dialog with a way to the
-      // Output picker instead of dying in the console. Volume/pause/stop
-      // stay quiet: nagging on every tick helps nobody.
-      if (!resp.ok && resp.status === 503
-          && (cmd === 'play' || cmd === 'next' || cmd === 'previous')
-          && window.reportOutputUnavailable) {
-        const err = await resp.json().catch(() => ({}));
-        window.reportOutputUnavailable(err.detail || '');
+      const resp = await fetch('/api/player/' + cmd, { method: 'POST' }).catch(() => null);
+      if (resp && resp.ok) return;
+      // A play intent that produced no music gets its explanation from the
+      // shell's one reporter (a dozing output, streaming, the node not
+      // answering) instead of dying in the console. Volume/pause/stop stay
+      // quiet: nagging on every tick helps nobody.
+      if (cmd === 'play' || cmd === 'next' || cmd === 'previous') {
+        await window.reportPlaybackResult(resp);
+      } else {
+        console.warn('Player command failed:', cmd, resp ? 'HTTP ' + resp.status : 'no response');
       }
-    } catch (e) { console.error('Player command failed:', e); }
-    finally { _cmdInFlight.delete(cmd); }
+    } finally { _cmdInFlight.delete(cmd); }
   }
 
   function togglePlayPause() {
@@ -841,24 +840,11 @@
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ track_id: mediaFileId }),
-      });
+      }).catch(() => null);
       // No client-side refetch on success — the backend bumps
       // playlist_version on the next SSE tick and processStatusEvent
       // awaits fetchPlaylist() before notifying subscribers.
-      if (!resp.ok) {
-        const err = await resp.json().catch(() => ({}));
-        if (resp.status === 503 && window.reportOutputUnavailable) {
-          window.reportOutputUnavailable(err.detail || '');
-        } else if (window.notices) {
-          const esc = window.escapeProfileHtml || ((s) => s);
-          window.notices.toast({
-            kind: 'error', key: 'player.error', title: 'Playback unavailable',
-            text: esc(err.detail || 'Could not play the track.'),
-          });
-        }
-      }
-    } catch (e) {
-      console.error('Play track failed:', e);
+      if (!resp || !resp.ok) await window.reportPlaybackResult(resp);
     } finally { _playTrackInFlight = false; }
   }
 

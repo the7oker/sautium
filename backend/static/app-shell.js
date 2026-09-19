@@ -1903,21 +1903,14 @@
 
     async jumpTo(index) {
       window.maybeClaimRenderer();
-      try {
-        const resp = await fetch('/api/player/jump', {
-          method: 'POST',
-          headers: {'Content-Type': 'application/json'},
-          body: JSON.stringify({index}),
-        });
-        if (!resp.ok && resp.status === 503) {
-          const err = await resp.json().catch(() => ({}));
-          window.reportOutputUnavailable(err.detail || '');
-        }
-        // The queue sheet stays open — user typically wants to keep
-        // browsing. Status SSE will repaint the active row.
-      } catch (err) {
-        console.warn('jump failed', err);
-      }
+      const resp = await fetch('/api/player/jump', {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({index}),
+      }).catch(() => null);
+      if (!resp || !resp.ok) await reportPlaybackResult(resp);
+      // The queue sheet stays open — user typically wants to keep
+      // browsing. Status SSE will repaint the active row.
     },
 
     // Pointer-events drag — works on desktop + mobile.
@@ -5883,10 +5876,6 @@
     updatePlayingHighlight();
   }
 
-  // Surface a backend queue/play failure (HQPlayer unreachable, or a
-  // partial add the backend now reports as 503) as a styled dialog instead
-  // of a swallowed console.warn. `resp` may be null (network error / thrown
-  // fetch). Returns true on success so callers can skip follow-up work.
   // Run an async click action at most once at a time per element — re-clicks
   // while it's in flight are ignored (kills the double-[Stream all] / double-queue
   // / double-play races where a 2nd click fires before the 1st settles). The
@@ -5955,6 +5944,13 @@
                     text: escapeProfileHtml(err) });
   });
 
+  // Surface a queue/play failure as a toast instead of a swallowed
+  // console.warn — the ONE reporter for every play intent, the transport
+  // commands in player.js included (window.reportPlaybackResult): a 503 is
+  // the output not taking the command, a structured streaming 503 the
+  // provider side, `resp` null a fetch that threw (network), anything else
+  // the route's own verdict. Returns true on success so callers can skip
+  // follow-up work.
   async function reportPlaybackResult(resp, body) {
     if (resp && resp.ok) return true;
     // A Response body is one-shot: callers that already read resp.json() must
@@ -5989,6 +5985,7 @@
                       : 'The node is not answering right now. Check the connection, then try again.')) });
     return false;
   }
+  window.reportPlaybackResult = reportPlaybackResult;
 
   // Grey out + disable the phantom track rows a provider couldn't resolve
   // (semi-transparent, pointer-events off). Driven by play-phantom-album's
