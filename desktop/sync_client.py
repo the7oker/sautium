@@ -16,7 +16,10 @@ Merkle proof → Worker timestamp, verified here before any write); the
 track-level mean is derived locally — it is a local aggregate, never wire
 data (see desktop/p2p/record_sig.py). Lyrics are deliberately NOT synced
 (2026-07-11): the one category that is verbatim copyrighted text — every
-node fetches its own from the public sources.
+node fetches its own from the public sources. Nor is anything Last.fm
+answered — bios, tags, similars, track stats, genre descriptions (since
+2026-09-19): its API terms do not allow redistribution, so that layer is
+node-local and every node fetches its own by name.
 """
 
 import base64
@@ -45,45 +48,12 @@ CATEGORIES = [
     ("segments", "segments", "track"),
     ("embeddings", "embeddings", "track"),
     ("audio_features", "audio-features", "track"),
-    ("track_stats", "track-stats", "track"),
-    ("artist_bios", "artist-bios", "artist"),
-    ("artist_tags", "artist-tags", "artist"),
-    ("similar_artists", "similar-artists", "artist"),
-    ("genre_descriptions", "genre-descriptions", "genre"),
 ]
-
-# When an incoming enrichment record may replace the local one. The rules, in
-# the order they matter:
-#
-#   1. Never overwrite first-hand data. What this node fetched itself outranks
-#      anything a peer says, always — the alternative is a network where the
-#      loudest relay rewrites your own observations.
-#   2. A signed record beats an unsigned one. Attribution is the point; a claim
-#      nobody stands behind should not displace one somebody does.
-#   3. Otherwise the fresher fetch wins, on fetched_at — which is inside the
-#      signed payload precisely so this comparison cannot be gamed.
-#
-# COALESCE on the local side so a legacy row with no fetched_at loses to a
-# stamped one rather than making the comparison NULL and blocking every update.
-_ENRICHMENT_PRECEDENCE = """
-    {t}.imported
-    AND (
-        (EXCLUDED.signature IS NOT NULL AND {t}.signature IS NULL)
-        OR EXCLUDED.fetched_at > COALESCE({t}.fetched_at, '-infinity'::timestamptz)
-    )
-"""
 
 # Pull category -> record kind. Membership in this map is what makes a category
 # verified; a new enrichment category is unverified until it appears here, which
 # is the failure mode we want (visible, not silent).
-_ENRICHMENT_KIND_BY_CATEGORY = {
-    "track_stats": "track_stat",
-    "artist_bios": "artist_bio",
-    "artist_tags": "artist_tag",
-    "similar_artists": "similar_artist",
-    "genre_descriptions": "genre_description",
-    "track_mbids": "track_mbid",
-}
+_ENRICHMENT_KIND_BY_CATEGORY = {"track_mbids": "track_mbid"}
 
 DEFAULT_BATCH_SIZE = 500
 # A segments batch is K=12..24 vectors + proofs per track (~50KB) — keep the
@@ -94,8 +64,8 @@ SEGMENT_PULL_BATCH = 100
 INVENTORY_CHUNK = 10_000
 
 # A fetched holdings filter is used as-is for this long before the peer's
-# version is even compared: a peer's version moves with every enrichment
-# pass it runs (the counts of six tables are in it), and the syncs that
+# version is even compared: a peer's version moves with every analysis
+# pass it runs (the counts of both analysis tables are in it), and the syncs that
 # follow a minting burst come minutes apart — refetching a filter that is
 # 99.9% the same for each of them is the waste the filter exists to avoid.
 # Staleness costs nothing but a delay: an element the peer gained since
@@ -121,9 +91,9 @@ class SyncClient:
         self.db_dsn = db_dsn
         self.batch_size = batch_size
         self.progress_cb = progress_cb
-        # peer pubkey -> {"version", "tracks": BloomFilter, "artists":
-        # BloomFilter}: the peers' published holdings, kept by the manager
-        # across runs (process lifetime) and refreshed by version.
+        # peer pubkey -> {"version", "tracks": BloomFilter}: the peers'
+        # published holdings, kept by the manager across runs (process
+        # lifetime) and refreshed by version.
         self.holdings_cache = holdings_cache if holdings_cache is not None else {}
         self._conn: Optional[psycopg2.extensions.connection] = None
         # Filled by run_sync's capability probe; the caller reads it to
@@ -154,26 +124,10 @@ class SyncClient:
             cur.execute("SELECT id::text FROM tracks ORDER BY id")
             return [row[0] for row in cur.fetchall()]
 
-    # Both existence checks are bounded by the INVENTORY, never by the
+    # The existence check is bounded by the INVENTORY, never by the
     # table: a filled node holds millions of rows per category and a run
     # asks about a few thousand — reading the whole table per category,
     # per peer, per run was seconds of pure waste on every sync.
-
-    def _get_existing_uuids(self, table: str, uuid_col: str,
-                            candidates) -> set[str]:
-        """Of `candidates`, the uuids that already have a local row."""
-        candidates = list(candidates)
-        if not candidates:
-            return set()
-        conn = self._get_conn()
-        try:
-            with conn.cursor() as cur:
-                cur.execute(f"SELECT DISTINCT {uuid_col}::text FROM {table} "
-                            f"WHERE {uuid_col} = ANY(%s::uuid[])", [candidates])
-                return {row[0] for row in cur.fetchall()}
-        except psycopg2.errors.UndefinedTable:
-            conn.rollback()
-            return set()
 
     def _get_existing_versions(self, table: str, uuid_col: str,
                                candidates) -> dict[str, int]:
@@ -193,18 +147,14 @@ class SyncClient:
             return {}
 
     def run_sync(self, track_uuids: list[str] = None,
-                 bulk_track_uuids: Optional[list[str]] = None,
-                 bulk_artist_uuids: Optional[list[str]] = None,
-                 core_artist_uuids: Optional[list[str]] = None) -> dict:
+                 bulk_track_uuids: Optional[list[str]] = None) -> dict:
         """
         Run full synchronization.
 
         Args:
             track_uuids: the CORE — tracks of engaged artists; None = every
-                local track. `core_artist_uuids` names those artists too,
-                so their bios/tags/similars are asked about even when every
-                track of theirs misses the peer's filter.
-            bulk_track_uuids / bulk_artist_uuids: the phantom BULK.
+                local track.
+            bulk_track_uuids: the phantom BULK.
 
         Core and bulk are priced the same way against the peer's holdings
         filter: one filter download and a handful of exact questions about
@@ -215,27 +165,23 @@ class SyncClient:
             dict with sync statistics per category.
         """
         try:
-            return self._run_sync_inner(track_uuids, bulk_track_uuids or [],
-                                        bulk_artist_uuids or [],
-                                        core_artist_uuids or [])
+            return self._run_sync_inner(track_uuids, bulk_track_uuids or [])
         finally:
             self._close_conn()
 
     def _run_sync_inner(self, track_uuids: list[str],
-                        bulk_track_uuids: list[str],
-                        bulk_artist_uuids: list[str],
-                        core_artist_uuids: list[str]) -> dict:
+                        bulk_track_uuids: list[str]) -> dict:
         # Step 1: Get track UUIDs
         if track_uuids is None:
             self._progress("Getting local track UUIDs...")
             track_uuids = self._get_local_track_uuids()
 
-        if not track_uuids and not bulk_track_uuids and not bulk_artist_uuids:
+        if not track_uuids and not bulk_track_uuids:
             self._progress("No tracks to sync.")
             return {"total_tracks": 0}
 
         self._progress(
-            f"Syncing enrichment for {len(track_uuids)} tracks"
+            f"Syncing analysis for {len(track_uuids)} tracks"
             + (f" + {len(bulk_track_uuids)} phantom-bulk tracks"
                if bulk_track_uuids else "") + "...")
 
@@ -256,8 +202,7 @@ class SyncClient:
         # requests per peer per run for what the filter answers in a
         # second.
         inventory = self._holdings_inventory(
-            health, list(track_uuids) + list(bulk_track_uuids),
-            list(core_artist_uuids) + list(bulk_artist_uuids))
+            health, list(track_uuids) + list(bulk_track_uuids))
         if inventory is None:
             self._progress("Inventory request failed.")
             return {"error": "inventory_failed"}
@@ -281,46 +226,30 @@ class SyncClient:
             )
             stats[cat_key] = imported
 
-        # Step 6: Recompute artist gender and vocalist status from imported bios
-        if stats.get("artist_bios", 0) > 0:
-            gender_updated = self._update_artist_gender(needed.get("artist_bios", []))
-            if gender_updated:
-                self._progress(f"Updated gender for {gender_updated} artists.")
-            vocal_updated = self._update_artist_is_vocalist(needed.get("artist_bios", []))
-            if vocal_updated:
-                self._progress(f"Updated vocalist status for {vocal_updated} artists.")
-
         total = sum(stats.values())
         self._progress(f"Sync complete. Imported {total} items across {len(stats)} categories.")
         return stats
 
-    def _fetch_inventory(self, track_uuids: list[str],
-                         artist_uuids: Optional[list[str]] = None) -> Optional[dict]:
-        """Inventory in ≤INVENTORY_CHUNK slices, merged. Chunks are disjoint
-        track sets, so list values concatenate; artist/genre categories may
-        repeat across chunks and are consumed as sets downstream. Artists
-        named outright travel in their own chunks."""
-        requests = [(track_uuids[i:i + INVENTORY_CHUNK], None)
+    def _fetch_inventory(self, track_uuids: list[str]) -> Optional[dict]:
+        """Inventory in ≤INVENTORY_CHUNK slices, merged: chunks are disjoint
+        track sets, so list values concatenate."""
+        requests = [track_uuids[i:i + INVENTORY_CHUNK]
                     for i in range(0, len(track_uuids), INVENTORY_CHUNK)]
-        artist_uuids = artist_uuids or []
-        requests += [([], artist_uuids[i:i + INVENTORY_CHUNK])
-                     for i in range(0, len(artist_uuids), INVENTORY_CHUNK)]
-        merged: dict = dict(EMPTY_INVENTORY)
-        for i, (tracks, artists) in enumerate(requests, 1):
+        merged: dict = {k: [] for k in EMPTY_INVENTORY}
+        for i, tracks in enumerate(requests, 1):
             t0 = time.monotonic()
-            part = self.api.sync_inventory(tracks, artists)
+            part = self.api.sync_inventory(tracks)
             if not part or "tracks" not in part:
                 return None
             for k, v in part.items():
                 if isinstance(v, list):
                     merged.setdefault(k, []).extend(v)
             self._progress(
-                f"  inventory {i}/{len(requests)}: {len(tracks)} tracks, "
-                f"{len(artists or [])} artists in {time.monotonic() - t0:.1f}s")
+                f"  inventory {i}/{len(requests)}: {len(tracks)} tracks "
+                f"in {time.monotonic() - t0:.1f}s")
         return merged
 
-    def _holdings_inventory(self, health: dict, tracks: list[str],
-                            artists: list[str]) -> Optional[dict]:
+    def _holdings_inventory(self, health: dict, tracks: list[str]) -> Optional[dict]:
         """Inventory for our gaps by the cheaper direction: the peer's
         holdings filter (one download, cached by version, tested locally)
         when the ask is bigger than the filter, the exact inventory
@@ -329,8 +258,8 @@ class SyncClient:
         if "holdings" not in self.peer_capabilities:
             self._progress(
                 f"  peer has no holdings filter — asking about "
-                f"{len(tracks)} tracks + {len(artists)} artists directly")
-            return self._fetch_inventory(tracks, artists)
+                f"{len(tracks)} tracks directly")
+            return self._fetch_inventory(tracks)
 
         key = self.api.peer_pubkey or self.api.base_url
         cached = self.holdings_cache.get(key)
@@ -342,14 +271,14 @@ class SyncClient:
         else:
             # Price the two directions: ~40 bytes per uuid on the wire
             # against ~1.2 bytes per held element in the filter.
-            ask_cost = (len(tracks) + len(artists)) * 40
+            ask_cost = len(tracks) * 40
             if summary:
-                fetch_cost = (summary.get("tracks", 0) + summary.get("artists", 0)) * 1.2
+                fetch_cost = summary.get("tracks", 0) * 1.2
                 if fetch_cost > ask_cost:
                     self._progress(
-                        f"  {len(tracks)} track + {len(artists)} artist gaps "
-                        f"weigh less than the peer's filter — asking directly")
-                    return self._fetch_inventory(tracks, artists)
+                        f"  {len(tracks)} track gaps weigh less than the "
+                        f"peer's filter — asking directly")
+                    return self._fetch_inventory(tracks)
             payload = self.api.sync_holdings(cached["version"] if cached else None)
             if not payload or "version" not in payload:
                 self._progress("  holdings request failed")
@@ -360,21 +289,18 @@ class SyncClient:
             else:
                 filters = {"version": payload["version"],
                            "fetched_at": time.time(),
-                           "tracks": BloomFilter.from_dict(payload["tracks"]),
-                           "artists": BloomFilter.from_dict(payload["artists"])}
+                           "tracks": BloomFilter.from_dict(payload["tracks"])}
                 self.holdings_cache[key] = filters
                 self._progress(
-                    f"  holdings filter fetched: {filters['tracks'].n} tracks + "
-                    f"{filters['artists'].n} artists held by the peer")
+                    f"  holdings filter fetched: {filters['tracks'].n} tracks "
+                    f"held by the peer")
 
-        hits_t = filters["tracks"].hits(tracks)
-        hits_a = filters["artists"].hits(artists)
+        hits = filters["tracks"].hits(tracks)
         self._progress(
-            f"  holdings filter: {len(hits_t)} of {len(tracks)} tracks and "
-            f"{len(hits_a)} of {len(artists)} artists worth asking")
-        if not hits_t and not hits_a:
+            f"  holdings filter: {len(hits)} of {len(tracks)} tracks worth asking")
+        if not hits:
             return dict(EMPTY_INVENTORY)
-        return self._fetch_inventory(hits_t, hits_a)
+        return self._fetch_inventory(hits)
 
     def _protected_analysis_tracks(self, uuids: list[str]) -> set:
         """Tracks whose local analysis a peer import must never replace:
@@ -395,93 +321,48 @@ class SyncClient:
             return {row[0] for row in cur.fetchall()}
 
     def _compute_needed(self, inventory: dict, use_segments: bool) -> dict:
-        """Compare inventory with local data to find what's missing."""
+        """Compare inventory with local data to find what's missing.
+
+        Both audio categories check the local `embeddings` table and read
+        the `embeddings` inventory key. The inventory carries [uuid,
+        analysis_version] pairs — [uuid, analysis_version, segment_count]
+        triples from segments-capable peers — and a locally-present row is
+        still pulled when the source's methodology is newer: existence
+        alone never delivers upgrades."""
         emb_cat = "segments" if use_segments else "embeddings"
-        # Map category to (table, uuid_column) for local existence check.
-        # Both audio categories check the local `embeddings` table and read
-        # the `embeddings` inventory key.
         local_check = {
             emb_cat: ("embeddings", "track_id"),
             "audio_features": ("audio_features", "track_id"),
-            "track_stats": ("track_stats", "track_id"),
-            "artist_bios": ("artist_bios", "artist_id"),
-            "artist_tags": ("artist_tags", "artist_id"),
-            "similar_artists": ("similar_artists", "artist_id"),
-            "genre_descriptions": ("genre_descriptions", "genre_id"),
         }
-
-        # Versioned categories: the inventory carries [uuid, analysis_version]
-        # pairs — [uuid, analysis_version, segment_count] triples from
-        # segments-capable peers — and a locally-present row is still pulled
-        # when the source's methodology is newer: existence alone never
-        # delivers upgrades.
-        versioned = {emb_cat, "audio_features"}
-
         needed = {}
         for cat_key, (table, uuid_col) in local_check.items():
             t0 = time.monotonic()
             inv_key = "embeddings" if cat_key == "segments" else cat_key
-            if cat_key in versioned:
-                available_versions = {row[0]: row[1]
-                                      for row in inventory.get(inv_key, [])}
-                if not available_versions:
-                    continue
-                local = self._get_existing_versions(
-                    table, uuid_col, available_versions)
-                new = [u for u in available_versions if u not in local]
-                outdated = [u for u, v in available_versions.items()
-                            if u in local and local[u] < v]
-                candidates = new + outdated
-                if cat_key == "segments" and candidates:
-                    protected = self._protected_analysis_tracks(candidates)
-                    if protected:
-                        self._progress(
-                            f"  segments: {len(protected)} protected "
-                            f"(own analysis) — not pulled")
-                        candidates = [u for u in candidates
-                                      if u not in protected]
-                if candidates:
-                    needed[cat_key] = candidates
-                    self._progress(
-                        f"  {cat_key}: {len(new)} new + {len(outdated)} outdated "
-                        f"/ {len(available_versions)} available"
-                    )
-                self._note_slow(cat_key, t0)
+            available_versions = {row[0]: row[1]
+                                  for row in inventory.get(inv_key, [])}
+            if not available_versions:
                 continue
-
-            available = set(inventory.get(cat_key, []))
-            if not available:
-                continue
-
-            existing = self._get_existing_uuids(table, uuid_col, available)
-            missing = available - existing
-
-            # Similars are ENGAGED-ONLY, mirroring the local enrichment rule
-            # (lastfm.backfill_similar): an owned file OR a completed listen.
-            # Importing an artist's similars mints a stub row for every
-            # target, those stubs get canonized, their discographies mint
-            # phantom tracks — and the next sync would then ask for THEIR
-            # similars. Each hop multiplies by the ~50 entries of a Last.fm
-            # list, so an ungated pull is a breadth-first walk of all
-            # recorded music through this node's disk. Engagement keeps the
-            # bound: both signals are linear in human behavior, and a minted
-            # stub only becomes a seed via a new human listen.
-            if cat_key == "similar_artists" and missing:
-                engaged = self._engaged_artist_uuids(missing)
-                skipped = len(missing) - len(engaged)
-                missing = engaged
-                if skipped:
+            local = self._get_existing_versions(
+                table, uuid_col, available_versions)
+            new = [u for u in available_versions if u not in local]
+            outdated = [u for u, v in available_versions.items()
+                        if u in local and local[u] < v]
+            candidates = new + outdated
+            if cat_key == "segments" and candidates:
+                protected = self._protected_analysis_tracks(candidates)
+                if protected:
                     self._progress(
-                        f"  similar_artists: {skipped} skipped "
-                        f"(no engagement — blowup guard)")
-
-            if missing:
-                needed[cat_key] = list(missing)
+                        f"  segments: {len(protected)} protected "
+                        f"(own analysis) — not pulled")
+                    candidates = [u for u in candidates
+                                  if u not in protected]
+            if candidates:
+                needed[cat_key] = candidates
                 self._progress(
-                    f"  {cat_key}: {len(missing)} new / {len(available)} available"
+                    f"  {cat_key}: {len(new)} new + {len(outdated)} outdated "
+                    f"/ {len(available_versions)} available"
                 )
             self._note_slow(cat_key, t0)
-
         return needed
 
     def _note_slow(self, cat_key: str, t0: float) -> None:
@@ -491,23 +372,6 @@ class SyncClient:
         dt = time.monotonic() - t0
         if dt > 2.0:
             self._progress(f"  {cat_key}: local check took {dt:.1f}s")
-
-    def _engaged_artist_uuids(self, artist_uuids) -> set:
-        """Of these artists, the ones this node owns a file by OR has a
-        completed, unskipped listen of (streamed phantoms count)."""
-        conn = self._get_conn()
-        with conn.cursor() as cur:
-            cur.execute(
-                """SELECT DISTINCT ta.artist_id::text
-                     FROM track_artists ta
-                    WHERE ta.artist_id = ANY(%s::uuid[])
-                      AND (EXISTS (SELECT 1 FROM media_files mf
-                                    WHERE mf.track_id = ta.track_id)
-                           OR EXISTS (SELECT 1 FROM listening_history lh
-                                       WHERE lh.track_id = ta.track_id
-                                         AND lh.completed AND NOT lh.skipped))""",
-                [list(artist_uuids)])
-            return {row[0] for row in cur.fetchall()}
 
     def _pull_and_import_category(
         self, cat_key: str, pull_endpoint: str, uuids: list[str]
@@ -590,8 +454,8 @@ class SyncClient:
                                  result.get("batches") or {})
             else:
                 items = result["items"]
-                # Enrichment verifies here rather than inside each importer:
-                # one gate, five categories, and no way to add a sixth that
+                # Sealed plain rows verify here rather than inside the
+                # importer: one gate, and no way to add a category that
                 # quietly skips it.
                 kind = _ENRICHMENT_KIND_BY_CATEGORY.get(category)
                 if kind:
@@ -620,14 +484,7 @@ class SyncClient:
     # -- Seal verification (verify-on-import) -------------------------------
 
     # Which wire field names the entity a record hangs off.
-    _ENRICHMENT_ENTITY = {
-        "artist_bio": "artist_uuid",
-        "artist_tag": "artist_uuid",
-        "similar_artist": "artist_uuid",
-        "track_stat": "track_uuid",
-        "genre_description": "genre_uuid",
-        "track_mbid": "track_uuid",
-    }
+    _ENRICHMENT_ENTITY = {"track_mbid": "track_uuid"}
 
     def _verify_enrichment(self, kind: str, items: list, batches: dict) -> list:
         """Keep only the records whose seal checks out.
@@ -1136,39 +993,6 @@ class SyncClient:
             )
         return len(items)
 
-    def _import_track_stats(self, conn, items: list[dict]) -> int:
-        with conn.cursor() as cur:
-            values = [
-                (
-                    item["track_uuid"], item.get("source", "sync"),
-                    item.get("listeners"), item.get("playcount"),
-                    *self._seal_values(item),
-                )
-                for item in items
-            ]
-            psycopg2.extras.execute_values(
-                cur,
-                """INSERT INTO track_stats
-                       (track_id, source, listeners, playcount, fetched_at,
-                        author_pubkey, signature, batch_root, merkle_proof,
-                        imported)
-                   VALUES %s
-                   ON CONFLICT (track_id, source) DO UPDATE SET
-                       listeners = EXCLUDED.listeners,
-                       playcount = EXCLUDED.playcount,
-                       fetched_at = EXCLUDED.fetched_at,
-                       author_pubkey = EXCLUDED.author_pubkey,
-                       signature = EXCLUDED.signature,
-                       batch_root = EXCLUDED.batch_root,
-                       merkle_proof = EXCLUDED.merkle_proof,
-                       updated_at = CURRENT_TIMESTAMP
-                   WHERE """ + _ENRICHMENT_PRECEDENCE.format(t="track_stats"),
-                values,
-                template="(%s, %s, %s, %s, %s, %s, %s, %s, %s, TRUE)",
-                page_size=500,
-            )
-        return len(items)
-
     def _import_track_mbids(self, conn, items: list[dict]) -> int:
         """Sealed track↔recording bindings — same shape as artist_mbids:
         the track must exist, an existing binding outranks a restatement."""
@@ -1199,359 +1023,6 @@ class SyncClient:
                 template="(%s::uuid, %s::uuid, %s::mb_match_confidence,"
                          " %s::timestamptz, %s, %s, %s, %s, TRUE)")
         return len(values)
-
-    def _import_artist_bios(self, conn, items: list[dict]) -> int:
-        with conn.cursor() as cur:
-            # Deduplicate items by (artist_uuid, source) — last wins
-            deduped = {
-                (item["artist_uuid"], item.get("source", "sync")): item
-                for item in items
-            }
-            unique_items = list(deduped.values())
-
-            # Batch upsert artists (deduplicated by uuid)
-            artist_values = list({
-                item["artist_uuid"]: (item["artist_uuid"], item["artist_name"])
-                for item in unique_items if item.get("artist_name")
-            }.values())
-            if artist_values:
-                psycopg2.extras.execute_values(
-                    cur,
-                    """INSERT INTO artists (id, name)
-                       VALUES %s ON CONFLICT (id) DO NOTHING""",
-                    artist_values,
-                    template="(%s, %s)",
-                )
-
-            # Batch upsert bios
-            values = [
-                (
-                    item["artist_uuid"], item.get("source", "sync"),
-                    item.get("summary"), item.get("content"),
-                    item.get("url"), item.get("listeners"),
-                    item.get("playcount"),
-                    *self._seal_values(item),
-                )
-                for item in unique_items
-            ]
-            psycopg2.extras.execute_values(
-                cur,
-                """INSERT INTO artist_bios
-                   (artist_id, source, summary, content, url, listeners, playcount,
-                    fetched_at,
-                        author_pubkey, signature, batch_root, merkle_proof,
-                        imported)
-                   VALUES %s
-                   ON CONFLICT (artist_id, source) DO UPDATE SET
-                       summary = EXCLUDED.summary,
-                       content = EXCLUDED.content,
-                       url = EXCLUDED.url,
-                       listeners = EXCLUDED.listeners,
-                       playcount = EXCLUDED.playcount,
-                       fetched_at = EXCLUDED.fetched_at,
-                       author_pubkey = EXCLUDED.author_pubkey,
-                       signature = EXCLUDED.signature,
-                       batch_root = EXCLUDED.batch_root,
-                       merkle_proof = EXCLUDED.merkle_proof,
-                       updated_at = CURRENT_TIMESTAMP
-                   WHERE """ + _ENRICHMENT_PRECEDENCE.format(t="artist_bios"),
-                values,
-                template="(%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, TRUE)",
-                page_size=500,
-            )
-        return len(items)
-
-    def _reconcile_named(self, cur, table: str, pairs: list[tuple]) -> dict:
-        """Get-or-create content-addressed (id, name) rows; return wire name -> local id.
-
-        tags/genres are unique on BOTH axes — id (uuid5 of the folded name)
-        and name (the raw spelling) — and a peer can differ from us on either:
-        the same name under a different id (legacy pre-v5 rows, a divergent
-        enrichment history), or — since identity normalize v2 folds case and
-        punctuation — the same id under a different spelling ("hip hop" here,
-        "Hip-Hop" there). An INSERT that guards one axis crashes the whole
-        batch on the other (tags_pkey, launcher stand 2026-08-26), and even
-        skipping it would leave the child row (artist_tags /
-        genre_descriptions) pointing at an id this node lacks. So: resolve by
-        id first (the folded identity — the local row wins, however it is
-        spelled), then by name, and insert only what neither axis knows, ON
-        CONFLICT DO NOTHING covering a race on either constraint. `table` is
-        a trusted literal from the caller, never user input.
-        """
-        by_name = {name: wid for wid, name in pairs if name}   # dedup, last wins
-        if not by_name:
-            return {}
-        resolved: dict = {}
-
-        def lookup(subset: dict) -> None:
-            cur.execute(
-                f"SELECT id::text, name FROM {table} "
-                f"WHERE id = ANY(%s::uuid[]) OR name = ANY(%s)",
-                (list(set(subset.values())), list(subset)))
-            rows = cur.fetchall()
-            local_by_id = {i: n for i, n in rows}
-            local_by_name = {n: i for i, n in rows}
-            for name, wid in subset.items():
-                if wid in local_by_id:
-                    resolved[name] = wid
-                elif name in local_by_name:
-                    resolved[name] = local_by_name[name]
-
-        lookup(by_name)
-        missing = {n: w for n, w in by_name.items() if n not in resolved}
-        if missing:
-            psycopg2.extras.execute_values(
-                cur,
-                f"INSERT INTO {table} (id, name) VALUES %s ON CONFLICT DO NOTHING",
-                [(w, n) for n, w in missing.items()], template="(%s, %s)",
-            )
-            lookup(missing)
-        return resolved
-
-    def _import_artist_tags(self, conn, items: list[dict]) -> int:
-        with conn.cursor() as cur:
-            local = self._reconcile_named(
-                cur, "tags",
-                [(item["tag_uuid"], item["tag_name"]) for item in items])
-            values = [
-                (item["artist_uuid"], local[item["tag_name"]],
-                 item["weight"], item.get("source", "sync"),
-                 *self._seal_values(item))
-                for item in items if item["tag_name"] in local
-            ]
-            if values:
-                psycopg2.extras.execute_values(
-                    cur,
-                    """INSERT INTO artist_tags
-                       (artist_id, tag_id, weight, source, fetched_at,
-                        author_pubkey, signature, batch_root, merkle_proof, imported)
-                       VALUES %s
-                       ON CONFLICT (artist_id, tag_id, source) DO UPDATE SET
-                           weight = EXCLUDED.weight,
-                           fetched_at = EXCLUDED.fetched_at,
-                           author_pubkey = EXCLUDED.author_pubkey,
-                           signature = EXCLUDED.signature,
-                           batch_root = EXCLUDED.batch_root,
-                           merkle_proof = EXCLUDED.merkle_proof,
-                           updated_at = CURRENT_TIMESTAMP
-                       WHERE """ + _ENRICHMENT_PRECEDENCE.format(t="artist_tags"),
-                    values,
-                    template="(%s, %s, %s, %s, %s, %s, %s, %s, %s, TRUE)",
-                    page_size=500,
-                )
-        return len(items)
-
-    def _import_similar_artists(self, conn, items: list[dict]) -> int:
-        # Boundary filter: a self-edge is always garbage (namesake-collapse
-        # era rows on peers that predate chk_not_self_similar) and would kill
-        # the whole batch against the constraint here.
-        self_edges = [i for i in items
-                      if i["artist_uuid"] == i["similar_artist_uuid"]]
-        if self_edges:
-            logger.warning("sync import: dropping %d self-similar edge(s)",
-                           len(self_edges))
-            items = [i for i in items
-                     if i["artist_uuid"] != i["similar_artist_uuid"]]
-            if not items:
-                return 0
-        with conn.cursor() as cur:
-            # Batch upsert similar artists
-            artist_values = list({
-                item["similar_artist_uuid"]: (
-                    item["similar_artist_uuid"], item["similar_artist_name"]
-                )
-                for item in items if item.get("similar_artist_name")
-            }.values())
-            if artist_values:
-                psycopg2.extras.execute_values(
-                    cur,
-                    """INSERT INTO artists (id, name)
-                       VALUES %s ON CONFLICT (id) DO NOTHING""",
-                    artist_values,
-                    template="(%s, %s)",
-                )
-
-            # Batch upsert similar_artists
-            values = [
-                (
-                    item["artist_uuid"], item["similar_artist_uuid"],
-                    item["match_score"], item.get("source", "sync"),
-                    *self._seal_values(item),
-                )
-                for item in items
-            ]
-            psycopg2.extras.execute_values(
-                cur,
-                """INSERT INTO similar_artists
-                   (artist_id, similar_artist_id, match_score, source, fetched_at,
-                        author_pubkey, signature, batch_root, merkle_proof, imported)
-                   VALUES %s
-                   ON CONFLICT (artist_id, similar_artist_id, source) DO UPDATE SET
-                       match_score = EXCLUDED.match_score,
-                       fetched_at = EXCLUDED.fetched_at,
-                       author_pubkey = EXCLUDED.author_pubkey,
-                       signature = EXCLUDED.signature,
-                       batch_root = EXCLUDED.batch_root,
-                       merkle_proof = EXCLUDED.merkle_proof,
-                       updated_at = CURRENT_TIMESTAMP
-                   WHERE """ + _ENRICHMENT_PRECEDENCE.format(t="similar_artists"),
-                values,
-                template="(%s, %s, %s, %s, %s, %s, %s, %s, %s, TRUE)",
-                page_size=500,
-            )
-        return len(items)
-
-    def _import_genre_descriptions(self, conn, items: list[dict]) -> int:
-        with conn.cursor() as cur:
-            local = self._reconcile_named(
-                cur, "genres",
-                [(item["genre_uuid"], item.get("genre_name")) for item in items])
-
-            # Batch upsert genre_descriptions (genre_id resolved to the local row)
-            values = [
-                (
-                    local[item["genre_name"]], item.get("source", "sync"),
-                    item.get("summary"), item.get("content"),
-                    item.get("url"), *self._seal_values(item),
-                )
-                for item in items if item.get("genre_name") in local
-            ]
-            if values:
-                psycopg2.extras.execute_values(
-                    cur,
-                    """INSERT INTO genre_descriptions
-                       (genre_id, source, summary, content, url, fetched_at,
-                        author_pubkey, signature, batch_root, merkle_proof, imported)
-                       VALUES %s
-                       ON CONFLICT (genre_id, source) DO UPDATE SET
-                           summary = EXCLUDED.summary,
-                           content = EXCLUDED.content,
-                           url = EXCLUDED.url,
-                           fetched_at = EXCLUDED.fetched_at,
-                           author_pubkey = EXCLUDED.author_pubkey,
-                           signature = EXCLUDED.signature,
-                           batch_root = EXCLUDED.batch_root,
-                           merkle_proof = EXCLUDED.merkle_proof,
-                           updated_at = CURRENT_TIMESTAMP
-                       WHERE """ + _ENRICHMENT_PRECEDENCE.format(t="genre_descriptions"),
-                    values,
-                    template="(%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, TRUE)",
-                    page_size=500,
-                )
-        return len(items)
-
-    # -- Post-import enrichment -----------------------------------------------
-
-    def _update_artist_gender(self, artist_uuids: list[str]) -> int:
-        """Classify artist gender from bio pronouns (she/he/her/his/they).
-
-        Uses regexp_count with \\y word boundaries for accurate matching.
-        Only updates artists whose bios were just imported.
-        """
-        if not artist_uuids:
-            return 0
-        conn = self._get_conn()
-        try:
-            with conn.cursor() as cur:
-                cur.execute(
-                    """WITH pronoun_analysis AS (
-                        SELECT ab.artist_id,
-                            regexp_count(LOWER(ab.content), '\\yshe\\y')
-                                + regexp_count(LOWER(ab.content), '\\yher\\y') AS female_score,
-                            regexp_count(LOWER(ab.content), '\\yhe\\y')
-                                + regexp_count(LOWER(ab.content), '\\yhis\\y') AS male_score,
-                            regexp_count(LOWER(ab.content), '\\ythey\\y') AS group_score
-                        FROM artist_bios ab
-                        WHERE ab.artist_id = ANY(%s::uuid[])
-                          AND LENGTH(ab.content) > 200
-                    )
-                    UPDATE artists a
-                    SET gender = (CASE
-                        WHEN pa.female_score >= 2 AND pa.female_score > pa.male_score * 2
-                             AND (pa.male_score = 0 OR (pa.female_score - pa.male_score) >= 4)
-                            THEN 'female'
-                        WHEN pa.male_score >= 2 AND pa.male_score > pa.female_score * 2
-                             AND (pa.female_score = 0 OR (pa.male_score - pa.female_score) >= 4)
-                            THEN 'male'
-                        WHEN pa.group_score > GREATEST(pa.female_score, pa.male_score)
-                             AND pa.group_score >= 3
-                            THEN 'mixed'
-                        ELSE 'unknown'
-                    END)::artist_gender,
-                    updated_at = NOW()
-                    FROM pronoun_analysis pa
-                    WHERE a.id = pa.artist_id""",
-                    [artist_uuids],
-                )
-                updated = cur.rowcount
-            conn.commit()
-            return updated
-        except Exception as e:
-            conn.rollback()
-            logger.error(f"Gender classification failed: {e}")
-            return 0
-
-    def _update_artist_is_vocalist(self, artist_uuids: list[str]) -> int:
-        """Classify artists as vocal/instrumental from bio keywords.
-
-        Rules mirror LastFmService._update_artist_is_vocalist:
-            - Any vocal keyword (strong or medium) → 'vocal'.
-            - Only instrumental keywords → 'instrumental'.
-            - Otherwise → 'unknown'.
-        Only updates artists whose bios were just imported.
-        """
-        if not artist_uuids:
-            return 0
-        conn = self._get_conn()
-        try:
-            with conn.cursor() as cur:
-                cur.execute(
-                    r"""WITH vocal_analysis AS (
-                        SELECT ab.artist_id,
-                            regexp_count(LOWER(ab.content), '\ysinger\y')
-                            + regexp_count(LOWER(ab.content), '\ysingers\y')
-                            + regexp_count(LOWER(ab.content), '\yvocalist\y')
-                            + regexp_count(LOWER(ab.content), '\yvocalists\y')
-                            + regexp_count(LOWER(ab.content), '\yfrontman\y')
-                            + regexp_count(LOWER(ab.content), '\yfrontwoman\y')
-                            + regexp_count(LOWER(ab.content), '\ycrooner\y')
-                            + regexp_count(LOWER(ab.content), '\ychanteuse\y')
-                            + regexp_count(LOWER(ab.content), '\ysoprano\y')
-                            + regexp_count(LOWER(ab.content), '\ytenor\y')
-                            + regexp_count(LOWER(ab.content), '\ybaritone\y')
-                            + regexp_count(LOWER(ab.content), '\ycontralto\y')
-                            + regexp_count(LOWER(ab.content), '\yrapper\y')
-                            + regexp_count(LOWER(ab.content), '\yvocal\y')
-                            + regexp_count(LOWER(ab.content), '\yvocals\y')
-                            + regexp_count(LOWER(ab.content), '\ysinging\y')
-                            + regexp_count(LOWER(ab.content), '\ysings\y')
-                            + regexp_count(LOWER(ab.content), '\ysang\y')
-                            + regexp_count(LOWER(ab.content), '\yrapping\y') AS vocal_hits,
-                            regexp_count(LOWER(ab.content), '\yinstrumental\y')
-                            + regexp_count(LOWER(ab.content), '\yinstrumentals\y')
-                            + regexp_count(LOWER(ab.content), '\yinstrumentalist\y') AS instr_hits
-                        FROM artist_bios ab
-                        WHERE ab.artist_id = ANY(%s::uuid[])
-                          AND LENGTH(ab.content) > 200
-                    )
-                    UPDATE artists a
-                    SET is_vocalist = (CASE
-                        WHEN va.vocal_hits >= 1 THEN 'vocal'
-                        WHEN va.instr_hits >= 1 THEN 'instrumental'
-                        ELSE 'unknown'
-                    END)::artist_vocalist,
-                    updated_at = NOW()
-                    FROM vocal_analysis va
-                    WHERE a.id = va.artist_id""",
-                    [artist_uuids],
-                )
-                updated = cur.rowcount
-            conn.commit()
-            return updated
-        except Exception as e:
-            conn.rollback()
-            logger.error(f"Vocalist classification failed: {e}")
-            return 0
 
 
 def import_pushed(db_dsn: str, category: str, payload: dict) -> int:

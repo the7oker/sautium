@@ -50,9 +50,13 @@ def test_chromaprint_is_required_and_in_alphabet(bad):
 
 
 def test_enrichment_payload_stays_v2():
-    payload = rs.enrichment_payload(AUTHOR, "artist_bio", TRACK, "lastfm",
+    payload = rs.enrichment_payload(AUTHOR, "track_mbid", TRACK, "",
                                     FEATURES_HASH, "2026-09-18T10:00:00Z")
-    assert payload.startswith(b"sautium-record:v2:artist_bio:")
+    assert payload.startswith(b"sautium-record:v2:track_mbid:")
+    # The Last.fm kinds left the grammar 2026-09-19 — node-local, never sealed.
+    with pytest.raises(ValueError):
+        rs.enrichment_payload(AUTHOR, "artist_bio", TRACK, "lastfm",
+                              FEATURES_HASH, "2026-09-18T10:00:00Z")
 
 
 def test_sign_verify_round_trip_across_copies():

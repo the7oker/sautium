@@ -171,8 +171,8 @@ identity exceeds the payoff of the fakes it can push before it burns.**
 |---|---|---|---|
 | Verifiable by recompute | CLAP embeddings, audio features, BPM, duration | Any node owning the same material | Recompute ladder (below) |
 | Verifiable by authority | MBIDs, canonical names, aliases, album existence | Local MB dump / owned-album overlap | Hint + local re-verify; never peer-driven merges |
-| Subjective | similar-artist opinions, tags, curatorial notes | none (no ground truth) | Trust-based: friends-only, reputation, local flags |
-| Self-reported | play stats | none | Trust-based; low blast radius, provenance-labeled |
+| Subjective | similar-artist opinions, tags, curatorial notes | none (no ground truth) | Trust-based: friends-only, reputation, local flags — the Last.fm-fetched ones never travel since 2026-09-19 (below) |
+| Self-reported | play stats | none | Trust-based; low blast radius, provenance-labeled — Last.fm track stats never travel since 2026-09-19 |
 
 **Mutable-source caveat (2026-07-05).** Authority- and source-fetched
 data (bios, tags, external descriptions) legitimately changes upstream
@@ -182,6 +182,15 @@ reports apply only to the recompute class**, where the function is
 deterministic and the input is content-addressed. This also fixes the
 signing rollout order: phase 1 signs audio-derived records only; what
 signatures mean for source-fetched classes is an open question.
+
+**Last.fm data is node-local (2026-09-19).** The source-fetched classes
+that came from Last.fm — bios, tags, similars, track stats, genre
+descriptions — are out of the protocol altogether: Last.fm's API terms do
+not allow redistributing its answers. Their tables carry no seal columns
+(migration 019), the enrichment grammar keeps only the carry canon layer
+(`album`, `album_track`, `track_mbid`), and every node fetches its own by
+name. For Last.fm the open question above is closed: nothing of it is
+signed, because nothing of it travels.
 
 The **public/friends flag** is data-class-aware: public mode accepts only
 verifiable (and verified) classes; subjective data stays friends-only.
@@ -333,7 +342,8 @@ sautium-record:v3:features:{author_pubkey}:{track_uuid}:{chromaprint}:{duration_
 
 Audio records and enrichment records are versioned separately
 (`AUDIO_RECORD_VERSION`, `ENRICHMENT_RECORD_VERSION` — the latter still
-v2, its grammar carries no material hash), so a change to one never
+v2, its grammar carries no material hash; since 2026-09-19 it names only
+the carry canon layer, the Last.fm kinds having left it), so a change to one never
 invalidates the other's seals. No record carries its version: a bump is a
 corpus re-sign, and an older format has no verifier.
 

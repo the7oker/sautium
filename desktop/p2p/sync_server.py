@@ -634,7 +634,7 @@ class SyncServer:
         return getattr(self, "_slice_count", 0)
 
     async def handle_inventory(self, request: web.Request) -> web.Response:
-        """POST /api/sync/inventory — check available enrichment data."""
+        """POST /api/sync/inventory — what this node holds for these tracks."""
         ip = request.remote or "unknown"
         if not self._check_rate_limit(ip):
             return self._rate_limited(request, ip)
@@ -646,22 +646,22 @@ class SyncServer:
         try:
             body = await request.json()
             track_uuids = body.get("track_uuids", [])
-            artist_uuids = body.get("artist_uuids", [])
         except (json.JSONDecodeError, Exception):
             return self._json_response(
                 request, {"error": "invalid JSON"}, status=400
             )
 
-        for name, lst in (("track_uuids", track_uuids), ("artist_uuids", artist_uuids)):
-            if not isinstance(lst, list) or len(lst) > MAX_UUIDS_PER_REQUEST:
-                return self._json_response(
-                    request, {"error": f"{name} must be a list of at most {MAX_UUIDS_PER_REQUEST} items"},
-                    status=400,
-                )
+        if (not isinstance(track_uuids, list)
+                or len(track_uuids) > MAX_UUIDS_PER_REQUEST):
+            return self._json_response(
+                request, {"error": f"track_uuids must be a list of at most "
+                                   f"{MAX_UUIDS_PER_REQUEST} items"},
+                status=400,
+            )
 
         try:
             result = await self._run_query(
-                sync_queries.get_inventory, track_uuids, artist_uuids
+                sync_queries.get_inventory, track_uuids
             )
             return self._json_response(request, result)
         except Exception as e:

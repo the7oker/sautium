@@ -4,8 +4,9 @@ Master-only CLI. The 52 curated picks (backend/seed/manifest_v1.json) are
 resolved to their minted rows through uuid_utils — never through SQL
 normalization, which cannot reproduce the identity rule's punctuation
 folding — and exported as <seed_dir>/seed_v{N}.json.gz for every node's
-first-start import (backend/seed_import.py). The bundle version follows the
-audio record payload: v2 (2026-09-18) ships seals made under payload v3.
+first-start import (backend/seed_import.py). The bundle version moves with
+its content: v2 (2026-09-18) shipped seals made under audio payload v3, v3
+(2026-09-19) dropped the Last.fm layer.
 
 The bundle never enters the tree (17 MB per version, for ever, in every
 clone): it is published as the asset of the GitHub release `seed-v{N}` by
@@ -16,10 +17,14 @@ importer, which downloads and checks the file on a node's first start.
 The bundle has two halves. The structural half (albums, tracklists,
 artists, descriptions, picks) has no P2P wire representation — the v3
 structural transport is deleted — so plain row dumps travel here, seals
-included where the master holds them. The enrichment/analysis half is the
-VERBATIM output of the pull handlers in desktop/p2p/sync_queries.py, so
-the importer replays it through the ordinary verify-and-import gate with
-zero format drift.
+included where the master holds them. The analysis half (segments, audio
+features, track↔recording bindings) is the VERBATIM output of the pull
+handlers in desktop/p2p/sync_queries.py, so the importer replays it
+through the ordinary verify-and-import gate with zero format drift.
+Nothing Last.fm answered ships — bios, tags, similars are node-local since
+2026-09-19 (Last.fm's API terms do not allow redistribution); a fresh
+node's own background enrichment fetches them for the seed's artists as
+for any other.
 
 Reliability over coverage: a pick with any integrity gap — a slot without
 a catalog length, a tracklist with position gaps (a partial mint), no
@@ -61,7 +66,7 @@ MANIFEST_PATH = SEED_DIR / "manifest_v1.json"
 BUNDLE_INFO_PATH = SEED_DIR / "bundle.json"
 
 BUNDLE_FORMAT = "sautium-seed"
-BUNDLE_VERSION = 2
+BUNDLE_VERSION = 3
 BUNDLE_PATH = Path(settings.seed_dir) / f"seed_v{BUNDLE_VERSION}.json.gz"
 RELEASE_URL = ("https://github.com/the7oker/sautium/releases/download/"
                f"seed-v{BUNDLE_VERSION}/{BUNDLE_PATH.name}")
@@ -189,25 +194,6 @@ def _coverage(conn, picks: list[dict]) -> tuple[list[str], list[str], list[dict]
                             "without sealed audio_features"
                             + (" (waived)" if p["analysis_waiver"] else ""))
 
-        enrich = sq.db_query(
-            conn,
-            """SELECT EXISTS (SELECT 1 FROM artist_bios
-                              WHERE artist_id = %(aid)s::uuid
-                                AND signature IS NOT NULL AND batch_root IS NOT NULL) AS bios,
-                      EXISTS (SELECT 1 FROM artist_tags
-                              WHERE artist_id = %(aid)s::uuid
-                                AND signature IS NOT NULL AND batch_root IS NOT NULL) AS tags,
-                      EXISTS (SELECT 1 FROM similar_artists
-                              WHERE artist_id = %(aid)s::uuid
-                                AND signature IS NOT NULL AND batch_root IS NOT NULL) AS similars""",
-            {"aid": p["artist_id"]})[0]
-        if not enrich["bios"]:
-            fatal.append(f"{label}: no sealed artist_bios for primary artist")
-        if not enrich["tags"]:
-            fatal.append(f"{label}: no sealed artist_tags for primary artist")
-        if not enrich["similars"]:
-            warns.append(f"{label}: no sealed similar_artists for primary artist")
-
         manifest_owned = next(
             e["owned_on_master"] for e in _manifest_cache["picks"]
             if e["rank"] == p["rank"])
@@ -315,14 +301,8 @@ _ENVELOPE_SORT_KEYS = {
     "segments": lambda i: i["track_uuid"],
     "audio_features": lambda i: i["track_uuid"],
     "track_mbids": lambda i: (i["track_uuid"], i["recording_mbid"]),
-    "artist_bios": lambda i: (i["artist_uuid"], i["source"]),
-    "artist_tags": lambda i: (i["artist_uuid"], i["tag_uuid"], i["source"]),
-    "similar_artists": lambda i: (i["artist_uuid"], i["similar_artist_uuid"], i["source"]),
 }
 
-ENRICHMENT_CATEGORIES = (("artist_bios", sq.pull_artist_bios),
-                         ("artist_tags", sq.pull_artist_tags),
-                         ("similar_artists", sq.pull_similar_artists))
 ANALYSIS_CATEGORIES = (("segments", sq.pull_segments),
                        ("audio_features", sq.pull_audio_features),
                        ("track_mbids", sq.pull_track_mbids))
@@ -333,35 +313,30 @@ def _envelope(pull_result: dict) -> dict:
     return pull_result
 
 
-def envelope_chunks(conn, track_ids: list[str], artist_ids: list[str], *,
+def envelope_chunks(conn, track_ids: list[str], *,
                     chunk: int = sq.SEGMENTS_MAX_UUIDS):
-    """Yield (group, category, envelope) — the VERBATIM output of the pull
-    handlers in desktop/p2p/sync_queries.py, per chunk of `chunk` entities,
+    """Yield (category, envelope) — the VERBATIM output of the pull
+    handlers in desktop/p2p/sync_queries.py, per chunk of `chunk` tracks,
     so the importer replays it through the ordinary verify-and-import gate.
-    Every sealed record the node holds, under its author's seal — what the
-    node serves on the network is what it ships in a file."""
-    for i in range(0, len(artist_ids), chunk):
-        part = artist_ids[i:i + chunk]
-        for category, pull in ENRICHMENT_CATEGORIES:
-            yield "enrichment", category, _envelope(pull(conn, part))
+    Every sealed analysis record the node holds, under its author's seal —
+    what the node serves on the network is what it ships in a file."""
     for i in range(0, len(track_ids), chunk):
         part = track_ids[i:i + chunk]
         for category, pull in ANALYSIS_CATEGORIES:
-            yield "analysis", category, _envelope(pull(conn, part))
+            yield category, _envelope(pull(conn, part))
 
 
 def build_bundle(conn, picks: list[dict]) -> dict:
     album_ids = sorted(p["album_id"] for p in picks)
     track_ids, artist_ids = collect_ids(conn, album_ids)
-    groups: dict = {"enrichment": {}, "analysis": {}}
-    for group, category, env in envelope_chunks(conn, track_ids, artist_ids):
-        merged = groups[group].setdefault(
+    analysis: dict = {}
+    for category, env in envelope_chunks(conn, track_ids):
+        merged = analysis.setdefault(
             category, {"category": category, "items": [], "batches": {}})
         merged["items"].extend(env["items"])
         merged["batches"].update(env["batches"])
-    for envelopes in groups.values():
-        for env in envelopes.values():
-            _envelope(env)
+    for env in analysis.values():
+        _envelope(env)
     return {
         "format": BUNDLE_FORMAT,
         "version": BUNDLE_VERSION,
@@ -374,8 +349,7 @@ def build_bundle(conn, picks: list[dict]) -> dict:
         ],
         "structural": dict(structural_sections(conn, album_ids, track_ids,
                                                artist_ids, picks=picks)),
-        "enrichment": groups["enrichment"],
-        "analysis": groups["analysis"],
+        "analysis": analysis,
     }
 
 

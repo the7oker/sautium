@@ -104,13 +104,7 @@ def _parse_vector(vec_text: str) -> list[float]:
 # Inventory
 # ---------------------------------------------------------------------------
 
-EMPTY_INVENTORY = {
-    "tracks": [], "embeddings": [],
-    "audio_features": [], "track_stats": [],
-    "artists": [], "artist_bios": [],
-    "artist_tags": [], "similar_artists": [],
-    "genres": [], "genre_descriptions": [],
-}
+EMPTY_INVENTORY = {"tracks": [], "embeddings": [], "audio_features": []}
 
 
 # Rows the sync protocol will hand out: sealed ones. The inventory and the
@@ -119,36 +113,29 @@ EMPTY_INVENTORY = {
 _SIGNED = "signature IS NOT NULL AND batch_root IS NOT NULL"
 
 
-def get_inventory(conn, track_uuids: list[str],
-                  artist_uuids: Optional[list[str]] = None) -> dict:
+def get_inventory(conn, track_uuids: list[str]) -> dict:
     """
-    Check what enrichment data is available for the given track UUIDs.
+    Check what analysis this node can serve for the given track UUIDs.
 
-    `artist_uuids` asks the artist-level categories about these artists
-    directly, on top of the artists of the given tracks — the holdings-
-    filter path names phantom artists whose tracks all missed the track
-    filter but who may still have a bio, tags or similars here.
-
-    Returns category -> uuid_list dict. The versioned categories return
-    [uuid, analysis_version, segment_count] triples (embeddings) and
-    [uuid, analysis_version] pairs (audio_features) instead, so peers can
-    re-pull rows produced by an older analysis methodology — existence
-    alone never delivers upgrades. segment_count lets a peer see how dense
-    this node's grid is (densification / "deepen analysis" planning).
+    Returns category -> list. `tracks` is plain uuids; the versioned
+    categories return [uuid, analysis_version, segment_count] triples
+    (embeddings) and [uuid, analysis_version] pairs (audio_features), so
+    peers can re-pull rows produced by an older analysis methodology —
+    existence alone never delivers upgrades. segment_count lets a peer see
+    how dense this node's grid is (densification / "deepen analysis"
+    planning).
 
     Lyrics are deliberately NOT part of the protocol (2026-07-11): the one
     category that is verbatim copyrighted text — every node fetches its own
-    from the public sources.
+    from the public sources. The Last.fm-fetched layer (bios, tags,
+    similars, track stats, genre descriptions) left it 2026-09-19 for the
+    same kind of reason: Last.fm's API terms do not allow redistributing
+    its answers, so every node fetches its own by name.
     """
-    track_uuids = track_uuids or []
-    artist_uuids = artist_uuids or []
-    if not track_uuids and not artist_uuids:
+    if not track_uuids:
         return dict(EMPTY_INVENTORY)
+    q = lambda sql: db_query(conn, sql, [track_uuids])
 
-    uuids = track_uuids
-    q = lambda sql: db_query(conn, sql, [uuids]) if uuids else []
-
-    # -- Track-level data --
     tracks = _uuid_list(
         q("SELECT id FROM tracks WHERE id = ANY(%s::uuid[])"), "id"
     )
@@ -164,72 +151,12 @@ def get_inventory(conn, track_uuids: list[str],
     ]
     audio_features = [
         [r["track_id"], r["analysis_version"]] for r in
-        q("""SELECT track_id::text AS track_id, analysis_version
-             FROM audio_features WHERE track_id = ANY(%s::uuid[])
-               AND signature IS NOT NULL AND batch_root IS NOT NULL""")
+        q(f"""SELECT track_id::text AS track_id, analysis_version
+              FROM audio_features WHERE track_id = ANY(%s::uuid[])
+                AND {_SIGNED}""")
     ]
-    track_stats = _uuid_list(
-        q("""SELECT DISTINCT track_id FROM track_stats
-             WHERE track_id = ANY(%s::uuid[])
-               AND signature IS NOT NULL AND batch_root IS NOT NULL"""),
-        "track_id",
-    )
-
-    # -- Related artists: the tracks' artists plus the ones named outright --
-    artist_set = set(_uuid_list(
-        q("SELECT DISTINCT artist_id FROM track_artists WHERE track_id = ANY(%s::uuid[])"),
-        "artist_id",
-    ))
-    artist_set.update(artist_uuids)
-    artists = sorted(artist_set)
-    qa = lambda sql: db_query(conn, sql, [artists]) if artists else []
-    artist_bios = _uuid_list(
-        qa(f"""SELECT DISTINCT artist_id FROM artist_bios
-               WHERE artist_id = ANY(%s::uuid[]) AND {_SIGNED}"""),
-        "artist_id",
-    )
-    artist_tags = _uuid_list(
-        qa(f"""SELECT DISTINCT artist_id FROM artist_tags
-               WHERE artist_id = ANY(%s::uuid[]) AND {_SIGNED}"""),
-        "artist_id",
-    )
-    similar_artists = _uuid_list(
-        qa(f"""SELECT DISTINCT artist_id FROM similar_artists
-               WHERE artist_id = ANY(%s::uuid[]) AND {_SIGNED}"""),
-        "artist_id",
-    )
-    # -- Related genres (album-grain: genres of the albums containing these tracks).
-    #    album_genres is local-only (albums don't sync), so we share only the genre
-    #    entities + their descriptions, derived via the sender's own albums. --
-    genres = _uuid_list(
-        q("""SELECT DISTINCT ag.genre_id FROM album_genres ag
-             INNER JOIN album_variants av ON av.album_id = ag.album_id
-             INNER JOIN media_files mf ON mf.album_variant_id = av.id
-             WHERE mf.track_id = ANY(%s::uuid[])"""),
-        "genre_id",
-    )
-    genre_descriptions = _uuid_list(
-        q("""SELECT DISTINCT gd.genre_id FROM genre_descriptions gd
-             INNER JOIN album_genres ag ON ag.genre_id = gd.genre_id
-             INNER JOIN album_variants av ON av.album_id = ag.album_id
-             INNER JOIN media_files mf ON mf.album_variant_id = av.id
-             WHERE mf.track_id = ANY(%s::uuid[])
-               AND gd.signature IS NOT NULL AND gd.batch_root IS NOT NULL"""),
-        "genre_id",
-    )
-
-    return {
-        "tracks": tracks,
-        "embeddings": embeddings,
-        "audio_features": audio_features,
-        "track_stats": track_stats,
-        "artists": artists,
-        "artist_bios": artist_bios,
-        "artist_tags": artist_tags,
-        "similar_artists": similar_artists,
-        "genres": genres,
-        "genre_descriptions": genre_descriptions,
-    }
+    return {"tracks": tracks, "embeddings": embeddings,
+            "audio_features": audio_features}
 
 
 # ---------------------------------------------------------------------------
@@ -237,29 +164,25 @@ def get_inventory(conn, track_uuids: list[str],
 # ---------------------------------------------------------------------------
 # A node with millions of phantom gaps cannot ask every peer about all of
 # them (306 inventory requests per peer per run at the master's size). The
-# peer publishes instead: two Bloom filters over what it HOLDS — track uuids
-# with sealed analysis, artist uuids with sealed bios/tags/similars — sized
-# by its holdings, never by anyone's gaps. The asker tests its gaps locally
-# and asks the exact inventory only about the hits. Built in memory when the
-# holdings version moved (checked at most every _HOLDINGS_RECHECK_S), served
-# from memory otherwise; a caller that already has the current version gets
-# a stub, no bits.
+# peer publishes instead: a Bloom filter over the track uuids it HOLDS
+# sealed analysis for — sized by its holdings, never by anyone's gaps. The
+# asker tests its gaps locally and asks the exact inventory only about the
+# hits. Built in memory when the holdings version moved (checked at most
+# every _HOLDINGS_RECHECK_S), served from memory otherwise; a caller that
+# already has the current version gets a stub, no bits. (Until 2026-09-19 a
+# second filter named the artists with sealed bios/tags/similars — that
+# layer is node-local now.)
 
 HOLDINGS_FPR = 0.01
 _HOLDINGS_RECHECK_S = 300
 
 _holdings_lock = threading.Lock()
 _holdings: dict = {"checked_at": 0.0, "version": None, "payload": None,
-                   "tracks_n": 0, "artists_n": 0}
+                   "tracks_n": 0}
 
 _HOLDINGS_TRACKS_SQL = f"""
     SELECT track_id::text FROM embeddings
-    UNION SELECT track_id::text FROM audio_features WHERE {_SIGNED}
-    UNION SELECT track_id::text FROM track_stats WHERE {_SIGNED}"""
-_HOLDINGS_ARTISTS_SQL = f"""
-    SELECT artist_id::text FROM artist_bios WHERE {_SIGNED}
-    UNION SELECT artist_id::text FROM artist_tags WHERE {_SIGNED}
-    UNION SELECT artist_id::text FROM similar_artists WHERE {_SIGNED}"""
+    UNION SELECT track_id::text FROM audio_features WHERE {_SIGNED}"""
 
 
 def holdings_version(conn) -> str:
@@ -269,18 +192,10 @@ def holdings_version(conn) -> str:
     row = db_query(conn, f"""
         SELECT (SELECT count(*) FROM embeddings) AS e,
                (SELECT count(*) FROM audio_features WHERE {_SIGNED}) AS af,
-               (SELECT count(*) FROM track_stats WHERE {_SIGNED}) AS ts,
-               (SELECT count(*) FROM artist_bios WHERE {_SIGNED}) AS ab,
-               (SELECT count(*) FROM artist_tags WHERE {_SIGNED}) AS atg,
-               (SELECT count(*) FROM similar_artists WHERE {_SIGNED}) AS sa,
                GREATEST((SELECT max(updated_at) FROM embeddings),
-                        (SELECT max(updated_at) FROM audio_features),
-                        (SELECT max(updated_at) FROM track_stats),
-                        (SELECT max(updated_at) FROM artist_bios),
-                        (SELECT max(updated_at) FROM artist_tags),
-                        (SELECT max(updated_at) FROM similar_artists)) AS latest
+                        (SELECT max(updated_at) FROM audio_features)) AS latest
     """)[0]
-    counts = [int(row[k]) for k in ("e", "af", "ts", "ab", "atg", "sa")]
+    counts = [int(row[k]) for k in ("e", "af")]
     latest = int(row["latest"].timestamp()) if row["latest"] else 0
     return ".".join(str(n) for n in counts) + f".{latest}"
 
@@ -298,10 +213,9 @@ def _stream_uuids(conn, sql: str):
 
 def _build_filter(conn, sql: str) -> BloomFilter:
     # Sized by the exact distinct count — the per-table row counts in the
-    # version are a poor bound (one artist has many tag rows, one track
-    # sits in three tables), and an oversized filter is wasted bytes for
-    # every peer that fetches it. One extra pass over the union, on
-    # rebuild only.
+    # version are a poor bound (one track sits in both tables), and an
+    # oversized filter is wasted bytes for every peer that fetches it. One
+    # extra pass over the union, on rebuild only.
     capacity = db_query(conn, f"SELECT count(*) AS n FROM ({sql}) u")[0]["n"]
     bf = BloomFilter.sized(max(int(capacity), 1000), HOLDINGS_FPR)
     bf.update(_stream_uuids(conn, sql))
@@ -309,9 +223,9 @@ def _build_filter(conn, sql: str) -> BloomFilter:
 
 
 def get_holdings(conn, have: Optional[str] = None) -> dict:
-    """The holdings payload: {"version", "tracks": filter, "artists":
-    filter}. `have` is the version the caller already holds — an unchanged
-    one answers {"version", "unchanged": true}."""
+    """The holdings payload: {"version", "tracks": filter}. `have` is the
+    version the caller already holds — an unchanged one answers {"version",
+    "unchanged": true}."""
     with _holdings_lock:
         now = time.monotonic()
         if (_holdings["payload"] is None
@@ -320,17 +234,13 @@ def get_holdings(conn, have: Optional[str] = None) -> dict:
             if version != _holdings["version"]:
                 t0 = time.monotonic()
                 tracks = _build_filter(conn, _HOLDINGS_TRACKS_SQL)
-                artists = _build_filter(conn, _HOLDINGS_ARTISTS_SQL)
                 _holdings.update(
-                    version=version, tracks_n=tracks.n, artists_n=artists.n,
-                    payload={"version": version,
-                             "tracks": tracks.to_dict(),
-                             "artists": artists.to_dict()},
+                    version=version, tracks_n=tracks.n,
+                    payload={"version": version, "tracks": tracks.to_dict()},
                 )
                 logger.info(
-                    f"Holdings filter rebuilt: {tracks.n} tracks + "
-                    f"{artists.n} artists, "
-                    f"{(len(tracks.bits) + len(artists.bits)) // 1024} KB, "
+                    f"Holdings filter rebuilt: {tracks.n} tracks, "
+                    f"{len(tracks.bits) // 1024} KB, "
                     f"{time.monotonic() - t0:.1f}s"
                 )
             _holdings["checked_at"] = now
@@ -340,13 +250,12 @@ def get_holdings(conn, have: Optional[str] = None) -> dict:
 
 
 def holdings_summary() -> Optional[dict]:
-    """Version and counts for /health, from memory only — never builds.
+    """Version and count for /health, from memory only — never builds.
     The asker prices "fetch the filter" against "send my gaps" with it;
-    None until the first holdings request built the filters."""
+    None until the first holdings request built the filter."""
     if _holdings["payload"] is None:
         return None
-    return {"version": _holdings["version"],
-            "tracks": _holdings["tracks_n"], "artists": _holdings["artists_n"]}
+    return {"version": _holdings["version"], "tracks": _holdings["tracks_n"]}
 
 
 def split_engaged(conn, artist_uuids: list[str]) -> tuple[list[str], list[str]]:
@@ -376,7 +285,7 @@ def split_engaged(conn, artist_uuids: list[str]) -> tuple[list[str], list[str]]:
 
 def _pull_simple(conn, category: str, sql: str, uuids: list[str],
                  post_process=None) -> dict:
-    """Common handler for the sealed enrichment categories.
+    """Common handler for the sealed plain-row categories.
 
     Every SELECT here MUST carry the four seal columns plus fetched_at, and
     every row MUST arrive with the signing_batches rows its root names —
@@ -402,9 +311,6 @@ def _pull_simple(conn, category: str, sql: str, uuids: list[str],
 # and the seal columns are NULLed by the seal-guard trigger the moment a
 # payload column changes, so "has a signature" also means "unmodified".
 _SEALED_ONLY = " AND {t}.signature IS NOT NULL AND {t}.batch_root IS NOT NULL"
-
-_SEAL_COLS = """{t}.fetched_at, {t}.author_pubkey, {t}.signature,
-                {t}.batch_root, {t}.merkle_proof"""
 
 
 def pull_tracks(conn, uuids: list[str]) -> dict:
@@ -627,79 +533,6 @@ def pull_audio_features(conn, uuids: list[str]) -> dict:
             "batches": _batches_map(conn, roots)}
 
 
-def pull_track_stats(conn, uuids: list[str]) -> dict:
-    return _pull_simple(
-        conn, "track_stats",
-        f"""SELECT ts.track_id::text AS track_uuid, ts.source,
-                   ts.listeners, ts.playcount,
-                   {_SEAL_COLS.format(t='ts')}
-            FROM track_stats ts
-            WHERE ts.track_id = ANY(%s::uuid[])
-            {_SEALED_ONLY.format(t='ts')}""",
-        uuids,
-    )
-
-
-def pull_artist_bios(conn, uuids: list[str]) -> dict:
-    return _pull_simple(
-        conn, "artist_bios",
-        f"""SELECT ab.artist_id::text AS artist_uuid, a.name AS artist_name,
-                   ab.source, ab.summary, ab.content, ab.url,
-                   ab.listeners, ab.playcount,
-                   {_SEAL_COLS.format(t='ab')}
-            FROM artist_bios ab
-            INNER JOIN artists a ON a.id = ab.artist_id
-            WHERE ab.artist_id = ANY(%s::uuid[])
-            {_SEALED_ONLY.format(t='ab')}""",
-        uuids,
-    )
-
-
-def pull_artist_tags(conn, uuids: list[str]) -> dict:
-    return _pull_simple(
-        conn, "artist_tags",
-        f"""SELECT at2.artist_id::text AS artist_uuid,
-                   t.id::text AS tag_uuid, t.name AS tag_name,
-                   at2.weight, at2.source,
-                   {_SEAL_COLS.format(t='at2')}
-            FROM artist_tags at2
-            INNER JOIN tags t ON t.id = at2.tag_id
-            WHERE at2.artist_id = ANY(%s::uuid[])
-            {_SEALED_ONLY.format(t='at2')}""",
-        uuids,
-    )
-
-
-def pull_similar_artists(conn, uuids: list[str]) -> dict:
-    return _pull_simple(
-        conn, "similar_artists",
-        f"""SELECT sa.artist_id::text AS artist_uuid,
-                   sa.similar_artist_id::text AS similar_artist_uuid,
-                   a.name AS similar_artist_name,
-                   sa.match_score::float, sa.source,
-                   {_SEAL_COLS.format(t='sa')}
-            FROM similar_artists sa
-            INNER JOIN artists a ON a.id = sa.similar_artist_id
-            WHERE sa.artist_id = ANY(%s::uuid[])
-            {_SEALED_ONLY.format(t='sa')}""",
-        uuids,
-    )
-
-
-def pull_genre_descriptions(conn, uuids: list[str]) -> dict:
-    return _pull_simple(
-        conn, "genre_descriptions",
-        f"""SELECT gd.genre_id::text AS genre_uuid, g.name AS genre_name,
-                   gd.source, gd.summary, gd.content, gd.url,
-                   {_SEAL_COLS.format(t='gd')}
-            FROM genre_descriptions gd
-            INNER JOIN genres g ON g.id = gd.genre_id
-            WHERE gd.genre_id = ANY(%s::uuid[])
-            {_SEALED_ONLY.format(t='gd')}""",
-        uuids,
-    )
-
-
 def pull_track_mbids(conn, track_uuids: list[str]) -> dict:
     """Sealed track↔recording bindings (carry v3)."""
     return _pull_simple(
@@ -723,16 +556,6 @@ PULL_HANDLERS = {
     "embeddings": pull_embeddings,
     "audio-features": pull_audio_features,
     "audio_features": pull_audio_features,
-    "track-stats": pull_track_stats,
-    "track_stats": pull_track_stats,
-    "artist-bios": pull_artist_bios,
-    "artist_bios": pull_artist_bios,
-    "artist-tags": pull_artist_tags,
-    "artist_tags": pull_artist_tags,
-    "similar-artists": pull_similar_artists,
-    "similar_artists": pull_similar_artists,
-    "genre-descriptions": pull_genre_descriptions,
-    "genre_descriptions": pull_genre_descriptions,
     "track-mbids": pull_track_mbids,
     "track_mbids": pull_track_mbids,
 }
@@ -1082,35 +905,26 @@ def get_rare_search_uuids(conn) -> list[str]:
 
 def get_incomplete_artist_uuids(conn) -> list[str]:
     """
-    Return artist UUIDs whose data is missing in at least one sync
-    category — used as the trigger set for manual/LAN peer sync.
+    Artist UUIDs with at least one track missing analysis in EITHER
+    category — the trigger set for a sync run.
 
-    Track-level (any track missing → trigger): embeddings, audio_features,
-    track_stats. (Lyrics are out of the sync protocol — never a trigger.)
-    Artist-level (artist itself missing → trigger): artist_bios,
-    artist_tags, similar_artists.
+    Why broader than get_unenriched_artist_uuids: that one is the audio gap
+    set between drains and uses AND-of-audio to keep DHT traffic down. At
+    the start of a run we want to catch partial states — embeddings landed
+    but features didn't (a transient pull failure). Inventory +
+    _compute_needed at the peer/category level filter out anything we
+    already have, so even a wide trigger here is cheap when there's
+    nothing new to pull.
 
-    Why broader than get_unenriched_artist_uuids: that one is for DHT
-    lookup and uses AND-of-audio to keep DHT traffic down. Inside the
-    sync flow we want to catch partial states — e.g. embeddings landed
-    but features didn't (transient pull failure), or audio is full but
-    Last.fm bios never came through because the artist was already
-    "audio-enriched" and skipped. Inventory + _compute_needed at the
-    peer/category level filter out anything we already have, so even
-    a wide trigger here is cheap when there's nothing new to pull.
-
-    Not included: artist_members (compound-artist-only — would trigger
-    every solo artist forever), genre_descriptions (per-genre).
+    Until 2026-09-19 a missing bio, tag list, similars or track stats was a
+    trigger too; that layer is node-local now (Last.fm's API terms) and no
+    peer can fill it.
     """
     rows = db_query(
         conn,
         """SELECT DISTINCT ta.artist_id::text AS artist_uuid
            FROM track_artists ta
            WHERE NOT EXISTS (SELECT 1 FROM embeddings e WHERE e.track_id = ta.track_id)
-              OR NOT EXISTS (SELECT 1 FROM audio_features af WHERE af.track_id = ta.track_id)
-              OR NOT EXISTS (SELECT 1 FROM track_stats ts WHERE ts.track_id = ta.track_id)
-              OR NOT EXISTS (SELECT 1 FROM artist_bios ab WHERE ab.artist_id = ta.artist_id)
-              OR NOT EXISTS (SELECT 1 FROM artist_tags atg WHERE atg.artist_id = ta.artist_id)
-              OR NOT EXISTS (SELECT 1 FROM similar_artists sa WHERE sa.artist_id = ta.artist_id)""",
+              OR NOT EXISTS (SELECT 1 FROM audio_features af WHERE af.track_id = ta.track_id)""",
     )
     return [r["artist_uuid"] for r in rows]

@@ -188,26 +188,34 @@ def canonical_features_blob(row: dict) -> bytes:
 
 # -- Enrichment records --------------------------------------------------------
 #
-# These say something DIFFERENT from the audio records above, and the difference
-# is the whole design. A segment signature is a derivation claim: "I computed
-# this vector from this exact PCM", and a verifier with the same file can redo
-# it. Nobody derives a Last.fm biography. The node fetched it, and all it can
-# honestly assert is "at this instant, this source told ME this".
+# The sealed canon layer around pushed analysis (carry v3/v4): an album, a
+# tracklist row, a track↔recording binding. These say something DIFFERENT from
+# the audio records above, and the difference is the whole design. A segment
+# signature is a derivation claim: "I computed this vector from this exact
+# PCM", and a verifier with the same file can redo it. Nobody derives a canon
+# row: the node observed it, and all it can honestly assert is "at this
+# instant, my canon held this".
 #
 # So the payload binds three things and no material hash: WHO relayed it, WHAT
-# they relayed (content hash), and WHEN they were told. fetched_at lives INSIDE
-# the signed bytes rather than beside them, because freshness is the entire
-# basis on which one copy beats another — a timestamp an importer could edit
-# would decide precedence while the signature went on looking valid.
+# they relayed (content hash), and WHEN (fetched_at — created_at for these
+# kinds). fetched_at lives INSIDE the signed bytes rather than beside them,
+# because freshness is the entire basis on which one copy beats another — a
+# timestamp an importer could edit would decide precedence while the
+# signature went on looking valid.
 #
-# What this buys is attribution, not verifiability: a fabricated bio is
-# indistinguishable from a real one until someone checks the source, but it is
-# never anonymous, and one DELETE by author_pubkey removes everything a bad
-# relay ever introduced.
+# What this buys is attribution, not verifiability: a fabricated row is
+# indistinguishable from a real one until someone checks, but it is never
+# anonymous, and one DELETE by author_pubkey removes everything a bad relay
+# ever introduced.
+#
+# The Last.fm-fetched kinds (artist_bio, artist_tag, similar_artist,
+# track_stat, genre_description) were sealed under this grammar until
+# 2026-09-19 and left the network then: Last.fm's API terms do not allow
+# redistributing its answers, so those tables are node-local now and carry no
+# seal columns at all (migration 019). The grammar is unchanged — the
+# remaining kinds verify exactly as before.
 
-ENRICHMENT_KINDS = ("artist_bio", "artist_tag", "similar_artist",
-                    "track_stat", "genre_description",
-                    "album", "album_track", "track_mbid")
+ENRICHMENT_KINDS = ("album", "album_track", "track_mbid")
 
 
 def _fmt_fetched_at(fetched_at) -> str:
@@ -242,9 +250,9 @@ def enrichment_payload(
 ) -> bytes:
     """The bytes an author signs for one enrichment row.
 
-    `entity_uuid` is the artist/track/genre the row hangs off; `source` is the
-    provider name as stored, so the same fact from Last.fm and from MusicBrainz
-    are separate claims rather than one contested one."""
+    `entity_uuid` is the album/track the row hangs off; `source` is the
+    provider name as stored — "" for every remaining kind, kept in the bytes
+    so the v2 grammar stays what it was."""
     if kind not in ENRICHMENT_KINDS:
         raise ValueError(f"unknown enrichment kind: {kind}")
     return ":".join([
@@ -258,22 +266,13 @@ def enrichment_payload(
 # byte-for-byte, so this is a contract, not a convenience — appending a field
 # invalidates every existing signature of that kind and needs a version bump.
 # Field names are the WIRE names, not the column names, and deliberately so:
-# a peer verifies what it received. tag_name and similar_artist_uuid travel
-# where the local rows hold tag_id and similar_artist_id — both are UUIDv5 of
-# the name, so the two forms are interchangeable, and the portable one is what
-# the signature should cover.
+# a peer verifies what it received.
 ENRICHMENT_ORDER = {
-    "artist_bio":        ["summary", "content", "url", "listeners", "playcount"],
-    "artist_tag":        ["tag_name", "weight"],
-    "similar_artist":    ["similar_artist_uuid", "match_score"],
-    "track_stat":        ["listeners", "playcount"],
-    "genre_description": ["summary", "content", "url"],
-    # Carry — the sealed canon layer around pushed analysis. entity:
-    # album → album_uuid; album_track / track_mbid → track_uuid. `source`
-    # is "" and fetched_at = created_at for all three. album/album_track
-    # seals feed the pusher's full-snapshot gate; track_mbid also travels
-    # (v4). confidence is inside the signed bytes — an unsigned tier could
-    # be inflated in transit.
+    # entity: album → album_uuid; album_track / track_mbid → track_uuid.
+    # `source` is "" and fetched_at = created_at for all three. album/
+    # album_track seals feed the pusher's full-snapshot gate; track_mbid
+    # also travels (v4). confidence is inside the signed bytes — an
+    # unsigned tier could be inflated in transit.
     # cover_url travels but is NOT sealed: a CAA front-image URL is a
     # deterministic derivative of rg_mbid (re-derivable by anyone), and an
     # owned album's cover lives in its files anyway — sealing it would

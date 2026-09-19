@@ -117,23 +117,20 @@ def _analysis_rank(db: Session, track_id: str) -> int:
 
 
 def _shed_track_seals(db: Session, track_id: str) -> None:
-    """Null the audio/stat seals of a track whose uuid just changed hands.
+    """Null the audio seals of a track whose uuid just changed hands.
 
-    Every seal payload binds the track uuid (segment_payload / features_payload
-    / the track_stat entity), so after a rename or a merge the stored
-    signatures verify against a uuid the row no longer carries — the
-    album_tracks / track_mbids guards shed theirs on the cascaded track_id
-    change, these tables have no track_id in their guard. sign_audio
-    re-seals on its next pass; nothing travels unsigned in between."""
+    Every seal payload binds the track uuid (segment_payload /
+    features_payload), so after a rename or a merge the stored signatures
+    verify against a uuid the row no longer carries — the album_tracks /
+    track_mbids guards shed theirs on the cascaded track_id change, these
+    tables have no track_id in their guard. sign_audio re-seals on its next
+    pass; nothing travels unsigned in between."""
     db.execute(text(f"""
         UPDATE embedding_segments es SET {_SEAL_NULL}
         FROM embeddings e
         WHERE e.id = es.embedding_id AND e.track_id = :tid
           AND es.signature IS NOT NULL"""), {"tid": track_id})
     db.execute(text(f"UPDATE audio_features SET {_SEAL_NULL} "
-                    "WHERE track_id = :tid AND signature IS NOT NULL"),
-               {"tid": track_id})
-    db.execute(text(f"UPDATE track_stats SET {_SEAL_NULL} "
                     "WHERE track_id = :tid AND signature IS NOT NULL"),
                {"tid": track_id})
 
@@ -211,10 +208,9 @@ def _update_track_uuid(db: Session, old_id, new_id) -> str:
             INSERT INTO track_artists (track_id, artist_id, role)
             SELECT :new, artist_id, role FROM track_artists WHERE track_id = :old
             ON CONFLICT DO NOTHING"""), p)
-        # One-per-(track, key) tables: move what the target lacks; a moved
-        # stats row carries the old uuid in its seal payload — shed it.
-        db.execute(text(f"""
-            UPDATE track_stats ts SET track_id = :new, {_SEAL_NULL}
+        # One-per-(track, key) tables: move what the target lacks.
+        db.execute(text("""
+            UPDATE track_stats ts SET track_id = :new
             WHERE ts.track_id = :old
               AND NOT EXISTS (SELECT 1 FROM track_stats x
                                WHERE x.track_id = :new AND x.source = ts.source)"""), p)

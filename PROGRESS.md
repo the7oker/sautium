@@ -965,6 +965,39 @@ and importer userscripts exist for Bandcamp, not for the hi-res shops).
   featured release, which read as "Buy opened a different album" on the
   first live tap.
 
+### Last.fm data is node-local (2026-09-19)
+
+Last.fm's API terms do not allow redistributing what the API answers, and
+until now Sautium did exactly that in four places: the five Last.fm-fetched
+tables (`artist_bios`, `artist_tags`, `similar_artists`, `track_stats`,
+`genre_descriptions`) were sealed and served over the P2P pull protocol,
+counted into the holdings filter, written into every share export, and the
+seed bundle shipped bios/tags/similars for the picks' artists as a public
+GitHub release asset. All four stopped in one change; P2P_NETWORK.md §
+"Last.fm data is node-local" has the protocol side.
+
+- **Local-only, not source-filtered.** Every row in those tables IS
+  Last.fm (36.8k bios, 285k tags, 73k similars, 36k stats, 2.3k genre
+  descriptions on the master — all `source='lastfm'`), so a `source`
+  filter in every pull SQL would have kept five categories alive for no
+  data. The tables lose their seal columns, `fetched_at` and `imported`
+  (migration 019, folded into 001) and join `album_descriptions` as the
+  local-only layer; the seal grammar keeps the carry canon kinds only.
+- **Imported copies go, first-hand rows stay.** The migration deletes
+  rows that arrived over the network — those are the redistributed copies
+  — and the node's own background enrichment re-fetches them by name,
+  because its "no bio yet" precondition is true again. A cache of a
+  public API is re-derivable in a day; the retention rule (a profile never
+  deletes what the owner can see) guards the phantom layer, which no node
+  can rebuild without the MB dump.
+- **The share file and the seed bundle moved versions** (v2 and v3): a
+  file or bundle that carried the layer is refused rather than half-read,
+  and the seed's fresh-node path no longer needs a sealed bio per pick —
+  the coverage gate lost those two fatal checks.
+- **What did not change**: the `listeners` count as the local rarity proxy
+  (announce tail, carry order, rare-key search), gender/vocalist
+  classification from the node's own bios, scrobbling.
+
 ## Known Gotchas
 
 - **Loopback targets are addresses, never `localhost`.** Windows resolves the

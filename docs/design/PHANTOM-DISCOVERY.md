@@ -226,6 +226,11 @@ Sautium network** instead of every node hammering Deezer/Last.fm.
 One node enriches an artist's discography; every peer receives it on
 sync. This is a genuine network-effect moat.
 
+> Revised 2026-09-19: this holds for audio analysis and the canon layer
+> only. Last.fm answers — bios, tags, similars, stats, genre descriptions —
+> are node-local (Last.fm's API terms do not allow redistribution), so every
+> node fetches its own; the network effect is the analysis.
+
 - Relax the `INNER JOIN track_artists` restriction in
   `sync_queries.py:117` and `routers/sync.py:97` so phantom
   enrichment enters the sync inventory.

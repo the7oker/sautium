@@ -11,7 +11,10 @@ Protocol:
 
 Lyrics are deliberately NOT part of the protocol (2026-07-11): the one
 category that is verbatim copyrighted text — every node fetches its own from
-the public sources. Audio analysis travels as SEGMENTS with their seals
+the public sources. Neither is anything Last.fm answered — bios, tags,
+similars, track stats, genre descriptions (since 2026-09-19): its API terms
+do not allow redistribution, so that layer is node-local and every node
+fetches its own by name. Audio analysis travels as SEGMENTS with their seals
 (pull category `segments`); the track-level mean is derived locally by the
 importer and the legacy `embeddings` mean pull remains only for peers
 without the `segments` capability.
@@ -21,7 +24,7 @@ import base64
 import json
 import logging
 import os
-from datetime import datetime, timezone
+from datetime import timezone
 from pathlib import Path
 from typing import Optional
 
@@ -322,10 +325,6 @@ class InventoryRequest(BaseModel):
     # Same ceiling as the launcher sync server (MAX_UUIDS_PER_REQUEST) — the
     # client chunks its library into ≤10k slices and merges the responses.
     track_uuids: list[str] = Field(default_factory=list, max_length=10000)
-    # Artists to answer the artist-level categories for directly — the
-    # holdings-filter path names phantom artists whose tracks all missed
-    # the track filter but who may still have a bio, tags or similars here.
-    artist_uuids: list[str] = Field(default_factory=list, max_length=10000)
 
 
 class PullRequest(BaseModel):
@@ -336,35 +335,24 @@ class PullRequest(BaseModel):
 # Inventory endpoint
 # ---------------------------------------------------------------------------
 
-_EMPTY_INVENTORY = {
-    "tracks": [], "embeddings": [],
-    "audio_features": [], "track_stats": [],
-    "artists": [], "artist_bios": [],
-    "artist_tags": [], "similar_artists": [],
-    "genres": [], "genre_descriptions": [],
-}
+_EMPTY_INVENTORY = {"tracks": [], "embeddings": [], "audio_features": []}
 
 
 @router.post("/inventory")
 async def get_inventory(req: InventoryRequest) -> dict:
     """
-    Check what enrichment data is available for the given track UUIDs.
+    Check what analysis this node can serve for the given track UUIDs.
 
-    The requester sends track UUIDs from their library.
-    The response contains categorized UUID lists indicating which
-    enrichment data this node can provide.
-
-    Uses 3 consolidated CTE queries instead of 15 separate ones.
+    The requester sends track UUIDs from their library; the response
+    carries, per category, what this node holds sealed for them — one
+    round trip. Mirrors desktop/p2p/sync_queries.get_inventory.
     """
     _require_sharing()
-    if not req.track_uuids and not req.artist_uuids:
+    if not req.track_uuids:
         return dict(_EMPTY_INVENTORY)
 
-    uuids = req.track_uuids
-
     try:
-        # Query 1: Track-level + genre data (7 categories, 1 round-trip)
-        track_row = _db_query_one("""
+        row = _db_query_one("""
             WITH uuids AS (SELECT unnest(%(u)s::uuid[]) AS id)
             SELECT
                 ARRAY(SELECT t.id::text FROM tracks t
@@ -382,58 +370,10 @@ async def get_inventory(req: InventoryRequest) -> dict:
                  FROM audio_features af
                  WHERE af.track_id IN (SELECT id FROM uuids)
                    AND af.signature IS NOT NULL
-                   AND af.batch_root IS NOT NULL) AS audio_features,
-                ARRAY(SELECT DISTINCT ts.track_id::text FROM track_stats ts
-                      WHERE ts.track_id IN (SELECT id FROM uuids)
-                        AND ts.signature IS NOT NULL
-                        AND ts.batch_root IS NOT NULL) AS track_stats,
-                ARRAY(SELECT DISTINCT ag.genre_id::text FROM album_genres ag
-                      JOIN album_variants av ON av.album_id = ag.album_id
-                      JOIN media_files mf ON mf.album_variant_id = av.id
-                      WHERE mf.track_id IN (SELECT id FROM uuids)) AS genres,
-                ARRAY(SELECT DISTINCT gd.genre_id::text FROM genre_descriptions gd
-                      JOIN album_genres ag ON ag.genre_id = gd.genre_id
-                      JOIN album_variants av ON av.album_id = ag.album_id
-                      JOIN media_files mf ON mf.album_variant_id = av.id
-                      WHERE mf.track_id IN (SELECT id FROM uuids)
-                        AND gd.signature IS NOT NULL
-                        AND gd.batch_root IS NOT NULL) AS genre_descriptions
-        """, {"u": uuids})
-
-        # Query 2: Artist data (5 categories, 1 round-trip)
-        artist_row = _db_query_one("""
-            WITH uuids AS (SELECT unnest(%(u)s::uuid[]) AS id),
-                 rel AS (SELECT DISTINCT ta.artist_id FROM track_artists ta
-                         WHERE ta.track_id IN (SELECT id FROM uuids)
-                         UNION SELECT unnest(%(a)s::uuid[]))
-            SELECT
-                ARRAY(SELECT artist_id::text FROM rel) AS artists,
-                ARRAY(SELECT DISTINCT ab.artist_id::text FROM artist_bios ab
-                      WHERE ab.artist_id IN (SELECT artist_id FROM rel)
-                        AND ab.signature IS NOT NULL
-                        AND ab.batch_root IS NOT NULL) AS artist_bios,
-                ARRAY(SELECT DISTINCT at2.artist_id::text FROM artist_tags at2
-                      WHERE at2.artist_id IN (SELECT artist_id FROM rel)
-                        AND at2.signature IS NOT NULL
-                        AND at2.batch_root IS NOT NULL) AS artist_tags,
-                ARRAY(SELECT DISTINCT sa.artist_id::text FROM similar_artists sa
-                      WHERE sa.artist_id IN (SELECT artist_id FROM rel)
-                        AND sa.signature IS NOT NULL
-                        AND sa.batch_root IS NOT NULL) AS similar_artists
-        """, {"u": uuids, "a": req.artist_uuids})
-
-        return {
-            "tracks": track_row["tracks"],
-            "embeddings": track_row["embeddings"],
-            "audio_features": track_row["audio_features"],
-            "track_stats": track_row["track_stats"],
-            "artists": artist_row["artists"],
-            "artist_bios": artist_row["artist_bios"],
-            "artist_tags": artist_row["artist_tags"],
-            "similar_artists": artist_row["similar_artists"],
-            "genres": track_row["genres"],
-            "genre_descriptions": track_row["genre_descriptions"],
-        }
+                   AND af.batch_root IS NOT NULL) AS audio_features
+        """, {"u": req.track_uuids})
+        return {"tracks": row["tracks"], "embeddings": row["embeddings"],
+                "audio_features": row["audio_features"]}
 
     except Exception as e:
         logger.error(f"Inventory query failed: {e}")
@@ -468,47 +408,9 @@ async def get_holdings(have: Optional[str] = None) -> dict:
 # Helpers for pull endpoints
 # ---------------------------------------------------------------------------
 
-def _serialize_row(row: dict) -> dict:
-    """Convert non-JSON-serializable types in a row dict."""
-    out = {}
-    for k, v in row.items():
-        if isinstance(v, datetime):
-            out[k] = v.isoformat()
-        elif hasattr(v, "__str__") and not isinstance(v, (str, int, float, bool, list, dict, type(None))):
-            out[k] = str(v)
-        else:
-            out[k] = v
-    return out
-
-
 def _parse_vector(vec_text: str) -> list[float]:
     """Parse pgvector text representation '[0.1,0.2,...]' to list of floats."""
     return json.loads(vec_text)
-
-
-def _pull_handler(category: str, sql: str, uuids: list[str], post_process=None) -> dict:
-    """Common handler for pull endpoints.
-
-    Any category whose rows carry a batch_root also ships the signing_batches
-    rows those roots name — the importer cannot verify a Merkle inclusion or a
-    Worker timestamp without them, and a seal it cannot check is a seal it must
-    drop."""
-    _require_sharing()
-    if not uuids:
-        return {"category": category, "items": []}
-    try:
-        rows = _db_query(sql, [uuids])
-        items = [_serialize_row(r) for r in rows]
-        if post_process:
-            items = [post_process(item) for item in items]
-        roots = {i["batch_root"] for i in items if i.get("batch_root")}
-        if roots:
-            return {"category": category, "items": items,
-                    "batches": _batches_map(roots)}
-        return {"category": category, "items": items}
-    except Exception as e:
-        logger.error(f"Pull {category} failed: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
 
 
 # ---------------------------------------------------------------------------
@@ -767,91 +669,3 @@ async def pull_audio_features(req: PullRequest) -> dict:
     except Exception as e:
         logger.error(f"Pull audio features failed: {e}")
         raise HTTPException(status_code=500, detail=str(e))
-
-
-@router.post("/pull/track-stats")
-async def pull_track_stats(req: PullRequest) -> dict:
-    """Pull track statistics (listeners, playcount)."""
-    return _pull_handler(
-        "track_stats",
-        """SELECT track_id::text AS track_uuid, source, listeners, playcount,
-                  fetched_at, author_pubkey, signature, batch_root, merkle_proof
-           FROM track_stats
-           WHERE track_id = ANY(%s::uuid[])
-             AND signature IS NOT NULL
-             AND batch_root IS NOT NULL""",
-        req.uuids,
-    )
-
-
-@router.post("/pull/artist-bios")
-async def pull_artist_bios(req: PullRequest) -> dict:
-    """Pull artist biographies."""
-    return _pull_handler(
-        "artist_bios",
-        """SELECT ab.artist_id::text AS artist_uuid, a.name AS artist_name,
-                  ab.source, ab.summary, ab.content, ab.url,
-                  ab.listeners, ab.playcount, ab.fetched_at,
-                  ab.author_pubkey, ab.signature, ab.batch_root, ab.merkle_proof
-           FROM artist_bios ab
-           INNER JOIN artists a ON a.id = ab.artist_id
-           WHERE ab.artist_id = ANY(%s::uuid[])
-             AND ab.signature IS NOT NULL
-             AND ab.batch_root IS NOT NULL""",
-        req.uuids,
-    )
-
-
-@router.post("/pull/artist-tags")
-async def pull_artist_tags(req: PullRequest) -> dict:
-    """Pull artist tags with tag names and weights."""
-    return _pull_handler(
-        "artist_tags",
-        """SELECT at2.artist_id::text AS artist_uuid,
-                  t.id::text AS tag_uuid, t.name AS tag_name,
-                  at2.weight, at2.source, at2.fetched_at,
-                  at2.author_pubkey, at2.signature, at2.batch_root, at2.merkle_proof
-           FROM artist_tags at2
-           INNER JOIN tags t ON t.id = at2.tag_id
-           WHERE at2.artist_id = ANY(%s::uuid[])
-             AND at2.signature IS NOT NULL
-             AND at2.batch_root IS NOT NULL""",
-        req.uuids,
-    )
-
-
-@router.post("/pull/similar-artists")
-async def pull_similar_artists(req: PullRequest) -> dict:
-    """Pull similar artist relationships."""
-    return _pull_handler(
-        "similar_artists",
-        """SELECT sa.artist_id::text AS artist_uuid,
-                  sa.similar_artist_id::text AS similar_artist_uuid,
-                  a.name AS similar_artist_name,
-                  sa.match_score::float, sa.source, sa.fetched_at,
-                  sa.author_pubkey, sa.signature, sa.batch_root, sa.merkle_proof
-           FROM similar_artists sa
-           INNER JOIN artists a ON a.id = sa.similar_artist_id
-           WHERE sa.artist_id = ANY(%s::uuid[])
-             AND sa.signature IS NOT NULL
-             AND sa.batch_root IS NOT NULL""",
-        req.uuids,
-    )
-
-
-
-@router.post("/pull/genre-descriptions")
-async def pull_genre_descriptions(req: PullRequest) -> dict:
-    """Pull genre descriptions."""
-    return _pull_handler(
-        "genre_descriptions",
-        """SELECT gd.genre_id::text AS genre_uuid, g.name AS genre_name,
-                  gd.source, gd.summary, gd.content, gd.url, gd.fetched_at,
-                  gd.author_pubkey, gd.signature, gd.batch_root, gd.merkle_proof
-           FROM genre_descriptions gd
-           INNER JOIN genres g ON g.id = gd.genre_id
-           WHERE gd.genre_id = ANY(%s::uuid[])
-             AND gd.signature IS NOT NULL
-             AND gd.batch_root IS NOT NULL""",
-        req.uuids,
-    )

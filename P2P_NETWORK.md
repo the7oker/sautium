@@ -14,14 +14,14 @@ server (public bootstrap resources only).
 
 **Shared** (the pull categories — `sync_queries.PULL_HANDLERS`): sealed CLAP
 segment bundles with their provenance, audio features, track↔recording
-bindings, artist bios/tags/similars, track stats, genre descriptions, chat
-(P4). Carry — the push channel — is narrower on purpose: audio analysis only
-(§ "Only audio analysis travels").
+bindings, chat (P4). Carry — the push channel — is narrower on purpose:
+audio analysis only (§ "Only audio analysis travels").
 
 **Never shared**: audio files; lyrics (the one category that is verbatim
-copyrighted text — every node fetches its own from the public sources); local
-paths; player state; private notes; listening history (unless the user opts
-in).
+copyrighted text — every node fetches its own from the public sources);
+anything Last.fm answered — artist bios/tags/similars, track stats, genre
+descriptions (§ "Last.fm data is node-local"); local paths; player state;
+private notes; listening history (unless the user opts in).
 
 ---
 
@@ -182,8 +182,8 @@ N artists.
 `desktop/p2p/sync_walk.SyncWalk`, imported by the launcher's P2PManager and by
 the Docker backend's lifespan alike — never copied. Until then a Docker node
 only served pulls and accepted carry, so the master's phantom layer received a
-peer's first-hand analysis only when that peer chose to carry it, and never a
-peer's bios/tags/stats at all. Runtime differences are injected: the DHT
+peer's first-hand analysis only when that peer chose to carry it. Runtime
+differences are injected: the DHT
 service, LAN discovery (none in a container — it cannot hear the beacon),
 manual peers, the address skip list (the launcher subtracts itself by its
 UPnP external IP; every runtime also recognises its own address by the key
@@ -205,21 +205,20 @@ a peer about all of them is ~306 inventory requests (10k uuids each, ~110 MB
 up) per peer per run — for answers that are "not here" almost every time. The
 sync now splits its gaps:
 
-- **Core** — tracks of ENGAGED artists (an owned file or a completed listen),
-  plus the artists themselves. Asked of every peer in full through the exact
-  `/api/sync/inventory` until 2026-09-08; since then priced exactly like the
-  bulk below — a master's core is 479k tracks (whole discographies of 3.8k
-  engaged artists), 48 exact requests per peer per run for what the filter
-  answers in a second.
+- **Core** — tracks of ENGAGED artists (an owned file or a completed listen).
+  Asked of every peer in full through the exact `/api/sync/inventory` until
+  2026-09-08; since then priced exactly like the bulk below — a master's core
+  is 479k tracks (whole discographies of 3.8k engaged artists), 48 exact
+  requests per peer per run for what the filter answers in a second.
 - **Bulk** — everything else (phantom-only artists): asked through the peer's
-  **holdings filter**, `GET /api/sync/holdings` — two Bloom filters
+  **holdings filter**, `GET /api/sync/holdings` — a Bloom filter
   (`desktop/p2p/bloom.py`, 1% false positives, 9.6 bits per element, seven
-  positions from the uuid's own SHA-1 bits, no hash functions) over what the
-  peer HOLDS: track uuids with sealed analysis, artist uuids with sealed
-  bios/tags/similars. The asker tests its bulk locally — a miss is final, a
-  hit is a reason to ask — and sends the exact inventory only the hits, plus
-  the hit ARTISTS named outright (`artist_uuids`), so an artist whose tracks
-  all missed still yields its bio.
+  positions from the uuid's own SHA-1 bits, no hash functions) over the track
+  uuids the peer HOLDS sealed analysis for. The asker tests its bulk locally —
+  a miss is final, a hit is a reason to ask — and sends the exact inventory
+  only the hits. (A second filter over artists with sealed bios/tags/similars,
+  and the `artist_uuids` axis of the inventory that went with it, left with
+  the Last.fm layer on 2026-09-19.)
 
 Sized by holdings, never by gaps: 40k held tracks ≈ 50 KB, 3M ≈ 3.6 MB. Both
 directions stay available and the asker picks the cheaper one per peer from
@@ -228,7 +227,7 @@ held element to fetch): a small node keeps sending its gaps, a big node fetches
 the small node's filter. Filters are cached per peer key for the process
 lifetime and refreshed by version (`?have=<version>` answers with a stub when
 nothing moved); the peer rebuilds its filters in memory when its holdings
-version — row counts + latest `updated_at` of the six contributing tables,
+version — row counts + latest `updated_at` of the two contributing tables,
 checked at most every 5 min — moves. Adds only, so a delta update (uuids
 since version N) is a plain append when it is needed.
 
@@ -494,8 +493,10 @@ Phase 2 & 3: Embeddings + features (lazy, on demand, gzip)
 
 1. **Embedding quantization**: is quantizing the 512 floats for transfer
    (float16, int8) worth it? Bandwidth saved vs precision lost.
-2. **Conflict resolution**: when two peers hold different Last.fm tags for the
-   same artist — who is "right"?
+2. ~~**Conflict resolution**: when two peers hold different Last.fm tags for
+   the same artist — who is "right"?~~ — MOOT (2026-09-19): Last.fm data no
+   longer travels (§ "Last.fm data is node-local"); a node holds only what
+   Last.fm told it.
 3. **PyInstaller + libtorrent**: does bundling the C++ extension (.pyd) into
    the .exe work well? Needs testing.
 4. ~~**DHT announce rate limits**~~ — ANSWERED (announce storm, 2026-07):
@@ -609,6 +610,8 @@ any node for two API calls, and importing similars minted stub artists straight
 into the carrier's phantom-canon feed (unsolicited canonization plus slice
 fetches). Audio analysis is the opposite: GPU work with no external source.
 `track_stats` and `genre_descriptions` are Last.fm too → they do not travel.
+Since 2026-09-19 none of it travels over the pull protocol either (§ "Last.fm
+data is node-local").
 
 **What is offered — the full canonized snapshot.** `get_pushable_tracks`:
 sealed segments **AND** a first-hand source (`analysis_sources NOT imported`)
@@ -1006,3 +1009,42 @@ the toggle. `backend.log` is now rotated to `backend.log.1` on every
 backend start so the previous run's crash survives into the `logs`
 scope. Retention: 90 d locally, 180 d reports / 30 d bundles on the
 master (swept once per start).
+
+### Last.fm data is node-local — 2026-09-19
+
+Until now the five Last.fm-fetched tables — `artist_bios`, `artist_tags`,
+`similar_artists`, `track_stats`, `genre_descriptions` — were sealed like
+audio analysis and served over the pull protocol, counted into the holdings
+filter's artist axis, written into every share export and shipped in the
+seed bundle (bios/tags/similars for the picks' artists — a public GitHub
+release asset). Last.fm's API terms do not allow redistributing what the API
+answers, so all of that stopped at once:
+
+- **Schema** (migration 019, folded into 001): the five tables lose their
+  seal columns, `fetched_at` and `imported` — node-local exactly like
+  `album_descriptions`. Rows that had ARRIVED over the network (`imported`)
+  are deleted by the migration: they are the redistributed copies, and the
+  node's own background enrichment fetches them again from Last.fm because
+  its "no bio yet" precondition is true again. First-hand rows stay. The seal
+  grammar (`record_sig.ENRICHMENT_KINDS`) keeps only the carry canon layer
+  (`album`, `album_track`, `track_mbid`); `ENRICHMENT_RECORD_VERSION` is
+  unchanged — the remaining kinds' bytes did not move.
+- **Protocol**: the five pull categories, their inventory keys and the
+  `artist_uuids` axis of `/api/sync/inventory` are gone on both surfaces; the
+  holdings filter is one filter over tracks with sealed analysis; the sync
+  client's gap set is analysis-only; the post-import gender/vocalist
+  classifiers went with the bios they read.
+- **Files**: the share export is format v2 (a v1 file carried the layer and
+  is refused); the seed bundle is v3 (`seed-v3` release,
+  `backend/seed/bundle.json`) with the analysis half only — a fresh node's own
+  enrichment fetches the picks' bios and tags on its first background pass,
+  as for any artist.
+- **What stays local and keeps working**: the Last.fm `listeners` count as
+  the rarity proxy (announce tail, carry order, rare-key search), the
+  bio-derived classifiers on the node's own bios, scrobbling.
+
+Why not filter by `source` and keep the categories: every row in those
+tables IS Last.fm (measured on the master: 36.8k bios, 285k tags, 73k
+similars, 36k track stats, 2.3k genre descriptions, all `source='lastfm'`).
+A category with one forbidden source and no other is a category that does
+not exist.

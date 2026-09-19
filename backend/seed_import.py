@@ -16,7 +16,7 @@ network yet) retries on the next start. Every statement is idempotent:
 structural rows land with
 ON CONFLICT DO NOTHING (a node that already holds a row keeps its own —
 the master and any owning node are no-ops by construction), and the
-enrichment/analysis half replays the bundle's verbatim pull envelopes
+analysis half replays the bundle's verbatim pull envelopes
 through SyncClient._import_items — the same verify-and-import gate a P2P
 pull uses, so seals are checked and first-hand rows are protected
 identically.
@@ -46,7 +46,6 @@ logger = logging.getLogger(__name__)
 BUNDLE_INFO_PATH = Path(__file__).resolve().parent / "seed" / "bundle.json"
 DOWNLOAD_TIMEOUT_S = 60
 
-_ENRICHMENT_CATEGORIES = ("artist_bios", "artist_tags", "similar_artists")
 _ANALYSIS_CATEGORIES = ("segments", "audio_features", "track_mbids")
 
 # (bundle section, INSERT statement, VALUES template, columns) in FK order.
@@ -224,12 +223,6 @@ _PRESENCE_SQL = {
                        "track_uuid"),
     "track_mbids": ("SELECT COUNT(DISTINCT track_id) FROM track_mbids WHERE track_id = ANY(%s::uuid[])",
                     "track_uuid"),
-    "artist_bios": ("SELECT COUNT(DISTINCT artist_id) FROM artist_bios WHERE artist_id = ANY(%s::uuid[])",
-                    "artist_uuid"),
-    "artist_tags": ("SELECT COUNT(DISTINCT artist_id) FROM artist_tags WHERE artist_id = ANY(%s::uuid[])",
-                    "artist_uuid"),
-    "similar_artists": ("SELECT COUNT(DISTINCT artist_id) FROM similar_artists WHERE artist_id = ANY(%s::uuid[])",
-                        "artist_uuid"),
 }
 
 
@@ -287,10 +280,7 @@ def apply_seed(conn, db_dsn: str, info: dict) -> dict:
         out["error"] = str(e)[:500]
         return out
 
-    envelopes = {
-        **{c: bundle["enrichment"][c] for c in _ENRICHMENT_CATEGORIES},
-        **{c: bundle["analysis"][c] for c in _ANALYSIS_CATEGORIES},
-    }
+    envelopes = {c: bundle["analysis"][c] for c in _ANALYSIS_CATEGORIES}
 
     from desktop.sync_client import SyncClient
     client = SyncClient(api_client=None, db_dsn=db_dsn)
@@ -302,9 +292,6 @@ def apply_seed(conn, db_dsn: str, info: dict) -> dict:
                 # leaves prior categories landed and this one retried next
                 # boot.
                 client._import_items(category, envelope)
-        artist_ids = [a["id"] for a in bundle["structural"]["artists"]]
-        client._update_artist_gender(artist_ids)
-        client._update_artist_is_vocalist(artist_ids)
     finally:
         client._close_conn()
 

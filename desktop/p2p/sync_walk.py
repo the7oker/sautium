@@ -10,10 +10,9 @@ identically.
 
 What a run does, in order (`SyncWalk.run`):
 
-1. the gap set — artists missing data in any category — split into the
-   CORE (engaged artists, asked of every peer in full through the exact
-   inventory) and the phantom BULK (asked through the peer's holdings
-   filter; sync_queries.split_engaged);
+1. the gap set — artists with a track missing analysis — split into the
+   CORE (tracks of engaged artists) and the phantom BULK, both priced
+   against each peer's holdings filter (sync_queries.split_engaged);
 2. manual peers, then LAN peers (the launcher's beacon; a Docker node has
    no LAN tier — containers cannot broadcast);
 3. tier A: ONE DHT node-key lookup plus the Worker directory's volunteers,
@@ -202,9 +201,9 @@ def unenriched_artist_uuids(dsn: str) -> list[str]:
 
 
 def incomplete_artist_uuids(dsn: str) -> list[str]:
-    """Artists missing data in ANY sync category — the run's trigger set.
-    Catches partial states (audio landed but the Last.fm bio didn't) that
-    the audio-only AND-logic of unenriched_artist_uuids skips."""
+    """Artists with a track missing analysis in EITHER category — the
+    run's trigger set. Catches partial states (segments landed but the
+    features didn't) that the AND-logic of unenriched_artist_uuids skips."""
     conn = _connect(dsn)
     try:
         return sync_queries.get_incomplete_artist_uuids(conn)
@@ -238,20 +237,17 @@ def tracks_for_artists(dsn: str, artist_uuids: list[str]) -> list[str]:
         conn.close()
 
 
-def core_and_bulk(dsn: str, artist_uuids: list[str],
-                  ) -> tuple[list[str], list[str], list[str], list[str]]:
-    """(core tracks, core artists, bulk tracks, bulk artists): the engaged
-    artists and their tracks are the core, the rest the phantom bulk
-    (sync_queries.split_engaged). Both are priced against a peer's
-    holdings filter the same way; the split keeps the logs honest about
-    what a run is made of."""
+def core_and_bulk(dsn: str, artist_uuids: list[str]) -> tuple[list[str], list[str]]:
+    """(core tracks, bulk tracks): the engaged artists' tracks are the
+    core, the rest the phantom bulk (sync_queries.split_engaged). Both are
+    priced against a peer's holdings filter the same way; the split keeps
+    the logs honest about what a run is made of."""
     conn = _connect(dsn)
     try:
         engaged, rest = sync_queries.split_engaged(conn, artist_uuids)
     finally:
         conn.close()
-    return (tracks_for_artists(dsn, engaged), engaged,
-            tracks_for_artists(dsn, rest), rest)
+    return tracks_for_artists(dsn, engaged), tracks_for_artists(dsn, rest)
 
 
 async def listen_notifications(db_dsn: str,
@@ -493,15 +489,15 @@ class SyncWalk:
         # Step 2: the CORE (engaged artists and their tracks) and the
         # phantom BULK — both priced against each peer's holdings filter.
         gaps = await self.db(core_and_bulk, incomplete)
-        core_tracks, _core_artists, bulk_tracks, bulk_artists = gaps
+        core_tracks, bulk_tracks = gaps
 
         if not core_tracks and not bulk_tracks:
             _progress("No tracks found for unenriched artists")
             return {"status": "no_tracks"}
 
         _progress(
-            f"Need enrichment for {len(core_tracks)} core tracks"
-            + (f" + {len(bulk_tracks)} phantom-bulk tracks of {len(bulk_artists)} artists"
+            f"Need analysis for {len(core_tracks)} core tracks"
+            + (f" + {len(bulk_tracks)} phantom-bulk tracks"
                if bulk_tracks else "")
         )
 
@@ -589,10 +585,10 @@ class SyncWalk:
                 if not remaining:
                     return
                 gaps = await self.db(core_and_bulk, remaining)
-                if not gaps[0] and not gaps[2]:
+                if not gaps[0] and not gaps[1]:
                     return
                 _progress(f"Asking {addr} about {len(gaps[0])} core + "
-                          f"{len(gaps[2])} bulk tracks...")
+                          f"{len(gaps[1])} bulk tracks...")
                 synced = await self._sync_from_peer(
                     addr, gaps, _progress, progress_cb, peer_api=api,
                 )
@@ -833,17 +829,17 @@ class SyncWalk:
     async def _sync_from_peer(
         self,
         peer_addr: str,
-        gaps: tuple[list[str], list[str], list[str], list[str]],
+        gaps: tuple[list[str], list[str]],
         _progress,
         progress_cb,
         is_lan: bool = False,
         peer_api: Optional[BackendAPIClient] = None,
     ) -> dict:
         """Sync enrichment data from a single peer. Returns stats dict.
-        `gaps`: (core tracks, core artists, bulk tracks, bulk artists) —
-        see core_and_bulk and SyncClient.run_sync. `peer_api`: a client
-        the caller already probed — skips the probe."""
-        core_tracks, core_artists, bulk_tracks, bulk_artists = gaps
+        `gaps`: (core tracks, bulk tracks) — see core_and_bulk and
+        SyncClient.run_sync. `peer_api`: a client the caller already
+        probed — skips the probe."""
+        core_tracks, bulk_tracks = gaps
         if peer_api is None:
             _progress(f"Connecting to {peer_addr}...")
             peer_api = await self.connect_peer(peer_addr, is_lan=is_lan)
@@ -867,8 +863,7 @@ class SyncWalk:
         try:
             stats = await asyncio.get_event_loop().run_in_executor(
                 None,
-                partial(sync_client.run_sync, core_tracks,
-                        bulk_tracks, bulk_artists, core_artists),
+                partial(sync_client.run_sync, core_tracks, bulk_tracks),
             )
         except Exception as e:
             logger.error(f"Sync from {peer_addr} failed: {e}")

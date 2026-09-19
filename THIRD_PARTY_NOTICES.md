@@ -93,7 +93,9 @@ Sautium. Source: https://github.com/quodlibet/mutagen.
 - **Last.fm** — metadata enrichment and scrobbling through the Last.fm API,
   under Last.fm's API terms of service. The application key ships in source,
   as desktop scrobblers do; scrobbling still needs the user's own session
-  authorisation.
+  authorisation. What the API answers stays on the node that asked: it is
+  not part of the P2P protocol, the share export or the seed bundle — every
+  node fetches its own.
 - **MusicBrainz** — metadata and the optional local database dump (data under
   CC0 / CC BY-NC-SA as published by MetaBrainz); API use follows the
   MusicBrainz rate and user-agent rules.

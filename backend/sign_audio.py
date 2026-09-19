@@ -176,40 +176,18 @@ def _pending_tracks(cur) -> list:
     return [r["tid"] for r in cur.fetchall()]
 
 
-# Enrichment records join the SAME batch as the audio ones: one Merkle root,
-# one Worker timestamp, one round trip. They are cheap to sign and there is no
-# reason to pay for a second notarisation.
+# The canon layer joins the SAME batch as the audio records: one Merkle root,
+# one Worker timestamp, one round trip. The rows are cheap to sign and there
+# is no reason to pay for a second notarisation.
 #
-# Only NOT imported rows. A signature here says "this source told ME this" —
+# Only NOT imported rows. A signature here says "my canon held this" —
 # signing a row a peer sent us would restate their observation as our own, and
 # the network would lose the one thing these signatures are for.
+#
+# The Last.fm-fetched tables (bios, tags, similars, track stats, genre
+# descriptions) were signed here until 2026-09-19; they are node-local now
+# (migration 019, no seal columns) — nothing Last.fm answered goes on the wire.
 _ENRICHMENT_SOURCES = {
-    "artist_bio": ("""
-        SELECT b.id, b.artist_id::text AS entity, b.source, b.fetched_at,
-               b.summary, b.content, b.url, b.listeners, b.playcount
-        FROM artist_bios b
-        WHERE b.signature IS NULL AND NOT b.imported""", "artist_bios"),
-    "artist_tag": ("""
-        SELECT at2.id, at2.artist_id::text AS entity, at2.source, at2.fetched_at,
-               t.name AS tag_name, at2.weight
-        FROM artist_tags at2 JOIN tags t ON t.id = at2.tag_id
-        WHERE at2.signature IS NULL AND NOT at2.imported""", "artist_tags"),
-    "similar_artist": ("""
-        SELECT sa.id, sa.artist_id::text AS entity, sa.source, sa.fetched_at,
-               sa.similar_artist_id::text AS similar_artist_uuid,
-               sa.match_score::float AS match_score
-        FROM similar_artists sa
-        WHERE sa.signature IS NULL AND NOT sa.imported""", "similar_artists"),
-    "track_stat": ("""
-        SELECT ts.id, ts.track_id::text AS entity, ts.source, ts.fetched_at,
-               ts.listeners, ts.playcount
-        FROM track_stats ts
-        WHERE ts.signature IS NULL AND NOT ts.imported""", "track_stats"),
-    "genre_description": ("""
-        SELECT gd.id, gd.genre_id::text AS entity, gd.source, gd.fetched_at,
-               gd.summary, gd.content, gd.url
-        FROM genre_descriptions gd
-        WHERE gd.signature IS NULL AND NOT gd.imported""", "genre_descriptions"),
     # Carry v3 — the album layer. Only what stands on this node's OWN
     # signable analysis signs (_SIGNABLE_SRC: a local rip or a first-hand
     # stream): the ~3M MB-minted phantom tracklist rows nobody analyzed are
@@ -275,10 +253,8 @@ _TABLE_PK = {"track_mbids": ("recording_mbid", "uuid"),
 # trip (52 segments of tracks split mid-batch verified invalid, 2026-08-25);
 # signing no longer waits on the network, so it is the seconds of one pass.
 _TABLE_ENTITY = {"embedding_segments": None,       # via embeddings.track_id, see below
-                 "audio_features": "track_id", "track_stats": "track_id",
+                 "audio_features": "track_id",
                  "album_tracks": "track_id", "track_mbids": "track_id",
-                 "artist_bios": "artist_id", "artist_tags": "artist_id",
-                 "similar_artists": "artist_id", "genre_descriptions": "genre_id",
                  "albums": "id"}
 
 
@@ -497,9 +473,8 @@ def sign(conn, full=False, limit=None, dry_run=False,
 
 # Stage 2 finds "signed, awaiting stamp" by scan; the partial indexes of
 # migration 011 make that O(pending) on the tables that are gigabytes.
-_STAMP_TABLES = ("embedding_segments", "audio_features", "artist_bios",
-                 "artist_tags", "similar_artists", "track_stats",
-                 "genre_descriptions", "albums", "album_tracks", "track_mbids")
+_STAMP_TABLES = ("embedding_segments", "audio_features", "albums",
+                 "album_tracks", "track_mbids")
 
 
 def stamp(conn, dry_run=False, max_records=MAX_RECORDS_PER_BATCH) -> StampResult:

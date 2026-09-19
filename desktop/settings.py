@@ -176,7 +176,7 @@ class SettingsDialog(ctk.CTkToplevel):
         ctk.CTkButton(row, text="Folder", width=80, command=lambda: self._open(export_dir()),
                       fg_color="transparent", border_width=1).pack(side="left")
         self._hint(tab, (
-            "Audio analysis, bios and tags this node holds — every sealed record, signed "
+            "The audio analysis and canon this node holds — every sealed record, signed "
             "by your node key — for the albums you own or listen to, or for named "
             "artists. A friend merges the file through the sync gate, adding your "
             "albums or enriching only theirs."))

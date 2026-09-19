@@ -11,6 +11,11 @@ Sautium uses a **hybrid approach** for metadata storage:
 
 ## Normalized Tables
 
+All five tables below are **node-local**: no seal columns, never on the P2P
+wire, in a share file or in the seed bundle (since 2026-09-19 — Last.fm's
+API terms do not allow redistributing its answers). Every node fetches its
+own by name; only `artist_bios.listeners` is read as a local rarity proxy.
+
 ### 1. `similar_artists` - Artist Similarity Relationships
 
 ```sql

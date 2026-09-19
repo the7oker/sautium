@@ -107,8 +107,6 @@ def describe_event(ev: dict, job: str = "Backup") -> str:
         sc = ev["scopes"]
         return (f"{job}: {sc.get('analysed', 0):,} albums with analysis here, "
                 f"{sc.get('engaged', 0):,} owned or listened to, {sc.get('owned', 0):,} owned")
-    if phase == "classifying":
-        return f"{job}: updating artist classifiers…"
     if phase in ("done", "plan") and "merged" in ev:
         return _describe_merge(ev, job)
     if phase == "done":

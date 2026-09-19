@@ -477,8 +477,7 @@ def normalize_artists(
 # Identity re-normalization — the one-off after a uuid_utils.normalize change
 # ---------------------------------------------------------------------------
 
-_SEALED_TABLES = ("embedding_segments", "audio_features", "artist_bios", "artist_tags",
-                  "similar_artists", "track_stats", "genre_descriptions", "albums",
+_SEALED_TABLES = ("embedding_segments", "audio_features", "albums",
                   "album_tracks", "track_mbids")
 _TRACK_BATCH = 100_000
 

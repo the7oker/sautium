@@ -15,7 +15,7 @@ whole in memory on both ends. Lines, in order:
     {"format": "sautium-export", "version": 1, "identity_rule": N,
      "exporter": {"pubkey", "username", "created_at", "app"}, "scope": {…}}
     {"section": "<structural table>", "rows": [...]}     FK order, batches first
-    {"envelope": "<category>", "group": "enrichment"|"analysis", "data": {…}}
+    {"envelope": "<category>", "data": {…}}
     {"summary": {"albums", "tracks", "artists", "analysed_tracks", "items"}}
     {"end": true, "sha256": "<every byte above>", "signature": "<hex>"}
 
@@ -27,11 +27,16 @@ the trailer, the second applies — a streamed import can take nothing back,
 so nothing is applied from a file that has not passed whole.
 
 Content: the structural rows the records need (like the seed: albums,
-tracklists, credits, genres, descriptions), then EVERY sealed record the
-node holds per sync category — its own and what it received, each under
-its author's seal, exactly what the node serves on the network. "What I
+tracklists, credits, genres, descriptions), then EVERY sealed analysis
+record the node holds per sync category — segments, audio features,
+track↔recording bindings; its own and what it received, each under its
+author's seal, exactly what the node serves on the network. "What I
 know" is more than "what I analysed", and the seals keep authorship
-straight whoever carries the file (Valerii, 2026-09-14). Scope: every album
+straight whoever carries the file (Valerii, 2026-09-14). Nothing Last.fm
+answered is in the file (bios, tags, similars, stats, genre descriptions):
+that layer is node-local since 2026-09-19 — Last.fm's API terms do not
+allow redistribution — which is why a v1 file, which carried it, is
+refused. Scope: every album
 with sealed audio analysis here (own, seeded or synced — a streaming-only
 node's whole enrichment), the carry gates — albums this node owns a file
 of, or is engaged with (a completed listen) — or an explicit artist / album
@@ -41,8 +46,8 @@ Import has two modes. The default adds what the file names — new artists,
 albums and tracks land as phantoms (no files) so their records have
 something to attach to, like the seed and a carry push. `existing_only`
 enriches what the node already has: no new artist, album or track row is
-created (the similar-artist stubs the gate would mint included), link rows
-and records land only where every entity they reference already exists,
+created, link rows and records land only where every entity they reference
+already exists,
 the rest of the file is dropped. The plan reports how much of the file the
 node already holds, so the choice is an informed one.
 """
@@ -64,7 +69,7 @@ from uuid_utils import IDENTITY_RULE
 logger = logging.getLogger(__name__)
 
 FORMAT = "sautium-export"
-VERSION = 1
+VERSION = 2
 FILE_SUFFIX = ".jsonl.gz"
 SIGN_PREFIX = b"sautium-export:v1:"
 ROWS_PER_LINE = 500
@@ -117,8 +122,8 @@ class ExportWriter:
         if not rows:
             self._write({"section": name, "rows": []})
 
-    def envelope(self, group: str, category: str, data: dict) -> None:
-        self._write({"envelope": category, "group": group, "data": data})
+    def envelope(self, category: str, data: dict) -> None:
+        self._write({"envelope": category, "data": data})
 
     def finish(self, summary: dict) -> dict:
         self._write({"summary": summary})
@@ -369,11 +374,10 @@ def export_file(conn, out_dir: Path, *, kind: str, exporter: dict,
                 check_cancel()
                 writer.section(section, rows)
             done_tracks = 0
-            for group, category, env in seed_export.envelope_chunks(
-                    conn, track_ids, artist_ids):
+            for category, env in seed_export.envelope_chunks(conn, track_ids):
                 check_cancel()
                 if env["items"]:
-                    writer.envelope(group, category, env)
+                    writer.envelope(category, env)
                 items[category] = items.get(category, 0) + len(env["items"])
                 if category == "segments":
                     analysed.update(i["track_uuid"] for i in env["items"])
@@ -424,10 +428,6 @@ _ITEM_REFS = {
     "segments": (("track_uuid", "tracks"),),
     "audio_features": (("track_uuid", "tracks"),),
     "track_mbids": (("track_uuid", "tracks"),),
-    "artist_bios": (("artist_uuid", "artists"),),
-    "artist_tags": (("artist_uuid", "artists"),),
-    # both ends: the gate would otherwise mint the neighbour as a stub artist
-    "similar_artists": (("artist_uuid", "artists"), ("similar_artist_uuid", "artists")),
 }
 
 
@@ -479,10 +479,9 @@ def apply_import(path: Path, db_dsn: str, *, confirmed: bool = False,
                  cancel: Optional[threading.Event] = None) -> dict:
     """Verify (pass one), then apply (pass two): structural sections through
     seed_import.insert_structural, envelopes through the sync client's
-    verify-and-import gate, then the post-import classifiers on the artists
-    the file touched. `existing_only` creates no artist, album or track and
-    keeps only what attaches to ones already here (module doc). Returns the
-    plan plus per-category counts as the gate reports them."""
+    verify-and-import gate. `existing_only` creates no artist, album or
+    track and keeps only what attaches to ones already here (module doc).
+    Returns the plan plus per-category counts as the gate reports them."""
     import seed_import
     from desktop.sync_client import SyncClient
 
@@ -499,7 +498,6 @@ def apply_import(path: Path, db_dsn: str, *, confirmed: bool = False,
 
     total_tracks = int(plan["summary"].get("tracks") or 0)
     imported: dict = {}
-    artist_ids: list = []
     have = plan.pop("have")
     conn = psycopg2.connect(db_dsn)
     client = SyncClient(api_client=None, db_dsn=db_dsn)
@@ -514,8 +512,6 @@ def apply_import(path: Path, db_dsn: str, *, confirmed: bool = False,
                     continue
                 if existing_only and section in _ROW_REFS:
                     rows = keep_existing(_ROW_REFS[section], rows, have)
-                if section == "artists":
-                    artist_ids.extend(r["id"] for r in rows)
                 seed_import.insert_structural(conn, {section: rows})
             elif "envelope" in obj:
                 category, data = obj["envelope"], obj["data"]
@@ -526,12 +522,6 @@ def apply_import(path: Path, db_dsn: str, *, confirmed: bool = False,
                 if category == "segments":
                     done = min(done + sq.SEGMENTS_MAX_UUIDS, total_tracks)
                     progress("importing", tracks_done=done, tracks=total_tracks)
-        if existing_only:
-            artist_ids = sorted(have["artists"])
-        if artist_ids:
-            progress("classifying")
-            client._update_artist_gender(artist_ids)
-            client._update_artist_is_vocalist(artist_ids)
     finally:
         client._close_conn()
         conn.close()

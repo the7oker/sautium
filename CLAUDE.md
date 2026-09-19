@@ -143,9 +143,17 @@ See:
   MusicBrainz) lives in normalized tables (`artist_bios`, `artist_tags`,
   `similar_artists`, `album_descriptions`, `track_stats`) with a `source`
   column for provenance. We migrated away from JSONB — functions on JSONB
-  get unreadable fast and can't be indexed cleanly. `album_descriptions`
-  is the LOCAL-ONLY one: albums never sync by UUID, so it carries no seal
-  columns and stays out of the sync contour, exactly like `album_genres`.
+  get unreadable fast and can't be indexed cleanly.
+- **The Last.fm layer is LOCAL-ONLY.** `artist_bios`, `artist_tags`,
+  `similar_artists`, `track_stats`, `genre_descriptions` carry no seal
+  columns and no `imported` flag, and stay out of the sync protocol, the
+  holdings filter, carry, the share export and the seed bundle (since
+  2026-09-19, migration 019): Last.fm's API terms do not allow
+  redistributing its answers, so every node fetches its own by name — the
+  layer is reproducible from the API for two calls per artist. The
+  `listeners` count is still read LOCALLY as the rarity proxy (announce
+  tail, carry order). `album_descriptions` and `album_genres` are local
+  for a different reason: albums never sync by UUID.
 - **UUID v5 for all shareable entities.** Same data on different nodes
   must collapse to the same ID. Namespace
   `adc1ec0b-2c81-5e26-9938-a369c6f7a5e1` (in `backend/uuid_utils.py`).
@@ -254,9 +262,6 @@ See:
 - **Explicit per-step stats.** Return a dict of `{step: count}` and log
   totals at the end — the caller is usually the launcher UI or a CLI
   progress callback.
-- **Post-import hooks.** After importing data from a peer (sync_client),
-  re-run derived classifiers like `_update_artist_gender` and
-  `_update_artist_is_vocalist` on the freshly-imported rows only.
 - **Anything that fans out per artist must be gated on HUMAN ENGAGEMENT** —
   an OWNED file (`track_artists JOIN media_files`) or a COMPLETED listen
   (`listening_history.completed AND NOT skipped`, the scrobble rule) — never
@@ -561,7 +566,7 @@ toast takes no pointer events and never blocks the user (see
 | `backend/invite_tokens.py` | Invite tokens + signed grants (mirrored in desktop/p2p/) |
 | `backend/dht_service.py` | Docker backend libtorrent DHT integration |
 | `desktop/node_identity.py` | Ed25519 identity + account system (Argon2id) |
-| `desktop/sync_client.py` | Sync client + the seal-verifying import gate (`import_pushed` for carry); post-import classifiers |
+| `desktop/sync_client.py` | Sync client + the seal-verifying import gate (`import_pushed` for carry) |
 | `desktop/p2p/sync_queries.py` | Shared SQL logic (pull handlers, carry offer/wanted, DHT announce tail) |
 | `desktop/p2p/sync_walk.py` | The pull side — `SyncWalk`: gap set, peer tiers (manual/LAN/DHT+directory/rare keys), carry push, network-size verdict, triggers; run by P2PManager AND the Docker lifespan |
 | `desktop/p2p/sync_server.py` | aiohttp HTTPS sync server + chat + relay (voucher/wake/forward) + watchdog |

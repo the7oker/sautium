@@ -50,8 +50,8 @@ own data ≈ 11 GB live, ≈ 3 GB as a compressed dump.
 | **MusicBrainz layer** | `mb_*` | no (re-load) | no | no |
 | **Catalog** (identity graph, owned + phantom) | `artists`, `albums`, `tracks`, `album_tracks`, `track_artists`, `album_artists`, `artist_mbids`, `genres`, `tags`, `embedding_models` | yes | yes — the structural rows the records hang off, in FK order (`seed_export.structural_sections`; `tags` and `embedding_models` are minted by the import gate, not carried) | — |
 | **Catalog, node-local** | `media_files` (this node's files and their cue bounds), `album_variants`, `artist_name_aliases`, `artist_members`, `seed_picks` | yes | no — nothing here means anything on another node | — |
-| **Enrichment** (sealed, travels) | `embedding_segments`, `embeddings`, `analysis_sources`, `signing_batches`, `audio_features`, `track_mbids`, `artist_bios`, `artist_tags`, `similar_artists` | yes | **yes — sealed records only**, own and received alike, each under its author's seal (decided 2026-09-14; the sketch said first-hand only). Analysis travels as segments with their provenance and batch map; the track-level mean is derived by the importer | — |
-| **Enrichment** (sealed, network only) | `track_stats`, `genre_descriptions` | yes | no — the network serves both (`sync_queries.PULL_HANDLERS`); `seed_export`'s category lists never grew them | — |
+| **Analysis** (sealed, travels) | `embedding_segments`, `embeddings`, `analysis_sources`, `signing_batches`, `audio_features`, `track_mbids` | yes | **yes — sealed records only**, own and received alike, each under its author's seal (decided 2026-09-14; the sketch said first-hand only). Analysis travels as segments with their provenance and batch map; the track-level mean is derived by the importer | — |
+| **Last.fm layer** (node-local) | `artist_bios`, `artist_tags`, `similar_artists`, `track_stats`, `genre_descriptions` | yes | no — Last.fm's API terms do not allow redistribution: out of the protocol, the share file (format v2) and the seed bundle since 2026-09-19; every node fetches its own by name | — |
 | **Album-grain enrichment** | `album_genres`, `album_descriptions` — outside the sync contour (albums never sync by UUID), but structural rows in a file, where albums do travel under their seal | yes | yes | — |
 | **Text vectors** (derived) | `text_embeddings`, `lyrics_embeddings`, `artist_bio_embeddings`, `genre_desc_embeddings` | yes | no — a BGE-M3 vector is a deterministic function of text the file already carries and of the local metadata composed around it; every node encodes its own in background enrichment, on every profile (`lite` on the CPU, smaller slices) | — |
 | **Local ledgers** | `external_metadata` (which source was asked for what and whether it answered — `not_found` included, so a step never re-asks), `covers` (fetched art) | yes | no — a record of this node's own fetches | — |
@@ -249,18 +249,17 @@ launcher runs the CLI, as for backups). Departures from the sketch above:
   is more than "what I analysed" — the file carries every sealed record
   the node holds, own and received, each under its author's seal, exactly
   what the node serves on the network. The pull handlers are untouched.
-  "Every sealed record" is the seed bundle's six categories, though —
-  `artist_bios` / `artist_tags` / `similar_artists` per artist,
+  "Every sealed record" is the seed bundle's three analysis categories —
   `segments` / `audio_features` / `track_mbids` per track
-  (`seed_export.ENRICHMENT_CATEGORIES` / `ANALYSIS_CATEGORIES`). The
-  network also serves `track_stats` and `genre_descriptions`; the file
-  builder inherited the seed's lists and never grew them.
+  (`seed_export.ANALYSIS_CATEGORIES`). Until 2026-09-19 the file also
+  carried `artist_bios` / `artist_tags` / `similar_artists` per artist;
+  that layer is node-local now (Last.fm's terms), and the format moved to
+  v2 so a file that carried it is refused rather than half-read.
 - **Two import modes.** Default: add what the file names — new artists,
   albums and tracks land as phantoms so their records attach (like the
   seed and a carry push). `--existing-only` (launcher: "Enrich only what I
-  already have"): no artist, album or track row is created, the
-  similar-artist stubs the gate would mint included; link rows and records
-  land only where every entity they reference already exists, the rest is
+  already have"): no artist, album or track row is created; link rows and
+  records land only where every entity they reference already exists, the rest is
   dropped (`share.keep_existing`). The plan reports how much of the file
   is already here (`existing` / `named` per table), and with the streaming
   library switched off only this mode is offered.
@@ -283,8 +282,7 @@ launcher runs the CLI, as for backups). Departures from the sketch above:
   `seed_import.insert_structural` (ON CONFLICT DO NOTHING — a node keeps
   its own rows), envelopes through `SyncClient._import_items` (seal
   verification, first-hand precedence — a receiving node's own records
-  are never overwritten), then the gender / vocalist classifiers on the
-  artists the file touched. Provenance is what the seals say: `imported`
+  are never overwritten). Provenance is what the seals say: `imported`
   rows under the author's pubkey. Above the carry budget
   (`sync.carry_limit`) only with `--yes` / the launcher's confirm.
 

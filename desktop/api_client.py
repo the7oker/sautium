@@ -345,14 +345,10 @@ class BackendAPIClient:
 
     # -- Sync API ----------------------------------------------------------
 
-    def sync_inventory(self, track_uuids: list[str],
-                       artist_uuids: Optional[list[str]] = None) -> Optional[dict]:
-        """Get available enrichment data for given track UUIDs, plus the
-        artist-level categories for `artist_uuids` named outright."""
-        body = {"track_uuids": track_uuids}
-        if artist_uuids:
-            body["artist_uuids"] = artist_uuids
-        return self._post_json("/api/sync/inventory", body=body, timeout=300)
+    def sync_inventory(self, track_uuids: list[str]) -> Optional[dict]:
+        """What the peer holds sealed for these track UUIDs."""
+        return self._post_json("/api/sync/inventory",
+                               body={"track_uuids": track_uuids}, timeout=300)
 
     def sync_holdings(self, have: Optional[str] = None) -> Optional[dict]:
         """The peer's holdings filters (GET /api/sync/holdings); `have` =

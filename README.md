@@ -32,8 +32,9 @@ analytics between collectors.
   `listening_history` and scrobbles to Last.fm.
 - **Web UI** — phone-first vanilla HTML/CSS/JS (no build step, no framework)
   served by FastAPI, with a tokens-based design system and SSE-driven player.
-- **Serverless P2P network** — share metadata, embeddings and audio features
-  over a libtorrent DHT; deterministic identity (Argon2id → Ed25519); E2E
+- **Serverless P2P network** — share sealed audio analysis (CLAP segments,
+  audio features) and the canon layer over a libtorrent DHT — never what
+  Last.fm answered; deterministic identity (Argon2id → Ed25519); E2E
   encrypted chat (NaCl Box); optional email verification via a Cloudflare
   Worker acting as a CA. See `P2P_NETWORK.md`.
 - **Desktop launcher** — CustomTkinter app that manages the backend, P2P

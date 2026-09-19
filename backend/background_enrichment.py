@@ -916,12 +916,14 @@ def _loop() -> None:
             from routers.settings import notify_library_subscribers
             notify_library_subscribers()
 
-            # Every network step writes signable rows (bios, tags, similars,
-            # stats, genre descriptions); the DB steps also shed seals (canon
-            # re-keys) and mint tracklists under already-signed tracks — those
-            # need the album layer rescanned end to end.
-            import notary
-            notary.wake("background pass", full=db_ran)
+            # The DB steps shed seals (canon re-keys) and mint tracklists
+            # under already-signed tracks — those need the album layer
+            # rescanned end to end. The network steps write nothing signable
+            # since the Last.fm layer became node-local (2026-09-19), so
+            # only a pass with DB steps is a producer.
+            if db_ran:
+                import notary
+                notary.wake("background pass", full=True)
 
             # A pass that minted artists (similars, streaming stubs) just
             # created canon work that a dump-less node can only do with

@@ -24,9 +24,9 @@ PUB = KEY.public_key().public_bytes_raw().hex()
 HEADER = {"exporter": {"pubkey": PUB, "username": "vale", "created_at": "2026-09-14T00:00:00Z"},
           "scope": {"kind": "owned"}}
 ROWS = [{"id": f"{i:032x}", "name": f"artist {i}"} for i in range(1234)]
-ENVELOPE = {"category": "artist_bios", "items": [{"artist_uuid": "a", "source": "lastfm"}],
+ENVELOPE = {"category": "track_mbids", "items": [{"track_uuid": "t", "recording_mbid": "r"}],
             "batches": {"root": {"worker_date": "2026-09-14T00:00:00Z"}}}
-SUMMARY = {"albums": 3, "tracks": 30, "artists": 5, "analysed_tracks": 12, "items": {"artist_bios": 1}}
+SUMMARY = {"albums": 3, "tracks": 30, "artists": 5, "analysed_tracks": 12, "items": {"track_mbids": 1}}
 
 
 def _write(path, sign=KEY.sign, header=HEADER, tail=True):
@@ -35,7 +35,7 @@ def _write(path, sign=KEY.sign, header=HEADER, tail=True):
         w.section("batches", {"root": {"author_pubkey": PUB}})
         w.section("artists", ROWS)
         w.section("tracks", [])
-        w.envelope("enrichment", "artist_bios", ENVELOPE)
+        w.envelope("track_mbids", ENVELOPE)
         if tail:
             w.finish(SUMMARY)
     return path
@@ -52,7 +52,7 @@ def test_round_trip_lines_and_chunking(tmp_path):
     assert sections == [("batches", 1), ("artists", 500), ("artists", 500), ("artists", 234), ("tracks", 0)]
     assert [r for o in body if o.get("section") == "artists" for r in o["rows"]] == ROWS
     env = [o for o in body if "envelope" in o]
-    assert env == [{"envelope": "artist_bios", "group": "enrichment", "data": ENVELOPE}]
+    assert env == [{"envelope": "track_mbids", "data": ENVELOPE}]
     assert summary == {"summary": SUMMARY}
     info = share.verify_export(path)
     assert info["summary"] == SUMMARY and info["header"]["exporter"]["username"] == "vale"
@@ -126,14 +126,11 @@ def test_keep_existing_filters_rows_and_items_by_local_entities():
     assert share.keep_existing(share._ROW_REFS["album_tracks"], rows, have) == [rows[0]]
     assert share.keep_existing(share._ROW_REFS["album_descriptions"],
                                [{"album_id": "b1"}, {"album_id": "b2"}], have) == [{"album_id": "b1"}]
-    items = [{"artist_uuid": "a1", "similar_artist_uuid": "a1"},
-             {"artist_uuid": "a1", "similar_artist_uuid": "a2"},     # would mint a2 — dropped
-             {"artist_uuid": "a2", "similar_artist_uuid": "a1"}]
-    assert share.keep_existing(share._ITEM_REFS["similar_artists"], items, have) == [items[0]]
     assert share.keep_existing(share._ITEM_REFS["segments"],
                                [{"track_uuid": "t1"}, {"track_uuid": "t2"}], have) == [{"track_uuid": "t1"}]
+    assert share.keep_existing(share._ITEM_REFS["track_mbids"],
+                               [{"track_uuid": "t9", "recording_mbid": "r"}], have) == []
     # every structural link table and every category has a reference rule
     assert set(share._ROW_REFS) >= {"album_tracks", "track_artists", "album_artists",
                                     "artist_mbids", "album_genres", "album_descriptions"}
-    assert set(share._ITEM_REFS) == {"segments", "audio_features", "track_mbids",
-                                     "artist_bios", "artist_tags", "similar_artists"}
+    assert set(share._ITEM_REFS) == {"segments", "audio_features", "track_mbids"}
