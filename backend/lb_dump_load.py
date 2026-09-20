@@ -4,7 +4,7 @@ replaced Last.fm's per-track counts on 2026-09-20 (Last.fm's terms kept those
 node-local; ListenBrainz data is CC0, so this layer travels between nodes as
 signed per-artist slices, desktop/p2p/lb_slice_queries.py).
 
-What the dump is: ``listenbrainz-statistics-dump-<ts>.tar.zst`` (~21 GB) under
+What the dump is: ``listenbrainz-statistics-dump-<ts>.tar.zst`` (~22 GB) under
 ``fullexport/listenbrainz-dump-<id>-<ts>-full/``, twice a month. Inside,
 ``lbdump/statistics/{stat}_{range}.jsonl`` — one JSON document per LB USER
 and stat, its ``data`` array being that user's TOP 1000 recordings / artists.
@@ -50,14 +50,17 @@ logger = logging.getLogger("lb_dump_load")
 _HERE = os.path.dirname(os.path.abspath(__file__))
 _DATA = os.environ.get("LB_DUMP_DIR") or os.path.normpath(os.path.join(_HERE, "..", "data", "lbdump"))
 
-# Runtime disk gate (agent quote + update precondition). The archive figure is
-# real (21 GB on 2026-09-15); staging and tables are estimates TO CALIBRATE
-# on the first master run — the archive, the staging tables and the new
-# tables coexist at peak (the swap keeps the old tables until the new ones
-# are indexed), on ONE volume in every shipped layout.
-ARCHIVE_GB = 21.0
-STAGING_GB = 4.0
-TABLES_GB = 4.0
+# Runtime disk gate (agent quote + update precondition). Measured on the
+# master, 2026-09-20, dump 20260915-000002: archive 21.8 GB; staging 5.0 GB
+# (29.6 M artist rows + 39.1 M recording rows from 84 850 users); loaded
+# tables 0.85 GB (4.9 M recordings + 0.67 M artists). The archive, the
+# staging tables and BOTH generations of the tables coexist at peak (the
+# swap keeps the old ones until the new ones are indexed), on ONE volume in
+# every shipped layout. Wall time: 17 min download at ~24 MB/s, 3 min
+# checksum, 7 min stage + aggregate + swap.
+ARCHIVE_GB = 22.0
+STAGING_GB = 6.0
+TABLES_GB = 2.0
 MARGIN_GB = 2.0
 
 _FULLEXPORT = "https://data.metabrainz.org/pub/musicbrainz/listenbrainz/fullexport"

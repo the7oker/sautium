@@ -843,9 +843,9 @@ def lb_dump_status() -> str:
 
 @mcp.tool()
 def lb_dump_download(confirm: bool = False) -> str:
-    """Start the background ListenBrainz statistics download+load (~21 GB
-    download, ~31 GB free disk during the install, ~4 GB kept, tens of
-    minutes). Fire-and-forget: returns immediately — NEVER wait for
+    """Start the background ListenBrainz statistics download+load (~22 GB
+    download, ~32 GB free disk during the install, ~1 GB kept, about half an
+    hour on a fast line). Fire-and-forget: returns immediately — NEVER wait for
     completion in the same reply; progress lives in More → Streaming
     library → ListenBrainz listening statistics, or via lb_dump_status. Call
     ONLY with confirm=true, ONLY after the user explicitly agreed in this

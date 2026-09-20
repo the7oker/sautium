@@ -98,6 +98,21 @@ async def _lb_after_walk() -> None:
         _lb_cycle.request("sync")
 
 
+async def _lb_sources_changed() -> None:
+    """A local statistics load finished (announce the capability now — no
+    restart, the launcher does the same) or the dump was deleted (this node
+    asks the network again)."""
+    if _dht_service is not None:
+        try:
+            from routers.sync import lb_dump_version
+            if lb_dump_version():
+                await _dht_service.announce_capability("lbdump")
+        except Exception as e:
+            logger.warning(f"lbdump capability announce failed: {e}")
+    if _lb_cycle is not None:
+        _lb_cycle.request("sources")
+
+
 def _build_sync_walk():
     """This runtime's dependencies for the shared sync walk
     (desktop/p2p/sync_walk.py): the node's identity as the peer client, the
@@ -536,7 +551,7 @@ async def lifespan(app: FastAPI):
                 settings.database_url,
                 {"sautium_lb_pending": lambda: _lb_cycle.request("pending"),
                  "sautium_lb_request": lambda: _lb_cycle.request("request"),
-                 "sautium_lb_sources": lambda: _lb_cycle.request("sources")},
+                 "sautium_lb_sources": lambda: asyncio.create_task(_lb_sources_changed())},
                 lambda: _lb_cycle.running)),
             asyncio.create_task(_lb_cycle.dispatch_loop()),
             asyncio.create_task(_lb_cycle.interval_loop()),

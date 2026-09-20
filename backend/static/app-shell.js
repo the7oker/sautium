@@ -12557,10 +12557,10 @@
           ? `Listening counts for <b>${fmtCompact(cat.recordings)} recordings</b> by <b>${fmtCompact(cat.artists)} artists</b> — what ranks Popular tracks and the Popularity sort. Open data (CC0), served to other nodes as they need it.`
           : `Listening counts from ListenBrainz for tens of millions of recordings — what ranks Popular tracks and the Popularity sort. Open data (CC0): a node without it receives per-artist statistics from the nodes that have it.`;
       },
-      // lb_dump_load ships ARCHIVE_GB 21 + STAGING_GB 4 + TABLES_GB 4 +
-      // MARGIN_GB 2 — the archive figure is real, the rest is calibrated
-      // after the first full run.
-      cost: 'Optional · ~4 GB in the database once loaded, plus ~21 GB of free space for the download while it installs — the archive is deleted afterwards.',
+      // lb_dump_load ships ARCHIVE_GB 22 + STAGING_GB 6 + TABLES_GB 2 +
+      // MARGIN_GB 2, measured on the master 2026-09-20: archive 21.8 GB,
+      // loaded tables 0.85 GB.
+      cost: 'Optional · ~1 GB in the database once loaded, plus ~22 GB of free space for the download while it installs — the archive is deleted afterwards.',
       deleteLabel: 'Delete statistics',
       deleteTitle: 'Delete the statistics?',
       deleteMessage: 'Removes the ListenBrainz tables and the downloaded archive. '

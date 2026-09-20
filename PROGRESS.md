@@ -1064,7 +1064,7 @@ untouched: Valerii's call, track level only.
 - **What ListenBrainz actually publishes.** No public dump carries its
   `popularity` tables; the popularity API sums LB listens with MLHD+
   (non-commercial-only) and cannot seed a redistributed layer. The
-  statistics dump (`listenbrainz-statistics-dump-<ts>.tar.zst`, ~21 GB,
+  statistics dump (`listenbrainz-statistics-dump-<ts>.tar.zst`, ~22 GB,
   1st and 15th) holds one JSONL document per LB user per stat — the user's
   TOP 1000 recordings / artists. `lb_dump_load` streams the archive once
   (`zstandard` + `tarfile`), COPYs the items of `artists_all_time.jsonl`
@@ -1121,10 +1121,20 @@ untouched: Valerii's call, track level only.
   `lbslices`, and the registration cap `capabilities.length > 4` becomes
   `> DIRECTORY_CAPS.size` — a node advertising six caps against the old
   Worker would lose its WHOLE registration, sync included.
-- **Coverage trade.** 84 % of owned tracks carry a recording MBID (31 365
-  of 37 115) against 98 % that had a Last.fm row; the rest fall to the
-  local-plays tier. Dump-size constants (`STAGING_GB`, `TABLES_GB`, the
-  wizard mirrors) are estimates until the first master run calibrates them.
+- **Coverage trade, measured.** 84 % of owned tracks carry a recording
+  MBID (31 365 of 37 115), and after the first master load **41 % (15 223)
+  have a ListenBrainz count** — the rest of the MBID-bound tracks never
+  reached any LB user's top 1000 and fall to the local-plays tier (Last.fm
+  answered for 98 %; it counted every scrobble). 2 812 of 4 120 owned
+  artists have an `lb_artist` row.
+- **First master run (2026-09-20, dump 20260915-000002).** Download 21.8 GB
+  in 17 min (~24 MB/s), checksum 3 min, stage + aggregate + swap 437 s:
+  84 850 users, 29.6 M artist items (of 37.3 M — the rest unmapped) and
+  39.1 M recording items (of 46.2 M) into 5.0 GB of staging, aggregated to
+  4.9 M recordings + 0.67 M artists = 0.85 GB. Reading stopped at 22 % of
+  the archive. Constants calibrated from it: ARCHIVE 22 + STAGING 6 +
+  TABLES 2 + MARGIN 2 GB. A Vangelis slice builds in 0.3 s (635 recordings,
+  16.8 KB gzipped).
 - **Measured**: 276 tests green in the container, the DB-gated ones
   building the schema from 001 → 020 on a scratch database and running the
   aggregation through the real `GROUP BY`; 020 rehearsed against a real

@@ -1574,11 +1574,11 @@ class SetupWizard(ctk.CTkToplevel):
     # cannot finish the load.
     _MB_ARCHIVE_GB = 7.5
     _MB_NEEDED_GB = 31
-    # MIRRORS backend/lb_dump_load (ARCHIVE_GB 21 + STAGING_GB 4 + TABLES_GB 4
-    # + MARGIN_GB 2): the ListenBrainz listening-statistics dump. The archive
-    # figure is real; the rest is TO CALIBRATE after the first master run.
-    _LB_ARCHIVE_GB = 21
-    _LB_NEEDED_GB = 31
+    # MIRRORS backend/lb_dump_load (ARCHIVE_GB 22 + STAGING_GB 6 + TABLES_GB 2
+    # + MARGIN_GB 2): the ListenBrainz listening-statistics dump, measured on
+    # the master 2026-09-20 (archive 21.8 GB, staging 5.0 GB, tables 0.85 GB).
+    _LB_ARCHIVE_GB = 22
+    _LB_NEEDED_GB = 32
 
     def _free_gb(self) -> float:
         try:
@@ -1669,7 +1669,7 @@ class SetupWizard(ctk.CTkToplevel):
         lb_chk = ctk.CTkCheckBox(
             self.content_frame,
             text=(f"Also download ListenBrainz listening statistics "
-                  f"(~{self._LB_ARCHIVE_GB:g} GB download, ~4 GB kept)"),
+                  f"(~{self._LB_ARCHIVE_GB:g} GB download, ~1 GB kept)"),
             variable=self._lb_dump_var,
         )
         lb_chk.pack(pady=(14, 4))
