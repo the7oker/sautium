@@ -129,6 +129,22 @@ def _load_carry():
 
 
 carry_queries, carry_importer = _load_carry()
+
+
+# The ListenBrainz slice protocol is imported as a package module (the walk
+# already is, since 2026-09-08 — /app is on sys.path via _load_carry): one
+# module object per process, never a second file-path loader. Absent → the
+# endpoint 404s and /health advertises no lb fields.
+def _load_lb_slice_queries():
+    try:
+        import importlib
+        return importlib.import_module("desktop.p2p.lb_slice_queries")
+    except Exception as e:
+        logger.warning(f"LB slices unavailable: {e}")
+        return None
+
+
+lb_slice_queries = _load_lb_slice_queries()
 if carry_importer is not None:
     SYNC_CAPABILITIES.append("carry")
 if carry_queries is not None:
@@ -274,6 +290,66 @@ def node_pubkey_hex() -> Optional[str]:
 
 class MBSliceRequest(BaseModel):
     names: list[str] = Field(default_factory=list, max_length=50)
+
+
+lb_router = APIRouter(prefix="/api/lb", tags=["sync"])
+
+
+def lb_dump_version() -> Optional[str]:
+    """ListenBrainz dump version this node serves slices from, or None —
+    the loader's in-DB marker plus rows (lb_slice_queries.local_dump_available)."""
+    if lb_slice_queries is None:
+        return None
+    try:
+        with get_conn() as conn:
+            return lb_slice_queries.local_dump_available(conn)
+    except Exception as e:
+        logger.debug(f"LB dump capability check failed: {e}")
+        return None
+
+
+def lb_inventory() -> tuple:
+    """(re-serve inventory size, newest version in it) for /health."""
+    if lb_slice_queries is None:
+        return 0, None
+    try:
+        with get_conn() as conn:
+            return (lb_slice_queries.count_slice_blobs(conn),
+                    lb_slice_queries.max_blob_version(conn))
+    except Exception:
+        return 0, None
+
+
+class LBSliceRequest(BaseModel):
+    artist_mbids: list[str] = Field(default_factory=list, max_length=50)
+    min_version: Optional[str] = Field(default=None, max_length=32)
+
+
+@lb_router.post("/slice")
+def lb_slice(req: LBSliceRequest) -> dict:
+    """Per-artist-MBID signed ListenBrainz statistics blobs (v1) — mirrors
+    desktop/p2p/sync_server.handle_lb_slice. Dump holders compute+sign+
+    cache misses; a replica answers what it holds, misses land in
+    `missing`; ``min_version`` keeps a stale cache from answering."""
+    _require_sharing()
+    if lb_slice_queries is None:
+        raise HTTPException(status_code=404, detail="lb slices unavailable")
+    sign_fn, author = None, ""
+    if lb_dump_version():
+        try:
+            key = node_signing_key()
+            author = node_pubkey_hex() or ""
+            sign_fn = key.sign
+        except Exception as e:
+            logger.warning(f"LB slice signing unavailable: {e}")
+    try:
+        with get_conn() as conn:
+            return lb_slice_queries.serve_slices(
+                conn, req.artist_mbids, req.min_version, sign_fn, author)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except lb_slice_queries.DumpBusy:
+        raise HTTPException(status_code=503, detail="dump_reloading")
 
 
 @mb_router.get("/search")

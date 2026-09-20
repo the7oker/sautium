@@ -102,6 +102,7 @@ services:
       OPENAI_COMPAT_NAME: ${OPENAI_COMPAT_NAME:-}
       DEFAULT_PROVIDER: ${DEFAULT_PROVIDER:-claude_code}
       MB_DUMP_DIR: /app/data/mbdump        # writable mount for the MusicBrainz dump
+      LB_DUMP_DIR: /app/data/lbdump        # writable mount for the ListenBrainz statistics dump
     extra_hosts:
       - "host.docker.internal:host-gateway"
     volumes:
@@ -110,6 +111,7 @@ services:
       - ./data/cache:/root/.cache
       - ./data/generated_eq:/app/generated_eq
       - ./data/mbdump:/app/data/mbdump   # MusicBrainz dump (download + stream-load)
+      - ./data/lbdump:/app/data/lbdump   # ListenBrainz statistics dump (download + aggregate)
       - ./data/support:/app/data/support # support desk — bundles user nodes sent, unpacked on demand (master only)
       - ./data/backup:/app/data/backup   # node backups (python -m backup create; the weekly task)
       - ./data/export:/app/data/export   # share exports for other collectors (python -m backup export)

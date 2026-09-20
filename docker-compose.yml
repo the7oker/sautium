@@ -153,6 +153,7 @@ services:
       # Intra-container backend self-calls (Claude Code tools, MCP server).
       BACKEND_URL: http://localhost:8000
       MB_DUMP_DIR: /app/data/mbdump        # writable mount for the MusicBrainz dump
+      LB_DUMP_DIR: /app/data/lbdump        # writable mount for the ListenBrainz statistics dump
       # Disable uvicorn auto-reload in Docker. The bind-mounted ./backend
       # lives on WSL2 drvfs (or macOS osxfs); inotify periodically returns
       # EIO (errno 5) on those filesystems, which crashes the Rust-based
@@ -174,6 +175,7 @@ services:
       - ./data/tls:/app/data/tls
       - ./data/node_identity:/app/data/node_identity   # identity certificate + mined proof (survive recreation)
       - ./data/mbdump:/app/data/mbdump   # MusicBrainz dump (download + stream-load)
+      - ./data/lbdump:/app/data/lbdump   # ListenBrainz statistics dump (download + aggregate)
       - ./data/support:/app/data/support # support desk — bundles user nodes sent, unpacked on demand (master only)
       - ./data/backup:/app/data/backup   # node backups (python -m backup create; the weekly task)
       - ./data/export:/app/data/export   # share exports for other collectors (python -m backup export)

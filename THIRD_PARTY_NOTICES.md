@@ -79,7 +79,7 @@ transformers (Apache-2.0) · sentence-transformers (Apache-2.0) · hear21passt
 argon2-cffi (MIT) · cryptography (Apache-2.0 OR BSD-3-Clause) · python-dotenv
 (BSD-3-Clause) · psutil (BSD-3-Clause) · click (BSD-3-Clause) · tqdm (MPL-2.0
 AND MIT) · numpy (BSD-3-Clause) · pandas (BSD-3-Clause) · scipy
-(BSD-3-Clause) · httpx (BSD-3-Clause) · requests (Apache-2.0) · aiohttp
+(BSD-3-Clause) · httpx (BSD-3-Clause) · zstandard (BSD-3-Clause) · requests (Apache-2.0) · aiohttp
 (Apache-2.0 AND MIT) · python-json-logger (BSD-2-Clause) · pytest (MIT) ·
 pytest-asyncio (Apache-2.0) · yt-dlp (Unlicense) · anyascii (ISC) · pypinyin
 (MIT) · cutlet (MIT) · koroman (MIT).
@@ -103,6 +103,16 @@ Sautium. Source: https://github.com/quodlibet/mutagen.
   crediting), and the connected account in Profile links to its
   `last.fm/user/<name>` page. Clause 3.1 limits the data to non-commercial
   use, which is where Sautium's own licence already sits.
+- **ListenBrainz** (MetaBrainz Foundation) — listening statistics. A node
+  that opts in downloads the public statistics dump
+  (`data.metabrainz.org/pub/musicbrainz/listenbrainz/fullexport/`, CC0)
+  with a contact `User-Agent`, and aggregates the users' top-1000 lists into
+  per-recording and per-artist listen counts. Being CC0, those counts are
+  redistributed between Sautium nodes as signed per-artist slices. No API
+  key, no account; the popularity API is not used (its answers include the
+  non-commercial MLHD+ dataset). Credited on the Artist and Genre screens
+  (`listening statistics from ListenBrainz`) wherever its counts ranked
+  something.
 - **MusicBrainz** — metadata and the optional local database dump (data under
   CC0 / CC BY-NC-SA as published by MetaBrainz); API use follows the
   MusicBrainz rate and user-agent rules.

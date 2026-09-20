@@ -66,8 +66,9 @@ def _fmt_seconds(total: int) -> str:
 
 
 def _fmt_plays(count: int) -> str:
-    """Human plays — 1.2M / 280k / 850. Last.fm scrobble counts can be
-    huge; tile space is tight, so we compact above 1k."""
+    """Human plays — 1.2M / 280k / 850. ListenBrainz listen counts (lower
+    bounds — sums over users' top-1000 lists) can be huge; tile space is
+    tight, so we compact above 1k."""
     if count is None or count <= 0:
         return ""
     if count >= 1_000_000:
@@ -126,6 +127,27 @@ def get_artist(
     # part of the response shape the screen consumes.
     last_album_sync = artist.pop("last_album_sync", None)
 
+    # The on-demand lane of the ListenBrainz slice cycle: an artist whose
+    # MBIDs the ledger does not vouch for yet, opened on a node without the
+    # statistics dump, is asked of the network now — the durable row is the
+    # request (the cycle serves it first), the NOTIFY only the wake. Version
+    # upgrades are the cycle's job, not this page's.
+    db_execute("""
+        INSERT INTO lb_slice_requests (artist_id)
+        SELECT %(id)s::uuid
+         WHERE EXISTS (SELECT 1 FROM artist_mbids am WHERE am.artist_id = %(id)s::uuid)
+           AND NOT EXISTS (SELECT 1 FROM user_settings WHERE key = 'listenbrainz.db_version')
+           AND NOT EXISTS (SELECT 1 FROM lb_slice_fetches f
+                           JOIN artist_mbids am ON am.mbid = f.artist_mbid
+                           WHERE am.artist_id = %(id)s::uuid)
+        ON CONFLICT (artist_id) DO NOTHING
+    """, {"id": artist_id})
+    artist["lb_pending"] = db_query_one(
+        "SELECT 1 AS x FROM lb_slice_requests WHERE artist_id = %(id)s::uuid",
+        {"id": artist_id}) is not None
+    if artist["lb_pending"]:
+        db_execute("NOTIFY sautium_lb_request")
+
     # --- Namesake disambiguation ------------------------------------------
     # One display name can map to several real MB artists (e.g. two bands
     # called "Enigma"); they collapse to a single name-UUID but album_artists
@@ -176,7 +198,7 @@ def get_artist(
     selected_mbid = None
     is_dominant = is_external = False
     album_ids = None
-    album_filter_al = album_filter_av = ""
+    album_filter_al = album_filter_av = album_filter_at = ""
     if split:
         selected = next((n for n in namesakes if n["mbid"] == mbid), namesakes[0])
         selected_mbid = selected["mbid"]
@@ -197,6 +219,7 @@ def get_artist(
         """, {"id": artist_id, "sel": selected_mbid, "dom": is_dominant})]
         album_filter_al = "AND al.id = ANY(%(album_ids)s::uuid[])"
         album_filter_av = "AND av.album_id = ANY(%(album_ids)s::uuid[])"
+        album_filter_at = "AND at.album_id = ANY(%(album_ids)s::uuid[])"
 
     bio_row = db_query_one("""
         SELECT content, summary, url
@@ -276,19 +299,36 @@ def get_artist(
     }[sort]
 
     rows = db_query(f"""
-        WITH metrics AS (
+        WITH track_pop AS (
+            -- ListenBrainz listens per track: a track binds to every
+            -- recording of the song, so the recordings' counts sum.
+            SELECT tm.track_id, SUM(lr.listen_count) AS listens
+            FROM track_mbids tm
+            JOIN lb_recording lr ON lr.recording_mbid = tm.recording_mbid
+            GROUP BY tm.track_id
+        ),
+        album_pop AS (
+            -- Per album over DISTINCT tracks, apart from the listening
+            -- history join below — joined there it multiplied by listens.
+            SELECT x.album_id, SUM(tp.listens)::bigint AS popularity
+            FROM (SELECT DISTINCT av.album_id, mf.track_id
+                  FROM album_variants av
+                  JOIN media_files mf ON mf.album_variant_id = av.id) x
+            JOIN track_pop tp ON tp.track_id = x.track_id
+            GROUP BY x.album_id
+        ),
+        metrics AS (
             SELECT al.id AS album_id,
                    COALESCE(SUM(lh.duration_listened), 0)::bigint
                        AS time_listened_seconds,
-                   COALESCE(SUM(ts.playcount), 0)::bigint
+                   COALESCE(MAX(ap.popularity), 0)::bigint
                        AS popularity
             FROM albums al
             JOIN album_variants av ON av.album_id = al.id
             JOIN media_files mf ON mf.album_variant_id = av.id
             JOIN tracks t ON t.id = mf.track_id
             LEFT JOIN listening_history lh ON lh.track_id = t.id
-            LEFT JOIN track_stats ts
-                   ON ts.track_id = t.id AND ts.source = 'lastfm'
+            LEFT JOIN album_pop ap ON ap.album_id = al.id
             WHERE al.id IN (
                 SELECT DISTINCT av2.album_id
                 FROM album_variants av2
@@ -348,6 +388,10 @@ def get_artist(
         ORDER BY role_priority, {sort_expr}
     """, {"id": artist_id, "album_ids": album_ids})
 
+    # Whether ListenBrainz ranked anything here — read before the raw
+    # metric columns are dropped below; feeds the credit line.
+    album_pop_used = any(int(r.get("popularity") or 0) > 0 for r in rows)
+
     # Pre-format the metric so the UI doesn't have to mirror server
     # formatting rules. Empty string == unavailable; the tile renders
     # it as '—' in the dimmed style.
@@ -375,12 +419,15 @@ def get_artist(
     artist["albums_sort"] = sort
 
     # Popular tracks — hybrid rank:
-    #   1. Tracks that are popular on Last.fm come first, ordered by
-    #      Last.fm playcount. This is the "general / cultural" rank —
-    #      what the world considers the artist's hits, useful when
-    #      the user hasn't streamed this artist yet.
-    #   2. Tracks with no Last.fm data but local plays > 0 fall back
-    #      after, ordered by personal play_count. Keeps the block
+    #   1. Tracks ListenBrainz knows come first, ordered by their
+    #      listen count (a track binds to every recording of the song,
+    #      so the recordings' counts sum). This is the "general /
+    #      cultural" rank — what the world considers the artist's hits,
+    #      useful when the user hasn't streamed this artist yet. Lower
+    #      bounds by construction (sums over LB users' top-1000 lists):
+    #      a rank, never a figure to quote.
+    #   2. Tracks with no ListenBrainz data but local plays > 0 fall
+    #      back after, ordered by personal play_count. Keeps the block
     #      useful for niche library-only material the user has
     #      actually listened to.
     #   3. Tracks with neither signal are dropped — a tile under a
@@ -388,43 +435,82 @@ def get_artist(
     #      the data. If the filter empties the list, the section
     #      hides entirely (see renderArtist on the frontend).
     #
-    # Tier ordering and the 5-row cap happen entirely in SQL. The
-    # `candidates` CTE dedups media_file variants per track id; the
-    # outer SELECT filters tracks with no signal, applies the two
-    # tiers and LIMITs to 5.
+    # Two arms: OWNED tracks (one row per track id, the analysis-source
+    # file) and NOT-OWNED ones off the phantom tracklists — an artist
+    # page on a node that holds only the discography and its ListenBrainz
+    # counts still names the hits, and they stream like any phantom row
+    # (media_file_id NULL, the album as play context). Tier ordering and
+    # the 5-row cap happen entirely in SQL.
     artist["popular_tracks"] = db_query(f"""
-        WITH candidates AS (
+        WITH track_pop AS (
+            SELECT tm.track_id, SUM(lr.listen_count) AS listens
+            FROM track_mbids tm
+            JOIN lb_recording lr ON lr.recording_mbid = tm.recording_mbid
+            GROUP BY tm.track_id
+        ),
+        owned AS (
             SELECT DISTINCT ON (t.id)
                    t.id::text AS track_id,
                    mf.id AS media_file_id,
                    t.title,
                    al.title AS album,
+                   al.id::text AS album_id,
                    mf.duration_seconds AS duration,
                    COALESCE(lps.play_count, 0)::int AS local_plays,
-                   COALESCE(ts.playcount, 0)::bigint AS lastfm_playcount
+                   COALESCE(tp.listens, 0)::bigint AS lb_listens
             FROM tracks t
             JOIN track_artists ta ON ta.track_id = t.id
             JOIN media_files mf ON mf.track_id = t.id AND mf.is_analysis_source = true
             JOIN album_variants av ON av.id = mf.album_variant_id
             JOIN albums al ON al.id = av.album_id
             LEFT JOIN local_play_stats lps ON lps.track_id = t.id
-            LEFT JOIN track_stats ts
-                   ON ts.track_id = t.id AND ts.source = 'lastfm'
+            LEFT JOIN track_pop tp ON tp.track_id = t.id
             WHERE ta.artist_id = %(id)s::uuid
             {album_filter_av}
-            ORDER BY t.id, COALESCE(ts.playcount, 0) DESC,
+            ORDER BY t.id, COALESCE(tp.listens, 0) DESC,
                            COALESCE(lps.play_count, 0) DESC
+        ),
+        phantom AS (
+            SELECT DISTINCT ON (t.id)
+                   t.id::text AS track_id,
+                   NULL::int AS media_file_id,
+                   t.title,
+                   al.title AS album,
+                   al.id::text AS album_id,
+                   (at.length_ms / 1000)::int AS duration,
+                   COALESCE(lps.play_count, 0)::int AS local_plays,
+                   COALESCE(tp.listens, 0)::bigint AS lb_listens
+            FROM album_tracks at
+            JOIN tracks t ON t.id = at.track_id
+            JOIN albums al ON al.id = at.album_id
+            JOIN track_artists ta ON ta.track_id = t.id
+            LEFT JOIN local_play_stats lps ON lps.track_id = t.id
+            LEFT JOIN track_pop tp ON tp.track_id = t.id
+            WHERE ta.artist_id = %(id)s::uuid
+              AND NOT EXISTS (SELECT 1 FROM media_files mf WHERE mf.track_id = t.id)
+            {album_filter_at}
+            ORDER BY t.id, COALESCE(tp.listens, 0) DESC,
+                           COALESCE(lps.play_count, 0) DESC
+        ),
+        candidates AS (
+            SELECT * FROM owned UNION ALL SELECT * FROM phantom
         )
-        SELECT track_id, media_file_id, title, album, duration
+        SELECT track_id, media_file_id, title, album, album_id, duration,
+               lb_listens > 0 AS from_listenbrainz
         FROM candidates
-        WHERE lastfm_playcount > 0 OR local_plays > 0
+        WHERE lb_listens > 0 OR local_plays > 0
         ORDER BY
-            CASE WHEN lastfm_playcount > 0 THEN 0 ELSE 1 END,
-            lastfm_playcount DESC,
+            CASE WHEN lb_listens > 0 THEN 0 ELSE 1 END,
+            lb_listens DESC,
             local_plays DESC,
             title
         LIMIT 5
     """, {"id": artist_id, "album_ids": album_ids})
+    # The credit line names ListenBrainz only where its numbers actually
+    # ranked something on this page (the Popularity sort counts too).
+    artist["listenbrainz_used"] = (
+        any(t.pop("from_listenbrainz", False) for t in artist["popular_tracks"])
+        or album_pop_used)
 
     # Whole similar-artists list, ordered by the Last.fm match score
     # (0..1). No cap — the row is a horizontal scroll, so showing the

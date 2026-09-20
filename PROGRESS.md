@@ -26,7 +26,7 @@ implementation details live in the code, DB and git history.
 
 - **Normalized multi-source metadata**. Last.fm/MusicBrainz data lives
   in separate normalized tables (`artist_bios`, `artist_tags`, `similar_artists`,
-  `album_descriptions`, `track_stats`), not JSONB blobs. Allows per-source re-fetch and
+  `album_descriptions`, `lb_recording`), not JSONB blobs. Allows per-source re-fetch and
   provenance tracking. First iteration used JSONB in `external_metadata`, that
   was scrapped because PostgreSQL functions on JSONB get unreadable fast.
 - **Canonical UUID v5 for shareable entities**. Artist/Album/Track/Genre/Tag/
@@ -132,7 +132,9 @@ implementation details live in the code, DB and git history.
   conceptual similarity, audio captures sonic. Tunable per query.
 - **Retrieval floor: 0.3 min_similarity, cap at 30 tracks for context**. Wide
   pool, let Claude decide. Higher thresholds caused false "nothing found".
-- **Subtle popularity boost (15%, log-scale)**. Listeners range from 6 to 300k+
+- **Subtle popularity boost (15%, log-scale)** — historical: the boost was
+  ripped out of search later, and since 2026-09-20 popularity is a
+  ListenBrainz rank, not a Last.fm figure. Listeners range from 6 to 300k+
   → power-law distribution → log normalization. Without boost, obscure tracks
   dominate by chance; with >15% boost, popular tracks crowd everything else.
 
@@ -969,7 +971,8 @@ and importer userscripts exist for Bandcamp, not for the hi-res shops).
 
 Last.fm's API terms do not allow redistributing what the API answers, and
 until now Sautium did exactly that in four places: the five Last.fm-fetched
-tables (`artist_bios`, `artist_tags`, `similar_artists`, `track_stats`,
+tables (`artist_bios`, `artist_tags`, `similar_artists`, `track_stats` —
+gone since 2026-09-20, see the ListenBrainz section — and
 `genre_descriptions`) were sealed and served over the P2P pull protocol,
 counted into the holdings filter, written into every share export, and the
 seed bundle shipped bios/tags/similars for the picks' artists as a public
@@ -1035,6 +1038,8 @@ artist's `/music/…` page and the genre's `/tag/…` page.
   (1.2 %) have Last.fm `track_stats` but no bio yet — featured artists the
   engagement-gated `enrich_bios` has not reached. They show no credit until
   it does, which is self-healing and beats a second, hand-rolled URL source.
+  (Since 2026-09-20 the numbers on those pages are ListenBrainz's, and the
+  credit line names both sources — see the next section.)
 - **The connected account links to its Last.fm page.** Clause 2.7 names the
   `/user/<name>` link specifically, so Profile › Account › Last.fm renders
   the username as a link to it.
@@ -1042,6 +1047,89 @@ artist's `/music/…` page and the genre's `/tag/…` page.
   genre chips that fall back to the artist's Last.fm tags, Discovery's
   bio-search scope, the 226 covers from `album.getInfo`, and assistant
   answers. No global footer credit.
+
+### ListenBrainz replaces Last.fm track stats (2026-09-20)
+
+Per-track listening statistics used to be one Last.fm `track.getInfo` call
+per owned track (36k rows on the master), node-local by licence since 019.
+They now come from ListenBrainz — CC0, so the layer travels — as a second
+dump family built like the MusicBrainz one: an opt-in local dump on "dump
+nodes", per-artist signed slices for everyone else. Migration 020 drops
+`track_stats` and the Last.fm negative-cache rows behind it; the album
+"Popularity" sort and the Popular tracks blocks read `track_mbids ⋈
+lb_recording` (a track sums its recordings — 4 583 tracks bind to more
+than one). The artist-level rarity proxy (`artist_bios.listeners`) is
+untouched: Valerii's call, track level only.
+
+- **What ListenBrainz actually publishes.** No public dump carries its
+  `popularity` tables; the popularity API sums LB listens with MLHD+
+  (non-commercial-only) and cannot seed a redistributed layer. The
+  statistics dump (`listenbrainz-statistics-dump-<ts>.tar.zst`, ~21 GB,
+  1st and 15th) holds one JSONL document per LB user per stat — the user's
+  TOP 1000 recordings / artists. `lb_dump_load` streams the archive once
+  (`zstandard` + `tarfile`), COPYs the items of `artists_all_time.jsonl`
+  and `recordings_all_time.jsonl` into UNLOGGED staging, `GROUP BY`s them
+  (SUM of listens, COUNT of users, `min(artist_mbids)` — a hash aggregate,
+  never a Python dict) into `lb_recording_new` / `lb_artist_new`, indexes
+  them and SWAPS them in: readers never block for the minutes the
+  aggregation takes. Reading stops at the end of the recordings member —
+  the tool writes artists first, recordings second, then releases and
+  activity, which are never decompressed. The counts are LOWER BOUNDS by
+  construction and every consumer treats them as a rank.
+- **One completion marker**, `user_settings['listenbrainz.db_version']` —
+  the only value signed into a slice and the only "loaded here" truth. The
+  MB loader's VERSION-file + DB-key pair is what let its signed version
+  and its serve gate disagree; the LB archive name carries the version for
+  download resume instead. The `.sha256` is verified before anything reads
+  the archive and fails closed (the MB `verify_md5` is dead code that
+  fails open — left as is).
+- **Versioned from the start.** The MB slice family has no staleness: a
+  ledger row is never re-asked, a dump node keeps re-serving blobs cached
+  from an older dump. Here `dump_version` rides in every ledger and data
+  row, a request carries `min_version` (the newest version any reachable
+  source advertised in `/health`: `lb_dump`, `lb_slices_version`), a cached
+  blob older than that is `missing`, a dump node never serves a cache older
+  than its own dump, imports move a row forward only (one recording is
+  credited to two artists and arrives from two slices in any order), and
+  `pending_slice_mbids` re-asks every row older than the newest — a signed
+  zero-match included.
+- **Owned + engaged in bulk, phantoms on demand.** The cycle asks for
+  owned artists and completed-listen artists that have an MBID; a phantom
+  artist is asked when its page is opened (`routers/artists.py` writes
+  `lb_slice_requests` and NOTIFYs; the cycle serves that lane first; a
+  `sautium_lb_done` NOTIFY reaches the tab as `{"t":"lb"}` on `/api/events`
+  and the page patches its Popular tracks block in place). Popular tracks
+  gained a phantom arm off `album_tracks.recording_mbid`, so a not-owned
+  artist's hits render as phantom rows and stream like any other.
+- **One cycle for both runtimes.** `desktop/p2p/lb_slice_cycle.py` runs
+  in the launcher's P2PManager and in the Docker backend (the walk's
+  `connect_peer` injected), which the MB family never got — a dump-less
+  Docker node has no MB slice loop to this day. `verified` and `missing`
+  are two explicit sets: `mb_slice_client.py`'s `missing` expression has an
+  `and`/`or` precedence hole that drops a name whose blob failed
+  verification. Discovery mirrors `_find_dump_peers` (replicas first, DHT
+  `lbdump`, the Worker directory's `lbslices`/`lbdump`, the master hint
+  last); moving the MB family onto `LbSliceCycle.find_sources` is the
+  follow-up.
+- **One dump-job runner** (`backend/dump_job.py`): the MB job's
+  state/progress/budget/auto-update machinery generalised over a family,
+  two instances, ONE worker thread — the wizard can tick both downloads
+  and two bulk loads on one volume must never run at once (the second
+  says "Queued…"). The Streaming library screen renders both blocks from
+  one `_dumpBlockHTML(family)`.
+- **The Worker deploys first.** `DIRECTORY_CAPS` gains `lbdump` /
+  `lbslices`, and the registration cap `capabilities.length > 4` becomes
+  `> DIRECTORY_CAPS.size` — a node advertising six caps against the old
+  Worker would lose its WHOLE registration, sync included.
+- **Coverage trade.** 84 % of owned tracks carry a recording MBID (31 365
+  of 37 115) against 98 % that had a Last.fm row; the rest fall to the
+  local-plays tier. Dump-size constants (`STAGING_GB`, `TABLES_GB`, the
+  wizard mirrors) are estimates until the first master run calibrates them.
+- **Measured**: 276 tests green in the container, the DB-gated ones
+  building the schema from 001 → 020 on a scratch database and running the
+  aggregation through the real `GROUP BY`; 020 rehearsed against a real
+  `track_stats` (dropped, negative-cache rows deleted, idempotent, the
+  `artist_mbids` statement trigger fires one wake).
 
 ## Known Gotchas
 

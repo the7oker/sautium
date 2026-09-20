@@ -152,7 +152,7 @@ const DIRECTORY_TTL_MS = 2 * 3600 * 1000;
 // how often the Worker is asked: at 20 a directory of a few dozen nodes is
 // walked in a couple of runs instead of a day of five-at-a-time samples.
 const DIRECTORY_K = 20;
-const DIRECTORY_CAPS = new Set(["sync", "mbdump", "relay", "mbslices"]);
+const DIRECTORY_CAPS = new Set(["sync", "mbdump", "relay", "mbslices", "lbdump", "lbslices"]);
 const DIRECTORY_REG_PER_IP_HOUR = 12;
 // email_class is a coarse, Worker-side hint (the node never sees the domain):
 // disposable → reduced similarity weight, major → shared-provider (many honest
@@ -1102,7 +1102,8 @@ async function handleNodeRegister(request, env, corsHeaders) {
   if (!Number.isInteger(p) || p <= 0 || p >= 65536) {
     return json({ error: "invalid port" }, corsHeaders, 400);
   }
-  if (!Array.isArray(capabilities) || capabilities.length === 0 || capabilities.length > 4
+  if (!Array.isArray(capabilities) || capabilities.length === 0
+      || capabilities.length > DIRECTORY_CAPS.size
       || !capabilities.every((c) => DIRECTORY_CAPS.has(c))) {
     return json({ error: "invalid capabilities" }, corsHeaders, 400);
   }
@@ -1200,6 +1201,7 @@ export class NodeDirectory {
                                     now - DIRECTORY_TTL_MS).one().n),
         sync: fresh("sync"), mbdump: fresh("mbdump"),
         mbslices: fresh("mbslices"), relay: fresh("relay"),
+        lbdump: fresh("lbdump"), lbslices: fresh("lbslices"),
       });
     }
     return new Response("not found", { status: 404 });

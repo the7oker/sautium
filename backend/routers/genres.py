@@ -166,9 +166,10 @@ def get_genre(genre_id: str) -> dict:
     # Tracks with relevance = 0 are dropped (artist isn't in the
     # cohort). Surviving tracks rank in two tiers, mirroring the
     # artist-page rule:
-    #   tier 0 — track is known to Last.fm; order by
-    #            playcount * relevance descending
-    #   tier 1 — Last.fm knows nothing but the user has played it
+    #   tier 0 — ListenBrainz knows the track (its recordings' listen
+    #            counts summed — a track binds to every recording of
+    #            the song); order by listens * relevance descending
+    #   tier 1 — ListenBrainz knows nothing but the user has played it
     #            locally; order by play_count * relevance
     # Tracks with no popularity signal at all fall out — keeps the
     # block honest on a freshly-imported library.
@@ -195,6 +196,12 @@ def get_genre(genre_id: str) -> dict:
                 = (SELECT norm FROM g)
             GROUP BY a.id
         ),
+        track_pop AS (
+            SELECT tm.track_id, SUM(lr.listen_count) AS listens
+            FROM track_mbids tm
+            JOIN lb_recording lr ON lr.recording_mbid = tm.recording_mbid
+            GROUP BY tm.track_id
+        ),
         candidates AS (
             SELECT DISTINCT ON (t.id)
                    t.id::text AS track_id,
@@ -208,7 +215,7 @@ def get_genre(genre_id: str) -> dict:
                        COALESCE(aw.weight, 0)
                    )::int AS relevance_pct,
                    COALESCE(lps.play_count, 0)::int AS local_plays,
-                   COALESCE(ts.playcount, 0)::bigint AS lastfm_playcount
+                   COALESCE(tp.listens, 0)::bigint AS lb_listens
             FROM tracks t
             JOIN track_artists ta ON ta.track_id = t.id AND ta.role = 'primary'
             JOIN artists a ON a.id = ta.artist_id
@@ -219,24 +226,28 @@ def get_genre(genre_id: str) -> dict:
                    ON ag.album_id = av.album_id AND ag.genre_id = (SELECT id FROM g)
             LEFT JOIN artist_weights aw ON aw.artist_id = ta.artist_id
             LEFT JOIN local_play_stats lps ON lps.track_id = t.id
-            LEFT JOIN track_stats ts
-                   ON ts.track_id = t.id AND ts.source = 'lastfm'
+            LEFT JOIN track_pop tp ON tp.track_id = t.id
             WHERE GREATEST(
                       CASE WHEN ag.album_id IS NOT NULL THEN 100 ELSE 0 END,
                       COALESCE(aw.weight, 0)
                   ) > 0
-            ORDER BY t.id, COALESCE(ts.playcount, 0) DESC,
+            ORDER BY t.id, COALESCE(tp.listens, 0) DESC,
                            COALESCE(lps.play_count, 0) DESC
         )
-        SELECT track_id, media_file_id, title, album, artist, duration
+        SELECT track_id, media_file_id, title, album, artist, duration,
+               lb_listens > 0 AS from_listenbrainz
         FROM candidates
-        WHERE lastfm_playcount > 0 OR local_plays > 0
+        WHERE lb_listens > 0 OR local_plays > 0
         ORDER BY
-            CASE WHEN lastfm_playcount > 0 THEN 0 ELSE 1 END,
-            lastfm_playcount * relevance_pct DESC,
+            CASE WHEN lb_listens > 0 THEN 0 ELSE 1 END,
+            lb_listens * relevance_pct DESC,
             local_plays * relevance_pct DESC,
             title
         LIMIT 5
     """, {"id": genre_id})
+    # The credit line names ListenBrainz only where its numbers actually
+    # ranked something on this page.
+    genre["listenbrainz_used"] = any(t.pop("from_listenbrainz", False)
+                                     for t in genre["popular_tracks"])
 
     return genre

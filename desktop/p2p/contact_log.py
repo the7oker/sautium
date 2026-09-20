@@ -129,7 +129,8 @@ def addr_ids(host: Optional[str]):
 def extract_request_shape(path: str, body: bytes):
     """(items, targets) for the request families that carry names or ids:
     mb.search → the query as one target; mb.slice → up to MAX_TARGETS
-    name keys + count; sync.* → item count only. Never raises."""
+    name keys + count; lb.slice → artist MBIDs the same way; sync.* → item
+    count only. Never raises."""
     family = endpoint_family(path)
     try:
         if family == "mb.search":
@@ -144,6 +145,10 @@ def extract_request_shape(path: str, body: bytes):
             names = data.get("names") or []
             keys = [k for k in (str(n).strip().lower()[:200] for n in names) if k][:MAX_TARGETS]
             return len(names), keys or None
+        if family == "lb.slice":
+            mbids = data.get("artist_mbids") or []
+            keys = [k for k in (str(m).strip().lower()[:36] for m in mbids) if k][:MAX_TARGETS]
+            return len(mbids), keys or None
         for key in ("track_uuids", "uuids", "recordings", "items"):
             if isinstance(data.get(key), list):
                 return len(data[key]), None

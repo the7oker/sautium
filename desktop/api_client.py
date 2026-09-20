@@ -325,6 +325,11 @@ class BackendAPIClient:
         (the wizard's opt-in, fired once after first start)."""
         return self._post_json("/api/settings/musicbrainz/update", timeout=30)
 
+    def lb_dump_start(self) -> Optional[dict]:
+        """Start the ListenBrainz statistics download+aggregate in the
+        background (the wizard's second opt-in; queued behind the catalogue)."""
+        return self._post_json("/api/settings/listenbrainz/update", timeout=30)
+
     def refresh_gear_registries(self) -> Optional[dict]:
         """Refresh measurement registries (spinorama fetched by the
         backend itself; AutoEq reimported from its mount). Import
@@ -456,4 +461,16 @@ class BackendAPIClient:
             "/api/mb/slice",
             body={"names": names},
             timeout=600,
+        )
+
+    def lb_slice(self, artist_mbids: list[str],
+                 min_version: Optional[str] = None) -> Optional[dict]:
+        """Fetch signed ListenBrainz statistics slices for artist MBIDs from a
+        peer that holds the dump or re-serves slices. ``min_version``: answer
+        only with data at least that fresh (the requester learnt a newer dump
+        exists) — older cached blobs come back as ``missing``."""
+        return self._post_json(
+            "/api/lb/slice",
+            body={"artist_mbids": artist_mbids, "min_version": min_version},
+            timeout=120,
         )

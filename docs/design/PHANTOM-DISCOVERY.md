@@ -138,7 +138,7 @@ millions of phantom rows and an enormous external-API bill.
 | Bio / summary           | Last.fm            | Already integrated; good prose. |
 | Albums + tracklists     | **Deezer**         | Already integrated (`routers/covers.py`), public JSON API, no OAuth, normalized titles, album art. |
 | Canonical release IDs   | MusicBrainz        | Release groups distinguish an album from its reissues/deluxe editions; free, no auth. |
-| Listening counts        | Last.fm            | `track_stats` already models this. |
+| Listening counts        | ListenBrainz       | `lb_recording` / `lb_artist` per MBID (CC0, lower bounds), from the statistics dump or P2P slices — since 2026-09-20; Last.fm's `track_stats` is gone. |
 
 Last.fm tags/tracklists are noisy and duplicated — **do not** use
 Last.fm for tracklists. Streaming services are intentionally **not**

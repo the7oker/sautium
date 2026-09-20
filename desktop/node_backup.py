@@ -40,9 +40,9 @@ and every pre-check read one small chunk), db.dump, identity/<file>...
 Never inside: the private Ed25519 seed (it derives from username +
 password, which the restore asks for anyway — `node_ed25519.key` is
 excluded at every level, the rotation archive's copies included), TLS
-material (re-generated), the `mb_*` table DATA (re-loadable from the
-MusicBrainz dump / slices; the schema is dumped so the restored database
-is complete).
+material (re-generated), the `mb_*` and `lb_*` table DATA (re-loadable
+from the MusicBrainz / ListenBrainz dumps or their P2P slices; the schema
+is dumped so the restored database is complete).
 """
 
 import hashlib
@@ -94,8 +94,8 @@ IDENTITY_PREFIX = "identity/"
 # what is re-derived on restore (the public PEM comes with the key).
 IDENTITY_EXCLUDE = frozenset({"node_ed25519.key", "node_ed25519.pub",
                               "tls_cert.pem", "tls_key.pem"})
-EXCLUDED_TABLE_PATTERN = "mb_*"          # pg_dump pattern
-EXCLUDED_TABLE_LIKE = "mb\\_%"           # the same set, in SQL
+EXCLUDED_TABLE_PATTERNS = ("mb_*", "lb_*")        # pg_dump patterns
+EXCLUDED_TABLE_LIKES = ["mb\\_%", "lb\\_%"]       # the same sets, in SQL
 MIGRATIONS_DIR = Path(__file__).resolve().parent / "migrations"
 READ_BLOCK = 1024 * 1024
 PG_PRIORITY_NICE = 10
@@ -542,8 +542,8 @@ def _stderr_tail(tmp, limit: int = 2000) -> str:
 def own_tables(conn) -> List[str]:
     with conn.cursor() as cur:
         cur.execute("""SELECT tablename FROM pg_tables
-                        WHERE schemaname = 'public' AND tablename NOT LIKE %s
-                        ORDER BY tablename""", (EXCLUDED_TABLE_LIKE,))
+                        WHERE schemaname = 'public' AND tablename NOT LIKE ALL(%s)
+                        ORDER BY tablename""", (EXCLUDED_TABLE_LIKES,))
         return [r[0] for r in cur.fetchall()]
 
 
@@ -567,8 +567,8 @@ def _database_facts(conn, dbname: str) -> dict:
         cur.execute("SELECT extname FROM pg_extension WHERE extname <> 'plpgsql' ORDER BY 1")
         extensions = [r[0] for r in cur.fetchall()]
         cur.execute("""SELECT tablename FROM pg_tables
-                        WHERE schemaname = 'public' AND tablename LIKE %s ORDER BY 1""",
-                    (EXCLUDED_TABLE_LIKE,))
+                        WHERE schemaname = 'public' AND tablename LIKE ANY(%s) ORDER BY 1""",
+                    (EXCLUDED_TABLE_LIKES,))
         excluded = [r[0] for r in cur.fetchall()]
         cur.execute("SELECT filename FROM _schema_migrations ORDER BY id")
         migrations = [r[0] for r in cur.fetchall()]
@@ -701,7 +701,7 @@ def create_backup(out_dir: Path, *, target: PgTarget, kek: bytes, username: str,
             progress("dumping", bytes=0)
             cmd = [target.tool("pg_dump"), "-h", target.host, "-p", str(target.port),
                    "-U", target.user, "-d", target.dbname, "-Fc",
-                   f"--exclude-table-data={EXCLUDED_TABLE_PATTERN}",
+                   *[f"--exclude-table-data={p}" for p in EXCLUDED_TABLE_PATTERNS],
                    f"--snapshot={snapshot}"]
             wait_ok()
             check_cancel()

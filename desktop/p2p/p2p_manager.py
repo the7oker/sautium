@@ -24,13 +24,14 @@ import psycopg2.extensions
 
 from desktop.api_client import BackendAPIClient
 from desktop.mb_slice_client import MBSliceClient
-from desktop.p2p import diag_protocol, mb_slice_queries, sync_walk
+from desktop.p2p import diag_protocol, lb_slice_cycle, mb_slice_queries, sync_walk
 from desktop.p2p.addrs import fmt_addr, is_internet_vantage
 from desktop.p2p.peer_auth import pinned_pubkey, pinned_ssl_context
 from desktop.p2p.chat_service import ChatService
 from desktop.p2p.dht_service import DHTService
 from desktop.p2p.dht_state import DhtStateStore
 from desktop.p2p.lan_discovery import LANDiscovery
+from desktop.p2p.lb_slice_cycle import LbSliceCycle
 from desktop.p2p.sync_walk import SyncWalk
 from desktop.p2p.sync_server import (
     FORWARD_ACK_TIMEOUT, VOUCHER_TTL, SyncServer, voucher_payload,
@@ -88,6 +89,7 @@ class P2PManager:
         self._walk: Optional[SyncWalk] = None   # the pull side (desktop/p2p/sync_walk.py)
         self._mb_slice_task: Optional[asyncio.Task] = None
         self._mb_slice_lock: Optional[asyncio.Lock] = None
+        self._lb_cycle_tasks: list = []
         self._mb_dump_version: Optional[str] = None
         self._running = False
         self._on_message_cb: Optional[Callable] = None
@@ -235,6 +237,19 @@ class P2PManager:
             diag_record=self._diag_record,
             after_run=self._request_mb_slices_safe,
             on_enriched_count=self._lan_discovery.update_enriched_count,
+        )
+        # The ListenBrainz slice cycle — the same shape, its own family
+        # (desktop/p2p/lb_slice_cycle.py, shared with the Docker backend).
+        self._lb_cycle = LbSliceCycle(
+            self.db_dsn,
+            connect=self._walk.connect_peer,
+            config=self.config.get("lb_slice", {}),
+            dht=self._dht_service,
+            lan=self._lan_discovery,
+            manual_peers=p2p_cfg.get("manual_peers", []),
+            load_bans_fn=self._load_p2p_bans,
+            diag_record=self._diag_record,
+            first_source=lambda: self._walk.first_source,
         )
 
         # Initialize chat service if account exists
@@ -458,6 +473,11 @@ class P2PManager:
             self._mb_slice_task = asyncio.create_task(
                 self._mb_slice_loop()
             )
+            self._lb_cycle.bind()
+            self._lb_cycle_tasks = [
+                asyncio.create_task(self._lb_cycle.dispatch_loop()),
+                asyncio.create_task(self._lb_cycle.interval_loop()),
+            ]
 
             self._running = True
 
@@ -531,6 +551,8 @@ class P2PManager:
         # this node beyond LAN/manual peers
         if self._mb_dump_version:
             await self._dht_service.announce_capability("mbdump")
+        if await self._lb_dump_local():
+            await self._dht_service.announce_capability("lbdump")
 
         self._reannounce_task = asyncio.create_task(
             self._dht_service.periodic_reannounce()
@@ -630,6 +652,7 @@ class P2PManager:
                      self._pending_accepts_task, self._lan_discovery_task,
                      self._sync_request_listen_task, self._sync_request_task,
                      self._auto_sync_task, self._mb_slice_task,
+                     *self._lb_cycle_tasks,
                      self._upnp_renewal_task, self._master_wake_task,
                      self._peer_relay_task, self._diag_task,
                      *self._peer_relay_subs.values(),
@@ -2319,6 +2342,10 @@ class P2PManager:
                         caps.append("mbdump")
                     elif self.config.get("mb_slice", {}).get("serve", True):
                         caps.append("mbslices")
+                    if await self._lb_dump_local():
+                        caps.append("lbdump")
+                    elif self.config.get("lb_slice", {}).get("serve", True):
+                        caps.append("lbslices")
                     if self._read_setting("p2p.relay_enabled") is not False:
                         caps.append("relay")
                     port = ((self._upnp.get_external_port(self._http_port)
@@ -2955,6 +2982,13 @@ class P2PManager:
             # timer, so the chip flips honestly.
             "sautium_mb_sources_request": lambda: asyncio.create_task(
                 self._refresh_mb_sources()),
+            # The ListenBrainz family: the MBID set grew (a trigger on
+            # artist_mbids), an artist page asked for one artist now, or
+            # the backend finished/deleted the local statistics dump.
+            "sautium_lb_pending": lambda: self._lb_cycle.request("pending"),
+            "sautium_lb_request": lambda: self._lb_cycle.request("request"),
+            "sautium_lb_sources": lambda: asyncio.create_task(
+                self._lb_sources_changed()),
         }, lambda: self._running)
 
     async def _request_mb_slices_safe(self):
@@ -2962,6 +2996,28 @@ class P2PManager:
             await self._request_mb_slices()
         except Exception:
             logger.exception("post-sync MB slice fetch failed")
+        # What the walk just carried in may have brought new artist MBIDs.
+        self._lb_cycle.request("sync")
+
+    async def _lb_dump_local(self) -> Optional[str]:
+        """The ListenBrainz dump version served from this database, read
+        live: the backend finishes a load while this process runs."""
+        try:
+            return await asyncio.get_event_loop().run_in_executor(
+                None, lb_slice_cycle.local_dump_available, self.db_dsn)
+        except Exception as e:
+            logger.debug(f"LB dump capability check failed: {e}")
+            return None
+
+    async def _lb_sources_changed(self) -> None:
+        """A local statistics load finished (announce the capability, no
+        restart needed) or the dump was deleted (this node asks again)."""
+        if self._dht_service and await self._lb_dump_local():
+            try:
+                await self._dht_service.announce_capability("lbdump")
+            except Exception as e:
+                logger.debug(f"lbdump announce failed: {e}")
+        self._lb_cycle.request("sources")
 
     async def _refresh_mb_sources(self):
         """On-demand source re-probe (backend NOTIFYs when a remote search

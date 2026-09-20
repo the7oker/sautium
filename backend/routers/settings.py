@@ -357,6 +357,11 @@ _DEFAULTS: Dict[str, Any] = {
     # canonicalization. version/last-update written by the loader.
     "musicbrainz.auto_update":   False,
     "musicbrainz.last_update_at": None,
+    # ListenBrainz statistics dump — the listening-statistics layer (CC0),
+    # same opt-in shape. version written by the loader
+    # (listenbrainz.db_version), status by the slice cycle (lb_slice.status).
+    "listenbrainz.auto_update":   False,
+    "listenbrainz.last_update_at": None,
     # AI canonicalization (the judgment tier). null = use the computed default
     # (On when the AI provider is free/subscription, Off when it's a paid API key).
     "ai.canonization_enabled":   None,
@@ -400,166 +405,61 @@ def _write(key: str, value: Any) -> None:
 # MusicBrainz local dump (optional auxiliary layer)
 # ============================================================
 
-# In-memory progress for the (single) running download/load job. Surfaced in
-# the Library payload and woken over the shared library SSE channel.
-_mb_state: Dict[str, Any] = {"running": False, "phase": "", "progress": "",
-                             "pct": None, "error": None}
-_mb_lock = threading.Lock()
+# One background job per dump family (backend/dump_job.py): in-memory
+# progress surfaced in the Library payload, woken over the shared library
+# SSE channel; jobs of both families run one at a time on one worker.
+from dump_job import DumpBusy, DumpJob, InsufficientDisk
 
 
-def mb_load_active() -> bool:
-    """True while an MB-dump op is DOWNLOADING / LOADING (the data-mutating phases),
-    so scan/background/AI canon DEFER — otherwise they read a stale or half-TRUNCATEd
-    dump and watermark those artists out of the dump's fresh post-load canon. False
-    during the dump's own 'canonicalizing' phase, so the dump worker's OWN post-load
-    canon + AI trigger (which run THEN) are not blocked by their own op."""
-    with _mb_lock:
-        return bool(_mb_state["running"]) and _mb_state["phase"] not in ("canonicalizing", "done", "")
+def _mb_post_load(job: DumpJob, result: Dict) -> None:
+    """The freshly-loaded dump makes every owned artist canon-pending
+    (last_mb_sync IS NULL) — canonicalize now so the EXISTING library gets
+    MBIDs + RG titles without waiting for a re-scan. Incremental on later
+    dump refreshes (only artists with new content since their last canon)."""
+    job.set_phase("canonicalizing", "Canonicalizing library (MusicBrainz)…")
+    # The dump tables exist only now — re-evaluate the data source so this
+    # process (which may have started dump-less, LOCAL_DUMP=False) actually
+    # canonicalizes instead of silently skipping. No backend restart needed.
+    import mb_backend as mb
+    mb.refresh()
+    from canon.content import canonicalize_pending
+    from canon import algo_canon
+    canon = {}
+    with algo_canon() as _ok:   # priority over AI; dump lock already released here
+        if _ok:
+            canon = canonicalize_pending()
+            # A fresh dump may expose release-groups the matcher couldn't reach;
+            # catch the NULL-rg owned-album residue (deluxe/multi-disc, fragments) by
+            # name, then the content-only studio uniques (cross-script / reworded).
+            from canon.content import distill_album_residue, distill_album_coverage
+            canon["album_residue_bound"] = (distill_album_residue().get("bound", 0)
+                                            + distill_album_coverage().get("bound", 0))
+    logger.info(f"Post-load MB canon: {canon}")
+    # A fresh dump is the moment to run the AI judgment tier once over the
+    # whole residue (async, in the background — it's LLM-slow). Gated: no-op
+    # unless the tier is enabled + a provider is authed.
+    if start_aicanon_job():
+        logger.info("Post-load: AI canonization started")
 
 
-def _mb_progress(update: Dict) -> None:
-    """Loader callback → human progress line + numeric pct (None = indeterminate)
-    for the bar + SSE wake."""
-    phase = update.get("phase")
-    pct = None
-    if phase == "checking":
-        _mb_state["progress"] = "Checking for updates…"
-    elif phase == "downloading":
-        pct = update.get("pct")
-        _mb_state["progress"] = (f"Downloading… {pct or 0}% "
-                                 f"({update.get('downloaded_mb', 0)}/{update.get('total_mb', 0)} MB)")
-    elif phase == "loading":
-        pct = update.get("pct", 0)  # byte-weighted, smooth (loader-computed)
-        tbl = update.get("table")
-        _mb_state["progress"] = f"Loading database… {pct}%" + (f" ({tbl})" if tbl else "")
-    elif phase == "indexing":
-        pct = update.get("pct", 0)  # same weighted scale as loading
-        _mb_state["progress"] = f"Building indexes… {pct}% ({update.get('table')})"
-    elif phase == "analyzing":
-        pct = update.get("pct")
-        _mb_state["progress"] = "Analyzing…" if pct is None else f"Analyzing… {pct}%"
-    elif phase == "done":
-        pct = 100
-        _mb_state["progress"] = "Up to date"
-    if phase:
-        _mb_state["phase"] = phase
-    _mb_state["pct"] = pct
-    notify_library_subscribers()
+# The MB job's own post-load canon runs in 'canonicalizing', where
+# mb_load_active is already False so it is not blocked by its own op.
+mb_job = DumpJob("musicbrainz", "mb_dump_load", "musicbrainz",
+                 read=_read, write=_write, notify=notify_library_subscribers,
+                 post_load=_mb_post_load, passive_phases=frozenset({"canonicalizing"}))
+lb_job = DumpJob("listenbrainz", "lb_dump_load", "listenbrainz",
+                 read=_read, write=_write, notify=notify_library_subscribers)
 
-
-def _mb_worker(force: bool) -> None:
-    try:
-        import mb_dump_load
-        # Re-checked here (not only in the endpoint) because maybe_auto_update
-        # starts the worker directly — a full disk must fail before the
-        # download, not 6 GB into it.
-        budget = mb_dump_load.disk_budget()
-        if not budget["can_fit"]:
-            raise RuntimeError(f"insufficient disk: needs ~{budget['required_gb']} GB, "
-                               f"{budget['free_gb']} GB free")
-        result = mb_dump_load.download_and_load(_mb_progress, force=force)
-        from datetime import datetime, timezone
-        _write("musicbrainz.last_update_at", datetime.now(timezone.utc).isoformat())
-        logger.info(f"MusicBrainz dump loaded: {result}")
-
-        # The freshly-loaded dump makes every owned artist canon-pending
-        # (last_mb_sync IS NULL) — canonicalize now so the EXISTING library gets
-        # MBIDs + RG titles without waiting for a re-scan. Incremental on later
-        # dump refreshes (only artists with new content since their last canon).
-        _mb_state["phase"] = "canonicalizing"
-        _mb_state["progress"] = "Canonicalizing library (MusicBrainz)…"
-        _mb_state["pct"] = None
-        notify_library_subscribers()
-        # The dump tables exist only now — re-evaluate the data source so this
-        # process (which may have started dump-less, LOCAL_DUMP=False) actually
-        # canonicalizes instead of silently skipping. No backend restart needed.
-        import mb_backend as mb
-        mb.refresh()
-        from canon.content import canonicalize_pending
-        from canon import algo_canon
-        canon = {}
-        with algo_canon() as _ok:   # priority over AI; dump lock already released here
-            if _ok:
-                canon = canonicalize_pending()
-                # A fresh dump may expose release-groups the matcher couldn't reach;
-                # catch the NULL-rg owned-album residue (deluxe/multi-disc, fragments) by
-                # name, then the content-only studio uniques (cross-script / reworded).
-                from canon.content import distill_album_residue, distill_album_coverage
-                canon["album_residue_bound"] = (distill_album_residue().get("bound", 0)
-                                                + distill_album_coverage().get("bound", 0))
-        logger.info(f"Post-load MB canon: {canon}")
-        # A fresh dump is the moment to run the AI judgment tier once over the
-        # whole residue (async, in the background — it's LLM-slow). Gated: no-op
-        # unless the tier is enabled + a provider is authed.
-        if start_aicanon_job():
-            logger.info("Post-load: AI canonization started")
-        _mb_progress({"phase": "done"})
-    except Exception as e:
-        _mb_state["error"] = str(e)
-        _mb_state["progress"] = f"Failed: {e}"
-        logger.error(f"MusicBrainz update failed: {e}", exc_info=True)
-    finally:
-        _mb_state["running"] = False
-        notify_library_subscribers()
-
-
-def _mb_section() -> Dict[str, Any]:
-    """Stats + settings + live job state for the MusicBrainz block."""
-    try:
-        import mb_dump_load
-        st = mb_dump_load.stats()
-    except Exception as e:
-        logger.warning(f"MB stats failed: {e}")
-        st = {"loaded": False, "version": None, "total_records": 0, "size_bytes": 0}
-    return {
-        "loaded":          bool(st.get("loaded")),
-        "catalogue":       st.get("catalogue") or {},
-        # Reference tables added since this dump landed — Update fetches
-        # just those (mb_dump_load.download_and_load).
-        "missing_tables":  st.get("missing_tables") or [],
-        "version":         st.get("version"),
-        "total_records":   st.get("total_records", 0),
-        "size_bytes":      st.get("size_bytes", 0),
-        "auto_update":     bool(_read("musicbrainz.auto_update")),
-        "last_update_at":  _read("musicbrainz.last_update_at"),
-        "update": {
-            "running":  bool(_mb_state["running"]),
-            "phase":    _mb_state["phase"],
-            "progress": _mb_state["progress"],
-            "pct":      _mb_state["pct"],
-            "error":    _mb_state["error"],
-        },
-    }
+# Scan / background enrichment / AI canon defer while an MB-dump op is in its
+# data-mutating phases — they read the mb_* tables the load is rewriting.
+mb_load_active = mb_job.load_active
 
 
 def maybe_auto_update() -> None:
-    """Called at backend startup. If the user enabled auto-update, check the
-    mirror in a background thread and load a newer dump (or the first one).
-    Non-blocking: the network check + ~7 GB download never gate startup."""
-    if not bool(_read("musicbrainz.auto_update")):
-        return
-
-    def _check() -> None:
-        try:
-            import mb_dump_load
-            latest = mb_dump_load.latest_version()
-            if not latest:
-                return
-            st = mb_dump_load.stats()
-            current = (mb_dump_load.loaded_version() == latest and st.get("loaded")
-                       and not st.get("missing_tables"))
-            if current:
-                return
-            with _mb_lock:
-                if _mb_state["running"]:
-                    return
-                _mb_state.update(running=True, phase="checking",
-                                 progress="Auto-update…", pct=None, error=None)
-            _mb_worker(False)
-        except Exception as e:
-            logger.warning(f"MusicBrainz auto-update check failed: {e}")
-
-    threading.Thread(target=_check, daemon=True).start()
+    """Backend startup: each family with auto-update on checks its mirror in
+    the background and queues a newer dump (or the first one)."""
+    for job in (mb_job, lb_job):
+        job.maybe_auto_update()
 
 
 # ============================================================
@@ -652,7 +552,8 @@ def _phantom_section() -> Dict[str, Any]:
     """)
     return {
         "enabled":    bool(_read("discovery.phantom_layer")),
-        "musicbrainz": _mb_section(),
+        "musicbrainz": mb_job.section(),
+        "listenbrainz": lb_job.section(),
         "tracks":     int(row["tracks"]),
         "artists":    int(row["artists"]),
         "albums":     int(row["albums"]),
@@ -1159,17 +1060,18 @@ def _notices_state() -> Dict[str, Any]:
             "data": {"source": row["source"], "strikes": row["strikes"],
                      "reason": row["reason"] or ""},
         })
-    slices = _read("mb_slice.status") or {}
-    if slices.get("unserved"):
-        items.append({
-            "key": "mb_slice.deferred",
-            "kind": "info",
-            "since": slices.get("at"),
-            "until": slices.get("next_attempt_at"),
-            "data": {k: slices.get(k) for k in
-                     ("unserved", "pending", "pending_capped", "served",
-                      "reason", "sources")},
-        })
+    for family in ("mb_slice", "lb_slice"):
+        slices = _read(f"{family}.status") or {}
+        if slices.get("unserved"):
+            items.append({
+                "key": f"{family}.deferred",
+                "kind": "info",
+                "since": slices.get("at"),
+                "until": slices.get("next_attempt_at"),
+                "data": {k: slices.get(k) for k in
+                         ("unserved", "pending", "pending_capped", "served",
+                          "reason", "sources")},
+            })
     since = _derived("library.mount_missing", _music_root_empty())
     if since:
         items.append({"key": "library.mount_missing", "kind": "error",
@@ -2083,69 +1985,86 @@ def put_sync_prefs(req: SyncPrefs) -> Dict[str, Any]:
     return _sync_state()
 
 
-class MbPrefs(BaseModel):
+class DumpPrefs(BaseModel):
     auto_update: Optional[bool] = None
 
 
-@router.put("/musicbrainz")
-def put_mb_prefs(req: MbPrefs) -> Dict[str, Any]:
+def _dump_prefs(job: DumpJob, req: DumpPrefs) -> Dict[str, Any]:
     if req.auto_update is not None:
-        _write("musicbrainz.auto_update", bool(req.auto_update))
-    return _mb_section()
+        _write(f"{job.prefix}.auto_update", bool(req.auto_update))
+    return job.section()
 
 
-@router.post("/musicbrainz/delete")
-def mb_delete() -> Dict[str, Any]:
-    """Remove the local MusicBrainz dump. The wizard pre-ticks the download
-    when the disk allows it; this is the other half of that bargain."""
-    with _mb_lock:
-        if _mb_state["running"]:
-            raise HTTPException(status_code=409,
-                                detail="MusicBrainz update running")
+def _dump_delete(job: DumpJob) -> Dict[str, Any]:
+    """Remove a local dump. The wizard pre-ticks the download when the disk
+    allows it; this is the other half of that bargain."""
     try:
-        import mb_dump_load
-        result = mb_dump_load.delete_dump()
-    except RuntimeError as e:
+        result = job.delete()
+    except (DumpBusy, RuntimeError) as e:
         raise HTTPException(status_code=409, detail=str(e))
     except Exception as e:
-        logger.error(f"MB dump delete failed: {e}")
+        logger.error(f"{job.family} dump delete failed: {e}")
         raise HTTPException(status_code=500, detail=str(e))
     notify_library_subscribers()
     return {"success": True, **result}
 
 
+def _dump_status(job: DumpJob) -> Dict[str, Any]:
+    """Dump state + disk budget in one read — what the assistant's
+    *_dump_status tool quotes before offering (or declining) a download."""
+    return {**job.section(), "disk": job.loader.disk_budget()}
+
+
+def _dump_update(job: DumpJob, force: bool) -> Dict[str, Any]:
+    """Download (if newer) + load a dump in the background (queued behind a
+    running job of the other family)."""
+    try:
+        job.start(force)
+    except InsufficientDisk as e:
+        raise HTTPException(status_code=507, detail=str(e))
+    except DumpBusy as e:
+        raise HTTPException(status_code=409, detail=str(e))
+    return {"success": True}
+
+
+@router.put("/musicbrainz")
+def put_mb_prefs(req: DumpPrefs) -> Dict[str, Any]:
+    return _dump_prefs(mb_job, req)
+
+
+@router.post("/musicbrainz/delete")
+def mb_delete() -> Dict[str, Any]:
+    return _dump_delete(mb_job)
+
+
 @router.get("/musicbrainz/status")
 def mb_status() -> Dict[str, Any]:
-    """Dump state + disk budget in one read — what the assistant's
-    mb_dump_status tool quotes before offering (or declining) a download."""
-    import mb_dump_load
-    return {**_mb_section(), "disk": mb_dump_load.disk_budget()}
+    return _dump_status(mb_job)
 
 
 @router.post("/musicbrainz/update")
 def mb_update(force: bool = False) -> Dict[str, Any]:
-    """Download (if newer) + stream-load the MusicBrainz dump in the background."""
-    import mb_dump_load
-    budget = mb_dump_load.disk_budget()
-    if not budget["can_fit"]:
-        # Synchronous refusal (the assistant must not report "started"), and
-        # surfaced in _mb_state so the Settings screen's fire-and-forget POST
-        # shows the reason instead of silently doing nothing.
-        msg = (f"insufficient disk: needs ~{budget['required_gb']} GB, "
-               f"{budget['free_gb']} GB free")
-        with _mb_lock:
-            if not _mb_state["running"]:
-                _mb_state.update(phase="error", progress=f"Failed: {msg}", error=msg)
-        notify_library_subscribers()
-        raise HTTPException(status_code=507, detail=msg)
-    with _mb_lock:
-        if _mb_state["running"]:
-            raise HTTPException(status_code=409, detail="MusicBrainz update already running")
-        _mb_state.update(running=True, phase="checking",
-                         progress="Starting…", pct=None, error=None)
-    threading.Thread(target=_mb_worker, args=(bool(force),), daemon=True).start()
-    notify_library_subscribers()
-    return {"success": True}
+    return _dump_update(mb_job, force)
+
+
+@router.put("/listenbrainz")
+def put_lb_prefs(req: DumpPrefs) -> Dict[str, Any]:
+    return _dump_prefs(lb_job, req)
+
+
+@router.post("/listenbrainz/delete")
+def lb_delete() -> Dict[str, Any]:
+    return _dump_delete(lb_job)
+
+
+@router.get("/listenbrainz/status")
+def lb_status() -> Dict[str, Any]:
+    return _dump_status(lb_job)
+
+
+@router.post("/listenbrainz/update")
+def lb_update(force: bool = False) -> Dict[str, Any]:
+    return _dump_update(lb_job, force)
 
 
 class PhantomPrefs(BaseModel):

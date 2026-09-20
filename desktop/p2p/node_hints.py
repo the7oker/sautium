@@ -31,7 +31,7 @@ logger = logging.getLogger(__name__)
 HINTS_TTL_S = 600.0
 NEGATIVE_TTL_S = 60.0
 FETCH_TIMEOUT_S = 6.0
-CAPS = ("sync", "mbdump", "relay", "mbslices")
+CAPS = ("sync", "mbdump", "relay", "mbslices", "lbdump", "lbslices")
 
 _lock = threading.Lock()
 _cache: dict = {}                  # cap → (nodes, fetched_at)

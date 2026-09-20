@@ -80,6 +80,22 @@ _load_meter = None
 _playback_signal = None
 _sync_walk = None                          # the pull side (desktop/p2p/sync_walk.py)
 _sync_walk_tasks: list[asyncio.Task] = []
+_lb_cycle = None                           # ListenBrainz slices (desktop/p2p/lb_slice_cycle.py)
+_lb_cycle_tasks: list[asyncio.Task] = []
+
+
+def _diag_record(kind: str, detail: dict) -> None:
+    """A failed walk or slice run as a local incident (support diagnostics)."""
+    from db_pool import get_conn
+    from desktop.p2p import diag_events
+    with get_conn() as conn:
+        diag_events.record(conn, kind, detail)
+
+
+async def _lb_after_walk() -> None:
+    """What the walk just carried in may have brought new artist MBIDs."""
+    if _lb_cycle is not None:
+        _lb_cycle.request("sync")
 
 
 def _build_sync_walk():
@@ -88,21 +104,30 @@ def _build_sync_walk():
     sharing switch on the carry push, a failed run as a local incident. No
     LAN tier — a container cannot hear the beacon — and no address skip
     list: the walk recognises its own address by the key /health returns."""
-    from db_pool import get_conn
-    from desktop.p2p import diag_events
     from desktop.p2p.sync_walk import SyncWalk
     from p2p_identity import peer_identity
     from routers.settings import _read
-
-    def diag_record(kind: str, detail: dict) -> None:
-        with get_conn() as conn:
-            diag_events.record(conn, kind, detail)
 
     return SyncWalk(
         settings.database_url,
         identity=lambda: peer_identity(settings),
         sharing_enabled=lambda: bool(_read("sync.p2p_enabled")),
-        diag_record=diag_record,
+        diag_record=_diag_record,
+        after_run=_lb_after_walk,
+    )
+
+
+def _build_lb_cycle(walk):
+    """The ListenBrainz slice cycle on the Docker surface: the walk's
+    connect (health + pinned key + own-address guard), no LAN tier, no
+    config.json — the launcher's defaults as constants."""
+    from desktop.p2p.lb_slice_cycle import LbSliceCycle
+    return LbSliceCycle(
+        settings.database_url,
+        connect=walk.connect_peer,
+        config={"fetch": True, "batch_size": 20, "auto_interval_min": 360},
+        diag_record=_diag_record,
+        first_source=lambda: walk.first_source,
     )
 
 
@@ -500,6 +525,23 @@ async def lifespan(app: FastAPI):
         ]
         logger.info("P2P sync walk armed")
 
+        # The ListenBrainz slice cycle rides the same triggers as on the
+        # launcher: the artist_mbids trigger, an artist page's request, a
+        # local dump finishing/deleted, the walk's post-run hook, the timer.
+        global _lb_cycle, _lb_cycle_tasks
+        _lb_cycle = _build_lb_cycle(_sync_walk)
+        _lb_cycle.bind()
+        _lb_cycle_tasks = [
+            asyncio.create_task(sync_walk.listen_notifications(
+                settings.database_url,
+                {"sautium_lb_pending": lambda: _lb_cycle.request("pending"),
+                 "sautium_lb_request": lambda: _lb_cycle.request("request"),
+                 "sautium_lb_sources": lambda: _lb_cycle.request("sources")},
+                lambda: _lb_cycle.running)),
+            asyncio.create_task(_lb_cycle.dispatch_loop()),
+            asyncio.create_task(_lb_cycle.interval_loop()),
+        ]
+
     # Start DHT service for P2P peer discovery
     global _dht_service, _dht_online_task
     if settings.p2p_enabled and HAS_LIBTORRENT and settings.p2p_sync_port:
@@ -513,6 +555,8 @@ async def lifespan(app: FastAPI):
             await _dht_service.start()
             if _sync_walk is not None:
                 _sync_walk.dht = _dht_service
+            if _lb_cycle is not None:
+                _lb_cycle.dht = _dht_service
 
             if _load_meter is not None:
                 _dht_service.set_pace_provider(_load_meter.announce_pace)
@@ -551,11 +595,13 @@ async def lifespan(app: FastAPI):
                     # one as a slice source without a LAN beacon or a
                     # hand-written peer entry.
                     try:
-                        from routers.sync import mb_dump_version
+                        from routers.sync import lb_dump_version, mb_dump_version
                         if mb_dump_version():
                             await _dht_service.announce_capability("mbdump")
+                        if lb_dump_version():
+                            await _dht_service.announce_capability("lbdump")
                     except Exception as e:
-                        logger.warning(f"MB dump capability announce failed: {e}")
+                        logger.warning(f"dump capability announce failed: {e}")
 
                     # Relay role (Phase D). A Docker peer surface is reachable
                     # by deployment definition (its port was forwarded by
@@ -704,12 +750,13 @@ async def lifespan(app: FastAPI):
     if notary.start():
         notary.wake("startup", full=True)
 
-    # MusicBrainz dump auto-update (opt-in toggle in More → Library).
+    # Dump auto-updates — MusicBrainz and ListenBrainz statistics (opt-in
+    # toggles in More → Streaming library).
     try:
         from routers.settings import maybe_auto_update
         maybe_auto_update()
     except Exception as e:
-        logger.warning(f"MusicBrainz auto-update check failed: {e}")
+        logger.warning(f"dump auto-update check failed: {e}")
 
     yield
 
@@ -745,9 +792,11 @@ async def lifespan(app: FastAPI):
                 await _task
             except asyncio.CancelledError:
                 pass
+    if _lb_cycle is not None:
+        _lb_cycle.stop()
     if _sync_walk is not None:
         _sync_walk.stop()
-    for _task in _sync_walk_tasks:
+    for _task in (*_lb_cycle_tasks, *_sync_walk_tasks):
         _task.cancel()
         try:
             await _task

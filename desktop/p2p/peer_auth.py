@@ -34,7 +34,7 @@ HDR_IDENTITY = "X-Sautium-Peer-Identity"      # response: unknown|unverified|ver
 HDR_LANE = "X-Sautium-Peer-Lane"              # response: anonymous|stranger|identity
 
 TS_WINDOW = 60
-IDENTITY_BOUND_PREFIXES = ("/api/sync/", "/api/mb/")
+IDENTITY_BOUND_PREFIXES = ("/api/sync/", "/api/mb/", "/api/lb/")
 
 LANE_ANONYMOUS = "anonymous"
 LANE_STRANGER = "stranger"

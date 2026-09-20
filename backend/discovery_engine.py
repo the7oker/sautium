@@ -490,8 +490,8 @@ _OWNED_GUARD = {
 # SATURATES: an exact title clamps to the source ceil, so 1660 tracks named "intro"
 # and 17 named "Ursa Major" all score exactly 1.0 and `score DESC, name` has no key
 # left — the emitted rows were whatever the plan produced, and it changed with LIMIT.
-# Ownership is the only signal that survives the saturation (track_stats covers owned
-# rows only, 36k of 3M) and it is the right one: at equal relevance a lossless file
+# Ownership is the only signal that survives the saturation (media_files names the
+# owned rows, 37k of 3M) and it is the right one: at equal relevance a lossless file
 # you own beats an MB-dump stub you cannot play. It stays a TIE-BREAK, never a score
 # term — as score it would let a weak owned match outrank a strong phantom one and
 # would skew _DOMINANCE_CUT's ratio. The pk tail makes the order TOTAL, without which

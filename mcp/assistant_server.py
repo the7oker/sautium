@@ -811,6 +811,67 @@ def mb_dump_download(confirm: bool = False) -> str:
 
 
 @mcp.tool()
+def lb_dump_status() -> str:
+    """ListenBrainz listening-statistics dump state: loaded/version, live
+    download+load progress (phase, pct), and — only while NO operation is
+    running — the disk budget (download_gb/required_gb/free_gb/can_fit) for
+    offering lb_dump_download. Separate from the MusicBrainz dump: a node
+    without it still gets per-artist statistics from the network, so its
+    absence is never a reason to offer the download unprompted. Duration
+    discipline: the aggregation after the download takes tens of minutes;
+    NEVER estimate remaining time from download numbers — report phase + pct."""
+    try:
+        st = _backend_get("/api/settings/listenbrainz/status", {})
+        upd = st.get("update") or {}
+        out = {
+            "loaded": st.get("loaded"),
+            "version": st.get("version"),
+            "update": upd,
+        }
+        if upd.get("running"):
+            out["note"] = ("operation in progress; the aggregation phase takes "
+                           "tens of minutes — report progress, never promise "
+                           "quick completion")
+        else:
+            out["disk"] = st.get("disk")
+        return json.dumps(out, ensure_ascii=False)
+    except httpx.ConnectError:
+        return "Error: Cannot connect to backend."
+    except Exception as e:
+        return f"Error reading dump status: {e}"
+
+
+@mcp.tool()
+def lb_dump_download(confirm: bool = False) -> str:
+    """Start the background ListenBrainz statistics download+load (~21 GB
+    download, ~31 GB free disk during the install, ~4 GB kept, tens of
+    minutes). Fire-and-forget: returns immediately — NEVER wait for
+    completion in the same reply; progress lives in More → Streaming
+    library → ListenBrainz listening statistics, or via lb_dump_status. Call
+    ONLY with confirm=true, ONLY after the user explicitly agreed in this
+    conversation to the quoted size, and never when the disk budget said
+    can_fit=false (the backend refuses then anyway).
+
+    Args:
+        confirm: Must be true; the explicit-user-consent latch.
+    """
+    if not confirm:
+        return json.dumps({"status": "refused",
+                           "detail": "requires confirm=true after explicit user consent"})
+    try:
+        _backend_post("/api/settings/listenbrainz/update", {})
+    except httpx.ConnectError:
+        return "Error: Cannot connect to backend."
+    except RuntimeError as e:
+        # 409 already-running / 507 insufficient-disk, with the backend's reason.
+        return json.dumps({"status": "error", "detail": str(e)}, ensure_ascii=False)
+    return json.dumps({"status": "started",
+                       "note": "background job; check later via lb_dump_status "
+                               "or in More → Streaming library → ListenBrainz "
+                               "listening statistics"})
+
+
+@mcp.tool()
 def get_lyrics(track_id: str) -> str:
     """Get the full lyrics text for a specific track.
 

@@ -609,9 +609,11 @@ within a day: every bio/tag/similar is a Last.fm fetch by name, reproducible on
 any node for two API calls, and importing similars minted stub artists straight
 into the carrier's phantom-canon feed (unsolicited canonization plus slice
 fetches). Audio analysis is the opposite: GPU work with no external source.
-`track_stats` and `genre_descriptions` are Last.fm too → they do not travel.
-Since 2026-09-19 none of it travels over the pull protocol either (§ "Last.fm
-data is node-local").
+`genre_descriptions` is Last.fm too → it does not travel. Since 2026-09-19
+none of it travels over the pull protocol either (§ "Last.fm data is
+node-local"). Listening statistics are the exception by licence: since
+2026-09-20 they come from ListenBrainz (CC0) and travel as signed
+per-artist slices (§ "LB slices — a second dump family").
 
 **What is offered — the full canonized snapshot.** `get_pushable_tracks`:
 sealed segments **AND** a first-hand source (`analysis_sources NOT imported`)
@@ -871,6 +873,57 @@ replica re-serves a verified blob → a second hop verifies it **against the dum
 node's key**; a flipped byte and a blob served under another name are both
 rejected.
 
+### LB slices — a second dump family — 2026-09-20
+
+Track listening statistics left Last.fm (whose terms keep its answers on
+the node that asked) for the ListenBrainz statistics dump (CC0), and the
+layer is built like the MB family: a dump node (`backend/lb_dump_load.py`)
+serves, everyone else pulls per-artist slices. PROGRESS.md § "ListenBrainz
+replaces Last.fm track stats" has the loader; this is the protocol.
+
+- **Keyed by artist MBID, not name.** ListenBrainz speaks MBIDs, the
+  requester already holds its artists' MBIDs (canon, carry, seed), and
+  namesakes cannot collide. A slice is `{artist totals, every recording
+  credited to it}`: `desktop/p2p/lb_slice_queries.slice_blob` → canonical
+  JSON (positional rows sorted by recording MBID) → gzip → Ed25519 over
+  `sautium-lb-slice-v1:` + sha256. `POST /api/lb/slice` `{"artist_mbids":
+  [≤50], "min_version": …}` → `{"v": 1, "slices": {mbid: {dump_version,
+  author_pubkey, sig, blob_gz}}, "missing": […]}` on both peer surfaces
+  (`desktop/p2p/sync_server.py`, `backend/routers/sync.py`), identity-bound
+  like `/api/mb/` (`peer_auth.IDENTITY_BOUND_PREFIXES`), priced as the
+  `lb.slice` family. Replicas re-serve verbatim blobs under the ORIGINAL
+  author's signature; `/health` carries `lb_dump` (the version served),
+  `lb_slices` (the inventory) and `lb_slices_version` (the newest held).
+- **Versioned.** `dump_version` is inside the signed bytes and in every
+  ledger row (`lb_slice_fetches`, `lb_slice_blobs`) and data row. A request's
+  `min_version` is the newest version any reachable source advertised; a
+  cache older than it is `missing`, not an answer; a dump node never serves
+  a cache older than its own dump and rebuilds it; imports move rows
+  forward only; the requester re-asks every ledger row older than the
+  newest — a signed zero-match ("unknown to ListenBrainz at X") included.
+  Widening the blob = bump the context AND wipe every node's ledgers (the
+  MB v3 lesson: a signed hole closes a key for good).
+- **Separate family in every artefact**: its own context, ledgers, route
+  family, capabilities (`lbdump` / `lbslices` in `node_hints.CAPS` and the
+  Worker's `DIRECTORY_CAPS`; the registration cap grew from 4 to the set's
+  size, so the Worker deploys before any client), DHT infohash
+  `Sautium-cap:lbdump`, advisory lock `0x6C626C64`. A node may hold either
+  dump; one ledger could not track two families' holes.
+- **One requester for both runtimes** (`desktop/p2p/lb_slice_cycle.py`):
+  the launcher's P2PManager and the Docker backend run the same object with
+  their services injected (the walk's `connect_peer`, DHT, LAN or none).
+  Sources: manual peers → LAN → DHT `lbdump` → (only then) the directory's
+  `lbslices`/`lbdump` and the master hint last; replicas before dump nodes.
+  Pending (`pending_slice_mbids`): the on-demand lane (an artist page
+  opened — `lb_slice_requests`, a durable row + `NOTIFY sautium_lb_request`),
+  then owned artists, then engaged ones; never the phantom bulk. Wakes: a
+  statement trigger on `artist_mbids` (`sautium_lb_pending` — the MBID set
+  grew, wherever it grew), the walk's post-run hook, a local load finishing
+  or the dump deleted (`sautium_lb_sources`), the timer
+  (`lb_slice.auto_interval_min`). Every importing batch fires
+  `sautium_lb_done`; `lb_slice.status` is published on every run and the
+  backend derives the `lb_slice.deferred` notice from it.
+
 ### Master behind a trusted front — SHIPPED 2026-08-19
 
 **The problem.** A Docker node behind Docker Desktop (Windows/macOS) never
@@ -1013,7 +1066,8 @@ master (swept once per start).
 ### Last.fm data is node-local — 2026-09-19
 
 Until now the five Last.fm-fetched tables — `artist_bios`, `artist_tags`,
-`similar_artists`, `track_stats`, `genre_descriptions` — were sealed like
+`similar_artists`, `track_stats` (dropped 2026-09-20, replaced by the
+ListenBrainz layer above), `genre_descriptions` — were sealed like
 audio analysis and served over the pull protocol, counted into the holdings
 filter's artist axis, written into every share export and shipped in the
 seed bundle (bios/tags/similars for the picks' artists — a public GitHub

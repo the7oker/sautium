@@ -436,6 +436,7 @@ class LauncherApp(ctk.CTk):
         # cleared as soon as the job starts, so a later restart never
         # re-triggers a multi-GB download behind the user's back.
         self._check_mb_dump_pending()
+        self._check_lb_dump_pending()
 
     def _check_mb_dump_pending(self):
         if not self.config.get("mb_slice", {}).get("download_dump"):
@@ -448,6 +449,21 @@ class LauncherApp(ctk.CTk):
                 text="Downloading the music catalogue in the background…")
         else:
             logger.warning("MB dump auto-start failed: %s", result)
+
+    def _check_lb_dump_pending(self):
+        """Same one-shot contract as the catalogue; the backend queues this
+        job behind a running MusicBrainz load — two bulk loads on one
+        volume never run at once."""
+        if not self.config.get("lb_slice", {}).get("download_dump"):
+            return
+        self.config.setdefault("lb_slice", {})["download_dump"] = False
+        save_config(self.config)
+        result = self.api_client.lb_dump_start()
+        if result and result.get("success"):
+            self._progress_text.configure(
+                text="Downloading the listening statistics in the background…")
+        else:
+            logger.warning("LB dump auto-start failed: %s", result)
 
     def _start_event_streams(self):
         """Subscribe to the backend's wake channels — once per process, not

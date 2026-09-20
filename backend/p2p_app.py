@@ -37,8 +37,8 @@ from fastapi.responses import JSONResponse
 
 from db_pool import get_conn
 from routers.sync import (
-    SYNC_CAPABILITIES, carry_queries, mb_dump_version, mb_router,
-    node_pubkey_hex, router,
+    SYNC_CAPABILITIES, carry_queries, lb_dump_version, lb_inventory, lb_router,
+    mb_dump_version, mb_router, node_pubkey_hex, router,
 )
 
 logger = logging.getLogger(__name__)
@@ -432,12 +432,16 @@ async def health() -> dict:
                 mb_slices = mb_slice_queries.count_slice_blobs(conn)
     except Exception:
         pass   # table absent until the first slice lands — 0 is the truth
+    lb_slices, lb_slices_version = lb_inventory()
     return {
         "status": "ok",
         "type": "sautium-peer",
         "node_id": node_pubkey_hex(),
         "mb_dump": mb_dump_version(),
         "mb_slices": mb_slices,
+        "lb_dump": lb_dump_version(),
+        "lb_slices": lb_slices,
+        "lb_slices_version": lb_slices_version,
         "capabilities": SYNC_CAPABILITIES,
         # Version + counts of the holdings filter (None until built): the
         # asker prices fetching it against sending its own gaps.
@@ -448,6 +452,7 @@ async def health() -> dict:
 
 app.include_router(router)
 app.include_router(mb_router)
+app.include_router(lb_router)
 
 from routers.peer_chat import chat_router, relay_router  # noqa: E402
 from routers.peer_diag import diag_router  # noqa: E402

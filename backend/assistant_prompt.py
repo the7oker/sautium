@@ -161,7 +161,11 @@ percent_listened, completed BOOLEAN, skipped BOOLEAN)
 avg_percent_listened, last_played_at) - aggregated local listening stats per track
 **demo_plays** (track_id UUID PRIMARY KEY, provider, played_at) - not-owned tracks whose ONE full demo \
 stream (YouTube) is used up; from then on the track streams only as a 30 s excerpt
-**track_stats** (track_id UUID, source VARCHAR, listeners INT, playcount BIGINT) - external popularity (Last.fm)
+**lb_recording** (recording_mbid UUID PRIMARY KEY, listen_count BIGINT, user_count INT, artist_mbids UUID[], \
+dump_version) - ListenBrainz listening statistics per MusicBrainz recording, joined through track_mbids; \
+LOWER BOUNDS (sums over LB users' all-time top-1000 lists), so rank by them, never quote them as totals
+**lb_artist** (artist_mbid UUID PRIMARY KEY, listen_count BIGINT, user_count INT, dump_version) - the same \
+per artist MBID (artist_mbids.mbid)
 
 ## IMPORTANT: a track's identity is tracks.id (UUID), for you and for every tool
 Search tools return it, playback tools take it, output blocks carry it — and it is the ONE id an
@@ -325,15 +329,16 @@ ORDER BY lps.play_count DESC
 LIMIT 20
 ```
 
-Last.fm popularity stats:
+ListenBrainz popularity (what the world listens to; a track sums its recordings):
 ```sql
-SELECT t.title, a.name as artist, ts.listeners, ts.playcount
-FROM track_stats ts
-JOIN tracks t ON ts.track_id = t.id
-JOIN track_artists ta ON t.id = ta.track_id AND ta.role = 'primary'
-JOIN artists a ON ta.artist_id = a.id
-WHERE ts.source = 'lastfm'
-ORDER BY ts.playcount DESC
+SELECT t.title, a.name AS artist, SUM(lr.listen_count) AS listens, SUM(lr.user_count) AS listeners
+FROM track_mbids tm
+JOIN lb_recording lr ON lr.recording_mbid = tm.recording_mbid
+JOIN tracks t ON t.id = tm.track_id
+JOIN track_artists ta ON ta.track_id = t.id AND ta.role = 'primary'
+JOIN artists a ON a.id = ta.artist_id
+GROUP BY t.id, t.title, a.name
+ORDER BY listens DESC
 LIMIT 20
 ```
 
@@ -499,7 +504,9 @@ after the user says yes in THIS conversation. If can_fit is false, state the sho
 offer the download. The job runs in background for tens of minutes — never wait for it; the user \
 can ask progress later (mb_dump_status). In user-facing prose never use internal terms like \
 "phantom", "mint", or "SAUTIUM_BLOCKS" — say "artists/albums you can stream" and "the MusicBrainz \
-catalog".
+catalog". The ListenBrainz listening statistics (lb_dump_status / lb_dump_download, the same \
+consent latch) are a SEPARATE opt-in: never offer that download unprompted — a node without it \
+receives per-artist statistics from the network, and popularity answers fall back to local plays.
 - A SCENE / REGION / STYLE question ("is there modern jazz in Uzbekistan?", "Norwegian nu-jazz", \
 "who does Berlin School today?") is a discovery request, and the catalog rarely carries a tag for \
 it. In order: (1) ONE SQL over artist_tags / artist_bios (ILIKE on the country and style words) \

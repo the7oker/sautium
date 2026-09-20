@@ -30,6 +30,7 @@ numpy==1.26.3
 
 # HTTP Client
 httpx==0.26.0
+zstandard==0.25.0   # ListenBrainz statistics dump (.tar.zst) — bundles libzstd, wheels everywhere
 requests==2.31.0
 aiohttp==3.9.1
 

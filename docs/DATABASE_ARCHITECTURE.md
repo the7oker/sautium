@@ -11,10 +11,16 @@ Sautium uses a **hybrid approach** for metadata storage:
 
 ## Normalized Tables
 
-All five tables below are **node-local**: no seal columns, never on the P2P
-wire, in a share file or in the seed bundle (since 2026-09-19 — Last.fm's
-API terms do not allow redistributing its answers). Every node fetches its
-own by name; only `artist_bios.listeners` is read as a local rarity proxy.
+The four Last.fm tables below are **node-local**: no seal columns, never on
+the P2P wire, in a share file or in the seed bundle (since 2026-09-19 —
+Last.fm's API terms do not allow redistributing its answers). Every node
+fetches its own by name; only `artist_bios.listeners` is read as a local
+rarity proxy. `track_stats` is gone (2026-09-20, migration 020): track
+listening statistics live in `lb_recording` / `lb_artist` — per-MBID listen
+and listener counts aggregated from the ListenBrainz statistics dump (CC0,
+LOWER BOUNDS: each LB user's top-1000 list), reached through `track_mbids`,
+held whole on a dump node or as per-artist P2P slices
+(`lb_slice_fetches` / `lb_slice_blobs` / `lb_slice_requests`).
 
 ### 1. `similar_artists` - Artist Similarity Relationships
 
@@ -178,8 +184,9 @@ All existing metadata has been normalized:
 | Genre descriptions | `external_metadata` JSONB | `genre_descriptions` |
 
 **Result** (2026-09-18): the normalized tables hold the data — 285,188
-artist_tags, 73,171 similar_artists, 36,843 artist_bios, 36,358 track_stats,
-2,308 genre_descriptions — and `external_metadata` holds the 79,118 fetch
+artist_tags, 73,171 similar_artists, 36,843 artist_bios, 36,358 track_stats
+(dropped 2026-09-20 with migration 020 — ListenBrainz now), 2,308
+genre_descriptions — and `external_metadata` holds the 79,118 fetch
 records behind them.
 
 ---

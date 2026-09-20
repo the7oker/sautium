@@ -33,8 +33,9 @@ three products sharing one file toolkit.
 
 - Sautium is not a cloud backup client. It writes files; where they go
   (external disk, restic/Kopia, object storage) is the user's choice.
-- No backup of the MusicBrainz layer (`mb_*`, 22 GB): it is re-loadable
-  from the MusicBrainz dump and is the same on every node.
+- No backup of the MusicBrainz layer (`mb_*`, 22 GB) or the ListenBrainz
+  statistics layer (`lb_*`): both are re-loadable from their dumps or
+  refilled by P2P slices, and the same on every node.
 - No backup of re-creatable state: model cache, transcode cache, TLS
   certificates, the DHT routing table, the gate pool, contact events.
 - No "backup into the P2P network" (friends holding encrypted blobs) — a
@@ -48,10 +49,11 @@ own data ≈ 11 GB live, ≈ 3 GB as a compressed dump.
 | Class | Tables / files | Backup | Share | Merge own |
 |---|---|---|---|---|
 | **MusicBrainz layer** | `mb_*` | no (re-load) | no | no |
+| **ListenBrainz statistics layer** | `lb_*` (counts + the slice ledgers) | no (re-load / slices) | no | no |
 | **Catalog** (identity graph, owned + phantom) | `artists`, `albums`, `tracks`, `album_tracks`, `track_artists`, `album_artists`, `artist_mbids`, `genres`, `tags`, `embedding_models` | yes | yes — the structural rows the records hang off, in FK order (`seed_export.structural_sections`; `tags` and `embedding_models` are minted by the import gate, not carried) | — |
 | **Catalog, node-local** | `media_files` (this node's files and their cue bounds), `album_variants`, `artist_name_aliases`, `artist_members`, `seed_picks` | yes | no — nothing here means anything on another node | — |
 | **Analysis** (sealed, travels) | `embedding_segments`, `embeddings`, `analysis_sources`, `signing_batches`, `audio_features`, `track_mbids` | yes | **yes — sealed records only**, own and received alike, each under its author's seal (decided 2026-09-14; the sketch said first-hand only). Analysis travels as segments with their provenance and batch map; the track-level mean is derived by the importer | — |
-| **Last.fm layer** (node-local) | `artist_bios`, `artist_tags`, `similar_artists`, `track_stats`, `genre_descriptions` | yes | no — Last.fm's API terms do not allow redistribution: out of the protocol, the share file (format v2) and the seed bundle since 2026-09-19; every node fetches its own by name | — |
+| **Last.fm layer** (node-local) | `artist_bios`, `artist_tags`, `similar_artists`, `genre_descriptions` | yes | no — Last.fm's API terms do not allow redistribution: out of the protocol, the share file (format v2) and the seed bundle since 2026-09-19; every node fetches its own by name | — |
 | **Album-grain enrichment** | `album_genres`, `album_descriptions` — outside the sync contour (albums never sync by UUID), but structural rows in a file, where albums do travel under their seal | yes | yes | — |
 | **Text vectors** (derived) | `text_embeddings`, `lyrics_embeddings`, `artist_bio_embeddings`, `genre_desc_embeddings` | yes | no — a BGE-M3 vector is a deterministic function of text the file already carries and of the local metadata composed around it; every node encodes its own in background enrichment, on every profile (`lite` on the CPU, smaller slices) | — |
 | **Local ledgers** | `external_metadata` (which source was asked for what and whether it answered — `not_found` included, so a step never re-asks), `covers` (fetched art) | yes | no — a record of this node's own fetches | — |
@@ -89,7 +91,7 @@ plaintext inside the stream = a tar:
   manifest.json   format_version, created_at, app commit, applied migrations
                   (from _schema_migrations), node pubkey, table row counts,
                   sha256 of every member
-  db.dump         pg_dump -Fc --exclude-table-data='mb_*' music_ai
+  db.dump         pg_dump -Fc --exclude-table-data='mb_*' --exclude-table-data='lb_*' music_ai
   identity/       the identity dir minus nothing (see above)
 ```
 
@@ -110,10 +112,10 @@ plaintext inside the stream = a tar:
   sha256 list give integrity; the header is authenticated as associated
   data of chunk 0 (a tampered KDF block fails before any password is
   tried on it).
-- `--exclude-table-data='mb_*'`, not `-T 'mb_*'`: the schema of the MB
-  tables rides along empty, so a restored database is complete and the
-  MB loader fills them later; `-T` would leave the tables missing after the
-  migrations runner skips the already-recorded `001`.
+- `--exclude-table-data='mb_*'` (and `'lb_*'`), not `-T`: the schema of
+  the dump tables rides along empty, so a restored database is complete and
+  the loaders / slice cycles fill them later; `-T` would leave the tables
+  missing after the migrations runner skips the already-recorded `001`.
 - The failure domain is deliberately the account password: losing it loses
   the identity anyway, so the backup adds no new thing to remember.
 
@@ -406,9 +408,10 @@ from the sketch above, each for a reason found while building:
   (`pg_export_snapshot`), and `pg_dump --snapshot=<id>` dumps that same
   snapshot — so a restore is checked against the counts exactly, on a node
   that keeps writing (listens, sync imports) throughout.
-- **`mb_*` data is excluded whole** (`--exclude-table-data=mb_*`), the
-  slice cache included: MusicBrainz facts are network-replicated, the
-  loader / slice fetch refill them. The manifest records which tables were
+- **`mb_*` and `lb_*` data are excluded whole** (`--exclude-table-data`
+  per pattern), the slice caches included: MusicBrainz facts and
+  ListenBrainz counts are network-replicated, the loaders / slice cycles
+  refill them. The manifest records which tables were
   excluded, the server version, the extensions and the database's locale
   settings, and the restore recreates the database with them (falling back
   to the cluster default when the OS lacks the locale — a Docker
@@ -449,7 +452,7 @@ from the sketch above, each for a reason found while building:
   (stop the old node first: two live nodes on one key confuse the DHT, the
   relays and the support desk). What travels: the whole catalog, the
   sealed enrichment, listens, friends, chat, settings. What does not: the
-  `mb_*` layer (re-load the dump or let slices fill it), machine-specific
+  `mb_*` and `lb_*` layers (re-load the dumps or let slices fill them), machine-specific
   settings (`hqplayer.host` is `host.docker.internal` on Docker — re-pick
   the output), and file paths are the native ones the Docker node stored
   (`E:/Music/...`), so the same machine finds its files at once and another

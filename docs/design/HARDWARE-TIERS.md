@@ -30,6 +30,7 @@ plus user-facing minimum/recommended configurations.
 | HF model cache (`data/cache`) | **11.3 GB** | NLLB 4.7 + BGE-M3 4.3 + CLAP 1.2 + AST 0.33 + PaSST(torch hub) 0.33 + 2×MiniLM 0.55 |
 | Database total | **32 GB** | for ~37k analyzed tracks |
 | — of which `mb_*` dump | ~19 GB | **optional layer** (API fallback / P2P slices) |
+| — `lb_*` statistics | ~4 GB (estimate, calibrated after the first load) | **optional layer** (ListenBrainz statistics dump / P2P slices per artist) |
 | — `embedding_segments` | 3.36 GB | 451,693 rows; HNSW index alone 1.18 GB |
 | — phantom surface | ~2.5 GB | `tracks` = **3.0M rows** (879 MB) + `album_tracks` 1.13 GB + `albums` 274k rows — phantom minting, not owned files |
 | — text stack | ~1.9 GB | text/lyrics/bio embeddings + HNSW |

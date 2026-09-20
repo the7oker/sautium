@@ -29,7 +29,8 @@ import psycopg2.pool
 
 from aiohttp import web
 
-from desktop.p2p import addrs, admission, contact_log, mb_slice_queries, peer_auth, sync_queries
+from desktop.p2p import (addrs, admission, contact_log, lb_slice_queries, mb_slice_queries,
+                         peer_auth, sync_queries)
 
 logger = logging.getLogger(__name__)
 
@@ -613,6 +614,12 @@ class SyncServer:
             "type": "sautium-peer",
             "mb_dump": self.mb_dump_version,
             "mb_slices": self._slice_blob_total(),
+            # The ListenBrainz family: the dump version this node serves
+            # from, its re-serve inventory and the newest version in it —
+            # a requester picks sources AND learns "newest known" from these.
+            "lb_dump": self._lb_dump_version(),
+            "lb_slices": self._lb_inventory()[0],
+            "lb_slices_version": self._lb_inventory()[1],
             "capabilities": sync_queries.CAPABILITIES,
             # Version + counts of the holdings filter (None until built):
             # the asker prices fetching it against sending its own gaps.
@@ -632,6 +639,35 @@ class SyncServer:
                 self._slice_count = 0
             self._slice_count_at = now
         return getattr(self, "_slice_count", 0)
+
+    def _lb_dump_version(self) -> Optional[str]:
+        """The ListenBrainz dump version served from THIS database, read
+        from the loader's marker and cached 60 s — a method, not a
+        constructor constant, because the backend finishes a load while
+        this server runs (the MB constant goes stale that way)."""
+        now = time.time()
+        if now - getattr(self, "_lb_version_at", 0) > 60:
+            try:
+                with self._db() as conn:
+                    self._lb_version = lb_slice_queries.local_dump_available(conn)
+            except Exception as e:
+                logger.debug(f"LB dump capability check failed: {e}")
+                self._lb_version = None
+            self._lb_version_at = now
+        return getattr(self, "_lb_version", None)
+
+    def _lb_inventory(self) -> tuple:
+        """(re-serve inventory size, newest version in it), cached 60 s."""
+        now = time.time()
+        if now - getattr(self, "_lb_inventory_at", 0) > 60:
+            try:
+                with self._db() as conn:
+                    self._lb_inv = (lb_slice_queries.count_slice_blobs(conn),
+                                    lb_slice_queries.max_blob_version(conn))
+            except Exception:
+                self._lb_inv = (0, None)
+            self._lb_inventory_at = now
+        return getattr(self, "_lb_inv", (0, None))
 
     async def handle_inventory(self, request: web.Request) -> web.Response:
         """POST /api/sync/inventory — what this node holds for these tracks."""
@@ -908,6 +944,54 @@ class SyncServer:
             )
         except Exception as e:
             logger.error(f"MB slice query failed: {e}")
+            return self._json_response(
+                request, {"error": "internal error"}, status=500
+            )
+
+    async def handle_lb_slice(self, request: web.Request) -> web.Response:
+        """POST /api/lb/slice — per-artist-MBID signed ListenBrainz
+        statistics blobs (v1). Same shape as the MB slice: a dump holder
+        computes+signs+caches misses, a replica answers what it holds and
+        lists the rest in `missing`; ``min_version`` keeps a stale cache
+        from answering a requester that knows a newer dump exists."""
+        ip = request.remote or "unknown"
+        if not self._check_rate_limit(ip):
+            return self._rate_limited(request, ip)
+
+        if not self._sharing_enabled():
+            return self._json_response(
+                request, {"error": "sharing disabled"}, status=403)
+
+        try:
+            body = await request.json()
+            mbids = body.get("artist_mbids", [])
+            min_version = body.get("min_version")
+        except (json.JSONDecodeError, Exception):
+            return self._json_response(
+                request, {"error": "invalid JSON"}, status=400
+            )
+
+        sign_fn, author = None, ""
+        if self._lb_dump_version():
+            from desktop.node_identity import get_node_id, sign_message
+            try:
+                author = get_node_id()
+                sign_fn = sign_message
+            except Exception as e:
+                logger.warning(f"LB slice signing unavailable: {e}")
+
+        try:
+            result = await self._run_query(
+                lb_slice_queries.serve_slices, mbids, min_version, sign_fn, author)
+            return self._json_response(request, result)
+        except ValueError as e:
+            return self._json_response(request, {"error": str(e)}, status=400)
+        except lb_slice_queries.DumpBusy:
+            return self._json_response(
+                request, {"error": "dump_reloading"}, status=503
+            )
+        except Exception as e:
+            logger.error(f"LB slice query failed: {e}")
             return self._json_response(
                 request, {"error": "internal error"}, status=500
             )
@@ -2014,6 +2098,7 @@ class SyncServer:
         self._app.router.add_post(
             "/api/sync/push/{category}", self.handle_carry_push)
         self._app.router.add_post("/api/mb/slice", self.handle_mb_slice)
+        self._app.router.add_post("/api/lb/slice", self.handle_lb_slice)
         self._app.router.add_get("/api/mb/search", self.handle_mb_search)
         self._app.router.add_get("/api/gate/quote", self.handle_gate_quote)
         # Chat endpoints

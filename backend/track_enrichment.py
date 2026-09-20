@@ -4,8 +4,7 @@ Comprehensive track enrichment pipeline.
 Orchestrates all data aggregation steps in the correct order:
 1. Audio Embedding (CLAP) - base audio feature
 2. Last.fm Artist Info - artist metadata
-3. Last.fm Track Stats - track popularity
-4. Audio Analysis - DSP features + CLAP classification
+3. Audio Analysis - DSP features + CLAP classification
 
 Each step is conditional - only runs if data is missing.
 Supports filters, limits, time constraints, and graceful error handling.
@@ -36,7 +35,7 @@ from sql_queries import ARTIST_ENGAGED
 from models import (
     Track, MediaFile, Album, AlbumVariant, Artist, TrackArtist,
     AudioFeature, Embedding, SimilarArtist, ArtistBio,
-    TrackStats, ExternalMetadata,
+    ExternalMetadata,
 )
 # embeddings / audio_analysis are imported where they are constructed, not
 # here: both pull torch + librosa at module scope, which a torch-less node
@@ -737,8 +736,6 @@ class TrackEnrichmentPipeline:
             else:
                 results['lastfm_artist'] = 'skipped'
 
-            results['lastfm_track'] = 'skipped'
-
         # Step 5: Audio Analysis (reuse loaded audio — no second file read)
         if status['needs_audio_features']:
             if progress_callback:
@@ -905,7 +902,6 @@ class TrackEnrichmentPipeline:
             'audio_embedding_failed': 0,
             'lastfm_artist_success': 0,
             'lastfm_album_success': 0,
-            'lastfm_track_success': 0,
             'audio_features_success': 0,
             'audio_features_failed': 0,
         }
@@ -994,8 +990,6 @@ class TrackEnrichmentPipeline:
                     stats['lastfm_artist_success'] += 1
                 if results.get('lastfm_album') == 'success':
                     stats['lastfm_album_success'] += 1
-                if results.get('lastfm_track') == 'success':
-                    stats['lastfm_track_success'] += 1
 
                 if results.get('audio_features') == 'success':
                     stats['audio_features_success'] += 1

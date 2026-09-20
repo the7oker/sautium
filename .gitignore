@@ -59,6 +59,8 @@ data/support/
 data/claude_sessions/
 # MusicBrainz dump (~7GB tarball + extracted TSVs) — re-downloadable, loaded into pg
 data/mbdump/
+# ListenBrainz statistics dump (~21 GB archive) — re-downloadable, aggregated into pg
+data/lbdump/
 
 # HMAC API secret — generated per-instance at backend startup
 backend/data/

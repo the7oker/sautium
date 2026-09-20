@@ -24,16 +24,18 @@ trips it and a schema drift fails loudly on field count.
 
 import argparse
 import hashlib
-import json
 import logging
 import os
 import re
 import shutil
 import subprocess
 import tarfile
-import threading
 import time
 from typing import Callable, Dict, Optional
+
+from dump_common import (ProgressCb, ProgressReader, collect_index_ddl,
+                         download_resumable, drop_indexes, noop as _noop,
+                         rebuild_indexes, unlock_all)
 
 logger = logging.getLogger("mb_dump_load")
 
@@ -145,40 +147,8 @@ _LOAD_WEIGHT = {
     "mb_release_group_tag": 0.65, "mb_artist_tag": 0.30, "mb_tag": 0.05,
 }
 
-# progress_cb(update: dict). Phases: checking|downloading|loading|analyzing|done|error.
-ProgressCb = Callable[[Dict], None]
-def _noop(_: Dict) -> None: ...
-
-
-class _ProgressReader:
-    """Wraps a file object, reporting bytes-read (throttled) as ``COPY`` drains
-    it — so the big tables show intra-step progress instead of a 60s stall."""
-    def __init__(self, fh, on_bytes: Callable[[int], None]):
-        self._fh = fh
-        self._on = on_bytes
-        self._read = 0
-        self._last = 0.0
-
-    def _count(self, n: int) -> None:
-        if n:
-            self._read += n
-            now = time.monotonic()
-            if now - self._last > 0.3:
-                self._last = now
-                self._on(self._read)
-
-    def read(self, size: int = -1) -> bytes:
-        chunk = self._fh.read(size)
-        self._count(len(chunk))
-        return chunk
-
-    def readline(self, size: int = -1) -> bytes:
-        line = self._fh.readline(size)
-        self._count(len(line))
-        return line
-
-    def __getattr__(self, name):  # forward close/etc. to the real file
-        return getattr(self._fh, name)
+# progress_cb(update: dict). Phases: checking|downloading|loading|analyzing|done|error
+# — the vocabulary and the reader live in dump_common (shared with lb_dump_load).
 
 
 # ── row filters (COPY text) ─────────────────────────────────────────────────
@@ -287,57 +257,10 @@ def loaded_version() -> Optional[str]:
 
 def download(version: str, archive: str = _DEFAULT_ARCHIVE,
              progress_cb: ProgressCb = _noop) -> None:
-    """Resumable streaming download of ``{archive}.tar.bz2`` for ``version``.
-    Retries on transport/timeout errors, RESUMING from the bytes already on disk
-    (Range) — the mirror intermittently drops the TLS handshake or stalls mid-
-    stream, and a multi-GB transfer must survive a blip instead of restarting."""
-    import httpx
-    url = f"{_MIRROR}/{version}/{archive}.tar.bz2"
-    path = _dump_path(archive)
-    os.makedirs(_DATA, exist_ok=True)
-    t0 = time.monotonic()
-    for attempt in range(5):
-        have = os.path.getsize(path) if os.path.exists(path) else 0
-        headers = {"Range": f"bytes={have}-"} if have else {}
-        try:
-            with httpx.stream("GET", url, headers=headers,
-                              timeout=httpx.Timeout(120.0, connect=30.0, read=120.0),
-                              follow_redirects=True) as r:
-                if r.status_code == 416:  # already fully downloaded
-                    return
-                resuming = r.status_code == 206
-                r.raise_for_status()
-                total = (have if resuming else 0) + int(r.headers.get("Content-Length", 0))
-                done = have if resuming else 0
-                a_start, a_bytes = time.monotonic(), 0
-                with open(path, "ab" if resuming else "wb") as fh:
-                    last = 0.0
-                    for chunk in r.iter_bytes(1 << 20):
-                        fh.write(chunk)
-                        done += len(chunk)
-                        a_bytes += len(chunk)
-                        now = time.monotonic()
-                        # Reconnect on a stuck-slow connection (data trickles, so
-                        # the read timeout never fires): a fresh TCP path is often
-                        # fast (mirror throughput is variable). Resumes via Range.
-                        el = now - a_start
-                        if el > 45 and a_bytes / el < 600_000:  # < 0.6 MB/s sustained
-                            raise httpx.ReadTimeout("MB download too slow — reconnecting")
-                        if now - last > 0.5:  # throttle progress emits
-                            last = now
-                            pct = round(done / total * 100, 1) if total else 0
-                            progress_cb({"phase": "downloading", "pct": pct,
-                                         "downloaded_mb": round(done / 1e6),
-                                         "total_mb": round(total / 1e6)})
-            logger.info("download %s done in %.0fs (%.2f GB)", archive,
-                        time.monotonic() - t0, os.path.getsize(path) / 1e9)
-            return
-        except (httpx.TransportError, httpx.TimeoutException) as e:
-            logger.warning("MB download interrupted at %d bytes (try %d/5): %s",
-                           have, attempt + 1, e)
-            if attempt == 4:
-                raise
-            time.sleep(3)
+    """Resumable streaming download of ``{archive}.tar.bz2`` for ``version``
+    (dump_common.download_resumable: Range resume, stuck-slow reconnect)."""
+    download_resumable(f"{_MIRROR}/{version}/{archive}.tar.bz2", _dump_path(archive),
+                       progress_cb, label=f"MB {archive}")
 
 
 def verify_md5(version: str) -> bool:
@@ -375,7 +298,7 @@ def _ensure_schema(cur, tables) -> None:
             raise RuntimeError(f"table {table} missing — apply mb_* DDL from 001_initial.sql")
 
 
-# ── index drop/rebuild around COPY ───────────────────────────────────────────
+# ── index drop/rebuild around COPY (dump_common) ─────────────────────────────
 # COPY into indexed tables maintains every index row-by-row — on this dump
 # that is ~7 GB of btree+GIN (mb_track alone: 3.2 GB across 4 indexes, and the
 # trigram GINs on mb_artist/mb_release_group are the worst per-row cost).
@@ -391,106 +314,6 @@ _COPY_FRAC = 0.75
 
 def _saved_ddl_path(archive: str) -> str:
     return os.path.join(_DATA, f"indexes_{archive}.json")
-
-
-def _collect_index_ddl(conn, archive: str, tables) -> Dict[str, Dict[str, str]]:
-    """{table: {name: DDL}} for every index and PK/UNIQUE constraint, from the
-    live catalogs (the source of truth — 001 drift included). Merged with the
-    crash-file from an interrupted run, where the live set is already partial;
-    live definitions win on name collisions. The merged snapshot is persisted
-    BEFORE anything is dropped, so a crash anywhere in the load can always
-    rebuild the full original set on the next run."""
-    saved: Dict[str, Dict[str, str]] = {}
-    path = _saved_ddl_path(archive)
-    if os.path.exists(path):
-        with open(path) as f:
-            saved = json.load(f)
-        logger.warning("resuming with saved index DDL from %s", path)
-    ddl: Dict[str, Dict[str, str]] = {}
-    with conn.cursor() as cur:
-        for table, _ in tables:
-            merged = dict(saved.get(table, {}))
-            cur.execute(
-                "SELECT conname, pg_get_constraintdef(oid) FROM pg_constraint "
-                "WHERE conrelid = %s::regclass AND contype IN ('p', 'u')", (table,))
-            for name, condef in cur.fetchall():
-                merged[name] = f"ALTER TABLE {table} ADD CONSTRAINT {name} {condef}"
-            cur.execute(
-                "SELECT indexname, indexdef FROM pg_indexes "
-                "WHERE schemaname = 'public' AND tablename = %s", (table,))
-            for name, idxdef in cur.fetchall():
-                # constraint-owned indexes (pkey) keep the ALTER form from above
-                merged.setdefault(name, idxdef)
-            ddl[table] = merged
-    with open(path, "w") as f:
-        json.dump(ddl, f, indent=1)
-    return ddl
-
-
-def _drop_indexes(cur, table: str, ddl: Dict[str, str]) -> None:
-    for name, stmt in ddl.items():
-        if stmt.startswith("ALTER TABLE"):
-            cur.execute(f"ALTER TABLE {table} DROP CONSTRAINT IF EXISTS {name}")
-        else:
-            cur.execute(f"DROP INDEX IF EXISTS {name}")
-
-
-def _watch_index_build(pid: int, i: int, n: int,
-                       on_frac: Callable[[float], None],
-                       stop: threading.Event) -> None:
-    """Report intra-index progress from ``pg_stat_progress_create_index``
-    while the loader connection is blocked inside CREATE INDEX. A 1s poll on
-    a second pooled connection is the only source PG offers for utility-
-    command progress (no push channel exists). Watcher failure must never
-    fail the load — the bar just falls back to one step per index."""
-    from db_pool import get_conn
-    try:
-        with get_conn() as conn:
-            with conn.cursor() as cur:
-                while not stop.wait(1.0):
-                    cur.execute(
-                        "SELECT blocks_done, blocks_total, tuples_done, tuples_total "
-                        "FROM pg_stat_progress_create_index WHERE pid = %s", (pid,))
-                    row = cur.fetchone()
-                    if not row:
-                        continue
-                    bd, bt, td, tt = row
-                    intra = (bd / bt) if bt else ((td / tt) if tt else 0.0)
-                    on_frac((i + min(intra, 1.0)) / n)
-    except Exception as e:
-        logger.warning("index-build progress watcher stopped: %s", e)
-
-
-def _rebuild_indexes(conn, ddl: Dict[str, str],
-                     on_frac: Callable[[float], None]) -> None:
-    """Each build in its own transaction: SET LOCAL scopes the memory/parallel
-    bump to the statement, and a write-free transaction is what allows the
-    parallel (leader+workers) build path at all. ``on_frac`` gets the
-    table-rebuild fraction [0..1], fed between indexes AND (via the watcher)
-    inside each multi-minute build."""
-    n = len(ddl)
-    if not n:
-        return
-    with conn.cursor() as cur:
-        cur.execute("SELECT pg_backend_pid()")
-        pid = cur.fetchone()[0]
-    for i, stmt in enumerate(ddl.values()):
-        on_frac(i / n)
-        stop = threading.Event()
-        watcher = threading.Thread(target=_watch_index_build,
-                                   args=(pid, i, n, on_frac, stop), daemon=True)
-        watcher.start()
-        try:
-            with conn.cursor() as cur:
-                cur.execute("BEGIN")
-                cur.execute("SET LOCAL maintenance_work_mem = '1GB'")
-                cur.execute("SET LOCAL max_parallel_maintenance_workers = 4")
-                cur.execute(stmt)
-                cur.execute("COMMIT")
-        finally:
-            stop.set()
-            watcher.join()
-    on_frac(1.0)
 
 
 def stream_load(archive: str = _DEFAULT_ARCHIVE,
@@ -535,7 +358,7 @@ def stream_load(archive: str = _DEFAULT_ARCHIVE,
                 # released explicitly (finally below), not on conn close.
                 cur.execute("SELECT pg_advisory_lock(%s)", (MB_LOAD_LOCK_KEY,))
             try:
-                ddl = _collect_index_ddl(conn, archive, tables)
+                ddl = collect_index_ddl(conn, [t for t, _ in tables], _saved_ddl_path(archive))
                 cum_w = 0.0  # byte-weighted progress accumulated over completed tables
 
                 def _load_table(table: str, fh, size: int) -> None:
@@ -546,12 +369,12 @@ def stream_load(archive: str = _DEFAULT_ARCHIVE,
                         frac = (read_bytes / _s) if _s else 0.0
                         progress_cb({"phase": "loading", "table": _t,
                                      "pct": min(99, round((_c + _w * _COPY_FRAC * frac) * 100))})
-                    reader = _ProgressReader(fh, _on_bytes)
+                    reader = ProgressReader(fh, _on_bytes)
                     keep = filters.get(table)
                     if keep:
                         reader = _FilteredReader(reader, keep)
                     with conn.cursor() as cur:
-                        _drop_indexes(cur, table, ddl[table])
+                        drop_indexes(cur, table, ddl[table])
                         # One transaction for TRUNCATE+COPY: under
                         # wal_level=minimal the COPY then skips WAL entirely,
                         # and readers never see a half-loaded table.
@@ -566,7 +389,7 @@ def stream_load(archive: str = _DEFAULT_ARCHIVE,
                         part = _COPY_FRAC + (1 - _COPY_FRAC) * min(frac, 1.0)
                         progress_cb({"phase": "indexing", "table": _t,
                                      "pct": min(99, round((_c + _w * part) * 100))})
-                    _rebuild_indexes(conn, ddl[table], _on_frac)
+                    rebuild_indexes(conn, ddl[table], _on_frac)
                     cum_w += w
                     counts[table] = len(counts) + 1
                     progress_cb({"phase": "loading", "table": table,
@@ -608,14 +431,7 @@ def stream_load(archive: str = _DEFAULT_ARCHIVE,
                         _load_table(table, fh, size)
                     os.remove(spath)
             finally:
-                # A failed COPY leaves the explicit transaction aborted on this
-                # pooled connection — clear it or the unlock itself would fail.
-                from psycopg2.extensions import TRANSACTION_STATUS_IDLE
-                if conn.info.transaction_status != TRANSACTION_STATUS_IDLE:
-                    with conn.cursor() as cur:
-                        cur.execute("ROLLBACK")
-                with conn.cursor() as cur:
-                    cur.execute("SELECT pg_advisory_unlock_all()")
+                unlock_all(conn)
     finally:
         try:
             tar.close()

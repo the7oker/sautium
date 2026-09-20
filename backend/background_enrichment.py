@@ -4,28 +4,31 @@ metadata from public APIs (Last.fm, lrclib/genius). Started/stopped by the
 toggle in More → Sync & P2P flips the same key.
 
 Each pass, in order:
-  1. Last.fm track_stats (listeners + playcount) — priority-ordered
-  2. Lyrics (lrclib/genius) for tracks missing them
-  3. Last.fm artist bios for new artists
-  4. Last.fm genre wiki for new genres
-  5. Last.fm similars for engaged artists (owned file OR completed listen)
+  1. Lyrics (lrclib/genius) for tracks missing them
+  2. Last.fm artist bios for new artists
+  3. Last.fm genre wiki for new genres
+  4. Last.fm similars for engaged artists (owned file OR completed listen)
   then the text half of the analysis, over what the steps above just wrote:
-  6. Text embeddings (BGE-M3) for owned tracks
-  7. Lyrics embeddings
-  8. Artist-bio + genre-wiki embeddings
+  5. Text embeddings (BGE-M3) for owned tracks
+  6. Lyrics embeddings
+  7. Artist-bio + genre-wiki embeddings
   then, on the interval timer only:
-  9. Canonize the uncanonized residue (local MB dump, DB-only)
- 10. Missing-album reconcile for canonized artists (local MB dump, DB-only)
- 11. name_latin backfill for pre-0a phantom rows (pure Python)
+  8. Canonize the uncanonized residue (local MB dump, DB-only)
+  9. Missing-album reconcile for canonized artists (local MB dump, DB-only)
+ 10. name_latin backfill for pre-0a phantom rows (pure Python)
 
-Steps 6-8 moved here on 2026-09-09. They used to belong to the manual
+Listening statistics are not fetched here any more: since 2026-09-20 they
+come from the ListenBrainz statistics dump (lb_dump_load) or arrive as
+signed per-artist slices over P2P (desktop/p2p/lb_slice_cycle).
+
+Steps 5-7 moved here on 2026-09-09. They used to belong to the manual
 "Analyse library" run, which meant a person had to authorise embedding a
 bio this loop had fetched itself — and had no way to know it was owed: the
 first node to be asked was sitting on 7.3k unembedded bios. Nothing else
 computes these vectors and no peer carries them, so the producer drains
 them. The manual run keeps the AUDIO phase, which only a new file creates.
 
-Steps 6-8 YIELD WHILE THE NODE IS PLAYING (_playback_hold): the model is
+Steps 5-7 YIELD WHILE THE NODE IS PLAYING (_playback_hold): the model is
 the one part of this loop heavy enough to be heard, and HQPlayer wants the
 machine more than we do. What the meter cannot see is load from OUTSIDE
 this process tree — a game, a compile, HQPlayer's own CPU on the host side
@@ -46,14 +49,8 @@ and every later sync completion wakes a pass at once — peers fill a fresh
 library's gaps for free, the pass that follows fetches only the rest.
 The interval is the fallback for a node with sync off or no peers.
 
-Track-stats priority (Tier 1 → 3):
-  1. Tracks whose primary artist has the most accumulated listen-time
-  2. Tracks whose genre has the most accumulated listen-time
-  3. Everything else
-
-One-shot per entity: a track already in `track_stats` (source='lastfm')
-or marked `not_found`/`error` in `external_metadata` is skipped. Same
-pattern for artists/genres against their respective tables.
+One-shot per entity: an artist or genre already in its table, or marked
+`not_found`/`error` in `external_metadata`, is skipped.
 """
 
 from __future__ import annotations
@@ -94,7 +91,6 @@ _NEGATIVE_CACHE_WINDOW = """
 _BATCH_INTERVAL_MIN = 30          # idle sleep between passes; also the DB-only steps' cadence
 _DB_RETRY_S = 120                 # DB-only steps with work left (full batch, or blocked by a dump/slice load): retry soon, not next cycle
 _FIRST_SYNC_WAIT_MIN = 10         # boot: how long the first pass waits for the first P2P sync
-_TRACK_STATS_PER_BATCH = 100      # Last.fm track.getInfo calls per batch
 _LYRICS_PER_BATCH = 50            # lrclib/genius calls per batch
 _ARTISTS_PER_BATCH = 30           # Last.fm artist.getInfo calls per batch
 _GENRES_PER_BATCH = 20            # Last.fm tag.getInfo calls per batch
@@ -118,71 +114,6 @@ _LYRICS_EMB_PER_BATCH = 200       # a lyric is chunked into several vectors
 _ENRICH_EMB_PER_BATCH = 500       # artist bios + genre wikis, chunked the same way
 _LOCAL_MODEL_SCALE    = {"lite": 5}   # profile → batch divisor; CPU encoding is ~an order slower
 
-_PRIORITY_SQL = text("""
-    WITH artist_listen AS (
-        SELECT ta.artist_id, SUM(lh.duration_listened) AS sec
-        FROM listening_history lh
-        JOIN track_artists ta ON ta.track_id = lh.track_id
-        WHERE lh.duration_listened > 0
-        GROUP BY ta.artist_id
-    ),
-    genre_listen AS (
-        SELECT ag.genre_id, SUM(lh.duration_listened) AS sec
-        FROM listening_history lh
-        JOIN LATERAL (
-            SELECT DISTINCT ag2.genre_id
-            FROM media_files mf
-            JOIN album_variants av ON av.id = mf.album_variant_id
-            JOIN album_genres ag2 ON ag2.album_id = av.album_id
-            WHERE mf.track_id = lh.track_id
-        ) ag ON true
-        WHERE lh.duration_listened > 0
-        GROUP BY ag.genre_id
-    ),
-    candidates AS (
-        SELECT t.id           AS track_id,
-               t.title        AS track_title,
-               a.name         AS artist_name,
-               MAX(al.sec)    AS artist_score,
-               MAX(gl.sec)    AS genre_score
-        FROM tracks t
-        JOIN track_artists ta ON ta.track_id = t.id AND ta.role = 'primary'
-        JOIN artists a        ON a.id = ta.artist_id
-        LEFT JOIN artist_listen al ON al.artist_id = ta.artist_id
-        LEFT JOIN media_files mf_g    ON mf_g.track_id = t.id
-        LEFT JOIN album_variants av_g ON av_g.id = mf_g.album_variant_id
-        LEFT JOIN album_genres ag     ON ag.album_id = av_g.album_id
-        LEFT JOIN genre_listen gl     ON gl.genre_id = ag.genre_id
-        -- owned tracks only: phantom tracklist rows (no media_files) must
-        -- not burn the Last.fm budget
-        WHERE EXISTS (
-            SELECT 1 FROM media_files mf WHERE mf.track_id = t.id
-        )
-        AND NOT EXISTS (
-            SELECT 1 FROM track_stats ts
-            WHERE ts.track_id = t.id AND ts.source = 'lastfm'
-        )
-        AND NOT EXISTS (
-            SELECT 1 FROM external_metadata em
-            WHERE em.entity_type = 'track'
-              AND em.entity_id = t.id::text
-              AND em.source = 'lastfm'
-              AND em.metadata_type = 'stats'
-              AND em.fetch_status IN ('not_found', 'error')""" + _NEGATIVE_CACHE_WINDOW + """
-        )
-        GROUP BY t.id, t.title, a.name
-    )
-    SELECT track_id, artist_name, track_title,
-           COALESCE(artist_score, 0) AS artist_score,
-           COALESCE(genre_score, 0)  AS genre_score
-    FROM candidates
-    ORDER BY artist_score DESC NULLS LAST,
-             genre_score  DESC NULLS LAST,
-             track_id
-    LIMIT :batch
-""")
-
-
 # ============================================================
 # Shared state
 # ============================================================
@@ -197,7 +128,6 @@ _state: Dict[str, Any] = {
     "next_run_at": None,         # ISO timestamp of next batch start
     "last_batch": None,          # counts dict from last run_once
     "total": {                   # cumulative counts since process start
-        "track_stats": 0,
         "lyrics": 0,
         "artists": 0,
         "genres": 0,
@@ -291,54 +221,6 @@ def _sleep_until(seconds: int) -> None:
 # ============================================================
 # Per-batch steps
 # ============================================================
-
-def _step_track_stats(limit: int) -> Dict[str, int]:
-    """Fetch Last.fm track stats for priority-ordered tracks.
-
-    Picks tracks whose primary artist / genre has the most accumulated
-    listen-time from `listening_history`; falls back to insertion order
-    for tracks with no listen history. Per-track rate limit matches
-    enrich_artist/enrich_album (0.2s).
-    """
-    from lastfm import LastFmService
-
-    stats = {"processed": 0, "success": 0, "not_found": 0, "errors": 0}
-    lastfm = LastFmService()
-
-    with get_db_context() as db:
-        rows = db.execute(_PRIORITY_SQL, {"batch": int(limit)}).fetchall()
-        if not rows:
-            return stats
-        logger.info(f"Background: {len(rows)} tracks queued for Last.fm stats")
-
-        for row in rows:
-            if _cancel_flag():
-                break
-            stats["processed"] += 1
-            try:
-                result = lastfm.enrich_track(
-                    db, row.track_id, row.artist_name, row.track_title,
-                )
-                if result["status"] == "rate_limited":
-                    logger.info("Background track_stats: Last.fm rate-limited — ending batch")
-                    break
-                if result["status"] == "success":
-                    stats["success"] += 1
-                elif result["status"] == "not_found":
-                    stats["not_found"] += 1
-                else:
-                    stats["errors"] += 1
-            except Exception as e:
-                logger.error(
-                    f"Background track_stats failed for "
-                    f"{row.artist_name} - {row.track_title}: {e}"
-                )
-                stats["errors"] += 1
-                db.rollback()
-            time.sleep(_LASTFM_DELAY_S)
-
-    return stats
-
 
 def _step_lyrics(limit: int) -> Dict[str, int]:
     """Fetch lyrics for tracks missing them. Delegates to the existing batch."""
@@ -621,7 +503,6 @@ def _step_backfill_name_latin(limit: int) -> Dict[str, int]:
 _NETWORK_STEPS = (
     # (state key, step, batch cap, stats key folded into the running totals,
     #  gated on the Last.fm cooldown)
-    ("track_stats", _step_track_stats,     _TRACK_STATS_PER_BATCH, "success", True),
     ("lyrics",      _step_lyrics,          _LYRICS_PER_BATCH,      "found",   False),
     ("artists",     _step_missing_artists, _ARTISTS_PER_BATCH,     "success", True),
     ("genres",      _step_missing_genres,  _GENRES_PER_BATCH,      "success", True),

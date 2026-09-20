@@ -140,20 +140,39 @@ See:
 ## Data Model Conventions
 
 - **Normalized schemas, not JSONB blobs.** External metadata (Last.fm,
-  MusicBrainz) lives in normalized tables (`artist_bios`, `artist_tags`,
-  `similar_artists`, `album_descriptions`, `track_stats`) with a `source`
-  column for provenance. We migrated away from JSONB — functions on JSONB
+  MusicBrainz, ListenBrainz) lives in normalized tables (`artist_bios`,
+  `artist_tags`, `similar_artists`, `album_descriptions`, `lb_recording`)
+  with a `source` column or a `dump_version` for provenance. We migrated away from JSONB — functions on JSONB
   get unreadable fast and can't be indexed cleanly.
 - **The Last.fm layer is LOCAL-ONLY.** `artist_bios`, `artist_tags`,
-  `similar_artists`, `track_stats`, `genre_descriptions` carry no seal
-  columns and no `imported` flag, and stay out of the sync protocol, the
-  holdings filter, carry, the share export and the seed bundle (since
-  2026-09-19, migration 019): Last.fm's API terms do not allow
-  redistributing its answers, so every node fetches its own by name — the
-  layer is reproducible from the API for two calls per artist. The
-  `listeners` count is still read LOCALLY as the rarity proxy (announce
-  tail, carry order). `album_descriptions` and `album_genres` are local
-  for a different reason: albums never sync by UUID.
+  `similar_artists`, `genre_descriptions` carry no seal columns and no
+  `imported` flag, and stay out of the sync protocol, the holdings filter,
+  carry, the share export and the seed bundle (since 2026-09-19, migration
+  019): Last.fm's API terms do not allow redistributing its answers, so
+  every node fetches its own by name — the layer is reproducible from the
+  API for two calls per artist. The `listeners` count is still read
+  LOCALLY as the rarity proxy (announce tail, carry order).
+  `album_descriptions` and `album_genres` are local for a different
+  reason: albums never sync by UUID.
+- **Listening statistics come from ListenBrainz and DO travel.** Track
+  popularity left Last.fm on 2026-09-20 (migration 020 dropped
+  `track_stats`): `lb_recording` / `lb_artist` hold per-MBID listen and
+  listener counts aggregated from the ListenBrainz statistics dump (CC0).
+  They are LOWER BOUNDS — the dump carries each LB user's top-1000 list,
+  not every listen — so consumers rank by them and never quote them as
+  totals. A dump node (`backend/lb_dump_load.py`, opt-in like the MB
+  dump, its own `listenbrainz.db_version` marker) serves per-artist-MBID
+  signed slices (`desktop/p2p/lb_slice_queries.py`, context
+  `sautium-lb-slice-v1:`); every other node runs the shared cycle
+  (`desktop/p2p/lb_slice_cycle.py` — launcher AND Docker) for its owned
+  and engaged artists, and for a phantom artist when its page is opened
+  (`lb_slice_requests`). The ledger `lb_slice_fetches` is versioned:
+  requests carry `min_version`, a source's `/health` says which dump it
+  serves, and a row older than the newest reachable version is re-asked —
+  a signed zero-match included. A SEPARATE family from the MB slices in
+  every artefact (context, ledgers, `/api/lb/slice`, `lbdump`/`lbslices`
+  capabilities): a node may hold either dump. Widening the blob means
+  bumping the context AND wiping every node's ledgers.
 - **UUID v5 for all shareable entities.** Same data on different nodes
   must collapse to the same ID. Namespace
   `adc1ec0b-2c81-5e26-9938-a369c6f7a5e1` (in `backend/uuid_utils.py`).
@@ -511,6 +530,8 @@ toast takes no pointer events and never blocks the user (see
 | `backend/master_node.py` | Shipped master identity pins (mirrored in desktop/p2p/) |
 | `backend/invite_tokens.py` | Invite tokens + signed grants (mirrored in desktop/p2p/) |
 | `desktop/mb_slice_client.py` | Slice requester — per-name verification against the ORIGINAL dump node's key |
+| `backend/lb_dump_load.py` + `backend/dump_common.py` + `backend/dump_job.py` | The ListenBrainz statistics loader (stream the archive once, COPY two members into staging, `GROUP BY` into `lb_recording`/`lb_artist`, swap), the download/checksum/index mechanics both loaders share, and the one background-job runner both dump families use (queued one at a time) |
+| `desktop/p2p/lb_slice_queries.py` + `desktop/p2p/lb_slice_cycle.py` | The LB slice protocol (per-artist-MBID signed blobs, versioned serve/verify/import, the pending tiers) and the requester cycle shared by the launcher's P2PManager and the Docker backend (sources, `min_version`, the on-demand lane) |
 | `backend/assistant_queries.py` | Catalog queries + result formatting SHARED by both assistant tool surfaces (MCP + `backend/tools/definitions.py`) — one copy, so neither drifts owned-only |
 | `backend/notary.py` + `backend/sign_audio.py` | The sealing owner (one thread, woken by every producer of signable state) and its two stages: `sign()` author-signs at once, `stamp()` Merkle-batches + Worker-timestamps on the notary's cadence |
 | `desktop/node_backup.py` | Node backup format v1 (`.sbk`: Argon2id KEK in its own salt domain, per-file data key, chunked XChaCha20-Poly1305 with the header as AAD, framed members) + `pg_dump`/`pg_restore` drivers, staged restore, identity write, selftest — shared by launcher and backend (`docs/design/BACKUP.md`) |

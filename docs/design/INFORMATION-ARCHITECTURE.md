@@ -761,9 +761,9 @@ or is a thin query over existing data.
 | Bio prose | `artist_bios.bio` (Last.fm imported) | — |
 | Tag chips | `artist_tags` (Last.fm) ranked by weight, top 4 | — |
 | Albums | albums where this artist appears in `track_artists`, sorted by year | — |
-| Popular tracks | `local_play_stats` filtered to this artist's tracks | + Last.fm `artist.getTopTracks` for global popularity |
+| Popular tracks | ListenBrainz listen counts (`track_mbids ⋈ lb_recording`, owned and phantom tracks alike) first, then `local_play_stats` for tracks ListenBrainz does not know; a phantom artist's slice is asked of the network when the page opens and the block fills in place | — |
 | Similar artists | `similar_artists` (Last.fm imported) | + BGE-M3 vector similarity on bios |
-| Credit end-cap | `artist_bios.url` — `data from Last.fm` linking to this artist's Last.fm page. Required by clause 2.7 of the Last.fm API terms wherever their data is displayed; hidden when the artist has no Last.fm row | — |
+| Credit end-cap | `artist_bios.url` — `data from Last.fm` linking to this artist's Last.fm page (required by clause 2.7 of the Last.fm API terms wherever their data is displayed; hidden when the artist has no Last.fm row) · `listening statistics from ListenBrainz` whenever its counts ranked something on the page | — |
 
 ### Album
 

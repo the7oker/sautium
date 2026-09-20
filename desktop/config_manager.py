@@ -96,6 +96,14 @@ DEFAULT_CONFIG = {
         "batch_size": 20,
         "auto_interval_min": 360,
     },
+    # ListenBrainz listening statistics — a second, independent slice family
+    # (desktop/p2p/lb_slice_cycle.py); the same knobs, its own ledgers.
+    "lb_slice": {
+        "serve": True,   # re-serve held slices; mint them only with a full local dump
+        "fetch": True,   # request slices for owned/engaged artists when we have no dump
+        "batch_size": 20,
+        "auto_interval_min": 360,
+    },
 }
 
 

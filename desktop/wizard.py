@@ -1574,6 +1574,11 @@ class SetupWizard(ctk.CTkToplevel):
     # cannot finish the load.
     _MB_ARCHIVE_GB = 7.5
     _MB_NEEDED_GB = 31
+    # MIRRORS backend/lb_dump_load (ARCHIVE_GB 21 + STAGING_GB 4 + TABLES_GB 4
+    # + MARGIN_GB 2): the ListenBrainz listening-statistics dump. The archive
+    # figure is real; the rest is TO CALIBRATE after the first master run.
+    _LB_ARCHIVE_GB = 21
+    _LB_NEEDED_GB = 31
 
     def _free_gb(self) -> float:
         try:
@@ -1655,6 +1660,35 @@ class SetupWizard(ctk.CTkToplevel):
             text_color="gray", wraplength=470, justify="left",
         ).pack(pady=(6, 0))
 
+        # The listening statistics are a second, independent dump (a node
+        # may hold either). Pre-ticked only when the disk takes BOTH — the
+        # two jobs queue behind each other on one volume.
+        lb_enough = free >= self._LB_NEEDED_GB
+        self._lb_dump_var = ctk.BooleanVar(
+            value=enough and free >= self._MB_NEEDED_GB + self._LB_NEEDED_GB)
+        lb_chk = ctk.CTkCheckBox(
+            self.content_frame,
+            text=(f"Also download ListenBrainz listening statistics "
+                  f"(~{self._LB_ARCHIVE_GB:g} GB download, ~4 GB kept)"),
+            variable=self._lb_dump_var,
+        )
+        lb_chk.pack(pady=(14, 4))
+        if not lb_enough:
+            lb_chk.configure(state="disabled")
+        ctk.CTkLabel(
+            self.content_frame,
+            text=(
+                "What ranks an artist's popular tracks — open data (CC0). "
+                "Optional: a node without it receives per-artist statistics "
+                "from the nodes that hold it."
+                if lb_enough else
+                f"Needs ~{self._LB_NEEDED_GB} GB free while it installs — you "
+                f"can enable it later in More → Streaming library."
+            ),
+            text_color="gray" if lb_enough else "#C86450",
+            wraplength=470, justify="left",
+        ).pack(pady=(0, 4))
+
     def _step_summary(self):
         ctk.CTkLabel(
             self.content_frame,
@@ -1700,6 +1734,10 @@ class SetupWizard(ctk.CTkToplevel):
              f"Download after start (~{self._MB_ARCHIVE_GB:g} GB)"
              if getattr(self, "_mb_dump_var", None)
              and self._mb_dump_var.get() else "Skip for now"),
+            ("Listening statistics",
+             f"Download after start (~{self._LB_ARCHIVE_GB:g} GB)"
+             if getattr(self, "_lb_dump_var", None)
+             and self._lb_dump_var.get() else "Skip for now"),
         ]
 
         for label, value in items:
@@ -1883,6 +1921,9 @@ class SetupWizard(ctk.CTkToplevel):
         if getattr(self, "_mb_dump_var", None) is not None:
             self.config.setdefault("mb_slice", {})["download_dump"] = \
                 bool(self._mb_dump_var.get())
+        if getattr(self, "_lb_dump_var", None) is not None:
+            self.config.setdefault("lb_slice", {})["download_dump"] = \
+                bool(self._lb_dump_var.get())
 
         self.config["first_run_complete"] = True
         save_config(self.config)

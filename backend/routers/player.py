@@ -884,7 +884,8 @@ async def events_stream():
     pings by design: the open screen re-fetches its own snapshot, so
     there is no split source to race."""
     import mb_discovery
-    from routers.discovery import mb_sse_register, mb_sse_unregister
+    from routers.discovery import (lb_sse_register, lb_sse_unregister,
+                                   mb_sse_register, mb_sse_unregister)
     from routers.gear_models import (research_sse_register,
                                      research_sse_unregister)
     from routers.p2p import chat_sse_register, chat_sse_unregister
@@ -896,6 +897,7 @@ async def events_stream():
     status_evt = asyncio.Event()
     research_evt = asyncio.Event()
     mb_evt = asyncio.Event()
+    lb_evt = asyncio.Event()
     chat_evt = asyncio.Event()
     notice_evt = asyncio.Event()
 
@@ -905,6 +907,7 @@ async def events_stream():
         manager.sse_register(status_evt, loop)
         research_sse_register(research_evt, loop)
         mb_sse_register(mb_evt, loop)
+        lb_sse_register(lb_evt, loop)
         chat_sse_register(chat_evt, loop)
         notices_sse_register(notice_evt, loop)
         try:
@@ -925,6 +928,7 @@ async def events_stream():
                     asyncio.create_task(status_evt.wait()): "status",
                     asyncio.create_task(research_evt.wait()): "research",
                     asyncio.create_task(mb_evt.wait()): "mb",
+                    asyncio.create_task(lb_evt.wait()): "lb",
                     asyncio.create_task(chat_evt.wait()): "chat",
                     asyncio.create_task(notice_evt.wait()): "notice",
                     asyncio.create_task(preview_q.get()): "preview",
@@ -964,6 +968,11 @@ async def events_stream():
                     yield ("data: "
                            + json.dumps({"t": "mb", "d": mb_discovery.state()})
                            + "\n\n")
+                if "lb" in kinds:
+                    # Payload-free: a ListenBrainz slice landed — the open
+                    # artist page re-fetches its own snapshot.
+                    lb_evt.clear()
+                    yield 'data: {"t": "lb"}\n\n'
                 if "notice" in kinds:
                     notice_evt.clear()
                     yield ("data: "
@@ -975,6 +984,7 @@ async def events_stream():
             manager.sse_unregister(status_evt)
             research_sse_unregister(research_evt, loop)
             mb_sse_unregister(mb_evt, loop)
+            lb_sse_unregister(lb_evt, loop)
             chat_sse_unregister(chat_evt, loop)
             notices_sse_unregister(notice_evt, loop)
             preview_events.unsubscribe(preview_q)

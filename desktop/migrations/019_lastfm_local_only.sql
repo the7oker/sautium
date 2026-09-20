@@ -17,6 +17,12 @@ BEGIN
     FOREACH t IN ARRAY ARRAY['artist_bios', 'artist_tags', 'similar_artists',
                              'track_stats', 'genre_descriptions']
     LOOP
+        -- track_stats left the baseline in 020: a fresh node runs 001 (no
+        -- such table) and then this file, whose ALTER has no table-level
+        -- IF EXISTS. Nodes that already ran this delta never re-run it.
+        IF to_regclass(t) IS NULL THEN
+            CONTINUE;
+        END IF;
         IF EXISTS (SELECT 1 FROM information_schema.columns
                     WHERE table_schema = 'public' AND table_name = t
                       AND column_name = 'imported') THEN

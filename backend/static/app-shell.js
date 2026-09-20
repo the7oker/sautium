@@ -4800,10 +4800,54 @@
      asks for a "powered by AudioScrobbler" button off last.fm/resources — that
      page is 404, and the phrase never says "Last.fm", which is the name
      clause 4.2.2 actually requires crediting. The url is artist_bios.url /
-     genre_descriptions.url, stored at enrichment time. */
-  function lastfmCreditHtml(url) {
-    if (!url) return '';
-    return `<div class="source-credit"><a href="${escapeHtml(url)}" target="_blank" rel="noopener">data from Last.fm</a></div>`;
+     genre_descriptions.url, stored at enrichment time. ListenBrainz asks for
+     nothing (CC0) — naming the source is the project's practice, and the
+     page sets `listenbrainz` only where its numbers ranked something. */
+  function sourceCreditHtml({ lastfm, listenbrainz } = {}) {
+    const parts = [];
+    if (lastfm) parts.push(`<a href="${escapeHtml(lastfm)}" target="_blank" rel="noopener">data from Last.fm</a>`);
+    if (listenbrainz) parts.push(`<a href="https://listenbrainz.org/" target="_blank" rel="noopener">listening statistics from ListenBrainz</a>`);
+    if (!parts.length) return '';
+    return `<div class="source-credit">${parts.join(' · ')}</div>`;
+  }
+
+  /* Popular-tracks rows, shared by the artist and genre pages. An owned row
+     plays by its file; a not-owned one — the artist page on a node that
+     holds only the tracklist and its ListenBrainz counts — carries the
+     phantom contract every other screen uses (is-phantom-track +
+     data-track-id, the album as play context), so wireDetailHandlers
+     streams it like an album-page row. */
+  function popularTracksHtml(list, secondLine) {
+    return (list || []).map((t, i) => {
+      const attrs = t.media_file_id
+        ? `class="track-row" data-media-file-id="${escapeHtml(String(t.media_file_id))}"`
+        : `class="track-row is-phantom-track" data-track-id="${escapeHtml(String(t.track_id || ''))}"`
+          + (t.album_id ? ` data-album-id="${escapeHtml(String(t.album_id))}"` : '');
+      return `
+      <button ${attrs} type="button">
+        <span class="track-rank">${i + 1}</span>
+        <div class="track-info">
+          <div class="track-title-line">${escapeHtml(t.title || '')}</div>
+          <div class="track-artist-line">${escapeHtml(secondLine(t) || '')}</div>
+        </div>
+        <span class="track-dur">${fmtDuration(t.duration)}</span>
+        <span class="track-add" aria-label="Add to queue">${SVG_PLUS}</span>
+      </button>`;
+    }).join('');
+  }
+
+  /* The artist page's Popular tracks block, or — while this artist's
+     ListenBrainz slice is on its way from the network (routers/artists.py
+     lb_pending) — the note that says so where the block will appear.
+     Re-rendered in place when the slice lands (sautium:lb-changed). */
+  function popularSectionHtml(d) {
+    const rows = popularTracksHtml(d.popular_tracks, t => t.album);
+    if (rows) return `
+        <div class="section-sep"></div>
+        <div class="section-head"><h3>Popular tracks</h3></div>
+        <div class="track-list">${rows}</div>`;
+    if (d.lb_pending) return `<p class="card-note" data-lb-pending>${lbPendingText()}</p>`;
+    return '';
   }
 
   /* Prose block shared by the artist bio and the album description: the
@@ -4846,7 +4890,7 @@
   const ALBUMS_SORTS = [
     { id: 'release_year',   label: 'Release year',   hint: 'Newest first',                       glyph: null },
     { id: 'time_listened',  label: 'Time listened',  hint: 'My total time on each album',        glyph: 'clock' },
-    { id: 'popularity',     label: 'Popularity',     hint: 'Last.fm scrobble count',             glyph: 'plays' },
+    { id: 'popularity',     label: 'Popularity',     hint: 'ListenBrainz listen count',          glyph: 'plays' },
     { id: 'recently_added', label: 'Recently added', hint: 'When it landed in your library',     glyph: 'plus' },
     { id: 'a_z',            label: 'A–Z',            hint: 'Alphabetical, leading articles stripped', glyph: null },
   ];
@@ -5019,19 +5063,6 @@
         </button>`;
     }).join('');
 
-    const tracksHtml = (d.popular_tracks || []).map((t, i) => `
-      <button class="track-row" type="button"
-              data-media-file-id="${escapeHtml(String(t.media_file_id || ''))}">
-        <span class="track-rank">${i + 1}</span>
-        <div class="track-info">
-          <div class="track-title-line">${escapeHtml(t.title || '')}</div>
-          <div class="track-artist-line">${escapeHtml(t.album || '')}</div>
-        </div>
-        <span class="track-dur">${fmtDuration(t.duration)}</span>
-        <span class="track-add" aria-label="Add to queue">${SVG_PLUS}</span>
-      </button>
-    `).join('');
-
     const similarHtml = (d.similar_artists || []).map(s => {
       const sph = avatarPlaceholder(s.name || '?');
       const initialsBlock = `<div class="similar-avatar-fallback"
@@ -5107,11 +5138,7 @@
         <div class="section-head"><h3>Missing albums</h3></div>
         <div class="h-scroll" data-new-albums-scroll>${newAlbumsHtml}</div>
       </div>
-      ${tracksHtml ? `
-        <div class="section-sep"></div>
-        <div class="section-head"><h3>Popular tracks</h3></div>
-        <div class="track-list">${tracksHtml}</div>
-      ` : ''}
+      <div data-popular-section>${popularSectionHtml(d)}</div>
       ${similarHtml ? `
         <div class="section-sep"></div>
         <div class="section-head"><h3>Similar artists</h3></div>
@@ -5141,7 +5168,7 @@
           That’s the full profile for this ${escapeHtml(d.name || '')}.
           <span class="mb"><svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="9"/><path d="M12 8v.5M11 12h1v4h1"/></svg> metadata from MusicBrainz</span>
         </div>
-        ${lastfmCreditHtml(d.lastfm_url)}
+        ${sourceCreditHtml({ lastfm: d.lastfm_url, listenbrainz: d.listenbrainz_used })}
         <div style="height: calc(24 * var(--px));"></div>`;
     } else {
       screen.innerHTML = `
@@ -5160,11 +5187,45 @@
         ${pointerHtml}
         ${pendingHtml}
         ${sectionsHtml}
-        ${lastfmCreditHtml(d.lastfm_url)}
+        ${sourceCreditHtml({ lastfm: d.lastfm_url, listenbrainz: d.listenbrainz_used })}
         <div style="height: calc(24 * var(--px));"></div>`;
     }
 
     wireProseBlock(screen, bioSummary, bioFull);
+
+    // This artist's ListenBrainz slice is on its way (the on-demand lane):
+    // when it lands, the cycle's NOTIFY reaches this tab as
+    // 'sautium:lb-changed' over the ONE /api/events stream (player.js) —
+    // re-fetch this page's own snapshot and patch the Popular tracks block
+    // in place, no reload and no second connection to the origin.
+    if (d.lb_pending) {
+      const detach = () => {
+        window.removeEventListener('sautium:lb-changed', onLb);
+        window.removeEventListener('hashchange', onHashChange);
+      };
+      const onLb = async () => {
+        if (!document.contains(screen)) return detach();
+        let fresh = null;
+        try {
+          const r = await fetch('/api/artists/' + encodeURIComponent(artistId)
+                                + '?sort=' + encodeURIComponent(sort)
+                                + (selectedMbid ? '&mbid=' + encodeURIComponent(selectedMbid) : ''));
+          if (r.ok) fresh = await r.json();
+        } catch (_) {}
+        if (!fresh || !document.contains(screen)) return;
+        const section = screen.querySelector('[data-popular-section]');
+        if (section) {
+          section.innerHTML = popularSectionHtml(fresh);
+          wireDetailHandlers(section);
+        }
+        if (!fresh.lb_pending) detach();
+      };
+      const onHashChange = () => {
+        if (!document.contains(screen)) detach();
+      };
+      window.addEventListener('sautium:lb-changed', onLb);
+      window.addEventListener('hashchange', onHashChange);
+    }
 
     const sortBtn = screen.querySelector('[data-action="albums-sort"]');
     if (sortBtn) {
@@ -6820,20 +6881,8 @@
     // Popular tracks for this genre — same row layout as the artist
     // page, but the secondary line shows "<artist> · <album>" so the
     // user can tell different artists apart in a genre-scoped list.
-    const tracksHtml = (d.popular_tracks || []).map((t, i) => {
-      const second = [t.artist, t.album].filter(Boolean).join(' · ');
-      return `
-        <button class="track-row" type="button"
-                data-media-file-id="${escapeHtml(String(t.media_file_id || ''))}">
-          <span class="track-rank">${i + 1}</span>
-          <div class="track-info">
-            <div class="track-title-line">${escapeHtml(t.title || '')}</div>
-            <div class="track-artist-line">${escapeHtml(second)}</div>
-          </div>
-          <span class="track-dur">${fmtDuration(t.duration)}</span>
-          <span class="track-add" aria-label="Add to queue">${SVG_PLUS}</span>
-        </button>`;
-    }).join('');
+    const tracksHtml = popularTracksHtml(
+      d.popular_tracks, t => [t.artist, t.album].filter(Boolean).join(' · '));
 
     screen.innerHTML = `
       <div class="genre-hero">
@@ -6859,7 +6908,7 @@
         </div>
         <div class="artists-grid">${artistsHtml}</div>
       ` : ''}
-      ${lastfmCreditHtml(d.lastfm_url)}
+      ${sourceCreditHtml({ lastfm: d.lastfm_url, listenbrainz: d.listenbrainz_used })}
     `;
 
     screen.querySelector('[data-action="back"]')?.addEventListener('click', () => goBack());
@@ -9768,6 +9817,26 @@
                    text: `A catalog node did not answer — ${who} still wait for their albums. ${next}` };
       }
     },
+    'lb_slice.deferred': n => {
+      const d = n.data || {};
+      const capped = d.pending_capped && d.unserved === d.pending;
+      const who = `<span class="num">${fmtNum(d.unserved || 0)}${capped ? '+' : ''}</span> artist${d.unserved === 1 ? '' : 's'}`;
+      const next = `Next attempt ${fmtUntil(n.until)}.`;
+      switch (d.reason) {
+        case 'rate_limited':
+          return { title: 'Listening statistics delayed',
+                   text: `The network budget is used up — ${who} still wait for their listening statistics. ${next}` };
+        case 'no_sources':
+          return { title: 'No statistics node reachable',
+                   text: `${who} wait for their listening statistics until a node holding the ListenBrainz data is online. ${next}` };
+        case 'missing':
+          return { title: 'Listening statistics not found yet',
+                   text: `No reachable node holds listening statistics for ${who}. ${next}` };
+        default:
+          return { title: 'Listening statistics delayed',
+                   text: `A statistics node did not answer — ${who} still wait for their listening statistics. ${next}` };
+      }
+    },
   };
   NOTICE_COPY['library.mount_missing'] = n => ({
     title: 'Music folder unreachable',
@@ -9940,6 +10009,14 @@
     const n = notices.get('mb_slice.deferred');
     if (!n) return 'Discography is on its way — the catalog data arrives with the next network pass.';
     return `Discography is on its way. ${noticeCopy(n).text}`;
+  }
+
+  /* Same note for the Popular tracks block while the artist's ListenBrainz
+     slice is being asked of the network (routers/artists.py lb_pending). */
+  function lbPendingText() {
+    const n = notices.get('lb_slice.deferred');
+    if (!n) return 'Listening statistics are on their way — the network is being asked.';
+    return `Listening statistics are on their way. ${noticeCopy(n).text}`;
   }
 
   /* Email verification — two-step Worker-mediated flow.
@@ -11748,7 +11825,6 @@
     if (!enabled || !s) return '';
     const totals = s.totals || {};
     const partsArr = [];
-    if (totals.track_stats) partsArr.push(totals.track_stats + ' stats');
     if (totals.lyrics)      partsArr.push(totals.lyrics      + ' lyrics');
     if (totals.artists)     partsArr.push(totals.artists     + ' artists');
     if (totals.genres)      partsArr.push(totals.genres      + ' genres');
@@ -11758,7 +11834,6 @@
     const totalsLine = partsArr.length ? partsArr.join(', ') : 'no items yet';
 
     const stepLabels = {
-      track_stats: 'fetching track stats',
       lyrics:      'fetching lyrics',
       artists:     'fetching artist info',
       genres:      'fetching genre wikis',
@@ -12440,53 +12515,91 @@
      "Streaming library" is the name the user reads; "phantom" is the internal
      term for the same thing and stays in the route, the API, the settings key
      and the CSS. Rename copy, not identifiers. */
-  // MusicBrainz block. It lives with the phantom layer, not the library: the
-  // dump is what mints phantom discographies, and deleting it stops them
-  // updating while touching nothing the user owns. Extracted so it can be
-  // re-rendered IN PLACE (no full render() → no scroll jump) on click /
-  // toggle / job completion.
-  function _mbBlockHTML(mb) {
-    mb = mb || {};
-    const running = !!(mb.update && mb.update.running);
-    const progress = String((mb.update && mb.update.progress) || '');
-    const pct = (mb.update && typeof mb.update.pct === 'number') ? mb.update.pct : null;
-    const err = (!running && mb.update && mb.update.error) ? mb.update.error : '';
+  // Dump blocks — the MusicBrainz catalogue and the ListenBrainz listening
+  // statistics: two opt-in dumps with one job shape on the backend
+  // (dump_job.DumpJob), so one block renderer keyed by family. They live
+  // with the phantom layer, not the library: the catalogue is what mints
+  // phantom discographies, the statistics are what rank them, and deleting
+  // either stops that updating while touching nothing the user owns.
+  // Extracted so a block can be re-rendered IN PLACE (no full render() → no
+  // scroll jump) on click / toggle / job completion.
+  const DUMP_FAMILIES = {
+    mb: {
+      label: 'MusicBrainz database',
+      base: '/api/settings/musicbrainz',
+      // The pitch names what the catalogue buys. Loaded → the dump's own
+      // numbers; not loaded → MusicBrainz's order of magnitude, since the local
+      // tables are empty and cannot sell themselves.
+      pitch: (d) => {
+        const cat = d.catalogue || {};
+        return d.loaded
+          ? `<b>${fmtCompact(cat.albums)} albums</b> and <b>${fmtCompact(cat.recordings)} recordings</b> by <b>${fmtCompact(cat.artists)} artists</b> sit next to your library — every discography browsable, and streamable on tap.`
+          : `Puts <b>4M albums</b> and <b>39M recordings</b> by <b>2.9M artists</b> next to your library — every discography browsable, and streamable on tap.`;
+      },
+      // The price, shown in both states: a benefit with the cost hidden is a
+      // sales pitch. Real figures, not the ~11 GB / ~4 GB this line used to
+      // claim — mb_dump_load ships ARCHIVE_GB 7.5 + TABLES_GB 21 + MARGIN_GB
+      // 2, and the loaded tables measure 20.9 GB. Under-promising it invites
+      // a 7.5 GB download onto a volume that cannot finish.
+      cost: 'Optional · ~21 GB in the database once loaded, plus ~7.5 GB of free space for the download while it installs — the archive is deleted afterwards.',
+      deleteLabel: 'Delete catalogue',
+      deleteTitle: 'Delete the catalogue?',
+      deleteMessage: 'Removes the MusicBrainz tables and the downloaded archives. '
+                   + 'Phantom albums and canonization stop updating until you '
+                   + 'download it again — nothing in your own library is touched.',
+    },
+    lb: {
+      label: 'ListenBrainz listening statistics',
+      base: '/api/settings/listenbrainz',
+      pitch: (d) => {
+        const cat = d.catalogue || {};
+        return d.loaded
+          ? `Listening counts for <b>${fmtCompact(cat.recordings)} recordings</b> by <b>${fmtCompact(cat.artists)} artists</b> — what ranks Popular tracks and the Popularity sort. Open data (CC0), served to other nodes as they need it.`
+          : `Listening counts from ListenBrainz for tens of millions of recordings — what ranks Popular tracks and the Popularity sort. Open data (CC0): a node without it receives per-artist statistics from the nodes that have it.`;
+      },
+      // lb_dump_load ships ARCHIVE_GB 21 + STAGING_GB 4 + TABLES_GB 4 +
+      // MARGIN_GB 2 — the archive figure is real, the rest is calibrated
+      // after the first full run.
+      cost: 'Optional · ~4 GB in the database once loaded, plus ~21 GB of free space for the download while it installs — the archive is deleted afterwards.',
+      deleteLabel: 'Delete statistics',
+      deleteTitle: 'Delete the statistics?',
+      deleteMessage: 'Removes the ListenBrainz tables and the downloaded archive. '
+                   + 'Popular tracks and the Popularity sort keep only what the '
+                   + 'network sends for your artists — nothing in your own library is touched.',
+    },
+  };
+
+  function _dumpBlockHTML(family, d) {
+    const copy = DUMP_FAMILIES[family];
+    d = d || {};
+    const running = !!(d.update && d.update.running);
+    const progress = String((d.update && d.update.progress) || '');
+    const pct = (d.update && typeof d.update.pct === 'number') ? d.update.pct : null;
+    const err = (!running && d.update && d.update.error) ? d.update.error : '';
     // Reference tables the code gained after this dump was loaded: Update
     // fetches just those, and the button asks for it like a first download.
-    const incomplete = mb.loaded && (mb.missing_tables || []).length > 0;
+    const incomplete = d.loaded && (d.missing_tables || []).length > 0;
     const actions = running ? `
-      <div class="action-progress" data-progress-for="mb">${escapeProfileHtml(progress || 'Working…')}</div>
-      <div class="enrich-bar${pct == null ? ' indeterminate' : ''}" data-mb-bar><div class="fill"${pct == null ? '' : ` style="width:${pct}%;"`}></div></div>
+      <div class="action-progress" data-progress-for="${family}">${escapeProfileHtml(progress || 'Working…')}</div>
+      <div class="enrich-bar${pct == null ? ' indeterminate' : ''}" data-${family}-bar><div class="fill"${pct == null ? '' : ` style="width:${pct}%;"`}></div></div>
     ` : `
       ${err ? `<div class="action-progress failed">${escapeProfileHtml('Failed: ' + err)}</div>` : ''}
       ${incomplete ? `<div class="action-progress">New reference tables since this download — Update fetches just those.</div>` : ''}
-      <div class="btn-row${mb.loaded ? '' : ' single'}">
-        <button class="btn ${mb.loaded && !incomplete ? 'btn-secondary' : 'btn-primary'}" data-action="mb-update">${mb.loaded ? 'Update' : 'Download'}</button>
-        ${mb.loaded ? `<button class="btn btn-secondary" data-action="mb-delete">Delete catalogue</button>` : ''}
+      <div class="btn-row${d.loaded ? '' : ' single'}">
+        <button class="btn ${d.loaded && !incomplete ? 'btn-secondary' : 'btn-primary'}" data-action="${family}-update">${d.loaded ? 'Update' : 'Download'}</button>
+        ${d.loaded ? `<button class="btn btn-secondary" data-action="${family}-delete">${copy.deleteLabel}</button>` : ''}
       </div>`;
-    // The pitch names what the catalogue buys. Loaded → the dump's own
-    // numbers; not loaded → MusicBrainz's order of magnitude, since the local
-    // tables are empty and cannot sell themselves.
-    const cat = mb.catalogue || {};
-    const pitch = mb.loaded
-      ? `<b>${fmtCompact(cat.albums)} albums</b> and <b>${fmtCompact(cat.recordings)} recordings</b> by <b>${fmtCompact(cat.artists)} artists</b> sit next to your library — every discography browsable, and streamable on tap.`
-      : `Puts <b>4M albums</b> and <b>39M recordings</b> by <b>2.9M artists</b> next to your library — every discography browsable, and streamable on tap.`;
     return `
-      <div class="profile-group-label">MusicBrainz database</div>
+      <div class="profile-group-label">${copy.label}</div>
       <div class="form-group">
-        <div class="mb-pitch">${pitch}</div>
-        <!-- The price, shown in both states: a benefit with the cost hidden is
-             a sales pitch. Real figures, not the ~11 GB / ~4 GB this line used
-             to claim — mb_dump_load ships ARCHIVE_GB 7.5 + TABLES_GB 21 +
-             MARGIN_GB 2, and the loaded tables measure 20.9 GB. Under-promising
-             it invites a 7.5 GB download onto a volume that cannot finish. -->
-        <div class="form-row stacked"><div class="row-stack-sub">Optional · ~21 GB in the database once loaded, plus ~7.5 GB of free space for the download while it installs — the archive is deleted afterwards.</div></div>
-        <div class="form-row"><span class="form-label">Status</span><span class="form-value">${mb.loaded ? `${fmtNum(mb.total_records)} records · ${escapeProfileHtml(fmtBytes(mb.size_bytes))}` : 'Not downloaded'}</span></div>
-        ${mb.version ? `<div class="form-row"><span class="form-label">Version</span><span class="form-value mono">${escapeProfileHtml(mb.version)}</span></div>` : ''}
-        ${mb.last_update_at ? `<div class="form-row"><span class="form-label">Last update</span><span class="form-value">${escapeProfileHtml(fmtRelative(mb.last_update_at))}</span></div>` : ''}
-        <div class="form-row"><span class="form-label">Automatic update</span><button class="toggle ${mb.auto_update ? 'on' : ''}" data-action="mb-auto" aria-pressed="${mb.auto_update ? 'true' : 'false'}"><span class="knob"></span></button></div>
+        <div class="mb-pitch">${copy.pitch(d)}</div>
+        <div class="form-row stacked"><div class="row-stack-sub">${copy.cost}</div></div>
+        <div class="form-row"><span class="form-label">Status</span><span class="form-value">${d.loaded ? `${fmtNum(d.total_records)} records · ${escapeProfileHtml(fmtBytes(d.size_bytes))}` : 'Not downloaded'}</span></div>
+        ${d.version ? `<div class="form-row"><span class="form-label">Version</span><span class="form-value mono">${escapeProfileHtml(d.version)}</span></div>` : ''}
+        ${d.last_update_at ? `<div class="form-row"><span class="form-label">Last update</span><span class="form-value">${escapeProfileHtml(fmtRelative(d.last_update_at))}</span></div>` : ''}
+        <div class="form-row"><span class="form-label">Automatic update</span><button class="toggle ${d.auto_update ? 'on' : ''}" data-action="${family}-auto" aria-pressed="${d.auto_update ? 'true' : 'false'}"><span class="knob"></span></button></div>
       </div>
-      <div data-mb-actions>${actions}</div>`;
+      <div data-${family}-actions>${actions}</div>`;
   }
 
   /* Hardware profile block (Profile screen) — read-only info. Selection is
@@ -12525,24 +12638,23 @@
       </div>`;
   }
 
-  function _wireMb(root) {
+  function _wireDump(root, family) {
+    const copy = DUMP_FAMILIES[family];
     const onA = (sel, fn) => root.querySelectorAll(sel).forEach(el => el.addEventListener('click', fn));
-    onA('[data-action="mb-update"]', async () => {
+    onA(`[data-action="${family}-update"]`, async () => {
       // Button → progress UI in place; SSE animates from here. No render().
-      const wrap = root.querySelector('[data-mb-actions]');
-      if (wrap) wrap.innerHTML = `<div class="action-progress" data-progress-for="mb">Starting…</div><div class="enrich-bar indeterminate" data-mb-bar><div class="fill"></div></div>`;
-      await fetch('/api/settings/musicbrainz/update', { method: 'POST' });
+      const wrap = root.querySelector(`[data-${family}-actions]`);
+      if (wrap) wrap.innerHTML = `<div class="action-progress" data-progress-for="${family}">Starting…</div><div class="enrich-bar indeterminate" data-${family}-bar><div class="fill"></div></div>`;
+      await fetch(`${copy.base}/update`, { method: 'POST' });
     });
-    onA('[data-action="mb-delete"]', (e) => onceInFlight(e.currentTarget, async () => {
+    onA(`[data-action="${family}-delete"]`, (e) => onceInFlight(e.currentTarget, async () => {
       const ok = await window.confirmDestructive({
-        title: 'Delete the catalogue?',
-        message: 'Removes the MusicBrainz tables and the downloaded archives. '
-               + 'Phantom albums and canonization stop updating until you '
-               + 'download it again — nothing in your own library is touched.',
+        title: copy.deleteTitle,
+        message: copy.deleteMessage,
         confirmText: 'Delete',
       });
       if (!ok) return;
-      const r = await fetch('/api/settings/musicbrainz/delete', { method: 'POST' });
+      const r = await fetch(`${copy.base}/delete`, { method: 'POST' });
       if (!r.ok) {
         const d = await r.json().catch(() => ({}));
         await window.notifyDialog({ title: 'Could not delete', kind: 'error',
@@ -12551,12 +12663,12 @@
       }
       render();
     }));
-    onA('[data-action="mb-auto"]', (e) => {
+    onA(`[data-action="${family}-auto"]`, (e) => {
       const btn = e.currentTarget;
       const want = !btn.classList.contains('on');
       btn.classList.toggle('on', want);                 // optimistic flip, no render
       btn.setAttribute('aria-pressed', want ? 'true' : 'false');
-      serialized('mb.auto', () => fetch('/api/settings/musicbrainz', { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ auto_update: want }) }));
+      serialized(`${family}.auto`, () => fetch(copy.base, { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ auto_update: want }) }));
     });
   }
 
@@ -12693,13 +12805,15 @@
     root.innerHTML = `
       <section class="screen screen-settings">
         ${_settingsHeader('Streaming library')}
-        <div data-mb-block>${_mbBlockHTML(ph.musicbrainz)}</div>
+        <div data-mb-block>${_dumpBlockHTML('mb', ph.musicbrainz)}</div>
+        <div data-lb-block>${_dumpBlockHTML('lb', ph.listenbrainz)}</div>
         <div data-phantom-block>${_phantomBlockHTML(ph)}</div>
       </section>
     `;
     _wireBack(root);
     _wirePhantoms(root);
-    _wireMb(root);
+    _wireDump(root, 'mb');
+    _wireDump(root, 'lb');
     _subscribePhantomStream(root);
   }
 
@@ -12735,29 +12849,30 @@
         if (pct == null) { bar.classList.add('indeterminate'); if (fill) fill.style.width = ''; }
         else { bar.classList.remove('indeterminate'); if (fill) fill.style.width = pct + '%'; }
       }
-      const mb = ph.musicbrainz || {};
-      const mbRunning  = !!(mb.update && mb.update.running);
-      const mbProgress = String((mb.update && mb.update.progress) || '');
-      const mbLine = root.querySelector('[data-progress-for="mb"]');
-      if (mbLine && mbProgress && mbLine.textContent !== mbProgress) mbLine.textContent = mbProgress;
-      const mbBar = root.querySelector('[data-mb-bar]');
-      if (mbBar) {
-        const pct = (mb.update && typeof mb.update.pct === 'number') ? mb.update.pct : null;
-        const fill = mbBar.querySelector('.fill');
-        if (pct == null) { mbBar.classList.add('indeterminate'); if (fill) fill.style.width = ''; }
-        else { mbBar.classList.remove('indeterminate'); if (fill) fill.style.width = pct + '%'; }
-      }
-
       // Either job finishing → re-render its own block IN PLACE, so the counts
       // and the action row catch up without scrolling the page back to the top.
       const block = root.querySelector('[data-phantom-block]');
       if (block && !running && root.querySelector('[data-progress-for="phantoms"]')) {
         block.innerHTML = _phantomBlockHTML(ph);   // delegated listener survives the swap
       }
-      const mbBlockEl = root.querySelector('[data-mb-block]');
-      if (mbBlockEl && root.querySelector('[data-progress-for="mb"]') && !mbRunning) {
-        mbBlockEl.innerHTML = _mbBlockHTML(mb);
-        _wireMb(root);
+      for (const family of ['mb', 'lb']) {
+        const d = (family === 'mb' ? ph.musicbrainz : ph.listenbrainz) || {};
+        const jobRunning  = !!(d.update && d.update.running);
+        const jobProgress = String((d.update && d.update.progress) || '');
+        const jobLine = root.querySelector(`[data-progress-for="${family}"]`);
+        if (jobLine && jobProgress && jobLine.textContent !== jobProgress) jobLine.textContent = jobProgress;
+        const jobBar = root.querySelector(`[data-${family}-bar]`);
+        if (jobBar) {
+          const pct = (d.update && typeof d.update.pct === 'number') ? d.update.pct : null;
+          const fill = jobBar.querySelector('.fill');
+          if (pct == null) { jobBar.classList.add('indeterminate'); if (fill) fill.style.width = ''; }
+          else { jobBar.classList.remove('indeterminate'); if (fill) fill.style.width = pct + '%'; }
+        }
+        const blockEl = root.querySelector(`[data-${family}-block]`);
+        if (blockEl && jobLine && !jobRunning) {
+          blockEl.innerHTML = _dumpBlockHTML(family, d);
+          _wireDump(root, family);
+        }
       }
     }
 

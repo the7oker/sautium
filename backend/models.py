@@ -231,7 +231,6 @@ class Track(Base):
     embedding = relationship("Embedding", back_populates="track", uselist=False, cascade="all, delete-orphan")
     text_embedding = relationship("TextEmbedding", back_populates="track", uselist=False, cascade="all, delete-orphan")
     audio_feature = relationship("AudioFeature", back_populates="track", uselist=False, cascade="all, delete-orphan")
-    stats = relationship("TrackStats", back_populates="track", cascade="all, delete-orphan")
     local_play_stats = relationship("LocalPlayStats", back_populates="track", uselist=False, cascade="all, delete-orphan")
     lyrics = relationship("TrackLyrics", back_populates="track", cascade="all, delete-orphan")
     lyrics_embeddings = relationship("LyricsEmbedding", back_populates="track", cascade="all, delete-orphan")
@@ -1131,34 +1130,6 @@ class LocalPlayStats(Base):
 
     def __repr__(self):
         return f"<LocalPlayStats(track_id={self.track_id}, play_count={self.play_count})>"
-
-
-class TrackStats(Base):
-    """Track popularity statistics from external sources (Last.fm, etc)."""
-    __tablename__ = "track_stats"
-
-    id = Column(Integer, primary_key=True)
-    track_id = Column(UUID(as_uuid=True), ForeignKey("tracks.id", ondelete="CASCADE", onupdate="CASCADE"), nullable=False)
-    source = Column(String(50), nullable=False)
-
-    listeners = Column(Integer)
-    playcount = Column(BigInteger)
-
-    created_at = Column(DateTime(timezone=True), server_default=func.now())
-    updated_at = Column(DateTime(timezone=True), server_default=func.now())
-
-    track = relationship("Track", back_populates="stats")
-
-    __table_args__ = (
-        UniqueConstraint("track_id", "source", name="uq_track_stats"),
-        CheckConstraint("listeners IS NOT NULL OR playcount IS NOT NULL", name="chk_has_track_stats"),
-        Index("idx_track_stats_source", "source"),
-        Index("idx_track_stats_listeners", "listeners"),
-        Index("idx_track_stats_playcount", "playcount"),
-    )
-
-    def __repr__(self):
-        return f"<TrackStats(track_id={self.track_id}, source='{self.source}')>"
 
 
 class TrackLyrics(Base):

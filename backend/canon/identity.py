@@ -210,11 +210,6 @@ def _update_track_uuid(db: Session, old_id, new_id) -> str:
             ON CONFLICT DO NOTHING"""), p)
         # One-per-(track, key) tables: move what the target lacks.
         db.execute(text("""
-            UPDATE track_stats ts SET track_id = :new
-            WHERE ts.track_id = :old
-              AND NOT EXISTS (SELECT 1 FROM track_stats x
-                               WHERE x.track_id = :new AND x.source = ts.source)"""), p)
-        db.execute(text("""
             UPDATE track_lyrics tl SET track_id = :new
             WHERE tl.track_id = :old
               AND NOT EXISTS (SELECT 1 FROM track_lyrics x

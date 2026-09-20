@@ -39,7 +39,7 @@ this file carries the mechanics.
   change to `normalize`/`normalize_key`; never change the rule without it.
 - **Trying DDL out** happens on the rehearsal database, not the live one:
   restore the latest `data/backup/*.dump` into `music_ai_test`
-  (`pg_restore -L` without the `mb_*` data), run the delta there, then
+  (`pg_restore -L` without the `mb_*` / `lb_*` data), run the delta there, then
   commit it as `NNN_*.sql` and let the runner apply it (restart the
   backend).
 - **PostgreSQL ENUM type changes** require this exact sequence (a straight

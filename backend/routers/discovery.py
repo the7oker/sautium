@@ -68,6 +68,32 @@ def _wake_mb_clients() -> None:
         loop.call_soon_threadsafe(evt.set)
 
 
+# The ListenBrainz slice cycle's "a slice landed" wake (sautium_lb_done):
+# payload-free, the open artist page re-fetches its own snapshot. Rides the
+# same listener connection as the mb-sources channel.
+_lb_sse_clients: list = []
+
+
+def lb_sse_register(evt, loop) -> None:
+    with _mb_sse_lock:
+        _lb_sse_clients.append((evt, loop))
+
+
+def lb_sse_unregister(evt, loop) -> None:
+    with _mb_sse_lock:
+        try:
+            _lb_sse_clients.remove((evt, loop))
+        except ValueError:
+            pass
+
+
+def _wake_lb_clients() -> None:
+    with _mb_sse_lock:
+        clients = list(_lb_sse_clients)
+    for evt, loop in clients:
+        loop.call_soon_threadsafe(evt.set)
+
+
 def _mb_db_listener() -> None:
     while _mb_listener_running:
         conn = None
@@ -77,13 +103,18 @@ def _mb_db_listener() -> None:
                 psycopg2.extensions.ISOLATION_LEVEL_AUTOCOMMIT)
             with conn.cursor() as cur:
                 cur.execute("LISTEN sautium_mb_sources")
+                cur.execute("LISTEN sautium_lb_done")
             while _mb_listener_running:
                 ready = select.select([conn], [], [], 1)
                 if ready[0]:
                     conn.poll()
-                    if conn.notifies:
-                        conn.notifies.clear()
+                    fired = set()
+                    while conn.notifies:
+                        fired.add(conn.notifies.pop(0).channel)
+                    if "sautium_mb_sources" in fired:
                         _wake_mb_clients()
+                    if "sautium_lb_done" in fired:
+                        _wake_lb_clients()
         except Exception as e:
             logger.debug(f"mb sources listener error: {e}")
             if _mb_listener_running:
