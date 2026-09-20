@@ -166,6 +166,22 @@ def notify(dsn: str, channel: str) -> None:
         conn.close()
 
 
+def clear_status(dsn: str) -> bool:
+    """Drop the cycle's status row — a dump node asks nobody, so a status
+    written before its load landed ("no source reachable") would otherwise
+    keep the derived notice alive for good. True when a row was dropped."""
+    conn = _connect(dsn)
+    try:
+        with conn.cursor() as cur:
+            cur.execute("DELETE FROM user_settings WHERE key = %s", (STATUS_KEY,))
+            dropped = cur.rowcount > 0
+            if dropped:
+                cur.execute("NOTIFY sautium_notices")
+        return dropped
+    finally:
+        conn.close()
+
+
 class LbSliceCycle:
     """One node's LB slice requester. Construct once per process, `bind()`
     on the event loop that will run `dispatch_loop`/`interval_loop`, then
@@ -376,7 +392,10 @@ class LbSliceCycle:
         if not self.config.get("fetch", True):
             return {}
         if await loop.run_in_executor(None, local_dump_available, self.db_dsn):
-            return {}   # a dump node serves; it has nothing to ask for
+            # A dump node serves; it has nothing to ask for — and nothing to
+            # report: a status left from before its load must not outlive it.
+            await loop.run_in_executor(None, clear_status, self.db_dsn)
+            return {}
 
         sources, newest = await self.find_sources()
         pending = await loop.run_in_executor(
