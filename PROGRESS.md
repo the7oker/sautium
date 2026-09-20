@@ -998,6 +998,51 @@ GitHub release asset. All four stopped in one change; P2P_NETWORK.md §
   (announce tail, carry order, rare-key search), gender/vocalist
   classification from the node's own bios, scrobbling.
 
+### Last.fm attribution in the UI (2026-09-20)
+
+The companion to the node-local change above: that fixed what the node
+**sends**, this fixes what it **shows**. Clause 2.7 of the Last.fm API terms
+wants a credit AND a link from displayed catalog data back to the matching
+Last.fm page; nothing in the UI credited Last.fm at all, and `trimLastFmTail`
+was cutting Last.fm's own `Read more on Last.fm` tail out of every bio. The
+Artist and Genre screens now end with `data from Last.fm`, linking to the
+artist's `/music/…` page and the genre's `/tag/…` page.
+
+- **Why not the literal phrase.** Clause 2.7 says to use one of the
+  `powered by AudioScrobbler` buttons from `last.fm/resources`. That page is
+  **404** — the asset the clause points at no longer exists, so the clause
+  cannot be performed literally and what survives is its substance, which
+  clause 4.2.2 states plainly: credit **Last.fm**. The archaic phrase never
+  contains those words, so a reader learns nothing from it; naming Last.fm
+  and linking to it performs the real obligation better, and adds credit
+  rather than removing it. What would cross the line is the opposite
+  direction — implying endorsement ("in partnership with"), dropping the
+  link, or hiding the credit behind a tap.
+- **The URLs were already in the database.** `artist_bios.url` (36 793 rows)
+  and `genre_descriptions.url` (2 322 — every genre entity) are pylast's
+  `get_url()` output, populated at enrichment time and selected by nothing
+  until now. Lower-cased and double-encoded (`ac%252fdc`), which looks broken
+  and resolves fine. No new API call, no schema change, no URL builder of our
+  own — the credit links to what the node actually stored.
+- **`lastfm_url` survives the namesake nulling.** The bio is nulled off a
+  non-dominant namesake because it is the merged "more than one artist named
+  X" blob; the URL is name-keyed, so it is the right page for every namesake.
+  On the lean namesake page the credit is the second provenance line under
+  the existing `metadata from MusicBrainz` end-cap, sharing its divider.
+- **Credit what was stored, not what might exist.** No artist has Last.fm
+  tags or similar-artist edges without a bio row, so every page showing
+  Last.fm prose, chips or similars carries the credit. 46 of 3 899 artists
+  (1.2 %) have Last.fm `track_stats` but no bio yet — featured artists the
+  engagement-gated `enrich_bios` has not reached. They show no credit until
+  it does, which is self-healing and beats a second, hand-rolled URL source.
+- **The connected account links to its Last.fm page.** Clause 2.7 names the
+  `/user/<name>` link specifically, so Profile › Account › Last.fm renders
+  the username as a link to it.
+- **Scope is otherwise Artist and Genre.** Deliberately uncredited: album
+  genre chips that fall back to the artist's Last.fm tags, Discovery's
+  bio-search scope, the 226 covers from `album.getInfo`, and assistant
+  answers. No global footer credit.
+
 ## Known Gotchas
 
 - **Loopback targets are addresses, never `localhost`.** Windows resolves the

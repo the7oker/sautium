@@ -212,14 +212,14 @@ current tab stack (changes hash).
 
 | Screen | Pushed by | Contents |
 |--------|-----------|----------|
-| **Artist** | Tap on artist name (anywhere) | Hero (name, photo if available), bio (Last.fm), tags, albums grid, popular tracks, similar artists |
+| **Artist** | Tap on artist name (anywhere) | Hero (name, photo if available), bio (Last.fm), tags, albums grid, popular tracks, similar artists, Last.fm credit end-cap |
 | **Album** | Tap on album cover / title | Cover hero, metadata row (year · duration · format badge), genre chips on a separate row (up to 3), tracklist, **Play all** + **+ Queue** actions. A streaming-library (phantom) album wears a neutral `[demo]` badge in the metadata row beside the streamed-quality badge, its actions are **Stream all** · **Buy** · **+ Queue**, and a row that will play as a 30 s excerpt carries a `30s` tag beside its duration |
-| **Genre** | Tap on a genre chip (from Album / Artist / Discovery) | Hero banner with genre name, description prose, top artists / albums / tracks in genre, related-genre chip strip |
+| **Genre** | Tap on a genre chip (from Album / Artist / Discovery) | Hero banner with genre name, description prose, top artists / albums / tracks in genre, related-genre chip strip, Last.fm credit end-cap |
 | **Queue** (current playlist) | Queue button on Now Playing sheet, or `#queue` direct | Current queue with playing-track highlighted, drag-reorder, swipe-remove, Clear queue, Shuffle queue (future), summary "N tracks · HH:MM". The full list is rendered — no "and N more" truncation. |
 | **Queue history item** | Tap on "Recent queues" row | Snapshot preview + Restore action (loads queue, does not auto-play) |
 | **HQPlayer config** | From More | Status, host, port, filter / matrix / dither selector — read/write HQP state |
 | **DSP / Signal Chain** | From More or Now Playing "→ HQPlayer" icon | Deep HQP DSP controls: filter, oversampling, dither, digital attenuation stepper, matrix profile |
-| **Profile (own)** | From More → Profile entry | Identity card (avatar, name, @login, invite, city, bio), account (email + verify, password, Last.fm, scrobbling), audio chain (gear list), sociability placeholder |
+| **Profile (own)** | From More → Profile entry | Identity card (avatar, name, @login, invite, city, bio), account (email + verify, password, Last.fm — the connected username links to its Last.fm page, scrobbling), audio chain (gear list), sociability placeholder |
 | **Profile (viewing other)** | Tap on a user from friend chat header / friend list / future Discover-people | Read-only identity card, public audio chain (if owner opted in), match indicator (placeholder copy), CTAs (Send message · Add as friend) |
 | **Gear item detail** | Tap on a gear card from Profile | Sheet: header (brand · model · category · status), research panel (3 states), AI personalised take (only if agent active), My notes |
 | **Friend profile / chat thread** | Tap on friend in list | Chat messages, send-message input, identity info |
@@ -763,6 +763,7 @@ or is a thin query over existing data.
 | Albums | albums where this artist appears in `track_artists`, sorted by year | — |
 | Popular tracks | `local_play_stats` filtered to this artist's tracks | + Last.fm `artist.getTopTracks` for global popularity |
 | Similar artists | `similar_artists` (Last.fm imported) | + BGE-M3 vector similarity on bios |
+| Credit end-cap | `artist_bios.url` — `data from Last.fm` linking to this artist's Last.fm page. Required by clause 2.7 of the Last.fm API terms wherever their data is displayed; hidden when the artist has no Last.fm row | — |
 
 ### Album
 
@@ -784,6 +785,7 @@ or is a thin query over existing data.
 | Top albums | local plays aggregated per album within genre | + `tag.getTopAlbums` (LFM) |
 | Top tracks | local plays per track within genre | + `tag.getTopTracks` (LFM) |
 | Related genres | **co-occurrence** in library: genres sharing tracks with this one, ranked by shared-track count | + BGE-M3 cosine on `genre_desc_embeddings` (already exist) |
+| Credit end-cap | `genre_descriptions.url` — `data from Last.fm` linking to this genre's Last.fm tag page. Same clause-2.7 requirement as the Artist screen | — |
 
 All Genre blocks roll up into a single `(new endpoint)` GET
 `/genres/:id` that returns aggregated payload — saves the UI from

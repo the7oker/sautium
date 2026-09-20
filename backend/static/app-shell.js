@@ -4795,6 +4795,17 @@
     return text.trim();
   }
 
+  /* Clause 2.7 of the Last.fm API terms: where Last.fm data is displayed,
+     credit Last.fm and link back to the catalog page it came from. The clause
+     asks for a "powered by AudioScrobbler" button off last.fm/resources — that
+     page is 404, and the phrase never says "Last.fm", which is the name
+     clause 4.2.2 actually requires crediting. The url is artist_bios.url /
+     genre_descriptions.url, stored at enrichment time. */
+  function lastfmCreditHtml(url) {
+    if (!url) return '';
+    return `<div class="source-credit"><a href="${escapeHtml(url)}" target="_blank" rel="noopener">data from Last.fm</a></div>`;
+  }
+
   /* Prose block shared by the artist bio and the album description: the
      summary up front, the full text behind "See more". Callers pass text
      already run through stripHtml + trimLastFmTail. */
@@ -5130,6 +5141,7 @@
           That’s the full profile for this ${escapeHtml(d.name || '')}.
           <span class="mb"><svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="9"/><path d="M12 8v.5M11 12h1v4h1"/></svg> metadata from MusicBrainz</span>
         </div>
+        ${lastfmCreditHtml(d.lastfm_url)}
         <div style="height: calc(24 * var(--px));"></div>`;
     } else {
       screen.innerHTML = `
@@ -5148,6 +5160,7 @@
         ${pointerHtml}
         ${pendingHtml}
         ${sectionsHtml}
+        ${lastfmCreditHtml(d.lastfm_url)}
         <div style="height: calc(24 * var(--px));"></div>`;
     }
 
@@ -6846,6 +6859,7 @@
         </div>
         <div class="artists-grid">${artistsHtml}</div>
       ` : ''}
+      ${lastfmCreditHtml(d.lastfm_url)}
     `;
 
     screen.querySelector('[data-action="back"]')?.addEventListener('click', () => goBack());
@@ -9436,7 +9450,11 @@
                 <div class="form-row">
                   <span class="form-label">Last.fm</span>
                   <span class="form-actions">
-                    <span class="form-value">${escapeProfileHtml(lfmUser || 'connected')}</span>
+                    <span class="form-value">${lfmUser
+                      ? `<a class="form-value-link" target="_blank" rel="noopener"
+                            href="https://www.last.fm/user/${encodeURIComponent(lfmUser)}"
+                         >${escapeProfileHtml(lfmUser)}</a>`
+                      : 'connected'}</span>
                     <span class="verified">${PROFILE_ICONS.check}connected</span>
                   </span>
                 </div>

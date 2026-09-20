@@ -95,7 +95,14 @@ Sautium. Source: https://github.com/quodlibet/mutagen.
   as desktop scrobblers do; scrobbling still needs the user's own session
   authorisation. What the API answers stays on the node that asked: it is
   not part of the P2P protocol, the share export or the seed bundle — every
-  node fetches its own.
+  node fetches its own. Clause 2.7 of those terms is honoured in the UI: the
+  Artist and Genre screens end with a `data from Last.fm` credit linking back
+  to that artist's or tag's own Last.fm page (the clause asks for a `powered
+  by AudioScrobbler` button off `last.fm/resources`, a page that is now 404
+  and a phrase that never names Last.fm — the name clause 4.2.2 requires
+  crediting), and the connected account in Profile links to its
+  `last.fm/user/<name>` page. Clause 3.1 limits the data to non-commercial
+  use, which is where Sautium's own licence already sits.
 - **MusicBrainz** — metadata and the optional local database dump (data under
   CC0 / CC BY-NC-SA as published by MetaBrainz); API use follows the
   MusicBrainz rate and user-agent rules.

@@ -2511,6 +2511,29 @@ body.sautium-base {
   margin-top: calc(6 * var(--px));
 }
 
+/* Last.fm credit + catalog link (API terms, clause 2.7). Same provenance-stamp
+   treatment as .lean-endcap .mb above — mono here is a stamp, not prose. */
+.source-credit {
+  margin: calc(26 * var(--px)) calc(20 * var(--px)) 0;
+  padding: calc(14 * var(--px)) 0 0;
+  border-top: 1px solid var(--color-divider);
+  text-align: center;
+}
+.source-credit a {
+  display: inline-flex; align-items: center; gap: calc(5 * var(--px));
+  font-family: var(--font-mono);
+  font-size: calc(10.5 * var(--px));
+  color: var(--color-text-dim);
+  letter-spacing: 0.04em;
+}
+.source-credit a:active { color: var(--color-amber); }
+/* Second provenance line under the namesake end-cap — one divider, not two. */
+.lean-endcap + .source-credit {
+  border-top: 0;
+  margin-top: calc(6 * var(--px));
+  padding-top: 0;
+}
+
 /* ---- Album hero ---- */
 .album-hero {
   position: relative;
@@ -4727,6 +4750,15 @@ body.sautium-base {
 }
 .form-value.muted { color: var(--color-text-dim); font-weight: 400; }
 .form-value.action { color: var(--color-amber); font-weight: 600; }
+/* The Last.fm username links to that user's Last.fm page — clause 2.7 of the
+   API terms asks for it wherever a Last.fm account is shown. Underlined
+   because nothing else in the row says it is tappable. */
+.form-value-link {
+  text-decoration: underline;
+  text-decoration-color: var(--color-text-dim);
+  text-underline-offset: calc(3 * var(--px));
+}
+.form-value-link:active { color: var(--color-amber); }
 .form-actions {
   display: inline-flex;
   gap: calc(8 * var(--px));

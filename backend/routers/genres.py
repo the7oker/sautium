@@ -45,7 +45,7 @@ def get_genre(genre_id: str) -> dict:
         raise HTTPException(status_code=404, detail="genre not found")
 
     desc = db_query_one("""
-        SELECT summary, content, source
+        SELECT summary, content, source, url
         FROM genre_descriptions
         WHERE genre_id = %(id)s::uuid
         ORDER BY
@@ -54,6 +54,9 @@ def get_genre(genre_id: str) -> dict:
         LIMIT 1
     """, {"id": genre_id})
     genre["description"] = (desc and (desc["summary"] or desc["content"])) or None
+    # The Last.fm tag page behind the description, the artist ranking and the
+    # popular tracks — the credit link clause 2.7 of the API terms requires.
+    genre["lastfm_url"] = desc["url"] if desc else None
 
     # The hero banner shows the photo of the top-ranked artist —
     # picked at render time from genre["artists"][0] on the

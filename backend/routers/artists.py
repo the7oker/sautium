@@ -199,12 +199,16 @@ def get_artist(
         album_filter_av = "AND av.album_id = ANY(%(album_ids)s::uuid[])"
 
     bio_row = db_query_one("""
-        SELECT content, summary
+        SELECT content, summary, url
         FROM artist_bios
         WHERE artist_id = %(id)s::uuid
     """, {"id": artist_id})
     artist["bio"] = bio_row["content"] if bio_row else None
     artist["bio_summary"] = bio_row["summary"] if bio_row else None
+    # The Last.fm page this artist's bio, tags, stats and similars came from —
+    # the credit link clause 2.7 of the API terms requires. Name-keyed, so it
+    # survives the namesake nulling below: every namesake of the name shares it.
+    artist["lastfm_url"] = bio_row["url"] if bio_row else None
 
     # The Last.fm bio is the merged "there is more than one artist named X"
     # blob describing ALL namesakes, so it belongs only on the dominant landing.
