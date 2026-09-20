@@ -202,45 +202,12 @@ See:
 
 - **Schema = `desktop/migrations/001_initial.sql` + numbered deltas.** 001
   is the fresh-install baseline and the single readable source of truth —
-  fold every schema change into it. Since 2026-08-25 there are external
-  nodes to support (the first appeared that night, schema from 001, no
-  data yet), so every schema change ALSO ships as `NNN_<change>.sql`, an
-  IDEMPOTENT delta (`IF NOT EXISTS`, `DROP CONSTRAINT IF EXISTS` + `ADD`,
-  `DO $$ … EXCEPTION WHEN duplicate_object`) for databases that already ran
-  the earlier files — the same DDL as the 001 block it mirrors
-  (`002_invite_tokens.sql`, `003_gear_fk_cascade.sql` are the pattern). A
-  fresh node runs 001 and then every delta, so a delta must be a no-op on
-  the schema 001 just created. Never ALTER a node by hand.
-- **One runner, every node.** `desktop/db_init.apply_migrations` applies
-  pending files in name order and records them in `_schema_migrations`.
-  The launcher calls it at service start and after an update
-  (`updater.has_new_migrations` = an added `migrations/*.sql` in the
-  pulled range); the backend calls `backend/db_migrate.apply_pending()` in
-  its lifespan before anything serves — Docker included, so the master no
-  longer needs hand-applied DDL (it adopted 001 as its baseline on
-  2026-08-25; `adopt_baseline` does that for any pre-runner database). A
-  node only receives a delta once it is committed and pushed.
-- **Data migrations are Python steps in `backend/db_migrate.py`**, keyed
-  by marker rows in the same table (`identity_rule_v{N}`): the identity
-  rule (`uuid_utils.IDENTITY_RULE`) is re-normalized at startup when the
-  recorded rule is older than the code's. Bump the constant with every
-  change to `normalize`/`normalize_key`; never change the rule without it.
-- **Trying DDL out** happens on the rehearsal database, not the live one:
-  restore the latest `data/backup/*.dump` into `music_ai_test`
-  (`pg_restore -L` without the `mb_*` data), run the delta there, then
-  commit it as `NNN_*.sql` and let the runner apply it (restart the
-  backend).
-- **PostgreSQL ENUM type changes** require this exact sequence (a straight
-  `ALTER TYPE` fails):
-  ```
-  ALTER TABLE t ALTER COLUMN c DROP DEFAULT;
-  ALTER TABLE t DROP CONSTRAINT IF EXISTS chk_c;
-  ALTER TABLE t ALTER COLUMN c TYPE new_enum USING c::new_enum;
-  ALTER TABLE t ALTER COLUMN c SET DEFAULT 'x'::new_enum;
-  ```
-- **SQLAlchemy ENUM** uses `postgresql.ENUM(..., create_type=False)` — the
-  SQL migration owns type creation so `Base.metadata.create_all()` stays
-  lightweight and tests don't try to recreate existing types.
+  fold every schema change into it AND ship the same DDL as an IDEMPOTENT
+  `NNN_<change>.sql` delta for the external nodes that already ran the
+  earlier files. One runner applies pending files on every node; never
+  ALTER a node by hand. The runner, data-migration steps, the rehearsal
+  database and the ENUM change sequence load with `desktop/migrations/`
+  (`.claude/rules/db-migrations.md`).
 - **pgvector parameter binding**: `text("... <=> :qvec::vector ...")` plus
   `db.execute(sql, {"qvec": _to_vector_param(v), ...})`. The double-colon
   cast is mandatory.
@@ -309,9 +276,7 @@ See:
 
 ## Docker & Runtime Layout
 
-- `sautium-postgres` — PostgreSQL 18 + pgvector. Credentials `musicai/supervisor`, DB `music_ai`. Persistent volume `./data/postgres/`.
-- `sautium-backend` — FastAPI on `0.0.0.0:8000`, exposed to host at `localhost:8800`. GPU access via NVIDIA runtime. Also owns **play tracking** (`listening_history` + `local_play_stats` + Last.fm scrobbling) inside its status poller — keyed source-agnostically on `track_id`, so streamed phantom plays track like owned files. There is **no separate tracker daemon** (consolidated 2026-06-30; the old `sautium-playback-tracker` was retired).
-- Music library mounted read-only: `E:\Music` → `/music:ro` inside backend.
+- `sautium-backend` owns **play tracking** (`listening_history` + `local_play_stats` + Last.fm scrobbling) inside its status poller — keyed source-agnostically on `track_id`, so streamed phantom plays track like owned files. There is **no separate tracker daemon** (consolidated 2026-06-30; the old `sautium-playback-tracker` was retired).
 - Launcher tree mounted read-only: `./desktop` → `/app/desktop:ro`, so the peer
   surface imports `desktop.sync_client.import_pushed`,
   `desktop.p2p.sync_queries` and the whole pull side,
@@ -320,7 +285,6 @@ See:
   of mirroring them. Anything the two surfaces must agree on *exactly* — the
   seal-verification gate, the carry SQL, the DHT announce query, the walk —
   lives there and is imported, not copied.
-- Model cache external: `./data/cache` → `/root/.cache`.
 - Identity documents: `./data/node_identity` → `/app/data/node_identity`
   (`birth_certificate.json` + `identity_proof.json` — the Docker node derives
   its KEY in memory, but the Worker-issued certificate and the mined
@@ -539,55 +503,23 @@ toast takes no pointer events and never blocks the user (see
 
 | File | Purpose |
 |------|---------|
-| `backend/playback/` | Output-backend abstraction: PlaybackManager + canonical queue, HQPlayer backend, play tracker, listening sessions (HARDWARE-TIERS §2.6) |
-| `backend/lastfm.py` | Last.fm enrichment + bio-derived classifiers |
-| `backend/assistant_prompt.py` | System prompt + schema description for Claude Code + API variants |
 | `backend/device_auth.py` | Device tokens (derived from the epoch + node key, never stored) and the boxed credential channel every login/pair/create-account/logout-all/change-identity exchange rides — the Web UI has no TLS (rule 8) |
 | `desktop/agent_login.py` | Headless CLI sign-in driver (`claude auth login`, `codex login [--device-auth]` over pipes) shared by the wizard and the backend's `/api/settings/ai/<agent>/signin` — no console, completion is an event |
-| `backend/ensemble_instruments.py` | AST + PaSST instrument multi-label tagger (replaces CLAP zero-shot) |
 | `docs/design/POSITIONING.md` | Product positioning + UI design principles (source of truth) |
 | `docs/design/INFORMATION-ARCHITECTURE.md` | Navigation model, screen inventory, state flows (source of truth for UI layout) |
 | `docs/design/reference/claude-design-bundle/` | Claude Design handoff bundle — visual-intent reference |
-| `desktop/p2p/identity_pow.py` | Identity proof-of-work primitive (2 GiB Argon2id hashcash, difficulty = expected attempts) |
-| `desktop/p2p/identity_proof.py` | Proof file + the background miner policy shared by launcher and Docker |
-| `desktop/p2p/identity_registry.py` | `p2p_identities` registry + lazy `IdentityGate` (one-time proof verification, bans) |
-| `desktop/p2p/peer_auth.py` | Wire format v1: peer request signatures, cert introduction, lanes |
-| `backend/routers/sync.py` | Backend sync endpoints (P2P protocol) |
-| `desktop/p2p/diag_protocol.py` | Support diagnostics wire protocol: signed node-bound warrants, boxed bundles/reports, scope enum, log scrubbing |
-| `desktop/p2p/diag_events.py` | Node-local incident log (`diag_events`), pre-DB spool + session marker, the per-warrant state machine |
-| `desktop/diag_bundle.py` | Launcher bundle collector — fixed collectors per scope with settings/config allowlists |
-| `backend/routers/peer_diag.py` | Master peer-surface ingress (`/api/diag/report`, `/api/diag/bundle`) + warrant dispatch down wake streams |
-| `backend/routers/support.py` | The support desk on 8800 (`/api/support/*`, master-only): nodes overview, reports, warrants, bundle open/delete |
-| `mcp/support_server.py` | MCP server for the support desk — how the maintainer works support from Claude Code |
-| `backend/routers/p2p.py` | Web UI Friends/Chat/invite-token endpoints |
-| `backend/p2p_app.py` | Docker peer surface (8801): sync + chat/relay |
-| `backend/routers/peer_chat.py` | Peer chat + `/api/relay/*` (mirrors sync_server) |
 | `backend/master_node.py` | Shipped master identity pins (mirrored in desktop/p2p/) |
 | `backend/invite_tokens.py` | Invite tokens + signed grants (mirrored in desktop/p2p/) |
-| `backend/dht_service.py` | Docker backend libtorrent DHT integration |
-| `desktop/node_identity.py` | Ed25519 identity + account system (Argon2id) |
-| `desktop/sync_client.py` | Sync client + the seal-verifying import gate (`import_pushed` for carry) |
-| `desktop/p2p/sync_queries.py` | Shared SQL logic (pull handlers, carry offer/wanted, DHT announce tail) |
-| `desktop/p2p/sync_walk.py` | The pull side — `SyncWalk`: gap set, peer tiers (manual/LAN/DHT+directory/rare keys), carry push, network-size verdict, triggers; run by P2PManager AND the Docker lifespan |
-| `desktop/p2p/sync_server.py` | aiohttp HTTPS sync server + chat + relay (voucher/wake/forward) + watchdog |
-| `desktop/p2p/mb_slice_queries.py` | MB slice protocol: per-artist signed blobs, `mb_slice_blobs` cache/replica inventory, pending-name priority |
 | `desktop/mb_slice_client.py` | Slice requester — per-name verification against the ORIGINAL dump node's key |
-| `desktop/p2p/dht_service.py` | libtorrent DHT (per-artist + per-user announces, announce-on-behalf for relay clients) |
-| `desktop/p2p/p2p_manager.py` | Orchestration (asyncio in background thread) |
-| `desktop/p2p/chat_service.py` | NaCl Box encryption, friend CRUD |
-| `desktop/p2p/email_verify.py` | Signed email verification + invite delivery |
-| `mcp/assistant_server.py` | MCP server exposing the assistant tools to Claude Code / Codex (search, playback, MB catalog, HQP device) |
 | `backend/assistant_queries.py` | Catalog queries + result formatting SHARED by both assistant tool surfaces (MCP + `backend/tools/definitions.py`) — one copy, so neither drifts owned-only |
 | `backend/notary.py` + `backend/sign_audio.py` | The sealing owner (one thread, woken by every producer of signable state) and its two stages: `sign()` author-signs at once, `stamp()` Merkle-batches + Worker-timestamps on the notary's cadence |
 | `desktop/node_backup.py` | Node backup format v1 (`.sbk`: Argon2id KEK in its own salt domain, per-file data key, chunked XChaCha20-Poly1305 with the header as AAD, framed members) + `pg_dump`/`pg_restore` drivers, staged restore, identity write, selftest — shared by launcher and backend (`docs/design/BACKUP.md`) |
 | `backend/backup.py` | The node binding and the ONE "make a backup": `python -m backup create\|inspect\|restore\|selftest\|export\|import\|merge` on either interpreter (loads `<data_dir>/backend.env` under the launcher), password check via `device_auth.verify_password`, the playback signal as a PostgreSQL session advisory lock (`PlaybackSignal` held by the backend, `PlaybackHold` waited on by the job). The weekly task calls `create --password-env P2P_PASSWORD` — a contract. No Web UI |
-| `desktop/backup_task.py` | Launcher "Create backup…" / "Merge from backup…" / "Export enrichment…" / "Import enrichment…": runs that CLI on the backend interpreter (`--progress-json --cancel-on-stdin`) as one job per kind, streams events to the action's row in Settings & Tools (button → red Cancel, progress beneath) and the progress line, cancels through stdin |
 | `backend/share.py` | Share export/import (BACKUP.md Product B): gzip'd JSON lines with a signed trailer, streamed both ways; every sealed record the node holds under its author's seal, structural rows from the seed builders; import through `SyncClient._import_items` (the gate) after a verify pass, default (add phantoms) or `--existing-only` (create no artist/album/track) |
 | `backend/life_merge.py` | Own life-data merge (BACKUP.md Product C): `python -m backup merge <own .sbk>` — same-account rule, the dump streamed once through `pg_restore --data-only -t …` into a scratch schema in the live database, keyed union (listens, sessions, friends, messages, chats, gear, allowlisted settings, rotation records) in one transaction, unknown tracks wait; `--dry-run` = rollback |
 | `backend/play_stats.py` | `local_play_stats` is DERIVED from `listening_history` — the one statement the play tracker and the merge share; never increment those counters in place |
 | `backend/streaming/demo.py` | The demo policy: the `demo_plays` ledger (one full demo-channel listen per track), the resolve's per-track provider order, the proxy's fetch-time gate (`link_admissible`), the status observer that spends the listen past 90 % and drops the spent buffer |
 | `backend/streaming/deezer_catalog.py` + `deezer_preview.py` | Deezer public API in core: the catalog resolve (barcode → album tracklist → track gate, one pacer + memo per process) shared as `DeezerCatalogProvider` by the BYO lossless module and the core 30 s excerpt provider (`deezer_preview`, `manifest.excerpt`, always last in `providers_preferred()`) |
-| `desktop/restore.py` | Launcher restore flow (`restore_launcher_node`) + `RestoreDialog` for Settings & Tools › Backup & Restore and the wizard; the launcher stops P2P + backend around it |
 
 ---
 
