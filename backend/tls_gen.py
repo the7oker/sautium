@@ -12,9 +12,9 @@ The cert is regenerated only when the binding is absent or belongs to a
 previous identity, so peers see one TLS key for as long as the node keeps
 its identity.
 
-`detect_private_host_ips` / `detect_reachable_host_ips` answer "which
-addresses are this host's" for the Host guard (auth_hmac), the media host a
-DLNA renderer is handed, and the launcher's QR.
+`detect_own_ipv4s` / `detect_private_host_ips` / `detect_reachable_host_ips`
+answer "which addresses are this host's" for the Host guard (auth_hmac), the
+media host a DLNA renderer is handed, and the launcher's QR.
 """
 
 import datetime
@@ -24,6 +24,7 @@ import os
 import socket
 from pathlib import Path
 
+import psutil
 from cryptography import x509
 from cryptography.hazmat.primitives import hashes, serialization
 from cryptography.hazmat.primitives.asymmetric import ec
@@ -69,8 +70,9 @@ def _is_reachable_ipv4(ip: str) -> bool:
 
     The wider of the two: everything _is_private_ipv4 accepts, plus CGNAT,
     because a tunnel address is exactly how a phone off the home network
-    reaches this node. Used for the cert SAN and the Host guard — both answer
-    "who might legitimately be talking to us", not "where can we shout"."""
+    reaches this node. Applied to the SAUTIUM_HOST_IPS entries — the Host
+    guard's question is "who might legitimately be talking to us", not
+    "where can we shout"."""
     try:
         addr = ipaddress.ip_address(ip)
     except ValueError:
@@ -79,45 +81,34 @@ def _is_reachable_ipv4(ip: str) -> bool:
         isinstance(addr, ipaddress.IPv4Address) and addr in _CGNAT)
 
 
-def detect_private_host_ips() -> list[str]:
-    """LAN addresses only — the SSDP search sources and the media host the
-    DLNA output hands a renderer on the same segment."""
-    return _detect_private_host_ips()
+def detect_own_ipv4s() -> list[str]:
+    """Every IPv4 address bound to this host's interfaces right now, loopback
+    and link-local aside — the closed set behind "is this one of MY addresses".
 
-
-def detect_reachable_host_ips(extra: list[str] | None = None) -> list[str]:
-    """Every address this node can be addressed at, tunnels included.
-
-    `extra` is SAUTIUM_HOST_IPS — the only way a container learns the host's
-    real addresses, since its own interfaces are all bridge."""
-    found = set(_detect_private_host_ips())
-    for entry in (extra or []):
-        if _is_reachable_ipv4(entry):
-            found.add(entry)
-            continue
-        # A name, which is the better way to write a tunnel address down —
-        # it survives the address changing. Resolving OUR OWN configured name
-        # is safe; the thing rebinding attacks is resolving a name an attacker
-        # supplied, which nothing here ever does.
-        try:
-            resolved = socket.gethostbyname(entry)
-        except OSError as e:
-            logger.warning("host entry %r does not resolve (%s)", entry, e)
-            continue
-        if _is_reachable_ipv4(resolved):
-            found.add(resolved)
+    No privateness filter: an address that is up on our interface is ours
+    whoever issued it, and 100.64/10 is exactly how a phone off the home
+    network reaches this node. Inside Docker this is the bridge address
+    alone; the host's real addresses arrive via SAUTIUM_HOST_IPS."""
+    found: set[str] = set()
+    for addrs in psutil.net_if_addrs().values():
+        for a in addrs:
+            if a.family != socket.AF_INET:
+                continue
+            addr = ipaddress.ip_address(a.address)
+            if not (addr.is_loopback or addr.is_link_local or addr.is_unspecified):
+                found.add(a.address)
     return sorted(found)
 
 
-def _detect_private_host_ips() -> list[str]:
-    """Auto-detect private IPv4 addresses bound to local interfaces.
+def detect_private_host_ips() -> list[str]:
+    """LAN addresses only — the SSDP search sources and the media host the
+    DLNA output hands a renderer on the same segment.
 
-    Combines two probes — getaddrinfo(hostname) for multi-interface
-    coverage, and the connect-but-don't-send UDP trick for the primary
-    outbound interface. Inside Docker this typically yields only the
-    bridge IP (e.g. 172.x); for LAN reachability the operator must
-    pass the host's real IP via SAUTIUM_HOST_IPS.
-    """
+    Stays on the two probes it always used — getaddrinfo(hostname) and the
+    connect-but-don't-send UDP trick — because both name addresses the host
+    talks from, which is what a multicast search or a renderer needs; the
+    Host guard's wider question is detect_own_ipv4s. Inside Docker this
+    yields only the bridge IP (e.g. 172.x)."""
     found: set[str] = set()
 
     try:
@@ -139,6 +130,30 @@ def _detect_private_host_ips() -> list[str]:
     finally:
         sock.close()
 
+    return sorted(found)
+
+
+def detect_reachable_host_ips(extra: list[str] | None = None) -> list[str]:
+    """Every address this node can be addressed at: whatever its interfaces
+    carry, tunnels included, plus `extra` — SAUTIUM_HOST_IPS, the only way a
+    container learns the host's real addresses, since its own interfaces are
+    all bridge."""
+    found = set(detect_own_ipv4s())
+    for entry in (extra or []):
+        if _is_reachable_ipv4(entry):
+            found.add(entry)
+            continue
+        # A name, which is the better way to write a tunnel address down —
+        # it survives the address changing. Resolving OUR OWN configured name
+        # is safe; the thing rebinding attacks is resolving a name an attacker
+        # supplied, which nothing here ever does.
+        try:
+            resolved = socket.gethostbyname(entry)
+        except OSError as e:
+            logger.warning("host entry %r does not resolve (%s)", entry, e)
+            continue
+        if _is_reachable_ipv4(resolved):
+            found.add(resolved)
     return sorted(found)
 
 

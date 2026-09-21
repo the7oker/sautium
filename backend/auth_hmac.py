@@ -47,6 +47,7 @@ The middleware reads request body once and stashes it in
 import errno
 import hashlib
 import hmac
+import ipaddress
 import logging
 import os
 import secrets
@@ -98,11 +99,16 @@ WHITELIST_EXACT = {
 # attacker points at us, and no to 100.64/10, which is how a phone off the
 # home network legitimately reaches this node. The question is "is this one of
 # MY addresses" — a closed set we compute from our own interfaces and our own
-# configuration.
+# configuration. Interfaces change while we run (a tunnel started after the
+# backend, a new lease), so an IP literal the set does not hold is checked
+# against the interfaces once more and the answer remembered either way.
 #
 # Nothing here resolves a name the client supplied. Resolving attacker input is
 # the attack; our own configured names are resolved once, at startup.
 _allowed_hosts: set | None = None
+_host_misses: dict[str, float] = {}     # IP literal -> monotonic time its refusal expires
+_MISS_TTL_S = 10.0
+_MISS_CAP = 256
 
 
 def _allowed_host_set() -> set:
@@ -136,7 +142,38 @@ def _host_allowed(host_header: str) -> bool:
         host = host.split("]")[0] + "]"
     elif ":" in host:
         host = host.rsplit(":", 1)[0]
-    return host in _allowed_host_set()
+    allowed = _allowed_host_set()
+    return host in allowed or _own_ipv4_literal(host, allowed)
+
+
+def _own_ipv4_literal(host: str, allowed: set) -> bool:
+    """A literal the startup set does not hold may be an interface that came
+    up since. Re-read the interfaces and learn every address they carry; a
+    refusal is held for _MISS_TTL_S so a flood of bogus Host headers costs one
+    enumeration per literal, not one per request."""
+    try:
+        addr = ipaddress.ip_address(host)
+    except ValueError:
+        return False                          # a name — never resolved
+    if not isinstance(addr, ipaddress.IPv4Address):
+        return False
+    now = time.monotonic()
+    if _host_misses.get(host, 0.0) > now:
+        return False
+    from tls_gen import detect_own_ipv4s
+    new = set(detect_own_ipv4s()) - allowed
+    if new:
+        allowed |= new
+        logger.info("Host guard accepts: %s (interfaces up since startup)", sorted(new))
+    if host in allowed:
+        return True
+    if len(_host_misses) >= _MISS_CAP:
+        for stale in [h for h, until in _host_misses.items() if until <= now]:
+            del _host_misses[stale]
+        if len(_host_misses) >= _MISS_CAP:
+            del _host_misses[next(iter(_host_misses))]
+    _host_misses[host] = now + _MISS_TTL_S
+    return False
 
 
 WHITELIST_PREFIX = (

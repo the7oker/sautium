@@ -804,6 +804,17 @@ user brings.
   Docker peer-surface cert (pinned to the node key, static SAN), the
   launcher no longer mints a certificate, `~/.sautium/tls` of earlier
   installs is just a leftover.
+- **The Host guard learns its addresses from the interfaces (2026-09-21).**
+  Its own-address set is every IPv4 bound to the node's interfaces
+  (`tls_gen.detect_own_ipv4s`, psutil), Tailscale's 100.64/10 included,
+  and an IP literal it does not hold is re-checked against the interfaces
+  once (a tunnel started after the backend, a new lease); names are never
+  resolved. Before this the launcher node answered `Host: 100.x` with 421:
+  own-interface detection went through the LAN-only predicate, and only
+  `SAUTIUM_HOST_IPS` entries — which the launcher never sets — took the
+  wider one, so "Tailscale works because its address is one of the node's
+  own interfaces" held for a Docker node with the variable set and not for
+  the launcher.
 - **Found on the way:** `portmap._serves_web_ui` still looked for the
   inlined-secret marker of the 2026-08 page, so it recognised no port as
   the Web UI; it now reads the `sautium-webui` health type.
