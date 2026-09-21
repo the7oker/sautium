@@ -274,6 +274,15 @@ def ui_build() -> int:
     return _UI_BUILD_CACHE
 
 
+def build_identity() -> dict:
+    """What this node runs: the checkout's HEAD (first 12 hex digits) or the
+    packaged build id, None where either does not apply. The one reader for
+    /config, a backup manifest and a share export; HEAD is read from `.git`
+    by hand (desktop/updater.head_commit), never by spawning git."""
+    from desktop.updater import current_commit, installed_build
+    return {"commit": current_commit(), "build": installed_build()}
+
+
 def get_settings() -> Settings:
     """Get application settings instance."""
     return settings

@@ -148,7 +148,8 @@ services:
       # tunnel name — which Docker can't see from inside the container: the
       # Host guard accepts them (auth_hmac.py) and the DLNA output hands a
       # renderer the first LAN one. Set in .env, e.g.:
-      # SAUTIUM_HOST_IPS=192.168.1.10
+      # SAUTIUM_HOST_IPS=192.168.1.10                  (the LAN address)
+      # SAUTIUM_HOST_IPS=192.168.1.10,100.101.102.103  (plus a Tailscale one)
       SAUTIUM_HOST_IPS: ${SAUTIUM_HOST_IPS:-}
       # Intra-container backend self-calls (Claude Code tools, MCP server).
       BACKEND_URL: http://localhost:8000
@@ -192,6 +193,9 @@ services:
       # _load_carry). Read-only: the container is a consumer of this code,
       # never its owner.
       - ./desktop:/app/desktop:ro
+      # The checkout's .git, read-only: /config and the backup manifest report
+      # the running commit (desktop/updater.head_commit reads HEAD by hand).
+      - ./.git:/app/.git:ro
       # Mount music library as read-only
       # Windows path: E:\Music -> /music in container
       - ${MUSIC_LIBRARY_PATH:-/mnt/e/Music}:/music:ro

@@ -27,7 +27,7 @@ from pathlib import Path as _Path
 
 from auth_hmac import HMACAuthMiddleware, ensure_secret
 from auth_hmac import secret_path as _secret_path
-from config import settings, get_settings, ui_build, LOGGING_CONFIG
+from config import settings, get_settings, ui_build, build_identity, LOGGING_CONFIG
 from db_pool import db_query_one
 import device_auth
 from dht_service import DHTService, HAS_LIBTORRENT
@@ -851,7 +851,7 @@ async def lifespan(app: FastAPI):
 app = FastAPI(
     title=settings.app_name,
     version=settings.app_version,
-    description="AI-powered music library management and recommendation system",
+    description="Self-hosted music companion — library, playback, assistant and the collectors' network",
     lifespan=lifespan,
 )
 
@@ -1026,6 +1026,7 @@ async def get_config() -> Dict[str, Any]:
     return {
         "app_name": settings.app_name,
         "app_version": settings.app_version,
+        **build_identity(),
         "music_library_path": settings.music_library_path,
         "music_library_exists": settings.music_library_exists,
         "embedding_model": settings.embedding_model,

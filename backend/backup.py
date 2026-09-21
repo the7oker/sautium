@@ -75,7 +75,7 @@ def _bootstrap_launcher_env() -> None:
 
 _bootstrap_launcher_env()
 
-from config import settings  # noqa: E402
+from config import build_identity, settings  # noqa: E402
 from desktop import node_backup as nb  # noqa: E402
 
 logger = logging.getLogger(__name__)
@@ -124,16 +124,6 @@ def node() -> Optional[dict]:
     if not ident or not ident.get("username"):
         return None
     return {"username": ident["username"], "pubkey": ident["public_key_hex"].lower()}
-
-
-def app_version() -> dict:
-    """What wrote the file: the checkout's commit or the packaged build id."""
-    try:
-        from desktop.updater import current_commit, installed_build
-        return {"commit": current_commit(), "build": installed_build()}
-    except Exception as e:                                  # a packaged tree without git
-        logger.debug("app version unavailable: %s", e)
-        return {"commit": None, "build": None}
 
 
 def _fmt_bytes(n: int) -> str:
@@ -285,7 +275,7 @@ def create(password: str, *, out_dir: Optional[Path] = None,
 
     hold = PlaybackHold(settings.database_url)
     cancel._hold = hold
-    version = app_version()
+    version = build_identity()
 
     def wait_ok() -> None:
         if cancel.event.is_set():
@@ -519,7 +509,7 @@ def _cmd_export(args) -> int:
             result = share.export_file(
                 conn, Path(args.out) if args.out else Path(settings.export_dir), kind=kind,
                 exporter=exporter, sign=sign, artists=args.artist, albums=args.album,
-                app=app_version(), progress=printer, cancel=token.event)
+                app=build_identity(), progress=printer, cancel=token.event)
         finally:
             conn.close()
     except (share.ShareError, nb.BackupError) as e:
