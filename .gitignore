@@ -16,6 +16,8 @@ develop-eggs/
 docs/marketing
 # Maintainer-private notes: deployment specifics, defense status
 docs/private
+# The website (sautium-site repo) — a junction like docs/private
+site
 .claude/skills/security-posture
 dist/
 downloads/
