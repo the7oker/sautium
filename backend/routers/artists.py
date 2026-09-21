@@ -14,7 +14,8 @@ from typing import Optional
 from fastapi import APIRouter, HTTPException, Query
 
 from db_pool import db_execute, db_query, db_query_one
-from discography import fetch_new_albums, sync_artist_discography
+from discography import (ALBUM_SORT_EXPR, fetch_new_albums, phantom_sort,
+                         sync_artist_discography)
 from genre_queries import artist_genres
 from release_groups import collapse_to_groups
 
@@ -76,6 +77,30 @@ def _fmt_plays(count: int) -> str:
     if count >= 1000:
         return f"{count / 1000:.0f}k"
     return str(count)
+
+
+def _album_metric(row: dict, sort: str) -> str:
+    """The one metric a tile shows under the chosen sort, pre-formatted so
+    the UI never mirrors server formatting rules. Empty == unavailable; the
+    tile renders it as '—' in the dimmed style."""
+    if sort == "time_listened":
+        return _fmt_seconds(row["time_listened_seconds"])
+    if sort == "popularity":
+        return _fmt_plays(row["popularity"])
+    if sort == "recently_added":
+        return _fmt_added(row["added_at"])
+    return str(row["year"]) if row["year"] else ""
+
+
+def _format_album_tiles(rows: list, sort: str) -> list:
+    """Set `metric` and drop the raw metric columns — they are implementation
+    detail of the sort; the tile only uses `metric` + the screen-wide sort."""
+    for r in rows:
+        r["metric"] = _album_metric(r, sort)
+        r.pop("time_listened_seconds", None)
+        r.pop("popularity", None)
+        r.pop("added_at", None)
+    return rows
 
 
 def _fmt_added(added_at) -> str:
@@ -289,14 +314,7 @@ def get_artist(
     # every sort — solo work stays grouped, feat. credits stay in
     # their own block — and the user-picked column controls the order
     # within each group.
-    sort_expr = {
-        "release_year":   "al.release_year DESC NULLS LAST, al.title",
-        "time_listened":  "time_listened_seconds DESC NULLS LAST, al.title",
-        "popularity":     "popularity DESC NULLS LAST, al.title",
-        "recently_added": "al.created_at DESC NULLS LAST, al.title",
-        "a_z":            ("regexp_replace(LOWER(al.title), "
-                           "'^(the|a|an)\\s+', '', 'i')"),
-    }[sort]
+    sort_expr = ALBUM_SORT_EXPR[sort]
 
     rows = db_query(f"""
         WITH track_pop AS (
@@ -392,25 +410,7 @@ def get_artist(
     # metric columns are dropped below; feeds the credit line.
     album_pop_used = any(int(r.get("popularity") or 0) > 0 for r in rows)
 
-    # Pre-format the metric so the UI doesn't have to mirror server
-    # formatting rules. Empty string == unavailable; the tile renders
-    # it as '—' in the dimmed style.
-    metric_for = {
-        "release_year":   lambda r: (str(r["year"]) if r["year"] else ""),
-        "time_listened":  lambda r: _fmt_seconds(r["time_listened_seconds"]),
-        "popularity":     lambda r: _fmt_plays(r["popularity"]),
-        "recently_added": lambda r: _fmt_added(r["added_at"]),
-        "a_z":            lambda r: (str(r["year"]) if r["year"] else ""),
-    }[sort]
-
-    for r in rows:
-        r["metric"] = metric_for(r)
-        # Drop the raw metric columns from the response — they are
-        # implementation detail of the sort; the tile only uses
-        # `metric` + the screen-wide `sort` value.
-        r.pop("time_listened_seconds", None)
-        r.pop("popularity", None)
-        r.pop("added_at", None)
+    _format_album_tiles(rows, sort)
 
     # Collapse multi-edition release groups to one tile (the primary edition),
     # tagged with edition_count + group_id so the UI routes a group through the
@@ -566,13 +566,17 @@ def get_artist(
         artist["similar_artists"] = []
 
     # New albums the user doesn't own — phantom albums derived from the
-    # MB-dump discography (canonized artists only). `stale` lets the screen
-    # fire a fetch-on-view refresh (once a day) after rendering what's cached.
+    # MB-dump discography (canonized artists only), in the same order the
+    # user picked for the owned shelf (recently-added falls back to release
+    # year: a phantom album was never "added"). `stale` lets the screen fire
+    # a fetch-on-view refresh (once a day) after rendering what's cached.
     if split:
         artist["new_albums"] = fetch_new_albums(
-            artist_id, mbid=selected_mbid, include_unattributed=is_dominant)
+            artist_id, mbid=selected_mbid, include_unattributed=is_dominant, sort=sort)
     else:
-        artist["new_albums"] = fetch_new_albums(artist_id)
+        artist["new_albums"] = fetch_new_albums(artist_id, sort=sort)
+    artist["new_albums_sort"] = phantom_sort(sort)
+    _format_album_tiles(artist["new_albums"], artist["new_albums_sort"])
     artist["new_albums_stale"] = _is_discography_stale(last_album_sync)
     # A dump-less node shelves an artist only once a peer served its MB
     # slice; until then the discography sync answers no_source and the
@@ -607,7 +611,8 @@ def get_artist(
 
 
 @router.post("/{artist_id}/sync-discography")
-def sync_discography(artist_id: str) -> dict:
+def sync_discography(artist_id: str,
+                     sort: str = Query(default="release_year")) -> dict:
     """Fetch-on-view refresh of an artist's new-album discovery.
 
     Gated to once a day per artist (`last_album_sync`): if fresh, returns
@@ -624,8 +629,15 @@ def sync_discography(artist_id: str) -> dict:
     if not row:
         raise HTTPException(status_code=404, detail="artist not found")
 
+    if sort not in _ALBUM_SORTS:
+        sort = "release_year"
+    shelf_sort = phantom_sort(sort)
+
+    def _shelf() -> list:
+        return _format_album_tiles(fetch_new_albums(artist_id, sort=sort), shelf_sort)
+
     if not _is_discography_stale(row["last_album_sync"]):
-        return {"new_albums": fetch_new_albums(artist_id), "synced": False}
+        return {"new_albums": _shelf(), "new_albums_sort": shelf_sort, "synced": False}
 
     result = sync_artist_discography(artist_id, row["name"])
     if result.get("new"):
@@ -633,7 +645,8 @@ def sync_discography(artist_id: str) -> dict:
         # rather than at the interval (no listener on a Docker node: harmless).
         db_execute("NOTIFY sautium_sync_request")
     return {
-        "new_albums": fetch_new_albums(artist_id),
+        "new_albums": _shelf(),
+        "new_albums_sort": shelf_sort,
         "synced": result.get("status") == "success",
         "status": result.get("status"),
     }

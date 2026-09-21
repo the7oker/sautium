@@ -1141,6 +1141,25 @@ untouched: Valerii's call, track level only.
   `track_stats` (dropped, negative-cache rows deleted, idempotent, the
   `artist_mbids` statement trigger fires one wake).
 
+### Missing albums follow the albums sort (2026-09-21)
+
+The artist page's Missing-albums shelf (phantom albums off the discography)
+was always newest-first while the owned shelf took the user's pick. One
+sort map now orders both (`discography.ALBUM_SORT_EXPR`, imported by the
+router — one source of truth), and the phantom query computes the same
+metrics over the tracklist: listening time from streamed plays
+(`album_tracks ⋈ listening_history` — play tracking is keyed on the track,
+so a phantom listen counts like an owned one) and popularity from the
+ListenBrainz counts of the tracklist's recordings
+(`album_tracks.recording_mbid ⋈ lb_recording`). "Recently added" has no
+meaning for an album that was never added — its row appears when the
+discography is minted, which says nothing the user did — so the shelf falls
+back to release year (`PHANTOM_SORT_FALLBACK`), and the payload says which
+sort the shelf actually took (`new_albums_sort`) so the tiles carry the
+right glyph and metric. The fetch-on-view refresh passes the current sort,
+so a reshuffled shelf keeps the order. Measured on Vangelis's 29 phantom
+albums: every sort answers in a few ms.
+
 ## Known Gotchas
 
 - **Loopback targets are addresses, never `localhost`.** Windows resolves the

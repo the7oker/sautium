@@ -1032,9 +1032,39 @@ def sync_artist_discography(artist_id, artist_name: str) -> Dict[str, int]:
     return stats
 
 
-def fetch_new_albums(artist_id, mbid=None, include_unattributed=False) -> List[dict]:
+# The artist page's album sorts — ONE map for the owned shelf
+# (routers/artists.py) and the Missing-albums shelf below, so the user's
+# pick orders both. The expressions name the metric columns both queries
+# compute (`time_listened_seconds`, `popularity`) and `al.*` of the album row.
+ALBUM_SORT_EXPR = {
+    "release_year":   "al.release_year DESC NULLS LAST, al.title",
+    "time_listened":  "time_listened_seconds DESC NULLS LAST, al.title",
+    "popularity":     "popularity DESC NULLS LAST, al.title",
+    "recently_added": "al.created_at DESC NULLS LAST, al.title",
+    "a_z":            ("regexp_replace(LOWER(al.title), "
+                       "'^(the|a|an)\\s+', '', 'i')"),
+}
+# "Added" is the moment a file landed in the library — a phantom album has
+# no such moment (its row appears when the discography is minted, which says
+# nothing the user did), so the Missing shelf orders by release year instead.
+PHANTOM_SORT_FALLBACK = {"recently_added": "release_year"}
+
+
+def phantom_sort(sort: str) -> str:
+    return PHANTOM_SORT_FALLBACK.get(sort, sort)
+
+
+def fetch_new_albums(artist_id, mbid=None, include_unattributed=False,
+                     sort: str = "release_year") -> List[dict]:
     """The phantom albums for an artist — those linked via `album_artists`
-    with no local files — newest first. Tile shape for the artist screen.
+    with no local files — in the user's album order (`sort`, one of
+    ALBUM_SORT_EXPR; `recently_added` falls back to release year). Tile shape
+    for the artist screen plus the raw metric columns the router formats.
+
+    The metrics are the owned shelf's, computed over the phantom tracklist:
+    listening time from the streamed plays (play tracking is keyed on the
+    track, so a phantom listen counts like an owned one) and popularity from
+    the ListenBrainz counts of the tracklist's recordings.
 
     `mbid` scopes to one namesake (album_artists.mbid) when a display name maps
     to several MB artists; `include_unattributed` also folds NULL-mbid residue
@@ -1046,19 +1076,42 @@ def fetch_new_albums(artist_id, mbid=None, include_unattributed=False) -> List[d
         scope = ("AND (aa.mbid = %(mbid)s::uuid OR aa.mbid IS NULL)"
                  if include_unattributed else "AND aa.mbid = %(mbid)s::uuid")
         params["mbid"] = str(mbid)
+    order = ALBUM_SORT_EXPR[phantom_sort(sort)]
     return db_query(f"""
+        WITH shelf AS (
+            SELECT al.id, al.title, al.release_year, al.cover_url
+            FROM albums al
+            JOIN album_artists aa ON aa.album_id = al.id
+            WHERE aa.artist_id = %(id)s::uuid
+              {scope}
+              AND NOT EXISTS (
+                  SELECT 1 FROM album_variants av WHERE av.album_id = al.id
+              )
+        ),
+        listened AS (
+            SELECT at.album_id, SUM(lh.duration_listened)::bigint AS seconds
+            FROM album_tracks at
+            JOIN shelf s ON s.id = at.album_id
+            JOIN listening_history lh ON lh.track_id = at.track_id
+            GROUP BY at.album_id
+        ),
+        popular AS (
+            SELECT at.album_id, SUM(lr.listen_count)::bigint AS listens
+            FROM album_tracks at
+            JOIN shelf s ON s.id = at.album_id
+            JOIN lb_recording lr ON lr.recording_mbid = at.recording_mbid
+            GROUP BY at.album_id
+        )
         SELECT al.id::text AS id,
                al.title,
                al.release_year AS year,
-               al.cover_url
-        FROM albums al
-        JOIN album_artists aa ON aa.album_id = al.id
-        WHERE aa.artist_id = %(id)s::uuid
-          {scope}
-          AND NOT EXISTS (
-              SELECT 1 FROM album_variants av WHERE av.album_id = al.id
-          )
-        ORDER BY al.release_year DESC NULLS LAST, al.title
+               al.cover_url,
+               COALESCE(l.seconds, 0)::bigint AS time_listened_seconds,
+               COALESCE(p.listens, 0)::bigint AS popularity
+        FROM shelf al
+        LEFT JOIN listened l ON l.album_id = al.id
+        LEFT JOIN popular p ON p.album_id = al.id
+        ORDER BY {order}
     """, params)
 
 

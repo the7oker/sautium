@@ -5080,7 +5080,14 @@
     // New albums the user doesn't own — phantom albums from the MB-dump
     // discography (canonized artists only; covers hotlink Cover Art
     // Archive). Same tile as owned albums but dimmed (.is-unowned) with a
-    // Bandcamp buy affordance instead of navigation.
+    // Bandcamp buy affordance instead of navigation. The shelf follows the
+    // same sort as the owned one, with its own effective sort from the
+    // backend (`new_albums_sort`: "recently added" means nothing for an
+    // album that was never added, so it reads as release year here) — the
+    // glyph and the pre-formatted metric come from that.
+    const phantomSpec = ALBUMS_SORT_BY_ID[d.new_albums_sort] || ALBUMS_SORT_BY_ID.release_year;
+    const phantomGlyphSvg = phantomSpec.glyph ? ALBUMS_SORT_GLYPHS[phantomSpec.glyph] || '' : '';
+    const phantomGlyphHtml = phantomGlyphSvg ? `<span class="ic">${phantomGlyphSvg}</span>` : '';
     function newAlbumTileHtml(a) {
       const c = coverPlaceholderColors(a.title || a.id);
       const url = coverUrl(a);
@@ -5089,7 +5096,11 @@
         : `<div class="placeholder-badge"
               style="--cover-bg-1: ${c.bg1}; --cover-bg-2: ${c.bg2};">${
                 escapeHtml(a.title || '')}</div>`;
-      const year = a.year ? String(a.year) : '';
+      const metricRaw = (a.metric || '').toString();
+      const hasMetric = !!metricRaw;
+      const metricLine = hasMetric
+        ? `${phantomGlyphHtml}${escapeHtml(metricRaw)}`
+        : `${phantomGlyphHtml}—`;
       // Phantom tiles navigate to the album detail page (is_owned=false), which
       // carries the Listen-preview + Buy actions — same gesture as owned tiles.
       return `
@@ -5098,7 +5109,7 @@
           <div class="album-cover"
                style="--cover-bg-1: ${c.bg1}; --cover-bg-2: ${c.bg2};">${inner}</div>
           <div class="album-tile-title">${escapeHtml(a.title || '')}</div>
-          <div class="album-tile-year${year ? '' : ' unavailable'}">${year || '—'}</div>
+          <div class="album-tile-year${hasMetric ? '' : ' unavailable'}">${metricLine}</div>
         </button>`;
     }
     const newAlbumsHtml = (d.new_albums || []).map(newAlbumTileHtml).join('');
@@ -5266,7 +5277,8 @@
     // background and patch the shelf in place — no "Loading…" flash, no
     // full re-render.
     if (d.new_albums_stale) {
-      fetch('/api/artists/' + encodeURIComponent(artistId) + '/sync-discography',
+      fetch('/api/artists/' + encodeURIComponent(artistId) + '/sync-discography'
+            + '?sort=' + encodeURIComponent(d.albums_sort || 'release_year'),
             { method: 'POST' })
         .then(r => r.ok ? r.json() : null)
         .then(res => {
