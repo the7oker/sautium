@@ -27,8 +27,8 @@ The control protocol is the same on both, so a single client implementation talk
 either desktop version.
 
 ### Tested Configuration
-- **HQPlayer**: Desktop 5.16.3 (also runs against HQPlayer Desktop 6)
-- **Engine**: 5.34.14
+- **HQPlayer**: Desktop 6 — the daily configuration as of 2026-09-21;
+  Desktop 5.16.3 (Engine 5.34.14) also tested, same client
 - **Platform**: Windows
 - **Connection**: WSL2 → Windows (<windows-host-ip>:4321)
 

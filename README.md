@@ -1,10 +1,20 @@
 # Sautium
 
-AI-powered management system for a personal FLAC library (~35k tracks): audio
-content analysis, hybrid semantic search, AI-driven recommendations, several
-audio outputs (HQPlayer, DLNA, the browser, the host's own sound card), a
-phone-friendly Web UI, and a serverless P2P network for sharing analytics
-between collectors.
+Sautium is a self-hosted music companion for the collection you own: a
+library interface over your own files, search by sound, mood or lyrics, an
+assistant that knows what you have, and a phone remote for HQPlayer and every
+other output in the house — DLNA renderers, the browser, the host's own sound
+card. It runs on your machine, shares nothing but signed analysis with a
+collectors' network, and is source-available under the PolyForm
+Noncommercial 1.0.0 licence — free for personal use.
+
+Website and guides: https://sautium.net · Downloads: https://sautium.net/download
+
+<!-- Screenshots: docs/screenshots/ (360x800 phone and 834x1194 tablet
+     frames), captured on a demo library with
+       node scripts/ui-shots.mjs --out docs/screenshots --widths 360x800,834x1194 \
+         --routes home,home+np,discovery,more/output,more/sync,more/about
+     Add the <img> tags here once the folder exists; no demo track on screen. -->
 
 > Phases 1–3 (MVP + enrichment + audio analysis + HQPlayer + Web UI +
 > launcher) and P2P phases P0–P4 (sync, NAT traversal, account system, E2E
@@ -120,6 +130,25 @@ devices that cannot sign a request: the media proxy (`8830`, launcher
 - **aiohttp + PyNaCl + miniupnpc** for the P2P layer
 - **CustomTkinter** for the launcher; **Inno Setup** wraps it on Windows, a DMG on macOS
 
+## Requirements
+
+The app detects the tier itself at every start (`docs/design/HARDWARE-TIERS.md`)
+— there is nothing to choose. A tier decides what the node computes locally,
+never what it stores or plays.
+
+| | Lite | Standard | Curator |
+|---|---|---|---|
+| CPU | x86-64 with AVX2, 4 cores, or any Apple Silicon | 6+ cores | 8+ cores |
+| RAM | 8 GB | 16 GB | 32 GB (Mac: 24 GB unified) |
+| Disk | 25 GB free, SSD | 40 GB free, SSD | 100 GB+ free, NVMe |
+| GPU | none | NVIDIA ≥ 6 GB (Turing or newer) or Apple Silicon with 16 GB | NVIDIA ≥ 8 GB (Ampere or newer) or an M-Pro-class Mac |
+| What you get | Library, every output, enrichment, the peer network and chat, text and sound search (the first sound query warms the encoder for 1–3 min), similarity over analysis imported from peers. No bulk analysis of your own files — it arrives from the network. | Everything; analysing a large library is an overnight job; instrument tagging optional. | Everything, in hours to a day; serves analysis and catalogue slices to peers. |
+
+Unsupported: less than 8 GB RAM, a hard disk (model cold-loads take minutes
+even on a fast one), 32-bit systems. The first run downloads ~6–8 GB of
+models and runtime; the database grows by about 3 GB per 10,000 analysed
+tracks, plus the optional ~21 GB MusicBrainz catalogue.
+
 ## Prerequisites
 
 - Docker and Docker Compose
@@ -193,6 +222,12 @@ The backend is also reachable from phones/tablets on the same Wi-Fi at
 
 ### Desktop launcher (optional)
 
+> **Public beta (2026-09-21).** The Windows build is unsigned and the macOS
+> build ad-hoc signed, so both systems warn on first launch — the steps are
+> below. Downloads: https://sautium.net/download and
+> [GitHub Releases](https://github.com/the7oker/sautium/releases). An
+> installed app updates itself from `main`.
+
 The launcher runs the whole stack without Docker — PostgreSQL, backend, P2P and
 the account system. From a checkout it is `python -m desktop`; for other people
 it ships as a native app:
@@ -228,6 +263,13 @@ With a Developer ID:
 python desktop/build_macos.py --sign "Developer ID Application: ..." \
                               --notarize <keychain-profile>
 ```
+
+Since 2026-09-21 a build is published by `scripts/release-publish.sh`: it
+creates the GitHub release `v<version>` (marked latest), uploads the
+installers with `SHA256SUMS.txt` and a `downloads.json` describing them
+(version, commit, per-asset URL, sha256 and size — what the website's
+download page reads from `releases/latest/download/downloads.json`), then
+re-downloads every asset over the public URL and verifies it.
 
 #### Installing the Windows build
 
@@ -359,6 +401,12 @@ isolation:
   tokens — they exist because HQPlayer and DLNA renderers can neither sign a
   request nor trust a self-signed certificate.
 
+Audit it yourself: `docs/AUDIT.md` is a ready-to-paste prompt for an AI
+coding agent that checks the tree at one commit — outbound destinations,
+listening ports, credentials, the demo ledger, the sync gate, the
+diagnostics switch and the provenance of a downloaded installer — against
+this section and `SECURITY.md`.
+
 This is LAN-only by design. Public release / multi-user / remote-access would
 require per-user credentials, TLS from a front with a real name (Tailscale
 Serve, a reverse proxy) and CSRF-aware sessions — see the full **Security
@@ -461,6 +509,7 @@ docker compose down
 | `PROGRESS.md` | Design decisions and lessons learned (non-P2P) |
 | `P2P_NETWORK.md` | P2P architecture, technology choices, security model |
 | `SECURITY.md` | The public security model: surfaces, threat model, accepted limits |
+| `docs/AUDIT.md` | "Audit it yourself": the agent prompt that checks the tree against the security model |
 | `THIRD_PARTY_NOTICES.md` | Components, models, services and their licences |
 | `docs/README.md` | Index of everything under `docs/` |
 | `docs/design/POSITIONING.md` | Product positioning + UI design principles |

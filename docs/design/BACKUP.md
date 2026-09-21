@@ -1,6 +1,6 @@
 # Backup, restore and portable data
 
-> **Status: Phases 1–2 (Products A, B) BUILT 2026-09-13/14; Phase 3 DESIGN.** Origin:
+> **Status: Phases 1–3 (Products A, B, C) BUILT 2026-09-13/14.** Origin:
 > Valerii's idea 2026-09-13 — make the database backup a Sautium feature,
 > split it by data class (MusicBrainz / enrichment / life data), make the
 > enrichment part mergeable into another user's database, and protect the

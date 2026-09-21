@@ -26,6 +26,13 @@
 The repository root carries the rest: `CLAUDE.md` (spec and conventions),
 `PROGRESS.md` (design log), `P2P_NETWORK.md` (peer network), `SECURITY.md`.
 
+### 🔍 Security
+
+- **[AUDIT.md](AUDIT.md)** — "Audit it yourself": the ready-to-paste agent
+  prompt that checks the tree at one commit against `SECURITY.md` —
+  destinations, ports, credentials, the demo ledger, the sync gate, support
+  diagnostics, installer provenance
+
 ### 📘 HQPlayer integration
 
 - **[HQPLAYER_INTEGRATION.md](HQPLAYER_INTEGRATION.md)** — technical
@@ -170,6 +177,6 @@ When adding information:
 
 ---
 
-**HQPlayer version tested:** 5.16.3 (Engine 5.34.14); the same client drives
-HQPlayer Desktop 6
+**HQPlayer version tested:** Desktop 6 — the daily configuration as of
+2026-09-21; Desktop 5.16.3 (Engine 5.34.14) also tested, same client
 **Last reviewed:** 2026-09-21

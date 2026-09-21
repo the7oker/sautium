@@ -24,7 +24,7 @@ logger = logging.getLogger(__name__)
 
 @click.group()
 def cli():
-    """Sautium - AI-powered music library management."""
+    """Sautium — a self-hosted music companion. Library scan, analysis and stats."""
     pass
 
 
