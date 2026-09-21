@@ -10,6 +10,18 @@ Use GitHub's private vulnerability reporting on this repository (Security →
 Report a vulnerability). Please do not open a public issue for a security
 problem; the maintainer answers reports there.
 
+## Audit it yourself
+
+The tree is source-available, so none of this page has to be taken on
+faith. `docs/AUDIT.md` is a ready-to-paste prompt for an AI coding agent (or
+a checklist for a person) that clones the repository at one commit and
+checks the code against this page: every outbound destination and listening
+port, every credential in the tree, the one-full-listen demo ledger, the
+sync gate that drops unsigned records, the support-diagnostics switch, and
+the provenance of a downloaded installer through its payload stamp. A
+discrepancy that weakens the model is a vulnerability report (above); one
+that does not is an ordinary issue.
+
 ## Surfaces
 
 | Surface | Bind | Authentication |
