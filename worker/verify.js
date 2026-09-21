@@ -1986,7 +1986,7 @@ function verificationEmailHtml(code, fromUsername, inviteCode) {
   <p style="color: #999; font-size: 12px;">If you didn't request this, ignore this email.</p>
   <hr style="border: none; border-top: 1px solid #eee; margin: 20px 0;">
   <p style="color: #999; font-size: 11px;">
-    <a href="https://sautium.net" style="color: #666;">Sautium</a> — AI-powered music library for FLAC collectors.
+    <a href="https://sautium.net" style="color: #666;">Sautium</a> — a self-hosted music companion for the collection you own. Free for personal use.
   </p>
 </body>
 </html>`;
@@ -2018,22 +2018,22 @@ function inviteEmailHtml(fromUsername, inviteCode, verifiedEmail, message) {
   </p>
   <h3 style="color: #333; margin-top: 24px;">What is Sautium?</h3>
   <ul style="color: #555;">
-    <li>AI-powered search across your FLAC/music collection</li>
-    <li>Audio analysis: find similar tracks by sound, mood, tempo</li>
-    <li>P2P network: share music metadata with friends</li>
-    <li>End-to-end encrypted chat</li>
-    <li>HQPlayer integration for audiophile playback</li>
+    <li>Search your own library by sound, mood or lyrics — on your machine</li>
+    <li>Play from your phone through HQPlayer, a DLNA renderer or the host itself</li>
+    <li>An assistant that knows your shelf (sign in with Codex or Claude Code)</li>
+    <li>A collectors' network: signed audio analysis and catalogue facts between nodes — never your files</li>
+    <li>End-to-end encrypted chat with friends; source-available, free for personal use</li>
   </ul>
   <p>
     <a href="https://sautium.net/download"
-       style="display: inline-block; background: #2563eb; color: white; padding: 10px 24px;
+       style="display: inline-block; background: #E8B06F; color: #1B1714; padding: 10px 24px;
               border-radius: 6px; text-decoration: none; font-weight: bold;">
       Download Sautium
     </a>
   </p>
   <hr style="border: none; border-top: 1px solid #eee; margin: 20px 0;">
   <p style="color: #999; font-size: 11px;">
-    <a href="https://sautium.net" style="color: #666;">sautium.net</a>
+    <a href="https://sautium.net" style="color: #666;">Sautium</a> — a self-hosted music companion for the collection you own. Free for personal use.
   </p>
 </body>
 </html>`;
@@ -2064,7 +2064,7 @@ function acceptNotificationEmailHtml(fromUsername, inviteCode, verifiedEmail) {
   </p>
   <hr style="border: none; border-top: 1px solid #eee; margin: 20px 0;">
   <p style="color: #999; font-size: 11px;">
-    <a href="https://sautium.net" style="color: #666;">sautium.net</a>
+    <a href="https://sautium.net" style="color: #666;">Sautium</a> — a self-hosted music companion for the collection you own. Free for personal use.
   </p>
 </body>
 </html>`;
