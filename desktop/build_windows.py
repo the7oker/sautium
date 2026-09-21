@@ -94,9 +94,9 @@ installs the ML stack on its first run (~1.3 GB once; the GPU build when
 an NVIDIA card is present).
 
 In the launcher window: "Choose Music Folder…" points Sautium at your
-music, "Open Web UI" opens the player (accept the certificate warning
-once — the connection is to your own computer). Closing the window keeps
-Sautium running in the tray; "Quit" is in the tray menu.
+music, "Open Web UI" opens the player in your browser (plain HTTP on this
+computer and your LAN; the launcher's QR code pairs a phone). Closing the
+window keeps Sautium running in the tray; "Quit" is in the tray menu.
 
 Sautium keeps everything in four places. Uninstalling removes the first
 and asks about the others:

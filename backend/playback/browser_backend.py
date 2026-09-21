@@ -9,7 +9,7 @@ a `released` directive). Up: the tab POSTs its <audio> element events
 (playing/paused/ended/timeupdate/error — element callbacks, not polling)
 to /api/player/browser/event, and those become the PlaybackStatus feed.
 
-Media rides the SAME HTTPS origin as the app via short-lived signed URLs
+Media rides the SAME origin as the app (plain HTTP on the LAN) via short-lived signed URLs
 (media_urls) — audio elements can't set HMAC headers, and an https page
 can't fetch the plain-http LAN proxy (mixed content).
 

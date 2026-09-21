@@ -21,7 +21,7 @@ audio analysis only (§ "Only audio analysis travels").
 copyrighted text — every node fetches its own from the public sources);
 anything Last.fm answered — artist bios/tags/similars, track stats, genre
 descriptions (§ "Last.fm data is node-local"); local paths; player state;
-private notes; listening history (unless the user opts in).
+private notes; listening history.
 
 ---
 
