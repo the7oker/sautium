@@ -4808,7 +4808,9 @@
     if (lastfm) parts.push(`<a href="${escapeHtml(lastfm)}" target="_blank" rel="noopener">data from Last.fm</a>`);
     if (listenbrainz) parts.push(`<a href="https://listenbrainz.org/" target="_blank" rel="noopener">listening statistics from ListenBrainz</a>`);
     if (!parts.length) return '';
-    return `<div class="source-credit">${parts.join(' · ')}</div>`;
+    // One divider, one line per source: joined with a separator the pair
+    // wrapped at 360 px with the dot dangling at the end of the first line.
+    return `<div class="source-credit">${parts.map(p => `<div>${p}</div>`).join('')}</div>`;
   }
 
   /* Popular-tracks rows, shared by the artist and genre pages. An owned row
