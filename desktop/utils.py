@@ -74,6 +74,11 @@ def repair_gui_path() -> None:
 APP_USER_MODEL_ID = "Sautium.Launcher"
 APP_MUTEX = "SautiumLauncher"
 
+# MIRRORED: backend/static/app-shell.js SITE_URL (the Web UI cannot import
+# this module); desktop/installer/sautium.iss carries it literally in
+# AppPublisherURL / AppUpdatesURL. Update all three together.
+SITE_URL = "https://sautium.net"
+
 _app_mutex = None
 
 
@@ -585,6 +590,12 @@ class HardwareProfile(NamedTuple):
     ram_gb: float        # GiB
     cores: int
     ml_available: bool   # PyTorch publishes wheels for this platform
+
+
+# What a tier is called in front of the user: the public docs and the site
+# say "Curator" for the top tier (docs/design/HARDWARE-TIERS.md § 5). The
+# ids full/standard/lite stay — the backend, settings and profiles key on them.
+PROFILE_DISPLAY_NAMES = {"full": "Curator", "standard": "Standard", "lite": "Lite"}
 
 
 def detect_hardware_profile() -> HardwareProfile:

@@ -25,8 +25,10 @@ AppId={{7F0C3D3E-5B1C-4E9A-9C8E-2D6C5A1F0B77}
 AppName=Sautium
 AppVersion={#Version}
 AppPublisher=Sautium
-AppPublisherURL=https://github.com/the7oker/sautium
-AppSupportURL=https://github.com/the7oker/sautium
+; MIRRORED: desktop/utils.py SITE_URL (Inno cannot read it from there).
+AppPublisherURL=https://sautium.net
+AppSupportURL=https://github.com/the7oker/sautium/issues
+AppUpdatesURL=https://sautium.net/download
 ; Per-user, never elevated: the runtime under {app} has to stay writable —
 ; pip installs the launcher's packages into it — and an unsigned installer
 ; asking for administrator rights is the worst first impression Windows can

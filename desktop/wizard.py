@@ -2,11 +2,12 @@
 First-run setup wizard for Sautium.
 
 A multi-step customtkinter wizard that collects:
-1. Welcome / intro
-2. Music library path
-3. AI provider selection + API key
-4. HQPlayer settings
-5. Summary + initialization
+1. Welcome — the detected hardware profile, disk and first-run expectations
+2. Identity — account name and password (or a restore from a backup)
+3. AI provider — Claude Code / Codex sign-in, an API key, or none
+4. Last.fm — scrobbling and enrichment (optional)
+5. Music catalogue — the MusicBrainz and ListenBrainz dumps (optional)
+6. Summary + initialization
 """
 
 import logging
@@ -30,6 +31,8 @@ from desktop.agent_login import (
 )
 from desktop.config_manager import get_data_dir, load_config, save_config
 from desktop.utils import (
+    PROFILE_DISPLAY_NAMES,
+    SITE_URL,
     claude_auth_verified,
     claude_authenticated,
     codex_auth_verified,
@@ -43,6 +46,14 @@ from desktop.utils import (
 )
 
 logger = logging.getLogger(__name__)
+
+
+def _link_button(parent, text: str, url: str) -> ctk.CTkButton:
+    return ctk.CTkButton(
+        parent, text=text, width=140,
+        command=lambda: webbrowser.open(url),
+        fg_color="transparent", border_width=1,
+    )
 
 
 class SetupWizard(ctk.CTkToplevel):
@@ -427,33 +438,38 @@ class SetupWizard(ctk.CTkToplevel):
             self.content_frame,
             text="Sautium",
             font=ctk.CTkFont(size=28, weight="bold"),
-        ).pack(pady=(24, 8))
+        ).pack(pady=(16, 6))
 
+        # Tk wraps at a pixel column: 560 is the 600 px content frame less a
+        # margin, so the blurb takes four lines and leaves the guides button
+        # room above the info rows in the fixed 680 px window.
         ctk.CTkLabel(
             self.content_frame,
             text=(
-                "AI-powered music library management.\n"
-                "Search your collection by sound, mood, lyrics, or description,\n"
-                "and stream what you don't own yet — whole discographies and\n"
-                "neighbouring artists, browsable next to your own shelf.\n"
-                "Works standalone or with an AI agent for chat recommendations."
+                "Sautium is a self-hosted music companion for the collection "
+                "you own. Search it by sound, mood or lyrics, ask the assistant "
+                "about it, and play from your phone — through HQPlayer, a DLNA "
+                "renderer or this machine. Everything runs here, and it is "
+                "free for personal use."
             ),
             font=ctk.CTkFont(size=14),
-            justify="center",
-        ).pack(pady=(0, 4))
+            justify="center", wraplength=560,
+        ).pack(pady=(0, 6))
+        _link_button(self.content_frame, "Read the guides",
+                     f"{SITE_URL}/guides/").pack()
 
         hw = self._hw
         install = self._install_gb()
         free = self._free_gb()
         # The install plus the database a mid-size library builds: 10 GB
-        # covers the reference node's 42k owned tracks and its streaming
-        # layer. The catalogue is excluded — its own step prices it.
+        # covers a library in the tens of thousands of tracks and its
+        # streaming layer. The catalogue is excluded — its own step prices it.
         room = free >= install + 10
         accel = (f"{hw.accel_name} · {hw.accel_gb:.0f} GB VRAM"
                  if hw.device == "cuda" else hw.accel_name or "CPU only")
 
         items = [
-            ("Hardware profile", hw.name.capitalize(), None,
+            ("Hardware profile", PROFILE_DISPLAY_NAMES[hw.name], None,
              f"Auto-selected from this machine: {accel} · {hw.ram_gb:.0f} GB "
              f"RAM · {hw.cores} cores. "
              + (self._PROFILE_DETAIL[hw.name] if hw.ml_available
@@ -1758,7 +1774,21 @@ class SetupWizard(ctk.CTkToplevel):
             text_color="gray",
             font=ctk.CTkFont(size=12),
             justify="center",
-        ).pack(pady=15)
+        ).pack(pady=(15, 6))
+
+        site = SITE_URL.removeprefix("https://")
+        ctk.CTkLabel(
+            self.content_frame,
+            text=(
+                f"Where to find help: {site}/guides · the \"Sautium\" contact "
+                "in Friends (in-app chat) · github.com/the7oker/sautium/issues"
+            ),
+            text_color="gray",
+            font=ctk.CTkFont(size=12),
+            justify="center", wraplength=560,
+        ).pack(pady=(0, 6))
+        _link_button(self.content_frame, "Open the guides",
+                     f"{SITE_URL}/guides/").pack(pady=(0, 10))
 
         self._progress_label = ctk.CTkLabel(
             self.content_frame, text="", text_color="gray",
