@@ -1114,8 +1114,9 @@ untouched: Valerii's call, track level only.
   state/progress/budget/auto-update machinery generalised over a family,
   two instances, ONE worker thread — the wizard can tick both downloads
   and two bulk loads on one volume must never run at once (the second
-  says "Queued…"). The Streaming library screen renders both blocks from
-  one `_dumpBlockHTML(family)`.
+  says "Queued…"). The Offline databases screen (`#more/databases`, its own
+  section since 2026-09-21) renders both blocks from one
+  `_dumpBlockHTML(family)`.
 - **The Worker deploys first.** `DIRECTORY_CAPS` gains `lbdump` /
   `lbslices`, and the registration cap `capabilities.length > 4` becomes
   `> DIRECTORY_CAPS.size` — a node advertising six caps against the old

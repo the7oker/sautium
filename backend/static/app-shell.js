@@ -3817,10 +3817,10 @@
                 message: searching
                   ? 'Looking for MusicBrainz catalog nodes on the network — '
                     + 'give it a minute. Or download the catalog yourself in '
-                    + '<b>More → Library → MusicBrainz database</b>.'
+                    + '<b>More → Offline databases</b>.'
                   : 'No MusicBrainz catalog nodes are reachable, and the '
                     + 'optional local dump is not loaded. Download it in '
-                    + '<b>More → Library → MusicBrainz database</b>.',
+                    + '<b>More → Offline databases</b>.',
               });
             }
             return;
@@ -4353,7 +4353,7 @@
             // Network search is a shared volunteer resource — the client
             // rate-limits itself; the wait message doubles as the pitch
             // for the unlimited local option.
-            ? `Network search is rate-limited (shared volunteer nodes) — retry in ~${data.cooldown}s, or download the catalog in More → Library for unlimited local search.`
+            ? `Network search is rate-limited (shared volunteer nodes) — retry in ~${data.cooldown}s, or download the catalog in More → Offline databases for unlimited local search.`
             : data.available === false
               ? 'MusicBrainz dump is not loaded on this device, and no catalog nodes are reachable.'
               : 'No matches in MusicBrainz.';
@@ -7939,6 +7939,7 @@
     if (sub === 'gear') return renderGearDetail(root, segs[2]);
     if (sub === 'library') return renderLibrary(root);
     if (sub === 'phantoms') return renderPhantoms(root);
+    if (sub === 'databases') return renderDatabases(root);
     if (sub === 'ai')      return renderAI(root);
     if (sub === 'sync')    return renderSync(root);
     // Bare #more — nothing to render here; the drawer is the UI.
@@ -8079,6 +8080,14 @@
           <path d="M12 3l1.6 4 4 1.6-4 1.6L12 14l-1.6-3.8-4-1.6 4-1.6z"/>
           <path d="M19 14l.8 2 2 .8-2 .8L19 20l-.8-2.4-2-.8 2-.8z"/>
         </svg>`;
+      const ICON_DB = `
+        <svg width="22" height="22" viewBox="0 0 24 24" fill="none"
+             stroke="currentColor" stroke-width="1.7" stroke-linecap="round"
+             stroke-linejoin="round" aria-hidden="true">
+          <ellipse cx="12" cy="6" rx="7.5" ry="3"/>
+          <path d="M4.5 6v12c0 1.66 3.36 3 7.5 3s7.5-1.34 7.5-3V6"/>
+          <path d="M4.5 12c0 1.66 3.36 3 7.5 3s7.5-1.34 7.5-3"/>
+        </svg>`;
       const ICON_SYNC = `
         <svg width="22" height="22" viewBox="0 0 24 24" fill="none"
              stroke="currentColor" stroke-width="1.7" stroke-linecap="round"
@@ -8142,6 +8151,12 @@
               <span class="more-hint"></span>
               <span class="more-chev">${CHEV}</span>
             </button>
+            <button class="more-row" type="button" data-go="more/databases">
+              <span class="more-icon">${ICON_DB}</span>
+              <span class="more-label">Offline databases</span>
+              <span class="more-hint"></span>
+              <span class="more-chev">${CHEV}</span>
+            </button>
             <button class="more-row" type="button" data-go="more/ai">
               <span class="more-icon">${ICON_AI}</span>
               <span class="more-label">AI assistant</span>
@@ -8155,7 +8170,6 @@
               <span class="more-chev">${CHEV}</span>
             </button>
           </div>
-          <div class="drawer-foot">SAUTIUM</div>
         </div>
       `;
     },
@@ -11548,7 +11562,7 @@
         </div>
         ${noDump ? `
           <div class="form-row stacked">
-            <div class="row-stack-sub">Needs the local MusicBrainz catalogue — canonization resolves names against it. Download it in <b>Library</b>.</div>
+            <div class="row-stack-sub">Needs the local MusicBrainz catalogue — canonization resolves names against it. Download it in <b>Offline databases</b>.</div>
           </div>` : ''}
       </div>
       ${running ? `
@@ -12511,22 +12525,19 @@
     });
   }
 
-  /* ====== Streaming library screen — #more/phantoms ======
-     "Streaming library" is the name the user reads; "phantom" is the internal
-     term for the same thing and stays in the route, the API, the settings key
-     and the CSS. Rename copy, not identifiers. */
-  // Dump blocks — the MusicBrainz catalogue and the ListenBrainz listening
-  // statistics: two opt-in dumps with one job shape on the backend
-  // (dump_job.DumpJob), so one block renderer keyed by family. They live
-  // with the phantom layer, not the library: the catalogue is what mints
-  // phantom discographies, the statistics are what rank them, and deleting
-  // either stops that updating while touching nothing the user owns.
-  // Extracted so a block can be re-rendered IN PLACE (no full render() → no
-  // scroll jump) on click / toggle / job completion.
+  /* ====== Offline databases screen — #more/databases ======
+     The bulk open-data dumps a node may hold locally instead of asking the
+     network for every fact: the MusicBrainz catalogue and the ListenBrainz
+     listening statistics today, more later. Every one of them is opt-in,
+     sized in gigabytes, and runs the same job shape on the backend
+     (dump_job.DumpJob) — so one block renderer keyed by family, and a new
+     dump is an entry here plus its two endpoints, nothing else.
+     Blocks re-render IN PLACE (no full render() → no scroll jump) on
+     click / toggle / job completion. */
   const DUMP_FAMILIES = {
     mb: {
+      key: 'musicbrainz',
       label: 'MusicBrainz database',
-      base: '/api/settings/musicbrainz',
       // The pitch names what the catalogue buys. Loaded → the dump's own
       // numbers; not loaded → MusicBrainz's order of magnitude, since the local
       // tables are empty and cannot sell themselves.
@@ -12549,8 +12560,8 @@
                    + 'download it again — nothing in your own library is touched.',
     },
     lb: {
+      key: 'listenbrainz',
       label: 'ListenBrainz listening statistics',
-      base: '/api/settings/listenbrainz',
       pitch: (d) => {
         const cat = d.catalogue || {};
         return d.loaded
@@ -12602,6 +12613,110 @@
       <div data-${family}-actions>${actions}</div>`;
   }
 
+  function _wireDump(root, family) {
+    const copy = DUMP_FAMILIES[family];
+    const base = `/api/settings/${copy.key}`;
+    const onA = (sel, fn) => root.querySelectorAll(sel).forEach(el => el.addEventListener('click', fn));
+    onA(`[data-action="${family}-update"]`, async () => {
+      // Button → progress UI in place; SSE animates from here. No render().
+      const wrap = root.querySelector(`[data-${family}-actions]`);
+      if (wrap) wrap.innerHTML = `<div class="action-progress" data-progress-for="${family}">Starting…</div><div class="enrich-bar indeterminate" data-${family}-bar><div class="fill"></div></div>`;
+      await fetch(`${base}/update`, { method: 'POST' });
+    });
+    onA(`[data-action="${family}-delete"]`, (e) => onceInFlight(e.currentTarget, async () => {
+      const ok = await window.confirmDestructive({
+        title: copy.deleteTitle,
+        message: copy.deleteMessage,
+        confirmText: 'Delete',
+      });
+      if (!ok) return;
+      const r = await fetch(`${base}/delete`, { method: 'POST' });
+      if (!r.ok) {
+        const d = await r.json().catch(() => ({}));
+        await window.notifyDialog({ title: 'Could not delete', kind: 'error',
+          message: escapeProfileHtml(d.detail || 'Unknown error') });
+        return;
+      }
+      render();
+    }));
+    onA(`[data-action="${family}-auto"]`, (e) => {
+      const btn = e.currentTarget;
+      const want = !btn.classList.contains('on');
+      btn.classList.toggle('on', want);                 // optimistic flip, no render
+      btn.setAttribute('aria-pressed', want ? 'true' : 'false');
+      serialized(`${family}.auto`, () => fetch(base, { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ auto_update: want }) }));
+    });
+  }
+
+  async function _fetchDumps() {
+    try {
+      const r = await fetch('/api/settings/databases');
+      if (r.ok) return await r.json();
+    } catch (_) {}
+    return null;
+  }
+
+  async function renderDatabases(root) {
+    const data = await _fetchDumps();
+    if (!data) {
+      root.innerHTML = `<section class="screen screen-settings">${_settingsHeader('Offline databases')}<div class="placeholder">Could not load the statistics.</div></section>`;
+      _wireBack(root);
+      return;
+    }
+    const families = Object.keys(DUMP_FAMILIES);
+    root.innerHTML = `
+      <section class="screen screen-settings">
+        ${_settingsHeader('Offline databases')}
+        ${families.map(f => `<div data-${f}-block>${_dumpBlockHTML(f, data[DUMP_FAMILIES[f].key])}</div>`).join('')}
+      </section>
+    `;
+    _wireBack(root);
+    families.forEach(f => _wireDump(root, f));
+    _subscribeDumpStream(root);
+  }
+
+  /* Live download/load progress. Rides the shared library wake channel —
+     DumpJob notifies it on every phase change — and pulls this screen's own
+     endpoint on each wake. */
+  let _dumpStreamCtrl = null;
+
+  function _subscribeDumpStream(root) {
+    if (_dumpStreamCtrl) { _dumpStreamCtrl.abort(); _dumpStreamCtrl = null; }
+
+    async function refresh() {
+      if (!parseHash().startsWith('more/databases')) {
+        _dumpStreamCtrl && _dumpStreamCtrl.abort();
+        _dumpStreamCtrl = null;
+        return;
+      }
+      const data = await _fetchDumps();
+      if (!data) return;
+      for (const family of Object.keys(DUMP_FAMILIES)) {
+        const d = data[DUMP_FAMILIES[family].key] || {};
+        const running  = !!(d.update && d.update.running);
+        const progress = String((d.update && d.update.progress) || '');
+        const line = root.querySelector(`[data-progress-for="${family}"]`);
+        if (line && progress && line.textContent !== progress) line.textContent = progress;
+        const bar = root.querySelector(`[data-${family}-bar]`);
+        if (bar) {
+          const pct = (d.update && typeof d.update.pct === 'number') ? d.update.pct : null;
+          const fill = bar.querySelector('.fill');
+          if (pct == null) { bar.classList.add('indeterminate'); if (fill) fill.style.width = ''; }
+          else { bar.classList.remove('indeterminate'); if (fill) fill.style.width = pct + '%'; }
+        }
+        // A progress line on screen with the job gone = it just finished:
+        // re-render the block so the counts and the action row catch up.
+        const block = root.querySelector(`[data-${family}-block]`);
+        if (block && line && !running) {
+          block.innerHTML = _dumpBlockHTML(family, d);
+          _wireDump(root, family);
+        }
+      }
+    }
+
+    _dumpStreamCtrl = libraryWake.on(refresh);
+  }
+
   /* Hardware profile block (Profile screen) — read-only info. Selection is
      automatic (backend auto-detects full/standard/lite; SAUTIUM_PROFILE env
      is the only override, for diagnostics). Loads itself after render. */
@@ -12638,50 +12753,19 @@
       </div>`;
   }
 
-  function _wireDump(root, family) {
-    const copy = DUMP_FAMILIES[family];
-    const onA = (sel, fn) => root.querySelectorAll(sel).forEach(el => el.addEventListener('click', fn));
-    onA(`[data-action="${family}-update"]`, async () => {
-      // Button → progress UI in place; SSE animates from here. No render().
-      const wrap = root.querySelector(`[data-${family}-actions]`);
-      if (wrap) wrap.innerHTML = `<div class="action-progress" data-progress-for="${family}">Starting…</div><div class="enrich-bar indeterminate" data-${family}-bar><div class="fill"></div></div>`;
-      await fetch(`${copy.base}/update`, { method: 'POST' });
-    });
-    onA(`[data-action="${family}-delete"]`, (e) => onceInFlight(e.currentTarget, async () => {
-      const ok = await window.confirmDestructive({
-        title: copy.deleteTitle,
-        message: copy.deleteMessage,
-        confirmText: 'Delete',
-      });
-      if (!ok) return;
-      const r = await fetch(`${copy.base}/delete`, { method: 'POST' });
-      if (!r.ok) {
-        const d = await r.json().catch(() => ({}));
-        await window.notifyDialog({ title: 'Could not delete', kind: 'error',
-          message: escapeProfileHtml(d.detail || 'Unknown error') });
-        return;
-      }
-      render();
-    }));
-    onA(`[data-action="${family}-auto"]`, (e) => {
-      const btn = e.currentTarget;
-      const want = !btn.classList.contains('on');
-      btn.classList.toggle('on', want);                 // optimistic flip, no render
-      btn.setAttribute('aria-pressed', want ? 'true' : 'false');
-      serialized(`${family}.auto`, () => fetch(copy.base, { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ auto_update: want }) }));
-    });
-  }
+  /* ====== Streaming library screen — #more/phantoms ======
+     The catalog the node knows but does not own: MusicBrainz discographies
+     and Last.fm neighbours, streamable next to the library — which is what
+     the user-facing name says. "Streaming library" is that name only;
+     "phantom" stays the internal term in the route, the API, the settings
+     key and the CSS. Rename copy, not identifiers.
+     Its own screen because it is its own catalog — the same Library /
+     Enrichment shape, plus the owner's switch and the one explicit removal.
+     Nothing on the backend removes it (CLAUDE.md: a hardware profile governs
+     compute, never retention), so this screen is the only place it can go.
 
-  // The catalog the node knows but does not own: MusicBrainz discographies
-  // and Last.fm neighbours, streamable next to the library — which is what
-  // the user-facing name says.
-  // Its own screen because it is its own catalog — the same Library /
-  // Enrichment shape, plus the owner's switch and the one explicit removal.
-  // Nothing on the backend removes it (CLAUDE.md: a hardware profile governs
-  // compute, never retention), so this screen is the only place it can go.
-  //
-  // In-place contract, same as the MB block: no full render() on a click, a
-  // toggle or job completion — the delegated listener survives the swap.
+     In-place contract, same as the dump blocks: no full render() on a click,
+     a toggle or job completion — the delegated listener survives the swap. */
   function _phantomBlockHTML(ph) {
     ph = ph || {};
     const job = ph.prune || {};
@@ -12805,15 +12889,11 @@
     root.innerHTML = `
       <section class="screen screen-settings">
         ${_settingsHeader('Streaming library')}
-        <div data-mb-block>${_dumpBlockHTML('mb', ph.musicbrainz)}</div>
-        <div data-lb-block>${_dumpBlockHTML('lb', ph.listenbrainz)}</div>
         <div data-phantom-block>${_phantomBlockHTML(ph)}</div>
       </section>
     `;
     _wireBack(root);
     _wirePhantoms(root);
-    _wireDump(root, 'mb');
-    _wireDump(root, 'lb');
     _subscribePhantomStream(root);
   }
 
@@ -12849,30 +12929,11 @@
         if (pct == null) { bar.classList.add('indeterminate'); if (fill) fill.style.width = ''; }
         else { bar.classList.remove('indeterminate'); if (fill) fill.style.width = pct + '%'; }
       }
-      // Either job finishing → re-render its own block IN PLACE, so the counts
-      // and the action row catch up without scrolling the page back to the top.
+      // Prune finished → re-render the block IN PLACE, so the counts and the
+      // action row catch up without scrolling the page back to the top.
       const block = root.querySelector('[data-phantom-block]');
       if (block && !running && root.querySelector('[data-progress-for="phantoms"]')) {
         block.innerHTML = _phantomBlockHTML(ph);   // delegated listener survives the swap
-      }
-      for (const family of ['mb', 'lb']) {
-        const d = (family === 'mb' ? ph.musicbrainz : ph.listenbrainz) || {};
-        const jobRunning  = !!(d.update && d.update.running);
-        const jobProgress = String((d.update && d.update.progress) || '');
-        const jobLine = root.querySelector(`[data-progress-for="${family}"]`);
-        if (jobLine && jobProgress && jobLine.textContent !== jobProgress) jobLine.textContent = jobProgress;
-        const jobBar = root.querySelector(`[data-${family}-bar]`);
-        if (jobBar) {
-          const pct = (d.update && typeof d.update.pct === 'number') ? d.update.pct : null;
-          const fill = jobBar.querySelector('.fill');
-          if (pct == null) { jobBar.classList.add('indeterminate'); if (fill) fill.style.width = ''; }
-          else { jobBar.classList.remove('indeterminate'); if (fill) fill.style.width = pct + '%'; }
-        }
-        const blockEl = root.querySelector(`[data-${family}-block]`);
-        if (blockEl && jobLine && !jobRunning) {
-          blockEl.innerHTML = _dumpBlockHTML(family, d);
-          _wireDump(root, family);
-        }
       }
     }
 

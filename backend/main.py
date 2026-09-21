@@ -766,7 +766,7 @@ async def lifespan(app: FastAPI):
         notary.wake("startup", full=True)
 
     # Dump auto-updates — MusicBrainz and ListenBrainz statistics (opt-in
-    # toggles in More → Streaming library).
+    # toggles in More → Offline databases).
     try:
         from routers.settings import maybe_auto_update
         maybe_auto_update()

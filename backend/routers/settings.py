@@ -500,10 +500,7 @@ def _phantom_worker() -> None:
 
 def _phantom_section() -> Dict[str, Any]:
     """Footprint + switch + live job state for the Streaming library screen
-    ("phantom" is the internal term for the same thing, and stays),
-    plus the MusicBrainz catalogue block: the dump is what mints phantom
-    discographies in the first place, so its status belongs with the layer
-    it produces, not with the files the user owns.
+    ("phantom" is the internal term for the same thing, and stays).
 
     Every count is exact. The track figure is total-minus-owned rather than
     a correlated NOT EXISTS over 3M rows: the two agree exactly (media_files
@@ -552,8 +549,6 @@ def _phantom_section() -> Dict[str, Any]:
     """)
     return {
         "enabled":    bool(_read("discovery.phantom_layer")),
-        "musicbrainz": mb_job.section(),
-        "listenbrainz": lb_job.section(),
         "tracks":     int(row["tracks"]),
         "artists":    int(row["artists"]),
         "albums":     int(row["albums"]),
@@ -2065,6 +2060,16 @@ def lb_status() -> Dict[str, Any]:
 @router.post("/listenbrainz/update")
 def lb_update(force: bool = False) -> Dict[str, Any]:
     return _dump_update(lb_job, force)
+
+
+@router.get("/databases")
+def get_databases() -> Dict[str, Any]:
+    """Read for the Offline databases screen — every optional bulk dump this
+    node can hold, in one round-trip. Its own endpoint rather than a field on
+    /phantoms: that payload counts the whole phantom layer (~0.4 s) and this
+    screen wakes on every load-progress tick. A new dump family is a key
+    here and an entry in the UI's DUMP_FAMILIES."""
+    return {"musicbrainz": mb_job.section(), "listenbrainz": lb_job.section()}
 
 
 class PhantomPrefs(BaseModel):

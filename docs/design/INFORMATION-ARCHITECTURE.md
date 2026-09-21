@@ -125,12 +125,19 @@ A **bottom-up sheet** with a vertical list of entries:
   functions — `BACKUP.md`; the Web UI has no backup surface.)
 - Streaming library (`#more/phantoms`) — the catalog the node knows but
   does not own; its own screen because it is its own catalog, with the
-  owner's `discovery.phantom_layer` switch, the one explicit removal,
-  and the MusicBrainz catalogue that mints the discographies.
+  owner's `discovery.phantom_layer` switch and the one explicit removal.
   **"Streaming library" is the user-facing name only** — "phantom" stays
   the internal term in the route, the API, the settings key and the CSS,
   and everywhere else in the docs
-- About / version
+- Offline databases (`#more/databases`) — the bulk open-data dumps a node
+  may hold locally instead of asking the network for every fact: the
+  MusicBrainz catalogue and the ListenBrainz listening statistics
+  (2026-09-21), lyrics later. Each is opt-in, sized in gigabytes, and runs
+  the same `dump_job.DumpJob` shape, so the screen is one block renderer
+  over `DUMP_FAMILIES`. Its own section rather than rows on Library or
+  Streaming library: the dumps are neither the user's files nor a catalog
+  of music — they are reference data the whole node reads, and the set of
+  them grows
 
 Sheet is dismissed with drag-down or tap-outside. Detail screens
 (e.g., HQPlayer config) push **above** the sheet — the sheet stays
@@ -166,7 +173,8 @@ back/forward and refresh work natively:
 #more/profile                → Profile (own — identity, account, audio chain)
 #more/profile/gear/<id>      → Gear item detail (sheet within Profile)
 #more/library                → Library (owned counts, enrichment, scan)
-#more/phantoms               → Streaming library (phantom counts, enrichment, MB)
+#more/phantoms               → Streaming library (phantom counts, enrichment)
+#more/databases              → Offline databases (MusicBrainz, ListenBrainz)
 #profile/<pubkey-prefix>     → Profile (viewing other, read-only)
 #queue                       → Full queue editor
 #queue/history/<id>          → Specific historical queue restore
@@ -823,7 +831,7 @@ All Genre blocks roll up into a single `(new endpoint)` GET
 | DSP / Signal Chain | existing HQP filter / matrix / dither endpoints | + per-genre auto-profile |
 | Library | `/api/settings/library` — owned counts + enrichment coverage over the ENGAGED artist set (`sql_queries.ARTIST_ENGAGED`), so the ratio names the same population the pipeline queues | — |
 | Streaming library | `/api/settings/phantoms` — its own endpoint: the counts cost ~0.4 s and the library screen wakes on every scan/enrich tick. Enrichment there is a COUNT, never a ratio: a phantom track has no file, so audio analysis only arrives over P2P and there is no total to complete | + per-source breakdown (MB vs Last.fm) |
-| MusicBrainz catalogue | `/api/settings/musicbrainz/*` — status, auto-update toggle, download/update/delete. Sits on the Phantom screen because the dump is what mints phantom discographies; deleting it stops them updating and touches nothing owned | — |
+| Offline databases | `/api/settings/databases` — every dump family's section in one round-trip, so the screen's wake refresh is one request; writes go to `/api/settings/{musicbrainz,listenbrainz}/*` (auto-update toggle, download/update/delete). `/{family}/status` adds the disk budget and exists for the assistant's `*_dump_status` tools | + a lyrics dump |
 
 ### Profile (own)
 

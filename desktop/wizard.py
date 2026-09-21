@@ -1647,7 +1647,7 @@ class SetupWizard(ctk.CTkToplevel):
                 f"Free space: {free:.0f} GB — not enough (needs "
                 f"~{self._MB_NEEDED_GB} GB: ~21 GB in the database, plus the "
                 f"archive while it installs). You can enable this later in "
-                f"More → Library."
+                f"More → Offline databases."
             ),
             text_color="gray" if enough else "#C86450",
             wraplength=470, justify="left",
@@ -1656,7 +1656,7 @@ class SetupWizard(ctk.CTkToplevel):
         ctk.CTkLabel(
             self.content_frame,
             text=("Runs in the background after start, and can be removed at "
-                  "any time from More → Library → MusicBrainz database."),
+                  "any time from More → Offline databases."),
             text_color="gray", wraplength=470, justify="left",
         ).pack(pady=(6, 0))
 
@@ -1683,7 +1683,7 @@ class SetupWizard(ctk.CTkToplevel):
                 "from the nodes that hold it."
                 if lb_enough else
                 f"Needs ~{self._LB_NEEDED_GB} GB free while it installs — you "
-                f"can enable it later in More → Streaming library."
+                f"can enable it later in More → Offline databases."
             ),
             text_color="gray" if lb_enough else "#C86450",
             wraplength=470, justify="left",

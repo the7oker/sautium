@@ -435,7 +435,7 @@ def download_and_load(progress_cb: ProgressCb = _noop, force: bool = False) -> D
     except OSError:
         pass
     # The peer surface re-reads the marker; the launcher's P2PManager announces
-    # the lbdump capability; the Streaming library block shows the version.
+    # the lbdump capability; the Offline databases block shows the version.
     db_execute("NOTIFY sautium_lb_sources")
     progress_cb({"phase": "done", "version": version})
     return {"version": version, "loaded": True, "up_to_date": False, "kept": kept}

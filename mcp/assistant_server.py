@@ -787,7 +787,7 @@ def mb_dump_download(confirm: bool = False) -> str:
     """Start the background MusicBrainz dump download+load (~7 GB download,
     ~30 GB disk total, tens of minutes). Fire-and-forget: returns immediately —
     NEVER wait for completion in the same reply; progress lives in More →
-    Library → MusicBrainz database, or via mb_dump_status. Call ONLY with
+    Offline databases, or via mb_dump_status. Call ONLY with
     confirm=true, ONLY after the
     user explicitly agreed in this conversation to the quoted size, and never
     when the disk budget said can_fit=false (the backend refuses then anyway).
@@ -807,7 +807,7 @@ def mb_dump_download(confirm: bool = False) -> str:
         return json.dumps({"status": "error", "detail": str(e)}, ensure_ascii=False)
     return json.dumps({"status": "started",
                        "note": "background job; check later via mb_dump_status "
-                               "or in More → Library → MusicBrainz database"})
+                               "or in More → Offline databases"})
 
 
 @mcp.tool()
@@ -846,8 +846,8 @@ def lb_dump_download(confirm: bool = False) -> str:
     """Start the background ListenBrainz statistics download+load (~22 GB
     download, ~32 GB free disk during the install, ~1 GB kept, about half an
     hour on a fast line). Fire-and-forget: returns immediately — NEVER wait for
-    completion in the same reply; progress lives in More → Streaming
-    library → ListenBrainz listening statistics, or via lb_dump_status. Call
+    completion in the same reply; progress lives in More → Offline
+    databases, or via lb_dump_status. Call
     ONLY with confirm=true, ONLY after the user explicitly agreed in this
     conversation to the quoted size, and never when the disk budget said
     can_fit=false (the backend refuses then anyway).
@@ -867,8 +867,7 @@ def lb_dump_download(confirm: bool = False) -> str:
         return json.dumps({"status": "error", "detail": str(e)}, ensure_ascii=False)
     return json.dumps({"status": "started",
                        "note": "background job; check later via lb_dump_status "
-                               "or in More → Streaming library → ListenBrainz "
-                               "listening statistics"})
+                               "or in More → Offline databases"})
 
 
 @mcp.tool()
