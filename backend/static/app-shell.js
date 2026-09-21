@@ -8,6 +8,33 @@
 (function () {
   'use strict';
 
+  /* ---------- The public site ----------
+     A link out of the app carries the origin THIS device reached the node by
+     in the URL fragment (`#node=<origin>`): the site reads it to offer "Open
+     my Sautium", and a fragment never reaches a server log or a Referer. The
+     `noreferrer` on every such link keeps the http origin out of the site's
+     logs too — on the http→https hop the default policy would still send
+     `Referer: http://<lan-ip>:8800/`. */
+  const SITE_URL = 'https://sautium.net';   // MIRRORED: desktop/utils.py SITE_URL; desktop/installer/sautium.iss carries it literally
+  const REPO_URL = 'https://github.com/the7oker/sautium';
+  const SUPPORT_URL = '';                   // a donation page; the About row renders only once this is set
+  const SITE_PATHS = {
+    home: '/',
+    guides: '/guides/',
+    privacy: '/privacy/',
+    outputs: '/guides/phone-as-speaker/',
+    streaming: '/guides/streaming-library/',
+  };
+
+  function siteLink(path) {
+    return `${SITE_URL}${path}#node=${encodeURIComponent(location.origin)}`;
+  }
+
+  // What a hardware tier is called in front of the user (HARDWARE-TIERS.md
+  // § 5); the ids full/standard/lite stay in the API, settings and profiles.
+  // MIRRORED: desktop/utils.py PROFILE_DISPLAY_NAMES
+  const PROFILE_DISPLAY_NAMES = { full: 'Curator', standard: 'Standard', lite: 'Lite' };
+
   /* ---------- Placeholder colour helpers ---------- */
 
   function hashName(name) {
@@ -7956,6 +7983,7 @@
     if (sub === 'databases') return renderDatabases(root);
     if (sub === 'ai')      return renderAI(root);
     if (sub === 'sync')    return renderSync(root);
+    if (sub === 'about')   return renderAbout(root);
     // Bare #more — nothing to render here; the drawer is the UI.
     // Drop back to home so the page isn't blank if the user
     // bookmarked the route.
@@ -8010,6 +8038,7 @@
       });
       updateFabVisibility(currentRoute);
       this._refreshHqpStatus();
+      this._fillAboutHint();
       guide.paint();
     },
     close() {
@@ -8055,6 +8084,12 @@
           }
         }
       } catch (_) { /* leave hint as "…" — non-critical */ }
+    },
+    async _fillAboutHint() {
+      const hint = this.el.querySelector('#aboutHint');
+      if (hint.textContent) return;
+      const cfg = await nodeConfig();
+      if (cfg) hint.textContent = `v${cfg.app_version}`;
     },
     _html() {
       const ICON_HQP = `
@@ -8115,6 +8150,13 @@
              stroke-linejoin="round" aria-hidden="true">
           <polygon points="11 5 6 9 2 9 2 15 6 15 11 19 11 5"/>
           <path d="M15.5 8.5a5 5 0 010 7M18.5 5.5a9 9 0 010 13"/>
+        </svg>`;
+      const ICON_ABOUT = `
+        <svg width="22" height="22" viewBox="0 0 24 24" fill="none"
+             stroke="currentColor" stroke-width="1.7" stroke-linecap="round"
+             stroke-linejoin="round" aria-hidden="true">
+          <circle cx="12" cy="12" r="9"/>
+          <path d="M12 11v5M12 8h.01"/>
         </svg>`;
       const CHEV = `
         <svg width="16" height="16" viewBox="0 0 24 24" fill="none"
@@ -8181,6 +8223,12 @@
               <span class="more-icon">${ICON_SYNC}</span>
               <span class="more-label">Sync &amp; P2P</span>
               <span class="more-hint"></span>
+              <span class="more-chev">${CHEV}</span>
+            </button>
+            <button class="more-row" type="button" data-go="more/about">
+              <span class="more-icon">${ICON_ABOUT}</span>
+              <span class="more-label">About Sautium</span>
+              <span class="more-hint" id="aboutHint"></span>
               <span class="more-chev">${CHEV}</span>
             </button>
           </div>
@@ -12091,7 +12139,7 @@
   }
   function loadDetail(ld) {
     if (!ld || ld.headroom == null) return '';
-    const parts = [`profile ${ld.profile}`, `ceiling ${Math.round((ld.ceiling || 0) * 100)}% CPU`,
+    const parts = [`profile ${PROFILE_DISPLAY_NAMES[ld.profile] || ld.profile}`, `ceiling ${Math.round((ld.ceiling || 0) * 100)}% CPU`,
                    `using ${(100 * (ld.cpu_frac || 0)).toFixed(1)}%`, `announce pace ×${ld.pace}`];
     if (ld.mem_available_mib != null) parts.push(`${ld.mem_available_mib} MiB free`);
     return parts.join(' · ');
@@ -12138,6 +12186,8 @@
       <section class="screen screen-settings">
         ${_settingsHeader('Audio output')}
         <div data-output-content style="margin-top:calc(14*var(--px));">${_renderOutputs(data)}</div>
+        <div class="profile-group-label">Learn more</div>
+        <div class="form-group">${linkRow('Phones, DLNA and HQPlayer as outputs', siteLink(SITE_PATHS.outputs), 'Guide')}</div>
       </section>`;
     _wireBack(root);
     _wireOutputActions(root);
@@ -12539,6 +12589,17 @@
     });
   }
 
+  /* An outbound link as a settings row — the "learn more" hooks and the About
+     screen. A real anchor, so long-press and "open in new tab" work. */
+  const linkRow = (label, href, hint) => `
+    <a class="form-row is-clickable is-link" href="${escapeHtml(href)}" target="_blank" rel="noopener noreferrer">
+      <span class="form-label">${escapeHtml(label)}</span>
+      <span class="form-actions">
+        ${hint ? `<span class="form-value action">${escapeHtml(hint)}</span>` : ''}
+        <span class="link-chev">${PROFILE_ICONS.chev}</span>
+      </span>
+    </a>`;
+
   /* ====== Offline databases screen — #more/databases ======
      The bulk open-data dumps a node may hold locally instead of asking the
      network for every fact: the MusicBrainz catalogue and the ListenBrainz
@@ -12762,7 +12823,7 @@
     holder.innerHTML = `
       <div class="profile-group-label">Hardware profile</div>
       <div class="form-group">
-        <div class="form-row"><span class="form-label">Active</span><span class="form-value">${escapeProfileHtml(String(hw.profile || '?'))}${hw.source === 'env' ? ' · env override' : ''}</span></div>
+        <div class="form-row"><span class="form-label">Active</span><span class="form-value">${escapeProfileHtml(PROFILE_DISPLAY_NAMES[hw.profile] || hw.profile || '?')}${hw.source === 'env' ? ' · env override' : ''}</span></div>
         <div class="form-row stacked"><div class="row-stack-sub">Auto-selected from this machine: ${escapeProfileHtml(_hwMachineLine(d))}. Scales analysis, model pre-warm and background load.</div></div>
       </div>`;
   }
@@ -12904,6 +12965,8 @@
       <section class="screen screen-settings">
         ${_settingsHeader('Streaming library')}
         <div data-phantom-block>${_phantomBlockHTML(ph)}</div>
+        <div class="profile-group-label">Learn more</div>
+        <div class="form-group">${linkRow('Audition, then buy — how the Streaming library works', siteLink(SITE_PATHS.streaming), 'Guide')}</div>
       </section>
     `;
     _wireBack(root);
@@ -13430,6 +13493,8 @@
       <section class="screen screen-settings">
         ${_settingsHeader('Sync & P2P')}
         <div data-sync-content style="margin-top:calc(14*var(--px));">${_renderSync(sync)}</div>
+        <div class="profile-group-label">Learn more</div>
+        <div class="form-group">${linkRow('What leaves your machine', siteLink(SITE_PATHS.privacy))}</div>
       </section>
     `;
     _wireBack(root);
@@ -13506,6 +13571,53 @@
     }
 
     _syncStreamCtrl = libraryWake.on(refresh);
+  }
+
+  /* ============ About screen — #more/about ============
+     What this node runs and where the project lives. `/config` is fetched
+     once per page load: the drawer row's hint and this screen share it. */
+  let _nodeConfigPromise = null;
+
+  function nodeConfig() {
+    if (!_nodeConfigPromise) {
+      _nodeConfigPromise = fetch('/config')
+        .then(r => (r.ok ? r.json() : Promise.reject(new Error(`HTTP ${r.status}`))))
+        .catch(() => { _nodeConfigPromise = null; return null; });
+    }
+    return _nodeConfigPromise;
+  }
+
+  async function renderAbout(root) {
+    const cfg = await nodeConfig();
+    const identity = !cfg ? '' : cfg.build
+      ? `<div class="form-row"><span class="form-label">Build</span><span class="form-value mono">${escapeHtml(cfg.build)}</span></div>`
+      : `<div class="form-row"><span class="form-label">Commit</span><span class="form-value ${cfg.commit ? 'mono' : 'muted'}">${escapeHtml(cfg.commit || '—')}</span></div>`;
+    root.innerHTML = `
+      <section class="screen screen-settings">
+        ${_settingsHeader('About Sautium')}
+        <div class="profile-group-label">This node</div>
+        <div class="form-group">
+          <div class="form-row">
+            <span class="form-label">Version</span>
+            <span class="form-value ${cfg ? 'mono' : 'muted'}">${escapeHtml(cfg ? cfg.app_version : '—')}</span>
+          </div>
+          ${identity}
+          <div class="form-row">
+            <span class="form-label">Licence</span>
+            <span class="form-value"><a class="form-value-link" href="${REPO_URL}/blob/main/LICENSE" target="_blank" rel="noopener noreferrer">PolyForm Noncommercial 1.0.0</a></span>
+          </div>
+        </div>
+        <div class="profile-group-label">Sautium online</div>
+        <div class="form-group">
+          ${linkRow('Website', siteLink(SITE_PATHS.home), 'sautium.net')}
+          ${linkRow('Guides', siteLink(SITE_PATHS.guides))}
+          ${linkRow('What leaves your machine', siteLink(SITE_PATHS.privacy))}
+          ${linkRow('Source code', REPO_URL, 'GitHub')}
+          ${linkRow('Third-party notices', `${REPO_URL}/blob/main/THIRD_PARTY_NOTICES.md`)}
+          ${SUPPORT_URL ? linkRow('Support the project', SUPPORT_URL) : ''}
+        </div>
+      </section>`;
+    _wireBack(root);
   }
 
   /* ---------- Wire it up ---------- */

@@ -118,7 +118,6 @@ A **bottom-up sheet** with a vertical list of entries:
   newer tab taking over displaces the old one via a `released`
   directive; a closed renderer tab reports the output stopped after a
   short grace, and the queue survives for any output to pick up.
-- DSP / Signal Chain (filter, matrix, dither, digital attenuation)
 - Profile (identity, account, hardware profile, audio chain)
 - Library (`#more/library`) — music path, owned counts, enrichment
   coverage, scan/enrich actions. (Node backup and restore are launcher
@@ -138,6 +137,19 @@ A **bottom-up sheet** with a vertical list of entries:
   Streaming library: the dumps are neither the user's files nor a catalog
   of music — they are reference data the whole node reads, and the set of
   them grows
+- AI assistant (`#more/ai`) — which agent answers the chat and its sign-in
+- Sync & P2P (`#more/sync`) — the network's state, the P2P settings, the
+  notices
+- About Sautium (`#more/about`) — version, build or commit, licence, and the
+  links out: the website, the guides, "What leaves your machine" (the
+  privacy page), the source, the third-party notices. Every link to the site
+  carries `#node=<origin>` — the origin THIS device reached the node by, in
+  the URL fragment, so the site can offer "Open my Sautium" without the
+  address ever reaching a server log or a Referer (`rel="noreferrer"` on the
+  links plus the page-wide `no-referrer` policy). The same `siteLink()`
+  helper feeds the three contextual "Learn more" rows: Audio output → the
+  phone-as-speaker guide, Sync & P2P → the privacy page, Streaming library →
+  the streaming-library guide
 
 Sheet is dismissed with drag-down or tap-outside. Detail screens
 (e.g., HQPlayer config) push **above** the sheet — the sheet stays
@@ -169,12 +181,17 @@ back/forward and refresh work natively:
 #friends/chat/<peer>         → Friend chat thread
 #more                        → redirects to #home (the drawer toggles in place, it is not a route)
 #more/hqplayer               → HQPlayer config screen
-#more/dsp                    → DSP / Signal Chain screen
+#more/output                 → Audio output (the Output picker)
 #more/profile                → Profile (own — identity, account, audio chain)
-#more/profile/gear/<id>      → Gear item detail (sheet within Profile)
+#more/gear/<id>              → Gear item detail, pushed from Profile
+#more/gear-system            → System analysis (pair matrix), from Profile
+#more/gear-advisor           → Upgrade advisor, from Profile
 #more/library                → Library (owned counts, enrichment, scan)
 #more/phantoms               → Streaming library (phantom counts, enrichment)
 #more/databases              → Offline databases (MusicBrainz, ListenBrainz)
+#more/ai                     → AI assistant (agent, sign-in)
+#more/sync                   → Sync & P2P (network state, settings, notices)
+#more/about                  → About Sautium (version, build, licence, site links)
 #profile/<pubkey-prefix>     → Profile (viewing other, read-only)
 #queue                       → Full queue editor
 #queue/history/<id>          → Specific historical queue restore
@@ -662,7 +679,7 @@ Chrome mapping:
 |---|---|---|
 | Bottom nav | tab bar | nav rail (icon + caption) — same `<nav>` / `.nav-tab` DOM |
 | More drawer | bottom drawer | centred card (content-height, the card header: title + close); same rows, one DOM node |
-| More sections (`#more/*`) | full screens | **windows** (form sheets) that replace the More card: the phone screen in a centred window — 360px for the seven first-level sections, wider (~560px) for the gear screens reached from Profile; back returns to the menu, close dismisses, the content behind stays. These routes are *modal* on the tablet: the underlying screen stays mounted and Back removes the window |
+| More sections (`#more/*`) | full screens | **windows** (form sheets) that replace the More card: the phone screen in a centred window — 360px for the first-level sections, wider (~560px) for the gear screens reached from Profile; back returns to the menu, close dismisses, the content behind stays. These routes are *modal* on the tablet: the underlying screen stays mounted and Back removes the window |
 | Mini-player | bar above the nav | bar at the bottom, right of the rail |
 | AI FAB | bottom-right | bottom-right, above the bar |
 | Now Playing | full-screen sheet | the same sheet at its native 360px as a centred card over a scrim; the chevron, a scrim tap or Escape closes it; it scrolls as a whole, cover included, exactly like the phone |

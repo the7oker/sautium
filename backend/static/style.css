@@ -4729,6 +4729,7 @@ body.sautium-base {
 .form-row:last-child { border-bottom: none; }
 .form-row.is-clickable { cursor: pointer; }
 .form-row.is-clickable:active { background: var(--color-surface-hi); }
+.form-row.is-link { color: inherit; text-decoration: none; }
 .form-label {
   font-size: calc(13 * var(--px));
   color: var(--color-text-muted);
