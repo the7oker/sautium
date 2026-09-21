@@ -117,10 +117,13 @@ Sautium. Source: https://github.com/quodlibet/mutagen.
   CC0 / CC BY-NC-SA as published by MetaBrainz); API use follows the
   MusicBrainz rate and user-agent rules.
 - **Cover Art Archive** — album art.
-- **Deezer public API** — artist images only (no authentication, no audio).
+- **Deezer public API** — artist images, catalog lookup (barcode → album
+  tracklist → track) and the 30 s preview clips the catalog publishes, all
+  without authentication.
 - **Genius** — optional plain-text lyrics fallback with the user's own API
   token; **LRCLIB** — synced lyrics.
-- **YouTube** — the built-in streaming preview provider through yt-dlp, a
-  terms-of-service matter for the user, not anti-circumvention.
+- **YouTube** — the built-in demo channel through yt-dlp: a track plays in
+  full at most once, after which it falls back to the catalog's 30 s excerpt.
+  A terms-of-service matter for the user, not anti-circumvention.
 - **Cloudflare Workers** — the project's verification/notary service
   (`worker/`), operated by the maintainer.

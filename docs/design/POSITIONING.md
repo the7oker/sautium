@@ -40,10 +40,10 @@ Brand work should foreground the _medium_ aspect.
 
 ### Tertiary (served, not targeted) — Indie creators / niche labels
 
-- Musicians and small labels who want to find their audience through
+- Musicians and small labels whose work reaches listeners through
   music-similarity discovery.
-- Served as a **side effect** of the outdoor P2P network, **not** a
-  flagship flow in MVP.
+- Served purely as a **side effect** of the outdoor P2P network. There is
+  no creator-facing product: no profiles to claim, no flow of their own.
 
 ### Not for
 
@@ -75,10 +75,8 @@ Sautium is two halves that share one foundation.
   listening/library, **not** a feed of posts).
 - Chat with them about music, explore their libraries.
 - Discover new music through other people's collections.
-- **No social feed in MVP.** The model is **contact-driven, not
-  feed-driven**: "stay in touch", not "live in the app".
-- Feed-like affordances may arrive later for creators (tertiary group),
-  but are explicitly out of scope for the current UI iteration.
+- **No social feed.** The model is **contact-driven, not feed-driven**:
+  "stay in touch", not "live in the app".
 
 ---
 
@@ -106,7 +104,7 @@ Expanded:
 
 - SaaS-dashboard vibe (Linear / Stripe style).
 - Gamification — streaks, points, badges, achievements.
-- Social feed in MVP (reserved for future creator-oriented work).
+- Social feed.
 - Infinite scroll **in social contexts** (feeds, notifications).
 - Tab / screen labyrinths — every core action reachable in ≤ 2 taps.
 - Desktop-first mindset — everything must work from a phone, lying down.
@@ -282,8 +280,8 @@ Priority order for the first DS iteration:
 1. **Design system tokens** — colours, type scale, spacing scale,
    component vocab (buttons, chips, cards, sliders, tables).
 2. **Discovery tab** — stress-test of density. Most active development
-   area; will receive the upcoming instrument filter (built on
-   AST+PaSST data in `audio_features.instruments`).
+   area; carries the instrument filter (built on AST+PaSST data in
+   `audio_features.instruments`) alongside the other dimensions.
 3. **Now Playing / HQPlayer remote** — the defining mobile flow. The
    proof that "phone from the couch" actually works.
 4. **Library / Artist / Album pages** — the reading-heavy surfaces.
@@ -297,12 +295,8 @@ visual upgrade second, new features (like the instrument filter) third.
 
 ## Out of scope for this DS iteration
 
-- Creator profiles / artist-claim flows — tertiary audience, not in MVP
-  design.
 - Social feed — design hooks are NOT pre-baked. We build similarity
   discovery only.
-- Voice interface (Whisper + TTS) — on the roadmap but not part of
-  visual DS right now.
 
 ---
 
@@ -312,7 +306,7 @@ visual upgrade second, new features (like the instrument filter) third.
 |----------|----------|
 | Name aspect to foreground | **Medium** (guide into music) |
 | Primary endpoint | **Web**. Launcher exists only to solve web-security / local-server / filesystem-access problems. |
-| Creator features in MVP design | **Ignored.** No hooks, no stubs. Will be handled as a separate design cycle later. |
+| Creator features | **Not a product surface.** No profiles, no claim flow, no hooks, no stubs. Creators are reached by the similarity graph or not at all. |
 | Accent colour | Amber `#E8B06F` primary + cool blue `#4A7FA7` technical secondary. |
 | "Deep sky blue" personal preference | Retained in spirit — cool blue secondary is the de-saturated HSL complement of amber, exactly the axis the preference pointed to. |
 

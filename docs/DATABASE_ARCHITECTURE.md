@@ -57,7 +57,8 @@ artist_tags:
 
 **Purpose**: Flexible tagging system for artists (can be extended to albums, tracks)
 **Tag types**: genres, moods, eras, styles, demographics
-**Sources**: Last.fm (285,188 rows over 23,548 tags); user tags (future)
+**Sources**: Last.fm (285,188 rows over 23,548 tags); the `source` column
+leaves room for user tags
 **Use cases**:
 - "Find all artists tagged as 'psychedelic'"
 - "Show me 70s krautrock artists"
@@ -82,7 +83,8 @@ artist_bios:
 **Use cases**:
 - Display artist info in UI
 - Rank by popularity (listeners/playcount)
-- Text embeddings for semantic search (Phase 2)
+- Text embeddings for semantic search (`bio` is a relevance source in the
+  Discovery engine)
 
 ---
 
@@ -184,10 +186,11 @@ All existing metadata has been normalized:
 | Genre descriptions | `external_metadata` JSONB | `genre_descriptions` |
 
 **Result** (2026-09-18): the normalized tables hold the data — 285,188
-artist_tags, 73,171 similar_artists, 36,843 artist_bios, 36,358 track_stats
-(dropped 2026-09-20 with migration 020 — ListenBrainz now), 2,308
+artist_tags, 73,171 similar_artists, 36,843 artist_bios, 2,308
 genre_descriptions — and `external_metadata` holds the 79,118 fetch
-records behind them.
+records behind them. A fifth table, `track_stats` (36,358 rows), was
+dropped on 2026-09-20 with migration 020; ListenBrainz carries listening
+statistics now.
 
 ---
 

@@ -34,7 +34,7 @@ Sautium Node
 │                 libtorrent DHT (per-artist + per-user announces)
 │                 E2E chat (NaCl Box) → NAT traversal (UPnP)
 │                 Sync client (HTTP pull, layered LAN→DHT)
-└── UI layer:     Connect/Disconnect, peers list, Friends/Chat, cross-library search
+└── UI layer:     Connect/Disconnect, peers list, Friends/Chat
 ```
 
 Node A (Kyiv) ↔ Node B (Berlin) ↔ Node C (Tokyo) — direct UDP/TCP connections
@@ -463,7 +463,6 @@ Phase 2 & 3: Embeddings + features (lazy, on demand, gzip)
   P2P-SYNC-INTEGRITY.md § "Wire format v1", `tests/p2p/vectors/`.
 
 ### Future
-- Selective sharing (choose which artists/albums are visible)
 - Bandwidth limiting
 - IP reputation (auto-ban flood/spam)
 
@@ -497,8 +496,11 @@ Phase 2 & 3: Embeddings + features (lazy, on demand, gzip)
    the same artist — who is "right"?~~ — MOOT (2026-09-19): Last.fm data no
    longer travels (§ "Last.fm data is node-local"); a node holds only what
    Last.fm told it.
-3. **PyInstaller + libtorrent**: does bundling the C++ extension (.pyd) into
-   the .exe work well? Needs testing.
+3. ~~**PyInstaller + libtorrent**: does bundling the C++ extension (.pyd)
+   into the .exe work well?~~ — MOOT (2026-09-14): freezing was rejected
+   outright. Both packages carry a private CPython and pip-install
+   libtorrent into it like a checkout does (PROGRESS.md § "Desktop
+   packaging"), so no extension is ever bundled into an executable.
 4. ~~**DHT announce rate limits**~~ — ANSWERED (announce storm, 2026-07):
    25 announces/s produced timeout bursts near the END of the paced window and
    for ~a minute past it. The current regime is 5 announces + a 1 s pause; a
@@ -516,17 +518,10 @@ Phase 2 & 3: Embeddings + features (lazy, on demand, gzip)
 
 ---
 
-## Future Phases
+## Deferred — deliberate pauses, not a roadmap
 
-- **P3b: Cross-library search** — "who on the network has something like this
-  track?" through embedding similarity. Distributed query fanned out to the
-  peers found, 5s timeout.
-- **P4b: Music recommendations** — broadcast "I recommend this album" to
-  friends, shared playlists (track metadata lists, not files).
-
-Deferred out of the shipped phases (deliberate pauses, not roadmap):
-uptime-ratio and passive uplink measurement as relay-selection criteria (no
-data source); the taste profile for finding nodes with similar taste (carry
+Out of the shipped phases: uptime-ratio and passive uplink measurement as
+relay-selection criteria (no data source); the taste profile for finding nodes with similar taste (carry
 turned out not to need it — the phantom catalogue materializes it); the
 phase-A wake channel that grows linearly with the network ("alive only while a
 support thread is"); the mbid bridge for the "recording matches, uuid does not"

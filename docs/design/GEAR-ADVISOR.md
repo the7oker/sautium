@@ -1,9 +1,14 @@
 # Gear Advisor — system analysis & upgrade strategy
 
-Status: research worker (Phase 2) **implemented 2026-07-12**; pair engine and
-upgrade advisor designed, not yet built. This document is the source of truth
-for the feature's stance, layers and roadmap. The design was validated by a
-live end-to-end experiment before any code was written (see §Experiment).
+Status: **Phases 2–5 built** — research worker (2026-07-12), deterministic
+pair engine (`backend/gear_pairs.py`), upgrade advisor
+(`backend/gear_advisor.py`) and the measurement-registry candidate pool
+(`backend/gear_registry.py`), all reachable through `/api/profile/gear`,
+`/gear/system` and `/gear/advisor` and through the `gear_*` assistant tools.
+Remaining: P2P sharing of researched facts and the refresh policy (§Roadmap 6–7).
+This document is the source of truth for the feature's stance, layers and
+roadmap. The design was validated by a live end-to-end experiment before any
+code was written (see §Experiment).
 
 ---
 
@@ -99,10 +104,13 @@ one model took 6–14 min with a deep multi-product prompt; the focused
 single-model prompt runs shorter). This is why results are cached forever
 (`researched_at`) and why P2P sharing of research results matters later.
 
-## Deterministic pair engine (Phase 3 — next)
+## Deterministic pair engine (Phase 3 — implemented)
 
-Pure computation over `gear_specs`, no LLM. The threshold table IS the
-product:
+`backend/gear_pairs.py`. Pure computation over `gear_specs`, no LLM. Devices
+decompose into port ROLES (a DAP is at once a headphone amp, a line source, a
+USB DAC and a transport) and the engine emits a verdict for every electrically
+meaningful (out-port, in-port) pair in the park — a MATRIX, deliberately not a
+user-drawn chain. The threshold table IS the product:
 
 - Output impedance vs load: 1/8 rule **against the impedance-curve minimum**,
   not the nominal (AM5LE: "26 Ω" nominal, measured min 14.3 Ω); computed FR
@@ -122,9 +130,13 @@ Verdict grammar: ✓ pass / ⚠ pass-with-caveat / ✗ conflict / ⌀ no data �
 with the numbers shown and a provenance tier per number
 (DS datasheet / M measured / D derived / F forum).
 
-## Upgrade strategy (Phase 4 — designed)
+## Upgrade strategy (Phases 4/5 — implemented)
 
-The core audiophile question: "how do I improve what I have for sane money."
+`backend/gear_advisor.py`, served by `GET /api/profile/gear/advisor`. The core
+audiophile question: "how do I improve what I have for sane money." No merged
+score, ever: a candidate card carries price, park compatibility from the pair
+engine, community sentiment with its sample size, and which of the owner's own
+listening axes the praised traits hit.
 
 1. **Plateau diagnosis first.** Run the pair engine over every link; where the
    delta to best-in-budget is below audibility, say "plateau — money goes
@@ -198,12 +210,15 @@ hosts are region-blocked, head-fi renders JS-only.
 ## Roadmap
 
 1. ✅ Schema + catalog UI + research prompt (pre-existing).
-2. ✅ Research worker (this change).
-3. Pair engine (`gear_pairs` or computed-on-read from specs) + thresholds
-   table + System screen.
-4. "Component added → card" trigger + AI-sheet entry point.
-5. Upgrade advisor: plateau diagnosis + frontier + genre weighting.
-6. P2P: sync researched gear facts (same signing/karma rails as audio
-   analytics), co-ownership graph, pair-synergy cache sharing.
+2. ✅ Research worker (2026-07-12).
+3. ✅ Pair engine computed on read from specs + thresholds table + System
+   screen (`gear_pairs.system_analysis`, `GET /api/profile/gear/system`).
+4. ✅ "Component added → card" trigger + AI entry point (`gear_advisor_report`,
+   `gear_system_report`, `gear_add_candidate` assistant tools).
+5. ✅ Upgrade advisor: plateau diagnosis + candidate axes + genre weighting,
+   widened by the measurement-registry importer (`gear_registry.py`, AutoEq
+   FR databases → band signatures, promoted to the catalog on 'want').
+6. P2P: sync researched gear facts (same signing rails as audio analytics),
+   co-ownership graph, pair-synergy cache sharing.
 7. Refresh policy: re-research staleness (`researched_at` TTL per category),
    re-research on newly reachable sources, Retry button for `failed`.

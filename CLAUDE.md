@@ -8,8 +8,7 @@ Phases 1–3 (MVP + enrichment + audio analysis + HQPlayer + Web UI + launcher)
 and P2P phases P0–P4 (sync, NAT, account system, E2E chat) are **done**, as is
 the 2026-08 network run: relay forwarding, carry (push-seeding of sealed audio
 analysis), peer-relays, and MB-slice replication. Currently iterating on
-quality-of-life fixes and artist metadata enrichment. A voice interface
-(Whisper + TTS) remains on the roadmap.
+quality-of-life fixes and artist metadata enrichment.
 
 See:
 - `PROGRESS.md` — design decisions and lessons learned (non-P2P).
@@ -129,6 +128,18 @@ See:
 - **Delete code confidently when unused.** Backwards-compat shims,
   re-exported types, `# removed` marker comments and renamed `_unused` vars
   all belong in the commit history, not the working tree.
+- **A doc sentence that states STATE gets corrected in the same commit.**
+  Design rationale ages well — why libtorrent, why UUID v5, why HTTP on the
+  LAN read as written yesterday. What rots is status in the future tense:
+  "Phase 3 — next", "not yet implemented", "fix planned", "22 tools". A
+  reader cannot tell a stale line from a current one, so when a change
+  contradicts a sentence in `docs/` or a root doc, fix that sentence — don't
+  open a documentation task. The trigger is a contradiction you can see, not
+  "check the docs" on every task. Write status as a DATED FACT ("pair engine
+  shipped 2026-07-17") rather than a tense ("next"): a dated line never lies,
+  it only ages. The drift a commit-time fix cannot catch — a doc nobody had
+  reason to open while the work happened — is what a periodic pass over the
+  docs touched by `git log` since the last one is for.
 - **Log at the right level.** `logger.debug` for per-row noise, `logger.info`
   for lifecycle events, `logger.warning` for recoverable anomalies,
   `logger.error` for actual failures. Don't log stack traces at `info`.
@@ -435,8 +446,8 @@ below bind with or without it.
    certificate for the backend. Secure-context browser APIs
    (`crypto.subtle`, `navigator.clipboard`, `getUserMedia`, service
    workers) are unavailable on the http origin: HMAC comes from
-   `sha256.js`, copy has an `execCommand` fallback, and a microphone
-   for the voice roadmap will need the TLS front.
+   `sha256.js`, copy has an `execCommand` fallback, and anything
+   needing a microphone would need the TLS front.
 
 **Before any public release, multi-user deployment, or remote-access
 feature** (Tailscale exposure, "headless mode", reverse proxy), the

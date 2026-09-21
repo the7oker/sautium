@@ -2,7 +2,31 @@
 
 ## Layout
 
-### 📘 Core documents
+### 📐 Design & architecture
+
+- **[design/POSITIONING.md](design/POSITIONING.md)** — product positioning,
+  audience, tone, design principles and the palette (source of truth)
+- **[design/INFORMATION-ARCHITECTURE.md](design/INFORMATION-ARCHITECTURE.md)**
+  — navigation model, screen inventory, state flows, layout modes
+- **[design/DISCOVERY-SEARCH-ENGINE.md](design/DISCOVERY-SEARCH-ENGINE.md)** —
+  the search engine: tools, sources, bridges, corpus layers
+- **[design/PHANTOM-DISCOVERY.md](design/PHANTOM-DISCOVERY.md)** — music
+  beyond the local catalog (phantom artists, albums, tracklists)
+- **[design/HARDWARE-TIERS.md](design/HARDWARE-TIERS.md)** — the measured
+  resource map and the `full/standard/lite` profile layer
+- **[design/P2P-SYNC-INTEGRITY.md](design/P2P-SYNC-INTEGRITY.md)** —
+  provenance, seals and the recompute detector on the peer network
+- **[design/BACKUP.md](design/BACKUP.md)** — node backup, share export/import,
+  own life-data merge
+- **[design/GEAR-ADVISOR.md](design/GEAR-ADVISOR.md)** — system analysis and
+  upgrade strategy for the audio chain
+- **[DATABASE_ARCHITECTURE.md](DATABASE_ARCHITECTURE.md)** — the Last.fm
+  enrichment layer and the `external_metadata` fetch ledger
+
+The repository root carries the rest: `CLAUDE.md` (spec and conventions),
+`PROGRESS.md` (design log), `P2P_NETWORK.md` (peer network), `SECURITY.md`.
+
+### 📘 HQPlayer integration
 
 - **[HQPLAYER_INTEGRATION.md](HQPLAYER_INTEGRATION.md)** — technical
   documentation of the HQPlayer integration
@@ -17,7 +41,6 @@
   - Every DSP setting explained
   - Recommendations per scenario
   - Algorithms for choosing settings automatically
-  - ~18 KB of structured information
 
 ### 📖 Official manuals
 
@@ -109,45 +132,25 @@ Hi-res FLAC (192 kHz/24-bit) + R2R DAC
    - Pick the right mode
    - Configure filters
 
-3. **Voice control** (future)
-   - "Set the best quality"
-   - "Switch to DSD mode"
-   - "Adapt to this track"
-
 ## Integration with Sautium
 
 ### Capabilities
 
-- ✅ Automatic setting selection based on the track
+- ✅ Automatic setting selection based on the track — the assistant reads the
+  status and applies filters/shapers/matrix profiles through its MCP tools
 - ✅ Profiles per genre
 - ✅ Optimization for a specific DAC
-- ✅ Voice control (Phase 4)
 
-### Integration example
+### Where the integration lives
 
-```python
-from hqplayer_client import HQPlayerConnection
-from database import get_db_context
-from models import Track
-
-def play_track_optimized(track_id: int):
-    """Play a track with automatic HQPlayer optimization."""
-    with get_db_context() as db:
-        track = db.query(Track).get(track_id)
-
-        # Work out the optimal settings
-        settings = auto_select_hqplayer_settings(track)
-
-        with HQPlayerConnection() as hqp:
-            # Configure HQPlayer
-            hqp.set_mode(settings['mode'])
-            hqp.set_filter(settings['filter'])
-            hqp.set_rate(settings['rate'])
-
-            # Play
-            hqp.playlist_add(track.file_path, clear=True)
-            hqp.play()
-```
+HQPlayer is one `PlayerBackend` among several (`backend/playback/` —
+HQPlayer, DLNA, the browser and the local output). Playback goes through
+the canonical queue and the playback manager, which speak the track UUID;
+the file path is resolved from `media_files` at the moment the active
+backend needs it, and a phantom track resolves to a stream instead. The
+DSP side is `backend/hqplayer_client.py`, reached by the assistant through
+the `hqplayer_*` MCP tools — that is the path "pick settings for this
+track" actually takes, not a helper in application code.
 
 ## Keeping the documentation current
 
@@ -167,6 +170,6 @@ When adding information:
 
 ---
 
-**Documentation status:** ✅ Current
-**HQPlayer version:** 5.16.3 (Engine 5.34.14)
-**Last updated:** 2026-02-12
+**HQPlayer version tested:** 5.16.3 (Engine 5.34.14); the same client drives
+HQPlayer Desktop 6
+**Last reviewed:** 2026-09-21

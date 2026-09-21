@@ -1,7 +1,10 @@
 # Discovery — Modular Search Engine (v2)
 
-> **Status:** design brief, agreed in the 2026-06-30 redesign session; not yet
-> implemented.
+> **Status:** BUILT — `backend/discovery_engine.py` is the engine described
+> here (tools, sources, bridges, corpus-aware composition; vector floors/ceils
+> calibrated from live score distributions 2026-07-02). Phases 0–2 and 4–6 are
+> in; what remains is listed in §Proposed phasing. This file stays the
+> rationale: why the design is shaped this way.
 > **Supersedes:** the v1 brief (2026-04-28). v1 assumed two axes
 > (target × dimensions), owned-only results, track-grain genre, and no
 > cross-script search. All four assumptions are wrong now — see below.
@@ -264,7 +267,7 @@ not theory. A deferred option: extend `album_tracks` to owned rows too, making
 duplicating the owned link (`media_files` keeps the physical edition). Not needed if
 the CTE-head/tails path performs.
 
-## `composed-text-vector` decision (revive vs delete)
+## `composed-text-vector` decision (revive vs delete) — still open
 
 `text_embeddings` (36 955 rows, ~all owned tracks; BGE-M3 over
 `title+artist+album+year+lossless+genres+top-10 artist tags`) is **built and
@@ -275,32 +278,20 @@ synth-pop, 80s"* where CLAP (sound), bio (artist-level) and genre-desc
 composition (`lossless` is semantic noise). **Resolve when finalizing the
 relevance-source set** — delete only if bio + genre-desc prove to cover it.
 
-## Streaming search (future)
+## Phasing — what landed
 
-Streaming has **zero schema footprint** (100% runtime: `backend/streaming/`,
-YouTube core + a lossless BYO plugin). The future *"search the provider for a
-track/album/artist"* idea needs **no new engine**: the `StreamProvider` contract
-gains a `search()` method; results are **minted as phantom rows on-demand** (the
-way `_store_similar_artists` mints phantoms today); the engine then searches them
-as ordinary phantoms. Lay an **"entity source = DB vs provider"** abstraction now
-so this slots in later without rework. A provider catalog is huge — mint top-N
-per query, never en masse.
+| Phase | Scope | State |
+|---|---|---|
+| **0** | **Transliteration + `name_latin`** — field + GIN trgm index, `latinize()` dispatch, backfill (`backend/backfill_name_latin.py`), wired into scan/canon population. | ✅ shipped (also `title_latin` on albums/tracks) |
+| **1** | **Engine skeleton + registries** — tool registry, source registry with the score contract, bridge registry, query builder. | ✅ shipped |
+| **2** | **Unify vector sources** — `clap-text` + `clap-seed` (one path), `lyrics`, `bio`; absorb `_similar_by_track_embedding`. | ✅ shipped; the floors/ceils are calibrated constants now |
+| **3** | **Entity targets `artist`/`album`** — cross-level promotion (EXISTS / aggregation). | ✅ targets shipped. **Open:** album/track title aliases (CJK multi-form + human file tags) — copy the `artist_name_aliases` pattern to `album_title_aliases` / `track_title_aliases` (separate FK-CASCADE tables, **not** a polymorphic `name_aliases` — poly loses the FK and canon rewrites album/track UUIDs — and **not** a `text[]` column — `gin_trgm_ops` needs a normalized/unnested table) |
+| **4** | **Corpus layers** — owned/phantom/all as a bridge choice, mixed ranking, owned attribute, stable tiebreak. | ✅ shipped (`corpus` defaults to `all` on the endpoint, `owned` on the assistant's catalog tools) |
+| **5** | **Absorb all clients** — `discovery.py` and the MCP search tools on the engine. | ✅ for Discovery and the assistant's search tools. **Open:** `search.py` still carries `_apply_filters` for the lyrics/text paths |
+| **6** | **UI** — corpus control, dimensions (genre/mood/year/instruments), composite chip+text. | ✅ shipped |
 
-## Proposed phasing
-
-*(Order proposed, not yet locked — Phase 0 has standalone value and is the
-natural start.)*
-
-| Phase | Scope |
-|---|---|
-| **0** | **Transliteration + `name_latin`** — standalone value, independent of the engine. Field + GIN trgm index, `latinize()` dispatch module, backfill, wire into scan/canon population. Point the existing `/artists` at it for an immediate cross-script win. |
-| **1** | **Engine skeleton + registries** on `target=track` (simplest): entity registry, dimension registry, query builder, one relevance source, fixture tests. |
-| **2** | **Unify vector sources** — `clap-text` + `clap-seed` (one path), `lyrics`, `bio`; absorb `_similar_by_track_embedding`; resolve `composed-text-vector`. |
-| **3** | **Entity targets `artist`/`album`** — cross-level promotion (EXISTS / aggregation). Also: **album/track title aliases** (CJK multi-form + human file tags) — copy the `artist_name_aliases` pattern to `album_title_aliases` / `track_title_aliases` (separate FK-CASCADE tables, **not** a polymorphic `name_aliases` — poly loses the FK and canon rewrites album/track UUIDs — and **not** a `text[]` column — `gin_trgm_ops` needs a normalized/unnested table). Deferred here because the alias search channel only lands with album/track targets; populating earlier is dead capital. |
-| **4** | **Corpus layers** — owned/phantom/streamable control, mixed ranking, owned attribute, stable tiebreak. |
-| **5** | **Absorb all clients** — cut over the `discovery.py` endpoints and the MCP search tools to the engine; wire AI-chat decomposition. |
-| **6** | **UI** (Claude Design handoff) — corpus control, new dimensions (genre/mood/year), composite chip+text. |
-| **7** *(future)* | **Streaming search** — `provider.search()` → mint phantom. |
+Also open: the `composed-text-vector` decision above — `text_embeddings` is
+still built and still read by nothing.
 
 ## Out of scope (first iteration)
 
@@ -321,11 +312,13 @@ natural start.)*
 
 ## Reference — current-state files (to be absorbed)
 
-- `backend/routers/discovery.py` — 5 endpoints + `_filter_clauses` (dies).
-- `backend/search.py` — `search_by_text/lyrics/...`, `_similar_by_track_embedding`,
-  `_apply_filters` (dies).
-- `mcp/assistant_server.py` — the `search_*` / `play_similar` MCP tools.
-- `backend/static/app-shell.js` — `wireDiscoveryFilters`, `appendFilterParams`,
-  `runUnifiedSearch`, `runFilterOnlyBrowse` (frontend filter UI).
-- `backend/text_embeddings.py` — builder for the currently-unread
+- `backend/discovery_engine.py` — the engine (registries, composition, bridges).
+- `backend/routers/discovery.py` — the endpoints, now thin over the engine;
+  `_filter_clauses` is gone.
+- `backend/search.py` — `search_by_text/lyrics/...` and `_apply_filters`: the
+  remaining pre-engine filter site.
+- `mcp/assistant_server.py` — the `search_*` / `play_similar` tools, which call
+  the engine through `/api/discovery/search` and carry `corpus`.
+- `backend/static/app-shell.js` — the Discovery filter UI.
+- `backend/text_embeddings.py` — builder for the still-unread
   `composed-text-vector`.

@@ -10,13 +10,12 @@ implementation details live in the code, DB and git history.
 | Phase | Scope | Status |
 |-------|-------|--------|
 | **P1** | Docker env, scanner, CLAP embeddings, audio similarity search, Claude integration | DONE |
-| **P2** | Last.fm enrichment (bios, tags, similar, track stats, album wiki), text embeddings (BGE-M3), enhanced RAG | DONE |
+| **P2** | Last.fm enrichment (bios, tags, similar, album wiki), text embeddings (BGE-M3), enhanced RAG | DONE |
 | **P3.1** | Audio feature extraction (librosa + CLAP zero-shot, no essentia) | DONE |
 | **P3.2** | HQPlayer control via XML protocol (port 4321) | DONE |
-| **P3.3** | MCP server for HQPlayer + PostgreSQL + search (22 tools) | DONE |
+| **P3.3** | MCP server for HQPlayer + PostgreSQL + search + gear (41 tools) | DONE |
 | **P3.4** | Desktop launcher (CustomTkinter; Windows installer + macOS bundle as carriers) | DONE |
 | **P2P-P0..P4** | Launcher↔backend bridge, UUID v5 refactor, P2P sync, NAT traversal, account system, E2E chat, email CA | DONE — see `P2P_NETWORK.md` |
-| **P4 voice** | Whisper input + TTS output + voice conversation loop | TODO |
 
 ---
 
@@ -794,7 +793,7 @@ user brings.
   Secure-context APIs are gone on the http origin: `navigator.clipboard`
   got an `execCommand` fallback (`copyText`), `crypto.randomUUID` already
   had one, service workers were never available on the bypassed cert
-  either. A microphone (`getUserMedia`) for the voice roadmap will need
+  either. A microphone (`getUserMedia`), if one is ever needed, will need
   the TLS front below.
 - **TLS is a deployment front with a real name**, never a `tls_gen` job:
   `tailscale serve` terminates with a real Let's Encrypt cert for the

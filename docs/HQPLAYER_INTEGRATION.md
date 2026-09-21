@@ -162,22 +162,23 @@ with HQPlayerConnection(host="<windows-host-ip>") as hqp:
     print(f"Position: {status.position:.1f}s / {status.length:.1f}s")
 ```
 
-### Integration with Sautium Database
+### Integration with Sautium
+
+Application code does not talk to this client directly. HQPlayer is one
+`PlayerBackend` (`backend/playback/hqp_backend.py`) behind the playback
+manager: the canonical queue holds track UUIDs, the HQP backend mirrors
+that queue into HQPlayer's playlist, and the path comes from
+`media_files.file_path` — `tracks.id` identifies the music, the media file
+identifies the bytes (CLAUDE.md § Data Model Conventions). A phantom track
+has no file and resolves to a stream through the media proxy instead.
 
 ```python
-from database import get_db_context
-from models import Track
 from hqplayer_client import HQPlayerConnection, file_path_to_uri
 
-# Get track from database
-with get_db_context() as db:
-    track = db.query(Track).filter(Track.id == track_id).first()
-
-    # Play in HQPlayer
-    with HQPlayerConnection(host="<windows-host-ip>") as hqp:
-        uri = file_path_to_uri(track.file_path)
-        hqp.playlist_add(uri, clear=True)
-        hqp.play()
+# file_path comes from media_files, resolved for the track being played
+with HQPlayerConnection(host="<windows-host-ip>") as hqp:
+    hqp.playlist_add(file_path_to_uri(file_path), clear=True)
+    hqp.play()
 ```
 
 ## Network Configuration
@@ -234,25 +235,58 @@ assistant tools against the running instance: `hqplayer_get_status`
 - **File paths**: Using unencrypted URIs works fine on local network
 - **Metering**: Can be added later if needed for visualizations
 
+## Shipped since the first iteration
+
+- ✅ Playback control, status monitoring, DSP settings (filters, shapers,
+  modes, rates), matrix profiles, convolution and parametric-EQ presets.
+- ✅ Queue ownership moved to Sautium: `backend/playback/` holds the
+  canonical queue and mirrors it into HQPlayer's playlist, so HQPlayer is
+  one output among several (DLNA, browser, local) rather than the only one.
+- ✅ Natural-language control through the assistant's `hqplayer_*` MCP tools
+  ("what's playing", "play something similar", filter changes).
+
 ## Future Enhancements
 
-### Phase 3.2 (Planned)
-1. ✅ Basic playback control - **DONE**
-2. ✅ Status monitoring - **DONE**
-3. ⏳ Queue management - Partial (can add, need load/save)
-4. ⏳ Current track info - Basic (need more metadata)
+### A VU meter, and where its signal comes from
 
-### Phase 4.3 (Voice Integration)
-- Voice commands for playback ("Claude, play next track")
-- Natural language queries ("What's playing now?")
-- Playlist building ("Play something similar")
+The idea: a level meter on Now Playing, drawn in the VU idiom the palette
+already names (`#4A7FA7`, "McIntosh VU blue"). HQPlayer's metering port
+(4322) is one source for it, not the source — a meter is a property of the
+ACTIVE output, so each backend answers the question differently:
 
-### Potential Features
-- 📊 Real-time audio metering display
-- 🎛️ DSP settings control (filters, upsampling)
-- 🔍 HQPlayer library integration
-- 💾 Playlist synchronization
-- 🖼️ Album art display
+| Output | Signal source | Cost |
+|---|---|---|
+| HQPlayer | the metering port (4322) | a second socket + a new protocol to implement |
+| Local | the engine's own ring buffer — the PortAudio callback already holds `int32` frames and counts them; RMS/peak per block is an accumulator read from the other side | ~nothing, but it must not slow the RT callback |
+| Browser | `AnalyserNode` over a `MediaElementAudioSourceNode`; media is same-origin, so Web Audio is allowed and the http context is no obstacle | none — it runs entirely in the page |
+| DLNA | **none.** The renderer is across the network and GENA carries transport state, not signal | — |
+
+So DLNA shows no meter, by the same rule that hides a seek affordance on an
+output that cannot seek (POSITIONING §9): a control may not appear unless it
+reflects the audio actually playing. That is correct behaviour, not a gap.
+
+Before implementing the HQPlayer side, settle three things from the SDK
+(`hqp-control-*-src`, not vendored here): what the port emits (peak or RMS,
+per channel or summed), at what rate, and **whether it is measured before or
+after the DSP chain**. Post-DSP is the one worth the socket — it shows
+clipping introduced by upsampling and modulation, which nothing else in the
+UI can reveal; pre-DSP only restates what the file already says.
+
+Two implementation notes that apply to every source. The subscription lives
+**while the meter is on screen**, not while music plays — 20–60 updates per
+second pushed to a phone over Wi-Fi is real traffic, and Now Playing being
+collapsed is the signal to drop it. And VU ballistics are ours to apply:
+what a digital meter reports is peak or RMS in dBFS, so the ~300 ms
+integration, the separate fall time and any peak-hold are rendering, done
+once above whichever backend supplied the numbers.
+
+The cheap honest start is local + browser: the data is already in hand, no
+new protocol, and the meter works on the two most accessible outputs.
+
+### Other
+
+- **HQPlayer library browse / playlist load-save** — not needed while
+  Sautium owns the queue.
 
 ## Troubleshooting
 
@@ -341,4 +375,5 @@ class TrackStatus:
 
 - **HQPlayer Desktop**: Signalyst (https://www.signalyst.com/)
 - **SDK**: HQPlayer Control API SDK v5.29.2 (HQP5) / v6.0.1 (HQP6)
-- **License**: MIT (for our integration code)
+- **License**: the integration code is Sautium's own, under the
+  PolyForm Noncommercial License 1.0.0 (`LICENSE`)

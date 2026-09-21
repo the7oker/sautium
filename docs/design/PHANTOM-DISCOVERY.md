@@ -7,9 +7,14 @@
 > discovery, the provider→HQPlayer streaming preview (D4 / Phase 6,
 > shipped 2026-06-28), and source-agnostic listening tracking of streamed
 > phantom plays (history/stats/scrobble + Home-shelf sessions, 2026-06-30).
-> **Remaining:** Phase 4 (P2P propagation of phantom rows — partial), Phase 5
-> (wire phantom semantic search into the Discovery engine — pending the
-> `DISCOVERY-SEARCH-ENGINE.md` refactor), and Stage C (text-similarity). The
+> Phase 5 followed: the Discovery engine treats owned and phantom rows as
+> corpus layers (`corpus=owned|phantom|all`, chosen as a bridge, not a WHERE
+> filter), so phantom entities are searchable alongside local ones.
+> Phase 4 was **superseded** rather than built: the skeleton does not travel
+> as rows — the network ships MB slices, and each node mints its own phantom
+> albums and tracklists from them (see D6). What does travel is the analysis
+> hanging off those rows, through sync and carry.
+> **Remaining:** Stage C (text-similarity). The
 > "Phases" table and "Design decisions" below are the original plan, kept for
 > rationale; "Implementation status" records what actually landed.
 > **Origin:** proposed 2026-06-01 by Valerii.
@@ -53,7 +58,7 @@ physical files — locality is enforced by *code*, not constraints:
 - `tracks` (`:73-78`) is referenced *by* `media_files.track_id`, not
   the reverse — a track with no file is legal.
 - All enrichment tables — `artist_bios`, `artist_tags`,
-  `similar_artists`, `album_descriptions`, `track_stats` — FK only to the
+  `similar_artists`, `album_descriptions` — FK only to the
   logical entity, never to a file, and all carry a `source` column
   for provenance.
 - `similar_artists` (`:307-317`): both `artist_id` and
@@ -231,12 +236,31 @@ sync. This is a genuine network-effect moat.
 > are node-local (Last.fm's API terms do not allow redistribution), so every
 > node fetches its own; the network effect is the analysis.
 
-- Relax the `INNER JOIN track_artists` restriction in
-  `sync_queries.py:117` and `routers/sync.py:97` so phantom
-  enrichment enters the sync inventory.
-- Tag peer-sourced rows `source = 'p2p:<nodeid>'` (the `source`
-  column already exists) — keep them distinct from first-party
-  enrichment; trust-but-verify against poisoning.
+> Revised again: it propagates, but NOT the way this section proposed. The
+> structural rows never enter the sync inventory. Two mechanisms replaced
+> that plan, and the split is deliberate:
+>
+> - **The skeleton is replicated as source material, not as rows.** A dump
+>   node answers an artist name with raw `mb_*` rows — the matched artists
+>   plus their whole discography subtree — signed under its own key
+>   (`desktop/p2p/mb_slice_queries.py`). The requester inserts them into its
+>   own `mb_*` tables and runs the ordinary canon pipeline, so it *derives*
+>   the same phantom albums and tracklists instead of trusting a peer's
+>   version of them. ListenBrainz counts replicate through a second,
+>   separate slice family on the same pattern.
+> - **The analysis rides sync and carry**, keyed on track UUIDs that already
+>   exist locally: segments, audio features and recording bindings. Carry's
+>   answer rule states the invariant — *"structural categories are never
+>   asked for (the skeleton is already here, MB-canonical)"*
+>   (`sync_queries.wanted_tracks`) — and "a recording this node has no row
+>   for is a recording it never cared about" is what keeps a push from
+>   minting anything.
+>
+> Why this is better than importing rows: identity stays derivable (every
+> node computes the same UUID v5 from the same MB facts), a peer cannot
+> invent an album into your catalogue, and the `source='p2p:<nodeid>'`
+> trust-but-verify apparatus below is unnecessary for structure — only the
+> analysis needs seals, and it has them.
 
 ### D7. Text embeddings give phantoms semantic search for free
 
@@ -268,7 +292,7 @@ score (`DISCOVERY-SEARCH-ENGINE.md` §4).
 | **1** | **New albums for *local* artists.** Fetch full discography (Deezer + MusicBrainz) for owned artists, diff vs `albums`, surface "missing albums" shelf. | low | Validates the album/track source on *known* artists; immediate value; no phantom rows yet. |
 | **2** | **Phantom similar artists (eager).** Relax `lastfm.py:348,519`; background-enrich phantom artist + bio + tags + similar links, bounded to 1 hop from local. | med | Core feature; bounded by D2. |
 | **3** | **Phantom albums/tracks (lazy).** On phantom-artist-screen open, fetch + cache discography. | med | Storage-safe via laziness. |
-| **4** | **P2P propagation.** Relax sync inventory joins; `source='p2p:*'`; post-import handling. | med | Network effect; depends on phantom data existing. |
+| **4** | ~~**P2P propagation.** Relax sync inventory joins; `source='p2p:*'`; post-import handling.~~ **Superseded** by MB slices + carry — see D6. | med | Network effect; depends on phantom data existing. |
 | **5** | **Phantom semantic search.** BGE-M3 text embeddings for phantoms; wire into Discovery engine. | med | Depends on Discovery engine landing. |
 | **6** | **Provider→HQPlayer preview (D4).** | high | Most uncertainty; ship last, after open questions resolved. |
 
@@ -489,10 +513,12 @@ canonical artist identity*. Two things break that:
 - Schema: `desktop/migrations/001_initial.sql` (artists `:43`, albums
   `:59`, tracks `:73`, media_files `:191`, enrichment `:281-395`,
   similar_artists `:307`).
-- Locality filters to relax: `backend/lastfm.py:348-356,519`.
+- Locality filters that were relaxed in Phase 2: `backend/lastfm.py`.
 - UUID formulas: `backend/uuid_utils.py:27-54`.
-- Sync inventory joins: `desktop/p2p/sync_queries.py:117`,
-  `backend/routers/sync.py:97-109`.
+- Sync inventory joins (structure stays out by design, D6):
+  `desktop/p2p/sync_queries.py`, `backend/routers/sync.py`.
+- Slice replication, the mechanism that replaced Phase 4:
+  `desktop/p2p/mb_slice_queries.py`, `desktop/mb_slice_client.py`.
 - Playback path (local-file only): `mcp/assistant_server.py:751-1005`
   (`file_path_to_uri` → `playlist_add`).
 - Deezer integration + throttle: `backend/routers/covers.py`,

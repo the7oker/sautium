@@ -1546,7 +1546,8 @@ The agent picks:
 
 ---
 
-**Last updated:** 2026-02-12
-**HQPlayer version:** 5.16.3 (Engine 5.34.14)
+**Last updated:** 2026-09-18 (HQP6 note)
+**HQPlayer version:** compiled against 5.16.3 (Engine 5.34.14); HQPlayer 6
+availability is read live, not from this file
 **Status:** ✅ **Complete knowledge base — ready to use**
 **Control API coverage:** 100% (every parameter documented)

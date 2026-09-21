@@ -714,12 +714,15 @@ three container conventions (`.screen`, `.discovery-screen`,
 
 ## Data sources per screen (annex)
 
-Concrete mapping of each visible block on each screen to a data
-source: existing DB tables, existing endpoints, external APIs, or
-new endpoints to be built. Implementation blueprint — minimal
-additional research needed when wiring the UI to the data layer.
+> **Historical blueprint (2026-04).** It mapped each block to a data source
+> before the screens were wired, and the mapping has since been built — the
+> endpoint names drifted along the way (search is now one engine behind
+> `/api/discovery/search`, genres live under `/api/genres/{id}`, the profile
+> and gear routes under `/api/profile/*`). Read it for *what feeds a screen*,
+> and the code for *which route says it*. The one block never built is Recent
+> queues: there is no `queue_history` table.
 
-Conventions: `(new endpoint)` = backend work required; `(LFM)` =
+Conventions: `(new endpoint)` = backend work required at the time; `(LFM)` =
 Last.fm API call; otherwise the source already exists in the DB
 or is a thin query over existing data.
 
@@ -861,41 +864,44 @@ All Genre blocks roll up into a single `(new endpoint)` GET
 
 ### Backend work required (summary)
 
-For Phase-1 implementation:
+The Phase-1 list as written in 2026-04. Items 5–12 are built; 1–4 are not,
+and 13 stayed optional.
 
-1. `queue_history` table — `(id UUID, tracks JSONB, context TEXT, created_at TIMESTAMPTZ)`
-2. `GET /queue/history` — list last 5 replaced queues
-3. `POST /queue/history` — save current queue snapshot before replace
-4. `POST /queue/history/<id>/restore` — populate current queue (no auto-play)
-5. `GET /genres/:id` — aggregated genre detail payload (description, top
+1. ❌ `queue_history` table — `(id UUID, tracks JSONB, context TEXT, created_at TIMESTAMPTZ)`
+2. ❌ `GET /queue/history` — list last 5 replaced queues
+3. ❌ `POST /queue/history` — save current queue snapshot before replace
+4. ❌ `POST /queue/history/<id>/restore` — populate current queue (no auto-play)
+5. ✅ `GET /genres/:id` — aggregated genre detail payload (description, top
    artists/albums/tracks, related genres)
-6. Extend `/search/features` for multi-instrument filter (`instruments=piano,drums&op=AND`)
-7. `users` table extensions — `display_name TEXT`, `city TEXT`, `bio TEXT`,
+6. ✅ Multi-instrument filter — landed as an engine tool, not an extension of
+   the old endpoint
+7. ✅ `users` table extensions — `display_name TEXT`, `city TEXT`, `bio TEXT`,
    `avatar_cover_id UUID REFERENCES covers(id)`, `public_gear BOOLEAN DEFAULT FALSE`,
    `open_to_meet BOOLEAN DEFAULT FALSE`
-8. `gear_models` table **(new)** — `(id UUID PK, brand TEXT, model TEXT, category TEXT,
+8. ✅ `gear_models` table **(new)** — `(id UUID PK, brand TEXT, model TEXT, category TEXT,
    research_state gear_research_state ENUM, research_summary TEXT, specs JSONB,
    community_sentiment JSONB, researched_at TIMESTAMPTZ, refresh_cooldown_days INT
    DEFAULT 7)` — canonicalized via UUID v5 `(brand:model:category)`
-9. `user_gear` table **(new)** — `(id UUID PK, user_id, gear_model_id REFERENCES
+9. ✅ `user_gear` table **(new)** — `(id UUID PK, user_id, gear_model_id REFERENCES
    gear_models(id), status user_gear_status ENUM (own / want / sell / previously_owned),
    notes TEXT, added_at, status_changed_at)`
-10. `(new endpoints)` for Profile:
+10. ✅ `(new endpoints)` for Profile (now under `/api/profile/*`):
     - `GET/PUT /api/profile` — own profile read/write
     - `GET /api/profile/<pubkey>` — public profile of another user
     - `GET/POST/DELETE /api/profile/gear` — manage own audio chain
     - `GET /api/gear-models/search?q=` — autocomplete
     - `GET /api/gear-models/<id>` — detail (research summary etc.)
-11. **Background research worker** — picks up `gear_models` rows with
+11. ✅ **Background research worker** (`backend/gear_research_worker.py`) — picks up `gear_models` rows with
     `research_state = 'queued'`, performs WebSearch + WebFetch on
     audiophile sources, runs Claude synthesis, writes back specs +
     summary + sentiment. Triggered only when an AI-on user adds the
     gear; no-AI users still consume cached results via P2P sync.
-12. **P2P sync extension** — `gear_models` joins the sync inventory
+12. ⏳ **P2P sync extension** — `gear_models` joins the sync inventory
     (same protocol as artist bios); user-specific tables (`user_gear`,
     `users` profile fields) stay private to each node.
-13. Optional: cache layer for Last.fm `tag.getTopArtists/Albums/Tracks` if Evolution
-    tier work begins (not Phase-1 critical)
+13. Optional: a cache layer for Last.fm `tag.getTopArtists/Albums/Tracks`
+    (not Phase-1 critical, and Last.fm answers are node-local since
+    2026-09-19, so any such cache stays off the wire)
 
 No new ML pipelines required — existing CLAP + BGE-M3 + AST/PaSST
 embeddings cover everything. New backend work is database +
@@ -903,10 +909,10 @@ aggregation queries, not model training.
 
 ---
 
-## Open design decisions (to resolve before implementation)
+## Open design decisions — resolved by implementation
 
-These are small but merit explicit resolution during first Claude
-Design session or implementation:
+Small calls listed before the UI was built; the shipped UI is the answer to
+each. Kept for the reasoning.
 
 1. **Mini-player skip button** — include "next track" in mini bar, or
    only in expanded sheet? Compact space matters; "next" is a common

@@ -27,7 +27,7 @@ plus user-facing minimum/recommended configurations.
 | Item | Size | Notes |
 |---|---|---|
 | Docker image `djai-backend` | **24 GB** | CUDA + torch stack; distribution barrier by itself |
-| HF model cache (`data/cache`) | **11.3 GB** | NLLB 4.7 + BGE-M3 4.3 + CLAP 1.2 + AST 0.33 + PaSST(torch hub) 0.33 + 2×MiniLM 0.55 |
+| HF model cache (`data/cache`) | **11.3 GB** | NLLB 4.7 + BGE-M3 4.3 + CLAP 1.2 + AST 0.33 + PaSST(torch hub) 0.33 + 2×MiniLM 0.55 — as measured; the translator has since become MADLAD-400 in a CTranslate2 int8 build (~3 GB, §6.17), so the cache is smaller today |
 | Database total | **32 GB** | for ~37k analyzed tracks |
 | — of which `mb_*` dump | ~19 GB | **optional layer** (API fallback / P2P slices) |
 | — `lb_*` statistics | 0.85 GB (measured 2026-09-20: 4.9 M recordings + 0.67 M artists) | **optional layer** (ListenBrainz statistics dump / P2P slices per artist; ~22 GB archive + 5 GB staging while it installs) |
@@ -41,7 +41,7 @@ plus user-facing minimum/recommended configurations.
 |---|---|---|
 | Backend idle RSS | 709 MB | models live on GPU; on CPU-only they'd sit in RAM instead |
 | Postgres RSS | 1.32 GB | stock config (`shared_buffers=128MB` — untuned everywhere) |
-| VRAM resident after prewarm | ~~4.3 GB~~ → **2.68 GB measured** (2026-07-11, self-reported "backend VRAM" log line) | CLAP bf16 0.31 + BGE-M3 **bf16 1.14** + NLLB bf16 1.2; allocated == reserved (zero parked cache). Pre-fix state for history: BGE-M3 ran fp32 (2.27 GB) |
+| VRAM resident after prewarm | ~~4.3 GB~~ → 2.68 GB (2026-07-11) → **1.44 GB measured** (2026-07-21, §6.17) | CLAP bf16 0.31 + BGE-M3 **bf16 1.14**; allocated == reserved (zero parked cache). The translator left the GPU entirely (MADLAD on CTranslate2 int8, CPU). History: the 2.68 GB figure included NLLB bf16 1.2, and before the bf16 switch BGE-M3 ran fp32 (2.27 GB) |
 | VRAM during analysis | +0.5–2 GB + batch audio | AST+PaSST lazy-load; adaptive budget `device.py:123-150` |
 | Whole stack envelope | fits in **15.5 GB** WSL2 VM | i.e. real floor is ~16 GB host for the full profile, not 32 |
 | Model cold-load from NTFS | BGE-M3 **2m15s–5m10s** (logged) | startup latency driver; worse on HDD |
@@ -114,33 +114,30 @@ Frontend is clean — SSE-driven, zero `setInterval` polling.
   KNN overscans with `ef_search` 500–1000 + `iterative_scan=relaxed_order` via
   `db_pool.db_query_with_ef_search`.
 - `embedding_segments` ≈ **52 KB/track incl. HNSW** — the dominant local cost.
-  Currently not synced (`sync_client.py:451`) — **confirmed architecture gap
-  (Valerii, 2026-07-10), fix planned**: segment sync + verify is part of the P2P
-  sync refactor tracked in P2P-SYNC-INTEGRITY (segments are the signed entities,
-  so syncing them also transports the signatures).
+  Was not synced when this audit ran — **fixed since**: segments travel with
+  their seals and are verified on import (the P2P sync refactor,
+  P2P-SYNC-INTEGRITY; segments are the signed entities, so syncing them also
+  transports the signatures).
 - Optional layers degrade cleanly when empty: `mb_*` (API fallback +
   `mb_slice_client`), phantoms, text-embedding stack.
 
 ### 2.4 P2P as the weak-node escape hatch (verified)
 A weak node **can** import from peers: `embeddings` (track-level mean vector),
-`audio_features`, `analysis_sources` (marked `imported=true`), bios/tags/similar/
-stats. Local first-hand/signed analysis always outranks peer copies (Tier-0-lite
-guards, `sync_client.py:405-461`). It currently **cannot** import
-`embedding_segments` or seals — a **known architecture gap being fixed** (segment
-sync + verify, see P2P-SYNC-INTEGRITY). State of the world for an import-only node:
-- HNSW similarity, radio, home shelves, Discovery mean-vector channels: **work today**.
-- Segment-MAX Discovery channel, future "deepen analysis": unavailable **until
-  segment sync ships**, then available on imported data too.
-- Sizing note for the fix: importing segments costs ~52 KB/track (≈1.5–2 GB per
-  30k imported tracks) plus an HNSW build on the receiving node — with stock
-  `maintenance_work_mem=64MB` that build is slow on weak CPUs. Segment import
-  should probably be a per-profile default (lite may prefer mean-only to save
-  disk), decided within the sync refactor. The Tier-0-lite guard that uses
-  "has segments" as the marker for first-hand analysis (`sync_client.py:456-460`)
-  also needs a new discriminator once imported rows can carry segments.
+`embedding_segments` with their seals, `audio_features`, `analysis_sources`
+(marked `imported=true`). Local first-hand/signed analysis always outranks
+peer copies. Last.fm rows are NOT among them — that layer is node-local since
+2026-09-19 and every node fetches its own by name. State of the world for an
+import-only node:
+- HNSW similarity, radio, home shelves, Discovery mean-vector channels: **work**.
+- Segment-MAX Discovery channel: **works on imported data** — segments arrive
+  sealed and are verified on import.
+- Sizing note: importing segments costs ~52 KB/track (≈1.5–2 GB per 30k
+  imported tracks) plus an HNSW build on the receiving node — with stock
+  `maintenance_work_mem=64MB` that build is slow on weak CPUs.
 
 ### 2.5 Search-time compute
-Per text query: encode on whichever of CLAP-text/BGE/NLLB is **already warm** —
+Per text query: encode on whichever of CLAP-text/BGE/the translator is
+**already warm** —
 cold models are skipped gracefully (block shows `loading`) and `kick_load`ed in
 background (`discovery_engine.py:806-816`). Similar-tracks/radio = pure pgvector,
 zero inference. This means search degrades *already*; the missing piece is only
@@ -149,7 +146,8 @@ acceptable.
 
 ### 2.6 Output expansion (built-in player, DLNA) — resource & architecture view
 
-Planned outputs: a built-in no-upsampling player and DLNA, alongside HQPlayer.
+Outputs beyond HQPlayer — a built-in no-upsampling player, DLNA renderers and
+browser playback — have all shipped since this audit (`backend/playback/`).
 Resource-wise all of them are ~free (plain FLAC decode is a few % of one core;
 DLNA is SSDP multicast + HTTP serving + SOAP; browser playback costs the backend
 nothing) — **outputs are not a hardware-tier concern and profiles must not gate
@@ -253,10 +251,10 @@ wiring, not new machinery):
 
 | Feature | full | standard | lite |
 |---|---|---|---|
-| Prewarm at boot | all 4 | CLAP + BGE; NLLB lazy on first Cyrillic query (kick_load path exists) | none — everything lazy |
+| Prewarm at boot | all 4 | CLAP + BGE; the translator lazy on the first non-ASCII Sound query | none — everything lazy |
 | Local audio analysis (CLAP+librosa) | on | on, smaller budgets | **off — P2P import only** |
 | Instruments (AST+PaSST) | on | on + call `unload()` after each run | off |
-| `embedding_segments` (local computation) | balanced K | balanced K | none — no local analysis; imported segments arrive once segment sync ships (import default per profile, see §2.4) |
+| `embedding_segments` (local computation) | balanced K | balanced K | none — no local analysis; segments arrive by P2P import instead (§2.4) |
 | Stream enrichment (`streaming_preview_analyze`) | on (GPU, as today) | on (GPU) / trickle (CPU-only) | **trickle** (§2.7) — off only by user switch or below floor |
 | Phantom layer (similars / missing albums) | **owner's switch, on in all profiles** — `discovery.phantom_layer` (off = nothing new minted, existing rows stay); removal only by the explicit Settings action, never by tier | | |
 | Background enrichment | on | on | on — since 2026-09-05 the manual button is analysis-only, so the loop is the sole network path on every profile |
@@ -271,8 +269,8 @@ descriptions only note its +19 GB disk / shm requirement, which makes it
 realistic on full-tier machines.
 
 Search UX per profile: full/standard = as today; lite = SQL/filter blocks
-instant, semantic blocks show `loading` on first use while the encoder cold-loads
-(CPU, one-off), segment-MAX block hidden until segment sync lands.
+instant, semantic blocks show `loading` on first use while the encoder
+cold-loads (CPU, one-off); the segment-MAX block runs on imported segments.
 
 ## 5. User-facing configurations
 
@@ -286,8 +284,7 @@ the node still contributes phantom analysis to the network); phantom discovery
 (the layer is the owner's switch, `discovery.phantom_layer`, sized by what they
 listen to — never by tier). Not available:
 bulk local library analysis (P2P import instead; an explicit opt-in with a
-bench-estimated ETA can stay for small libraries); segment search — until
-segment sync ships. MB dump technically possible but infeasible at this disk
+bench-estimated ETA can stay for small libraries). MB dump technically possible but infeasible at this disk
 size (+19 GB) — slices via P2P cover canon needs.
 
 **Recommended ("Standard"):** 6+ cores; **16 GB RAM**; 40 GB SSD; NVIDIA ≥6 GB
@@ -332,8 +329,9 @@ cards, so the standard-tier VRAM floor deliberately stays at ≥5.5 GB until
    (auto-detect + `SAUTIUM_PROFILE` env override for diagnostics; the manual
    user_settings picker was built and then REMOVED same day per Valerii's
    call), `/api/settings/hardware` GET (read-only), Library-screen info block.
-6. ✅ Prewarm list is profile-driven (full = all 4; standard drops NLLB —
-   lazy on first Cyrillic query; lite warms nothing).
+6. ✅ Prewarm list is profile-driven (full = all 4; standard leaves the
+   translator lazy — since §6.17 it loads on the first non-ASCII Sound
+   query, not on a Cyrillic trigger; lite warms nothing).
 7. ✅ `torch.set_num_threads` on CPU device + I/O pool (was hardcoded 16)
    and analysis prefetch sized from profile × cores.
 8. ✅ `release_instrument_tagger()` after bulk runs on standard/lite.
@@ -342,20 +340,21 @@ cards, so the standard-tier VRAM floor deliberately stays at ≥5.5 GB until
 10. ✅ Trickle mode in `PreviewEnricher`: bounded backlog (1 running +
     1 queued, drop = retry on next stream), 10-min idle unload of AST+PaSST
     (CLAP/BGE stay — shared with search).
-11. Segment sync (P2P) — owned by the P2P sync refactor (P2P-SYNC-INTEGRITY
-    TODO), not by this doc; unblocks the full search surface for import-only
-    nodes (§2.4 sizing note applies).
+11. ✅ Segment sync (P2P) — shipped with the sync refactor: segments ride the
+    wire under their seals and are verified on import, so the full search
+    surface works on an import-only node (§2.4 sizing note applies).
 
 **P2 — polish:**
-12. ✅ Per-output-backend abstraction (§2.6) SHIPPED 2026-07-10:
+12. ✅ Per-output-backend abstraction (§2.6) SHIPPED 2026-07-10, and the
+    backends that plug into it followed — DLNA, browser and local output
+    are live (`backend/playback/`):
     `backend/playback/` — `PlayerBackend` (transport + capabilities() +
     status emit), `PlaybackManager` (activation lifecycle, SSE payload +
     `output` field, tracker feed above the abstraction), Sautium-canonical
     `CanonicalQueue` with a one-way HQP mirror (adopt-on-attach restores
     the queue after a backend restart; a 30-tick drift canary logs external
     HQPlayer edits, never reconciles). HQPlayer = 1 s poll (documented
-    boundary exception), gated on a configured endpoint as before. The
-    built-in player / DLNA / browser backends plug into this next.
+    boundary exception), gated on a configured endpoint as before.
 13. ✅ Per-tier Postgres tuning (SHIPPED 2026-07-10): compose files run
     `postgres -c` with env-overridable defaults targeting the 16GB+ Docker
     host (`PG_SHARED_BUFFERS:-1GB`, `PG_EFFECTIVE_CACHE_SIZE:-6GB`,

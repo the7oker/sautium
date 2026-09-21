@@ -105,6 +105,23 @@ inputs = hqp.get_inputs()
 
 ---
 
+#### 6. **Convolution and the Matrix Processor**
+```python
+hqp.set_convolution(True)          # convolution engine on/off
+
+profiles = hqp.matrix_list_profiles()   # saved matrix profiles, by name
+hqp.matrix_get_profile()                # the active one
+hqp.matrix_set_profile("Elite PEQ")     # switch profile
+
+hqp.get_dsp_state()   # mode, filter, shaper, rate, convolution, matrix profile
+```
+
+Sautium also *writes* matrix material: `backend/eq_generator.py` emits
+parametric-EQ files in REW text format (and the inline plugin syntax) for the
+Matrix Processor — the `generate_eq_preset` assistant tool.
+
+---
+
 ## Practical examples
 
 ### Example 1: PCM mode with a high-quality filter
@@ -214,6 +231,7 @@ the backend's `/health` reports the HQPlayer connection state.
 - ✅ 36 noise shapers (DSD5, ASDM5, ASDM7 series)
 - ✅ 20 sample rates (up to DSD2048 / 90.3168 MHz)
 - ✅ Input devices
+- ✅ Convolution toggle + matrix profiles + generated EQ presets
 
 ❌ **Not available:**
 - Output device selection (configure it in the GUI)
@@ -222,15 +240,15 @@ the backend's `/health` reports the HQPlayer connection state.
 
 ## Integration with Sautium
 
-Possibilities:
-1. **Automatic mode selection** based on track quality
-2. **Filter optimization** per genre
-3. **Voice control** of DSP settings (Phase 4)
-4. **Profiles** per kind of music (jazz, classical, rock)
+Shipped: every call above is an assistant tool (`hqplayer_get_settings`,
+`hqplayer_set_filter`, `hqplayer_set_shaper`, `hqplayer_set_convolution`,
+`hqplayer_*_matrix_profile`, `hqplayer_get_dsp_state`, `generate_eq_preset`),
+so mode/filter choice per track or per genre is a conversation, and the
+HQPlayer settings screen in the Web UI drives the same client. Chat
+sketch, working today:
 
-Voice-control sketch:
 ```
-User: "Claude, set the best quality for this track"
+User: "Set the best quality for this track"
 AI:   "Setting DSD256 with the ASDM7EC-super shaper for maximum quality"
 
 User: "Switch to PCM mode"
@@ -240,4 +258,5 @@ AI:   "Switching to PCM with the poly-sinc-ext2 filter"
 ---
 
 **Status**: ✅ **Ready to use**
-**Tested with**: HQPlayer Desktop 5.16.3 (Engine 5.34.14)
+**Tested with**: HQPlayer Desktop 5.16.3 (Engine 5.34.14); HQPlayer 6 speaks
+the same protocol

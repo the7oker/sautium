@@ -2,12 +2,13 @@
 
 ## ✅ Ready to use
 
-The basic HQPlayer Desktop 5 integration is implemented and tested.
+The HQPlayer integration is implemented and tested. The same client drives
+HQPlayer Desktop 5 and 6 — the control protocol is forward-compatible.
 
 ## Quick test
 
 ### 1. Make sure HQPlayer is running on Windows
-- Start HQPlayer Desktop 5
+- Start HQPlayer Desktop 5 or 6
 - Confirm it is up (port 4321 open)
 
 ### 2. Check the connection from WSL
@@ -76,6 +77,11 @@ HQPLAYER_HOST=host.docker.internal
 - volume_up, volume_down
 - volume_mute
 
+✅ **DSP**
+- modes, filters, shapers, rates (discovered at runtime)
+- matrix profiles, convolution
+- parametric-EQ preset generation (`generate_eq_preset`)
+
 ## Files
 
 ```
@@ -119,9 +125,12 @@ docker exec sautium-backend nc -zv host.docker.internal 4321
 ## Next steps
 
 1. ✅ Basic integration — **DONE**
-2. ⏳ AI assistant integration (recommendations → HQPlayer)
-3. ⏳ Voice control (Phase 4.3)
-4. ⏳ Extra features (metering, DSP settings)
+2. ✅ AI assistant integration — **DONE** (the `hqplayer_*` MCP tools; the
+   assistant reads status and drives transport and DSP)
+3. ✅ DSP settings, matrix profiles, convolution, EQ presets — **DONE**
+4. ✅ HQPlayer is one output among several — **DONE** (`backend/playback/`:
+   HQPlayer, DLNA, browser, local; one canonical queue mirrors into HQP)
+5. ⏳ Real-time metering (port 4322) — not started
 
 ## Full documentation
 
@@ -130,5 +139,6 @@ Detailed docs: [docs/HQPLAYER_INTEGRATION.md](docs/HQPLAYER_INTEGRATION.md)
 ---
 
 **Status**: ✅ Ready to use
-**Tested with**: HQPlayer Desktop 5.16.3 (Engine 5.34.14)
+**Tested with**: HQPlayer Desktop 5.16.3 (Engine 5.34.14); HQPlayer 6 speaks
+the same protocol
 **Platform**: Windows (reachable from WSL2 and Docker)
