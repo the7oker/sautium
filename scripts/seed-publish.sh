@@ -44,6 +44,9 @@ print(json.dumps({
     "body": "Cold-start seed bundle — imported by every node on its first start "
             "(backend/seed_import.py checks it against the sha256 in backend/seed/bundle.json).\n\n"
             "sha256 " + sys.argv[3],
+    # /releases/latest must stay the installers release (release-publish.sh):
+    # the website reads downloads.json from it.
+    "make_latest": "false",
 }))' "$tag" "$version" "$sha")")
     echo "created release $tag"
 fi
