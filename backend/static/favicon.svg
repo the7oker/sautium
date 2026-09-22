@@ -1,0 +1,9 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 100 100" role="img" aria-label="Sautium">
+  <defs><linearGradient id="p" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#332B26"/><stop offset="1" stop-color="#1B1714"/></linearGradient></defs>
+  <rect x="9.8" y="9.8" width="80.4" height="80.4" rx="18.5" fill="url(#p)"/>
+  <rect x="25.9" y="40" width="6.2" height="20" rx="3.1" fill="#7C6041"/>
+  <rect x="36.4" y="33.5" width="6.2" height="33" rx="3.1" fill="#C19360"/>
+  <rect x="46.9" y="26.5" width="6.2" height="47" rx="3.1" fill="#E8B06F"/>
+  <rect x="57.4" y="35.5" width="6.2" height="29" rx="3.1" fill="#C19360"/>
+  <rect x="67.9" y="39.5" width="6.2" height="21" rx="3.1" fill="#7C6041"/>
+</svg>
