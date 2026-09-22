@@ -1214,6 +1214,26 @@ were wrong, one hidden behind the other.
 
 ## Known Gotchas
 
+- **Docker restores containers in no order, and a failed restore is final.**
+  After a WSL restart Docker Desktop brings `restart: unless-stopped`
+  containers back within seconds, before the distro's bind mounts exist and
+  without the `depends_on` ordering `compose up` honours. On 2026-09-22
+  postgres failed to start on its `001_initial.sql` mount and stayed down —
+  the restart manager retries only a container that died after running —
+  while the backend came up on its own, swallowed the failed DB check, timed
+  out four more DB steps and died 25 s later on the first unguarded query,
+  five times, until a human pressed start; `mb_backend` meanwhile had bound
+  the HTTP API at import because its connection failed, and stayed there
+  until a slice import called `refresh()`. Two rules came out of it: the
+  process that launches uvicorn waits for postgres first (`entrypoint.py` in
+  Docker, `service_manager._wait_for_postgres` in the launcher) and the
+  lifespan treats the database as a precondition, never a step to log
+  around — a connection failure propagates, only a missing table means
+  "fresh install"; and the postgres container owns no bind mount from the
+  checkout — the runner builds the schema on an empty database (rehearsed:
+  20 files, 110 tables, 0.5 s), so `docker-entrypoint-initdb.d` did the same
+  work a second time and was the only thing tying postgres to the distro's
+  filesystem.
 - **Loopback targets are addresses, never `localhost`.** Windows resolves the
   name to `::1` first, and every listener the launcher runs is IPv4-only (the
   bundled PostgreSQL on 127.0.0.1, uvicorn on 0.0.0.0, the media proxy), so a

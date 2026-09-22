@@ -1,14 +1,22 @@
 """Selects the MusicBrainz data source for canonicalization.
 
 Local dump (``mb_local``) when the ``mb_*`` tables are populated, else the
-throttled HTTP API (``musicbrainz``). Resolved once at import — the dump is
-loaded by an offline batch job, never mid-process, and the backend is
-restarted after a load — so consumers (``mb_audit``, ``mb_canonicalize``) just
-``import mb_backend as mb`` and get the right source with no rate-limit logic
-of their own to change.
+throttled HTTP API (``musicbrainz``). Resolved at import and re-evaluated by
+``refresh()`` after a dump load or a slice import, so consumers
+(``mb_audit``, ``mb_canonicalize``) ``import mb_backend as mb`` and read the
+source as a module attribute, with no rate-limit logic of their own.
+
+The process that launched this one waited for the database before any
+import (Docker: entrypoint.py; launcher: service_manager), so only a missing
+``mb_artist`` table — a fresh install whose schema the lifespan is about to
+build — means "no dump". A connection failure is a real failure and
+propagates: swallowed, it bound the HTTP API on the master for as long as
+nothing called ``refresh()`` (2026-09-22).
 """
 
 import logging
+
+import psycopg2.errors
 
 from db_pool import db_query_one
 
@@ -18,8 +26,8 @@ logger = logging.getLogger(__name__)
 def _dump_loaded() -> bool:
     try:
         return db_query_one("SELECT 1 FROM mb_artist LIMIT 1") is not None
-    except Exception:
-        return False  # tables not yet created (fresh install) → API
+    except psycopg2.errors.UndefinedTable:
+        return False
 
 
 # True = the offline twin is active → BULK canon (canon.content) is safe (no IP-ban risk).

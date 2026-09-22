@@ -204,8 +204,9 @@ docker compose -f docker-compose.wsl.yml up -d --build
 docker compose -f docker-compose.mac.yml up -d --build
 ```
 
-This starts PostgreSQL (schema auto-applied from
-`desktop/migrations/001_initial.sql`) and the FastAPI backend.
+This starts PostgreSQL and the FastAPI backend; on its first start the
+backend builds the schema (`desktop/migrations/001_initial.sql` plus the
+numbered deltas, `backend/db_migrate.py`).
 
 ### 4. Verify
 
@@ -438,7 +439,8 @@ E:\Music\Jazz\Miles Davis\[TR24]\Kind of Blue\...
 
 The canonical schema is **`desktop/migrations/001_initial.sql`** — the single
 source of truth for a fresh install (all types, tables, indexes and triggers).
-It is auto-applied on first container start. Highlights:
+The backend's migration runner applies it on the node's first start — Docker
+and launcher alike — and the deltas after it. Highlights:
 
 - **Numbered deltas on top of the baseline**: `001_initial.sql` is the
   readable source of truth for a fresh install, and every change also ships as

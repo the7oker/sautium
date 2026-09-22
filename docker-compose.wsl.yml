@@ -47,7 +47,12 @@ services:
       # at /var/lib/postgresql (NOT /data) — mounting the old /data path makes the
       # entrypoint refuse to start. See docker-library/postgres#1259.
       - postgres-data:/var/lib/postgresql
-      - ./desktop/migrations/001_initial.sql:/docker-entrypoint-initdb.d/001_initial.sql
+      # No bind mount from the checkout, on purpose. The schema is built by the
+      # migration runner at the backend's first start (001 + the deltas,
+      # backend/db_migrate.py), not by docker-entrypoint-initdb.d. And Docker
+      # Desktop on WSL restores containers before the distro's bind mounts
+      # exist: a start that fails on a missing mount is never retried, which is
+      # how postgres stayed down after a WSL restart (2026-09-22).
     ports:
       - "127.0.0.1:5432:5432"
     networks:

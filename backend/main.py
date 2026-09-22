@@ -303,23 +303,24 @@ async def lifespan(app: FastAPI):
     else:
         logger.warning("PyTorch not installed. Audio embedding features unavailable.")
 
-    # Test database connection
-    try:
-        test_db_connection()
-        logger.info("Database connection successful")
-    except Exception as e:
-        logger.error(f"Database connection failed: {e}")
-    else:
-        # Bring the schema and the data to this code's version before
-        # anything writes: pending desktop/migrations/NNN_*.sql deltas and
-        # the Python data migrations (identity rule). One place for every
-        # node — Docker or launcher-run — see backend/db_migrate.py.
-        import db_migrate
-        db_migrate.apply_pending()
-        # Every signed request derives its token from the epoch and the
-        # node key; load both now so the first request never reads the
-        # DB on the event loop (the auth middleware runs there).
-        await asyncio.to_thread(device_auth.prime)
+    # The database is a precondition, not a step to log around: the process
+    # that launched uvicorn waited for postgres first (Docker: entrypoint.py;
+    # launcher: service_manager._wait_for_postgres), so a failure here is
+    # real and ends the startup. Logging it and going on skipped the
+    # migrations and died 25 s later on the first unguarded query anyway
+    # (2026-09-22).
+    test_db_connection()
+    logger.info("Database connection successful")
+    # Bring the schema and the data to this code's version before
+    # anything writes: pending desktop/migrations/NNN_*.sql deltas and
+    # the Python data migrations (identity rule). One place for every
+    # node — Docker or launcher-run — see backend/db_migrate.py.
+    import db_migrate
+    db_migrate.apply_pending()
+    # Every signed request derives its token from the epoch and the
+    # node key; load both now so the first request never reads the
+    # DB on the event loop (the auth middleware runs there).
+    await asyncio.to_thread(device_auth.prime)
 
     # Resolve the hardware profile (full/standard/lite — HARDWARE-TIERS.md).
     # Drives the pre-warm set below plus pool sizes, phantom minting and
