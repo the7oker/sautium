@@ -11930,7 +11930,6 @@
       canonize:    'canonizing artists',
       discography: 'reconciling discographies',
       name_latin:  'transliterating names',
-      awaiting_sync: 'waiting for the first P2P sync',
       idle:        'idle',
       starting:    'starting',
       '':          'idle',

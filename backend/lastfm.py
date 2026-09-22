@@ -34,33 +34,80 @@ logger = logging.getLogger(__name__)
 pylast.DELAY_TIME = 0.34
 
 
-class RateLimitExhausted(Exception):
-    """A Last.fm API rate-limit (error 29) survived every retry in
-    _with_retry, and the persistent 'lastfm' cooldown has been armed.
-    Callers surface status='rate_limited' and end the batch rather than
-    keep hammering a source that is actively refusing us."""
+# A failed fetch means one of three things, and each has its own handling —
+# reading them as one "error" is how a ban once marked thirty innocent
+# artists per pass, and how one bug of ours held a queue for weeks.
+#
+#   1. The SOURCE'S VERDICT about the entity: a pylast.WSError that reaches
+#      the caller — status 6 (not found) or another per-entity refusal.
+#      Cached in external_metadata so the planner backs off for the window
+#      (not_found 90 days, error 7 days).
+#   2. The SOURCE IS UNAVAILABLE to us: a transport failure, a 5xx, its own
+#      "offline / try again" statuses, or a refusal — the rate limit (29),
+#      a dead key, an HTML challenge page instead of XML. _with_retry turns
+#      these into SourceUnavailable (SourceRefused for the refusals, which
+#      also arm the persistent cooldown). Says nothing about the entity:
+#      the batch ends, the entity stays unmarked, the next pass retries.
+#   3. OUR OWN FAILURE: anything else — a UniqueViolation, a value too
+#      long, a TypeError. Nothing here is a statement about the artist, and
+#      recording it as a verdict turned a transient bug into permanent
+#      data loss: measured on the master before this existed, 26 of 49
+#      cached "errors" were our own database errors, one captioned
+#      "(transient)" and five months old. Never cached. But the same code
+#      fed the same row fails the same way, and an unmarked row is
+#      re-selected at the head of every pass — so it is registered here
+#      (internal_failures) and skipped until this process is replaced,
+#      because a fix is a restart.
+
+class SourceUnavailable(Exception):
+    """Last.fm gave no answer about the entity asked for, and every retry
+    in _with_retry failed. Callers end the batch and leave the entity
+    unmarked; the loop's interval is the backoff."""
 
 
+class SourceRefused(SourceUnavailable):
+    """The refusal variant — rate limit (29), invalid or suspended key
+    (10, 26), or a non-API answer such as an HTML challenge page — and the
+    persistent 'lastfm' cooldown has been armed (api_cooldown)."""
 
-def _is_our_failure(exc: Exception) -> bool:
-    """Did WE fail, or did the source give a verdict?
 
-    A UniqueViolation or a value-too-long says nothing about the artist and
-    everything about our code at that moment. Recording it as a negative cache
-    entry turns a transient bug of ours into permanent data loss: the planner
-    then skips that artist forever, long after the bug is fixed. Measured on
-    the master before this existed — 26 of 49 cached "errors" were our own
-    database errors, one of them literally captioned "(transient)" and five
-    months old.
+_REFUSED_STATUSES = {"29", "10", "26"}
+# 8 "operation failed, try again", 11 "service offline", 16 "temporary
+# error"; pylast reports an HTTP 5xx as a WSError carrying the HTTP code.
+_TRANSIENT_STATUSES = {"8", "11", "16", "500", "502", "503", "504"}
 
-    Only the source's own verdict belongs in the cache. Ours belongs in the
-    log, and the entity simply stays unenriched until the next pass."""
-    try:
-        from sqlalchemy.exc import SQLAlchemyError
-    except ImportError:          # pragma: no cover
-        return False
-    return isinstance(exc, (SQLAlchemyError, AttributeError, TypeError,
-                            KeyError, ValueError))
+
+def _failure_class(exc: BaseException) -> Optional[str]:
+    """'refused' or 'transient' for a failure of the source; None for its
+    verdict about the entity (any other WSError) and for our own errors —
+    neither is retried."""
+    if isinstance(exc, pylast.WSError):
+        status = str(exc.status)
+        if status in _REFUSED_STATUSES:
+            return "refused"
+        if status in _TRANSIENT_STATUSES:
+            return "transient"
+        return None
+    if isinstance(exc, pylast.MalformedResponseError):
+        return "refused"
+    if isinstance(exc, (pylast.NetworkError, ConnectionError, TimeoutError, OSError)):
+        return "transient"
+    return None
+
+
+# Entities this process's own code failed on, by entity type ('artist',
+# 'genre'). Read by every candidate query as an exclusion list; forgotten
+# with the process.
+_internal_failures: Dict[str, set] = {}
+
+
+def note_internal_failure(entity_type: str, entity_id) -> None:
+    _internal_failures.setdefault(entity_type, set()).add(str(entity_id))
+
+
+def internal_failures(entity_type: str) -> List[str]:
+    """For `<> ALL(CAST(:skip AS uuid[]))` in a candidate query."""
+    return sorted(_internal_failures.get(entity_type, ()))
 
 
 class LastFmService:
@@ -83,38 +130,30 @@ class LastFmService:
 
     @staticmethod
     def _with_retry(fn, max_retries=3, base_delay=2.0):
-        """Call fn() with exponential backoff on rate limit / transient errors.
-
-        Last.fm error code 29 = "Rate limit exceeded".
-        Also retries on network-level failures (timeout, connection reset).
-
-        A rate-limit that survives every retry arms the persistent 'lastfm'
-        cooldown and raises RateLimitExhausted, so the caller ends the batch
-        instead of continuing to hit an API that is actively banning us.
-        """
+        """Call fn(), retrying a failure of the SOURCE (see _failure_class)
+        with exponential backoff. One that survives every retry becomes
+        SourceUnavailable — SourceRefused, with the persistent 'lastfm'
+        cooldown armed, when the source is refusing us rather than merely
+        failing. A verdict about the entity and our own errors are raised
+        untouched, at once."""
         for attempt in range(max_retries + 1):
             try:
                 return fn()
-            except pylast.WSError as e:
-                err_str = str(e).lower()
-                is_rate_limit = 'rate limit' in err_str or 'try again' in err_str
-                if is_rate_limit and attempt < max_retries:
-                    delay = base_delay * (2 ** attempt)
-                    logger.warning(f"Rate limited, retry {attempt + 1}/{max_retries} in {delay:.0f}s")
-                    time.sleep(delay)
-                    continue
-                if is_rate_limit:
-                    from api_cooldown import arm
-                    arm('lastfm', str(e))
-                    raise RateLimitExhausted(str(e)) from e
-                raise
-            except (pylast.NetworkError, ConnectionError, TimeoutError, OSError) as e:
+            except Exception as e:
+                kind = _failure_class(e)
+                if kind is None:
+                    raise
                 if attempt < max_retries:
                     delay = base_delay * (2 ** attempt)
-                    logger.warning(f"Network error ({type(e).__name__}), retry {attempt + 1}/{max_retries} in {delay:.0f}s")
+                    logger.warning(f"Last.fm {kind} ({type(e).__name__}: {e}), "
+                                   f"retry {attempt + 1}/{max_retries} in {delay:.0f}s")
                     time.sleep(delay)
                     continue
-                raise
+                if kind == "refused":
+                    from api_cooldown import arm
+                    arm('lastfm', str(e))
+                    raise SourceRefused(str(e)) from e
+                raise SourceUnavailable(str(e)) from e
 
     @staticmethod
     def _is_genuine_not_found(e: pylast.WSError) -> bool:
@@ -137,76 +176,34 @@ class LastFmService:
         """
         try:
             artist = self.network.get_artist(artist_name)
-
-            # Get bio — first API call, also validates artist exists
-            bio_data = None
-            try:
-                bio = artist.get_bio_summary()
-                content = artist.get_bio_content()
-                bio_data = {
-                    "summary": bio,
-                    "content": content,
-                    "url": artist.get_url(),
-                }
-            except pylast.WSError:
-                raise  # re-raise so outer handler catches "Artist not found"
-            except Exception as e:
-                logger.debug(f"No bio for {artist_name}: {e}")
-
-            # Get tags
-            tags_data = []
-            try:
-                top_tags = artist.get_top_tags(limit=30)
-                tags_data = [
-                    {"name": tag.item.get_name(), "count": int(tag.weight)}
-                    for tag in top_tags
-                ]
-            except Exception as e:
-                logger.debug(f"No tags for {artist_name}: {e}")
-
-            # Get stats
-            stats_data = {}
-            try:
-                stats_data = {
-                    "listeners": int(artist.get_listener_count()),
-                    "playcount": int(artist.get_playcount()),
-                }
-            except pylast.WSError:
-                raise
-            except Exception as e:
-                logger.debug(f"No stats for {artist_name}: {e}")
-
-            # Get similar artists (skip for non-library artists to save API calls)
+            # getInfo (bio, stats, mbid), getTopTags and — for a library
+            # artist — getSimilar. Nothing is caught per section: pylast
+            # answers a missing section with None or [], and an exception
+            # here is the source failing or refusing, which _with_retry
+            # classifies for the caller. Per-section swallowing once turned
+            # a ban into "empty artist" verdicts cached for a week.
+            bio_data = {
+                "summary": artist.get_bio_summary(),
+                "content": artist.get_bio_content(),
+                "url": artist.get_url(),
+            }
+            tags_data = [
+                {"name": tag.item.get_name(), "count": int(tag.weight)}
+                for tag in artist.get_top_tags(limit=30)
+            ]
+            stats_data = {
+                "listeners": int(artist.get_listener_count()),
+                "playcount": int(artist.get_playcount()),
+            }
             similar_data = []
             if fetch_similar:
-                try:
-                    similar = artist.get_similar(limit=20)
-                    similar_data = [
-                        {
-                            "name": similar_artist.item.get_name(),
-                            "match": float(similar_artist.match),
-                        }
-                        for similar_artist in similar
-                    ]
-                except pylast.WSError:
-                    raise
-                except Exception as e:
-                    logger.debug(f"No similar artists for {artist_name}: {e}")
-
-            # Last.fm's canonical MBID for this name — disambiguates namesakes
-            # (one display name → several real MB artists). getInfo is already
-            # cached by the calls above, so this reads it for free.
-            try:
-                lastfm_mbid = artist.get_mbid() or None
-            except Exception:
-                lastfm_mbid = None
-
-            # Reaching here with every section empty but no WSError means the
-            # per-section handlers swallowed a transient failure (network/throttle):
-            # a genuinely missing artist would have raised status-6 on the bio call
-            # above. Raise so it's recorded as a retryable 'error', never not_found.
-            if not bio_data and not stats_data and not tags_data and not similar_data:
-                raise RuntimeError(f"Empty Last.fm response for {artist_name} (transient)")
+                similar_data = [
+                    {"name": s.item.get_name(), "match": float(s.match)}
+                    for s in artist.get_similar(limit=20)
+                ]
+            # Last.fm's canonical MBID for this name — disambiguates
+            # namesakes (one display name → several real MB artists).
+            lastfm_mbid = artist.get_mbid() or None
 
             return {
                 "bio": bio_data,
@@ -220,10 +217,6 @@ class LastFmService:
             if self._is_genuine_not_found(e):
                 logger.info(f"Artist not found on Last.fm: {artist_name}")
                 return None
-            logger.error(f"Last.fm API error for {artist_name}: {e}")
-            raise
-        except Exception as e:
-            logger.error(f"Error fetching Last.fm data for {artist_name}: {e}")
             raise
 
     def store_artist_metadata(
@@ -505,13 +498,18 @@ class LastFmService:
                 {"name": s.item.get_name(), "match": float(s.match)} for s in similar
             ]
         except pylast.WSError as e:
+            # The source's verdict about this name — not found, or another
+            # per-entity refusal (its own failures became SourceUnavailable
+            # in _with_retry). Nothing to store either way, and the stamp
+            # below keeps the backfill from asking again.
             if self._is_genuine_not_found(e):
                 result["status"] = "not_found"
-                similar_data = []
             else:
-                raise
+                logger.warning(f"Last.fm error for similars of {artist_name}: {e}")
+                result["status"] = "error"
+            similar_data = []
         result["stored"] = self._store_similar_artists(db, artist_id, artist_name, similar_data)
-        # Stamp even on not_found so we don't re-query a dead name every batch.
+        # Stamped on every verdict, not only on a list: a dead name is asked once.
         db.execute(text("UPDATE artists SET last_similar_sync = NOW() WHERE id = :id"),
                    {"id": str(artist_id)})
         db.commit()
@@ -703,46 +701,46 @@ class LastFmService:
                 "similar_count": len(data.get("similar", [])),
             }
 
-        except RateLimitExhausted as e:
-            # Not a per-artist failure — skip the external_metadata error
-            # upsert (no negative-caching) and surface a distinct status so
-            # the batch ends and retries after the cooldown clears.
+        except SourceUnavailable as e:
+            # Not a statement about this artist: no marker, and a status
+            # that ends the batch.
             db.rollback()
             return {
-                "status": "rate_limited",
+                "status": "unavailable",
+                "artist_id": artist_id,
+                "artist_name": artist_name,
+                "error": str(e),
+            }
+        except pylast.WSError as e:
+            # The source's verdict about this name (status 6 was answered
+            # as not_found above). Cached so the planner backs off for the
+            # window.
+            logger.warning(f"Last.fm error for artist {artist_name}: {e}")
+            db.rollback()
+            self._upsert_metadata(
+                db,
+                entity_type="artist",
+                entity_id=artist_id,
+                source="lastfm",
+                metadata_type="bio",
+                data={},
+                fetch_status="error",
+                error_message=str(e)[:500],
+            )
+            db.commit()
+            return {
+                "status": "error",
                 "artist_id": artist_id,
                 "artist_name": artist_name,
                 "error": str(e),
             }
         except Exception as e:
-            logger.error(f"Failed to enrich artist {artist_name}: {e}")
+            # Ours (see the taxonomy at the top): logged with its trace,
+            # registered for this process, never cached.
+            logger.error(f"Enriching artist {artist_name} failed in our code: {e}",
+                         exc_info=True)
             db.rollback()
-
-            if _is_our_failure(e):
-                # Do NOT negative-cache: nothing here is a statement about the
-                # artist, and remembering it would bar a retry once the bug is
-                # gone. It stays unenriched and comes back next pass.
-                logger.error("  ^ internal failure, not cached — %s will be "
-                             "retried", artist_name)
-                return {"status": "error", "artist_id": artist_id,
-                        "artist_name": artist_name, "error": str(e)}
-
-            # Store the SOURCE's error so the planner can back off from it
-            try:
-                self._upsert_metadata(
-                    db,
-                    entity_type="artist",
-                    entity_id=artist_id,
-                    source="lastfm",
-                    metadata_type="bio",
-                    data={},
-                    fetch_status="error",
-                    error_message=str(e)[:500],
-                )
-                db.commit()
-            except Exception:
-                db.rollback()
-
+            note_internal_failure("artist", artist_id)
             return {
                 "status": "error",
                 "artist_id": artist_id,
@@ -761,16 +759,10 @@ class LastFmService:
         """
         try:
             tag = self.network.get_tag(tag_name)
-
-            # Get wiki info
-            summary = None
-            content = None
-            try:
-                summary = tag.get_wiki_summary()
-                content = tag.get_wiki_content()
-            except Exception as e:
-                logger.debug(f"No wiki for tag {tag_name}: {e}")
-
+            # Not caught per call: pylast answers a missing wiki with None,
+            # and an exception is the source failing, for _with_retry.
+            summary = tag.get_wiki_summary()
+            content = tag.get_wiki_content()
             if not summary and not content:
                 return None
 
@@ -784,11 +776,6 @@ class LastFmService:
             if self._is_genuine_not_found(e):
                 logger.info(f"Tag not found on Last.fm: {tag_name}")
                 return None
-            else:
-                logger.error(f"Last.fm API error for tag {tag_name}: {e}")
-                raise
-        except Exception as e:
-            logger.error(f"Error fetching Last.fm data for tag {tag_name}: {e}")
             raise
 
     def enrich_genre(self, db: Session, genre_id: int, genre_name: str) -> Dict[str, Any]:
@@ -800,12 +787,23 @@ class LastFmService:
         logger.info(f"Enriching genre: {genre_name} (ID: {genre_id})")
 
         try:
-            # Fetch from Last.fm (with retry on rate limit / network errors)
             data = self._with_retry(lambda: self.get_tag_info(genre_name))
 
             if data is None:
-                # Tag not found
-                logger.warning(f"Genre not found on Last.fm: {genre_name}")
+                # No wiki (or no such tag): marked here, not by the caller,
+                # so every batch — background or CLI — stops asking.
+                logger.info(f"Genre not found on Last.fm: {genre_name}")
+                self._upsert_metadata(
+                    db,
+                    entity_type="genre",
+                    entity_id=genre_id,
+                    source="lastfm",
+                    metadata_type="description",
+                    data={},
+                    fetch_status="not_found",
+                    error_message="No wiki on Last.fm",
+                )
+                db.commit()
                 return {
                     "status": "not_found",
                     "genre_id": genre_id,
@@ -847,18 +845,39 @@ class LastFmService:
                 "content_length": len(data.get("content") or ""),
             }
 
-        except RateLimitExhausted as e:
+        except SourceUnavailable as e:
             db.rollback()
             return {
-                "status": "rate_limited",
+                "status": "unavailable",
+                "genre_id": genre_id,
+                "genre_name": genre_name,
+                "error": str(e),
+            }
+        except pylast.WSError as e:
+            logger.warning(f"Last.fm error for genre {genre_name}: {e}")
+            db.rollback()
+            self._upsert_metadata(
+                db,
+                entity_type="genre",
+                entity_id=genre_id,
+                source="lastfm",
+                metadata_type="description",
+                data={},
+                fetch_status="error",
+                error_message=str(e)[:500],
+            )
+            db.commit()
+            return {
+                "status": "error",
                 "genre_id": genre_id,
                 "genre_name": genre_name,
                 "error": str(e),
             }
         except Exception as e:
-            logger.error(f"Failed to enrich genre {genre_name}: {e}")
+            logger.error(f"Enriching genre {genre_name} failed in our code: {e}",
+                         exc_info=True)
             db.rollback()
-
+            note_internal_failure("genre", genre_id)
             return {
                 "status": "error",
                 "genre_id": genre_id,
@@ -915,6 +934,9 @@ class LastFmService:
 
         for genre_id, genre_name in genres:
             result = self.enrich_genre(db, genre_id, genre_name)
+            if result["status"] == "unavailable":
+                logger.info("Last.fm unavailable — ending genre batch")
+                break
 
             stats["processed"] += 1
 
@@ -994,6 +1016,9 @@ class LastFmService:
 
         for artist_id, artist_name in artists:
             result = self.enrich_artist(db, artist_id, artist_name)
+            if result["status"] == "unavailable":
+                logger.info("Last.fm unavailable — ending artist batch")
+                break
 
             stats["processed"] += 1
 
@@ -1044,12 +1069,10 @@ class LastFmService:
         except pylast.WSError as e:
             if self._is_genuine_not_found(e):
                 return None
-            # Rate limit (code 29) survived the backoff, or some other
-            # API-level error — transient, not "no cover".
+            # Another per-entity verdict — left unresolved, not "no cover".
             raise TransientFetchError(f"WSError: {e}") from e
         except Exception as e:
-            # NetworkError / timeout / connection reset that outlived
-            # _with_retry's backoff.
+            # SourceUnavailable after _with_retry's backoff, or our own error.
             raise TransientFetchError(f"{type(e).__name__}: {e}") from e
 
         if not url:
@@ -1074,6 +1097,10 @@ def backfill_similar(limit: Optional[int] = None, delay: float = 0.2,
     resumability; incremental + idempotent. ``force=True`` re-fetches the whole
     engaged set (also the escape hatch for the permanent not_found stamp —
     fetch_and_store_similar stamps a dead name once, forever).
+
+    Every row counted in ``processed`` left the queue — stamped, or registered
+    as this process's own failure (internal_failures). An unavailable source
+    ends the batch (``unavailable``) with the row unstamped for the next pass.
     """
     from database import get_db_context
 
@@ -1085,6 +1112,7 @@ def backfill_similar(limit: Optional[int] = None, delay: float = 0.2,
         FROM artists a
         WHERE {ARTIST_ENGAGED}
         {where}
+        AND a.id <> ALL(CAST(:skip AS uuid[]))
         ORDER BY a.last_similar_sync NULLS FIRST,
                  (SELECT MAX(lh.started_at)
                   FROM listening_history lh
@@ -1094,10 +1122,12 @@ def backfill_similar(limit: Optional[int] = None, delay: float = 0.2,
                  a.name
         {lim}
     """)
-    stats = {"processed": 0, "stored": 0, "not_found": 0, "errors": 0,
-             "rate_limited": 0}
+    params: Dict[str, Any] = {"skip": internal_failures("artist")}
+    if limit:
+        params["lim"] = limit
+    stats = {"processed": 0, "stored": 0, "not_found": 0, "errors": 0}
     with get_db_context() as db:
-        rows = db.execute(sql, {"lim": limit} if limit else {}).fetchall()
+        rows = db.execute(sql, params).fetchall()
     logger.info(f"backfill_similar: {len(rows)} engaged artists queued")
     for row in rows:
         if cancel_flag and cancel_flag():
@@ -1105,17 +1135,20 @@ def backfill_similar(limit: Optional[int] = None, delay: float = 0.2,
         try:
             with get_db_context() as db:
                 r = svc.fetch_and_store_similar(db, row.id, row.name)
-            stats["processed"] += 1
-            stats["stored"] += r["stored"]
-            if r["status"] == "not_found":
-                stats["not_found"] += 1
-        except RateLimitExhausted:
-            stats["rate_limited"] += 1
-            logger.info("backfill_similar: Last.fm rate-limited — ending batch")
+        except SourceUnavailable:
+            logger.info("backfill_similar: Last.fm unavailable — ending batch")
+            stats["unavailable"] = True
             break
         except Exception as e:
             stats["errors"] += 1
-            logger.error(f"backfill_similar failed for {row.name}: {e}")
+            note_internal_failure("artist", row.id)
+            logger.error(f"backfill_similar failed for {row.name} in our code: {e}",
+                         exc_info=True)
+        else:
+            stats["stored"] += r["stored"]
+            if r["status"] == "not_found":
+                stats["not_found"] += 1
+        stats["processed"] += 1
         time.sleep(delay)
     return stats
 
@@ -1170,6 +1203,9 @@ def backfill_lastfm_mbid(limit: Optional[int] = None, delay: float = 0.2,
             stats["processed"] += 1
             stats["set" if mbid else "null"] += 1
             logger.info(f"  {row.name}: lastfm_mbid={mbid}")
+        except SourceUnavailable:
+            logger.info("backfill_lastfm_mbid: Last.fm unavailable — ending batch")
+            break
         except Exception as e:
             stats["errors"] += 1
             logger.error(f"backfill_lastfm_mbid failed for {row.name}: {e}")

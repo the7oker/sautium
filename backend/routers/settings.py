@@ -237,11 +237,6 @@ def _sync_db_listener() -> None:
                         channels = set()
                         while conn.notifies:
                             channels.add(conn.notifies.pop(0).channel)
-                        if "sautium_sync_done" in channels:
-                            # The sync just imported what peers had; the
-                            # enrichment pass that follows fetches the rest.
-                            import background_enrichment
-                            background_enrichment.wake("P2P sync finished")
                         if "sautium_notices" in channels:
                             notify_notice_subscribers()
                         notify_library_subscribers()

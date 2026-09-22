@@ -36,21 +36,27 @@ of a Docker install. Playback is the signal that stands in for it, because
 it is the one the product can observe on every runtime.
 
 Two cadences. The network and model steps DRAIN: a step that came back with
-a full, error-free batch has a longer queue behind it, so the next pass
-follows at once instead of after the interval — a fresh library's bios take
-minutes, not days, while the per-call delay still caps the request rate. A
-short batch (queue empty, rate limit, cooldown) or any error hands control
-back to the interval timer, which is the backoff. The DB-only steps never
-drain: each is a bounded slice of a table walk that the timer paces.
+a full batch has a longer queue behind it, so the next pass follows at once
+instead of after the interval — a fresh library's bios take minutes, not
+days, while the per-call delay still caps the request rate. A short batch
+(queue empty, source unavailable, cooldown) hands control back to the
+interval timer, which is the backoff. The premise is that every processed
+row LEFT the queue; a step whose failed rows stay queued (the lyrics step's
+`errors`, the model steps' `failed`) says so and never drains on them — see
+_wants_more. The DB-only steps never drain: each is a bounded slice of a
+table walk that the timer paces.
 
-The loop follows the P2P sync rather than its own clock where it can: at
-boot the first pass waits (bounded) for the first `sautium_sync_done`,
-and every later sync completion wakes a pass at once — peers fill a fresh
-library's gaps for free, the pass that follows fetches only the rest.
-The interval is the fallback for a node with sync off or no peers.
+The loop ran behind the P2P sync from 2026-09-05 to 2026-09-22 — the first
+pass waited for the first `sautium_sync_done`, every later one woke a pass
+— while bios, stats and similars travelled between nodes. Since the Last.fm
+layer became node-local (2026-09-19) nothing a sync imports is this loop's
+input, so the wait and the wake went: the interval, the drain, the playback
+falling edge and the canon wake are the cadence.
 
-One-shot per entity: an artist or genre already in its table, or marked
-`not_found`/`error` in `external_metadata`, is skipped.
+One-shot per entity: an artist or genre already in its table, marked
+`not_found`/`error` in `external_metadata`, or one this process's own code
+failed on (lastfm.internal_failures — retried by the next process, never by
+the same code) is skipped.
 """
 
 from __future__ import annotations
@@ -90,7 +96,6 @@ _NEGATIVE_CACHE_WINDOW = """
 # data showing the defaults are wrong.
 _BATCH_INTERVAL_MIN = 30          # idle sleep between passes; also the DB-only steps' cadence
 _DB_RETRY_S = 120                 # DB-only steps with work left (full batch, or blocked by a dump/slice load): retry soon, not next cycle
-_FIRST_SYNC_WAIT_MIN = 10         # boot: how long the first pass waits for the first P2P sync
 _LYRICS_PER_BATCH = 50            # lrclib/genius calls per batch
 _ARTISTS_PER_BATCH = 30           # Last.fm artist.getInfo calls per batch
 _GENRES_PER_BATCH = 20            # Last.fm tag.getInfo calls per batch
@@ -155,17 +160,15 @@ def _cancel_flag() -> bool:
     return bool(_state["cancel"])
 
 
-# Cross-process wake from the launcher's P2P sync: the LISTEN thread in
-# routers/settings.py sets it on NOTIFY sautium_sync_done. A sync that
-# completes while a pass is running leaves it set, so the next wait()
-# returns at once and the following pass sees the freshly imported rows.
-_sync_wake = threading.Event()
+# A wake that lands while a pass is running stays set, so the next wait()
+# returns at once and the following pass sees what the waker produced.
+_pass_wake = threading.Event()
 
 
 def wake(reason: str = "") -> None:
     """Run the next pass now instead of at the interval (any thread)."""
     logger.info(f"Background enrichment wake: {reason or 'requested'}")
-    _sync_wake.set()
+    _pass_wake.set()
 
 
 # The DB-only steps run on the interval timer — except when something just
@@ -179,42 +182,16 @@ def wake_db_steps(reason: str = "") -> None:
     """Run the DB-only steps at the next pass, and start that pass now."""
     logger.info(f"Background enrichment DB-steps wake: {reason or 'requested'}")
     _db_wake.set()
-    _sync_wake.set()
-
-
-def _await_first_sync() -> None:
-    """Boot order: let the first P2P sync fill the gaps for free before the
-    first API call — a fresh library's bios, stats and similars mostly exist
-    on peers already. Bounded: a node with sync off, or one whose peers are
-    slow, runs its first pass after _FIRST_SYNC_WAIT_MIN anyway."""
-    try:
-        from routers.settings import _read
-        p2p_on = bool(_read("sync.p2p_enabled"))
-    except Exception as e:
-        logger.warning(f"sync.p2p_enabled read failed — not waiting for a sync: {e}")
-        p2p_on = False
-    if not p2p_on:
-        return
-    _set(current_step="awaiting_sync")
-    deadline = time.time() + _FIRST_SYNC_WAIT_MIN * 60
-    while time.time() < deadline and not _cancel_flag():
-        if _sync_wake.wait(timeout=1):
-            _sync_wake.clear()
-            logger.info("Background enrichment: first pass follows the P2P sync")
-            return
-    logger.info(
-        f"Background enrichment: no P2P sync within {_FIRST_SYNC_WAIT_MIN} min, "
-        "first pass runs now"
-    )
+    _pass_wake.set()
 
 
 def _sleep_until(seconds: int) -> None:
-    """Idle until the interval elapses, a sync completes (wake) or cancel —
-    1s slices so stop() never waits out the interval."""
+    """Idle until the interval elapses, a wake lands or cancel — 1s slices
+    so stop() never waits out the interval."""
     deadline = time.time() + seconds
     while time.time() < deadline and not _cancel_flag():
-        if _sync_wake.wait(timeout=1):
-            _sync_wake.clear()
+        if _pass_wake.wait(timeout=1):
+            _pass_wake.clear()
             return
 
 
@@ -238,8 +215,13 @@ def _step_missing_artists(limit: int) -> Dict[str, int]:
     slot to its own artist (a compilation is ~15 of them), and on a dump
     node that is a quarter-million name-only stubs nobody asked about; one
     Last.fm call each is the blowup the engagement rule exists to prevent.
+
+    Every row counted in `processed` left the queue: a bio row, a marker,
+    or — for a failure in our own code — this process's exclusion list
+    (lastfm.internal_failures). An unavailable source ends the batch with
+    the row unmarked, for the next pass.
     """
-    from lastfm import LastFmService
+    from lastfm import LastFmService, internal_failures, note_internal_failure
 
     stats = {"processed": 0, "success": 0, "not_found": 0, "errors": 0}
     lastfm = LastFmService()
@@ -265,12 +247,14 @@ def _step_missing_artists(limit: int) -> Dict[str, int]:
               AND em.metadata_type = 'bio'
               AND em.fetch_status IN ('not_found', 'error')""" + _NEGATIVE_CACHE_WINDOW + """
         )
+        AND a.id <> ALL(CAST(:skip AS uuid[]))
         ORDER BY a.name
         LIMIT :batch
     """)
 
     with get_db_context() as db:
-        rows = db.execute(sql, {"batch": int(limit)}).fetchall()
+        rows = db.execute(sql, {"batch": int(limit),
+                                "skip": internal_failures("artist")}).fetchall()
         if not rows:
             return stats
         logger.info(f"Background: {len(rows)} artists queued for Last.fm bio")
@@ -278,11 +262,17 @@ def _step_missing_artists(limit: int) -> Dict[str, int]:
         for row in rows:
             if _cancel_flag():
                 break
-            stats["processed"] += 1
             try:
                 result = lastfm.enrich_artist(db, row.id, row.name)
-                if result["status"] == "rate_limited":
-                    logger.info("Background artists: Last.fm rate-limited — ending batch")
+            except Exception as e:
+                logger.error(f"Background artist failed for {row.name}: {e}", exc_info=True)
+                db.rollback()
+                note_internal_failure("artist", row.id)
+                stats["errors"] += 1
+            else:
+                if result["status"] == "unavailable":
+                    logger.info("Background artists: Last.fm unavailable — ending batch")
+                    stats["unavailable"] = True
                     break
                 if result["status"] == "success":
                     stats["success"] += 1
@@ -290,18 +280,16 @@ def _step_missing_artists(limit: int) -> Dict[str, int]:
                     stats["not_found"] += 1
                 else:
                     stats["errors"] += 1
-            except Exception as e:
-                logger.error(f"Background artist failed for {row.name}: {e}")
-                stats["errors"] += 1
-                db.rollback()
+            stats["processed"] += 1
             time.sleep(_LASTFM_DELAY_S)
 
     return stats
 
 
 def _step_missing_genres(limit: int) -> Dict[str, int]:
-    """Fetch Last.fm wiki text for genres without a description."""
-    from lastfm import LastFmService
+    """Fetch Last.fm wiki text for genres without a description. Same row
+    contract as _step_missing_artists."""
+    from lastfm import LastFmService, internal_failures, note_internal_failure
 
     stats = {"processed": 0, "success": 0, "not_found": 0, "errors": 0}
     lastfm = LastFmService()
@@ -321,12 +309,14 @@ def _step_missing_genres(limit: int) -> Dict[str, int]:
               AND em.metadata_type = 'description'
               AND em.fetch_status IN ('not_found', 'error')""" + _NEGATIVE_CACHE_WINDOW + """
         )
+        AND g.id <> ALL(CAST(:skip AS uuid[]))
         ORDER BY g.name
         LIMIT :batch
     """)
 
     with get_db_context() as db:
-        rows = db.execute(sql, {"batch": int(limit)}).fetchall()
+        rows = db.execute(sql, {"batch": int(limit),
+                                "skip": internal_failures("genre")}).fetchall()
         if not rows:
             return stats
         logger.info(f"Background: {len(rows)} genres queued for Last.fm wiki")
@@ -334,40 +324,26 @@ def _step_missing_genres(limit: int) -> Dict[str, int]:
         for row in rows:
             if _cancel_flag():
                 break
-            stats["processed"] += 1
             try:
                 result = lastfm.enrich_genre(db, row.id, row.name)
-                status = result.get("status")
-                if status == "rate_limited":
-                    logger.info("Background genres: Last.fm rate-limited — ending batch")
+            except Exception as e:
+                logger.error(f"Background genre failed for {row.name}: {e}", exc_info=True)
+                db.rollback()
+                note_internal_failure("genre", row.id)
+                stats["errors"] += 1
+            else:
+                status = result["status"]
+                if status == "unavailable":
+                    logger.info("Background genres: Last.fm unavailable — ending batch")
+                    stats["unavailable"] = True
                     break
                 if status == "success":
                     stats["success"] += 1
                 elif status == "not_found":
-                    # enrich_genre does not write external_metadata for
-                    # not_found — record it here so the next batch skips
-                    # this genre instead of re-asking Last.fm forever.
-                    db.execute(text("""
-                        INSERT INTO external_metadata (
-                            entity_type, entity_id, source,
-                            metadata_type, data, fetch_status, error_message
-                        ) VALUES (
-                            'genre', :gid, 'lastfm',
-                            'description', '{}'::jsonb, 'not_found',
-                            'No wiki on Last.fm'
-                        )
-                        ON CONFLICT (entity_type, entity_id, source, metadata_type)
-                        DO UPDATE SET fetch_status = 'not_found',
-                                      updated_at = CURRENT_TIMESTAMP
-                    """), {"gid": str(row.id)})
-                    db.commit()
                     stats["not_found"] += 1
                 else:
                     stats["errors"] += 1
-            except Exception as e:
-                logger.error(f"Background genre failed for {row.name}: {e}")
-                stats["errors"] += 1
-                db.rollback()
+            stats["processed"] += 1
             time.sleep(_LASTFM_DELAY_S)
 
     return stats
@@ -502,14 +478,15 @@ def _step_backfill_name_latin(limit: int) -> Dict[str, int]:
 
 _NETWORK_STEPS = (
     # (state key, step, batch cap, stats key folded into the running totals,
-    #  gated on the Last.fm cooldown)
-    ("lyrics",      _step_lyrics,          _LYRICS_PER_BATCH,      "found",   False),
-    ("artists",     _step_missing_artists, _ARTISTS_PER_BATCH,     "success", True),
-    ("genres",      _step_missing_genres,  _GENRES_PER_BATCH,      "success", True),
+    #  gated on the Last.fm cooldown, stats keys whose rows STAY queued —
+    #  see _wants_more)
+    ("lyrics",      _step_lyrics,          _LYRICS_PER_BATCH,      "found",   False, ("errors",)),
+    ("artists",     _step_missing_artists, _ARTISTS_PER_BATCH,     "success", True,  ()),
+    ("genres",      _step_missing_genres,  _GENRES_PER_BATCH,      "success", True,  ()),
     # Engagement-gated similars (owned file OR completed listen) that never
     # had getSimilar. Last of the network steps, so the stubs it mints go
     # straight into canonize when the DB steps follow in the same pass.
-    ("similar",     _step_similar_artists, _SIMILAR_PER_BATCH,     "stored",  True),
+    ("similar",     _step_similar_artists, _SIMILAR_PER_BATCH,     "stored",  True,  ()),
 )
 
 
@@ -573,19 +550,26 @@ _LOCAL_MODEL_STEPS = (
 )
 
 
-def _wants_more(stats: Dict[str, int], limit: int) -> bool:
-    """A full, error-free batch means the queue behind it is longer than the
-    batch, so the next pass follows at once. A short batch (queue drained,
-    rate limit, cancel) or any error hands control back to the timer — the
-    interval IS the backoff. Safe because every step stamps what it
-    processed (a row, a not_found/error marker, last_similar_sync): a full
-    batch never hands the same rows back.
+def _wants_more(stats: Dict[str, int], limit: int,
+                stuck: Tuple[str, ...] = ()) -> bool:
+    """A full batch means the queue behind it is longer than the batch, so
+    the next pass follows at once; a short one (queue drained, source
+    unavailable, cancel) hands control back to the timer.
 
-    Both error key names count: the network steps report `errors`, the model
-    steps `failed`. A step whose every item fails still fills a batch, and
-    reading only one name would drain on it forever."""
-    return (stats.get("processed", 0) >= limit
-            and not stats.get("errors") and not stats.get("failed"))
+    The premise is that every processed row LEFT the queue, or the next
+    pass drains on the same rows forever. The Last.fm steps guarantee it: a
+    written row, a not_found/error marker, a `last_similar_sync` stamp, or
+    — for a failure in our own code — lastfm.internal_failures, which their
+    candidate queries exclude. `stuck` names the stats keys of a step that
+    cannot: the lyrics step's `errors` (a failed track keeps its place) and
+    the model steps' `failed` (an unembedded track likewise). A batch
+    holding any of those waits out the interval — the timer is the backoff
+    from a failing source or model. Reading `errors` for every step was
+    what let one bug of ours, uncached and alphabetically first, end every
+    artist batch and hold the step to a batch per interval."""
+    if stats.get("processed", 0) < limit:
+        return False
+    return not any(stats.get(key) for key in stuck)
 
 
 def _run_network_steps() -> Tuple[Dict[str, Any], bool]:
@@ -593,17 +577,22 @@ def _run_network_steps() -> Tuple[Dict[str, Any], bool]:
     stats and whether any step still has a backlog behind it."""
     summary: Dict[str, Any] = {}
     backlog = False
-    for key, step, limit, total_key, lastfm_gated in _NETWORK_STEPS:
+    lastfm_down = False
+    for key, step, limit, total_key, lastfm_gated, stuck in _NETWORK_STEPS:
         if _cancel_flag():
             break
-        if lastfm_gated and cooling_down('lastfm'):
+        # One verdict on Last.fm per pass: a step that found it unavailable
+        # spares the steps behind it their own retries.
+        if lastfm_gated and (lastfm_down or cooling_down('lastfm')):
             summary[key] = {}
             continue
         _set(current_step=key)
         stats = step(limit)
         summary[key] = stats
         _bump(key, stats.get(total_key, 0))
-        backlog = backlog or _wants_more(stats, limit)
+        backlog = backlog or _wants_more(stats, limit, stuck)
+        if lastfm_gated and stats.get("unavailable"):
+            lastfm_down = True
     return summary, backlog
 
 
@@ -649,7 +638,7 @@ def _run_local_model_steps() -> Tuple[Dict[str, Any], bool]:
         stats = step(limit)
         summary[key] = stats
         _bump("embeddings", stats.get("success", 0))
-        backlog = backlog or _wants_more(stats, limit)
+        backlog = backlog or _wants_more(stats, limit, ("failed",))
     return summary, backlog
 
 
@@ -750,15 +739,14 @@ def _loop() -> None:
     """One pass = a batch of every network step, then — when the interval
     timer says so — the DB-only steps. A pass that left a network backlog
     behind is followed by the next one at once (drain); otherwise the loop
-    idles until the interval elapses or a P2P sync completes. Exits when
-    cancel is set."""
+    idles until the interval elapses or a wake lands. Exits when cancel is
+    set."""
     logger.info("Background enrichment loop started")
     _wake_when_playback_ends()
     db_due_at = 0.0        # the first pass runs the DB steps too
     minted = False         # canon work created since the last NOTIFY
     grew = False           # new phantom gaps created since the last sync request
     try:
-        _await_first_sync()
         while not _cancel_flag():
             backlog = False
             db_ran = False

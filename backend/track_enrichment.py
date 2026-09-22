@@ -228,8 +228,8 @@ def run_parallel_enrichment(
                 try:
                     result = lastfm.enrich_artist(db, artist_id, artist_name)
                     stats["artists_processed"] += 1
-                    if result.get("status") == "rate_limited":
-                        logger.info("Last.fm: rate-limited — ending pipeline")
+                    if result.get("status") == "unavailable":
+                        logger.info("Last.fm: unavailable — ending pipeline")
                         break
                     if result.get("status") == "success":
                         stats["artists_success"] += 1

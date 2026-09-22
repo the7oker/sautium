@@ -161,18 +161,23 @@ implementation details live in the code, DB and git history.
   encoders. Last.fm bios/stats/similars and lyrics are fetched only by
   `background_enrichment.py`, on every profile — lite's "manual button"
   exception went with the split. Its network steps drain a backlog
-  pass-to-pass (a full, error-free batch means more behind it; a short
-  batch or any error is the signal to sleep out the 30-min interval), the
-  DB-only steps stay on the timer. One job per kind of work: the GPU run
+  pass-to-pass (a full batch means more behind it; a short batch, or one
+  whose failed rows stay queued, is the signal to sleep out the 30-min
+  interval — the failure taxonomy of 2026-09-22 below), the DB-only
+  steps stay on the timer. One job per kind of work: the GPU run
   is bounded by the library, the network trickle by per-call API delays,
   and neither waits on the other. A node with no ML runtime has no button
   at all — launcher disabled, web hidden, endpoint 400 — because the run
   would be a no-op there (`/stats` → `analysis_available`).
-- **Enrichment follows the sync (2026-09-05).** The background loop's first
-  pass waits (≤10 min) for the first P2P sync, and every later
-  `sautium_sync_done` wakes a pass at once: peers fill a fresh library's
-  bios, stats and similars for free, the API pass fetches only the rest.
-  The 30-min interval is the fallback for a node with sync off or no peers.
+- **Enrichment followed the sync (2026-09-05 → 2026-09-22).** While bios,
+  stats and similars travelled between nodes, the background loop's first
+  pass waited (≤10 min) for the first P2P sync and every later
+  `sautium_sync_done` woke a pass: peers filled a fresh library's gaps for
+  free, the API pass fetched the rest. The Last.fm layer became node-local
+  on 2026-09-19 (migration 019) and a sync now imports only audio analysis
+  and track anchors — nothing the loop's network or model steps consume —
+  so the wait and the wake went on 2026-09-22: the loop runs on its 30-min
+  interval, its own drain, the playback falling edge and the canon wake.
   The sync itself runs on events — first source after start, a scan that
   added files, a LAN peer appearing, the interval — and the manual buttons
   (launcher "Sync Library", web "Force sync now") are gone; the web button
@@ -238,6 +243,24 @@ implementation details live in the code, DB and git history.
   inside the container is the WSL VM's, and HQPlayer runs on the Windows
   side of it. Playback is the proxy because it is the one signal every
   runtime can observe.
+- **A failed Last.fm fetch means one of three things (2026-09-22).** The
+  source's verdict about the entity (a `WSError` that reaches the caller:
+  not found, or another per-entity refusal) is cached in
+  `external_metadata` for its window. The source being unavailable to us —
+  a transport failure, a 5xx, its own "try again" statuses, and the
+  refusals: rate limit 29, a dead key, an HTML challenge page where XML was
+  due — ends the batch without marking anything (`SourceUnavailable`), the
+  refusals also arming the persistent cooldown (`SourceRefused`). Our own
+  failure (a UniqueViolation, a TypeError) is never cached, but registered
+  for the process (`lastfm.internal_failures`) and excluded from the
+  candidate queries until a restart, because the same code fed the same
+  row fails the same way and a fix IS a restart. Before the split every
+  error was one thing: a ban (an HTML page, swallowed per section) marked
+  thirty innocent artists per pass as `error` for a week and genres as
+  `not_found` for 90 days, while one bug of ours — uncached, alphabetically
+  first, re-selected every pass — ended every batch "with an error", which
+  the drain read as "back off", and held the step to 30 artists per 30 min
+  instead of a few thousand an hour.
 
 ### AI assistant
 
