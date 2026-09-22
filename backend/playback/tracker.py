@@ -21,6 +21,7 @@ from datetime import datetime
 from typing import Optional
 
 from api_cooldown import cooling_down
+from config import settings
 from db_pool import db_execute as _db_execute
 from play_stats import PLAY_STATS_SQL
 
@@ -30,7 +31,6 @@ _SCROBBLE_MIN_SECONDS = 240  # Last.fm: scrobble after >50% OR >4 min, whichever
 
 _play_session: "Optional[_PlaySession]" = None
 _scrobbler = None
-_scrobbler_init = False
 
 
 class _PlaySession:
@@ -73,28 +73,23 @@ class _PlaySession:
 
 
 def _get_scrobbler():
-    """Lazy Last.fm network from env credentials (LASTFM_API_KEY/_API_SECRET/
-    _SESSION_KEY/_USERNAME). None when scrobbling isn't configured."""
-    global _scrobbler, _scrobbler_init
-    if _scrobbler_init:
-        return _scrobbler
-    _scrobbler_init = True
-    import os
-    key = os.environ.get("LASTFM_API_KEY")
-    secret = os.environ.get("LASTFM_API_SECRET")
-    session_key = os.environ.get("LASTFM_SESSION_KEY")
-    username = os.environ.get("LASTFM_USERNAME") or ""
-    if key and secret and session_key:
-        try:
-            import pylast
-            _scrobbler = pylast.LastFMNetwork(
-                api_key=key, api_secret=secret,
-                session_key=session_key, username=username)
-            logger.info("Last.fm scrobbler initialized (user=%s)", username or "?")
-        except Exception as e:
-            logger.error("Last.fm scrobbler init failed: %s", e)
-    else:
-        logger.info("Last.fm scrobbling disabled (missing credentials)")
+    """The Last.fm network scrobbles go through, built from the session the
+    node holds NOW. `settings` carries what the authorization flow persisted
+    (lastfm_auth — the DB row overlays .env at startup, the flow updates it
+    at runtime), so a session earned while the backend runs scrobbles the
+    next play: no restart, no environment variable. None while there is no
+    session."""
+    global _scrobbler
+    session_key = settings.lastfm_session_key
+    if not (settings.lastfm_api_key and settings.lastfm_api_secret and session_key):
+        _scrobbler = None
+        return None
+    if _scrobbler is None or _scrobbler.session_key != session_key:
+        import pylast
+        _scrobbler = pylast.LastFMNetwork(
+            api_key=settings.lastfm_api_key, api_secret=settings.lastfm_api_secret,
+            session_key=session_key, username=settings.lastfm_username or "")
+        logger.info("Last.fm scrobbler initialized (user=%s)", settings.lastfm_username or "?")
     return _scrobbler
 
 

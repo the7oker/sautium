@@ -10452,75 +10452,85 @@
         </div>
         <div class="add-gear-row">
           <p style="margin:0;color:var(--color-text-muted);font-size:calc(13*var(--px));line-height:1.5;">
-            Sautium uses your Last.fm account to fetch artist bios, similar artists and tags, and to scrobble what you play. The next step opens last.fm in a new tab — authorise there, come back here, and tap <b style="color:var(--color-text);">Finish</b>.
+            Sautium uses your Last.fm account to fetch artist bios, similar artists and tags, and to scrobble what you play. The next step opens last.fm in a new tab — allow access there, and Last.fm sends the browser back to finish here.
           </p>
           <div id="lfmStartRow">
             <button class="profile-btn primary" data-start>Open Last.fm authorisation</button>
           </div>
-          <div id="lfmFinishRow" style="display:none;">
-            <a id="lfmReopen" target="_blank" rel="noopener" style="display:block;font-size:calc(12*var(--px));color:var(--color-accent);word-break:break-all;text-decoration:underline;margin-bottom:calc(10*var(--px));"></a>
-            <button class="profile-btn primary" data-finish>Finish</button>
+          <div id="lfmWaitRow" style="display:none;">
+            <a id="lfmReopen" target="_blank" rel="noopener" style="display:block;font-size:calc(12*var(--px));color:var(--color-accent);word-break:break-all;text-decoration:underline;margin-bottom:calc(10*var(--px));">Reopen authorisation page</a>
+            <button class="profile-btn" data-finish>Finish without the redirect</button>
           </div>
           <div id="lfmMsg" style="font-size:calc(12*var(--px));color:var(--color-text-dim);min-height:calc(16*var(--px));"></div>
         </div>
       </div>
     `;
     document.body.appendChild(overlay);
-    const close = () => overlay.remove();
+    let wake = null;
+    let done = false;
+    const close = () => { if (wake) wake.abort(); overlay.remove(); };
     overlay.addEventListener('click', e => { if (e.target === overlay) close(); });
     overlay.querySelector('[data-cancel]').addEventListener('click', close);
     const msg = overlay.querySelector('#lfmMsg');
     const startRow = overlay.querySelector('#lfmStartRow');
-    const finishRow = overlay.querySelector('#lfmFinishRow');
+    const waitRow = overlay.querySelector('#lfmWaitRow');
     const reopen = overlay.querySelector('#lfmReopen');
+    const say = (text, tone) => { msg.style.color = tone; msg.textContent = text; };
+    const connected = (username) => {
+      if (done) return;          // the wake and a manual finish may both report it
+      done = true;
+      say(username ? `Connected as ${username}.` : 'Connected.', 'var(--color-positive)');
+      setTimeout(() => { close(); render(); }, 700);
+    };
+
+    // The callback landing on the node is the completion event: the wake
+    // channel says that it did, /status says how it went.
+    const onWake = async () => {
+      const r = await fetch('/lastfm/auth/status');
+      if (!r.ok) return;
+      const s = await r.json();
+      if (s.authorized) { connected(s.username); return; }
+      if (s.error) {
+        say(`Last.fm refused the token: ${s.error} — start again.`, 'var(--color-negative)');
+        waitRow.style.display = 'none';
+        startRow.style.display = '';
+      }
+    };
 
     overlay.querySelector('[data-start]').addEventListener('click', (e) => onceInFlight(e.currentTarget, async () => {
-      msg.style.color = 'var(--color-text-muted)';
-      msg.textContent = 'Requesting authorisation URL…';
+      say('Requesting authorisation URL…', 'var(--color-text-muted)');
       try {
-        const r = await fetch('/lastfm/auth/start', { method: 'POST' });
-        if (!r.ok) {
-          msg.style.color = 'var(--color-negative)';
-          msg.textContent = 'Could not start: ' + await r.text();
-          return;
-        }
+        const r = await fetch('/lastfm/auth/start', {
+          method: 'POST', headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ origin: location.origin }),
+        });
+        if (!r.ok) { say('Could not start: ' + await r.text(), 'var(--color-negative)'); return; }
         const data = await r.json();
-        if (!data.auth_url) {
-          msg.style.color = 'var(--color-negative)';
-          msg.textContent = 'Last.fm did not return an authorisation URL.';
-          return;
-        }
+        if (!data.auth_url) { say('Last.fm did not return an authorisation URL.', 'var(--color-negative)'); return; }
         window.open(data.auth_url, '_blank', 'noopener');
         reopen.href = data.auth_url;
-        reopen.textContent = 'Reopen authorisation page';
         startRow.style.display = 'none';
-        finishRow.style.display = '';
-        msg.textContent = 'After clicking "Yes, allow access" on Last.fm, return here and tap Finish.';
+        waitRow.style.display = '';
+        say('Allow access in the Last.fm tab — this sheet finishes by itself when the browser comes back.', 'var(--color-text-muted)');
+        if (!wake) wake = window.sseStream('/lastfm/auth/stream', onWake, () => {});
       } catch (err) {
-        msg.style.color = 'var(--color-negative)';
-        msg.textContent = String(err);
+        say(String(err), 'var(--color-negative)');
       }
     }));
 
     overlay.querySelector('[data-finish]').addEventListener('click', (e) => onceInFlight(e.currentTarget, async () => {
-      msg.style.color = 'var(--color-text-muted)';
-      msg.textContent = 'Confirming…';
+      say('Confirming…', 'var(--color-text-muted)');
       try {
         const r = await fetch('/lastfm/auth/complete', { method: 'POST' });
         if (!r.ok) {
           let detail = await r.text();
           try { detail = JSON.parse(detail).detail || detail; } catch (_) {}
-          msg.style.color = 'var(--color-negative)';
-          msg.textContent = detail;
+          say(detail, 'var(--color-negative)');
           return;
         }
-        const data = await r.json();
-        msg.style.color = 'var(--color-positive)';
-        msg.textContent = data.username ? `Connected as ${data.username}.` : 'Connected.';
-        setTimeout(() => { close(); render(); }, 700);
+        connected((await r.json()).username);
       } catch (err) {
-        msg.style.color = 'var(--color-negative)';
-        msg.textContent = String(err);
+        say(String(err), 'var(--color-negative)');
       }
     }));
   }

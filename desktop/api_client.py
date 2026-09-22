@@ -29,6 +29,7 @@ import hmac
 import json
 import logging
 import ssl
+import threading
 import time
 import urllib.parse
 import urllib.request
@@ -337,12 +338,19 @@ class BackendAPIClient:
         return self._post_json("/api/gear-models/registry/refresh", timeout=300)
 
     def lastfm_auth_start(self) -> Optional[dict]:
-        """Start Last.fm OAuth flow. Returns {"auth_url": "..."}."""
-        return self._post_json("/lastfm/auth/start", timeout=10)
+        """Start the Last.fm authorization flow: {"auth_url": ...} to open in
+        the browser. Last.fm sends the browser back to the origin named here
+        — this client's own, the one the machine's browser reaches too."""
+        return self._post_json("/lastfm/auth/start",
+                               body={"origin": self.base_url}, timeout=15)
+
+    def lastfm_auth_status(self) -> Optional[dict]:
+        """The flow's outcome, read after a wake on /lastfm/auth/stream."""
+        return self._get_json("/lastfm/auth/status", timeout=5)
 
     def lastfm_auth_complete(self) -> Optional[dict]:
-        """Complete Last.fm OAuth flow. Returns {"session_key": "..."}."""
-        return self._post_json("/lastfm/auth/complete", timeout=10)
+        """The manual fallback: exchange the token the node minted itself."""
+        return self._post_json("/lastfm/auth/complete", timeout=15)
 
     def canonicalize(self) -> Optional[dict]:
         """Trigger backend canonicalization in the background (returns immediately)."""
@@ -400,8 +408,12 @@ class BackendAPIClient:
         see the same code, so this reads rather than mints."""
         return self._get_json("/api/auth/pin", timeout=15)
 
-    def stream(self, path: str) -> Iterator[None]:
-        """Yield once per server-sent event on `path`, forever.
+    def stream(self, path: str,
+               stop: Optional[threading.Event] = None) -> Iterator[None]:
+        """Yield once per server-sent event on `path`, forever — or until
+        `stop` is set: checked on every frame, keepalives included, so a
+        subscriber scoped to a dialog is gone within one keepalive period
+        of the dialog closing.
 
         Deliberately not a payload reader: every channel we consume is a wake
         event whose whole meaning is "re-read state over the signed API", so
@@ -412,7 +424,8 @@ class BackendAPIClient:
         backend under itself (a scan does exactly that) and a tight retry
         would spin through the whole restart."""
         delay = 1.0
-        while not self._stream_closed:
+        stopped = lambda: self._stream_closed or (stop is not None and stop.is_set())
+        while not stopped():
             try:
                 url = f"{self.base_url}{path}"
                 req = urllib.request.Request(url, method="GET")
@@ -426,7 +439,7 @@ class BackendAPIClient:
                 delay = 1.0
                 try:
                     for raw in resp:
-                        if self._stream_closed:
+                        if stopped():
                             return
                         if raw.startswith(b"data:"):
                             yield None
@@ -437,7 +450,7 @@ class BackendAPIClient:
                 raise
             except Exception as e:
                 logger.debug(f"SSE {path} dropped — {e}")
-            if self._stream_closed:
+            if stopped():
                 return
             time.sleep(delay)
             # Capped low: the far end is localhost, and the gap after a

@@ -134,7 +134,7 @@ def _allowed_host_set() -> set:
     return allowed
 
 
-def _host_allowed(host_header: str) -> bool:
+def host_allowed(host_header: str) -> bool:
     if not host_header:
         return True          # HTTP/1.0 and health probes send none
     host = host_header.strip().lower()
@@ -185,6 +185,11 @@ WHITELIST_PREFIX = (
     # <audio> elements can't set HMAC headers — these routes verify their
     # own short-lived query-param signatures instead (media_urls.verify).
     "/api/player/media/",
+    # Last.fm sends the browser here once the user has granted access — a
+    # redirect cannot sign. Admitted on the nonce in the path (lastfm_auth):
+    # minted only for a signed caller, single use, dead with the flow; the
+    # page never echoes the token or the session key.
+    "/lastfm/auth/callback/",
 )
 
 
@@ -284,7 +289,7 @@ class HMACAuthMiddleware(BaseHTTPMiddleware):
     async def dispatch(self, request: Request, call_next):
         path = request.url.path
 
-        if not _host_allowed(request.headers.get("host", "")):
+        if not host_allowed(request.headers.get("host", "")):
             # Refuse before anything else, whitelist included — the whitelist
             # is precisely what a rebinding attack has to work with.
             return JSONResponse({"detail": "unrecognised Host"}, status_code=421)

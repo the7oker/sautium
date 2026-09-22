@@ -146,7 +146,7 @@ def config_allowlisted(config: dict) -> dict:
     out["openai_compat"] = {k: compat.get(k) for k in ("base_url", "model", "name") if k in compat}
     lastfm = config.get("lastfm") or {}
     out["lastfm"] = {"username": lastfm.get("username"),
-                     "authorized": bool(lastfm.get("session_key"))}
+                     "authorized": bool(lastfm.get("username"))}
     return out
 
 

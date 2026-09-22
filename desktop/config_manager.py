@@ -74,7 +74,6 @@ DEFAULT_CONFIG = {
     "postgres_password": None,  # auto-generated on first run
     "lastfm": {
         "username": None,
-        "session_key": None,
     },
     "p2p": {
         "node_name": None,
@@ -244,7 +243,6 @@ def generate_env_file(config: dict, env_path: Path) -> None:
     """
     hqp = config.get("hqplayer", {})
     ports = config.get("ports", {})
-    lastfm = config.get("lastfm", {})
     api_keys = config.get("api_keys", {})
     compat = config.get("openai_compat", {})
 
@@ -286,10 +284,6 @@ def generate_env_file(config: dict, env_path: Path) -> None:
         "",
         "# OpenAI Codex CLI",
         f"CODEX_CLI_ENABLED={'true' if config.get('codex_available') and config.get('provider') == 'codex' else 'false'}",
-        "",
-        "# Last.fm (API key/secret are built into the app)",
-        f"LASTFM_USERNAME={lastfm.get('username') or ''}",
-        f"LASTFM_SESSION_KEY={lastfm.get('session_key') or ''}",
         "",
         "# P2P Identity",
         f"P2P_IDENTITY_DIR={identity_dir}",

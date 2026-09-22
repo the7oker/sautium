@@ -1171,6 +1171,47 @@ right glyph and metric. The fetch-on-view refresh passes the current sort,
 so a reshuffled shelf keeps the order. Measured on Vangelis's 29 phantom
 albums: every sort answers in a few ms.
 
+### Last.fm authorization is callback-driven (2026-09-22)
+
+The launcher's first-run dialog and the Profile sheet used to open the
+Last.fm page and then ask the user to press "Complete" / "Finish" once they
+had allowed access — the desktop flow, in which the app learns that the
+browser step is over by asking a human. On the first launcher run of a
+fresh install the click came ten seconds after the tab opened and Last.fm
+answered `Unauthorized Token`; the second try, a minute later, answered the
+same, and the dialog's only advice was "try again in Settings". Two things
+were wrong, one hidden behind the other.
+
+- **The completion event exists — Last.fm sends it.** The auth page takes a
+  `cb` parameter and, once access is granted, redirects the browser to it
+  with the authorised token (the web flow in Last.fm's own docs). The node
+  now names itself as the callback, `<origin>/lastfm/auth/callback/<nonce>`,
+  the origin being the one the CLIENT reached the node at — which only the
+  client knows (127.0.0.1 for the launcher, the LAN or tunnel address for a
+  phone, the front's name behind TLS) and which the Host guard vets. The
+  callback exchanges the token, persists the session and wakes
+  `/lastfm/auth/stream`; the dialog and the sheet read `/status` and close
+  themselves. Nobody guesses. The route is unsigned by necessity (a redirect
+  cannot carry HMAC headers) and admitted on the nonce: 128 bits, minted
+  only for a signed caller, single use, gone with the flow; the page it
+  renders names the user and nothing else (`backend/lastfm_auth.py`).
+- **The desktop token stays as the fallback.** The page also carries a token
+  this node minted (`auth.getToken`), so a Last.fm page that ignores `cb`
+  can still be finished by hand ("Finish manually" in the launcher, "Finish
+  without the redirect" in the sheet — both exchange that token). Kept until
+  the callback is seen landing on a real account; then it goes.
+- **Scrobbling never saw the in-app session.** `playback/tracker.py` built
+  its network from `LASTFM_SESSION_KEY` in the environment, once, at the
+  first scrobble — the session the flow had been persisting to
+  `user_settings` since 2026-05-20 reached `/config` and nothing else. The
+  Docker node never noticed because its key came from `.env` via the old
+  CLI script. The scrobbler now follows `settings`, which the DB overlay
+  fills at startup and the flow updates at runtime, and rebuilds its network
+  when the session changes. The CLI script is gone (the file name now holds
+  the flow), and the launcher no longer copies the session key into
+  `config.json` and `backend.env`: it records the username, the credential
+  stays in the database.
+
 ## Known Gotchas
 
 - **Loopback targets are addresses, never `localhost`.** Windows resolves the

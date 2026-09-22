@@ -30,6 +30,7 @@ from auth_hmac import secret_path as _secret_path
 from config import settings, get_settings, ui_build, build_identity, LOGGING_CONFIG
 from db_pool import db_query_one
 import device_auth
+import lastfm_auth
 from dht_service import DHTService, HAS_LIBTORRENT
 
 _API_SECRET_PATH = _secret_path()
@@ -333,7 +334,7 @@ async def lifespan(app: FastAPI):
 
     # Overlay Last.fm credentials from user_settings (Pydantic Settings
     # only reads .env at startup; the OAuth callback persists to DB).
-    _load_lastfm_from_db()
+    lastfm_auth.load_from_db()
 
     # Warm the external-API rate-limit cooldown cache from its table so a
     # restart mid-cooldown doesn't resume hammering a still-banning source.
@@ -1702,123 +1703,6 @@ async def generate_lyrics_embeddings_endpoint(
 
 
 
-# -- Last.fm Auth -------------------------------------------------------------
-
-# Temporary storage for auth URL (one per server instance)
-_lastfm_auth_state: Dict[str, Any] = {}
-
-# DB persistence — Pydantic Settings reads .env at startup, so the OAuth
-# callback writes credentials to user_settings instead and the lifespan
-# hook copies them onto `settings` runtime. This survives backend restarts
-# without depending on a writable .env file (launcher mode keeps .env
-# read-only after first generation).
-_LASTFM_SESSION_KEY_KEY = "lastfm.session_key"
-_LASTFM_USERNAME_KEY = "lastfm.username"
-
-
-def _persist_lastfm_credentials(session_key: str, username: Optional[str]) -> None:
-    """Write OAuth result to user_settings and update `settings` runtime."""
-    import json as _json
-    from db_pool import db_execute as _db_execute
-    _db_execute(
-        """
-        INSERT INTO user_settings (key, value) VALUES (%s, %s::jsonb)
-        ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value,
-                                        updated_at = CURRENT_TIMESTAMP
-        """,
-        (_LASTFM_SESSION_KEY_KEY, _json.dumps(session_key)),
-    )
-    if username:
-        _db_execute(
-            """
-            INSERT INTO user_settings (key, value) VALUES (%s, %s::jsonb)
-            ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value,
-                                            updated_at = CURRENT_TIMESTAMP
-            """,
-            (_LASTFM_USERNAME_KEY, _json.dumps(username)),
-        )
-    settings.lastfm_session_key = session_key
-    if username:
-        settings.lastfm_username = username
-
-
-def _load_lastfm_from_db() -> None:
-    """Overlay user_settings Last.fm creds onto `settings`. DB wins over env."""
-    try:
-        from db_pool import db_query_one as _db_query_one
-        row = _db_query_one(
-            "SELECT value FROM user_settings WHERE key = %(k)s",
-            {"k": _LASTFM_SESSION_KEY_KEY},
-        )
-        if row and row.get("value"):
-            settings.lastfm_session_key = row["value"]
-        row = _db_query_one(
-            "SELECT value FROM user_settings WHERE key = %(k)s",
-            {"k": _LASTFM_USERNAME_KEY},
-        )
-        if row and row.get("value"):
-            settings.lastfm_username = row["value"]
-    except Exception as e:
-        logger.warning(f"Failed to load Last.fm credentials from DB: {e}")
-
-
-@app.post("/lastfm/auth/start")
-async def lastfm_auth_start() -> Dict[str, str]:
-    """Start Last.fm OAuth flow. Returns auth URL to open in browser.
-
-    A flow started in the last ten minutes is handed back as-is: a second
-    start overwrote the token the first tab was authorising, so "Finish"
-    failed for the tab the user actually used."""
-    import pylast
-
-    if (_lastfm_auth_state.get("url")
-            and time.time() - _lastfm_auth_state.get("started_at", 0) < 600):
-        return {"auth_url": _lastfm_auth_state["url"]}
-
-    network = pylast.LastFMNetwork(
-        api_key=settings.lastfm_api_key,
-        api_secret=settings.lastfm_api_secret,
-    )
-    skg = pylast.SessionKeyGenerator(network)
-    url = skg.get_web_auth_url()
-    _lastfm_auth_state["skg"] = skg
-    _lastfm_auth_state["url"] = url
-    _lastfm_auth_state["started_at"] = time.time()
-    return {"auth_url": url}
-
-
-@app.post("/lastfm/auth/complete")
-async def lastfm_auth_complete() -> Dict[str, Any]:
-    """Complete Last.fm OAuth flow. Call after user authorized in browser.
-
-    Persists session_key and username to user_settings so subsequent
-    /config calls return `lastfm_authorized: true` without restart.
-
-    auth.getSession returns both key and name in a single XML response —
-    pylast exposes that as get_web_auth_session_key_username(), so we get
-    the username without a second API round-trip."""
-    skg = _lastfm_auth_state.get("skg")
-    url = _lastfm_auth_state.get("url")
-    if not skg or not url:
-        raise HTTPException(status_code=400, detail="Auth flow not started. Call /lastfm/auth/start first.")
-    try:
-        session_key, username = skg.get_web_auth_session_key_username(url)
-    except Exception as e:
-        raise HTTPException(
-            status_code=400,
-            detail=f"Authorization failed. Make sure you allowed access in the browser. ({e})",
-        )
-    _lastfm_auth_state.clear()
-
-    _persist_lastfm_credentials(session_key, username)
-    return {
-        "success": True,
-        "session_key": session_key,
-        "username": username or "",
-        "lastfm_authorized": True,
-    }
-
-
 # -- Routers & Static Files ---------------------------------------------------
 
 from routers.player import events_router
@@ -1840,6 +1724,7 @@ app.include_router(mb_sync_router)
 
 from routers.auth import router as auth_router
 app.include_router(auth_router)
+app.include_router(lastfm_auth.router)
 
 from routers.p2p import router as p2p_router
 app.include_router(p2p_router)

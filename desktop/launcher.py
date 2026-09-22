@@ -776,101 +776,137 @@ class LauncherApp(ctk.CTk):
         threading.Thread(target=_start, daemon=True).start()
 
     def _check_lastfm_pending_auth(self):
-        """If user enabled Last.fm in wizard, trigger authorization."""
+        """The wizard asked for Last.fm: open the authorization page once the
+        backend is up. One-shot — the flag clears before the browser opens."""
         lastfm = self.config.get("lastfm", {})
         if not lastfm.get("pending_auth"):
             return
-        if lastfm.get("session_key"):
-            return  # Already authorized
-
-        # Clear pending flag
         self.config["lastfm"]["pending_auth"] = False
         save_config(self.config)
+        if lastfm.get("username"):
+            return  # already connected
 
         def _auth():
-            try:
-                result = self.api_client.lastfm_auth_start()
-                if not result or not result.get("auth_url"):
-                    logger.warning("Last.fm auth start failed")
-                    return
-
-                webbrowser.open(result["auth_url"])
-
-                # Show dialog asking user to complete auth
-                self.ui_call(lambda: self._show_lastfm_auth_dialog())
-            except Exception as e:
-                logger.warning(f"Last.fm auth failed: {e}")
+            if self._open_lastfm_page():
+                self.ui_call(self._show_lastfm_auth_dialog)
+            else:
+                logger.warning("Last.fm auth start failed")
 
         threading.Thread(target=_auth, daemon=True).start()
 
+    def _open_lastfm_page(self) -> Optional[str]:
+        """Ask the backend for the authorization page and open it. A live
+        flow is handed back as-is, so reopening lands on the same page and
+        the same token; a fresh one is minted only after the last attempt
+        ended."""
+        result = self.api_client.lastfm_auth_start()
+        url = (result or {}).get("auth_url")
+        if url:
+            webbrowser.open(url)
+        return url
+
     def _show_lastfm_auth_dialog(self):
-        """Show dialog to complete Last.fm authorization after browser step."""
+        """The window that waits for Last.fm to send the browser back.
+
+        The callback landing on the backend is the completion event: it
+        wakes /lastfm/auth/stream, the dialog reads the outcome over /status
+        and closes itself. No button asks the user whether the browser step
+        is over — the first version did, and a click a moment early failed
+        with "Unauthorized Token". "Finish manually" remains for a browser
+        that never comes back: it exchanges the token this node minted,
+        which works once access is granted."""
         dialog = ctk.CTkToplevel(self)
         dialog.title("Last.fm Authorization")
-        dialog.geometry("420x200")
+        dialog.geometry("460x230")
         dialog.resizable(False, False)
         dialog.transient(self)
         dialog.grab_set()
+
+        stop = threading.Event()
+
+        def _close():
+            if stop.is_set():
+                return
+            stop.set()
+            dialog.destroy()
+
+        dialog.protocol("WM_DELETE_WINDOW", _close)
 
         ctk.CTkLabel(
             dialog, text="Last.fm Authorization",
             font=ctk.CTkFont(size=18, weight="bold"),
         ).pack(pady=(20, 10))
-
         ctk.CTkLabel(
             dialog,
-            text="A browser window has opened.\nAllow access on Last.fm, then click 'Complete'.",
+            text="A browser window has opened.\nAllow access on Last.fm — this window finishes by itself\n"
+                 "when Last.fm sends the browser back.",
             justify="center",
         ).pack(pady=5)
+        msg = ctk.CTkLabel(dialog, text="", text_color="gray")
+        msg.pack(pady=5)
 
-        self._lastfm_dialog_msg = ctk.CTkLabel(
-            dialog, text="", text_color="gray",
-        )
-        self._lastfm_dialog_msg.pack(pady=5)
+        def _say(text: str, color: str):
+            if not stop.is_set():
+                msg.configure(text=text, text_color=color)
+
+        def _connected(username: str):
+            self._record_lastfm_username(username)
+            _say(f"Authorized as {username}!" if username else "Authorized successfully!",
+                 "#22c55e")
+            self.after(1500, _close)
+
+        def _watch():
+            for _ in self.api_client.stream("/lastfm/auth/stream", stop=stop):
+                if stop.is_set():
+                    return
+                status = self.api_client.lastfm_auth_status() or {}
+                if status.get("authorized"):
+                    self.ui_call(lambda s=status: _connected(s.get("username") or ""))
+                    return
+                if status.get("error"):
+                    self.ui_call(lambda s=status: _say(
+                        f"Last.fm refused the token: {s['error']}\nReopen the page to try again.",
+                        "#ef4444"))
+
+        threading.Thread(target=_watch, daemon=True, name="lastfm-auth").start()
+
+        def _reopen():
+            threading.Thread(target=self._open_lastfm_page, daemon=True).start()
+
+        def _finish_manually():
+            _say("Checking...", "gray")
+
+            def _complete():
+                result = self.api_client.lastfm_auth_complete()
+                if result and result.get("success"):
+                    self.ui_call(lambda: _connected(result.get("username") or ""))
+                else:
+                    detail = (result or {}).get("detail") or ""
+                    self.ui_call(lambda: _say(
+                        f"Authorization failed.\n{detail}".strip(), "#ef4444"))
+
+            threading.Thread(target=_complete, daemon=True).start()
 
         btn_frame = ctk.CTkFrame(dialog, fg_color="transparent")
         btn_frame.pack(pady=10)
-
         ctk.CTkButton(
-            btn_frame, text="Complete", width=120,
-            command=lambda: self._complete_lastfm_auth(dialog),
+            btn_frame, text="Reopen page", width=120, command=_reopen,
+        ).pack(side="left", padx=5)
+        ctk.CTkButton(
+            btn_frame, text="Finish manually", width=130,
+            fg_color="transparent", border_width=1, command=_finish_manually,
+        ).pack(side="left", padx=5)
+        ctk.CTkButton(
+            btn_frame, text="Skip", width=80,
+            fg_color="transparent", border_width=1, command=_close,
         ).pack(side="left", padx=5)
 
-        ctk.CTkButton(
-            btn_frame, text="Skip", width=100,
-            fg_color="transparent", border_width=1,
-            command=dialog.destroy,
-        ).pack(side="left", padx=5)
-
-    def _complete_lastfm_auth(self, dialog):
-        """Complete Last.fm auth after user allowed in browser."""
-        self._lastfm_dialog_msg.configure(text="Checking...", text_color="gray")
-
-        def _complete():
-            result = self.api_client.lastfm_auth_complete()
-            if result and result.get("success"):
-                self.config.setdefault("lastfm", {})
-                self.config["lastfm"]["session_key"] = result.get("session_key", "")
-                if result.get("username"):
-                    self.config["lastfm"]["username"] = result["username"]
-                save_config(self.config)
-                ok_text = (
-                    f"Authorized as {result['username']}!"
-                    if result.get("username")
-                    else "Authorized successfully!"
-                )
-                self.ui_call(lambda: self._lastfm_dialog_msg.configure(
-                    text=ok_text, text_color="#22c55e"))
-                self.ui_call(lambda: self.after(1500, dialog.destroy))
-            else:
-                detail = ""
-                if result and result.get("detail"):
-                    detail = f"\n{result['detail']}"
-                self.ui_call(lambda: self._lastfm_dialog_msg.configure(
-                    text=f"Authorization failed.{detail}\nYou can try again in Settings.",
-                    text_color="#ef4444"))
-
-        threading.Thread(target=_complete, daemon=True).start()
+    def _record_lastfm_username(self, username: str):
+        """The launcher's own record of the connection — what the wizard's
+        summary and the diagnostic bundle read. The session key itself stays
+        in the backend's database and never travels."""
+        self.config.setdefault("lastfm", {})["username"] = username or None
+        save_config(self.config)
 
     def _set_status(self, state: str, text: str):
         """Update status indicator."""

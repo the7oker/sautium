@@ -1740,7 +1740,7 @@ class SetupWizard(ctk.CTkToplevel):
             (
                 "Last.fm",
                 f"{lastfm_cfg['username']} (connected)"
-                if lastfm_cfg.get("session_key")
+                if lastfm_cfg.get("username")
                 else "Will authorize after start"
                 if lastfm_cfg.get("pending_auth")
                 else "Disabled",
