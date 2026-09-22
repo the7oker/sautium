@@ -12599,9 +12599,13 @@
   }
 
   /* An outbound link as a settings row — the "learn more" hooks and the About
-     screen. A real anchor, so long-press and "open in new tab" work. */
+     screen. A real anchor, so long-press and "open in new tab" work. The site
+     is the other half of this system, so a sautium.net link navigates in
+     place and its "Open my Sautium" brings the user back; anything else (the
+     source, a licence) is a foreign page and opens in a new tab. noreferrer
+     keeps the http origin out of the site's logs even on the in-place hop. */
   const linkRow = (label, href, hint) => `
-    <a class="form-row is-clickable is-link" href="${escapeHtml(href)}" target="_blank" rel="noopener noreferrer">
+    <a class="form-row is-clickable is-link" href="${escapeHtml(href)}"${href.startsWith(SITE_URL) ? ' rel="noreferrer"' : ' target="_blank" rel="noopener noreferrer"'}>
       <span class="form-label">${escapeHtml(label)}</span>
       <span class="form-actions">
         ${hint ? `<span class="form-value action">${escapeHtml(hint)}</span>` : ''}
