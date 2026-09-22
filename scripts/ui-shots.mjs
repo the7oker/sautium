@@ -26,6 +26,10 @@
  *   --quiet     ms of DOM silence that counts as settled (default 500;
  *               raise it for a build that does not publish
  *               window.sautiumRendered)
+ *   --inject    a JS file evaluated in the page after every route (and
+ *               overlay) has settled, before the shot — for public
+ *               screenshots: type a query, blur an e-mail or a price. May
+ *               return a promise; the page settles again afterwards
  *
  * Never waits for network idle: the SSE stream keeps a connection open
  * forever. A route counts as rendered when fonts are ready and the DOM has
@@ -57,6 +61,7 @@ const DEFAULTS = {
   libs: '',
   token: process.env.SAUTIUM_TOKEN || '',
   quiet: '500',
+  inject: '',
 };
 
 const OVERLAYS = {
@@ -334,6 +339,10 @@ async function shootRoute(page, route, vp, out) {
     await page.eval(ov.open);
     ms += await page.settle();
   }
+  if (page.inject) {
+    await page.eval(page.inject, true);
+    ms += await page.settle();
+  }
   await page.shoot(file, vp, !overlay);
   if (overlay) {
     await page.eval(OVERLAYS[overlay].close);
@@ -473,6 +482,7 @@ async function main() {
     const { sessionId } = await cdp.send('Target.attachToTarget', { targetId, flatten: true });
     const page = new Page(cdp, sessionId);
     page.quiet = Number(opts.quiet);
+    page.inject = opts.inject ? readFileSync(resolve(opts.inject), 'utf8') : '';
     await page.send('Page.enable');
     await page.send('Runtime.enable');
     for (const vp of widths) {
