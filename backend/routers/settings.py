@@ -316,7 +316,9 @@ _DEFAULTS: Dict[str, Any] = {
     "discovery.phantom_layer":   True,
     # Provider/model default to None so the first-run UI shows
     # "Not selected" instead of pretending Claude is picked when the
-    # wizard offered an explicit "no AI" option.
+    # wizard offered an explicit "no AI" option. An install-time pick
+    # (the wizard's, compose's) lands in the row once, at the first boot
+    # without one — seed_ai_provider_from_env().
     "ai.provider":               None,
     "ai.model":                  None,
     "ai.api_key":                None,
@@ -1207,16 +1209,15 @@ def _canon_provider(p: Optional[str]) -> Optional[str]:
     return "anthropic" if p == "claude" else p
 
 
-@router.put("/ai/provider")
-def put_ai_provider(req: AiProviderUpdate) -> Dict[str, Any]:
-    """Switch provider. Stash the current model/key under per-provider
-    keys so the next switch back restores them, then activate the new
-    provider's saved model/key (or clear when there's nothing saved).
-    The single `ai.api_key` / `ai.model` rows stay the source of truth
-    for `_ai_state()` and `_resolve_*()` — switching just swaps what
-    lives in them."""
+def _select_provider(new_provider: str) -> None:
+    """The one way a provider becomes the node's pick — the Web UI's PUT
+    and the first-boot seed both come through here. Stash the current
+    model/key under per-provider keys so the next switch back restores
+    them, then activate the new provider's saved model/key (or clear when
+    there's nothing saved). The single `ai.api_key` / `ai.model` rows stay
+    the source of truth for `_ai_state()` and `_resolve_*()` — switching
+    just swaps what lives in them."""
     cur_provider = _canon_provider(_read("ai.provider"))
-    new_provider = _canon_provider(req.provider) or req.provider
 
     # Stash the current pair under the *outgoing* provider's bucket
     # before overwriting the active slot.
@@ -1228,7 +1229,6 @@ def put_ai_provider(req: AiProviderUpdate) -> Dict[str, Any]:
     next_key   = _read(f"ai.{new_provider}.api_key")
     next_model = _read(f"ai.{new_provider}.model")
     _write("ai.api_key", next_key)
-    _write("ai.key",     next_key)  # legacy alias
     _write("ai.model",   next_model)
     _write("ai.provider", new_provider)
 
@@ -1241,6 +1241,11 @@ def put_ai_provider(req: AiProviderUpdate) -> Dict[str, Any]:
     # the dump / when disabled, async in the background.
     start_aicanon_job()
 
+
+@router.put("/ai/provider")
+def put_ai_provider(req: AiProviderUpdate) -> Dict[str, Any]:
+    new_provider = _canon_provider(req.provider)
+    _select_provider(new_provider)
     return {"provider": new_provider}
 
 
@@ -1284,7 +1289,6 @@ def put_ai_key(req: AiKeyUpdate) -> Dict[str, Any]:
     under `ai.<provider>.api_key` so the next provider switch preserves
     it for restoration."""
     key = (req.api_key or "").strip() or None
-    _write("ai.key", key)  # legacy alias readable elsewhere
     _write("ai.api_key", key)
     provider = _canon_provider(_read("ai.provider"))
     if provider:
@@ -1296,7 +1300,6 @@ def put_ai_key(req: AiKeyUpdate) -> Dict[str, Any]:
 @router.delete("/ai/key")
 def delete_ai_key() -> Dict[str, Any]:
     _write("ai.api_key", None)
-    _write("ai.key", None)
     provider = _canon_provider(_read("ai.provider"))
     if provider:
         _write(f"ai.{provider}.api_key", None)
@@ -1359,6 +1362,37 @@ async def ai_canonization_stream() -> StreamingResponse:
         headers={"Cache-Control": "no-cache", "Connection": "keep-alive",
                  "X-Accel-Buffering": "no"},
     )
+
+
+# The registry's pick ids (providers/__init__.py). DEFAULT_PROVIDER may
+# also say "none" — the wizard's explicit "no AI" — which seeds nothing.
+_SEEDABLE_PROVIDERS = frozenset(
+    {"claude_code", "codex", "anthropic", "openai", "openai_compat"})
+
+
+def seed_ai_provider_from_env() -> None:
+    """First boot: the install-time pick reaches the node as environment
+    (the wizard's choice through the launcher's backend.env, compose's
+    DEFAULT_PROVIDER for Docker), while the `ai.provider` row is what
+    every reader consults — chat, the AI screen, the canon tier. Copy
+    the pick and its key into the row ONCE, through the same switch the
+    Web UI uses; the environment is never read for the pick again, so
+    the launcher rewriting backend.env from config.json at each start
+    cannot undo a choice made in the Web UI. A row that exists, whatever
+    it holds, is the pick. Until 2026-09-22 the wizard's choice never
+    reached the row: chat worked through its env fallback while Settings
+    said "Not selected" and the canon tier stayed off."""
+    if db_query_one("SELECT 1 FROM user_settings WHERE key = 'ai.provider'"):
+        return
+    provider = _canon_provider(app_settings.default_provider)
+    if provider not in _SEEDABLE_PROVIDERS:
+        return
+    key = {"anthropic": app_settings.anthropic_api_key,
+           "openai":    app_settings.openai_api_key}.get(provider)
+    if key:
+        _write(f"ai.{provider}.api_key", key)
+    _select_provider(provider)
+    logger.info(f"AI provider seeded from the install-time pick: {provider}")
 
 
 def load_ai_credentials_from_db() -> None:

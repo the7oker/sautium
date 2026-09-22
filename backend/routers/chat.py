@@ -23,7 +23,6 @@ from fastapi import APIRouter, HTTPException
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 
-from config import settings
 from db_pool import db_query as _db_query, db_query_one as _db_query_one, db_execute as _db_execute
 from entity_hydration import hydrate_artists, hydrate_albums, hydrate_tracks
 from providers.base import StreamDone, StreamEvent, TextDelta, ToolStart
@@ -644,9 +643,12 @@ def _resolve_provider(req_provider: Optional[str]) -> str:
     """Pick a provider name, validating availability. Raises
     HTTPException on no usable provider. Selection priority:
       1. explicit `req_provider` from the request,
-      2. `ai.provider` row in user_settings (Settings UI writes this),
-      3. `settings.default_provider` from env,
-      4. first available provider in the registry."""
+      2. `ai.provider` row in user_settings — the Web UI's pick, seeded
+         from the install-time environment at the first boot
+         (routers.settings.seed_ai_provider_from_env); the environment
+         is not a fallback here, or a pick made in the Web UI could be
+         undone by the launcher rewriting backend.env,
+      3. first available provider in the registry."""
     from providers import available_providers, get_provider
 
     providers = available_providers()
@@ -656,11 +658,7 @@ def _resolve_provider(req_provider: Optional[str]) -> str:
             detail="No LLM providers configured. Set CLAUDE_CODE_ENABLED, ANTHROPIC_API_KEY, GROQ_API_KEY, or OPENAI_API_KEY.",
         )
 
-    name = (
-        req_provider
-        or _user_settings_value("ai.provider")
-        or settings.default_provider
-    )
+    name = req_provider or _user_settings_value("ai.provider")
     # Web UI used to surface the Anthropic API provider under the
     # short id 'claude'; backend registers it as 'anthropic'. Map the
     # legacy value here so users who picked it before the rename

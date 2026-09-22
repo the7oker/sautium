@@ -345,6 +345,12 @@ async def lifespan(app: FastAPI):
     except Exception as e:
         logger.warning(f"Failed to load API cooldowns at startup: {e}")
 
+    # The install-time AI pick (the wizard's via backend.env, compose's
+    # DEFAULT_PROVIDER) becomes the user_settings row at the first boot
+    # without one; from then on the row is the pick every reader sees.
+    from routers.settings import seed_ai_provider_from_env
+    seed_ai_provider_from_env()
+
     # Same idea for AI provider API keys — Web UI writes them to DB,
     # but providers/__init__.py reads `settings.anthropic_api_key`
     # etc. Without this overlay AnthropicProvider would not register

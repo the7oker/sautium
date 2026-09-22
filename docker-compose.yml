@@ -146,6 +146,8 @@ services:
       OPENAI_COMPAT_API_KEY: ${OPENAI_COMPAT_API_KEY:-}
       OPENAI_COMPAT_MODEL: ${OPENAI_COMPAT_MODEL:-}
       OPENAI_COMPAT_NAME: ${OPENAI_COMPAT_NAME:-}
+      # The pick at the node's FIRST boot only — copied into user_settings
+      # once; the Web UI's choice rules afterwards.
       DEFAULT_PROVIDER: ${DEFAULT_PROVIDER:-claude_code}
 
       # The Web UI rides plain HTTP (PROGRESS.md "HTTP on the LAN").

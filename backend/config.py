@@ -118,6 +118,10 @@ class Settings(BaseSettings):
     openai_compat_api_key: Optional[str] = None
     openai_compat_model: Optional[str] = None
     openai_compat_name: Optional[str] = None
+    # The install-time pick: the wizard's, through the launcher's
+    # backend.env; compose's DEFAULT_PROVIDER for Docker. Read once —
+    # routers/settings.py copies it into user_settings.ai.provider at the
+    # first boot without that row, and the row is the pick from then on.
     default_provider: str = "claude_code"
 
     # P2P / DHT Configuration

@@ -1235,6 +1235,31 @@ were wrong, one hidden behind the other.
   `config.json` and `backend.env`: it records the username, the credential
   stays in the database.
 
+### The install-time AI pick reaches the database (2026-09-22)
+
+A launcher installed with Claude Code as the assistant showed the AI button
+and answered in chat, while More › AI assistant › Provider said "Not
+selected" and the AI-canon tier stayed off. Since 2026-05-21 the
+`ai.provider` row in `user_settings` is the single source for the pick —
+the Web UI writes it, the AI screen and the canon tier read it — but the
+wizard's choice never reached it: it went into `config.json`, from there
+into the generated `backend.env` as `DEFAULT_PROVIDER`, and only the chat
+router still consulted that environment as a fallback. Two readers, two
+answers.
+
+The row is now seeded ONCE, at the first backend boot that finds none, from
+the environment the node was installed with (`DEFAULT_PROVIDER` plus the
+matching `ANTHROPIC_API_KEY` / `OPENAI_API_KEY`; the wizard's "none" seeds
+nothing) — through the same switch the Web UI's PUT uses, so the
+per-provider buckets, the credential overlay and the canon catch-up behave
+identically (`routers/settings.py` `seed_ai_provider_from_env`). After that
+the environment is not read for the pick again: the chat router lost its
+`DEFAULT_PROVIDER` step, so the launcher rewriting `backend.env` from
+`config.json` at every start cannot undo a pick made in the Web UI. A node
+installed before this fix gets its row at the next start. For Docker the
+compose default (`claude_code`) is the declared pick, so a fresh container
+shows Claude Code with its sign-in state instead of "Not selected".
+
 ## Known Gotchas
 
 - **Docker restores containers in no order, and a failed restore is final.**
