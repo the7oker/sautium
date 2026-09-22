@@ -413,28 +413,6 @@ require per-user credentials, TLS from a front with a real name (Tailscale
 Serve, a reverse proxy) and CSRF-aware sessions — see the full **Security
 Posture** section in `CLAUDE.md` before changing any of it.
 
-## Music Library Structure
-
-```
-E:\Music\{Genre}\{Artist}\{Album}\{Track}.flac
-```
-
-Quality is inferred from a folder marker:
-- `[Vinyl]` → vinyl rip
-- `[TR24]` → Hi-Res (24-bit)
-- `[MP3]` → MP3
-- (no marker) → CD quality (16-bit)
-
-A single-file rip with a `.cue` sheet is read as N tracks on one file: each
-becomes its own row bounded by start/end offsets, analysed and played as its
-own slice.
-
-```
-E:\Music\Blues\Sade\The Best Of Sade\Sade - 01. Your Love Is King.flac
-E:\Music\Rock\Pink Floyd\[Vinyl]\The Dark Side of the Moon\...
-E:\Music\Jazz\Miles Davis\[TR24]\Kind of Blue\...
-```
-
 ## Database
 
 The canonical schema is **`desktop/migrations/001_initial.sql`** — the single
@@ -450,7 +428,8 @@ and launcher alike — and the deltas after it. Highlights:
   a dump version for provenance — not JSONB blobs.
 - **`media_files.id` identifies a FILE, `tracks.id` (UUID) identifies the
   MUSIC** — everything above the file speaks the UUID, which is what makes
-  not-owned music playable through the same API.
+  not-owned music playable through the same API. A single-file rip with a
+  `.cue` sheet is N rows on one file, each bounded by its start/end offsets.
 - **Deterministic UUID v5** for all shareable entities (Artist, Album, Track,
   Genre, Tag, EmbeddingModel) so the same data on different nodes collapses to
   the same ID. Namespace `adc1ec0b-2c81-5e26-9938-a369c6f7a5e1`.
