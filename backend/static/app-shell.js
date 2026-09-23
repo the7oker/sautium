@@ -5374,22 +5374,27 @@
     return specs && tail ? `${specs} · ${tail}` : (specs || tail || ('Variant ' + v.variant_id));
   }
 
-  function openVariantPicker(variants, currentVid, onPick) {
-    const rows = variants.map(v => {
-      const active = v.variant_id === currentVid;
-      return `
+  const ALL_VARIANTS_LABEL = 'All variants · best per track';
+
+  // currentVid null = the default tracklist draws on several variants.
+  // `withAll` adds the row that returns to that default, offered only when the
+  // default IS such a mix — a single-variant default is that variant's row.
+  function openVariantPicker(variants, currentVid, withAll, onPick) {
+    const row = (value, label, active) => `
         <button class="sort-row${active ? ' active' : ''}"
                 type="button"
                 role="radio"
                 aria-checked="${active ? 'true' : 'false'}"
-                data-variant-id="${v.variant_id}">
+                data-variant-id="${value}">
           <div>
-            <div class="sort-row-label">${escapeHtml(variantLabel(v))}</div>
+            <div class="sort-row-label">${escapeHtml(label)}</div>
           </div>
           <span class="sort-check">${ALBUMS_SORT_CHECK_SVG}</span>
         </button>
       `;
-    }).join('');
+    const rows = (withAll ? row('all', ALL_VARIANTS_LABEL, currentVid == null) : '')
+      + variants.map(v =>
+        row(v.variant_id, variantLabel(v), v.variant_id === currentVid)).join('');
     const { el, close } = openModal(`
       <div class="confirm-sheet">
         <div class="sheet-handle" aria-hidden="true"></div>
@@ -5400,7 +5405,8 @@
       if (typeof onPick === 'function' && picked !== null) onPick(picked);
     }, null);
     el.querySelectorAll('[data-variant-id]').forEach(btn => {
-      btn.addEventListener('click', () => close(parseInt(btn.dataset.variantId, 10)));
+      btn.addEventListener('click', () => close(btn.dataset.variantId === 'all'
+        ? 'all' : parseInt(btn.dataset.variantId, 10)));
     });
   }
 
@@ -5410,12 +5416,16 @@
     root.replaceChildren(screen);
 
     // Local screen state. selectedVariantId is null until the user picks
-    // a specific rip; the server then falls back to its DISTINCT ON
-    // default (analysis-source preferred). On variant change we re-fetch
-    // and re-render the whole screen — header/cover usually doesn't move
-    // since covers are identical across variants of the same album, and
-    // a clean rebuild keeps the wiring logic in one place.
+    // a specific rip; the server then serves its default, the best rip of
+    // every track. Which variant is SHOWING is the server's answer
+    // (selected_variant_id), never a guess from here. defaultMixed records
+    // whether that default drew on several variants, learned on the first
+    // (default) load. On variant change we re-fetch and re-render the whole
+    // screen — header/cover usually doesn't move since covers are identical
+    // across variants of the same album, and a clean rebuild keeps the
+    // wiring logic in one place.
     let selectedVariantId = null;
+    let defaultMixed = false;
 
     // Similar-albums shelf — lazy, and memoized so a variant re-render reuses
     // the result instead of asking the server to recompute. `undefined` = not
@@ -5580,17 +5590,18 @@
       const descFull = trimLastFmTail(stripHtml(d.description || ''));
       const descHtml = proseBlockHtml(descSummary, descFull);
 
-      // Variant selector — render only when >1 variant. variants[] is
-      // pre-sorted by the API (lossless/highest-resolution first), so
-      // variants[0] is the natural default when no variant is pinned.
+      // Variant selector — render only when >1 variant. The pill names the
+      // variant the tracklist came from; null = the default mixed several
+      // (a disc per folder, a rip missing tracks another has).
       const variants = d.variants || [];
+      const shownVid = d.selected_variant_id ?? null;
+      if (selectedVariantId == null) defaultMixed = shownVid == null;
       let variantHtml = '';
       if (variants.length > 1) {
-        const activeVid = selectedVariantId ?? variants[0].variant_id;
-        const active = variants.find(v => v.variant_id === activeVid) || variants[0];
+        const active = variants.find(v => v.variant_id === shownVid);
         variantHtml = `
           <button class="album-variant-toggle" type="button" data-action="pick-variant">
-            <span class="variant-label">${escapeHtml(variantLabel(active))}</span>
+            <span class="variant-label">${escapeHtml(active ? variantLabel(active) : ALL_VARIANTS_LABEL)}</span>
             <span class="variant-chevron">▾</span>
           </button>
         `;
@@ -5652,10 +5663,10 @@
       const pickBtn = screen.querySelector('[data-action="pick-variant"]');
       if (pickBtn) {
         pickBtn.addEventListener('click', () => {
-          const currentVid = selectedVariantId ?? variants[0].variant_id;
-          openVariantPicker(variants, currentVid, (newVid) => {
-            if (newVid !== currentVid) {
-              selectedVariantId = newVid;
+          openVariantPicker(variants, shownVid, defaultMixed, (picked) => {
+            const vid = picked === 'all' ? null : picked;
+            if (vid !== shownVid) {
+              selectedVariantId = vid;
               loadAndRender();
             }
           });

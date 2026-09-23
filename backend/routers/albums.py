@@ -7,11 +7,12 @@ with per-track audio features (key, mode, BPM) into a single roundtrip.
 
 When an album has more than one variant (multiple rips/encodings/
 masters of the same logical release), callers can pick a specific
-variant via ``?variant_id=<id>``. Without it, the response uses
-DISTINCT ON across all variants of the album, falling back to the
-"best" media_file per track (analysis-source first, lowest id as
-deterministic tiebreaker). The full variant list is always returned
-so the UI can render a selector without a second roundtrip.
+variant via ``?variant_id=<id>``. Without it, the response takes the
+best rip of every track across all variants (sql_queries.best_rip_order),
+so a disc split over two folders still lists whole. The full variant
+list is always returned so the UI can render a selector without a
+second roundtrip, and ``selected_variant_id`` names the variant the
+tracklist actually came from — null when the default drew on several.
 """
 
 from typing import Optional
@@ -20,9 +21,26 @@ from fastapi import APIRouter, HTTPException, Query
 
 from db_pool import db_query, db_query_one
 from genre_queries import album_genre_chips
+from sql_queries import best_rip_order
 
 
 router = APIRouter(prefix="/api/albums", tags=["albums"])
+
+# One file per track of an owned album: the pinned variant's, else the track's
+# best rip across every variant. The header (quality, duration, which variant
+# is showing) and the tracklist all read THIS pick, so the badge and the
+# variant pill can never describe another file than the one a row plays.
+_PICKED_FILES = f"""
+    SELECT DISTINCT ON (mf.track_id)
+           mf.id, mf.track_id, mf.album_variant_id, mf.is_lossless,
+           mf.sample_rate, mf.bit_depth, mf.duration_seconds,
+           mf.disc_number, mf.track_number
+    FROM media_files mf
+    JOIN album_variants av ON av.id = mf.album_variant_id
+    WHERE av.album_id = %(id)s::uuid
+      AND (%(vid)s::int IS NULL OR av.id = %(vid)s::int)
+    ORDER BY mf.track_id, {best_rip_order('mf')}
+"""
 
 
 def _buy_link(rg_mbid: Optional[str], artist_name: Optional[str]) -> dict:
@@ -303,30 +321,18 @@ def get_album(
     """, {"id": album_id})
     album["primary_artist"] = primary
 
-    # Quality + total duration. When no variant_id is requested, the same
-    # DISTINCT ON pattern as the tracklist below — pick one media_file per
-    # track (analysis-source preferred, lowest id as fallback) so multi-
-    # variant albums don't double-count duration. When a specific variant
-    # is requested, restrict to that variant before DISTINCT ON; tracks
-    # without a media_file in that variant simply don't contribute.
-    qrow = db_query_one("""
+    # Quality + total duration over the picked files (one per track, so a
+    # second variant never double-counts). `variant_id` is the one variant
+    # every picked file came from, NULL when the default mixed several.
+    qrow = db_query_one(f"""
+        WITH picked AS ({_PICKED_FILES})
         SELECT BOOL_OR(is_lossless)          AS lossless,
                MAX(sample_rate)              AS sr_max,
                MAX(bit_depth)                AS bd_max,
-               SUM(duration_seconds)         AS total_duration
-        FROM (
-            SELECT DISTINCT ON (mf.track_id)
-                   mf.track_id,
-                   mf.is_lossless,
-                   mf.sample_rate,
-                   mf.bit_depth,
-                   mf.duration_seconds
-            FROM media_files mf
-            JOIN album_variants av ON av.id = mf.album_variant_id
-            WHERE av.album_id = %(id)s::uuid
-              AND (%(vid)s::int IS NULL OR av.id = %(vid)s::int)
-            ORDER BY mf.track_id, mf.is_analysis_source DESC, mf.id
-        ) per_track
+               SUM(duration_seconds)         AS total_duration,
+               CASE WHEN COUNT(DISTINCT album_variant_id) = 1
+                    THEN MIN(album_variant_id) END AS variant_id
+        FROM picked
     """, params)
     sr = qrow["sr_max"] or 0
     bd = qrow["bd_max"] or 0
@@ -344,47 +350,29 @@ def get_album(
     album["genres"] = album_genre_chips(
         album_id, primary["id"] if primary else None)
 
-    # Tracklist ordered by disc / track number. `is_analysis_source`
-    # is a *preference* — it marks the media_file we chose for audio
-    # analysis when a track has multiple variants — not a "show this
-    # in the UI" flag. Filtering on it strictly hides tracks whose
-    # variants weren't picked yet (newly imported files, edge cases
-    # like Wingbeats where two media_files share disc/track and
-    # neither is flagged). Use DISTINCT ON instead: one row per
-    # track, picking analysis-source first and the lowest media_file
-    # id as the deterministic fallback. When a variant is pinned, the
-    # WHERE clause narrows the pool to that variant's media_files only.
-    album["tracks"] = db_query("""
-        SELECT DISTINCT ON (t.id)
-               t.id::text AS track_id,
-               mf.id AS media_file_id,
+    # Tracklist of the picked files, ordered by disc / track number. Every
+    # track gets a row even when no variant covers the whole album (a disc
+    # per folder, a rip missing a bonus track).
+    album["tracks"] = db_query(f"""
+        WITH picked AS ({_PICKED_FILES})
+        SELECT t.id::text AS track_id,
+               p.id AS media_file_id,
                t.title,
-               mf.disc_number,
-               mf.track_number,
-               mf.duration_seconds AS duration,
+               p.disc_number,
+               p.track_number,
+               p.duration_seconds AS duration,
                af.bpm,
                af.key,
                af.mode
-        FROM media_files mf
-        JOIN tracks t ON t.id = mf.track_id
-        JOIN album_variants av ON av.id = mf.album_variant_id
+        FROM picked p
+        JOIN tracks t ON t.id = p.track_id
         LEFT JOIN audio_features af ON af.track_id = t.id
-        WHERE av.album_id = %(id)s::uuid
-          AND (%(vid)s::int IS NULL OR av.id = %(vid)s::int)
-        ORDER BY t.id,
-                 mf.is_analysis_source DESC,
-                 mf.id
+        ORDER BY p.disc_number NULLS LAST, p.track_number NULLS LAST, t.title
     """, params)
-    album["tracks"].sort(key=lambda r: (
-        r.get("disc_number") if r.get("disc_number") is not None else 99,
-        r.get("track_number") if r.get("track_number") is not None else 999,
-        r.get("title") or "",
-    ))
 
     # Full variant list, always returned (UI hides the selector when
-    # len == 1). Ordered "best first" so a UI defaulting to variants[0]
-    # picks the lossless/highest-resolution rip without further logic.
-    album["variants"] = db_query("""
+    # len == 1), best first — the rank the default pick uses per track.
+    album["variants"] = db_query(f"""
         SELECT av.id AS variant_id,
                av.sample_rate,
                av.bit_depth,
@@ -400,12 +388,10 @@ def get_album(
                 LIMIT 1) AS file_format
         FROM album_variants av
         WHERE av.album_id = %(id)s::uuid
-        ORDER BY av.is_lossless DESC NULLS LAST,
-                 av.sample_rate DESC NULLS LAST,
-                 av.bit_depth DESC NULLS LAST,
-                 av.id
+        ORDER BY {best_rip_order('av')}
     """, {"id": album_id})
-    album["selected_variant_id"] = variant_id
+    album["selected_variant_id"] = (variant_id if variant_id is not None
+                                    else qrow["variant_id"])
     album["is_owned"] = True
     album.update(_album_description(album_id))
 

@@ -18,6 +18,7 @@ from discography import (ALBUM_SORT_EXPR, fetch_new_albums, phantom_sort,
                          sync_artist_discography)
 from genre_queries import artist_genres
 from release_groups import collapse_to_groups
+from sql_queries import best_rip_order
 
 
 router = APIRouter(prefix="/api/artists", tags=["artists"])
@@ -435,8 +436,8 @@ def get_artist(
     #      the data. If the filter empties the list, the section
     #      hides entirely (see renderArtist on the frontend).
     #
-    # Two arms: OWNED tracks (one row per track id, the analysis-source
-    # file) and NOT-OWNED ones off the phantom tracklists — an artist
+    # Two arms: OWNED tracks (one row per track id, its best rip) and
+    # NOT-OWNED ones off the phantom tracklists — an artist
     # page on a node that holds only the discography and its ListenBrainz
     # counts still names the hits, and they stream like any phantom row
     # (media_file_id NULL, the album as play context). Tier ordering and
@@ -460,15 +461,14 @@ def get_artist(
                    COALESCE(tp.listens, 0)::bigint AS lb_listens
             FROM tracks t
             JOIN track_artists ta ON ta.track_id = t.id
-            JOIN media_files mf ON mf.track_id = t.id AND mf.is_analysis_source = true
+            JOIN media_files mf ON mf.track_id = t.id
             JOIN album_variants av ON av.id = mf.album_variant_id
             JOIN albums al ON al.id = av.album_id
             LEFT JOIN local_play_stats lps ON lps.track_id = t.id
             LEFT JOIN track_pop tp ON tp.track_id = t.id
             WHERE ta.artist_id = %(id)s::uuid
             {album_filter_av}
-            ORDER BY t.id, COALESCE(tp.listens, 0) DESC,
-                           COALESCE(lps.play_count, 0) DESC
+            ORDER BY t.id, {best_rip_order('mf')}
         ),
         phantom AS (
             SELECT DISTINCT ON (t.id)

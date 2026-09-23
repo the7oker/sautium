@@ -12,6 +12,7 @@ local play count as a tiebreaker.
 from fastapi import APIRouter, HTTPException
 
 from db_pool import db_query, db_query_one
+from sql_queries import best_rip_order
 
 
 router = APIRouter(prefix="/api/genres", tags=["genres"])
@@ -180,7 +181,7 @@ def get_genre(genre_id: str) -> dict:
     # outer SELECT applies the two-tier order and LIMITs to top 5,
     # so we never haul tens of thousands of rows into Python for a
     # genre with a large catalogue.
-    genre["popular_tracks"] = db_query("""
+    genre["popular_tracks"] = db_query(f"""
         WITH g AS (
             SELECT id,
                    regexp_replace(LOWER(name), '[^a-z0-9]', '', 'g') AS norm
@@ -219,7 +220,7 @@ def get_genre(genre_id: str) -> dict:
             FROM tracks t
             JOIN track_artists ta ON ta.track_id = t.id AND ta.role = 'primary'
             JOIN artists a ON a.id = ta.artist_id
-            JOIN media_files mf ON mf.track_id = t.id AND mf.is_analysis_source = true
+            JOIN media_files mf ON mf.track_id = t.id
             JOIN album_variants av ON av.id = mf.album_variant_id
             JOIN albums al ON al.id = av.album_id
             LEFT JOIN album_genres ag
@@ -231,8 +232,7 @@ def get_genre(genre_id: str) -> dict:
                       CASE WHEN ag.album_id IS NOT NULL THEN 100 ELSE 0 END,
                       COALESCE(aw.weight, 0)
                   ) > 0
-            ORDER BY t.id, COALESCE(tp.listens, 0) DESC,
-                           COALESCE(lps.play_count, 0) DESC
+            ORDER BY t.id, (ag.album_id IS NOT NULL) DESC, {best_rip_order('mf')}
         )
         SELECT track_id, media_file_id, title, album, artist, duration,
                lb_listens > 0 AS from_listenbrainz

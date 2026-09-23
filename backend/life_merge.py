@@ -37,6 +37,7 @@ from psycopg2 import sql
 
 from desktop import node_backup as nb
 from play_stats import refresh_play_stats
+from sql_queries import best_rip_order
 
 logger = logging.getLogger(__name__)
 
@@ -279,7 +280,7 @@ def _whole_rows(cur, table: str, *, where: sql.SQL = sql.SQL("TRUE")) -> int:
 
 
 _MEDIA_FILE_FOR = ("(SELECT mf.id FROM media_files mf WHERE mf.track_id = {track} "
-                   "ORDER BY mf.is_analysis_source DESC, mf.id LIMIT 1)")
+                   f"ORDER BY {best_rip_order('mf')} LIMIT 1)")
 
 
 def merge_life(conn, *, progress: Optional[ProgressFn] = None) -> dict:

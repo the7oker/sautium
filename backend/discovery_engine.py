@@ -27,6 +27,7 @@ from dataclasses import dataclass
 from typing import Any, Callable, Optional
 
 import track_similarity
+from sql_queries import best_rip_order
 from uuid_utils import artist_uuid
 
 _VA_ID = str(artist_uuid("Various Artists"))
@@ -87,7 +88,7 @@ ENTITIES: dict[str, EntityDef] = {
                         "WHERE ta.track_id=t.id AND ta.role='primary' LIMIT 1) AS artist, "
                         "EXISTS (SELECT 1 FROM media_files mf WHERE mf.track_id=t.id) AS is_owned, "
                         "(SELECT mf.id FROM media_files mf WHERE mf.track_id=t.id "
-                        "ORDER BY mf.is_analysis_source DESC LIMIT 1) AS media_file_id, "
+                        f"ORDER BY {best_rip_order('mf')} LIMIT 1) AS media_file_id, "
                         "(SELECT mf.cover_id::text FROM media_files mf WHERE mf.track_id=t.id "
                         "AND mf.cover_id IS NOT NULL LIMIT 1) AS cover_id, "
                         "(SELECT al.cover_url FROM album_tracks atr JOIN albums al ON al.id=atr.album_id "

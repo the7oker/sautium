@@ -17,6 +17,7 @@ import uuid as _uuid
 
 from ensemble_instruments import present_instruments
 from hqplayer_client import format_time
+from sql_queries import best_rip_order
 
 # Lexical candidate sources, each behind its trigram GIN index (`%` — a bare
 # `similarity(col, q) > x` cannot use one and seq-scans 3M rows).
@@ -51,9 +52,10 @@ _ALB_TRACKS = """
       JOIN album_variants av ON av.album_id = alb.id
       JOIN media_files mf ON mf.album_variant_id = av.id"""
 
-# One row per track with both layers resolved: the owned file (if any) and the
-# tracklist row that carries a not-owned track's album, length and cover.
-_OWN_LATERAL = """
+# One row per track with both layers resolved: the owned file that would play
+# (if any) and the tracklist row that carries a not-owned track's album,
+# length and cover.
+_OWN_LATERAL = f"""
     LEFT JOIN LATERAL (
         SELECT mf.id, mf.cover_id, mf.duration_seconds, mf.is_lossless,
                mf.track_number, mf.disc_number, mf.sample_rate, mf.bit_depth,
@@ -62,7 +64,7 @@ _OWN_LATERAL = """
         JOIN album_variants av ON av.id = mf.album_variant_id
         JOIN albums al ON al.id = av.album_id
         WHERE mf.track_id = t.id
-        ORDER BY mf.is_analysis_source DESC, mf.id LIMIT 1) own ON true"""
+        ORDER BY {best_rip_order('mf')} LIMIT 1) own ON true"""
 
 _PH_LATERAL = """
     LEFT JOIN LATERAL (
@@ -103,10 +105,10 @@ def entity_kinds(q, ids: list[str]) -> dict:
 def owned_media_file(q, track_uuid: str):
     """The playable file for a track UUID, or None when nothing is on disk
     (a not-owned track — it streams instead)."""
-    rows = q("""
+    rows = q(f"""
         SELECT mf.id FROM media_files mf
         WHERE mf.track_id = %(t)s::uuid
-        ORDER BY mf.is_analysis_source DESC, mf.id
+        ORDER BY {best_rip_order('mf')}
         LIMIT 1
     """, {"t": track_uuid})
     return rows[0]["id"] if rows else None

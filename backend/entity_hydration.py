@@ -17,6 +17,7 @@ silently dropped (logged at debug level by the caller if needed).
 """
 
 from db_pool import db_query
+from sql_queries import best_rip_order
 
 
 def hydrate_artists(artist_ids: list[str]) -> list[dict]:
@@ -141,7 +142,7 @@ def hydrate_tracks(refs: list) -> list[dict]:
     if not wanted:
         return []
 
-    rows = db_query("""
+    rows = db_query(f"""
         SELECT t.id::text AS track_id,
                own.id,
                (own.id IS NOT NULL) AS is_owned,
@@ -165,7 +166,7 @@ def hydrate_tracks(refs: list) -> list[dict]:
             JOIN album_variants av ON av.id = mf.album_variant_id
             JOIN albums al ON al.id = av.album_id
             WHERE mf.track_id = t.id
-            ORDER BY mf.is_analysis_source DESC, mf.id
+            ORDER BY {best_rip_order('mf')}
             LIMIT 1
         ) own ON true
         LEFT JOIN LATERAL (

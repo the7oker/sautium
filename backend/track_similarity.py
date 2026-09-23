@@ -55,6 +55,7 @@ autocorrelated windows.
 """
 
 from db_pool import db_query_with_ef_search
+from sql_queries import best_rip_order
 
 POOL = 600              # mean-KNN recall horizon. Probe: widening 300→600 pulled
                         # 5 more tracks into the hybrid top-30 (one at mean-rank
@@ -92,7 +93,7 @@ def similar_tracks(seed_uuid: str, exclude=(), limit: int = 20,
     wave dries up once radio's exclude list outgrows it and the station would
     silently die mid-session.
     """
-    return db_query_with_ef_search("""
+    return db_query_with_ef_search(f"""
         WITH target AS (SELECT vector FROM embeddings WHERE track_id = %(seed)s::uuid),
         seed_seg AS (
             SELECT es.segment_index, es.vector
@@ -160,7 +161,7 @@ def similar_tracks(seed_uuid: str, exclude=(), limit: int = 20,
                 JOIN album_variants av ON av.id = mf.album_variant_id
                 JOIN albums al ON al.id = av.album_id
                 WHERE mf.track_id = t.id
-                ORDER BY mf.is_analysis_source DESC, mf.id LIMIT 1
+                ORDER BY {best_rip_order('mf')} LIMIT 1
             ) mf_rep ON true
             LEFT JOIN LATERAL (
                 SELECT atr.length_ms, al.title AS album, al.release_year, al.cover_url

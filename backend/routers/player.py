@@ -35,6 +35,7 @@ from playback.manager import manager
 from playback.queue import resolved_artwork as _resolved_artwork
 from playback.queue import resolved_durations as _resolved_durations
 from playback.sessions import _SESSION_ORIGINS
+from sql_queries import best_rip_order
 
 logger = logging.getLogger(__name__)
 
@@ -1588,18 +1589,7 @@ def play_album(req: PlayAlbumRequest):
 def _play_album_rows(best_album: dict):
     """Replace the queue with one album's tracks and play. Owned files load from
     disk; an album with none is streamed instead."""
-    rows = _db_query("""
-        SELECT mf.id, mf.file_path, t.title, mf.track_number,
-               a.name as artist, al.title as album
-        FROM media_files mf
-        JOIN tracks t ON mf.track_id = t.id
-        JOIN track_artists ta ON t.id = ta.track_id AND ta.role = 'primary'
-        JOIN artists a ON ta.artist_id = a.id
-        JOIN album_variants av ON mf.album_variant_id = av.id
-        JOIN albums al ON av.album_id = al.id
-        WHERE al.id = %(album_id)s
-        ORDER BY mf.disc_number, mf.track_number
-    """, {"album_id": best_album["id"]})
+    rows = _album_media_rows(str(best_album["id"]))
 
     if not rows:
         return play_phantom_album(PlayPhantomAlbumRequest(album_id=str(best_album["id"])))
@@ -2519,16 +2509,22 @@ def queue_phantom_album(req: PlayPhantomAlbumRequest):
 
 
 def _album_media_rows(album_id: str) -> list[dict]:
-    """Owned media files of an album in play order, one row per track — a second
-    variant of the same album must not duplicate its tracklist."""
-    return _db_query("""
-        SELECT id FROM (
+    """Owned media files of an album in play order: one row per track, its best
+    rip — a second variant of the same album must neither duplicate the
+    tracklist nor win over a better one."""
+    return _db_query(f"""
+        SELECT id, title, track_number, artist, album FROM (
             SELECT DISTINCT ON (mf.track_id)
-                   mf.id, mf.disc_number, mf.track_number
+                   mf.id, mf.disc_number, mf.track_number, t.title,
+                   a.name AS artist, al.title AS album
             FROM media_files mf
+            JOIN tracks t ON t.id = mf.track_id
+            JOIN track_artists ta ON ta.track_id = t.id AND ta.role = 'primary'
+            JOIN artists a ON a.id = ta.artist_id
             JOIN album_variants av ON av.id = mf.album_variant_id
+            JOIN albums al ON al.id = av.album_id
             WHERE av.album_id = %(album_id)s::uuid
-            ORDER BY mf.track_id, mf.is_analysis_source DESC, mf.id
+            ORDER BY mf.track_id, {best_rip_order('mf')}
         ) picked
         ORDER BY disc_number NULLS FIRST, track_number
     """, {"album_id": album_id})
@@ -2556,10 +2552,10 @@ def _entity_segments(refs: list) -> tuple[list, list]:
             rows = _album_media_rows(ref.id)
             kind, items = ("owned", rows) if rows else ("phantom", _phantom_album_queries(ref.id))
         else:
-            row = _db_query_one("""
+            row = _db_query_one(f"""
                 SELECT mf.id FROM media_files mf
                 WHERE mf.track_id = %(tid)s::uuid
-                ORDER BY mf.is_analysis_source DESC, mf.id
+                ORDER BY {best_rip_order('mf')}
                 LIMIT 1
             """, {"tid": ref.id})
             if row:
@@ -2747,17 +2743,17 @@ def play_entities(req: QueueEntitiesRequest):
 def _session_segments(session_id: str) -> tuple[list, int]:
     """('owned', [media rows]) / ('phantom', [TrackQuery]) segments for a
     session snapshot, in slot order, plus the count of slots nothing can play.
-    An owned slot prefers its own file, then any rip of the track (the file
+    An owned slot prefers its own file, then the track's best rip (the file
     was removed, the track kept); a slot with no file left streams like a
     phantom. Streamed queries are built per album — the slot's album_id keeps
     the edition the listener pressed — and a slot whose album no longer lists
     the track (or never had one) gets the display edition."""
-    rows = _db_query("""
+    rows = _db_query(f"""
         SELECT st.track_id::text AS track_id, st.album_id::text AS album_id,
                (SELECT mf.id FROM media_files mf
                 WHERE mf.track_id = st.track_id
                 ORDER BY (mf.id = st.media_file_id) DESC NULLS LAST,
-                         mf.is_analysis_source DESC, mf.id
+                         {best_rip_order('mf')}
                 LIMIT 1) AS media_file_id
         FROM session_tracks st
         WHERE st.session_id = %(id)s::uuid
@@ -2887,8 +2883,9 @@ def play_similar(req: PlaySimilarRequest):
     if any(k == "phantom" for k, _p in segments):
         _ensure_streaming_ready()
 
-    seed_mf = _db_query_one("""
-        SELECT mf.id FROM media_files mf WHERE mf.track_id = %(tid)s::uuid LIMIT 1
+    seed_mf = _db_query_one(f"""
+        SELECT mf.id FROM media_files mf WHERE mf.track_id = %(tid)s::uuid
+        ORDER BY {best_rip_order('mf')} LIMIT 1
     """, {"tid": req.track_id})
     sessions.rotate_session(manager.queue, 'radio', seed_track_id=req.track_id,
                             seed_media_file_id=(seed_mf or {}).get("id"))

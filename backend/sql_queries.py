@@ -34,6 +34,23 @@ MEDIA_FILE_FROM = """\
     JOIN albums al ON av.album_id = al.id"""
 
 # ---------------------------------------------------------------------------
+# Which rip plays when a caller names the music, not a file
+# ---------------------------------------------------------------------------
+# A track owned twice (a CD rip and a 24/96 one) plays its best file: lossless
+# first, then sample rate, then bit depth, the lowest id breaking ties. Every
+# path that turns a track UUID or an album into files ranks with this, and the
+# album page lists its variants in the same order. Never `is_analysis_source`:
+# that flag prefers the 16-bit rip on purpose, and borrowing it for playback
+# queued the CD copy of an album also owned in hi-res.
+
+def best_rip_order(alias: str) -> str:
+    """ORDER BY terms, best rip first, for a media_files or album_variants row
+    aliased `alias` (both carry the ranked columns)."""
+    return (f"{alias}.is_lossless DESC NULLS LAST, "
+            f"{alias}.sample_rate DESC NULLS LAST, "
+            f"{alias}.bit_depth DESC NULLS LAST, {alias}.id")
+
+# ---------------------------------------------------------------------------
 # Embedding similarity queries (track-centric, picks representative media_file)
 # ---------------------------------------------------------------------------
 
@@ -45,7 +62,7 @@ EMBEDDING_SIMILARITY_SELECT = """\
            mf_rep.duration_seconds, mf_rep.track_number,
            mf_rep.sample_rate, mf_rep.bit_depth, mf_rep.is_lossless"""
 
-EMBEDDING_SIMILARITY_FROM = """\
+EMBEDDING_SIMILARITY_FROM = f"""\
     FROM tracks t
     JOIN embeddings e ON e.track_id = t.id
     JOIN track_artists ta ON t.id = ta.track_id AND ta.role = 'primary'
@@ -58,7 +75,7 @@ EMBEDDING_SIMILARITY_FROM = """\
         JOIN album_variants av ON mf.album_variant_id = av.id
         JOIN albums al ON av.album_id = al.id
         WHERE mf.track_id = t.id
-        ORDER BY mf.is_analysis_source DESC, mf.id
+        ORDER BY {best_rip_order('mf')}
         LIMIT 1
     ) mf_rep ON true"""
 

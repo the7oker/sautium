@@ -1260,6 +1260,32 @@ installed before this fix gets its row at the next start. For Docker the
 compose default (`claude_code`) is the declared pick, so a fresh container
 shows Claude Code with its sign-in state instead of "Not selected".
 
+### The best rip plays (2026-09-23)
+
+An album owned twice — Ghosts I–IV as a CD rip and as a 24/96 one — played
+the CD while its page named the 24/96 rip. The variant pill showed
+`variants[0]` (sorted best first), but the default tracklist picked one file
+per track by `is_analysis_source`, and that flag prefers the 16-bit rip on
+purpose (`fix-analysis-source`: CD > other lossless > lossy). Picking the
+24/96 row in the sheet did nothing: the page believed it was already
+showing it. The same borrowed preference chose the file wherever a caller
+named the music rather than a file — the assistant's play tools, search
+tiles, chat blocks, similar/radio, the artist and genre Popular rows,
+session replay, the life-data merge — and `/play-album` (the assistant's
+`play_album`) deduplicated nothing, queueing both rips of every track.
+
+One rule now answers "which file plays": `sql_queries.best_rip_order` —
+lossless, then sample rate, then bit depth, lowest id. Every track→file and
+album→files path ranks with it, and the album page lists its variants in
+the same order; `is_analysis_source` keeps its one job, choosing what the
+analysers read. The album page stopped guessing which variant it shows: the
+server says it (`selected_variant_id` — the pinned variant, the single
+variant a default drew entirely on, or null when the default mixed several),
+and the header, the tracklist and that answer come from one pick
+(`albums._PICKED_FILES`). A mixed default — 36 of the 61 multi-variant
+albums on the master, mostly a disc per folder — reads "All variants · best
+per track", with that row in the sheet to come back to.
+
 ## Known Gotchas
 
 - **Docker restores containers in no order, and a failed restore is final.**
