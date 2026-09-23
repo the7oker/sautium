@@ -8,6 +8,8 @@ inside the backend container:
 import threading
 import types
 
+import pytest
+
 from playback.dlna_backend import DlnaBackend
 from playback.queue import CanonicalQueue, QueueItem
 from streaming.base import FetchedAudio, ProviderManifest, StreamProvider, TrackQuery
@@ -225,3 +227,35 @@ def test_unplayable_reason_reads_the_skipped_slots():
     # streamed album; the reason must be about those slots, not about the
     # empty space past the end of the queue.
     assert DlnaBackend._unplayable_reason(stub, 2, 4).startswith("4 streamed track(s)")
+
+
+def test_a_file_token_is_checked_when_served_not_when_minted(tmp_path):
+    proxy = _proxy()
+    # Minting is bookkeeping: a path the disk does not have still gets a
+    # token, and nothing raises into the caller that builds the URL.
+    tok = proxy.register_file(str(tmp_path / "gone.flac"), "audio/flac")
+    with pytest.raises(OSError):
+        proxy.materialize_file(tok, None)
+    track = tmp_path / "track.flac"
+    track.write_bytes(b"x" * 10)
+    tok = proxy.register_file(str(track), "audio/flac")
+    assert proxy.materialize_file(tok, None) == (str(track), "audio/flac", 10)
+    # The library's drive goes away under a running node: the token minted
+    # while the file was there must not vouch for it any more.
+    track.unlink()
+    with pytest.raises(OSError):
+        proxy.materialize_file(tok, None)
+
+
+def test_unplayable_reason_names_owned_files_the_disk_refused():
+    q = CanonicalQueue()
+    q.replace([QueueItem(track_id=f"t{i}", media_file_id=i,
+                         source={"kind": "file", "path": f"E:/Music/A/B/{i}.flac",
+                                 "format": "FLAC"},
+                         title=f"T{i}", artist="A", album="B")
+               for i in range(1, 4)])
+    stub = types.SimpleNamespace(_queue=q)
+    # Catalogued files are neither "not scanned yet" nor "outside the
+    # library": only the disk can have refused them.
+    assert DlnaBackend._unplayable_reason(stub, 1, 3).startswith(
+        "3 queued track(s) could not be read from the library")

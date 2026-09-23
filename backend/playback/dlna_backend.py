@@ -149,10 +149,13 @@ def _connection_failure(e: Exception) -> bool:
     """A failure below SOAP — the request got no answer at all: refused (the
     renderer app is closed, its port has moved), timed out, unreachable.
     That is the doze signature; a SOAP fault is the renderer answering.
-    async_upnp_client raises its own ClientConnectionError subclass for the
-    refused case, and that one is NOT an OSError — checking OSError alone
-    let a closed phone renderer pass as "answering"."""
-    return isinstance(e, (TimeoutError, OSError, ClientConnectionError))
+    Every request to the renderer rides aiohttp, whose transport failures
+    async_upnp_client re-raises as ClientConnectionError subclasses (a
+    refused connect is NOT an OSError); TimeoutError is our own command
+    window running out. A bare OSError is our own disk, never the renderer:
+    counting it detached an awake KANN on every play while the library's
+    drive was unmounted, and told the user to wake the device."""
+    return isinstance(e, (TimeoutError, ClientConnectionError))
 
 
 def _describe(e: Exception) -> str:
@@ -1086,15 +1089,21 @@ class DlnaBackend(PlayerBackend):
         HQPlayer can open anything on the machine, while the library is defined
         by its root, so importing whatever HQPlayer happened to be playing
         would catalogue files the owner never chose — and in a node that syncs,
-        mint rows that travel to peers as a side effect of pressing play."""
+        mint rows that travel to peers as a side effect of pressing play.
+
+        A catalogued file the disk refused is neither: it was scanned, and no
+        rescan brings it back while the library's drive is unmounted."""
         root = (settings.music_host_path or settings.music_library_path or "")
         norm = lambda p: p.replace("\\", "/").rstrip("/").lower()
-        inside = outside = streamed = 0
+        inside = outside = streamed = unreadable = 0
         for i in range(skipped):
             item = self._queue.item_at(first + i)
             src = (item.source or {}) if item else {}
             if src.get("kind") == "proxy":
                 streamed += 1
+                continue
+            if src.get("kind") == "file":
+                unreadable += 1
                 continue
             uri = src.get("uri", "")
             path = unquote(uri[8:] if uri.startswith("file:///") else uri)
@@ -1102,73 +1111,83 @@ class DlnaBackend(PlayerBackend):
                 inside += 1
             else:
                 outside += 1
-        if streamed and not (inside or outside):
+        if streamed and not (inside or outside or unreadable):
             return (f"{streamed} streamed track(s) could not be fetched from "
                     "their provider, and nothing else is left in the queue.")
-        if inside and not outside:
+        if unreadable and not (inside or outside):
+            return (f"{unreadable} queued track(s) could not be read from the "
+                    f"library ({root or 'unset'}) — is its drive connected? "
+                    "Reconnect it, then try again.")
+        if inside and not (outside or unreadable):
             return (f"{inside} queued item(s) are in your library folder but "
                     "have not been scanned yet, so they cannot be streamed to a "
                     "renderer. Run Scan Library, then try again.")
-        if outside and not inside:
+        if outside and not (inside or unreadable):
             return (f"{outside} queued item(s) live outside this node's library "
                     f"({root or 'unset'}) — HQPlayer can open them directly, but "
                     "they cannot be streamed to another renderer. Play something "
                     "from the library to replace the queue.")
         return (f"None of the {skipped} queued item(s) can be sent to this "
-                f"renderer: {inside} not scanned yet, {outside} outside the "
-                f"library folder, {streamed} not fetchable from their "
-                "provider. Play something from the library to replace the "
-                "queue.")
+                f"renderer: {unreadable} unreadable, {inside} not scanned yet, "
+                f"{outside} outside the library folder, {streamed} not "
+                "fetchable from their provider. Play something from the "
+                "library to replace the queue.")
 
     async def _load_seq(self, index: int, *, play: bool = True, ss: float = 0.0,
-                        url_override: Optional[str] = None,
-                        skipped: int = 0) -> bool:
-        item = self._queue.item_at(index)
-        if item is None:
-            # Running off the end having skipped everything is not the same as
-            # reaching the end of a queue, and it used to look identical: a
-            # silent stop, with the reason only in the log. It happens for
-            # real — a queue adopted from HQPlayer's own playlist holds entries
-            # this library has no media_files row for, so no token can be
-            # minted and no renderer but HQPlayer itself can be handed them.
-            if skipped:
-                self._error = self._unplayable_reason(index - skipped, skipped)
-            self._emit_now("stopped")
-            return False
-        # url_override (a seek) carries the currently-playing stream's URL,
-        # already including ?ss — keeping the format the track was dispatched
-        # in even if the global quality has since changed.
-        url = url_override or self._url_for(item)
-        if url is None:
-            logger.warning("DLNA: skipping unreachable item %s — %s",
-                           item.artist, item.title)
-            return await self._load_seq(index + 1, play=play,
-                                        skipped=skipped + 1)
-        if ss > 0 and not url_override:
-            # Server-side seek: re-encode the track from the offset (the
-            # media route honors ?ss). Only Opus URLs (which carry ?q) take
-            # this path, so the "&" join is always right.
-            url += ("&" if "?" in url else "?") + f"ss={int(ss)}"
-        # A track change is seconds of SOAP + renderer buffering: adopt the
-        # new slot and report `loading` FIRST, so the UI shows the tapped
-        # track with a transition spinner instead of either lying
-        # ("playing") or looking dead while the old audio rides on.
-        self._index = index
-        self._load_gen += 1     # in-flight poll evidence is now about a dead world
-        self._pos_offset = ss   # 0 for a fresh track; the seek offset otherwise
-        self._position = ss     # so the loading state shows the seek target
-        self._length = item.duration_seconds or 0.0
-        self._error = None      # something in the queue is playable after all
-        self._awaiting_play = False   # a new load supersedes an unconfirmed Play
-        if play:
-            self._emit_now("loading")
-        if not self._dmr.is_subscribed:
-            asyncio.ensure_future(self._resubscribe(), loop=self._loop)
-        if self._preload_task is not None:
-            self._preload_task.cancel()   # its "next" is not this load's next
-        if not await self._serve_ready(item, url, front=True):
-            return await self._load_seq(index + 1, play=play,
-                                        skipped=skipped + 1)
+                        url_override: Optional[str] = None) -> bool:
+        # Slots with nothing to serve are walked past in a loop, not by
+        # recursion: with the library's drive unmounted every owned slot is
+        # one, and a queue past ~1000 of them overran the recursion limit.
+        # A seek (ss, url_override) belongs to the first slot only.
+        first = index
+        while True:
+            item = self._queue.item_at(index)
+            if item is None:
+                # Running off the end having skipped everything is not the
+                # same as reaching the end of a queue, and it used to look
+                # identical: a silent stop, with the reason only in the log.
+                # It happens for real — a queue adopted from HQPlayer's own
+                # playlist holds entries this library has no media_files row
+                # for, so no token can be minted and no renderer but
+                # HQPlayer itself can be handed them.
+                if index > first:
+                    self._error = self._unplayable_reason(first, index - first)
+                self._emit_now("stopped")
+                return False
+            # url_override (a seek) carries the currently-playing stream's
+            # URL, already including ?ss — keeping the format the track was
+            # dispatched in even if the global quality has since changed.
+            url = url_override or self._url_for(item)
+            if url is None:
+                logger.warning("DLNA: skipping unreachable item %s — %s",
+                               item.artist, item.title)
+                index, ss, url_override = index + 1, 0.0, None
+                continue
+            if ss > 0 and not url_override:
+                # Server-side seek: re-encode the track from the offset (the
+                # media route honors ?ss). Only Opus URLs (which carry ?q)
+                # take this path, so the "&" join is always right.
+                url += ("&" if "?" in url else "?") + f"ss={int(ss)}"
+            # A track change is seconds of SOAP + renderer buffering: adopt
+            # the new slot and report `loading` FIRST, so the UI shows the
+            # tapped track with a transition spinner instead of either lying
+            # ("playing") or looking dead while the old audio rides on.
+            self._index = index
+            self._load_gen += 1     # in-flight poll evidence is now about a dead world
+            self._pos_offset = ss   # 0 for a fresh track; the seek offset otherwise
+            self._position = ss     # so the loading state shows the seek target
+            self._length = item.duration_seconds or 0.0
+            self._error = None      # something in the queue is playable after all
+            self._awaiting_play = False   # a new load supersedes an unconfirmed Play
+            if play:
+                self._emit_now("loading")
+            if not self._dmr.is_subscribed:
+                asyncio.ensure_future(self._resubscribe(), loop=self._loop)
+            if self._preload_task is not None:
+                self._preload_task.cancel()   # its "next" is not this load's next
+            if await self._serve_ready(item, url, front=True):
+                break
+            index, ss, url_override = index + 1, 0.0, None
         # The wait may have (re)fetched the stream — as an excerpt, or from
         # another provider — and the proxy's track-ready hook has brought the
         # item up to date; the DIDL below and the track-end detection read
@@ -1219,7 +1238,8 @@ class DlnaBackend(PlayerBackend):
         """Wait (off the loop) until the proxy can serve `url` at once —
         the preview fetched, and the CUE cut / Opus tier the URL's ?q and
         ?ss ask for produced on disk. False when it never will (provider
-        failure, expired token, a cut that cannot be made).
+        failure, expired token, a file gone from disk, a cut that cannot be
+        made).
 
         KANN probes the URI INSIDE SetAVTransportURI, and its control channel
         answers nothing until the probe returns: a preview still being fetched

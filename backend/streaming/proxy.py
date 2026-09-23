@@ -39,12 +39,12 @@ class _FileEntry:
     """Disk-backed serving (owned tracks for DLNA renderers/HQPlayer): the
     proxy streams straight from the file handle — never slurped into RAM,
     unlike preview buffers. A CUE slice entry (start is not None) serves the
-    cached FLAC cut of [start, end) produced on first GET, so size resolves
-    at serve time."""
+    cached FLAC cut of [start, end) produced on first GET. Size always
+    resolves at serve time (materialize_file): the file can be gone since
+    the token was minted."""
     token: str
     path: str
     mime: str
-    size: Optional[int] = None
     start: Optional[float] = None
     end: Optional[float] = None
     tags: Optional[dict] = None
@@ -133,16 +133,19 @@ class MediaProxy:
         returns the existing token (a renderer may still be mid-stream on it),
         and two slices of one image get DISTINCT tokens so URI-based
         auto-advance detection keeps working. Tokens are unguessable; only
-        registered files are reachable, never the library at large."""
-        import os
+        registered files are reachable, never the library at large.
+
+        Bookkeeping only — the disk is read when the token is served. A
+        stat here raised out of URL minting on the DLNA loop, where a
+        missing file read as the renderer failing, and it could only ever
+        vouch for the file at minting time."""
         key = (path, start, end)
         with self._lock:
             tok = self._file_tokens_by_key.get(key)
             if tok:
                 return tok
             tok = secrets.token_urlsafe(12)
-            size = os.path.getsize(path) if start is None else None
-            self._files[tok] = _FileEntry(tok, path, mime, size,
+            self._files[tok] = _FileEntry(tok, path, mime,
                                           start=start, end=end, tags=tags)
             self._file_tokens_by_key[key] = tok
             return tok
@@ -497,7 +500,9 @@ class MediaProxy:
         file, the cached CUE cut, or the cached Opus of either — produced NOW
         when not cached yet. Returns (path, mime, size); KeyError for an
         unknown token, RuntimeError when a CUE cut cannot be made (a cut has
-        no lossless fallback — the raw image would play the whole disc).
+        no lossless fallback — the raw image would play the whole disc),
+        OSError when the file is gone (moved since the scan, the library's
+        drive unmounted).
 
         The DLNA backend calls this before a URL is handed to a renderer:
         KANN probes the URI inside SetAVTransportURI and its control channel
@@ -509,21 +514,21 @@ class MediaProxy:
         fe = self.file_entry(token)
         if fe is None:
             raise KeyError(token)
-        path, mime, size = fe.path, fe.mime, fe.size
+        path, mime = fe.path, fe.mime
         if fe.start is not None:
             path = transcode.flac_slice_path_for_file(
                 fe.path, fe.start, fe.end, fe.tags or {})
-            mime, size = transcode.FLAC_MIME, os.path.getsize(path)
+            mime = transcode.FLAC_MIME
         if transcode.wants_opus(q):
             try:
                 # For a slice `path` is already the cut, so the Opus tier
                 # chains off it with slice-relative ?ss for free.
                 opus = transcode.opus_path_for_file(path, q, ss=ss)
                 if opus:
-                    path, mime, size = opus, transcode.MIME, os.path.getsize(opus)
+                    return opus, transcode.MIME, os.path.getsize(opus)
             except Exception as e:
                 logger.warning("opus transcode failed %s — lossless: %s", path, e)
-        return path, mime, size
+        return path, mime, os.path.getsize(path)
 
     def materialize_preview(self, token: str, q: Optional[str],
                             ss: float = 0.0) -> Optional[str]:
@@ -762,7 +767,7 @@ def _make_handler(proxy: MediaProxy):
                 self.send_error(404, "unknown token")
                 return
             except Exception as e:
-                logger.error("flac slice failed for token %s: %s", token, e)
+                logger.error("file token %s not servable: %s", token, e)
                 self.send_error(500)
                 return
             self._serve_disk_file(path, mime, size, body=body)
