@@ -1470,6 +1470,58 @@ per track", with that row in the sheet to come back to.
   on the Windows launcher surfaced as a bare `rc=1`; the lossless plugin now
   runs its tool with a per-process config and reads stdout for the real error.
 
+### The Last.fm history makes a new node's Home (2026-09-24)
+
+A new node's Home had nothing to go on. Connecting Last.fm now imports the
+owner's scrobbles, so Favourite artists, Listening history and the seeds of
+Recommendations start from the owner's own listening.
+
+- **Strings first, entities born canonical.** The first idea — mint an
+  artist, album and track from each scrobble's names and canonicalize them
+  later — broke on today's canon: every canon entry point selects artists that
+  own files, the content match needs durations a scrobble does not have,
+  tracks converge only on exact normalized titles, the discography reconcile
+  deleted file-less tracks (listens with them), and migration 007 had just
+  made phantoms "born canonical". So scrobbles wait as raw strings; the canon
+  resolves the artist from the heard titles and albums (the owned canon's
+  anchor, with heard albums in place of owned ones), mints its discography,
+  and binds a scrobble to a recording through every track and recording name
+  credited to the artist — only then is there a listen, on a canonical track,
+  with a length. Measured before any write: 235 of 247 verified owned artists
+  resolved, 0 wrong; with one title and no album, 216 right, 0 wrong.
+- **"The same listen" is time, not identity.** Sautium scrobbles what it
+  plays, so the history hands its own listens back — a second off, possibly
+  renamed by Last.fm's autocorrect. A start within 10 s of a completed record
+  is that listen (a scrobble needs 30 s of listening), and the native record
+  wins, in the import and in the life merge alike; two native records keep
+  the exact key, since two machines can play at once. It needed a prior fix:
+  the tracker stamped starts with naive local time under a UTC session, so a
+  launcher's history sat hours off the scrobbles (54 of 54 rows on the stand).
+- **Last.fm knows no duration.** A scrobble only says the scrobble rule was
+  met; the listen takes the track's length. NULL would have hidden imported
+  listens from every time-weighted consumer (Favourite artists filter on
+  listening time; Home seeds weigh by it and sort NULL first).
+- **No timer.** Last.fm pushes nothing, so the walk runs on events: the
+  connection, the Sync button, a restart mid-walk. The canon's consumer wakes
+  on the events that can place a waiting scrobble — new scrobbles for a name,
+  a slice or a dump for it, a mint of its artist, a scan.
+- **One pace per process.** The import made Last.fm's lack of a shared
+  throttle visible: every service object had its own pylast limiter. Its
+  first live run also showed that a bio cost seven requests (five getInfo),
+  now three.
+- **What the master's own history showed** (80,267 scrobbles back to 2009):
+  a page with one nameless scrobble ended the first walk after 25,063 (the
+  end is now read from what Last.fm sent, not from what parsed), and the
+  canon lock — also the dump lock — held for a whole batch read to the shelf
+  step as a dump reload. After both fixes: 69,568 listens placed; 4,314
+  scrobbles wait on artists MusicBrainz cannot place (mostly `&` credits it
+  holds no entity for), 2,724 on tracks no minted album carries (singles,
+  compilations, live).
+- **MB slices for Docker too.** The resolver needs MB data for names a node
+  has never seen, and only the launcher asked for slices; the cycle is now
+  shared (`desktop/p2p/mb_slice_cycle.py`) with a tier for the names imported
+  scrobbles wait on.
+
 ---
 
 ## References

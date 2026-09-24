@@ -228,7 +228,7 @@ current tab stack (changes hash).
 
 | Screen | Hash | Contents |
 |--------|------|----------|
-| **Home** | `#home` | 3 horizontal-scroll sections (6 items each, lazy "See all"): Favourite artists · New in my collection · Recommendations. Optional 4th: Recent queues (queue history). |
+| **Home** | `#home` | 3 horizontal-scroll sections (6 items each, lazy "See all"): Favourite artists · New in my collection · Recommendations · Listening history (the queues this node played and, since 2026-09-24, cards generated from the imported Last.fm history; hidden while empty). |
 | **Discovery** | `#discovery` | Search bar (default visible), advanced filters (collapsed), below: horizontal-scroll shuffle mosaic (infinite, random albums from library) |
 | **Friends** | `#friends` | Identity card (invite code), add-by-code form, email-invite form, friends list. (Chat is a pushed detail per-friend.) |
 | **More** | `#more` | Bottom-up sheet listing HQPlayer / DSP / Settings / Profile / etc. |
@@ -241,7 +241,7 @@ current tab stack (changes hash).
 | **Album** | Tap on album cover / title | Cover hero, metadata row (year · duration · format badge), genre chips on a separate row (up to 3), tracklist, **Play all** + **+ Queue** actions. A streaming-library (phantom) album wears a neutral `[demo]` badge in the metadata row beside the streamed-quality badge, its actions are **Stream all** · **Buy** · **+ Queue**, and a row that will play as a 30 s excerpt carries a `30s` tag beside its duration |
 | **Genre** | Tap on a genre chip (from Album / Artist / Discovery) | Hero banner with genre name, description prose, top artists / albums / tracks in genre, related-genre chip strip, Last.fm credit end-cap |
 | **Queue** (current playlist) | Queue button on Now Playing sheet, or `#queue` direct | Current queue with playing-track highlighted, drag-reorder, swipe-remove, Clear queue, Shuffle queue (future), summary "N tracks · HH:MM". The full list is rendered — no "and N more" truncation. |
-| **Queue history item** | Tap on "Recent queues" row | Snapshot preview + Restore action (loads queue, does not auto-play) |
+| **Listening session** | Tap on a Listening history card | Artists, the tracklist grouped by album, Play / Queue replaying the stored slots; a card generated from the Last.fm history carries a last.fm chip linking the owner's library |
 | **HQPlayer config** | From More | Status, host, port, filter / matrix / dither selector — read/write HQP state |
 | **DSP / Signal Chain** | From More or Now Playing "→ HQPlayer" icon | Deep HQP DSP controls: filter, oversampling, dither, digital attenuation stepper, matrix profile |
 | **Profile (own)** | From More → Profile entry | Identity card (avatar, name, @login, invite, city, bio), account (email + verify, password, Last.fm — the connected username links to its Last.fm page, scrobbling), audio chain (gear list), sociability placeholder |
@@ -332,6 +332,11 @@ No long-press gestures, no hidden interactions. Explicit beats clever.
 
 ### "Replace queue" safety — queue history
 
+_Shipped as `listening_sessions` / `session_tracks` — the Home "Listening
+history" shelf (archived on every destructive play, replayed, not restored);
+the `queue_history` table below was never built. Since 2026-09-24 the shelf
+also carries cards generated from the imported Last.fm history._
+
 Every "play now, replace queue" action **automatically saves the
 previous queue state** into a queue-history store before overwriting.
 
@@ -356,10 +361,10 @@ lazy-load "See all" into a full screen.
 
 | Section | Content | Source |
 |---------|---------|--------|
-| **Favourite artists** | Artists with highest listen count in `local_play_stats`, ordered by play frequency | Aggregated from listening history |
+| **Favourite artists** | Artists with the most listening in `local_play_stats` (listen time, then plays) — imported Last.fm listens included | Aggregated from listening history |
 | **New in my collection** | Albums most recently imported, `media_files.file_modified_at DESC` | Scanner-tracked |
 | **Recommendations** | "Like what you love, haven't heard yet" — similar to highly-played artists but under-played themselves | CLAP embeddings + `similar_artists` + play counts |
-| **Recent queues** *(optional, if queue-history populated)* | Last 3–5 replaced queues | `queue_history` table |
+| **Listening history** *(hidden while empty)* | Queues this node played, newest first, consecutive replays collapsed; cards generated from imported Last.fm listens (sittings, album runs) | `listening_sessions` (`source` sautium / lastfm) |
 
 Each section row is horizontally scrollable; tap item navigates to
 Artist / Album / Queue-history-item detail within the Home tab stack.
@@ -503,7 +508,9 @@ Top to bottom:
   blue), city (optional, editable), bio (3-line max, editable inline).
 - **Account** — email + verification badge (✓ / ⚠), change password,
   Last.fm connect/disconnect, scrobbling toggle (enabled only when
-  Last.fm is connected).
+  Last.fm is connected), and — when connected — the imported listening
+  history: listens imported, scrobbles waiting and why, the last sync,
+  "data from Last.fm", Sync, Remove imported (2026-09-24).
 - **Hardware profile** — read-only: the auto-detected tier
   (full/standard/lite) and what the machine was measured at. Sits with
   the account because it describes THIS node, not the library; it
@@ -758,7 +765,7 @@ or is a thin query over existing data.
 | Favourite artists | `local_play_stats` aggregated by artist | + listening recency weight |
 | New in my collection | `media_files.file_modified_at DESC`, grouped to album | + scanner-assigned "fresh" tag |
 | Recommendations | CLAP audio similarity to top-played tracks, filter to artists not yet heard much | + AI assistant contextual blends |
-| Recent queues *(if populated)* | `queue_history` table **(new)** + `(new endpoint)` GET `/queue/history` | + cross-device sync via P2P |
+| Listening history | `listening_sessions` + `session_tracks`, GET `/api/home/listening-history`; imported cards from `playback.sessions.rebuild_imported_sessions` | + cross-device via the life merge |
 
 ### Discovery
 

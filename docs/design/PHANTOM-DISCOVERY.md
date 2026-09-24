@@ -73,9 +73,10 @@ physical files — locality is enforced by *code*, not constraints:
   file OR a completed, unskipped listen (`listening_history`); run as
   the background `similar` step, it is how listened phantoms
   (catalog-less mode) get their similars.
-- `desktop/sync_client.py` `_engaged_artist_uuids` — the sync client
-  filters the similars pull by the same engagement predicate before
-  requesting anything from a peer.
+- `desktop/p2p/sync_queries.py` `split_engaged` — the sync walk asks
+  every peer in full only for the engaged core (the same predicate);
+  the phantom bulk goes through the holdings filter. Imported Last.fm
+  listens (2026-09-24) are completed listens and count.
 
 ### Why UUID v5 makes phantom→local seamless
 

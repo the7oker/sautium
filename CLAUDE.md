@@ -167,6 +167,22 @@ See:
   LOCALLY as the rarity proxy (announce tail, carry order).
   `album_descriptions` and `album_genres` are local for a different
   reason: albums never sync by UUID.
+- **The owner's Last.fm history is imported, LOCAL-ONLY, and born
+  canonical** (since 2026-09-24). Connecting Last.fm — and the Sync
+  button — walks `user.getRecentTracks` (`backend/lastfm_history.py`) into
+  a waiting room of raw strings (`pending_scrobbles` /
+  `pending_scrobble_artists`, kept only until placed); the canon
+  (`backend/canon/scrobbles.py`) places a scrobble only on a canonical
+  track — owned, or a minted MB slot — after resolving its artist from the
+  heard titles and albums, and only then writes a `listening_history` row
+  with `source = 'lastfm'` (the track's length as the seconds listened).
+  No entity is ever named after Last.fm's strings; its MBIDs are hints.
+  Sautium's own plays come back from Last.fm: "the same listen" is
+  `play_stats.same_listen` (the start within 10 s, time only — autocorrect
+  renames), and the native record always wins. Imported listens count as
+  engagement like any completed listen; their Listening-history cards are
+  generated (`listening_sessions.source = 'lastfm'`) and rebuilt with
+  them. Nothing of it leaves the node but the owner's own `.sbk`.
 - **Listening statistics come from ListenBrainz and DO travel.** Track
   popularity left Last.fm on 2026-09-20 (migration 020 dropped
   `track_stats`): `lb_recording` / `lb_artist` hold per-MBID listen and
@@ -268,10 +284,11 @@ See:
   as "in catalog". Both signals are linear in user behavior, so a minted
   similar-stub only becomes a seed via a new human listen — no transitive
   expansion. Last.fm similars (`lastfm.backfill_similar`, the background
-  `similar` step) and the sync's similars pull (`_engaged_artist_uuids`)
-  carry this gate; the DHT announce tail is gated differently — on held
-  analysis ("serveability", `ANNOUNCE_TAIL_SQL`), which name-only stubs
-  never enter, and on the SIZE of the network (`desktop/p2p/network_size.py`:
+  `similar` step) and the sync's core pull (`sync_queries.split_engaged`)
+  carry this gate — an imported Last.fm scrobble placed on a canonical
+  track is such a listen; the DHT announce tail is gated differently — on
+  held analysis ("serveability", `ANNOUNCE_TAIL_SQL`), which name-only
+  stubs never enter, and on the SIZE of the network (`desktop/p2p/network_size.py`:
   per-artist keys are announced AND searched only past ~1000 reachable
   nodes — below that the node key lists everyone and a per-artist key can
   name nobody it doesn't; the rare search set is the ENGAGED artists with
@@ -313,8 +330,10 @@ See:
   surface imports `desktop.sync_client.import_pushed`,
   `desktop.p2p.sync_queries` and the whole pull side,
   `desktop.p2p.sync_walk` (the Docker node walks the network like a launcher
-  since 2026-09-08 — before that it only served and accepted carry), instead
-  of mirroring them. Anything the two surfaces must agree on *exactly* — the
+  since 2026-09-08 — before that it only served and accepted carry) and the
+  MB slice cycle, `desktop.p2p.mb_slice_cycle` (since 2026-09-24 — before
+  that only the launcher asked for MB slices), instead of mirroring them.
+  Anything the two surfaces must agree on *exactly* — the
   seal-verification gate, the carry SQL, the DHT announce query, the walk —
   lives there and is imported, not copied.
 - Identity documents: `./data/node_identity` → `/app/data/node_identity`
@@ -551,7 +570,9 @@ toast takes no pointer events and never blocks the user (see
 | `backend/backup.py` | The node binding and the ONE "make a backup": `python -m backup create\|inspect\|restore\|selftest\|export\|import\|merge` on either interpreter (loads `<data_dir>/backend.env` under the launcher), password check via `device_auth.verify_password`, the playback signal as a PostgreSQL session advisory lock (`PlaybackSignal` held by the backend, `PlaybackHold` waited on by the job). The weekly task calls `create --password-env P2P_PASSWORD` — a contract. No Web UI |
 | `backend/share.py` | Share export/import (BACKUP.md Product B): gzip'd JSON lines with a signed trailer, streamed both ways; every sealed record the node holds under its author's seal, structural rows from the seed builders; import through `SyncClient._import_items` (the gate) after a verify pass, default (add phantoms) or `--existing-only` (create no artist/album/track) |
 | `backend/life_merge.py` | Own life-data merge (BACKUP.md Product C): `python -m backup merge <own .sbk>` — same-account rule, the dump streamed once through `pg_restore --data-only -t …` into a scratch schema in the live database, keyed union (listens, sessions, friends, messages, chats, gear, allowlisted settings, rotation records) in one transaction, unknown tracks wait; `--dry-run` = rollback |
-| `backend/play_stats.py` | `local_play_stats` is DERIVED from `listening_history` — the one statement the play tracker and the merge share; never increment those counters in place |
+| `backend/play_stats.py` | `local_play_stats` is DERIVED from `listening_history` — the one statement the play tracker and the merge share; never increment those counters in place. Also the one "same listen" rule (`same_listen`, `LISTENS_LOCK_KEY`) and the repair of pre-2026-09-24 naive listen starts |
+| `backend/lastfm_history.py` + `backend/canon/scrobbles.py` | The Last.fm history import: the walk into the waiting room (single flight, resumable, event-triggered) and the canon that places waiting scrobbles on canonical tracks (stages A–E, one consumer thread woken by events; `python -m canon.scrobbles --eval / --report` measure it read-only) |
+| `desktop/p2p/mb_slice_cycle.py` | The MB slice requester shared by the launcher's P2PManager and the Docker backend (sources, the pending tiers incl. imported-scrobble names, `mb.search_sources`, `mb_slice.status`) |
 | `backend/streaming/demo.py` | The demo policy: the `demo_plays` ledger (one full demo-channel listen per track), the resolve's per-track provider order, the proxy's fetch-time gate (`link_admissible`), the status observer that spends the listen past 90 % and drops the spent buffer |
 | `backend/streaming/deezer_catalog.py` + `deezer_preview.py` | Deezer public API in core: the catalog resolve (barcode → album tracklist → track gate, one pacer + memo per process) shared as `DeezerCatalogProvider` by the BYO lossless module and the core 30 s excerpt provider (`deezer_preview`, `manifest.excerpt`, always last in `providers_preferred()`) |
 

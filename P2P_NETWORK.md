@@ -188,7 +188,8 @@ service, LAN discovery (none in a container — it cannot hear the beacon),
 manual peers, the address skip list (the launcher subtracts itself by its
 UPnP external IP; every runtime also recognises its own address by the key
 `/health` returns), the sharing switch on the carry push, the diag sink, the
-post-run hook (the launcher fetches MB slices). Triggers are the same on both:
+post-run hook (both runtimes request the MB and LB slice cycles; before
+2026-09-24 only the launcher fetched MB slices). Triggers are the same on both:
 `NOTIFY sautium_sync_request`, the `sync.auto_interval_min` timer, the first
 source after start. The master's first run (2026-09-08, 297k artists with a
 gap → 479k core + 2.65M bulk tracks) took 6 min 50 s against one peer and
@@ -826,7 +827,7 @@ distribution (tens of KB) spreads — and the most popular names replicate
 fastest.
 
 **Who answers.** `/health` reports `mb_slices` (inventory size);
-`_find_dump_peers` puts **replicas BEFORE dump nodes**, and misses (`missing`
+`MbSliceCycle.find_sources` puts **replicas BEFORE dump nodes**, and misses (`missing`
 in the response) carry over to the next candidate. A dump node no longer 404s:
 partially useful is useful. Closed-world semantics are preserved exactly: a
 name closes only on the author's **signed** zero-match, never on transport
@@ -862,6 +863,16 @@ dump node whose dump predates the tables advertises no dump and answers
 `missing` until `download_and_load` adds them (the same version's archive when
 the mirror still has it, else the next full update), so a requester that
 updates first simply keeps its names pending.
+
+**One requester for both runtimes (2026-09-24).** The cycle left the
+launcher's P2PManager for `desktop/p2p/mb_slice_cycle.py`, which the Docker
+backend runs too — before, a dump-less Docker node had no MB data but
+click-to-mint's and never wrote `mb.search_sources`. The queue gained a tier
+right after the owner's files: the names imported Last.fm scrobbles wait on
+(`pending_scrobble_artists`, most scrobbled first), asked by their lowercased
+credit head; a run that fills its cap with those first two tiers and serves
+something asks for the next at once, the discovery-stub tiers keep the timed
+pace.
 
 E2E: dump → client (2 matched, 12277 rows, zero-match closed) → a dump-less
 replica re-serves a verified blob → a second hop verifies it **against the dump
