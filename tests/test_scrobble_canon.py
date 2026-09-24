@@ -232,3 +232,57 @@ def test_a_pass_resolves_places_and_wakes_what_feeds_on_listens(db, monkeypatch)
         cur.execute("SELECT artist_id::text FROM artist_mbids WHERE mbid = %s", (SADE,))
         assert cur.fetchone() == (sade,)
     assert woken == ["lastfm import", "lastfm import"]
+
+
+def test_imported_listens_become_album_mix_and_track_cards(db):
+    from playback.sessions import rebuild_imported_sessions
+    from psycopg2.extras import RealDictCursor
+    record, compilation, other = (str(uuid.uuid4()) for _ in range(3))
+    t = [str(uuid.uuid4()) for _ in range(6)]
+    with db.cursor() as cur:
+        cur.execute("""INSERT INTO albums (id, title) VALUES (%s, 'Love Deluxe'),
+                         (%s, 'Now That''s Music'), (%s, 'Other Record')""",
+                    (record, compilation, other))
+        for n, track in enumerate(t):
+            cur.execute("INSERT INTO tracks (id, title) VALUES (%s, %s)", (track, f"Song {n}"))
+        for n, track in enumerate(t[:4]):
+            cur.execute("INSERT INTO album_tracks (album_id, track_id, position, length_ms) "
+                        "VALUES (%s, %s, %s, 200000)", (record, track, n + 1))
+        for n, track in enumerate(t[:2]):   # the compilation lists two of them
+            cur.execute("INSERT INTO album_tracks (album_id, track_id, position, length_ms) "
+                        "VALUES (%s, %s, %s, 200000)", (compilation, track, n + 1))
+        for n, track in enumerate(t[4:]):
+            cur.execute("INSERT INTO album_tracks (album_id, track_id, position, length_ms) "
+                        "VALUES (%s, %s, %s, 200000)", (other, track, n + 1))
+
+        def imported(track, minutes):
+            cur.execute("""INSERT INTO listening_history (track_id, started_at, ended_at,
+                                                          duration_listened, completed, source)
+                           VALUES (%s, %s, %s, 200, TRUE, 'lastfm')""",
+                        (track, T0 + timedelta(minutes=minutes),
+                         T0 + timedelta(minutes=minutes + 3.33)))
+
+        # One sitting: three songs off the record, then one off another.
+        for minutes, track in ((0, t[0]), (4, t[1]), (8, t[2]), (12, t[4])):
+            imported(track, minutes)
+        # Two hours later, one song alone.
+        imported(t[5], 140)
+
+    def rebuild():
+        with db.cursor(cursor_factory=RealDictCursor) as cur:
+            return rebuild_imported_sessions(cur)
+
+    assert rebuild() == 3
+    with db.cursor() as cur:
+        cur.execute("""SELECT id, origin, origin_album_id::text, title, track_count, source
+                         FROM listening_sessions ORDER BY started_at""")
+        cards = cur.fetchall()
+    assert [(c[1], c[2], c[3], c[4], c[5]) for c in cards] == [
+        ("album", record, "Love Deluxe", 3, "lastfm"),
+        ("track", None, "Song 4", 1, "lastfm"),
+        ("track", None, "Song 5", 1, "lastfm"),
+    ]
+    assert rebuild() == 3
+    with db.cursor() as cur:
+        cur.execute("SELECT id FROM listening_sessions ORDER BY started_at")
+        assert [r[0] for r in cur.fetchall()] == [c[0] for c in cards]

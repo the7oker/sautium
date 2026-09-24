@@ -684,12 +684,16 @@ def run_pass(scope: Row) -> bool:
 
 
 def _after_binding(minted: bool) -> None:
-    """Listens landed: the engaged set grew. Wake what feeds on it — the
-    background loop (bios, similars), the DB steps (credit heads, shelves),
-    the P2P walk (analysis for the new canonical tracks), the LB slices — and
-    the screens."""
+    """Listens landed: the Listening-history cards follow them, and the engaged
+    set grew. Wake what feeds on it — the background loop (bios, similars),
+    the DB steps (credit heads, shelves), the P2P walk (analysis for the new
+    canonical tracks), the LB slices — and the screens."""
     import background_enrichment
+    from playback.sessions import rebuild_imported_sessions
     from routers.settings import notify_library_subscribers
+    with transaction(RealDictCursor) as cur:
+        cur.execute("SELECT pg_advisory_xact_lock(%s)", (LISTENS_LOCK_KEY,))
+        rebuild_imported_sessions(cur)
     background_enrichment.wake("lastfm import")
     background_enrichment.wake_db_steps("lastfm import")
     notify_library_subscribers()

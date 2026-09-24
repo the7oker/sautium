@@ -11,7 +11,11 @@ transactional archive/open logic and the session card derivation.
 
 import logging
 import threading
+from datetime import timedelta
+from itertools import groupby
 from typing import Optional
+
+from psycopg2.extras import execute_values
 
 from db_pool import (
     db_query as _db_query,
@@ -416,3 +420,113 @@ def _schedule_mix_title(session_id: str) -> None:
             logger.warning(f"mix title generation failed for {session_id}: {e}")
 
     threading.Thread(target=_worker, daemon=True, name="mix-title-worker").start()
+
+
+# --------------------------------------------------------------------------
+# Cards from imported listens (the Last.fm history)
+# --------------------------------------------------------------------------
+
+# A listen that starts more than this after the previous one ended begins a
+# new sitting; three consecutive listens off one album make it an album card.
+_RUN_GAP_MIN = 30
+_ALBUM_BLOCK = 3
+_IMPORTED_WINDOW_DAYS = 30
+
+
+def rebuild_imported_sessions(cur) -> int:
+    """The Listening-history cards of the imported listens, rebuilt with them —
+    a projection of `listening_history` rows with source 'lastfm', re-derivable
+    like local_play_stats, so replacing them removes nothing the owner did.
+    Covers the 30 days before the newest imported listen (an account that went
+    quiet still yields cards); older generated cards stay as they were.
+
+    A sitting is a run of listens with no gap over 30 minutes. Inside it,
+    three or more consecutive listens sharing an album become that album's
+    card (the owned edition, else the smallest album listing them all — the
+    record, not a compilation); the rest become a mix, or a track card when
+    alone. Card fields come from _compute_session_card; a mix is titled
+    "Mix" (no model call per imported card). `cur` is a RealDictCursor inside
+    the caller's transaction, which holds the listens lock."""
+    import uuid
+    from uuid_utils import NAMESPACE
+    cur.execute("SELECT max(started_at) AS newest FROM listening_history WHERE source = 'lastfm'")
+    newest = cur.fetchone()["newest"]
+    if newest is None:
+        cur.execute("DELETE FROM listening_sessions WHERE source = 'lastfm'")
+        return 0
+    since = newest - timedelta(days=_IMPORTED_WINDOW_DAYS)
+    cur.execute("DELETE FROM listening_sessions WHERE source = 'lastfm' AND started_at >= %s",
+                (since,))
+    cur.execute(f"""
+        SELECT track_id, media_file_id, started_at, ended_at, albums,
+               sum(gap) OVER (ORDER BY started_at) AS sitting
+          FROM (SELECT lh.track_id::text AS track_id, lh.media_file_id, lh.started_at, lh.ended_at,
+                       CASE WHEN lh.started_at - lag(lh.ended_at) OVER (ORDER BY lh.started_at)
+                                 > interval '{_RUN_GAP_MIN} minutes' THEN 1 ELSE 0 END AS gap,
+                       ARRAY(SELECT at.album_id::text FROM album_tracks at
+                              WHERE at.track_id = lh.track_id
+                             UNION
+                             SELECT av.album_id::text FROM media_files mf
+                               JOIN album_variants av ON av.id = mf.album_variant_id
+                              WHERE mf.track_id = lh.track_id) AS albums
+                  FROM listening_history lh
+                 WHERE lh.source = 'lastfm' AND lh.started_at >= %s) x
+         ORDER BY started_at""", (since,))
+    listens = cur.fetchall()
+    album_ids = sorted({a for l in listens for a in l["albums"]})
+    cur.execute("""
+        SELECT al.id::text AS id,
+               EXISTS (SELECT 1 FROM album_variants av WHERE av.album_id = al.id) AS owned,
+               (SELECT count(*) FROM album_tracks at WHERE at.album_id = al.id) AS slots
+          FROM albums al WHERE al.id = ANY(CAST(%s AS uuid[]))""", (album_ids,))
+    rank = {r["id"]: (not r["owned"], r["slots"], r["id"]) for r in cur.fetchall()}
+
+    def best(albums) -> Optional[str]:
+        return min(albums, key=lambda a: rank.get(a, (True, 0, a))) if albums else None
+
+    cards = []
+    for _, sitting in groupby(listens, key=lambda l: l["sitting"]):
+        sitting, loose = list(sitting), []
+        i = 0
+        while i < len(sitting):
+            shared, j = set(sitting[i]["albums"]), i + 1
+            while j < len(sitting) and shared & set(sitting[j]["albums"]):
+                shared &= set(sitting[j]["albums"])
+                j += 1
+            if j - i >= _ALBUM_BLOCK:
+                if loose:
+                    cards.append(("mix", None, loose))
+                    loose = []
+                cards.append(("album", best(shared), sitting[i:j]))
+                i = j
+            else:
+                loose.append(sitting[i])
+                i += 1
+        if loose:
+            cards.append(("mix", None, loose))
+
+    for origin, album_id, block in cards:
+        if origin == "mix" and len(block) == 1:
+            origin = "track"
+        first = block[0]
+        sid = str(uuid.uuid5(NAMESPACE, f"listening_session:lastfm:{int(first['started_at'].timestamp())}"))
+        snapshot = [(l["track_id"], l["media_file_id"], album_id or best(l["albums"])) for l in block]
+        active = {"id": sid, "origin": origin, "origin_album_id": album_id,
+                  "seed_track_id": first["track_id"], "seed_media_file_id": first["media_file_id"],
+                  "title": "Mix" if origin == "mix" else None}
+        cur.execute("""
+            INSERT INTO listening_sessions (id, origin, origin_album_id, seed_track_id,
+                                            seed_media_file_id, track_count, started_at,
+                                            ended_at, source)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, 'lastfm')""",
+            (sid, origin, album_id, first["track_id"], first["media_file_id"], len(block),
+             first["started_at"], block[-1]["ended_at"]))
+        execute_values(cur, """INSERT INTO session_tracks (session_id, position, track_id,
+                                                           media_file_id, album_id) VALUES %s""",
+                       [(sid, n, t, mf, a) for n, (t, mf, a) in enumerate(snapshot)],
+                       template="(%s::uuid, %s, %s::uuid, %s, %s::uuid)")
+        title, subtitle, cover_id, cover_url = _compute_session_card(cur, active, snapshot)
+        cur.execute("""UPDATE listening_sessions
+                          SET title = %s, subtitle = %s, cover_id = %s, cover_url = %s
+                        WHERE id = %s""", (title, subtitle, cover_id, cover_url, sid))
+    return len(cards)

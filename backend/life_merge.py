@@ -34,8 +34,10 @@ from pathlib import Path
 from typing import Callable, Dict, Iterator, List, Optional, Tuple
 
 from psycopg2 import sql
+from psycopg2.extras import RealDictCursor
 
 from desktop import node_backup as nb
+from playback.sessions import rebuild_imported_sessions
 from play_stats import LISTENS_LOCK_KEY, refresh_play_stats, repair_naive_listen_times, same_listen
 from sql_queries import best_rip_order
 
@@ -420,6 +422,8 @@ def merge_life(conn, *, progress: Optional[ProgressFn] = None) -> dict:
         merged["listens"] = len(added)
         merged["listens_replaced"] = len(replaced)
         merged["stats"] = refresh_play_stats(cur, sorted({str(r[0]) for r in added + replaced}))
+        with conn.cursor(cursor_factory=RealDictCursor) as dcur:
+            merged["imported_cards"] = rebuild_imported_sessions(dcur)
         cur.execute(f"""SELECT count(*), count(DISTINCT track_id) FROM {SCRATCH}.listening_history s
                          WHERE NOT EXISTS (SELECT 1 FROM tracks t WHERE t.id = s.track_id)""")
         waiting["listens"], waiting["tracks"] = (int(v) for v in cur.fetchone())

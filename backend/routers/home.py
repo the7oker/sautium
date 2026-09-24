@@ -532,7 +532,7 @@ def get_listening_history(
     sessions = db_query("""
         WITH recent AS (
             SELECT ls.id, ls.title, ls.subtitle, ls.cover_id, ls.cover_url,
-                   ls.origin, ls.track_count, ls.started_at, ls.ended_at,
+                   ls.origin, ls.track_count, ls.started_at, ls.ended_at, ls.source,
                    (SELECT count(DISTINCT st.album_id) FROM session_tracks st
                     WHERE st.session_id = ls.id AND st.album_id IS NOT NULL) AS album_count,
                    (SELECT md5(string_agg(st.track_id::text, ',' ORDER BY st.position))
@@ -568,7 +568,8 @@ def get_listening_history(
                track_count,
                started_at,
                album_count,
-               repeat_count
+               repeat_count,
+               source
         FROM counted
         WHERE run_start = 1
         ORDER BY ended_at DESC, id
@@ -597,6 +598,7 @@ def get_listening_session(session_id: str) -> dict[str, Any]:
                cover_url,
                origin,
                origin_album_id::text AS origin_album_id,
+               source,
                track_count,
                started_at,
                ended_at
@@ -664,6 +666,13 @@ def get_listening_session(session_id: str) -> dict[str, Any]:
     session["total_duration"] = sum(
         t["duration_seconds"] or 0 for t in session["tracks"]
     )
+    if session["source"] == "lastfm":
+        # A card generated from the owner's Last.fm history credits it (the
+        # Last.fm API terms, 2.7) by linking the library it came from.
+        from urllib.parse import quote
+        from config import settings
+        user = settings.lastfm_username
+        session["lastfm_url"] = f"https://www.last.fm/user/{quote(user)}/library" if user else None
 
     return session
 
