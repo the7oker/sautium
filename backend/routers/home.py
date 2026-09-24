@@ -144,7 +144,10 @@ def get_favourite_artists(
     # orders the same from any anchor (moving it multiplies every weight by
     # one factor), so the anchor only places the window — and a history that
     # went quiet, an imported Last.fm account nobody scrobbles to any more,
-    # keeps its last era instead of leaving only the seed picks.
+    # keeps its last era instead of leaving only the seed picks. The anchor
+    # is read first and handed in as a value: behind a subquery the planner
+    # cannot see it, prices the window at a third of all history and hashes
+    # the whole of track_artists instead of probing it (211 → 50 ms).
     #
     # Bucket 1 is the curated seed layer's artists with no listen in the
     # window, ordered by curation tier/rank. One completed listen promotes an
@@ -156,17 +159,17 @@ def get_favourite_artists(
     # cut: in the select list of the ranking query the planner hashes the
     # ownership of every artist in the catalogue instead of probing the
     # emitted ones.
+    newest = db_query_one(
+        "SELECT MAX(started_at) AS at FROM listening_history WHERE completed")["at"]
     artists = db_query(f"""
         WITH played AS (
             SELECT lh.track_id,
                    SUM(lh.duration_listened *
-                       EXP(-EXTRACT(EPOCH FROM (newest.at - lh.started_at))
+                       EXP(-EXTRACT(EPOCH FROM (%(newest)s::timestamptz - lh.started_at))
                            / %(tau_sec)s)) AS weight
-            FROM (SELECT MAX(started_at) AS at FROM listening_history
-                  WHERE completed) newest
-            JOIN listening_history lh
-              ON lh.started_at >= newest.at - INTERVAL '{FAVOURITE_WINDOW_DAYS} days'
-            WHERE lh.completed AND lh.duration_listened > 0
+            FROM listening_history lh
+            WHERE lh.started_at >= %(newest)s::timestamptz - INTERVAL '{FAVOURITE_WINDOW_DAYS} days'
+              AND lh.completed AND lh.duration_listened > 0
             GROUP BY lh.track_id
         ),
         listened AS (
@@ -203,7 +206,7 @@ def get_favourite_artists(
         FROM shelf s
         JOIN artists a ON a.id = s.id
         ORDER BY s.pos
-    """, {"tau_sec": FAVOURITE_TAU_DAYS * 86400, "limit": limit})
+    """, {"newest": newest, "tau_sec": FAVOURITE_TAU_DAYS * 86400, "limit": limit})
 
     return {"artists": artists}
 

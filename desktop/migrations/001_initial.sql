@@ -192,11 +192,14 @@ CREATE TABLE IF NOT EXISTS tags (
 -- Association tables (canonical)
 -- ============================================================
 
+-- Both credit keys put role second: readers probe (track|album, role), and a
+-- role behind artist_id is costed by PostgreSQL 18 as a skip scan over the
+-- artists (022_credit_key_order.sql).
 CREATE TABLE IF NOT EXISTS track_artists (
     track_id UUID NOT NULL REFERENCES tracks(id) ON DELETE CASCADE ON UPDATE CASCADE,
     artist_id UUID NOT NULL REFERENCES artists(id) ON DELETE CASCADE ON UPDATE CASCADE,
     role credit_role DEFAULT 'primary',
-    PRIMARY KEY (track_id, artist_id, role)
+    PRIMARY KEY (track_id, role, artist_id)
 );
 
 CREATE TABLE IF NOT EXISTS album_artists (
@@ -204,7 +207,7 @@ CREATE TABLE IF NOT EXISTS album_artists (
     artist_id UUID NOT NULL REFERENCES artists(id) ON DELETE CASCADE ON UPDATE CASCADE,
     role credit_role DEFAULT 'primary',
     mbid UUID,  -- materialized MB artist MBID for THIS album (which namesake); NULL = MB unavailable
-    PRIMARY KEY (album_id, artist_id, role)
+    PRIMARY KEY (album_id, role, artist_id)
 );
 
 CREATE TABLE IF NOT EXISTS artist_members (
