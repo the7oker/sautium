@@ -2473,6 +2473,9 @@ CREATE INDEX IF NOT EXISTS idx_mb_artist_sortname_lower  ON mb_artist(lower(sort
 CREATE INDEX IF NOT EXISTS idx_mb_track_credit           ON mb_track(artist_credit);
 CREATE INDEX IF NOT EXISTS idx_mb_acn_artist            ON mb_artist_credit_name(artist);
 CREATE INDEX IF NOT EXISTS idx_mb_rg_credit             ON mb_release_group(artist_credit);
+-- A release group is looked up by its gid from the album row: every album a
+-- discography mint materializes reads its releases' tracklists that way.
+CREATE INDEX IF NOT EXISTS idx_mb_rg_gid                ON mb_release_group(gid);
 CREATE INDEX IF NOT EXISTS idx_mb_rg_type               ON mb_release_group(type);
 CREATE INDEX IF NOT EXISTS idx_mb_rg_name_trgm          ON mb_release_group USING gin (lower(name) gin_trgm_ops);
 CREATE INDEX IF NOT EXISTS idx_mb_release_rg            ON mb_release(release_group);
