@@ -362,11 +362,18 @@ ordinary history sync. Deleting the contact sets `p2p.master_removed` — the
 auto-add never resurrects it (re-adding the code by hand clears the flag).
 
 `/api/relay/*` is a deliberately **proxy-agnostic** contract (both surfaces):
-- `GET /api/relay/wake-stream?pubkey&ts&sig` — the "you have mail" SSE channel.
-  A CGNAT node holds ONE outbound connection (outbound works from behind any
-  NAT) and pulls history on every ping: the maintainer's reply lands in ~0.2 s
-  instead of "at the next restart". The subscription registry doubles as live
-  presence.
+- `GET /api/relay/wake-stream?pubkey&ts&sig&instance` — the "you have mail"
+  SSE channel. A CGNAT node holds ONE outbound connection (outbound works from
+  behind any NAT) and pulls history on every ping: the maintainer's reply
+  lands in ~0.2 s instead of "at the next restart". The subscription registry
+  doubles as live presence. It keeps one stream per NODE, not per key
+  (`desktop/p2p/wake_registry.py`, both surfaces, since 2026-09-24):
+  `instance` is a token the node draws per process, a subscription supersedes
+  only its own node's previous stream, and whatever the relay has for a key —
+  wakes, forwarded envelopes, support warrants — goes to every stream of it.
+  Before, a second machine signed into the same account closed the first
+  one's stream, which came back 5 s later and closed it in turn: ~220
+  reconnects an hour on each, each with a history pull.
 - `POST /api/relay/probe-connect` — the relay knocks BACK on the request's
   source address (never on an IP from the body — that would be a
   reflector/port scanner) and checks `node_id` in `/health`. This is how
@@ -564,13 +571,16 @@ flips only on a verified signature.
 
 **The relay stores nothing** — not a row, not a table. Its only state: an
 in-memory future while it waits for the receipt (`FORWARD_ACK_TIMEOUT = 10 s`)
-and a queue of envelopes per subscription (`FORWARD_QUEUE_MAX = 100`). No TTL,
+and a queue of envelopes per stream (`wake_registry.QUEUE_MAX = 100`). No TTL,
 no prune, no disk quotas, no reconciliation. Recipient not connected → 409
 immediately rather than a timeout: the sender should know at once that waiting
-is pointless.
+is pointless. An envelope goes to every stream of the recipient's key; the
+first receipt answers the sender, and a later one finds no forward waiting (a
+404 the node ignores).
 
 Mirrors: `backend/routers/peer_chat.py` and `desktop/p2p/sync_server.py` — any
-reachable launcher becomes a relay with no protocol change.
+reachable launcher becomes a relay with no protocol change; the stream
+registry both use is one module, `desktop/p2p/wake_registry.py`.
 
 **Deposit/collect (a mailbox) — CANCELLED.** The reasons, recorded 2026-08-02:
 (1) the master is the maintainer's laptop, not infrastructure, and a network
@@ -1035,7 +1045,9 @@ discovery, no relay hop, works behind CGNAT. A node that is offline gets
 it parked (`support_warrants.dispatched_at IS NULL`) and pushed the moment
 it subscribes (`peer_chat.set_subscribe_hook` →
 `peer_diag.on_wake_subscribed`), re-pushed on every subscribe until the
-bundle lands. The node (`P2PManager._diag_worker`) accepts the frame only
+bundle lands — down every stream of the key when the account runs on several
+machines: each node deduplicates it by id, and the first bundle fulfils it
+(the others get 409 and close it). The node (`P2PManager._diag_worker`) accepts the frame only
 on the master subscription, then `verify_warrant`: issuer is the pinned
 master, target is itself, not expired, scopes ⊆ the fixed enum, signature
 good. `diag_warrants.id` (PRIMARY KEY, `INSERT … ON CONFLICT DO NOTHING

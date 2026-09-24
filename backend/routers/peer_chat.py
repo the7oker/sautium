@@ -22,7 +22,6 @@ import json
 import logging
 import threading
 import time
-from collections import deque
 from datetime import datetime
 from typing import Optional
 
@@ -34,6 +33,7 @@ from config import settings
 from db_pool import db_query_one, get_conn
 from p2p_chat import MAX_ENCRYPTED_CHARS, get_peer_chat
 from p2p_identity import load_signing_key, resolve_identity, verify_invite_code
+from desktop.p2p.wake_registry import WakeRegistry, valid_instance
 
 logger = logging.getLogger(__name__)
 
@@ -42,14 +42,12 @@ relay_router = APIRouter(prefix="/api/relay", tags=["peer-relay"])
 
 TS_WINDOW = 60                 # seconds, mirrors auth_hmac's replay window
 TOKEN_FRIENDS_PER_HOUR = 30    # soft cap on token auto-accepts
-WAKE_MAX_PER_IP = 20
 PROBE_COOLDOWN = 60            # seconds per pubkey
 # Forwarding: how long a sender's request waits for the recipient's signed
-# receipt, how many envelopes may queue for one recipient, and how many
-# forwards one sender may have in flight. The queue is the ONLY resource a
-# relay spends per client — it stores nothing.
+# receipt and how many forwards one sender may have in flight. The envelope
+# queue per stream (wake_registry.QUEUE_MAX) is the ONLY resource a relay
+# spends per client — it stores nothing.
 FORWARD_ACK_TIMEOUT = 10
-FORWARD_QUEUE_MAX = 100
 FORWARD_INFLIGHT_PER_SENDER = 10
 # Peer-relay caps (Phase D) — mirror desktop/p2p/sync_server.py, where the
 # adaptive-cap rationale lives.
@@ -121,31 +119,14 @@ def _find_friend_for_handshake(invite_code: str, pubkey: str) -> Optional[dict]:
 # Wake registry — who holds a live wake stream to this relay
 # ---------------------------------------------------------------------------
 
-class _WakeSub:
-    __slots__ = ("evt", "loop", "kinds", "envelopes", "frames", "closed", "ip")
-
-    def __init__(self, evt, loop, ip):
-        self.evt = evt
-        self.loop = loop
-        self.kinds: set = set()
-        # Envelopes to push down this stream. A queue, not a set: each one
-        # is a distinct message, and order is the sender's.
-        self.envelopes: deque = deque()
-        # Typed frames beyond deliver/wake — today the support warrant
-        # (routers/peer_diag). Queued by push_frame, sent first by gen().
-        self.frames: deque = deque()
-        self.closed = False
-        self.ip = ip
-
-
-_wake_subs: dict = {}          # subscriber pubkey -> _WakeSub
-_wake_lock = threading.Lock()
+_wake = WakeRegistry()
 
 # Peer-relay clients (Phase D): pubkey -> {invite_code, until, signature}.
 # In-memory on purpose — a relay restart drops the registry and every
 # client re-issues its voucher on reconnect. The announce hooks are wired
 # by main.py to DHTService.announce_user_for / withdraw_user_for.
 _relay_clients: dict = {}
+_relay_lock = threading.Lock()
 _relay_cap = RELAY_CAP_BASE
 _client_announce_cb = None
 _client_withdraw_cb = None
@@ -158,8 +139,9 @@ def set_client_announce_cbs(announce, withdraw) -> None:
 
 
 def relay_client_count() -> int:
-    with _wake_lock:
-        return sum(1 for k in _wake_subs if k in _relay_clients)
+    with _relay_lock:
+        clients = set(_relay_clients)
+    return sum(1 for k in _wake.keys() if k in clients)
 
 
 def relay_has_room() -> bool:
@@ -186,22 +168,16 @@ def adapt_relay_cap(other_relays_visible: bool) -> bool:
 
 
 def ping_wake(pubkey: str, kind: str = "message") -> None:
-    """Thread-safe: signal one subscriber's stream. No-op when offline —
+    """Thread-safe: signal every stream of `pubkey`. No-op when offline —
     they catch up with the connect-time history sync."""
-    with _wake_lock:
-        sub = _wake_subs.get(pubkey)
-        if sub is None:
-            return
-        sub.kinds.add(kind)
-        sub.loop.call_soon_threadsafe(sub.evt.set)
+    _wake.ping(pubkey, kind)
 
 
 def ping_wake_by_friend_id(friend_id: int, kind: str = "message") -> None:
     """For the LISTEN thread: resolve the friend's pubkey only when someone
     is actually subscribed."""
-    with _wake_lock:
-        if not _wake_subs:
-            return
+    if not _wake.keys():
+        return
     row = db_query_one(
         "SELECT public_key_hex FROM friends WHERE id = %s", (friend_id,))
     if row:
@@ -209,17 +185,10 @@ def ping_wake_by_friend_id(friend_id: int, kind: str = "message") -> None:
 
 
 def push_frame(pubkey: str, frame: dict) -> bool:
-    """Thread-safe: queue one typed frame for a subscriber's stream. False
-    when nobody with that key holds a stream right now — the caller keeps
-    the payload and pushes again when the node subscribes
-    (set_subscribe_hook)."""
-    with _wake_lock:
-        sub = _wake_subs.get(pubkey)
-        if sub is None or sub.closed:
-            return False
-        sub.frames.append(frame)
-        sub.loop.call_soon_threadsafe(sub.evt.set)
-    return True
+    """Thread-safe: queue one typed frame on every stream of `pubkey`.
+    False when the key holds none right now — the caller keeps the payload
+    and pushes again when a node subscribes (set_subscribe_hook)."""
+    return _wake.push_frame(pubkey, frame)
 
 
 _subscribe_hook = None
@@ -231,28 +200,6 @@ def set_subscribe_hook(cb) -> None:
     be pushed (routers/peer_diag.on_wake_subscribed)."""
     global _subscribe_hook
     _subscribe_hook = cb
-
-
-def _register_wake(pubkey: str, ip: str) -> Optional[_WakeSub]:
-    """A new subscription supersedes the old one for the same pubkey
-    (cap 1/pubkey); per-IP subscriptions are capped."""
-    sub = _WakeSub(asyncio.Event(), asyncio.get_running_loop(), ip)
-    with _wake_lock:
-        ip_count = sum(1 for s in _wake_subs.values() if s.ip == ip)
-        old = _wake_subs.get(pubkey)
-        if old is None and ip_count >= WAKE_MAX_PER_IP:
-            return None
-        if old is not None:
-            old.closed = True
-            old.loop.call_soon_threadsafe(old.evt.set)
-        _wake_subs[pubkey] = sub
-    return sub
-
-
-def _unregister_wake(pubkey: str, sub: _WakeSub) -> None:
-    with _wake_lock:
-        if _wake_subs.get(pubkey) is sub:
-            del _wake_subs[pubkey]
 
 
 # ---------------------------------------------------------------------------
@@ -587,11 +534,14 @@ async def chat_history(request: Request):
 @relay_router.get("/wake-stream")
 async def wake_stream(request: Request, pubkey: str = "", ts: str = "",
                       sig: str = "", invite: str = "",
-                      voucher_until: str = "", voucher_sig: str = ""):
+                      voucher_until: str = "", voucher_sig: str = "",
+                      instance: str = ""):
     svc = get_peer_chat()
     ident = resolve_identity(settings)
     if svc is None or not ident:
         return _err("relay not available", 503)
+    if not valid_instance(instance):
+        return _err("invalid instance", 400)
     if not _ts_ok(ts):
         return _err("stale timestamp", 403)
     signed = f"wake_subscribe:{int(ts)}:{ident['public_key_hex']}:{pubkey}"
@@ -631,12 +581,11 @@ async def wake_stream(request: Request, pubkey: str = "", ts: str = "",
         return _err("voucher required", 403)
 
     ip = request.client.host if request.client else "unknown"
-    sub = _register_wake(pubkey, ip)
+    sub = _wake.register(pubkey, instance, ip)
     if sub is None:
         return _err("too many subscriptions", 429)
-    is_client = voucher is not None
-    if is_client:
-        with _wake_lock:
+    if voucher is not None:
+        with _relay_lock:
             _relay_clients[pubkey] = voucher
         if _client_announce_cb:
             try:
@@ -664,21 +613,14 @@ async def wake_stream(request: Request, pubkey: str = "", ts: str = "",
                     sub.evt.clear()
                     if sub.closed:
                         break
-                    with _wake_lock:
-                        kinds, sub.kinds = sub.kinds, set()
-                        envelopes = list(sub.envelopes)
-                        sub.envelopes.clear()
-                        frames = list(sub.frames)
-                        sub.frames.clear()
-                    # Typed frames first (an instruction), then envelopes
-                    # (the payload), then wakes (only a hint to go looking).
+                    frames, envelopes, kinds = _wake.drain(sub)
                     for frame in frames:
                         yield "data: %s\n\n" % json.dumps(frame, ensure_ascii=False)
                     for envelope in envelopes:
                         yield "data: %s\n\n" % json.dumps(
                             {"type": "deliver", "envelope": envelope},
                             ensure_ascii=False)
-                    for kind in sorted(kinds):
+                    for kind in kinds:
                         yield ('data: {"type": "wake", "kind": "%s"}\n\n'
                                % kind)
                 except asyncio.TimeoutError:
@@ -688,14 +630,11 @@ async def wake_stream(request: Request, pubkey: str = "", ts: str = "",
                     svc.update_friend_last_seen(pubkey)
                     cycles = 0
         finally:
-            with _wake_lock:
-                still_ours = _wake_subs.get(pubkey) is sub
-            _unregister_wake(pubkey, sub)
-            # Announce lives exactly as long as the subscription; only when
-            # THIS sub is the registered one — a re-subscribe supersession
-            # must not withdraw the successor's announce.
-            if is_client and still_ours:
-                with _wake_lock:
+            # The announce lives exactly as long as the key holds a stream
+            # here: a superseded stream, or one node of an account leaving
+            # while another stays, must not withdraw it.
+            if _wake.unregister(pubkey, instance, sub):
+                with _relay_lock:
                     rec = _relay_clients.pop(pubkey, None)
                 if rec and _client_withdraw_cb:
                     try:
@@ -716,7 +655,7 @@ async def relay_voucher(invite: str = ""):
     desktop/p2p/sync_server.handle_relay_voucher. A black-hole impostor
     announcing someone else's invite has nothing to answer with here."""
     ident = resolve_identity(settings)
-    with _wake_lock:
+    with _relay_lock:
         for pubkey, rec in _relay_clients.items():
             if rec["invite_code"] == invite:
                 return {
@@ -831,7 +770,7 @@ def delivery_payload(message_uuid: str, ciphertext_sha256: str) -> str:
     return f"sautium-delivery:v1:{message_uuid}:{ciphertext_sha256}"
 
 
-_pending_acks: dict = {}       # message_uuid -> (recipient_pubkey, Future)
+_pending_acks: dict = {}       # message_uuid -> (recipient_pubkey, sender_pubkey, Future)
 _ack_lock = threading.Lock()
 
 
@@ -873,7 +812,7 @@ async def relay_forward(request: Request):
     if friend and friend.get("is_blocked"):
         return _err("not a friend", 403)
     if not friend:
-        with _wake_lock:
+        with _relay_lock:
             registered = recipient in _relay_clients
         if not registered:
             return _err("not a friend", 403)
@@ -883,29 +822,28 @@ async def relay_forward(request: Request):
 
     loop = asyncio.get_running_loop()
     future = loop.create_future()
-    with _wake_lock:
-        sub = _wake_subs.get(recipient)
-        if sub is None:
+    with _ack_lock:
+        inflight = sum(1 for _, s, _ in _pending_acks.values() if s == sender)
+        if inflight >= FORWARD_INFLIGHT_PER_SENDER:
+            return _err("too many forwards in flight", 429)
+        _pending_acks[message_uuid] = (recipient, sender, future)
+    try:
+        # Every node of the recipient's account gets the envelope; the
+        # first receipt answers.
+        refused = _wake.queue_envelope(recipient, envelope)
+        if refused == "not connected":
             # Tell the sender immediately rather than burning the timeout:
             # "not connected" is an answer, and it keeps the message queued.
             return _err("recipient not connected", 409)
-        if len(sub.envelopes) >= FORWARD_QUEUE_MAX:
+        if refused:
             return _err("recipient busy", 429)
-        with _ack_lock:
-            inflight = sum(1 for r, _ in _pending_acks.values() if r == sender)
-            if inflight >= FORWARD_INFLIGHT_PER_SENDER:
-                return _err("too many forwards in flight", 429)
-            _pending_acks[message_uuid] = (recipient, future)
-        sub.envelopes.append(envelope)
-        sub.loop.call_soon_threadsafe(sub.evt.set)
-
-    try:
-        ack = await asyncio.wait_for(future, timeout=FORWARD_ACK_TIMEOUT)
-    except asyncio.TimeoutError:
-        return JSONResponse({"delivered": False, "reason": "no ack"})
+        try:
+            ack = await asyncio.wait_for(future, timeout=FORWARD_ACK_TIMEOUT)
+        except asyncio.TimeoutError:
+            return JSONResponse({"delivered": False, "reason": "no ack"})
     finally:
         with _ack_lock:
-            if _pending_acks.get(message_uuid, (None, None))[1] is future:
+            if _pending_acks.get(message_uuid, (None, None, None))[2] is future:
                 del _pending_acks[message_uuid]
 
     logger.info("Relayed %s… from %s… to %s…", message_uuid[:8],
@@ -939,7 +877,7 @@ async def relay_ack(request: Request):
     if friend and friend.get("is_blocked"):
         return _err("not a friend", 403)
     if not friend:
-        with _wake_lock:
+        with _relay_lock:
             registered = pubkey in _relay_clients
         if not registered:
             return _err("not a friend", 403)
@@ -950,7 +888,7 @@ async def relay_ack(request: Request):
         # receipt cannot be planted for someone else's forward.
         if entry is None or entry[0] != pubkey:
             return _err("no such forward", 404)
-        future = entry[1]
+        future = entry[2]
     if not future.done():
         future.get_loop().call_soon_threadsafe(
             future.set_result,

@@ -17,7 +17,7 @@ import json
 import logging
 import threading
 import time
-from collections import defaultdict, deque
+from collections import defaultdict
 from contextlib import contextmanager
 from functools import partial
 from typing import Callable, Optional
@@ -31,6 +31,7 @@ from aiohttp import web
 
 from desktop.p2p import (addrs, admission, contact_log, lb_slice_queries, mb_slice_queries,
                          peer_auth, sync_queries)
+from desktop.p2p.wake_registry import WakeRegistry, valid_instance
 
 logger = logging.getLogger(__name__)
 
@@ -80,11 +81,10 @@ DB_POOL_MAX = 32
 # backend/routers/peer_chat.py, keep in step.
 TS_WINDOW = 60
 TOKEN_FRIENDS_PER_HOUR = 30
-WAKE_MAX_PER_IP = 20
 PROBE_COOLDOWN = 60
-# Forwarding caps — mirror backend/routers/peer_chat.py, keep in step.
+# Forwarding caps — mirror backend/routers/peer_chat.py, keep in step (the
+# stream caps live in desktop/p2p/wake_registry.py, which both import).
 FORWARD_ACK_TIMEOUT = 10
-FORWARD_QUEUE_MAX = 100
 FORWARD_INFLIGHT_PER_SENDER = 10
 # Peer-relay caps (Phase D) — mirror backend/routers/peer_chat.py.
 # The cap counts FOREIGN clients (voucher-registered, not friends); it is
@@ -115,21 +115,6 @@ def voucher_payload(client_pubkey: str, relay_pubkey: str, until: int) -> str:
     bounds how long the authority lives without re-issue."""
     return (f"sautium-relay-voucher:v1:{client_pubkey.lower()}"
             f":{relay_pubkey.lower()}:{int(until)}")
-
-
-class _WakeSub:
-    """One live wake-stream subscription (relay protocol)."""
-    __slots__ = ("evt", "loop", "kinds", "envelopes", "closed", "ip")
-
-    def __init__(self, evt, loop, ip):
-        self.evt = evt
-        self.loop = loop
-        self.kinds: set = set()
-        # Envelopes to push down this stream. A queue, not a set: each one
-        # is a distinct message, and order is the sender's.
-        self.envelopes: deque = deque()
-        self.closed = False
-        self.ip = ip
 
 
 class SyncServer:
@@ -163,8 +148,8 @@ class SyncServer:
         self._gate_mode = ("shadow", 0.0)   # (value, read-at) — user_settings p2p.gate_mode, cached
         self._contact_log = contact_log.ContactLog(
             self._db)
-        # Relay wake registry: subscriber pubkey -> _WakeSub
-        self._wake_subs: dict[str, _WakeSub] = {}
+        # Relay wake registry: who holds a stream here, per node of each key
+        self._wake = WakeRegistry()
         # Peer-relay clients (Phase D): pubkey -> voucher record
         # {invite_code, until, signature}. In-memory on purpose — a relay
         # restart drops the registry and every client re-issues on
@@ -176,7 +161,8 @@ class SyncServer:
         self._client_announce_cb: Optional[Callable] = None
         self._client_withdraw_cb: Optional[Callable] = None
         self._probe_last: dict[str, float] = {}
-        # In-flight forwards awaiting a receipt: uuid -> (recipient, Future).
+        # In-flight forwards awaiting a receipt: uuid -> (recipient, sender,
+        # Future).
         # The ONLY state a relay holds for a forwarded message, and only
         # until the receipt arrives or the timeout fires.
         self._pending_acks: dict[str, tuple] = {}
@@ -196,7 +182,7 @@ class SyncServer:
 
     def relay_client_count(self) -> int:
         """Foreign (voucher-registered) clients currently subscribed."""
-        return sum(1 for k in self._wake_subs if k in self._relay_clients)
+        return sum(1 for k in self._wake.keys() if k in self._relay_clients)
 
     def relay_has_room(self) -> bool:
         return self.relay_client_count() < self._relay_cap
@@ -1511,16 +1497,12 @@ class SyncServer:
 
     def ping_wake(self, pubkey: Optional[str] = None,
                   kind: str = "message") -> None:
-        """Signal one subscriber (or all, when pubkey is None)."""
-        subs = ([self._wake_subs[pubkey]]
-                if pubkey and pubkey in self._wake_subs
-                else list(self._wake_subs.values()) if pubkey is None else [])
-        for sub in subs:
-            sub.kinds.add(kind)
-            sub.loop.call_soon_threadsafe(sub.evt.set)
+        """Signal every stream of `pubkey` (of every key when None)."""
+        self._wake.ping(pubkey, kind)
 
     async def handle_wake_stream(self, request: web.Request) -> web.Response:
-        """GET /api/relay/wake-stream?pubkey=&ts=&sig= — SSE wake channel."""
+        """GET /api/relay/wake-stream?pubkey=&ts=&sig=&instance= — SSE wake
+        channel, one stream per node of a key (desktop/p2p/wake_registry.py)."""
         ip = request.remote or "unknown"
         if not self._check_rate_limit(ip):
             return self._rate_limited(request, ip)
@@ -1531,6 +1513,10 @@ class SyncServer:
         pubkey = request.query.get("pubkey", "")
         ts = request.query.get("ts", "")
         sig = request.query.get("sig", "")
+        instance = request.query.get("instance", "")
+        if not valid_instance(instance):
+            return self._json_response(
+                request, {"error": "invalid instance"}, status=400)
         if not self._ts_ok(ts):
             return self._json_response(
                 request, {"error": "stale timestamp"}, status=403)
@@ -1572,10 +1558,8 @@ class SyncServer:
                     v_sig):
                 return self._json_response(
                     request, {"error": "invalid voucher"}, status=403)
-            foreign = sum(1 for k in self._wake_subs
-                          if k in self._relay_clients)
             if pubkey not in self._relay_clients \
-                    and foreign >= self._relay_cap:
+                    and self.relay_client_count() >= self._relay_cap:
                 return self._json_response(
                     request, {"error": "relay full"}, status=429)
             voucher = {"invite_code": invite, "until": v_until,
@@ -1584,16 +1568,10 @@ class SyncServer:
             return self._json_response(
                 request, {"error": "voucher required"}, status=403)
 
-        ip_count = sum(1 for s in self._wake_subs.values() if s.ip == ip)
-        old = self._wake_subs.get(pubkey)
-        if old is None and ip_count >= WAKE_MAX_PER_IP:
+        sub = self._wake.register(pubkey, instance, ip)
+        if sub is None:
             return self._json_response(
                 request, {"error": "too many subscriptions"}, status=429)
-        if old is not None:
-            old.closed = True
-            old.loop.call_soon_threadsafe(old.evt.set)
-        sub = _WakeSub(asyncio.Event(), asyncio.get_event_loop(), ip)
-        self._wake_subs[pubkey] = sub
         if voucher is not None:
             self._relay_clients[pubkey] = voucher
             if self._client_announce_cb:
@@ -1607,7 +1585,6 @@ class SyncServer:
             "Cache-Control": "no-cache",
             "X-Accel-Buffering": "no",
         })
-        is_client = voucher is not None
         await resp.prepare(request)
         try:
             await resp.write(b": connected\n\n")
@@ -1623,18 +1600,16 @@ class SyncServer:
                     sub.evt.clear()
                     if sub.closed:
                         break
-                    kinds, sub.kinds = sub.kinds, set()
-                    envelopes = list(sub.envelopes)
-                    sub.envelopes.clear()
-                    # Envelopes first: a forwarded message is the payload,
-                    # a wake is only a hint to go looking.
+                    # A launcher relay issues no frames (support warrants
+                    # come from the master alone).
+                    _, envelopes, kinds = self._wake.drain(sub)
                     for envelope in envelopes:
                         frame = json.dumps(
                             {"type": "deliver", "envelope": envelope},
                             ensure_ascii=False)
                         await resp.write(
                             b"data: %s\n\n" % frame.encode("utf-8"))
-                    for kind in sorted(kinds):
+                    for kind in kinds:
                         await resp.write(
                             b'data: {"type": "wake", "kind": "%s"}\n\n'
                             % kind.encode("ascii"))
@@ -1647,19 +1622,17 @@ class SyncServer:
         except (ConnectionResetError, ConnectionError):
             pass  # subscriber went away — normal churn, not an error
         finally:
-            if self._wake_subs.get(pubkey) is sub:
-                del self._wake_subs[pubkey]
-                # The announce lives exactly as long as the subscription:
-                # a client we can no longer reach must not stay findable
-                # through us. Only when THIS sub is the registered one — a
-                # re-subscribe supersession must not withdraw the new life.
-                if is_client:
-                    rec = self._relay_clients.pop(pubkey, None)
-                    if rec and self._client_withdraw_cb:
-                        try:
-                            self._client_withdraw_cb(rec["invite_code"])
-                        except Exception as e:
-                            logger.warning("client withdraw failed: %s", e)
+            # The announce lives exactly as long as the key holds a stream
+            # here: a client we can no longer reach must not stay findable
+            # through us, while a superseded stream, or one node of an
+            # account leaving as another stays, must not withdraw it.
+            if self._wake.unregister(pubkey, instance, sub):
+                rec = self._relay_clients.pop(pubkey, None)
+                if rec and self._client_withdraw_cb:
+                    try:
+                        self._client_withdraw_cb(rec["invite_code"])
+                    except Exception as e:
+                        logger.warning("client withdraw failed: %s", e)
         return resp
 
     async def handle_probe_connect(self, request: web.Request) -> web.Response:
@@ -1820,31 +1793,33 @@ class SyncServer:
         # envelope must never claim an authorship the signature does not back.
         envelope = dict(envelope, from_public_key=sender)
 
-        sub = self._wake_subs.get(recipient)
-        if sub is None:
-            # Tell the sender immediately rather than burning the timeout:
-            # "not connected" is an answer, and it keeps the message queued.
-            return self._json_response(
-                request, {"error": "recipient not connected"}, status=409)
-        if len(sub.envelopes) >= FORWARD_QUEUE_MAX:
-            return self._json_response(
-                request, {"error": "recipient busy"}, status=429)
-        inflight = sum(1 for r, _ in self._pending_acks.values() if r == sender)
+        inflight = sum(1 for _, s, _ in self._pending_acks.values() if s == sender)
         if inflight >= FORWARD_INFLIGHT_PER_SENDER:
             return self._json_response(
                 request, {"error": "too many forwards in flight"}, status=429)
 
         future = asyncio.get_event_loop().create_future()
-        self._pending_acks[message_uuid] = (recipient, future)
-        sub.envelopes.append(envelope)
-        sub.loop.call_soon_threadsafe(sub.evt.set)
+        self._pending_acks[message_uuid] = (recipient, sender, future)
         try:
-            ack = await asyncio.wait_for(future, timeout=FORWARD_ACK_TIMEOUT)
-        except asyncio.TimeoutError:
-            return self._json_response(
-                request, {"delivered": False, "reason": "no ack"})
+            # Every node of the recipient's account gets the envelope; the
+            # first receipt answers.
+            refused = self._wake.queue_envelope(recipient, envelope)
+            if refused == "not connected":
+                # Tell the sender immediately rather than burning the
+                # timeout: "not connected" is an answer, and it keeps the
+                # message queued.
+                return self._json_response(
+                    request, {"error": "recipient not connected"}, status=409)
+            if refused:
+                return self._json_response(
+                    request, {"error": "recipient busy"}, status=429)
+            try:
+                ack = await asyncio.wait_for(future, timeout=FORWARD_ACK_TIMEOUT)
+            except asyncio.TimeoutError:
+                return self._json_response(
+                    request, {"delivered": False, "reason": "no ack"})
         finally:
-            if self._pending_acks.get(message_uuid, (None, None))[1] is future:
+            if self._pending_acks.get(message_uuid, (None, None, None))[2] is future:
                 del self._pending_acks[message_uuid]
 
         logger.info("Relayed %s… from %s… to %s…", message_uuid[:8],
@@ -1915,7 +1890,7 @@ class SyncServer:
         if entry is None or entry[0] != pubkey:
             return self._json_response(
                 request, {"error": "no such forward"}, status=404)
-        future = entry[1]
+        future = entry[2]
         if not future.done():
             future.set_result({
                 "public_key_hex": pubkey, "message_uuid": message_uuid,

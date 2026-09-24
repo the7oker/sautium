@@ -11,6 +11,7 @@ Provides P2P sync: find peers via DHT, sync enrichment data via HTTP.
 import asyncio
 import json
 import logging
+import secrets
 import select
 import threading
 import time
@@ -103,6 +104,11 @@ class P2PManager:
         self._diag_task: Optional[asyncio.Task] = None
         # Live peer-relay subscriptions: relay_pubkey -> asyncio.Task
         self._peer_relay_subs: dict[str, asyncio.Task] = {}
+        # This node among the nodes of its account: every relay keeps one
+        # wake stream per instance, so a second machine signed into the same
+        # account holds its own stream instead of taking this one's
+        # (desktop/p2p/wake_registry.py).
+        self._wake_instance = secrets.token_hex(8)
         self._peer_relay_addrs: dict[str, tuple] = {}
         self._reachability_task: Optional[asyncio.Task] = None
         # unknown | reachable | cgnat | unreachable — see _reachability_loop
@@ -1991,7 +1997,8 @@ class P2PManager:
                     f"wake_subscribe:{ts}:{relay_pubkey}:{own}"
                     .encode("utf-8")).hex()
                 url = (f"https://{fmt_addr(ip, port)}/api/relay/wake-stream"
-                       f"?pubkey={own}&ts={ts}&sig={sig}")
+                       f"?pubkey={own}&ts={ts}&sig={sig}"
+                       f"&instance={self._wake_instance}")
                 # A voucher rides along whenever this node needs relaying —
                 # peer relays always (that is their whole point), the master
                 # too while we are unreachable: it then announces us and
@@ -2239,11 +2246,8 @@ class P2PManager:
                 await self._dht_service.announce_capability("relay")
         else:
             self._dht_service.withdraw_capability("relay")
-            for pk, rec in list(self._sync_server._relay_clients.items()):
-                sub = self._sync_server._wake_subs.get(pk)
-                if sub:
-                    sub.closed = True
-                    sub.loop.call_soon_threadsafe(sub.evt.set)
+            for pk in list(self._sync_server._relay_clients):
+                self._sync_server._wake.close(pk)
 
     async def _probe_reachability_via_master(self) -> "_ProbeResult":
         """Definitive test — ask the master to connect back to our sync
