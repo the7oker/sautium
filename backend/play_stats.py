@@ -27,6 +27,29 @@ from psycopg2.extras import execute_values
 # start after the end is not skew but the shift below.
 _CLOCK_SLACK = timedelta(seconds=5)
 
+# Two records of one listen — the row this node's player wrote and the
+# scrobble Last.fm hands back, or the same listen on two merged nodes — begin
+# within a second or two of each other, while a scrobble needs 30 s of
+# listening, so two scrobbled listens begin at least 30 s apart. The match is
+# on time alone: Last.fm's autocorrect can rename what Sautium sent, so the
+# two records may name different tracks. Only completed rows take part —
+# nothing else is ever scrobbled.
+SAME_LISTEN_S = 10
+
+# Held (transaction-scoped) by every writer that reconciles listens against
+# each other — the import's bind, the life merge, the rebuild of generated
+# cards, Remove imported history — so no two of them judge "the same listen"
+# on a history the other is still changing.
+LISTENS_LOCK_KEY = 0x6C73746E  # "lstn"
+
+
+def same_listen(h: str, at: str) -> str:
+    """SQL condition: the listening_history row aliased `h` is a completed
+    record of the listen that began at `at` (an SQL timestamptz expression).
+    Range-shaped, so idx_listening_history_started serves it."""
+    return (f"({h}.completed AND {h}.started_at BETWEEN {at} - interval '{SAME_LISTEN_S} seconds' "
+            f"AND {at} + interval '{SAME_LISTEN_S} seconds')")
+
 PLAY_STATS_SQL = """
     INSERT INTO local_play_stats (track_id, play_count, skip_count, total_listen_time,
                                   avg_percent_listened, last_played_at, updated_at)

@@ -36,7 +36,7 @@ from typing import Callable, Dict, Iterator, List, Optional, Tuple
 from psycopg2 import sql
 
 from desktop import node_backup as nb
-from play_stats import refresh_play_stats, repair_naive_listen_times
+from play_stats import LISTENS_LOCK_KEY, refresh_play_stats, repair_naive_listen_times, same_listen
 from sql_queries import best_rip_order
 
 logger = logging.getLogger(__name__)
@@ -378,28 +378,48 @@ def merge_life(conn, *, progress: Optional[ProgressFn] = None) -> dict:
              WHERE m.message_uuid IS NOT NULL
             ON CONFLICT DO NOTHING""")
 
-        # --- listens by (track, started_at); the file this machine has for the
-        # track, if any, stands in for the other machine's file id. A backup
-        # written before 2026-09-24 carries the tracker's naive-time starts —
-        # repaired first, or the same listen would miss its twin here.
+        # --- listens. The file this machine has for the track, if any, stands
+        # in for the other machine's file id. A backup written before
+        # 2026-09-24 carries the tracker's naive-time starts — repaired first,
+        # or the same listen would miss its twin here. Two native records are
+        # one listen only by their exact (track, start) key: two machines can
+        # play at once. Where one side is an imported scrobble, "the same
+        # listen" is play_stats.same_listen — time alone — and the native
+        # record wins, whichever side holds it.
         progress("merging", what="listens")
+        cur.execute("SELECT pg_advisory_xact_lock(%s)", (LISTENS_LOCK_KEY,))
         repair_naive_listen_times(cur, f"{SCRATCH}.listening_history")
+        run(f"""DELETE FROM listening_history h
+                 WHERE h.source = 'lastfm'
+                   AND EXISTS (SELECT 1 FROM _S_.listening_history s
+                                WHERE s.source = 'sautium'
+                                  AND EXISTS (SELECT 1 FROM tracks t WHERE t.id = s.track_id)
+                                  AND {same_listen('s', 'h.started_at')})
+                RETURNING h.track_id""")
+        replaced = cur.fetchall()
         run(f"""INSERT INTO listening_history (media_file_id, track_id, started_at, ended_at,
                                                duration_listened, percent_listened, completed,
-                                               skipped, created_at)
+                                               skipped, created_at, source)
                 SELECT DISTINCT ON (s.track_id, s.started_at)
                        {_MEDIA_FILE_FOR.format(track='s.track_id')},
                        s.track_id, s.started_at, s.ended_at, s.duration_listened,
-                       s.percent_listened, s.completed, s.skipped, s.created_at
+                       s.percent_listened, s.completed, s.skipped, s.created_at, s.source
                   FROM _S_.listening_history s
                  WHERE EXISTS (SELECT 1 FROM tracks t WHERE t.id = s.track_id)
                    AND NOT EXISTS (SELECT 1 FROM listening_history h
                                     WHERE h.track_id = s.track_id AND h.started_at = s.started_at)
+                   AND NOT (s.source = 'lastfm' AND (
+                           EXISTS (SELECT 1 FROM listening_history h
+                                    WHERE {same_listen('h', 's.started_at')})
+                        OR EXISTS (SELECT 1 FROM _S_.listening_history n
+                                    WHERE n.source = 'sautium'
+                                      AND {same_listen('n', 's.started_at')})))
                  ORDER BY s.track_id, s.started_at, s.id
                 RETURNING track_id""")
         added = cur.fetchall()
         merged["listens"] = len(added)
-        merged["stats"] = refresh_play_stats(cur, sorted({str(r[0]) for r in added}))
+        merged["listens_replaced"] = len(replaced)
+        merged["stats"] = refresh_play_stats(cur, sorted({str(r[0]) for r in added + replaced}))
         cur.execute(f"""SELECT count(*), count(DISTINCT track_id) FROM {SCRATCH}.listening_history s
                          WHERE NOT EXISTS (SELECT 1 FROM tracks t WHERE t.id = s.track_id)""")
         waiting["listens"], waiting["tracks"] = (int(v) for v in cur.fetchone())
@@ -419,7 +439,9 @@ def merge_life(conn, *, progress: Optional[ProgressFn] = None) -> dict:
 
         # --- listening sessions by id: closed ones whose tracks are all known
         # here (an open one is the other machine's live queue; a partial card
-        # would never be completed, so it waits whole).
+        # would never be completed, so it waits whole). A card generated from
+        # imported listens is not merged: it is a projection of those listens,
+        # rebuilt here from the merged ones.
         run(f"""INSERT INTO listening_sessions (id, origin, title, subtitle, cover_id, origin_album_id,
                                                 seed_media_file_id, track_count, started_at, ended_at,
                                                 created_at, seed_track_id, cover_url)
@@ -430,7 +452,7 @@ def merge_life(conn, *, progress: Optional[ProgressFn] = None) -> dict:
                        s.track_count, s.started_at, s.ended_at, s.created_at,
                        (SELECT t.id FROM tracks t WHERE t.id = s.seed_track_id), s.cover_url
                   FROM _S_.listening_sessions s
-                 WHERE s.ended_at IS NOT NULL
+                 WHERE s.ended_at IS NOT NULL AND s.source = 'sautium'
                    AND NOT EXISTS (SELECT 1 FROM _S_.session_tracks st
                                     WHERE st.session_id = s.id
                                       AND NOT EXISTS (SELECT 1 FROM tracks t WHERE t.id = st.track_id))
@@ -445,7 +467,7 @@ def merge_life(conn, *, progress: Optional[ProgressFn] = None) -> dict:
                      WHERE st.session_id = ANY(CAST(%(ids)s AS uuid[]))
                     ON CONFLICT DO NOTHING""", {"ids": [str(s) for s in sessions]})
         run("""SELECT count(*) FROM _S_.listening_sessions s
-                WHERE s.ended_at IS NOT NULL
+                WHERE s.ended_at IS NOT NULL AND s.source = 'sautium'
                   AND NOT EXISTS (SELECT 1 FROM listening_sessions l WHERE l.id = s.id)
                   AND EXISTS (SELECT 1 FROM _S_.session_tracks st
                                WHERE st.session_id = s.id

@@ -304,7 +304,7 @@ after a rebuild): union, keyed so that a second import changes nothing.
 
 | Table | Key | Rule |
 |---|---|---|
-| `listening_history` | `(track_id, started_at)` | insert missing rows only; the other machine's `media_file_id` becomes this machine's file for the track, or NULL |
+| `listening_history` | `(track_id, started_at)` between two native rows; the start within 10 s (`play_stats.same_listen`) where one side is an imported Last.fm scrobble (`source='lastfm'`, since 2026-09-24) | insert missing rows only — except that a native completed listen replaces the imported record of the same listen; the other machine's `media_file_id` becomes this machine's file for the track, or NULL. Cards generated from imported listens are not merged but rebuilt |
 | `local_play_stats` | — | **recompute** from history for every track the merge touched, never merge counters |
 | `demo_plays` | `track_id` | the one full demo stream of a track is spent on whichever machine heard it first: insert missing, and an earlier `played_at` replaces a later one |
 | `listening_sessions`, `session_tracks` | session uuid | insert missing **closed** sessions whose tracks are all known here (an open one is the other machine's live queue; a partial card would never complete) |
