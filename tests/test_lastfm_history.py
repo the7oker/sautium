@@ -41,7 +41,8 @@ PAGE = """<?xml version="1.0" encoding="utf-8"?>
 
 def test_a_page_reads_dated_scrobbles_and_keeps_mbids_as_hints():
     page = lastfm._recent_tracks(parseString(PAGE))
-    assert page["total"] == 3
+    assert page["total"] == 3 and page["dated"] == 2
+    assert page["oldest"] == datetime.fromtimestamp(1758391000, tz=timezone.utc)
     assert page["items"] == [
         {"played_at": datetime.fromtimestamp(1758391200, tz=timezone.utc), "artist": "Sade",
          "title": "Kiss of Life", "album": "Love Deluxe",
@@ -109,7 +110,10 @@ class _FakeLastFm:
         rows = sorted((s for s in self.history
                        if s["played_at"] < before and (after is None or s["played_at"] >= after)),
                       key=lambda s: s["played_at"], reverse=True)
-        return {"total": len(rows), "items": rows[:lastfm_history.PAGE_SIZE]}
+        page = rows[:lastfm_history.PAGE_SIZE]
+        return {"total": len(rows), "dated": len(page),
+                "oldest": min((s["played_at"] for s in page), default=None),
+                "items": [s for s in page if s["artist"] and s["title"]]}
 
 
 @pytest.fixture
@@ -124,6 +128,7 @@ def walk(dsn, monkeypatch):
     monkeypatch.setattr(settings, "lastfm_session_key", "sk")
     monkeypatch.setattr(settings, "lastfm_username", "Vale")
     _FakeLastFm.calls = []
+    lastfm_history._cancel.clear()   # start() clears it; these tests call _run directly
     conn = psycopg2.connect(dsn, options="-c timezone=UTC")
     conn.autocommit = True
     with conn.cursor() as cur:
@@ -226,3 +231,19 @@ def test_remove_takes_every_imported_listen_and_the_waiting_room(walk):
         assert cur.fetchall() == [("sautium",)]
         cur.execute("SELECT (SELECT count(*) FROM lastfm_import), (SELECT count(*) FROM pending_scrobble_artists)")
         assert cur.fetchone() == (0, 0)
+
+
+def test_a_nameless_scrobble_does_not_end_the_walk(walk):
+    # A full page whose one scrobble has no title reads as full: the walk
+    # goes on to the older pages instead of taking it for the last one.
+    _FakeLastFm.history = [_scrobble(m) for m in (0, 10, 20, 30, 40)]
+    _FakeLastFm.history[3]["title"] = ""
+
+    lastfm_history._run("vale", "connected")
+
+    with walk.cursor() as cur:
+        cur.execute("SELECT count(*) FROM pending_scrobbles")
+        assert cur.fetchone() == (4,)
+        cur.execute("SELECT walk_fetched FROM lastfm_import")
+        assert cur.fetchone() == (4,)
+

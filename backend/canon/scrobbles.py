@@ -403,6 +403,7 @@ def resolve_names(limit: int = _RESOLVE_PER_PASS, *, create: bool = True) -> Row
     MB data at all. With `create` off (the phantom layer switched off) only a
     gid this node already anchors is taken. Returns counts, the artists
     resolved, and whether names are left for another pass."""
+    from canon import algo_canon
     from discography import _MB_SOURCE_COVERS_SQL
     stats: Row = {"decided": 0, "resolved": 0, "not_in_mb": 0, "undecided": 0}
     due = [r["name_key"] for r in db_query(f"""
@@ -421,26 +422,34 @@ def resolve_names(limit: int = _RESOLVE_PER_PASS, *, create: bool = True) -> Row
     resolved: Dict[str, str] = {}
     evidence = _evidence(due) if due else {}
     for nk in due:
-        stats["decided"] += 1
         e = evidence.get(nk)
         if e is None or _unplaceable(nk):
+            stats["decided"] += 1
             continue
-        gids = _candidates(e["credits"].most_common(1)[0][0])
-        if not gids:
-            stats["not_in_mb"] += 1
-            continue
-        anchored = {r["gid"] for r in db_query(
-            "SELECT mbid::text AS gid FROM artist_mbids WHERE mbid = ANY(%(g)s::uuid[])",
-            {"g": gids})}
-        if not create:
-            gids = [g for g in gids if g in anchored]
-        gid = decide(e, gids, anchored) if gids else None
-        artist_id = _anchor(gid) if gid else None
+        # The canon lock per name, not per pass: it is also the dump lock
+        # the mint and the discography step probe, and held for a whole
+        # batch it read to them as a dump reload for tens of seconds.
+        with algo_canon() as ok:
+            if not ok:
+                break
+            stats["decided"] += 1
+            gids = _candidates(e["credits"].most_common(1)[0][0])
+            if not gids:
+                stats["not_in_mb"] += 1
+                continue
+            anchored = {r["gid"] for r in db_query(
+                "SELECT mbid::text AS gid FROM artist_mbids WHERE mbid = ANY(%(g)s::uuid[])",
+                {"g": gids})}
+            if not create:
+                gids = [g for g in gids if g in anchored]
+            gid = decide(e, gids, anchored) if gids else None
+            artist_id = _anchor(gid) if gid else None
         if artist_id is None:
             stats["undecided"] += 1
             continue
         resolved[nk] = artist_id
         stats["resolved"] += 1
+    due = due[:stats["decided"]]
     if due:
         db_execute("""UPDATE pending_scrobble_artists
                          SET checked_at = now(),
@@ -655,7 +664,6 @@ def run_pass(scope: Row) -> bool:
     allows, then what the new listens wake. Returns whether a stage hit its cap
     with work left (the consumer runs another pass)."""
     import mb_backend
-    from canon import algo_canon
     from discography import _mb_load_in_progress
     from routers.settings import _read as read_setting
     stats: Row = {"echoes": drop_echoes(),
@@ -663,8 +671,7 @@ def run_pass(scope: Row) -> bool:
     drain = False
     if mb_backend.LOCAL_DUMP and not _mb_load_in_progress():
         create = bool(read_setting("discovery.phantom_layer"))
-        with algo_canon() as ok:
-            resolve = resolve_names(create=create) if ok else {"artists": [], "drain": False}
+        resolve = resolve_names(create=create)
         mint = mint_resolved() if create else {"statuses": Counter(), "artists": [], "drain": False}
         catalogue = bind_catalogue(set(scope["artists"]) | set(resolve["artists"])
                                    | set(mint["artists"]))

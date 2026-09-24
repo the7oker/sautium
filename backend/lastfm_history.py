@@ -258,10 +258,10 @@ def _run(user: str, reason: str) -> None:
             if walk["total"] is None:
                 walk["total"] = page["total"]
             items = [i for i in page["items"] if i["played_at"] <= walk["top"]]
-            oldest = min((i["played_at"] for i in page["items"]), default=before)
+            oldest = page["oldest"] or before
             with transaction() as cur:
                 touched = _store_page(cur, user, items, walk, before, oldest)
-                done = len(page["items"]) < PAGE_SIZE
+                done = page["dated"] < PAGE_SIZE
                 if done:
                     _close_walk(cur, user)
             pages += 1

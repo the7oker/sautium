@@ -185,15 +185,17 @@ def _recent_tracks(doc: Document) -> Dict[str, Any]:
     (an album's is an MB release, a track's often an MB track, not a
     recording), never anchors."""
     root = doc.getElementsByTagName("recenttracks")[0]
-    items = []
+    items, dated = [], []
     for track in root.getElementsByTagName("track"):
         dates = track.getElementsByTagName("date")
         if track.getAttribute("nowplaying") == "true" or not dates:
             continue
+        played_at = datetime.fromtimestamp(int(dates[0].getAttribute("uts")), tz=timezone.utc)
+        dated.append(played_at)
         artist = track.getElementsByTagName("artist")[0]
         album = track.getElementsByTagName("album")[0]
         items.append({
-            "played_at": datetime.fromtimestamp(int(dates[0].getAttribute("uts")), tz=timezone.utc),
+            "played_at": played_at,
             "artist": (_first_text(track, "artist") or "")[:_SCROBBLE_TEXT_MAX],
             "title": (_first_text(track, "name") or "")[:_SCROBBLE_TEXT_MAX],
             "album": (_first_text(track, "album") or "")[:_SCROBBLE_TEXT_MAX] or None,
@@ -201,7 +203,11 @@ def _recent_tracks(doc: Document) -> Dict[str, Any]:
             "album_mbid": _uuid_or_none(album.getAttribute("mbid")),
             "track_mbid": _uuid_or_none(_first_text(track, "mbid") or ""),
         })
+    # `dated` counts every scrobble on the page, a nameless one included: the
+    # walk's end and its next bound read the page as Last.fm sent it — one
+    # scrobble without a title once ended a walk 55,000 scrobbles early.
     return {"total": int(root.getAttribute("total") or 0),
+            "dated": len(dated), "oldest": min(dated, default=None),
             "items": [i for i in items if i["artist"] and i["title"]]}
 
 
