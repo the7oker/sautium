@@ -31,7 +31,7 @@ import logging
 from collections import defaultdict
 from typing import Optional
 
-from db_pool import db_query, get_conn
+from db_pool import db_execute, db_query, get_conn
 
 logger = logging.getLogger(__name__)
 
@@ -260,7 +260,11 @@ def canonize_engaged_credit_heads(limit: Optional[int] = None) -> dict:
     namesake collision the mint's name-keyed rows cannot express; it is left
     for the namesake split. Nothing is discarded: a head whose recordings
     are not in the local mb_* tables yet (a slice replica ahead of its slice)
-    keeps its tracks and is retried next pass."""
+    keeps its tracks and is retried in turn: every attempt stamps
+    last_mb_sync and the queue takes the never-tried, then the longest-waiting
+    first — an imported listening history engages hundreds of heads at once,
+    and unresolvable ones at the front of a name-ordered queue starved the
+    rest."""
     from sql_queries import ARTIST_ENGAGED
     stats = {"candidates": 0, "canonized": 0, "ambiguous": 0, "unresolved": 0}
     lim = "LIMIT %(lim)s" if limit else ""
@@ -274,7 +278,7 @@ def canonize_engaged_credit_heads(limit: Optional[int] = None) -> dict:
                               JOIN media_files mf ON mf.track_id = ta.track_id
                               WHERE ta.artist_id = a.id)
               AND {ARTIST_ENGAGED}
-            ORDER BY a.name
+            ORDER BY a.last_mb_sync NULLS FIRST, a.name
             {lim}
         )
         SELECT c.id::text AS artist_id,
@@ -313,6 +317,9 @@ def canonize_engaged_credit_heads(limit: Optional[int] = None) -> dict:
                     SELECT COUNT(*) FROM artist_mbids
                     WHERE artist_id = ANY(%s::uuid[])""", ([a for _, a in anchors],))
                 stats["canonized"] = cur.fetchone()[0]
+    if rows:
+        db_execute("UPDATE artists SET last_mb_sync = now() WHERE id = ANY(%(ids)s::uuid[])",
+                   {"ids": [r["artist_id"] for r in rows]})
     if stats["candidates"]:
         logger.info("credit-head canon: %s", stats)
     return stats

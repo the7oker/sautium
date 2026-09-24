@@ -225,9 +225,20 @@ def _step_missing_artists(limit: int) -> Dict[str, int]:
     stats = {"processed": 0, "success": 0, "not_found": 0, "errors": 0}
     lastfm = LastFmService()
 
+    # Most-listened first: a Last.fm history import engages hundreds of
+    # artists at once, and the ones the owner actually plays are the bios
+    # worth having first. The weight comes from the small side
+    # (local_play_stats), not a per-artist probe.
     sql = text(f"""
+        WITH weight AS (
+            SELECT ta.artist_id, sum(lps.total_listen_time) AS listened
+              FROM local_play_stats lps
+              JOIN track_artists ta ON ta.track_id = lps.track_id AND ta.role = 'primary'
+             GROUP BY ta.artist_id
+        )
         SELECT a.id, a.name
         FROM artists a
+        LEFT JOIN weight w ON w.artist_id = a.id
         WHERE (
             {ARTIST_ENGAGED}
             OR EXISTS (SELECT 1 FROM artist_mbids am WHERE am.artist_id = a.id)
@@ -247,7 +258,7 @@ def _step_missing_artists(limit: int) -> Dict[str, int]:
               AND em.fetch_status IN ('not_found', 'error')""" + _NEGATIVE_CACHE_WINDOW + """
         )
         AND a.id <> ALL(CAST(:skip AS uuid[]))
-        ORDER BY a.name
+        ORDER BY w.listened DESC NULLS LAST, a.name
         LIMIT :batch
     """)
 
