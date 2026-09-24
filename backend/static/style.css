@@ -313,6 +313,8 @@ body.sautium-base {
   overflow: hidden;
   text-overflow: ellipsis;
 }
+/* "· last.fm" after the line of a card generated from the imported history. */
+.album-artist .tile-source { color: var(--color-text-dim); }
 
 .album-similarity {
   font-family: var(--font-mono);
@@ -2826,6 +2828,8 @@ body.sautium-base {
 /* Origin tag for a queue that is neither an album nor a track (radio, mix):
    a neutral status tag like the Lossless badge — never blue, that is for
    numbers. */
+a.am-kind { text-decoration: none; }
+.am-kind + .am-kind { margin-left: calc(6 * var(--px)); }
 .am-kind {
   margin-left: auto;
   padding: calc(3 * var(--px)) calc(8 * var(--px));

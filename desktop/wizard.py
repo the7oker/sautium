@@ -1554,7 +1554,8 @@ class SetupWizard(ctk.CTkToplevel):
 
         ctk.CTkLabel(
             self.content_frame,
-            text="Track your listening history on Last.fm.\nScrobbling works automatically with HQPlayer playback.",
+            text="Scrobble what you play to Last.fm, and bring your Last.fm\n"
+                 "listening history in, so Home knows your taste from day one.",
         ).pack(pady=5)
 
         lastfm = self.config.get("lastfm", {})
@@ -1566,7 +1567,7 @@ class SetupWizard(ctk.CTkToplevel):
 
         ctk.CTkCheckBox(
             self.content_frame,
-            text="Enable Last.fm scrobbling",
+            text="Connect Last.fm",
             variable=self._lastfm_enabled_var,
         ).pack(pady=10)
 
@@ -1574,9 +1575,9 @@ class SetupWizard(ctk.CTkToplevel):
             self.content_frame,
             text=(
                 "After setup, the app will open Last.fm in your browser\n"
-                "to authorize scrobbling. Your Last.fm username is detected\n"
-                "automatically once you allow access. You can also do this\n"
-                "later in Settings."
+                "to authorize access. Your listening history is imported once\n"
+                "you allow it and stays on this node. You can also do this\n"
+                "later in Profile › Last.fm."
             ),
             text_color="gray",
             font=ctk.CTkFont(size=12),

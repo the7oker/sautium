@@ -851,9 +851,12 @@ class LauncherApp(ctk.CTk):
 
         def _connected(username: str):
             self._record_lastfm_username(username)
-            _say(f"Authorized as {username}!" if username else "Authorized successfully!",
+            # The connection also starts the listening-history import
+            # (backend/lastfm_history.py); Profile › Last.fm shows it.
+            _say(f"Authorized as {username} — importing your listening history."
+                 if username else "Authorized — importing your listening history.",
                  "#22c55e")
-            self.after(1500, _close)
+            self.after(2500, _close)
 
         def _watch():
             for _ in self.api_client.stream("/lastfm/auth/stream", stop=stop):

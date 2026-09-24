@@ -3196,12 +3196,14 @@
       ? `<span class="album-tile-editions">${Number(item.album_count)}</span>` : '';
     const repeat = (item.repeat_count > 1)
       ? `<span class="album-tile-repeat">×${Number(item.repeat_count)}</span>` : '';
+    // A card generated from the imported Last.fm history says so, quietly.
+    const source = item.source === 'lastfm' ? ' <span class="tile-source">· last.fm</span>' : '';
     tile.innerHTML = `
       <div class="album-cover" style="--cover-bg-1: ${c.bg1}; --cover-bg-2: ${c.bg2};">
         ${cover}${repeat}${stack}
       </div>
       <div class="album-title">${escapeHtml(title || '')}</div>
-      <div class="album-artist">${escapeHtml(subtitle || '')}</div>
+      <div class="album-artist">${escapeHtml(subtitle || '')}${source}</div>
     `;
     if (id) {
       tile.addEventListener('click', () => navigateToEntity('session', id));
@@ -5975,6 +5977,8 @@
           <span class="am-dur" style="margin-left: 0;">${count} track${count === 1 ? '' : 's'}</span>
           ${d.total_duration ? `<span class="am-dot"></span><span class="am-dur" style="margin-left: 0;">${fmtDurationLong(d.total_duration)}</span>` : ''}
           ${kind ? `<span class="am-kind">${kind}</span>` : ''}
+          ${d.source === 'lastfm' && d.lastfm_url ? `<a class="am-kind" href="${escapeHtml(d.lastfm_url)}"
+               target="_blank" rel="noopener">last.fm</a>` : ''}
         </div>
       </div>
       <div class="album-actions${singleAlbumId ? ' has-album' : ''}">
@@ -9614,6 +9618,8 @@
           })()}
         </div>
 
+        ${(config && config.lastfm_authorized) ? '<div data-lfm-history></div>' : ''}
+
         <div data-hw-block></div>
 
         <div class="profile-section-head">
@@ -9641,6 +9647,7 @@
     `;
 
     _loadHwBlock(root);
+    _loadLfmHistoryBlock(root);
 
     root.querySelector('[data-back]').addEventListener('click', () => {
       goBack('home');
@@ -10463,7 +10470,7 @@
         </div>
         <div class="add-gear-row">
           <p style="margin:0;color:var(--color-text-muted);font-size:calc(13*var(--px));line-height:1.5;">
-            Sautium uses your Last.fm account to fetch artist bios, similar artists and tags, and to scrobble what you play. The next step opens last.fm in a new tab — allow access there, and Last.fm sends the browser back to finish here.
+            Sautium uses your Last.fm account to fetch artist bios, similar artists and tags, to scrobble what you play, and to import your listening history — kept on this node only — so Home knows your taste. The next step opens last.fm in a new tab — allow access there, and Last.fm sends the browser back to finish here.
           </p>
           <div id="lfmStartRow">
             <button class="profile-btn primary" data-start>Open Last.fm authorisation</button>
@@ -12850,6 +12857,127 @@
         <div class="form-row"><span class="form-label">Active</span><span class="form-value">${escapeProfileHtml(PROFILE_DISPLAY_NAMES[hw.profile] || hw.profile || '?')}${hw.source === 'env' ? ' · env override' : ''}</span></div>
         <div class="form-row stacked"><div class="row-stack-sub">Auto-selected from this machine: ${escapeProfileHtml(_hwMachineLine(d))}. Scales analysis, model pre-warm and background load.</div></div>
       </div>`;
+  }
+
+  /* Last.fm listening history (Profile screen, when Last.fm is connected).
+     The connection starts the import; Sync reads what Last.fm gained since —
+     other players and services too. Loads itself after render and follows
+     the walk over the shared library stream, in place: the counts, the
+     progress line and the bar change; the block re-renders only when a walk
+     ends. Remove is the owner's explicit, confirmed removal of everything
+     the import brought in. */
+  let _lfmHistoryCtrl = null;
+
+  function _lfmHistoryCounts(h) {
+    return `${fmtNum(h.imported)} imported${h.waiting ? ` · ${fmtNum(h.waiting)} waiting` : ''}`;
+  }
+
+  function _lfmHistoryHTML(h, user) {
+    const running = !!h.running;
+    const pct = typeof h.pct === 'number' ? h.pct : null;
+    const why = h.waiting_why;
+    const whyParts = why ? [
+      why.catalogue ? `${fmtNum(why.catalogue)} for MusicBrainz data` : '',
+      why.unknown ? `${fmtNum(why.unknown)} by artists MusicBrainz cannot place` : '',
+      why.unminted ? `${fmtNum(why.unminted)} not on an album (singles, compilations, live)` : '',
+    ].filter(Boolean) : [];
+    const note = h.error || h.paused || '';
+    const credit = user
+      ? `<a class="form-value-link" target="_blank" rel="noopener"
+            href="https://www.last.fm/user/${encodeURIComponent(user)}/library">data from Last.fm</a>`
+      : '';
+    const actions = running ? `
+      <div class="action-progress" data-lfm-progress>${escapeProfileHtml(h.progress || 'Reading your scrobbles…')}</div>
+      <div class="enrich-bar${pct == null ? ' indeterminate' : ''}" data-lfm-bar><div class="fill"${pct == null ? '' : ` style="width:${pct}%;"`}></div></div>
+    ` : `
+      ${note ? `<div class="action-progress${h.error ? ' failed' : ''}">${escapeProfileHtml(note)}</div>` : ''}
+      <div class="btn-row">
+        <button class="btn btn-secondary" data-action="lfm-sync">Sync</button>
+        ${h.imported || h.waiting ? '<button class="btn btn-secondary" data-action="lfm-remove">Remove imported</button>' : ''}
+      </div>`;
+    return `
+      <div class="profile-group-label">Listening history</div>
+      <div class="form-group">
+        <div class="form-row"><span class="form-label">From Last.fm</span><span class="form-value" data-lfm-counts>${_lfmHistoryCounts(h)}</span></div>
+        <div class="form-row stacked"><div class="row-stack-sub">Your scrobbles become listens on the tracks they name, so Home knows your taste. They stay on this node.${h.last_sync_at ? ` Last sync ${escapeProfileHtml(fmtRelative(h.last_sync_at))}.` : ''}</div></div>
+        ${whyParts.length ? `<div class="form-row stacked"><div class="row-stack-sub">Waiting: ${whyParts.join(' · ')}.</div></div>` : ''}
+        ${credit ? `<div class="form-row stacked"><div class="row-stack-sub">${credit}</div></div>` : ''}
+      </div>
+      <div data-lfm-actions>${actions}</div>`;
+  }
+
+  async function _fetchLfmHistory() {
+    try {
+      const r = await fetch('/api/profile/lastfm/history');
+      return r.ok ? await r.json() : null;
+    } catch (_) { return null; }
+  }
+
+  function _paintLfmHistory(root, holder, h, user) {
+    holder.innerHTML = _lfmHistoryHTML(h, user);
+    const sync = holder.querySelector('[data-action="lfm-sync"]');
+    if (sync) sync.addEventListener('click', () => onceInFlight(sync, async () => {
+      const r = await fetch('/api/profile/lastfm/history/sync', { method: 'POST' });
+      if (r.ok) _paintLfmHistory(root, holder, await r.json(), user);
+    }));
+    const remove = holder.querySelector('[data-action="lfm-remove"]');
+    if (remove) remove.addEventListener('click', () => onceInFlight(remove, async () => {
+      const ok = await confirmDestructive({
+        title: 'Remove the imported history?',
+        message: 'Every listen and Listening-history card brought in from Last.fm is removed from '
+               + 'this node, with the scrobbles still waiting. Plays on this node stay. '
+               + 'Sync brings the history back.',
+        confirmText: 'Remove',
+      });
+      if (!ok) return;
+      const r = await fetch('/api/profile/lastfm/history/remove', { method: 'POST' });
+      if (r.ok) _paintLfmHistory(root, holder, await r.json(), user);
+      else notices.toast({ kind: 'error', title: 'Not removed', text: 'The node refused the removal.' });
+    }));
+  }
+
+  async function _loadLfmHistoryBlock(root) {
+    const holder = root.querySelector('[data-lfm-history]');
+    if (!holder) return;
+    const user = (await (async () => {
+      try { const r = await fetch('/lastfm/auth/status'); return r.ok ? (await r.json()).username : ''; }
+      catch (_) { return ''; }
+    })()) || '';
+    const h = await _fetchLfmHistory();
+    if (!h || !h.connected) { holder.innerHTML = ''; return; }
+    _paintLfmHistory(root, holder, h, user);
+
+    if (_lfmHistoryCtrl) _lfmHistoryCtrl.abort();
+    _lfmHistoryCtrl = libraryWake.on(async () => {
+      if (!parseHash().startsWith('more/profile') || !holder.isConnected) {
+        _lfmHistoryCtrl && _lfmHistoryCtrl.abort();
+        _lfmHistoryCtrl = null;
+        return;
+      }
+      const isFresh = claimFresh('lfm.history');
+      const next = await _fetchLfmHistory();
+      if (!next || !isFresh()) return;
+      const line = holder.querySelector('[data-lfm-progress]');
+      if (next.running && line) {
+        if (line.textContent !== next.progress && next.progress) line.textContent = next.progress;
+        const bar = holder.querySelector('[data-lfm-bar]');
+        const fill = bar && bar.querySelector('.fill');
+        if (bar && typeof next.pct === 'number') {
+          bar.classList.remove('indeterminate');
+          if (fill) fill.style.width = next.pct + '%';
+        }
+        const counts = holder.querySelector('[data-lfm-counts]');
+        const text = _lfmHistoryCounts(next);
+        if (counts && counts.textContent !== text) counts.textContent = text;
+        return;
+      }
+      // A walk started or ended (or the canon placed what waited): the
+      // block's shape changes, so it is painted anew.
+      const counts = holder.querySelector('[data-lfm-counts]');
+      if (next.running || line || !counts || counts.textContent !== _lfmHistoryCounts(next)) {
+        _paintLfmHistory(root, holder, next, user);
+      }
+    });
   }
 
   /* ====== Streaming library screen — #more/phantoms ======
