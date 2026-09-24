@@ -23,7 +23,6 @@ import psycopg2
 import psycopg2.extensions
 
 from desktop.api_client import BackendAPIClient
-from desktop.mb_slice_client import MBSliceClient
 from desktop.p2p import diag_protocol, lb_slice_cycle, mb_slice_queries, sync_walk
 from desktop.p2p.addrs import fmt_addr, is_internet_vantage
 from desktop.p2p.peer_auth import pinned_pubkey, pinned_ssl_context
@@ -32,6 +31,7 @@ from desktop.p2p.dht_service import DHTService
 from desktop.p2p.dht_state import DhtStateStore
 from desktop.p2p.lan_discovery import LANDiscovery
 from desktop.p2p.lb_slice_cycle import LbSliceCycle
+from desktop.p2p.mb_slice_cycle import MbSliceCycle
 from desktop.p2p.sync_walk import SyncWalk
 from desktop.p2p.sync_server import (
     FORWARD_ACK_TIMEOUT, VOUCHER_TTL, SyncServer, voucher_payload,
@@ -87,8 +87,7 @@ class P2PManager:
         self._sync_request_listen_task: Optional[asyncio.Task] = None
         self._auto_sync_task: Optional[asyncio.Task] = None
         self._walk: Optional[SyncWalk] = None   # the pull side (desktop/p2p/sync_walk.py)
-        self._mb_slice_task: Optional[asyncio.Task] = None
-        self._mb_slice_lock: Optional[asyncio.Lock] = None
+        self._mb_cycle_tasks: list = []
         self._lb_cycle_tasks: list = []
         self._mb_dump_version: Optional[str] = None
         self._running = False
@@ -235,7 +234,7 @@ class P2PManager:
             manual_peers=p2p_cfg.get("manual_peers", []),
             skip_addrs=self._dht_skip_addrs,
             diag_record=self._diag_record,
-            after_run=self._request_mb_slices_safe,
+            after_run=self._after_walk,
             on_enriched_count=self._lan_discovery.update_enriched_count,
         )
         # The ListenBrainz slice cycle — the same shape, its own family
@@ -244,6 +243,21 @@ class P2PManager:
             self.db_dsn,
             connect=self._walk.connect_peer,
             config=self.config.get("lb_slice", {}),
+            dht=self._dht_service,
+            lan=self._lan_discovery,
+            manual_peers=p2p_cfg.get("manual_peers", []),
+            load_bans_fn=self._load_p2p_bans,
+            diag_record=self._diag_record,
+            first_source=lambda: self._walk.first_source,
+        )
+        # The MusicBrainz slice cycle — shared with the Docker backend since
+        # 2026-09-24 (desktop/p2p/mb_slice_cycle.py); the facts it imports go
+        # to the backend canon over its API.
+        self._mb_cycle = MbSliceCycle(
+            self.db_dsn,
+            connect=self._walk.connect_peer,
+            after_import=self._canonicalize_locally,
+            config=self.config.get("mb_slice", {}),
             dht=self._dht_service,
             lan=self._lan_discovery,
             manual_peers=p2p_cfg.get("manual_peers", []),
@@ -345,11 +359,6 @@ class P2PManager:
         self._stop_event = asyncio.Event()
         self._chat_notify = asyncio.Event()
         self._walk.bind()
-        self._mb_slice_lock = asyncio.Lock()
-        # When the periodic cycle fires next — what a deferred slice
-        # batch is honestly waiting for (published with mb_slice.status).
-        self._mb_slice_next_at: Optional[float] = None
-        self._mb_probe_lock = asyncio.Lock()
         # Support diagnostics: one sequential worker fed by the master's
         # wake stream (warrants), its reconnects (resume) and LISTEN
         # sautium_diag (reports) — see _diag_worker.
@@ -470,9 +479,11 @@ class P2PManager:
             self._auto_sync_task = asyncio.create_task(
                 self._walk.interval_loop()
             )
-            self._mb_slice_task = asyncio.create_task(
-                self._mb_slice_loop()
-            )
+            self._mb_cycle.bind()
+            self._mb_cycle_tasks = [
+                asyncio.create_task(self._mb_cycle.dispatch_loop()),
+                asyncio.create_task(self._mb_cycle.interval_loop()),
+            ]
             self._lb_cycle.bind()
             self._lb_cycle_tasks = [
                 asyncio.create_task(self._lb_cycle.dispatch_loop()),
@@ -651,8 +662,8 @@ class P2PManager:
                      self._resolve_friends_task, self._db_listen_task,
                      self._pending_accepts_task, self._lan_discovery_task,
                      self._sync_request_listen_task, self._sync_request_task,
-                     self._auto_sync_task, self._mb_slice_task,
-                     *self._lb_cycle_tasks,
+                     self._auto_sync_task,
+                     *self._mb_cycle_tasks, *self._lb_cycle_tasks,
                      self._upnp_renewal_task, self._master_wake_task,
                      self._peer_relay_task, self._diag_task,
                      *self._peer_relay_subs.values(),
@@ -2975,13 +2986,15 @@ class P2PManager:
             # Enrichment is what MINTS phantom similars, and it runs in the
             # backend — without this the freshly minted names wait out the
             # 6-hour slice timer even with a dump peer online right now.
-            "sautium_enrich_done": lambda: asyncio.create_task(
-                self._request_mb_slices_safe()),
+            "sautium_enrich_done": lambda: self._mb_cycle.request("enrich"),
             # Backend fires this when a remote MB search exhausted every
             # known source — re-probe now instead of waiting out the slice
             # timer, so the chip flips honestly.
             "sautium_mb_sources_request": lambda: asyncio.create_task(
-                self._refresh_mb_sources()),
+                self._mb_cycle.refresh_sources()),
+            # Imported Last.fm scrobbles wait on names only a slice can
+            # place (backend/canon/scrobbles.py).
+            "sautium_mb_pending": lambda: self._mb_cycle.request("scrobbles"),
             # The ListenBrainz family: the MBID set grew (a trigger on
             # artist_mbids), an artist page asked for one artist now, or
             # the backend finished/deleted the local statistics dump.
@@ -2991,12 +3004,10 @@ class P2PManager:
                 self._lb_sources_changed()),
         }, lambda: self._running)
 
-    async def _request_mb_slices_safe(self):
-        try:
-            await self._request_mb_slices()
-        except Exception:
-            logger.exception("post-sync MB slice fetch failed")
-        # What the walk just carried in may have brought new artist MBIDs.
+    async def _after_walk(self):
+        """What the walk just carried in may name artists canon waits on
+        (MB slices) and may have brought new artist MBIDs (LB slices)."""
+        self._mb_cycle.request("sync")
         self._lb_cycle.request("sync")
 
     async def _lb_dump_local(self) -> Optional[str]:
@@ -3019,112 +3030,17 @@ class P2PManager:
                 logger.debug(f"lbdump announce failed: {e}")
         self._lb_cycle.request("sources")
 
-    async def _refresh_mb_sources(self):
-        """On-demand source re-probe (backend NOTIFYs when a remote search
-        exhausted every known source — the 'dump node disappeared' moment).
-        _find_dump_peers persists the fresh verdict and NOTIFYs it back to
-        open tabs; a full-dump node has nothing to probe."""
-        if self._mb_probe_lock.locked():
-            return
-        async with self._mb_probe_lock:
-            try:
-                if await asyncio.get_event_loop().run_in_executor(
-                        None, self._local_dump_available_sync):
-                    return
-                await self._find_dump_peers()
-            except Exception as e:
-                logger.debug(f"MB source re-probe failed: {e}")
-
     # -------------------------------------------------------------------
-    # MB dump slices (P2P canonicalization for dump-less nodes)
+    # MB dump slices (desktop/p2p/mb_slice_cycle.py) — the launcher's side
     # -------------------------------------------------------------------
 
-    # Fallback default when user_settings has no mb_slice.auto_interval_min
-    # row and the config block is absent.
-    _MB_SLICE_INTERVAL_DEFAULT_MIN = 360
-
-    async def _mb_slice_loop(self):
-        """Periodic MB slice fetch for dump-less nodes. The post-sync trigger
-        covers the common case (new content arrives via sync/scan); this loop
-        is the fallback cadence and the retry path after peer failures.
-
-        The deadline of the NEXT timed run is set before each run and
-        published with every cycle's status: it is the one honest answer
-        to "when will the albums appear" for names a cycle could not serve."""
-        self._mb_slice_next_at = time.time() + 120
-        try:
-            await asyncio.sleep(120)
-        except asyncio.CancelledError:
-            return
-
-        while self._running:
-            interval_min = self._read_mb_slice_interval()
-            if interval_min and interval_min > 0:
-                self._mb_slice_next_at = time.time() + interval_min * 60
-                try:
-                    await self._request_mb_slices()
-                except Exception:
-                    logger.exception("MB slice cycle failed")
-                sleep_for = max(1.0, self._mb_slice_next_at - time.time())
-            else:
-                self._mb_slice_next_at = None
-                sleep_for = 300  # disabled — re-check the setting later
-            try:
-                await asyncio.sleep(sleep_for)
-            except asyncio.CancelledError:
-                break
-
-    def _read_mb_slice_interval(self) -> Optional[int]:
-        """mb_slice.auto_interval_min from user_settings (None = disabled),
-        falling back to the config block on a fresh install."""
-        default = self.config.get("mb_slice", {}).get(
-            "auto_interval_min", self._MB_SLICE_INTERVAL_DEFAULT_MIN)
-        try:
-            conn = psycopg2.connect(self.db_dsn)
-            conn.autocommit = True
-            try:
-                with conn.cursor() as cur:
-                    cur.execute(
-                        "SELECT value FROM user_settings WHERE key = %s",
-                        ("mb_slice.auto_interval_min",),
-                    )
-                    row = cur.fetchone()
-                    if row is None:
-                        return default
-                    if row[0] is None:
-                        return None  # explicitly disabled
-                    return int(row[0]) if row[0] else None
-            finally:
-                conn.close()
-        except Exception as e:
-            logger.debug(f"Failed to read mb_slice.auto_interval_min: {e}")
-        return default
-
-    def request_mb_slices(self) -> bool:
-        """Manual trigger from the launcher/UI thread (thread-safe)."""
-        if not self._running or not self._loop:
-            return False
-        asyncio.run_coroutine_threadsafe(
-            self._request_mb_slices(), self._loop)
-        return True
-
-    def _pending_slice_names_sync(self) -> list[str]:
-        conn = psycopg2.connect(self.db_dsn)
-        try:
-            return mb_slice_queries.pending_slice_names(conn, limit=200)
-        finally:
-            conn.close()
-
-    def _local_dump_available_sync(self):
-        """Full dump in THIS node's DB (VERSION marker + mb_artist rows on
-        our DSN). The file alone is not enough: on a dev host the Docker
-        loader stamps VERSION through the repo bind-mount while the
-        launcher's embedded PG has empty mb_* — fetch must not be fooled."""
-        conn = psycopg2.connect(self.db_dsn)
-        try:
-            return mb_slice_queries.local_dump_available(conn)
-        finally:
-            conn.close()
+    def _canonicalize_locally(self) -> None:
+        """The MB cycle's after-import hook (executor thread): hand the
+        freshly imported facts to the backend canon."""
+        api = self._local_backend_api()
+        result = api.canonicalize() if api else None
+        if not result or not (result.get("started") or result.get("running")):
+            logger.warning(f"backend canonicalize trigger failed: {result}")
 
     def _local_backend_api(self) -> Optional[BackendAPIClient]:
         port = self.config.get("ports", {}).get("web", 0)
@@ -3150,247 +3066,6 @@ class P2PManager:
         except Exception as e:
             logger.debug(f"Failed to load p2p bans: {e}")
             return set(), set()
-
-    async def _find_dump_peers(self) -> list[tuple[BackendAPIClient, str]]:
-        """Reachable slice sources, REPLICAS FIRST: manual peers and LAN
-        (cheap, likely friends), then a DHT capability lookup for full
-        dump holders. A dump-less peer with mb_slices > 0 re-serves the
-        blobs it verified — asking those first is what spreads the
-        entry-load off the few dump nodes; misses fall through to a dump
-        holder because serve order tries every source until a batch closes.
-        Locally-banned nodes are skipped before connecting (by address)
-        and after health (by pubkey)."""
-        loop = asyncio.get_event_loop()
-        banned_keys, banned_addrs = await loop.run_in_executor(
-            None, self._load_p2p_bans)
-        replicas: list[tuple[BackendAPIClient, str]] = []
-        dumps: list[tuple[BackendAPIClient, str]] = []
-        seen_addrs: set[str] = set()
-
-        candidates: list[str] = list(
-            self.config.get("p2p", {}).get("manual_peers", []))
-        if self._lan_discovery:
-            for ip, port in self._lan_discovery.peers:
-                info = self._lan_discovery.get_peer_info(ip, port) or {}
-                scheme = info.get("scheme", "https")
-                candidates.append(f"{scheme}://{fmt_addr(ip, port)}")
-        if self._dht_service:
-            for ip, port in await self._dht_service.lookup_capability("mbdump"):
-                candidates.append(fmt_addr(ip, port))
-        if not candidates:
-            # Dead DHT + no LAN + no manual peers (the mobile newborn):
-            # volunteer dump nodes from the Worker directory FIRST, the
-            # master hint LAST — that ordering is the de-specialization
-            # (Ф16c). The ban/health/node_id validation below stays the
-            # judge for every one of them.
-            from desktop.p2p import master_hint, node_hints
-            # Replica volunteers too — the health probe sorts them into the
-            # replicas tier, and replicas are asked BEFORE dump nodes by
-            # design: they are the load-spreader this directory exists for.
-            for cap in ("mbslices", "mbdump"):
-                for host, hport, _pk in await loop.run_in_executor(
-                        None, node_hints.fetch, cap):
-                    candidates.append(fmt_addr(host, hport))
-            hint = await loop.run_in_executor(None, master_hint.fetch)
-            if hint:
-                candidates.append(fmt_addr(*hint))
-
-        for addr in candidates:
-            if addr in seen_addrs:
-                continue
-            seen_addrs.add(addr)
-            if mb_slice_queries.addr_uuid(addr) in banned_addrs:
-                logger.info(f"MB slice: skipping banned address {addr}")
-                continue
-            api = await self._walk.connect_peer(addr)
-            if not api:
-                continue
-            health = await loop.run_in_executor(None, api.get_health)
-            if not health:
-                continue
-            node_id = health.get("node_id", "")
-            if node_id and node_id in banned_keys:
-                logger.info(f"MB slice: skipping banned node "
-                            f"{node_id[:16]}… at {addr}")
-                continue
-            if health.get("mb_dump"):
-                dumps.append((api, node_id))
-            elif health.get("mb_slices"):
-                replicas.append((api, node_id))
-
-        # Persist the source map for the backend's request-time consumers
-        # (remote MB search + click-to-mint slice fetch, mb_discovery):
-        # peer discovery needs the P2P stack living in THIS process, so the
-        # backend reads this cache instead. Refreshed on every slice run; a
-        # stale entry costs one failed probe and a rotation step.
-        try:
-            loop_ = asyncio.get_event_loop()
-            await loop_.run_in_executor(
-                None, self._write_settings_blocking, {
-                    "mb.search_sources":
-                        [{"url": api.base_url, "kind": "replica"}
-                         for api, _ in replicas]
-                        + [{"url": api.base_url, "kind": "dump"}
-                           for api, _ in dumps],
-                })
-            # Wake the backend's mb-sources listener → {"t": "mb"} event →
-            # the Discovery chip flips live (searching → online/disabled).
-            await loop_.run_in_executor(
-                None, self._notify_blocking, "sautium_mb_sources")
-        except Exception as e:
-            logger.debug(f"MB slice: source persist failed: {e}")
-        return replicas + dumps
-
-    async def _request_mb_slices(self) -> dict:
-        """Fetch MB slices for every canon-pending artist name and hand the
-        imported facts to the backend canon. Serialised via _mb_slice_lock so
-        the periodic loop, post-sync trigger and manual runs merge."""
-        cfg = self.config.get("mb_slice", {})
-        if not cfg.get("fetch", True):
-            logger.debug("MB slice: fetch disabled in config")
-            return {}
-        loop = asyncio.get_event_loop()
-        if await loop.run_in_executor(None, self._local_dump_available_sync):
-            logger.debug("MB slice: full local dump — nothing to fetch")
-            return {}
-        if self._mb_slice_lock.locked():
-            return {}
-
-        async with self._mb_slice_lock:
-            # Peer discovery runs BEFORE the pending-names early return: it
-            # also persists mb.search_sources for the backend's remote MB
-            # search, which a dump-less node needs even when canon has no
-            # work — gating it on pending names left the Discovery MB chip
-            # dead on idle nodes (observed 2026-08-10).
-            peers = await self._find_dump_peers()
-
-            names = await loop.run_in_executor(
-                None, self._pending_slice_names_sync)
-            if not names:
-                logger.info("MB slice: no pending names — all canon inputs "
-                            "already fetched")
-                await self._publish_mb_slice_status(
-                    pending=0, served=0, unserved=0, reason="idle",
-                    sources=len(peers))
-                return {}
-
-            if not peers:
-                logger.info("MB slice: no slice sources reachable")
-                await self._publish_mb_slice_status(
-                    pending=len(names), served=0, unserved=len(names),
-                    reason="no_sources", sources=0)
-                return {}
-
-            batch_size = max(1, min(int(cfg.get("batch_size", 20)),
-                                    mb_slice_queries.MAX_NAMES_PER_REQUEST))
-            logger.info(f"MB slice: {len(names)} pending names, "
-                        f"{len(peers)} source(s) (replicas first)")
-
-            backend_api = self._local_backend_api()
-            total = {"names": 0, "matched": 0, "rows_inserted": 0}
-            imported_any = False
-            last_client = None
-            remaining = list(names)
-            reasons: set[str] = set()
-            # Source by source: each takes what it can, the leftovers
-            # (a replica's `missing` plus outright failures) carry to the
-            # next candidate. Provenance is written per verified name, so
-            # re-asking is idempotent.
-            for api, node in peers:
-                if not remaining:
-                    break
-                client = MBSliceClient(api, db_dsn=self.db_dsn,
-                                       source_node=node,
-                                       backend_api=backend_api)
-                leftovers: list[str] = []
-                waited = False
-                for i in range(0, len(remaining), batch_size):
-                    batch = remaining[i:i + batch_size]
-                    stats = await loop.run_in_executor(
-                        None, client.run, batch)
-                    if "retry_after" in stats and not waited:
-                        # The peer's per-IP window is full — usually our own
-                        # sync walk just spent it. Retry-After says when the
-                        # oldest stamp leaves the window; wait that out ONCE
-                        # per source and re-ask. Parking the batch instead
-                        # used to mean the next timed cycle, hours away.
-                        wait = min(int(stats.get("retry_after") or 60), 120)
-                        logger.info(f"MB slice: {node} rate-limited — "
-                                    f"re-asking in {wait}s")
-                        waited = True
-                        await asyncio.sleep(wait)
-                        stats = await loop.run_in_executor(
-                            None, client.run, batch)
-                    if "error" in stats:
-                        leftovers.extend(batch)
-                        if "retry_after" in stats:
-                            # Still limited after the wait: every further
-                            # batch on this source would 429 too.
-                            reasons.add("rate_limited")
-                            leftovers.extend(remaining[i + batch_size:])
-                            break
-                        reasons.add("error")
-                        continue
-                    imported_any = True
-                    for k in total:
-                        total[k] += stats.get(k, 0)
-                    leftovers.extend(stats.get("missing") or [])
-                if imported_any and last_client is not client:
-                    if last_client is not None:
-                        last_client.close()
-                    last_client = client
-                else:
-                    client.close()
-                remaining = leftovers
-            if remaining:
-                logger.info(f"MB slice: {len(remaining)} name(s) not served "
-                            f"this cycle — they stay pending")
-
-            if imported_any and last_client is not None:
-                # ANALYZE + backend POST /canonicalize — once per run
-                await loop.run_in_executor(None, last_client.finalize)
-                logger.info(f"MB slice run done: {total}")
-            await self._publish_mb_slice_status(
-                pending=len(names), served=len(names) - len(remaining),
-                unserved=len(remaining),
-                reason=("rate_limited" if "rate_limited" in reasons
-                        else "error" if "error" in reasons
-                        else "missing" if remaining else "ok"),
-                sources=len(peers))
-            return total
-
-    async def _publish_mb_slice_status(self, *, pending: int, served: int,
-                                       unserved: int, reason: str,
-                                       sources: int) -> None:
-        """One row, `mb_slice.status`, is the whole of what the UI knows
-        about this cycle: how many names canon waits on, how many a peer
-        served, why the rest stayed pending and when the timed loop asks
-        again. Written on every cycle — including an all-clear — so the
-        condition the backend derives from it (`mb_slice.deferred`) ends
-        the moment it stops being true. The NOTIFY wakes the backend's
-        notices channel; the row rides the same bus as p2p.identity."""
-        next_at = self._mb_slice_next_at
-        state = {
-            "at": datetime.now(timezone.utc).isoformat(),
-            "pending": pending,
-            # pending_slice_names is capped at 200 per cycle: at the cap the
-            # true backlog is unknown, and the copy says "200+".
-            "pending_capped": pending >= 200,
-            "served": served,
-            "unserved": unserved,
-            "reason": reason,
-            "sources": sources,
-            "next_attempt_at": (datetime.fromtimestamp(next_at, timezone.utc).isoformat()
-                                if next_at else None),
-        }
-        loop = asyncio.get_event_loop()
-        try:
-            await loop.run_in_executor(
-                None, self._write_settings_blocking, {"mb_slice.status": state})
-            await loop.run_in_executor(
-                None, self._notify_blocking, "sautium_notices")
-        except Exception as e:
-            logger.warning(f"MB slice: status publish failed: {e}")
 
     # ------------------------------------------------------------------
     # Support diagnostics (desktop/p2p/diag_protocol.py)

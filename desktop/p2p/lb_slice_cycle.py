@@ -71,13 +71,14 @@ def _connect(dsn: str):
     return conn
 
 
-def read_interval(dsn: str, default: int) -> Optional[int]:
-    """lb_slice.auto_interval_min: the default without a row, None when the
-    row says null (explicitly disabled)."""
+def read_interval(dsn: str, default: int, key: str = INTERVAL_KEY) -> Optional[int]:
+    """A slice cycle's auto_interval_min (this family's by default): the
+    default without a row, None when the row says null (explicitly
+    disabled)."""
     conn = _connect(dsn)
     try:
         with conn.cursor() as cur:
-            cur.execute("SELECT value FROM user_settings WHERE key = %s", (INTERVAL_KEY,))
+            cur.execute("SELECT value FROM user_settings WHERE key = %s", (key,))
             row = cur.fetchone()
         if row is None:
             return default

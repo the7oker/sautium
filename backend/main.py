@@ -83,6 +83,8 @@ _sync_walk = None                          # the pull side (desktop/p2p/sync_wal
 _sync_walk_tasks: list[asyncio.Task] = []
 _lb_cycle = None                           # ListenBrainz slices (desktop/p2p/lb_slice_cycle.py)
 _lb_cycle_tasks: list[asyncio.Task] = []
+_mb_cycle = None                           # MusicBrainz slices (desktop/p2p/mb_slice_cycle.py)
+_mb_cycle_tasks: list[asyncio.Task] = []
 
 
 def _diag_record(kind: str, detail: dict) -> None:
@@ -93,8 +95,11 @@ def _diag_record(kind: str, detail: dict) -> None:
         diag_events.record(conn, kind, detail)
 
 
-async def _lb_after_walk() -> None:
-    """What the walk just carried in may have brought new artist MBIDs."""
+async def _after_walk() -> None:
+    """What the walk just carried in may name artists canon waits on (MB
+    slices) and may have brought new artist MBIDs (LB slices)."""
+    if _mb_cycle is not None:
+        _mb_cycle.request("sync")
     if _lb_cycle is not None:
         _lb_cycle.request("sync")
 
@@ -129,7 +134,23 @@ def _build_sync_walk():
         identity=lambda: peer_identity(settings),
         sharing_enabled=lambda: bool(_read("sync.p2p_enabled")),
         diag_record=_diag_record,
-        after_run=_lb_after_walk,
+        after_run=_after_walk,
+    )
+
+
+def _build_mb_cycle(walk):
+    """The MusicBrainz slice cycle on the Docker surface (shared with the
+    launcher since 2026-09-24): the walk's connect, no LAN tier, the
+    launcher's defaults as constants, and the in-process canon trigger for
+    what it imports. A full-dump node runs it too — it asks nothing."""
+    from desktop.p2p.mb_slice_cycle import MbSliceCycle
+    return MbSliceCycle(
+        settings.database_url,
+        connect=walk.connect_peer,
+        after_import=_start_canon_trigger,
+        config={"fetch": True, "batch_size": 20, "auto_interval_min": 360},
+        diag_record=_diag_record,
+        first_source=lambda: walk.first_source,
     )
 
 
@@ -572,6 +593,26 @@ async def lifespan(app: FastAPI):
             asyncio.create_task(_lb_cycle.interval_loop()),
         ]
 
+        # The MusicBrainz slice cycle — until 2026-09-24 launcher-only, so a
+        # dump-less Docker node had no MB data but click-to-mint's. Woken by
+        # the names imported Last.fm scrobbles wait on, by enrichment that
+        # minted phantom names, by a remote search that ran out of sources,
+        # and by the walk's post-run hook; the timer is the fallback.
+        global _mb_cycle, _mb_cycle_tasks
+        _mb_cycle = _build_mb_cycle(_sync_walk)
+        _mb_cycle.bind()
+        _mb_cycle_tasks = [
+            asyncio.create_task(sync_walk.listen_notifications(
+                settings.database_url,
+                {"sautium_mb_pending": lambda: _mb_cycle.request("scrobbles"),
+                 "sautium_enrich_done": lambda: _mb_cycle.request("enrich"),
+                 "sautium_mb_sources_request": lambda: asyncio.create_task(
+                     _mb_cycle.refresh_sources())},
+                lambda: _mb_cycle.running)),
+            asyncio.create_task(_mb_cycle.dispatch_loop()),
+            asyncio.create_task(_mb_cycle.interval_loop()),
+        ]
+
     # Start DHT service for P2P peer discovery
     global _dht_service, _dht_online_task
     if settings.p2p_enabled and HAS_LIBTORRENT and settings.p2p_sync_port:
@@ -587,6 +628,8 @@ async def lifespan(app: FastAPI):
                 _sync_walk.dht = _dht_service
             if _lb_cycle is not None:
                 _lb_cycle.dht = _dht_service
+            if _mb_cycle is not None:
+                _mb_cycle.dht = _dht_service
 
             if _load_meter is not None:
                 _dht_service.set_pace_provider(_load_meter.announce_pace)
@@ -824,9 +867,11 @@ async def lifespan(app: FastAPI):
                 pass
     if _lb_cycle is not None:
         _lb_cycle.stop()
+    if _mb_cycle is not None:
+        _mb_cycle.stop()
     if _sync_walk is not None:
         _sync_walk.stop()
-    for _task in (*_lb_cycle_tasks, *_sync_walk_tasks):
+    for _task in (*_mb_cycle_tasks, *_lb_cycle_tasks, *_sync_walk_tasks):
         _task.cancel()
         try:
             await _task
@@ -1463,18 +1508,27 @@ def _canon_trigger_worker():
             _canon_trigger_running = False
 
 
+def _start_canon_trigger() -> bool:
+    """Start the canon trigger worker unless one runs (single flight) —
+    the MB slice cycle's after-import hook on this surface, and the
+    endpoint below for the launcher's."""
+    global _canon_trigger_running
+    with _canon_trigger_lock:
+        if _canon_trigger_running:
+            return False
+        _canon_trigger_running = True
+    threading.Thread(target=_canon_trigger_worker, daemon=True).start()
+    return True
+
+
 @app.post("/canonicalize")
 async def canonicalize_endpoint() -> Dict[str, Any]:
     """Kick deterministic canonicalization in the background — the event hook
     for P2P MB slice imports (the launcher calls this after landing a slice).
     Single-flight; returns immediately."""
-    global _canon_trigger_running
-    with _canon_trigger_lock:
-        if _canon_trigger_running:
-            return {"started": False, "running": True}
-        _canon_trigger_running = True
-    threading.Thread(target=_canon_trigger_worker, daemon=True).start()
-    return {"started": True}
+    if _start_canon_trigger():
+        return {"started": True}
+    return {"started": False, "running": True}
 
 
 @app.post("/embeddings/generate")
