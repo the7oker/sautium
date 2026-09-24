@@ -55,7 +55,6 @@ def run_parallel_enrichment(
     skip_lyrics: bool = False,
     force_embeddings: bool = False,
     force_audio_analysis: bool = False,
-    lastfm_delay: float = 0.2,
     cancel_flag: Optional[Callable] = None,
     progress_cb: Optional[Callable] = None,
     track_ids: Optional[List] = None,
@@ -233,7 +232,6 @@ def run_parallel_enrichment(
                         break
                     if result.get("status") == "success":
                         stats["artists_success"] += 1
-                    time.sleep(lastfm_delay)
                 except Exception as e:
                     logger.error(f"Last.fm artist failed {artist_name}: {e}")
                     stats["errors"] += 1
@@ -535,14 +533,12 @@ class TrackEnrichmentPipeline:
         skip_audio_analysis: bool = False,
         force_embeddings: bool = False,
         force_audio_analysis: bool = False,
-        lastfm_delay: float = 0.2,
     ):
         self.skip_embeddings = skip_embeddings
         self.skip_lastfm = skip_lastfm
         self.skip_audio_analysis = skip_audio_analysis
         self.force_embeddings = force_embeddings
         self.force_audio_analysis = force_audio_analysis
-        self.lastfm_delay = lastfm_delay
 
         # Lazy-loaded components
         self._audio_embedding_generator = None
@@ -727,7 +723,6 @@ class TrackEnrichmentPipeline:
                         db, status['artist_id'], status['artist_name']
                     )
                     results['lastfm_artist'] = result['status']
-                    time.sleep(self.lastfm_delay)
 
                 except Exception as e:
                     logger.error(f"Last.fm artist enrichment failed: {e}")

@@ -85,10 +85,8 @@ def _get_scrobbler():
         _scrobbler = None
         return None
     if _scrobbler is None or _scrobbler.session_key != session_key:
-        import pylast
-        _scrobbler = pylast.LastFMNetwork(
-            api_key=settings.lastfm_api_key, api_secret=settings.lastfm_api_secret,
-            session_key=session_key, username=settings.lastfm_username or "")
+        from lastfm import lastfm_network
+        _scrobbler = lastfm_network(session_key, settings.lastfm_username or "")
         logger.info("Last.fm scrobbler initialized (user=%s)", settings.lastfm_username or "?")
     return _scrobbler
 

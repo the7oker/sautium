@@ -551,8 +551,7 @@ def normalize_genres_cmd(dry_run):
 @click.option("--artist", "-a", type=str, default=None, help="Enrich specific artist by name")
 @click.option("--genres", is_flag=True, help="Enrich genres instead of artists")
 @click.option("--no-skip", is_flag=True, help="Re-fetch data that already exists")
-@click.option("--delay", type=float, default=0.2, help="Delay between requests (seconds)")
-def enrich_lastfm(limit, artist, genres, no_skip, delay):
+def enrich_lastfm(limit, artist, genres, no_skip):
     """Enrich artists or genres with Last.fm data."""
     from lastfm import LastFmService
 
@@ -569,14 +568,13 @@ def enrich_lastfm(limit, artist, genres, no_skip, delay):
                 click.echo("🎵 Enriching genres with Last.fm tag data...")
                 skip_existing = not no_skip
                 click.echo(f"{'⚠️  Re-fetching all genres' if no_skip else '✓ Skipping genres with existing data'}")
-                click.echo(f"⏱️  Rate limit: {delay}s between requests")
                 if limit:
                     click.echo(f"⚠️  Limited to {limit} genres")
 
                 click.echo()
 
                 stats = service.enrich_genres_batch(
-                    db, limit=limit, skip_existing=skip_existing, rate_limit_delay=delay
+                    db, limit=limit, skip_existing=skip_existing
                 )
 
                 click.echo("\n✅ Last.fm genre enrichment complete!")
@@ -618,14 +616,13 @@ def enrich_lastfm(limit, artist, genres, no_skip, delay):
                 click.echo("🎵 Enriching artists with Last.fm data...")
                 skip_existing = not no_skip
                 click.echo(f"{'⚠️  Re-fetching all artists' if no_skip else '✓ Skipping artists with existing data'}")
-                click.echo(f"⏱️  Rate limit: {delay}s between requests")
                 if limit:
                     click.echo(f"⚠️  Limited to {limit} artists")
 
                 click.echo()
 
                 stats = service.enrich_artists_batch(
-                    db, limit=limit, skip_existing=skip_existing, rate_limit_delay=delay
+                    db, limit=limit, skip_existing=skip_existing
                 )
 
                 click.echo("\n✅ Last.fm artist enrichment complete!")
@@ -758,13 +755,12 @@ def analyze_audio(limit, batch_size, force, newest_first, librosa_only, max_dura
 @click.option("--skip-audio-analysis", is_flag=True, help="Skip audio feature extraction")
 @click.option("--force-embeddings", is_flag=True, help="Regenerate audio embeddings even if exist")
 @click.option("--force-audio-analysis", is_flag=True, help="Re-analyze audio even if features exist")
-@click.option("--lastfm-delay", type=float, default=0.2, help="Delay between Last.fm requests (seconds)")
 @click.option("--worker-id", type=int, default=None, help="Worker ID for parallel processing (0-indexed, use with --worker-count)")
 @click.option("--worker-count", type=int, default=None, help="Total number of workers for parallel processing (use with --worker-id)")
 @track_filter_options
 def enrich_tracks(limit, newest_first, max_duration, skip_embeddings, skip_lastfm,
                   skip_lyrics, skip_audio_analysis, force_embeddings,
-                  force_audio_analysis, lastfm_delay,
+                  force_audio_analysis,
                   worker_id, worker_count,
                   filter_artist, filter_album, filter_genre, filter_path,
                   filter_tag, filter_track_number, filter_lossless):
@@ -833,9 +829,6 @@ def enrich_tracks(limit, newest_first, max_duration, skip_embeddings, skip_lastf
     if max_duration:
         click.echo(f"⏱️  Time limit: {max_duration} seconds ({max_duration/60:.1f} minutes)")
 
-    if not skip_lastfm:
-        click.echo(f"⏱️  Last.fm delay: {lastfm_delay}s between requests")
-
     # Resolve track filters
     track_ids = _resolve_filters(
         filter_artist, filter_album, filter_genre, filter_path,
@@ -856,7 +849,6 @@ def enrich_tracks(limit, newest_first, max_duration, skip_embeddings, skip_lastf
             skip_audio_analysis=skip_audio_analysis,
             force_embeddings=force_embeddings,
             force_audio_analysis=force_audio_analysis,
-            lastfm_delay=lastfm_delay,
             progress_cb=_print_progress,
             track_ids=track_ids,
             order_by_date=newest_first,

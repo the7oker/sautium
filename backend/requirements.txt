@@ -61,7 +61,9 @@ openai>=1.0.0
 mcp>=1.2,<2
 
 # External APIs
-pylast>=5.2.0
+# The process-wide Last.fm pace hooks pylast internals (_delay_call,
+# limit_rate, _Request) — tests/test_lastfm_pace.py fails if they move.
+pylast>=7,<8
 lyricsgenius>=3.0.0
 
 # P2P Identity + the node backup envelope (desktop/node_backup.py)

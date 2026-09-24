@@ -5,10 +5,14 @@ Fetches artist bios, tags, and similar artists, storing in external_metadata tab
 
 import logging
 import re
+import threading
 import time
 from typing import Callable, Dict, List, Optional, Any
+from xml.dom.minidom import Document
 
 import pylast
+
+import api_cooldown
 from sqlalchemy import text
 from sqlalchemy.orm import Session
 from decimal import Decimal
@@ -24,14 +28,42 @@ from uuid_utils import tag_uuid
 
 logger = logging.getLogger(__name__)
 
-# Single throttle point for every Last.fm API call. pylast's built-in
-# limiter (enabled per-network in LastFmService.__init__) sleeps
-# DELAY_TIME between consecutive web-service calls. We raise the module
-# default from 0.2s (== the published 5 req/s/IP ceiling, zero headroom)
-# to 0.34s (~3 req/s): comfortably under the cap, and — crucially — it
-# spaces out the ~5 back-to-back calls inside get_artist_info (bio, tags,
-# stats, similar, mbid) that previously burst against the API with no gap.
-pylast.DELAY_TIME = 0.34
+# One pace for every Last.fm request this process makes — enrichment,
+# covers, scrobbles, the authorization flow. pylast's own limiter lives on
+# each network object (every LastFmService built its own, so parallel callers
+# never saw each other), holds no lock, and stamps the time BEFORE its sleep,
+# so back-to-back calls left in pairs. 0.34 s (~3 req/s) keeps clear of the
+# published 5 req/s per address; the lock is held through the sleep, which is
+# what queues the callers onto the pace.
+_PACE_S = 0.34
+_pace_lock = threading.Lock()
+_last_call = 0.0
+
+
+class _PacedNetwork(pylast.LastFMNetwork):
+    """pylast calls `_delay_call` before every request once `limit_rate` is
+    set (`_Request._download_response`); this one waits for the process-wide
+    slot instead of the instance's own clock."""
+
+    def __init__(self, **kwargs):
+        super().__init__(**kwargs)
+        self.limit_rate = True
+
+    def _delay_call(self) -> None:
+        global _last_call
+        with _pace_lock:
+            wait = _last_call + _PACE_S - time.monotonic()
+            if wait > 0:
+                time.sleep(wait)
+            _last_call = time.monotonic()
+
+
+def lastfm_network(session_key: str = "", username: str = "") -> pylast.LastFMNetwork:
+    """The only way this codebase builds a Last.fm network: behind the pace,
+    signing every call when a session key is given."""
+    return _PacedNetwork(api_key=settings.lastfm_api_key,
+                         api_secret=settings.lastfm_api_secret,
+                         session_key=session_key or "", username=username or "")
 
 
 # A failed fetch means one of three things, and each has its own handling —
@@ -110,6 +142,28 @@ def internal_failures(entity_type: str) -> List[str]:
     return sorted(_internal_failures.get(entity_type, ()))
 
 
+def _first_text(doc: Document, tag: str) -> Optional[str]:
+    """Text of the first `tag` element (pylast's own reading: the artist's
+    fields come before the similar-artist block in getInfo), or None."""
+    nodes = doc.getElementsByTagName(tag)
+    if not nodes or nodes[0].firstChild is None:
+        return None
+    return nodes[0].firstChild.wholeText.strip() or None
+
+
+def _artist_info(doc: Document) -> Dict[str, Any]:
+    """The fields enrichment keeps from one artist.getInfo answer."""
+    return {
+        "bio": {"summary": _first_text(doc, "summary"),
+                "content": _first_text(doc, "content")},
+        "stats": {"listeners": int(_first_text(doc, "listeners") or 0),
+                  "playcount": int(_first_text(doc, "playcount") or 0)},
+        # Last.fm's canonical MBID for this name — disambiguates namesakes
+        # (one display name → several real MB artists).
+        "mbid": _first_text(doc, "mbid"),
+    }
+
+
 class LastFmService:
     """Service for fetching and storing Last.fm metadata."""
 
@@ -118,15 +172,8 @@ class LastFmService:
         if not settings.lastfm_api_key:
             raise ValueError("LASTFM_API_KEY is not configured")
 
-        self.network = pylast.LastFMNetwork(
-            api_key=settings.lastfm_api_key,
-            api_secret=None,  # Not needed for read-only access
-        )
-        # Route every call through pylast's rate limiter (see DELAY_TIME
-        # above). Without this, each enrich_artist fired ~5 requests
-        # back-to-back — the kind of micro-burst anti-abuse systems flag.
-        self.network.enable_rate_limit()
-        logger.info("Last.fm service initialized")
+        self.network = lastfm_network()
+        logger.debug("Last.fm service initialized")
 
     @staticmethod
     def _with_retry(fn, max_retries=3, base_delay=2.0):
@@ -135,10 +182,14 @@ class LastFmService:
         SourceUnavailable — SourceRefused, with the persistent 'lastfm'
         cooldown armed, when the source is refusing us rather than merely
         failing. A verdict about the entity and our own errors are raised
-        untouched, at once."""
+        untouched, at once. A successful call clears the cooldown's strikes:
+        this is the one place that arms it, so it is the one place that
+        resets it."""
         for attempt in range(max_retries + 1):
             try:
-                return fn()
+                result = fn()
+                api_cooldown.clear('lastfm')
+                return result
             except Exception as e:
                 kind = _failure_class(e)
                 if kind is None:
@@ -150,8 +201,7 @@ class LastFmService:
                     time.sleep(delay)
                     continue
                 if kind == "refused":
-                    from api_cooldown import arm
-                    arm('lastfm', str(e))
+                    api_cooldown.arm('lastfm', str(e))
                     raise SourceRefused(str(e)) from e
                 raise SourceUnavailable(str(e)) from e
 
@@ -176,41 +226,31 @@ class LastFmService:
         """
         try:
             artist = self.network.get_artist(artist_name)
-            # getInfo (bio, stats, mbid), getTopTags and — for a library
-            # artist — getSimilar. Nothing is caught per section: pylast
-            # answers a missing section with None or [], and an exception
-            # here is the source failing or refusing, which _with_retry
-            # classifies for the caller. Per-section swallowing once turned
-            # a ban into "empty artist" verdicts cached for a week.
-            bio_data = {
-                "summary": artist.get_bio_summary(),
-                "content": artist.get_bio_content(),
-                "url": artist.get_url(),
-            }
+            # One getInfo read whole (pylast's per-field getters each send
+            # their own — five requests for one answer), getTopTags and — for
+            # a library artist — getSimilar. Nothing is caught per section:
+            # a missing section reads as None or [], and an exception here is
+            # the source failing or refusing, which _with_retry classifies for
+            # the caller. Per-section swallowing once turned a ban into
+            # "empty artist" verdicts cached for a week.
+            info = _artist_info(artist._request(artist.ws_prefix + ".getInfo", True))
             tags_data = [
                 {"name": tag.item.get_name(), "count": int(tag.weight)}
                 for tag in artist.get_top_tags(limit=30)
             ]
-            stats_data = {
-                "listeners": int(artist.get_listener_count()),
-                "playcount": int(artist.get_playcount()),
-            }
             similar_data = []
             if fetch_similar:
                 similar_data = [
                     {"name": s.item.get_name(), "match": float(s.match)}
                     for s in artist.get_similar(limit=20)
                 ]
-            # Last.fm's canonical MBID for this name — disambiguates
-            # namesakes (one display name → several real MB artists).
-            lastfm_mbid = artist.get_mbid() or None
 
             return {
-                "bio": bio_data,
+                "bio": {**info["bio"], "url": artist.get_url()},
                 "tags": tags_data,
-                "stats": stats_data,
+                "stats": info["stats"],
                 "similar": similar_data,
-                "lastfm_mbid": lastfm_mbid,
+                "lastfm_mbid": info["mbid"],
             }
 
         except pylast.WSError as e:
@@ -890,7 +930,6 @@ class LastFmService:
         db: Session,
         limit: Optional[int] = None,
         skip_existing: bool = True,
-        rate_limit_delay: float = 0.2,
     ) -> Dict[str, Any]:
         """
         Enrich multiple genres with Last.fm tag data.
@@ -899,7 +938,6 @@ class LastFmService:
             db: Database session
             limit: Max number of genres to process
             skip_existing: Skip genres that already have Last.fm data
-            rate_limit_delay: Delay between requests (seconds)
 
         Returns:
             Statistics dict
@@ -947,10 +985,6 @@ class LastFmService:
             elif result["status"] == "error":
                 stats["errors"] += 1
 
-            # Rate limiting
-            if rate_limit_delay > 0:
-                time.sleep(rate_limit_delay)
-
         logger.info(
             f"Last.fm genre enrichment complete: {stats['success']} success, "
             f"{stats['not_found']} not found, {stats['errors']} errors"
@@ -963,7 +997,6 @@ class LastFmService:
         db: Session,
         limit: Optional[int] = None,
         skip_existing: bool = True,
-        rate_limit_delay: float = 0.2,
     ) -> Dict[str, Any]:
         """
         Enrich multiple artists with Last.fm data.
@@ -972,7 +1005,6 @@ class LastFmService:
             db: Database session
             limit: Max number of artists to process
             skip_existing: Skip artists that already have Last.fm data
-            rate_limit_delay: Delay between requests (seconds)
 
         Returns:
             Statistics dict
@@ -1029,10 +1061,6 @@ class LastFmService:
             elif result["status"] == "error":
                 stats["errors"] += 1
 
-            # Rate limiting
-            if rate_limit_delay > 0:
-                time.sleep(rate_limit_delay)
-
         logger.info(
             f"Last.fm enrichment complete: {stats['success']} success, "
             f"{stats['not_found']} not found, {stats['errors']} errors"
@@ -1081,8 +1109,7 @@ class LastFmService:
         return url or None
 
 
-def backfill_similar(limit: Optional[int] = None, delay: float = 0.2,
-                     force: bool = False,
+def backfill_similar(limit: Optional[int] = None, force: bool = False,
                      cancel_flag: Optional[Callable[[], bool]] = None) -> Dict[str, int]:
     """Fetch Last.fm similars for ENGAGED artists that never had them.
 
@@ -1149,12 +1176,11 @@ def backfill_similar(limit: Optional[int] = None, delay: float = 0.2,
             if r["status"] == "not_found":
                 stats["not_found"] += 1
         stats["processed"] += 1
-        time.sleep(delay)
     return stats
 
 
-def backfill_lastfm_mbid(limit: Optional[int] = None, delay: float = 0.2,
-                         force: bool = False, namesakes_only: bool = True) -> Dict[str, int]:
+def backfill_lastfm_mbid(limit: Optional[int] = None, force: bool = False,
+                         namesakes_only: bool = True) -> Dict[str, int]:
     """Populate ``artists.lastfm_mbid`` — the MB artist Last.fm treats as canonical
     for the name. Used to decide which namesake owns the (name-based) photo/similar
     block when one display name maps to several real MB artists.
@@ -1209,5 +1235,4 @@ def backfill_lastfm_mbid(limit: Optional[int] = None, delay: float = 0.2,
         except Exception as e:
             stats["errors"] += 1
             logger.error(f"backfill_lastfm_mbid failed for {row.name}: {e}")
-        time.sleep(delay)
     return stats

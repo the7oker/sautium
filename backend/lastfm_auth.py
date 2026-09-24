@@ -124,8 +124,8 @@ def load_from_db() -> None:
 # -- The flow -----------------------------------------------------------------
 
 def _network() -> pylast.LastFMNetwork:
-    return pylast.LastFMNetwork(api_key=settings.lastfm_api_key,
-                                api_secret=settings.lastfm_api_secret)
+    from lastfm import lastfm_network
+    return lastfm_network()
 
 
 def _callback_base(origin: str) -> str:

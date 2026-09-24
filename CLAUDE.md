@@ -143,8 +143,10 @@ See:
 - **Log at the right level.** `logger.debug` for per-row noise, `logger.info`
   for lifecycle events, `logger.warning` for recoverable anomalies,
   `logger.error` for actual failures. Don't log stack traces at `info`.
-- **Rate-limit external APIs.** Last.fm: 0.2s delay (~5 req/sec). Claude
-  Haiku translation: non-Cyrillic queries bypass the call entirely.
+- **Rate-limit external APIs.** Last.fm: one pace per process for every
+  request (`lastfm.lastfm_network`, 0.34 s ≈ 3 req/s, since 2026-09-24) —
+  never a sleep in a caller's loop. Query translation: ASCII queries bypass
+  MT entirely.
 
 ---
 

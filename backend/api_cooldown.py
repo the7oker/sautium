@@ -147,17 +147,17 @@ def clear(source: str) -> None:
 
 def load_from_db() -> None:
     """Warm the in-memory cache from the persisted table at startup so a
-    restart mid-cooldown doesn't resume hitting a still-banning source."""
-    rows = db_query(
-        "SELECT source, cooldown_until FROM external_api_cooldown WHERE cooldown_until > now()"
-    )
+    restart mid-cooldown doesn't resume hitting a still-banning source.
+    Lapsed rows load too: cooling_down() ignores a past deadline, and clear()
+    only finds a row it has cached — skipping them left a lapsed row's
+    strikes to escalate the next ban forever after a restart."""
+    rows = db_query("SELECT source, cooldown_until FROM external_api_cooldown")
     for row in rows:
         _cache[row["source"]] = row["cooldown_until"]
-    if rows:
-        logger.info(
-            "Loaded %d active API cooldown(s) from DB: %s",
-            len(rows), ", ".join(r["source"] for r in rows),
-        )
+    active = [r["source"] for r in rows if r["cooldown_until"] > _now()]
+    if active:
+        logger.info("Loaded %d active API cooldown(s) from DB: %s",
+                    len(active), ", ".join(active))
 
 
 def _fmt_dur(seconds: int) -> str:

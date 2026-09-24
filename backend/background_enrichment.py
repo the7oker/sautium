@@ -100,7 +100,6 @@ _LYRICS_PER_BATCH = 50            # lrclib/genius calls per batch
 _ARTISTS_PER_BATCH = 30           # Last.fm artist.getInfo calls per batch
 _GENRES_PER_BATCH = 20            # Last.fm tag.getInfo calls per batch
 _SIMILAR_PER_BATCH = 25           # Last.fm artist.getSimilar calls per batch (engaged artists) — the cap that drains a radio-night's phantom qualifications at a bounded rate
-_LASTFM_DELAY_S = 0.2             # ~5 req/sec, the Last.fm published limit
 
 _CANONIZE_PER_BATCH = 50          # uncanonized artists distilled per batch (Layer 2: content + phantom)
 _DISCOGRAPHY_PER_BATCH = 50       # canonized artists reconciled per batch (local MB dump — DB-only)
@@ -281,7 +280,6 @@ def _step_missing_artists(limit: int) -> Dict[str, int]:
                 else:
                     stats["errors"] += 1
             stats["processed"] += 1
-            time.sleep(_LASTFM_DELAY_S)
 
     return stats
 
@@ -344,7 +342,6 @@ def _step_missing_genres(limit: int) -> Dict[str, int]:
                 else:
                     stats["errors"] += 1
             stats["processed"] += 1
-            time.sleep(_LASTFM_DELAY_S)
 
     return stats
 
@@ -357,8 +354,7 @@ def _step_similar_artists(limit: int) -> Dict[str, int]:
     from lastfm import backfill_similar
 
     try:
-        return backfill_similar(limit=int(limit), delay=_LASTFM_DELAY_S,
-                                cancel_flag=_cancel_flag)
+        return backfill_similar(limit=int(limit), cancel_flag=_cancel_flag)
     except Exception as e:
         logger.error(f"Background similar backfill failed: {e}")
         return {"processed": 0, "stored": 0, "errors": 1}
