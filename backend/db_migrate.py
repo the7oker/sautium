@@ -21,7 +21,9 @@ rule. Two layers, one tracking table (`_schema_migrations`):
      it (backend/play_stats.py) instead of counters kept in place. The
      sub-floor step (`sub_floor_analysis_v1`) drops the node's own analysis
      of material under provenance.MIN_MATERIAL_SECONDS, computed before the
-     floor existed (2026-09-18).
+     floor existed (2026-09-18). The listen-times step (`listen_times_utc_v1`)
+     moves the starts a launcher's tracker wrote as naive local time back to
+     the instant they meant (play_stats.repaired_start, 2026-09-24).
 
 The launcher's own P2P sync server is a separate process: on a launcher
 node with old-rule data a peer import racing this rewrite is a known
@@ -66,6 +68,15 @@ def _rederive_play_stats(conn) -> int:
     with conn.cursor() as cur:
         cur.execute("SELECT DISTINCT track_id::text FROM listening_history")
         return refresh_play_stats(cur, [r[0] for r in cur.fetchall()])
+
+
+def _repair_naive_listen_times(conn) -> int:
+    from play_stats import refresh_play_stats, repair_naive_listen_times
+    with conn.cursor() as cur:
+        tracks = repair_naive_listen_times(cur)
+        refresh_play_stats(cur, tracks)
+    conn.commit()
+    return len(tracks)
 
 
 def _drop_sub_floor_analysis(conn) -> dict:
@@ -128,6 +139,10 @@ def apply_pending() -> dict:
         if not _marked(conn, "sub_floor_analysis_v1"):
             out["sub_floor_dropped"] = _drop_sub_floor_analysis(conn)
             _mark(conn, "sub_floor_analysis_v1")
+
+        if not _marked(conn, "listen_times_utc_v1"):
+            out["listen_tracks_repaired"] = _repair_naive_listen_times(conn)
+            _mark(conn, "listen_times_utc_v1")
 
         # Cold-start seed: after the identity pass, so the bundle's rule
         # check compares against a fully renormalized database. The marker

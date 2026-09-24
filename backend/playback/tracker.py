@@ -17,7 +17,7 @@ This is the single tracking point above the output-backend abstraction
 
 import logging
 import threading
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Optional
 
 from api_cooldown import cooling_down
@@ -147,13 +147,16 @@ def _save_play_session(s: "_PlaySession") -> None:
     try:
         completed = s.completed
         skipped = not s.scrobble_ready
+        # Both ends from the one clock the start came from: an end stamped by
+        # PostgreSQL's now() landed up to ~2 s before its own start on the master.
         _db_execute(
             "INSERT INTO listening_history "
             "(media_file_id, track_id, started_at, ended_at, "
             " duration_listened, percent_listened, completed, skipped) "
-            "VALUES (%(mf)s, %(tid)s::uuid, %(start)s, now(), "
+            "VALUES (%(mf)s, %(tid)s::uuid, %(start)s, %(end)s, "
             "        %(dur)s, %(pct)s, %(comp)s, %(skip)s)",
             {"mf": s.media_file_id, "tid": s.track_id, "start": s.started_at,
+             "end": datetime.now(timezone.utc),
              "dur": s.max_position, "pct": s.percent_listened,
              "comp": completed, "skip": skipped},
         )
@@ -231,7 +234,9 @@ def track_play_event(state_name: str, position: float, length: float,
     if not same_track or restarted:
         if _play_session is not None:
             _save_play_session(_play_session)
-        _play_session = _PlaySession(ident, datetime.now(), length)
+        # Aware UTC: a naive local clock written through the UTC session put
+        # every launcher listen hours off (play_stats.repaired_start).
+        _play_session = _PlaySession(ident, datetime.now(timezone.utc), length)
         _scrobble_async(
             "update_now_playing", artist=ident["artist"] or "",
             title=ident["title"] or "", album=ident.get("album"),

@@ -998,7 +998,7 @@ def search_features(bpm_min, bpm_max, key, instrument, vocal, instrumental, danc
 def update_file_dates(limit):
     """Update file_modified_at for existing media files from filesystem."""
     from pathlib import Path
-    from datetime import datetime
+    from datetime import datetime, timezone
     from models import MediaFile
 
     click.echo("🔄 Updating file modification dates from filesystem...")
@@ -1028,7 +1028,7 @@ def update_file_dates(limit):
 
                     if file_path.exists():
                         mtime = file_path.stat().st_mtime
-                        mf.file_modified_at = datetime.fromtimestamp(mtime)
+                        mf.file_modified_at = datetime.fromtimestamp(mtime, tz=timezone.utc)
                         updated += 1
 
                         if updated % 100 == 0:

@@ -36,7 +36,7 @@ from typing import Callable, Dict, Iterator, List, Optional, Tuple
 from psycopg2 import sql
 
 from desktop import node_backup as nb
-from play_stats import refresh_play_stats
+from play_stats import refresh_play_stats, repair_naive_listen_times
 from sql_queries import best_rip_order
 
 logger = logging.getLogger(__name__)
@@ -379,8 +379,11 @@ def merge_life(conn, *, progress: Optional[ProgressFn] = None) -> dict:
             ON CONFLICT DO NOTHING""")
 
         # --- listens by (track, started_at); the file this machine has for the
-        # track, if any, stands in for the other machine's file id.
+        # track, if any, stands in for the other machine's file id. A backup
+        # written before 2026-09-24 carries the tracker's naive-time starts —
+        # repaired first, or the same listen would miss its twin here.
         progress("merging", what="listens")
+        repair_naive_listen_times(cur, f"{SCRATCH}.listening_history")
         run(f"""INSERT INTO listening_history (media_file_id, track_id, started_at, ended_at,
                                                duration_listened, percent_listened, completed,
                                                skipped, created_at)

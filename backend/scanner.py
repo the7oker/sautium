@@ -10,7 +10,7 @@ import os
 import re
 from collections import defaultdict
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional, Dict, Any, List, Set, Tuple
 
@@ -184,7 +184,7 @@ class LibraryScanner:
                 "file_path": settings.translate_to_host_path(str(file_path.absolute())),
                 "file_size_bytes": file_stat.st_size,
                 "file_format": file_format,
-                "file_modified_at": datetime.fromtimestamp(file_stat.st_mtime),
+                "file_modified_at": datetime.fromtimestamp(file_stat.st_mtime, tz=timezone.utc),
                 "is_lossless": check_lossless(file_format),
 
                 # Audio properties
