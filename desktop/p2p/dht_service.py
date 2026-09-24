@@ -529,10 +529,13 @@ class DHTService:
         stops advertising). The published entry ages out on its own."""
         self._capabilities.discard(capability)
 
-    async def lookup_capability(self, capability: str) -> list[tuple[str, int]]:
-        """Find nodes announcing a capability. Returns list of (ip, port)."""
+    async def lookup_capability(self, capability: str,
+                                want_all: bool = False) -> list[tuple[str, int]]:
+        """Find nodes announcing a capability. Returns list of (ip, port).
+        `want_all` for a caller off the critical path that needs every
+        holder (the slice sources), not the first reply's view."""
         return await self._lookup(capability_infohash(capability),
-                                  f"cap:{capability}")
+                                  f"cap:{capability}", want_all=want_all)
 
     async def announce_artists(self, artist_uuids: list[str]):
         """Register the rare-artist tail (see module docstring). The caller

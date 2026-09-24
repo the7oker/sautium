@@ -15,12 +15,14 @@ the backend itself.
 What a run does (`MbSliceCycle.run`):
 
 1. nothing, when this node holds the full dump (it serves, it does not ask);
-2. sources: manual peers, LAN peers, a DHT `mbdump` capability lookup, and —
-   only when those yield nothing — the Worker directory's `mbslices` /
-   `mbdump` volunteers with the master hint LAST (Ф16c); each probed through
-   the walk's connect, banned addresses and keys skipped, REPLICAS BEFORE DUMP
-   NODES; the map is persisted as `mb.search_sources` for the backend's
-   request-time consumers and announced with NOTIFY sautium_mb_sources;
+2. sources (desktop/p2p/slice_sources.py): manual peers, LAN peers, every
+   holder of the DHT `mbdump` key, and — when those yield no usable source —
+   the Worker directory's `mbslices` / `mbdump` volunteers with the master
+   hint LAST (Ф16c); each probed once through the walk's connect, banned
+   addresses and keys skipped, REPLICAS BEFORE DUMP NODES, the verified set
+   kept between runs until a source fails; a new map is persisted as
+   `mb.search_sources` for the backend's request-time consumers and
+   announced with NOTIFY sautium_mb_sources;
 3. the pending names in priority order (mb_slice_queries.pending_slice_names:
    owned artists, then the names imported scrobbles wait on, then the rest);
 4. source by source, batches through MBSliceClient (verified against the
@@ -47,9 +49,9 @@ import psycopg2
 
 from desktop.api_client import BackendAPIClient
 from desktop.mb_slice_client import MBSliceClient
-from desktop.p2p import master_hint, mb_slice_queries, node_hints
-from desktop.p2p.addrs import fmt_addr
+from desktop.p2p import mb_slice_queries
 from desktop.p2p.lb_slice_cycle import load_bans, notify, read_interval
+from desktop.p2p.slice_sources import SourceFinder
 from desktop.p2p.sync_walk import write_settings
 
 logger = logging.getLogger(__name__)
@@ -114,7 +116,7 @@ class MbSliceCycle:
         after_import: () -> None, executor-safe — hand the freshly imported
             facts to the canon (the launcher's POST /canonicalize, the
             backend's in-process trigger).
-        config: the `mb_slice` block (fetch / batch_size / auto_interval_min).
+        config: the `mb_slice` block (fetch / auto_interval_min).
         dht / lan: the runtime's DHTService / LANDiscovery (either None).
         manual_peers: explicit `scheme://host:port` entries, tried first.
         load_bans_fn: () -> (pubkeys, addr uuids); the DB list by default.
@@ -124,12 +126,13 @@ class MbSliceCycle:
         """
         self.db_dsn = db_dsn
         self.config = dict(config or {})
-        self.dht = dht
-        self.lan = lan
-        self.manual_peers = list(manual_peers or [])
-        self._connect = connect
+        self._sources = SourceFinder(
+            "MB slice", capability="mbdump", directory=("mbslices", "mbdump"),
+            usable=lambda h: bool(h.get("mb_dump") or h.get("mb_slices")),
+            connect=connect, dht=dht, lan=lan, manual_peers=list(manual_peers or []),
+            load_bans=load_bans_fn or (lambda: load_bans(self.db_dsn)),
+            addr_uuid=mb_slice_queries.addr_uuid)
         self._after_import = after_import
-        self._load_bans = load_bans_fn or (lambda: load_bans(self.db_dsn))
         self._diag_record = diag_record
         self._first_source = first_source
         self._reasons: set[str] = set()
@@ -157,6 +160,15 @@ class MbSliceCycle:
     @property
     def running(self) -> bool:
         return self._running
+
+    @property
+    def dht(self):
+        return self._sources.dht
+
+    @dht.setter
+    def dht(self, dht) -> None:
+        """The backend starts its DHT after the cycle exists."""
+        self._sources.dht = dht
 
     # ------------------------------------------------------------- triggers
 
@@ -245,6 +257,7 @@ class MbSliceCycle:
             loop = asyncio.get_event_loop()
             if await loop.run_in_executor(None, local_dump_available, self.db_dsn):
                 return
+            self._sources.forget()
             await self.find_sources()
 
     # -------------------------------------------------------------- sources
@@ -253,64 +266,20 @@ class MbSliceCycle:
         """Reachable slice sources as (client, node_id), REPLICAS FIRST: a
         dump-less peer with mb_slices > 0 re-serves the blobs it verified —
         asking those first spreads the load off the few dump nodes; misses
-        fall through to a dump holder. The map is persisted for the backend's
-        request-time consumers (remote MB search, click-to-mint)."""
-        loop = asyncio.get_event_loop()
-        banned_keys, banned_addrs = await loop.run_in_executor(None, self._load_bans)
-        replicas: list = []
-        dumps: list = []
-        seen: set[str] = set()
-
-        candidates: list[str] = list(self.manual_peers)
-        if self.lan is not None:
-            for ip, port in self.lan.peers:
-                info = self.lan.get_peer_info(ip, port) or {}
-                candidates.append(f"{info.get('scheme', 'https')}://{fmt_addr(ip, port)}")
-        if self.dht is not None:
-            try:
-                for ip, port in await self.dht.lookup_capability("mbdump"):
-                    candidates.append(fmt_addr(ip, port))
-            except Exception as e:
-                logger.debug(f"MB slice: DHT capability lookup failed: {e}")
-        if not candidates:
-            # Dead DHT + no LAN + no manual peers (the mobile newborn): the
-            # Worker directory's volunteers FIRST, the master hint LAST —
-            # that ordering is the de-specialization (Ф16c).
-            for cap in ("mbslices", "mbdump"):
-                for host, hport, _pk in await loop.run_in_executor(None, node_hints.fetch, cap):
-                    candidates.append(fmt_addr(host, hport))
-            hint = await loop.run_in_executor(None, master_hint.fetch)
-            if hint:
-                candidates.append(fmt_addr(*hint))
-
-        for addr in candidates:
-            if addr in seen:
-                continue
-            seen.add(addr)
-            if mb_slice_queries.addr_uuid(addr) in banned_addrs:
-                logger.info(f"MB slice: skipping banned address {addr}")
-                continue
-            api = await self._connect(addr)
-            if not api:
-                continue
-            health = await loop.run_in_executor(None, api.get_health)
-            if not health:
-                continue
-            node_id = health.get("node_id", "")
-            if node_id and node_id in banned_keys:
-                logger.info(f"MB slice: skipping banned node {node_id[:16]}… at {addr}")
-                continue
-            if health.get("mb_dump"):
-                dumps.append((api, node_id))
-            elif health.get("mb_slices"):
-                replicas.append((api, node_id))
-
-        await loop.run_in_executor(None, write_settings, self.db_dsn, {
-            SOURCES_KEY: [{"url": api.base_url, "kind": "replica"} for api, _ in replicas]
-                         + [{"url": api.base_url, "kind": "dump"} for api, _ in dumps]})
-        # The backend's mb-sources listener → {"t": "mb"} → the Discovery
-        # chip flips live (searching → online/disabled).
-        await loop.run_in_executor(None, notify, self.db_dsn, "sautium_mb_sources")
+        fall through to a dump holder. A newly probed set is persisted for
+        the backend's request-time consumers (remote MB search,
+        click-to-mint); desktop/p2p/slice_sources.py keeps it between runs."""
+        sources, probed = await self._sources.find()
+        replicas = [(api, node) for api, node, health in sources if not health.get("mb_dump")]
+        dumps = [(api, node) for api, node, health in sources if health.get("mb_dump")]
+        if probed:
+            loop = asyncio.get_event_loop()
+            await loop.run_in_executor(None, write_settings, self.db_dsn, {
+                SOURCES_KEY: [{"url": api.base_url, "kind": "replica"} for api, _ in replicas]
+                             + [{"url": api.base_url, "kind": "dump"} for api, _ in dumps]})
+            # The backend's mb-sources listener → {"t": "mb"} → the Discovery
+            # chip flips live (searching → online/disabled).
+            await loop.run_in_executor(None, notify, self.db_dsn, "sautium_mb_sources")
         return replicas + dumps
 
     # -------------------------------------------------------------- the run
@@ -336,8 +305,7 @@ class MbSliceCycle:
             return {}
 
         names = [name for name, _ in pending]
-        batch_size = max(1, min(int(self.config.get("batch_size", 20)),
-                                mb_slice_queries.MAX_NAMES_PER_REQUEST))
+        batch_size = mb_slice_queries.MAX_NAMES_PER_REQUEST
         logger.info(f"MB slice: {len(names)} pending names, {len(peers)} source(s) (replicas first)")
         total = {"names": 0, "matched": 0, "rows_inserted": 0}
         imported_any = False
@@ -371,6 +339,7 @@ class MbSliceCycle:
                         leftovers.extend(remaining[i + batch_size:])
                         break
                     reasons.add("error")
+                    self._sources.drop(node)
                     continue
                 imported_any = True
                 for k in total:

@@ -874,6 +874,26 @@ credit head; a run that fills its cap with those first two tiers and serves
 something asks for the next at once, the discovery-stub tiers keep the timed
 pace.
 
+**Sources found once, kept while they answer (2026-09-24).** Both families'
+cycles find their sources through `desktop/p2p/slice_sources.py`: manual peers
+→ LAN → every holder of the DHT capability key (the lookup gathers all
+replies — the first is one DHT node's view and can name only a stale port) →
+and, when those tiers give no *usable* source, the Worker directory's
+volunteers with the master hint last. A stale port, a node with neither dump
+nor inventory, and this node's own twin under the same account (one account
+is one node key, so each skips the other as itself) all count as none —
+before, any candidate at all skipped the fallback, and a node whose account
+runs a second node sat "with no source" beside a reachable master. A
+candidate is probed once, the walk's connect being the `/health`, and the
+verified set serves the next runs until a request to it fails or 15 min pass;
+a batch is the protocol's 50. Every run used to probe every candidate twice,
+and a history import triggers runs every few seconds: the probes of the nodes
+behind one router spent the master's per-IP window, and a 429 on a probe read
+as "no source". The Docker peer surface counts `/health` in a window of its
+own. A run that finds no source retries on the next network event — a walk,
+a LAN peer, new pending names; the 6 h timer is only the latest retry, and
+the notice says so.
+
 E2E: dump → client (2 matched, 12277 rows, zero-match closed) → a dump-less
 replica re-serves a verified blob → a second hop verifies it **against the dump
 node's key**; a flipped byte and a blob served under another name are both
@@ -918,8 +938,10 @@ replaces Last.fm track stats" has the loader; this is the protocol.
 - **One requester for both runtimes** (`desktop/p2p/lb_slice_cycle.py`):
   the launcher's P2PManager and the Docker backend run the same object with
   their services injected (the walk's `connect_peer`, DHT, LAN or none).
-  Sources: manual peers → LAN → DHT `lbdump` → (only then) the directory's
-  `lbslices`/`lbdump` and the master hint last; replicas before dump nodes.
+  Sources (`desktop/p2p/slice_sources.py`, shared with the MB cycle): manual
+  peers → LAN → every DHT `lbdump` holder → (when those give no usable
+  source) the directory's `lbslices`/`lbdump` and the master hint last;
+  replicas before dump nodes, the verified set kept between runs.
   Pending (`pending_slice_mbids`): the on-demand lane (an artist page
   opened — `lb_slice_requests`, a durable row + `NOTIFY sautium_lb_request`),
   then owned artists, then engaged ones; never the phantom bulk. Wakes: a
@@ -987,7 +1009,9 @@ Verification transcript and rollback steps: `docs/private/DEPLOYMENT.md`.
 similarity, the registry's addr axes, probe-connect's call-back target. Never
 auth (CLAUDE.md Security Posture rule #5 still stands). Consequence to accept:
 the master's per-IP 60/min limiter stops being an accidental global cap and
-becomes per-peer, like on every launcher node; the global `mb/search` window,
+becomes per-peer, like on every launcher node (`/health` has its own 60/min
+window since 2026-09-24, so probes never spend the work's); the global
+`mb/search` window,
 the load meter and the gate's backstops remain the node-wide protection.
 
 ### Support diagnostics — SHIPPED 2026-08-26

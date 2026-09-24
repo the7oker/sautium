@@ -367,6 +367,7 @@ class _CIHeaders(dict):
 app.add_middleware(PeerAuthMiddleware)
 
 _hits: dict[str, list[float]] = defaultdict(list)
+_health_hits: dict[str, list[float]] = defaultdict(list)
 _search_hits: dict[str, list[float]] = defaultdict(list)
 _search_global: list[float] = []
 
@@ -405,17 +406,21 @@ async def rate_limit(request: Request, call_next):
         if not _search_allowed(ip, now):
             return _rate_limited(_search_hits.get(ip, []), now)
         return await call_next(request)
-    recent = [t for t in _hits.get(ip, ()) if now - t < RATE_LIMIT_WINDOW]
+    # /health counts in its own window: every requester probes before it
+    # asks, and the nodes behind one router share one address — probes
+    # counted with the work spent the window the work needed, and a 429 on
+    # a probe read as "no source" (2026-09-24).
+    bucket = _health_hits if request.url.path == "/health" else _hits
+    recent = [t for t in bucket.get(ip, ()) if now - t < RATE_LIMIT_WINDOW]
     if len(recent) >= RATE_LIMIT_PER_MINUTE:
-        _hits[ip] = recent
+        bucket[ip] = recent
         return _rate_limited(recent, now)
     recent.append(now)
-    _hits[ip] = recent
-    if len(_hits) > 10_000:                    # bound the table under a flood
-        for k in [k for k, v in _hits.items() if not v or now - v[-1] > RATE_LIMIT_WINDOW]:
-            _hits.pop(k, None)
-        for k in [k for k, v in _search_hits.items() if not v or now - v[-1] > RATE_LIMIT_WINDOW]:
-            _search_hits.pop(k, None)
+    bucket[ip] = recent
+    if len(bucket) > 10_000:                   # bound the tables under a flood
+        for table in (_hits, _health_hits, _search_hits):
+            for k in [k for k, v in table.items() if not v or now - v[-1] > RATE_LIMIT_WINDOW]:
+                table.pop(k, None)
     return await call_next(request)
 
 

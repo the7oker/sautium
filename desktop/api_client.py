@@ -124,6 +124,7 @@ class BackendAPIClient:
         self.peer = peer
         self._server_pubkey: Optional[str] = None
         self._introduced = False
+        self.last_health: Optional[dict] = None          # the last /health that passed its checks
         self.last_peer_identity: Optional[str] = None   # last X-Sautium-Peer-Identity seen
         self.last_peer_lane: Optional[str] = None
         self.last_gate_result: Optional[str] = None
@@ -295,10 +296,12 @@ class BackendAPIClient:
                     "belongs to %s… — refusing",
                     self.base_url, node_id[:16] or "<none>",
                     (channel or "<unauthenticated>")[:16])
+                self.last_health = None
                 return None
             if channel != self._server_pubkey:
                 self._server_pubkey = channel
                 self._introduced = False
+        self.last_health = health
         return health
 
     def start_scan(self, subpath: str = None) -> Optional[dict]:

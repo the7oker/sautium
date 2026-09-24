@@ -148,7 +148,7 @@ def _build_mb_cycle(walk):
         settings.database_url,
         connect=walk.connect_peer,
         after_import=_start_canon_trigger,
-        config={"fetch": True, "batch_size": 20, "auto_interval_min": 360},
+        config={"fetch": True, "auto_interval_min": 360},
         diag_record=_diag_record,
         first_source=lambda: walk.first_source,
     )
@@ -162,7 +162,7 @@ def _build_lb_cycle(walk):
     return LbSliceCycle(
         settings.database_url,
         connect=walk.connect_peer,
-        config={"fetch": True, "batch_size": 20, "auto_interval_min": 360},
+        config={"fetch": True, "auto_interval_min": 360},
         diag_record=_diag_record,
         first_source=lambda: walk.first_source,
     )

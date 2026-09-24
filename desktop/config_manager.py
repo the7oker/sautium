@@ -92,7 +92,6 @@ DEFAULT_CONFIG = {
     "mb_slice": {
         "serve": True,   # answer /api/mb/slice (effective only with a full local dump)
         "fetch": True,   # request slices from dump peers when we have no dump
-        "batch_size": 20,
         "auto_interval_min": 360,
     },
     # ListenBrainz listening statistics — a second, independent slice family
@@ -100,7 +99,6 @@ DEFAULT_CONFIG = {
     "lb_slice": {
         "serve": True,   # re-serve held slices; mint them only with a full local dump
         "fetch": True,   # request slices for owned/engaged artists when we have no dump
-        "batch_size": 20,
         "auto_interval_min": 360,
     },
 }

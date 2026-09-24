@@ -3,26 +3,29 @@ family, one implementation for both runtimes.
 
 The launcher's P2PManager runs it beside the sync walk; the Docker backend
 runs the same object with its own services injected (the walk's
-`connect_peer`, its DHT, no LAN tier). The MB slice cycle lives only in the
-launcher, so a dump-less Docker node never receives MB slices — this family
-closes that gap from the start (CLAUDE.md: what both surfaces must agree on
-exactly lives in desktop/p2p and is imported, never copied).
+`connect_peer`, its DHT, no LAN tier). The MB family's cycle
+(desktop/p2p/mb_slice_cycle.py) has had the same shape since 2026-09-24, and
+both find their sources through desktop/p2p/slice_sources.py (CLAUDE.md: what
+both surfaces must agree on exactly lives in desktop/p2p and is imported,
+never copied).
 
 What a run does (`LbSliceCycle.run`):
 
 1. nothing, when this node holds the dump (it serves, it does not ask);
-2. sources: manual peers, LAN peers, a DHT `lbdump` capability lookup, and
-   — only when those yield nothing — the Worker directory's `lbslices` /
-   `lbdump` volunteers with the master hint LAST (Ф16c de-specialization);
-   each probed through the walk's connect (health + pinned key + own-address
-   guard), banned addresses and keys skipped; REPLICAS BEFORE DUMP NODES.
-   Every source's `/health` says which dump version it serves or re-serves,
-   and the newest of those is what the ledger is measured against;
+2. sources (desktop/p2p/slice_sources.py): manual peers, LAN peers, every
+   holder of the DHT `lbdump` key, and — when those yield no usable source —
+   the Worker directory's `lbslices` / `lbdump` volunteers with the master
+   hint LAST (Ф16c de-specialization); each probed once through the walk's
+   connect (health + pinned key + own-address guard), banned addresses and
+   keys skipped, REPLICAS BEFORE DUMP NODES, the verified set kept between
+   runs until a source fails. Every source's `/health` says which dump
+   version it serves or re-serves, and the newest of those is what the
+   ledger is measured against;
 3. the pending set (lb_slice_queries.pending_slice_mbids): the on-demand
    lane first, then owned, then engaged artists, minus ledger rows at the
    newest version — a row older than that is STALE and asked again with
    `min_version`, so counts refresh and signed zero-matches re-open;
-4. source by source, batches of ≤ 50: every entry verified against the
+4. source by source, batches of 50 (the protocol's maximum): every entry verified against the
    ORIGINAL author's key, imported in one transaction per batch under the
    loader's lock; `missing` (the peer does not hold it) and DROPPED (it sent
    something that does not verify) both carry to the next source — two
@@ -46,8 +49,8 @@ from typing import Awaitable, Callable, Optional
 import psycopg2
 
 from desktop.api_client import BackendAPIClient
-from desktop.p2p import lb_slice_queries, master_hint, node_hints
-from desktop.p2p.addrs import fmt_addr
+from desktop.p2p import lb_slice_queries
+from desktop.p2p.slice_sources import SourceFinder
 from desktop.p2p.sync_walk import write_settings
 
 logger = logging.getLogger(__name__)
@@ -204,7 +207,7 @@ class LbSliceCycle:
         """
         connect: async (addr) -> BackendAPIClient | None — the walk's
             connect_peer: health, the TLS-pinned key, the own-address guard.
-        config: the `lb_slice` block (fetch / batch_size / auto_interval_min).
+        config: the `lb_slice` block (fetch / auto_interval_min).
         dht / lan: the runtime's DHTService / LANDiscovery (either None).
         manual_peers: explicit `scheme://host:port` entries, tried first.
         load_bans_fn: () -> (pubkeys, addr uuids); the DB list by default.
@@ -214,11 +217,12 @@ class LbSliceCycle:
         """
         self.db_dsn = db_dsn
         self.config = dict(config or {})
-        self.dht = dht
-        self.lan = lan
-        self.manual_peers = list(manual_peers or [])
-        self._connect = connect
-        self._load_bans = load_bans_fn or (lambda: load_bans(self.db_dsn))
+        self._sources = SourceFinder(
+            "LB slice", capability="lbdump", directory=("lbslices", "lbdump"),
+            usable=lambda h: bool(h.get("lb_dump") or h.get("lb_slices")),
+            connect=connect, dht=dht, lan=lan, manual_peers=list(manual_peers or []),
+            load_bans=load_bans_fn or (lambda: load_bans(self.db_dsn)),
+            addr_uuid=lb_slice_queries.addr_uuid)
         self._diag_record = diag_record
         self._first_source = first_source
         self._reasons: set[str] = set()
@@ -244,6 +248,15 @@ class LbSliceCycle:
     @property
     def running(self) -> bool:
         return self._running
+
+    @property
+    def dht(self):
+        return self._sources.dht
+
+    @dht.setter
+    def dht(self, dht) -> None:
+        """The backend starts its DHT after the cycle exists."""
+        self._sources.dht = dht
 
     # ------------------------------------------------------------- triggers
 
@@ -328,53 +341,13 @@ class LbSliceCycle:
     async def find_sources(self) -> tuple[list[tuple[BackendAPIClient, str, Optional[str]]],
                                           Optional[str]]:
         """Reachable slice sources as (client, node_id, version), REPLICAS
-        FIRST, and the newest dump version any of them holds."""
-        loop = asyncio.get_event_loop()
-        banned_keys, banned_addrs = await loop.run_in_executor(None, self._load_bans)
+        FIRST, and the newest dump version any of them holds — read from the
+        /health each answered when it was probed."""
+        sources, _ = await self._sources.find()
         replicas: list = []
         dumps: list = []
-        seen: set[str] = set()
         newest: Optional[str] = None
-
-        candidates: list[str] = list(self.manual_peers)
-        if self.lan is not None:
-            for ip, port in self.lan.peers:
-                info = self.lan.get_peer_info(ip, port) or {}
-                candidates.append(f"{info.get('scheme', 'https')}://{fmt_addr(ip, port)}")
-        if self.dht is not None:
-            try:
-                for ip, port in await self.dht.lookup_capability("lbdump"):
-                    candidates.append(fmt_addr(ip, port))
-            except Exception as e:
-                logger.debug(f"LB slice: DHT capability lookup failed: {e}")
-        if not candidates:
-            # Dead DHT + no LAN + no manual peers: the Worker directory's
-            # volunteers FIRST, the master hint LAST (Ф16c). Replicas are
-            # asked before dump nodes by design — the load-spreader.
-            for cap in ("lbslices", "lbdump"):
-                for host, hport, _pk in await loop.run_in_executor(None, node_hints.fetch, cap):
-                    candidates.append(fmt_addr(host, hport))
-            hint = await loop.run_in_executor(None, master_hint.fetch)
-            if hint:
-                candidates.append(fmt_addr(*hint))
-
-        for addr in candidates:
-            if addr in seen:
-                continue
-            seen.add(addr)
-            if lb_slice_queries.addr_uuid(addr) in banned_addrs:
-                logger.info(f"LB slice: skipping banned address {addr}")
-                continue
-            api = await self._connect(addr)
-            if not api:
-                continue
-            health = await loop.run_in_executor(None, api.get_health)
-            if not health:
-                continue
-            node_id = health.get("node_id", "")
-            if node_id and node_id in banned_keys:
-                logger.info(f"LB slice: skipping banned node {node_id[:16]}… at {addr}")
-                continue
+        for api, node_id, health in sources:
             dump_version = health.get("lb_dump") or None
             held_version = health.get("lb_slices_version") or None
             for v in (dump_version, held_version):
@@ -382,7 +355,7 @@ class LbSliceCycle:
                     newest = v
             if dump_version:
                 dumps.append((api, node_id, dump_version))
-            elif health.get("lb_slices"):
+            else:
                 replicas.append((api, node_id, held_version))
         return replicas + dumps, newest
 
@@ -411,8 +384,7 @@ class LbSliceCycle:
                                 reason="no_sources", sources=0, newest=newest)
             return {}
 
-        batch_size = max(1, min(int(self.config.get("batch_size", 20)),
-                                lb_slice_queries.MAX_MBIDS_PER_REQUEST))
+        batch_size = lb_slice_queries.MAX_MBIDS_PER_REQUEST
         # Stale rows (a ledger version older than the newest reachable) are
         # asked with min_version, so a replica's older cache is a miss, not
         # an answer; never-fetched artists take the first data they can get
@@ -455,6 +427,7 @@ class LbSliceCycle:
                             limited = True
                         else:
                             reasons.add("error")
+                            self._sources.drop(node)
                         continue
                     if result["imported"]:
                         imported_any = True
