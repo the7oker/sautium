@@ -338,6 +338,10 @@ async def lifespan(app: FastAPI):
     # node — Docker or launcher-run — see backend/db_migrate.py.
     import db_migrate
     db_migrate.apply_pending()
+    # After a crash recovery no table has an analysis on record; the API
+    # need not wait for the statistics to come back.
+    threading.Thread(target=db_migrate.analyze_unrecorded, args=(settings.database_url,),
+                     name="analyze-unrecorded", daemon=True).start()
     # Every signed request derives its token from the epoch and the
     # node key; load both now so the first request never reads the
     # DB on the event loop (the auth middleware runs there).

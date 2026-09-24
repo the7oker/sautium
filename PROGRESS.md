@@ -1540,6 +1540,45 @@ Recommendations start from the owner's own listening.
   one finds the shelf of their last day, the records heard just before the
   break still counted as heard.
 
+### Credit keys the planner can price; statistics that survive a crash (2026-09-24)
+
+Two faults under the Home rewrite, neither in its code.
+
+- **Role goes second in the credit keys.** Readers probe a credit by its
+  track or album and its role (`ta.track_id = … AND ta.role = 'primary'`,
+  ~120 sites). With role last, behind artist_id, PostgreSQL 18 prices the
+  probe as a skip scan over artist_id whenever the sampled distinct-artist
+  estimate stays under the index's page count — 28,732 estimated against
+  301,879 real on the master, and no ANALYZE raises it — so one probe cost
+  55,720 instead of 8 and the planner read all 3.8M rows instead. Migration
+  022 reorders both keys, `(track_id, role, artist_id)` and
+  `(album_id, role, artist_id)` (album_artists was 2.6× growth from the same
+  cliff); a probe by (track, artist) now skips over role's three values.
+  New in my collection went 285 → 74 ms, an album page 19 → 5 ms, and
+  Favourite artists 116 → 32 ms once its anchor went in as a value — from a
+  subquery the planner guessed a third of all history and hashed the table.
+- **A crash recovery took autovacuum's memory.** PostgreSQL discards its
+  cumulative statistics after one, and autovacuum schedules from exactly
+  those counters, so a large table waits for another 10-20 % of churn from
+  zero. The master had three recoveries on 2026-09-23 (the WSL VM went away
+  under the container); a day later 98 of 113 tables had no analysis on
+  record and the four churned life tables were 8-23 % all-visible with
+  ~1.15M dead rows between them. A launcher lost the same on every Windows
+  shutdown: Windows ends a session by terminating its processes, and the
+  stand's PostgreSQL came back in crash recovery the morning after a
+  restart. Now the backend ANALYZEs, at start, every table with no analysis
+  on record (`db_migrate.analyze_unrecorded` — PostgreSQL's remedy after a
+  statistics reset, which also re-estimates the dead rows vacuum waits on;
+  96 tables in 18 s on the master), and the launcher stops the database
+  inside WM_ENDSESSION from a hidden window on its own thread
+  (`utils.watch_session_end`; Tk surfaces only the query, which another app
+  can still veto). One VACUUM brought the master back to 100 % visible.
+- **The lesson** is in the diagnosis: "stale statistics" read well for the
+  10× distinct-artist gap and was wrong — an ANALYZE inside a rolled-back
+  transaction left it unchanged, because the gap is the sampling estimator's,
+  and the planner cost with it. The lost counters did their damage on the
+  vacuum side instead.
+
 ---
 
 ## References

@@ -23,7 +23,7 @@ from desktop.api_client import BackendAPIClient
 from desktop.config_manager import load_config, save_config, update_config
 from desktop.service_manager import ServiceManager
 from desktop.utils import (get_local_ip, get_project_root, get_tailscale_ip,
-                           generate_qr_ctk)
+                           generate_qr_ctk, watch_session_end)
 
 logger = logging.getLogger(__name__)
 
@@ -100,6 +100,9 @@ class LauncherApp(ctk.CTk):
 
         # Close → keep running in the background
         self.protocol("WM_DELETE_WINDOW", self._minimize_to_tray)
+        # Windows ends a session by killing its processes: the database
+        # stops first (see utils.watch_session_end).
+        watch_session_end(self._stop_for_session_end)
 
     def _pin_window_size(self):
         """Lock the launcher to its design size — min/max, not just the
@@ -1584,6 +1587,17 @@ class LauncherApp(ctk.CTk):
                 self.p2p_manager.stop()
             except Exception as e:
                 logger.debug(f"P2P stop error: {e}")
+        self.service_manager.stop_all()
+        from desktop.config_manager import get_data_dir
+        from desktop.p2p import diag_events
+        diag_events.clear_session_marker(get_data_dir())
+
+    def _stop_for_session_end(self) -> None:
+        """Windows is ending the session: the backend and PostgreSQL stop
+        before its processes are terminated. Runs on the session-end thread
+        inside WM_ENDSESSION, and never touches Tk. Windows waits seconds, not
+        the 17 a P2P goodbye can take — the rest dies with the process."""
+        self._shutting_down = True
         self.service_manager.stop_all()
         from desktop.config_manager import get_data_dir
         from desktop.p2p import diag_events

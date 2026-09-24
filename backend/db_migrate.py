@@ -28,11 +28,16 @@ rule. Two layers, one tracking table (`_schema_migrations`):
 The launcher's own P2P sync server is a separate process: on a launcher
 node with old-rule data a peer import racing this rewrite is a known
 window — keep P2P off for the first start after such an upgrade.
+
+Beside the migrations, analyze_unrecorded gives back what a crash recovery
+takes from autovacuum (below); the lifespan runs it in the background.
 """
 
 import logging
+import time
 
 import psycopg2
+from psycopg2 import errors, sql
 
 from config import settings
 from desktop import db_init
@@ -163,3 +168,44 @@ def apply_pending() -> dict:
         conn.close()
     logger.info("db_migrate: %s", out)
     return out
+
+
+def analyze_unrecorded(dsn: str) -> int:
+    """ANALYZE every table PostgreSQL holds no analysis on record for;
+    returns how many.
+
+    A crash recovery (a killed container, a Windows session that ended
+    under the launcher, a power cut) discards PostgreSQL's cumulative
+    statistics, and those counters are what autovacuum schedules from: with
+    them gone a large table waits for another 10-20 % of churn before it is
+    analyzed or vacuumed again, and every recovery starts that count anew.
+    PostgreSQL's remedy for lost counters is a database-wide ANALYZE, which
+    also re-estimates each table's dead rows and so puts the vacuum backlog
+    back in front of autovacuum. A table with no analysis on record is one
+    whose counters were lost, or one nothing has analyzed yet — after a
+    clean restart there is nothing to do."""
+    started = time.monotonic()
+    analyzed = 0
+    conn = psycopg2.connect(dsn)
+    conn.autocommit = True
+    try:
+        with conn.cursor() as cur:
+            cur.execute("""
+                SELECT schemaname, relname FROM pg_stat_user_tables
+                WHERE last_analyze IS NULL AND last_autoanalyze IS NULL
+            """)
+            for schema, table in cur.fetchall():
+                try:
+                    cur.execute(sql.SQL("ANALYZE (SKIP_LOCKED) {}.{}").format(
+                        sql.Identifier(schema), sql.Identifier(table)))
+                except errors.UndefinedTable:
+                    # Dropped since the listing: a dump load's swap, a merge's
+                    # scratch schema.
+                    continue
+                analyzed += 1
+    finally:
+        conn.close()
+    if analyzed:
+        logger.info("analyzed %d tables with no analysis on record (%.0f s)",
+                    analyzed, time.monotonic() - started)
+    return analyzed

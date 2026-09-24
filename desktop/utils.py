@@ -833,3 +833,95 @@ def keep_awake(enabled: bool) -> None:
         logger.debug("No idle-sleep inhibition on %s", sys.platform)
         return
     _awake_release = release
+
+
+def watch_session_end(on_end) -> None:
+    """Call `on_end` when Windows ends the session (log off, restart, shut
+    down), before it goes on. Windows ends a session by terminating every
+    process in it: the launcher's PostgreSQL got no signal and started the
+    next time in crash recovery, which discards the statistics autovacuum
+    schedules its work from. Tk surfaces only WM_QUERYENDSESSION, which
+    another app can still veto; WM_ENDSESSION is final, and Windows waits
+    for the reply, so `on_end` runs inside it — on this thread, never Tk's.
+    No-op off Windows: macOS routes logout through ::tk::mac::Quit."""
+    if sys.platform != "win32":
+        return
+    threading.Thread(target=_windows_session_window, args=(on_end,),
+                     name="session-end", daemon=True).start()
+
+
+def _windows_session_window(on_end) -> None:
+    """A hidden top-level window and its message loop — a message-only
+    window hears no session broadcast."""
+    import ctypes
+    from ctypes import wintypes
+
+    user32 = ctypes.WinDLL("user32", use_last_error=True)
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    LRESULT = ctypes.c_ssize_t
+    WNDPROC = ctypes.WINFUNCTYPE(LRESULT, wintypes.HWND, wintypes.UINT,
+                                 wintypes.WPARAM, wintypes.LPARAM)
+
+    class WNDCLASSW(ctypes.Structure):
+        _fields_ = [("style", wintypes.UINT), ("lpfnWndProc", WNDPROC),
+                    ("cbClsExtra", ctypes.c_int), ("cbWndExtra", ctypes.c_int),
+                    ("hInstance", wintypes.HINSTANCE), ("hIcon", wintypes.HICON),
+                    ("hCursor", wintypes.HICON), ("hbrBackground", wintypes.HBRUSH),
+                    ("lpszMenuName", wintypes.LPCWSTR), ("lpszClassName", wintypes.LPCWSTR)]
+
+    kernel32.GetModuleHandleW.argtypes = (wintypes.LPCWSTR,)
+    kernel32.GetModuleHandleW.restype = wintypes.HMODULE
+    user32.DefWindowProcW.argtypes = (wintypes.HWND, wintypes.UINT, wintypes.WPARAM, wintypes.LPARAM)
+    user32.DefWindowProcW.restype = LRESULT
+    user32.RegisterClassW.argtypes = (ctypes.POINTER(WNDCLASSW),)
+    user32.RegisterClassW.restype = wintypes.ATOM
+    user32.CreateWindowExW.argtypes = (wintypes.DWORD, wintypes.LPCWSTR, wintypes.LPCWSTR,
+                                       wintypes.DWORD, ctypes.c_int, ctypes.c_int, ctypes.c_int,
+                                       ctypes.c_int, wintypes.HWND, wintypes.HMENU,
+                                       wintypes.HINSTANCE, wintypes.LPVOID)
+    user32.CreateWindowExW.restype = wintypes.HWND
+    user32.GetMessageW.argtypes = (ctypes.POINTER(wintypes.MSG), wintypes.HWND,
+                                   wintypes.UINT, wintypes.UINT)
+    user32.GetMessageW.restype = wintypes.BOOL
+    user32.DispatchMessageW.argtypes = (ctypes.POINTER(wintypes.MSG),)
+    user32.DispatchMessageW.restype = LRESULT
+    user32.ShutdownBlockReasonCreate.argtypes = (wintypes.HWND, wintypes.LPCWSTR)
+    user32.ShutdownBlockReasonDestroy.argtypes = (wintypes.HWND,)
+
+    WM_QUERYENDSESSION, WM_ENDSESSION = 0x0011, 0x0016
+
+    def wndproc(hwnd, msg, wparam, lparam):
+        if msg == WM_QUERYENDSESSION:
+            # A window nobody sees is killed when it outlasts the grace
+            # period, unless it gives a reason — then the "apps are still
+            # running" screen names it and waits.
+            user32.ShutdownBlockReasonCreate(hwnd, "Stopping the Sautium database")
+            return 1
+        if msg == WM_ENDSESSION:
+            if wparam:
+                try:
+                    on_end()
+                except Exception:
+                    # ctypes prints what escapes a callback to stderr, which
+                    # the windowless launcher has not got.
+                    logger.exception("Stopping for the end of the session failed")
+            user32.ShutdownBlockReasonDestroy(hwnd)
+            return 0
+        return user32.DefWindowProcW(hwnd, msg, wparam, lparam)
+
+    proc = WNDPROC(wndproc)
+    klass = WNDCLASSW(lpfnWndProc=proc, hInstance=kernel32.GetModuleHandleW(None),
+                      lpszClassName="SautiumSessionEnd")
+    if not user32.RegisterClassW(ctypes.byref(klass)):
+        logger.warning("Session-end watch unavailable: RegisterClassW failed (%d)",
+                       ctypes.get_last_error())
+        return
+    hwnd = user32.CreateWindowExW(0, klass.lpszClassName, "Sautium", 0, 0, 0, 0, 0,
+                                  None, None, klass.hInstance, None)
+    if not hwnd:
+        logger.warning("Session-end watch unavailable: CreateWindowExW failed (%d)",
+                       ctypes.get_last_error())
+        return
+    message = wintypes.MSG()
+    while user32.GetMessageW(ctypes.byref(message), None, 0, 0) > 0:
+        user32.DispatchMessageW(ctypes.byref(message))
