@@ -1,5 +1,6 @@
-"""Home › Favourite artists follows the taste of the last months
-(backend/routers/home.py get_favourite_artists).
+"""Home's Favourite artists and Recommendations follow the taste of the last
+months, counted back from the newest listen (backend/routers/home.py): a node
+whose owner went quiet keeps the shelves it had.
 
 On a real PostgreSQL — a throwaway database built from the migrations, the
 connection pool pointed at it. Skipped where there is no cluster.
@@ -24,9 +25,13 @@ PG = dict(host=os.environ.get("SAUTIUM_TEST_PGHOST", "postgres"),
           port=int(os.environ.get("SAUTIUM_TEST_PGPORT", "5432")),
           user=os.environ.get("SAUTIUM_TEST_PGUSER", "musicai"),
           password=os.environ.get("SAUTIUM_TEST_PGPASSWORD", "supervisor"))
-DBNAME = "sautium_favourite_artists_test"
+DBNAME = "sautium_home_recency_test"
 # Two co-primary artists of one duet: their weights tie, the id decides.
 DUO_A, DUO_B = "11111111-1111-4111-8111-111111111111", "22222222-2222-4222-8222-222222222222"
+NEWEST = pytest.mark.parametrize(
+    "newest", [datetime.now(timezone.utc) - timedelta(hours=2),
+               datetime(2019, 5, 1, 20, 0, tzinfo=timezone.utc)],
+    ids=["active", "went-quiet"])
 
 
 @pytest.fixture(scope="module")
@@ -34,7 +39,7 @@ def dsn():
     try:
         admin = psycopg2.connect(dbname="postgres", **PG)
     except psycopg2.OperationalError as e:
-        pytest.skip(f"no PostgreSQL for the favourite artists test: {e}")
+        pytest.skip(f"no PostgreSQL for the Home recency test: {e}")
     admin.autocommit = True
     from desktop import db_init, node_backup as nb
     nb._drop_database(admin, DBNAME)
@@ -58,7 +63,8 @@ def cur(dsn, monkeypatch):
     conn = psycopg2.connect(dsn, options="-c timezone=UTC")
     conn.autocommit = True
     with conn.cursor() as c:
-        c.execute("TRUNCATE listening_history, seed_picks, tracks, albums, artists CASCADE")
+        c.execute("TRUNCATE listening_history, seed_picks, embedding_models, tracks, albums, "
+                  "artists CASCADE")
         yield c
     conn.close()
     pool.closeall()
@@ -94,10 +100,8 @@ def _album(cur, title, artist):
     return album
 
 
-@pytest.mark.parametrize("newest", [datetime.now(timezone.utc) - timedelta(hours=2),
-                                    datetime(2019, 5, 1, 20, 0, tzinfo=timezone.utc)],
-                         ids=["active", "went-quiet"])
-def test_the_shelf_follows_the_taste_of_the_last_months(cur, newest):
+@NEWEST
+def test_favourite_artists_follow_the_taste_of_the_last_months(cur, newest):
     recent = _artist(cur, "Recent Love")
     old = _artist(cur, "Old Flame")
     gone = _artist(cur, "Long Gone")
@@ -140,7 +144,7 @@ def test_the_shelf_follows_the_taste_of_the_last_months(cur, newest):
         "Old Flame": True, "Seed Artist": False}
 
 
-def test_a_node_with_no_listens_shows_the_seed_picks(cur):
+def test_favourites_of_a_node_with_no_listens_are_the_seed_picks(cur):
     first, second = _artist(cur, "First Pick"), _artist(cur, "Second Pick")
     cur.execute("INSERT INTO seed_picks (album_id, tier, rank) VALUES (%s, 2, 1), (%s, 1, 2)",
                 (_album(cur, "One", second), _album(cur, "Two", first)))
@@ -148,3 +152,42 @@ def test_a_node_with_no_listens_shows_the_seed_picks(cur):
     shelf = home.get_favourite_artists(limit=1)["artists"]
 
     assert [a["name"] for a in shelf] == ["First Pick"]
+
+
+def _phantom_album(cur, title, model, *vectors):
+    """A tracklist-only album (no files: the owned-album fills stay empty),
+    one analysed track per vector; returns the track ids."""
+    album = str(uuid.uuid4())
+    cur.execute("INSERT INTO albums (id, title) VALUES (%s, %s)", (album, title))
+    tracks = []
+    for position, head in enumerate(vectors, 1):
+        track = _track(cur)
+        cur.execute("INSERT INTO album_tracks (album_id, track_id, position) VALUES (%s, %s, %s)",
+                    (album, track, position))
+        vector = "[" + ",".join(map(str, head + (0.0,) * (512 - len(head)))) + "]"
+        cur.execute("INSERT INTO embeddings (vector, model_id, track_id) VALUES (%s::vector, %s, %s)",
+                    (vector, model, track))
+        tracks.append(track)
+    return tracks
+
+
+@NEWEST
+def test_recommendations_stay_the_shelf_the_listener_left(cur, newest):
+    model = str(uuid.uuid4())
+    cur.execute("INSERT INTO embedding_models (id, name, dimension) VALUES (%s, 'clap', 512)",
+                (model,))
+    # The last listen seeds the shelf; its album is heard, so it never comes
+    # back. Every other record sounds alike: never heard, heard 75 days
+    # before the last listen (inside the forgotten threshold, still heard)
+    # and heard 200 days before it (forgotten, after the unheard one).
+    seed, _ = _phantom_album(cur, "Heard Last", model, (1.0,), (1.0, 0.05))
+    _phantom_album(cur, "Never Heard", model, (1.0, 0.1))
+    (season,) = _phantom_album(cur, "Heard This Season", model, (1.0, 0.15))
+    (forgotten,) = _phantom_album(cur, "Long Forgotten", model, (1.0, 0.2))
+    _listen(cur, seed, newest, 300)
+    _listen(cur, season, newest - timedelta(days=75), 300)
+    _listen(cur, forgotten, newest - timedelta(days=200), 300)
+
+    shelf = home.get_recommendations(limit=5)["albums"]
+
+    assert [a["title"] for a in shelf] == ["Never Heard", "Long Forgotten"]

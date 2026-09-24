@@ -1531,6 +1531,14 @@ Recommendations start from the owner's own listening.
   picks. The rewrite also resolves ownership after the cut — the planner had
   hashed the ownership of every artist in the catalogue: 552 → 118 ms on the
   master.
+- **Home is the Home the listener left.** Recommendations counted their
+  60-day seed window, their decay and their "forgotten" threshold from now,
+  so two months without a listen sent a node with history to the cold start
+  — an imported account that went quiet never got past it. All three now
+  run from the newest listen, like the favourites: nothing moves for an
+  active listener (the master's shelf came out identical), and a returning
+  one finds the shelf of their last day, the records heard just before the
+  break still counted as heard.
 
 ---
 

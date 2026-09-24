@@ -14,8 +14,8 @@ so a fresh install is never an empty shelf.
 Recommendations are CLAP-similarity-driven from recent listening
 (see get_recommendations for the full pipeline), folding to owned AND
 phantom albums — a node can live entirely on streamed phantoms. Cold
-start (no listening_history) leads with the seed-pick rotation, then
-newest-by-file_modified_at.
+start (no listened track with CLAP analysis to seed from) leads with the
+seed-pick rotation, then newest-by-file_modified_at.
 """
 
 import logging
@@ -33,14 +33,16 @@ router = APIRouter(prefix="/api/home", tags=["home"])
 
 
 # ─── Recommendation tuning ────────────────────────────────────────────────
-# Recency decay τ: weight(t) = exp(-hours_since_play / τ).
-# 168h → today=1.0, week-ago=0.37, two-weeks=0.14. Matches "session every
-# week or two" listening rhythm; raise to 336 for slower drift, lower to 72
-# to make recommendations track today's mood more aggressively.
+# Recency decay τ: weight(t) = exp(-hours_before_the_newest_listen / τ).
+# 168h → the newest listen's day=1.0, a week before it 0.37, two weeks 0.14.
+# Matches "session every week or two" listening rhythm; raise to 336 for
+# slower drift, lower to 72 to make recommendations track the latest mood
+# more aggressively.
 RECENCY_TAU_HOURS = 168
-# Hard cap on listening_history events that may seed the centroid.
-# A play from 4 months ago has tiny exp-weight anyway, but the cap keeps
-# the seed-pool query bounded and skips cold-cache reads.
+# Hard cap on the listening_history events that may seed the shelf, counted
+# back from the newest listen. A play four months before it has a tiny
+# exp-weight anyway, but the cap keeps the seed-pool query bounded and skips
+# cold-cache reads.
 SEED_WINDOW_DAYS = 60
 # Seed selection: top release groups by recency-weighted listening — one
 # slot per record (see the query), each standing in the kNN as its heaviest
@@ -60,8 +62,9 @@ KNN_PER_SEED = 150
 # default 40 is "single nearest match" tuning); iterative_scan keeps the
 # graph walk going when the self-exclusion filter eats into the first wave.
 HNSW_EF_SEARCH = 500
-# Tier 1 ("forgotten") threshold: albums whose last play was longer than
-# this ago — eligible to resurface once tier 0 (never played) is exhausted.
+# Tier 1 ("forgotten") threshold: albums whose last play came longer than
+# this before the newest listen — eligible to resurface once tier 0 (never
+# played) is exhausted.
 FORGOTTEN_THRESHOLD_DAYS = 90
 # Seed-pick rotation quotas per curation tier (list A bridge gems / list B
 # palette / honourable mentions / rotation pool) out of the 20-slot shelf:
@@ -304,10 +307,10 @@ def get_recommendations(
     CLAP multi-seed recommendations from recent listening — one SQL pass.
 
     Pipeline (all in the query, no Python vector math):
-      1. Seed candidates: recent completed listens within SEED_WINDOW_DAYS,
-         weight = duration x exp(-hours_since_play / RECENCY_TAU_HOURS),
-         summed per RELEASE GROUP — one seed slot per record, its heaviest
-         embedded track as the vector.
+      1. Seed candidates: completed listens within SEED_WINDOW_DAYS of the
+         newest one, weight = duration x exp(-hours_before_it /
+         RECENCY_TAU_HOURS), summed per RELEASE GROUP — one seed slot per
+         record, its heaviest embedded track as the vector.
       2. Diversity prune: drop a seed within SEED_DIVERSITY_CEIL cosine of a
          heavier one — the survivors span the week's distinct tastes.
       3. Per-seed HNSW kNN (parameterized LATERAL) — NO centroid: averaging
@@ -318,21 +321,29 @@ def get_recommendations(
          Folds to owned albums (via media_files) AND phantom albums (via
          album_tracks) — a node can live entirely on streamed phantoms.
       5. Two-tier ordering — never-played (tier 0) before forgotten albums
-         whose last play is older than FORGOTTEN_THRESHOLD_DAYS (tier 1) —
-         then one edition per release group and one record per credited
-         artist.
+         whose last play came FORGOTTEN_THRESHOLD_DAYS or more before the
+         newest listen (tier 1) — then one edition per release group and one
+         record per credited artist.
       6. Shortfall fill: unplayed seed picks first, then random owned
-         albums; cold start (no completed listens in the window) →
-         seed-pick rotation, then newest-by-file_modified_at.
+         albums; cold start (no completed listen of an embedded track in
+         the window) → seed-pick rotation, then newest-by-file_modified_at.
+
+    Every clock above runs from the newest completed listen, not NOW(): the
+    exponential ranks the same from any anchor, so an active listener sees
+    no difference, while a node whose owner went quiet — or whose imported
+    Last.fm history ended long ago — keeps the shelf it had instead of
+    falling back to the cold start.
     """
-    has_seeds = db_query_one(f"""
-        SELECT 1 AS x FROM listening_history lh
-        JOIN embeddings e ON e.track_id = lh.track_id
-        WHERE lh.started_at >= NOW() - INTERVAL '{SEED_WINDOW_DAYS} days'
-          AND lh.completed
-        LIMIT 1
+    newest = db_query_one(f"""
+        SELECT n.at
+        FROM (SELECT MAX(started_at) AS at FROM listening_history
+              WHERE completed) n
+        WHERE EXISTS (SELECT 1 FROM listening_history lh
+                      JOIN embeddings e ON e.track_id = lh.track_id
+                      WHERE lh.completed
+                        AND lh.started_at >= n.at - INTERVAL '{SEED_WINDOW_DAYS} days')
     """)
-    if not has_seeds:
+    if not newest:
         albums = _seed_fill(limit, exclude=set())
         if len(albums) < limit:
             albums.extend(_cold_start_albums(
@@ -345,11 +356,11 @@ def get_recommendations(
             SELECT lh.track_id,
                    SUM(
                        lh.duration_listened *
-                       EXP(-EXTRACT(EPOCH FROM (NOW() - lh.started_at))
+                       EXP(-EXTRACT(EPOCH FROM (%(newest)s - lh.started_at))
                            / %(tau_sec)s)
                    ) AS weight
             FROM listening_history lh
-            WHERE lh.started_at >= NOW() - INTERVAL '{SEED_WINDOW_DAYS} days'
+            WHERE lh.started_at >= %(newest)s - INTERVAL '{SEED_WINDOW_DAYS} days'
               AND lh.completed
             GROUP BY lh.track_id
         ),
@@ -485,7 +496,7 @@ def get_recommendations(
                    SUM(ca.w * ca.sim) / (COUNT(*) + 3.0) AS score,
                    CASE
                        WHEN als.total_plays = 0 THEN 0
-                       WHEN als.last_touch < NOW() - INTERVAL '{FORGOTTEN_THRESHOLD_DAYS} days' THEN 1
+                       WHEN als.last_touch < %(newest)s - INTERVAL '{FORGOTTEN_THRESHOLD_DAYS} days' THEN 1
                        ELSE 2
                    END AS tier
             FROM candidate_albums ca
@@ -535,7 +546,7 @@ def get_recommendations(
         ORDER BY d.tier ASC, d.score DESC
         LIMIT %(limit)s
         """,
-        {"tau_sec": RECENCY_TAU_HOURS * 3600, "limit": limit},
+        {"newest": newest["at"], "tau_sec": RECENCY_TAU_HOURS * 3600, "limit": limit},
         ef_search=HNSW_EF_SEARCH,
     )
 
