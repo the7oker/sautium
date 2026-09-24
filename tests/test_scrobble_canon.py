@@ -133,7 +133,7 @@ def test_stage_a_places_known_tracks_once_and_leaves_echoes(db):
         _wait(cur, 30.02, "Kiss of Life")
 
     assert scrobbles.drop_echoes() == 1
-    assert scrobbles.bind_known(None) == 1
+    assert scrobbles.bind_known(None) == [T0]
 
     with db.cursor() as cur:
         assert _listens(cur) == [(known, T0, 330, "lastfm"),
@@ -191,9 +191,11 @@ def test_stage_d_places_through_the_catalogue(db):
         _slot(cur, str(uuid.uuid4()), "Kiss of Life", 330, recording=KISS_REC)
 
     stats = scrobbles.bind_catalogue(resolved)
-    assert scrobbles.bind_catalogue() == {"bound": 0, "not_minted": 0, "not_in_catalogue": 0}
+    assert scrobbles.bind_catalogue() == {"bound": 0, "not_minted": 0, "not_in_catalogue": 0,
+                                          "newest": None}
 
-    assert stats == {"bound": 1, "not_minted": 1, "not_in_catalogue": 2}
+    assert stats == {"bound": 1, "not_minted": 1, "not_in_catalogue": 2,
+                     "newest": T0 + timedelta(minutes=10)}
     with db.cursor() as cur:
         assert [(s, d) for _, s, d, _ in _listens(cur)] == [(T0 + timedelta(minutes=10), 330)]
         cur.execute("SELECT title FROM pending_scrobbles ORDER BY played_at")
@@ -283,6 +285,9 @@ def test_imported_listens_become_album_mix_and_track_cards(db):
         ("track", None, "Song 5", 1, "lastfm"),
     ]
     assert rebuild() == 3
+    # Listens that changed long before the window leave its cards alone.
+    with db.cursor(cursor_factory=RealDictCursor) as cur:
+        assert rebuild_imported_sessions(cur, touched=T0 - timedelta(days=400)) == 0
     with db.cursor() as cur:
         cur.execute("SELECT id FROM listening_sessions ORDER BY started_at")
         assert [r[0] for r in cur.fetchall()] == [c[0] for c in cards]

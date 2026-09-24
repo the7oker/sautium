@@ -36,6 +36,7 @@ import math
 import re
 import threading
 from collections import Counter, defaultdict
+from datetime import datetime
 from typing import Any, Dict, Iterable, List, Optional, Set, Tuple
 
 from psycopg2.extras import RealDictCursor, execute_values
@@ -207,12 +208,13 @@ def _seconds(entry: Row, album: Optional[str]) -> Optional[float]:
     return Counter(s for _, s in slots).most_common(1)[0][0]
 
 
-def _commit_binds(cur, binds: List[Row]) -> int:
-    """Write placed scrobbles as listens and release their waiting rows. Two
+def _commit_binds(cur, binds: List[Row]) -> List[datetime]:
+    """Write placed scrobbles as listens and release their waiting rows;
+    returns the starts of the listens written. Two
     scrobbles of one play (two scrobblers reporting it) become one listen; a
     record of the same listen already here wins (play_stats.same_listen)."""
     if not binds:
-        return 0
+        return []
     binds = sorted(binds, key=lambda b: b["played_at"])
     kept: List[Row] = []
     for b in binds:
@@ -228,7 +230,7 @@ def _commit_binds(cur, binds: List[Row]) -> int:
           FROM (VALUES %s) AS v(media_file_id, track_id, played_at, seconds)
          WHERE NOT EXISTS (SELECT 1 FROM listening_history h
                             WHERE {same_listen('h', 'v.played_at')})
-        RETURNING track_id::text AS track_id""",
+        RETURNING track_id::text AS track_id, started_at""",
         [(b["media_file_id"], b["track_id"], b["played_at"], round(b["seconds"], 2)) for b in kept],
         template="(%s::int, %s::uuid, %s::timestamptz, %s::numeric)", fetch=True)
     execute_values(cur, """
@@ -237,7 +239,7 @@ def _commit_binds(cur, binds: List[Row]) -> int:
         [(b["played_at"], b["artist"], b["title"]) for b in binds],
         template="(%s::timestamptz, %s, %s)")
     refresh_play_stats(cur, sorted({r["track_id"] for r in rows}))
-    return len(rows)
+    return [r["started_at"] for r in rows]
 
 
 def drop_echoes() -> int:
@@ -272,9 +274,10 @@ def _bind_known(cur, rows: List[Row]) -> List[Row]:
     return binds
 
 
-def bind_known(name_keys: Optional[List[str]] = None) -> int:
-    """Stage A over the waiting scrobbles of `name_keys` (all when None)."""
-    return sum(_commit_binds(cur, _bind_known(cur, rows)) for cur, rows in _chunks(name_keys))
+def bind_known(name_keys: Optional[List[str]] = None) -> List[datetime]:
+    """Stage A over the waiting scrobbles of `name_keys` (all when None);
+    returns the starts of the listens written."""
+    return [at for cur, rows in _chunks(name_keys) for at in _commit_binds(cur, _bind_known(cur, rows))]
 
 
 # --------------------------------------------------------------------------
@@ -568,8 +571,9 @@ def _pick(row: Row, names: List[Row], local: Dict[str, List[str]],
 def bind_catalogue(extra_artists: Iterable[str] = ()) -> Row:
     """Stage D for the resolved names due a placement attempt — never tried
     since resolution, new scrobbles, or a mint of their artist since — plus
-    the artists in `extra_artists`. Stamps each name's attempt."""
-    stats: Row = {"bound": 0, "not_in_catalogue": 0, "not_minted": 0}
+    the artists in `extra_artists`. Stamps each name's attempt; `newest` is
+    the latest start among the listens written."""
+    stats: Row = {"bound": 0, "not_in_catalogue": 0, "not_minted": 0, "newest": None}
     artists = db_query("""
         SELECT n.artist_id::text AS artist_id, a.name, array_agg(DISTINCT n.name_key) AS names,
                (SELECT array_agg(am.mbid::text) FROM artist_mbids am
@@ -601,7 +605,9 @@ def bind_catalogue(extra_artists: Iterable[str] = ()) -> Row:
                 entry = lengths[track_id]
                 binds.append({**r, "track_id": track_id, "seconds": _seconds(entry, r["album"]),
                               "media_file_id": entry["media_file_id"]})
-            stats["bound"] += _commit_binds(cur, binds)
+            written = _commit_binds(cur, binds)
+            stats["bound"] += len(written)
+            stats["newest"] = max([t for t in (*written, stats["newest"]) if t], default=None)
         db_execute("UPDATE pending_scrobble_artists SET checked_at = now() WHERE name_key = ANY(%(n)s)",
                    {"n": art["names"]})
     return stats
@@ -666,8 +672,10 @@ def run_pass(scope: Row) -> bool:
     import mb_backend
     from discography import _mb_load_in_progress
     from routers.settings import _read as read_setting
-    stats: Row = {"echoes": drop_echoes(),
-                  "bound_known": bind_known(None if scope["full"] else scope["names"])}
+    known = bind_known(None if scope["full"] else scope["names"])
+    stats: Row = {"echoes": drop_echoes(), "bound_known": len(known)}
+    newest = max(known, default=None)
+    minted = False
     drain = False
     if mb_backend.LOCAL_DUMP and not _mb_load_in_progress():
         create = bool(read_setting("discovery.phantom_layer"))
@@ -678,10 +686,10 @@ def run_pass(scope: Row) -> bool:
         drain = resolve["drain"] or mint["drain"]
         stats.update(resolved=resolve.get("resolved", 0), minted=len(mint["artists"]),
                      mint=dict(mint["statuses"]), catalogue=catalogue)
-        if stats["bound_known"] + catalogue["bound"]:
-            _after_binding(minted=bool(mint["artists"]))
-    elif stats["bound_known"]:
-        _after_binding(minted=False)
+        newest = max([t for t in (newest, catalogue["newest"]) if t], default=None)
+        minted = bool(mint["artists"])
+    if newest is not None:
+        _after_binding(minted=minted, newest=newest)
     db_execute("DELETE FROM pending_scrobble_artists n WHERE NOT EXISTS "
                "(SELECT 1 FROM pending_scrobbles p WHERE p.name_key = n.name_key)")
     import lastfm_history
@@ -690,9 +698,9 @@ def run_pass(scope: Row) -> bool:
     return drain
 
 
-def _after_binding(minted: bool) -> None:
-    """Listens landed: the Listening-history cards follow them, and the engaged
-    set grew. Wake what feeds on it — the background loop (bios, similars),
+def _after_binding(minted: bool, newest) -> None:
+    """Listens landed (the latest of them began at `newest`): the
+    Listening-history cards follow them, and the engaged set grew. Wake what feeds on it — the background loop (bios, similars),
     the DB steps (credit heads, shelves), the P2P walk (analysis for the new
     canonical tracks), the LB slices — and the screens."""
     import background_enrichment
@@ -700,7 +708,7 @@ def _after_binding(minted: bool) -> None:
     from routers.settings import notify_library_subscribers
     with transaction(RealDictCursor) as cur:
         cur.execute("SELECT pg_advisory_xact_lock(%s)", (LISTENS_LOCK_KEY,))
-        rebuild_imported_sessions(cur)
+        rebuild_imported_sessions(cur, touched=newest)
     background_enrichment.wake("lastfm import")
     background_enrichment.wake_db_steps("lastfm import")
     notify_library_subscribers()

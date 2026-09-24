@@ -3,8 +3,10 @@ Product C) — the "two nodes, one person" case: a laptop and a desktop, or
 an old backup after a rebuild. What the owner DID — listens, listening
 sessions, friends and their messages, AI chats, gear, a handful of
 preferences — is unioned into this database by natural key, so a second run
-changes nothing. Nothing here is replaced or removed. Enrichment inside the
-file is not touched: that travels as a share export through the gate
+changes nothing. Nothing the owner did is replaced or removed; the one row
+that gives way is an imported Last.fm record, to the native record of the
+same listen (play_stats.same_listen). Enrichment inside the file is not
+touched: that travels as a share export through the gate
 (Product B), like anyone else's.
 
 The file is a Product-A `.sbk` of the same account: the password unwraps it,

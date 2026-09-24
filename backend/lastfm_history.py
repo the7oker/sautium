@@ -56,7 +56,6 @@ _state: Dict[str, Any] = {"running": False, "phase": "idle", "progress": "",
                           "pct": None, "error": None, "paused": None, "budget": False}
 _cancel = threading.Event()
 _lock = threading.Lock()
-_thread: Optional[threading.Thread] = None
 
 
 def _notify() -> None:
@@ -124,7 +123,6 @@ def status() -> Dict[str, Any]:
 def start(reason: str) -> bool:
     """Begin (or continue) the walk for the connected account. Single flight:
     False when one is already running or no account is connected."""
-    global _thread
     user = _account()
     if user is None:
         return False
@@ -134,9 +132,8 @@ def start(reason: str) -> bool:
         _cancel.clear()
         _state.update(running=True, phase="starting", progress="", pct=None,
                       error=None, paused=None, budget=False)
-        _thread = threading.Thread(target=_run, args=(user, reason), daemon=True,
-                                   name="lastfm-history")
-        _thread.start()
+        threading.Thread(target=_run, args=(user, reason), daemon=True,
+                         name="lastfm-history").start()
     _notify()
     return True
 
@@ -242,6 +239,13 @@ def _run(user: str, reason: str) -> None:
             _set(paused="Last.fm is rate-limiting this node — Sync again later.")
             return
         with transaction() as cur:
+            # Every write of the walk happens under the listens lock — the one
+            # Remove deletes under — and only if Remove has not been asked
+            # meanwhile: a walk stopping or a page in flight while Remove ran
+            # can then never write after it, whatever the timing.
+            cur.execute("SELECT pg_advisory_xact_lock(%s)", (LISTENS_LOCK_KEY,))
+            if _cancel.is_set():
+                return
             walk = _open_walk(cur, user)
         svc = LastFmService(session_key=settings.lastfm_session_key)
         after = walk["watermark"] - LATE_SCROBBLE_WINDOW if walk["watermark"] else None
@@ -260,6 +264,9 @@ def _run(user: str, reason: str) -> None:
             items = [i for i in page["items"] if i["played_at"] <= walk["top"]]
             oldest = page["oldest"] or before
             with transaction() as cur:
+                cur.execute("SELECT pg_advisory_xact_lock(%s)", (LISTENS_LOCK_KEY,))
+                if _cancel.is_set():
+                    break
                 touched = _store_page(cur, user, items, walk, before, oldest)
                 done = page["dated"] < PAGE_SIZE
                 if done:
@@ -302,10 +309,11 @@ def _run(user: str, reason: str) -> None:
 def remove_imported() -> Dict[str, int]:
     """The owner's explicit "Remove imported history": stop the walk, then
     delete every imported listen and generated card, the waiting room and the
-    cursor. Native plays are untouched; a later Sync brings the history back."""
+    cursor. Native plays are untouched; a later Sync brings the history back.
+    Nothing waits for the walk's thread: it writes only under the listens lock
+    and only while not cancelled, so once this transaction holds the lock no
+    page of it can land afterwards."""
     _cancel.set()
-    if _thread is not None:
-        _thread.join(timeout=120)
     with transaction() as cur:
         cur.execute("SELECT pg_advisory_xact_lock(%s)", (LISTENS_LOCK_KEY,))
         cur.execute("DELETE FROM listening_sessions WHERE source = 'lastfm'")

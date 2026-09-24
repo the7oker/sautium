@@ -247,3 +247,23 @@ def test_a_nameless_scrobble_does_not_end_the_walk(walk):
         cur.execute("SELECT walk_fetched FROM lastfm_import")
         assert cur.fetchone() == (4,)
 
+
+
+def test_a_page_in_flight_while_remove_runs_is_never_written(walk, monkeypatch):
+    # Remove lands while a page is being fetched: the page comes back after
+    # the removal and must not bring back what was just removed.
+    _FakeLastFm.history = [_scrobble(m) for m in (0, 10)]
+
+    class _RemovedMidFetch(_FakeLastFm):
+        def recent_tracks_page(self, user, before, after):
+            lastfm_history.remove_imported()
+            return super().recent_tracks_page(user, before, after)
+
+    monkeypatch.setattr(lastfm, "LastFmService", _RemovedMidFetch)
+    lastfm_history._run("vale", "connected")
+
+    with walk.cursor() as cur:
+        cur.execute("SELECT (SELECT count(*) FROM pending_scrobbles), "
+                    "(SELECT count(*) FROM pending_scrobble_artists), "
+                    "(SELECT count(*) FROM lastfm_import)")
+        assert cur.fetchone() == (0, 0, 0)

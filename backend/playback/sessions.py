@@ -433,7 +433,7 @@ _ALBUM_BLOCK = 3
 _IMPORTED_WINDOW_DAYS = 30
 
 
-def rebuild_imported_sessions(cur) -> int:
+def rebuild_imported_sessions(cur, touched=None) -> int:
     """The Listening-history cards of the imported listens, rebuilt with them —
     a projection of `listening_history` rows with source 'lastfm', re-derivable
     like local_play_stats, so replacing them removes nothing the owner did.
@@ -446,7 +446,10 @@ def rebuild_imported_sessions(cur) -> int:
     record, not a compilation); the rest become a mix, or a track card when
     alone. Card fields come from _compute_session_card; a mix is titled
     "Mix" (no model call per imported card). `cur` is a RealDictCursor inside
-    the caller's transaction, which holds the listens lock."""
+    the caller's transaction, which holds the listens lock. `touched` is the
+    latest start among the listens that just changed: listens older than the
+    window leave its cards as they are — an import walks back through years
+    while the window stays at its newest month. Returns the cards written."""
     import uuid
     from uuid_utils import NAMESPACE
     cur.execute("SELECT max(started_at) AS newest FROM listening_history WHERE source = 'lastfm'")
@@ -455,6 +458,8 @@ def rebuild_imported_sessions(cur) -> int:
         cur.execute("DELETE FROM listening_sessions WHERE source = 'lastfm'")
         return 0
     since = newest - timedelta(days=_IMPORTED_WINDOW_DAYS)
+    if touched is not None and touched < since:
+        return 0
     cur.execute("DELETE FROM listening_sessions WHERE source = 'lastfm' AND started_at >= %s",
                 (since,))
     cur.execute(f"""
