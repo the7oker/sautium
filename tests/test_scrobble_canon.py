@@ -187,23 +187,79 @@ def test_stage_d_places_through_the_catalogue(db):
     resolved = scrobbles.resolve_names()["artists"]
     with db.cursor() as cur:
         # The mint gave Kiss of Life a slot (under MB's own title); Smooth
-        # Operator's album was never minted.
+        # Operator's album was never minted — its recording gets a track.
         _slot(cur, str(uuid.uuid4()), "Kiss of Life", 330, recording=KISS_REC)
 
     stats = scrobbles.bind_catalogue(resolved)
-    assert scrobbles.bind_catalogue() == {"bound": 0, "not_minted": 0, "not_in_catalogue": 0,
-                                          "newest": None}
+    assert scrobbles.bind_catalogue() == {"bound": 0, "tracks_minted": 0, "not_minted": 0,
+                                          "not_in_catalogue": 0, "newest": None}
 
-    assert stats == {"bound": 1, "not_minted": 1, "not_in_catalogue": 2,
+    assert stats == {"bound": 2, "tracks_minted": 1, "not_minted": 0, "not_in_catalogue": 2,
                      "newest": T0 + timedelta(minutes=10)}
+    from uuid_utils import track_uuid
+    smooth = str(track_uuid("Smooth Operator", "Sade"))
     with db.cursor() as cur:
-        assert [(s, d) for _, s, d, _ in _listens(cur)] == [(T0 + timedelta(minutes=10), 330)]
+        assert [(t, s, d) for t, s, d, _ in _listens(cur)][0] == \
+            (smooth, T0 + timedelta(minutes=5), 298)
+        assert [(s, d) for _, s, d, _ in _listens(cur)][1] == (T0 + timedelta(minutes=10), 330)
+        cur.execute("""SELECT t.title, a.name, ta.role FROM tracks t
+                         JOIN track_artists ta ON ta.track_id = t.id
+                         JOIN artists a ON a.id = ta.artist_id WHERE t.id = %s""", (smooth,))
+        assert cur.fetchall() == [("Smooth Operator", "Sade", "primary")]
         cur.execute("SELECT title FROM pending_scrobbles ORDER BY played_at")
         assert [r[0] for r in cur.fetchall()] == ["Kiss of Life (Live at the Albert Hall)",
-                                                  "Smooth Operator - Single Version",
                                                   "A Song Nobody Recorded"]
         cur.execute("SELECT checked_at IS NOT NULL FROM pending_scrobble_artists")
         assert cur.fetchone() == (True,)
+
+
+def test_stage_d_leaves_a_guest_spot_and_an_untimed_recording_waiting(db):
+    with db.cursor() as cur:
+        # Sade sings second on another artist's record, and one recording of
+        # her own has no length in MB.
+        cur.execute("INSERT INTO mb_artist (id, gid, name) VALUES (3, %s, 'A Host')",
+                    (str(uuid.uuid4()),))
+        cur.execute("""INSERT INTO mb_artist_credit_name (artist_credit, position, artist, name)
+                       VALUES (30, 0, 3, 'A Host'), (30, 1, 1, 'Sade')""")
+        cur.execute("""INSERT INTO mb_recording (id, gid, name, artist_credit, length) VALUES
+                         (103, %s, 'Duet Song', 30, 200000),
+                         (104, %s, 'Untimed Song', 10, NULL)""",
+                    (str(uuid.uuid4()), str(uuid.uuid4())))
+        _wait(cur, 0, "Duet Song")
+        _wait(cur, 5, "Untimed Song")
+    resolved = scrobbles.resolve_names()["artists"]
+
+    stats = scrobbles.bind_catalogue(resolved)
+
+    assert (stats["bound"], stats["tracks_minted"], stats["not_minted"]) == (0, 0, 2)
+
+
+def test_a_store_annotation_is_not_part_of_the_title():
+    assert scrobbles._title_variants("Fade to grey (as originally performed by Visage)")[-1] \
+        == "Fade to grey"
+    assert "Rip It Up" in scrobbles._title_variants("Rip It Up-1956")
+    assert "Nature Boy" in scrobbles._title_variants("Nature Boy (1972)")
+    assert scrobbles._title_variants("1979") == ["1979"]
+
+
+def test_stage_d_compares_titles_by_their_folded_key(db):
+    paradise = str(uuid.uuid4())
+    with db.cursor() as cur:
+        cur.execute("""INSERT INTO mb_recording (id, gid, name, artist_credit, length)
+                       VALUES (102, %s, 'Paradise Café', 10, 250000)""", (paradise,))
+        cur.execute("""INSERT INTO mb_track (id, gid, recording, name, artist_credit)
+                       VALUES (1002, %s, 102, 'Paradise Café', 10)""", (str(uuid.uuid4()),))
+        _wait(cur, 0, "Kiss of Life (as originally performed by Sade)")
+        _wait(cur, 5, "KISS OF LIFE-1992")
+        _wait(cur, 10, "Paradise Cafe")
+    resolved = scrobbles.resolve_names()["artists"]
+    with db.cursor() as cur:
+        _slot(cur, str(uuid.uuid4()), "Kiss of Life", 330, recording=KISS_REC)
+        _slot(cur, str(uuid.uuid4()), "Paradise Café", 250, recording=paradise, album="Promise")
+
+    stats = scrobbles.bind_catalogue(resolved)
+
+    assert (stats["bound"], stats["not_in_catalogue"], stats["not_minted"]) == (3, 0, 0)
 
 
 def test_a_pass_resolves_places_and_wakes_what_feeds_on_listens(db, monkeypatch):

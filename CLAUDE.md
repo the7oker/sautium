@@ -173,9 +173,13 @@ See:
   a waiting room of raw strings (`pending_scrobbles` /
   `pending_scrobble_artists`, kept only until placed); the canon
   (`backend/canon/scrobbles.py`) places a scrobble only on a canonical
-  track — owned, or a minted MB slot — after resolving its artist from the
-  heard titles and albums, and only then writes a `listening_history` row
-  with `source = 'lastfm'` (the track's length as the seconds listened).
+  track — owned, a minted MB slot, or for a recording no album here
+  carries (a single, a compilation or live cut, a bonus track) the
+  recording's own track, MB's name and length, never its album — after
+  resolving its artist from the heard titles and albums (compared by a
+  folded key: accents, typography, a store's annotation), and only then
+  writes a `listening_history` row with `source = 'lastfm'` (the track's
+  length as the seconds listened).
   No entity is ever named after Last.fm's strings; its MBIDs are hints.
   Sautium's own plays come back from Last.fm: "the same listen" is
   `play_stats.same_listen` (the start within 10 s, time only — autocorrect

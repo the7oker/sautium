@@ -23,7 +23,10 @@ rule. Two layers, one tracking table (`_schema_migrations`):
      of material under provenance.MIN_MATERIAL_SECONDS, computed before the
      floor existed (2026-09-18). The listen-times step (`listen_times_utc_v1`)
      moves the starts a launcher's tracker wrote as naive local time back to
-     the instant they meant (play_stats.repaired_start, 2026-09-24).
+     the instant they meant (play_stats.repaired_start, 2026-09-24). The
+     scrobble step (`scrobble_title_key_v1`) reopens every waiting
+     imported-scrobble name once, the day titles came to be compared by a
+     folded key (accents, typography, a store's annotation — 2026-09-24).
 
 The launcher's own P2P sync server is a separate process: on a launcher
 node with old-rule data a peer import racing this rewrite is a known
@@ -82,6 +85,18 @@ def _repair_naive_listen_times(conn) -> int:
         refresh_play_stats(cur, tracks)
     conn.commit()
     return len(tracks)
+
+
+def _reopen_waiting_scrobble_names(conn) -> int:
+    """Every name with scrobbles still waiting is due again: decided and
+    placed under exact lowered titles, it gets another look under the folded
+    title key — the resolver's consumer starts on them at startup."""
+    with conn.cursor() as cur:
+        cur.execute("UPDATE pending_scrobble_artists SET checked_at = NULL "
+                    "WHERE checked_at IS NOT NULL")
+        reopened = cur.rowcount
+    conn.commit()
+    return reopened
 
 
 def _drop_sub_floor_analysis(conn) -> dict:
@@ -148,6 +163,10 @@ def apply_pending() -> dict:
         if not _marked(conn, "listen_times_utc_v1"):
             out["listen_tracks_repaired"] = _repair_naive_listen_times(conn)
             _mark(conn, "listen_times_utc_v1")
+
+        if not _marked(conn, "scrobble_title_key_v1"):
+            out["scrobble_names_reopened"] = _reopen_waiting_scrobble_names(conn)
+            _mark(conn, "scrobble_title_key_v1")
 
         # Cold-start seed: after the identity pass, so the bundle's rule
         # check compares against a fully renormalized database. The marker

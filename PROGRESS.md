@@ -1517,6 +1517,22 @@ Recommendations start from the owner's own listening.
   scrobbles wait on artists MusicBrainz cannot place (mostly `&` credits it
   holds no entity for), 2,724 on tracks no minted album carries (singles,
   compilations, live).
+- **A listened song needs no album.** On the launcher stand — the same
+  account, 430 owned tracks instead of 37,138 — 14.5k scrobbles (18 %)
+  still waited once the canon was done: on the master the owner's files had
+  been carrying what the phantom layer never mints. `python -m
+  canon.scrobbles --gap` split them: 6.3k titles naming no recording of the
+  artist, then compilations 3.2k, bonus tracks 2.0k, albums never fully
+  timed 1.1k, singles 0.8k, remixes 0.7k, live 0.2k. Titles are now
+  compared by a folded key (lowered, unaccented, typography folded, a
+  store's "(as originally performed by …)" or "-1956" dropped) — artist
+  resolution went 235 → 239 of 247 right, none wrong — and a recording no
+  album here carries gets its own canonical track (MB's name and length,
+  primary to the resolved artist). Minting its album instead would have put
+  4.2k singles and compilations on artist pages, the release types the
+  discography keeps out on purpose. On the stand that places ~9.6k of the
+  14.3k; what waits is a title MB does not know (4.2k), a recording MB never
+  timed (0.4k), a guest spot.
 - **MB slices for Docker too.** The resolver needs MB data for names a node
   has never seen, and only the launcher asked for slices; the cycle is now
   shared (`desktop/p2p/mb_slice_cycle.py`) with a tier for the names imported

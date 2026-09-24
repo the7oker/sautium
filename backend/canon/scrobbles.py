@@ -63,6 +63,18 @@ _VERSION = re.compile(
     r"\s*(?:[\(\[]\s*(?:single|radio|album|lp|original)\s+(?:version|edit|mix)\s*[\)\]]"
     r"|[-–—]\s*(?:single|radio|album|lp|original)\s+(?:version|edit|mix)\s*$)",
     re.IGNORECASE)
+# What a store or a compilation writes after the title of the same recording:
+# "(as originally performed by Visage)", "Rip It Up-1956", "Nature Boy (1972)".
+_ANNOTATION = re.compile(
+    r"\s*[\(\[]\s*as\s+(?:originally\s+)?(?:performed|made\s+famous)\s+by\s[^\)\]]*[\)\]]\s*$"
+    r"|\s*(?:[-–—]\s*|\(\s*)(?:19|20)\d\d\s*\)?\s*$",
+    re.IGNORECASE)
+# The key a title is compared by: lowered, unaccented, apostrophes dropped,
+# every other run of non-alphanumerics one space — "Don’t Go" is "dont go",
+# "Ma dernière" is "ma derniere". Computed in SQL on both sides: PostgreSQL's
+# unaccent folds ø, æ, ß and ё, which a Unicode decomposition does not.
+_TITLE_KEY_SQL = ("btrim(regexp_replace(regexp_replace(lower(public.f_unaccent({x})), "
+                  "'[''’‘ʼ`´]', '', 'g'), '[^[:alnum:]]+', ' ', 'g'))")
 # MB's special-purpose artists — [unknown], [traditional], Various Artists —
 # credit every record on Earth; a name that is one of them places nothing.
 _SPECIAL = re.compile(r"^\[.*\]$")
@@ -92,8 +104,9 @@ Row = Dict[str, Any]
 def _title_variants(title: str) -> List[str]:
     """The title as scrobbled, then without a "(feat. …)" credit, without an
     edition marker ("- 2011 Remaster"), without a version tag ("- Radio
-    Edit") — the most precise form first. A live, acoustic or remixed take is
-    another recording and keeps its word."""
+    Edit"), without a store's annotation ("(as originally performed by …)",
+    "-1956") — the most precise form first. A live, acoustic or remixed take
+    is another recording and keeps its word."""
     from discography import split_edition
     out: List[str] = []
 
@@ -107,6 +120,8 @@ def _title_variants(title: str) -> List[str]:
         add(split_edition(t)[0])
         add(_VERSION.sub("", t))
         add(split_edition(_VERSION.sub("", t))[0])
+    for t in list(out):
+        add(_ANNOTATION.sub("", t))
     return out
 
 
@@ -122,15 +137,22 @@ def _artist_variants(artist: str) -> List[str]:
     return [artist] + ([head] if head != artist else [])
 
 
-def _lower_forms(title: str) -> List[str]:
-    """What an MB track or recording name may read as, lowered: every variant,
-    in the scrobbler's and in MB's punctuation, the most precise first."""
-    from canon.match import _mb_spelling
-    out: List[str] = []
-    for v in _title_variants(title):
-        for f in (v.lower(), _mb_spelling(v).lower()):
-            if f not in out:
-                out.append(f)
+def _title_keys(titles: Iterable[str]) -> Dict[str, List[str]]:
+    """title → the keys an MB track or recording name may carry for it: every
+    variant's _TITLE_KEY_SQL, the most precise first. One query for them all."""
+    variants = {t: _title_variants(t) for t in set(titles)}
+    wanted = sorted({v for vs in variants.values() for v in vs})
+    key_of = {r["v"]: r["k"] for r in db_query(
+        f"SELECT v, {_TITLE_KEY_SQL.format(x='v')} AS k FROM unnest(CAST(%(v)s AS text[])) v",
+        {"v": wanted})} if wanted else {}
+    out: Dict[str, List[str]] = {}
+    for t, vs in variants.items():
+        keys: List[str] = []
+        for v in vs:
+            k = key_of.get(v)
+            if k and k not in keys:
+                keys.append(k)
+        out[t] = keys
     return out
 
 
@@ -159,13 +181,15 @@ def _pending(cur, name_keys: Optional[List[str]], after: Optional[Tuple]) -> Lis
     return cur.fetchall()
 
 
-def _chunks(name_keys: Optional[List[str]]):
+def _chunks(name_keys: Optional[List[str]], locked: bool = True):
     """(cursor, rows) for every chunk of the waiting scrobbles of `name_keys`,
-    each in its own transaction under the listens lock."""
+    each in its own transaction — under the listens lock, unless a read-only
+    report walks them beside a working resolver."""
     after = None
     while True:
         with transaction(RealDictCursor) as cur:
-            cur.execute("SELECT pg_advisory_xact_lock(%s)", (LISTENS_LOCK_KEY,))
+            if locked:
+                cur.execute("SELECT pg_advisory_xact_lock(%s)", (LISTENS_LOCK_KEY,))
             rows = _pending(cur, name_keys, after)
             if not rows:
                 return
@@ -292,9 +316,11 @@ def _evidence(name_keys: List[str]) -> Dict[str, Row]:
 
 
 def _evidence_of(rows: Iterable[Row]) -> Dict[str, Row]:
-    """name_key → its scrobbles' title forms (lowered form → title key), the
-    title and album keys, the credits carried, and Last.fm's artist MBIDs."""
+    """name_key → its scrobbles' title forms (compare key → title), the title
+    and album keys, the credits carried, and Last.fm's artist MBIDs."""
     from discography import release_match_key
+    rows = list(rows)
+    keys = _title_keys(r["title"] for r in rows)
     out: Dict[str, Row] = {}
     for r in rows:
         e = out.setdefault(r["name_key"], {"forms": {}, "titles": set(), "albums": set(),
@@ -305,7 +331,7 @@ def _evidence_of(rows: Iterable[Row]) -> Dict[str, Row]:
         key = r["title"].strip().lower()
         if key and key not in _STOP_TITLES:
             e["titles"].add(key)
-            for f in _lower_forms(r["title"]):
+            for f in keys[r["title"]]:
                 e["forms"].setdefault(f, key)
         if r["album"]:
             k = release_match_key(r["album"])
@@ -330,23 +356,24 @@ def _candidates(credit: str) -> List[str]:
 
 
 def _title_matches(gids: List[str], forms: List[str]) -> Dict[str, Set[str]]:
-    """gid → the lowered track/recording names credited to it that are among
+    """gid → the keys of track/recording names credited to it that are among
     `forms` — matched in SQL over the artist's credited catalogue, so a
     prolific artist's names never leave the database."""
     out: Dict[str, Set[str]] = defaultdict(set)
     if not gids or not forms:
         return out
-    for r in db_query("""
+    t_key, r_key = _TITLE_KEY_SQL.format(x="t.name"), _TITLE_KEY_SQL.format(x="r.name")
+    for r in db_query(f"""
         WITH cand AS (SELECT id, gid FROM mb_artist WHERE gid = ANY(%(g)s::uuid[])),
              cred AS (SELECT DISTINCT c.gid, acn.artist_credit
                         FROM cand c JOIN mb_artist_credit_name acn ON acn.artist = c.id)
-        SELECT cr.gid::text AS gid, lower(t.name) AS n
+        SELECT cr.gid::text AS gid, {t_key} AS n
           FROM cred cr JOIN mb_track t ON t.artist_credit = cr.artist_credit
-         WHERE lower(t.name) = ANY(%(f)s)
+         WHERE {t_key} = ANY(%(f)s)
         UNION
-        SELECT cr.gid::text, lower(r.name)
+        SELECT cr.gid::text, {r_key}
           FROM cred cr JOIN mb_recording r ON r.artist_credit = cr.artist_credit
-         WHERE lower(r.name) = ANY(%(f)s)
+         WHERE {r_key} = ANY(%(f)s)
     """, {"g": gids, "f": forms}):
         out[r["gid"]].add(r["n"])
     return out
@@ -503,23 +530,25 @@ def mint_resolved(limit: int = _MINT_PER_PASS) -> Row:
 # --------------------------------------------------------------------------
 
 def _catalogue(gids: List[str], forms: List[str], track_hints: List[str]) -> List[Row]:
-    """The artist's credited tracks and recordings whose lowered name is one of
-    `forms` (or whose MB track gid Last.fm hinted): name, recording gid, track
-    gid, and whether the artist heads the credit."""
-    return db_query("""
+    """The artist's credited tracks and recordings whose name key is one of
+    `forms` (or whose MB track gid Last.fm hinted): the key, MB's own name,
+    recording gid and length, track gid, and whether the artist heads the
+    credit."""
+    t_key, r_key = _TITLE_KEY_SQL.format(x="t.name"), _TITLE_KEY_SQL.format(x="r.name")
+    return db_query(f"""
         WITH a AS (SELECT id FROM mb_artist WHERE gid = ANY(%(g)s::uuid[])),
              cred AS (SELECT acn.artist_credit, min(acn.position) AS pos
                         FROM mb_artist_credit_name acn JOIN a ON acn.artist = a.id
                        GROUP BY acn.artist_credit)
-        SELECT lower(t.name) AS n, rec.gid::text AS recording, t.gid::text AS track_gid,
-               cr.pos = 0 AS head
+        SELECT {t_key} AS n, t.name, rec.gid::text AS recording, rec.length,
+               t.gid::text AS track_gid, cr.pos = 0 AS head
           FROM cred cr JOIN mb_track t ON t.artist_credit = cr.artist_credit
           JOIN mb_recording rec ON rec.id = t.recording
-         WHERE lower(t.name) = ANY(%(f)s) OR t.gid = ANY(CAST(%(h)s AS uuid[]))
+         WHERE {t_key} = ANY(%(f)s) OR t.gid = ANY(CAST(%(h)s AS uuid[]))
         UNION
-        SELECT lower(r.name), r.gid::text, NULL, cr.pos = 0
+        SELECT {r_key}, r.name, r.gid::text, r.length, NULL, cr.pos = 0
           FROM cred cr JOIN mb_recording r ON r.artist_credit = cr.artist_credit
-         WHERE lower(r.name) = ANY(%(f)s)
+         WHERE {r_key} = ANY(%(f)s)
     """, {"g": gids, "f": forms, "h": track_hints})
 
 
@@ -544,36 +573,61 @@ def _local_tracks(cur, recordings: List[str]) -> Dict[str, List[str]]:
     return out
 
 
-def _pick(row: Row, names: List[Row], local: Dict[str, List[str]],
-          fallback: Dict[str, str], lengths: Dict[str, Row]) -> Tuple[Optional[str], bool]:
-    """(track id, named) for one scrobble: the most precise title form that
-    names a recording this node holds a track for — the recording Last.fm's
-    track MBID points at first, the artist's own credits before guest spots.
-    `named` tells a recording MB has but nothing minted from one MB lacks."""
-    forms = _lower_forms(row["title"])
+def _pick(row: Row, forms: List[str], names: List[Row], local: Dict[str, List[str]],
+          fallback: Dict[str, str], lengths: Dict[str, Row]) -> Tuple[Optional[str], Optional[Row]]:
+    """(track id, best) for one scrobble with title keys `forms`: the most
+    precise form that names a recording this node holds a track for — the
+    recording Last.fm's track MBID points at first, the artist's own credits
+    before guest spots. When nothing here carries it, `best` is the catalogue
+    row that match would have been (None when MB names no recording)."""
     ranked = []
-    for n in names:
+    for i, n in enumerate(names):
         if row["track_mbid"] and n["track_gid"] == row["track_mbid"]:
             rank = -1
         elif n["n"] in forms:
             rank = forms.index(n["n"])
         else:
             continue
-        ranked.append((rank, not n["head"], n["recording"]))
-    for _, _, rec in sorted(ranked):
+        ranked.append((rank, not n["head"], n["recording"], i))
+    ranked.sort()
+    for _, _, rec, _ in ranked:
         for track_id in local.get(rec, []) + ([fallback[rec]] if rec in fallback else []):
             entry = lengths.get(track_id)
             if entry and _seconds(entry, row["album"]):
-                return track_id, True
-    return None, bool(ranked)
+                return track_id, None
+    return None, (names[ranked[0][3]] if ranked else None)
+
+
+def _mint_recording_tracks(cur, tracks: Dict[str, str], artist_id: str) -> int:
+    """The canonical tracks of listened recordings no album here carries
+    (track id → MB's name), primary to the resolved artist; returns how many
+    are new. Born canonical like a slot: the id is track_uuid of MB's name
+    and artist, so a later rip or mint of the same song lands on it."""
+    from transliterate import latinize
+    new = execute_values(cur, "INSERT INTO tracks (id, title, title_latin) VALUES %s "
+                              "ON CONFLICT (id) DO NOTHING RETURNING 1",
+                         [(t, name[:500], latinize(name[:500])) for t, name in tracks.items()],
+                         fetch=True)
+    execute_values(cur, "INSERT INTO track_artists (track_id, role, artist_id) VALUES %s "
+                        "ON CONFLICT DO NOTHING",
+                   [(t, "primary", artist_id) for t in tracks])
+    return len(new)
 
 
 def bind_catalogue(extra_artists: Iterable[str] = ()) -> Row:
     """Stage D for the resolved names due a placement attempt — never tried
     since resolution, new scrobbles, or a mint of their artist since — plus
     the artists in `extra_artists`. Stamps each name's attempt; `newest` is
-    the latest start among the listens written."""
-    stats: Row = {"bound": 0, "not_in_catalogue": 0, "not_minted": 0, "newest": None}
+    the latest start among the listens written.
+
+    A recording MB names that no track here carries — a single, a
+    compilation or live record, a bonus track, an album never fully timed —
+    gets its own canonical track when the artist heads its credit and MB
+    knows its length: the listen is placed on the song, the album it came
+    from is never minted for it (the discography keeps to studio albums and
+    EPs). A guest spot, or a recording without a length, waits."""
+    stats: Row = {"bound": 0, "tracks_minted": 0, "not_in_catalogue": 0, "not_minted": 0,
+                  "newest": None}
     artists = db_query("""
         SELECT n.artist_id::text AS artist_id, a.name, array_agg(DISTINCT n.name_key) AS names,
                (SELECT array_agg(am.mbid::text) FROM artist_mbids am
@@ -589,22 +643,32 @@ def bind_catalogue(extra_artists: Iterable[str] = ()) -> Row:
         if not art["gids"]:
             continue
         for cur, rows in _chunks(art["names"]):
-            forms = sorted({f for r in rows for f in _lower_forms(r["title"])})
+            keys = _title_keys(r["title"] for r in rows)
+            forms = sorted({f for ks in keys.values() for f in ks})
             hints = sorted({r["track_mbid"] for r in rows if r["track_mbid"]})
             names = _catalogue(art["gids"], forms, hints)
             local = _local_tracks(cur, sorted({n["recording"] for n in names}))
-            fallback = {n["recording"]: str(track_uuid(n["n"], art["name"])) for n in names}
+            fallback = {n["recording"]: str(track_uuid(n["name"], art["name"])) for n in names}
             lengths = _track_lengths(cur, [t for ts in local.values() for t in ts]
                                      + list(fallback.values()))
-            binds = []
+            binds, recording_tracks = [], {}
             for r in rows:
-                track_id, named = _pick(r, names, local, fallback, lengths)
-                if track_id is None:
-                    stats["not_minted" if named else "not_in_catalogue"] += 1
-                    continue
-                entry = lengths[track_id]
-                binds.append({**r, "track_id": track_id, "seconds": _seconds(entry, r["album"]),
-                              "media_file_id": entry["media_file_id"]})
+                track_id, best = _pick(r, keys[r["title"]], names, local, fallback, lengths)
+                if track_id:
+                    entry = lengths[track_id]
+                    binds.append({**r, "track_id": track_id,
+                                  "seconds": _seconds(entry, r["album"]),
+                                  "media_file_id": entry["media_file_id"]})
+                elif best and best["head"] and best["length"]:
+                    track_id = fallback[best["recording"]]
+                    recording_tracks[track_id] = best["name"]
+                    binds.append({**r, "track_id": track_id, "seconds": best["length"] / 1000,
+                                  "media_file_id": None})
+                else:
+                    stats["not_minted" if best else "not_in_catalogue"] += 1
+            if recording_tracks:
+                stats["tracks_minted"] += _mint_recording_tracks(cur, recording_tracks,
+                                                                 art["artist_id"])
             written = _commit_binds(cur, binds)
             stats["bound"] += len(written)
             stats["newest"] = max([t for t in (*written, stats["newest"]) if t], default=None)
@@ -773,9 +837,10 @@ def report(pages: int = 25) -> Row:
     """What the stages would do with the owner's newest scrobbles, read into
     memory — nothing is written. Buckets: bound to a track this node has
     (A), names resolved or not (B), and of the resolved names' scrobbles,
-    those whose title names a recording with a local track, a recording
-    nothing minted (a single, a compilation, a live record — C decides), or
-    no recording at all."""
+    those whose title names a recording with a local track, a recording that
+    gets a track of its own (nothing here carries it; the artist heads it and
+    MB times it), a recording that waits (a guest spot, no length), or no
+    recording at all."""
     from datetime import datetime, timezone
     import lastfm_history
     from config import settings
@@ -812,20 +877,119 @@ def report(pages: int = 25) -> Row:
             stats["B_undecided_scrobbles"] += len(these)
             continue
         stats["B_resolved_names"] += 1
-        forms = sorted({f for r in these for f in _lower_forms(r["title"])})
+        keys = _title_keys(r["title"] for r in these)
+        forms = sorted({f for ks in keys.values() for f in ks})
         hints = sorted({r["track_mbid"] for r in these if r["track_mbid"]})
         names = _catalogue([gid], forms, hints)
         with transaction(RealDictCursor) as cur:
             local = _local_tracks(cur, sorted({n["recording"] for n in names}))
             artist = db_query_one("SELECT name FROM mb_artist WHERE gid = %(g)s::uuid", {"g": gid})
-            fallback = {n["recording"]: str(track_uuid(n["n"], artist["name"])) for n in names}
+            fallback = {n["recording"]: str(track_uuid(n["name"], artist["name"])) for n in names}
             lengths = _track_lengths(cur, [t for ts in local.values() for t in ts]
                                      + list(fallback.values()))
         for r in these:
-            track_id, named = _pick(r, names, local, fallback, lengths)
+            track_id, best = _pick(r, keys[r["title"]], names, local, fallback, lengths)
             stats["D_bound_now" if track_id else
-                  "D_recording_not_minted" if named else "D_no_recording"] += 1
+                  "D_recording_track" if best and best["head"] and best["length"] else
+                  "D_recording_waits" if best else "D_no_recording"] += 1
     return dict(stats)
+
+
+def gap_report() -> Row:
+    """Where the waiting scrobbles of resolved artists stand, read from this
+    node — nothing is written. `placeable_now`: stage D places it on its
+    next try on a track this node holds. `track_from_<kind>`: it will get a
+    track of its own, and <kind> says why no album here carries it — the
+    album the discography mint makes (an Album or EP with no disqualifying
+    secondary type) is here but its picked edition lacks the recording
+    (`edition_lacks_track`, a bonus track) or was never minted
+    (`album_not_minted`, no fully timed release), else the release groups
+    that do carry it are `single`, `compilation`, `live` or `other` (or it
+    is on no release: `no_release`).
+    `wait_no_recording`: the title names no recording of the artist;
+    `wait_guest_spot`: the artist does not head the credit; `wait_no_length`:
+    MB has no length for it."""
+    from discography import _ALLOWED_PRIMARY, _DISQUALIFYING_SECONDARY
+    scrobbles: Counter = Counter()
+    groups: Dict[str, Set[str]] = defaultdict(set)
+    other_kinds: Counter = Counter()
+    here = {r["rg"] for r in db_query(
+        "SELECT musicbrainz_id::text AS rg FROM albums WHERE musicbrainz_id IS NOT NULL")}
+    artists = db_query("""
+        SELECT a.name, array_agg(DISTINCT n.name_key) AS names,
+               (SELECT array_agg(am.mbid::text) FROM artist_mbids am
+                 WHERE am.artist_id = n.artist_id) AS gids
+          FROM pending_scrobble_artists n JOIN artists a ON a.id = n.artist_id
+         WHERE EXISTS (SELECT 1 FROM pending_scrobbles p WHERE p.name_key = n.name_key)
+         GROUP BY n.artist_id, a.name""")
+    for art in artists:
+        if not art["gids"]:
+            continue
+        for cur, rows in _chunks(art["names"], locked=False):
+            keys = _title_keys(r["title"] for r in rows)
+            forms = sorted({f for ks in keys.values() for f in ks})
+            hints = sorted({r["track_mbid"] for r in rows if r["track_mbid"]})
+            names = _catalogue(art["gids"], forms, hints)
+            local = _local_tracks(cur, sorted({n["recording"] for n in names}))
+            fallback = {n["recording"]: str(track_uuid(n["name"], art["name"])) for n in names}
+            lengths = _track_lengths(cur, [t for ts in local.values() for t in ts]
+                                     + list(fallback.values()))
+            t_key, r_key = _TITLE_KEY_SQL.format(x="t.name"), _TITLE_KEY_SQL.format(x="r.name")
+            carriers = db_query(f"""
+                WITH a AS (SELECT id FROM mb_artist WHERE gid = ANY(%(g)s::uuid[])),
+                     cred AS (SELECT DISTINCT acn.artist_credit FROM mb_artist_credit_name acn
+                                JOIN a ON acn.artist = a.id),
+                     hit AS (SELECT {t_key} AS n, t.gid AS track_gid, t.recording
+                               FROM cred JOIN mb_track t ON t.artist_credit = cred.artist_credit
+                              WHERE {t_key} = ANY(%(f)s) OR t.gid = ANY(CAST(%(h)s AS uuid[]))
+                             UNION
+                             SELECT {r_key}, NULL, r.id
+                               FROM cred JOIN mb_recording r ON r.artist_credit = cred.artist_credit
+                              WHERE {r_key} = ANY(%(f)s))
+                SELECT DISTINCT hit.n, hit.track_gid::text AS track_gid, rg.gid::text AS rg,
+                       pt.name AS primary_type,
+                       ARRAY(SELECT st.name FROM mb_release_group_secondary_type_join j
+                               JOIN mb_release_group_secondary_type st ON st.id = j.secondary_type
+                              WHERE j.release_group = rg.id) AS secondary
+                  FROM hit
+                  JOIN mb_track t2 ON t2.recording = hit.recording
+                  JOIN mb_medium m ON m.id = t2.medium
+                  JOIN mb_release r ON r.id = m.release
+                  JOIN mb_release_group rg ON rg.id = r.release_group
+                  LEFT JOIN mb_release_group_primary_type pt ON pt.id = rg.type
+            """, {"g": art["gids"], "f": forms, "h": hints})
+            for r in rows:
+                track_id, best = _pick(r, keys[r["title"]], names, local, fallback, lengths)
+                if track_id:
+                    scrobbles["placeable_now"] += 1
+                    continue
+                if best is None or not best["head"] or not best["length"]:
+                    scrobbles["wait_no_recording" if best is None else
+                              "wait_guest_spot" if not best["head"] else "wait_no_length"] += 1
+                    continue
+                forms_of = set(keys[r["title"]])
+                mine = [c for c in carriers
+                        if c["n"] in forms_of or (r["track_mbid"] and c["track_gid"] == r["track_mbid"])]
+                shelf = [c for c in mine if c["primary_type"] in _ALLOWED_PRIMARY
+                         and not set(c["secondary"]) & _DISQUALIFYING_SECONDARY]
+                if shelf:
+                    kind = ("edition_lacks_track" if any(c["rg"] in here for c in shelf)
+                            else "album_not_minted")
+                    carriers_of = shelf
+                else:
+                    secondary = {s for c in mine for s in c["secondary"]}
+                    kind = ("no_release" if not mine
+                            else "single" if any(c["primary_type"] == "Single" for c in mine)
+                            else "compilation" if "Compilation" in secondary
+                            else "live" if "Live" in secondary else "other")
+                    carriers_of = mine
+                    if kind == "other":
+                        other_kinds[" + ".join(sorted({c["primary_type"] or "?" for c in mine}
+                                                      | secondary))] += 1
+                scrobbles[f"track_from_{kind}"] += 1
+                groups[kind].update(c["rg"] for c in carriers_of)
+    return {"scrobbles": dict(scrobbles), "release_groups": {k: len(v) for k, v in groups.items()},
+            "other_kinds": dict(other_kinds.most_common(12))}
 
 
 if __name__ == "__main__":
@@ -834,6 +998,7 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Imported-scrobble canon: read-only checks")
     parser.add_argument("--eval", action="store_true", help="stage B against verified owned artists")
     parser.add_argument("--report", action="store_true", help="the stages over the newest scrobbles")
+    parser.add_argument("--gap", action="store_true", help="why resolved names' scrobbles still wait")
     parser.add_argument("--limit", type=int, default=300)
     parser.add_argument("--pages", type=int, default=25)
     parser.add_argument("--titles", type=int, default=None, help="eval: sparse evidence")
@@ -841,6 +1006,8 @@ if __name__ == "__main__":
     logging.basicConfig(level=logging.WARNING)
     if args.eval:
         pprint.pprint(evaluate(args.limit, args.titles))
+    if args.gap:
+        pprint.pprint(gap_report())
     if args.report:
         import lastfm_auth
         lastfm_auth.load_from_db()
