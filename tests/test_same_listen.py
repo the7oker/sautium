@@ -107,3 +107,38 @@ def test_the_native_record_wins_and_two_natives_keep_their_key(conn):
         cur.execute("SELECT play_count FROM local_play_stats WHERE track_id = %s", (str(native),))
         assert cur.fetchone() == (2,)
     conn.rollback()
+
+
+def test_two_nodes_that_imported_one_history_merge_to_one_listen_per_scrobble(conn):
+    """Both nodes walked the same Last.fm account and each placed the
+    scrobbles on the tracks it had; one node's backup is merged into the
+    other. Every scrobble stays one listen: where both placed it, this node's
+    placement stands; where only the backup did, on a track known here, it
+    lands; a native record whose track is unknown here takes nothing away."""
+    here, there, only_there, rip_there = (uuid.uuid4() for _ in range(4))
+    live, scratch = "listening_history", f"{life_merge.SCRATCH}.listening_history"
+    with conn.cursor() as cur:
+        for t in (here, there, only_there):          # rip_there: the other machine's file only
+            cur.execute("INSERT INTO tracks (id, title) VALUES (%s, 'x')", (str(t),))
+        _scratch(cur)
+        # 1. Both placed the scrobble — on different tracks.
+        _listen(cur, live, here, T0, source="lastfm")
+        _listen(cur, scratch, there, T0, source="lastfm")
+        # 2. Only the other node placed it, on a track this node knows.
+        _listen(cur, scratch, only_there, T0 + timedelta(hours=1), source="lastfm")
+        # 3. The other node played it on its own rip and scrobbled it; this
+        #    node imported the scrobble. The rip is unknown here.
+        _listen(cur, live, here, T0 + timedelta(hours=2), source="lastfm")
+        _listen(cur, scratch, rip_there, T0 + timedelta(hours=2, seconds=1))
+        from play_stats import refresh_play_stats
+        refresh_play_stats(cur, [str(here)])
+
+        out = life_merge.merge_life(conn)
+
+        cur.execute("SELECT track_id, source FROM listening_history ORDER BY started_at")
+        assert [(uuid.UUID(str(t)), s) for t, s in cur.fetchall()] == [
+            (here, "lastfm"), (only_there, "lastfm"), (here, "lastfm")]
+        assert (out["merged"]["listens"], out["merged"]["listens_replaced"]) == (1, 0)
+        cur.execute("SELECT track_id, play_count FROM local_play_stats ORDER BY play_count")
+        assert [(uuid.UUID(str(t)), n) for t, n in cur.fetchall()] == [(only_there, 1), (here, 2)]
+    conn.rollback()
