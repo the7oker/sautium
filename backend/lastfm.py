@@ -7,6 +7,8 @@ import logging
 import re
 import threading
 import time
+import uuid
+from datetime import datetime, timezone
 from typing import Callable, Dict, List, Optional, Any
 from xml.dom.minidom import Document
 
@@ -164,15 +166,55 @@ def _artist_info(doc: Document) -> Dict[str, Any]:
     }
 
 
+# A scrobble's strings are stored while it waits for the canon; the columns
+# they land in are bounded like every other name in the schema.
+_SCROBBLE_TEXT_MAX = 500
+
+
+def _uuid_or_none(value: str) -> Optional[str]:
+    try:
+        return str(uuid.UUID(value)) if value else None
+    except ValueError:
+        return None
+
+
+def _recent_tracks(doc: Document) -> Dict[str, Any]:
+    """One user.getRecentTracks page: the range's total and its dated
+    scrobbles, newest first. The now-playing item carries no date and is not a
+    scrobble. The MBIDs are Last.fm's own name-based association — hints
+    (an album's is an MB release, a track's often an MB track, not a
+    recording), never anchors."""
+    root = doc.getElementsByTagName("recenttracks")[0]
+    items = []
+    for track in root.getElementsByTagName("track"):
+        dates = track.getElementsByTagName("date")
+        if track.getAttribute("nowplaying") == "true" or not dates:
+            continue
+        artist = track.getElementsByTagName("artist")[0]
+        album = track.getElementsByTagName("album")[0]
+        items.append({
+            "played_at": datetime.fromtimestamp(int(dates[0].getAttribute("uts")), tz=timezone.utc),
+            "artist": (_first_text(track, "artist") or "")[:_SCROBBLE_TEXT_MAX],
+            "title": (_first_text(track, "name") or "")[:_SCROBBLE_TEXT_MAX],
+            "album": (_first_text(track, "album") or "")[:_SCROBBLE_TEXT_MAX] or None,
+            "artist_mbid": _uuid_or_none(artist.getAttribute("mbid")),
+            "album_mbid": _uuid_or_none(album.getAttribute("mbid")),
+            "track_mbid": _uuid_or_none(_first_text(track, "mbid") or ""),
+        })
+    return {"total": int(root.getAttribute("total") or 0),
+            "items": [i for i in items if i["artist"] and i["title"]]}
+
+
 class LastFmService:
     """Service for fetching and storing Last.fm metadata."""
 
-    def __init__(self):
-        """Initialize Last.fm network connection."""
+    def __init__(self, session_key: str = ""):
+        """Initialize Last.fm network connection — signed as the owner when a
+        session key is given (their own history, even a private one)."""
         if not settings.lastfm_api_key:
             raise ValueError("LASTFM_API_KEY is not configured")
 
-        self.network = lastfm_network()
+        self.network = lastfm_network(session_key)
         logger.debug("Last.fm service initialized")
 
     @staticmethod
@@ -213,6 +255,23 @@ class LastFmService:
         of the message) is what keeps transient failures out of the negative cache
         and stops real entities being recorded as missing forever."""
         return str(getattr(e, "status", "")) == str(pylast.STATUS_INVALID_PARAMS)
+
+    def recent_tracks_page(self, user: str, before: Optional[datetime],
+                           after: Optional[datetime]) -> Dict[str, Any]:
+        """The newest page (≤200) of `user`'s scrobbles before `before` and
+        after `after` — the import walks down by moving `before`, never by
+        page number (Last.fm's deep pages are slow and unstable). Requested
+        page by page rather than through pylast's own paging, which drops the
+        MBIDs and turns a refusal (error 29) into a bare PyLastError the
+        failure classifier cannot read."""
+        params = {"user": user, "limit": "200", "extended": "0"}
+        if before is not None:
+            params["to"] = str(int(before.timestamp()))
+        if after is not None:
+            params["from"] = str(int(after.timestamp()))
+        doc = self._with_retry(
+            lambda: pylast._Request(self.network, "user.getRecentTracks", params).execute(False))
+        return _recent_tracks(doc)
 
     def get_artist_info(self, artist_name: str, fetch_similar: bool = True) -> Optional[Dict[str, Any]]:
         """

@@ -209,6 +209,10 @@ def _finish(flow: Flow, token: str, *, keep_on_error: bool) -> str:
         _last_error = None
     logger.info("Last.fm authorized as %s", username)
     _notify()
+    # The connection is the import's first trigger: the owner's history is
+    # what makes a new node's Home theirs (backend/lastfm_history.py).
+    import lastfm_history
+    lastfm_history.start("connected")
     return username
 
 

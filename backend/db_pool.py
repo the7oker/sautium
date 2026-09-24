@@ -67,6 +67,24 @@ def get_conn():
         pool.putconn(conn)
 
 
+@contextmanager
+def transaction(cursor_factory=None):
+    """A cursor on a pooled connection inside ONE transaction: committed when
+    the block ends, rolled back when it raises. The connection goes back to
+    the pool in autocommit — the pool's contract with every other caller."""
+    with get_conn() as conn:
+        conn.autocommit = False
+        try:
+            with conn.cursor(cursor_factory=cursor_factory) as cur:
+                yield cur
+            conn.commit()
+        except BaseException:
+            conn.rollback()
+            raise
+        finally:
+            conn.autocommit = True
+
+
 def db_query(sql: str, params=None) -> list[dict]:
     """Execute a SELECT query, return list of dicts."""
     with get_conn() as conn:

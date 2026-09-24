@@ -120,6 +120,14 @@ def _scrobbling_enabled() -> bool:
         return True
 
 
+def open_listen_started_at() -> Optional[datetime]:
+    """When the listen in progress began, or None. Its scrobble may already be
+    on Last.fm (scrobbled mid-listen) while its history row is written only
+    when it ends — an import of the Last.fm history stops short of it."""
+    s = _play_session
+    return s.started_at if s is not None else None
+
+
 def _play_identity(item) -> Optional[dict]:
     """Source-agnostic identity for the playing QueueItem: its track UUID
     (owned AND phantom carry it) + optional media_file_id. None when the item

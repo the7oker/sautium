@@ -294,6 +294,35 @@ def set_scrobbling(req: ScrobblingUpdate) -> Dict[str, Any]:
 
 
 # ============================================================
+# Last.fm listening history (backend/lastfm_history.py)
+# ============================================================
+
+@router.get("/lastfm/history")
+def get_lastfm_history() -> Dict[str, Any]:
+    import lastfm_history
+    return lastfm_history.status()
+
+
+@router.post("/lastfm/history/sync")
+def sync_lastfm_history() -> Dict[str, Any]:
+    """Read the scrobbles Last.fm has gained since the last sync — from other
+    players and services too. Idempotent: a walk already running is left to
+    finish, and nothing already here is read in twice."""
+    import lastfm_history
+    started = lastfm_history.start("sync")
+    return {"started": started, **lastfm_history.status()}
+
+
+@router.post("/lastfm/history/remove")
+def remove_lastfm_history() -> Dict[str, Any]:
+    """The owner's explicit, confirmed removal of everything the import
+    brought in (listens, generated cards, the waiting room, the cursor)."""
+    import lastfm_history
+    removed = lastfm_history.remove_imported()
+    return {"removed": removed, **lastfm_history.status()}
+
+
+# ============================================================
 # Audio chain
 # ============================================================
 

@@ -345,6 +345,10 @@ async def lifespan(app: FastAPI):
     except Exception as e:
         logger.warning(f"Failed to load API cooldowns at startup: {e}")
 
+    # A Last.fm history walk a restart interrupted continues from its cursor.
+    import lastfm_history
+    lastfm_history.resume()
+
     # The install-time AI pick (the wizard's via backend.env, compose's
     # DEFAULT_PROVIDER) becomes the user_settings row at the first boot
     # without one; from then on the row is the pick every reader sees.
