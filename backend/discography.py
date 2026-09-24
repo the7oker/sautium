@@ -197,16 +197,17 @@ def _stamp_sync(artist_id: str) -> None:
 
 
 def _mb_load_in_progress() -> bool:
-    """True while mb_dump_load.stream_load holds the reload lock. The
-    reconcile must not run against half-TRUNCATEd mb_* tables — it would
-    read an empty discography and strip the artist's phantom shelf.
+    """True while mb_dump_load.stream_load holds the reload lock (exclusive).
+    The reconcile must not run against half-TRUNCATEd mb_* tables — it would
+    read an empty discography and strip the artist's phantom shelf. A SHARED
+    probe: canon runs holding the lock shared are readers like us, not a load.
     try-lock + unlock must happen on the SAME pooled connection."""
     with get_conn() as conn:
         with conn.cursor() as cur:
-            cur.execute("SELECT pg_try_advisory_lock(%s)", (MB_LOAD_LOCK_KEY,))
+            cur.execute("SELECT pg_try_advisory_lock_shared(%s)", (MB_LOAD_LOCK_KEY,))
             got = cur.fetchone()[0]
             if got:
-                cur.execute("SELECT pg_advisory_unlock(%s)", (MB_LOAD_LOCK_KEY,))
+                cur.execute("SELECT pg_advisory_unlock_shared(%s)", (MB_LOAD_LOCK_KEY,))
             return not got
 
 

@@ -26,8 +26,8 @@ from uuid import UUID, uuid5
 logger = logging.getLogger(__name__)
 
 # Mirrors backend/mb_dump_load.py MB_LOAD_LOCK_KEY — the full-dump loader holds
-# this advisory lock for its whole TRUNCATE+COPY pass; slice reads/writes must
-# not interleave with it.
+# this advisory lock EXCLUSIVE for its whole TRUNCATE+COPY pass; slice reads and
+# writes take it SHARED — never beside a load, never in a canon run's way.
 MB_LOAD_LOCK_KEY = 0x6D626C64
 
 MAX_NAMES_PER_REQUEST = 50
@@ -438,12 +438,13 @@ def get_slice_one(conn, name: str) -> dict:
         raise ValueError("name must be a non-empty string")
 
     with conn.cursor() as cur:
-        # The loader holds this lock for its whole TRUNCATE+COPY pass — serving
-        # half-truncated tables would poison the requester, so answer 503.
-        cur.execute("SELECT pg_try_advisory_lock(%s)", (MB_LOAD_LOCK_KEY,))
+        # The loader holds this lock exclusive for its whole TRUNCATE+COPY pass —
+        # serving half-truncated tables would poison the requester, so answer
+        # 503. A shared probe: a canon run reading mb_* is no reason to refuse.
+        cur.execute("SELECT pg_try_advisory_lock_shared(%s)", (MB_LOAD_LOCK_KEY,))
         if not cur.fetchone()[0]:
             raise DumpBusy()
-        cur.execute("SELECT pg_advisory_unlock(%s)", (MB_LOAD_LOCK_KEY,))
+        cur.execute("SELECT pg_advisory_unlock_shared(%s)", (MB_LOAD_LOCK_KEY,))
 
         all_ids = set(_match_artist_ids(cur, name.strip()))
         matched = {name: sorted(all_ids)}

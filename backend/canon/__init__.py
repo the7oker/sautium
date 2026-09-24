@@ -41,11 +41,12 @@ _algo_wants_lock = threading.Lock()
 
 @contextmanager
 def _dump_lock_held():
-    """Hold MB_LOAD_LOCK_KEY for the block on a dedicated connection, so the dump
-    loader's BLOCKING pg_advisory_lock waits for us before it TRUNCATEs the mb_*
-    tables. Yields True if acquired, False if a dump load currently holds it (the
-    caller must not read mb_* — skip/abort). Autocommit so the held connection isn't
-    idle-in-transaction."""
+    """Hold MB_LOAD_LOCK_KEY SHARED for the block on a dedicated connection, so
+    the dump loader's BLOCKING exclusive pg_advisory_lock waits for us before it
+    TRUNCATEs the mb_* tables — while other readers (a discography reconcile, a
+    slice import) go on beside us. Yields True if acquired, False if a dump load
+    currently holds it (the caller must not read mb_* — skip/abort). Autocommit
+    so the held connection isn't idle-in-transaction."""
     from db_pool import get_conn
     from mb_dump_load import MB_LOAD_LOCK_KEY
     with get_conn() as conn:
@@ -54,14 +55,14 @@ def _dump_lock_held():
         got = False
         try:
             with conn.cursor() as cur:
-                cur.execute("SELECT pg_try_advisory_lock(%s)", (MB_LOAD_LOCK_KEY,))
+                cur.execute("SELECT pg_try_advisory_lock_shared(%s)", (MB_LOAD_LOCK_KEY,))
                 got = bool(cur.fetchone()[0])
             yield got
         finally:
             if got:
                 try:
                     with conn.cursor() as cur:
-                        cur.execute("SELECT pg_advisory_unlock(%s)", (MB_LOAD_LOCK_KEY,))
+                        cur.execute("SELECT pg_advisory_unlock_shared(%s)", (MB_LOAD_LOCK_KEY,))
                 except Exception:
                     pass
             try:

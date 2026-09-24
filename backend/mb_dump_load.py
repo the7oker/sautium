@@ -283,11 +283,15 @@ def verify_md5(version: str) -> bool:
 
 # ── streaming load ───────────────────────────────────────────────────────────
 
-# Cross-process "reload in flight" signal: stream_load holds this advisory
-# lock for the whole TRUNCATE+COPY loop; the discography reconcile try-locks
-# it and skips while held (half-loaded mb_* tables would read as an empty
-# discography and strip phantom shelves). DB-level so it works no matter
-# which process (backend thread, docker exec, launcher) runs the load.
+# Cross-process "reload in flight" signal, a readers-writer lock: stream_load
+# (and delete_dump) hold this advisory lock EXCLUSIVE for the whole
+# TRUNCATE+COPY; everything that reads or adds to mb_* — canon runs, the
+# discography reconcile's probe, slice import and slice serving — takes it
+# SHARED and backs off while the loader holds it (half-loaded mb_* tables would
+# read as an empty discography and strip phantom shelves). Readers never
+# exclude one another: when canon runs held it exclusive, every reconcile
+# beside them read "a load is running" and stopped. DB-level so it works no
+# matter which process (backend thread, docker exec, launcher) runs the load.
 MB_LOAD_LOCK_KEY = 0x6D626C64  # "mbld"
 
 

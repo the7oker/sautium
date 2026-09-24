@@ -127,8 +127,10 @@ class MBSliceClient:
         conn = self._get_conn()
         with conn.cursor() as cur:
             # Serialize against a concurrent full dump load (its TRUNCATE+COPY
-            # holds the same lock); session-scoped, released in finally.
-            cur.execute("SELECT pg_advisory_lock(%s)", (MB_LOAD_LOCK_KEY,))
+            # holds the same lock exclusive). Shared: canon runs reading mb_*
+            # meanwhile are no conflict — this batch lands in one transaction.
+            # Session-scoped, released in finally.
+            cur.execute("SELECT pg_advisory_lock_shared(%s)", (MB_LOAD_LOCK_KEY,))
         try:
             with conn.cursor() as cur:
                 for name, (core, blob_gz, entry) in verified.items():
@@ -191,7 +193,7 @@ class MBSliceClient:
             raise
         finally:
             with conn.cursor() as cur:
-                cur.execute("SELECT pg_advisory_unlock(%s)", (MB_LOAD_LOCK_KEY,))
+                cur.execute("SELECT pg_advisory_unlock_shared(%s)", (MB_LOAD_LOCK_KEY,))
             conn.commit()
 
         if stats["truncated"]:
