@@ -234,6 +234,25 @@ def test_stage_d_leaves_a_guest_spot_and_an_untimed_recording_waiting(db):
     assert (stats["bound"], stats["tracks_minted"], stats["not_minted"]) == (0, 0, 2)
 
 
+def test_the_waiting_room_tells_the_queue_from_what_cannot_be_placed(db):
+    with db.cursor() as cur:
+        _wait(cur, 0, "Kiss of Life")
+        _wait(cur, 5, "A Song Nobody Recorded")
+        _wait(cur, 10, "Anything", artist="Nobody MusicBrainz Knows")
+    assert scrobbles.waiting_breakdown() == {"queue": 3, "no_artist": 0, "no_title": 0}
+
+    resolved = scrobbles.resolve_names()["artists"]
+    with db.cursor() as cur:
+        # The mint ran: the artist's discography is here, a placement is due.
+        cur.execute("UPDATE artists SET last_album_sync = now() WHERE id = ANY(%s::uuid[])",
+                    (resolved,))
+        _slot(cur, str(uuid.uuid4()), "Kiss of Life", 330, recording=KISS_REC)
+    assert scrobbles.waiting_breakdown() == {"queue": 2, "no_artist": 1, "no_title": 0}
+
+    scrobbles.bind_catalogue(resolved)
+    assert scrobbles.waiting_breakdown() == {"queue": 0, "no_artist": 1, "no_title": 1}
+
+
 def test_a_store_annotation_is_not_part_of_the_title():
     assert scrobbles._title_variants("Fade to grey (as originally performed by Visage)")[-1] \
         == "Fade to grey"

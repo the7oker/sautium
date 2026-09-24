@@ -75,6 +75,18 @@ _ANNOTATION = re.compile(
 # unaccent folds ø, æ, ß and ё, which a Unicode decomposition does not.
 _TITLE_KEY_SQL = ("btrim(regexp_replace(regexp_replace(lower(public.f_unaccent({x})), "
                   "'[''’‘ʼ`´]', '', 'g'), '[^[:alnum:]]+', ' ', 'g'))")
+# When a name (`n`, pending_scrobble_artists) is due another decision — stage
+# B: never tried, new scrobbles, a slice or a dump since — or, its artist
+# resolved (`a`, artists), another placement try — stage D: never tried, new
+# scrobbles, a mint since. The stages select by them and waiting_breakdown
+# counts by them, so "still being placed" is what the resolver will do.
+_B_DUE_SQL = """(n.checked_at IS NULL OR n.checked_at < n.touched_at
+                 OR EXISTS (SELECT 1 FROM mb_slice_fetches f
+                             WHERE f.name_key = n.name_key AND f.fetched_at > n.checked_at)
+                 OR n.checked_at < (SELECT updated_at FROM user_settings
+                                     WHERE key = 'musicbrainz.db_version'))"""
+_D_DUE_SQL = """(n.checked_at IS NULL OR n.checked_at < n.touched_at
+                 OR n.checked_at < a.last_album_sync)"""
 # MB's special-purpose artists — [unknown], [traditional], Various Artists —
 # credit every record on Earth; a name that is one of them places nothing.
 _SPECIAL = re.compile(r"^\[.*\]$")
@@ -440,11 +452,7 @@ def resolve_names(limit: int = _RESOLVE_PER_PASS, *, create: bool = True) -> Row
         SELECT n.name_key
           FROM pending_scrobble_artists n JOIN pending_scrobbles p USING (name_key)
          WHERE n.artist_id IS NULL
-           AND (n.checked_at IS NULL OR n.checked_at < n.touched_at
-                OR EXISTS (SELECT 1 FROM mb_slice_fetches f
-                            WHERE f.name_key = n.name_key AND f.fetched_at > n.checked_at)
-                OR n.checked_at < (SELECT updated_at FROM user_settings
-                                    WHERE key = 'musicbrainz.db_version'))
+           AND {_B_DUE_SQL}
            AND ({_MB_SOURCE_COVERS_SQL.format(name='n.name_key')})
          GROUP BY n.name_key
          ORDER BY count(*) DESC, n.name_key
@@ -628,16 +636,14 @@ def bind_catalogue(extra_artists: Iterable[str] = ()) -> Row:
     EPs). A guest spot, or a recording without a length, waits."""
     stats: Row = {"bound": 0, "tracks_minted": 0, "not_in_catalogue": 0, "not_minted": 0,
                   "newest": None}
-    artists = db_query("""
+    artists = db_query(f"""
         SELECT n.artist_id::text AS artist_id, a.name, array_agg(DISTINCT n.name_key) AS names,
                (SELECT array_agg(am.mbid::text) FROM artist_mbids am
                  WHERE am.artist_id = n.artist_id) AS gids
           FROM pending_scrobble_artists n
           JOIN artists a ON a.id = n.artist_id
          WHERE EXISTS (SELECT 1 FROM pending_scrobbles p WHERE p.name_key = n.name_key)
-           AND (n.checked_at IS NULL OR n.checked_at < n.touched_at
-                OR n.checked_at < a.last_album_sync
-                OR n.artist_id = ANY(CAST(%(x)s AS uuid[])))
+           AND ({_D_DUE_SQL} OR n.artist_id = ANY(CAST(%(x)s AS uuid[])))
          GROUP BY n.artist_id, a.name""", {"x": sorted(set(extra_artists))})
     for art in artists:
         if not art["gids"]:
@@ -675,6 +681,34 @@ def bind_catalogue(extra_artists: Iterable[str] = ()) -> Row:
         db_execute("UPDATE pending_scrobble_artists SET checked_at = now() WHERE name_key = ANY(%(n)s)",
                    {"n": art["names"]})
     return stats
+
+
+def waiting_breakdown() -> Row:
+    """The waiting scrobbles by what comes next: `queue` — the resolver will
+    still try (a name not decided since its last change or with MB data to
+    come, an artist whose discography is not minted, a placement not tried
+    since the last change); `no_artist` — decided: MusicBrainz cannot place
+    the artist; `no_title` — tried: the artist's catalogue holds no match
+    (MB does not know the title, never timed the recording, or the artist
+    only guests on it). Decided per name, weighted by its scrobbles."""
+    from discography import _MB_SOURCE_COVERS_SQL
+    covered = _MB_SOURCE_COVERS_SQL.format(name="n.name_key")
+    # COALESCE: a node without a dump reads NULL from the dump-marker arm,
+    # and a name must land in exactly one count.
+    b_due, d_due = f"COALESCE({_B_DUE_SQL}, FALSE)", f"COALESCE({_D_DUE_SQL}, FALSE)"
+    return db_query_one(f"""
+        WITH w AS (SELECT name_key, count(*) AS c FROM pending_scrobbles GROUP BY name_key)
+        SELECT COALESCE(sum(w.c) FILTER (
+                   WHERE n.artist_id IS NULL AND (NOT ({covered}) OR {b_due})
+                      OR n.artist_id IS NOT NULL AND (a.last_album_sync IS NULL OR {d_due})), 0)::int
+                   AS queue,
+               COALESCE(sum(w.c) FILTER (
+                   WHERE n.artist_id IS NULL AND ({covered}) AND NOT {b_due}), 0)::int AS no_artist,
+               COALESCE(sum(w.c) FILTER (
+                   WHERE n.artist_id IS NOT NULL AND a.last_album_sync IS NOT NULL
+                     AND NOT {d_due}), 0)::int AS no_title
+          FROM w JOIN pending_scrobble_artists n USING (name_key)
+          LEFT JOIN artists a ON a.id = n.artist_id""")
 
 
 # --------------------------------------------------------------------------

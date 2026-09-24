@@ -12872,15 +12872,22 @@
     return `${fmtNum(h.imported)} imported${h.waiting ? ` · ${fmtNum(h.waiting)} waiting` : ''}`;
   }
 
+  // What the waiting scrobbles wait for: the resolver's queue, then what it
+  // has tried and cannot place — the two are never summed into one number.
+  function _lfmWaitingText(h) {
+    const why = h.waiting_why;
+    const parts = why ? [
+      why.queue ? `${fmtNum(why.queue)} still being placed` : '',
+      why.no_artist ? `${fmtNum(why.no_artist)} by artists MusicBrainz cannot place` : '',
+      why.no_title ? `${fmtNum(why.no_title)} with titles MusicBrainz does not know` : '',
+    ].filter(Boolean) : [];
+    return parts.length ? `Waiting: ${parts.join(' · ')}.` : '';
+  }
+
   function _lfmHistoryHTML(h, user) {
     const running = !!h.running;
     const pct = typeof h.pct === 'number' ? h.pct : null;
-    const why = h.waiting_why;
-    const whyParts = why ? [
-      why.catalogue ? `${fmtNum(why.catalogue)} for MusicBrainz data` : '',
-      why.unknown ? `${fmtNum(why.unknown)} by artists MusicBrainz cannot place` : '',
-      why.unminted ? `${fmtNum(why.unminted)} not on an album (singles, compilations, live)` : '',
-    ].filter(Boolean) : [];
+    const waitingText = _lfmWaitingText(h);
     const note = h.error || h.paused || '';
     const credit = user
       ? `<a class="form-value-link" target="_blank" rel="noopener"
@@ -12900,7 +12907,7 @@
       <div class="form-group">
         <div class="form-row"><span class="form-label">From Last.fm</span><span class="form-value" data-lfm-counts>${_lfmHistoryCounts(h)}</span></div>
         <div class="form-row stacked"><div class="row-stack-sub">Your scrobbles become listens on the tracks they name, so Home knows your taste. They stay on this node.${h.last_sync_at ? ` Last sync ${escapeProfileHtml(fmtRelative(h.last_sync_at))}.` : ''}</div></div>
-        ${whyParts.length ? `<div class="form-row stacked"><div class="row-stack-sub">Waiting: ${whyParts.join(' · ')}.</div></div>` : ''}
+        <div class="form-row stacked" data-lfm-waiting${waitingText ? '' : ' hidden'}><div class="row-stack-sub">${waitingText}</div></div>
         ${credit ? `<div class="form-row stacked"><div class="row-stack-sub">${credit}</div></div>` : ''}
       </div>
       <div data-lfm-actions>${actions}</div>`;
@@ -12958,7 +12965,16 @@
       const next = await _fetchLfmHistory();
       if (!next || !isFresh()) return;
       const line = holder.querySelector('[data-lfm-progress]');
-      if (next.running && line) {
+      const counts = holder.querySelector('[data-lfm-counts]');
+      const waiting = holder.querySelector('[data-lfm-waiting]');
+      // The block's shape follows the walk — progress and bar while it runs,
+      // the buttons after — so only a walk starting or ending repaints it;
+      // the counts and the waiting line change in place.
+      if (!!next.running !== !!line || !counts || !waiting) {
+        _paintLfmHistory(root, holder, next, user);
+        return;
+      }
+      if (next.running) {
         if (line.textContent !== next.progress && next.progress) line.textContent = next.progress;
         const bar = holder.querySelector('[data-lfm-bar]');
         const fill = bar && bar.querySelector('.fill');
@@ -12966,17 +12982,13 @@
           bar.classList.remove('indeterminate');
           if (fill) fill.style.width = next.pct + '%';
         }
-        const counts = holder.querySelector('[data-lfm-counts]');
-        const text = _lfmHistoryCounts(next);
-        if (counts && counts.textContent !== text) counts.textContent = text;
-        return;
       }
-      // A walk started or ended (or the canon placed what waited): the
-      // block's shape changes, so it is painted anew.
-      const counts = holder.querySelector('[data-lfm-counts]');
-      if (next.running || line || !counts || counts.textContent !== _lfmHistoryCounts(next)) {
-        _paintLfmHistory(root, holder, next, user);
-      }
+      const text = _lfmHistoryCounts(next);
+      if (counts.textContent !== text) counts.textContent = text;
+      const waitingText = _lfmWaitingText(next);
+      const sub = waiting.firstElementChild;
+      if (sub.textContent !== waitingText) sub.textContent = waitingText;
+      waiting.hidden = !waitingText;
     });
   }
 

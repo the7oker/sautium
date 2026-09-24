@@ -509,8 +509,10 @@ Top to bottom:
 - **Account** — email + verification badge (✓ / ⚠), change password,
   Last.fm connect/disconnect, scrobbling toggle (enabled only when
   Last.fm is connected), and — when connected — the imported listening
-  history: listens imported, scrobbles waiting and why, the last sync,
-  "data from Last.fm", Sync, Remove imported (2026-09-24).
+  history: listens imported, scrobbles waiting — those the canon is still
+  placing apart from those MusicBrainz cannot place (an unknown artist, an
+  unknown title) — the last sync, "data from Last.fm", Sync, Remove
+  imported (2026-09-24).
 - **Hardware profile** — read-only: the auto-detected tier
   (full/standard/lite) and what the machine was measured at. Sits with
   the account because it describes THIS node, not the library; it

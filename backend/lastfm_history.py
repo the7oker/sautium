@@ -95,16 +95,9 @@ def status() -> Dict[str, Any]:
                (SELECT last_error FROM lastfm_import WHERE username = %(u)s) AS last_error
     """, {"u": user})
     waiting = None
-    if row["waiting"] and not _state["running"]:
-        # Why they wait — read only between walks: during one the room
-        # changes every page and the progress line is what matters.
-        from discography import _MB_SOURCE_COVERS_SQL
-        covered = _MB_SOURCE_COVERS_SQL.format(name="n.name_key")
-        waiting = db_query_one(f"""
-            SELECT count(*) FILTER (WHERE n.artist_id IS NULL AND NOT ({covered})) AS catalogue,
-                   count(*) FILTER (WHERE n.artist_id IS NULL AND ({covered})) AS unknown,
-                   count(*) FILTER (WHERE n.artist_id IS NOT NULL) AS unminted
-              FROM pending_scrobbles p JOIN pending_scrobble_artists n USING (name_key)""")
+    if row["waiting"]:
+        from canon import scrobbles
+        waiting = scrobbles.waiting_breakdown()
     return {
         "waiting_why": waiting,
         "connected": user is not None,
