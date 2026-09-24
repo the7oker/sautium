@@ -38,6 +38,10 @@ DO $$ BEGIN
 EXCEPTION WHEN duplicate_object THEN NULL; END $$;
 
 DO $$ BEGIN
+    CREATE TYPE listen_source AS ENUM ('sautium', 'lastfm');
+EXCEPTION WHEN duplicate_object THEN NULL; END $$;
+
+DO $$ BEGIN
     CREATE TYPE artist_type AS ENUM ('unknown', 'solo', 'band', 'collaboration', 'orchestra', 'other');
 EXCEPTION WHEN duplicate_object THEN NULL; END $$;
 
@@ -895,7 +899,13 @@ CREATE TABLE IF NOT EXISTS listening_history (
     percent_listened NUMERIC(5, 2) CHECK (percent_listened >= 0 AND percent_listened <= 100),
     completed BOOLEAN DEFAULT FALSE,
     skipped BOOLEAN DEFAULT FALSE,
-    created_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP
+    created_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP,
+    -- Who recorded the listen: this node's player, or the owner's Last.fm
+    -- history (backend/lastfm_history.py). An imported listen is a completed
+    -- scrobble bound to a canonical track; it gives way to the native row of
+    -- the same listen (play_stats.same_listen) and is what "Remove imported
+    -- history" removes.
+    source listen_source NOT NULL DEFAULT 'sautium'
 );
 
 CREATE TABLE IF NOT EXISTS local_play_stats (
@@ -955,6 +965,10 @@ CREATE TABLE IF NOT EXISTS listening_sessions (
     started_at         TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
     ended_at           TIMESTAMPTZ,
     created_at         TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP,
+    -- 'lastfm' = a card generated from imported listens (a projection of
+    -- them, rebuilt with them — playback/sessions.rebuild_imported_sessions),
+    -- not a queue this node played.
+    source             listen_source NOT NULL DEFAULT 'sautium',
     CONSTRAINT chk_listening_sessions_track_count CHECK (track_count >= 0)
 );
 
@@ -976,6 +990,61 @@ CREATE TABLE IF NOT EXISTS session_tracks (
     media_file_id  INTEGER REFERENCES media_files(id) ON DELETE SET NULL,
     album_id       UUID REFERENCES albums(id) ON DELETE SET NULL ON UPDATE CASCADE,
     PRIMARY KEY (session_id, position)
+);
+
+-- ============================================================
+-- Last.fm listening-history import (backend/lastfm_history.py,
+-- backend/canon/scrobbles.py) — LOCAL-ONLY, like the rest of the Last.fm
+-- layer: never synced, shared or seeded.
+-- ============================================================
+
+-- The walk over one Last.fm account's scrobbles (user.getRecentTracks,
+-- newest → oldest). username is lowercased: a different account is a fresh
+-- row, and the walk resumes from walk_cursor_at after a restart.
+-- watermark_at: every scrobble at or before it has been fetched.
+-- walk_top_at: the fixed upper bound of the walk in progress (NULL when
+-- idle); walk_cursor_at: how far down it has committed.
+CREATE TABLE IF NOT EXISTS lastfm_import (
+    username       TEXT PRIMARY KEY,
+    watermark_at   TIMESTAMPTZ,
+    walk_top_at    TIMESTAMPTZ,
+    walk_cursor_at TIMESTAMPTZ,
+    walk_total     INTEGER,
+    walk_fetched   INTEGER NOT NULL DEFAULT 0,
+    last_sync_at   TIMESTAMPTZ,
+    last_error     TEXT
+);
+
+-- One row per artist name the pending scrobbles carry: the canon decision is
+-- per name, not per scrobble. name_key = lower(btrim(the credit's head)), the
+-- same key mb_slice_fetches uses, so the slice cycle requests it as is.
+-- artist_id is the canonical artist the name resolved to (follows canon
+-- renames; a deleted artist sends the name back to resolution). touched_at
+-- (new evidence) vs checked_at (last attempt) keeps a wake from re-deciding
+-- names nothing changed for.
+CREATE TABLE IF NOT EXISTS pending_scrobble_artists (
+    name_key   TEXT PRIMARY KEY,
+    artist_id  UUID REFERENCES artists(id) ON DELETE SET NULL ON UPDATE CASCADE,
+    touched_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    checked_at TIMESTAMPTZ
+);
+
+-- Scrobbles not yet bound to a track: raw strings, kept only while unbound
+-- (a bound scrobble becomes a listening_history row and leaves). The key is
+-- the scrobble's natural identity, so a re-fetch inserts nothing. The three
+-- MBIDs are Last.fm's hints — compared only inside a candidate artist's MB
+-- catalogue, never stored as anchors (album_mbid is an MB release gid,
+-- track_mbid often an MB track gid, not a recording).
+CREATE TABLE IF NOT EXISTS pending_scrobbles (
+    played_at   TIMESTAMPTZ NOT NULL,
+    artist      TEXT NOT NULL,
+    title       TEXT NOT NULL,
+    album       TEXT,
+    name_key    TEXT NOT NULL REFERENCES pending_scrobble_artists(name_key) ON DELETE CASCADE,
+    artist_mbid UUID,
+    album_mbid  UUID,
+    track_mbid  UUID,
+    PRIMARY KEY (played_at, artist, title)
 );
 
 CREATE TABLE IF NOT EXISTS track_lyrics (
@@ -1169,6 +1238,10 @@ CREATE INDEX IF NOT EXISTS idx_listening_history_media_file ON listening_history
 CREATE INDEX IF NOT EXISTS idx_listening_history_track ON listening_history(track_id);
 CREATE INDEX IF NOT EXISTS idx_listening_history_started ON listening_history(started_at);
 CREATE INDEX IF NOT EXISTS idx_listening_history_track_started ON listening_history(track_id, started_at DESC);
+-- Imported listens: the generated-card window, the Profile count, Remove.
+CREATE INDEX IF NOT EXISTS idx_listening_history_imported ON listening_history(started_at) WHERE source = 'lastfm';
+CREATE INDEX IF NOT EXISTS idx_pending_scrobble_artists_artist ON pending_scrobble_artists(artist_id) WHERE artist_id IS NOT NULL;
+CREATE INDEX IF NOT EXISTS idx_pending_scrobbles_name ON pending_scrobbles(name_key);
 
 -- Local play stats indexes
 CREATE INDEX IF NOT EXISTS idx_local_play_stats_last_played ON local_play_stats(last_played_at);

@@ -156,7 +156,8 @@ GIN-index retrieve branch only). A much higher score (0.3+) = high-confidence pr
 ## Listening history
 
 **listening_history** (media_file_id INT, track_id UUID NOT NULL, started_at, ended_at, duration_listened, \
-percent_listened, completed BOOLEAN, skipped BOOLEAN)
+percent_listened, completed BOOLEAN, skipped BOOLEAN, source listen_source ('sautium' = played on this node, \
+'lastfm' = imported from the owner's Last.fm history; duration_listened of an imported row is the track length))
 **local_play_stats** (track_id UUID PRIMARY KEY, play_count, skip_count, total_listen_time, \
 avg_percent_listened, last_played_at) - aggregated local listening stats per track
 **demo_plays** (track_id UUID PRIMARY KEY, provider, played_at) - not-owned tracks whose ONE full demo \
