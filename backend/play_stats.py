@@ -52,12 +52,20 @@ PLAY_STATS_SQL = """
 
 def refresh_play_stats(cur, track_ids) -> int:
     """Recompute the stats rows of `track_ids` from their history on an open
-    cursor; returns how many rows were written."""
+    cursor; returns how many rows were written. A track whose history is gone
+    loses its row too — a stats row with nothing under it would keep counting
+    listens that no longer exist (and keep an orphan track alive)."""
     ids = [str(t) for t in track_ids]
     if not ids:
         return 0
     cur.execute(PLAY_STATS_SQL, {"ids": ids})
-    return cur.rowcount
+    written = cur.rowcount
+    cur.execute("""
+        DELETE FROM local_play_stats lp
+         WHERE lp.track_id = ANY(CAST(%(ids)s AS uuid[]))
+           AND NOT EXISTS (SELECT 1 FROM listening_history h WHERE h.track_id = lp.track_id)
+    """, {"ids": ids})
+    return written
 
 
 def repaired_start(started_at: datetime, ended_at: Optional[datetime],

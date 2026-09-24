@@ -14,6 +14,7 @@ from sqlalchemy import text
 from sqlalchemy.orm import Session
 
 from uuid_utils import artist_uuid, track_uuid, album_uuid
+from play_stats import refresh_play_stats
 from provenance import MATERIAL_RANK_SQL
 
 logger = logging.getLogger(__name__)
@@ -245,28 +246,12 @@ def _update_track_uuid(db: Session, old_id, new_id) -> str:
             text("UPDATE listening_history SET track_id = :new WHERE track_id = :old"),
             {"new": new_str, "old": old_str},
         )
-        # Merge local_play_stats: sum counts from old into new
-        db.execute(text("""
-            INSERT INTO local_play_stats (track_id, play_count, skip_count,
-                total_listen_time, avg_percent_listened, last_played_at)
-            SELECT :new, play_count, skip_count, total_listen_time,
-                   avg_percent_listened, last_played_at
-            FROM local_play_stats WHERE track_id = :old
-            ON CONFLICT (track_id) DO UPDATE SET
-                play_count = local_play_stats.play_count + EXCLUDED.play_count,
-                skip_count = local_play_stats.skip_count + EXCLUDED.skip_count,
-                total_listen_time = local_play_stats.total_listen_time + EXCLUDED.total_listen_time,
-                avg_percent_listened = CASE
-                    WHEN (local_play_stats.play_count + EXCLUDED.play_count) > 0 THEN
-                        (local_play_stats.avg_percent_listened * local_play_stats.play_count
-                         + EXCLUDED.avg_percent_listened * EXCLUDED.play_count)
-                        / (local_play_stats.play_count + EXCLUDED.play_count)
-                    ELSE 0
-                END,
-                last_played_at = GREATEST(local_play_stats.last_played_at, EXCLUDED.last_played_at),
-                updated_at = CURRENT_TIMESTAMP
-        """), {"new": new_str, "old": old_str})
+        # The survivor's stats are a function of the history it now holds
+        # (play_stats) — summing two counter rows was the drift that made the
+        # table derived in the first place.
         db.execute(text("DELETE FROM local_play_stats WHERE track_id = :old"), {"old": old_str})
+        with db.connection().connection.cursor() as cur:
+            refresh_play_stats(cur, [new_str])
         # CASCADE takes whatever lost the merge: the weaker analysis, duplicate
         # stats/lyrics/embeddings, the old associations.
         db.execute(text("DELETE FROM tracks WHERE id = :old"), {"old": old_str})
@@ -385,23 +370,37 @@ def _update_album_uuid(db: Session, old_id, new_id) -> str:
     return new_str
 
 
+# The one definition of an orphan track, formatted with the alias of the
+# `tracks` row: nothing refers to it — no file, no tracklist slot, no
+# analysis, none of the owner's life data (a listen, its stats, a session
+# slot or seed, the demo channel's spent listen) and no lyrics. Every deleter
+# of tracks uses it: the orphan sweep below, the discography reconcile (and
+# through it the explicit phantom-layer removal), the scanner's prune of
+# vanished files and its cue supersede. A listen cascades with its track,
+# and the reconcile's own copy of this rule lacked that line — opening an
+# artist page could delete the owner's listens of a streamed phantom
+# (2026-09-24). A NOT EXISTS fragment rather than a SQL function, so the
+# planner keeps anti-joins over millions of phantom tracks.
+ORPHAN_TRACK_SQL = """
+    NOT EXISTS (SELECT 1 FROM media_files o_mf WHERE o_mf.track_id = {t}.id)
+    AND NOT EXISTS (SELECT 1 FROM album_tracks o_at WHERE o_at.track_id = {t}.id)
+    AND NOT EXISTS (SELECT 1 FROM embeddings o_e WHERE o_e.track_id = {t}.id)
+    AND NOT EXISTS (SELECT 1 FROM audio_features o_af WHERE o_af.track_id = {t}.id)
+    AND NOT EXISTS (SELECT 1 FROM listening_history o_lh WHERE o_lh.track_id = {t}.id)
+    AND NOT EXISTS (SELECT 1 FROM local_play_stats o_lp WHERE o_lp.track_id = {t}.id)
+    AND NOT EXISTS (SELECT 1 FROM session_tracks o_st WHERE o_st.track_id = {t}.id)
+    AND NOT EXISTS (SELECT 1 FROM listening_sessions o_ls WHERE o_ls.seed_track_id = {t}.id)
+    AND NOT EXISTS (SELECT 1 FROM demo_plays o_dp WHERE o_dp.track_id = {t}.id)
+    AND NOT EXISTS (SELECT 1 FROM track_lyrics o_tl WHERE o_tl.track_id = {t}.id)
+"""
+
+
 def delete_orphan_tracks(db: Session) -> int:
-    """Drop track rows nothing refers to any more — no file, no tracklist
-    slot, no analysis, no listen, no lyrics, no session. A re-keyed phantom
-    slot (the mint moved it to another uuid) leaves such a row behind; a
-    track that carries anything at all is not an orphan and stays."""
-    res = db.execute(text("""
-        DELETE FROM tracks t
-         WHERE NOT EXISTS (SELECT 1 FROM media_files mf WHERE mf.track_id = t.id)
-           AND NOT EXISTS (SELECT 1 FROM album_tracks at2 WHERE at2.track_id = t.id)
-           AND NOT EXISTS (SELECT 1 FROM embeddings e WHERE e.track_id = t.id)
-           AND NOT EXISTS (SELECT 1 FROM audio_features af WHERE af.track_id = t.id)
-           AND NOT EXISTS (SELECT 1 FROM listening_history lh WHERE lh.track_id = t.id)
-           AND NOT EXISTS (SELECT 1 FROM local_play_stats lp WHERE lp.track_id = t.id)
-           AND NOT EXISTS (SELECT 1 FROM session_tracks st WHERE st.track_id = t.id)
-           AND NOT EXISTS (SELECT 1 FROM listening_sessions ls WHERE ls.seed_track_id = t.id)
-           AND NOT EXISTS (SELECT 1 FROM track_lyrics tl WHERE tl.track_id = t.id)
-    """))
+    """Drop track rows nothing refers to any more (ORPHAN_TRACK_SQL). A
+    re-keyed phantom slot (the mint moved it to another uuid) leaves such a
+    row behind; a track that carries anything at all is not an orphan and
+    stays."""
+    res = db.execute(text(f"DELETE FROM tracks t WHERE {ORPHAN_TRACK_SQL.format(t='t')}"))
     return res.rowcount
 
 

@@ -386,9 +386,11 @@ collapses onto the same `track_uuid` row (gains files, no migration).
 - **Idempotent persist:** `execute_values` batches; tracks ON CONFLICT
   DO NOTHING (never clobber an owned title), slot upsert on the PK.
   Re-syncs skip albums that already have a tracklist.
-- **Reconcile extended:** orphan phantom tracks of the artist (album
-  GC'd, no files, no remaining album_tracks ref) are deleted;
-  enrichment rows cascade.
+- **Reconcile extended:** orphan phantom tracks of the artist are
+  deleted; enrichment rows cascade. "Orphan" is one rule for every
+  deleter of tracks (`canon.identity.ORPHAN_TRACK_SQL`, 2026-09-24): no
+  file, slot, analysis, lyrics or life data — a listened phantom loses its
+  album, never its listens.
 - **Reload guard:** a pg advisory lock (`MB_LOAD_LOCK_KEY`) is held by
   `stream_load` for the whole TRUNCATE+COPY loop; the sync try-locks it
   and returns `status="mb_loading"` (not stamped) — without this, a

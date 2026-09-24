@@ -30,7 +30,7 @@ from database import get_db_context
 from db_pool import db_query
 from uuid_utils import artist_uuid, track_uuid, album_uuid, genre_uuid, is_lossless as check_lossless
 from album_identity import assign_dir_albums
-from canon.identity import elect_analysis_source
+from canon.identity import ORPHAN_TRACK_SQL, elect_analysis_source
 import cue_sheet
 
 logger = logging.getLogger(__name__)
@@ -854,18 +854,25 @@ class LibraryScanner:
 
             # ── Cue supersede post-pass ─────────────────────────────
             # Runs after the re-import so a track whose slices merely moved
-            # keeps its row (and listening history). Tracks left with no
-            # files die WITH their analysis: the cue replaces the material,
-            # a whole-image embedding must not survive as a spare (contrast
-            # prune_missing_files, which spares vanished-but-real rips).
+            # keeps its row (and listening history). A track left with no
+            # files loses its analysis: the cue replaces the material, a
+            # whole-image embedding must not survive as a spare (contrast
+            # prune_missing_files, which spares vanished-but-real rips). The
+            # row itself then goes only as an orphan (ORPHAN_TRACK_SQL) — a
+            # listen of the whole image is still the owner's listen.
             # Orphan cleanup is SCOPED to the affected ids — the global
             # LEFT JOIN sweeps prune uses would take phantom albums with them.
             if superseded_tracks:
                 tids = list(superseded_tracks)
-                r = db.execute(text("""
-                    DELETE FROM tracks WHERE id = ANY(CAST(:tids AS uuid[]))
-                      AND NOT EXISTS (SELECT 1 FROM media_files mf
-                                      WHERE mf.track_id = tracks.id)
+                for table in ("embeddings", "audio_features", "analysis_sources"):
+                    db.execute(text(f"""
+                        DELETE FROM {table} x WHERE x.track_id = ANY(CAST(:tids AS uuid[]))
+                          AND NOT EXISTS (SELECT 1 FROM media_files mf
+                                          WHERE mf.track_id = x.track_id)
+                    """), {"tids": tids})
+                r = db.execute(text(f"""
+                    DELETE FROM tracks t WHERE t.id = ANY(CAST(:tids AS uuid[]))
+                      AND {ORPHAN_TRACK_SQL.format(t='t')}
                 """), {"tids": tids})
                 logger.info(f"Cue supersede: removed {r.rowcount} whole-image tracks")
 
@@ -1030,16 +1037,15 @@ def prune_missing_files(
 
         db.query(MediaFile).filter(MediaFile.id.in_(missing_ids)).delete(synchronize_session=False)
 
-        # Analysis-carrying tracks are spared: embeddings + analysis_sources
-        # cascade with the track, and neither the node's own streamed
-        # enrichment nor rows a CGNAT peer push-seeded here (carry) can be
-        # re-derived without the audio. The file is gone; the analysis of it
-        # is still real. A listen is the same kind of fact.
-        r = db.execute(text("""
+        # Only true orphans go (canon.identity.ORPHAN_TRACK_SQL): embeddings +
+        # analysis_sources cascade with the track, and neither the node's own
+        # streamed enrichment nor rows a CGNAT peer push-seeded here (carry)
+        # can be re-derived without the audio. The file is gone; the analysis
+        # of it is still real. A listen is the same kind of fact, and a track
+        # that is also a phantom album's slot stays that album's track.
+        r = db.execute(text(f"""
             DELETE FROM tracks t WHERE t.id = ANY(CAST(:ids AS uuid[]))
-              AND NOT EXISTS (SELECT 1 FROM media_files mf WHERE mf.track_id = t.id)
-              AND NOT EXISTS (SELECT 1 FROM embeddings e WHERE e.track_id = t.id)
-              AND NOT EXISTS (SELECT 1 FROM listening_history lh WHERE lh.track_id = t.id)
+              AND {ORPHAN_TRACK_SQL.format(t='t')}
         """), {"ids": [str(t) for t in track_ids]})
         stats["orphan_tracks"] = r.rowcount
 

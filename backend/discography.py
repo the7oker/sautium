@@ -828,17 +828,16 @@ def _reconcile_phantoms(artist_id: str, missing_rgs: List[str]) -> None:
     """, {"id": artist_id})
 
     # Orphan phantom tracks of this artist: their album was GC'd above and
-    # no file ever materialized (a ripped phantom track has media_files and
-    # is protected). Enrichment rows cascade with the track — the embedding
-    # guard is the secondary net behind the album-level analyzed one.
-    db_execute("""
+    # nothing else holds them (canon.identity.ORPHAN_TRACK_SQL). A track the
+    # owner listened to outlives its album — the listen is not re-derivable
+    # from MB, and it cascades with the track.
+    from canon.identity import ORPHAN_TRACK_SQL
+    db_execute(f"""
         DELETE FROM tracks t
         USING track_artists ta
         WHERE ta.track_id = t.id
           AND ta.artist_id = %(id)s::uuid
-          AND NOT EXISTS (SELECT 1 FROM media_files mf WHERE mf.track_id = t.id)
-          AND NOT EXISTS (SELECT 1 FROM album_tracks at WHERE at.track_id = t.id)
-          AND NOT EXISTS (SELECT 1 FROM embeddings e WHERE e.track_id = t.id)
+          AND {ORPHAN_TRACK_SQL.format(t='t')}
     """, {"id": artist_id})
 
 
@@ -849,11 +848,12 @@ def prune_phantom_layer(cancel_flag=None, progress_cb=None) -> Dict[str, Any]:
     ~3.1M phantom track rows + album_tracks cost ~3.6 GB of heap+index on
     the reference library.
 
-    Spares: owned rows, streaming mints (explicit user intent), and
+    Spares: owned rows, streaming mints (explicit user intent),
     analysis-carrying phantoms (the node's own streamed-enrichment
-    contribution). Similar-artist stubs stay — `similar_artists` edges hang
-    off them. Everything deleted is re-derivable from the MB dump / Last.fm,
-    at the cost of hours. Per-artist commits: resumable and error-isolated.
+    contribution) and the tracks of the owner's life data — a listened
+    phantom loses its album, never its listens. Similar-artist stubs stay —
+    `similar_artists` edges hang off them. Everything deleted is re-derivable
+    from the MB dump / Last.fm, at the cost of hours. Per-artist commits: resumable and error-isolated.
     `progress_cb(done, total)` fires every 250 artists and at the end; the
     planner statistics are refreshed afterwards so the Settings footprint
     row reads the new size at once."""
