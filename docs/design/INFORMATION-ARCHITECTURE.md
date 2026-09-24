@@ -361,7 +361,7 @@ lazy-load "See all" into a full screen.
 
 | Section | Content | Source |
 |---------|---------|--------|
-| **Favourite artists** | Artists with the most listening in `local_play_stats` (listen time, then plays) — imported Last.fm listens included | Aggregated from listening history |
+| **Favourite artists** | Artists with the most recent listening time: a completed listen weighs its duration × exp(−age / 90 days), age counted from the newest listen, two years at most (since 2026-09-24) — imported Last.fm listens included; seed-pick artists trail | Aggregated from listening history |
 | **New in my collection** | Albums most recently imported, `media_files.file_modified_at DESC` | Scanner-tracked |
 | **Recommendations** | "Like what you love, haven't heard yet" — similar to highly-played artists but under-played themselves | CLAP embeddings + `similar_artists` + play counts |
 | **Listening history** *(hidden while empty)* | Queues this node played, newest first, consecutive replays collapsed; cards generated from imported Last.fm listens (sittings, album runs) | `listening_sessions` (`source` sautium / lastfm) |
@@ -762,7 +762,7 @@ or is a thin query over existing data.
 
 | Block | MVP source | Evolution |
 |-------|------------|-----------|
-| Favourite artists | `local_play_stats` aggregated by artist | + listening recency weight |
+| Favourite artists | `listening_history` completed listens by primary artist | recency weight shipped 2026-09-24: τ 90 days from the newest listen, two-year window |
 | New in my collection | `media_files.file_modified_at DESC`, grouped to album | + scanner-assigned "fresh" tag |
 | Recommendations | CLAP audio similarity to top-played tracks, filter to artists not yet heard much | + AI assistant contextual blends |
 | Listening history | `listening_sessions` + `session_tracks`, GET `/api/home/listening-history`; imported cards from `playback.sessions.rebuild_imported_sessions` | + cross-device via the life merge |

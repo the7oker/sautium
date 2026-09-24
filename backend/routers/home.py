@@ -5,8 +5,9 @@ Each Home section is its own endpoint so the frontend can render
 on-readiness instead of waiting for the slowest block to load, and so
 "New in my collection" can paginate independently via infinite scroll.
 
-Favourite artists rank by total listening time (not play count): a
-single 90-minute ambient track should outweigh ten 5-minute pop plays.
+Favourite artists rank by listening time (not play count) — a single
+90-minute ambient track should outweigh ten 5-minute pop plays — with
+every listen fading over months, because a taste changes over a lifetime.
 Artists of the curated seed picks (seed_picks) trail the listened ones
 so a fresh install is never an empty shelf.
 
@@ -70,6 +71,19 @@ FORGOTTEN_THRESHOLD_DAYS = 90
 SEED_TIER_QUOTAS = {1: 12, 2: 5, 3: 2, 4: 1}
 
 
+# ─── Favourite artists tuning ─────────────────────────────────────────────
+# The recommendation seeds' recency weight on a slower clock. The seeds
+# follow the week's mood; a favourite is who the listener has loved this
+# season, so τ = 90 days: last month weighs 0.72, a season ago 0.37, a year
+# ago 0.02. A taste the listener has moved on from leaves the shelf within
+# about a year, and fifteen years of imported scrobbles no longer pin it to
+# the listener of 2010.
+FAVOURITE_TAU_DAYS = 90
+# Past ~8 τ a listen weighs under 0.03 % of the newest one: like
+# SEED_WINDOW_DAYS, the window only bounds the scan.
+FAVOURITE_WINDOW_DAYS = 730
+
+
 # Subqueries shared by the album shelves to fetch the album-tile-row
 # contract: {artist, cover_url, cover_id, media_file_id}. A phantom album
 # has no files, so the artist falls back to the album credit and its art
@@ -112,57 +126,81 @@ _ALBUM_TILE_SUBQUERIES = """
 def get_favourite_artists(
     limit: int = Query(100, ge=1, le=200),
 ) -> dict[str, list[dict[str, Any]]]:
-    """Top primary artists by listening time, then unlistened seed-pick
-    artists at the tail."""
+    """Primary artists by recency-weighted listening time, then the
+    seed-pick artists not heard in the window at the tail."""
 
-    # Count time only against the primary artist of each track — featured /
+    # A completed listen weighs its duration × exp(-age / FAVOURITE_TAU_DAYS)
+    # and counts only for the primary artist of its track — featured /
     # composer / conductor rows in track_artists would otherwise hoist
     # soundtrack composers into Favourites for any film-score listener, but
     # the artist page lists albums only where they are primary, so the tile
-    # would lead to an empty detail screen. Tie-break by play_count so two
-    # artists with identical (rare) total_seconds order stably.
+    # would lead to an empty detail screen. The co-primary artists of a duet
+    # share every weight; the id orders their tie stably.
     #
-    # Bucket 1 is the curated seed layer's artists with no listens yet —
-    # never hidden by the zero-plays gate, ordered by curation tier/rank.
-    # One completed listen promotes an artist into bucket 0 naturally
-    # (local_play_stats keys on track_id, so streamed phantom plays count);
-    # past the limit on a mature node the tail falls off by ranking, which
-    # is the designed behavior, not hiding. is_owned is resolved only for
-    # the emitted rows and drives the phantom tile styling.
-    artists = db_query("""
-        WITH listened AS (
-            SELECT a.id, a.name,
-                   SUM(lps.play_count)::int AS play_count,
-                   FLOOR(SUM(lps.total_listen_time))::bigint AS total_seconds
-            FROM artists a
-            JOIN track_artists ta ON ta.artist_id = a.id AND ta.role = 'primary'
-            JOIN local_play_stats lps ON lps.track_id = ta.track_id
-            GROUP BY a.id, a.name
-            HAVING SUM(lps.total_listen_time) > 0
+    # Age runs from the newest completed listen, not NOW(): an exponential
+    # orders the same from any anchor (moving it multiplies every weight by
+    # one factor), so the anchor only places the window — and a history that
+    # went quiet, an imported Last.fm account nobody scrobbles to any more,
+    # keeps its last era instead of leaving only the seed picks.
+    #
+    # Bucket 1 is the curated seed layer's artists with no listen in the
+    # window, ordered by curation tier/rank. One completed listen promotes an
+    # artist into bucket 0 naturally (listening_history keys on track_id, so
+    # streamed phantom plays count); past the limit on a mature node the tail
+    # falls off by ranking, which is the designed behavior, not hiding.
+    #
+    # The name and is_owned (the phantom tile styling) are resolved after the
+    # cut: in the select list of the ranking query the planner hashes the
+    # ownership of every artist in the catalogue instead of probing the
+    # emitted ones.
+    artists = db_query(f"""
+        WITH played AS (
+            SELECT lh.track_id,
+                   SUM(lh.duration_listened *
+                       EXP(-EXTRACT(EPOCH FROM (newest.at - lh.started_at))
+                           / %(tau_sec)s)) AS weight
+            FROM (SELECT MAX(started_at) AS at FROM listening_history
+                  WHERE completed) newest
+            JOIN listening_history lh
+              ON lh.started_at >= newest.at - INTERVAL '{FAVOURITE_WINDOW_DAYS} days'
+            WHERE lh.completed AND lh.duration_listened > 0
+            GROUP BY lh.track_id
+        ),
+        listened AS (
+            SELECT ta.artist_id AS id, SUM(p.weight) AS weight
+            FROM played p
+            JOIN track_artists ta ON ta.track_id = p.track_id AND ta.role = 'primary'
+            GROUP BY ta.artist_id
         ),
         seed_tail AS (
-            SELECT DISTINCT ON (a.id) a.id, a.name, sp.tier, sp.rank
+            SELECT DISTINCT ON (aa.artist_id) aa.artist_id AS id, sp.tier, sp.rank
             FROM seed_picks sp
             JOIN album_artists aa ON aa.album_id = sp.album_id AND aa.role = 'primary'
-            JOIN artists a ON a.id = aa.artist_id
-            WHERE NOT EXISTS (SELECT 1 FROM listened l WHERE l.id = a.id)
-            ORDER BY a.id, sp.tier, sp.rank
+            WHERE NOT EXISTS (SELECT 1 FROM listened l WHERE l.id = aa.artist_id)
+            ORDER BY aa.artist_id, sp.tier, sp.rank
+        ),
+        shelf AS (
+            SELECT u.id,
+                   ROW_NUMBER() OVER (ORDER BY u.bucket, u.weight DESC,
+                                               u.tier, u.rank, u.id) AS pos
+            FROM (
+                SELECT id, weight, 0 AS bucket, 0 AS tier, 0 AS rank
+                FROM listened
+                UNION ALL
+                SELECT id, 0, 1, tier, rank
+                FROM seed_tail
+            ) u
+            ORDER BY pos
+            LIMIT %(limit)s
         )
-        SELECT u.id::text AS id, u.name, u.play_count, u.total_seconds,
-               EXISTS (SELECT 1 FROM track_artists ta2
-                       JOIN media_files mf ON mf.track_id = ta2.track_id
-                       WHERE ta2.artist_id = u.id) AS is_owned
-        FROM (
-            SELECT id, name, play_count, total_seconds,
-                   0 AS bucket, 0 AS tier, 0 AS rank
-            FROM listened
-            UNION ALL
-            SELECT id, name, 0, 0, 1, tier, rank
-            FROM seed_tail
-        ) u
-        ORDER BY u.bucket, u.total_seconds DESC, u.play_count DESC, u.tier, u.rank
-        LIMIT %(limit)s
-    """, {"limit": limit})
+        SELECT s.id::text AS id, a.name,
+               EXISTS (SELECT 1 FROM track_artists ta
+                       JOIN media_files mf ON mf.track_id = ta.track_id
+                       WHERE ta.artist_id = s.id) AS is_owned
+        FROM shelf s
+        JOIN artists a ON a.id = s.id
+        ORDER BY s.pos
+    """, {"tau_sec": FAVOURITE_TAU_DAYS * 86400, "limit": limit})
 
     return {"artists": artists}
 

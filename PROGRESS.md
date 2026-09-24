@@ -1521,6 +1521,16 @@ Recommendations start from the owner's own listening.
   has never seen, and only the launcher asked for slices; the cycle is now
   shared (`desktop/p2p/mb_slice_cycle.py`) with a tier for the names imported
   scrobbles wait on.
+- **A favourite fades.** Fifteen years of imported scrobbles turned the
+  all-time Favourite artists row into the owner of 2010. A listen now weighs
+  its duration × exp(−age / 90 days) — the Recommendations' recency weight on
+  a slower clock: their seeds follow the week (τ = 7 days), a favourite the
+  season. Age runs from the newest listen, not from now: an exponential orders
+  the same from any anchor, so the anchor only places the two-year window,
+  and an account that went quiet keeps its last era instead of the seed
+  picks. The rewrite also resolves ownership after the cut — the planner had
+  hashed the ownership of every artist in the catalogue: 552 → 118 ms on the
+  master.
 
 ---
 
