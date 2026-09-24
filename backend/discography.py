@@ -1029,6 +1029,10 @@ def sync_artist_discography(artist_id, artist_name: str) -> Dict[str, int]:
 
     _reconcile_phantoms(artist_id, list(missing.keys()))
     _stamp_sync(artist_id)
+    if stats["tracks"]:
+        # New slots can place imported scrobbles waiting for this artist.
+        from canon import scrobbles
+        scrobbles.wake(artist_ids=[artist_id])
     return stats
 
 

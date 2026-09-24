@@ -53,7 +53,7 @@ _MB_WAKE_EVERY = 50
 _PRIVATE_PROFILE = "17"
 
 _state: Dict[str, Any] = {"running": False, "phase": "idle", "progress": "",
-                          "pct": None, "error": None, "paused": None}
+                          "pct": None, "error": None, "paused": None, "budget": False}
 _cancel = threading.Event()
 _lock = threading.Lock()
 _thread: Optional[threading.Thread] = None
@@ -121,7 +121,7 @@ def start(reason: str) -> bool:
             return False
         _cancel.clear()
         _state.update(running=True, phase="starting", progress="", pct=None,
-                      error=None, paused=None)
+                      error=None, paused=None, budget=False)
         _thread = threading.Thread(target=_run, args=(user, reason), daemon=True,
                                    name="lastfm-history")
         _thread.start()
@@ -135,6 +135,13 @@ def resume() -> None:
     if user and db_query_one("SELECT 1 AS x FROM lastfm_import "
                              "WHERE username = %(u)s AND walk_top_at IS NOT NULL", {"u": user}):
         start("resume")
+
+
+def resume_below_budget() -> None:
+    """After a canon pass: a walk the waiting room's budget paused goes on once
+    the canon has placed enough of what waits."""
+    if _state["budget"] and not _state["running"] and _pending_rows() < RESUME_BELOW:
+        start("budget")
 
 
 def _open_walk(cur, user: str) -> Dict[str, Any]:
@@ -231,7 +238,8 @@ def _run(user: str, reason: str) -> None:
         _set(phase="fetching")
         while not _cancel.is_set():
             if _pending_rows() >= PENDING_ROW_BUDGET:
-                _set(paused="Waiting for the catalogue to place the scrobbles already fetched.")
+                _set(paused="Waiting for the catalogue to place the scrobbles already fetched.",
+                     budget=True)
                 break
             before = walk["cursor"] or walk["top"] + timedelta(seconds=1)
             page = svc.recent_tracks_page(settings.lastfm_username, before, after)
@@ -240,11 +248,14 @@ def _run(user: str, reason: str) -> None:
             items = [i for i in page["items"] if i["played_at"] <= walk["top"]]
             oldest = min((i["played_at"] for i in page["items"]), default=before)
             with transaction() as cur:
-                _store_page(cur, user, items, walk, before, oldest)
+                touched = _store_page(cur, user, items, walk, before, oldest)
                 done = len(page["items"]) < PAGE_SIZE
                 if done:
                     _close_walk(cur, user)
             pages += 1
+            if touched:
+                from canon import scrobbles
+                scrobbles.wake(names=touched)
             if pages == 1 or pages % _MB_WAKE_EVERY == 0 or done:
                 db_execute("NOTIFY sautium_mb_pending")
             total = max(walk["total"] or 0, walk["fetched"])

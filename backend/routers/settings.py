@@ -432,6 +432,9 @@ def _mb_post_load(job: DumpJob, result: Dict) -> None:
             canon["album_residue_bound"] = (distill_album_residue().get("bound", 0)
                                             + distill_album_coverage().get("bound", 0))
     logger.info(f"Post-load MB canon: {canon}")
+    # A new dump is new MB data for every imported Last.fm name still waiting.
+    from canon import scrobbles
+    scrobbles.wake(names=())
     # A fresh dump is the moment to run the AI judgment tier once over the
     # whole residue (async, in the background — it's LLM-slow). Gated: no-op
     # unless the tier is enabled + a provider is authed.
@@ -2117,6 +2120,10 @@ def get_phantom_state() -> Dict[str, Any]:
 @router.put("/phantoms")
 def put_phantom_prefs(req: PhantomPrefs) -> Dict[str, Any]:
     _write("discovery.phantom_layer", bool(req.enabled))
+    if req.enabled:
+        # Imported scrobbles waiting on names only the phantom layer can place.
+        from canon import scrobbles
+        scrobbles.wake()
     return _phantom_section()
 
 

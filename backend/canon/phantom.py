@@ -107,9 +107,10 @@ def canonize_phantom_similars(limit: Optional[int] = None, dry_run: bool = False
     # the title fetch — a similar-artist stub has none, so today this channel
     # mostly idles; it stays for any phantom source that links albums.
     album_keys = defaultdict(set)           # ph_id -> linked-album match keys
-    rg_keys = defaultdict(set)              # gid -> namesake's release title keys
+    rg_keys = {}                            # gid -> namesake's release title keys
     if amb_ids:
         from discography import release_match_key
+        from canon.match import release_title_keys
         for r in db_query("""
             SELECT aa.artist_id::text AS ph_id, al.title
             FROM album_artists aa
@@ -119,28 +120,8 @@ def canonize_phantom_similars(limit: Optional[int] = None, dry_run: bool = False
             k = release_match_key(r["title"])
             if k:
                 album_keys[r["ph_id"]].add(k)
-        titled_gids = list({g for i in amb_ids if album_keys.get(i)
-                            for g in name_gids[lname(i)]})
-        if titled_gids:
-            # Release titles too, not just RG names — a mint's provider title
-            # often matches a regional/alternate release, the same channel the
-            # discography own-check goes through.
-            for r in db_query("""
-                SELECT a.gid::text AS gid, rg.name AS title
-                FROM mb_artist a
-                JOIN mb_artist_credit_name acn ON acn.artist = a.id
-                JOIN mb_release_group rg ON rg.artist_credit = acn.artist_credit
-                WHERE a.gid = ANY(%(g)s::uuid[])
-                UNION
-                SELECT a.gid::text, rel.name
-                FROM mb_artist a
-                JOIN mb_artist_credit_name acn ON acn.artist = a.id
-                JOIN mb_release rel ON rel.artist_credit = acn.artist_credit
-                WHERE a.gid = ANY(%(g)s::uuid[])
-            """, {"g": titled_gids}):
-                k = release_match_key(r["title"])
-                if k:
-                    rg_keys[r["gid"]].add(k)
+        rg_keys = release_title_keys(list({g for i in amb_ids if album_keys.get(i)
+                                           for g in name_gids[lname(i)]}))
 
     # Channel 2 — seed-genre overlap (similar-artist stubs).
     seed_genres = defaultdict(set)

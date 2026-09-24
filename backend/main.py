@@ -345,7 +345,10 @@ async def lifespan(app: FastAPI):
     except Exception as e:
         logger.warning(f"Failed to load API cooldowns at startup: {e}")
 
-    # A Last.fm history walk a restart interrupted continues from its cursor.
+    # The imported Last.fm history: the canon consumer that places waiting
+    # scrobbles, then a walk a restart interrupted, from its cursor.
+    from canon import scrobbles as scrobble_canon
+    scrobble_canon.start()
     import lastfm_history
     lastfm_history.resume()
 
@@ -1255,6 +1258,9 @@ def _scan_worker(limit: Optional[int], skip_existing: bool, subpath: Optional[st
             if not state["cancel_requested"]:
                 import notary
                 notary.wake("scan", full=True)
+                # New files can be the tracks imported scrobbles wait for.
+                from canon import scrobbles
+                scrobbles.wake()
 
             if prune and not state["cancel_requested"]:
                 state["progress"] = "Pruning missing files..."
@@ -1446,6 +1452,10 @@ def _canon_trigger_worker():
         if canon.get("artists") or (canon.get("phantom") or {}).get("canonized"):
             import background_enrichment
             background_enrichment.wake_db_steps("canon")
+        # The slices that triggered this are MB data for imported Last.fm
+        # names still waiting.
+        from canon import scrobbles
+        scrobbles.wake(names=())
     except Exception:
         logger.exception("canonicalize trigger worker crashed")
     finally:

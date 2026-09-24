@@ -173,6 +173,36 @@ def _unaccent_gids(name: str) -> list:
         JOIN mb_artist_alias al ON al.artist = a.id
         WHERE f_unaccent(al.name) = f_unaccent(%(q)s)
     """, {"q": name})]
+def release_title_keys(gids: list) -> dict:
+    """gid → the release_match_keys of every release group and release the MB
+    artist is credited on. The album channel of a name decision: an album the
+    owner holds or heard belongs to exactly one namesake's discography.
+    Release titles too, not just RG names — a provider's or a scrobbler's
+    album title often matches a regional/alternate release."""
+    from collections import defaultdict
+    from discography import release_match_key
+    keys = defaultdict(set)
+    if not gids:
+        return {}
+    for r in db_query("""
+        SELECT a.gid::text AS gid, rg.name AS title
+        FROM mb_artist a
+        JOIN mb_artist_credit_name acn ON acn.artist = a.id
+        JOIN mb_release_group rg ON rg.artist_credit = acn.artist_credit
+        WHERE a.gid = ANY(%(g)s::uuid[])
+        UNION
+        SELECT a.gid::text, rel.name
+        FROM mb_artist a
+        JOIN mb_artist_credit_name acn ON acn.artist = a.id
+        JOIN mb_release rel ON rel.artist_credit = acn.artist_credit
+        WHERE a.gid = ANY(%(g)s::uuid[])
+    """, {"g": list(gids)}):
+        k = release_match_key(r["title"])
+        if k:
+            keys[r["gid"]].add(k)
+    return dict(keys)
+
+
 # collaboration separators — for phantom matching, alias is trusted ONLY for
 # non-compounds (a compound's 'X and Y' alias is a credit-redirect onto a member).
 _PHANTOM_SEP = r'\s+&\s+|\s+and\s+|\s+with\s+|\s*/\s*|\s*,\s*|;'
