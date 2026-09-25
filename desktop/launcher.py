@@ -1620,7 +1620,11 @@ class LauncherApp(ctk.CTk):
         — desktop/macos/bootstrap.py, desktop/windows/bootstrap.py), which
         installs a changed desktop/requirements.txt before the new launcher
         code imports from it; a checkout comes back as `python -m desktop`,
-        its owner keeps that environment."""
+        its owner keeps that environment. On macOS the bootstrap is reached
+        through LaunchServices (`open -n` on the bundle), as Finder starts
+        it: a process this one spawns is a bare python3 to macOS — a Dock
+        tile and an app name of its own while the Sautium tile disappears,
+        which read as "the launcher closed" (2026-09-25)."""
         if changelog:
             logger.info("Update applied: %s", "; ".join(changelog))
             # The successor is the one that can show it: a dialog here would
@@ -1635,14 +1639,25 @@ class LauncherApp(ctk.CTk):
         def _relaunch():
             self._stop_everything()
             bootstrap = os.environ.get("SAUTIUM_BOOTSTRAP")
-            cmd = ([sys.executable, bootstrap] if bootstrap
-                   else [sys.executable, "-m", "desktop"])
+            if bootstrap and sys.platform == "darwin":
+                # .../Sautium.app/Contents/Resources/bootstrap.py; -n because
+                # this instance of the app is still running.
+                cmd = ["open", "-n", str(Path(bootstrap).parents[2])]
+            elif bootstrap:
+                cmd = [sys.executable, bootstrap]
+            else:
+                cmd = [sys.executable, "-m", "desktop"]
             logger.info("Relaunching: %s (cwd=%s)", " ".join(cmd),
                         get_project_root())
             try:
-                subprocess.Popen(cmd, cwd=str(get_project_root()),
-                                 start_new_session=True)
-            except OSError as e:
+                if cmd[0] == "open":
+                    # `open` returns once LaunchServices took the launch, and
+                    # says so in its exit code — a moved bundle fails here.
+                    subprocess.run(cmd, check=True, capture_output=True, timeout=30)
+                else:
+                    subprocess.Popen(cmd, cwd=str(get_project_root()),
+                                     start_new_session=True)
+            except (OSError, subprocess.SubprocessError) as e:
                 logger.error(f"Relaunch failed: {e}")
                 self.service_manager.start_backend()
                 self.service_manager.start_tracker()

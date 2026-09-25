@@ -523,7 +523,11 @@ The short version of the hard-learned lessons:
   (`_ensure_backend_deps`, 3600 s), and the bootstrap installs
   `desktop/requirements.txt` — which is why `_restart_self` now relaunches
   THROUGH the bootstrap (`SAUTIUM_BOOTSTRAP`) on both platforms instead of
-  `python -m desktop` directly.
+  `python -m desktop` directly. On macOS it goes through LaunchServices
+  (`open -n` on the bundle, since 2026-09-25): a bootstrap the launcher
+  spawned itself was a bare python3 to macOS, with a Dock tile and an app
+  name of its own while the Sautium tile vanished, and the first live
+  relaunch read as "the launcher closed".
 - **Testing beside the checkout.** The installed app and the launcher
   checkout share `%LOCALAPPDATA%\Sautium` (pgdata, config), like the two
   runtimes on macOS. `scripts/test-node.ps1 run` points LOCALAPPDATA and
@@ -1376,6 +1380,15 @@ per track", with that row in the sheet to come back to.
   generation now. The Now Playing sheet paints into a real `<img>`, where
   assigning `src` aborts the load in flight — same task, no race, and the
   difference is the reason one of them needed fixing.
+- **Closing a response another thread is reading waits for that read.**
+  `ApiClient.close_streams()` closed each SSE response from the Tk thread
+  while its reader sat in `readline()`; `BufferedReader.close()` takes the
+  buffer lock the blocked read holds, so the close returned only with the
+  server's next keepalive — 1.6 to 15.5 s of a frozen launcher window
+  (macOS logged "slow hid response") on every Quit and before every update
+  relaunch (2026-09-25). The reader now takes a duplicate of its socket when
+  it connects (`_read_breaker`) and `close_streams()` only `shutdown()`s
+  that: the read ends at once and the reader closes its own response.
 - **iOS 27 WebKit reloads a fragment navigation on an IP-addressed http
   origin (2026-09-25).** On `http://192.168.x.x:<port>` — how a phone
   reaches a node — `location.hash = '#x'` commits the same-document

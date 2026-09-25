@@ -28,6 +28,7 @@ import hashlib
 import hmac
 import json
 import logging
+import socket
 import ssl
 import threading
 import time
@@ -101,6 +102,22 @@ def _read_json_body(resp) -> dict:
     if (resp.headers.get("Content-Encoding") or "").lower() == "gzip":
         data = gzip.decompress(data)
     return json.loads(data.decode("utf-8"))
+
+
+def _read_breaker(resp) -> socket.socket:
+    """A duplicate of the response's socket, taken by the thread that reads
+    it, so another thread can end the blocked read with shutdown()
+    (close_streams). Closing the RESPONSE from that other thread waits on the
+    buffer lock the blocked readline() holds — until the server's next
+    keepalive, which froze the launcher window for up to 20 s on every Quit
+    and before every update relaunch (2026-09-25). A duplicate rather than
+    the fd number: the reader closes its own fd when it ends, and a number
+    handed out again would shut some other connection down."""
+    borrowed = socket.socket(fileno=resp.fileno())
+    try:
+        return borrowed.dup()
+    finally:
+        borrowed.detach()
 
 
 class BackendAPIClient:
@@ -421,7 +438,7 @@ class BackendAPIClient:
         Deliberately not a payload reader: every channel we consume is a wake
         event whose whole meaning is "re-read state over the signed API", so
         parsing frames would only invite the two to disagree. Blocks; run it
-        on a thread and stop it by closing the handle this stores.
+        on a thread and end it with close_streams().
 
         Reconnects on drop with a backoff, because the launcher restarts the
         backend under itself (a scan does exactly that) and a tight retry
@@ -438,7 +455,8 @@ class BackendAPIClient:
                 # No read timeout: an idle channel is normal, and the server
                 # sends a keepalive comment every 20s to prove it is alive.
                 resp = urllib.request.urlopen(req, context=self._ssl_ctx)
-                self._streams.append(resp)
+                breaker = _read_breaker(resp)
+                self._streams.append(breaker)
                 delay = 1.0
                 try:
                     for raw in resp:
@@ -447,7 +465,8 @@ class BackendAPIClient:
                         if raw.startswith(b"data:"):
                             yield None
                 finally:
-                    self._streams.remove(resp)
+                    self._streams.remove(breaker)
+                    breaker.close()
                     resp.close()
             except GeneratorExit:
                 raise
@@ -462,13 +481,14 @@ class BackendAPIClient:
 
     def close_streams(self) -> None:
         """Unblock every reader so launcher shutdown does not wait on a
-        connection that is, by design, never going to end on its own."""
+        connection that is, by design, never going to end on its own. Only
+        ends the read — each reader closes its own response (_read_breaker)."""
         self._stream_closed = True
-        for resp in list(self._streams):
+        for breaker in list(self._streams):
             try:
-                resp.close()
-            except Exception:
-                pass
+                breaker.shutdown(socket.SHUT_RDWR)
+            except OSError:
+                pass   # that stream ended in between and its reader closed the breaker
 
     def mb_slice(self, names: list[str]) -> Optional[dict]:
         """Fetch raw mb_* rows for artist names from a dump-holding peer.
