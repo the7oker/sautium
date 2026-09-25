@@ -1389,6 +1389,18 @@ per track", with that row in the sheet to come back to.
   relaunch (2026-09-25). The reader now takes a duplicate of its socket when
   it connects (`_read_breaker`) and `close_streams()` only `shutdown()`s
   that: the read ends at once and the reader closes its own response.
+- **Quit is final, for the window and for the services.** The launcher starts
+  services from several threads — a scan's backend restart, settings being
+  applied, a restore, an update, the start sequence, P2P's own start — and a
+  quit that merely stopped them could be followed by one of those starting
+  them again, leaving a backend analysing the library and holding its port
+  behind a closed window; the window also stayed clickable through the stop
+  (2026-09-25). `ServiceManager.close()` sets a flag under the lock every
+  start spawns under, so a start caught mid-spawn is stopped by it and none
+  begins after (`reopen()` only for a failed update relaunch); P2P's start
+  and the quit's P2P stop share a lock the same way. The window goes under a
+  cover, its dialogs close, the tray icon goes, a second Quit is the same
+  quit, and a Quit during an update beats the update's relaunch.
 - **iOS 27 WebKit reloads a fragment navigation on an IP-addressed http
   origin (2026-09-25).** On `http://192.168.x.x:<port>` — how a phone
   reaches a node — `location.hash = '#x'` commits the same-document

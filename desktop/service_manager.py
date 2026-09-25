@@ -41,6 +41,10 @@ class ServiceManager:
         self._backend_stopping = False
         self._backend_started_at = 0.0
         self._crash_restarts = 0
+        # close() is final: a start either spawned under this lock before
+        # close() took it — and close() stops it — or finds _closed set.
+        self._lifecycle = threading.Lock()
+        self._closed = False
         from desktop.utils import get_project_root
         self._project_root = get_project_root()
         self._backend_dir = self._project_root / "backend"
@@ -79,13 +83,17 @@ class ServiceManager:
         # Initialize cluster if needed
         initialize_cluster(password, progress_cb=progress_cb)
 
-        if is_postgres_running():
-            logger.info("PostgreSQL already running")
-        else:
-            if progress_cb:
-                progress_cb("Starting PostgreSQL...")
-            if not start_postgres(port=port):
+        with self._lifecycle:
+            if self._closed:
+                logger.info("PostgreSQL not started: the launcher is quitting")
                 return False
+            if is_postgres_running():
+                logger.info("PostgreSQL already running")
+            else:
+                if progress_cb:
+                    progress_cb("Starting PostgreSQL...")
+                if not start_postgres(port=port):
+                    return False
 
         # Create database/role if needed (first run)
         if progress_cb:
@@ -438,40 +446,44 @@ class ServiceManager:
         if self.ports.get("p2p_sync"):
             self._ensure_firewall_rule(self.ports["p2p_sync"])
 
-        # Log backend output to file instead of PIPE (PIPE can block on Windows).
-        # The previous run's log survives as backend.log.1: a crash tail has
-        # to outlive the restart that follows it, or support never sees it.
-        # The old handle is closed first — Windows refuses to rename an open
-        # file.
         from desktop.config_manager import get_data_dir
         log_dir = get_data_dir()
         log_dir.mkdir(parents=True, exist_ok=True)
         backend_log = log_dir / "backend.log"
-        previous_handle = getattr(self, "_backend_log_file", None)
-        if previous_handle:
-            previous_handle.close()
-        if backend_log.exists():
-            backend_log.replace(log_dir / "backend.log.1")
-        self._backend_log_file = open(backend_log, "w", encoding="utf-8")
+        with self._lifecycle:
+            if self._closed:
+                logger.info("Backend not started: the launcher is quitting")
+                return False
+            # Log backend output to file instead of PIPE (PIPE can block on
+            # Windows). The previous run's log survives as backend.log.1: a
+            # crash tail has to outlive the restart that follows it, or
+            # support never sees it. The old handle is closed first — Windows
+            # refuses to rename an open file.
+            previous_handle = getattr(self, "_backend_log_file", None)
+            if previous_handle:
+                previous_handle.close()
+            if backend_log.exists():
+                backend_log.replace(log_dir / "backend.log.1")
+            self._backend_log_file = open(backend_log, "w", encoding="utf-8")
 
-        kwargs = {
-            "cwd": str(self._backend_dir),
-            "env": env,
-            "stdout": self._backend_log_file,
-            "stderr": self._backend_log_file,
-        }
-        if sys.platform == "win32":
-            kwargs["creationflags"] = subprocess.CREATE_NO_WINDOW
+            kwargs = {
+                "cwd": str(self._backend_dir),
+                "env": env,
+                "stdout": self._backend_log_file,
+                "stderr": self._backend_log_file,
+            }
+            if sys.platform == "win32":
+                kwargs["creationflags"] = subprocess.CREATE_NO_WINDOW
 
-        try:
-            self._backend_stopping = False
-            self.backend_proc = subprocess.Popen(cmd, **kwargs)
-            logger.info(f"Backend started (PID {self.backend_proc.pid}) on port {port}")
-            logger.info(f"Backend log: {backend_log}")
-        except Exception as e:
-            logger.error(f"Failed to start backend: {e}")
-            self._backend_log_file.close()
-            return False
+            try:
+                self._backend_stopping = False
+                self.backend_proc = subprocess.Popen(cmd, **kwargs)
+                logger.info(f"Backend started (PID {self.backend_proc.pid}) on port {port}")
+                logger.info(f"Backend log: {backend_log}")
+            except Exception as e:
+                logger.error(f"Failed to start backend: {e}")
+                self._backend_log_file.close()
+                return False
 
         # Wait for /health endpoint
         if progress_cb:
@@ -626,6 +638,23 @@ class ServiceManager:
         self.stop_tracker()
         self.stop_backend()
         self.stop_postgres()
+
+    def close(self) -> None:
+        """Stop everything for good — the launcher is going away. A flow still
+        in flight (a scan's backend restart, settings being applied, a
+        restore, an update, the start sequence itself) starts services on its
+        own thread, and one that got there after a plain stop_all() left a
+        backend analysing the library and holding its port — or PostgreSQL —
+        behind the closed window. After this every start refuses."""
+        with self._lifecycle:
+            self._closed = True
+        self.stop_all()
+
+    def reopen(self) -> None:
+        """Undo close(), for the one caller that stays after all: an update
+        relaunch whose successor could not be started."""
+        with self._lifecycle:
+            self._closed = False
 
     def restart_backend_and_tracker(self, progress_cb: Optional[Callable] = None) -> bool:
         """Restart backend and tracker (keep PostgreSQL running)."""

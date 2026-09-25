@@ -11,6 +11,7 @@ import queue
 import subprocess
 import sys
 import threading
+import tkinter
 import webbrowser
 from logging.handlers import RotatingFileHandler
 from pathlib import Path
@@ -69,6 +70,10 @@ class LauncherApp(ctk.CTk):
         # restart) from launching a parallel P2PManager that races on the
         # same listen port.
         self._p2p_starting = False
+        # Held by a P2P start from "not quitting?" through P2PManager.start(),
+        # and by the quit's P2P stop: the start either finished before the
+        # stop and is stopped, or sees the quit and does not begin.
+        self._p2p_lifecycle = threading.Lock()
         self.tray = None
         self._update_thread = None
         self._update_in_progress = False
@@ -383,7 +388,12 @@ class LauncherApp(ctk.CTk):
         self.ui_call(apply)
 
     def _on_services_ready(self):
-        """Called when all services are running."""
+        """Called when all services are running. Not while quitting: a flow
+        that was in flight when Quit came (settings applied, a restore)
+        still reports in, and turning the node back on — buttons, P2P, the
+        wizard's pending downloads — is the one thing it must not do."""
+        if self._shutting_down:
+            return
         port = self.config.get("ports", {}).get("web", 8000)
 
         # Check GPU status via backend Python (torch is in python312, not launcher)
@@ -760,12 +770,15 @@ class LauncherApp(ctk.CTk):
                     sync_port, "TCP")
                 self.service_manager._prune_stale_p2p_rules(sync_port)
 
-                self.p2p_manager = P2PManager(db_dsn, self.config)
-                self.p2p_manager.set_identity_rotated_callback(
-                    self._on_identity_rotated)
-                self.p2p_manager.start(
-                    node_id=node_id, progress_cb=progress,
-                )
+                with self._p2p_lifecycle:
+                    if self._shutting_down:
+                        return
+                    self.p2p_manager = P2PManager(db_dsn, self.config)
+                    self.p2p_manager.set_identity_rotated_callback(
+                        self._on_identity_rotated)
+                    self.p2p_manager.start(
+                        node_id=node_id, progress_cb=progress,
+                    )
             except Exception as e:
                 logger.error(f"P2P startup failed: {e}", exc_info=True)
                 from desktop.config_manager import get_data_dir
@@ -1538,15 +1551,19 @@ class LauncherApp(ctk.CTk):
         affordance by another name (see the handlers in _build_ui).
         """
         self.withdraw()
-        if sys.platform == "darwin":
+        # Quitting: a tray icon now would offer the menu of a node that is
+        # going away.
+        if sys.platform == "darwin" or self._shutting_down:
             return
         if self.tray is None:
             from desktop.tray import create_tray
+            # pystray fires these on its own thread; Tk is only ever touched
+            # from the Tk thread (ui_call).
             self.tray = create_tray(
-                on_show=self._show_from_tray,
-                on_open_ui=self._open_web_ui,
+                on_show=lambda: self.ui_call(self._show_from_tray),
+                on_open_ui=lambda: self.ui_call(self._open_web_ui),
                 on_check_updates=lambda: self.ui_call(self._check_updates),
-                on_quit=self._quit,
+                on_quit=lambda: self.ui_call(self._quit),
             )
 
     def _show_from_tray(self):
@@ -1556,13 +1573,16 @@ class LauncherApp(ctk.CTk):
         self.focus_force()
 
     def _quit(self):
-        """Full quit: stop services and exit."""
+        """Full quit: stop services and exit. Every way in — the button,
+        Cmd+Q and the Dock, the tray — lands here, and a second one while
+        the first is stopping things is the same quit."""
+        if self._shutting_down:
+            return
         self._shutting_down = True   # stop the stats worker from rescheduling onto a dying loop
+        self._cover("Shutting down — stopping services…")
         # SSE readers block on a socket that is never going to close by
         # itself — unblock them before anything waits on their threads.
         self.api_client.close_streams()
-        self._set_status("starting", "Shutting down...")
-        self._progress_text.configure(text="Stopping services...")
         self.update()
 
         def _shutdown():
@@ -1570,6 +1590,32 @@ class LauncherApp(ctk.CTk):
             self.ui_call(self._final_quit)
 
         threading.Thread(target=_shutdown, daemon=True).start()
+
+    def _cover(self, message: str) -> None:
+        """Quitting or relaunching: the window can start nothing any more.
+        Its controls go under a cover, the dialogs close and the tray icon
+        goes, because a scan, a tool, a restore or an update begun now would
+        run into services being stopped under it — or start them again
+        behind the closed window. A cover rather than disabling buttons:
+        flows still in flight re-enable theirs when they finish."""
+        for window in self.winfo_children():
+            if isinstance(window, tkinter.Toplevel):
+                window.destroy()
+        if self.tray is not None:
+            self.tray.stop()
+            self.tray = None
+        self._cover_frame = ctk.CTkFrame(self, corner_radius=0,
+                                         fg_color=self.cget("fg_color"))
+        self._cover_frame.place(relx=0, rely=0, relwidth=1, relheight=1)
+        self._cover_frame.lift()
+        ctk.CTkLabel(self._cover_frame, text="Sautium",
+                     font=ctk.CTkFont(size=24, weight="bold")).pack(pady=(15, 5))
+        ctk.CTkLabel(self._cover_frame, text=message,
+                     text_color="gray").pack(pady=10)
+
+    def _uncover(self) -> None:
+        self._cover_frame.destroy()
+        self._cover_frame = None
 
     def _stop_everything(self) -> None:
         """Stop P2P and every service, then clear the session marker so the
@@ -1582,12 +1628,13 @@ class LauncherApp(ctk.CTk):
             run.cancel()
         for run in running:
             run.wait(15)
-        if self.p2p_manager:
-            try:
-                self.p2p_manager.stop()
-            except Exception as e:
-                logger.debug(f"P2P stop error: {e}")
-        self.service_manager.stop_all()
+        with self._p2p_lifecycle:
+            if self.p2p_manager:
+                try:
+                    self.p2p_manager.stop()
+                except Exception as e:
+                    logger.debug(f"P2P stop error: {e}")
+        self.service_manager.close()
         from desktop.config_manager import get_data_dir
         from desktop.p2p import diag_events
         diag_events.clear_session_marker(get_data_dir())
@@ -1598,7 +1645,7 @@ class LauncherApp(ctk.CTk):
         inside WM_ENDSESSION, and never touches Tk. Windows waits seconds, not
         the 17 a P2P goodbye can take — the rest dies with the process."""
         self._shutting_down = True
-        self.service_manager.stop_all()
+        self.service_manager.close()
         from desktop.config_manager import get_data_dir
         from desktop.p2p import diag_events
         diag_events.clear_session_marker(get_data_dir())
@@ -1631,9 +1678,11 @@ class LauncherApp(ctk.CTk):
             # hold the node down — services already stopped — until somebody
             # walked back and clicked OK.
             self.config = update_config({"_pending_changelog": changelog})
+        if self._shutting_down:
+            return      # Quit came during the update and wins; the next start shows the changelog
         self._shutting_down = True
+        self._cover("Restarting Sautium…")
         self.api_client.close_streams()
-        self._set_status("updating", "Restarting Sautium...")
         self.update()
 
         def _relaunch():
@@ -1659,9 +1708,12 @@ class LauncherApp(ctk.CTk):
                                      start_new_session=True)
             except (OSError, subprocess.SubprocessError) as e:
                 logger.error(f"Relaunch failed: {e}")
-                self.service_manager.start_backend()
-                self.service_manager.start_tracker()
+                # This process stays after all. _stop_everything closed the
+                # services — PostgreSQL included, which the backend needs.
+                self.service_manager.reopen()
+                self.service_manager.start_all()
                 self._shutting_down = False
+                self.ui_call(self._uncover)
                 self.ui_call(lambda: self._set_status(
                     "error", "Restart failed — the update applies on the next start"))
                 self.ui_call(self._update_flow_idle)
