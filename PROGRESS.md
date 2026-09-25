@@ -1369,6 +1369,20 @@ per track", with that row in the sheet to come back to.
   generation now. The Now Playing sheet paints into a real `<img>`, where
   assigning `src` aborts the load in flight — same task, no race, and the
   difference is the reason one of them needed fixing.
+- **iOS 27 WebKit reloads a fragment navigation on an IP-addressed http
+  origin (2026-09-25).** On `http://192.168.x.x:<port>` — how a phone
+  reaches a node — `location.hash = '#x'` commits the same-document
+  navigation and then loads the same URL again as a new document in a new
+  process: `history.length` grows by two and the old page gets no
+  `pagehide`. Back lands on the old document's entry of the same URL, so it
+  reloads the screen instead of leaving it: More › Profile could not be left
+  in Chrome on an iPhone. Measured in the iOS 27 simulator's Safari on a bare
+  page from `python -m http.server`: the same server under its `.local`
+  name, `127.0.0.1`, `localhost` and https pages were unaffected, and
+  `pushState`, `replaceState` and traversals between pushed entries stayed
+  same-document. The router pushes with `pushState` and renders on
+  `popstate` (`navigate()` in `app-shell.js`); nothing in the app assigns
+  `location.hash` or navigates through an `<a href="#…">`.
 - **A name is not an identity — Deezer ranks namesakes by nothing useful.**
   `search/artist?q=vangelis` returns three artists called exactly "Vangelis",
   and the one it puts FIRST has one album and 20 followers while the composer

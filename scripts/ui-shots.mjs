@@ -128,11 +128,11 @@ const IMAGES_READY = `new Promise(resolve => {
 })`;
 
 // Navigate by hash and wait for the app's own "route painted" promise
-// (window.sautiumRendered, set by render() on hashchange) when the build
-// publishes one; older builds fall back to the quiet-DOM settle alone.
-// The hashchange listener is registered before the hash moves, and the
-// app's listener (registered at boot) runs first, so the promise read
-// afterwards is the new route's.
+// (window.sautiumRendered, set by every render()) when the build publishes
+// one; older builds fall back to the quiet-DOM settle alone. The app renders
+// on popstate, which a fragment navigation fires before hashchange, so the
+// promise read in this hashchange listener is the new route's. (Headless
+// Chrome only: the app itself never navigates by fragment — see navigate().)
 const GO_TO = hash => `new Promise(resolve => {
   const target = ${JSON.stringify('#' + hash)};
   // A renderer whose promise never settles must not hang the run: after

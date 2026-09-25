@@ -229,6 +229,20 @@ Playing sheet state machine, URL hash routing, per-screen contents,
 Play-vs-Queue action semantics, and the queue-history concept. Read
 it before touching UI routing or screen layout.
 
+**Navigate with `navigate(hash)` — never `location.hash =`, never an
+`<a href="#…">`.** The URL stays hash-shaped, but a push is
+`history.pushState` followed by `render()`, and a traversal (Back,
+`goBack`, a window's `history.go`) arrives as `popstate`. WebKit on
+iOS 27 — Safari and Chrome alike — turns a fragment navigation on an
+http origin addressed by IP, which is how a phone reaches the node on
+the LAN, into a full reload in a new process; Back then lands on the
+old document's entry of the same URL and reloads that screen instead
+of leaving it. `render()` is the router's one exit: a hash that names
+no screen (`namesScreen`) is replaced by Home, and `sautium:route`
+fires once the new screen is mounted. A screen-scoped listener
+detaches on `sautium:route`, not on `hashchange`, which a push never
+fires.
+
 ### View-layer architecture
 
 The top-down rebuild against the new design system and information

@@ -528,11 +528,18 @@
   }
   window.goBack = goBack;
 
+  // A push goes through the History API and never through `location.hash =`:
+  // WebKit on iOS 27 (Safari and Chrome alike) turns a fragment navigation on
+  // an http origin addressed by IP — how a phone reaches the node on the
+  // LAN — into a full reload in a new process, and Back then reloads the
+  // same screen for good. pushState is a same-document push on every
+  // engine; render() follows it here, and popstate follows a traversal.
   function navigate(hash) {
     const target = '#' + hash;
     if (_windowRoot) _windowIntent = 'navigate';
     if (location.hash !== target) {
-      location.hash = target;  // hashchange event will trigger render()
+      history.pushState(null, '', target);
+      render();
     } else {
       // Already on this hash. The shared renderers (Home, Discovery,
       // Friends) appendChild into root, so calling render() here
@@ -560,7 +567,32 @@
     navigate(`${tab}/${kind}/${id}`);
   }
 
+  // Whether a hash names a screen: a tab (an entity may nest under it), a
+  // More section, or the peer profile with its key. A bare #more names the
+  // drawer, which is not a route.
+  function namesScreen(hash) {
+    const segs = hash.split('/').filter(Boolean);
+    const [top, sub] = segs;
+    if (top === 'profile') return !!sub;
+    if (top === 'more') {
+      return MORE_SCREENS.has(sub) || (ENTITY_KINDS.has(sub) && segs.length >= 3);
+    }
+    return Object.hasOwn(routes, top);
+  }
+
+  // The one route-change signal is `sautium:route`, fired once the screen is
+  // mounted — after a push and after a traversal alike. Screen-scoped
+  // listeners detach on it when their screen has left the page.
   function render() {
+    // A hash that names no screen — empty, the launcher's one-time
+    // `#pair=<code>` (auth.js has read it and will scrub it), a bare #more,
+    // a section since removed — is replaced by Home rather than rendered.
+    if (!namesScreen(location.hash.slice(1))) history.replaceState(null, '', '#home');
+    mountRoute();
+    window.dispatchEvent(new Event('sautium:route'));
+  }
+
+  function mountRoute() {
     const hash = parseHash();
     const segments = hash.split('/').filter(Boolean);
     const route = segments[0] || 'home';
@@ -5243,7 +5275,7 @@
     if (d.lb_pending) {
       const detach = () => {
         window.removeEventListener('sautium:lb-changed', onLb);
-        window.removeEventListener('hashchange', onHashChange);
+        window.removeEventListener('sautium:route', onRoute);
       };
       const onLb = async () => {
         if (!document.contains(screen)) return detach();
@@ -5262,11 +5294,11 @@
         }
         if (!fresh.lb_pending) detach();
       };
-      const onHashChange = () => {
+      const onRoute = () => {
         if (!document.contains(screen)) detach();
       };
       window.addEventListener('sautium:lb-changed', onLb);
-      window.addEventListener('hashchange', onHashChange);
+      window.addEventListener('sautium:route', onRoute);
     }
 
     const sortBtn = screen.querySelector('[data-action="albums-sort"]');
@@ -6051,7 +6083,7 @@
       title: 'Audio output unavailable',
       text: escapeProfileHtml(detail ||
         'The playback device is not responding. Wake it, or pick another output.'),
-      action: { label: 'Audio output', run: () => { location.hash = '#more/output'; } },
+      action: { label: 'Audio output', run: () => navigate('more/output') },
     });
   }
   window.reportOutputUnavailable = reportOutputUnavailable;
@@ -7204,17 +7236,17 @@
     // manual reload and without a second connection to the origin.
     const detach = () => {
       window.removeEventListener('sautium:chat-changed', onChat);
-      window.removeEventListener('hashchange', onHashChange);
+      window.removeEventListener('sautium:route', onRoute);
     };
     const onChat = () => {
       if (!document.contains(listEl)) return detach();
       refreshFriends(true);
     };
-    const onHashChange = () => {
+    const onRoute = () => {
       if (!document.contains(listEl)) detach();
     };
     window.addEventListener('sautium:chat-changed', onChat);
-    window.addEventListener('hashchange', onHashChange);
+    window.addEventListener('sautium:route', onRoute);
 
     // Friends list: favorites first, then the first page, further pages
     // via Show more (the Discovery Tracks pattern — a self-growing
@@ -7959,7 +7991,7 @@
     // stream per tab.
     const detach = () => {
       window.removeEventListener('sautium:chat-changed', onChat);
-      window.removeEventListener('hashchange', onHashChange);
+      window.removeEventListener('sautium:route', onRoute);
     };
     const onChat = () => {
       if (!document.contains(threadEl)) return detach();
@@ -7967,11 +7999,11 @@
       loadFriend();            // status may have changed
       markRead();
     };
-    const onHashChange = () => {
+    const onRoute = () => {
       if (!document.contains(threadEl)) detach();
     };
     window.addEventListener('sautium:chat-changed', onChat);
-    window.addEventListener('hashchange', onHashChange);
+    window.addEventListener('sautium:route', onRoute);
   }
 
   /* ---------- More tab ----------
@@ -7984,25 +8016,26 @@
      directly (deep link) still works because renderMore dispatches
      to the leaf screen below. */
 
+  // The sections by the segment after #more/. The router (namesScreen)
+  // sends a hash naming none of them Home before it gets here.
+  const MORE_SCREENS = new Map([
+    ['hqplayer',     root => renderHqplayerSettings(root)],
+    ['output',       root => renderOutputSettings(root)],
+    ['profile',      root => renderProfile(root)],
+    ['gear-system',  root => renderGearSystem(root)],
+    ['gear-advisor', root => renderGearAdvisor(root)],
+    ['gear',         (root, id) => renderGearDetail(root, id)],
+    ['library',      root => renderLibrary(root)],
+    ['phantoms',     root => renderPhantoms(root)],
+    ['databases',    root => renderDatabases(root)],
+    ['ai',           root => renderAI(root)],
+    ['sync',         root => renderSync(root)],
+    ['about',        root => renderAbout(root)],
+  ]);
+
   function renderMore(root, hash) {
-    const segs = (hash || '').split('/').filter(Boolean);
-    const sub = segs[1] || '';
-    if (sub === 'hqplayer') return renderHqplayerSettings(root);
-    if (sub === 'output')  return renderOutputSettings(root);
-    if (sub === 'profile') return renderProfile(root);
-    if (sub === 'gear-system') return renderGearSystem(root);
-    if (sub === 'gear-advisor') return renderGearAdvisor(root);
-    if (sub === 'gear') return renderGearDetail(root, segs[2]);
-    if (sub === 'library') return renderLibrary(root);
-    if (sub === 'phantoms') return renderPhantoms(root);
-    if (sub === 'databases') return renderDatabases(root);
-    if (sub === 'ai')      return renderAI(root);
-    if (sub === 'sync')    return renderSync(root);
-    if (sub === 'about')   return renderAbout(root);
-    // Bare #more — nothing to render here; the drawer is the UI.
-    // Drop back to home so the page isn't blank if the user
-    // bookmarked the route.
-    navigate('home');
+    const segs = hash.split('/').filter(Boolean);
+    return MORE_SCREENS.get(segs[1])(root, segs[2]);
   }
 
   // Drawer overlay (More tab handler). Built lazily on first open,
@@ -12464,7 +12497,7 @@
         // First time only: show the screen that exists for HQPlayer, so its
         // filters and DSP are not a secret. Selection has already happened, so
         // this informs rather than blocks.
-        if (first) location.hash = '#more/hqplayer';
+        if (first) navigate('more/hqplayer');
       }));
     root.querySelectorAll('[data-action="select-device"]').forEach(el =>
       el.addEventListener('click', () =>
@@ -13888,7 +13921,7 @@
     // detail screens once the playlist DOM is reachable; tryFetchDetail
     // no longer needs a re-poke because media_file_id is in np-update.
     document.addEventListener('playlist-loaded', updatePlayingHighlight);
-    window.addEventListener('hashchange', render);
+    window.addEventListener('popstate', render);
     document.addEventListener('keydown', e => {
       if (e.key !== 'Escape' || !_windowRoot || modalIsOpen()) return;
       if (sheet.isOpen || queue.isOpen || ai.isOpen) return;
@@ -13915,14 +13948,6 @@
       if (chip) applyMbChipState(chip, e.detail || {});
     });
 
-    // A hash that names no screen — empty, or the launcher's one-time
-    // `#pair=<code>`, which auth.js has already read and will scrub — must
-    // not become the current route. replaceState fires no hashchange, so
-    // render() is called explicitly after.
-    const top = parseHash().split('/')[0];
-    if (!location.hash || !(routes[top] || top === 'profile')) {
-      history.replaceState(null, '', '#home');
-    }
     render();
   }
 
