@@ -89,6 +89,15 @@ def get_project_root() -> Path:
     return _get_root()
 
 
+def is_managed_install() -> bool:
+    """Whether OUR tree is the one a carrier installed — `<data dir>/app`
+    (desktop/macos/bootstrap.py, desktop/windows/bootstrap.py). The updater
+    owns that tree and nobody works in it. Any other checkout is a working
+    tree: the developer's runs this launcher as a test stand."""
+    from desktop.config_manager import get_data_dir
+    return get_project_root().resolve() == (get_data_dir() / "app").resolve()
+
+
 def installed_build() -> Optional[str]:
     """The build id of a packaged install (a bootstrap that could not clone
     writes it beside the copy it unpacks — desktop/macos/bootstrap.py,
@@ -256,37 +265,61 @@ def has_launcher_changes(old_hash: str) -> bool:
     return any(f.startswith("desktop/") for f in changed)
 
 
-def reset_to_origin() -> Tuple[str, Optional[str]]:
+def reset_to_origin() -> Tuple[str, Optional[str], Optional[Path]]:
     """
     Make the checkout equal to origin/main.
 
     Returns:
-        (old_hash before the move, error or None)
+        (old_hash before the move, error or None, the patch the tree's own
+        edits were set aside in or None)
     """
     old_hash = _rev("HEAD") or ""
 
     status = _git_cmd(["status", "--porcelain", "--untracked-files=no"])
-    if status.returncode != 0 or status.stdout.strip():
-        return old_hash, "the checkout has local modifications"
+    if status.returncode != 0:
+        return old_hash, f"git status failed: {status.stderr.strip()}", None
+    # An edited tracked file in a working tree is somebody's work and stops
+    # the update, as `git pull` did. In the tree a carrier installed it is
+    # nobody's — a hot-patch left from a test, a tool that rewrote a file —
+    # and stopping there stranded the node on "Update failed" until someone
+    # ran git by hand (2026-09-25); it is set aside below instead.
+    edited = bool(status.stdout.strip())
+    if edited and not is_managed_install():
+        return old_hash, "the checkout has local modifications", None
 
     _migrate_origin()
     result = _git_cmd(["fetch", "origin", "main"], timeout=120)
     if result.returncode != 0:
-        return old_hash, f"git fetch failed: {result.stderr.strip()}"
+        return old_hash, f"git fetch failed: {result.stderr.strip()}", None
 
     # A fast-forward loses nothing and is always taken; any other move is
     # taken only from a tip origin itself handed us (MIRRORED_REF).
     fast_forward = _is_ancestor("HEAD", REMOTE_BRANCH)
     if not fast_forward and old_hash != _rev(MIRRORED_REF):
-        return old_hash, "the checkout carries commits of its own and upstream history has moved"
+        return old_hash, "the checkout carries commits of its own and upstream history has moved", None
+
+    set_aside = None
+    if edited:
+        # Kept, never discarded: `git apply` on the old commit brings the
+        # edits back. A file in the data dir, not a stash — the reflog expiry
+        # after a rewritten history would drop a stash.
+        from datetime import datetime
+        from desktop.config_manager import get_data_dir
+        folder = get_data_dir() / "local-edits"
+        folder.mkdir(exist_ok=True)
+        set_aside = folder / f"{datetime.now():%Y%m%d-%H%M%S}-{old_hash[:12]}.patch"
+        saved = _git_cmd(["diff", "--binary", f"--output={set_aside}", "HEAD"])
+        if saved.returncode != 0:
+            return old_hash, f"could not set local edits aside: {saved.stderr.strip()}", None
+        logger.warning(f"local edits set aside in {set_aside}")
 
     result = _git_cmd(["reset", "--hard", REMOTE_BRANCH], timeout=120)
     if result.returncode != 0:
-        return old_hash, f"git reset failed: {result.stderr.strip()}"
+        return old_hash, f"git reset failed: {result.stderr.strip()}", set_aside
     new_hash = _rev("HEAD")
     _record_mirrored(new_hash)
     logger.info(f"checkout moved {old_hash[:12]} -> {new_hash[:12]}")
-    return old_hash, None
+    return old_hash, None, set_aside
 
 
 def forget_old_history(progress_cb: Optional[Callable] = None) -> None:
@@ -312,7 +345,8 @@ def perform_update(
     """
     Full update sequence:
     1. Stop backend + tracker + P2P (keep PostgreSQL)
-    2. Make the checkout equal to origin/main (fetch + reset --hard)
+    2. Make the checkout equal to origin/main (fetch + reset --hard; a
+       managed tree's own edits are set aside as a patch first)
     3. Run migrations if new ones exist
     4. Restart backend + tracker — UNLESS the launcher itself has to come
        back as a new process, which starts them on its own
@@ -347,7 +381,7 @@ def perform_update(
     if progress_cb:
         progress_cb("Downloading updates...")
 
-    old_hash, error = reset_to_origin()
+    old_hash, error, set_aside = reset_to_origin()
     if error:
         logger.error(f"update failed: {error}")
         _update_failed(config, "checkout", error)
@@ -357,6 +391,8 @@ def perform_update(
         return False, [], False
 
     changelog = get_update_changelog(old_hash)
+    if set_aside:
+        changelog.insert(0, f"Local edits to the app were set aside in {set_aside}")
 
     # Check for new migrations
     if has_new_migrations(old_hash):
@@ -371,7 +407,9 @@ def perform_update(
             logger.error(f"Migration after update failed: {e}")
             _update_failed(config, "migration", str(e))
 
-    relaunch = has_launcher_changes(old_hash)
+    # An edit just set aside may still be loaded in this process — a
+    # hot-patched desktop/ module — and only a new process drops it.
+    relaunch = has_launcher_changes(old_hash) or set_aside is not None
 
     if not _is_ancestor(old_hash, "HEAD"):
         forget_old_history(progress_cb)

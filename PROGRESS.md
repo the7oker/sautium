@@ -597,7 +597,14 @@ The short version of the hard-learned lessons:
   other move is taken only when HEAD equals that marker. The developer's tree
   runs the same launcher as a test stand, and its unpushed commits would
   otherwise be one click from a `reset --hard`. A tracked file edited by hand
-  refuses the update before the fetch, as `git pull` did.
+  refuses the update before the fetch, as `git pull` did — in a working tree.
+  The tree a carrier installed (`<data dir>/app`, `is_managed_install`) is
+  nobody's work, and there the refusal stranded a node on "Update failed"
+  until someone ran git by hand (2026-09-25: a hot-patch left from a test).
+  Its edits are now written to `<data dir>/local-edits/<time>-<old HEAD>.patch`
+  (`git apply` on the old commit restores them), the move goes ahead, the
+  changelog names the patch, and the launcher relaunches — the edited code
+  may still be loaded in it.
 - **The purge reaches the node's disk last.** A move that was not a
   fast-forward ends with `reflog expire --expire=now --all` + `gc
   --prune=now`: without it the reflog keeps the old commits — and the blobs
