@@ -62,7 +62,6 @@
   /* --- Color · accents (LOCKED per POSITIONING.md) ---------------- */
   --color-amber:        #E8B06F;            /* brand / CTA / emotion    */
   --color-amber-hover:  #EFBE83;
-  --color-amber-press:  #D29A5B;
   --color-amber-weak:   rgba(232, 176, 111, 0.14);
   --color-amber-stripe: rgba(232, 176, 111, 0.06);  /* active-row tint */
 

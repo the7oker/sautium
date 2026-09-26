@@ -140,16 +140,21 @@ A **bottom-up sheet** with a vertical list of entries:
 - AI assistant (`#more/ai`) — which agent answers the chat and its sign-in
 - Sync & P2P (`#more/sync`) — the network's state, the P2P settings, the
   notices
-- About Sautium (`#more/about`) — version, build or commit, licence, and the
-  links out: the website, the guides, "What leaves your machine" (the
-  privacy page), the source, the third-party notices. Every link to the site
-  carries `#node=<origin>` — the origin THIS device reached the node by, in
-  the URL fragment, so the site can offer "Open my Sautium" without the
-  address ever reaching a server log or a Referer (`rel="noreferrer"` on the
-  links plus the page-wide `no-referrer` policy). The same `siteLink()`
-  helper feeds the three contextual "Learn more" rows: Audio output → the
-  phone-as-speaker guide, Sync & P2P → the privacy page, Streaming library →
-  the streaming-library guide
+
+The drawer's header carries the title and, on its baseline at the right
+edge, a link to the website (sautium.net). The About screen that held the
+version, the licence and the links out was removed 2026-09-26 to keep the
+drawer short; the site's footer carries the guides, the privacy page, the
+licence, the source and the third-party notices. Every link to the site
+carries `#node=<origin>` — the origin THIS device reached the node by, in
+the URL fragment, so the site can offer "Open my Sautium" without the
+address ever reaching a server log or a Referer (`rel="noreferrer"` on the
+links plus the page-wide `no-referrer` policy). The same `siteLink()`
+helper feeds the header link and the three contextual "Learn more" rows:
+Audio output → the phone-as-speaker guide, Sync & P2P → the privacy page,
+Streaming library → the streaming-library guide. The drawer never grows
+past the viewport: it stops a strip short of the top and its rows scroll
+inside it.
 
 Sheet is dismissed with drag-down or tap-outside. Detail screens
 (e.g., HQPlayer config) push **above** the sheet — the sheet stays
@@ -191,7 +196,6 @@ back/forward and refresh work natively:
 #more/databases              → Offline databases (MusicBrainz, ListenBrainz)
 #more/ai                     → AI assistant (agent, sign-in)
 #more/sync                   → Sync & P2P (network state, settings, notices)
-#more/about                  → About Sautium (version, build, licence, site links)
 #profile/<pubkey-prefix>     → Profile (viewing other, read-only)
 #queue                       → Full queue editor
 #queue/history/<id>          → Specific historical queue restore

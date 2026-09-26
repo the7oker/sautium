@@ -16,11 +16,8 @@
      logs too — on the http→https hop the default policy would still send
      `Referer: http://<lan-ip>:8800/`. */
   const SITE_URL = 'https://sautium.net';   // MIRRORED: desktop/utils.py SITE_URL; desktop/installer/sautium.iss carries it literally
-  const REPO_URL = 'https://github.com/the7oker/sautium';
-  const SUPPORT_URL = '';                   // a donation page; the About row renders only once this is set
   const SITE_PATHS = {
     home: '/',
-    guides: '/guides/',
     privacy: '/privacy/',
     outputs: '/guides/phone-as-speaker/',
     streaming: '/guides/streaming-library/',
@@ -8030,7 +8027,6 @@
     ['databases',    root => renderDatabases(root)],
     ['ai',           root => renderAI(root)],
     ['sync',         root => renderSync(root)],
-    ['about',        root => renderAbout(root)],
   ]);
 
   function renderMore(root, hash) {
@@ -8086,7 +8082,6 @@
       });
       updateFabVisibility(currentRoute);
       this._refreshHqpStatus();
-      this._fillAboutHint();
       guide.paint();
     },
     close() {
@@ -8132,12 +8127,6 @@
           }
         }
       } catch (_) { /* leave hint as "…" — non-critical */ }
-    },
-    async _fillAboutHint() {
-      const hint = this.el.querySelector('#aboutHint');
-      if (hint.textContent) return;
-      const cfg = await nodeConfig();
-      if (cfg) hint.textContent = `v${cfg.app_version}`;
     },
     _html() {
       const ICON_HQP = `
@@ -8199,13 +8188,6 @@
           <polygon points="11 5 6 9 2 9 2 15 6 15 11 19 11 5"/>
           <path d="M15.5 8.5a5 5 0 010 7M18.5 5.5a9 9 0 010 13"/>
         </svg>`;
-      const ICON_ABOUT = `
-        <svg width="22" height="22" viewBox="0 0 24 24" fill="none"
-             stroke="currentColor" stroke-width="1.7" stroke-linecap="round"
-             stroke-linejoin="round" aria-hidden="true">
-          <circle cx="12" cy="12" r="9"/>
-          <path d="M12 11v5M12 8h.01"/>
-        </svg>`;
       const CHEV = `
         <svg width="16" height="16" viewBox="0 0 24 24" fill="none"
              stroke="currentColor" stroke-width="2" stroke-linecap="round"
@@ -8218,6 +8200,7 @@
           <div class="drawer-handle"></div>
           <div class="drawer-title-row">
             <h1 class="drawer-title">More</h1>
+            <a class="drawer-site form-value-link" href="${escapeHtml(siteLink(SITE_PATHS.home))}" rel="noreferrer">sautium.net</a>
             <button class="drawer-close" type="button" aria-label="Close">
               <svg width="22" height="22" viewBox="0 0 24 24" fill="none"
                    stroke="currentColor" stroke-width="1.8" stroke-linecap="round"
@@ -8271,12 +8254,6 @@
               <span class="more-icon">${ICON_SYNC}</span>
               <span class="more-label">Sync &amp; P2P</span>
               <span class="more-hint"></span>
-              <span class="more-chev">${CHEV}</span>
-            </button>
-            <button class="more-row" type="button" data-go="more/about">
-              <span class="more-icon">${ICON_ABOUT}</span>
-              <span class="more-label">About Sautium</span>
-              <span class="more-hint" id="aboutHint"></span>
               <span class="more-chev">${CHEV}</span>
             </button>
           </div>
@@ -11269,6 +11246,7 @@
     check:   '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.6" stroke-linecap="round" stroke-linejoin="round"><path d="M5 13l4 4L19 7"/></svg>',
     chev:    '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M6 9l6 6 6-6"/></svg>',
     rightCh: '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M9 6l6 6-6 6"/></svg>',
+    gear:    '<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M9.84 5.34L10.19 2.67L13.81 2.67L14.16 5.34A7 7 0 0 1 15.18 5.76L17.31 4.12L19.88 6.69L18.24 8.82A7 7 0 0 1 18.66 9.84L21.33 10.19L21.33 13.81L18.66 14.16A7 7 0 0 1 18.24 15.18L19.88 17.31L17.31 19.88L15.18 18.24A7 7 0 0 1 14.16 18.66L13.81 21.33L10.19 21.33L9.84 18.66A7 7 0 0 1 8.82 18.24L6.69 19.88L4.12 17.31L5.76 15.18A7 7 0 0 1 5.34 14.16L2.67 13.81L2.67 10.19L5.34 9.84A7 7 0 0 1 5.76 8.82L4.12 6.69L6.69 4.12L8.82 5.76A7 7 0 0 1 9.84 5.34Z"/><circle cx="12" cy="12" r="3"/></svg>',
     vinyl:   '<svg width="28" height="28" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="M9 17V5l11-2v12"/><circle cx="6" cy="17" r="3"/><circle cx="17" cy="15" r="3"/></svg>',
   };
 
@@ -12247,7 +12225,7 @@
     root.innerHTML = `
       <section class="screen screen-settings">
         ${_settingsHeader('Audio output')}
-        <div data-output-content style="margin-top:calc(14*var(--px));">${_renderOutputs(data)}</div>
+        <div data-output-content>${_renderOutputs(data)}</div>
         <div class="profile-group-label">Learn more</div>
         <div class="form-group">${linkRow('Phones, DLNA and HQPlayer as outputs', siteLink(SITE_PATHS.outputs), 'Guide')}</div>
       </section>`;
@@ -12288,10 +12266,14 @@
       : `<span style="color:var(--color-text-dim);display:inline-flex;">${SETTINGS_ICONS.rightCh}</span>`;
 
     const hqpRow = `
-      <div class="form-row stacked" data-action="select-hqp"
-           data-configured="${hqp.available ? '1' : '0'}" style="cursor:pointer;">
+      <div class="form-row stacked is-clickable" data-action="select-hqp"
+           data-configured="${hqp.available ? '1' : '0'}">
         <div class="row-stack">
-          <span class="row-stack-label">HQPlayer</span>
+          <span class="row-stack-lead">
+            <span class="row-stack-label">HQPlayer</span>
+            <button class="row-stack-settings" type="button" data-action="hqp-settings"
+                    aria-label="HQPlayer settings" hidden>${SETTINGS_ICONS.gear}</button>
+          </span>
           ${mark(active.type === 'hqplayer')}
         </div>
         <div class="row-stack-value" style="display:flex;align-items:center;gap:calc(8*var(--px));flex-wrap:wrap;">
@@ -12307,7 +12289,7 @@
         const dflt = d.is_default
           ? ` <span style="color:var(--color-text-dim);font-size:calc(11*var(--px));">· default</span>` : '';
         return `
-        <div class="form-row stacked" data-action="select-device" data-device-id="${escapeProfileHtml(d.device_id)}" style="cursor:pointer;">
+        <div class="form-row stacked is-clickable" data-action="select-device" data-device-id="${escapeProfileHtml(d.device_id)}">
           <div class="row-stack">
             <span class="row-stack-label">${escapeProfileHtml(d.name)}${dflt}</span>
             ${mark(sel)}
@@ -12324,7 +12306,7 @@
       // nowhere else — bundling it into the renderer Rescan meant every
       // search for a speaker put the backend at the mercy of a driver.
       deviceRows += `
-        <div class="form-row stacked" data-action="redetect-devices" style="cursor:pointer;">
+        <div class="form-row stacked is-clickable" data-action="redetect-devices">
           <div class="row-stack">
             <span class="row-stack-label">Re-detect audio devices</span>
             <span style="color:var(--color-text-dim);display:inline-flex;">${SETTINGS_ICONS.rightCh}</span>
@@ -12364,7 +12346,7 @@
         let host = '';
         try { host = new URL(r.location || '').hostname; } catch (e) { host = ''; }
         return `
-        <div class="form-row stacked" data-action="select-renderer" data-udn="${escapeProfileHtml(r.udn)}" style="cursor:pointer;">
+        <div class="form-row stacked is-clickable" data-action="select-renderer" data-udn="${escapeProfileHtml(r.udn)}">
           <div class="row-stack">
             <span class="row-stack-label">${escapeProfileHtml(r.name || 'Renderer')}</span>
             <span style="display:inline-flex;align-items:center;gap:calc(6*var(--px));">${unpin}${mark(sel)}</span>
@@ -12379,7 +12361,7 @@
           <div class="row-stack-sub">No renderers found yet — enable the device's network mode (e.g. AK Connect) and Rescan.</div>
         </div>`;
       dlnaRows = rows + empty + `
-        <div class="form-row stacked" data-action="add-renderer" style="cursor:pointer;">
+        <div class="form-row stacked is-clickable" data-action="add-renderer">
           <div class="row-stack">
             <span class="row-stack-label">Add renderer by address</span>
             <span style="color:var(--color-text-dim);display:inline-flex;">${SETTINGS_ICONS.rightCh}</span>
@@ -12393,6 +12375,13 @@
           <div class="row-stack-sub">async-upnp-client is not installed on this backend yet — restart it to pick up new dependencies.</div>
         </div>`;
     }
+
+    // The scan fills the renderer rows above it, so it sits under the device
+    // list, and only where there is a DLNA stack to scan with.
+    const rescanRow = (dlna && dlna.available) ? `
+      <div class="btn-row single">
+        <button class="btn btn-secondary" data-action="refresh-outputs">Rescan renderers</button>
+      </div>` : '';
 
     const browserSel = active.type === 'browser';
     const isRendererTab = browserSel && window.browserRenderer && window.browserRenderer.active;
@@ -12410,7 +12399,7 @@
       }
     }
     const browserRow = `
-      <div class="form-row stacked" data-action="select-browser" style="cursor:pointer;">
+      <div class="form-row stacked is-clickable" data-action="select-browser">
         <div class="row-stack">
           <span class="row-stack-label">This device <span style="color:var(--color-text-dim);font-size:calc(11*var(--px));">(experimental)</span></span>
           ${mark(browserSel)}
@@ -12436,7 +12425,7 @@
     // and local outputs ignore it (always lossless).
     const q = active.stream_quality || 'lossless';
     const qOpt = (val, label, sub) => `
-      <div class="form-row stacked" data-action="set-quality" data-quality="${val}" style="cursor:pointer;">
+      <div class="form-row stacked is-clickable" data-action="set-quality" data-quality="${val}">
         <div class="row-stack">
           <span class="row-stack-label">${label}</span>
           ${mark(q === val)}
@@ -12458,12 +12447,10 @@
         ${dlnaRows}
         ${browserRow}
       </div>
+      ${rescanRow}
       ${exclusiveGroup}
       <div class="profile-group-label">Output quality · DLNA / This device</div>
-      ${qualityGroup}
-      <div class="btn-row single">
-        <button class="btn btn-secondary" data-action="refresh-outputs">Rescan renderers</button>
-      </div>`;
+      ${qualityGroup}`;
   }
 
   function _wireOutputActions(root) {
@@ -12516,7 +12503,7 @@
         // repaint that clears this button happens inside — so "Scanning…"
         // lasts exactly as long as the scan whose results it is waiting for.
         // The scan alone is what this does: reloading the machine's audio
-        // drivers belongs to Re-detect, in the Local devices group.
+        // drivers belongs to the Re-detect row in the device list.
         await _dlnaScanOnce(root);
       });
     }
@@ -12534,6 +12521,10 @@
         const r = dlna && (dlna.renderers || []).find(x => x.udn === el.dataset.udn);
         if (r) putOutput({ type: 'dlna', renderer: r });
       }));
+    root.querySelector('[data-action="hqp-settings"]').addEventListener('click', e => {
+      e.stopPropagation();   // the gear sits inside the select-hqp row
+      navigate('more/hqplayer');
+    });
     root.querySelectorAll('[data-action="remove-renderer"]').forEach(el =>
       el.addEventListener('click', async (e) => {
         e.stopPropagation();   // the × sits inside the select-renderer row
@@ -12623,9 +12614,13 @@
     });
   }
 
+  // One state check paints the row's dot and decides its settings gear:
+  // the HQPlayer screen operates HQPlayer, so it is offered only while
+  // there is one to talk to.
   async function _refreshOutputHqpDot(root) {
     const el = root.querySelector('[data-hqp-dot]');
     if (!el) return;
+    const gear = root.querySelector('[data-action="hqp-settings"]');
     let connected = false;
     try {
       const r = await fetch('/api/hqplayer/state');
@@ -12635,6 +12630,7 @@
     el.innerHTML = connected
       ? '<span class="status-dot green"></span>Connected'
       : '<span class="status-dot red"></span>Disconnected';
+    gear.hidden = !connected;
   }
 
   /* Render entrypoint. */
@@ -12651,12 +12647,13 @@
     });
   }
 
-  /* An outbound link as a settings row — the "learn more" hooks and the About
-     screen. A real anchor, so long-press and "open in new tab" work. The site
-     is the other half of this system, so a sautium.net link navigates in
-     place and its "Open my Sautium" brings the user back; anything else (the
-     source, a licence) is a foreign page and opens in a new tab. noreferrer
-     keeps the http origin out of the site's logs even on the in-place hop. */
+  /* An outbound link as a settings row — the "learn more" hooks. A real
+     anchor, so long-press and "open in new tab" work. The site is the other
+     half of this system, so a sautium.net link navigates in place and its
+     "Open my Sautium" brings the user back (the More drawer's site link
+     does the same); anything else is a foreign page and opens in a new tab.
+     noreferrer keeps the http origin out of the site's logs even on the
+     in-place hop. */
   const linkRow = (label, href, hint) => `
     <a class="form-row is-clickable is-link" href="${escapeHtml(href)}"${href.startsWith(SITE_URL) ? ' rel="noreferrer"' : ' target="_blank" rel="noopener noreferrer"'}>
       <span class="form-label">${escapeHtml(label)}</span>
@@ -13772,53 +13769,6 @@
     _syncStreamCtrl = libraryWake.on(refresh);
   }
 
-  /* ============ About screen — #more/about ============
-     What this node runs and where the project lives. `/config` is fetched
-     once per page load: the drawer row's hint and this screen share it. */
-  let _nodeConfigPromise = null;
-
-  function nodeConfig() {
-    if (!_nodeConfigPromise) {
-      _nodeConfigPromise = fetch('/config')
-        .then(r => (r.ok ? r.json() : Promise.reject(new Error(`HTTP ${r.status}`))))
-        .catch(() => { _nodeConfigPromise = null; return null; });
-    }
-    return _nodeConfigPromise;
-  }
-
-  async function renderAbout(root) {
-    const cfg = await nodeConfig();
-    const identity = !cfg ? '' : cfg.build
-      ? `<div class="form-row"><span class="form-label">Build</span><span class="form-value mono">${escapeHtml(cfg.build)}</span></div>`
-      : `<div class="form-row"><span class="form-label">Commit</span><span class="form-value ${cfg.commit ? 'mono' : 'muted'}">${escapeHtml(cfg.commit || '—')}</span></div>`;
-    root.innerHTML = `
-      <section class="screen screen-settings">
-        ${_settingsHeader('About Sautium')}
-        <div class="profile-group-label">This node</div>
-        <div class="form-group">
-          <div class="form-row">
-            <span class="form-label">Version</span>
-            <span class="form-value ${cfg ? 'mono' : 'muted'}">${escapeHtml(cfg ? cfg.app_version : '—')}</span>
-          </div>
-          ${identity}
-          <div class="form-row">
-            <span class="form-label">Licence</span>
-            <span class="form-value"><a class="form-value-link" href="${REPO_URL}/blob/main/LICENSE" target="_blank" rel="noopener noreferrer">PolyForm Noncommercial 1.0.0</a></span>
-          </div>
-        </div>
-        <div class="profile-group-label">Sautium online</div>
-        <div class="form-group">
-          ${linkRow('Website', siteLink(SITE_PATHS.home), 'sautium.net')}
-          ${linkRow('Guides', siteLink(SITE_PATHS.guides))}
-          ${linkRow('What leaves your machine', siteLink(SITE_PATHS.privacy))}
-          ${linkRow('Source code', REPO_URL, 'GitHub')}
-          ${linkRow('Third-party notices', `${REPO_URL}/blob/main/THIRD_PARTY_NOTICES.md`)}
-          ${SUPPORT_URL ? linkRow('Support the project', SUPPORT_URL) : ''}
-        </div>
-      </section>`;
-    _wireBack(root);
-  }
-
   /* ---------- Wire it up ---------- */
 
   registerScreen('home', renderHome);
@@ -13922,6 +13872,10 @@
     // no longer needs a re-poke because media_file_id is in np-update.
     document.addEventListener('playlist-loaded', updatePlayingHighlight);
     window.addEventListener('popstate', render);
+    // WebKit on iOS paints :active on a touch only while the page listens
+    // for touches; without a listener the press dip (style.css § Press
+    // feedback) never shows there. Passive, so it never holds a scroll.
+    document.addEventListener('touchstart', () => {}, { passive: true });
     document.addEventListener('keydown', e => {
       if (e.key !== 'Escape' || !_windowRoot || modalIsOpen()) return;
       if (sheet.isOpen || queue.isOpen || ai.isOpen) return;

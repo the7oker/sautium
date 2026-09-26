@@ -398,6 +398,29 @@ idempotent instead (an empty chat is reused, a radio start is
 single-flight, a pending Last.fm flow is handed back, a queue slot is
 removed by index AND track identity).
 
+### Press feedback — one dip for every control
+
+A tap answers the same way everywhere: the pressed control dips to
+`filter: opacity(0.55)` and fades back (`style.css` § Press feedback,
+decided 2026-09-26). The UA tap highlight is off — Chrome on Android
+lays a translucent blue box over anything with a hand cursor — and no
+control has a press look of its own: no tint, colour or scale on
+`:active`, even where a reference HTML draws one (the bundle's
+`.icon-btn:active { color: amber }` is not translated).
+
+- Buttons, links, selects and summaries dip by tag; a tappable of any
+  other tag (a `div` row, a `span` chip) joins the selector list there.
+- Only the innermost pressed control dips (`:not(:has(&:active))`), so a
+  `+` inside a row never dims the row.
+- The dip is a `filter`, so it multiplies with a control's own `opacity`
+  (phantom, disabled, breathing) instead of replacing it. A control that
+  needs a filter of its own sets `--own-filter` (the hero icon buttons'
+  shadow), never `filter`: the press appends its dip to that list. One
+  that declares its own `transition` lists `filter` in it.
+- WebKit on iOS paints `:active` on a touch only while the page listens
+  for touches: the passive no-op `touchstart` listener in `app-shell.js`
+  `init()` is what makes the dip show on an iPhone.
+
 ### Notices — messages that need no decision
 
 A dialog is for a decision, or for an instruction that must not be

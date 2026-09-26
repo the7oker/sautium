@@ -13,7 +13,7 @@ Website and guides: https://sautium.net · Downloads: https://sautium.net/downlo
 <!-- Screenshots: docs/screenshots/ (360x800 phone and 834x1194 tablet
      frames), captured on a demo library with
        node scripts/ui-shots.mjs --out docs/screenshots --widths 360x800,834x1194 \
-         --routes home,home+np,discovery,more/output,more/sync,more/about
+         --routes home,home+np,discovery,more/output,more/sync
      Add the <img> tags here once the folder exists; no demo track on screen. -->
 
 > Phases 1–3 (MVP + enrichment + audio analysis + HQPlayer + Web UI +

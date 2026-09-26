@@ -52,7 +52,7 @@ const DEFAULTS = {
     'home', 'home+np', 'home+queue', 'home+ai', 'home+more',
     'discovery', 'friends',
     'more/library', 'more/output', 'more/profile', 'more/hqplayer', 'more/ai',
-    'more/sync', 'more/phantoms', 'more/databases', 'more/about',
+    'more/sync', 'more/phantoms', 'more/databases',
     'more/gear-system', 'more/gear-advisor',
   ].join(','),
   ids: '',
