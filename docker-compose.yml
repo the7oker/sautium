@@ -19,6 +19,12 @@ services:
     # max_wal_size=4GB: at the stock 1GB a 21GB dump load (or an embeddings
     # backfill) checkpoints every ~1GB written — constant dirty-page flushing
     # and re-inflated full_page_writes.
+    # jit=off: the app's queries are index probes and small reranks, and the
+    # cost estimate that switches JIT on follows the data, not the work — the
+    # Last.fm history import pushed the Home Recommendations query over it,
+    # and compiling took 0.86 s of its 1.1 s (the discovery engine 1.87 →
+    # 0.80 s and the assistant's search_tracks 719 → 126 ms before that,
+    # each once switched off per query). It never paid back here.
     command: postgres
       -c shared_buffers=${PG_SHARED_BUFFERS:-1GB}
       -c effective_cache_size=${PG_EFFECTIVE_CACHE_SIZE:-6GB}
@@ -27,6 +33,7 @@ services:
       -c wal_level=minimal
       -c max_wal_senders=0
       -c max_wal_size=${PG_MAX_WAL_SIZE:-4GB}
+      -c jit=off
     environment:
       POSTGRES_DB: ${POSTGRES_DB:-music_ai}
       POSTGRES_USER: ${POSTGRES_USER:-musicai}

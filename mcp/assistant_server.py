@@ -179,12 +179,6 @@ def _get_db() -> psycopg2.extensions.connection:
             dbname=DB_NAME,
         )
         _db_conn.autocommit = True
-        # Every query here is an index probe plus a small rerank; PG's JIT
-        # compiles the big per-row score expressions for ~0.6s of pure
-        # overhead and never pays for itself (measured on search_tracks:
-        # 719ms -> 126ms). Same call the discovery engine makes per query.
-        with _db_conn.cursor() as cur:
-            cur.execute("SET jit = off")
     return _db_conn
 
 

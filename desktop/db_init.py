@@ -872,28 +872,39 @@ logging_collector = off
 wal_level = minimal
 max_wal_senders = 0
 max_wal_size = '4GB'
+# Index probes and small reranks: JIT compiles longer than it saves
+# (mirrors docker-compose.yml).
+jit = off
 {_pg_memory_tier()}"""
     conf_path.write_text(existing + additions)
 
 
-def _ensure_bulk_load_conf(data_dir: Path) -> None:
-    """Idempotently bring an EXISTING cluster up to the bulk-load settings
-    that _configure_postgresql_conf writes for new ones — clusters created
-    before those settings existed never re-run initdb, so without this only
-    fresh installs would get the WAL-skipping dump-load path."""
+def _ensure_conf_settings(data_dir: Path) -> None:
+    """Idempotently bring an EXISTING cluster up to the settings
+    _configure_postgresql_conf writes for new ones — clusters created before
+    a setting existed never re-run initdb, so without this only fresh
+    installs would get the WAL-skipping dump-load path and the JIT-less
+    planner."""
     conf_path = data_dir / "postgresql.conf"
     if not conf_path.exists():
         return
     existing = conf_path.read_text()
-    if "wal_level = minimal" in existing:
-        return
-    conf_path.write_text(existing + """
+    additions = ""
+    if "wal_level = minimal" not in existing:
+        additions += """
 # Sautium bulk-load settings (mirrors _configure_postgresql_conf for new clusters)
 wal_level = minimal
 max_wal_senders = 0
 max_wal_size = '4GB'
-""")
-    logger.info("postgresql.conf: appended bulk-load settings (wal_level=minimal)")
+"""
+    if "jit = off" not in existing:
+        additions += """
+# Sautium: no JIT (mirrors _configure_postgresql_conf for new clusters)
+jit = off
+"""
+    if additions:
+        conf_path.write_text(existing + additions)
+        logger.info("postgresql.conf: appended missing Sautium settings")
 
 
 def _log_server_log_tail(data_dir: Path, lines: int = 15) -> None:
@@ -915,7 +926,7 @@ def start_postgres(port: int = 5432) -> bool:
     pg_bin = get_pg_bin_dir()
     data_dir = get_pg_data_dir()
     pg_ctl = str(pg_bin / "pg_ctl")
-    _ensure_bulk_load_conf(data_dir)
+    _ensure_conf_settings(data_dir)
 
     # Check if already running
     result = _run_pg_cmd([pg_ctl, "status", "-D", str(data_dir)])
