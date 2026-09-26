@@ -4074,7 +4074,11 @@ a.am-kind { text-decoration: none; }
   box-shadow: 0 calc(-16 * var(--px)) calc(40 * var(--px)) rgba(0, 0, 0, 0.45);
   pointer-events: auto;
 }
+/* The sheets are height-capped flex columns: once a long list overflows,
+   every item shrinks, and an empty 4 px bar has no content to stop it —
+   the handle thinned to a hairline over the modulator list. */
 .drawer-handle {
+  flex-shrink: 0;
   width: calc(36 * var(--px));
   height: calc(4 * var(--px));
   margin: calc(8 * var(--px)) auto 0;
@@ -4303,9 +4307,17 @@ a.am-kind { text-decoration: none; }
   border-left: calc(2 * var(--px)) solid var(--color-divider);
   padding-left: calc(10 * var(--px));
 }
+/* The trigger of a knob's picker (openSettingsPicker), drawn as a field
+   with a caret. A long name is cut rather than pushing the row's label. */
 .hqp-select {
   appearance: none;
   -webkit-appearance: none;
+  min-width: 0;
+  max-width: 100%;
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+  text-align: left;
   height: calc(36 * var(--px));
   padding: 0 calc(28 * var(--px)) 0 calc(12 * var(--px));
   background: var(--color-surface-lo);
@@ -5276,6 +5288,7 @@ a.am-kind { text-decoration: none; }
   flex-direction: column;
 }
 .sheet-handle {
+  flex-shrink: 0;   /* see .drawer-handle */
   width: calc(36 * var(--px));
   height: calc(4 * var(--px));
   margin: calc(8 * var(--px)) auto calc(8 * var(--px));

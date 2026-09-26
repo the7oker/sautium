@@ -8462,10 +8462,6 @@
              </div>
            </div>`;
 
-      const modeOptions = (s.modes || []).map(m =>
-        `<option value="${m.index}"${m.index === st.mode ? ' selected' : ''}>${
-          escapeHtml(m.name)}</option>`).join('');
-
       // HQPlayer's Control Protocol exposes only the "auto / [source]"
       // rate slot via GetRates — the explicit rate menu shown in HQP
       // Desktop isn't reachable from here. When the list is just the
@@ -8473,22 +8469,30 @@
       // as a read-only readout instead of a one-option dropdown.
       const realRates = (s.rates || []).filter(r => r.rate > 0);
       const showRateDropdown = realRates.length > 1;
-      const rateOptions = (s.rates || []).map(r =>
-        `<option value="${r.index}"${r.index === st.rate ? ' selected' : ''}>${
-          escapeHtml(r.rate ? fmtRateLabel(r.rate) : 'Auto')}</option>`).join('');
       const activeRateLabel = st.active_rate
         ? fmtRateLabel(st.active_rate)
         : '—';
 
-      const shaperOptions = (s.shapers || []).map(sh =>
-        `<option value="${sh.index}"${sh.index === st.shaper ? ' selected' : ''}>${
-          escapeHtml(sh.name)}</option>`).join('');
-
-      const matrixOptions = profiles.length
-        ? profiles.map(p =>
-            `<option value="${escapeHtml(p)}"${p === matrixActive ? ' selected' : ''}>${
-              escapeHtml(p)}</option>`).join('')
-        : '';
+      // What each knob's picker lists. The trigger's label and the picker's
+      // options come from the same entries, so the two cannot disagree. No
+      // "(none)" option for the matrix: HQPlayer has no call that clears the
+      // active profile, so picking it would do nothing.
+      const knobs = {
+        mode: { title: 'Mode', current: st.mode,
+                options: (s.modes || []).map(m => ({ id: m.index, label: m.name })) },
+        rate: { title: 'Rate', current: st.rate,
+                options: (s.rates || []).map(r => ({ id: r.index, label: r.rate ? fmtRateLabel(r.rate) : 'Auto' })) },
+        shaper: { title: shaperLabel, current: st.shaper,
+                  options: (s.shapers || []).map(sh => ({ id: sh.index, label: sh.name })) },
+        matrix_profile: { title: 'Matrix profile', current: matrixActive,
+                          options: profiles.map(p => ({ id: p, label: p })) },
+      };
+      const knobTrigger = (knob, id) => {
+        const k = knobs[knob];
+        const cur = k.options.find(o => String(o.id) === String(k.current));
+        return `<button class="hqp-select" type="button" id="${id}" data-knob="${knob}">${
+          escapeHtml(cur ? cur.label : (knob === 'matrix_profile' ? '(none)' : '—'))}</button>`;
+      };
 
       // Active filter row + the favourites strip below it. Tap on the
       // active filter or the [All filters] button opens the modal.
@@ -8530,12 +8534,12 @@
           <div class="hqp-section-label">Output</div>
           <div class="hqp-row">
             <label class="hqp-row-label" for="hqpMode">Mode</label>
-            <select class="hqp-select" id="hqpMode" data-knob="mode">${modeOptions}</select>
+            ${knobTrigger('mode', 'hqpMode')}
           </div>
           <div class="hqp-row">
             <span class="hqp-row-label">Rate</span>
             ${showRateDropdown
-              ? `<select class="hqp-select" id="hqpRate" data-knob="rate">${rateOptions}</select>`
+              ? knobTrigger('rate', 'hqpRate')
               : `<span class="hqp-row-value mono">${escapeHtml(activeRateLabel)}</span>`}
           </div>
           <div class="hqp-row hqp-volume-row">
@@ -8570,7 +8574,7 @@
           ${favouritesStrip}
           <div class="hqp-row">
             <label class="hqp-row-label" for="hqpShaper">${escapeHtml(shaperLabel)}</label>
-            <select class="hqp-select" id="hqpShaper" data-knob="shaper">${shaperOptions}</select>
+            ${knobTrigger('shaper', 'hqpShaper')}
           </div>
         </section>
 
@@ -8579,26 +8583,25 @@
           <div class="hqp-section-label">Matrix profile</div>
           <div class="hqp-row">
             <label class="hqp-row-label" for="hqpMatrix">Active</label>
-            <select class="hqp-select" id="hqpMatrix" data-knob="matrix_profile">
-              <option value=""${matrixActive ? '' : ' selected'}>(none)</option>
-              ${matrixOptions}
-            </select>
+            ${knobTrigger('matrix_profile', 'hqpMatrix')}
           </div>
         </section>
         ` : ''}
       `;
 
-      // Wire dropdowns: each select calls /config with one knob.
-      // Every knob write rides one chain: HQPlayer applies them in tap
-      // order, and the reload after each one paints only if it is still
-      // the latest (claimFresh in load()).
-      body.querySelectorAll('select[data-knob]').forEach(sel => {
-        sel.addEventListener('change', () => {
-          const knob = sel.dataset.knob;
-          const raw = sel.value;
+      // A knob opens the app's own picker: a native <select> pops the OS's
+      // chrome (a Material dialog on Android), which no stylesheet reaches.
+      // The picked value goes to /config as one knob. Every knob write rides
+      // one chain: HQPlayer applies them in tap order, and the reload after
+      // each one paints only if it is still the latest (claimFresh in load()).
+      body.querySelectorAll('button[data-knob]').forEach(btn => {
+        btn.addEventListener('click', () => onceInFlight(btn, async () => {
+          const knob = btn.dataset.knob;
+          const k = knobs[knob];
+          const picked = await openSettingsPicker({ title: k.title, options: k.options, currentId: k.current });
+          if (picked == null || picked === String(k.current)) return;
           const payload = {};
-          payload[knob] = (knob === 'matrix_profile') ? raw : parseInt(raw, 10);
-          if (knob === 'matrix_profile' && raw === '') return;
+          payload[knob] = (knob === 'matrix_profile') ? picked : parseInt(picked, 10);
           serialized('hqp.config', async () => {
             try {
               const r = await fetch('/api/hqplayer/config', {
@@ -8615,7 +8618,7 @@
             // e.g. mode flip changes filter availability).
             await load();
           });
-        });
+        }));
       });
 
       body.querySelectorAll('.hqp-fav-chip').forEach(btn => {
@@ -11391,22 +11394,33 @@
             <button class="icon-btn" data-cancel aria-label="close">${PROFILE_ICONS.close}</button>
           </div>
           <div class="add-gear-results">
-            ${options.map(o => `
-              <div class="add-gear-result" data-pick="${escapeProfileHtml(String(o.id))}">
+            ${options.map(o => {
+              const current = String(o.id) === String(currentId);
+              return `
+              <div class="add-gear-result${current ? ' is-current' : ''}" data-pick="${escapeProfileHtml(String(o.id))}">
                 <div>
                   <div class="gear-line1">
                     <span class="gear-model">${escapeProfileHtml(o.label)}</span>
                   </div>
                 </div>
-                ${String(o.id) === String(currentId) ? `<span style="color:var(--color-amber);">${SETTINGS_ICONS.check}</span>` : `<span class="gear-chev">${SETTINGS_ICONS.rightCh}</span>`}
-              </div>
-            `).join('')}
+                ${current ? `<span style="color:var(--color-amber);">${SETTINGS_ICONS.check}</span>` : `<span class="gear-chev">${SETTINGS_ICONS.rightCh}</span>`}
+              </div>`;
+            }).join('')}
           </div>
         </div>
       `;
       document.body.appendChild(overlay);
+      // A long list (HQPlayer's modulators) opens on the current choice.
+      const list = overlay.querySelector('.add-gear-results');
+      const current = list.querySelector('.is-current');
+      if (current) {
+        list.scrollTop += current.getBoundingClientRect().top - list.getBoundingClientRect().top
+          - (list.clientHeight - current.offsetHeight) / 2;
+      }
       const close = (id) => { overlay.remove(); resolve(id); };
-      overlay.addEventListener('click', e => { if (e.target === overlay) close(null); });
+      // The second tap of a double-tap on the trigger lands on the scrim: it
+      // repeats the wish to open, it is not a wish to close.
+      overlay.addEventListener('click', e => { if (e.target === overlay && e.detail < 2) close(null); });
       overlay.querySelector('[data-cancel]').addEventListener('click', () => close(null));
       overlay.querySelectorAll('[data-pick]').forEach(el => {
         el.addEventListener('click', () => close(el.dataset.pick));
