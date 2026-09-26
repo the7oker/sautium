@@ -1641,6 +1641,45 @@ Two faults under the Home rewrite, neither in its code.
   and the planner cost with it. The lost counters did their damage on the
   vacuum side instead.
 
+### Recommendations rebuilt on a listen; no JIT (2026-09-26)
+
+Home's Recommendations took 1.1 s per visit on the master, and that was the
+warm case.
+
+- **JIT was most of it.** The work was 0.2 s; 0.86 s was LLVM compiling the
+  query. The Last.fm history import (listening history 4k → 75k rows) had
+  pushed the planner's cost estimate past the inline/optimize thresholds —
+  the estimate follows the data, not the work. The discovery engine and the
+  assistant's MCP server had each switched JIT off for themselves before, so
+  `jit=off` now sits with the appliance's other server settings
+  (docker-compose `command`, the launcher's `postgresql.conf` through
+  `db_init`) and the per-site switches are gone. A Docker node takes it on
+  `docker compose up -d postgres`, a launcher on its next PostgreSQL start.
+- **The "played" check read the whole history.** Telling a candidate album
+  never-played from forgotten mapped every played track to its albums —
+  14.5k tracks after the import — to label ~800 candidates. It starts from
+  the candidates' member tracks now (set joins, ~11k rows): 210 → 113 ms,
+  and it no longer grows with the history.
+- **Rebuilt when listening changes, read by the visit.** Every clock of the
+  ranking runs from the newest listen, so only `listening_history` moves it.
+  A statement trigger (migration 025) NOTIFYs `sautium_listens` on every
+  write — the tracker, the scrobble canon, a Last.fm removal, a life merge
+  from the CLI — and a backend thread rebuilds the ranking (one at a time,
+  a burst folded, again on every reconnect); Home reads the stored album ids
+  and renders their tiles live, 13 ms. Per visit, eight HNSW walks ran each
+  time Home opened, and a background pass (the sync walk alone reads more of
+  `tracks` and `album_tracks` than `shared_buffers` holds) evicted the
+  vector index between visits: the first visit after one paid ~1 s of cold
+  reads.
+- **"It never rebuilds" was the ranking, not a cache.** There was none; the
+  shelf changed with every completed listen. A day of one artist's records
+  filled five of the eight seed slots, and 45 minutes of another record
+  then moved 1 of the 20 tiles.
+- **Index drift.** The master lacked `idx_album_variants_album_id`, which
+  001 has declared since the canonical-tracks schema (its database is older
+  than the unified 001): every album tile's artist, cover and first file
+  scanned `album_variants`. Migration 024.
+
 ---
 
 ## References

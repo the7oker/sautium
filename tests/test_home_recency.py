@@ -154,6 +154,12 @@ def test_favourites_of_a_node_with_no_listens_are_the_seed_picks(cur):
     assert [a["name"] for a in shelf] == ["First Pick"]
 
 
+def _embed(cur, model, track, head):
+    vector = "[" + ",".join(map(str, head + (0.0,) * (512 - len(head)))) + "]"
+    cur.execute("INSERT INTO embeddings (vector, model_id, track_id) VALUES (%s::vector, %s, %s)",
+                (vector, model, track))
+
+
 def _phantom_album(cur, title, model, *vectors):
     """A tracklist-only album (no files: the owned-album fills stay empty),
     one analysed track per vector; returns the track ids."""
@@ -164,18 +170,36 @@ def _phantom_album(cur, title, model, *vectors):
         track = _track(cur)
         cur.execute("INSERT INTO album_tracks (album_id, track_id, position) VALUES (%s, %s, %s)",
                     (album, track, position))
-        vector = "[" + ",".join(map(str, head + (0.0,) * (512 - len(head)))) + "]"
-        cur.execute("INSERT INTO embeddings (vector, model_id, track_id) VALUES (%s::vector, %s, %s)",
-                    (vector, model, track))
+        _embed(cur, model, track, head)
         tracks.append(track)
     return tracks
 
 
-@NEWEST
-def test_recommendations_stay_the_shelf_the_listener_left(cur, newest):
+def _owned_album(cur, title, model, head):
+    """A scanned album with no tracklist — reached through its files alone —
+    of one analysed track; returns the track id."""
+    album = str(uuid.uuid4())
+    cur.execute("INSERT INTO albums (id, title) VALUES (%s, %s)", (album, title))
+    cur.execute("INSERT INTO album_variants (album_id, directory_path) VALUES (%s, %s) "
+                "RETURNING id", (album, f"/music/{album}"))
+    variant = cur.fetchone()[0]
+    track = _track(cur)
+    cur.execute("INSERT INTO media_files (track_id, album_variant_id, file_path) "
+                "VALUES (%s, %s, %s)", (track, variant, f"/music/{album}/01.flac"))
+    _embed(cur, model, track, head)
+    return track
+
+
+def _clap(cur):
     model = str(uuid.uuid4())
     cur.execute("INSERT INTO embedding_models (id, name, dimension) VALUES (%s, 'clap', 512)",
                 (model,))
+    return model
+
+
+@NEWEST
+def test_recommendations_stay_the_shelf_the_listener_left(cur, newest):
+    model = _clap(cur)
     # The last listen seeds the shelf; its album is heard, so it never comes
     # back. Every other record sounds alike: never heard, heard 75 days
     # before the last listen (inside the forgotten threshold, still heard)
@@ -187,7 +211,59 @@ def test_recommendations_stay_the_shelf_the_listener_left(cur, newest):
     _listen(cur, seed, newest, 300)
     _listen(cur, season, newest - timedelta(days=75), 300)
     _listen(cur, forgotten, newest - timedelta(days=200), 300)
+    home._ranking.rebuild()
 
     shelf = home.get_recommendations(limit=5)["albums"]
 
     assert [a["title"] for a in shelf] == ["Never Heard", "Long Forgotten"]
+
+
+@NEWEST
+def test_an_owned_record_heard_through_its_files_stays_off_the_shelf(cur, newest):
+    model = _clap(cur)
+    # The owned record heard this season sounds closest to the seed; only
+    # its files make it the album of that listen.
+    (seed,) = _phantom_album(cur, "Heard Last", model, (1.0,))
+    season = _owned_album(cur, "Owned, Heard This Season", model, (1.0, 0.02))
+    _owned_album(cur, "Owned, Never Heard", model, (1.0, 0.1))
+    _phantom_album(cur, "Never Heard", model, (1.0, 0.15))
+    _listen(cur, seed, newest, 300)
+    _listen(cur, season, newest - timedelta(days=75), 300)
+    home._ranking.rebuild()
+
+    shelf = home.get_recommendations(limit=2)["albums"]
+
+    assert [a["title"] for a in shelf] == ["Owned, Never Heard", "Never Heard"]
+
+
+def test_home_serves_the_ranking_the_last_history_write_rebuilt(cur):
+    model = _clap(cur)
+    newest = datetime.now(timezone.utc) - timedelta(hours=2)
+    (seed,) = _phantom_album(cur, "Heard Last", model, (1.0,))
+    (unheard,) = _phantom_album(cur, "Never Heard", model, (1.0, 0.1))
+    _phantom_album(cur, "Also Never Heard", model, (1.0, 0.2))
+    _listen(cur, seed, newest, 300)
+    home._ranking.rebuild()
+    before = [a["title"] for a in home.get_recommendations(limit=5)["albums"]]
+
+    # Home reads what the last rebuild stored; the listener rebuilds on the
+    # write, and the record just heard leaves the shelf.
+    _listen(cur, unheard, newest + timedelta(minutes=5), 300)
+    stored = [a["title"] for a in home.get_recommendations(limit=5)["albums"]]
+    home._ranking.rebuild()
+    after = [a["title"] for a in home.get_recommendations(limit=5)["albums"]]
+
+    assert before == stored == ["Never Heard", "Also Never Heard"]
+    assert after == ["Also Never Heard"]
+
+
+def test_every_history_write_wakes_the_ranking_listener(cur):
+    track = _track(cur)
+    cur.execute("LISTEN sautium_listens")
+
+    _listen(cur, track, datetime.now(timezone.utc), 300)
+    cur.execute("UPDATE listening_history SET skipped = NOT skipped")
+    cur.execute("DELETE FROM listening_history")
+    cur.connection.poll()
+
+    assert [n.channel for n in cur.connection.notifies] == ["sautium_listens"] * 3

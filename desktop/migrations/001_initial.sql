@@ -1385,6 +1385,23 @@ DO $$ BEGIN
     FOR EACH STATEMENT EXECUTE FUNCTION trg_mf_av_mtime_del();
 EXCEPTION WHEN duplicate_object THEN NULL; END $$;
 
+-- The Home Recommendations ranking is a function of the listening history
+-- (backend/routers/home.py), rebuilt when it changes: every write — the play
+-- tracker, the scrobble canon, a Last.fm history removal, a life-data merge
+-- run from the CLI, a track id rewrite cascading in — wakes the backend's
+-- listener. Per statement, so an import batch or a merge is one wake.
+CREATE OR REPLACE FUNCTION notify_listens_changed() RETURNS TRIGGER AS $$
+BEGIN
+    PERFORM pg_notify('sautium_listens', '');
+    RETURN NULL;
+END $$ LANGUAGE plpgsql;
+
+DO $$ BEGIN
+    CREATE TRIGGER trg_listening_history_notify
+    AFTER INSERT OR UPDATE OR DELETE OR TRUNCATE ON listening_history
+    FOR EACH STATEMENT EXECUTE FUNCTION notify_listens_changed();
+EXCEPTION WHEN duplicate_object THEN NULL; END $$;
+
 DO $$ BEGIN CREATE TRIGGER trg_covers_updated_at BEFORE UPDATE ON covers
     FOR EACH ROW EXECUTE FUNCTION update_updated_at_column();
 EXCEPTION WHEN duplicate_object THEN NULL; END $$;

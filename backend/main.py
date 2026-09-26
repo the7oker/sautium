@@ -438,6 +438,12 @@ async def lifespan(app: FastAPI):
                                    stop_mb_sources_listener)
     start_mb_sources_listener()
 
+    # Rebuild the Home Recommendations ranking on every listening-history
+    # write (the table's trigger NOTIFYs sautium_listens)
+    from routers.home import (start_recommendations_listener,
+                              stop_recommendations_listener)
+    start_recommendations_listener()
+
     # Derive P2P identity (single resolution point, cached in p2p_identity —
     # the same cache later serves peer-chat, receipts and /health).
     _p2p_identity = None
@@ -891,6 +897,7 @@ async def lifespan(app: FastAPI):
     stop_gear_research_worker()
     stop_gear_state_listener()
     stop_mb_sources_listener()
+    stop_recommendations_listener()
 
     try:
         import background_enrichment

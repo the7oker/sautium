@@ -12,18 +12,25 @@ Artists of the curated seed picks (seed_picks) trail the listened ones
 so a fresh install is never an empty shelf.
 
 Recommendations are CLAP-similarity-driven from recent listening
-(see get_recommendations for the full pipeline), folding to owned AND
-phantom albums — a node can live entirely on streamed phantoms. Cold
-start (no listened track with CLAP analysis to seed from) leads with the
-seed-pick rotation, then newest-by-file_modified_at.
+(see _rank_recommendations for the full pipeline), folding to owned AND
+phantom albums — a node can live entirely on streamed phantoms. The
+ranking is rebuilt when the listening history changes, not per visit
+(see _Ranking). Cold start (no listened track with CLAP analysis to seed
+from) leads with the seed-pick rotation, then newest-by-file_modified_at.
 """
 
 import logging
+import select
+import threading
+import time
 from datetime import datetime
 from typing import Any
 
+import psycopg2
+import psycopg2.extensions
 from fastapi import APIRouter, HTTPException, Query
 
+from config import settings
 from db_pool import db_query, db_query_one, db_query_with_ef_search
 
 logger = logging.getLogger(__name__)
@@ -72,6 +79,8 @@ FORGOTTEN_THRESHOLD_DAYS = 90
 # tier's unplayed pool runs dry the overflow refills from the rest; a
 # played pick leaves the rotation for good and competes only organically.
 SEED_TIER_QUOTAS = {1: 12, 2: 5, 3: 2, 4: 1}
+# The stored ranking's depth: the endpoint's limit ceiling.
+RANKING_DEPTH = 50
 
 
 # ─── Favourite artists tuning ─────────────────────────────────────────────
@@ -304,10 +313,142 @@ def get_new_in_library(
 
 @router.get("/recommendations")
 def get_recommendations(
-    limit: int = Query(20, ge=1, le=50),
+    limit: int = Query(20, ge=1, le=RANKING_DEPTH),
 ) -> dict[str, list[dict[str, Any]]]:
+    """The stored ranking's first `limit` albums, the shortfall filled with
+    unplayed seed picks, then random owned albums. A cold start leads with
+    the seed-pick rotation, then newest-by-file_modified_at.
+
+    The tiles are read now, not stored with the ranking: names and covers
+    stay current, and an album that left the catalog since the rebuild
+    gives its place to the next one in line."""
+    ranking = _ranking.album_ids()
+    if ranking is None:
+        albums = _seed_fill(limit, exclude=set())
+        if len(albums) < limit:
+            albums.extend(_cold_start_albums(
+                limit - len(albums), exclude={a["id"] for a in albums}))
+        return {"albums": albums}
+
+    albums = db_query(f"""
+        SELECT al.id::text AS id,
+               al.title,
+               al.release_year AS year,
+               {_ALBUM_TILE_SUBQUERIES}
+        FROM unnest(%(ranking)s::uuid[]) WITH ORDINALITY AS r(album_id, pos)
+        JOIN albums al ON al.id = r.album_id
+        ORDER BY r.pos
+        LIMIT %(limit)s
+    """, {"ranking": ranking, "limit": limit})
+
+    if len(albums) < limit:
+        existing = {a["id"] for a in albums}
+        albums.extend(_seed_fill(limit - len(albums), exclude=existing))
+    if len(albums) < limit:
+        existing = {a["id"] for a in albums}
+        albums.extend(_random_fill(limit - len(albums), exclude=existing))
+
+    return {"albums": albums}
+
+
+class _Ranking:
+    """The organic Recommendations ranking — album ids best first, or None on
+    a cold start — rebuilt when the listening history changes and read by
+    every Home visit.
+
+    Every clock of the ranking runs from the newest listen, so nothing but
+    listening_history moves it, and that table's statement trigger NOTIFYs
+    sautium_listens on every write, whoever makes it: the play tracker, the
+    scrobble canon, a Last.fm history removal, a life-data merge run from the
+    CLI. Computed per visit, Home ran eight HNSW walks each time it opened,
+    and the first visit after a background pass paid their cold index reads
+    (~1 s on the master). One build runs at a time; a visit that comes before
+    the first one builds it itself."""
+
+    def __init__(self) -> None:
+        self._lock = threading.Lock()
+        self._built = False
+        self._album_ids: list[str] | None = None
+
+    def rebuild(self) -> None:
+        with self._lock:
+            self._build()
+
+    def album_ids(self) -> list[str] | None:
+        if not self._built:
+            with self._lock:
+                if not self._built:    # else: the build this visit waited on
+                    self._build()
+        return self._album_ids
+
+    def _build(self) -> None:
+        started = time.monotonic()
+        album_ids = _rank_recommendations()
+        self._album_ids = album_ids
+        self._built = True
+        logger.info("Recommendations ranking rebuilt in %.0f ms: %s",
+                    (time.monotonic() - started) * 1000,
+                    "cold start" if album_ids is None else f"{len(album_ids)} albums")
+
+
+_ranking = _Ranking()
+_listener_thread: threading.Thread | None = None
+_listener_running = False
+
+
+def _listens_listener() -> None:
+    """Rebuild the ranking on sautium_listens. A burst — the scrobble canon
+    places thousands of listens — folds into few rebuilds: whatever lands
+    during one waits on the socket and is cleared together. Every
+    (re)connect rebuilds too, since a NOTIFY only reaches a live listener.
+    Keepalives as in gear_research_worker: an idle socket reaped without an
+    RST would swallow every later NOTIFY."""
+    while _listener_running:
+        conn = None
+        try:
+            conn = psycopg2.connect(
+                settings.database_url,
+                keepalives=1, keepalives_idle=30,
+                keepalives_interval=10, keepalives_count=3,
+            )
+            conn.set_isolation_level(psycopg2.extensions.ISOLATION_LEVEL_AUTOCOMMIT)
+            with conn.cursor() as cur:
+                cur.execute("LISTEN sautium_listens")
+            _ranking.rebuild()
+            while _listener_running:
+                if select.select([conn], [], [], 5)[0]:
+                    conn.poll()
+                    if conn.notifies:
+                        conn.notifies.clear()
+                        _ranking.rebuild()
+        except Exception as e:
+            logger.warning(f"Recommendations listener error: {e}")
+            if _listener_running:
+                time.sleep(2)
+        finally:
+            if conn:
+                conn.close()
+
+
+def start_recommendations_listener() -> None:
+    global _listener_thread, _listener_running
+    if _listener_thread and _listener_thread.is_alive():
+        return
+    _listener_running = True
+    _listener_thread = threading.Thread(
+        target=_listens_listener, daemon=True, name="recommendations-listener")
+    _listener_thread.start()
+
+
+def stop_recommendations_listener() -> None:
+    global _listener_running
+    _listener_running = False
+
+
+def _rank_recommendations() -> list[str] | None:
     """
-    CLAP multi-seed recommendations from recent listening — one SQL pass.
+    CLAP multi-seed ranking from recent listening — one SQL pass; None on a
+    cold start (no completed listen of an embedded track in the window).
 
     Pipeline (all in the query, no Python vector math):
       1. Seed candidates: completed listens within SEED_WINDOW_DAYS of the
@@ -327,9 +468,6 @@ def get_recommendations(
          whose last play came FORGOTTEN_THRESHOLD_DAYS or more before the
          newest listen (tier 1) — then one edition per release group and one
          record per credited artist.
-      6. Shortfall fill: unplayed seed picks first, then random owned
-         albums; cold start (no completed listen of an embedded track in
-         the window) → seed-pick rotation, then newest-by-file_modified_at.
 
     Every clock above runs from the newest completed listen, not NOW(): the
     exponential ranks the same from any anchor, so an active listener sees
@@ -347,13 +485,9 @@ def get_recommendations(
                         AND lh.started_at >= n.at - INTERVAL '{SEED_WINDOW_DAYS} days')
     """)
     if not newest:
-        albums = _seed_fill(limit, exclude=set())
-        if len(albums) < limit:
-            albums.extend(_cold_start_albums(
-                limit - len(albums), exclude={a["id"] for a in albums}))
-        return {"albums": albums}
+        return None
 
-    albums = db_query_with_ef_search(
+    rows = db_query_with_ef_search(
         f"""
         WITH played AS (
             SELECT lh.track_id,
@@ -467,44 +601,39 @@ def get_recommendations(
         -- from local_play_stats here would split the source of truth.
         -- Membership is judged by TRACK identity (files ∪ tracklist):
         -- phantom plays land with media_file_id NULL and would otherwise
-        -- never mark their album as played. Driven FROM the played tracks —
-        -- the small side — mapped to albums by indexed lateral probes;
-        -- driving from candidate albums instead re-scanned listening_history
-        -- once per album (measured 1.3s vs 19ms on the reference library).
+        -- never mark their album as played. Driven FROM the candidate
+        -- albums' member tracks as set joins (~11k rows on the master): the
+        -- hits bound that side, while the history grows without bound — an
+        -- imported Last.fm account (74k listens over 14.5k tracks) made
+        -- mapping every played track to its albums the larger side
+        -- (210 → 113 ms). A NULL last_touch is an album never played.
         album_state AS (
-            SELECT c.album_id, p.last_touch, COALESCE(p.total_plays, 0) AS total_plays
-            FROM (SELECT DISTINCT album_id FROM candidate_albums) c
-            LEFT JOIN (
-                SELECT x.album_id, MAX(tp.last_touch) AS last_touch,
-                       SUM(tp.plays) AS total_plays
-                FROM (SELECT track_id, MAX(started_at) AS last_touch,
-                             COUNT(*) AS plays
-                      FROM listening_history WHERE completed
-                      GROUP BY track_id) tp
-                CROSS JOIN LATERAL (
-                    SELECT av.album_id
-                    FROM media_files mf
-                    JOIN album_variants av ON av.id = mf.album_variant_id
-                    WHERE mf.track_id = tp.track_id
-                    UNION
-                    SELECT at2.album_id
-                    FROM album_tracks at2
-                    WHERE at2.track_id = tp.track_id
-                ) x
-                GROUP BY x.album_id
-            ) p ON p.album_id = c.album_id
+            SELECT ct.album_id, MAX(lh.started_at) AS last_touch
+            FROM (
+                SELECT av.album_id, mf.track_id
+                FROM album_variants av
+                JOIN media_files mf ON mf.album_variant_id = av.id
+                WHERE av.album_id IN (SELECT album_id FROM candidate_albums)
+                UNION
+                SELECT at2.album_id, at2.track_id
+                FROM album_tracks at2
+                WHERE at2.album_id IN (SELECT album_id FROM candidate_albums)
+            ) ct
+            LEFT JOIN listening_history lh
+                   ON lh.track_id = ct.track_id AND lh.completed
+            GROUP BY ct.album_id
         ),
         scored AS (
             SELECT ca.album_id,
                    SUM(ca.w * ca.sim) / (COUNT(*) + 3.0) AS score,
                    CASE
-                       WHEN als.total_plays = 0 THEN 0
+                       WHEN als.last_touch IS NULL THEN 0
                        WHEN als.last_touch < %(newest)s - INTERVAL '{FORGOTTEN_THRESHOLD_DAYS} days' THEN 1
                        ELSE 2
                    END AS tier
             FROM candidate_albums ca
             JOIN album_state als ON als.album_id = ca.album_id
-            GROUP BY ca.album_id, als.total_plays, als.last_touch
+            GROUP BY ca.album_id, als.last_touch
         ),
         -- One edition per release group: with phantoms in the fold, a hit
         -- track can sit on several near-identical editions/compilations of
@@ -523,8 +652,7 @@ def get_recommendations(
         -- 20-tile shelf would spend itself on it. The key is the album's
         -- primary credit, name-ordered for a stable pick on multi-artist
         -- credits; a credit-less album keys on itself. Both dedups run on
-        -- slim rows; the tile subqueries are evaluated only for the ≤limit
-        -- emitted rows.
+        -- slim rows; the tiles are read per visit (get_recommendations).
         shelf AS (
             SELECT DISTINCT ON (artist_key) album_id, tier, score
             FROM (
@@ -540,27 +668,15 @@ def get_recommendations(
             ) keyed
             ORDER BY artist_key, tier ASC, score DESC
         )
-        SELECT al.id::text AS id,
-               al.title,
-               al.release_year AS year,
-               {_ALBUM_TILE_SUBQUERIES}
-        FROM shelf d
-        JOIN albums al ON al.id = d.album_id
-        ORDER BY d.tier ASC, d.score DESC
-        LIMIT %(limit)s
+        SELECT album_id::text AS id
+        FROM shelf
+        ORDER BY tier ASC, score DESC
+        LIMIT {RANKING_DEPTH}
         """,
-        {"newest": newest["at"], "tau_sec": RECENCY_TAU_HOURS * 3600, "limit": limit},
+        {"newest": newest["at"], "tau_sec": RECENCY_TAU_HOURS * 3600},
         ef_search=HNSW_EF_SEARCH,
     )
-
-    if len(albums) < limit:
-        existing = {a["id"] for a in albums}
-        albums.extend(_seed_fill(limit - len(albums), exclude=existing))
-    if len(albums) < limit:
-        existing = {a["id"] for a in albums}
-        albums.extend(_random_fill(limit - len(albums), exclude=existing))
-
-    return {"albums": albums}
+    return [r["id"] for r in rows]
 
 
 @router.get("/listening-history")
