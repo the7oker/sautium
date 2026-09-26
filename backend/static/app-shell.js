@@ -12935,10 +12935,10 @@
     const pct = typeof h.pct === 'number' ? h.pct : null;
     const waitingText = _lfmWaitingText(h);
     const note = h.error || h.paused || '';
-    const credit = user
+    const lastfm = user
       ? `<a class="form-value-link" target="_blank" rel="noopener"
-            href="https://www.last.fm/user/${encodeURIComponent(user)}/library">data from Last.fm</a>`
-      : '';
+            href="https://www.last.fm/user/${encodeURIComponent(user)}/library">Last.fm</a>`
+      : 'Last.fm';
     const actions = running ? `
       <div class="action-progress" data-lfm-progress>${escapeProfileHtml(h.progress || 'Reading your scrobbles…')}</div>
       <div class="enrich-bar${pct == null ? ' indeterminate' : ''}" data-lfm-bar><div class="fill"${pct == null ? '' : ` style="width:${pct}%;"`}></div></div>
@@ -12951,10 +12951,9 @@
     return `
       <div class="profile-group-label">Listening history</div>
       <div class="form-group">
-        <div class="form-row"><span class="form-label">From Last.fm</span><span class="form-value" data-lfm-counts>${_lfmHistoryCounts(h)}</span></div>
+        <div class="form-row"><span class="form-label">From ${lastfm}</span><span class="form-value" data-lfm-counts>${_lfmHistoryCounts(h)}</span></div>
         <div class="form-row stacked"><div class="row-stack-sub">Your scrobbles become listens on the tracks they name, so Home knows your taste. They stay on this node.${h.last_sync_at ? ` Last sync ${escapeProfileHtml(fmtRelative(h.last_sync_at))}.` : ''}</div></div>
         <div class="form-row stacked" data-lfm-waiting${waitingText ? '' : ' hidden'}><div class="row-stack-sub">${waitingText}</div></div>
-        ${credit ? `<div class="form-row stacked"><div class="row-stack-sub">${credit}</div></div>` : ''}
       </div>
       <div data-lfm-actions>${actions}</div>`;
   }
