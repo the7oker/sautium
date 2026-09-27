@@ -343,7 +343,10 @@ tracklist Jaccard past the drift threshold with recordings counted only
 where both sides are well stamped — and merges the copy into the row
 named for the release group (`_update_album_uuid`). The same rule folds
 a rip pair ("[Vinyl]" / "[TR24]") and a per-disc split ("Disc 2") that
-different tags had kept as rows. The import stamps `album_variants.raw_title`
+different tags had kept as rows; a box ripped as CD1/CD2/CD3 folders
+under one tag folds on the folder names (a local rip's `disc_number`
+stays 1 when only the folder says CD3), and fingerprint titles fold
+typography the way the identity does. The import stamps `album_variants.raw_title`
 (the scanner never had, since the folder-album migration), and a sync
 re-stamps a variant imported without it from the library's album tag.
 Inside a folded album, two track rows whose titles differ only by a

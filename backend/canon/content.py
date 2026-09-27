@@ -761,7 +761,23 @@ _FEAT_RE = re.compile(_FEAT_PATTERN, re.IGNORECASE)
 
 
 def _title_key(title: str) -> str:
-    return _FEAT_RE.sub("", title or "").strip().lower()
+    """A track title as the edition fingerprint compares it: the featuring
+    credit off, then the identity's own typography fold (apostrophes,
+    punctuation, case — normalize), so two rips tagged "Let's" and "Let’s"
+    read as one tracklist."""
+    return normalize(_FEAT_RE.sub("", title or ""))
+
+
+# A per-disc folder name — "CD2 - Green", "Disc 2", "LP4", "CD-1", "Side B" —
+# names the disc where the files' tags do not (a local rip's disc_number
+# stays 1 when only the folder says CD3).
+_DIR_DISC_RE = re.compile(r"^(?:cd|disc|disk|lp|side)\s*[-_.]?\s*(\d+|[a-d])(?![\w])", re.IGNORECASE)
+
+
+def _dir_disc(directory_path: str):
+    last = (directory_path or "").replace("\\", "/").rstrip("/").rsplit("/", 1)[-1]
+    m = _DIR_DISC_RE.match(last.strip())
+    return m.group(1).lower() if m else None
 
 
 # Two files of one track read from two copies: the same slot, or the same
@@ -874,7 +890,7 @@ def _variant_fingerprints(album_id: str) -> list:
     when recordings are sparse; featuring credits stripped), its track-id set,
     raw_title and track count."""
     rows = db_query("""
-        SELECT av.id AS vid, av.raw_title,
+        SELECT av.id AS vid, av.raw_title, av.directory_path,
                array_remove(array_agg(DISTINCT mf.recording_mbid::text), NULL) AS recs,
                array_agg(DISTINCT lower(btrim(t.title))) AS titles,
                array_agg(DISTINCT mf.track_id::text) AS tracks,
@@ -883,9 +899,10 @@ def _variant_fingerprints(album_id: str) -> list:
         JOIN owned_files mf ON mf.album_variant_id = av.id
         JOIN tracks t ON t.id = mf.track_id
         WHERE av.album_id = %(a)s::uuid
-        GROUP BY av.id, av.raw_title
+        GROUP BY av.id, av.raw_title, av.directory_path
     """, {"a": str(album_id)})
     return [{"vid": r["vid"], "raw_title": r["raw_title"] or "",
+             "dir_disc": _dir_disc(r["directory_path"]),
              "recs": set(r["recs"] or []),
              "titles": {_title_key(t) for t in (r["titles"] or []) if _title_key(t)},
              "tracks": set(r["tracks"] or []),
@@ -991,6 +1008,7 @@ def _row_fingerprint(variants: list) -> dict:
     return {"raws": {v["raw_title"].strip().lower() for v in variants if v["raw_title"].strip()},
             "bases": {_disc_base(v["raw_title"]) for v in variants},
             "marked": any(_CHANNEL_DISC_RE.search(v["raw_title"]) for v in variants),
+            "dir_discs": {v["dir_disc"] for v in variants},
             "recs": set().union(*[v["recs"] for v in variants]),
             "titles": set().union(*[v["titles"] for v in variants]),
             "tracks": tracks, "ntracks": len(tracks)}
@@ -999,14 +1017,19 @@ def _row_fingerprint(variants: list) -> dict:
 def _rows_one_edition(a: dict, b: dict) -> bool:
     """Two album rows hold ONE edition: the same track identities; one scan
     tag on every variant of both, corroborated by content (a folder
-    mis-tagged with another album's name shares its tag and nothing else);
-    a tracklist past the drift threshold (recordings only where both rows
-    are well stamped — MB binds one tracklist to other recordings on
-    another release); or one disc marker apart (a per-disc split)."""
+    mis-tagged with another album's name shares its tag and nothing else)
+    or by per-disc folders holding different discs (a box ripped as
+    CD1/CD2/CD3 under one tag); a tracklist past the drift threshold
+    (recordings only where both rows are well stamped — MB binds one
+    tracklist to other recordings on another release); or one disc marker
+    apart in the tag (a per-disc split)."""
     same_tracks = bool(a["tracks"]) and a["tracks"] == b["tracks"]
     title_jac = _jaccard(a["titles"], b["titles"])
-    same_raw = (len(a["raws"]) == 1 and a["raws"] == b["raws"]
-                and (same_tracks or title_jac >= _EDITION_MATCH_MIN))
+    one_tag = len(a["raws"]) == 1 and a["raws"] == b["raws"]
+    disc_folders = (None not in a["dir_discs"] | b["dir_discs"]
+                    and a["dir_discs"].isdisjoint(b["dir_discs"])
+                    and not (a["tracks"] & b["tracks"]))
+    same_raw = one_tag and (same_tracks or title_jac >= _EDITION_MATCH_MIN or disc_folders)
     well = _well_stamped(a) and _well_stamped(b)
     jac = _jaccard(a["recs"], b["recs"]) if well else title_jac
     disc = (len(a["bases"] | b["bases"]) == 1 and (a["marked"] or b["marked"]))

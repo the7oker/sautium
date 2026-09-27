@@ -409,6 +409,10 @@ implementation details live in the code, DB and git history.
   remixes, 3 left unproven on the master). Identity itself stays the
   tagged title: folding the credit into `normalize` is a network-wide
   identity migration, not a canon pass.
+  Same night: rows of one tag holding different discs fold on their
+  folder names (CD1/CD2/CD3, Disc 2) — the local scanner leaves
+  `disc_number` at 1 for such rips — and the fingerprint titles run
+  through `normalize` (3 more folds on the master).
   Lesson: the first import of an
   endpoint is a previewed decision — a tap on the Desktop endpoint imported
   21k files of the same library as copies before it was cancelled and
