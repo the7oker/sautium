@@ -50,6 +50,7 @@ class BrowserBackend(PlayerBackend):
 
         self._index = 0                # 1-based canonical slot
         self._current_ident: Optional[str] = None   # media identity of that slot
+        self._unplayable: Optional[str] = None   # why the last start found nothing to play
         self._state = "stopped"
         self._position = 0.0
         self._length = 0.0
@@ -350,15 +351,40 @@ class BrowserBackend(PlayerBackend):
             "queue": self._queue_tail(index),
         }
 
+    def _unplayable_reason(self, first: int, skipped: int) -> str:
+        """Why slots ``first`` .. ``first + skipped - 1`` had nothing this
+        device could play. A file in an HQPlayer's own library
+        (hqp_library.sync) is the one kind a queue can hold that no output
+        but that HQPlayer opens; it stays in the queue across an output
+        switch, so the stop must say so instead of looking like the end."""
+        held = sum(1 for i in range(skipped)
+                   if (self._queue.item_at(first + i).source or {}).get("kind") == "hqp")
+        if held == skipped:
+            return (f"{held} queued track(s) live in the HQPlayer's own library "
+                    "— only that HQPlayer can play them. Pick it as the output, "
+                    "or play the album again to stream it here.")
+        return (f"None of the {skipped} queued item(s) can be played on this "
+                f"device ({held} live in the HQPlayer's own library).")
+
     def _start_at(self, index: int, *, play: bool) -> bool:
-        item = self._queue.item_at(index)
-        if item is None:
-            return False
-        url = self._media_url(item)
-        if url is None:
-            logger.warning("browser output: skipping unreachable item %s — %s",
-                           item.artist, item.title)
-            return self._start_at(index + 1, play=play)
+        first = index
+        while True:
+            item = self._queue.item_at(index)
+            if item is None:
+                # Running off the end having skipped everything is not the
+                # end of the queue: say why (status extra.error).
+                if index > first:
+                    self._unplayable = self._unplayable_reason(first, index - first)
+                    self._emit_now()
+                return False
+            url = self._media_url(item)
+            if url is None:
+                logger.warning("browser output: skipping unreachable item %s — %s",
+                               item.artist, item.title)
+                index += 1
+                continue
+            break
+        self._unplayable = None
         self._index = index
         self._current_ident = self._item_ident(item)
         self._position = 0.0
@@ -488,6 +514,8 @@ class BrowserBackend(PlayerBackend):
                                       or self._pending_play_index is not None):
             extra["error"] = ("no playback device — open Sautium on the "
                               "device that should play and press play")
+        elif self._unplayable:
+            extra["error"] = self._unplayable
         self._emit(PlaybackStatus(
             state=self._state,
             position=self._position,

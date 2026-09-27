@@ -981,12 +981,18 @@ class DlnaBackend(PlayerBackend):
         rescan brings it back while the library's drive is unmounted."""
         root = settings.library_db_root()
         norm = lambda p: p.replace("\\", "/").rstrip("/").lower()
-        inside = outside = streamed = unreadable = 0
+        inside = outside = streamed = unreadable = held = 0
         for i in range(skipped):
             item = self._queue.item_at(first + i)
             src = (item.source or {}) if item else {}
             if src.get("kind") == "proxy":
                 streamed += 1
+                continue
+            if src.get("kind") == "hqp":
+                # A file in an HQPlayer's own library (hqp_library.sync):
+                # only that HQPlayer can open it; every other output plays
+                # the album afresh as a stream.
+                held += 1
                 continue
             if src.get("kind") == "file":
                 unreadable += 1
@@ -997,27 +1003,31 @@ class DlnaBackend(PlayerBackend):
                 inside += 1
             else:
                 outside += 1
-        if streamed and not (inside or outside or unreadable):
+        if held and not (inside or outside or unreadable or streamed):
+            return (f"{held} queued track(s) live in the HQPlayer's own library "
+                    "— only that HQPlayer can play them. Pick it as the output, "
+                    "or play the album again to stream it here.")
+        if streamed and not (inside or outside or unreadable or held):
             return (f"{streamed} streamed track(s) could not be fetched from "
                     "their provider, and nothing else is left in the queue.")
-        if unreadable and not (inside or outside):
+        if unreadable and not (inside or outside or held):
             return (f"{unreadable} queued track(s) could not be read from the "
                     f"library ({root or 'unset'}) — is its drive connected? "
                     "Reconnect it, then try again.")
-        if inside and not (outside or unreadable):
+        if inside and not (outside or unreadable or held):
             return (f"{inside} queued item(s) are in your library folder but "
                     "have not been scanned yet, so they cannot be streamed to a "
                     "renderer. Run Scan Library, then try again.")
-        if outside and not (inside or unreadable):
+        if outside and not (inside or unreadable or held):
             return (f"{outside} queued item(s) live outside this node's library "
                     f"({root or 'unset'}) — HQPlayer can open them directly, but "
                     "they cannot be streamed to another renderer. Play something "
                     "from the library to replace the queue.")
         return (f"None of the {skipped} queued item(s) can be sent to this "
                 f"renderer: {unreadable} unreadable, {inside} not scanned yet, "
-                f"{outside} outside the library folder, {streamed} not "
-                "fetchable from their provider. Play something from the "
-                "library to replace the queue.")
+                f"{outside} outside the library folder, {held} in the "
+                f"HQPlayer's own library, {streamed} not fetchable from their "
+                "provider. Play something from the library to replace the queue.")
 
     async def _load_seq(self, index: int, *, play: bool = True, ss: float = 0.0,
                         url_override: Optional[str] = None) -> bool:

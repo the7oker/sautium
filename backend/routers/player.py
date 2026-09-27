@@ -127,6 +127,9 @@ class QueueEntitiesRequest(BaseModel):
     # play-entities only: assembling a playlist is not the same act as putting
     # one on, and the user says which ("build me a set" vs "play these").
     autoplay: bool = True
+    # queue-entities only: 'next' | 'end' — next only for an all-owned list
+    # (the same rule as queue-tracks: a rolling list appends behind).
+    position: str = "end"
 
 class PlaySessionRequest(BaseModel):
     session_id: str
@@ -2690,7 +2693,8 @@ def queue_entities(req: QueueEntitiesRequest):
     # appends strictly in order, and _add_owned's own rolling filler would race
     # that ordering for a set that needs transcoding (m4a, CUE cuts).
     if len(segments) == 1 and segments[0][0] == "owned":
-        _add_owned(segments[0][1], clear_first=False, position="end")
+        _add_owned(segments[0][1], clear_first=False,
+                   position="next" if req.position == "next" else "end")
     else:
         _queue_segments_async(segments, gen, "queue-entities")
     return {"ok": True, "queued": owned, "streaming": phantom, "not_found": missing}

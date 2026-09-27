@@ -95,6 +95,9 @@
   // Phantom previews have no media_files.id — the playing one is identified by
   // its track UUID (surfaced as preview_track_id on the status payload).
   let _lastNpPreviewTrackId = null;
+  // A file held in the HQPlayer's own library has no media_files.id either —
+  // its row is matched by the status payload's track_id.
+  let _lastNpTrackId = null;
 
   function updatePlayingHighlight() {
     const mfTarget = _lastNpMediaFileId != null ? String(_lastNpMediaFileId) : null;
@@ -110,6 +113,13 @@
       .forEach(row => {
         const match = tidTarget !== null
           && row.getAttribute('data-track-id') === tidTarget;
+        row.classList.toggle('is-playing', match);
+      });
+    const heldTarget = _lastNpTrackId != null ? String(_lastNpTrackId) : null;
+    document.querySelectorAll('.detail-screen .track-row.is-held-track[data-track-id]')
+      .forEach(row => {
+        const match = heldTarget !== null
+          && row.getAttribute('data-track-id') === heldTarget;
         row.classList.toggle('is-playing', match);
       });
   }
@@ -5602,8 +5612,7 @@
         if (t.location === 'hqplayer') {
           // Held in the HQPlayer's own library, no file here: the row plays
           // by track uuid (play-entities) — natively when that HQPlayer is
-          // the output, as a stream elsewhere. No [+]: the queue endpoints
-          // still speak media file ids.
+          // the output, as a stream elsewhere; [+] queues it the same way.
           trackParts.push(`
             <div class="track-row is-held-track" data-track-id="${escapeHtml(t.track_id || '')}"
                  data-album-id="${escapeHtml(albumId)}">
@@ -5613,6 +5622,7 @@
                 ${sub ? `<div class="track-sub">${escapeHtml(sub)}</div>` : ''}
               </div>
               <span class="track-dur"><span class="track-dur-num">${fmtDuration(t.duration)}</span></span>
+              <span class="track-add" aria-label="Add to queue">${SVG_PLUS}</span>
             </div>
           `);
           continue;
@@ -6459,6 +6469,18 @@
         else openPhantomQueueConfirm(screen, row);
       });
     });
+    // Held track [+] → the same confirm; the chosen position queues by track
+    // uuid (queue-entities), the backend picking the copy for the output.
+    screen.querySelectorAll('.track-row.is-held-track .track-add').forEach(btn => {
+      btn.addEventListener('click', (e) => {
+        e.stopPropagation();
+        if (e.detail > 1) return;
+        const row = btn.closest('.track-row');
+        if (!row) return;
+        if (row.classList.contains('is-confirming')) closeQueueConfirm(row);
+        else openHeldQueueConfirm(row);
+      });
+    });
     // Phantom [+ Queue] → toggles the album-wide "Add album to: [Next] [End]"
     // confirm; the chosen position streams via queue-phantom-album.
     screen.querySelectorAll('[data-action="queue-phantom-album"]').forEach(btn => {
@@ -6612,7 +6634,8 @@
     // play-entities by track uuid: the backend picks the copy the active
     // output can open — natively on that HQPlayer, a stream elsewhere.
     screen.querySelectorAll('.track-row.is-held-track[data-track-id]').forEach(row => {
-      row.addEventListener('click', () => {
+      row.addEventListener('click', (e) => {
+        if (e.target.closest('.track-add')) return;   // queue button handles its own
         const tid = row.getAttribute('data-track-id');
         if (!tid) return;
         onceInFlight(row, async () => {
@@ -6636,13 +6659,20 @@
       btn.addEventListener('click', (e) => {
         if (e.detail > 1 || !ctx.tracks || !ctx.tracks.length) return;
         const ids = ctx.tracks.map(t => t.media_file_id).filter(Boolean);
-        if (!ids.length) return;
         const wrap = btn.closest('.album-actions');
         if (!wrap) return;
-        if (wrap.classList.contains('is-confirming')) {
-          closeAlbumQueueConfirm(wrap);
-        } else {
-          openAlbumQueueConfirm(wrap, ids);
+        if (wrap.classList.contains('is-confirming')) { closeAlbumQueueConfirm(wrap); return; }
+        if (ids.length) { openAlbumQueueConfirm(wrap, ids); return; }
+        // Every picked file lives in the HQPlayer's own library: queue the
+        // album by uuid, the backend picking the copies for the output.
+        if (ctx.albumId && ctx.tracks.some(t => t.location === 'hqplayer')) {
+          openAlbumQueueBar(wrap, async (position) => {
+            const resp = await fetch('/api/player/queue-entities', {
+              method: 'POST', headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({ items: [{ kind: 'album', id: ctx.albumId }], position }),
+            }).catch(() => null);
+            await reportPlaybackResult(resp);
+          });
         }
       });
     });
@@ -6894,6 +6924,33 @@
       closeQueueConfirm(row);
       if (!resp || !resp.ok) { await reportPlaybackResult(resp, body); return; }
       if (body && body.track_count === 0) applyPhantomMissing(screen, body.missing);
+    });
+    bar.querySelector('[data-confirm="next"]').addEventListener('click', e => { e.stopPropagation(); go('next'); });
+    bar.querySelector('[data-confirm="end"]').addEventListener('click', e => { e.stopPropagation(); go('end'); });
+  }
+
+  // A held track's "Add to: [Next] [End]" — queue-entities by track uuid;
+  // the backend picks the copy the active output can open.
+  function openHeldQueueConfirm(row) {
+    const tid = row.getAttribute('data-track-id');
+    if (!tid) return;
+    row.classList.add('is-confirming');
+    const bar = document.createElement('div');
+    bar.className = 'track-confirm-bar';
+    bar.innerHTML = `
+      <span class="track-confirm-ask">Add to:</span>
+      <button class="track-confirm-btn" type="button" data-confirm="next">Next</button>
+      <button class="track-confirm-btn" type="button" data-confirm="end">End</button>`;
+    const addBtn = row.querySelector('.track-add');
+    if (addBtn) row.insertBefore(bar, addBtn); else row.appendChild(bar);
+    const go = (position) => onceInFlight(bar, async () => {
+      bar.querySelectorAll('.track-confirm-btn').forEach(b => { b.disabled = true; });
+      const resp = await fetch('/api/player/queue-entities', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ items: [{ kind: 'track', id: tid }], position }),
+      }).catch(() => null);
+      closeQueueConfirm(row);
+      await reportPlaybackResult(resp);
     });
     bar.querySelector('[data-confirm="next"]').addEventListener('click', e => { e.stopPropagation(); go('next'); });
     bar.querySelector('[data-confirm="end"]').addEventListener('click', e => { e.stopPropagation(); go('end'); });
@@ -14045,6 +14102,7 @@
       const d = e.detail || {};
       _lastNpMediaFileId = d.media_file_id != null ? d.media_file_id : null;
       _lastNpPreviewTrackId = d.preview_track_id != null ? d.preview_track_id : null;
+      _lastNpTrackId = d.track_id != null ? d.track_id : null;
       mp.update(d);
       sheet.onStatus(d);
       updatePlayingHighlight();
