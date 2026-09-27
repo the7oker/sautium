@@ -308,8 +308,11 @@ that HQPlayer is the output, the album page offers only its copies and
 `play-album` queues them as `kind: "hqp"` items HQPlayer opens itself —
 `file:///media/FLASH_SG/…` straight from its own disk, no proxy, the play
 tracker keyed on the track UUID; the drift canary and the playlist adoption
-recognise those paths. On another output the same album streams like a
-phantom (the copy is left out of the pick).
+recognise those paths; the album page renders such tracks as held rows that
+play by track UUID (`play-entities`), and the engagement gates (the sync's
+core, the similars backfill, owned-vs-phantom) count a held file as owned
+through the `owned_files` view. On another output the same album streams
+like a phantom (the copy is left out of the pick).
 
 Settings › Library shows the endpoint's section: the FIRST import is a
 previewed decision (which HQPlayer, how many files, how many new — an
