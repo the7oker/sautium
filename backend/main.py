@@ -1254,69 +1254,8 @@ def _scan_worker(limit: Optional[int], skip_existing: bool, subpath: Optional[st
         if state["cancel_requested"]:
             state["progress"] = "Scan cancelled"
         else:
-            # Run artist normalization Pass 1 (safe patterns only)
-            state["progress"] = "Normalizing artists..."
-            try:
-                from canon.migrations import normalize_artists as do_normalize
-                from database import get_db_context
-                with get_db_context() as db:
-                    norm_stats = do_normalize(db, pass1=True)
-                    if norm_stats.get('pass1', {}).get('split', 0) > 0:
-                        logger.info(f"Post-scan normalization: {norm_stats}")
-            except Exception as e:
-                logger.error(f"Post-scan normalization failed: {e}")
-
-            # MB canonicalization (local dump): resolve RG/MBID + collapse editions for
-            # artists with new content since their last canon. No-op without the dump.
-            # Runs HERE — after scan, before sync (peers get canonical content) and before
-            # enrich (dedup + correction cut wasted fetches). Renames are local + reversible
-            # (album_variants.raw_title), so it auto-applies without a review gate.
-            from routers.settings import mb_load_active
-            if not state["cancel_requested"] and mb_load_active():
-                # A dump op is downloading/loading concurrently — running canon now
-                # would read a stale/half-loaded dump and watermark these artists out
-                # of the dump's own fresh post-load canon. Defer; that pass covers them.
-                logger.info("Post-scan canon deferred — MB dump operation in progress")
-            elif not state["cancel_requested"]:
-                state["progress"] = "Canonicalizing (MusicBrainz)..."
-                notify_library_subscribers()
-                try:
-                    from canon.content import canonicalize_pending
-                    from canon import algo_canon
-                    canon_stats = {}
-                    with algo_canon() as _ok:   # priority over AI; holds the dump lock
-                        if _ok:
-                            canon_stats = canonicalize_pending()
-                            # Catch the NULL-rg owned-album residue the main matcher
-                            # rejects on its bidirectional size gate — first by edition-
-                            # stripped name, then the content-only studio uniques the name
-                            # pass can't reach (cross-script / reworded titles). Free,
-                            # algorithmic, event-driven.
-                            from canon.content import distill_album_residue, distill_album_coverage
-                            bound = distill_album_residue().get("bound", 0)
-                            bound += distill_album_coverage().get("bound", 0)
-                            if bound:
-                                canon_stats["album_residue_bound"] = bound
-                    if canon_stats.get("artists") or canon_stats.get("album_residue_bound"):
-                        result["mb_canon"] = canon_stats
-                        logger.info(f"Post-scan MB canon: {canon_stats}")
-                    # AI judgment tier on what the deterministic canon left — scoped
-                    # to THIS scan's new files (since=_scan_started), async + gated.
-                    from routers.settings import start_aicanon_job
-                    if start_aicanon_job(since=_scan_started):
-                        logger.info("Post-scan: AI canonization started (new files)")
-                except Exception as e:
-                    logger.error(f"Post-scan MB canonicalization failed: {e}")
-
-            # The scan's analysis and its post-scan canon are signable state:
-            # wake the sealing owner (full — canon may have anchored albums
-            # whose tracks were signed long ago).
-            if not state["cancel_requested"]:
-                import notary
-                notary.wake("scan", full=True)
-                # New files can be the tracks imported scrobbles wait for.
-                from canon import scrobbles
-                scrobbles.wake()
+            from canon import post_import
+            post_import.run(state, result, _scan_started)
 
             if prune and not state["cancel_requested"]:
                 state["progress"] = "Pruning missing files..."

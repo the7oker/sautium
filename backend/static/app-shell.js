@@ -13396,6 +13396,44 @@
     // Enrichment) — so no end-of-screen action block is emitted.
     const actions = '';
 
+    // The HQPlayer library as a source: what the HQPlayer at the saved
+    // endpoint holds in its own library becomes variants of this catalogue
+    // (albums it alone holds are HQP-only: they play natively there and
+    // stream elsewhere). Shown whenever an endpoint is configured — also on
+    // a node with no local files at all, which is the "disk on the HQPlayer
+    // box" case this exists for. The first import is always this button;
+    // after it the output re-checks the library on every attach.
+    const hl = lib.hqp_library || {};
+    const hqpProgress   = String(hl.progress || '');
+    const hqpRunning    = !!hl.running && !_terminalRe.test(hqpProgress);
+    const hqpCancelling = hqpRunning && !!hl.cancel_requested;
+    const hqpLibrary = !hl.endpoint ? '' : `
+      <div class="profile-group-label">HQPlayer library</div>
+      <div class="form-group">
+        <div class="form-row stacked">
+          <div class="row-stack">
+            <span class="row-stack-label">HQPlayer</span>
+            <span class="row-stack-value" style="font-family:var(--font-mono);letter-spacing:0.02em;">${escapeProfileHtml(hl.endpoint)}</span>
+          </div>
+          <div class="row-stack-sub">${hl.synced
+            ? `${escapeProfileHtml(fmtNum(hl.files))} files in ${escapeProfileHtml(fmtNum(hl.albums))} albums held by this HQPlayer. Its library is re-checked whenever the output attaches.`
+            : 'Not imported yet. Albums this HQPlayer holds in its own library become variants of yours: the copy plays natively there and streams elsewhere.'}</div>
+        </div>
+      </div>
+      ${hqpRunning ? `
+      <div class="btn-row single">
+        <button class="btn btn-danger" data-cancel-hqp ${hqpCancelling ? 'disabled' : ''}>${hqpCancelling ? 'Cancelling…' : 'Cancel'}</button>
+      </div>
+      <div class="action-progress" data-progress-for="hqp">${escapeProfileHtml(hqpCancelling ? 'Finishing the current file…' : hqpProgress)}</div>
+      ` : `
+      <div class="btn-row${hl.synced ? '' : ' single'}">
+        <button class="btn btn-primary" data-action="hqp-sync">${hl.synced ? 'Sync HQPlayer library' : 'Import HQPlayer library'}</button>
+        ${hl.synced ? '<button class="btn btn-secondary" data-action="hqp-rescan">Rescan</button>' : ''}
+      </div>
+      ${hqpProgress ? `<div class="action-progress" data-progress-for="hqp">${escapeProfileHtml(hqpProgress)}</div>` : ''}
+      `}
+    `;
+
     root.innerHTML = `
       <section class="screen screen-settings">
         ${_settingsHeader('Library')}
@@ -13426,6 +13464,7 @@
         </div>
 
         ${libraryStats}
+        ${hqpLibrary}
         ${emptyState}
         ${actions}
       </section>
@@ -13438,6 +13477,34 @@
     onAction('[data-action="enrich"]',     async () => { await fetch('/api/settings/library/enrich',        { method: 'POST' }); render(); });
     onAction('[data-cancel-scan]',         async () => { await fetch('/api/settings/library/scan/cancel',   { method: 'POST' }); render(); });
     onAction('[data-cancel-enrich]',       async () => { await fetch('/api/settings/library/enrich/cancel', { method: 'POST' }); render(); });
+    onAction('[data-action="hqp-sync"]',   async () => {
+      // The first import of an endpoint comes back as a preview — the
+      // decision names the HQPlayer and the size of what it would bring.
+      const r = await fetch('/api/settings/library/hqp-sync', { method: 'POST' });
+      const body = r.ok ? await r.json() : null;
+      if (body && body.preview) {
+        const p = body.preview;
+        const ok = await window.confirmDestructive({
+          title: 'Import the HQPlayer library?',
+          message: `<b>${escapeProfileHtml(p.endpoint)}</b> lists ${escapeProfileHtml(fmtNum(p.files))} files, ${escapeProfileHtml(fmtNum(p.new))} of them new here. Albums it holds become variants of yours; an HQPlayer that scans this same library would bring every album in as a copy.`,
+          confirmText: 'Import',
+        });
+        if (!ok) return;
+        await fetch('/api/settings/library/hqp-sync?confirm=true', { method: 'POST' });
+      }
+      render();
+    });
+    onAction('[data-cancel-hqp]',          async () => { await fetch('/api/settings/library/hqp-sync/cancel', { method: 'POST' }); render(); });
+    onAction('[data-action="hqp-rescan"]', async () => {
+      const ok = await window.confirmDestructive({
+        title: 'Rescan the HQPlayer library?',
+        message: 'Files its library no longer lists are forgotten here. Analysis, listening history and the music itself stay; an album stays wherever other files still hold it.',
+        confirmText: 'Rescan',
+      });
+      if (!ok) return;
+      await fetch('/api/settings/library/hqp-rescan', { method: 'POST' });
+      render();
+    });
 
     guide.paint();
     _subscribeLibraryStream(root);
@@ -13472,7 +13539,13 @@
       const terminalRe = /(complete|failed|cancelled)/i;
       const scanRunning   = !!(lib.scan   && lib.scan.running)   && !terminalRe.test(scanProgress);
       const enrichRunning = !!(lib.enrich && lib.enrich.running) && !terminalRe.test(enrichProgress);
+      const hqpProgress   = String((lib.hqp_library && lib.hqp_library.progress) || '');
+      const hqpRunning    = !!(lib.hqp_library && lib.hqp_library.running) && !terminalRe.test(hqpProgress);
 
+      const hqpLine = root.querySelector('[data-progress-for="hqp"]');
+      if (hqpLine && hqpProgress && hqpLine.textContent !== hqpProgress) {
+        hqpLine.textContent = hqpProgress;
+      }
       const scanLine = root.querySelector('[data-progress-for="scan"]');
       if (scanLine && scanProgress && scanLine.textContent !== scanProgress) {
         scanLine.textContent = scanProgress;
@@ -13486,9 +13559,9 @@
       _refreshEnrichRow(root, 'lastfm',     lib.lastfm_done,     lib.lastfm_total);
       _refreshEnrichRow(root, 'lyrics',     lib.lyrics_done,     lib.total_tracks);
 
-      // Scan/enrich finishing → full re-render, which flips the Cancel row back.
-      const scanEnrichWasRunning = !!root.querySelector('[data-cancel-scan], [data-cancel-enrich]');
-      if (scanEnrichWasRunning && !scanRunning && !enrichRunning) {
+      // A worker finishing → full re-render, which flips its Cancel row back.
+      const scanEnrichWasRunning = !!root.querySelector('[data-cancel-scan], [data-cancel-enrich], [data-cancel-hqp]');
+      if (scanEnrichWasRunning && !scanRunning && !enrichRunning && !hqpRunning) {
         if (parseHash().startsWith('more/library')) render();
       }
     }

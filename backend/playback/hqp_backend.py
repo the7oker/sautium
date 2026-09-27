@@ -550,11 +550,19 @@ class HqpBackend(PlayerBackend):
                     logger.warning("canonical mirror on attach failed: %s", e)
             else:
                 self._register_serving()
+        self._library_check()
         self._running = True
         self._thread = threading.Thread(target=self._poll_loop, daemon=True,
                                         name="hqp-status-poller")
         self._thread.start()
         logger.info("HQPlayer status poller started")
+
+    def _library_check(self) -> None:
+        """An HQPlayer we just attached to or that just came back may have
+        rescanned its library: hqp_library re-checks its hash off this
+        thread and syncs only an endpoint the owner synced before."""
+        import hqp_library
+        hqp_library.request_sync(settings.hqplayer_host, settings.hqplayer_port)
 
     def shutdown(self) -> None:
         self._running = False
@@ -674,6 +682,7 @@ class HqpBackend(PlayerBackend):
                     # on an empty list.
                     if (before is not None and hqp is not before) or self._failures > 0:
                         self._verify_mirror = True
+                        self._library_check()
                     if status is not None and (self._verify_mirror
                                                or tick % DRIFT_CHECK_EVERY == 0):
                         try:

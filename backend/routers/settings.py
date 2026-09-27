@@ -633,7 +633,38 @@ async def _library_state() -> Dict[str, Any]:
         "last_scan_at":       _read("library.last_scan_at"),
         "scan":               scan,
         "enrich":             enrich,
+        "hqp_library":        _hqp_library_state(),
     }
+
+
+def _hqp_endpoint() -> tuple:
+    from config import settings as app_settings
+    host = _read("hqplayer.host") or app_settings.hqplayer_host
+    port = _read("hqplayer.port") or app_settings.hqplayer_port
+    return (host or None), int(port or 4321)
+
+
+def _hqp_library_state() -> Dict[str, Any]:
+    """The HQPlayer library as a source: the configured endpoint, what of
+    it this node holds, whether the owner ever synced it (only then does
+    the output re-check it on attach), and the running job."""
+    import hqp_library
+    host, port = _hqp_endpoint()
+    state = hqp_library.job_state()
+    if host:
+        counts = db_query_one("""
+            SELECT count(f.id) AS files, count(DISTINCT av.album_id) AS albums
+            FROM album_variants av
+            LEFT JOIN hqp_library_files f ON f.album_variant_id = av.id
+            WHERE av.location = 'hqplayer'
+              AND av.hqp_endpoint_host = %(h)s AND av.hqp_endpoint_port = %(p)s
+        """, {"h": host, "p": port}) or {}
+        state.update(endpoint=f"{host}:{port}", files=int(counts.get("files") or 0),
+                     albums=int(counts.get("albums") or 0),
+                     synced=_read(hqp_library.HASH_SETTING.format(host=host, port=port)) is not None)
+    else:
+        state.update(endpoint=None, files=0, albums=0, synced=False)
+    return state
 
 
 def _ai_state() -> Dict[str, Any]:
@@ -2223,3 +2254,52 @@ async def trigger_enrich() -> Dict[str, Any]:
 async def cancel_enrich() -> Dict[str, Any]:
     from main import enrich_cancel
     return await enrich_cancel()
+
+
+@router.post("/library/hqp-sync")
+def trigger_hqp_sync(force: bool = False, confirm: bool = False) -> Dict[str, Any]:
+    """Bring the HQPlayer library at the saved endpoint into the catalogue
+    (hqp_library.sync): files known here are touched, new ones imported,
+    nothing removed. `force` ignores the stored library hash.
+
+    The FIRST import of an endpoint is answered with a preview — which
+    HQPlayer, how many files it lists, how many are new here — until the
+    caller repeats the request with `confirm`: an HQPlayer Desktop on this
+    very library would otherwise import its tens of thousands of files as
+    a copy at one tap (it did, on 2026-09-27)."""
+    import hqp_library
+    host, port = _hqp_endpoint()
+    if not host:
+        raise HTTPException(status_code=400, detail="No HQPlayer endpoint is configured")
+    if not confirm and _read(hqp_library.HASH_SETTING.format(host=host, port=port)) is None:
+        try:
+            entries, counts = hqp_library.parse_library(hqp_library.fetch_library(host, port))
+        except OSError as e:
+            raise HTTPException(status_code=503, detail=f"HQPlayer at {host}:{port} is not answering: {e}")
+        known = hqp_library._known_paths(host, port)
+        return {"success": False, "preview": {
+            "endpoint": f"{host}:{port}", "files": counts["files"],
+            "unsupported": counts["unsupported"], "known": len(known),
+            "new": sum(1 for _, md in entries if md["file_path"] not in known)}}
+    if not hqp_library.start_job(host, port, force=force):
+        raise HTTPException(status_code=409, detail="An HQPlayer library job is already running")
+    return {"success": True}
+
+
+@router.post("/library/hqp-rescan")
+def trigger_hqp_rescan() -> Dict[str, Any]:
+    """The explicit, confirmed rescan: files the HQPlayer library no longer
+    lists are forgotten (hqp_library.forget_missing)."""
+    import hqp_library
+    host, port = _hqp_endpoint()
+    if not host:
+        raise HTTPException(status_code=400, detail="No HQPlayer endpoint is configured")
+    if not hqp_library.start_job(host, port, rescan=True):
+        raise HTTPException(status_code=409, detail="An HQPlayer library job is already running")
+    return {"success": True}
+
+
+@router.post("/library/hqp-sync/cancel")
+def cancel_hqp_sync() -> Dict[str, Any]:
+    import hqp_library
+    return {"success": hqp_library.cancel_job()}

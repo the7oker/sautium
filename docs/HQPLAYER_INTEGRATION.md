@@ -288,6 +288,41 @@ backend:
     - "host.docker.internal:host-gateway"
 ```
 
+### The HQPlayer library as a source (2026-09-27)
+HQPlayer scans its own library and answers `<LibraryGet/>` with every
+directory and file it holds, tags included — the whole library as one line
+of XML (39 618 files, 7.4 MB, 1.2 s from Desktop 6). `backend/hqp_library.py`
+brings it into the catalogue as **album variants located at that HQPlayer**
+(`album_variants.location = 'hqplayer'` + endpoint, files in
+`hqp_library_files`, media_files' mirror without bytes): a copy of an album
+the HQPlayer holds — a disk on an HQPlayer Embedded box, a share it mounts,
+a hi-res subset copied there — is one more variant, like a CD rip next to a
+vinyl rip. The entries go through the scanner's own import
+(`scanner.import_metadata`), so an album a local scan minted gains a
+variant instead of a twin and keeps its analysis and history; the canon
+reads the `owned_files` view (a file here or one the HQPlayer holds) and
+stamps recording MBIDs on both file tables. An album only the HQPlayer holds
+plays natively there and streams like a phantom elsewhere; its tracks count
+as owned for the gates.
+
+Settings › Library shows the endpoint's section: the FIRST import is a
+previewed decision (which HQPlayer, how many files, how many new — an
+HQPlayer Desktop scanning this same library would bring every album in as a
+copy at one tap, which happened once on 2026-09-27 and was reverted with
+`python -m hqp_library --forget-endpoint`); after it the output re-checks
+`<LibraryGetHash/>` whenever it attaches or a restarted HQPlayer comes back
+and syncs only when the hash moved. A sync never removes rows; "Rescan"
+(confirmed) forgets what the library no longer lists and refuses an empty
+answer. Measured on the reference library: HQPlayer reads FLAC tags as the
+scanner does (99.7 % identical), mp3 tags worse (ID3v1 truncation, encodings,
+folder names standing in) — such files become twin tracks without analysis.
+Known gap: a local rip and its copy that the canon named as two editions of
+one release group ("X" / "X (Alt)") stay two album rows — editions are
+resolved per album row, the release-group-level fold is a canon follow-up.
+The scan itself starts in HQPlayer's web interface (or by a Digest-
+authenticated `POST /library` — an unauthenticated POST is dropped without a
+401; leave "Perform analysis" off, it costs ~1.5 min per album on a Pi 5).
+
 ### Windows Firewall
 Ensure port 4321 is accessible:
 1. Open Windows Firewall settings

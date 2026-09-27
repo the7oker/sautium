@@ -160,6 +160,7 @@ def import_metadata(entries: List[Tuple[str, Dict[str, Any]]], *, sink: FileSink
     assoc_ta: set = set()   # (track_id, artist_id, role)
     assoc_aa: set = set()   # (album_id, artist_id, role)
     seen_track_ids = set()
+    local_albums: Dict[Any, bool] = {}   # album_id -> has a local variant (HQP sink only)
     # Folder→albums pre-pass: resolve box-set / singles / mix directories
     # once (album_identity.assign_dir_albums).
     dir_albums = _classify_dirs(entries, sink)
@@ -318,7 +319,17 @@ def import_metadata(entries: List[Tuple[str, Dict[str, Any]]], *, sink: FileSink
                             ))
                         assoc_aa.add(aa_key)
                     # ── Album-Genre associations (album grain) ──
+                    # A copy at the HQPlayer of an album whose files are here
+                    # adds no genre information: its tags are the same tags,
+                    # counted already. Only an HQP-only album's files count.
                     genre_name = metadata.get("genre")
+                    if genre_name and genre_name.strip() and sink.location != "local":
+                        if album.id not in local_albums:
+                            local_albums[album.id] = bool(db.execute(text(
+                                "SELECT 1 FROM album_variants WHERE album_id = :a AND location = 'local' LIMIT 1"
+                            ), {"a": str(album.id)}).fetchone())
+                        if local_albums[album.id]:
+                            genre_name = None
                     if genre_name and genre_name.strip():
                         file_genre_ids: set = set()
                         for gn in parse_genre_string(genre_name):

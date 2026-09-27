@@ -373,6 +373,19 @@ implementation details live in the code, DB and git history.
   mirror is re-mirrored by the next play through the play-intent gate. The
   gate's liveness probe asks `GetInfo` — the trial stop keeps the port open
   and closes every connection.
+  **The HQPlayer library as a source** (same day, evening): `hqp_library`
+  imports `<LibraryGet/>` as album variants located at that HQPlayer
+  (`location`/endpoint on `album_variants`, `hqp_library_files`), through
+  the scanner's `import_metadata` with a file sink; the canon reads the
+  `owned_files` view and stamps recording MBIDs on both tables. Live: the
+  Pi's 928-file library (a flash drive + one shared folder) landed 429 of 845
+  tracks on existing rows, 45 albums gained a second variant; 8 local/copy
+  pairs stayed twin "(Alt)" editions — editions are resolved per album row,
+  the release-group fold is a canon follow-up. Lesson: the first import of an
+  endpoint is a previewed decision — a tap on the Desktop endpoint imported
+  21k files of the same library as copies before it was cancelled and
+  reverted (`--forget-endpoint`); `album_genres.count` for the albums that
+  import touched stayed roughly doubled (no per-file record to undo it).
 - **2s delay after playlist load, 1s after track selection**. HQPlayer needs
   time to process. Skipping the delays caused random "track not found" errors.
 - **Stop-clear-add-select-play sequence** for `play_track`/`play_album`. Without

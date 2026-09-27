@@ -36,7 +36,9 @@ import logging
 import os
 import re
 import socket
+import threading
 import xml.etree.ElementTree as ET
+from datetime import datetime, timezone
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
 from sqlalchemy import text
@@ -228,16 +230,66 @@ def sync(host: str, port: int, *, force: bool = False,
     return stats
 
 
-def forget_missing(host: str, port: int) -> Dict[str, Any]:
-    """The explicit rescan: rows the library no longer lists go — files,
-    then the endpoint's variants left without files, then albums left with
-    neither a variant nor a phantom tracklist, then tracks nothing refers to
+def _forget(db, gone: List[int], since: Optional[datetime] = None) -> Dict[str, int]:
+    """Remove hqp_library_files rows ``gone`` and what they alone justified:
+    the endpoint's variants left without files, albums left with neither a
+    variant nor a phantom tracklist, tracks nothing refers to
     (ORPHAN_TRACK_SQL — a track with analysis or a listen stays, as it does
-    for a vanished local rip). An empty answer is refused the way the
-    scanner refuses an empty tree: a library being rebuilt on the HQPlayer
-    side lists nothing, and every row would read as gone."""
-    stats: Dict[str, Any] = {"refused": False, "checked": 0, "forgotten": 0,
-                             "orphan_variants": 0, "orphan_albums": 0, "orphan_tracks": 0}
+    for a vanished local rip) and, when ``since`` is given, artists minted
+    after it that no credit names any more (a cancelled import's raw
+    credits; an artist that existed before keeps its bio and similars)."""
+    stats = {"forgotten": 0, "orphan_variants": 0, "orphan_albums": 0,
+             "orphan_tracks": 0, "orphan_artists": 0}
+    rows = db.execute(text("""
+        DELETE FROM hqp_library_files WHERE id = ANY(CAST(:ids AS int[]))
+        RETURNING track_id, album_variant_id
+    """), {"ids": gone}).fetchall()
+    stats["forgotten"] = len(rows)
+    track_ids = sorted({str(r[0]) for r in rows})
+    variant_ids = sorted({r[1] for r in rows})
+    if not track_ids:
+        return stats
+    credited = [str(r[0]) for r in db.execute(text("""
+        SELECT DISTINCT artist_id FROM track_artists WHERE track_id = ANY(CAST(:tids AS uuid[]))
+    """), {"tids": track_ids}).fetchall()]
+    album_ids = [str(r[0]) for r in db.execute(text("""
+        DELETE FROM album_variants
+        WHERE id = ANY(CAST(:vids AS int[])) AND location = 'hqplayer'
+          AND NOT EXISTS (SELECT 1 FROM hqp_library_files f
+                          WHERE f.album_variant_id = album_variants.id)
+        RETURNING album_id
+    """), {"vids": variant_ids}).fetchall()]
+    stats["orphan_variants"] = len(album_ids)
+    if album_ids:
+        credited += [str(r[0]) for r in db.execute(text("""
+            SELECT DISTINCT artist_id FROM album_artists WHERE album_id = ANY(CAST(:aids AS uuid[]))
+        """), {"aids": album_ids}).fetchall()]
+        stats["orphan_albums"] = db.execute(text("""
+            DELETE FROM albums
+            WHERE id = ANY(CAST(:aids AS uuid[]))
+              AND NOT EXISTS (SELECT 1 FROM album_variants av WHERE av.album_id = albums.id)
+              AND NOT EXISTS (SELECT 1 FROM album_tracks at WHERE at.album_id = albums.id)
+        """), {"aids": album_ids}).rowcount
+    stats["orphan_tracks"] = db.execute(text(f"""
+        DELETE FROM tracks t
+        WHERE t.id = ANY(CAST(:tids AS uuid[])) AND {ORPHAN_TRACK_SQL.format(t='t')}
+    """), {"tids": track_ids}).rowcount
+    if since is not None and credited:
+        stats["orphan_artists"] = db.execute(text("""
+            DELETE FROM artists a
+            WHERE a.id = ANY(CAST(:aids AS uuid[])) AND a.created_at >= :since
+              AND NOT EXISTS (SELECT 1 FROM track_artists ta WHERE ta.artist_id = a.id)
+              AND NOT EXISTS (SELECT 1 FROM album_artists aa WHERE aa.artist_id = a.id)
+        """), {"aids": sorted(set(credited)), "since": since}).rowcount
+    return stats
+
+
+def forget_missing(host: str, port: int) -> Dict[str, Any]:
+    """The explicit rescan: rows the library no longer lists go (see
+    _forget). An empty answer is refused the way the scanner refuses an
+    empty tree: a library being rebuilt on the HQPlayer side lists nothing,
+    and every row would read as gone."""
+    stats: Dict[str, Any] = {"refused": False, "checked": 0}
     entries, _counts = parse_library(fetch_library(host, port))
     listed = {md["file_path"] for _, md in entries}
     if not listed:
@@ -247,38 +299,128 @@ def forget_missing(host: str, port: int) -> Dict[str, Any]:
     known = _known_paths(host, port)
     stats["checked"] = len(known)
     gone = [row_id for path, row_id in known.items() if path not in listed]
-    if not gone:
-        return stats
-    with get_db_context() as db:
-        rows = db.execute(text("""
-            DELETE FROM hqp_library_files WHERE id = ANY(CAST(:ids AS int[]))
-            RETURNING track_id, album_variant_id
-        """), {"ids": gone}).fetchall()
-        stats["forgotten"] = len(rows)
-        track_ids = sorted({str(r[0]) for r in rows})
-        variant_ids = sorted({r[1] for r in rows})
-        album_ids = [str(r[0]) for r in db.execute(text("""
-            DELETE FROM album_variants
-            WHERE id = ANY(CAST(:vids AS int[])) AND location = 'hqplayer'
-              AND NOT EXISTS (SELECT 1 FROM hqp_library_files f
-                              WHERE f.album_variant_id = album_variants.id)
-            RETURNING album_id
-        """), {"vids": variant_ids}).fetchall()]
-        stats["orphan_variants"] = len(album_ids)
-        if album_ids:
-            stats["orphan_albums"] = db.execute(text("""
-                DELETE FROM albums
-                WHERE id = ANY(CAST(:aids AS uuid[]))
-                  AND NOT EXISTS (SELECT 1 FROM album_variants av WHERE av.album_id = albums.id)
-                  AND NOT EXISTS (SELECT 1 FROM album_tracks at WHERE at.album_id = albums.id)
-            """), {"aids": album_ids}).rowcount
-        stats["orphan_tracks"] = db.execute(text(f"""
-            DELETE FROM tracks t
-            WHERE t.id = ANY(CAST(:tids AS uuid[])) AND {ORPHAN_TRACK_SQL.format(t='t')}
-        """), {"tids": track_ids}).rowcount
-        db.commit()
+    if gone:
+        with get_db_context() as db:
+            stats.update(_forget(db, gone))
+            db.commit()
     logger.info("HQPlayer library %s:%s rescan: %s", host, port, stats)
     return stats
+
+
+def forget_endpoint(host: str, port: int, since: Optional[datetime] = None) -> Dict[str, Any]:
+    """Everything this endpoint's library put into the catalogue goes (see
+    _forget) — the HQPlayer was retired, or an import ran against the wrong
+    one. ``since`` also drops the artists that import minted."""
+    known = _known_paths(host, port)
+    stats: Dict[str, Any] = {"checked": len(known)}
+    if known:
+        with get_db_context() as db:
+            stats.update(_forget(db, list(known.values()), since))
+            db.commit()
+    logger.info("HQPlayer library %s:%s forgotten: %s", host, port, stats)
+    return stats
+
+
+# -- the background job (Settings, the HQPlayer output's attach) ----------------
+
+_job_state: Dict[str, Any] = {
+    "running": False,
+    "cancel_requested": False,
+    "progress": "",
+    "stats": None,        # live stats dict while a sync runs
+    "result": None,       # final result when done
+    "endpoint": None,     # "host:port" of the run
+    "mode": None,         # "sync" | "rescan"
+}
+_job_lock = threading.Lock()
+
+
+def job_state() -> Dict[str, Any]:
+    return dict(_job_state)
+
+
+def start_job(host: str, port: int, *, force: bool = False, rescan: bool = False) -> bool:
+    """Run a sync — or the explicit rescan — in a background thread.
+    False when a job is already running."""
+    with _job_lock:
+        if _job_state["running"]:
+            return False
+        _job_state.update(running=True, cancel_requested=False, progress="Starting...",
+                          stats=None, result=None, endpoint=f"{host}:{port}",
+                          mode="rescan" if rescan else "sync")
+    threading.Thread(target=_job, args=(host, port, force, rescan), daemon=True,
+                     name="hqp-library-sync").start()
+    return True
+
+
+def cancel_job() -> bool:
+    if not _job_state["running"]:
+        return False
+    _job_state["cancel_requested"] = True
+    return True
+
+
+def request_sync(host: str, port: int) -> None:
+    """Event-driven entry for the HQPlayer output: on attach and on every
+    return of a restarted HQPlayer, the library's hash is compared with the
+    last complete sync and a sync runs only when it moved. Only an endpoint
+    the owner has synced once is followed — the first import of a library
+    is always the explicit button, never a side effect of choosing an
+    output (an HQPlayer Desktop on this very library would otherwise import
+    its 39k files behind the owner's back). Off the caller's thread: the
+    status poller must not wait on the control port."""
+    def _check() -> None:
+        from routers.settings import _read
+        last = _read(HASH_SETTING.format(host=host, port=port))
+        if last is None:
+            return
+        try:
+            if library_hash(host, port) != last:
+                start_job(host, port)
+        except OSError as e:
+            logger.warning("HQPlayer library check at %s:%s skipped: %s", host, port, e)
+    threading.Thread(target=_check, daemon=True, name="hqp-library-check").start()
+
+
+def _job(host: str, port: int, force: bool, rescan: bool) -> None:
+    from routers.settings import notify_library_subscribers
+    state = _job_state
+    started = datetime.now(timezone.utc)
+    try:
+        def progress_cb(msg: str, stats: Dict[str, Any]) -> None:
+            state["progress"] = msg
+            state["stats"] = dict(stats)
+            notify_library_subscribers()
+
+        if rescan:
+            result = forget_missing(host, port)
+            state["progress"] = ("Nothing forgotten: the library answered with no files"
+                                 if result["refused"] else
+                                 f"Rescan complete: {result['forgotten']} files forgotten")
+        else:
+            result = sync(host, port, force=force, progress_cb=progress_cb,
+                          cancel_check=lambda: state["cancel_requested"])
+            if result["unchanged"]:
+                state["progress"] = "HQPlayer library unchanged"
+            elif result["cancelled"]:
+                state["progress"] = "Sync cancelled"
+            else:
+                if result["added"]:
+                    from canon import post_import
+                    post_import.run(state, result, started)
+                state["progress"] = (f"Sync complete: {result['added']} added, "
+                                     f"{result['known']} already here")
+        state["result"] = result
+    except Exception as e:
+        logger.error("HQPlayer library job failed: %s", e, exc_info=True)
+        state["progress"] = f"Sync failed: {str(e)[:200]}"
+        state["result"] = {"error": str(e)}
+    finally:
+        state["running"] = False
+        try:
+            notify_library_subscribers()
+        except Exception:
+            pass
 
 
 if __name__ == "__main__":
@@ -290,6 +432,9 @@ if __name__ == "__main__":
                     help="read the library and report what would be new; write nothing")
     ap.add_argument("--forget-missing", action="store_true",
                     help="the explicit rescan: remove rows the library no longer lists")
+    ap.add_argument("--forget-endpoint", action="store_true",
+                    help="remove everything this endpoint's library put into the catalogue")
+    ap.add_argument("--since", help="with --forget-endpoint: also drop artists minted after this ISO time")
     args = ap.parse_args()
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
     if args.dry_run:
@@ -300,5 +445,8 @@ if __name__ == "__main__":
               f"known here: {len(have)}; new: {fresh}")
     elif args.forget_missing:
         print(forget_missing(args.host, args.port))
+    elif args.forget_endpoint:
+        since = datetime.fromisoformat(args.since.replace("Z", "+00:00")) if args.since else None
+        print(forget_endpoint(args.host, args.port, since))
     else:
         print(sync(args.host, args.port, force=args.force))

@@ -247,6 +247,21 @@ See:
 - **`audio_features.vocal_instrumental` is unreliable.** For vocal/
   instrumental queries, use `artists.is_vocalist` (classified from bio
   keywords). See `PROGRESS.md` design decisions.
+- **A copy at the HQPlayer is a VARIANT, and "owned" means `owned_files`.**
+  Since 2026-09-27 an album's copy in the library of the HQPlayer the node
+  drives (a disk on an Embedded box, a mounted share, a hi-res subset copied
+  there) is an `album_variants` row with `location = 'hqplayer'` + endpoint,
+  its files in `hqp_library_files` (media_files' mirror without bytes: no
+  analysis source, no CUE slices, no cover extraction; the canon stamps
+  `recording_mbid` on both). It reaches the catalogue through
+  `scanner.import_metadata` with an HQPlayer `FileSink` (`hqp_library.sync`),
+  so identities land on the tracks a local scan minted. Presence, coverage,
+  engagement and orphan rules read the `owned_files` view — never
+  `media_files` alone — and per-file things (analysis, `file://` paths
+  HQPlayer opens) stay where the bytes are. When that endpoint is the active
+  output its variants outrank local ones; elsewhere an HQP-only track
+  streams like a phantom. No path mapping of a moved disk: Rescan prunes the
+  local rows, the sync adds the copy, the UUID keeps the analysis.
 
 ---
 
