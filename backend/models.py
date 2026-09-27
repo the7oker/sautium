@@ -33,6 +33,11 @@ Base = declarative_base()
 
 # ENUM types declared in the SQL migration; SQLAlchemy references them without
 # re-creating (create_type=False) so table creation in tests stays lightweight.
+VariantLocationEnum = ENUM(
+    "local", "hqplayer",
+    name="variant_location",
+    create_type=False,
+)
 ArtistGenderEnum = ENUM(
     "unknown", "female", "male", "mixed",
     name="artist_gender",
@@ -228,6 +233,7 @@ class Track(Base):
     # Relationships
     artist_associations = relationship("TrackArtist", back_populates="track", cascade="all, delete-orphan")
     media_files = relationship("MediaFile", back_populates="track", cascade="all, delete-orphan")
+    hqp_files = relationship("HqpLibraryFile", back_populates="track", cascade="all, delete-orphan")
     embedding = relationship("Embedding", back_populates="track", uselist=False, cascade="all, delete-orphan")
     text_embedding = relationship("TextEmbedding", back_populates="track", uselist=False, cascade="all, delete-orphan")
     audio_feature = relationship("AudioFeature", back_populates="track", uselist=False, cascade="all, delete-orphan")
@@ -437,6 +443,12 @@ class AlbumVariant(Base):
                               # makes album rename/merge reversible (albums are local, not synced)
     edition = Column(Text)  # named edition extracted from a dirty title on canon; NULL = standard
     release_mbid = Column(UUID(as_uuid=False))  # MB release MBID (specific edition); best-effort, often NULL
+    # 'local' = media_files on this node's disk; 'hqplayer' = hqp_library_files
+    # held by the HQPlayer at (host, port): the same album copied to an
+    # HQPlayer Embedded box is one more variant, like a CD rip next to a vinyl rip.
+    location = Column(VariantLocationEnum, nullable=False, default="local", server_default="local")
+    hqp_endpoint_host = Column(Text)
+    hqp_endpoint_port = Column(Integer)
 
     sample_rate = Column(Integer)
     bit_depth = Column(Integer)
@@ -448,10 +460,13 @@ class AlbumVariant(Base):
     # Relationships
     album = relationship("Album", back_populates="variants")
     media_files = relationship("MediaFile", back_populates="album_variant", cascade="all, delete-orphan")
+    hqp_files = relationship("HqpLibraryFile", back_populates="album_variant", cascade="all, delete-orphan")
 
     __table_args__ = (
         Index("idx_album_variants_album_id", "album_id"),
-        UniqueConstraint("directory_path", "album_id", name="album_variants_dir_album_key"),
+        UniqueConstraint("directory_path", "album_id", "hqp_endpoint_host", "hqp_endpoint_port",
+                         name="album_variants_dir_album_endpoint_key",
+                         postgresql_nulls_not_distinct=True),
     )
 
     def __repr__(self):
@@ -1190,3 +1205,47 @@ class ExternalMetadata(Base):
 
     def __repr__(self):
         return f"<ExternalMetadata(id={self.id}, entity={self.entity_type}/{self.entity_id})>"
+
+
+class HqpLibraryFile(Base):
+    """A file an HQPlayer holds in its own library (LibraryGet) for an album
+    variant located there — media_files' mirror without bytes: no analysis
+    source, no CUE slices, no cover extraction. HQPlayer opens
+    file://<hqp_path> itself; analysis for the track comes from an earlier
+    local scan (same UUID) or from the network."""
+    __tablename__ = "hqp_library_files"
+
+    id = Column(Integer, primary_key=True)
+    track_id = Column(UUID(as_uuid=True), ForeignKey("tracks.id", ondelete="CASCADE", onupdate="CASCADE"), nullable=False)
+    album_variant_id = Column(Integer, ForeignKey("album_variants.id", ondelete="CASCADE", onupdate="CASCADE"), nullable=False)
+    hqp_path = Column(Text, nullable=False)   # LibraryDirectory.path + LibraryFile.name, forward slashes
+    hqp_file_hash = Column(Text)              # LibraryFile.hash (an MD5 of the file name) — change detection only
+    hqp_dir_hash = Column(Text)               # LibraryDirectory.hash (an MD5 of the directory path)
+    file_format = Column(AudioFileFormatEnum)
+    is_lossless = Column(Boolean, default=True)
+    sample_rate = Column(Integer)
+    bit_depth = Column(Integer)
+    bitrate = Column(Integer)
+    channels = Column(Integer)
+    duration_seconds = Column(Numeric(10, 2))
+    track_number = Column(Integer)
+    disc_number = Column(Integer, default=1)
+    # Tags as HQPlayer reported them — the same ground truth media_files keeps
+    raw_track_name = Column(Text)
+    raw_artist = Column(Text)
+    raw_album_artist = Column(Text)
+    raw_album = Column(Text)
+    raw_year = Column(Text)
+    first_seen_at = Column(DateTime(timezone=True), server_default=func.now())
+    last_seen_at = Column(DateTime(timezone=True), server_default=func.now())
+
+    track = relationship("Track", back_populates="hqp_files")
+    album_variant = relationship("AlbumVariant", back_populates="hqp_files")
+
+    __table_args__ = (
+        Index("idx_hqp_library_files_track_id", "track_id"),
+        UniqueConstraint("album_variant_id", "hqp_path", name="uq_hqp_library_files_variant_path"),
+    )
+
+    def __repr__(self):
+        return f"<HqpLibraryFile(id={self.id}, track_id={self.track_id}, path={self.hqp_path!r})>"

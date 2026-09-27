@@ -76,6 +76,13 @@ DO $$ BEGIN
     CREATE TYPE audio_file_format AS ENUM ('FLAC', 'APE', 'WAV', 'AIFF', 'WV', 'TTA', 'DSF', 'DFF', 'MP3', 'OGG', 'M4A');
 EXCEPTION WHEN duplicate_object THEN NULL; END $$;
 
+-- Where an album variant's files live: on this node's disk, or in the library
+-- of the HQPlayer the node drives (a disk on an HQPlayer Embedded box, a share
+-- it mounts) — a copy this node holds no bytes of.
+DO $$ BEGIN
+    CREATE TYPE variant_location AS ENUM ('local', 'hqplayer');
+EXCEPTION WHEN duplicate_object THEN NULL; END $$;
+
 DO $$ BEGIN
     CREATE TYPE cover_source_type AS ENUM ('external', 'embedded', 'sentinel');
 EXCEPTION WHEN duplicate_object THEN NULL; END $$;
@@ -300,13 +307,21 @@ CREATE TABLE IF NOT EXISTS album_genres (
 CREATE TABLE IF NOT EXISTS album_variants (
     id SERIAL PRIMARY KEY,
     album_id UUID NOT NULL REFERENCES albums(id) ON DELETE CASCADE ON UPDATE CASCADE,
-    directory_path TEXT NOT NULL,          -- NOT unique: a box set is many albums in one folder, so the key is (directory_path, album_id) below
+    directory_path TEXT NOT NULL,          -- NOT unique: a box set is many albums in one folder, so the key is (directory_path, album_id, endpoint) below
     raw_title TEXT,                        -- original (pre-canon) album title for this variant — source of truth; makes album rename/merge reversible (albums are local, not synced)
     edition TEXT,                          -- named edition ("Super Deluxe Edition") extracted from a dirty title on canon; NULL = standard
     release_mbid UUID,                     -- MB release MBID (specific edition under albums.musicbrainz_id RG); best-effort, often NULL
     sample_rate INTEGER,
     bit_depth INTEGER,
     is_lossless BOOLEAN DEFAULT TRUE,
+    -- 'local' = media_files rows on this node's disk; 'hqplayer' = rows in
+    -- hqp_library_files held by the HQPlayer at (host, port) — the same album
+    -- copied to an HQPlayer Embedded box is one more variant, like a CD rip
+    -- next to a vinyl rip. When that endpoint is the active output its
+    -- variants outrank the local ones (sql_queries.best_rip_order).
+    location variant_location NOT NULL DEFAULT 'local',
+    hqp_endpoint_host TEXT,
+    hqp_endpoint_port INTEGER,
     -- Denormalised MAX(media_files.file_modified_at) across this variant's
     -- files. Maintained by FOR EACH STATEMENT triggers on media_files so the
     -- Home "New in my collection" feed sorts by an indexed column instead of a
@@ -314,7 +329,14 @@ CREATE TABLE IF NOT EXISTS album_variants (
     file_modified_at TIMESTAMPTZ,
     created_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP,
     updated_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP,
-    CONSTRAINT album_variants_dir_album_key UNIQUE (directory_path, album_id)
+    -- The same directory string can name a local folder AND the folder an
+    -- HQPlayer on this very box scans, so the endpoint is part of the key;
+    -- local rows carry NULLs and NULLS NOT DISTINCT keeps them unique.
+    CONSTRAINT album_variants_dir_album_endpoint_key
+        UNIQUE NULLS NOT DISTINCT (directory_path, album_id, hqp_endpoint_host, hqp_endpoint_port),
+    CONSTRAINT chk_album_variants_location CHECK (
+        (location = 'local' AND hqp_endpoint_host IS NULL AND hqp_endpoint_port IS NULL)
+        OR (location = 'hqplayer' AND hqp_endpoint_host IS NOT NULL AND hqp_endpoint_port IS NOT NULL))
 );
 
 -- Phantom-album tracklists (Phantom Discovery, Stage B). Owned albums keep
@@ -341,6 +363,40 @@ CREATE TABLE IF NOT EXISTS album_tracks (
     PRIMARY KEY (album_id, disc, position)
 );
 CREATE INDEX IF NOT EXISTS idx_album_tracks_track ON album_tracks(track_id);
+
+-- Files an HQPlayer holds in its own library (LibraryGet) for an album_variants
+-- row located there — media_files' mirror without bytes: no analysis source, no
+-- CUE slices, no cover extraction; HQPlayer opens file://<hqp_path> itself.
+-- Analysis for these tracks comes from an earlier local scan (same UUID) or
+-- from the network.
+CREATE TABLE IF NOT EXISTS hqp_library_files (
+    id SERIAL PRIMARY KEY,
+    track_id UUID NOT NULL REFERENCES tracks(id) ON DELETE CASCADE ON UPDATE CASCADE,
+    album_variant_id INTEGER NOT NULL REFERENCES album_variants(id) ON DELETE CASCADE ON UPDATE CASCADE,
+    hqp_path TEXT NOT NULL,                 -- LibraryDirectory.path + LibraryFile.name, forward slashes; the file:// URI HQPlayer opens
+    hqp_file_hash TEXT,                     -- LibraryFile.hash (an MD5 of the file name) — change detection only
+    hqp_dir_hash TEXT,                      -- LibraryDirectory.hash (an MD5 of the directory path)
+    file_format audio_file_format,
+    is_lossless BOOLEAN DEFAULT TRUE,
+    sample_rate INTEGER,
+    bit_depth INTEGER,
+    bitrate INTEGER,
+    channels INTEGER,
+    duration_seconds NUMERIC(10, 2),
+    track_number INTEGER,
+    disc_number INTEGER DEFAULT 1,
+    -- Tags as HQPlayer reported them — the same ground truth media_files keeps
+    raw_track_name TEXT,
+    raw_artist TEXT,
+    raw_album_artist TEXT,
+    raw_album TEXT,
+    raw_year TEXT,
+    first_seen_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP,
+    last_seen_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP,
+    CONSTRAINT uq_hqp_library_files_variant_path UNIQUE (album_variant_id, hqp_path),
+    CONSTRAINT chk_hqp_library_files_duration CHECK (duration_seconds IS NULL OR duration_seconds >= 0)
+);
+CREATE INDEX IF NOT EXISTS idx_hqp_library_files_track_id ON hqp_library_files(track_id);
 
 CREATE TABLE IF NOT EXISTS covers (
     id UUID PRIMARY KEY,                             -- uuid5(NS, 'cover:' || hash_hex)
