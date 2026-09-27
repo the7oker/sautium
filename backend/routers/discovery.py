@@ -178,11 +178,12 @@ def shuffle_albums(
         SELECT al.id::text AS id,
                al.title,
                al.release_year AS year,
+               al.cover_url,
                (SELECT a.name
                 FROM artists a
                 JOIN track_artists ta ON ta.artist_id = a.id AND ta.role = 'primary'
                 JOIN tracks t ON t.id = ta.track_id
-                JOIN media_files mf2 ON mf2.track_id = t.id
+                JOIN owned_files mf2 ON mf2.track_id = t.id
                 JOIN album_variants av2 ON av2.id = mf2.album_variant_id
                 WHERE av2.album_id = al.id
                 GROUP BY a.id, a.name
@@ -202,7 +203,7 @@ def shuffle_albums(
         FROM albums al
         WHERE EXISTS (
             SELECT 1 FROM album_variants av
-            JOIN media_files mf ON mf.album_variant_id = av.id
+            JOIN owned_files mf ON mf.album_variant_id = av.id
             WHERE av.album_id = al.id
         )
         ORDER BY md5(al.id::text || %(seed)s::text)

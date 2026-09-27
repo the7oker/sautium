@@ -145,8 +145,15 @@ def similar_tracks(seed_uuid: str, exclude=(), limit: int = 20,
         pool AS (
             SELECT t.id AS track_uuid, t.id::text AS track_id, e.id AS emb_id,
                    CASE WHEN mf_rep.location = 'local' THEN mf_rep.id END AS media_file_id,
+                   mf_rep.id AS file_id,
                    mf_rep.location::text AS location, mf_rep.file_path, mf_rep.file_format,
                    (mf_rep.id IS NOT NULL) AS is_owned,
+                   -- the active output opens this copy itself: a local file, or
+                   -- one held at the HQPlayer that IS the output (params
+                   -- hqp_host / hqp_port); a copy held elsewhere streams
+                   COALESCE(mf_rep.location = 'local'
+                            OR (mf_rep.hqp_endpoint_host = %(hqp_host)s
+                                AND mf_rep.hqp_endpoint_port = %(hqp_port)s), false) AS playable,
                    t.title, a.name AS artist, ta.artist_id,
                    COALESCE(mf_rep.album_title, ph_rep.album) AS album,
                    COALESCE(mf_rep.release_year, ph_rep.release_year) AS year,
@@ -160,7 +167,8 @@ def similar_tracks(seed_uuid: str, exclude=(), limit: int = 20,
             JOIN track_artists ta ON ta.track_id = t.id AND ta.role = 'primary'
             JOIN artists a ON a.id = ta.artist_id
             LEFT JOIN LATERAL (
-                SELECT f.id, f.location, f.file_path, f.file_format,
+                SELECT f.id, f.location, f.hqp_endpoint_host, f.hqp_endpoint_port,
+                       f.file_path, f.file_format,
                        al.title AS album_title, al.release_year, al.cover_url AS album_cover_url
                 FROM (
                     SELECT mf.id, av.location, av.hqp_endpoint_host, av.hqp_endpoint_port,
@@ -217,8 +225,8 @@ def similar_tracks(seed_uuid: str, exclude=(), limit: int = 20,
                     AND at2.artist_id = pool.artist_id
             ) tg ON true
         )
-        SELECT track_id, media_file_id, location, file_path, file_format, is_owned,
-               title, artist, album, year, cover_url, phantom_album, length_ms,
+        SELECT track_id, media_file_id, file_id, location, file_path, file_format, is_owned,
+               playable, title, artist, album, year, cover_url, phantom_album, length_ms,
                round((1 - score)::numeric, 4) AS similarity
         FROM (SELECT rescored.*, ROW_NUMBER() OVER (PARTITION BY artist_id
                                                     ORDER BY score) AS artist_rank

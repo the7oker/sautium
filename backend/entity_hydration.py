@@ -70,12 +70,12 @@ def hydrate_albums(album_ids: list[str]) -> list[dict]:
                al.title AS album,
                al.release_year AS year,
                al.cover_url,
-               -- primary artist: owned credit via media_files, else (phantom) via album_tracks
+               -- primary artist: owned credit via owned_files, else (phantom) via album_tracks
                COALESCE(
                  (SELECT a.name FROM artists a
                   JOIN track_artists ta ON ta.artist_id = a.id AND ta.role = 'primary'
                   JOIN tracks t ON t.id = ta.track_id
-                  JOIN media_files mf ON mf.track_id = t.id
+                  JOIN owned_files mf ON mf.track_id = t.id
                   JOIN album_variants av ON av.id = mf.album_variant_id
                   WHERE av.album_id = al.id
                   GROUP BY a.id, a.name ORDER BY COUNT(*) DESC LIMIT 1),
@@ -98,7 +98,7 @@ def hydrate_albums(album_ids: list[str]) -> list[dict]:
                 LIMIT 1) AS media_file_id,
                -- track count: owned files, else (phantom) the album_tracks tracklist
                COALESCE(NULLIF(
-                 (SELECT COUNT(*)::int FROM owned_files mf4
+                 (SELECT COUNT(DISTINCT mf4.track_id)::int FROM owned_files mf4
                   JOIN album_variants av4 ON av4.id = mf4.album_variant_id
                   WHERE av4.album_id = al.id), 0),
                  (SELECT COUNT(*)::int FROM album_tracks atr WHERE atr.album_id = al.id)

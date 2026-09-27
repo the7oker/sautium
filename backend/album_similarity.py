@@ -30,13 +30,14 @@ from db_pool import get_conn
 
 logger = logging.getLogger(__name__)
 
-# Album → its track ids, covering BOTH owned albums (physical files via
-# media_files/album_variants) AND phantom albums (the album_tracks tracklist, no
-# files). Lets audio similarity work for previewed-and-enriched phantom albums
-# too — a phantom source finds owned neighbours just like an owned source does.
+# Album → its track ids, covering BOTH owned albums (files here or held at an
+# HQPlayer, via owned_files/album_variants) AND phantom albums (the album_tracks
+# tracklist, no files). Lets audio similarity work for previewed-and-enriched
+# phantom albums too — a phantom source finds owned neighbours just like an
+# owned source does.
 _ALBUM_TRACKS_SQL = """
     SELECT av.album_id, mf.track_id
-    FROM media_files mf
+    FROM owned_files mf
     JOIN album_variants av ON av.id = mf.album_variant_id
     UNION
     SELECT atr.album_id, atr.track_id
@@ -108,7 +109,7 @@ def _candidate_albums(cur, album_id) -> list[str]:
             -- and dedup-sort the whole 3.5M-row union (143MB on disk, ~1.7s)
             -- before merging with a few hundred hits.
             SELECT DISTINCT x.album_id FROM (
-                SELECT av.album_id FROM media_files mf
+                SELECT av.album_id FROM owned_files mf
                 JOIN album_variants av ON av.id = mf.album_variant_id
                 WHERE mf.track_id = nn.track_id
                 UNION ALL

@@ -496,7 +496,7 @@ _OWNED_GUARD = {
 # SATURATES: an exact title clamps to the source ceil, so 1660 tracks named "intro"
 # and 17 named "Ursa Major" all score exactly 1.0 and `score DESC, name` has no key
 # left — the emitted rows were whatever the plan produced, and it changed with LIMIT.
-# Ownership is the only signal that survives the saturation (media_files names the
+# Ownership is the only signal that survives the saturation (owned_files names the
 # owned rows, 37k of 3M) and it is the right one: at equal relevance a lossless file
 # you own beats an MB-dump stub you cannot play. It stays a TIE-BREAK, never a score
 # term — as score it would let a weak owned match outrank a strong phantom one and
@@ -546,7 +546,7 @@ _TABLE_LEVEL = {
     "albums": "album", "album_artists": "album", "album_genres": "album", "genres": "album",
     "tracks": "track", "audio_features": "track", "embeddings": "track",
     "embedding_segments": "track",
-    "lyrics_embeddings": "track", "album_tracks": "track", "media_files": "track",
+    "lyrics_embeddings": "track", "album_tracks": "track", "owned_files": "track",
     "track_artists": "track",
 }
 # atom = the MIN (finest) rank. Genre tops the ladder: a category every lower
@@ -898,7 +898,7 @@ def _build_higher(atom, L, tools, active, corpus, limit, offset, K=RETRIEVE_K):
 
 def _agg_link(atom, L, corpus):
     """LATERAL yielding L's pk(s) for a matched atom row (m.id), corpus two-path aware:
-    under corpus='all' a track rolls up to its owned album (media_files→album_variants)
+    under corpus='all' a track rolls up to its owned album (owned_files→album_variants)
     AND its phantom album (album_tracks), so the shorter phantom bridge alone wouldn't
     drop 87% of owned links."""
     Lt = L.table.split()[0]

@@ -162,7 +162,7 @@ def _album_description(album_id: str) -> dict:
 
 def _phantom_album(album_id: str) -> dict:
     """Album-detail payload for a PHANTOM (not-owned) album. Owned albums are
-    served from media_files/album_variants; a phantom has neither, so the
+    served from their files (ALBUM_FILES); a phantom has none, so the
     tracklist comes from `album_tracks` (Phantom Discovery) with its MB length,
     the cover from `albums.cover_url` (Cover Art Archive hotlink), and the
     primary artist from the track credits. No quality / variant data — a phantom
@@ -464,7 +464,7 @@ def get_similar_albums(
             FROM track_artists ta
             JOIN artists a ON a.id = ta.artist_id
             WHERE ta.role = 'primary' AND ta.track_id IN (
-                SELECT mf.track_id FROM media_files mf
+                SELECT mf.track_id FROM owned_files mf
                 JOIN album_variants av ON av.id = mf.album_variant_id WHERE av.album_id = %(id)s::uuid
                 UNION
                 SELECT atr.track_id FROM album_tracks atr WHERE atr.album_id = %(id)s::uuid)

@@ -711,110 +711,6 @@ def browser_event(req: BrowserEventRequest):
 
 # -- Search -------------------------------------------------------------------
 
-@router.get("/search")
-async def search_tracks(q: str = "", limit: int = 20):
-    """Two-stage search grouped by albums: exact ILIKE first, fuzzy trigram fallback."""
-    limit = min(limit, 100)
-    q = q.strip()
-    if not q:
-        return {"albums": [], "count": 0}
-
-    # Stage 1: Exact ILIKE — split into words, all must match in at least one field
-    words = q.split()
-    word_conditions = []
-    params: dict = {"limit": limit * 10}  # Get more tracks for grouping
-    for i, word in enumerate(words):
-        key = f"w{i}"
-        params[key] = f"%{word}%"
-        word_conditions.append(
-            f"(a.name ILIKE %({key})s OR al.title ILIKE %({key})s OR t.title ILIKE %({key})s)"
-        )
-    where_exact = " AND ".join(word_conditions)
-
-    rows = _db_query(f"""
-        SELECT mf.id, t.title, mf.track_number, mf.disc_number, mf.duration_seconds,
-               a.name as artist, av.id as album_id, al.title as album,
-               (SELECT g.name FROM album_genres ag JOIN genres g ON g.id = ag.genre_id
-                WHERE ag.album_id = av.album_id ORDER BY ag.count DESC NULLS LAST LIMIT 1) as genre,
-               mf.is_lossless, t.id as track_id
-        FROM media_files mf
-        JOIN tracks t ON mf.track_id = t.id
-        JOIN track_artists ta ON t.id = ta.track_id AND ta.role = 'primary'
-        JOIN artists a ON ta.artist_id = a.id
-        JOIN album_variants av ON mf.album_variant_id = av.id
-        JOIN albums al ON av.album_id = al.id
-        WHERE {where_exact}
-        ORDER BY a.name, al.title, mf.disc_number, mf.track_number
-    """, params)
-
-    if not rows:
-        # Stage 2: Fuzzy trigram fallback
-        params = {"query": q, "query_like": f"%{q}%", "limit": limit * 10}
-        rows = _db_query("""
-            SELECT mf.id, t.title, mf.track_number, mf.disc_number, mf.duration_seconds,
-                   a.name as artist, av.id as album_id, al.title as album,
-                   (SELECT g.name FROM album_genres ag JOIN genres g ON g.id = ag.genre_id
-                    WHERE ag.album_id = av.album_id ORDER BY ag.count DESC NULLS LAST LIMIT 1) as genre,
-                   mf.is_lossless, t.id as track_id,
-                   GREATEST(
-                       similarity(a.name, %(query)s),
-                       similarity(al.title, %(query)s),
-                       similarity(t.title, %(query)s)
-                   ) as _score
-            FROM media_files mf
-            JOIN tracks t ON mf.track_id = t.id
-            JOIN track_artists ta ON t.id = ta.track_id AND ta.role = 'primary'
-            JOIN artists a ON ta.artist_id = a.id
-            JOIN album_variants av ON mf.album_variant_id = av.id
-            JOIN albums al ON av.album_id = al.id
-            WHERE similarity(a.name, %(query)s) > 0.25
-               OR similarity(al.title, %(query)s) > 0.25
-               OR similarity(t.title, %(query)s) > 0.25
-            ORDER BY _score DESC, a.name, al.title, mf.disc_number, mf.track_number
-        """, params)
-
-    # Group by album (merge multi-disc albums, but keep lossless/lossy separate)
-    # Deduplicate tracks that appear in multiple album_variants of the same album
-    albums_dict = {}
-    seen_tracks = {}  # key -> set of track_ids already added
-    for row in rows:
-        key = (row["artist"], row["album"], row["is_lossless"])
-        if key not in albums_dict:
-            albums_dict[key] = {
-                "artist": row["artist"],
-                "album": row["album"],
-                "album_id": row["album_id"],
-                "genre": row["genre"],
-                "is_lossless": row["is_lossless"],
-                "tracks": [],
-            }
-            seen_tracks[key] = set()
-        track_id = row.get("track_id")
-        if track_id and track_id in seen_tracks[key]:
-            continue
-        if track_id:
-            seen_tracks[key].add(track_id)
-        albums_dict[key]["tracks"].append({
-            "id": row["id"],
-            "title": row["title"],
-            "track_number": row["track_number"],
-            "disc_number": row["disc_number"],
-            "duration_seconds": row["duration_seconds"],
-        })
-
-    # Calculate totals and limit to requested album count
-    albums = []
-    for i, album_data in enumerate(list(albums_dict.values())[:limit]):
-        album_data["album_id"] = i  # Unique index per group for DOM IDs (DB album_id may collide)
-        album_data["track_count"] = len(album_data["tracks"])
-        album_data["total_duration"] = sum(t["duration_seconds"] or 0 for t in album_data["tracks"])
-        albums.append(album_data)
-
-    return {"albums": albums, "count": len(albums)}
-
-
-# -- Transport controls -------------------------------------------------------
-
 @router.get("/playlist")
 def get_playlist():
     """The canonical queue, serialized. Always instant — the queue lives
@@ -1574,7 +1470,7 @@ def play_album(req: PlayAlbumRequest):
         SELECT al.id, al.title as album, a.name as artist, {order_expr} as _score
         FROM albums al
         JOIN album_variants av ON av.album_id = al.id
-        JOIN media_files mf ON mf.album_variant_id = av.id
+        JOIN owned_files mf ON mf.album_variant_id = av.id
         JOIN tracks t ON mf.track_id = t.id
         JOIN track_artists ta ON t.id = ta.track_id AND ta.role = 'primary'
         JOIN artists a ON ta.artist_id = a.id
@@ -2761,26 +2657,43 @@ def play_entities(req: QueueEntitiesRequest):
 def _session_segments(session_id: str) -> tuple[list, int]:
     """('owned', [media rows]) / ('phantom', [TrackQuery]) segments for a
     session snapshot, in slot order, plus the count of slots nothing can play.
-    An owned slot prefers its own file, then the track's best rip (the file
-    was removed, the track kept); a slot with no file left streams like a
-    phantom. Streamed queries are built per album — the slot's album_id keeps
-    the edition the listener pressed — and a slot whose album no longer lists
-    the track (or never had one) gets the display edition."""
+    An owned slot plays the copy the ACTIVE output opens natively — held at
+    the HQPlayer that is the output, else its own file, else the track's
+    best rip (the file was removed, the track kept); a slot with no such
+    copy streams like a phantom. Streamed queries are built per album — the
+    slot's album_id keeps the edition the listener pressed — and a slot
+    whose album no longer lists the track (or never had one) gets the
+    display edition."""
+    hqp_host, hqp_port = active_hqp_endpoint()
     rows = _db_query(f"""
         SELECT st.track_id::text AS track_id, st.album_id::text AS album_id,
-               (SELECT mf.id FROM media_files mf
-                WHERE mf.track_id = st.track_id
-                ORDER BY (mf.id = st.media_file_id) DESC NULLS LAST,
-                         {best_rip_order('mf')}
-                LIMIT 1) AS media_file_id
+               f.id AS file_id, f.location::text AS location
         FROM session_tracks st
+        LEFT JOIN LATERAL (
+            SELECT f.id, f.location
+            FROM (
+                SELECT mf.id, av.location, av.hqp_endpoint_host, av.hqp_endpoint_port,
+                       mf.is_lossless, mf.sample_rate, mf.bit_depth,
+                       (mf.id = st.media_file_id) AS own
+                FROM media_files mf JOIN album_variants av ON av.id = mf.album_variant_id
+                WHERE mf.track_id = st.track_id
+                UNION ALL
+                SELECT hf.id, av.location, av.hqp_endpoint_host, av.hqp_endpoint_port,
+                       hf.is_lossless, hf.sample_rate, hf.bit_depth, false
+                FROM hqp_library_files hf JOIN album_variants av ON av.id = hf.album_variant_id
+                WHERE hf.track_id = st.track_id
+            ) f
+            WHERE f.location = 'local'
+               OR (f.hqp_endpoint_host = %(hqp_host)s AND f.hqp_endpoint_port = %(hqp_port)s)
+            ORDER BY {owned_rank('f')}, f.own DESC, {best_rip_order('f')}
+            LIMIT 1) f ON true
         WHERE st.session_id = %(id)s::uuid
         ORDER BY st.position
-    """, {"id": session_id})
+    """, {"id": session_id, "hqp_host": hqp_host, "hqp_port": hqp_port})
 
     by_album: dict[Optional[str], list[str]] = {}
     for r in rows:
-        if r["media_file_id"] is None:
+        if r["file_id"] is None:
             by_album.setdefault(r["album_id"], []).append(r["track_id"])
     queries: dict[str, object] = {}
     loose: list[str] = []
@@ -2798,8 +2711,8 @@ def _session_segments(session_id: str) -> tuple[list, int]:
     segments: list[tuple[str, list]] = []
     missing = 0
     for r in rows:
-        if r["media_file_id"] is not None:
-            _push_segment(segments, "owned", [{"id": r["media_file_id"]}])
+        if r["file_id"] is not None:
+            _push_segment(segments, "owned", [{"id": r["file_id"], "location": r["location"]}])
         elif r["track_id"] in queries:
             _push_segment(segments, "phantom", [queries[r["track_id"]]])
         else:
@@ -2890,11 +2803,14 @@ def play_similar(req: PlaySimilarRequest):
             status_code=404,
             detail="No similar tracks found — the seed may not be analysed yet.")
 
-    queries = _phantom_track_queries([r["track_id"] for r in rows if not r["is_owned"]])
+    # a copy the ACTIVE output opens itself (a local file, or one held at the
+    # HQPlayer that is the output) queues as owned; anything else streams
+    native = [bool(r["is_owned"] and r["playable"]) for r in rows]
+    queries = _phantom_track_queries([r["track_id"] for r, n in zip(rows, native) if not n])
     segments: list[tuple[str, list]] = []
-    for r in rows:
-        if r["is_owned"]:
-            _push_segment(segments, "owned", [{"id": r["media_file_id"]}])
+    for r, n in zip(rows, native):
+        if n:
+            _push_segment(segments, "owned", [{"id": r["file_id"], "location": r["location"]}])
         elif r["track_id"] in queries:
             _push_segment(segments, "phantom", [queries[r["track_id"]]])
     if not segments:
@@ -3106,6 +3022,11 @@ def _radio_build_batch(seed_uuid: str, gen: int) -> list:
     from streaming.base import TrackQuery
 
     rows = _radio_similar(seed_uuid, _radio_played, _RADIO_BATCH_SIZE * 3)
+    # "owned" here means the ACTIVE output opens the copy itself (a local
+    # file, or one held at the HQPlayer that is the output); a track whose
+    # only copy sits at another HQPlayer streams like a phantom
+    for r in rows:
+        r["is_owned"] = bool(r["is_owned"] and r["playable"])
     owned = [r for r in rows if r["is_owned"]]
     phantom = [r for r in rows if not r["is_owned"]]
     proxy = streaming_service.get_proxy() if streaming_service.is_enabled() else None
@@ -3136,8 +3057,7 @@ def _radio_build_batch(seed_uuid: str, gen: int) -> list:
     batch = []
     for i, r in enumerate(batch_rows):
         if r["is_owned"]:
-            batch.append({"kind": "owned", "media_file_id": r["media_file_id"],
-                          "file_path": r["file_path"], "file_format": r["file_format"],
+            batch.append({"kind": "owned", "file_id": r["file_id"], "location": r["location"],
                           "track_uuid": r["track_id"], "artist": r["artist"]})
         elif i in pos_token:
             batch.append({"kind": "phantom", "token": pos_token[i],
@@ -3169,7 +3089,7 @@ def _radio_append_batch(batch: list, gen: int) -> None:
                 continue
             item = queue_mod.item_for_proxy_token(entry["token"])
         else:
-            owned = queue_mod.items_for_media_ids([entry["media_file_id"]])
+            owned = queue_mod.items_for_owned_rows([{"id": entry["file_id"], "location": entry["location"]}])
             item = owned[0] if owned else None
         if item is None:
             continue

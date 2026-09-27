@@ -304,7 +304,7 @@ def _compute_session_card(cur, active: dict,
     first = snapshot[0] if snapshot else (None, None, None)
 
     if origin == "album" and active["origin_album_id"]:
-        # Source-agnostic primary artist: owned via media_files, phantom via the
+        # Source-agnostic primary artist: owned via owned_files, phantom via the
         # canonical album_tracks list (COALESCE picks whichever the album has).
         cur.execute("""
             SELECT al.title,
@@ -312,7 +312,7 @@ def _compute_session_card(cur, active: dict,
                      (SELECT a.name FROM artists a
                       JOIN track_artists ta ON ta.artist_id = a.id AND ta.role = 'primary'
                       JOIN tracks t ON t.id = ta.track_id
-                      JOIN media_files mf ON mf.track_id = t.id
+                      JOIN owned_files mf ON mf.track_id = t.id
                       JOIN album_variants av ON av.id = mf.album_variant_id
                       WHERE av.album_id = al.id
                       GROUP BY a.id, a.name ORDER BY COUNT(*) DESC LIMIT 1),
@@ -471,7 +471,7 @@ def rebuild_imported_sessions(cur, touched=None) -> int:
                        ARRAY(SELECT at.album_id::text FROM album_tracks at
                               WHERE at.track_id = lh.track_id
                              UNION
-                             SELECT av.album_id::text FROM media_files mf
+                             SELECT av.album_id::text FROM owned_files mf
                                JOIN album_variants av ON av.id = mf.album_variant_id
                               WHERE mf.track_id = lh.track_id) AS albums
                   FROM listening_history lh

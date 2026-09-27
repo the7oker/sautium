@@ -39,7 +39,7 @@ def get_release_group(group_id: str) -> dict:
                (SELECT av.release_mbid::text FROM album_variants av
                 WHERE av.album_id = al.id AND av.release_mbid IS NOT NULL LIMIT 1) AS release_mbid,
                (SELECT count(DISTINCT mf.track_id)
-                FROM album_variants av JOIN media_files mf ON mf.album_variant_id = av.id
+                FROM album_variants av JOIN owned_files mf ON mf.album_variant_id = av.id
                 WHERE av.album_id = al.id) AS track_count,
                (SELECT mf.cover_id::text
                 FROM media_files mf JOIN album_variants av ON av.id = mf.album_variant_id
@@ -69,7 +69,7 @@ def get_release_group(group_id: str) -> dict:
         SELECT a.id::text AS id, a.name
         FROM artists a
         JOIN track_artists ta ON ta.artist_id = a.id AND ta.role = 'primary'
-        JOIN media_files mf ON mf.track_id = ta.track_id
+        JOIN owned_files mf ON mf.track_id = ta.track_id
         JOIN album_variants av ON av.id = mf.album_variant_id
         WHERE av.album_id = %(id)s::uuid
         GROUP BY a.id, a.name
