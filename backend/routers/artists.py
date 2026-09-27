@@ -364,6 +364,14 @@ def get_artist(
                al.musicbrainz_id::text AS musicbrainz_id,
                al.release_year AS year,
                al.created_at AS added_at,
+               -- where the album's files are: a copy only the HQPlayer's
+               -- library holds wears a badge on its tile
+               CASE WHEN bool_or(av.location = 'local') THEN 'local' ELSE 'hqplayer' END AS location,
+               -- the external cover only where no file here carries one
+               CASE WHEN NOT EXISTS (SELECT 1 FROM media_files mfc
+                                     JOIN album_variants avc ON avc.id = mfc.album_variant_id
+                                     WHERE avc.album_id = al.id AND mfc.cover_id IS NOT NULL)
+                    THEN al.cover_url END AS cover_url,
                (SELECT mf.cover_id::text
                 FROM media_files mf
                 JOIN album_variants av ON av.id = mf.album_variant_id
@@ -389,21 +397,21 @@ def get_artist(
                m.popularity
         FROM albums al
         JOIN album_variants av ON av.album_id = al.id
-        JOIN media_files mf ON mf.album_variant_id = av.id
+        JOIN owned_files mf ON mf.album_variant_id = av.id
         JOIN tracks t ON t.id = mf.track_id
         JOIN track_artists ta ON ta.track_id = t.id
         JOIN metrics m ON m.album_id = al.id
         WHERE al.id IN (
             SELECT DISTINCT av2.album_id
             FROM album_variants av2
-            JOIN media_files mf2 ON mf2.album_variant_id = av2.id
+            JOIN owned_files mf2 ON mf2.album_variant_id = av2.id
             JOIN tracks t2 ON t2.id = mf2.track_id
             JOIN track_artists ta2 ON ta2.track_id = t2.id
             WHERE ta2.artist_id = %(id)s::uuid
         )
         {album_filter_al}
         GROUP BY al.id, al.title, al.musicbrainz_id, al.release_year, al.created_at,
-                 m.time_listened_seconds, m.popularity
+                 al.cover_url, m.time_listened_seconds, m.popularity
         ORDER BY role_priority, {sort_expr}
     """, {"id": artist_id, "album_ids": album_ids})
 

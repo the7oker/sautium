@@ -3197,9 +3197,12 @@
     const sim = (similarity != null)
       ? `<div class="album-similarity">${similarity.toFixed(2)}</div>`
       : '';
+    // The album's files live only in the HQPlayer's library (no bytes here).
+    const held = item.location === 'hqplayer'
+      ? '<span class="album-tile-feat album-tile-held">HQPlayer</span>' : '';
     tile.innerHTML = `
       <div class="album-cover" style="--cover-bg-1: ${c.bg1}; --cover-bg-2: ${c.bg2};">
-        ${cover}
+        ${cover}${held}
       </div>
       <div class="album-title">${escapeHtml(title || '')}</div>
       <div class="album-artist">${escapeHtml(artist || '')}</div>
@@ -5116,6 +5119,9 @@
       // so the discography is honest without splitting into sections.
       const featBadge = a.is_primary === false
         ? '<span class="album-tile-feat">feat.</span>' : '';
+      // The album's files live only in the HQPlayer's library (no bytes here).
+      const heldBadge = a.location === 'hqplayer'
+        ? '<span class="album-tile-feat album-tile-held">HQPlayer</span>' : '';
       // Multi-edition release group — one tile, tapping opens the editions screen.
       const editionsBadge = (a.edition_count > 1)
         ? `<span class="album-tile-editions">${a.edition_count}</span>` : '';
@@ -5134,7 +5140,7 @@
                 data-group-id="${escapeHtml(a.group_id || a.id)}"
                 data-edition-count="${a.edition_count || 1}">
           <div class="album-cover"
-               style="--cover-bg-1: ${c.bg1}; --cover-bg-2: ${c.bg2};">${inner}${featBadge}${editionsBadge}</div>
+               style="--cover-bg-1: ${c.bg1}; --cover-bg-2: ${c.bg2};">${inner}${featBadge}${heldBadge}${editionsBadge}</div>
           <div class="album-tile-title">${escapeHtml(a.title || '')}</div>
           <div class="album-tile-year${hasMetric ? '' : ' unavailable'}">${metricLine}</div>
         </button>`;

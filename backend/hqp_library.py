@@ -222,6 +222,17 @@ def sync(host: str, port: int, *, force: bool = False,
     if new:
         import_metadata(new, sink=FileSink("hqplayer", host, port), stats=stats,
                         progress_cb=progress_cb, cancel_check=cancel_check)
+        # A copy that just arrived is new in the collection: the Home feed
+        # sorts variants by file_modified_at, which media_files' triggers keep
+        # for local rips and nothing keeps for a copy — the moment the node
+        # first saw it stands in.
+        db_execute("""
+            UPDATE album_variants av
+               SET file_modified_at = (SELECT MIN(f.first_seen_at) FROM hqp_library_files f
+                                       WHERE f.album_variant_id = av.id)
+             WHERE av.location = 'hqplayer' AND av.file_modified_at IS NULL
+               AND av.hqp_endpoint_host = %(h)s AND av.hqp_endpoint_port = %(p)s
+        """, {"h": host, "p": port})
     if cancel_check and cancel_check():
         stats["cancelled"] = True
         return stats
@@ -282,6 +293,33 @@ def _forget(db, gone: List[int], since: Optional[datetime] = None) -> Dict[str, 
               AND NOT EXISTS (SELECT 1 FROM album_artists aa WHERE aa.artist_id = a.id)
         """), {"aids": sorted(set(credited)), "since": since}).rowcount
     return stats
+
+
+def fill_held_album_covers() -> int:
+    """Albums held only in an HQPlayer's library have no bytes here to
+    extract art from: give the ones the canon bound to a release group the
+    Cover Art Archive front, the way a phantom album carries it. Never
+    touches an album with a file cover or an existing url. Returns the
+    number of albums given a cover."""
+    from caa import CAA_FRONT_URL
+    with get_db_context() as db:
+        rows = db.execute(text("""
+            SELECT al.id::text, al.musicbrainz_id::text
+            FROM albums al
+            WHERE al.musicbrainz_id IS NOT NULL AND al.cover_url IS NULL
+              AND EXISTS (SELECT 1 FROM album_variants av
+                          WHERE av.album_id = al.id AND av.location = 'hqplayer')
+              AND NOT EXISTS (SELECT 1 FROM media_files mf
+                              JOIN album_variants av ON av.id = mf.album_variant_id
+                              WHERE av.album_id = al.id AND mf.cover_id IS NOT NULL)
+        """)).fetchall()
+        for album_id, rg in rows:
+            db.execute(text("UPDATE albums SET cover_url = :u WHERE id = :a"),
+                       {"u": CAA_FRONT_URL.format(rg=rg), "a": album_id})
+        db.commit()
+    if rows:
+        logger.info("HQPlayer-held albums given a Cover Art Archive cover: %d", len(rows))
+    return len(rows)
 
 
 def forget_missing(host: str, port: int) -> Dict[str, Any]:
@@ -408,6 +446,7 @@ def _job(host: str, port: int, force: bool, rescan: bool) -> None:
                 if result["added"]:
                     from canon import post_import
                     post_import.run(state, result, started)
+                    result["covers"] = fill_held_album_covers()
                 state["progress"] = (f"Sync complete: {result['added']} added, "
                                      f"{result['known']} already here")
         state["result"] = result

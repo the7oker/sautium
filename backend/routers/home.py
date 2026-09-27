@@ -253,26 +253,43 @@ def get_new_in_library(
             SELECT al.id AS album_id,
                    al.title,
                    al.release_year AS year,
-                   MAX(av.file_modified_at) AS newest_added
+                   al.cover_url,
+                   MAX(av.file_modified_at) AS newest_added,
+                   -- where the album's files are: a copy that only the
+                   -- HQPlayer's library holds wears a badge on its tile
+                   CASE WHEN bool_or(av.location = 'local') THEN 'local' ELSE 'hqplayer' END AS location
             FROM albums al
             JOIN album_variants av ON av.album_id = al.id
-            GROUP BY al.id, al.title, al.release_year
+            GROUP BY al.id, al.title, al.release_year, al.cover_url
         )
         SELECT ak.album_id::text AS id,
                ak.title,
                ak.year,
                ak.newest_added,
+               ak.location,
                ak.album_id AS _album_uuid,
-               (SELECT a.name
-                FROM artists a
-                JOIN track_artists ta ON ta.artist_id = a.id AND ta.role = 'primary'
-                JOIN tracks t ON t.id = ta.track_id
-                JOIN media_files mf2 ON mf2.track_id = t.id
-                JOIN album_variants av2 ON av2.id = mf2.album_variant_id
-                WHERE av2.album_id = ak.album_id
-                GROUP BY a.id, a.name
-                ORDER BY COUNT(*) DESC
-                LIMIT 1) AS artist,
+               COALESCE(
+                (SELECT a.name
+                 FROM artists a
+                 JOIN track_artists ta ON ta.artist_id = a.id AND ta.role = 'primary'
+                 JOIN tracks t ON t.id = ta.track_id
+                 JOIN owned_files f2 ON f2.track_id = t.id
+                 JOIN album_variants av2 ON av2.id = f2.album_variant_id
+                 WHERE av2.album_id = ak.album_id
+                 GROUP BY a.id, a.name
+                 ORDER BY COUNT(*) DESC
+                 LIMIT 1),
+                (SELECT a.name
+                 FROM artists a
+                 JOIN album_artists aa ON aa.artist_id = a.id AND aa.role = 'primary'
+                 WHERE aa.album_id = ak.album_id
+                 ORDER BY a.name
+                 LIMIT 1)) AS artist,
+               -- the external cover only where no file here carries one
+               (SELECT CASE WHEN NOT EXISTS (SELECT 1 FROM media_files mfc
+                                             JOIN album_variants avc ON avc.id = mfc.album_variant_id
+                                             WHERE avc.album_id = ak.album_id AND mfc.cover_id IS NOT NULL)
+                            THEN ak.cover_url END) AS cover_url,
                (SELECT mf3.cover_id::text
                 FROM media_files mf3
                 JOIN album_variants av3 ON av3.id = mf3.album_variant_id

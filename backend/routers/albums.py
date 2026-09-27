@@ -299,7 +299,14 @@ def get_album(
                 WHERE av2.album_id = al.id
                   AND (%(vid)s::int IS NULL OR av2.id = %(vid)s::int)
                 ORDER BY mf2.disc_number, mf2.track_number
-                LIMIT 1) AS media_file_id
+                LIMIT 1) AS media_file_id,
+               -- The external cover (Cover Art Archive, by release group) only
+               -- where no file here carries one: an album held only in the
+               -- HQPlayer's library has no bytes to extract art from.
+               CASE WHEN NOT EXISTS (SELECT 1 FROM media_files mf3
+                                     JOIN album_variants av3 ON av3.id = mf3.album_variant_id
+                                     WHERE av3.album_id = al.id AND mf3.cover_id IS NOT NULL)
+                    THEN al.cover_url END AS cover_url
         FROM albums al
         WHERE al.id = %(id)s::uuid
     """, params)
