@@ -625,7 +625,7 @@ def pending_slice_names(conn, limit: int = 200) -> list:
                 FROM artists ar
                 WHERE EXISTS (
                     SELECT 1 FROM track_artists ta
-                    JOIN media_files mf ON mf.track_id = ta.track_id
+                    JOIN owned_files mf ON mf.track_id = ta.track_id
                     WHERE ta.artist_id = ar.id AND ta.role = 'primary'
                       AND (ar.last_mb_sync IS NULL OR mf.created_at > ar.last_mb_sync))
                 UNION ALL
@@ -642,7 +642,7 @@ def pending_slice_names(conn, limit: int = 200) -> list:
                 WHERE a.last_album_sync IS NULL
                   AND EXISTS (SELECT 1 FROM artist_mbids am WHERE am.artist_id = a.id)
                   AND NOT EXISTS (SELECT 1 FROM track_artists ta
-                                  JOIN media_files mf ON mf.track_id = ta.track_id
+                                  JOIN owned_files mf ON mf.track_id = ta.track_id
                                   WHERE ta.artist_id = a.id)
                 UNION ALL
                 SELECT a.name,

@@ -407,26 +407,28 @@ def _fetch_lyrics_batch(
     stats = {"processed": 0, "found": 0, "not_found": 0, "errors": 0}
 
     with get_db_context() as db:
-        # Driven from media_files (is_analysis_source) — the OWNED set (~37k),
-        # NOT the tracks table, which now holds millions of trackless phantom
-        # rows from missing-album discovery. Walking tracks by title (the old
-        # ORDER BY) scanned all 2.7M to find 50 owned ones missing lyrics — the
-        # recurring multi-hour runaway query. No ORDER BY: an enrichment batch
-        # only needs to make progress; a processed track gains a lyrics row or
-        # a 'not_found' marker and drops out of the next batch.
+        # Driven from owned_files — the OWNED set (~37k; a track held at an
+        # HQPlayer included, the lookup needs no bytes), NOT the tracks table,
+        # which now holds millions of trackless phantom rows from missing-album
+        # discovery. Walking tracks by title (the old ORDER BY) scanned all
+        # 2.7M to find 50 owned ones missing lyrics — the recurring multi-hour
+        # runaway query. DISTINCT ON folds a track's several files (CUE
+        # slices, duplicate rips, the copy at the HQPlayer) to one row, a
+        # file here first; a processed track gains a lyrics row or a
+        # 'not_found' marker and drops out of the next batch.
         query_sql = """
-            SELECT t.id as track_id, t.title,
+            SELECT DISTINCT ON (t.id)
+                   t.id as track_id, t.title,
                    a.name as artist,
                    al.title as album,
                    mf.duration_seconds
-            FROM media_files mf
+            FROM owned_files mf
             JOIN tracks t ON t.id = mf.track_id
             JOIN track_artists ta ON ta.track_id = t.id AND ta.role = 'primary'
             JOIN artists a ON a.id = ta.artist_id
             JOIN album_variants av ON av.id = mf.album_variant_id
             JOIN albums al ON al.id = av.album_id
-            WHERE mf.is_analysis_source = true
-            AND NOT EXISTS (
+            WHERE NOT EXISTS (
                 SELECT 1 FROM track_lyrics tl WHERE tl.track_id = t.id
             )
             AND NOT EXISTS (
@@ -437,6 +439,7 @@ def _fetch_lyrics_batch(
                 AND em.metadata_type = 'lyrics'
                 AND em.fetch_status = 'not_found'
             )
+            ORDER BY t.id, (mf.location = 'local') DESC
         """
         if limit:
             query_sql += f" LIMIT {int(limit)}"

@@ -92,18 +92,29 @@ _D_DUE_SQL = """(n.checked_at IS NULL OR n.checked_at < n.touched_at
 _SPECIAL = re.compile(r"^\[.*\]$")
 _VARIOUS = frozenset({"various artists", "various", "va", "various artist"})
 
-# A track this node holds, with its lengths: the best rip's, or each slot's.
+# A track this node holds, with its lengths: the best rip's (a file here
+# first — its id rides the listen; a copy held at an HQPlayer lends its
+# length and no id), or each slot's.
 _TRACK_LENGTHS_SQL = f"""
     SELECT t.id::text AS track_id, f.id AS media_file_id, f.duration_seconds,
            at.length_ms, al.title AS album_title
       FROM tracks t
-      LEFT JOIN LATERAL (SELECT mf.id, mf.duration_seconds FROM media_files mf
-                          WHERE mf.track_id = t.id AND mf.duration_seconds > 0
-                          ORDER BY {best_rip_order('mf')} LIMIT 1) f ON TRUE
+      LEFT JOIN LATERAL (
+          SELECT x.id, x.duration_seconds FROM (
+              SELECT mf.id, mf.duration_seconds, mf.is_lossless, mf.sample_rate,
+                     mf.bit_depth, 0 AS held
+                FROM media_files mf
+               WHERE mf.track_id = t.id AND mf.duration_seconds > 0
+              UNION ALL
+              SELECT NULL::int, hf.duration_seconds, hf.is_lossless, hf.sample_rate,
+                     hf.bit_depth, 1
+                FROM hqp_library_files hf
+               WHERE hf.track_id = t.id AND hf.duration_seconds > 0) x
+           ORDER BY x.held, {best_rip_order('x')} LIMIT 1) f ON TRUE
       LEFT JOIN album_tracks at ON at.track_id = t.id AND at.length_ms > 0
       LEFT JOIN albums al ON al.id = at.album_id
      WHERE t.id = ANY(CAST(%(ids)s AS uuid[]))
-       AND (f.id IS NOT NULL OR at.track_id IS NOT NULL)
+       AND (f.duration_seconds IS NOT NULL OR at.track_id IS NOT NULL)
 """
 
 Row = Dict[str, Any]
@@ -570,7 +581,7 @@ def _local_tracks(cur, recordings: List[str]) -> Dict[str, List[str]]:
         SELECT recording_mbid::text AS rec, track_id::text AS track_id FROM track_mbids
          WHERE recording_mbid = ANY(CAST(%(r)s AS uuid[]))
         UNION
-        SELECT recording_mbid::text, track_id::text FROM media_files
+        SELECT recording_mbid::text, track_id::text FROM owned_files
          WHERE recording_mbid = ANY(CAST(%(r)s AS uuid[]))
         UNION
         SELECT recording_mbid::text, track_id::text FROM album_tracks
@@ -843,7 +854,7 @@ def evaluate(limit: int = 300, titles: Optional[int] = None) -> Row:
             SELECT DISTINCT t.title, al.title AS album
               FROM track_artists ta
               JOIN tracks t ON t.id = ta.track_id
-              JOIN media_files mf ON mf.track_id = t.id
+              JOIN owned_files mf ON mf.track_id = t.id
               JOIN album_variants av ON av.id = mf.album_variant_id
               JOIN albums al ON al.id = av.album_id
              WHERE ta.artist_id = %(a)s::uuid AND ta.role = 'primary'""", {"a": a["id"]})]

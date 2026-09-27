@@ -99,15 +99,16 @@ class TextEmbeddingGenerator:
             FROM tracks t
             JOIN track_artists ta ON t.id = ta.track_id AND ta.role = 'primary'
             JOIN artists a ON ta.artist_id = a.id
-            -- Representative media file for album info
+            -- Representative owned file for album info: a file here first,
+            -- else the copy held at an HQPlayer
             JOIN LATERAL (
                 SELECT al.title as album_title, al.release_year, al.id as album_id,
-                       mf.is_lossless
-                FROM media_files mf
+                       av.is_lossless
+                FROM owned_files mf
                 JOIN album_variants av ON mf.album_variant_id = av.id
                 JOIN albums al ON av.album_id = al.id
                 WHERE mf.track_id = t.id
-                ORDER BY mf.is_analysis_source DESC, mf.id
+                ORDER BY (mf.location = 'local') DESC, mf.created_at
                 LIMIT 1
             ) mf_rep ON true
             -- Aggregated genres (album-grain, via the representative album)
@@ -206,17 +207,18 @@ class TextEmbeddingGenerator:
         start_time = time.time()
 
         # Query tracks to process. Owned tracks only: phantom tracklist
-        # rows (no media_files) have no genre/feature context and must not
-        # occupy the GPU batch.
+        # rows (no owned file) have no genre/feature context and must not
+        # occupy the GPU batch. A track held at an HQPlayer is owned — the
+        # text is metadata, no bytes needed.
         #
-        # Driven FROM media_files — the owned set — never from tracks, the
+        # Driven FROM owned_files — the owned set — never from tracks, the
         # same rule the lyrics planner already carries. tracks now holds
         # millions of trackless phantom rows, so asking it for the owned
         # ~37k walked all of them: 3.4 s per batch against 16 ms (measured).
         # It was survivable while a human pressed a button once; the
         # background loop drains this queue now, and pays it every pass.
-        # GROUP BY collapses the several media_files a track can own (CUE
-        # slices, duplicate rips) back to one row per track.
+        # GROUP BY collapses the several files a track can own (CUE slices,
+        # duplicate rips, a copy at the HQPlayer) back to one row per track.
         where_parts = []
         params: Dict[str, Any] = {}
 
@@ -233,11 +235,11 @@ class TextEmbeddingGenerator:
         where_clause = ("WHERE " + " AND ".join(where_parts)) if where_parts else ""
 
         if order_by_date:
-            order_clause = "ORDER BY MAX(mf.file_modified_at) DESC NULLS LAST"
+            order_clause = "ORDER BY MAX(mf.created_at) DESC NULLS LAST"
         else:
             order_clause = "ORDER BY mf.track_id"
 
-        query_sql = (f"SELECT mf.track_id FROM media_files mf {where_clause} "
+        query_sql = (f"SELECT mf.track_id FROM owned_files mf {where_clause} "
                      f"GROUP BY mf.track_id {order_clause}")
         if limit:
             query_sql += f" LIMIT {limit}"

@@ -224,12 +224,12 @@ def verify_export(path: Path, *, progress: Optional[ProgressFn] = None) -> dict:
 
 _OWNED_ALBUMS = """
     SELECT DISTINCT av.album_id::text AS id
-      FROM album_variants av JOIN media_files mf ON mf.album_variant_id = av.id"""
+      FROM album_variants av JOIN owned_files mf ON mf.album_variant_id = av.id"""
 
 _ENGAGED_ALBUMS = """
     SELECT al.id::text AS id FROM albums al
      WHERE EXISTS (SELECT 1 FROM album_variants av
-                     JOIN media_files mf ON mf.album_variant_id = av.id
+                     JOIN owned_files mf ON mf.album_variant_id = av.id
                     WHERE av.album_id = al.id)
         OR EXISTS (SELECT 1 FROM album_tracks at2
                      JOIN listening_history lh ON lh.track_id = at2.track_id

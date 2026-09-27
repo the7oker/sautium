@@ -756,7 +756,7 @@ class LastFmService:
         # NOT EXISTS(track_artists):
         # phantom artists gained track_artists from materialized phantom
         # tracklists, so track_artists no longer means "in catalog". Without
-        # the media_files join, ~16k phantoms would fetch similars -> blowup.
+        # the owned_files join, ~16k phantoms would fetch similars -> blowup.
         # Deliberately NOT widened to the listened-phantom predicate: the
         # engagement-gated step (backfill_similar, run by background_enrichment)
         # owns that rule as the single choke point, and picks such artists up
