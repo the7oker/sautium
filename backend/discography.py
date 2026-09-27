@@ -69,7 +69,7 @@ _DISQUALIFYING_SECONDARY = {
 # Cover Art Archive front image by release-group MBID, written verbatim into
 # `albums.cover_url`. The CAA image API has no rate limit, so the browser
 # resolves it directly (the tile's onerror hides a 404's broken image).
-from caa import CAA_FRONT_URL as _CAA_FRONT_URL
+from caa import CAA_FRONT_URL as _CAA_FRONT_URL, fill_held_album_covers
 
 # Edition/reissue markers — same album, different packaging; stripped so
 # variants collapse. Deliberately EXCLUDES 'live', 'remix', 'acoustic',
@@ -505,9 +505,10 @@ def _carry_rekeyed_slots(album_id: str, slot_rows: list, slot_artists: dict) -> 
 def _persist_phantom_tracklist(album_id: str, artist_id: str,
                                artist_name: str, rg_mbid: str) -> int:
     """Persist the canonical MB tracklist of one phantom album as
-    tracks + track_artists + album_tracks rows — deliberately NO
-    media_files (that is the owned/phantom discriminator; a later rip
-    collapses onto the same `track_uuid` row and simply gains files).
+    tracks + track_artists + album_tracks rows — deliberately NO files
+    (owned_files is the owned/phantom discriminator; a later rip, or a
+    copy in an HQPlayer's library, collapses onto the same `track_uuid`
+    row and simply gains files).
 
     Each slot is keyed by title + the PRIMARY artist of the track's own
     credit, taken from the catalog's structure: MB keeps a credit as an
@@ -819,14 +820,20 @@ def _reconcile_phantoms(artist_id: str, missing_rgs: List[str]) -> None:
           AND NOT EXISTS (SELECT 1 FROM album_artists aa WHERE aa.album_id = al.id)
     """)
 
+    # The external cover belongs to an album no file here carries art for —
+    # a phantom, or a copy held only in an HQPlayer's library; once a file
+    # with a cover arrives the art comes from it.
     db_execute("""
         UPDATE albums al
         SET cover_url = NULL, updated_at = now()
         WHERE al.cover_url IS NOT NULL
-          AND EXISTS (SELECT 1 FROM album_variants av WHERE av.album_id = al.id)
+          AND EXISTS (SELECT 1 FROM album_variants av
+                      JOIN media_files mf ON mf.album_variant_id = av.id
+                      WHERE av.album_id = al.id AND mf.cover_id IS NOT NULL)
           AND EXISTS (SELECT 1 FROM album_artists aa
                       WHERE aa.album_id = al.id AND aa.artist_id = %(id)s::uuid)
     """, {"id": artist_id})
+    fill_held_album_covers(artist_id)
 
     # Orphan phantom tracks of this artist: their album was GC'd above and
     # nothing else holds them (canon.identity.ORPHAN_TRACK_SQL). A track the
@@ -964,7 +971,7 @@ def sync_artist_discography(artist_id, artist_name: str) -> Dict[str, int]:
         SELECT DISTINCT al.title, al.musicbrainz_id::text AS rg_mbid
         FROM albums al
         JOIN album_variants av ON av.album_id = al.id
-        JOIN media_files mf ON mf.album_variant_id = av.id
+        JOIN owned_files mf ON mf.album_variant_id = av.id
         JOIN track_artists ta ON ta.track_id = mf.track_id
         WHERE ta.artist_id = %(id)s::uuid
     """, {"id": artist_id})

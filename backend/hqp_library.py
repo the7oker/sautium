@@ -295,33 +295,6 @@ def _forget(db, gone: List[int], since: Optional[datetime] = None) -> Dict[str, 
     return stats
 
 
-def fill_held_album_covers() -> int:
-    """Albums held only in an HQPlayer's library have no bytes here to
-    extract art from: give the ones the canon bound to a release group the
-    Cover Art Archive front, the way a phantom album carries it. Never
-    touches an album with a file cover or an existing url. Returns the
-    number of albums given a cover."""
-    from caa import CAA_FRONT_URL
-    with get_db_context() as db:
-        rows = db.execute(text("""
-            SELECT al.id::text, al.musicbrainz_id::text
-            FROM albums al
-            WHERE al.musicbrainz_id IS NOT NULL AND al.cover_url IS NULL
-              AND EXISTS (SELECT 1 FROM album_variants av
-                          WHERE av.album_id = al.id AND av.location = 'hqplayer')
-              AND NOT EXISTS (SELECT 1 FROM media_files mf
-                              JOIN album_variants av ON av.id = mf.album_variant_id
-                              WHERE av.album_id = al.id AND mf.cover_id IS NOT NULL)
-        """)).fetchall()
-        for album_id, rg in rows:
-            db.execute(text("UPDATE albums SET cover_url = :u WHERE id = :a"),
-                       {"u": CAA_FRONT_URL.format(rg=rg), "a": album_id})
-        db.commit()
-    if rows:
-        logger.info("HQPlayer-held albums given a Cover Art Archive cover: %d", len(rows))
-    return len(rows)
-
-
 def forget_missing(host: str, port: int) -> Dict[str, Any]:
     """The explicit rescan: rows the library no longer lists go (see
     _forget). An empty answer is refused the way the scanner refuses an
@@ -446,7 +419,7 @@ def _job(host: str, port: int, force: bool, rescan: bool) -> None:
                 if result["added"]:
                     from canon import post_import
                     post_import.run(state, result, started)
-                    result["covers"] = fill_held_album_covers()
+                    result["covers"] = caa.fill_held_album_covers()
                 state["progress"] = (f"Sync complete: {result['added']} added, "
                                      f"{result['known']} already here")
         state["result"] = result
