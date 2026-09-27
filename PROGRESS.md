@@ -365,8 +365,10 @@ implementation details live in the code, DB and git history.
   protocol, no client change). Media URLs name the address HQPlayer can reach
   us at (`streaming/media_host.py`, shared with DLNA), owned-file tokens are an
   HMAC of the path under the node secret (stable across restarts), the drift
-  canary and adopt read the playlist back through the same rules, and a
-  reconnect of the status socket triggers an immediate playlist read: a
+  canary and adopt read the playlist back through the same rules, and the
+  first status answer after HQPlayer was out of sight (a dropped socket, or
+  failed polls across a power cycle — the case a same-tick socket comparison
+  missed live on 2026-09-27) triggers an immediate playlist read: a
   restarted HQPlayer (trial-mode Embedded stops every 30 min) that lost the
   mirror is re-mirrored by the next play through the play-intent gate. The
   gate's liveness probe asks `GetInfo` — the trial stop keeps the port open

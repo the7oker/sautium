@@ -218,7 +218,10 @@ status is reported as external playback (slot 0) and nothing is tracked
 against the wrong track.
 
 **A restarted HQPlayer re-mirrors on the next play.** The status poller
-detects its reconnect, reads the playlist at once and, when it differs from
+notices HQPlayer coming back — a dropped socket answered on the immediate
+retry, or the first answer after failed polls (a power cycle, a restart that
+takes longer than one poll; that second shape was missed until a live Pi
+reboot on 2026-09-27) — reads the playlist at once and, when it differs from
 the queue, marks the mirror lost; the play-intent gate then re-attaches the
 backend, which mirrors the queue afresh. An HQPlayer Embedded in trial mode
 stops every 30 minutes and must be restarted — its control port stays open

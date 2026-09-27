@@ -510,6 +510,11 @@ class HqpBackend(PlayerBackend):
         # trial-mode Embedded stops every 30 minutes) and lost the mirror —
         # so the play-intent gate re-attaches and re-mirrors before playing.
         self._mirror_lost = False
+        # Lost sight of HQPlayer (a dropped socket, failed polls): its
+        # playlist is read on the first answer, and the flag stays raised
+        # until that read succeeds, so one failed PlaylistGet right after a
+        # restart cannot let an empty playlist pass as an external edit.
+        self._verify_mirror = False
         self._gone = False
         # The proxy address HQPlayer reaches, fixed per attach: a DNS + route
         # lookup once, not per queued item.
@@ -655,13 +660,21 @@ class HqpBackend(PlayerBackend):
                         _reset_hqp_status()
                         hqp = _get_hqp_status()
                         status = hqp.get_status()
-                    # A new socket where one already existed = HQPlayer went
-                    # away and came back. Its playlist is read NOW, not at
-                    # the next canary tick: a restart drops the mirror, and
-                    # the play press must know before it lands on an empty
-                    # list.
-                    reconnected = before is not None and hqp is not before
-                    if status is not None and (reconnected
+                    # HQPlayer went away and came back: the socket was
+                    # replaced within this tick (it dropped the connection
+                    # and answered the immediate retry), or this is the
+                    # first answer after failed ticks — it was gone for
+                    # longer than one poll (a power cycle, a trial restart
+                    # taking its time), and those ticks had already reset
+                    # the client, so the socket comparison alone saw
+                    # nothing and the empty playlist passed as an external
+                    # edit (live, 2026-09-27). Its playlist is read NOW,
+                    # not at the next canary tick: a restart drops the
+                    # mirror, and the play press must know before it lands
+                    # on an empty list.
+                    if (before is not None and hqp is not before) or self._failures > 0:
+                        self._verify_mirror = True
+                    if status is not None and (self._verify_mirror
                                                or tick % DRIFT_CHECK_EVERY == 0):
                         try:
                             hqp_playlist = hqp.get_playlist()
@@ -675,11 +688,12 @@ class HqpBackend(PlayerBackend):
                 else:
                     self._failures = 0
                     if hqp_playlist is not None:
-                        if self._check_drift(hqp_playlist) and reconnected:
+                        if self._check_drift(hqp_playlist) and self._verify_mirror:
                             self._mirror_lost = True
                             logger.warning("HQPlayer came back with a different "
                                            "playlist (restarted?) — the queue is "
                                            "re-mirrored on the next play")
+                        self._verify_mirror = False
                     self._emit(self._status_of(status))
             except Exception:
                 self._register_failure()

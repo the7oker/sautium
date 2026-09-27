@@ -32,6 +32,12 @@ _CMD_RE = re.compile(r'<(\w+)((?:\s+[\w:]+="[^"]*")*)\s*/>')
 _ATTR_RE = re.compile(r'([\w:]+)="([^"]*)"')
 
 
+class _ReusableServer(socketserver.ThreadingTCPServer):
+    # come_back() rebinds the port the box listened on before it went down.
+    allow_reuse_address = True
+    daemon_threads = True
+
+
 class FakeHqp:
     """HQPlayer's control port as hqplayer_client speaks it: one XML element
     per command with NO newline after it, one line back per command."""
@@ -70,8 +76,12 @@ class FakeHqp:
                         last = m.end()
                     buf = buf[last:]
 
-        self._srv = socketserver.ThreadingTCPServer(("127.0.0.1", 0), Handler)
-        self._srv.daemon_threads = True
+        self._handler = Handler
+        self.port = 0
+        self._serve()
+
+    def _serve(self) -> None:
+        self._srv = _ReusableServer(("127.0.0.1", self.port), self._handler)
         self.port = self._srv.server_address[1]
         threading.Thread(target=self._srv.serve_forever, daemon=True).start()
 
@@ -141,9 +151,14 @@ class FakeHqp:
             c.close()
 
     def close(self) -> None:
+        """Powered off: every connection dropped, the port refuses."""
         self.restart()
         self._srv.shutdown()
         self._srv.server_close()
+
+    def come_back(self) -> None:
+        """Booted again on the same port — playlist and transport empty."""
+        self._serve()
 
 
 @pytest.fixture
@@ -307,6 +322,40 @@ def test_restart_loses_the_mirror_and_the_play_intent_remirrors(fake, monkeypatc
 
     fake.restart()
     assert _wait(lambda: not b.healthy(), timeout=12.0), "reconnect never flagged the lost mirror"
+    assert fake.playlist == []
+
+    from routers import settings as settings_router
+    prefs = {"output.type": "hqplayer"}
+    monkeypatch.setattr(settings_router, "_read", lambda key: prefs.get(key))
+    live = mgr.ensure_active()
+    try:
+        assert live is not b and live.healthy()
+        assert fake.playlist == ["file:///E:/Music/A/01.flac", "file:///E:/Music/A/02.flac"]
+    finally:
+        live.shutdown()
+
+
+def test_a_return_after_a_long_outage_also_loses_the_mirror(fake, monkeypatch):
+    """The Pi was power-cycled for half a minute (live, 2026-09-27): the
+    failed polls had already reset the status client, so a same-tick socket
+    comparison saw no reconnect, the empty playlist passed as an external
+    edit and Play landed on nothing."""
+    mgr = PlaybackManager()
+    mgr.queue.replace([_item("E:/Music/A/01.flac", 1), _item("E:/Music/A/02.flac", 2)])
+    b = _attach(mgr)
+    assert len(fake.playlist) == 2
+
+    fake.close()
+    # Not merely a failed tick: the first one only finds the socket dead and
+    # keeps the client object, which a same-tick socket comparison still
+    # catches on the return. The shape that fooled it live is a failed
+    # CONNECT — the client reset to None while HQPlayer stays away.
+    assert _wait(lambda: b._failures >= 1 and hb._hqp_status_client is None,
+                 timeout=15.0), "the outage never reset the status client"
+    fake.come_back()
+    hb._hqp_unreachable_until = 0.0      # the breaker's wall clock is not under test
+    b.poke()
+    assert _wait(lambda: not b.healthy(), timeout=15.0), "the return never flagged the lost mirror"
     assert fake.playlist == []
 
     from routers import settings as settings_router
