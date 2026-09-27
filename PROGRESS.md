@@ -400,6 +400,15 @@ implementation details live in the code, DB and git history.
   1.0 and would have folded a single into an album). The scanner never
   stamped `raw_title` (only the 2026-06 folder-album migration had) —
   fixed at variant creation, HQP variants re-stamped by the sync.
+  The next layer down (2026-09-28): a folded album showed one song as
+  three rows — "Eyesdown (feat. Adreya Triana)" / "ft. Andreya Triana" /
+  "Eyesdown" — because the track uuid is the title as tagged;
+  `fold_credit_duplicates` merges rows of one album that differ by a
+  featuring credit when they never share a variant and a file of each
+  sits at the same slot or length (19 merged, 13 vetoed as real duets and
+  remixes, 3 left unproven on the master). Identity itself stays the
+  tagged title: folding the credit into `normalize` is a network-wide
+  identity migration, not a canon pass.
   Lesson: the first import of an
   endpoint is a previewed decision — a tap on the Desktop endpoint imported
   21k files of the same library as copies before it was cancelled and

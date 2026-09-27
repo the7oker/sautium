@@ -31,7 +31,7 @@ from database import SessionLocal
 from db_pool import db_execute, db_query, get_conn
 from discography import release_match_key, title_residual
 from canon.match import _candidates, _exact_mbids, match_whole_gids, _name_exact_gids
-from canon.identity import _update_album_uuid, recanonicalize_album_variants, recanonicalize_artist
+from canon.identity import _update_album_uuid, _update_track_uuid, recanonicalize_album_variants, recanonicalize_artist
 from canon.split import normalize_compound_artist
 from release_groups import release_group_cluster, simplify_edition_name
 from uuid_utils import album_uuid, artist_uuid, normalize
@@ -755,12 +755,117 @@ def _disc_base(raw_title: str) -> str:
 # MB titles the track "Eyesdown" and credits the guest on the artist. The
 # edition fingerprint compares titles without it, or two rips of one album
 # read as different tracklists (a title Jaccard of 0.47 for Migration).
-_FEAT_RE = re.compile(r"(?<=\S)\s*[\(\[]?\s*(?:feat\.?|ft\.?|featuring)\s+[^\)\]]*[\)\]]?\s*$",
-                      re.IGNORECASE)
+# One pattern for Python and PostgreSQL (both read the lookbehind).
+_FEAT_PATTERN = r"(?<=\S)\s*[\(\[]?\s*(?:feat\.?|ft\.?|featuring)\s+[^\)\]]*[\)\]]?\s*$"
+_FEAT_RE = re.compile(_FEAT_PATTERN, re.IGNORECASE)
 
 
 def _title_key(title: str) -> str:
     return _FEAT_RE.sub("", title or "").strip().lower()
+
+
+# Two files of one track read from two copies: the same slot, or the same
+# length give or take a lead-in.
+_CREDIT_LENGTH_TOLERANCE = 3.0
+
+
+def fold_credit_duplicates(dry_run: bool = True, artist_ids: list = None) -> dict:
+    """Two owned track rows of one album whose titles differ only by a
+    featuring credit — "Eyesdown (feat. Andreya Triana)" / "Eyesdown ft.
+    Andreya Triana" / "Eyesdown", the tagger's habit MB keeps off the title
+    — are one track read from two copies of the album (a rip here and the
+    HQPlayer's reading of another, 2026-09-28): fold them into one row.
+    _update_track_uuid moves the loser's files, listens, analysis and
+    slots. Evidence: the rows never share a variant (a folder holding
+    "X (feat. A)" and "X (feat. B)" holds two tracks), and a file of each
+    sits at the same slot or within a few seconds of length — a guest
+    version of a different length stays its own track. Keeper: a row with
+    a file here, else one bound to a recording, else the older. Per-album
+    commit; artist_ids scopes to those primary artists."""
+    st = {"groups": 0, "merged": 0, "vetoed": 0, "unproven": 0}
+    scope = ""
+    params: dict = {"pat": _FEAT_PATTERN, "tol": _CREDIT_LENGTH_TOLERANCE}
+    if artist_ids is not None:
+        if not artist_ids:
+            return st
+        scope = """WHERE av.album_id IN (SELECT aa.album_id FROM album_artists aa
+                                      WHERE aa.role = 'primary' AND aa.artist_id::text = ANY(%(ids)s))"""
+        params["ids"] = [str(a) for a in artist_ids]
+    rows = db_query(f"""
+        WITH f AS (
+            SELECT av.album_id::text AS album_id, av.id AS variant_id, x.track_id::text AS track_id,
+                   x.duration_seconds, x.disc_number, x.track_number, x.location
+            FROM (SELECT track_id, album_variant_id, duration_seconds, disc_number, track_number,
+                         'local'::text AS location FROM media_files
+                  UNION ALL
+                  SELECT track_id, album_variant_id, duration_seconds, disc_number, track_number,
+                         'hqplayer' FROM hqp_library_files) x
+            JOIN album_variants av ON av.id = x.album_variant_id
+            {scope}
+        ),
+        k AS (
+            SELECT f.*, t.title, t.created_at,
+                   regexp_replace(lower(btrim(t.title)), %(pat)s, '') AS key,
+                   EXISTS (SELECT 1 FROM track_mbids tm WHERE tm.track_id = f.track_id::uuid) AS bound
+            FROM f JOIN tracks t ON t.id = f.track_id::uuid
+        ),
+        g AS (SELECT album_id, key FROM k GROUP BY album_id, key HAVING count(DISTINCT track_id) > 1)
+        SELECT k.* FROM k JOIN g USING (album_id, key)
+        ORDER BY k.album_id, k.key, k.created_at, k.track_id
+    """, params)
+    groups: dict = {}
+    for r in rows:
+        groups.setdefault((r["album_id"], r["key"]), []).append(r)
+    db = SessionLocal()
+    try:
+        for (album_id, key), files in groups.items():
+            st["groups"] += 1
+            per_variant: dict = {}
+            for r in files:
+                per_variant.setdefault(r["variant_id"], set()).add(r["track_id"])
+            if any(len(s) > 1 for s in per_variant.values()):
+                st["vetoed"] += 1
+                continue
+            tracks: dict = {}
+            for r in files:
+                tracks.setdefault(r["track_id"], []).append(r)
+            def rank(tid):
+                fs = tracks[tid]
+                return (any(r["location"] == "local" for r in fs), fs[0]["bound"],
+                        -fs[0]["created_at"].timestamp(), tid)
+            keeper = max(tracks, key=rank)
+            for loser, lfiles in tracks.items():
+                if loser == keeper:
+                    continue
+                proven = any(
+                    (kf["disc_number"], kf["track_number"]) == (lf["disc_number"], lf["track_number"])
+                    and kf["track_number"] is not None
+                    or (kf["duration_seconds"] and lf["duration_seconds"]
+                        and abs(float(kf["duration_seconds"]) - float(lf["duration_seconds"]))
+                        <= _CREDIT_LENGTH_TOLERANCE)
+                    for kf in tracks[keeper] for lf in lfiles)
+                if not proven:
+                    st["unproven"] += 1
+                    logger.info("credit fold unproven on album %s: %r vs %r", album_id,
+                                lfiles[0]["title"], tracks[keeper][0]["title"])
+                    continue
+                st["merged"] += 1
+                if dry_run:
+                    logger.info("[dry] track %s %r -> fold into %s %r (album %s)", loser,
+                                lfiles[0]["title"], keeper, tracks[keeper][0]["title"], album_id)
+                    continue
+                logger.info("track %s %r folded into %s %r (album %s)", loser, lfiles[0]["title"],
+                            keeper, tracks[keeper][0]["title"], album_id)
+                try:
+                    _update_track_uuid(db, loser, keeper)
+                    db.commit()
+                except Exception as e:
+                    db.rollback()
+                    st["merged"] -= 1
+                    logger.error("credit fold failed for track %s: %s", loser, e)
+    finally:
+        db.close()
+    return st
 
 
 def _variant_fingerprints(album_id: str) -> list:
@@ -1692,6 +1797,7 @@ def canonicalize_pending(limit: int = None) -> dict:
             logger.error("canon failed for %r: %s", aname, e)
     if done:
         apply_editions(dry_run=False, artist_ids=done)   # scoped edition split + RG rename
+        fold_credit_duplicates(dry_run=False, artist_ids=done)   # one track read from two copies
         # watermark BEFORE merge: rename leaves artist ids intact, merge re-ids the rare
         # collision survivors (they simply re-canon next scan — idempotent, cheap)
         db_execute("UPDATE artists SET last_mb_sync = now() WHERE id::text = ANY(%(ids)s)",

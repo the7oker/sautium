@@ -174,3 +174,50 @@ def test_sync_lands_on_the_local_scan_and_is_idempotent(db, monkeypatch):
     monkeypatch.setattr(hqp_library, "fetch_library", lambda h, p: EMPTY)
     assert hqp_library.forget_missing(*PI)["refused"] is True
     assert _one(db, "SELECT count(*) FROM hqp_library_files") == 2
+
+
+CREDITS = """<?xml version="1.0" encoding="utf-8"?><LibraryGet>\
+<LibraryDirectory album="Black Sands" artist="Bonobo" bitrate="1411" bits="16" channels="2" date="2010" \
+genre="Downtempo" hash="d3" path="/media/FLASH/Bonobo/Black Sands" rate="44100">\
+<LibraryFile hash="f5" length="327" name="04 - Eyesdown ft. Andreya Triana.flac" number="4" song="Eyesdown ft. Andreya Triana"/>\
+<LibraryFile hash="f6" length="236" name="03 - Kong.flac" number="3" song="Kong"/>\
+</LibraryDirectory>\
+<LibraryDirectory album="Duets" artist="Andrea Bocelli" bitrate="1411" bits="16" channels="2" date="2017" \
+genre="Classical" hash="d4" path="/media/FLASH/Bocelli/Duets" rate="44100">\
+<LibraryFile hash="f7" length="240" name="06 - Canto (feat. Lauren).flac" number="6" song="Canto della terra (feat. Lauren Daigle)"/>\
+<LibraryFile hash="f8" length="242" name="20 - Canto (feat. A-Lin).flac" number="20" song="Canto della terra (feat. A-Lin)"/>\
+</LibraryDirectory></LibraryGet>
+"""
+
+
+def test_credit_duplicates_fold_across_copies_never_within_one(db, dsn, monkeypatch):
+    """A featuring credit spelt two ways minted two rows for one track — a
+    rip here and the HQPlayer's reading of a copy; they fold. Two duets with
+    different guests in ONE folder are two tracks and stay."""
+    from sqlalchemy.orm import sessionmaker
+    from scanner import LOCAL_FILES, import_metadata
+    from canon import content
+    monkeypatch.setattr(content, "SessionLocal", sessionmaker(bind=sqlalchemy.create_engine(dsn)))
+    local_dir = "E:/Music/Bonobo/Black Sands"
+
+    def scan(title, number, seconds):
+        return {"file_path": f"{local_dir}/{number:02d}. {title}.flac", "title": title, "artist": "Bonobo",
+                "album_artist": "Bonobo", "album": "Black Sands", "date": "2010", "release_year": 2010,
+                "genre": "Downtempo", "track_number": number, "disc_number": 1, "duration_seconds": seconds,
+                "file_format": "FLAC", "is_lossless": True, "sample_rate": 44100, "bit_depth": 16}
+    import_metadata([(local_dir, scan("Eyesdown (feat. Adreya Triana)", 4, 331.0)),
+                     (local_dir, scan("Kong", 3, 236.0))], sink=LOCAL_FILES, stats={})
+    monkeypatch.setattr(hqp_library, "library_hash", lambda h, p: "h2")
+    monkeypatch.setattr(hqp_library, "fetch_library", lambda h, p: CREDITS)
+    hqp_library.sync(*PI)
+    assert _one(db, "SELECT count(*) FROM tracks") == 5          # Eyesdown x2, Kong, Canto x2
+    assert _one(db, "SELECT count(*) FROM tracks WHERE title LIKE %s", "Eyesdown%") == 2
+
+    st = content.fold_credit_duplicates(dry_run=False)
+    assert (st["groups"], st["merged"], st["vetoed"], st["unproven"]) == (2, 1, 1, 0)
+    assert _one(db, "SELECT count(*) FROM tracks WHERE title LIKE %s", "Eyesdown%") == 1
+    # the keeper is the row with the file here; the copy's file followed it
+    assert _one(db, """SELECT count(*) FROM hqp_library_files hf JOIN tracks t ON t.id = hf.track_id
+                       WHERE t.title = 'Eyesdown (feat. Adreya Triana)'""") == 1
+    assert _one(db, "SELECT count(*) FROM tracks WHERE title LIKE %s", "Canto della terra%") == 2
+    assert content.fold_credit_duplicates(dry_run=False)["merged"] == 0

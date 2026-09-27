@@ -346,6 +346,15 @@ a rip pair ("[Vinyl]" / "[TR24]") and a per-disc split ("Disc 2") that
 different tags had kept as rows. The import stamps `album_variants.raw_title`
 (the scanner never had, since the folder-album migration), and a sync
 re-stamps a variant imported without it from the library's album tag.
+Inside a folded album, two track rows whose titles differ only by a
+featuring credit — "Eyesdown (feat. Andreya Triana)" here, "Eyesdown ft.
+Andreya Triana" as HQPlayer read the copy — are one track read twice:
+`canon.content.fold_credit_duplicates` (after the edition pass, and
+`python -m mb_split_editions --fold-credits`) folds them when the rows
+never share a variant (a folder holding "X (feat. A)" and "X (feat. B)"
+holds two tracks) and a file of each sits at the same slot or within 3 s
+of length; the row with a file here keeps the identity, the copy's file,
+listens and analysis follow it (`_update_track_uuid`).
 The scan itself starts in HQPlayer's web interface (or by a Digest-
 authenticated `POST /library` — an unauthenticated POST is dropped without a
 401; leave "Perform analysis" off, it costs ~1.5 min per album on a Pi 5).

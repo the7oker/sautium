@@ -70,6 +70,8 @@ if __name__ == "__main__":
     logging.basicConfig(level=logging.INFO, format="%(levelname)s %(message)s")
     parser = argparse.ArgumentParser(description="Split/attach album editions (one-time retrofit)")
     parser.add_argument("--dry-run", action="store_true", help="preview without mutating")
+    parser.add_argument("--fold-credits", action="store_true",
+                        help="fold track rows of one album that differ by a featuring credit")
     parser.add_argument("--revert", action="store_true",
                         help="reset every owned album to its scan-time raw_title identity")
     args = parser.parse_args()
@@ -83,5 +85,9 @@ if __name__ == "__main__":
     if args.revert:
         print(revert_editions(dry_run=args.dry_run))
     else:
+        if args.fold_credits:
+            from canon.content import fold_credit_duplicates
+            print(fold_credit_duplicates(dry_run=args.dry_run))
+            sys.exit(0)
         result = apply_editions(dry_run=args.dry_run)
         print(result)
