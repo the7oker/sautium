@@ -150,7 +150,9 @@ def similar_tracks(seed_uuid: str, exclude=(), limit: int = 20,
                    t.title, a.name AS artist, ta.artist_id,
                    COALESCE(mf_rep.album_title, ph_rep.album) AS album,
                    COALESCE(mf_rep.release_year, ph_rep.release_year) AS year,
-                   ph_rep.cover_url,
+                   -- a held copy has no file cover here: its album's external one
+                   COALESCE(CASE WHEN mf_rep.location = 'hqplayer' THEN mf_rep.album_cover_url END,
+                            ph_rep.cover_url) AS cover_url,
                    ph_rep.album AS phantom_album, ph_rep.length_ms
             FROM cand c
             JOIN tracks t ON t.id = c.track_id
@@ -159,7 +161,7 @@ def similar_tracks(seed_uuid: str, exclude=(), limit: int = 20,
             JOIN artists a ON a.id = ta.artist_id
             LEFT JOIN LATERAL (
                 SELECT f.id, f.location, f.file_path, f.file_format,
-                       al.title AS album_title, al.release_year
+                       al.title AS album_title, al.release_year, al.cover_url AS album_cover_url
                 FROM (
                     SELECT mf.id, av.location, av.hqp_endpoint_host, av.hqp_endpoint_port,
                            mf.album_variant_id, mf.file_path, mf.file_format,

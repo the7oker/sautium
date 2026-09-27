@@ -1133,6 +1133,23 @@
             return;
           }
           if (row.classList.contains('is-confirming')) return;
+          if (row.classList.contains('is-held-sim')) {
+            // held match (the copy for this output sits in the HQPlayer's
+            // library) → play by track uuid; the backend picks the copy
+            const tid = row.getAttribute('data-track-id');
+            if (!tid) return;
+            onceInFlight(row, async () => {
+              window.maybeClaimRenderer();
+              const resp = await fetch('/api/player/play-entities', {
+                method: 'POST', headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ items: [{ kind: 'track', id: tid }] }),
+              }).catch(() => null);
+              let body = null;
+              try { body = resp ? await resp.json() : null; } catch (_) {}
+              if (!resp || !resp.ok) await reportPlaybackResult(resp, body);
+            });
+            return;
+          }
           if (row.classList.contains('is-phantom-sim')) {
             const tid = row.getAttribute('data-phantom-tid');
             if (!tid) return;
@@ -1504,10 +1521,14 @@
       this.similarCount.textContent = String(tracks.length);
       this.similarList.innerHTML = tracks.map(t => {
         // Mixed results: an owned match carries media_file_id (plays by file); a
-        // phantom one carries only track_id + cover_url (streams). Owned rows keep
-        // the legacy data-track-id=media_file_id attr the play/queue handlers read;
-        // phantom rows are tagged is-phantom-sim + data-phantom-tid.
+        // held one (its copy for this output is in the HQPlayer's library) has
+        // no file id but location 'hqplayer' and plays by track uuid; a phantom
+        // one carries only track_id + cover_url (streams). Owned rows keep the
+        // legacy data-track-id=media_file_id attr the play/queue handlers read;
+        // held rows are is-held-sim + data-track-id=uuid, phantom rows
+        // is-phantom-sim + data-phantom-tid.
         const owned = t.is_owned !== false && t.media_file_id != null;
+        const held = !owned && t.is_owned !== false && t.location === 'hqplayer';
         const url = owned
           ? coverUrl({ media_file_id: t.media_file_id })
           : coverUrl({ cover_url: t.cover_url });
@@ -1520,7 +1541,9 @@
         const yearStr = t.year ? ' · ' + t.year : '';
         const rowAttrs = owned
           ? `class="np-sim-row" data-track-id="${escapeHtml(String(t.media_file_id))}"`
-          : `class="np-sim-row is-phantom-sim" data-phantom-tid="${escapeHtml(String(t.track_id || ''))}"`;
+          : held
+            ? `class="np-sim-row is-held-sim" data-track-id="${escapeHtml(String(t.track_id || ''))}"`
+            : `class="np-sim-row is-phantom-sim" data-phantom-tid="${escapeHtml(String(t.track_id || ''))}"`;
         return `
           <div ${rowAttrs}>
             <div class="np-sim-art">${cover}</div>
@@ -6714,7 +6737,9 @@
     // data-track-id. Same with the add-button class name (.track-add
     // vs .np-sim-add) — both are tagged with aria-label "Add to
     // queue" so a single query covers both. Keeping one function
-    // shared means UX changes only need editing in one place.
+    // shared means UX changes only need editing in one place. A held
+    // row (is-held-sim, data-track-id = uuid) queues by entity.
+    if (row.classList.contains('is-held-sim')) { openHeldQueueConfirm(row); return; }
     const phantomTid = row.classList.contains('is-phantom-sim')
       ? row.getAttribute('data-phantom-tid') : null;
     const mfId = phantomTid ? null : parseInt(
@@ -6958,7 +6983,7 @@
       <span class="track-confirm-ask">Add to:</span>
       <button class="track-confirm-btn" type="button" data-confirm="next">Next</button>
       <button class="track-confirm-btn" type="button" data-confirm="end">End</button>`;
-    const addBtn = row.querySelector('.track-add');
+    const addBtn = row.querySelector('.track-add, .np-sim-add');
     if (addBtn) row.insertBefore(bar, addBtn); else row.appendChild(bar);
     const go = (position) => onceInFlight(bar, async () => {
       bar.querySelectorAll('.track-confirm-btn').forEach(b => { b.disabled = true; });
