@@ -36,8 +36,11 @@ either desktop version.
 - **Connection**: WSL2 → Windows (<windows-host-ip>:4321)
 - **HQPlayer Embedded 6** (engine 6.2.3, HQPlayer OS image on a Raspberry Pi 5,
   reached by LAN address from the Docker node): control protocol, status and the
-  DSP lists verified 2026-09-27; playback in `stream` mode is the live test that
-  follows this integration (dated here when it passes)
+  DSP lists verified 2026-09-27; `stream` mode passed live the same day (album
+  playback, gapless advance, seek, transport, tracking; a backend restart
+  mid-album and an HQPlayer power cycle both recovered), and `path` mode with
+  `library_root=/smb` passed against the Windows share of the library mounted
+  through HQPlayer OS's NetworkMounts
 
 ### HQP6-only additions
 HQPlayer 6 exposes two extra fields that Sautium now uses when present. Both degrade
@@ -269,7 +272,9 @@ HOST = "<windows-host-ip>"
 ### HQPlayer Embedded on the LAN
 Give the node the box's LAN address (a Docker node cannot resolve `.local`
 names; a DHCP reservation keeps the address stable) and choose `stream` as
-the file access, or `path` with the root HQPlayer OS mounted the library at.
+the file access, or `path` with the root HQPlayer OS mounted the library at —
+a share configured in its NetworkMounts page lands at `/smb` itself, not in a
+subdirectory (verified 2026-09-27), so the root is `/smb`.
 In `stream` mode the box fetches from the media proxy — on a Windows host
 with Docker Desktop that is the same port forward and firewall allow the
 DLNA output needs (CLAUDE.md Security Posture, rule 3); a launcher node
