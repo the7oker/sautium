@@ -24,20 +24,37 @@ _hqp_client = None
 
 
 def _get_hqp():
+    """The HQPlayer client every HQPlayer tool here goes through — the
+    same two rules the MCP server's tools follow: refuse when HQPlayer is
+    not the chosen output (a filter change or a skip would reconfigure a
+    device in another room while the sound goes elsewhere, with the
+    canonical queue none the wiser), and follow the endpoint the owner
+    saved (the cached socket is dropped when host or port changed)."""
     global _hqp_client
     from config import settings
     from hqplayer_client import HQPlayerClient
-    if _hqp_client is None or not _hqp_client.is_connected():
-        _hqp_client = HQPlayerClient(
-            host=settings.hqplayer_host,
-            port=settings.hqplayer_port,
-            timeout=10.0,
+    from routers.settings import _read
+    active = _read("output.type")
+    if active and active != "hqplayer":
+        raise ConnectionError(
+            f"HQPlayer is not the active audio output (currently: {active}). "
+            "Its transport and DSP controls are unavailable. Use play_track / "
+            "play_album / play_similar / add_to_queue, which play through "
+            "whatever output the user has chosen."
         )
+    endpoint = (settings.hqplayer_host, settings.hqplayer_port)
+    if (_hqp_client is None or not _hqp_client.is_connected()
+            or (_hqp_client.host, _hqp_client.port) != endpoint):
+        if _hqp_client is not None:
+            _hqp_client.disconnect()
+        _hqp_client = HQPlayerClient(host=endpoint[0], port=endpoint[1],
+                                     timeout=10.0)
         if not _hqp_client.connect():
             _hqp_client = None
             raise ConnectionError(
-                f"Cannot connect to HQPlayer at {settings.hqplayer_host}:{settings.hqplayer_port}. "
-                "Make sure HQPlayer Desktop is running."
+                f"Cannot connect to HQPlayer at {endpoint[0]}:{endpoint[1]}. "
+                "Make sure HQPlayer is running (an HQPlayer Embedded in trial "
+                "mode stops every 30 minutes and must be restarted)."
             )
     return _hqp_client
 

@@ -130,6 +130,24 @@ _hqp_client: HQPlayerClient | None = None
 _db_conn: psycopg2.extensions.connection | None = None
 
 
+def _hqp_endpoint() -> tuple[str, int]:
+    """The endpoint the node is configured for — the host and port saved
+    in the Web UI (GET /api/settings/hqplayer), not this process's
+    environment: the launcher's config and the Docker MCP config carry a
+    boot-time default that the owner may have replaced from the phone since
+    (an HQPlayer Embedded box on the LAN, say). The environment is the
+    fallback when the backend cannot be asked."""
+    try:
+        prefs = _backend_get("/api/settings/hqplayer", {}) or {}
+        host, port = prefs.get("host"), prefs.get("port")
+        if host and port:
+            return str(host), int(port)
+    except Exception as e:
+        logger.warning("HQPlayer endpoint unavailable from the backend (%s) — "
+                       "using the environment's", e)
+    return HQPLAYER_HOST, HQPLAYER_PORT
+
+
 def _active_output() -> str:
     """Which output the node is playing through, per the backend."""
     try:
@@ -156,13 +174,18 @@ def _get_hqp() -> HQPlayerClient:
             "whatever output the user has chosen."
         )
     global _hqp_client
-    if _hqp_client is None or not _hqp_client.is_connected():
-        _hqp_client = HQPlayerClient(host=HQPLAYER_HOST, port=HQPLAYER_PORT, timeout=10.0)
+    host, port = _hqp_endpoint()
+    if (_hqp_client is None or not _hqp_client.is_connected()
+            or (_hqp_client.host, _hqp_client.port) != (host, port)):
+        if _hqp_client is not None:
+            _hqp_client.disconnect()
+        _hqp_client = HQPlayerClient(host=host, port=port, timeout=10.0)
         if not _hqp_client.connect():
             _hqp_client = None
             raise ConnectionError(
-                f"Cannot connect to HQPlayer at {HQPLAYER_HOST}:{HQPLAYER_PORT}. "
-                "Make sure HQPlayer Desktop is running."
+                f"Cannot connect to HQPlayer at {host}:{port}. Make sure HQPlayer "
+                "is running (an HQPlayer Embedded in trial mode stops every 30 "
+                "minutes and must be restarted)."
             )
     return _hqp_client
 
@@ -293,10 +316,21 @@ def hqplayer_get_status() -> str:
         }
 
         lines = [f"State: {state_names.get(status.state, 'Unknown')}"]
-        if status.artist or status.song:
-            lines.append(f"Track: {status.artist} - {status.song}")
-        if status.album:
-            lines.append(f"Album: {status.album}")
+        # The node's own status names the track from the canonical queue
+        # — HQPlayer's tags are authoritative only for a file it opened
+        # itself; a track it streams over http (a preview, an owned file
+        # reached through the media proxy) is 'HTTP stream' to it.
+        try:
+            now = _backend_get("/api/player/status", {}) or {}
+        except Exception:
+            now = {}
+        artist = now.get("artist") or status.artist
+        song = now.get("song") or status.song
+        album = now.get("album") or status.album
+        if artist or song:
+            lines.append(f"Track: {artist} - {song}")
+        if album:
+            lines.append(f"Album: {album}")
         if status.genre:
             lines.append(f"Genre: {status.genre}")
         lines.append(f"Position: {format_time(status.position)} / {format_time(status.length)}")
