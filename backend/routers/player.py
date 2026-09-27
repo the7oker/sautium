@@ -35,7 +35,7 @@ from playback.manager import manager, active_hqp_endpoint
 from playback.queue import resolved_artwork as _resolved_artwork
 from playback.queue import resolved_durations as _resolved_durations
 from playback.sessions import _SESSION_ORIGINS
-from sql_queries import ALBUM_FILES, best_rip_order, owned_rank
+from sql_queries import ALBUM_FILES, TRACK_FILES, best_rip_order, owned_rank
 
 logger = logging.getLogger(__name__)
 
@@ -2561,12 +2561,16 @@ def _entity_segments(refs: list) -> tuple[list, list]:
             rows = _album_media_rows(ref.id)
             kind, items = ("owned", rows) if rows else ("phantom", _phantom_album_queries(ref.id))
         else:
+            # The track's best copy the ACTIVE output can open (local, or
+            # held at the HQPlayer that is the output); none → a stream.
+            hqp_host, hqp_port = active_hqp_endpoint()
             row = _db_query_one(f"""
-                SELECT mf.id FROM media_files mf
-                WHERE mf.track_id = %(tid)s::uuid
-                ORDER BY {best_rip_order('mf')}
+                SELECT f.id, f.location::text AS location FROM ({TRACK_FILES}) f
+                WHERE f.location = 'local'
+                   OR (f.hqp_endpoint_host = %(hqp_host)s AND f.hqp_endpoint_port = %(hqp_port)s)
+                ORDER BY {owned_rank('f')}, {best_rip_order('f')}
                 LIMIT 1
-            """, {"tid": ref.id})
+            """, {"tid": ref.id, "hqp_host": hqp_host, "hqp_port": hqp_port})
             if row:
                 kind, items = "owned", [row]
             else:
@@ -2725,7 +2729,8 @@ def play_entities(req: QueueEntitiesRequest):
     sessions.rotate_session(
         manager.queue, "album" if single_album else "mix",
         origin_album_id=single_album,
-        seed_media_file_id=(head_items[0]["id"] if head_kind == "owned" else None),
+        seed_media_file_id=(head_items[0]["id"] if head_kind == "owned"
+                            and (head_items[0].get("location") or "local") == "local" else None),
         seed_track_id=(None if head_kind == "owned" else head_items[0].track_id))
 
     try:
@@ -2825,7 +2830,8 @@ def play_session(req: PlaySessionRequest):
     sessions.rotate_session(
         manager.queue, origin,
         origin_album_id=header["origin_album_id"],
-        seed_media_file_id=(head_items[0]["id"] if head_kind == "owned" else None),
+        seed_media_file_id=(head_items[0]["id"] if head_kind == "owned"
+                            and (head_items[0].get("location") or "local") == "local" else None),
         seed_track_id=(None if head_kind == "owned" else head_items[0].track_id),
         # A mix keeps the name it was archived under (a radio, replaying as a
         # static mix, keeps its seed's); album and track cards are recomputed

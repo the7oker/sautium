@@ -752,7 +752,8 @@ class LastFmService:
         """
         logger.info(f"Enriching artist: {artist_name} (ID: {artist_id})")
 
-        # Gate similars on OWNED (a physical file), NOT EXISTS(track_artists):
+        # Gate similars on OWNED (a file here or at the HQPlayer — owned_files),
+        # NOT EXISTS(track_artists):
         # phantom artists gained track_artists from materialized phantom
         # tracklists, so track_artists no longer means "in catalog". Without
         # the media_files join, ~16k phantoms would fetch similars -> blowup.
@@ -762,7 +763,7 @@ class LastFmService:
         # within one cycle regardless of bio state.
         is_owned = db.execute(text("""
             SELECT 1 FROM track_artists ta
-            JOIN media_files mf ON mf.track_id = ta.track_id
+            JOIN owned_files f ON f.track_id = ta.track_id
             WHERE ta.artist_id = :id LIMIT 1
         """), {"id": str(artist_id)}).first() is not None
         fetch_similar = is_owned
@@ -1178,7 +1179,8 @@ def backfill_similar(limit: Optional[int] = None, force: bool = False,
                      cancel_flag: Optional[Callable[[], bool]] = None) -> Dict[str, int]:
     """Fetch Last.fm similars for ENGAGED artists that never had them.
 
-    Engaged = an owned file (track_artists JOIN media_files) OR at least one
+    Engaged = an owned file (track_artists JOIN owned_files — here or at the
+    HQPlayer) OR at least one
     completed, unskipped listen (listening_history — covers streamed phantoms,
     the catalog-less mode). Both signals are linear in human behavior, so the
     fan-out stays bounded: a minted similar-stub only becomes a seed via a new

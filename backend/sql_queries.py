@@ -64,6 +64,22 @@ def owned_rank(alias: str) -> str:
             f"WHEN {alias}.location = 'local' THEN 1 ELSE 2 END")
 
 
+# One track's files (%(tid)s) from both places files live — the per-track
+# form of ALBUM_FILES below, for a play/queue by track uuid.
+TRACK_FILES = """
+    SELECT mf.id, av.location, av.hqp_endpoint_host, av.hqp_endpoint_port,
+           mf.is_lossless, mf.sample_rate, mf.bit_depth
+    FROM media_files mf
+    JOIN album_variants av ON av.id = mf.album_variant_id
+    WHERE mf.track_id = %(tid)s::uuid
+    UNION ALL
+    SELECT hf.id, av.location, av.hqp_endpoint_host, av.hqp_endpoint_port,
+           hf.is_lossless, hf.sample_rate, hf.bit_depth
+    FROM hqp_library_files hf
+    JOIN album_variants av ON av.id = hf.album_variant_id
+    WHERE hf.track_id = %(tid)s::uuid
+"""
+
 # Every file of one album (%(id)s) from both places files live — a row per
 # media_files / hqp_library_files entry with the variant's location and
 # endpoint, so a picker can rank copies with owned_rank + best_rip_order.
@@ -234,12 +250,12 @@ VALIDATE_TRACKS_FROM = """\
 # arm is what makes streamed phantoms count in the catalog-less mode.
 #
 # Written as a set, not as correlated EXISTS on `artists`: both arms are driven
-# from the small side (media_files, listening_history), so it costs one pass
+# from the small side (owned_files, listening_history), so it costs one pass
 # instead of one index probe per artist row — 63 ms against 5.3 s here.
 
 ARTIST_ENGAGED_SET = """\
         SELECT ta.artist_id FROM track_artists ta
-          JOIN media_files mf ON mf.track_id = ta.track_id
+          JOIN owned_files f ON f.track_id = ta.track_id
         UNION
         SELECT ta.artist_id FROM track_artists ta
           JOIN listening_history lh ON lh.track_id = ta.track_id
@@ -254,10 +270,10 @@ ARTIST_ENGAGED = f"""a.id IN (
 # Owned vs phantom (correlates against an `artists` row aliased `a`)
 # ---------------------------------------------------------------------------
 # The product's definition of a phantom artist, mirroring the `is_owned`
-# expression the artist/discovery surfaces already ship: any owned file
-# crediting them in ANY role. A featured artist on a track you own is owned —
+# expression the artist/discovery surfaces already ship: any owned file —
+# here or at the HQPlayer (owned_files) — crediting them in ANY role. A featured artist on a track you own is owned —
 # the UI shows them undimmed — so `role = 'primary'` is the wrong line here.
 
 ARTIST_OWNED = """EXISTS (SELECT 1 FROM track_artists ta
-                    JOIN media_files mf ON mf.track_id = ta.track_id
+                    JOIN owned_files f ON f.track_id = ta.track_id
                    WHERE ta.artist_id = a.id)"""

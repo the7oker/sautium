@@ -259,7 +259,8 @@ def holdings_summary() -> Optional[dict]:
 
 
 def split_engaged(conn, artist_uuids: list[str]) -> tuple[list[str], list[str]]:
-    """Partition artists into the ENGAGED core — an owned file or a
+    """Partition artists into the ENGAGED core — an owned file (here, or in
+    the library of the HQPlayer the node drives: owned_files) or a
     completed, unskipped listen — asked of every peer in full, and the
     phantom bulk, asked through the holdings filter."""
     if not artist_uuids:
@@ -268,8 +269,8 @@ def split_engaged(conn, artist_uuids: list[str]) -> tuple[list[str], list[str]]:
         SELECT DISTINCT ta.artist_id::text AS artist_uuid
           FROM track_artists ta
          WHERE ta.artist_id = ANY(%s::uuid[])
-           AND (EXISTS (SELECT 1 FROM media_files mf
-                         WHERE mf.track_id = ta.track_id)
+           AND (EXISTS (SELECT 1 FROM owned_files f
+                         WHERE f.track_id = ta.track_id)
                 OR EXISTS (SELECT 1 FROM listening_history lh
                             WHERE lh.track_id = ta.track_id
                               AND lh.completed AND NOT lh.skipped))""",
@@ -698,8 +699,8 @@ def count_carried_tracks(conn) -> int:
              FROM embeddings e
              JOIN analysis_sources s ON s.id = e.analysis_source_id
             WHERE s.imported
-              AND NOT EXISTS (SELECT 1 FROM media_files mf
-                               WHERE mf.track_id = e.track_id)""",
+              AND NOT EXISTS (SELECT 1 FROM owned_files f
+                               WHERE f.track_id = e.track_id)""",
     )
     return int(rows[0]["n"]) if rows else 0
 
@@ -869,8 +870,8 @@ RARE_SEARCH_SQL = """
     WITH engaged AS (
         SELECT DISTINCT ta.artist_id
           FROM track_artists ta
-         WHERE EXISTS (SELECT 1 FROM media_files mf
-                        WHERE mf.track_id = ta.track_id)
+         WHERE EXISTS (SELECT 1 FROM owned_files f
+                        WHERE f.track_id = ta.track_id)
             OR EXISTS (SELECT 1 FROM listening_history lh
                         WHERE lh.track_id = ta.track_id
                           AND lh.completed AND NOT lh.skipped)

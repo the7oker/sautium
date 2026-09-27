@@ -297,7 +297,7 @@ See:
   totals at the end — the caller is usually the launcher UI or a CLI
   progress callback.
 - **Anything that fans out per artist must be gated on HUMAN ENGAGEMENT** —
-  an OWNED file (`track_artists JOIN media_files`) or a COMPLETED listen
+  an OWNED file (`track_artists JOIN owned_files` — here or at the HQPlayer) or a COMPLETED listen
   (`listening_history.completed AND NOT skipped`, the scrobble rule) — never
   on `track_artists` alone: phantom tracklists made that column meaningless
   as "in catalog". Both signals are linear in user behavior, so a minted

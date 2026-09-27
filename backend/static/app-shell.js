@@ -5559,6 +5559,10 @@
         .join('');
 
       const tracksList = d.tracks || [];
+      // Every picked file lives in the HQPlayer's own library (none here):
+      // the header says so beside the quality badge.
+      const heldOnly = !isPhantom && tracksList.length > 0
+        && tracksList.every(t => t.location === 'hqplayer');
       const hasMultipleDiscs = tracksList.some(t => t.disc_number && t.disc_number > 1);
       let lastDisc = null;
       const trackParts = [];
@@ -5595,6 +5599,24 @@
           t.key ? (t.key + (modeShort(t.mode) ? ' ' + modeShort(t.mode) : '')) : null,
           t.bpm ? Math.round(t.bpm) + ' bpm' : null,
         ].filter(Boolean).join(' · ');
+        if (t.location === 'hqplayer') {
+          // Held in the HQPlayer's own library, no file here: the row plays
+          // by track uuid (play-entities) — natively when that HQPlayer is
+          // the output, as a stream elsewhere. No [+]: the queue endpoints
+          // still speak media file ids.
+          trackParts.push(`
+            <div class="track-row is-held-track" data-track-id="${escapeHtml(t.track_id || '')}"
+                 data-album-id="${escapeHtml(albumId)}">
+              <span class="track-rank">${t.track_number || ''}</span>
+              <div class="track-info">
+                <div class="track-title-line">${escapeHtml(t.title || '')}</div>
+                ${sub ? `<div class="track-sub">${escapeHtml(sub)}</div>` : ''}
+              </div>
+              <span class="track-dur"><span class="track-dur-num">${fmtDuration(t.duration)}</span></span>
+            </div>
+          `);
+          continue;
+        }
         trackParts.push(`
           <button class="track-row" type="button"
                   data-media-file-id="${escapeHtml(String(t.media_file_id || ''))}">
@@ -5659,7 +5681,9 @@
             ${isPhantom
               ? `<span class="am-demo">Demo</span>`
                 + (streamQual ? `<span class="am-hires ${streamQualClass}">${streamQualLabel}</span>` : '')
-              : `<span class="am-hires ${qualClass}" style="margin-left: auto;">${qualLabel}</span>`}
+              : heldOnly
+                ? `<span class="am-demo am-held">HQPlayer</span><span class="am-hires ${qualClass}">${qualLabel}</span>`
+                : `<span class="am-hires ${qualClass}" style="margin-left: auto;">${qualLabel}</span>`}
           </div>
           ${genresHtml ? `<div class="tag-row" style="padding: calc(12 * var(--px)) 0 0;">${genresHtml}</div>` : ''}
         </div>
@@ -6581,6 +6605,25 @@
           setTrackBuffering(screen, tid, false);
           if (!resp || !resp.ok) { await reportPlaybackResult(resp, body); return; }
           if (body && body.track_count === 0) applyPhantomMissing(screen, body.missing);
+        });
+      });
+    });
+    // Held track row (a file in the HQPlayer's own library, none here) →
+    // play-entities by track uuid: the backend picks the copy the active
+    // output can open — natively on that HQPlayer, a stream elsewhere.
+    screen.querySelectorAll('.track-row.is-held-track[data-track-id]').forEach(row => {
+      row.addEventListener('click', () => {
+        const tid = row.getAttribute('data-track-id');
+        if (!tid) return;
+        onceInFlight(row, async () => {
+          window.maybeClaimRenderer();
+          const resp = await fetch('/api/player/play-entities', {
+            method: 'POST', headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ items: [{ kind: 'track', id: tid }] }),
+          }).catch(() => null);
+          let body = null;
+          try { body = resp ? await resp.json() : null; } catch (_) {}
+          if (!resp || !resp.ok) await reportPlaybackResult(resp, body);
         });
       });
     });
