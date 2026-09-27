@@ -41,14 +41,16 @@ Also check `a.gender = 'mixed'` for bands with female vocalists (ABBA, Blondie, 
 with singing/vocals (~766 artists detected from biographies). Use \
 `a.is_vocalist = 'instrumental'` for purely instrumental acts (~42 artists detected). \
 Combine with `a.gender` for queries like "female vocal jazz".
-- For "recently added" queries: use `media_files.created_at` to find newest additions (`ORDER BY mf.created_at DESC`).
+- For "recently added" queries: use `owned_files.created_at` — a file here or a copy that appeared \
+in the HQPlayer's library (`ORDER BY f.created_at DESC`).
 - NOT-OWNED music is FIRST-CLASS, both to recommend and to PLAY. Besides the files on disk the \
 catalog holds ~22k artists and hundreds of thousands of albums the user does not own (discovered \
 from MusicBrainz/Last.fm/similar-artists — see the schema's Phantom section). Every playback tool \
-takes the canonical UUID and routes on what exists: a track with a file plays from disk, one \
+takes the canonical UUID and routes on what exists: a track with an owned file plays it (from this \
+node's disk, or natively from the HQPlayer's own library when that HQPlayer is the output), one \
 without STREAMS through a configured provider on the same output. So "queue her ten albums" \
 works whether or not any of them is ripped — add_to_queue takes album UUIDs. Find not-owned rows \
-with SQL gating on the ABSENCE of media_files (NOT EXISTS ...). Only two things are owned-only, \
+with SQL gating on the ABSENCE of owned files (NOT EXISTS ... owned_files). Only two things are owned-only, \
 and by nature: FILE facts (bit depth, sample rate, path) and search_tracks' default corpus — pass \
 corpus='all' there to include not-owned tracks. Recommend them freely and emit them in the output \
 blocks like anything else.
@@ -82,35 +84,46 @@ _DB_SCHEMA = """\
 
 ## Physical entities (SERIAL primary keys)
 
-**album_variants** (id SERIAL, album_id UUID, directory_path, sample_rate, bit_depth, is_lossless BOOLEAN)
-  - A physical edition of an album (CD, Vinyl, Hi-Res, etc.)
+**album_variants** (id SERIAL, album_id UUID, directory_path, sample_rate, bit_depth, is_lossless BOOLEAN, \
+location ENUM 'local'|'hqplayer', hqp_endpoint_host, hqp_endpoint_port)
+  - A physical edition of an album (CD, Vinyl, Hi-Res, etc.). `location` says where its files live: \
+this node's disk, or an HQPlayer's own library (a copy the HQPlayer holds — one more edition, like a \
+CD rip next to a vinyl rip).
 
 **media_files** (id SERIAL, track_id UUID, album_variant_id INT, file_path, file_format, \
 is_lossless BOOLEAN, sample_rate, bit_depth, bitrate, channels, duration_seconds, \
 track_number, disc_number, is_analysis_source BOOLEAN, play_count)
-  - A physical audio file on disk. `id` is the track ID used for playback.
+  - A physical audio file on THIS node's disk. `id` is the id of the FILE — never a playback id.
+
+**hqp_library_files** (id SERIAL, track_id UUID, album_variant_id INT, hqp_path, file_format, \
+is_lossless BOOLEAN, sample_rate, bit_depth, duration_seconds, track_number, disc_number)
+  - A file held in an HQPlayer's own library (its variant has location = 'hqplayer'); no bytes here. \
+It plays natively when that HQPlayer is the output and streams like a not-owned track elsewhere.
+
+**owned_files** (VIEW: track_id UUID, album_variant_id INT, location, duration_seconds, recording_mbid, created_at)
+  - Every owned file from both places — THE owned filter. "Owned" means a row here, wherever it lives.
 
 ## Phantom (NOT-owned) entities — discovered, not on disk
 
 Sautium also stores artists/albums/tracks the user does NOT own — "phantom" entities \
 discovered from MusicBrainz / Last.fm / similar-artists (~22k phantom artists, hundreds of \
 thousands of phantom albums). They live in the SAME canonical tables (artists, albums, tracks) \
-but have NO media_files and NO album_variants (no audio on disk). They ARE valid recommendations: \
+but have NO owned_files and NO album_variants (no audio anywhere the user holds). They ARE valid recommendations: \
 a phantom ALBUM can be STREAMED to the user's output through a configured provider (lossless or lossy, provider-dependent) from its album page.
 
 **album_tracks** (album_id UUID, track_id UUID, disc, position, length_ms)
   - Tracklist of an album with no rip. Phantom albums live here (no album_variants). length_ms is \
 the MusicBrainz track length — the ONLY place a phantom track's length lives.
 
-There is NO is_phantom flag — owned vs phantom is defined by PRESENCE of files:
-  - OWNED artist  = EXISTS a media_files row for one of its tracks.
-  - PHANTOM artist = NO media_files for any track (still has track_artists, album_tracks, and \
+There is NO is_phantom flag — owned vs phantom is defined by PRESENCE of owned files:
+  - OWNED artist  = EXISTS an owned_files row for one of its tracks (on disk here, or held at the HQPlayer).
+  - PHANTOM artist = NO owned_files for any track (still has track_artists, album_tracks, and \
 usually artist_tags / artist_bios / similar_artists — ~80% of phantoms carry tags+bios+tracklists, \
 ~98% are reachable via similar_artists from a seed).
   - PHANTOM album = has album_tracks but NO album_variants.
 
-To find phantoms, query artists / albums / album_tracks and gate on the ABSENCE of media_files \
-(NOT EXISTS ...) — never JOIN media_files into a phantom query, that join IS the owned filter. \
+To find phantoms, query artists / albums / album_tracks and gate on the ABSENCE of owned_files \
+(NOT EXISTS ...) — never JOIN owned_files into a phantom query, that join IS the owned filter. \
 The tools take it from there: every search tool returns the canonical UUID and marks a not-owned \
 row "NOT in library (streams)", and the play/queue tools accept those UUIDs directly \
 (search_tracks needs corpus='all' to include them; everything else always does).
@@ -170,35 +183,37 @@ per artist MBID (artist_mbids.mbid)
 
 ## IMPORTANT: a track's identity is tracks.id (UUID), for you and for every tool
 Search tools return it, playback tools take it, output blocks carry it — and it is the ONE id an
-owned file and a streamable not-owned row both have. media_files.id stays the id of the FILE:
-read it for file facts (path, bit depth, sample rate, "recently added" via mf.created_at) and as
-the owned filter, never as the thing you hand to a playback tool or put in a block."""
+owned file and a streamable not-owned row both have. media_files.id stays the id of a FILE on this
+node's disk: read it for file facts (path, bit depth, sample rate), never as the owned filter (that
+is owned_files, which also covers the HQPlayer's library) and never as the thing you hand to a
+playback tool or put in a block."""
 
 _SQL_PATTERNS = """\
 # Common SQL patterns
 
-Find tracks by artist:
+Find tracks by artist (owned_files is the owned filter; GROUP BY folds a track's several copies):
 ```sql
 SELECT t.id AS track_id, t.title, a.name as artist, al.title as album
-FROM media_files mf
-JOIN tracks t ON mf.track_id = t.id
+FROM owned_files f
+JOIN tracks t ON f.track_id = t.id
 JOIN track_artists ta ON t.id = ta.track_id AND ta.role = 'primary'
 JOIN artists a ON ta.artist_id = a.id
-JOIN album_variants av ON mf.album_variant_id = av.id
+JOIN album_variants av ON f.album_variant_id = av.id
 JOIN albums al ON av.album_id = al.id
 WHERE a.name ILIKE '%search%'
-ORDER BY al.release_year, mf.disc_number, mf.track_number
+GROUP BY t.id, t.title, a.name, al.title, al.release_year
+ORDER BY al.release_year, t.title
 ```
 
 Find albums by artist:
 ```sql
 SELECT DISTINCT al.id, al.title, al.release_year, a.name as artist,
-       COUNT(mf.id) as track_count,
+       COUNT(DISTINCT f.track_id) as track_count,
        BOOL_OR(av.is_lossless) as has_lossless
 FROM albums al
 JOIN album_variants av ON av.album_id = al.id
-JOIN media_files mf ON mf.album_variant_id = av.id
-JOIN tracks t ON mf.track_id = t.id
+JOIN owned_files f ON f.album_variant_id = av.id
+JOIN tracks t ON f.track_id = t.id
 JOIN track_artists ta ON t.id = ta.track_id AND ta.role = 'primary'
 JOIN artists a ON ta.artist_id = a.id
 WHERE a.name ILIKE '%search%'
@@ -206,16 +221,16 @@ GROUP BY al.id, al.title, al.release_year, a.name
 ORDER BY al.release_year
 ```
 
-Tracks with audio features:
+Tracks with audio features (owned only):
 ```sql
 SELECT t.id AS track_id, t.title, a.name as artist, af.bpm, af.key, af.mode,
        af.energy, af.danceability, af.vocal_instrumental
-FROM media_files mf
-JOIN tracks t ON mf.track_id = t.id
+FROM tracks t
 JOIN track_artists ta ON t.id = ta.track_id AND ta.role = 'primary'
 JOIN artists a ON ta.artist_id = a.id
 JOIN audio_features af ON af.track_id = t.id
 WHERE af.bpm BETWEEN 120 AND 140
+  AND EXISTS (SELECT 1 FROM owned_files f WHERE f.track_id = t.id)
 ORDER BY af.energy DESC
 ```
 
@@ -225,8 +240,8 @@ SELECT al.title as album, AVG(af.energy) as avg_energy, AVG(af.brightness) as av
        AVG(af.danceability) as avg_danceability, AVG(af.bpm) as avg_bpm
 FROM audio_features af
 JOIN tracks t ON af.track_id = t.id
-JOIN media_files mf ON mf.track_id = t.id
-JOIN album_variants av ON mf.album_variant_id = av.id
+JOIN owned_files f ON f.track_id = t.id
+JOIN album_variants av ON f.album_variant_id = av.id
 JOIN albums al ON av.album_id = al.id
 WHERE al.title ILIKE '%album_name%'
 GROUP BY al.title
@@ -265,54 +280,32 @@ WHERE t.name ILIKE '%tag_name%'
 ORDER BY at2.weight DESC
 ```
 
-Find tracks by artist gender (female/male/mixed vocals):
+Find tracks by artist gender (female/male/mixed vocals), newest owned first:
 ```sql
-SELECT t.id AS track_id, t.title, a.name as artist, al.title as album
-FROM media_files mf
-JOIN tracks t ON mf.track_id = t.id
+SELECT t.id AS track_id, t.title, a.name as artist, al.title as album, MAX(f.created_at) AS added_at
+FROM owned_files f
+JOIN tracks t ON f.track_id = t.id
 JOIN track_artists ta ON t.id = ta.track_id AND ta.role = 'primary'
 JOIN artists a ON ta.artist_id = a.id
-JOIN album_variants av ON mf.album_variant_id = av.id
+JOIN album_variants av ON f.album_variant_id = av.id
 JOIN albums al ON av.album_id = al.id
 WHERE a.gender = 'female'
-ORDER BY mf.created_at DESC
+GROUP BY t.id, t.title, a.name, al.title
+ORDER BY added_at DESC
 ```
 
-Find instrumental-only tracks (no singing):
-```sql
-SELECT t.id AS track_id, t.title, a.name as artist, al.title as album
-FROM media_files mf
-JOIN tracks t ON mf.track_id = t.id
-JOIN track_artists ta ON t.id = ta.track_id AND ta.role = 'primary'
-JOIN artists a ON ta.artist_id = a.id
-JOIN album_variants av ON mf.album_variant_id = av.id
-JOIN albums al ON av.album_id = al.id
-WHERE a.is_vocalist = 'instrumental'
-ORDER BY mf.created_at DESC
-```
-
-Find female vocal tracks (combine gender + is_vocalist):
-```sql
-SELECT t.id AS track_id, t.title, a.name as artist, al.title as album
-FROM media_files mf
-JOIN tracks t ON mf.track_id = t.id
-JOIN track_artists ta ON t.id = ta.track_id AND ta.role = 'primary'
-JOIN artists a ON ta.artist_id = a.id
-JOIN album_variants av ON mf.album_variant_id = av.id
-JOIN albums al ON av.album_id = al.id
-WHERE a.gender IN ('female', 'mixed') AND a.is_vocalist = 'vocal'
-ORDER BY mf.created_at DESC
-```
+Find instrumental-only tracks (no singing): the same query with `a.is_vocalist = 'instrumental'`.
+Find female vocal tracks: `a.gender IN ('female', 'mixed') AND a.is_vocalist = 'vocal'`.
 
 Recently added albums:
 ```sql
-SELECT DISTINCT al.title, a.name as artist, MIN(mf.created_at) as added_at,
-       COUNT(mf.id) as track_count
-FROM media_files mf
-JOIN tracks t ON mf.track_id = t.id
+SELECT al.title, a.name as artist, MIN(f.created_at) as added_at,
+       COUNT(DISTINCT f.track_id) as track_count
+FROM owned_files f
+JOIN tracks t ON f.track_id = t.id
 JOIN track_artists ta ON t.id = ta.track_id AND ta.role = 'primary'
 JOIN artists a ON ta.artist_id = a.id
-JOIN album_variants av ON mf.album_variant_id = av.id
+JOIN album_variants av ON f.album_variant_id = av.id
 JOIN albums al ON av.album_id = al.id
 GROUP BY al.title, a.name
 ORDER BY added_at DESC
@@ -348,8 +341,8 @@ Find PHANTOM (not-owned) artists matching a vibe (e.g. Italian, instrumental):
 SELECT a.id, a.name, a.gender, a.is_vocalist
 FROM artists a
 WHERE NOT EXISTS (                           -- phantom: user owns no audio by them
-        SELECT 1 FROM media_files mf
-        JOIN track_artists ta ON ta.track_id = mf.track_id
+        SELECT 1 FROM owned_files f
+        JOIN track_artists ta ON ta.track_id = f.track_id
         WHERE ta.artist_id = a.id)
   AND a.is_vocalist = 'instrumental'         -- or 'vocal'; combine with a.gender
   AND EXISTS (                               -- has a discovered tracklist to stream
@@ -368,8 +361,8 @@ SELECT a.id, a.name, MAX(s.match_score) AS score
 FROM similar_artists s
 JOIN artists a ON a.id = s.similar_artist_id
 WHERE s.artist_id = :owned_seed_artist_id
-  AND NOT EXISTS (SELECT 1 FROM media_files mf
-                  JOIN track_artists ta ON ta.track_id = mf.track_id
+  AND NOT EXISTS (SELECT 1 FROM owned_files f
+                  JOIN track_artists ta ON ta.track_id = f.track_id
                   WHERE ta.artist_id = a.id)     -- keep only the NOT-owned similars
 GROUP BY a.id, a.name
 ORDER BY score DESC LIMIT 15
@@ -391,8 +384,8 @@ SELECT al.id AS album_id, al.title, al.release_year,
 FROM albums al
 WHERE EXISTS (SELECT 1 FROM album_tracks atr JOIN track_artists ta ON ta.track_id = atr.track_id
               WHERE atr.album_id = al.id AND ta.artist_id = :artist_id AND ta.role = 'primary')
-   OR EXISTS (SELECT 1 FROM album_variants av JOIN media_files mf ON mf.album_variant_id = av.id
-              JOIN track_artists ta2 ON ta2.track_id = mf.track_id
+   OR EXISTS (SELECT 1 FROM album_variants av JOIN owned_files f ON f.album_variant_id = av.id
+              JOIN track_artists ta2 ON ta2.track_id = f.track_id
               WHERE av.album_id = al.id AND ta2.artist_id = :artist_id AND ta2.role = 'primary')
 ORDER BY al.release_year NULLS LAST
 ```"""
@@ -464,7 +457,7 @@ HQPlayer is the selected output; they refuse otherwise and tell you so.
 recommendation/search query with AT MOST 1–3 focused SQL queries, then reply immediately with the \
 SAUTIUM_BLOCKS. Do NOT re-query to "double-check", do NOT try many alternative phrasings of the same search, \
 and do NOT call playback tools for a recommend-only request (the output may be offline, and each call \
-then blocks ~10s). The phantom `NOT EXISTS media_files` query returns in well under a second — run it once and \
+then blocks ~10s). The phantom `NOT EXISTS owned_files` query returns in well under a second — run it once and \
 answer. A long multi-tool exploration times out and the user gets nothing.
 - When the user asks to play something, use play_track / play_album / play_all / play_similar / \
 add_to_queue. Never reach for hqplayer_* to start playback — those command one particular device, \
@@ -575,7 +568,7 @@ curated Last.fm data that respects genre boundaries.
 - **execute_query(sql)**: Run any read-only SELECT query. Best for comparing audio features, \
 finding albums by criteria, checking listening history, getting artist bios.
 - **search_tracks(query, artist, album, genre, limit, corpus)**: Fuzzy search by metadata, any \
-script. corpus='owned' (default) or 'all' to include tracks with no file, which stream.
+script. corpus='owned' (default) or 'all' to include tracks with no owned file, which stream.
 - **search_similar(track_id, limit, vocalist, gender, genres, instruments, corpus)**: Find sonically \
 similar tracks (CLAP audio embeddings), optionally narrowed by hard filters in the SAME query — \
 "more like this but instrumental", "similar + only Trip-Hop". track_id is the track UUID.
@@ -720,11 +713,9 @@ def _describe_library_size() -> str:
     indexed COUNT) and stops that class of hallucination."""
     try:
         from db_pool import db_query_one
-        # playable tracks only — phantom tracklist rows have no files
-        row = db_query_one("""
-            SELECT COUNT(*) AS n FROM tracks t
-            WHERE EXISTS (SELECT 1 FROM media_files mf WHERE mf.track_id = t.id)
-        """)
+        # owned tracks only (a file here or one held at the HQPlayer) —
+        # phantom tracklist rows have no files
+        row = db_query_one("SELECT COUNT(DISTINCT track_id) AS n FROM owned_files")
         n = int(row["n"]) if row and row.get("n") is not None else 0
     except Exception:
         return "size unknown — query the tracks table for the real count"
