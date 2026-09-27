@@ -326,6 +326,11 @@ _DEFAULTS: Dict[str, Any] = {
     # user_settings overrides them on PUT /api/settings/hqplayer.
     "hqplayer.host":             None,
     "hqplayer.port":             None,
+    # How HQPlayer reaches the files: path | stream, and the root it sees the
+    # library under in path mode (None = the stored paths themselves). A saved
+    # file_access is the mark that the owner chose; until then env rules.
+    "hqplayer.file_access":      None,
+    "hqplayer.library_root":     None,
     # Artist-screen Albums block sort. release_year is the default;
     # other valid values: time_listened, popularity, recently_added,
     # a_z. UI exposes this through a bottom-sheet picker on the
@@ -1783,6 +1788,16 @@ def get_hardware_profile() -> Dict[str, Any]:
 class HqplayerPrefs(BaseModel):
     host: Optional[str] = Field(default=None, max_length=255)
     port: Optional[int] = Field(default=None, ge=1, le=65535)
+    # How HQPlayer reaches the library's bytes (config.hqplayer_file_access).
+    file_access: Optional[str] = Field(default=None, pattern="^(path|stream)$")
+    library_root: Optional[str] = Field(default=None, max_length=1024)
+
+
+def _library_root_value(raw: Optional[str]) -> Optional[str]:
+    """A root as the URI builder wants it: forward slashes, no trailing
+    separator. Empty = HQPlayer sees the library at the stored paths."""
+    root = (raw or "").strip().replace("\\", "/").rstrip("/")
+    return root or None
 
 
 @router.get("/hqplayer")
@@ -1791,15 +1806,23 @@ def get_hqplayer_prefs() -> Dict[str, Any]:
     return {
         "host": _read("hqplayer.host") or app_settings.hqplayer_host,
         "port": _read("hqplayer.port") or app_settings.hqplayer_port,
+        "file_access": app_settings.hqplayer_file_access,
+        "library_root": app_settings.hqplayer_library_root,
+        # The prefix every stored path shares — what `library_root` stands
+        # in for on the HQPlayer side.
+        "library_root_local": app_settings.library_db_root(),
     }
 
 
 @router.put("/hqplayer")
 def put_hqplayer_prefs(req: HqplayerPrefs) -> Dict[str, Any]:
-    """Update HQPlayer host/port. Persisted to user_settings and
-    overlaid onto Pydantic settings runtime so the control client —
-    and the status poller that play tracking now rides on — reconnect
-    to the new endpoint on the next call, no restart needed."""
+    """Update the HQPlayer endpoint and how it reaches the files.
+    Persisted to user_settings and overlaid onto the runtime settings; when
+    HQPlayer is the selected output the backend is detached and re-attached,
+    so a new address — or a new file-access mode — takes effect at once:
+    the attach mirrors the canonical queue in the URI form the mode
+    dictates. (activate() is a no-op for an already-active type, so a plain
+    re-activate would leave HQPlayer holding URIs of the old form.)"""
     from config import settings as app_settings
     if req.host is not None:
         host = req.host.strip() or None
@@ -1809,36 +1832,40 @@ def put_hqplayer_prefs(req: HqplayerPrefs) -> Dict[str, Any]:
     if req.port is not None:
         _write("hqplayer.port", req.port)
         app_settings.hqplayer_port = req.port
+    if req.file_access is not None:
+        _write("hqplayer.file_access", req.file_access)
+        app_settings.hqplayer_file_access = req.file_access
+    if req.library_root is not None:
+        root = _library_root_value(req.library_root)
+        _write("hqplayer.library_root", root)
+        app_settings.hqplayer_library_root = root
     logger.info(
-        f"HQPlayer settings updated: host={app_settings.hqplayer_host}, "
-        f"port={app_settings.hqplayer_port}"
-    )
+        "HQPlayer settings updated: host=%s, port=%s, file_access=%s, "
+        "library_root=%s", app_settings.hqplayer_host, app_settings.hqplayer_port,
+        app_settings.hqplayer_file_access, app_settings.hqplayer_library_root)
     # Drop cached HQPlayer sockets so the next status/command call
     # reconnects against the new address.
-    try:
-        from playback.hqp_backend import reset_all_clients as _reset_hqp
-        _reset_hqp()
-        logger.info("HQPlayer cached clients reset")
-    except Exception as e:
-        logger.warning(f"HQPlayer client reset failed: {e}")
-    # The HQPlayer backend is gated on a configured endpoint — saving a host
-    # is the event that activates it (idempotent when already running);
-    # clearing the host detaches it on HQP-less nodes. When another output
-    # type is explicitly selected, saving an HQPlayer address must NOT
-    # hijack the active output.
-    try:
-        from routers.player import (start_status_poller, stop_status_poller,
-                                    _hqp_configured)
-        # Only when HQPlayer IS the selection. Unset no longer means "HQPlayer
-        # may have it" — an unset output resolves to this device, so saving an
-        # address here must not quietly move playback.
-        if _read("output.type") == "hqplayer":
-            if _hqp_configured():
-                start_status_poller()
-            else:
-                stop_status_poller()
-    except Exception as e:
-        logger.warning(f"Status poller toggle failed: {e}")
+    from playback.hqp_backend import reset_all_clients as _reset_hqp
+    _reset_hqp()
+    # Only when HQPlayer IS the selection. Unset no longer means "HQPlayer
+    # may have it" — an unset output resolves to this device, so saving an
+    # address here must not quietly move playback. Nothing is sent to the
+    # previous endpoint (stop_old=False): an HQPlayer the owner just pointed
+    # away from is left as it was.
+    if _read("output.type") == "hqplayer":
+        from playback.manager import manager
+        from routers.player import _hqp_configured, stop_status_poller
+        if _hqp_configured():
+            manager.activate(None, stop_old=False)
+            try:
+                manager.activate("hqplayer")
+            except Exception as e:
+                # The address is saved either way; the picker shows the
+                # endpoint as disconnected until it answers.
+                logger.warning("HQPlayer re-attach after a settings change "
+                               "failed: %s", e)
+        else:
+            stop_status_poller()
     return get_hqplayer_prefs()
 
 
@@ -1954,6 +1981,14 @@ def load_hqplayer_from_db() -> None:
             app_settings.hqplayer_host = host
         if port:
             app_settings.hqplayer_port = int(port)
+        # A saved file_access means the owner chose in the Web UI; the root
+        # then follows it, cleared included (None) — env is the default only
+        # for a node that never saved.
+        file_access = _read("hqplayer.file_access")
+        if file_access:
+            app_settings.hqplayer_file_access = file_access
+            app_settings.hqplayer_library_root = _library_root_value(
+                _read("hqplayer.library_root"))
     except Exception as e:
         logger.warning(f"Failed to load HQPlayer settings from DB: {e}")
 

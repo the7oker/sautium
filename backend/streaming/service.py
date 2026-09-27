@@ -68,12 +68,12 @@ def init(settings) -> bool:
         logger.info("loaded %d external stream provider(s) from %s", n, providers_dir)
     _persist_registry(_registry)
 
-    _proxy = MediaProxy(
-        port=settings.media_proxy_port,
-        advertised_host=settings.media_proxy_advertised_host,
-        bind_host=settings.media_proxy_host,
-    )
-    _proxy.start()
+    # ONE proxy per process: the playback output may already have started
+    # a provider-less one (the HQPlayer attach mirrors a restored queue
+    # before this runs), and binding a second instance would fail after
+    # the global had been repointed at it — leaving the port served by an
+    # object nothing references.
+    _proxy = ensure_proxy()
 
     # The canonical-queue item of a stream is built once, when its buffer is
     # first ready; a REFETCH (a budget eviction, a spent demo buffer) may land
@@ -195,15 +195,18 @@ async def ytdlp_refresh_loop() -> None:
 
 def ensure_proxy() -> Optional[MediaProxy]:
     """Start the media proxy WITHOUT the provider registry when it isn't
-    running yet — DLNA output needs the plain-http file server even on nodes
-    where streaming preview is disabled. Phantom streaming stays gated on
-    streaming_preview_enabled."""
+    running yet — the DLNA output and a remote HQPlayer need the plain-http
+    file server even on nodes where streaming preview is disabled. Phantom
+    streaming stays gated on streaming_preview_enabled; init() attaches
+    the providers to this same instance."""
     global _proxy
     if _proxy is None:
         from config import settings
+        import media_urls
         proxy = MediaProxy(
             port=settings.media_proxy_port,
             advertised_host=settings.media_proxy_advertised_host,
+            file_token_key=media_urls.secret(),
             bind_host=settings.media_proxy_host,
         )
         try:
@@ -215,7 +218,8 @@ def ensure_proxy() -> Optional[MediaProxy]:
                 "(Docker). Only one node per machine can serve DLNA/HQPlayer "
                 "media") from e
         _proxy = proxy
-        logger.info("media proxy started for local file serving (no providers)")
+        logger.info("media proxy started (providers attach when streaming "
+                    "preview initializes)")
     return _proxy
 
 
@@ -339,6 +343,6 @@ def get_provider(provider_id: Optional[str] = None) -> Optional[StreamProvider]:
     return provs[0] if provs else None
 
 
-def preview_meta(uri: str) -> Optional[dict]:
-    """Provider metadata for a preview URI, or None (no proxy / not a preview)."""
-    return _proxy.preview_meta(uri) if _proxy else None
+def preview_meta(token: str) -> Optional[dict]:
+    """Provider metadata for a preview token, or None (no proxy / unknown)."""
+    return _proxy.preview_meta(token) if _proxy else None

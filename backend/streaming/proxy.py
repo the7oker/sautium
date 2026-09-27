@@ -1,6 +1,8 @@
 """In-memory media proxy: serves provider-fetched audio to HQPlayer over plain
 http (HQPlayer can't sign HMAC, so this is a SEPARATE plain-http endpoint,
-localhost/LAN-reachable, gated by per-track ephemeral tokens).
+localhost/LAN-reachable, gated by per-track tokens), and owned files by
+token to any output that pulls bytes over the network — a DLNA renderer,
+an HQPlayer on another machine.
 
 Design points proven during bring-up:
 - HQPlayer plays http FLAC sustained in its NATIVE playlist (alongside file://
@@ -18,6 +20,9 @@ persisted to disk (legal: derived-metadata model, plus casual-copy resistance).
 """
 from __future__ import annotations
 
+import base64
+import hashlib
+import hmac
 import logging
 import secrets
 import threading
@@ -33,6 +38,15 @@ from .events import preview_events
 logger = logging.getLogger(__name__)
 
 _UNSET_TIMEOUT = object()   # wait_ready sentinel: "use the proxy default"
+
+# Content type by media_files.file_format — the one table every URL-serving
+# output reads (DLNA DIDL, the browser route, HQPlayer's stream mode).
+MIME_BY_FORMAT = {
+    "FLAC": "audio/flac", "MP3": "audio/mpeg", "WAV": "audio/wav",
+    "OGG": "audio/ogg", "M4A": "audio/mp4", "AIFF": "audio/aiff",
+    "DSF": "audio/x-dsf", "DFF": "audio/x-dff", "WV": "audio/x-wavpack",
+    "APE": "audio/x-ape",
+}
 
 @dataclass
 class _FileEntry:
@@ -75,14 +89,18 @@ class _Entry:
 
 
 class MediaProxy:
-    def __init__(self, port: int, advertised_host: str, bind_host: str = "0.0.0.0",
-                 prepare_timeout: float = 120.0):
-        # advertised_host: the address HQPlayer uses to reach us (it pulls the
-        # URL itself), which may differ from bind_host in containerised setups.
+    def __init__(self, port: int, advertised_host: str, *, file_token_key: bytes,
+                 bind_host: str = "0.0.0.0", prepare_timeout: float = 120.0):
+        # advertised_host: the address a consumer on this machine uses to
+        # reach us (it pulls the URL itself), which may differ from bind_host
+        # in containerised setups; a consumer elsewhere on the network is
+        # handed the address `streaming.media_host` picks for it instead.
+        # file_token_key: the node secret the owned-file tokens derive from.
         self.port = port
         self._advertised_host = advertised_host
         self._bind_host = bind_host
         self._prepare_timeout = prepare_timeout
+        self._file_token_key = file_token_key
         self._lock = threading.RLock()
         # SEQUENTIAL, in-ORDER fetching: one worker drains an ordered token queue
         # (enqueue order == playlist order). The next-to-play track gets the full
@@ -98,7 +116,6 @@ class MediaProxy:
         # by the manager. Work bound to any other generation has no consumer left.
         self._live_generation: Optional[int] = None
         self._files: dict[str, _FileEntry] = {}          # /file/{token} registry
-        self._file_tokens_by_key: dict[tuple, str] = {}  # (path, start, end) → token
         self._blobs: dict[str, tuple[bytes, str]] = {}   # /art/{token} → (data, mime)
         self._blob_tokens_by_key: dict[str, str] = {}    # cover key → token
         self._httpd: Optional[ThreadingHTTPServer] = None
@@ -125,40 +142,39 @@ class MediaProxy:
 
     # ---- owned-file serving (DLNA renderers pull these) -------------------
 
+    def file_token(self, path: str, start: Optional[float] = None,
+                   end: Optional[float] = None) -> str:
+        """The token /file/ serves (path, start, end) under — a keyed hash,
+        not a random draw, so it is the SAME across backend restarts: an
+        HQPlayer on another machine keeps a mirrored playlist of these URLs
+        for days, and after a restart the restored queue re-registers the
+        very tokens it still holds instead of leaving it a list of 404s.
+        Unguessable all the same (the node secret is the key), and a token
+        is served only while a queue has registered its file — never the
+        library at large."""
+        canonical = f"{path}\n{start}\n{end}".encode()
+        digest = hmac.new(self._file_token_key, canonical, hashlib.sha256).digest()
+        return base64.urlsafe_b64encode(digest[:15]).decode()
+
     def register_file(self, path: str, mime: str, *,
                       start: Optional[float] = None, end: Optional[float] = None,
                       tags: Optional[dict] = None) -> str:
         """Expose one owned file — or a CUE slice [start, end) of it — at
-        /file/{token}. Idempotent per (path, start, end) — re-registering
-        returns the existing token (a renderer may still be mid-stream on it),
-        and two slices of one image get DISTINCT tokens so URI-based
-        auto-advance detection keeps working. Tokens are unguessable; only
-        registered files are reachable, never the library at large.
+        /file/{token}. Idempotent per (path, start, end) by construction
+        (`file_token`): re-registering returns the same token a renderer may
+        still be mid-stream on, and two slices of one image get DISTINCT
+        tokens so URI-based auto-advance detection keeps working.
 
         Bookkeeping only — the disk is read when the token is served. A
         stat here raised out of URL minting on the DLNA loop, where a
         missing file read as the renderer failing, and it could only ever
         vouch for the file at minting time."""
-        key = (path, start, end)
+        tok = self.file_token(path, start, end)
         with self._lock:
-            tok = self._file_tokens_by_key.get(key)
-            if tok:
-                return tok
-            tok = secrets.token_urlsafe(12)
-            self._files[tok] = _FileEntry(tok, path, mime,
-                                          start=start, end=end, tags=tags)
-            self._file_tokens_by_key[key] = tok
+            if tok not in self._files:
+                self._files[tok] = _FileEntry(tok, path, mime,
+                                              start=start, end=end, tags=tags)
             return tok
-
-    def clear_files(self, keep_paths: Optional[set] = None) -> None:
-        """Drop file registrations (queue replaced) except entries whose
-        path is in `keep_paths`."""
-        with self._lock:
-            keep = keep_paths or set()
-            for key, tok in list(self._file_tokens_by_key.items()):
-                if key[0] not in keep:
-                    del self._file_tokens_by_key[key]
-                    self._files.pop(tok, None)
 
     def file_entry(self, token: str) -> Optional[_FileEntry]:
         with self._lock:
@@ -547,20 +563,22 @@ class MediaProxy:
                            token, ex)
             return None
 
-    def url_for(self, token: str) -> str:
-        return f"http://{self._advertised_host}:{self.port}/preview/{token}"
+    # `host` is the address the CONSUMER reaches us at (streaming.media_host
+    # picks it per peer); None = the advertised host, right for a consumer on
+    # this machine.
+    def url_for(self, token: str, *, host: Optional[str] = None) -> str:
+        return f"http://{host or self._advertised_host}:{self.port}/preview/{token}"
 
-    def file_url(self, token: str) -> str:
-        return f"http://{self._advertised_host}:{self.port}/file/{token}"
+    def file_url(self, token: str, *, host: Optional[str] = None) -> str:
+        return f"http://{host or self._advertised_host}:{self.port}/file/{token}"
 
-    def preview_meta(self, uri: str) -> Optional[dict]:
-        """Provider metadata for a current-session preview URI — Now Playing /
-        the queue panel use it because HQPlayer only knows the track as
-        'HTTP stream'. Returns None for non-preview URIs / expired sessions."""
-        prefix = f"http://{self._advertised_host}:{self.port}/preview/"
-        if not uri.startswith(prefix):
-            return None
-        token = uri[len(prefix):].split("?", 1)[0]
+    def art_url(self, token: str, *, host: Optional[str] = None) -> str:
+        return f"http://{host or self._advertised_host}:{self.port}/art/{token}"
+
+    def preview_meta(self, token: str) -> Optional[dict]:
+        """Provider metadata for a current-session preview token — Now
+        Playing / the queue panel use it because HQPlayer only knows the
+        track as 'HTTP stream'. None for an unknown token / expired session."""
         with self._lock:
             e = self._entries.get(token)
         if e is None:

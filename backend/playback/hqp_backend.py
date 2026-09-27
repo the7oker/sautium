@@ -18,15 +18,26 @@ user-initiated commands never contend for the same socket / lock:
 
 HQPlayer's control API accepts multiple concurrent TCP clients, so the
 two sockets co-exist cleanly on the HQP side.
+
+Where HQPlayer runs decides how a track reaches it (config.hqplayer_file_access):
+in `path` mode an owned file is a file:// URI HQPlayer opens itself — at the
+stored path, or under `hqplayer_library_root` when it mounts the same library
+elsewhere; in `stream` mode every owned file is an http URL on the media proxy,
+as a DLNA renderer gets, so an HQPlayer Embedded box on the LAN needs no path
+in common with this node. CUE slices, m4a transcodes and phantom previews are
+http URLs in both modes. Media URLs name the address HQPlayer can reach us at
+(streaming.media_host), never a fixed one.
 """
 
 import logging
+import socket
 import threading
 import time
 from typing import Optional
 
 from config import settings
-from hqplayer_client import HQPlayerClient, PlaybackState, file_path_to_uri
+from hqplayer_client import (HQPlayerClient, PlaybackState, file_path_to_uri,
+                             uri_to_file_path)
 
 from playback import queue as queue_mod
 from playback.base import Capabilities, PlaybackStatus, PlayerBackend, ReorderPlan
@@ -221,10 +232,18 @@ def _add_uris_with_retry(uris: list[str], *, clear_first: bool = False) -> int:
         else:
             logger.warning(f"playlist_add failed after reconnect: {uri}")
     if added < len(uris):
-        # HQPlayer refuses a file it cannot open — a dropped music mount
-        # looks exactly like this; the notices channel re-derives.
-        from db_pool import db_execute
-        db_execute("NOTIFY sautium_notices")
+        if _stream_mode():
+            logger.warning(
+                "HQPlayer refused %d of %d media URLs — in stream mode that "
+                "usually means it cannot reach %s:%d (a firewall, or the wrong "
+                "LAN address in MEDIA_PROXY_ADVERTISED_HOST / SAUTIUM_HOST_IPS)",
+                len(uris) - added, len(uris), hqp_media_host(),
+                settings.media_proxy_port)
+        else:
+            # HQPlayer refuses a file it cannot open — a dropped music mount
+            # looks exactly like this; the notices channel re-derives.
+            from db_pool import db_execute
+            db_execute("NOTIFY sautium_notices")
     return added
 
 
@@ -267,20 +286,128 @@ def _skip_to_first_playable(added: int) -> None:
 _local_provider = None
 
 
-def _owned_play_uri(item: "QueueItem") -> str:
-    """HQPlayer URI for an owned track. Native file:// for formats HQPlayer decodes;
-    for an m4a (which it can't — MP4 container, AAC or ALAC) transcode to FLAC in
-    memory and return the media-proxy http URL so it plays anyway, displayed as
-    owned. Falls back to file:// if streaming/proxy is off or the transcode fails.
-    HQPlayer-only workaround: engine-rendered backends decode m4a natively.
+def _stream_mode() -> bool:
+    return settings.hqplayer_file_access == "stream"
+
+
+def hqp_media_host() -> str:
+    """The address HQPlayer is handed inside media URLs — picked for the
+    machine it runs on (streaming.media_host), never a fixed advertised
+    host: an HQPlayer Embedded box on the LAN cannot reach 127.0.0.1."""
+    from streaming.media_host import media_host_for_name
+    return media_host_for_name(settings.hqplayer_host)
+
+
+def _library_uri(db_path: str) -> str:
+    """The file:// URI HQPlayer opens for a stored path: the path itself, or
+    the same path under `hqplayer_library_root` when HQPlayer mounts the
+    library elsewhere (a NAS, HQPlayer OS's SMB mount, a disk moved to the
+    HQPlayer box)."""
+    root = settings.hqplayer_library_root
+    db_root = settings.library_db_root()
+    if root and db_root and db_path.startswith(db_root + "/"):
+        db_path = root + db_path[len(db_root):]
+    return file_path_to_uri(db_path)
+
+
+def _library_db_path(uri: str) -> Optional[str]:
+    """Inverse of `_library_uri`: the stored media_files.file_path behind a
+    file:// URI HQPlayer reports — percent-escapes undone (HQPlayer escapes
+    brackets in the URIs it returns), the library-root remap reversed. None
+    for anything that is not a file, or lies outside the mapped root."""
+    if not uri.startswith("file://"):
+        return None
+    path = uri_to_file_path(uri).replace("\\", "/")
+    root = settings.hqplayer_library_root
+    if root:
+        if not path.startswith(root + "/"):
+            return None
+        path = settings.library_db_root() + path[len(root):]
+    return path
+
+
+def _http_served(item: QueueItem) -> bool:
+    """Does this slot reach HQPlayer as an http URL rather than a file it
+    opens itself? Then HQPlayer's own tags for it are not authoritative (it
+    may know the track only as 'HTTP stream') and its playlist URI carries a
+    token, not a path."""
+    src = item.source
+    if src["kind"] == "proxy":
+        return True
+    if src["kind"] != "file":
+        return src.get("uri", "").startswith("http")
+    if src.get("cue_start") is not None:
+        return True
+    from streaming.local import TRANSCODE_FORMATS
+    if (src.get("format") or "").upper() in TRANSCODE_FORMATS:
+        return True
+    return _stream_mode()
+
+
+def _register_owned(item: QueueItem, proxy) -> str:
+    """Register the owned bytes behind `item` with the media proxy and
+    return the token /file/ serves them under — a CUE slice as its cut, a
+    plain file as itself. Idempotent (the tokens are deterministic), so the
+    busy attach calls it for a restored queue and the playlist a running
+    HQPlayer still holds resolves again after a backend restart."""
+    from streaming import transcode
+    from streaming.proxy import MIME_BY_FORMAT
+    src = item.source
+    container_path = settings.translate_to_local_path(src["path"])
+    if src.get("cue_start") is not None:
+        return proxy.register_file(
+            container_path, transcode.FLAC_MIME,
+            start=src["cue_start"], end=src.get("cue_end"),
+            tags={"title": item.title, "artist": item.artist,
+                  "album": item.album, "track": item.track_number})
+    mime = MIME_BY_FORMAT.get((src.get("format") or "").upper(),
+                              "application/octet-stream")
+    return proxy.register_file(container_path, mime)
+
+
+def _slot_identity(uri: str, proxy) -> Optional[tuple]:
+    """(db_path, cue_start) behind a URI in HQPlayer's playlist: a file://
+    path through the library-root remap, an owned /file/{token} through the
+    proxy's registry. None for previews, transcodes and foreign items."""
+    if uri.startswith("file://"):
+        path = _library_db_path(uri)
+        return (path, None) if path else None
+    if proxy is not None and "/file/" in uri:
+        token = uri.rsplit("/file/", 1)[-1].split("?", 1)[0]
+        entry = proxy.file_entry(token)
+        if entry is None:
+            return None
+        return (settings.translate_to_host_path(entry.path), entry.start)
+    return None
+
+
+def _owned_play_uri(item: QueueItem, host: str) -> str:
+    """HQPlayer URI for an owned track.
 
     A CUE slice always rides the media proxy as a cached FLAC cut — the raw
-    path would play the whole disc image. The only fallback is that whole
-    image, loudly logged; there is no silent path."""
+    path would play the whole disc image; the only fallback is that whole
+    image, loudly logged. An m4a (MP4 container: HQPlayer decodes neither AAC
+    nor ALAC) is transcoded to FLAC in memory and served from /preview/,
+    displayed as owned, falling back to the raw file when streaming is off
+    or the transcode fails. Everything else is a file:// URI at the path
+    HQPlayer opens itself (`path` mode) or /file/{token} on the media proxy
+    (`stream` mode). `host` is the proxy address HQPlayer reaches."""
     global _local_provider
     src = item.source
     media_file_id, db_path, file_format = (
         item.media_file_id, src["path"], src.get("format"))
+
+    def whole_file_uri() -> str:
+        """The file itself — for a CUE slice, the raw image (cut failed)."""
+        if not _stream_mode():
+            return _library_uri(db_path)
+        from streaming import service as streaming_service
+        from streaming.proxy import MIME_BY_FORMAT
+        proxy = streaming_service.ensure_proxy()
+        mime = MIME_BY_FORMAT.get((file_format or "").upper(),
+                                  "application/octet-stream")
+        tok = proxy.register_file(settings.translate_to_local_path(db_path), mime)
+        return proxy.file_url(tok, host=host)
 
     if src.get("cue_start") is not None:
         from streaming import service as streaming_service
@@ -299,20 +426,17 @@ def _owned_play_uri(item: "QueueItem") -> str:
             logger.error("cue slice unavailable for %s [%s, %s) — playing the "
                          "whole image: %s", db_path, src.get("cue_start"),
                          src.get("cue_end"), e)
-            return file_path_to_uri(db_path)
-        tok = proxy.register_file(container_path, transcode.FLAC_MIME,
-                                  start=src["cue_start"], end=src.get("cue_end"),
-                                  tags=tags)
-        return proxy.file_url(tok)
+            return whole_file_uri()
+        return proxy.file_url(_register_owned(item, proxy), host=host)
 
     from streaming.local import TRANSCODE_FORMATS
     if (file_format or "").upper() not in TRANSCODE_FORMATS:
-        return file_path_to_uri(db_path)
+        return whole_file_uri()
 
     from streaming import service as streaming_service
     proxy = streaming_service.get_proxy() if streaming_service.is_enabled() else None
     if proxy is None:
-        return file_path_to_uri(db_path)
+        return whole_file_uri()
 
     if _local_provider is None:
         from streaming.local import LocalTranscodeProvider
@@ -330,9 +454,8 @@ def _owned_play_uri(item: "QueueItem") -> str:
     except (TimeoutError, KeyError):
         e = None
     if e is None or e.audio is None:
-        return file_path_to_uri(db_path)
-    return proxy.url_for(tokens[0])
-
+        return whole_file_uri()
+    return proxy.url_for(tokens[0], host=host)
 
 # -- The HQPlayer output backend ------------------------------------------------
 
@@ -366,6 +489,10 @@ class HqpBackend(PlayerBackend):
 
     id = "hqplayer"
     label = "HQPlayer"
+    # What the play-intent gate tells the user when reachable() says no.
+    offline_hint = ("start HQPlayer, or pick another output in Settings → "
+                    "Audio output (an HQPlayer Embedded in trial mode stops "
+                    "every 30 minutes and must be restarted)")
 
     def __init__(self, emit, queue: CanonicalQueue):
         super().__init__(emit)
@@ -375,6 +502,18 @@ class HqpBackend(PlayerBackend):
         self._running = False
         self._failures = 0
         self._drift_logged = False
+        # The playlist HQPlayer holds differs from the canonical queue (an
+        # external edit, or HQPlayer came back empty after a restart): the
+        # slot index names nothing of ours until the next mirror.
+        self._drift = False
+        # Set when a RECONNECT found that difference — HQPlayer restarted (a
+        # trial-mode Embedded stops every 30 minutes) and lost the mirror —
+        # so the play-intent gate re-attaches and re-mirrors before playing.
+        self._mirror_lost = False
+        self._gone = False
+        # The proxy address HQPlayer reaches, fixed per attach: a DNS + route
+        # lookup once, not per queued item.
+        self._url_host = hqp_media_host()
         # Slot to select on the first play after an output switch (resume_at).
         self._resume_index: Optional[int] = None
 
@@ -404,6 +543,8 @@ class HqpBackend(PlayerBackend):
                                 "on attach", added)
                 except Exception as e:
                     logger.warning("canonical mirror on attach failed: %s", e)
+            else:
+                self._register_serving()
         self._running = True
         self._thread = threading.Thread(target=self._poll_loop, daemon=True,
                                         name="hqp-status-poller")
@@ -419,6 +560,48 @@ class HqpBackend(PlayerBackend):
 
     def capabilities(self) -> Capabilities:
         return Capabilities(volume=True, volume_kind="db", seek=True, gapless=True)
+
+    def healthy(self) -> bool:
+        return not self._gone and not self._mirror_lost
+
+    def reachable(self) -> bool:
+        """Protocol-level liveness at play-intent time: connect and get an
+        answer to GetInfo within 2 s. A bare TCP connect proves nothing —
+        HQPlayer Embedded's trial stop keeps the port open and closes every
+        connection at once (seen live), and HQPlayer Desktop listens only
+        once its audio engine is up."""
+        try:
+            with socket.create_connection(
+                    (settings.hqplayer_host, settings.hqplayer_port),
+                    timeout=2.0) as s:
+                s.settimeout(2.0)
+                s.sendall(b"<GetInfo/>")
+                reply = s.recv(4096)
+        except OSError:
+            return False
+        return b"product=" in reply
+
+    def _register_serving(self) -> None:
+        """HQPlayer plays on through a backend restart: its playlist is
+        left alone, but the restored queue's owned files are registered with
+        the proxy again so the /file/ URLs it still holds resolve — the
+        tokens are deterministic, so they are the very same ones."""
+        from streaming.local import TRANSCODE_FORMATS
+        items = [it for it in self._queue.snapshot()
+                 if it.source["kind"] == "file" and _http_served(it)
+                 and (it.source.get("format") or "").upper() not in TRANSCODE_FORMATS]
+        if not items:
+            return
+        from streaming import service as streaming_service
+        try:
+            proxy = streaming_service.ensure_proxy()
+        except RuntimeError as e:
+            logger.warning("owned files not re-registered for HQPlayer: %s", e)
+            return
+        for it in items:
+            _register_owned(it, proxy)
+        logger.info("re-registered %d owned file(s) behind HQPlayer's running "
+                    "playlist", len(items))
 
     def resume_at(self, index: int) -> None:
         # HQPlayer owns its playlist pointer, and a select fired straight
@@ -464,6 +647,7 @@ class HqpBackend(PlayerBackend):
             try:
                 hqp_playlist = None
                 with _hqp_status_lock:
+                    before = _hqp_status_client
                     try:
                         hqp = _get_hqp_status()
                         status = hqp.get_status()
@@ -471,7 +655,14 @@ class HqpBackend(PlayerBackend):
                         _reset_hqp_status()
                         hqp = _get_hqp_status()
                         status = hqp.get_status()
-                    if status is not None and tick % DRIFT_CHECK_EVERY == 0:
+                    # A new socket where one already existed = HQPlayer went
+                    # away and came back. Its playlist is read NOW, not at
+                    # the next canary tick: a restart drops the mirror, and
+                    # the play press must know before it lands on an empty
+                    # list.
+                    reconnected = before is not None and hqp is not before
+                    if status is not None and (reconnected
+                                               or tick % DRIFT_CHECK_EVERY == 0):
                         try:
                             hqp_playlist = hqp.get_playlist()
                         except (BrokenPipeError, ConnectionError, OSError) as e:
@@ -483,22 +674,13 @@ class HqpBackend(PlayerBackend):
                     self._register_failure()
                 else:
                     self._failures = 0
-                    self._emit(PlaybackStatus(
-                        state=STATE_NAMES.get(status.state, "unknown"),
-                        position=status.position,
-                        length=status.length,
-                        queue_index=status.track_index,
-                        volume=status.volume,
-                        extra={
-                            "artist": status.artist,
-                            "album": status.album,
-                            "song": status.song,
-                            "genre": status.genre,
-                            "process_speed": status.process_speed,
-                        },
-                    ))
                     if hqp_playlist is not None:
-                        self._check_drift(hqp_playlist)
+                        if self._check_drift(hqp_playlist) and reconnected:
+                            self._mirror_lost = True
+                            logger.warning("HQPlayer came back with a different "
+                                           "playlist (restarted?) — the queue is "
+                                           "re-mirrored on the next play")
+                    self._emit(self._status_of(status))
             except Exception:
                 self._register_failure()
 
@@ -518,6 +700,30 @@ class HqpBackend(PlayerBackend):
             self._wake.clear()
             tick += 1
 
+    def _status_of(self, status) -> PlaybackStatus:
+        """One status tick as the manager reads it. HQPlayer's own tags are
+        authoritative only for a slot it opened as a file; an http-served
+        slot (a preview, a transcode, every owned file in stream mode) is
+        described by the queue item, so those keys are left out and the
+        manager falls back to it. While HQPlayer's playlist has drifted from
+        the queue its slot index names nothing of ours: the tick is reported
+        as external playback (slot 0), so nothing is tracked against the
+        wrong track."""
+        idx = status.track_index
+        extra = {"genre": status.genre, "process_speed": status.process_speed}
+        item = self._queue.item_at(idx)
+        if self._drift and status.state in (PlaybackState.PLAYING,
+                                            PlaybackState.PAUSED):
+            idx, item = 0, None
+            extra["source"] = "external"
+        if item is None or not _http_served(item):
+            extra.update(artist=status.artist, album=status.album,
+                         song=status.song)
+        return PlaybackStatus(
+            state=STATE_NAMES.get(status.state, "unknown"),
+            position=status.position, length=status.length,
+            queue_index=idx, volume=status.volume, extra=extra)
+
     def _register_failure(self) -> None:
         """Tolerate a short burst of misses; emit 'disconnected' only past
         the threshold (the manager dedupes repeats)."""
@@ -525,26 +731,29 @@ class HqpBackend(PlayerBackend):
         if self._failures >= STATUS_FAILURE_THRESHOLD:
             self._emit(PlaybackStatus(state="disconnected"))
 
-    def _check_drift(self, hqp_tracks: list) -> None:
-        """Compare HQPlayer's playlist against the canonical queue. Proxy-
-        and transcode-backed slots are skipped (their tokens are re-minted
-        across restarts); plain file slots must resolve to the same db path
-        (compared through `_uri_db_path` — HQPlayer percent-escapes brackets
-        in the URIs it returns, so raw URI equality would false-positive)."""
+    def _check_drift(self, hqp_tracks: list) -> bool:
+        """Compare HQPlayer's playlist against the canonical queue. Preview
+        and transcode slots are skipped (their tokens are re-minted); every
+        other file slot must resolve to the same (path, cue_start) —
+        `_slot_identity` undoes HQPlayer's percent-escapes and the
+        library-root remap and looks /file/ tokens up in the proxy, so raw
+        URI equality is never relied on. Returns whether they differ."""
+        from streaming import service as streaming_service
+        from streaming.local import TRANSCODE_FORMATS
+        proxy = streaming_service.get_proxy()
         snapshot = self._queue.snapshot()
         drift = len(hqp_tracks) != len(snapshot)
         if not drift:
-            from streaming.local import TRANSCODE_FORMATS
             for t, it in zip(hqp_tracks, snapshot):
-                if (it.source["kind"] != "file"
-                        or it.source.get("cue_start") is not None
-                        or (it.source.get("format") or "").upper() in TRANSCODE_FORMATS):
+                src = it.source
+                if (src["kind"] != "file"
+                        or (src.get("format") or "").upper() in TRANSCODE_FORMATS):
                     continue
-                uri = t.get("uri") or ""
-                if (not uri.startswith("file://")
-                        or _uri_db_path(uri) != it.source["path"]):
+                if (_slot_identity(t.get("uri") or "", proxy)
+                        != (src["path"], src.get("cue_start"))):
                     drift = True
                     break
+        self._drift = drift
         if drift and not self._drift_logged:
             logger.warning(
                 "HQPlayer playlist drifted from the canonical queue "
@@ -552,6 +761,7 @@ class HqpBackend(PlayerBackend):
             self._drift_logged = True
         elif not drift:
             self._drift_logged = False
+        return drift
 
     # -- transport -----------------------------------------------------------------
 
@@ -624,15 +834,18 @@ class HqpBackend(PlayerBackend):
     # -- canonical-queue mirror -------------------------------------------------------
 
     def _uri_for(self, item: QueueItem) -> str:
-        """Playable HQPlayer URI for a queue item. May transcode (m4a) —
-        call OUTSIDE `_hqp_lock`; a slow transcode must never hold the
+        """Playable HQPlayer URI for a queue item — an owned file by
+        file-access mode (`_owned_play_uri`), a preview by its proxy URL,
+        both naming the address HQPlayer reaches us at. May transcode (m4a)
+        — call OUTSIDE `_hqp_lock`; a slow transcode must never hold the
         command socket hostage."""
         src = item.source
         if src["kind"] == "file":
-            return _owned_play_uri(item)
+            return _owned_play_uri(item, self._url_host)
         if src["kind"] == "proxy":
             from streaming import service as streaming_service
-            return streaming_service.get_proxy().url_for(src["token"])
+            return streaming_service.get_proxy().url_for(src["token"],
+                                                         host=self._url_host)
         return src["uri"]
 
     def queue_replace(self, items: list, *, play: bool, probe_first: bool = False) -> int:
@@ -640,6 +853,8 @@ class HqpBackend(PlayerBackend):
         with _hqp_lock:
             _hqp_safe(lambda h: h.stop())
             added = _add_uris_with_retry(uris, clear_first=True)
+            if added == len(uris):
+                self._drift = self._mirror_lost = False   # mirrored afresh
             if added and play:
                 _hqp_safe(lambda h: h.play())
                 if probe_first:
@@ -762,31 +977,30 @@ class HqpBackend(PlayerBackend):
         }
 
 
-def _uri_db_path(uri: str) -> str:
-    """file:// URI → the stored media_files.file_path form (forward slashes,
-    HQPlayer's %5B/%5D bracket escapes undone)."""
-    p = uri[8:] if uri.startswith("file:///") else uri[7:]
-    p = p.replace("\\", "/")
-    return p.replace("%5B", "[").replace("%5D", "]")
-
-
 def _items_from_hqp_tracks(hqp_tracks: list) -> list[QueueItem]:
     """Reverse-map HQPlayer's raw playlist into QueueItems (adopt-on-attach):
-    file:// URIs resolve through media_files, proxy URLs through the
-    streaming session's metadata, anything else becomes a foreign
-    pass-through item with HQPlayer's own labels."""
+    file:// URIs and owned /file/ URLs resolve through media_files by
+    (path, cue_start) — `_slot_identity` undoes HQPlayer's escapes, the
+    library-root remap and the proxy's token registry; proxy previews
+    resolve through the streaming session's metadata; anything else
+    becomes a foreign pass-through item with HQPlayer's own labels."""
     from streaming import service as streaming_service
+    proxy = streaming_service.get_proxy()
 
-    paths = [_uri_db_path(t["uri"]) for t in hqp_tracks
-             if t.get("uri", "").startswith("file://")]
-    by_path = queue_mod.items_for_file_paths(paths)
+    identities: dict[str, tuple] = {}
+    for t in hqp_tracks:
+        uri = t.get("uri", "")
+        ident = _slot_identity(uri, proxy)
+        if ident is not None:
+            identities[uri] = ident
+    by_span = queue_mod.items_for_file_spans(list(identities.values()))
 
     items: list[QueueItem] = []
     for t in hqp_tracks:
         uri = t.get("uri", "")
         item = None
-        if uri.startswith("file://"):
-            item = by_path.get(_uri_db_path(uri))
+        if uri in identities:
+            item = by_span.get(identities[uri])
         elif uri.startswith("http://") and "/preview/" in uri:
             token = uri.rsplit("/preview/", 1)[-1].split("?", 1)[0]
             try:

@@ -289,16 +289,24 @@ def items_for_media_ids(ids: list[int]) -> list[QueueItem]:
     return [_item_from_media_row(r) for r in rows]
 
 
-def items_for_file_paths(paths: list[str]) -> dict[str, QueueItem]:
-    """QueueItems for owned media files keyed by file_path — the reverse
-    mapping used when adopting an existing HQPlayer playlist on attach."""
+def items_for_file_spans(spans: list[tuple]) -> dict[tuple, QueueItem]:
+    """QueueItems for owned media files keyed by (file_path, cue_start) —
+    the reverse mapping used when adopting an existing HQPlayer playlist on
+    attach. Keyed by the span, not the path alone: the N virtual rows of a
+    CUE image share one path and are distinct tracks."""
+    paths = sorted({p for p, _ in spans})
     if not paths:
         return {}
     rows = _db_query(
         _MEDIA_ITEM_SQL.replace("WHERE mf.id = ANY(%(ids)s)",
                                 "WHERE mf.file_path = ANY(%(ids)s)"),
         {"ids": paths})
-    return {r["file_path"]: _item_from_media_row(r) for r in rows}
+    out: dict[tuple, QueueItem] = {}
+    for r in rows:
+        start = r.get("cue_start_seconds")
+        out[(r["file_path"], float(start) if start is not None else None)] = \
+            _item_from_media_row(r)
+    return out
 
 
 def item_for_proxy_token(token: str) -> Optional[QueueItem]:
@@ -310,7 +318,7 @@ def item_for_proxy_token(token: str) -> Optional[QueueItem]:
     proxy = streaming_service.get_proxy()
     if proxy is None:
         return None
-    meta = streaming_service.preview_meta(proxy.url_for(token))
+    meta = streaming_service.preview_meta(token)
     if not meta:
         return None
     if meta.get("media_file_id"):

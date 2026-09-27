@@ -19,7 +19,9 @@ _SECRET_CACHE: Optional[bytes] = None
 _TTL_SECONDS = 4 * 3600
 
 
-def _secret() -> bytes:
+def secret() -> bytes:
+    """The node secret every media URL and owned-file token derives from
+    (the same key the request signatures use, read once)."""
     global _SECRET_CACHE
     if _SECRET_CACHE is None:
         _SECRET_CACHE = ensure_secret(_secret_path())
@@ -28,7 +30,7 @@ def _secret() -> bytes:
 
 def _sign(kind: str, ident: str, exp: int) -> str:
     canonical = f"media\n{kind}\n{ident}\n{exp}"
-    return hmac.new(_secret(), canonical.encode(), hashlib.sha256).hexdigest()
+    return hmac.new(secret(), canonical.encode(), hashlib.sha256).hexdigest()
 
 
 def signed_media_url(kind: str, ident: str, quality: Optional[str] = None) -> str:

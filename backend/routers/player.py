@@ -433,7 +433,7 @@ def _lan_subnets() -> list:
     host's address has to be supplied, and SAUTIUM_HOST_IPS is where it lives.
     """
     import ipaddress
-    from playback.dlna_backend import _source_address_toward
+    from streaming.media_host import _source_address_toward
     explicit = [s.strip() for s in os.getenv("SAUTIUM_HOST_IPS", "").split(",")
                 if s.strip()]
     seeds = explicit or [ip for ip in [_source_address_toward("8.8.8.8")] if ip]
@@ -1444,8 +1444,8 @@ def _filler_append(item, gen: int, *, position: str = "end",
 
 
 def _owned_filler(items: list, gen: int) -> None:
-    """Append the rest of an owned set as each item is ready — file:// instantly,
-    an m4a after its in-memory transcode (inside the HQP mirror) — in order,
+    """Append the rest of an owned set as each item is ready — a plain file
+    instantly, an m4a after its in-memory transcode (inside the HQP mirror) — in order,
     stopping if a new playback supersedes this one (generation)."""
     for item in items:
         if _filler_append(item, gen) is None:
@@ -1455,7 +1455,8 @@ def _owned_filler(items: list, gen: int) -> None:
 def _add_owned(rows: list, *, clear_first: bool, position: str = "end") -> int:
     """THE single path for queueing owned tracks. Rows (id, ...) become
     full-metadata QueueItems; the active backend mirrors them as needed
-    (HQPlayer: file:// URIs, m4a via in-memory FLAC transcode). When any
+    (HQPlayer: a file:// URI or a media-proxy URL by file-access mode, m4a via
+    in-memory FLAC transcode). When any
     track needs transcoding the queue is rolled in — the first track is
     added (and, for a replace, played) now, the rest fill in behind via a
     background filler — so a slow transcode never blocks the add. A native-

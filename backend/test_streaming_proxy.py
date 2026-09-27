@@ -67,7 +67,7 @@ def _session(proxy, prov, *titles):
 
 
 def _proxy():
-    return MediaProxy(port=0, advertised_host="127.0.0.1")
+    return MediaProxy(port=0, advertised_host="127.0.0.1", file_token_key=b"test-key")
 
 
 def test_live_queue_streams_survive_a_new_session():
@@ -86,7 +86,7 @@ def test_live_queue_streams_survive_a_new_session():
     for t, title in zip(a, ("a1", "a2", "a3")):
         e = proxy.wait_ready(t, timeout=5)
         assert e.audio is not None
-        assert proxy.preview_meta(proxy.url_for(t))["title"] == title
+        assert proxy.preview_meta(t)["title"] == title
 
     for t in b:
         proxy.wait_ready(t, timeout=5)
@@ -146,7 +146,7 @@ def test_an_excerpt_reports_the_clips_own_length():
     proxy = _proxy()
     tok = proxy.start_session([(_q("a1"), [(clip, None)])])[0]
     proxy.wait_ready(tok, timeout=5)
-    meta = proxy.preview_meta(proxy.url_for(tok))
+    meta = proxy.preview_meta(tok)
     assert meta["excerpt"] is True and meta["duration"] == 30.0
     assert meta["provider"] == "clip"
     assert proxy.ready_run([tok])[1] == 30.0          # not the 100 s catalog length
@@ -194,7 +194,7 @@ def test_drop_audio_rearms_the_demo_channels_entry_and_a_wait_refetches():
     proxy.link_admissible = lambda provider, query: not provider.manifest.demo_limited
     e = proxy.wait_ready(tok, timeout=5)
     assert e.provider is clip and e.audio.excerpt
-    assert proxy.preview_meta(proxy.url_for(tok))["excerpt"] is True
+    assert proxy.preview_meta(tok)["excerpt"] is True
     # An excerpt entry is never dropped: only the demo channel's bytes are.
     assert proxy.drop_audio("id-a1") == 0
 
@@ -259,3 +259,18 @@ def test_unplayable_reason_names_owned_files_the_disk_refused():
     # library": only the disk can have refused them.
     assert DlnaBackend._unplayable_reason(stub, 1, 3).startswith(
         "3 queued track(s) could not be read from the library")
+
+
+def test_file_tokens_are_deterministic_per_node_key_and_span():
+    import string
+    a = MediaProxy(port=0, advertised_host="127.0.0.1", file_token_key=b"k1")
+    b = MediaProxy(port=0, advertised_host="127.0.0.1", file_token_key=b"k1")
+    c = MediaProxy(port=0, advertised_host="127.0.0.1", file_token_key=b"k2")
+    t = a.register_file("/music/a.flac", "audio/flac")
+    assert t == b.register_file("/music/a.flac", "audio/flac")     # a restart hands out the same one
+    assert t == a.register_file("/music/a.flac", "audio/flac")     # idempotent
+    assert t != c.register_file("/music/a.flac", "audio/flac")     # another node's key
+    assert t != a.register_file("/music/a.flac", "audio/flac", start=10.0, end=20.0)
+    assert len(t) == 20 and set(t) <= set(string.ascii_letters + string.digits + "-_")
+    assert a.file_url(t, host="192.168.1.5") == f"http://192.168.1.5:0/file/{t}"
+    assert a.file_url(t) == f"http://127.0.0.1:0/file/{t}"

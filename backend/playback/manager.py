@@ -83,9 +83,10 @@ class PlaybackManager:
             # probe: its window is sized for a sleeping radio.
             if b is not None and not b.reachable():
                 b._gone = True
-                raise ConnectionError(
-                    f"'{b.label}' is offline — turn it on, or pick another "
-                    "output in Settings → Audio output")
+                hint = getattr(b, "offline_hint",
+                               "turn it on, or pick another output in "
+                               "Settings → Audio output")
+                raise ConnectionError(f"'{b.label}' is offline — {hint}")
             if b is not None and b.healthy():
                 return b
             from routers.settings import _read
@@ -418,9 +419,13 @@ class PlaybackManager:
         if preview:
             artist, album, song = item.artist, (item.album or ""), item.title
         else:
-            artist = s.extra.get("artist", item.artist if item else "")
-            album = s.extra.get("album", (item.album or "") if item else "")
-            song = s.extra.get("song", item.title if item else "")
+            # A backend with authoritative metadata (HQPlayer's tags for a
+            # file it opened) supplies it via `extra`; absent or empty, the
+            # queue item is the source — HQPlayer reports nothing useful for
+            # a slot it streams over http.
+            artist = s.extra.get("artist") or (item.artist if item else "")
+            album = s.extra.get("album") or ((item.album or "") if item else "")
+            song = s.extra.get("song") or (item.title if item else "")
 
         new_data = {
             "state": s.state,
@@ -463,6 +468,11 @@ class PlaybackManager:
         # tracks) — additive; absent when everything is healthy.
         if s.extra.get("error"):
             new_data["error"] = s.extra["error"]
+        # The output is playing something that is not ours (HQPlayer's
+        # playlist edited in its own GUI, another source): additive, and
+        # the slot above is 0 so nothing is tracked against a wrong track.
+        if s.extra.get("source"):
+            new_data["source"] = s.extra["source"]
 
         # Per-track listening history + scrobble (source-agnostic: owned and
         # streamed phantom items both carry the track UUID). Separate from the

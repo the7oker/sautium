@@ -97,7 +97,8 @@ def test_a_disk_failure_is_not_the_renderer_leaving():
 
 def test_a_library_gone_from_disk_is_walked_past_without_recursing(monkeypatch):
     monkeypatch.setattr(streaming_service, "_proxy",
-                        MediaProxy(port=0, advertised_host="127.0.0.1"))
+                        MediaProxy(port=0, advertised_host="127.0.0.1",
+                                   file_token_key=b"test-key"))
     monkeypatch.setattr(DlnaBackend, "_quality_suffix", staticmethod(lambda: ""))
     queue = CanonicalQueue()
     # Every owned slot of an unmounted library is one to skip, and a queue
@@ -118,3 +119,19 @@ def test_a_library_gone_from_disk_is_walked_past_without_recursing(monkeypatch):
     assert backend._error.startswith("1200 queued track(s) could not be read")
     assert backend._gone is False
     assert statuses[-1].state == "stopped"
+
+
+def test_empty_backend_tags_fall_back_to_the_queue_item():
+    mgr = PlaybackManager()
+    mgr.queue.replace([QueueItem(
+        track_id=None, media_file_id=7,
+        source={"kind": "file", "path": "E:/Music/A/01.flac", "format": "FLAC"},
+        title="Song", artist="Artist", album="Album")])
+    live = _Stub(mgr._on_backend_status)
+    mgr._active = live
+    # HQPlayer knows an http-served slot only as 'HTTP stream' and reports
+    # empty tags for it: the queue item names the track.
+    live._emit(PlaybackStatus(state="stopped", queue_index=1,
+                              extra={"artist": "", "album": "", "song": ""}))
+    st = mgr.latest_status
+    assert (st["artist"], st["album"], st["song"]) == ("Artist", "Album", "Song")

@@ -1,7 +1,9 @@
 #!/usr/bin/env python3
 """
-HQPlayer Desktop 5/6 Control API Client
-Based on HQPlayer SDK (engine version 5.29.2); wire-compatible with HQPlayer 6.
+HQPlayer Control API Client — Desktop 5/6 and Embedded 6, one wire protocol
+Based on HQPlayer SDK (engine version 5.29.2); wire-compatible with HQPlayer 6
+Desktop and with HQPlayer Embedded 6 (verified against engine 6.2.3 on
+HQPlayer OS, 2026-09-27).
 
 Protocol: XML over TCP
 Default port: 4321

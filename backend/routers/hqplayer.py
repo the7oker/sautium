@@ -93,10 +93,19 @@ class VolumeRequest(BaseModel):
 @router.get("/state")
 def get_state() -> Dict[str, Any]:
     """Snapshot everything the HQPlayer settings screen needs."""
+    from playback.hqp_backend import hqp_media_host
     response: Dict[str, Any] = {
         "host": settings.hqplayer_host,
         "port": settings.hqplayer_port,
         "connected": False,
+        # How HQPlayer reaches the files, and the proxy address its media
+        # URLs name — the screen shows both so a remote HQPlayer that cannot
+        # fetch anything is diagnosable from the phone.
+        "file_access": settings.hqplayer_file_access,
+        "library_root": settings.hqplayer_library_root,
+        "library_root_local": settings.library_db_root(),
+        "media_url_host": hqp_media_host(),
+        "media_url_port": settings.media_proxy_port,
     }
 
     try:

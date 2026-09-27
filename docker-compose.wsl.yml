@@ -91,6 +91,10 @@ services:
       HQPLAYER_HOST: ${HQPLAYER_HOST:-host.docker.internal}
       HQPLAYER_PORT: ${HQPLAYER_PORT:-4321}
       HQPLAYER_ENABLED: ${HQPLAYER_ENABLED:-false}
+      # path = HQPlayer opens the files itself (under HQPLAYER_LIBRARY_ROOT when
+      # it mounts the library elsewhere); stream = every track via the media proxy.
+      HQPLAYER_FILE_ACCESS: ${HQPLAYER_FILE_ACCESS:-path}
+      HQPLAYER_LIBRARY_ROOT: ${HQPLAYER_LIBRARY_ROOT:-}
       # Phantom-album streaming preview (media proxy on a separate plain-http port;
       # advertised_host is what HQPlayer puts in the URL — 127.0.0.1 = the published
       # port on this host).

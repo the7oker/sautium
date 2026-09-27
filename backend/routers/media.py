@@ -19,15 +19,12 @@ import media_urls
 from config import settings
 from db_pool import db_execute, db_query_one
 from streaming import transcode
+from streaming.proxy import MIME_BY_FORMAT
 
 logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/api/player/media", tags=["media"])
 
-_MIME_BY_FORMAT = {
-    "FLAC": "audio/flac", "MP3": "audio/mpeg", "WAV": "audio/wav",
-    "OGG": "audio/ogg", "M4A": "audio/mp4", "AIFF": "audio/aiff",
-}
 _CHUNK = 262144
 
 
@@ -116,7 +113,7 @@ def media_file(media_file_id: int, request: Request,
     if not row:
         raise HTTPException(status_code=404, detail="media file not found")
     path = settings.translate_to_local_path(row["file_path"])
-    mime = _MIME_BY_FORMAT.get((row["file_format"] or "").upper(),
+    mime = MIME_BY_FORMAT.get((row["file_format"] or "").upper(),
                                "application/octet-stream")
 
     if row["cue_start_seconds"] is not None:
