@@ -31,7 +31,7 @@ from database import SessionLocal
 from db_pool import db_execute, db_query, get_conn
 from discography import release_match_key, title_residual
 from canon.match import _candidates, _exact_mbids, match_whole_gids, _name_exact_gids
-from canon.identity import recanonicalize_album_variants, recanonicalize_artist
+from canon.identity import _update_album_uuid, recanonicalize_album_variants, recanonicalize_artist
 from canon.split import normalize_compound_artist
 from release_groups import release_group_cluster, simplify_edition_name
 from uuid_utils import album_uuid, artist_uuid, normalize
@@ -750,14 +750,29 @@ def _disc_base(raw_title: str) -> str:
     return _CHANNEL_DISC_RE.sub("", (raw_title or "").strip()).strip().lower()
 
 
+# A featuring credit inside a track title — "Eyesdown (feat. Andreya Triana)",
+# "Eyesdown ft. Andreya Triana" — is the tagger's habit, not the tracklist:
+# MB titles the track "Eyesdown" and credits the guest on the artist. The
+# edition fingerprint compares titles without it, or two rips of one album
+# read as different tracklists (a title Jaccard of 0.47 for Migration).
+_FEAT_RE = re.compile(r"(?<=\S)\s*[\(\[]?\s*(?:feat\.?|ft\.?|featuring)\s+[^\)\]]*[\)\]]?\s*$",
+                      re.IGNORECASE)
+
+
+def _title_key(title: str) -> str:
+    return _FEAT_RE.sub("", title or "").strip().lower()
+
+
 def _variant_fingerprints(album_id: str) -> list:
     """Per variant: its recording-MBID set (the name-independent tracklist
     fingerprint, stamped by apply_artist), normalized track-title set (fallback
-    when recordings are sparse), raw_title and track count."""
+    when recordings are sparse; featuring credits stripped), its track-id set,
+    raw_title and track count."""
     rows = db_query("""
         SELECT av.id AS vid, av.raw_title,
                array_remove(array_agg(DISTINCT mf.recording_mbid::text), NULL) AS recs,
                array_agg(DISTINCT lower(btrim(t.title))) AS titles,
+               array_agg(DISTINCT mf.track_id::text) AS tracks,
                count(DISTINCT mf.track_id) AS ntracks
         FROM album_variants av
         JOIN owned_files mf ON mf.album_variant_id = av.id
@@ -767,7 +782,8 @@ def _variant_fingerprints(album_id: str) -> list:
     """, {"a": str(album_id)})
     return [{"vid": r["vid"], "raw_title": r["raw_title"] or "",
              "recs": set(r["recs"] or []),
-             "titles": {t for t in (r["titles"] or []) if t},
+             "titles": {_title_key(t) for t in (r["titles"] or []) if _title_key(t)},
+             "tracks": set(r["tracks"] or []),
              "ntracks": r["ntracks"], "rel": None} for r in rows]
 
 
@@ -785,11 +801,17 @@ def _prep_releases(rg_mbid: str, cache: dict) -> list:
     return cache[rg_mbid]
 
 
+def _well_stamped(v: dict) -> bool:
+    """At least half of the variant's tracks carry a recording MBID — enough
+    for its recording set to stand for its tracklist."""
+    return len(v["recs"]) >= max(1, v["ntracks"] // 2)
+
+
 def _best_release(v: dict, releases: list) -> tuple:
     """The RG release whose tracklist best matches variant ``v`` — recording-MBID
     Jaccard when the variant is well-canonized, else track-title Jaccard.
     Returns (release | None, score)."""
-    use_recs = len(v["recs"]) >= max(1, v["ntracks"] // 2)
+    use_recs = _well_stamped(v)
     best, bscore = None, 0.0
     for rel in releases:
         score = _jaccard(v["recs"], rel["recset"]) if use_recs \
@@ -800,9 +822,12 @@ def _best_release(v: dict, releases: list) -> tuple:
 
 
 def _group_editions(variants: list) -> list:
-    """Cluster variants into editions: same matched release, OR near-identical
-    tracklist (drift / different-tag true rips), OR a bare disc/channel marker
-    apart (a multi-disc edition). Returns lists of variants."""
+    """Cluster variants into editions: same matched release, OR the same
+    tracks (one set of track identities within a release group is one
+    edition — the recording stamps of two copies can disagree where MB binds
+    a title to several recordings), OR near-identical tracklist (drift /
+    different-tag true rips), OR a bare disc/channel marker apart (a
+    multi-disc edition). Returns lists of variants."""
     parent = list(range(len(variants)))
 
     def find(x):
@@ -819,12 +844,16 @@ def _group_editions(variants: list) -> list:
             # here; this is what folds 3 rips tagged "X (Deluxe)" into one edition).
             same_raw = (a["raw_title"].strip() != ""
                         and a["raw_title"].strip().lower() == b["raw_title"].strip().lower())
-            jac = _jaccard(a["recs"], b["recs"]) if (a["recs"] and b["recs"]) \
+            same_tracks = bool(a["tracks"]) and a["tracks"] == b["tracks"]
+            # Recordings only when BOTH sides are well stamped (_best_release's
+            # rule): one shared stamp on a sparsely stamped variant read as a
+            # 1.0 match and folded a single into an album (2026-09-27).
+            jac = _jaccard(a["recs"], b["recs"]) if (_well_stamped(a) and _well_stamped(b)) \
                 else _jaccard(a["titles"], b["titles"])
             disc = (_disc_base(a["raw_title"]) == _disc_base(b["raw_title"])
                     and (_CHANNEL_DISC_RE.search(a["raw_title"])
                          or _CHANNEL_DISC_RE.search(b["raw_title"])))
-            if same_raw or jac >= _EDITION_SAME_MIN or disc:
+            if same_raw or same_tracks or jac >= _EDITION_SAME_MIN or disc:
                 parent[find(i)] = find(j)
 
     groups: dict = {}
@@ -849,6 +878,65 @@ def _cluster_rg(album_id: str) -> str:
 def _album_is_owned(db, album_id: str) -> bool:
     return db.execute(_sql("SELECT 1 FROM album_variants WHERE album_id = :a LIMIT 1"),
                       {"a": album_id}).fetchone() is not None
+
+
+def _row_fingerprint(variants: list) -> dict:
+    """An album row's content as one fingerprint over all its variants."""
+    tracks = set().union(*[v["tracks"] for v in variants])
+    return {"raws": {v["raw_title"].strip().lower() for v in variants if v["raw_title"].strip()},
+            "bases": {_disc_base(v["raw_title"]) for v in variants},
+            "marked": any(_CHANNEL_DISC_RE.search(v["raw_title"]) for v in variants),
+            "recs": set().union(*[v["recs"] for v in variants]),
+            "titles": set().union(*[v["titles"] for v in variants]),
+            "tracks": tracks, "ntracks": len(tracks)}
+
+
+def _rows_one_edition(a: dict, b: dict) -> bool:
+    """Two album rows hold ONE edition: the same track identities; one scan
+    tag on every variant of both, corroborated by content (a folder
+    mis-tagged with another album's name shares its tag and nothing else);
+    a tracklist past the drift threshold (recordings only where both rows
+    are well stamped — MB binds one tracklist to other recordings on
+    another release); or one disc marker apart (a per-disc split)."""
+    same_tracks = bool(a["tracks"]) and a["tracks"] == b["tracks"]
+    title_jac = _jaccard(a["titles"], b["titles"])
+    same_raw = (len(a["raws"]) == 1 and a["raws"] == b["raws"]
+                and (same_tracks or title_jac >= _EDITION_MATCH_MIN))
+    well = _well_stamped(a) and _well_stamped(b)
+    jac = _jaccard(a["recs"], b["recs"]) if well else title_jac
+    disc = (len(a["bases"] | b["bases"]) == 1 and (a["marked"] or b["marked"]))
+    return same_raw or same_tracks or jac >= _EDITION_SAME_MIN or disc
+
+
+def _same_edition_twin(db, album_id: str, rg: str, bare_id: str, variants: list):
+    """Another owned row of this release group that holds the SAME edition
+    as this row (_rows_one_edition over the rows' whole content) — the row
+    this one is a copy of: a rip tagged a little differently, a per-disc
+    split, or the HQPlayer's reading of the same folder's tags (the same
+    files over a share, 2026-09-27). Two rows of one edition are one album,
+    never "X" and "X (Alt)"; a row with MORE content (a bonus disc) is a
+    different edition and stays. Returns (loser, keeper): the row named for
+    the release group keeps the identity, else the older row."""
+    rows = db.execute(_sql("""
+        SELECT a.id::text FROM albums a
+        WHERE a.musicbrainz_id = :rg AND a.id <> :a
+          AND EXISTS (SELECT 1 FROM album_variants av WHERE av.album_id = a.id)
+        ORDER BY a.created_at, a.id
+    """), {"rg": rg, "a": album_id}).fetchall()
+    mine = _row_fingerprint(variants)
+    for (other,) in rows:
+        others = _variant_fingerprints(other)
+        if not others or not _rows_one_edition(mine, _row_fingerprint(others)):
+            continue
+        if album_id == bare_id:
+            return other, album_id
+        if other == bare_id:
+            return album_id, other
+        older = db.execute(_sql("""
+            SELECT id::text FROM albums WHERE id IN (:a, :b) ORDER BY created_at, id LIMIT 1
+        """), {"a": album_id, "b": other}).fetchone()[0]
+        return (other, album_id) if older == album_id else (album_id, other)
+    return None
 
 
 def _split_album_editions(db, album_id: str, dry_run: bool, st: dict, rel_cache: dict) -> None:
@@ -889,6 +977,24 @@ def _split_album_editions(db, album_id: str, dry_run: bool, st: dict, rel_cache:
     multi = len(editions) > 1
     rg_base = release_match_key(rg_name)
     bare_id = str(album_uuid(rg_name, artist_name))   # the standard-edition row
+    # A lone edition that is another row's edition folds into it — the copy
+    # becomes that album's variant — and the keeper is resolved afresh.
+    if not multi and not attaching:
+        twin = _same_edition_twin(db, album_id, rg, bare_id, variants)
+        if twin:
+            loser, keeper = twin
+            st["merged"] += 1
+            if dry_run:
+                logger.info("[dry] %s -> fold into %s (same edition of RG %s)", loser, keeper, rg)
+                return
+            logger.info("album %s folded into %s (same edition of RG %s)", loser, keeper, rg)
+            _update_album_uuid(db, loser, keeper)
+            # An "Alt" label named a twin row, never a release: it means
+            # nothing on a variant of the album it folded into.
+            db.execute(_sql("UPDATE album_variants SET edition = NULL "
+                            "WHERE album_id = :k AND edition ~ '^Alt( \\d+)?$'"), {"k": keeper})
+            _split_album_editions(db, keeper, dry_run, st, rel_cache)
+            return
     # A row needs an edition qualifier when it is NOT the plain standard album:
     # attaching (cluster-borrowed RG), a multi-edition split, OR a lone row whose
     # bare RG name is already owned by another edition (a split edition seen on its
@@ -977,7 +1083,7 @@ def apply_editions(dry_run: bool = True, artist_ids: list = None) -> dict:
     album_variants.raw_title; local-only. artist_ids scopes to those primary
     artists; None = whole library. dry_run logs the plan without mutating."""
     db = SessionLocal()
-    st = {"albums": 0, "editions_split": 0, "attached": 0, "anomalies": 0}
+    st = {"albums": 0, "editions_split": 0, "attached": 0, "anomalies": 0, "merged": 0}
     rel_cache: dict = {}
     try:
         sql = """

@@ -34,8 +34,12 @@ def get_release_group(group_id: str) -> dict:
     rows = db_query("""
         SELECT al.id::text AS album_id, al.title, al.release_year AS year,
                al.cover_url, al.musicbrainz_id::text AS rg_mbid,
-               (SELECT av.edition FROM album_variants av
-                WHERE av.album_id = al.id AND av.edition IS NOT NULL LIMIT 1) AS stored_edition,
+               -- the variants' release label names the row only when every
+               -- variant carries the same one: a folded rip pair (a vinyl and
+               -- a remaster CD as variants of one album) has no single label
+               (SELECT CASE WHEN count(*) = count(av.edition) AND count(DISTINCT av.edition) = 1
+                            THEN min(av.edition) END
+                FROM album_variants av WHERE av.album_id = al.id) AS stored_edition,
                (SELECT av.release_mbid::text FROM album_variants av
                 WHERE av.album_id = al.id AND av.release_mbid IS NOT NULL LIMIT 1) AS release_mbid,
                (SELECT count(DISTINCT mf.track_id)

@@ -334,9 +334,18 @@ and syncs only when the hash moved. A sync never removes rows; "Rescan"
 answer. Measured on the reference library: HQPlayer reads FLAC tags as the
 scanner does (99.7 % identical), mp3 tags worse (ID3v1 truncation, encodings,
 folder names standing in) — such files become twin tracks without analysis.
-Known gap: a local rip and its copy that the canon named as two editions of
-one release group ("X" / "X (Alt)") stay two album rows — editions are
-resolved per album row, the release-group-level fold is a canon follow-up.
+A local rip and its copy that the canon had named as two editions of one
+release group ("X" / "X (Alt)") fold into one album since 2026-09-27
+night: `_split_album_editions` asks, before minting an "(Alt)" edition
+beside an existing row of the RG, whether the two are ONE edition —
+the same track identities, the same scan tag, a disc marker apart, or a
+tracklist Jaccard past the drift threshold with recordings counted only
+where both sides are well stamped — and merges the copy into the row
+named for the release group (`_update_album_uuid`). The same rule folds
+a rip pair ("[Vinyl]" / "[TR24]") and a per-disc split ("Disc 2") that
+different tags had kept as rows. The import stamps `album_variants.raw_title`
+(the scanner never had, since the folder-album migration), and a sync
+re-stamps a variant imported without it from the library's album tag.
 The scan itself starts in HQPlayer's web interface (or by a Digest-
 authenticated `POST /library` — an unauthenticated POST is dropped without a
 401; leave "Perform analysis" off, it costs ~1.5 min per album on a Pi 5).

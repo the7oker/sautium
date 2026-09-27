@@ -390,6 +390,16 @@ implementation details live in the code, DB and git history.
   prompt — the audit found 40-odd `media_files` sites that still meant
   "owned". A held album keeps its Cover Art Archive cover: the discography
   reconcile used to clear `cover_url` from every album with a variant.
+  The "(Alt)" twins (a rip and its copy as two rows of one release group)
+  fold in the canon: `_split_album_editions` tests a lone edition against
+  the RG's other owned rows with the edition grouping and merges it into
+  the row named for the RG — identical track-id sets count as one edition
+  (two copies' recording stamps can disagree where MB binds a title to
+  several recordings), and the recording Jaccard now needs both sides
+  well stamped (one shared stamp on a sparsely stamped variant read as
+  1.0 and would have folded a single into an album). The scanner never
+  stamped `raw_title` (only the 2026-06 folder-album migration had) —
+  fixed at variant creation, HQP variants re-stamped by the sync.
   Lesson: the first import of an
   endpoint is a previewed decision — a tap on the Desktop endpoint imported
   21k files of the same library as copies before it was cancelled and

@@ -219,6 +219,17 @@ def sync(host: str, port: int, *, force: bool = False,
     if seen_ids:
         db_execute("UPDATE hqp_library_files SET last_seen_at = CURRENT_TIMESTAMP "
                    "WHERE id = ANY(%(ids)s)", {"ids": seen_ids})
+        # A variant imported before the import stamped raw_title (2026-09-27)
+        # takes the library's album tag now — the scan-time title the canon's
+        # edition rules read.
+        tagged = [(known[md["file_path"]], md["album"]) for _, md in entries
+                  if md["file_path"] in known and md.get("album")]
+        db_execute("""
+            UPDATE album_variants av SET raw_title = x.title
+              FROM (SELECT unnest(%(ids)s::int[]) AS id, unnest(%(titles)s::text[]) AS title) x
+              JOIN hqp_library_files hf ON hf.id = x.id
+             WHERE av.id = hf.album_variant_id AND av.raw_title IS NULL
+        """, {"ids": [i for i, _ in tagged], "titles": [t for _, t in tagged]})
     if new:
         import_metadata(new, sink=FileSink("hqplayer", host, port), stats=stats,
                         progress_cb=progress_cb, cancel_check=cancel_check)

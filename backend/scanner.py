@@ -278,6 +278,7 @@ def import_metadata(entries: List[Tuple[str, Dict[str, Any]]], *, sink: FileSink
                             variant = AlbumVariant(
                                 album_id=album.id,
                                 directory_path=dir_path,
+                                raw_title=album_title,
                                 sample_rate=metadata.get("sample_rate"),
                                 bit_depth=metadata.get("bit_depth"),
                                 is_lossless=metadata.get("is_lossless", True),
