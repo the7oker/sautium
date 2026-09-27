@@ -18,7 +18,8 @@ from discography import (ALBUM_SORT_EXPR, fetch_new_albums, phantom_sort,
                          sync_artist_discography)
 from genre_queries import artist_genres
 from release_groups import collapse_to_groups
-from sql_queries import best_rip_order
+from playback.manager import active_hqp_endpoint
+from sql_queries import best_rip_order, owned_rank
 
 
 router = APIRouter(prefix="/api/artists", tags=["artists"])
@@ -190,15 +191,19 @@ def get_artist(
             WHERE aa.artist_id = %(id)s::uuid AND aa.mbid IS NOT NULL
         ),
         owned AS (
-            SELECT ns.mbid,
-                   COUNT(DISTINCT mf.id) AS owned_tracks,
-                   COALESCE(SUM(mf.duration_seconds), 0)::bigint AS owned_seconds,
-                   COUNT(DISTINCT av.album_id) FILTER (WHERE av.id IS NOT NULL)
-                       AS owned_albums
-            FROM ns
-            LEFT JOIN album_variants av ON av.album_id = ns.album_id
-            LEFT JOIN media_files mf ON mf.album_variant_id = av.id
-            GROUP BY ns.mbid
+            -- one row per owned track: a rip here and a copy at the
+            -- HQPlayer are the same track, not two
+            SELECT mbid,
+                   COUNT(*) AS owned_tracks,
+                   COALESCE(SUM(duration_seconds), 0)::bigint AS owned_seconds,
+                   COUNT(DISTINCT album_id) AS owned_albums
+            FROM (SELECT DISTINCT ON (ns.mbid, mf.track_id)
+                         ns.mbid, av.album_id, mf.duration_seconds
+                  FROM ns
+                  JOIN album_variants av ON av.album_id = ns.album_id
+                  JOIN owned_files mf ON mf.album_variant_id = av.id
+                  ORDER BY ns.mbid, mf.track_id, mf.location) x
+            GROUP BY mbid
         )
         SELECT am.mbid::text AS mbid,
                am.about,
@@ -332,7 +337,7 @@ def get_artist(
             SELECT x.album_id, SUM(tp.listens)::bigint AS popularity
             FROM (SELECT DISTINCT av.album_id, mf.track_id
                   FROM album_variants av
-                  JOIN media_files mf ON mf.album_variant_id = av.id) x
+                  JOIN owned_files mf ON mf.album_variant_id = av.id) x
             JOIN track_pop tp ON tp.track_id = x.track_id
             GROUP BY x.album_id
         ),
@@ -344,14 +349,14 @@ def get_artist(
                        AS popularity
             FROM albums al
             JOIN album_variants av ON av.album_id = al.id
-            JOIN media_files mf ON mf.album_variant_id = av.id
+            JOIN owned_files mf ON mf.album_variant_id = av.id
             JOIN tracks t ON t.id = mf.track_id
             LEFT JOIN listening_history lh ON lh.track_id = t.id
             LEFT JOIN album_pop ap ON ap.album_id = al.id
             WHERE al.id IN (
                 SELECT DISTINCT av2.album_id
                 FROM album_variants av2
-                JOIN media_files mf2 ON mf2.album_variant_id = av2.id
+                JOIN owned_files mf2 ON mf2.album_variant_id = av2.id
                 JOIN tracks t2 ON t2.id = mf2.track_id
                 JOIN track_artists ta2 ON ta2.track_id = t2.id
                 WHERE ta2.artist_id = %(id)s::uuid
@@ -450,6 +455,7 @@ def get_artist(
     # counts still names the hits, and they stream like any phantom row
     # (media_file_id NULL, the album as play context). Tier ordering and
     # the 5-row cap happen entirely in SQL.
+    hqp_host, hqp_port = active_hqp_endpoint()
     artist["popular_tracks"] = db_query(f"""
         WITH track_pop AS (
             SELECT tm.track_id, SUM(lr.listen_count) AS listens
@@ -458,30 +464,51 @@ def get_artist(
             GROUP BY tm.track_id
         ),
         owned AS (
+            -- the copy the ACTIVE output opens natively first (params
+            -- hqp_host / hqp_port): a local rip plays by its file, a copy
+            -- held at the HQPlayer by track uuid (`location`)
             SELECT DISTINCT ON (t.id)
                    t.id::text AS track_id,
-                   mf.id AS media_file_id,
+                   CASE WHEN f.location = 'local' THEN f.id END AS media_file_id,
+                   f.location::text AS location,
                    t.title,
                    al.title AS album,
                    al.id::text AS album_id,
-                   mf.duration_seconds AS duration,
+                   f.duration_seconds AS duration,
                    COALESCE(lps.play_count, 0)::int AS local_plays,
                    COALESCE(tp.listens, 0)::bigint AS lb_listens
             FROM tracks t
             JOIN track_artists ta ON ta.track_id = t.id
-            JOIN media_files mf ON mf.track_id = t.id
-            JOIN album_variants av ON av.id = mf.album_variant_id
+            JOIN LATERAL (
+                SELECT f.id, f.location, f.album_variant_id, f.duration_seconds
+                FROM (
+                    SELECT mf.id, av.location, av.hqp_endpoint_host, av.hqp_endpoint_port,
+                           mf.album_variant_id, mf.duration_seconds,
+                           mf.is_lossless, mf.sample_rate, mf.bit_depth
+                    FROM media_files mf JOIN album_variants av ON av.id = mf.album_variant_id
+                    WHERE mf.track_id = t.id
+                    UNION ALL
+                    SELECT hf.id, av.location, av.hqp_endpoint_host, av.hqp_endpoint_port,
+                           hf.album_variant_id, hf.duration_seconds,
+                           hf.is_lossless, hf.sample_rate, hf.bit_depth
+                    FROM hqp_library_files hf JOIN album_variants av ON av.id = hf.album_variant_id
+                    WHERE hf.track_id = t.id
+                ) f
+                ORDER BY {owned_rank('f')}, {best_rip_order('f')}
+                LIMIT 1) f ON true
+            JOIN album_variants av ON av.id = f.album_variant_id
             JOIN albums al ON al.id = av.album_id
             LEFT JOIN local_play_stats lps ON lps.track_id = t.id
             LEFT JOIN track_pop tp ON tp.track_id = t.id
             WHERE ta.artist_id = %(id)s::uuid
             {album_filter_av}
-            ORDER BY t.id, {best_rip_order('mf')}
+            ORDER BY t.id
         ),
         phantom AS (
             SELECT DISTINCT ON (t.id)
                    t.id::text AS track_id,
                    NULL::int AS media_file_id,
+                   NULL::text AS location,
                    t.title,
                    al.title AS album,
                    al.id::text AS album_id,
@@ -495,7 +522,7 @@ def get_artist(
             LEFT JOIN local_play_stats lps ON lps.track_id = t.id
             LEFT JOIN track_pop tp ON tp.track_id = t.id
             WHERE ta.artist_id = %(id)s::uuid
-              AND NOT EXISTS (SELECT 1 FROM media_files mf WHERE mf.track_id = t.id)
+              AND NOT EXISTS (SELECT 1 FROM owned_files mf WHERE mf.track_id = t.id)
             {album_filter_at}
             ORDER BY t.id, COALESCE(tp.listens, 0) DESC,
                            COALESCE(lps.play_count, 0) DESC
@@ -503,7 +530,7 @@ def get_artist(
         candidates AS (
             SELECT * FROM owned UNION ALL SELECT * FROM phantom
         )
-        SELECT track_id, media_file_id, title, album, album_id, duration,
+        SELECT track_id, media_file_id, location, title, album, album_id, duration,
                lb_listens > 0 AS from_listenbrainz
         FROM candidates
         WHERE lb_listens > 0 OR local_plays > 0
@@ -513,7 +540,7 @@ def get_artist(
             local_plays DESC,
             title
         LIMIT 5
-    """, {"id": artist_id, "album_ids": album_ids})
+    """, {"id": artist_id, "album_ids": album_ids, "hqp_host": hqp_host, "hqp_port": hqp_port})
     # The credit line names ListenBrainz only where its numbers actually
     # ranked something on this page (the Popularity sort counts too).
     artist["listenbrainz_used"] = (
@@ -548,13 +575,24 @@ def get_artist(
                 JOIN track_artists ta ON ta.track_id = t.id
                 WHERE ta.artist_id = a.id AND mf.cover_id IS NOT NULL
                 LIMIT 1) AS cover_id,
+               -- the external cover only where no file here carries one
+               CASE WHEN NOT EXISTS (SELECT 1 FROM media_files mfc
+                                     JOIN track_artists tac ON tac.track_id = mfc.track_id
+                                     WHERE tac.artist_id = a.id AND mfc.cover_id IS NOT NULL)
+                    THEN (SELECT al.cover_url
+                          FROM owned_files f
+                          JOIN album_variants av ON av.id = f.album_variant_id
+                          JOIN albums al ON al.id = av.album_id
+                          JOIN track_artists ta ON ta.track_id = f.track_id
+                          WHERE ta.artist_id = a.id AND al.cover_url IS NOT NULL
+                          LIMIT 1) END AS cover_url,
                (SELECT mf2.id
                 FROM media_files mf2
                 JOIN tracks t2 ON t2.id = mf2.track_id
                 JOIN track_artists ta2 ON ta2.track_id = t2.id AND ta2.role = 'primary'
                 WHERE ta2.artist_id = a.id
                 LIMIT 1) AS media_file_id,
-               EXISTS (SELECT 1 FROM media_files mf3
+               EXISTS (SELECT 1 FROM owned_files mf3
                        JOIN track_artists ta3 ON ta3.track_id = mf3.track_id
                        WHERE ta3.artist_id = a.id) AS is_owned
         FROM (SELECT other_id, MAX(match_score) AS match_score

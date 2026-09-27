@@ -12,7 +12,8 @@ local play count as a tiebreaker.
 from fastapi import APIRouter, HTTPException
 
 from db_pool import db_query, db_query_one
-from sql_queries import best_rip_order
+from playback.manager import active_hqp_endpoint
+from sql_queries import best_rip_order, owned_rank
 
 
 router = APIRouter(prefix="/api/genres", tags=["genres"])
@@ -105,7 +106,7 @@ def get_genre(genre_id: str) -> dict:
             JOIN tracks t ON t.id = ta.track_id
             LEFT JOIN local_play_stats lps ON lps.track_id = t.id
             WHERE EXISTS (
-                SELECT 1 FROM media_files mf
+                SELECT 1 FROM owned_files mf
                 JOIN album_variants av ON av.id = mf.album_variant_id
                 JOIN album_genres ag ON ag.album_id = av.album_id
                 WHERE mf.track_id = t.id AND ag.genre_id = (SELECT id FROM g)
@@ -117,7 +118,7 @@ def get_genre(genre_id: str) -> dict:
                MAX(lastfm_weight)::int AS weight,
                MAX(track_count)::int   AS track_count,
                MAX(plays)::int         AS plays,
-               EXISTS (SELECT 1 FROM media_files mf
+               EXISTS (SELECT 1 FROM owned_files mf
                        JOIN track_artists ta ON ta.track_id = mf.track_id
                        WHERE ta.artist_id = u.id::uuid) AS is_owned
         FROM (SELECT * FROM via_tag UNION ALL SELECT * FROM via_track) u
@@ -137,7 +138,7 @@ def get_genre(genre_id: str) -> dict:
                    COUNT(DISTINCT al.id)::int AS albums
             FROM track_artists ta
             JOIN tracks t ON t.id = ta.track_id
-            JOIN media_files mf ON mf.track_id = t.id
+            JOIN owned_files mf ON mf.track_id = t.id
             JOIN album_variants av ON av.id = mf.album_variant_id
             JOIN albums al ON al.id = av.album_id
             WHERE ta.role = 'primary'
@@ -176,11 +177,15 @@ def get_genre(genre_id: str) -> dict:
     # block honest on a freshly-imported library.
     #
     # Tier ordering, weighting and the 5-row cap all happen in SQL.
-    # `candidates` dedups media_file variants per track (one row per
-    # track id, picking the variant with the strongest signal); the
-    # outer SELECT applies the two-tier order and LIMITs to top 5,
-    # so we never haul tens of thousands of rows into Python for a
-    # genre with a large catalogue.
+    # `candidates` holds one row per track: the copy the ACTIVE output
+    # opens natively (params hqp_host / hqp_port — a local rip plays by
+    # its file, a copy held at the HQPlayer by track uuid, `location`),
+    # while the tag is read over EVERY copy of the track (a song on an
+    # album and on a best-of is one track — the copy that plays is picked
+    # for the output, not for the tag); the outer SELECT applies the
+    # two-tier order and LIMITs to top 5, so we never haul tens of
+    # thousands of rows into Python for a genre with a large catalogue.
+    hqp_host, hqp_port = active_hqp_endpoint()
     genre["popular_tracks"] = db_query(f"""
         WITH g AS (
             SELECT id,
@@ -206,13 +211,15 @@ def get_genre(genre_id: str) -> dict:
         candidates AS (
             SELECT DISTINCT ON (t.id)
                    t.id::text AS track_id,
-                   mf.id AS media_file_id,
+                   CASE WHEN f.location = 'local' THEN f.id END AS media_file_id,
+                   f.location::text AS location,
                    t.title,
                    al.title AS album,
                    a.name AS artist,
-                   mf.duration_seconds AS duration,
+                   f.duration_seconds AS duration,
                    GREATEST(
-                       CASE WHEN ag.album_id IS NOT NULL THEN 100 ELSE 0 END,
+                       CASE WHEN bool_or(ag.album_id IS NOT NULL) OVER (PARTITION BY t.id)
+                            THEN 100 ELSE 0 END,
                        COALESCE(aw.weight, 0)
                    )::int AS relevance_pct,
                    COALESCE(lps.play_count, 0)::int AS local_plays,
@@ -220,31 +227,36 @@ def get_genre(genre_id: str) -> dict:
             FROM tracks t
             JOIN track_artists ta ON ta.track_id = t.id AND ta.role = 'primary'
             JOIN artists a ON a.id = ta.artist_id
-            JOIN media_files mf ON mf.track_id = t.id
-            JOIN album_variants av ON av.id = mf.album_variant_id
-            JOIN albums al ON al.id = av.album_id
+            JOIN (
+                SELECT mf.id, mf.track_id, mf.duration_seconds,
+                       mf.is_lossless, mf.sample_rate, mf.bit_depth,
+                       av.location, av.hqp_endpoint_host, av.hqp_endpoint_port, av.album_id
+                FROM media_files mf JOIN album_variants av ON av.id = mf.album_variant_id
+                UNION ALL
+                SELECT hf.id, hf.track_id, hf.duration_seconds,
+                       hf.is_lossless, hf.sample_rate, hf.bit_depth,
+                       av.location, av.hqp_endpoint_host, av.hqp_endpoint_port, av.album_id
+                FROM hqp_library_files hf JOIN album_variants av ON av.id = hf.album_variant_id
+            ) f ON f.track_id = t.id
+            JOIN albums al ON al.id = f.album_id
             LEFT JOIN album_genres ag
-                   ON ag.album_id = av.album_id AND ag.genre_id = (SELECT id FROM g)
+                   ON ag.album_id = f.album_id AND ag.genre_id = (SELECT id FROM g)
             LEFT JOIN artist_weights aw ON aw.artist_id = ta.artist_id
             LEFT JOIN local_play_stats lps ON lps.track_id = t.id
             LEFT JOIN track_pop tp ON tp.track_id = t.id
-            WHERE GREATEST(
-                      CASE WHEN ag.album_id IS NOT NULL THEN 100 ELSE 0 END,
-                      COALESCE(aw.weight, 0)
-                  ) > 0
-            ORDER BY t.id, (ag.album_id IS NOT NULL) DESC, {best_rip_order('mf')}
+            ORDER BY t.id, {owned_rank('f')}, {best_rip_order('f')}
         )
-        SELECT track_id, media_file_id, title, album, artist, duration,
+        SELECT track_id, media_file_id, location, title, album, artist, duration,
                lb_listens > 0 AS from_listenbrainz
         FROM candidates
-        WHERE lb_listens > 0 OR local_plays > 0
+        WHERE relevance_pct > 0 AND (lb_listens > 0 OR local_plays > 0)
         ORDER BY
             CASE WHEN lb_listens > 0 THEN 0 ELSE 1 END,
             lb_listens * relevance_pct DESC,
             local_plays * relevance_pct DESC,
             title
         LIMIT 5
-    """, {"id": genre_id})
+    """, {"id": genre_id, "hqp_host": hqp_host, "hqp_port": hqp_port})
     # The credit line names ListenBrainz only where its numbers actually
     # ranked something on this page.
     genre["listenbrainz_used"] = any(t.pop("from_listenbrainz", False)

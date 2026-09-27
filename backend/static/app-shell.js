@@ -4892,17 +4892,21 @@
   }
 
   /* Popular-tracks rows, shared by the artist and genre pages. An owned row
-     plays by its file; a not-owned one — the artist page on a node that
+     plays by its file; one whose copy for the active output is held at
+     the HQPlayer (`location`) plays by track uuid (is-held-track →
+     play-entities); a not-owned one — the artist page on a node that
      holds only the tracklist and its ListenBrainz counts — carries the
      phantom contract every other screen uses (is-phantom-track +
      data-track-id, the album as play context), so wireDetailHandlers
      streams it like an album-page row. */
   function popularTracksHtml(list, secondLine) {
     return (list || []).map((t, i) => {
+      const albumAttr = t.album_id ? ` data-album-id="${escapeHtml(String(t.album_id))}"` : '';
       const attrs = t.media_file_id
         ? `class="track-row" data-media-file-id="${escapeHtml(String(t.media_file_id))}"`
-        : `class="track-row is-phantom-track" data-track-id="${escapeHtml(String(t.track_id || ''))}"`
-          + (t.album_id ? ` data-album-id="${escapeHtml(String(t.album_id))}"` : '');
+        : t.location === 'hqplayer'
+          ? `class="track-row is-held-track" data-track-id="${escapeHtml(String(t.track_id || ''))}"${albumAttr}`
+          : `class="track-row is-phantom-track" data-track-id="${escapeHtml(String(t.track_id || ''))}"${albumAttr}`;
       return `
       <button ${attrs} type="button">
         <span class="track-rank">${i + 1}</span>
