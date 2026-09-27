@@ -383,6 +383,7 @@ def _update_album_uuid(db: Session, old_id, new_id) -> str:
 # planner keeps anti-joins over millions of phantom tracks.
 ORPHAN_TRACK_SQL = """
     NOT EXISTS (SELECT 1 FROM media_files o_mf WHERE o_mf.track_id = {t}.id)
+    AND NOT EXISTS (SELECT 1 FROM hqp_library_files o_hf WHERE o_hf.track_id = {t}.id)
     AND NOT EXISTS (SELECT 1 FROM album_tracks o_at WHERE o_at.track_id = {t}.id)
     AND NOT EXISTS (SELECT 1 FROM embeddings o_e WHERE o_e.track_id = {t}.id)
     AND NOT EXISTS (SELECT 1 FROM audio_features o_af WHERE o_af.track_id = {t}.id)
