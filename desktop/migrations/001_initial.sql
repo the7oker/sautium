@@ -391,12 +391,15 @@ CREATE TABLE IF NOT EXISTS hqp_library_files (
     raw_album_artist TEXT,
     raw_album TEXT,
     raw_year TEXT,
+    recording_mbid UUID,                    -- materialised MB recording for THIS file, stamped by the canon like media_files'
     first_seen_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP,
     last_seen_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP,
     CONSTRAINT uq_hqp_library_files_variant_path UNIQUE (album_variant_id, hqp_path),
     CONSTRAINT chk_hqp_library_files_duration CHECK (duration_seconds IS NULL OR duration_seconds >= 0)
 );
 CREATE INDEX IF NOT EXISTS idx_hqp_library_files_track_id ON hqp_library_files(track_id);
+CREATE INDEX IF NOT EXISTS idx_hqp_library_files_recording_mbid
+    ON hqp_library_files(recording_mbid) WHERE recording_mbid IS NOT NULL;
 
 CREATE TABLE IF NOT EXISTS covers (
     id UUID PRIMARY KEY,                             -- uuid5(NS, 'cover:' || hash_hex)
@@ -1254,6 +1257,19 @@ CREATE UNIQUE INDEX IF NOT EXISTS uq_media_files_analysis_source
 CREATE INDEX IF NOT EXISTS idx_media_files_cover_id ON media_files(cover_id);
 CREATE INDEX IF NOT EXISTS idx_media_files_cover_pending ON media_files(id)
     WHERE cover_processed_at IS NULL;
+
+-- One definition of "this node holds the track" for the canon and the gates:
+-- a file on this node's disk or a file the HQPlayer it drives holds.
+-- Presence, coverage and "content newer than the artist's last canon" read
+-- this view; the analysis source stays on media_files, the only rows with bytes.
+CREATE OR REPLACE VIEW owned_files AS
+    SELECT track_id, album_variant_id, 'local'::variant_location AS location,
+           duration_seconds, recording_mbid, created_at
+    FROM media_files
+    UNION ALL
+    SELECT track_id, album_variant_id, 'hqplayer'::variant_location,
+           duration_seconds, recording_mbid, first_seen_at
+    FROM hqp_library_files;
 
 -- Cover art indexes
 CREATE INDEX IF NOT EXISTS idx_covers_phash ON covers(perceptual_hash)

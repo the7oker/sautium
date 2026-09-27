@@ -102,7 +102,7 @@ WITH owned AS (
     JOIN album_artists aa ON aa.album_id=a.id AND aa.role='primary'
         AND aa.artist_id=%(artist)s::uuid
     JOIN album_variants av ON av.album_id=a.id
-    JOIN media_files mf ON mf.album_variant_id=av.id
+    JOIN owned_files mf ON mf.album_variant_id=av.id
     JOIN tracks t ON t.id=mf.track_id
     JOIN track_artists ta2 ON ta2.track_id=t.id AND ta2.role='primary'
         AND ta2.artist_id=%(artist)s::uuid
@@ -160,7 +160,7 @@ WITH owned AS (
     FROM tracks t
     JOIN track_artists ta ON ta.track_id = t.id AND ta.role = 'primary'
         AND ta.artist_id = %(artist)s::uuid
-    JOIN media_files mf ON mf.track_id = t.id
+    JOIN owned_files mf ON mf.track_id = t.id
     GROUP BY t.id, t.title
 ),
 cand AS (
@@ -211,7 +211,7 @@ WITH owned AS (
     JOIN album_artists aa ON aa.album_id=a.id AND aa.role='primary'
         AND aa.artist_id=%(artist)s::uuid
     JOIN album_variants av ON av.album_id=a.id
-    JOIN media_files mf ON mf.album_variant_id=av.id
+    JOIN owned_files mf ON mf.album_variant_id=av.id
     JOIN tracks t ON t.id=mf.track_id
     JOIN track_artists ta2 ON ta2.track_id=t.id AND ta2.role='primary'
         AND ta2.artist_id=%(artist)s::uuid
@@ -310,7 +310,7 @@ owned AS (
     JOIN album_artists aa ON aa.album_id=a.id AND aa.role='primary'
         AND aa.artist_id=%(artist)s::uuid
     JOIN album_variants av ON av.album_id=a.id
-    JOIN media_files mf ON mf.album_variant_id=av.id
+    JOIN owned_files mf ON mf.album_variant_id=av.id
     JOIN tracks t ON t.id=mf.track_id
     JOIN track_artists ta2 ON ta2.track_id=t.id AND ta2.role='primary'
         AND ta2.artist_id=%(artist)s::uuid
@@ -435,7 +435,7 @@ def _owned_counts(artist_id):
         JOIN album_artists aa ON aa.album_id=a.id AND aa.role='primary'
             AND aa.artist_id=%(id)s::uuid
         JOIN album_variants av ON av.album_id=a.id
-        JOIN media_files mf ON mf.album_variant_id=av.id
+        JOIN owned_files mf ON mf.album_variant_id=av.id
         JOIN tracks t ON t.id=mf.track_id
         JOIN track_artists ta2 ON ta2.track_id=t.id AND ta2.role='primary'
             AND ta2.artist_id=%(id)s::uuid
@@ -557,11 +557,12 @@ def apply_artist(artist_id, name: str, plan: dict = None) -> dict:
                                     (a["artist_mbid"], a["album_id"], aid))
                         st["album_artists"] += cur.rowcount
                     for tid, rec in a["recordings"].items():
-                        cur.execute("UPDATE media_files mf SET recording_mbid=%s "
-                                    "FROM album_variants av WHERE mf.album_variant_id=av.id "
-                                    "AND av.album_id=%s AND mf.track_id=%s",
-                                    (rec, a["album_id"], tid))
-                        st["files"] += cur.rowcount
+                        for table in ("media_files", "hqp_library_files"):
+                            cur.execute(f"UPDATE {table} f SET recording_mbid=%s "
+                                        "FROM album_variants av WHERE f.album_variant_id=av.id "
+                                        "AND av.album_id=%s AND f.track_id=%s",
+                                        (rec, a["album_id"], tid))
+                            st["files"] += cur.rowcount
                         cur.execute("INSERT INTO track_mbids (recording_mbid, track_id, "
                                     "confidence) VALUES (%s,%s,'overlap_verified') "
                                     "ON CONFLICT (recording_mbid) DO NOTHING", (rec, tid))
@@ -622,12 +623,14 @@ def canonicalize_trackonly(artist_id, name: str) -> dict:
                 if ok:
                     st["artist_mbid"] = dom
                     # Stamp files FIRST (before any rename/merge): recording_mbid
-                    # rides the media_files row, which survives a track-UUID move.
+                    # rides the file row (here or at the HQPlayer), which
+                    # survives a track-UUID move.
                     for h in dom_hits:
-                        cur.execute(
-                            "UPDATE media_files SET recording_mbid = %s WHERE track_id = %s::uuid",
-                            (h["rec_mbid"], h["track_id"]))
-                        st["files"] += cur.rowcount
+                        for table in ("media_files", "hqp_library_files"):
+                            cur.execute(
+                                f"UPDATE {table} SET recording_mbid = %s WHERE track_id = %s::uuid",
+                                (h["rec_mbid"], h["track_id"]))
+                            st["files"] += cur.rowcount
                 # inside the txn on purpose: commit clears them; a rollback
                 # reverts the SET and the temp table along with the work
                 cur.execute("RESET pg_trgm.similarity_threshold")
@@ -663,11 +666,11 @@ def canonicalize_trackonly(artist_id, name: str) -> dict:
     finally:
         db.close()
     # track_mbids re-derived from the stamped files: track UUIDs may have just
-    # moved in the rename/merge, media_files.track_id followed by CASCADE.
+    # moved in the rename/merge, the files' track_id followed by CASCADE.
     db_execute("""
         INSERT INTO track_mbids (recording_mbid, track_id, confidence)
         SELECT DISTINCT mf.recording_mbid, mf.track_id, 'overlap_verified'::mb_match_confidence
-        FROM media_files mf
+        FROM owned_files mf
         JOIN track_artists ta ON ta.track_id = mf.track_id AND ta.role = 'primary'
         WHERE ta.artist_id = %(a)s::uuid AND mf.recording_mbid IS NOT NULL
         ON CONFLICT (recording_mbid) DO NOTHING
@@ -757,7 +760,7 @@ def _variant_fingerprints(album_id: str) -> list:
                array_agg(DISTINCT lower(btrim(t.title))) AS titles,
                count(DISTINCT mf.track_id) AS ntracks
         FROM album_variants av
-        JOIN media_files mf ON mf.album_variant_id = av.id
+        JOIN owned_files mf ON mf.album_variant_id = av.id
         JOIN tracks t ON t.id = mf.track_id
         WHERE av.album_id = %(a)s::uuid
         GROUP BY av.id, av.raw_title
@@ -1402,7 +1405,7 @@ def split_collaborations(dry_run: bool = False) -> dict:
         WHERE (a.name ~ ' & ' OR a.name ~ ', ' OR a.name ~ ' and '
                OR a.name ~ ' with ' OR a.name ~ ' / ')
           AND EXISTS (SELECT 1 FROM track_artists ta
-                JOIN media_files mf ON mf.track_id = ta.track_id
+                JOIN owned_files mf ON mf.track_id = ta.track_id
                 WHERE ta.artist_id = a.id AND ta.role = 'primary')
     """)
     out = {"candidates": len(owned), "split": 0, "errors": 0, "plan": []}
@@ -1509,7 +1512,7 @@ def promote_name_exact() -> dict:
                 WHERE am.confidence = 'name_exact'
                   AND EXISTS (
                     SELECT 1 FROM track_artists ta
-                    JOIN media_files mf ON mf.track_id = ta.track_id
+                    JOIN owned_files mf ON mf.track_id = ta.track_id
                         AND mf.recording_mbid IS NOT NULL
                     JOIN mb_recording rec ON rec.gid = mf.recording_mbid
                     JOIN mb_artist_credit_name acn ON acn.artist_credit = rec.artist_credit
@@ -1522,7 +1525,7 @@ def promote_name_exact() -> dict:
 def canonicalize_pending(limit: int = None) -> dict:
     """Incremental canon stage — the post-scan / post-import entry point. For every OWNED
     artist whose content is newer than its last canon (the `artists.last_mb_sync` watermark
-    vs `media_files.created_at`): resolve + materialize (apply_artist) + scoped rename/edition-
+    vs `owned_files.created_at` — a file here or one the HQPlayer holds): resolve + materialize (apply_artist) + scoped rename/edition-
     collapse, then merge any MBID collisions surfaced across the batch.
 
     MB-OPTIONAL — a NO-OP without the local dump (sync/enrich proceed on tier-3 deterministic
@@ -1544,7 +1547,7 @@ def canonicalize_pending(limit: int = None) -> dict:
         FROM artists ar
         WHERE EXISTS (
             SELECT 1 FROM track_artists ta
-            JOIN media_files mf ON mf.track_id = ta.track_id
+            JOIN owned_files mf ON mf.track_id = ta.track_id
             WHERE ta.artist_id = ar.id AND ta.role = 'primary'
               AND (ar.last_mb_sync IS NULL OR mf.created_at > ar.last_mb_sync))
         ORDER BY ar.last_mb_sync NULLS FIRST, ar.name

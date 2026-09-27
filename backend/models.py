@@ -1236,6 +1236,7 @@ class HqpLibraryFile(Base):
     raw_album_artist = Column(Text)
     raw_album = Column(Text)
     raw_year = Column(Text)
+    recording_mbid = Column(UUID(as_uuid=False))  # materialised MB recording for THIS file, stamped by the canon
     first_seen_at = Column(DateTime(timezone=True), server_default=func.now())
     last_seen_at = Column(DateTime(timezone=True), server_default=func.now())
 
