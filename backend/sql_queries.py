@@ -50,6 +50,42 @@ def best_rip_order(alias: str) -> str:
             f"{alias}.sample_rate DESC NULLS LAST, "
             f"{alias}.bit_depth DESC NULLS LAST, {alias}.id")
 
+
+def owned_rank(alias: str) -> str:
+    """ORDER BY term ahead of best_rip_order: the copy the active output
+    plays natively first. A variant at the HQPlayer that IS the output
+    (params `hqp_host` / `hqp_port` — NULL when another output is active,
+    playback.manager.active_hqp_endpoint) outranks the local files, which
+    outrank copies at other HQPlayers (those play only as streams). The row
+    needs album_variants' location and endpoint columns (ALBUM_FILES)."""
+    return (f"CASE WHEN {alias}.location = 'hqplayer' "
+            f"AND {alias}.hqp_endpoint_host = %(hqp_host)s "
+            f"AND {alias}.hqp_endpoint_port = %(hqp_port)s THEN 0 "
+            f"WHEN {alias}.location = 'local' THEN 1 ELSE 2 END")
+
+
+# Every file of one album (%(id)s) from both places files live — a row per
+# media_files / hqp_library_files entry with the variant's location and
+# endpoint, so a picker can rank copies with owned_rank + best_rip_order.
+# `id` is the row's id IN ITS TABLE; read it with `location`.
+ALBUM_FILES = """
+    SELECT mf.id, av.location, av.hqp_endpoint_host, av.hqp_endpoint_port,
+           mf.track_id, mf.album_variant_id, mf.is_lossless, mf.sample_rate,
+           mf.bit_depth, mf.duration_seconds, mf.disc_number, mf.track_number,
+           mf.file_format, mf.file_path AS path
+    FROM media_files mf
+    JOIN album_variants av ON av.id = mf.album_variant_id
+    WHERE av.album_id = %(id)s::uuid
+    UNION ALL
+    SELECT hf.id, av.location, av.hqp_endpoint_host, av.hqp_endpoint_port,
+           hf.track_id, hf.album_variant_id, hf.is_lossless, hf.sample_rate,
+           hf.bit_depth, hf.duration_seconds, hf.disc_number, hf.track_number,
+           hf.file_format, hf.hqp_path
+    FROM hqp_library_files hf
+    JOIN album_variants av ON av.id = hf.album_variant_id
+    WHERE av.album_id = %(id)s::uuid
+"""
+
 # ---------------------------------------------------------------------------
 # Embedding similarity queries (track-centric, picks representative media_file)
 # ---------------------------------------------------------------------------

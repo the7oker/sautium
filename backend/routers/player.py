@@ -31,11 +31,11 @@ from playback import queue as queue_mod
 from playback import sessions
 from playback.base import ReorderPlan
 from playback.hqp_backend import _get_hqp, _hqp_lock
-from playback.manager import manager
+from playback.manager import manager, active_hqp_endpoint
 from playback.queue import resolved_artwork as _resolved_artwork
 from playback.queue import resolved_durations as _resolved_durations
 from playback.sessions import _SESSION_ORIGINS
-from sql_queries import best_rip_order
+from sql_queries import ALBUM_FILES, best_rip_order, owned_rank
 
 logger = logging.getLogger(__name__)
 
@@ -1465,7 +1465,7 @@ def _add_owned(rows: list, *, clear_first: bool, position: str = "end") -> int:
     (``position`` next|end). Returns the count queued (rolling appends
     finish async)."""
     from streaming.local import TRANSCODE_FORMATS
-    items = queue_mod.items_for_media_ids([r["id"] for r in rows])
+    items = queue_mod.items_for_owned_rows(rows)
     # CUE slices roll like m4a: each needs its FLAC cut encoded at
     # _uri_for time, and a whole album of cuts must not block the add.
     needs_roll = any((it.source.get("format") or "").upper() in TRANSCODE_FORMATS
@@ -1599,11 +1599,11 @@ def _play_album_rows(best_album: dict):
         manager.queue,
         'album',
         origin_album_id=str(best_album["id"]),
-        seed_media_file_id=rows[0]["id"],
+        seed_media_file_id=next((r["id"] for r in rows if r["location"] == "local"), None),
     )
 
     try:
-        items = queue_mod.items_for_media_ids([r["id"] for r in rows])
+        items = queue_mod.items_for_owned_rows(rows)
         added, _gen = manager.replace_queue(items, play=True)
         _exit_radio_mode()
 
@@ -1619,7 +1619,9 @@ def _play_album_rows(best_album: dict):
             "album": rows[0]["album"],
             "track_count": len(rows),
             "tracks": [
-                {"id": r["id"], "title": r["title"], "track_number": r.get("track_number")}
+                {"id": r["id"] if r["location"] == "local" else None,
+                 "track_id": r["track_id"], "location": r["location"],
+                 "title": r["title"], "track_number": r.get("track_number")}
                 for r in rows
             ],
         }
@@ -2510,25 +2512,31 @@ def queue_phantom_album(req: PlayPhantomAlbumRequest):
 
 
 def _album_media_rows(album_id: str) -> list[dict]:
-    """Owned media files of an album in play order: one row per track, its best
-    rip — a second variant of the same album must neither duplicate the
-    tracklist nor win over a better one."""
+    """The album's files in play order for the ACTIVE output: one row per
+    track, its best copy — the copy at the HQPlayer that is the output first
+    (it plays that natively), then the local rips; a second variant must
+    neither duplicate the tracklist nor win over a better one. A copy at
+    another HQPlayer is left out: this output cannot open it, and an album
+    with nothing else streams like a phantom. Rows carry `id` + `location`
+    (queue.items_for_owned_rows) and the track UUID."""
+    hqp_host, hqp_port = active_hqp_endpoint()
     return _db_query(f"""
-        SELECT id, title, track_number, artist, album FROM (
-            SELECT DISTINCT ON (mf.track_id)
-                   mf.id, mf.disc_number, mf.track_number, t.title,
+        SELECT id, location, track_id, title, track_number, artist, album FROM (
+            SELECT DISTINCT ON (f.track_id)
+                   f.id, f.location::text AS location, f.track_id::text AS track_id,
+                   f.disc_number, f.track_number, t.title,
                    a.name AS artist, al.title AS album
-            FROM media_files mf
-            JOIN tracks t ON t.id = mf.track_id
+            FROM ({ALBUM_FILES}) f
+            JOIN tracks t ON t.id = f.track_id
             JOIN track_artists ta ON ta.track_id = t.id AND ta.role = 'primary'
             JOIN artists a ON a.id = ta.artist_id
-            JOIN album_variants av ON av.id = mf.album_variant_id
-            JOIN albums al ON al.id = av.album_id
-            WHERE av.album_id = %(album_id)s::uuid
-            ORDER BY mf.track_id, {best_rip_order('mf')}
+            JOIN albums al ON al.id = %(id)s::uuid
+            WHERE f.location = 'local'
+               OR (f.hqp_endpoint_host = %(hqp_host)s AND f.hqp_endpoint_port = %(hqp_port)s)
+            ORDER BY f.track_id, {owned_rank('f')}, {best_rip_order('f')}
         ) picked
         ORDER BY disc_number NULLS FIRST, track_number
-    """, {"album_id": album_id})
+    """, {"id": album_id, "hqp_host": hqp_host, "hqp_port": hqp_port})
 
 
 def _push_segment(segments: list, kind: str, items: list) -> None:
@@ -2581,7 +2589,7 @@ def _queue_segments_worker(segments: list, gen: int) -> None:
         if manager.queue.generation != gen:
             return
         if kind == "owned":
-            _owned_filler(queue_mod.items_for_media_ids([r["id"] for r in payload]), gen)
+            _owned_filler(queue_mod.items_for_owned_rows(payload), gen)
             continue
         chains = _resolve_waterfall(payload)
         pairs = [(q, ch) for q, ch in zip(payload, chains) if ch]
@@ -2609,7 +2617,7 @@ def _play_segments(segments: list, worker_name: str, *, play: bool = True) -> No
             gen = manager.queue.generation
         else:
             added, gen = manager.replace_queue(
-                queue_mod.items_for_media_ids([head_items[0]["id"]]), play=False)
+                queue_mod.items_for_owned_rows([head_items[0]]), play=False)
         head_rest = head_items[1:]
     else:
         from streaming import service as streaming_service

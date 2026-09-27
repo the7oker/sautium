@@ -175,6 +175,10 @@ def fake(monkeypatch):
                         MediaProxy(port=0, advertised_host="127.0.0.1", file_token_key=b"k"))
     hb.reset_all_clients()
     hb._hqp_unreachable_until = 0.0
+    # The attach re-checks the HQPlayer library hash through the database;
+    # these tests have none.
+    import hqp_library
+    monkeypatch.setattr(hqp_library, "request_sync", lambda host, port: None)
     yield f
     hb.reset_all_clients()
     f.close()
@@ -184,6 +188,14 @@ def _item(path, mfid, fmt="FLAC", **span):
     return QueueItem(track_id=f"track-{mfid}", media_file_id=mfid,
                      source={"kind": "file", "path": path, "format": fmt, **span},
                      title=f"Song {mfid}", artist="Artist", album="Album")
+
+
+def _held(path, n, port):
+    """A file the HQPlayer holds in its own library (hqp_library.sync)."""
+    return QueueItem(track_id=f"held-{n}", media_file_id=None,
+                     source={"kind": "hqp", "path": path, "format": "FLAC",
+                             "host": "127.0.0.1", "port": port},
+                     title=f"Held {n}", artist="Artist", album="Album")
 
 
 def _attach(mgr):
@@ -376,3 +388,51 @@ def test_reachable_needs_a_protocol_answer(fake):
     t0 = time.monotonic()
     assert not b.reachable()
     assert time.monotonic() - t0 < 3.0
+
+
+def test_held_files_mirror_as_their_own_paths_and_drift_clean(fake):
+    """A file in HQPlayer's own library is opened by HQPlayer at that very
+    path — no library-root remap, no proxy — and the drift canary reads it
+    back as the same slot through HQPlayer's escaping of brackets."""
+    mgr = PlaybackManager()
+    mgr.queue.replace([_item("E:/Music/A/01.flac", 1),
+                       _held("/media/FLASH/Bonobo [FLAC]/01. Intro.flac", 1, fake.port)])
+    b = _attach(mgr)
+    try:
+        assert fake.playlist == ["file:///E:/Music/A/01.flac",
+                                 "file:///media/FLASH/Bonobo [FLAC]/01. Intro.flac"]
+        with hb._hqp_status_lock:
+            playlist = hb._get_hqp_status().get_playlist()
+        assert playlist[1]["uri"] == "file:///media/FLASH/Bonobo %5BFLAC%5D/01. Intro.flac"
+        assert b._check_drift(playlist) is False
+        fake.playlist[1] = "file:///media/FLASH/Other/01.flac"
+        with hb._hqp_status_lock:
+            playlist = hb._get_hqp_status().get_playlist()
+        assert b._check_drift(playlist) is True
+    finally:
+        b.shutdown()
+
+
+def test_adopt_resolves_a_held_file_by_its_path(fake, monkeypatch):
+    """A playlist HQPlayer still holds after a backend restart: a file://
+    slot that is no local file is looked up among the files held at this
+    endpoint, by the path HQPlayer opens."""
+    fake.playlist = ["file:///media/FLASH/Bonobo%20%5BFLAC%5D/01.%20Intro.flac"]
+    fake.state = int(PlaybackState.PLAYING)
+    fake.track = 1
+    monkeypatch.setattr(queue_mod, "items_for_file_spans", lambda spans: {})
+
+    def held(paths, host, port):
+        assert paths == ["/media/FLASH/Bonobo [FLAC]/01. Intro.flac"]
+        assert (host, port) == ("127.0.0.1", fake.port)
+        return {paths[0]: _held(paths[0], 7, port)}
+    monkeypatch.setattr(queue_mod, "items_for_hqp_paths", held)
+    mgr = PlaybackManager()
+    b = _attach(mgr)
+    try:
+        items = mgr.queue.snapshot()
+        assert [it.track_id for it in items] == ["held-7"]
+        assert items[0].source["kind"] == "hqp"
+        assert not [c for c, _ in fake.commands if c == "PlaylistAdd"]
+    finally:
+        b.shutdown()

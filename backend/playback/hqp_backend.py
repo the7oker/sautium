@@ -326,6 +326,15 @@ def _library_db_path(uri: str) -> Optional[str]:
     return path
 
 
+def _uri_file_path(uri: str) -> Optional[str]:
+    """The path behind a file:// URI as HQPlayer reports it, escapes undone,
+    forward slashes — the identity of a file held in HQPlayer's own library
+    (no library-root remap: that path IS where HQPlayer opens it)."""
+    if not uri.startswith("file://"):
+        return None
+    return uri_to_file_path(uri).replace("\\", "/")
+
+
 def _http_served(item: QueueItem) -> bool:
     """Does this slot reach HQPlayer as an http URL rather than a file it
     opens itself? Then HQPlayer's own tags for it are not authoritative (it
@@ -769,6 +778,13 @@ class HqpBackend(PlayerBackend):
         if not drift:
             for t, it in zip(hqp_tracks, snapshot):
                 src = it.source
+                if src["kind"] == "hqp":
+                    # A file in HQPlayer's own library: the URI's path is
+                    # the identity, no remap.
+                    if _uri_file_path(t.get("uri") or "") != src["path"]:
+                        drift = True
+                        break
+                    continue
                 if (src["kind"] != "file"
                         or (src.get("format") or "").upper() in TRANSCODE_FORMATS):
                     continue
@@ -865,6 +881,9 @@ class HqpBackend(PlayerBackend):
         src = item.source
         if src["kind"] == "file":
             return _owned_play_uri(item, self._url_host)
+        if src["kind"] == "hqp":
+            # Held in HQPlayer's own library: it opens the path itself.
+            return file_path_to_uri(src["path"])
         if src["kind"] == "proxy":
             from streaming import service as streaming_service
             return streaming_service.get_proxy().url_for(src["token"],
@@ -1017,6 +1036,14 @@ def _items_from_hqp_tracks(hqp_tracks: list) -> list[QueueItem]:
         if ident is not None:
             identities[uri] = ident
     by_span = queue_mod.items_for_file_spans(list(identities.values()))
+    # A file:// slot that is no local file may be one HQPlayer holds in its
+    # own library (hqp_library.sync) — keyed by the path it opens.
+    held_paths = [_uri_file_path(t.get("uri", "")) for t in hqp_tracks
+                  if t.get("uri", "").startswith("file://")
+                  and by_span.get(identities.get(t.get("uri", ""))) is None]
+    by_held = queue_mod.items_for_hqp_paths(
+        [h for h in held_paths if h], settings.hqplayer_host, settings.hqplayer_port
+    ) if any(held_paths) else {}
 
     items: list[QueueItem] = []
     for t in hqp_tracks:
@@ -1024,7 +1051,9 @@ def _items_from_hqp_tracks(hqp_tracks: list) -> list[QueueItem]:
         item = None
         if uri in identities:
             item = by_span.get(identities[uri])
-        elif uri.startswith("http://") and "/preview/" in uri:
+        if item is None and uri.startswith("file://"):
+            item = by_held.get(_uri_file_path(uri))
+        if item is None and uri.startswith("http://") and "/preview/" in uri:
             token = uri.rsplit("/preview/", 1)[-1].split("?", 1)[0]
             try:
                 item = queue_mod.item_for_proxy_token(token)

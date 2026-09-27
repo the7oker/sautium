@@ -21,25 +21,26 @@ from fastapi import APIRouter, HTTPException, Query
 
 from db_pool import db_query, db_query_one
 from genre_queries import album_genre_chips
-from sql_queries import best_rip_order
+from playback.manager import active_hqp_endpoint
+from sql_queries import ALBUM_FILES, best_rip_order, owned_rank
 
 
 router = APIRouter(prefix="/api/albums", tags=["albums"])
 
 # One file per track of an owned album: the pinned variant's, else the track's
-# best rip across every variant. The header (quality, duration, which variant
+# best copy across every variant — from both places files live (a local rip,
+# a copy in an HQPlayer's library), the copy the active output plays natively
+# first (owned_rank). The header (quality, duration, which variant
 # is showing) and the tracklist all read THIS pick, so the badge and the
 # variant pill can never describe another file than the one a row plays.
 _PICKED_FILES = f"""
-    SELECT DISTINCT ON (mf.track_id)
-           mf.id, mf.track_id, mf.album_variant_id, mf.is_lossless,
-           mf.sample_rate, mf.bit_depth, mf.duration_seconds,
-           mf.disc_number, mf.track_number
-    FROM media_files mf
-    JOIN album_variants av ON av.id = mf.album_variant_id
-    WHERE av.album_id = %(id)s::uuid
-      AND (%(vid)s::int IS NULL OR av.id = %(vid)s::int)
-    ORDER BY mf.track_id, {best_rip_order('mf')}
+    SELECT DISTINCT ON (f.track_id)
+           f.id, f.location, f.track_id, f.album_variant_id, f.is_lossless,
+           f.sample_rate, f.bit_depth, f.duration_seconds,
+           f.disc_number, f.track_number
+    FROM ({ALBUM_FILES}) f
+    WHERE (%(vid)s::int IS NULL OR f.album_variant_id = %(vid)s::int)
+    ORDER BY f.track_id, {owned_rank('f')}, {best_rip_order('f')}
 """
 
 
@@ -278,7 +279,8 @@ def get_album(
                 detail="variant not found for this album",
             )
 
-    params = {"id": album_id, "vid": variant_id}
+    hqp_host, hqp_port = active_hqp_endpoint()
+    params = {"id": album_id, "vid": variant_id, "hqp_host": hqp_host, "hqp_port": hqp_port}
 
     album = db_query_one("""
         SELECT al.id::text AS id,
@@ -312,8 +314,8 @@ def get_album(
         FROM artists a
         JOIN track_artists ta ON ta.artist_id = a.id AND ta.role = 'primary'
         JOIN tracks t ON t.id = ta.track_id
-        JOIN media_files mf ON mf.track_id = t.id
-        JOIN album_variants av ON av.id = mf.album_variant_id
+        JOIN owned_files f ON f.track_id = t.id
+        JOIN album_variants av ON av.id = f.album_variant_id
         WHERE av.album_id = %(id)s::uuid
         GROUP BY a.id, a.name
         ORDER BY COUNT(*) DESC
@@ -356,7 +358,9 @@ def get_album(
     album["tracks"] = db_query(f"""
         WITH picked AS ({_PICKED_FILES})
         SELECT t.id::text AS track_id,
-               p.id AS media_file_id,
+               CASE WHEN p.location = 'local' THEN p.id END AS media_file_id,
+               CASE WHEN p.location = 'hqplayer' THEN p.id END AS hqp_file_id,
+               p.location::text AS location,
                t.title,
                p.disc_number,
                p.track_number,
@@ -372,8 +376,20 @@ def get_album(
 
     # Full variant list, always returned (UI hides the selector when
     # len == 1), best first — the rank the default pick uses per track.
+    # The variants offered for picking follow the output: when the HQPlayer
+    # that is the output holds this album, its copies are the choice (one,
+    # usually — the pill then has nothing to pick); otherwise the local rips,
+    # never a copy at an HQPlayer that is not playing.
     album["variants"] = db_query(f"""
+        WITH here AS (
+            SELECT 1 FROM album_variants
+            WHERE album_id = %(id)s::uuid AND location = 'hqplayer'
+              AND hqp_endpoint_host = %(hqp_host)s AND hqp_endpoint_port = %(hqp_port)s
+            LIMIT 1)
         SELECT av.id AS variant_id,
+               av.location::text AS location,
+               av.hqp_endpoint_host,
+               av.hqp_endpoint_port,
                av.sample_rate,
                av.bit_depth,
                av.is_lossless,
@@ -383,13 +399,19 @@ def get_album(
                 WHERE mf.album_variant_id = av.id
                 ORDER BY mf.disc_number, mf.track_number
                 LIMIT 1) AS first_media_file_id,
-               (SELECT mf.file_format FROM media_files mf
-                WHERE mf.album_variant_id = av.id
-                LIMIT 1) AS file_format
+               COALESCE((SELECT mf.file_format::text FROM media_files mf
+                         WHERE mf.album_variant_id = av.id LIMIT 1),
+                        (SELECT hf.file_format::text FROM hqp_library_files hf
+                         WHERE hf.album_variant_id = av.id LIMIT 1)) AS file_format
         FROM album_variants av
         WHERE av.album_id = %(id)s::uuid
+          AND CASE WHEN EXISTS (SELECT 1 FROM here)
+                   THEN av.location = 'hqplayer'
+                        AND av.hqp_endpoint_host = %(hqp_host)s
+                        AND av.hqp_endpoint_port = %(hqp_port)s
+                   ELSE av.location = 'local' END
         ORDER BY {best_rip_order('av')}
-    """, {"id": album_id})
+    """, params)
     album["selected_variant_id"] = (variant_id if variant_id is not None
                                     else qrow["variant_id"])
     album["is_owned"] = True

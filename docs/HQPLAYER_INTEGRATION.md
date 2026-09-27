@@ -303,7 +303,13 @@ variant instead of a twin and keeps its analysis and history; the canon
 reads the `owned_files` view (a file here or one the HQPlayer holds) and
 stamps recording MBIDs on both file tables. An album only the HQPlayer holds
 plays natively there and streams like a phantom elsewhere; its tracks count
-as owned for the gates.
+as owned for the gates. Playback (live on the Pi, 2026-09-27 late): when
+that HQPlayer is the output, the album page offers only its copies and
+`play-album` queues them as `kind: "hqp"` items HQPlayer opens itself —
+`file:///media/FLASH_SG/…` straight from its own disk, no proxy, the play
+tracker keyed on the track UUID; the drift canary and the playlist adoption
+recognise those paths. On another output the same album streams like a
+phantom (the copy is left out of the pick).
 
 Settings › Library shows the endpoint's section: the FIRST import is a
 previewed decision (which HQPlayer, how many files, how many new — an

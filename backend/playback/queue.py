@@ -45,6 +45,11 @@ class QueueItem:
     `media_file_id` is the optional physical file (owned only). `source`
     tells a backend how to reach the audio:
       {"kind": "file",  "path": <db file_path>, "format": <file_format>}
+      {"kind": "hqp",   "path": <hqp_path>, "format": <file_format>,
+                        "host": <endpoint host>, "port": <endpoint port>}
+                        — a file held in an HQPlayer's own library: that
+                        HQPlayer opens it as file://<path>; no other output
+                        can (it is played as a stream there)
       {"kind": "proxy", "token": <media-proxy token>}
       {"kind": "uri",   "uri": <verbatim>}   — foreign/out-of-library
     """
@@ -287,6 +292,79 @@ def items_for_media_ids(ids: list[int]) -> list[QueueItem]:
     rows = _db_query(_MEDIA_ITEM_SQL + " ORDER BY array_position(%(ids)s, mf.id)",
                      {"ids": ids})
     return [_item_from_media_row(r) for r in rows]
+
+
+_HQP_ITEM_SQL = """
+    SELECT hf.id, hf.hqp_path, hf.file_format, av.hqp_endpoint_host, av.hqp_endpoint_port,
+           t.id::text AS track_uuid, t.title, hf.track_number, hf.duration_seconds,
+           (SELECT mf.cover_id::text FROM media_files mf
+            JOIN album_variants av2 ON av2.id = mf.album_variant_id
+            WHERE av2.album_id = al.id AND mf.cover_id IS NOT NULL LIMIT 1) AS cover_id,
+           a.name AS artist, al.title AS album, al.id::text AS album_id
+    FROM hqp_library_files hf
+    JOIN tracks t ON hf.track_id = t.id
+    JOIN track_artists ta ON t.id = ta.track_id AND ta.role = 'primary'
+    JOIN artists a ON ta.artist_id = a.id
+    JOIN album_variants av ON hf.album_variant_id = av.id
+    JOIN albums al ON av.album_id = al.id
+"""
+
+
+def _item_from_hqp_row(r: dict) -> QueueItem:
+    return QueueItem(
+        track_id=r["track_uuid"],
+        media_file_id=None,
+        source={"kind": "hqp", "path": r["hqp_path"], "format": r["file_format"],
+                "host": r["hqp_endpoint_host"], "port": r["hqp_endpoint_port"]},
+        title=r["title"],
+        artist=r["artist"],
+        album=r.get("album") or "",
+        album_id=r.get("album_id"),
+        track_number=r["track_number"],
+        duration_seconds=(float(r["duration_seconds"])
+                          if r["duration_seconds"] is not None else None),
+        cover_id=r["cover_id"],
+    )
+
+
+def items_for_hqp_ids(ids: list[int]) -> list[QueueItem]:
+    """QueueItems for files held at an HQPlayer (hqp_library_files ids),
+    order-preserving — the album's cover, when a local rip carries one."""
+    if not ids:
+        return []
+    rows = _db_query(_HQP_ITEM_SQL + " WHERE hf.id = ANY(%(ids)s) ORDER BY array_position(%(ids)s, hf.id)",
+                     {"ids": ids})
+    return [_item_from_hqp_row(r) for r in rows]
+
+
+def items_for_hqp_paths(paths: list[str], host: str, port: int) -> dict[str, QueueItem]:
+    """QueueItems for files held at the HQPlayer (host, port), keyed by
+    hqp_path — the reverse mapping when adopting a playlist HQPlayer still
+    holds after a backend restart."""
+    if not paths:
+        return {}
+    rows = _db_query(_HQP_ITEM_SQL + " WHERE hf.hqp_path = ANY(%(paths)s) "
+                     "AND av.hqp_endpoint_host = %(h)s AND av.hqp_endpoint_port = %(p)s",
+                     {"paths": paths, "h": host, "p": port})
+    return {r["hqp_path"]: _item_from_hqp_row(r) for r in rows}
+
+
+def items_for_owned_rows(rows: list[dict]) -> list[QueueItem]:
+    """QueueItems for file rows from both places files live, in the rows'
+    order: `id` is a media_files id when `location` is 'local' (or absent —
+    a plain media row), an hqp_library_files id when 'hqplayer'
+    (sql_queries.ALBUM_FILES)."""
+    loc = lambda r: r.get("location") or "local"
+    local = {it.media_file_id: it
+             for it in items_for_media_ids([r["id"] for r in rows if loc(r) == "local"])}
+    hqp_ids = [r["id"] for r in rows if loc(r) == "hqplayer"]
+    held = dict(zip(hqp_ids, items_for_hqp_ids(hqp_ids)))
+    out = []
+    for r in rows:
+        it = local.get(r["id"]) if loc(r) == "local" else held.get(r["id"])
+        if it is not None:
+            out.append(it)
+    return out
 
 
 def items_for_file_spans(spans: list[tuple]) -> dict[tuple, QueueItem]:
