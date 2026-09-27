@@ -356,6 +356,21 @@ implementation details live in the code, DB and git history.
 - **Path translation**: Container `/music/...` → Windows `E:/Music/...` before
   sending to HQPlayer. Both sides see the same files through different mount
   points.
+- **Where HQPlayer runs is a setting of the endpoint (2026-09-27).**
+  `hqplayer.file_access`: `path` hands HQPlayer `file://` URIs — the stored
+  path, or the same path under `hqplayer.library_root` when HQPlayer mounts the
+  library elsewhere; `stream` hands it `/file/{token}` URLs on the media proxy
+  like a DLNA renderer, which is what HQPlayer Embedded on a Raspberry Pi
+  needs (verified against Embedded 6.2.3 / HQPlayer OS: same control
+  protocol, no client change). Media URLs name the address HQPlayer can reach
+  us at (`streaming/media_host.py`, shared with DLNA), owned-file tokens are an
+  HMAC of the path under the node secret (stable across restarts), the drift
+  canary and adopt read the playlist back through the same rules, and a
+  reconnect of the status socket triggers an immediate playlist read: a
+  restarted HQPlayer (trial-mode Embedded stops every 30 min) that lost the
+  mirror is re-mirrored by the next play through the play-intent gate. The
+  gate's liveness probe asks `GetInfo` — the trial stop keeps the port open
+  and closes every connection.
 - **2s delay after playlist load, 1s after track selection**. HQPlayer needs
   time to process. Skipping the delays caused random "track not found" errors.
 - **Stop-clear-add-select-play sequence** for `play_track`/`play_album`. Without

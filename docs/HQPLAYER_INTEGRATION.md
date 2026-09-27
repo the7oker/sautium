@@ -1,12 +1,15 @@
-# HQPlayer Desktop 5 / 6 Integration
+# HQPlayer Desktop 5 / 6 and HQPlayer Embedded Integration
 
 ## Overview
 
-Integration with the HQPlayer Desktop Control API for playback control and status
-monitoring. Supports **HQPlayer Desktop 5 and 6** — the XML-over-TCP control protocol is
-forward-compatible between the two releases, and Sautium discovers all DSP options
-(filters, shapers, modes, rates) dynamically at runtime, so the same code drives either
-version with no version switch.
+Integration with the HQPlayer Control API for playback control and status
+monitoring. Supports **HQPlayer Desktop 5 and 6** and **HQPlayer Embedded 6** — the
+XML-over-TCP control protocol is the same across them (forward-compatible between the
+Desktop releases, and Embedded speaks it unchanged: verified 2026-09-27 against
+Embedded 6 / engine 6.2.3 on HQPlayer OS, Raspberry Pi 5), and Sautium discovers all
+DSP options (filters, shapers, modes, rates) dynamically at runtime, so the same code
+drives any of them with no version switch. What differs between an HQPlayer on this
+machine and one on another box is how a track reaches it — see "Where HQPlayer runs".
 
 **Status**: ✅ Working - Basic implementation complete
 
@@ -31,6 +34,10 @@ either desktop version.
   Desktop 5.16.3 (Engine 5.34.14) also tested, same client
 - **Platform**: Windows
 - **Connection**: WSL2 → Windows (<windows-host-ip>:4321)
+- **HQPlayer Embedded 6** (engine 6.2.3, HQPlayer OS image on a Raspberry Pi 5,
+  reached by LAN address from the Docker node): control protocol, status and the
+  DSP lists verified 2026-09-27; playback in `stream` mode is the live test that
+  follows this integration (dated here when it passes)
 
 ### HQP6-only additions
 HQPlayer 6 exposes two extra fields that Sautium now uses when present. Both degrade
@@ -181,6 +188,64 @@ with HQPlayerConnection(host="<windows-host-ip>") as hqp:
     hqp.play()
 ```
 
+### Where HQPlayer runs: file access (since 2026-09-27)
+
+How an owned track is handed to HQPlayer is a setting of the endpoint
+(`hqplayer.file_access`, More → HQPlayer → connection; env defaults
+`HQPLAYER_FILE_ACCESS` / `HQPLAYER_LIBRARY_ROOT`):
+
+| Mode | The owned track becomes | When |
+|---|---|---|
+| `path`, no root | `file:///E:/Music/…` — the stored path itself | HQPlayer on this machine (Desktop) — the default and the pre-2026-09-27 behaviour |
+| `path` + `library_root` | `file:///<root>/…` — the stored path with the library root replaced | HQPlayer mounts the same library elsewhere: a NAS share, HQPlayer OS's SMB mount, a disk moved to the HQPlayer box |
+| `stream` | `http://<our LAN address>:8830/file/{token}` on the media proxy | HQPlayer Embedded on another box — nothing in common with this node's paths; the same URLs a DLNA renderer gets |
+
+CUE slices (a cached FLAC cut), m4a (transcoded to FLAC in memory — HQPlayer
+decodes neither AAC nor ALAC) and phantom previews are http URLs in every
+mode. The address inside a media URL is chosen for the machine HQPlayer runs
+on (`streaming/media_host.py`, shared with the DLNA output): a name for this
+machine keeps `MEDIA_PROXY_ADVERTISED_HOST`, any other host is resolved and
+handed the local address on its network. Owned-file tokens are an HMAC of the
+path under the node secret, so they are the same after a backend restart and
+the playlist a remote HQPlayer still holds keeps resolving.
+
+The playlist canary (`_check_drift`) and adopt-on-attach read HQPlayer's
+playlist back through the same rules — a `file://` URI through the root
+remap and HQPlayer's percent-escapes, a `/file/{token}` URL through the
+proxy's registry — so both work in every mode. While the playlist differs
+from the queue (edited in HQPlayer's own GUI, another source playing), the
+status is reported as external playback (slot 0) and nothing is tracked
+against the wrong track.
+
+**A restarted HQPlayer re-mirrors on the next play.** The status poller
+detects its reconnect, reads the playlist at once and, when it differs from
+the queue, marks the mirror lost; the play-intent gate then re-attaches the
+backend, which mirrors the queue afresh. An HQPlayer Embedded in trial mode
+stops every 30 minutes and must be restarted — its control port stays open
+but closes every connection, which is why the play-intent probe asks
+`GetInfo` instead of trusting a TCP connect. Auto-resume after such a
+restart is deliberately not done.
+
+### The HQPlayer library as a catalog source (researched 2026-09-27)
+
+HQPlayer keeps its own library (Desktop: File → Library; Embedded: the web
+interface's Library tab, which is also the only place a scan is started).
+`<LibraryGet picture="0"/>` returns the whole of it in one line of XML — for a
+39 618-file library 7.4 MB in 1.2 s — declared UTF-8 but carrying raw bytes
+from tags, so it must be decoded leniently. Schema: `LibraryDirectory` (one per
+album folder: `hash`, `path`, `album`, `artist` = album artist, `date`, `genre`,
+`composer`, `performer`, `rate`, `bits`, `bitrate`, `channels`, `has_cover`,
+`has_booklet`) → `LibraryFile` (`hash`, `name` = file name, `song`, `number` =
+track number — absent for ~11 % of files, `length` in seconds, and `artist` /
+`date` / `genre` / `composer` / `performer` only where they differ from the
+folder's). A track's URI is `file://{directory.path}/{file.name}`, which is how
+HQPDcontrol, HQPlayer Client and HQPWV queue library tracks. `LibraryGetHash`
+answers "has the library changed" cheaply. `LibraryGet picture="1"` embeds no
+pictures; `PlaylistGet picture="1"` embeds a base64 JPEG per playlist item.
+HQPlayer indexes neither m4a/ape nor CUE sheets (a CUE image is one file).
+Sautium does not build its catalogue from this yet; the notes are the basis
+for a library-on-HQPlayer node (a disk attached to the HQPlayer box).
+
 ## Network Configuration
 
 ### From WSL2
@@ -197,6 +262,16 @@ HOST = "host.docker.internal"
 # Option 2: Use Windows host IP
 HOST = "<windows-host-ip>"
 ```
+
+### HQPlayer Embedded on the LAN
+Give the node the box's LAN address (a Docker node cannot resolve `.local`
+names; a DHCP reservation keeps the address stable) and choose `stream` as
+the file access, or `path` with the root HQPlayer OS mounted the library at.
+In `stream` mode the box fetches from the media proxy — on a Windows host
+with Docker Desktop that is the same port forward and firewall allow the
+DLNA output needs (CLAUDE.md Security Posture, rule 3); a launcher node
+serves it natively on 8832. The web interface (port 8088, default login
+`hqplayer` / `password`) is where the library is configured and scanned.
 
 **Note**: For Docker, you may need to add to docker-compose.yml:
 ```yaml
@@ -225,7 +300,8 @@ assistant tools against the running instance: `hqplayer_get_status`
 - 🔒 **Authentication** - Advanced security features (ECDH + Ed25519)
 - 🔒 **Encrypted Commands** - ChaCha20Poly1305 encryption for file paths
 - 📊 **Metering** - Real-time audio metering (port 4322)
-- 📁 **Library Browse** - HQPlayer library browsing
+- 📁 **Library Browse** - HQPlayer library browsing (the wire format is documented
+  above; nothing consumes it yet)
 - 💾 **Playlist Load/Save** - Saved playlists management
 - 🖼️ **Album Art** - Cover art retrieval
 - 🔊 **Output Device Selection** - Not available in API (configure in GUI)

@@ -46,10 +46,11 @@ Website and guides: https://sautium.net · Downloads: https://sautium.net/downlo
   bio-derived classifiers (gender, vocalist); artist photos and catalog
   lookups from the Deezer public API. Idempotent and incremental.
 - **Audio outputs** — one canonical queue behind an output picker:
-  **HQPlayer** (XML control over TCP 4321 — transport, DSP filter/shaper
-  selection, matrix profiles, convolution, parametric-EQ preset generation),
-  **DLNA** renderers, the **browser** itself, and the host's local sound
-  device. Play tracking (`listening_history` + Last.fm scrobbling) lives in
+  **HQPlayer** (XML control over TCP 4321 — Desktop on this machine or
+  HQPlayer Embedded on a box on the LAN, fed by path or streamed from the
+  node; transport, DSP filter/shaper selection, matrix profiles, convolution,
+  parametric-EQ preset generation), **DLNA** renderers, the **browser**
+  itself, and the host's local sound device. Play tracking (`listening_history` + Last.fm scrobbling) lives in
   the backend and is keyed on the track UUID, so a streamed track counts like
   an owned file.
 - **Music beyond the library** — artists, albums and tracklists the node does
@@ -182,6 +183,10 @@ Edit `.env`:
 - `MUSIC_LIBRARY_PATH` — host path Docker mounts read-only (e.g. `E:\Music`).
 - `MUSIC_HOST_PATH` — native OS path stored in the DB so HQPlayer can open
   files directly (e.g. `E:/Music`).
+- `HQPLAYER_FILE_ACCESS` / `HQPLAYER_LIBRARY_ROOT` — how HQPlayer reaches the
+  files: `path` at the stored paths (or under the root it mounts the library
+  at), `stream` through the media proxy for an HQPlayer Embedded box on the
+  LAN. The Web UI's choice (More → HQPlayer) overrides both once saved.
 - `POSTGRES_PASSWORD` — database password.
 - `LASTFM_API_KEY` / `LASTFM_API_SECRET` — for enrichment + scrobbling (optional).
 - `SAUTIUM_HOST_IPS` — your host's LAN IP, so the backend accepts requests
@@ -398,9 +403,10 @@ isolation:
   to the node key + timestamp-bound Ed25519 signatures on everything but the
   deliberately open sync pulls).
 - The **media proxy and DLNA eventing** (`8830`/`8831`, launcher
-  `8832`/`8833`) are plain HTTP on the LAN, gated by unguessable per-queue
-  tokens — they exist because HQPlayer and DLNA renderers can neither sign a
-  request nor trust a self-signed certificate.
+  `8832`/`8833`) are plain HTTP on the LAN, gated by unguessable per-file
+  tokens served only while a queue registers the file — they exist because
+  HQPlayer (local, or an Embedded box on the LAN) and DLNA renderers can
+  neither sign a request nor trust a self-signed certificate.
 
 Audit it yourself: `docs/AUDIT.md` is a ready-to-paste prompt for an AI
 coding agent that checks the tree at one commit — outbound destinations,

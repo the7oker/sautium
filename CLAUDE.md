@@ -379,9 +379,13 @@ below bind with or without it.
    (the maintainer's setup: `docs/private/DEPLOYMENT.md`).
    The media proxy (8830) serves phantom-preview buffers AND — since the
    DLNA output — owned-file bytes at `/file/{token}` plus cover art at
-   `/art/{token}`; all gated by unguessable per-queue tokens (never the
-   library at large) and exist because HQPlayer and DLNA renderers can
-   neither sign HMAC nor trust the self-signed TLS. 8831 is the DLNA
+   `/art/{token}`; all gated by unguessable tokens (an owned file's is an
+   HMAC of its path under the node secret — stable across restarts so a
+   remote HQPlayer's mirrored playlist survives one — and is served only
+   while a queue has registered the file, never the library at large) and
+   exist because HQPlayer — on this machine, or an HQPlayer Embedded box on
+   the LAN in `stream` mode — and DLNA renderers can neither sign HMAC nor
+   trust TLS. 8831 is the DLNA
    GENA event listener (renderer → backend callbacks). The launcher
    node uses its own pair — 8832 (media) / 8833 (GENA), `ports.media`/
    `ports.gena` in config.json → `MEDIA_PROXY_PORT`/`DLNA_GENA_PORT` —
