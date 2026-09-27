@@ -106,7 +106,7 @@ _ALBUM_TILE_SUBQUERIES = """
          FROM artists a
          JOIN track_artists ta ON ta.artist_id = a.id AND ta.role = 'primary'
          JOIN tracks t ON t.id = ta.track_id
-         JOIN media_files mf2 ON mf2.track_id = t.id
+         JOIN owned_files mf2 ON mf2.track_id = t.id
          JOIN album_variants av2 ON av2.id = mf2.album_variant_id
          WHERE av2.album_id = al.id
          GROUP BY a.id, a.name
@@ -210,7 +210,7 @@ def get_favourite_artists(
         )
         SELECT s.id::text AS id, a.name,
                EXISTS (SELECT 1 FROM track_artists ta
-                       JOIN media_files mf ON mf.track_id = ta.track_id
+                       JOIN owned_files mf ON mf.track_id = ta.track_id
                        WHERE ta.artist_id = s.id) AS is_owned
         FROM shelf s
         JOIN artists a ON a.id = s.id
@@ -479,7 +479,7 @@ def _rank_recommendations() -> list[str] | None:
       4. Album fold: score = SUM(seed_weight x sim) / (hits + 3) — an album
          similar to SEVERAL of the week's tastes outranks a one-hit match;
          the +3 is the same Bayesian shrink the search engine's roll-ups use.
-         Folds to owned albums (via media_files) AND phantom albums (via
+         Folds to owned albums (via owned_files) AND phantom albums (via
          album_tracks) — a node can live entirely on streamed phantoms.
       5. Two-tier ordering — never-played (tier 0) before forgotten albums
          whose last play came FORGOTTEN_THRESHOLD_DAYS or more before the
@@ -538,7 +538,7 @@ def _rank_recommendations() -> list[str] | None:
             FROM played p
             LEFT JOIN LATERAL (
                 SELECT av.album_id
-                FROM media_files mf
+                FROM owned_files mf
                 JOIN album_variants av ON av.id = mf.album_variant_id
                 WHERE mf.track_id = p.track_id
                 UNION
@@ -599,13 +599,13 @@ def _rank_recommendations() -> list[str] | None:
         candidate_albums AS (
             -- DISTINCT folds multi-edition variants of one album; the same
             -- track hit from TWO seeds keeps two rows — cross-taste evidence.
-            -- Two fold arms: owned albums via media_files, phantom albums via
+            -- Two fold arms: owned albums via owned_files, phantom albums via
             -- album_tracks. Both are indexed joins driven by the ≤1200 hit
             -- rows — the phantom layer's size never enters the cost. UNION
             -- also dedups an owned album that carries a canonized tracklist.
             SELECT DISTINCT av.album_id, h.w, h.track_id, h.sim
             FROM hits h
-            JOIN media_files mf ON mf.track_id = h.track_id
+            JOIN owned_files mf ON mf.track_id = h.track_id
             JOIN album_variants av ON av.id = mf.album_variant_id
             UNION
             SELECT at2.album_id, h.w, h.track_id, h.sim
@@ -629,7 +629,7 @@ def _rank_recommendations() -> list[str] | None:
             FROM (
                 SELECT av.album_id, mf.track_id
                 FROM album_variants av
-                JOIN media_files mf ON mf.album_variant_id = av.id
+                JOIN owned_files mf ON mf.album_variant_id = av.id
                 WHERE av.album_id IN (SELECT album_id FROM candidate_albums)
                 UNION
                 SELECT at2.album_id, at2.track_id
@@ -827,7 +827,8 @@ def get_listening_session(session_id: str) -> dict[str, Any]:
                 WHERE atk.track_id = t.id AND al2.cover_url IS NOT NULL
                 ORDER BY (al2.id = st.album_id) DESC NULLS LAST
                 LIMIT 1) AS cover_url,
-               (st.media_file_id IS NULL) AS is_phantom,
+               NOT EXISTS (SELECT 1 FROM owned_files f
+                           WHERE f.track_id = st.track_id) AS is_phantom,
                af.key,
                af.mode,
                af.bpm::float AS bpm

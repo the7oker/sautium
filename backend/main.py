@@ -1183,7 +1183,7 @@ async def get_stats() -> Dict[str, Any]:
                                  WHERE ab.artist_id = a.id AND ab.source = 'lastfm')
                 ) as artists_with_lastfm,
                 (SELECT COUNT(DISTINCT av.album_id) FROM album_variants av
-                 JOIN media_files mf ON mf.album_variant_id = av.id
+                 JOIN owned_files mf ON mf.album_variant_id = av.id
                 ) as library_albums
             """
             import provenance

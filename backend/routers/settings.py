@@ -508,7 +508,7 @@ def _phantom_section() -> Dict[str, Any]:
     ("phantom" is the internal term for the same thing, and stays).
 
     Every count is exact. The track figure is total-minus-owned rather than
-    a correlated NOT EXISTS over 3M rows: the two agree exactly (media_files
+    a correlated NOT EXISTS over 3M rows: the two agree exactly (owned_files
     .track_id is NOT NULL and FK-valid) but the subtraction is a pair of
     aggregates at 0.13 s against ~2 s. It used to be a planner estimate,
     which drifted 4.4 % low here — the layer grows faster than autovacuum
@@ -525,21 +525,21 @@ def _phantom_section() -> Dict[str, Any]:
                (SELECT count(*) FROM artists a WHERE NOT {ARTIST_OWNED})    AS artists,
                (SELECT count(*) FROM albums al
                  WHERE NOT EXISTS (SELECT 1 FROM album_variants av
-                                     JOIN media_files mf ON mf.album_variant_id = av.id
+                                     JOIN owned_files mf ON mf.album_variant_id = av.id
                                     WHERE av.album_id = al.id))              AS albums,
                (SELECT count(*) FROM genres g
                  WHERE NOT EXISTS (SELECT 1 FROM album_genres ag
                                      JOIN album_variants av ON av.album_id = ag.album_id
-                                     JOIN media_files mf ON mf.album_variant_id = av.id
+                                     JOIN owned_files mf ON mf.album_variant_id = av.id
                                     WHERE ag.genre_id = g.id))               AS genres,
                (SELECT count(*) FROM embeddings e
-                 WHERE NOT EXISTS (SELECT 1 FROM media_files mf
+                 WHERE NOT EXISTS (SELECT 1 FROM owned_files mf
                                     WHERE mf.track_id = e.track_id))         AS embeddings,
                (SELECT count(*) FROM audio_features f
-                 WHERE NOT EXISTS (SELECT 1 FROM media_files mf
+                 WHERE NOT EXISTS (SELECT 1 FROM owned_files mf
                                     WHERE mf.track_id = f.track_id))         AS features,
                (SELECT count(*) FROM track_lyrics l
-                 WHERE NOT EXISTS (SELECT 1 FROM media_files mf
+                 WHERE NOT EXISTS (SELECT 1 FROM owned_files mf
                                     WHERE mf.track_id = l.track_id))         AS lyrics,
                (SELECT count(*) FROM artists a
                  WHERE NOT {ARTIST_OWNED}
@@ -550,7 +550,7 @@ def _phantom_section() -> Dict[str, Any]:
              + pg_total_relation_size('albums') + pg_total_relation_size('track_artists')
              + pg_total_relation_size('album_artists') AS size_bytes
         FROM (SELECT count(*) AS total FROM tracks) t,
-             (SELECT count(DISTINCT track_id) AS tracks FROM media_files) o
+             (SELECT count(DISTINCT track_id) AS tracks FROM owned_files) o
     """)
     return {
         "enabled":    bool(_read("discovery.phantom_layer")),
