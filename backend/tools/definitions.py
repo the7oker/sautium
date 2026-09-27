@@ -216,24 +216,19 @@ def _player_call(fn, req):
 
 
 def _h_play_track(track_id: str) -> str:
-    from routers.player import (PlayPhantomTrackRequest, PlayTrackRequest,
-                                play_phantom_track, play_track)
+    from routers.player import EntityRef, QueueEntitiesRequest, play_entities
     tid = aq.valid_uuids([track_id])
     if not tid:
         return f"'{track_id}' is not a track UUID. Search first and pass the ID it returned."
-    mf = aq.owned_media_file(_db_query, tid[0])
-    if mf is not None:
-        r, err = _player_call(play_track, PlayTrackRequest(track_id=mf))
-        if err:
-            return f"Could not play track: {err}"
-        return f"Now playing: {r['artist']} - {r['title']}\nAlbum: {r['album']}"
-    r, err = _player_call(play_phantom_track, PlayPhantomTrackRequest(track_id=tid[0]))
+    info = aq.track_info(_db_query, tid[0]) or {}
+    r, err = _player_call(play_entities,
+                          QueueEntitiesRequest(items=[EntityRef(kind="track", id=tid[0])]))
     if err:
         return f"Could not play track: {err}"
-    if not r.get("track_count"):
+    if r.get("not_found"):
         return "No streaming provider has that track, so it cannot be played."
-    return (f"Now streaming: {r.get('artist')} - {r.get('title')}\n"
-            f"Album: {r.get('album')} | via {r.get('provider')}")
+    how = "streaming" if r.get("streaming") else "playing"
+    return f"Now {how}: {info.get('artist')} - {info.get('title')}\nAlbum: {info.get('album')}"
 
 
 def _h_play_album(album: str, artist_name: str = "") -> str:

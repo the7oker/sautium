@@ -232,8 +232,6 @@ def _valid_uuids(ids: list) -> list[str]:
     return aq.valid_uuids(ids)
 
 
-def _owned_media_file(track_uuid: str):
-    return aq.owned_media_file(_db_query, track_uuid)
 
 
 def _format_track_list(rows: list[dict], header: str = "") -> str:
@@ -964,27 +962,25 @@ def play_track(track_id: str) -> str:
     """Play one track on the user's chosen output (replaces the queue).
 
     Args:
-        track_id: Track UUID. A track with no file in the library plays too —
-            it streams through the configured providers, which takes a few seconds
-            longer to start.
+        track_id: Track UUID. The backend picks the copy the output can open
+            — a file here, a copy in the HQPlayer's own library when that
+            HQPlayer is the output — and streams a track with neither, which
+            takes a few seconds longer to start.
     """
     try:
         tid = _valid_uuids([track_id])
         if not tid:
             return f"'{track_id}' is not a track UUID. Search first and pass the ID it returned."
-        mf = _owned_media_file(tid[0])
-        if mf is not None:
-            r = _backend_post("/api/player/play-track", {"track_id": mf})
-            if not r.get("ok"):
-                return f"Could not play track: {r.get('detail') or r}"
-            return (f"Now playing: {r.get('artist')} - {r.get('title')}\n"
-                    f"Album: {r.get('album')}")
-
-        r = _backend_post("/api/player/play-phantom-track", {"track_id": tid[0]}, timeout=90.0)
-        if not r.get("track_count"):
+        info = aq.track_info(_db_query, tid[0]) or {}
+        r = _backend_post("/api/player/play-entities",
+                          {"items": [{"kind": "track", "id": tid[0]}]}, timeout=90.0)
+        if not r.get("ok"):
+            return f"Could not play track: {r.get('detail') or r}"
+        if r.get("not_found"):
             return "No streaming provider has that track, so it cannot be played."
-        return (f"Now streaming: {r.get('artist')} - {r.get('title')}\n"
-                f"Album: {r.get('album')} | via {r.get('provider')}")
+        how = "streaming" if r.get("streaming") else "playing"
+        return (f"Now {how}: {info.get('artist')} - {info.get('title')}\n"
+                f"Album: {info.get('album')}")
     except Exception as e:
         return f"Error playing track: {e}"
 

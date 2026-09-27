@@ -13,11 +13,12 @@ which owned rows and not-owned (streamable) rows both carry. `media_files.id` is
 the id of a FILE and appears only where a file is the subject.
 """
 
+import os
 import uuid as _uuid
 
 from ensemble_instruments import present_instruments
 from hqplayer_client import format_time
-from sql_queries import best_rip_order
+from sql_queries import best_rip_order, owned_rank
 
 # Lexical candidate sources, each behind its trigram GIN index (`%` — a bare
 # `similarity(col, q) > x` cannot use one and seq-scans 3M rows).
@@ -44,27 +45,53 @@ _TRK_MATCH = """
     ORDER BY s DESC LIMIT 300"""
 
 # Tracks OF a matched album, both layers: an owned album reaches them through its
-# files, a not-owned one through its MusicBrainz tracklist.
+# files (here or at the HQPlayer — owned_files), a not-owned one through its
+# MusicBrainz tracklist.
 _ALB_TRACKS = """
     SELECT atr.track_id, alb.s FROM alb JOIN album_tracks atr ON atr.album_id = alb.id
     UNION ALL
-    SELECT mf.track_id, alb.s FROM alb
+    SELECT f.track_id, alb.s FROM alb
       JOIN album_variants av ON av.album_id = alb.id
-      JOIN media_files mf ON mf.album_variant_id = av.id"""
+      JOIN owned_files f ON f.album_variant_id = av.id"""
 
 # One row per track with both layers resolved: the owned file that would play
-# (if any) and the tracklist row that carries a not-owned track's album,
-# length and cover.
+# (if any — a local rip or a copy in the HQPlayer's library, the one the active
+# output opens natively first: params hqp_host / hqp_port) and the tracklist
+# row that carries a not-owned track's album, length and cover.
 _OWN_LATERAL = f"""
     LEFT JOIN LATERAL (
-        SELECT mf.id, mf.cover_id, mf.duration_seconds, mf.is_lossless,
-               mf.track_number, mf.disc_number, mf.sample_rate, mf.bit_depth,
-               mf.file_path, al.id AS album_id, al.title AS album, al.release_year
-        FROM media_files mf
-        JOIN album_variants av ON av.id = mf.album_variant_id
+        SELECT f.id, f.location::text AS location, f.cover_id, f.duration_seconds,
+               f.is_lossless, f.track_number, f.disc_number, f.sample_rate, f.bit_depth,
+               f.file_path, al.id AS album_id, al.title AS album, al.release_year
+        FROM (
+            SELECT mf.id, av.location, av.hqp_endpoint_host, av.hqp_endpoint_port,
+                   mf.album_variant_id, mf.cover_id, mf.duration_seconds, mf.is_lossless,
+                   mf.track_number, mf.disc_number, mf.sample_rate, mf.bit_depth, mf.file_path
+            FROM media_files mf JOIN album_variants av ON av.id = mf.album_variant_id
+            WHERE mf.track_id = t.id
+            UNION ALL
+            SELECT hf.id, av.location, av.hqp_endpoint_host, av.hqp_endpoint_port,
+                   hf.album_variant_id, NULL::uuid, hf.duration_seconds, hf.is_lossless,
+                   hf.track_number, hf.disc_number, hf.sample_rate, hf.bit_depth, hf.hqp_path
+            FROM hqp_library_files hf JOIN album_variants av ON av.id = hf.album_variant_id
+            WHERE hf.track_id = t.id
+        ) f
+        JOIN album_variants av ON av.id = f.album_variant_id
         JOIN albums al ON al.id = av.album_id
-        WHERE mf.track_id = t.id
-        ORDER BY {best_rip_order('mf')} LIMIT 1) own ON true"""
+        ORDER BY {owned_rank('f')}, {best_rip_order('f')} LIMIT 1) own ON true"""
+
+
+def active_hqp_endpoint(q) -> tuple:
+    """(host, port) of the HQPlayer that is the active output, else (None,
+    None) — from the saved settings, so the MCP server (its own process,
+    no playback manager) ranks copies the way the backend does."""
+    rows = q("SELECT key, value FROM user_settings WHERE key IN "
+             "('output.type', 'hqplayer.host', 'hqplayer.port')")
+    kv = {r["key"]: r["value"] for r in rows}
+    if kv.get("output.type") != "hqplayer":
+        return None, None
+    host = kv.get("hqplayer.host") or os.environ.get("HQPLAYER_HOST") or None
+    return host, int(kv.get("hqplayer.port") or os.environ.get("HQPLAYER_PORT") or 4321)
 
 _PH_LATERAL = """
     LEFT JOIN LATERAL (
@@ -102,25 +129,14 @@ def entity_kinds(q, ids: list[str]) -> dict:
     return {r["id"]: r["kind"] for r in rows}
 
 
-def owned_media_file(q, track_uuid: str):
-    """The playable file for a track UUID, or None when nothing is on disk
-    (a not-owned track — it streams instead)."""
-    rows = q(f"""
-        SELECT mf.id FROM media_files mf
-        WHERE mf.track_id = %(t)s::uuid
-        ORDER BY {best_rip_order('mf')}
-        LIMIT 1
-    """, {"t": track_uuid})
-    return rows[0]["id"] if rows else None
-
-
 def search_tracks(q, query: str = "", artist: str = "", album: str = "",
                   genre: str = "", limit: int = 20, corpus: str = "owned") -> list[dict]:
     """Metadata search over the catalog. The first term given IS the candidate
     source (query > artist > album > genre); the rest narrow it. corpus='owned'
     keeps only tracks with a file, 'all' includes the streamable ones."""
+    hqp_host, hqp_port = active_hqp_endpoint(q)
     params: dict = {"limit": min(limit, 50), "pool": max(limit * 4, 40),
-                    "owned_only": corpus != "all"}
+                    "owned_only": corpus != "all", "hqp_host": hqp_host, "hqp_port": hqp_port}
     ctes: list[str] = []
     cand: list[str] = []
     filters: list[str] = []
@@ -162,9 +178,9 @@ def search_tracks(q, query: str = "", artist: str = "", album: str = "",
                 WHERE (al.title_latin %% %(b_ql)s OR al.title_latin LIKE %(b_pfx)s)
                   AND (EXISTS (SELECT 1 FROM album_tracks atr
                                WHERE atr.album_id = al.id AND atr.track_id = best.track_id)
-                    OR EXISTS (SELECT 1 FROM album_variants av JOIN media_files mf
-                                 ON mf.album_variant_id = av.id
-                               WHERE av.album_id = al.id AND mf.track_id = best.track_id)))""")
+                    OR EXISTS (SELECT 1 FROM album_variants av JOIN owned_files f
+                                 ON f.album_variant_id = av.id
+                               WHERE av.album_id = al.id AND f.track_id = best.track_id)))""")
 
     if genre:
         params["genre_like"] = f"%{genre}%"
@@ -178,9 +194,9 @@ def search_tracks(q, query: str = "", artist: str = "", album: str = "",
             filters.append(f"""EXISTS (SELECT 1 FROM ({genre_albums}) ga
                 WHERE EXISTS (SELECT 1 FROM album_tracks atr
                               WHERE atr.album_id = ga.album_id AND atr.track_id = best.track_id)
-                   OR EXISTS (SELECT 1 FROM album_variants av JOIN media_files mf
-                                ON mf.album_variant_id = av.id
-                              WHERE av.album_id = ga.album_id AND mf.track_id = best.track_id))""")
+                   OR EXISTS (SELECT 1 FROM album_variants av JOIN owned_files f
+                                ON f.album_variant_id = av.id
+                              WHERE av.album_id = ga.album_id AND f.track_id = best.track_id))""")
 
     where_extra = "".join(f" AND {f}" for f in filters)
     sql = f"""
@@ -188,8 +204,8 @@ def search_tracks(q, query: str = "", artist: str = "", album: str = "",
         cand AS ({' UNION ALL '.join(cand)}),
         best AS (
             SELECT cand.track_id, MAX(cand.s) AS score,
-                   EXISTS (SELECT 1 FROM media_files mf
-                           WHERE mf.track_id = cand.track_id) AS is_owned
+                   EXISTS (SELECT 1 FROM owned_files f
+                           WHERE f.track_id = cand.track_id) AS is_owned
             FROM cand GROUP BY cand.track_id
         ),
         top AS (
@@ -223,8 +239,9 @@ def track_info(q, track_uuid: str):
     track, so a not-owned track carried in over P2P has it too)."""
     rows = q(f"""
         SELECT t.id::text AS track_id, t.title,
-               (own.id IS NOT NULL) AS is_owned,
-               own.id AS media_file_id, own.track_number, own.disc_number,
+               (own.id IS NOT NULL) AS is_owned, own.location,
+               CASE WHEN own.location = 'local' THEN own.id END AS media_file_id,
+               own.track_number, own.disc_number,
                own.sample_rate, own.bit_depth, own.is_lossless,
                COALESCE(own.duration_seconds, ph.length_ms / 1000.0) AS duration_seconds,
                COALESCE(own.album, ph.album) AS album,
@@ -238,7 +255,8 @@ def track_info(q, track_uuid: str):
         {_OWN_LATERAL}
         {_PH_LATERAL}
         WHERE t.id = %(track_id)s::uuid
-    """, {"track_id": track_uuid})
+    """, {"track_id": track_uuid,
+          **dict(zip(("hqp_host", "hqp_port"), active_hqp_endpoint(q)))})
     return rows[0] if rows else None
 
 

@@ -51,16 +51,19 @@ def best_rip_order(alias: str) -> str:
             f"{alias}.bit_depth DESC NULLS LAST, {alias}.id")
 
 
-def owned_rank(alias: str) -> str:
+def owned_rank(alias: str, style: str = "psycopg") -> str:
     """ORDER BY term ahead of best_rip_order: the copy the active output
     plays natively first. A variant at the HQPlayer that IS the output
     (params `hqp_host` / `hqp_port` — NULL when another output is active,
     playback.manager.active_hqp_endpoint) outranks the local files, which
     outrank copies at other HQPlayers (those play only as streams). The row
-    needs album_variants' location and endpoint columns (ALBUM_FILES)."""
+    needs album_variants' location and endpoint columns (ALBUM_FILES).
+    `style` names the placeholder syntax: psycopg's %(name)s or
+    SQLAlchemy's :name."""
+    h, p = ("%(hqp_host)s", "%(hqp_port)s") if style == "psycopg" else (":hqp_host", ":hqp_port")
     return (f"CASE WHEN {alias}.location = 'hqplayer' "
-            f"AND {alias}.hqp_endpoint_host = %(hqp_host)s "
-            f"AND {alias}.hqp_endpoint_port = %(hqp_port)s THEN 0 "
+            f"AND {alias}.hqp_endpoint_host = {h} "
+            f"AND {alias}.hqp_endpoint_port = {p} THEN 0 "
             f"WHEN {alias}.location = 'local' THEN 1 ELSE 2 END")
 
 
