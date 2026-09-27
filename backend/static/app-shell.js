@@ -4724,10 +4724,17 @@
         // [+] → queue-phantom-track with no second implementation. Without
         // it these rows rendered with an empty media-file id and did nothing.
         const owned = t.is_owned !== false && t.id != null;
+        // A row whose only file lives in the HQPlayer's own library plays by
+        // track uuid (is-held-track → play-entities); a row with no file at all
+        // streams (is-phantom-track).
+        const held = !owned && t.is_owned !== false && t.location === 'hqplayer';
         const attrs = owned
           ? `class="track-row result-row" data-media-file-id="${escapeHtml(String(t.id))}"`
-          : `class="track-row result-row is-phantom-track"`
-            + ` data-track-id="${escapeHtml(String(t.track_id || ''))}"`;
+          : held
+            ? `class="track-row result-row is-held-track"`
+              + ` data-track-id="${escapeHtml(String(t.track_id || ''))}"`
+            : `class="track-row result-row is-phantom-track"`
+              + ` data-track-id="${escapeHtml(String(t.track_id || ''))}"`;
         return `
           <button ${attrs} type="button">
             <div class="result-art"

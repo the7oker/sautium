@@ -55,7 +55,7 @@ autocorrelated windows.
 """
 
 from db_pool import db_query_with_ef_search
-from sql_queries import best_rip_order
+from sql_queries import best_rip_order, owned_rank
 
 POOL = 600              # mean-KNN recall horizon. Probe: widening 300→600 pulled
                         # 5 more tracks into the hybrid top-30 (one at mean-rank
@@ -93,6 +93,8 @@ def similar_tracks(seed_uuid: str, exclude=(), limit: int = 20,
     wave dries up once radio's exclude list outgrows it and the station would
     silently die mid-session.
     """
+    from playback.manager import active_hqp_endpoint
+    hqp_host, hqp_port = active_hqp_endpoint()
     return db_query_with_ef_search(f"""
         WITH target AS (SELECT vector FROM embeddings WHERE track_id = %(seed)s::uuid),
         seed_seg AS (
@@ -142,7 +144,8 @@ def similar_tracks(seed_uuid: str, exclude=(), limit: int = 20,
         ),
         pool AS (
             SELECT t.id AS track_uuid, t.id::text AS track_id, e.id AS emb_id,
-                   mf_rep.id AS media_file_id, mf_rep.file_path, mf_rep.file_format,
+                   CASE WHEN mf_rep.location = 'local' THEN mf_rep.id END AS media_file_id,
+                   mf_rep.location::text AS location, mf_rep.file_path, mf_rep.file_format,
                    (mf_rep.id IS NOT NULL) AS is_owned,
                    t.title, a.name AS artist, ta.artist_id,
                    COALESCE(mf_rep.album_title, ph_rep.album) AS album,
@@ -155,13 +158,24 @@ def similar_tracks(seed_uuid: str, exclude=(), limit: int = 20,
             JOIN track_artists ta ON ta.track_id = t.id AND ta.role = 'primary'
             JOIN artists a ON a.id = ta.artist_id
             LEFT JOIN LATERAL (
-                SELECT mf.id, mf.file_path, mf.file_format,
+                SELECT f.id, f.location, f.file_path, f.file_format,
                        al.title AS album_title, al.release_year
-                FROM media_files mf
-                JOIN album_variants av ON av.id = mf.album_variant_id
+                FROM (
+                    SELECT mf.id, av.location, av.hqp_endpoint_host, av.hqp_endpoint_port,
+                           mf.album_variant_id, mf.file_path, mf.file_format,
+                           mf.is_lossless, mf.sample_rate, mf.bit_depth
+                    FROM media_files mf JOIN album_variants av ON av.id = mf.album_variant_id
+                    WHERE mf.track_id = t.id
+                    UNION ALL
+                    SELECT hf.id, av.location, av.hqp_endpoint_host, av.hqp_endpoint_port,
+                           hf.album_variant_id, hf.hqp_path, hf.file_format,
+                           hf.is_lossless, hf.sample_rate, hf.bit_depth
+                    FROM hqp_library_files hf JOIN album_variants av ON av.id = hf.album_variant_id
+                    WHERE hf.track_id = t.id
+                ) f
+                JOIN album_variants av ON av.id = f.album_variant_id
                 JOIN albums al ON al.id = av.album_id
-                WHERE mf.track_id = t.id
-                ORDER BY {best_rip_order('mf')} LIMIT 1
+                ORDER BY {owned_rank('f')}, {best_rip_order('f')} LIMIT 1
             ) mf_rep ON true
             LEFT JOIN LATERAL (
                 SELECT atr.length_ms, al.title AS album, al.release_year, al.cover_url
@@ -201,7 +215,7 @@ def similar_tracks(seed_uuid: str, exclude=(), limit: int = 20,
                     AND at2.artist_id = pool.artist_id
             ) tg ON true
         )
-        SELECT track_id, media_file_id, file_path, file_format, is_owned,
+        SELECT track_id, media_file_id, location, file_path, file_format, is_owned,
                title, artist, album, year, cover_url, phantom_album, length_ms,
                round((1 - score)::numeric, 4) AS similarity
         FROM (SELECT rescored.*, ROW_NUMBER() OVER (PARTITION BY artist_id
@@ -210,7 +224,7 @@ def similar_tracks(seed_uuid: str, exclude=(), limit: int = 20,
         WHERE artist_rank <= %(artist_cap)s
         ORDER BY score * (1 + %(jitter)s * random())
         LIMIT %(limit)s
-    """, {"seed": seed_uuid, "exclude": list(exclude), "limit": limit,
+    """, {"hqp_host": hqp_host, "hqp_port": hqp_port, "seed": seed_uuid, "exclude": list(exclude), "limit": limit,
           "pool": pool, "artist_cap": artist_cap, "jitter": jitter,
           "kin_cap": KIN_ARM_CAP, "w_tag": W_TAG},
         ef_search=max(pool, 500))

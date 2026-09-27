@@ -309,6 +309,9 @@ def _album_results(rows) -> list:
 def _track_results(rows) -> list:
     return [{
         "id": r.media_file_id,          # owned playback id (None for a phantom track)
+        # 'local' | 'hqplayer' | None: a track held only in the HQPlayer's
+        # library is owned with no id here — the held-row contract.
+        "location": getattr(r, "location", None),
         "track_id": str(r.id),
         "title": r.name,
         "artist": r.artist,

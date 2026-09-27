@@ -15,7 +15,7 @@ Model:
            characteristic signals (clap/lyrics) also aggregate up via AVG.
   Bridge = static, corpus-aware edge registry; BFS composes the shortest table
            path from a source's table to the target (dedup shared joins). corpus
-           SELECTS a bridge (owned→media_files, phantom→album_tracks, all→both),
+           SELECTS a bridge (owned→owned_files, phantom→album_tracks, all→both),
            not just a WHERE filter.
 
 Composition is ATOM-CENTRIC (see build()): gates AND on the lowest active level,
@@ -27,7 +27,7 @@ from dataclasses import dataclass
 from typing import Any, Callable, Optional
 
 import track_similarity
-from sql_queries import best_rip_order
+from sql_queries import best_rip_order, owned_rank
 from uuid_utils import artist_uuid
 
 _VA_ID = str(artist_uuid("Various Artists"))
@@ -50,8 +50,8 @@ ENTITIES: dict[str, EntityDef] = {
                         "(SELECT COUNT(*) FROM track_artists ta "
                         "WHERE ta.artist_id=a.id AND ta.role='primary') DESC",
                         surface=", a.gender, a.is_vocalist, "
-                        "EXISTS (SELECT 1 FROM track_artists ta JOIN media_files mf "
-                        "ON mf.track_id=ta.track_id WHERE ta.artist_id=a.id) AS is_owned, "
+                        "EXISTS (SELECT 1 FROM track_artists ta JOIN owned_files f "
+                        "ON f.track_id=ta.track_id WHERE ta.artist_id=a.id) AS is_owned, "
                         "(SELECT mf.cover_id::text FROM track_artists ta JOIN media_files mf "
                         "ON mf.track_id=ta.track_id WHERE ta.artist_id=a.id AND mf.cover_id IS NOT NULL "
                         "LIMIT 1) AS cover_id, "
@@ -86,9 +86,13 @@ ENTITIES: dict[str, EntityDef] = {
                         "t.title",
                         surface=", (SELECT a.name FROM track_artists ta JOIN artists a ON a.id=ta.artist_id "
                         "WHERE ta.track_id=t.id AND ta.role='primary' LIMIT 1) AS artist, "
-                        "EXISTS (SELECT 1 FROM media_files mf WHERE mf.track_id=t.id) AS is_owned, "
+                        "EXISTS (SELECT 1 FROM owned_files f WHERE f.track_id=t.id) AS is_owned, "
                         "(SELECT mf.id FROM media_files mf WHERE mf.track_id=t.id "
                         f"ORDER BY {best_rip_order('mf')} LIMIT 1) AS media_file_id, "
+                        # 'local' when a file is here, 'hqplayer' when only the
+                        # HQPlayer's library holds it (the UI's held-row contract).
+                        "(SELECT f.location::text FROM owned_files f WHERE f.track_id=t.id "
+                        "ORDER BY (f.location = 'local') DESC LIMIT 1) AS location, "
                         "(SELECT mf.cover_id::text FROM media_files mf WHERE mf.track_id=t.id "
                         "AND mf.cover_id IS NOT NULL LIMIT 1) AS cover_id, "
                         "(SELECT al.cover_url FROM album_tracks atr JOIN albums al ON al.id=atr.album_id "
@@ -96,15 +100,15 @@ ENTITIES: dict[str, EntityDef] = {
                         # album / year / duration fall back to the tracklist row: a
                         # not-owned track has no media_file to read them from, and a
                         # result tile with no album and no length reads as broken.
-                        "COALESCE((SELECT mf.duration_seconds FROM media_files mf WHERE mf.track_id=t.id LIMIT 1), "
+                        "COALESCE((SELECT f.duration_seconds FROM owned_files f WHERE f.track_id=t.id LIMIT 1), "
                         "(SELECT atr.length_ms/1000.0 FROM album_tracks atr WHERE atr.track_id=t.id "
                         "AND atr.length_ms IS NOT NULL LIMIT 1)) AS duration_seconds, "
-                        "COALESCE((SELECT al.title FROM media_files mf JOIN album_variants av ON av.id=mf.album_variant_id "
-                        "JOIN albums al ON al.id=av.album_id WHERE mf.track_id=t.id LIMIT 1), "
+                        "COALESCE((SELECT al.title FROM owned_files f JOIN album_variants av ON av.id=f.album_variant_id "
+                        "JOIN albums al ON al.id=av.album_id WHERE f.track_id=t.id LIMIT 1), "
                         "(SELECT al.title FROM album_tracks atr JOIN albums al ON al.id=atr.album_id "
                         "WHERE atr.track_id=t.id ORDER BY (al.cover_url IS NOT NULL) DESC, al.id LIMIT 1)) AS album, "
-                        "COALESCE((SELECT al.release_year FROM media_files mf JOIN album_variants av ON av.id=mf.album_variant_id "
-                        "JOIN albums al ON al.id=av.album_id WHERE mf.track_id=t.id LIMIT 1), "
+                        "COALESCE((SELECT al.release_year FROM owned_files f JOIN album_variants av ON av.id=f.album_variant_id "
+                        "JOIN albums al ON al.id=av.album_id WHERE f.track_id=t.id LIMIT 1), "
                         "(SELECT al.release_year FROM album_tracks atr JOIN albums al ON al.id=atr.album_id "
                         "WHERE atr.track_id=t.id AND al.release_year IS NOT NULL ORDER BY al.id LIMIT 1)) AS year"),
 }
@@ -368,7 +372,7 @@ class Edge:
 
 
 # Undirected. Two track↔album edges by design (the doc's proof case): album_tracks
-# is phantom-only (1 hop), media_files→album_variants is owned-only (2 hops). A
+# is phantom-only (1 hop), owned_files→album_variants is owned-only (2 hops). A
 # corpus-blind BFS would take album_tracks and lose 87% of owned tracks — so the
 # corpus filter on edges is load-bearing, not cosmetic.
 EDGES: tuple = (
@@ -385,8 +389,8 @@ EDGES: tuple = (
     Edge("genres", "genre_desc_embeddings", "gde.genre_id = g.id"),
     Edge("tracks", "album_tracks", "atr.track_id = t.id", corpus="phantom"),
     Edge("album_tracks", "albums", "atr.album_id = al.id", corpus="phantom"),
-    Edge("tracks", "media_files", "mf.track_id = t.id", corpus="owned"),
-    Edge("media_files", "album_variants", "mf.album_variant_id = av.id", corpus="owned"),
+    Edge("tracks", "owned_files", "f.track_id = t.id", corpus="owned"),
+    Edge("owned_files", "album_variants", "f.album_variant_id = av.id", corpus="owned"),
     Edge("album_variants", "albums", "av.album_id = al.id", corpus="owned"),
     Edge("albums", "album_genres", "ag.album_id = al.id"),
     Edge("album_genres", "genres", "g.id = ag.genre_id"),
@@ -398,7 +402,7 @@ _ALIAS = {
     "artists": "a", "albums": "al", "tracks": "t",
     "track_artists": "ta", "album_artists": "aa", "album_tracks": "atr",
     "audio_features": "af", "embeddings": "e", "artist_bio_embeddings": "abe",
-    "media_files": "mf", "album_variants": "av", "album_genres": "ag", "genres": "g",
+    "owned_files": "f", "album_variants": "av", "album_genres": "ag", "genres": "g",
     "artist_name_aliases": "ana", "lyrics_embeddings": "le",
     "embedding_segments": "es",
     "genre_desc_embeddings": "gde",
@@ -455,7 +459,7 @@ def _exists_gate(src: Source, entity: EntityDef, corpus: str) -> str:
     """A below-target gate → EXISTS over the bridge path (genre on a track target →
     'track has an album with this genre'). Under corpus='all', a source that crosses
     the owned/phantom boundary (track↔album) has TWO distinct bridges — owned
-    (media_files→album_variants) and phantom (album_tracks) — so OR both EXISTS;
+    (owned_files→album_variants) and phantom (album_tracks) — so OR both EXISTS;
     otherwise the shorter phantom path would silently drop 87% of owned tracks."""
     if corpus == "all":
         po = _route(src.table, entity, "owned")
@@ -476,12 +480,13 @@ def _lateral_relevance(src: Source, entity: EntityDef, corpus: str) -> tuple[str
     return join, f"COALESCE({alias}.s, 0)", f"{alias}.s > 0"
 
 
-# Ownership is derived, never flagged: owned ⟺ the entity has a media_files row.
+# Ownership is derived, never flagged: owned ⟺ the entity has a file — here or
+# in the library of the HQPlayer the node drives (the owned_files view).
 _OWNED_GUARD = {
-    "artist": "EXISTS (SELECT 1 FROM track_artists ta JOIN media_files mf "
-              "ON mf.track_id=ta.track_id WHERE ta.artist_id=a.id)",
+    "artist": "EXISTS (SELECT 1 FROM track_artists ta JOIN owned_files f "
+              "ON f.track_id=ta.track_id WHERE ta.artist_id=a.id)",
     "album":  "EXISTS (SELECT 1 FROM album_variants av WHERE av.album_id=al.id)",
-    "track":  "EXISTS (SELECT 1 FROM media_files mf WHERE mf.track_id=t.id)",
+    "track":  "EXISTS (SELECT 1 FROM owned_files f WHERE f.track_id=t.id)",
     "genre":  "EXISTS (SELECT 1 FROM album_genres ag JOIN album_variants av "
               "ON av.album_id=ag.album_id WHERE ag.genre_id=g.id)",
 }

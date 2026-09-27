@@ -17,7 +17,8 @@ silently dropped (logged at debug level by the caller if needed).
 """
 
 from db_pool import db_query
-from sql_queries import best_rip_order
+from playback.manager import active_hqp_endpoint
+from sql_queries import TRACK_FILES, best_rip_order, owned_rank
 
 
 def hydrate_artists(artist_ids: list[str]) -> list[dict]:
@@ -47,8 +48,8 @@ def hydrate_artists(artist_ids: list[str]) -> list[dict]:
                                        AND ta2.role = 'primary'
                 WHERE ta2.artist_id = a.id
                 LIMIT 1) AS media_file_id,
-               EXISTS (SELECT 1 FROM media_files mf3
-                       JOIN track_artists ta3 ON ta3.track_id = mf3.track_id
+               EXISTS (SELECT 1 FROM owned_files f3
+                       JOIN track_artists ta3 ON ta3.track_id = f3.track_id
                        WHERE ta3.artist_id = a.id) AS is_owned
         FROM artists a
         WHERE a.id::text = ANY(%(ids)s)
@@ -97,7 +98,7 @@ def hydrate_albums(album_ids: list[str]) -> list[dict]:
                 LIMIT 1) AS media_file_id,
                -- track count: owned files, else (phantom) the album_tracks tracklist
                COALESCE(NULLIF(
-                 (SELECT COUNT(*)::int FROM media_files mf4
+                 (SELECT COUNT(*)::int FROM owned_files mf4
                   JOIN album_variants av4 ON av4.id = mf4.album_variant_id
                   WHERE av4.album_id = al.id), 0),
                  (SELECT COUNT(*)::int FROM album_tracks atr WHERE atr.album_id = al.id)
@@ -142,9 +143,11 @@ def hydrate_tracks(refs: list) -> list[dict]:
     if not wanted:
         return []
 
+    hqp_host, hqp_port = active_hqp_endpoint()
     rows = db_query(f"""
         SELECT t.id::text AS track_id,
-               own.id,
+               CASE WHEN own.location = 'local' THEN own.id END AS id,
+               own.location,
                (own.id IS NOT NULL) AS is_owned,
                t.title,
                ta.artist_id::text AS artist_id,
@@ -160,13 +163,24 @@ def hydrate_tracks(refs: list) -> list[dict]:
         JOIN track_artists ta ON ta.track_id = t.id AND ta.role = 'primary'
         JOIN artists a ON a.id = ta.artist_id
         LEFT JOIN LATERAL (
-            SELECT mf.id, mf.cover_id, mf.duration_seconds,
+            SELECT f.id, f.location::text AS location, f.cover_id, f.duration_seconds,
                    al.id AS album_id, al.title AS album, al.release_year
-            FROM media_files mf
-            JOIN album_variants av ON av.id = mf.album_variant_id
+            FROM (
+                SELECT mf.id, av.location, av.hqp_endpoint_host, av.hqp_endpoint_port,
+                       mf.album_variant_id, mf.cover_id, mf.duration_seconds,
+                       mf.is_lossless, mf.sample_rate, mf.bit_depth
+                FROM media_files mf JOIN album_variants av ON av.id = mf.album_variant_id
+                WHERE mf.track_id = t.id
+                UNION ALL
+                SELECT hf.id, av.location, av.hqp_endpoint_host, av.hqp_endpoint_port,
+                       hf.album_variant_id, NULL::uuid, hf.duration_seconds,
+                       hf.is_lossless, hf.sample_rate, hf.bit_depth
+                FROM hqp_library_files hf JOIN album_variants av ON av.id = hf.album_variant_id
+                WHERE hf.track_id = t.id
+            ) f
+            JOIN album_variants av ON av.id = f.album_variant_id
             JOIN albums al ON al.id = av.album_id
-            WHERE mf.track_id = t.id
-            ORDER BY {best_rip_order('mf')}
+            ORDER BY {owned_rank('f')}, {best_rip_order('f')}
             LIMIT 1
         ) own ON true
         LEFT JOIN LATERAL (
@@ -179,6 +193,6 @@ def hydrate_tracks(refs: list) -> list[dict]:
             LIMIT 1
         ) ph ON true
         WHERE t.id::text = ANY(%(ids)s)
-    """, {"ids": wanted})
+    """, {"ids": wanted, "hqp_host": hqp_host, "hqp_port": hqp_port})
     by_id = {r["track_id"]: r for r in rows}
     return [by_id[tid] for tid in wanted if tid in by_id]
