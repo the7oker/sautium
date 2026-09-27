@@ -153,7 +153,8 @@ Hi-res FLAC (192 kHz/24-bit) + R2R DAC
 HQPlayer is one `PlayerBackend` among several (`backend/playback/` —
 HQPlayer, DLNA, the browser and the local output). Playback goes through
 the canonical queue and the playback manager, which speak the track UUID;
-the file path is resolved from `media_files` at the moment the active
+the file path is resolved from `media_files` (or, for a copy held in the
+HQPlayer's own library, from `hqp_library_files`) at the moment the active
 backend needs it, and a phantom track resolves to a stream instead. The
 DSP side is `backend/hqplayer_client.py`, reached by the assistant through
 the `hqplayer_*` MCP tools — that is the path "pick settings for this

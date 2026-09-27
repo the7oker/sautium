@@ -312,7 +312,16 @@ recognise those paths; the album page renders such tracks as held rows that
 play by track UUID (`play-entities`), and the engagement gates (the sync's
 core, the similars backfill, owned-vs-phantom) count a held file as owned
 through the `owned_files` view. On another output the same album streams
-like a phantom (the copy is left out of the pick).
+like a phantom (the copy is left out of the pick). The same night the rule
+reached everything that means "owned": the artist and genre pages (albums,
+counts, popular tracks by the output's copy), the Home shelves, the library
+totals (`library_stats`, migration 029), session replay, radio and
+play-similar, text embeddings and the lyrics planner (metadata only, so a
+held track qualifies), the scrobble canon (a listen lands on a held track,
+its length from the held copy), the MB slice tiers, the share scope and the
+assistant's prompt; a held album bound to its release group carries the
+Cover Art Archive front (`caa.fill_held_album_covers`, after a sync and on
+every discography reconcile).
 
 Settings › Library shows the endpoint's section: the FIRST import is a
 previewed decision (which HQPlayer, how many files, how many new — an

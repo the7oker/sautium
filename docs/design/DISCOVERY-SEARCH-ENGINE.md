@@ -116,8 +116,10 @@ level — typically `EXISTS`).
 
 `owned` · `phantom` · `streamable`. **Orthogonal** to the other three.
 
-- **Ownership is derived, never a flag**: owned ⟺ `EXISTS media_files`. Phantom
-  track ⟺ no `media_files` (hangs off `album_tracks`). Phantom album ⟺ no
+- **Ownership is derived, never a flag**: owned ⟺ `EXISTS owned_files` — the
+  view over `media_files` (a file on this node's disk) and `hqp_library_files`
+  (a copy held in an HQPlayer's own library, since 2026-09-27). Phantom
+  track ⟺ no `owned_files` (hangs off `album_tracks`). Phantom album ⟺ no
   `album_variants` (carries `cover_url`, `musicbrainz_id`).
 - **Signal presence is a row property, not a corpus property.** A phantom row
   *can* have a CLAP vector / lyrics / features — it gets them via streaming
@@ -244,19 +246,19 @@ registry, tuned from the real score distribution — not an architecture change.
 A source lives on some table; the target is another entity. The engine connects
 them through **bridge joins** from a **static, corpus-aware edge registry** — NOT
 an auto-path over the FK graph. Why static: `track↔album` has TWO edges —
-`album_tracks` (phantom; 1 hop) and `media_files→album_variants` (owned; 2 hops).
+`album_tracks` (phantom; 1 hop) and `owned_files→album_variants` (owned; 2 hops).
 An FK-graph BFS picks the shorter `album_tracks` and silently loses **87% of owned
 tracks** (only 4 972 / 37 000 owned appear in `album_tracks`). Topology ≠ semantics:
-the FK graph doesn't know `media_files` is owned-only and `album_tracks` is
+the FK graph doesn't know `owned_files` is owned-only and `album_tracks` is
 phantom-only. So edges are declared explicitly with corpus semantics; path
 composition (shortest, dedup of shared tables) runs BFS over the declared edges.
-`corpus` therefore **selects a bridge** (owned→media_files, phantom→album_tracks,
-all→both), not just a WHERE filter. Any path through `media_files` is owned-only,
+`corpus` therefore **selects a bridge** (owned→owned_files, phantom→album_tracks,
+all→both), not just a WHERE filter. Any path through `owned_files` is owned-only,
 so a file-level tool (quality) is physically inapplicable to phantoms — dropped for
 now; it returns as a **two-source** tool (file-tier for owned, stream-tier for
 phantom: YouTube lossy / a lossless provider).
 
-**`corpus='all'` branches only at the `media_files` boundary, not the whole query.**
+**`corpus='all'` branches only at the `owned_files` boundary, not the whole query.**
 The owned/phantom split is LOCAL — only `track↔album` differs; `artist↔track`,
 `artist↔album`, `album↔genre` are corpus-agnostic. So compose a **shared CTE head**
 (the corpus-agnostic prefix — e.g. the matching album/artist ids) and **two thin

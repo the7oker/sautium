@@ -381,7 +381,16 @@ implementation details live in the code, DB and git history.
   Pi's 928-file library (a flash drive + one shared folder) landed 429 of 845
   tracks on existing rows, 45 albums gained a second variant; 8 local/copy
   pairs stayed twin "(Alt)" editions — editions are resolved per album row,
-  the release-group fold is a canon follow-up. Lesson: the first import of an
+  the release-group fold is a canon follow-up. Later that night every
+  owned gate, page and tool took the `owned_files` rule: the artist and
+  genre pages, the Home shelves, `library_stats` (migration 029), session
+  replay, radio and play-similar (the copy the ACTIVE output opens
+  natively, else a stream), text embeddings, the lyrics planner, the
+  scrobble canon, the MB slice tiers, the share scope and the assistant
+  prompt — the audit found 40-odd `media_files` sites that still meant
+  "owned". A held album keeps its Cover Art Archive cover: the discography
+  reconcile used to clear `cover_url` from every album with a variant.
+  Lesson: the first import of an
   endpoint is a previewed decision — a tap on the Desktop endpoint imported
   21k files of the same library as copies before it was cancelled and
   reverted (`--forget-endpoint`); `album_genres.count` for the albums that
