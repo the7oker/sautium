@@ -226,7 +226,10 @@ def get_new_in_library(
     before: str | None = None,
     before_id: str | None = None,
 ) -> dict[str, Any]:
-    """Albums by recency of latest file mtime, cursor-paginated."""
+    """Albums by recency of latest file mtime, cursor-paginated. An album
+    is as new as its newest file HERE; only an album with no file here is
+    dated by its copy in the HQPlayer's library (the copy's first sighting) —
+    a copy of an album on disk is not news to the collection."""
 
     if (before is None) != (before_id is None):
         raise HTTPException(
@@ -254,7 +257,8 @@ def get_new_in_library(
                    al.title,
                    al.release_year AS year,
                    al.cover_url,
-                   MAX(av.file_modified_at) AS newest_added,
+                   COALESCE(MAX(av.file_modified_at) FILTER (WHERE av.location = 'local'),
+                            MAX(av.file_modified_at)) AS newest_added,
                    -- where the album's files are: a copy that only the
                    -- HQPlayer's library holds wears a badge on its tile
                    CASE WHEN bool_or(av.location = 'local') THEN 'local' ELSE 'hqplayer' END AS location
