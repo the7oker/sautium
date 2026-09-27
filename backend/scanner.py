@@ -9,6 +9,7 @@ import logging
 import os
 import re
 from collections import defaultdict
+from dataclasses import dataclass
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timezone
 from pathlib import Path
@@ -24,7 +25,7 @@ from tqdm import tqdm
 from config import settings
 from models import (
     Artist, Album, Track, TrackArtist, AlbumArtist,
-    AlbumVariant, MediaFile, Genre,
+    AlbumVariant, MediaFile, HqpLibraryFile, Genre,
 )
 from database import get_db_context
 from db_pool import db_query
@@ -50,42 +51,63 @@ _ALBUM_GENRE_UPSERT = text("""
 AUDIO_EXTENSIONS = {'.flac', '.ape', '.wav', '.aiff', '.wv', '.tta', '.dsf', '.dff', '.mp3', '.ogg', '.m4a'}
 
 
-def _classify_dirs(metadata_results):
-    """Resolve how each directory's files map to albums (album_identity.
-    assign_dir_albums).
+@dataclass(frozen=True)
+class FileSink:
+    """Where an import run's file rows land. Local files become media_files
+    under variants located here; an HQPlayer's library (hqp_library.sync)
+    becomes hqp_library_files under variants located at that endpoint. The
+    canonical entities are the same either way, so a copy at the HQPlayer
+    lands on the tracks a local scan minted — one album, one more variant."""
+    location: str = "local"
+    hqp_endpoint_host: Optional[str] = None
+    hqp_endpoint_port: Optional[int] = None
 
-    Returns ``{host_dir: {file_path: (album_title, album_artist, track_override,
+    @property
+    def files_table(self) -> str:
+        return "media_files" if self.location == "local" else "hqp_library_files"
+
+
+LOCAL_FILES = FileSink()
+
+
+def _classify_dirs(entries, sink: FileSink):
+    """Resolve how each directory's files map to albums (album_identity.
+    assign_dir_albums). ``entries`` = ``(dir_path, metadata)`` pairs, the
+    directory in DB form (the variant key).
+
+    Returns ``{dir_path: {file_path: (album_title, album_artist, track_override,
     disc_override)}}`` for directories that need reshaping — box sets and singles
     collections (one album per release group) and mixes / loose per-track dumps
     (one folder album). A plain single-album directory is absent, so the import
     loop keeps each file's own tags. A ``None`` track/disc override means "keep
     the file's own value".
 
-    Classification unions this batch with the directory's existing media_files,
-    so an incremental scan that sees only part of a folder still classifies the
-    whole folder; only this batch's files are returned (existing rows are already
-    imported).
+    Classification unions this batch with the directory's existing rows in the
+    sink's file table, so an incremental scan that sees only part of a folder
+    still classifies the whole folder; only this batch's files are returned
+    (existing rows are already imported).
     """
     by_dir = defaultdict(list)
-    for fp, md in metadata_results:
+    for dir_path, md in entries:
         # Cue slices are excluded: the sheet is the album authority for its
         # folder, and the renumber-fold below is keyed by file path — N
         # virtual entries sharing one image path would collapse onto one
         # track number.
         if md.get("cue_start_seconds") is not None:
             continue
-        by_dir[settings.translate_to_host_path(str(fp.parent))].append(md)
-
+        by_dir[dir_path].append(md)
     existing = defaultdict(list)
     if by_dir:
-        for r in db_query("""
-            SELECT av.directory_path AS d, mf.raw_album, mf.disc_number, mf.track_number,
-                   mf.raw_album_artist, mf.raw_artist, mf.file_path
-            FROM album_variants av JOIN media_files mf ON mf.album_variant_id = av.id
+        path_col = "file_path" if sink.location == "local" else "hqp_path"
+        for r in db_query(f"""
+            SELECT av.directory_path AS d, f.raw_album, f.disc_number, f.track_number,
+                   f.raw_album_artist, f.raw_artist, f.{path_col} AS file_path
+            FROM album_variants av JOIN {sink.files_table} f ON f.album_variant_id = av.id
             WHERE av.directory_path = ANY(%(d)s)
-        """, {"d": list(by_dir)}):
+              AND av.hqp_endpoint_host IS NOT DISTINCT FROM %(h)s
+              AND av.hqp_endpoint_port IS NOT DISTINCT FROM %(p)s
+        """, {"d": list(by_dir), "h": sink.hqp_endpoint_host, "p": sink.hqp_endpoint_port}):
             existing[r["d"]].append(r)
-
     dir_albums = {}
     for hd, mds in by_dir.items():
         batch_paths = {md.get("file_path") for md in mds}
@@ -103,6 +125,299 @@ def _classify_dirs(metadata_results):
             continue
         dir_albums[hd] = {p: a for p, a in assignment.items() if p in batch_paths}
     return dir_albums
+
+
+def import_metadata(entries: List[Tuple[str, Dict[str, Any]]], *, sink: FileSink,
+                    stats: Dict[str, int], progress_cb: Optional[callable] = None,
+                    cancel_check: Optional[callable] = None) -> None:
+    """Phase 2 of a scan: canonical entities and file rows from extracted
+    metadata. ``entries`` = ``(dir_path, metadata)`` — the directory in DB
+    form (the variant key) and the metadata as extract_metadata returns it
+    (an HQPlayer library entry is shaped the same way by hqp_library).
+    Single-threaded with entity caches, one savepoint per file, a commit
+    every 100 files; counts into ``stats`` (added, errors, unique_tracks).
+    cancel_check stops after the current file, keeping what was committed.
+    """
+    from normalize_genres import parse_genre_string, normalize_genre_name
+
+    for key in ("added", "errors", "unique_tracks"):
+        stats.setdefault(key, 0)
+
+    def _report(msg: str):
+        if progress_cb:
+            progress_cb(msg, stats)
+
+    # Entity caches — populated on demand, survive across files.
+    # Key = deterministic UUID (or (dir_path, album_id) for variants).
+    caches: Dict[str, dict] = {
+        "artist": {},
+        "track": {},
+        "album": {},
+        "genre": {},
+        "variant": {},
+    }
+    # Association caches — avoid repeated DB existence checks.
+    assoc_ta: set = set()   # (track_id, artist_id, role)
+    assoc_aa: set = set()   # (album_id, artist_id, role)
+    seen_track_ids = set()
+    # Folder→albums pre-pass: resolve box-set / singles / mix directories
+    # once (album_identity.assign_dir_albums).
+    dir_albums = _classify_dirs(entries, sink)
+
+    with get_db_context() as db:
+        for dir_path, metadata in tqdm(entries, desc="Importing", unit="file"):
+            if cancel_check and cancel_check():
+                logger.info("Import cancelled by user")
+                db.commit()
+                break
+            file_path = metadata.get("file_path")
+            try:
+                # Validate required fields
+                if not metadata.get("title"):
+                    logger.warning(f"Missing title for {file_path}, skipping")
+                    stats["errors"] += 1
+                    continue
+                # Per-track artist owns the TRACK identity — compilation cuts
+                # belong to their real artists, not 'Various Artists'; the
+                # album_artist owns the ALBUM identity, so the compilation
+                # still groups as one album (Album has no artist_id — both
+                # credits coexist via track_artists/album_artists).
+                track_artist_name = metadata.get("artist") or metadata.get("album_artist")
+                album_artist_name = metadata.get("album_artist") or metadata.get("artist")
+                if not track_artist_name:
+                    logger.warning(f"Missing artist for {file_path}, skipping")
+                    stats["errors"] += 1
+                    continue
+                album_title = metadata.get("album")
+                if not album_title:
+                    album_title = metadata["title"]
+                    logger.info(f"No album tag, using title as album: {album_title}")
+                # Box set / singles / mix folder → album identity comes from
+                # the directory pre-pass (per-group title + credit). The
+                # per-track artist (track_artist_name) is untouched, so track
+                # identity stands. Cue slices bypass it — the sheet is the
+                # album authority (they are excluded from _classify_dirs too).
+                asg = None
+                if metadata.get("cue_start_seconds") is None:
+                    asg = dir_albums.get(dir_path, {}).get(file_path)
+                if asg:
+                    album_title, album_artist_name = asg[0], asg[1]
+                # Collect cache entries created inside the savepoint;
+                # only commit them to the long-lived caches after the
+                # savepoint succeeds (rollback safety).
+                pending_cache: List[Tuple[str, Any, Any]] = []
+                savepoint = db.begin_nested()
+                try:
+                    # ── Artist (track credit) ──
+                    a_uid = artist_uuid(track_artist_name)
+                    if a_uid in caches["artist"]:
+                        artist = caches["artist"][a_uid]
+                    else:
+                        artist = db.query(Artist).filter(Artist.id == a_uid).first()
+                        if not artist:
+                            artist = Artist(id=a_uid, name=track_artist_name)
+                            db.add(artist)
+                            db.flush()
+                        pending_cache.append(("artist", a_uid, artist))
+                    # ── Artist (album credit — e.g. 'Various Artists' on comps) ──
+                    aa_uid = artist_uuid(album_artist_name)
+                    if aa_uid == a_uid:
+                        album_artist = artist
+                    elif aa_uid in caches["artist"]:
+                        album_artist = caches["artist"][aa_uid]
+                    else:
+                        album_artist = db.query(Artist).filter(Artist.id == aa_uid).first()
+                        if not album_artist:
+                            album_artist = Artist(id=aa_uid, name=album_artist_name)
+                            db.add(album_artist)
+                            db.flush()
+                        pending_cache.append(("artist", aa_uid, album_artist))
+                    # ── Track ──
+                    t_uid = track_uuid(metadata["title"], track_artist_name)
+                    if t_uid in caches["track"]:
+                        track = caches["track"][t_uid]
+                    else:
+                        track = db.query(Track).filter(Track.id == t_uid).first()
+                        if not track:
+                            track = Track(id=t_uid, title=metadata["title"])
+                            db.add(track)
+                            db.flush()
+                        pending_cache.append(("track", t_uid, track))
+                    # ── Album ──
+                    al_uid = album_uuid(album_title, album_artist_name)
+                    if al_uid in caches["album"]:
+                        album = caches["album"][al_uid]
+                    else:
+                        album = db.query(Album).filter(Album.id == al_uid).first()
+                        if not album:
+                            album = Album(
+                                id=al_uid,
+                                title=album_title,
+                                release_year=metadata.get("release_year"),
+                                label=metadata.get("label"),
+                                catalog_number=metadata.get("catalog_number"),
+                            )
+                            db.add(album)
+                            db.flush()
+                        pending_cache.append(("album", al_uid, album))
+                    # ── Album variant (one physical edition per (dir, album)
+                    # at the sink's location — a box set is several albums in
+                    # one folder) ──
+                    vkey = (dir_path, str(album.id))
+                    if vkey in caches["variant"]:
+                        variant = caches["variant"][vkey]
+                    else:
+                        variant = db.query(AlbumVariant).filter(
+                            AlbumVariant.directory_path == dir_path,
+                            AlbumVariant.album_id == album.id,
+                            AlbumVariant.hqp_endpoint_host == sink.hqp_endpoint_host,
+                            AlbumVariant.hqp_endpoint_port == sink.hqp_endpoint_port,
+                        ).first()
+                        if not variant:
+                            variant = AlbumVariant(
+                                album_id=album.id,
+                                directory_path=dir_path,
+                                sample_rate=metadata.get("sample_rate"),
+                                bit_depth=metadata.get("bit_depth"),
+                                is_lossless=metadata.get("is_lossless", True),
+                                location=sink.location,
+                                hqp_endpoint_host=sink.hqp_endpoint_host,
+                                hqp_endpoint_port=sink.hqp_endpoint_port,
+                            )
+                            db.add(variant)
+                            db.flush()
+                        pending_cache.append(("variant", vkey, variant))
+                    # ── Track-Artist association ──
+                    ta_key = (track.id, artist.id, "primary")
+                    if ta_key not in assoc_ta:
+                        existing_ta = db.query(TrackArtist).filter(
+                            TrackArtist.track_id == track.id,
+                            TrackArtist.artist_id == artist.id,
+                            TrackArtist.role == "primary",
+                        ).first()
+                        if not existing_ta:
+                            db.add(TrackArtist(
+                                track_id=track.id,
+                                artist_id=artist.id,
+                                role="primary",
+                            ))
+                        assoc_ta.add(ta_key)
+                    # ── Album-Artist association (album credit) ──
+                    aa_key = (album.id, album_artist.id, "primary")
+                    if aa_key not in assoc_aa:
+                        existing_aa = db.query(AlbumArtist).filter(
+                            AlbumArtist.album_id == album.id,
+                            AlbumArtist.artist_id == album_artist.id,
+                            AlbumArtist.role == "primary",
+                        ).first()
+                        if not existing_aa:
+                            db.add(AlbumArtist(
+                                album_id=album.id,
+                                artist_id=album_artist.id,
+                                role="primary",
+                            ))
+                        assoc_aa.add(aa_key)
+                    # ── Album-Genre associations (album grain) ──
+                    genre_name = metadata.get("genre")
+                    if genre_name and genre_name.strip():
+                        file_genre_ids: set = set()
+                        for gn in parse_genre_string(genre_name):
+                            gn = normalize_genre_name(gn)
+                            g_uid = genre_uuid(gn)
+                            if g_uid in caches["genre"]:
+                                genre = caches["genre"][g_uid]
+                            else:
+                                genre = db.query(Genre).filter(Genre.id == g_uid).first()
+                                if not genre:
+                                    genre = Genre(id=g_uid, name=gn)
+                                    db.add(genre)
+                                    db.flush()
+                                pending_cache.append(("genre", g_uid, genre))
+                            # One +1 per genre per file (a tag may normalize
+                            # two parts to the same genre).
+                            if genre.id in file_genre_ids:
+                                continue
+                            file_genre_ids.add(genre.id)
+                            db.execute(_ALBUM_GENRE_UPSERT, {
+                                "album_id": album.id,
+                                "genre_id": genre.id,
+                            })
+                    # ── File row ──
+                    track_number = (asg[2] if asg and asg[2] is not None
+                                    else metadata.get("track_number"))
+                    disc_number = (asg[3] if asg and asg[3] is not None
+                                   else metadata.get("disc_number", 1))
+                    if sink.location == "local":
+                        db.add(MediaFile(
+                            track_id=track.id,
+                            album_variant_id=variant.id,
+                            file_path=metadata["file_path"],
+                            file_format=metadata.get("file_format", "FLAC"),
+                            is_lossless=metadata.get("is_lossless", True),
+                            file_size_bytes=metadata.get("file_size_bytes"),
+                            file_modified_at=metadata.get("file_modified_at"),
+                            sample_rate=metadata.get("sample_rate"),
+                            bit_depth=metadata.get("bit_depth"),
+                            bitrate=metadata.get("bitrate"),
+                            channels=metadata.get("channels"),
+                            duration_seconds=metadata.get("duration_seconds"),
+                            cue_start_seconds=metadata.get("cue_start_seconds"),
+                            cue_end_seconds=metadata.get("cue_end_seconds"),
+                            track_number=track_number,
+                            disc_number=disc_number,
+                            isrc=metadata.get("isrc"),
+                            # Original tags — ground truth for re-normalization / correction
+                            raw_track_name=metadata.get("title"),
+                            raw_artist=metadata.get("artist"),
+                            raw_album_artist=metadata.get("album_artist"),
+                            raw_album=metadata.get("album"),
+                            raw_year=metadata.get("date"),
+                        ))
+                        db.flush()
+                        elect_analysis_source(db, track.id)
+                    else:
+                        # No bytes here: nothing to elect as an analysis source.
+                        db.add(HqpLibraryFile(
+                            track_id=track.id,
+                            album_variant_id=variant.id,
+                            hqp_path=metadata["file_path"],
+                            hqp_file_hash=metadata.get("hqp_file_hash"),
+                            hqp_dir_hash=metadata.get("hqp_dir_hash"),
+                            file_format=metadata.get("file_format", "FLAC"),
+                            is_lossless=metadata.get("is_lossless", True),
+                            sample_rate=metadata.get("sample_rate"),
+                            bit_depth=metadata.get("bit_depth"),
+                            bitrate=metadata.get("bitrate"),
+                            channels=metadata.get("channels"),
+                            duration_seconds=metadata.get("duration_seconds"),
+                            track_number=track_number,
+                            disc_number=disc_number,
+                            raw_track_name=metadata.get("title"),
+                            raw_artist=metadata.get("artist"),
+                            raw_album_artist=metadata.get("album_artist"),
+                            raw_album=metadata.get("album"),
+                            raw_year=metadata.get("date"),
+                        ))
+                        db.flush()
+                    savepoint.commit()
+                except Exception:
+                    savepoint.rollback()
+                    raise
+                # Promote pending entries to long-lived caches
+                for cache_name, key, obj in pending_cache:
+                    caches[cache_name][key] = obj
+                stats["added"] += 1
+                if track.id not in seen_track_ids:
+                    seen_track_ids.add(track.id)
+                    stats["unique_tracks"] += 1
+                if stats["added"] % 100 == 0:
+                    db.commit()
+                    _report(f"Importing: {stats['added']}/{len(entries)}")
+                    logger.info(f"Progress: {stats['added']} files added")
+            except Exception as e:
+                logger.error(f"Error processing {file_path}: {e}")
+                stats["errors"] += 1
+        db.commit()
 
 
 class LibraryScanner:
@@ -413,8 +728,6 @@ class LibraryScanner:
             "unique_tracks": 0,
             "superseded": 0,
         }
-        seen_track_ids = set()
-
         def _report(msg: str = None):
             if progress_cb:
                 progress_cb(msg or f"Scanned {stats['processed']}/{total_files}", stats)
@@ -560,24 +873,9 @@ class LibraryScanner:
         # not "discard collected data". A second cancel during Phase 2
         # will stop the import (keeping what was already committed).
         _report(f"Importing {len(metadata_results)} files to database...")
-
-        # Entity caches — populated on demand, survive across files.
-        # Key = deterministic UUID (or directory_path for variants).
-        caches: Dict[str, dict] = {
-            "artist": {},
-            "track": {},
-            "album": {},
-            "genre": {},
-            "variant": {},     # (dir_path, album_id) -> AlbumVariant
-        }
-        # Association caches — avoid repeated DB existence checks.
-        assoc_ta: set = set()   # (track_id, artist_id, role)
-        assoc_aa: set = set()   # (album_id, artist_id, role)
-
-        # Folder→albums pre-pass: resolve box-set / singles / mix directories
-        # once (album_identity.assign_dir_albums).
-        dir_albums = _classify_dirs(metadata_results)
-
+        # The variant key is the file's directory in DB form.
+        entries = [(settings.translate_to_host_path(str(fp.parent)), md)
+                   for fp, md in metadata_results]
         # ── Cue reconciliation pre-pass ─────────────────────────────
         # Deletes committed before the import starts: if the scan dies in
         # between, the next scan's start-set inequality re-processes the
@@ -604,265 +902,20 @@ class LibraryScanner:
                 logger.info(f"Cue reconciliation: removed {stats['superseded']} "
                             f"superseded media_files rows across {len(recon_plans)} paths")
 
-        with get_db_context() as db:
-            for file_path, metadata in tqdm(
-                metadata_results, desc="Importing", unit="file"
-            ):
-                if not cancelled_in_phase1 and _cancelled():
-                    logger.info("Scan cancelled by user during import")
-                    db.commit()
-                    break
-
-                try:
-                    # Validate required fields
-                    if not metadata.get("title"):
-                        logger.warning(f"Missing title for {file_path}, skipping")
-                        stats["errors"] += 1
-                        continue
-
-                    # Per-track artist owns the TRACK identity — compilation cuts
-                    # belong to their real artists, not 'Various Artists'; the
-                    # album_artist owns the ALBUM identity, so the compilation
-                    # still groups as one album (Album has no artist_id — both
-                    # credits coexist via track_artists/album_artists).
-                    track_artist_name = metadata.get("artist") or metadata.get("album_artist")
-                    album_artist_name = metadata.get("album_artist") or metadata.get("artist")
-                    if not track_artist_name:
-                        logger.warning(f"Missing artist for {file_path}, skipping")
-                        stats["errors"] += 1
-                        continue
-
-                    album_title = metadata.get("album")
-                    if not album_title:
-                        album_title = metadata["title"]
-                        logger.info(f"No album tag, using title as album: {album_title}")
-
-                    # Box set / singles / mix folder → album identity comes from
-                    # the directory pre-pass (per-group title + credit). The
-                    # per-track artist (track_artist_name) is untouched, so track
-                    # identity stands. Cue slices bypass it — the sheet is the
-                    # album authority (they are excluded from _classify_dirs too).
-                    asg = None
-                    if metadata.get("cue_start_seconds") is None:
-                        asg = dir_albums.get(
-                            settings.translate_to_host_path(str(file_path.parent)), {}
-                        ).get(metadata["file_path"])
-                    if asg:
-                        album_title, album_artist_name = asg[0], asg[1]
-
-                    # Collect cache entries created inside the savepoint;
-                    # only commit them to the long-lived caches after the
-                    # savepoint succeeds (rollback safety).
-                    pending_cache: List[Tuple[str, Any, Any]] = []
-
-                    savepoint = db.begin_nested()
-                    try:
-                        # ── Artist (track credit) ──
-                        a_uid = artist_uuid(track_artist_name)
-                        if a_uid in caches["artist"]:
-                            artist = caches["artist"][a_uid]
-                        else:
-                            artist = db.query(Artist).filter(Artist.id == a_uid).first()
-                            if not artist:
-                                artist = Artist(id=a_uid, name=track_artist_name)
-                                db.add(artist)
-                                db.flush()
-                            pending_cache.append(("artist", a_uid, artist))
-
-                        # ── Artist (album credit — e.g. 'Various Artists' on comps) ──
-                        aa_uid = artist_uuid(album_artist_name)
-                        if aa_uid == a_uid:
-                            album_artist = artist
-                        elif aa_uid in caches["artist"]:
-                            album_artist = caches["artist"][aa_uid]
-                        else:
-                            album_artist = db.query(Artist).filter(Artist.id == aa_uid).first()
-                            if not album_artist:
-                                album_artist = Artist(id=aa_uid, name=album_artist_name)
-                                db.add(album_artist)
-                                db.flush()
-                            pending_cache.append(("artist", aa_uid, album_artist))
-
-                        # ── Track ──
-                        t_uid = track_uuid(metadata["title"], track_artist_name)
-                        if t_uid in caches["track"]:
-                            track = caches["track"][t_uid]
-                        else:
-                            track = db.query(Track).filter(Track.id == t_uid).first()
-                            if not track:
-                                track = Track(id=t_uid, title=metadata["title"])
-                                db.add(track)
-                                db.flush()
-                            pending_cache.append(("track", t_uid, track))
-
-                        # ── Album ──
-                        al_uid = album_uuid(album_title, album_artist_name)
-                        if al_uid in caches["album"]:
-                            album = caches["album"][al_uid]
-                        else:
-                            album = db.query(Album).filter(Album.id == al_uid).first()
-                            if not album:
-                                album = Album(
-                                    id=al_uid,
-                                    title=album_title,
-                                    release_year=metadata.get("release_year"),
-                                    label=metadata.get("label"),
-                                    catalog_number=metadata.get("catalog_number"),
-                                )
-                                db.add(album)
-                                db.flush()
-                            pending_cache.append(("album", al_uid, album))
-
-                        # ── Album variant (one physical edition per (dir, album)
-                        # — a box set is several albums in one folder) ──
-                        dir_path = settings.translate_to_host_path(str(file_path.parent))
-                        vkey = (dir_path, str(album.id))
-                        if vkey in caches["variant"]:
-                            variant = caches["variant"][vkey]
-                        else:
-                            variant = db.query(AlbumVariant).filter(
-                                AlbumVariant.directory_path == dir_path,
-                                AlbumVariant.album_id == album.id,
-                            ).first()
-                            if not variant:
-                                variant = AlbumVariant(
-                                    album_id=album.id,
-                                    directory_path=dir_path,
-                                    sample_rate=metadata.get("sample_rate"),
-                                    bit_depth=metadata.get("bit_depth"),
-                                    is_lossless=metadata.get("is_lossless", True),
-                                )
-                                db.add(variant)
-                                db.flush()
-                            pending_cache.append(("variant", vkey, variant))
-
-                        # ── Track-Artist association ──
-                        ta_key = (track.id, artist.id, "primary")
-                        if ta_key not in assoc_ta:
-                            existing_ta = db.query(TrackArtist).filter(
-                                TrackArtist.track_id == track.id,
-                                TrackArtist.artist_id == artist.id,
-                                TrackArtist.role == "primary",
-                            ).first()
-                            if not existing_ta:
-                                db.add(TrackArtist(
-                                    track_id=track.id,
-                                    artist_id=artist.id,
-                                    role="primary",
-                                ))
-                            assoc_ta.add(ta_key)
-
-                        # ── Album-Artist association (album credit) ──
-                        aa_key = (album.id, album_artist.id, "primary")
-                        if aa_key not in assoc_aa:
-                            existing_aa = db.query(AlbumArtist).filter(
-                                AlbumArtist.album_id == album.id,
-                                AlbumArtist.artist_id == album_artist.id,
-                                AlbumArtist.role == "primary",
-                            ).first()
-                            if not existing_aa:
-                                db.add(AlbumArtist(
-                                    album_id=album.id,
-                                    artist_id=album_artist.id,
-                                    role="primary",
-                                ))
-                            assoc_aa.add(aa_key)
-
-                        # ── Album-Genre associations (album grain) ──
-                        genre_name = metadata.get("genre")
-                        if genre_name and genre_name.strip():
-                            file_genre_ids: set = set()
-                            for gn in parse_genre_string(genre_name):
-                                gn = normalize_genre_name(gn)
-                                g_uid = genre_uuid(gn)
-
-                                if g_uid in caches["genre"]:
-                                    genre = caches["genre"][g_uid]
-                                else:
-                                    genre = db.query(Genre).filter(Genre.id == g_uid).first()
-                                    if not genre:
-                                        genre = Genre(id=g_uid, name=gn)
-                                        db.add(genre)
-                                        db.flush()
-                                    pending_cache.append(("genre", g_uid, genre))
-
-                                # One +1 per genre per file (a tag may normalize
-                                # two parts to the same genre).
-                                if genre.id in file_genre_ids:
-                                    continue
-                                file_genre_ids.add(genre.id)
-                                db.execute(_ALBUM_GENRE_UPSERT, {
-                                    "album_id": album.id,
-                                    "genre_id": genre.id,
-                                })
-
-                        # ── Media file ──
-                        media_file = MediaFile(
-                            track_id=track.id,
-                            album_variant_id=variant.id,
-                            file_path=metadata["file_path"],
-                            file_format=metadata.get("file_format", "FLAC"),
-                            is_lossless=metadata.get("is_lossless", True),
-                            file_size_bytes=metadata.get("file_size_bytes"),
-                            file_modified_at=metadata.get("file_modified_at"),
-                            sample_rate=metadata.get("sample_rate"),
-                            bit_depth=metadata.get("bit_depth"),
-                            bitrate=metadata.get("bitrate"),
-                            channels=metadata.get("channels"),
-                            duration_seconds=metadata.get("duration_seconds"),
-                            cue_start_seconds=metadata.get("cue_start_seconds"),
-                            cue_end_seconds=metadata.get("cue_end_seconds"),
-                            track_number=(asg[2] if asg and asg[2] is not None
-                                          else metadata.get("track_number")),
-                            disc_number=(asg[3] if asg and asg[3] is not None
-                                         else metadata.get("disc_number", 1)),
-                            isrc=metadata.get("isrc"),
-                            # Original tags — ground truth for re-normalization / correction
-                            raw_track_name=metadata.get("title"),
-                            raw_artist=metadata.get("artist"),
-                            raw_album_artist=metadata.get("album_artist"),
-                            raw_album=metadata.get("album"),
-                            raw_year=metadata.get("date"),
-                        )
-                        db.add(media_file)
-                        db.flush()
-
-                        elect_analysis_source(db, track.id)
-
-                        savepoint.commit()
-                    except Exception as e:
-                        savepoint.rollback()
-                        raise
-
-                    # Promote pending entries to long-lived caches
-                    for cache_name, key, obj in pending_cache:
-                        caches[cache_name][key] = obj
-
-                    stats["added"] += 1
-                    if track.id not in seen_track_ids:
-                        seen_track_ids.add(track.id)
-                        stats["unique_tracks"] += 1
-
-                    if stats["added"] % 100 == 0:
-                        db.commit()
-                        _report(f"Importing: {stats['added']}/{len(metadata_results)}")
-                        logger.info(f"Progress: {stats['added']} files added")
-
-                except Exception as e:
-                    logger.error(f"Error processing {file_path}: {e}")
-                    stats["errors"] += 1
-
-            # ── Cue supersede post-pass ─────────────────────────────
-            # Runs after the re-import so a track whose slices merely moved
-            # keeps its row (and listening history). A track left with no
-            # files loses its analysis: the cue replaces the material, a
-            # whole-image embedding must not survive as a spare (contrast
-            # prune_missing_files, which spares vanished-but-real rips). The
-            # row itself then goes only as an orphan (ORPHAN_TRACK_SQL) — a
-            # listen of the whole image is still the owner's listen.
-            # Orphan cleanup is SCOPED to the affected ids — the global
-            # LEFT JOIN sweeps prune uses would take phantom albums with them.
-            if superseded_tracks:
+        import_metadata(entries, sink=LOCAL_FILES, stats=stats, progress_cb=progress_cb,
+                        cancel_check=None if cancelled_in_phase1 else cancel_check)
+        # ── Cue supersede post-pass ─────────────────────────────
+        # Runs after the re-import so a track whose slices merely moved
+        # keeps its row (and listening history). A track left with no
+        # files loses its analysis: the cue replaces the material, a
+        # whole-image embedding must not survive as a spare (contrast
+        # prune_missing_files, which spares vanished-but-real rips). The
+        # row itself then goes only as an orphan (ORPHAN_TRACK_SQL) — a
+        # listen of the whole image is still the owner's listen.
+        # Orphan cleanup is SCOPED to the affected ids — the global
+        # LEFT JOIN sweeps prune uses would take phantom albums with them.
+        if superseded_tracks:
+            with get_db_context() as db:
                 tids = list(superseded_tracks)
                 for table in ("embeddings", "audio_features", "analysis_sources"):
                     db.execute(text(f"""
@@ -898,8 +951,7 @@ class LibraryScanner:
                                           WHERE av.album_id = albums.id)
                     """), {"aids": [str(a) for a in affected_albums]})
 
-            # Final commit
-            db.commit()
+                db.commit()
 
         if _cancelled():
             _report(f"Cancelled: {stats['added']} added before cancel")
