@@ -69,15 +69,6 @@ class Settings(BaseSettings):
     hqplayer_host: str = "localhost"
     hqplayer_port: int = 4321
     hqplayer_enabled: bool = False
-    # How HQPlayer reaches the library's bytes. `path`: it opens the files
-    # itself — at the stored paths, or under `hqplayer_library_root` when the
-    # same library is mounted elsewhere for it (a NAS, HQPlayer OS's SMB
-    # mount, a disk moved to the HQPlayer box). `stream`: every track through
-    # the media proxy, like a DLNA renderer — no path assumption at all, which
-    # is what an HQPlayer Embedded box on the LAN needs. Env defaults;
-    # user_settings overrides both on PUT /api/settings/hqplayer.
-    hqplayer_file_access: str = "path"
-    hqplayer_library_root: Optional[str] = None
 
     # Streaming preview (phantom albums) — stream missing albums onto HQPlayer
     # via pluggable providers (YouTube in core; DRM providers are external BYO

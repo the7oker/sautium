@@ -40,7 +40,7 @@ logger = logging.getLogger(__name__)
 _UNSET_TIMEOUT = object()   # wait_ready sentinel: "use the proxy default"
 
 # Content type by media_files.file_format — the one table every URL-serving
-# output reads (DLNA DIDL, the browser route, HQPlayer's stream mode).
+# output reads (DLNA DIDL, the browser route, an HQPlayer elsewhere).
 MIME_BY_FORMAT = {
     "FLAC": "audio/flac", "MP3": "audio/mpeg", "WAV": "audio/wav",
     "OGG": "audio/ogg", "M4A": "audio/mp4", "AIFF": "audio/aiff",

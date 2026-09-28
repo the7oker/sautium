@@ -8590,9 +8590,7 @@
       // a remote HQPlayer that fetches nothing is diagnosed from here.
       const filesLine = s.file_access === 'stream'
         ? `files streamed from ${escapeHtml(String(s.media_url_host || ''))}:${escapeHtml(String(s.media_url_port || ''))}`
-        : (s.library_root
-            ? `files by path under ${escapeHtml(s.library_root)}`
-            : 'files by path on this computer');
+        : 'files by path on this computer';
       const info = s.info || {};
       const productLine = escapeHtml(info.product || 'Connected')
         + (info.version ? ' · ' + escapeHtml(info.version) : '')
@@ -8813,11 +8811,7 @@
       const connEl = body.querySelector('[data-action="edit-conn"]');
       if (connEl) {
         connEl.addEventListener('click', () => {
-          openHqpConnectionEditor({
-            host: s.host, port: s.port, file_access: s.file_access,
-            library_root: s.library_root, library_root_local: s.library_root_local,
-            media_url_host: s.media_url_host, media_url_port: s.media_url_port,
-          }, () => load());
+          openHqpConnectionEditor({ host: s.host, port: s.port }, () => load());
         });
       }
 
@@ -10391,22 +10385,10 @@
   }
 
   async function openHqpConnectionEditor(current, onSaved) {
+    // Only where HQPlayer is: how the files reach it is read off the
+    // address — by path on this machine, streams from anywhere else.
     const px = (n) => `calc(${n} * var(--px))`;
     const muted = `color:var(--color-text-muted);font-size:${px(11.5)};line-height:1.5;`;
-    const localRoot = current.library_root_local || '';
-    const mediaAddr = `${current.media_url_host || ''}:${current.media_url_port || ''}`;
-    // Three choices on screen, two fields in the setting: `path` without a
-    // root is "same computer", `path` with one is "mounted elsewhere".
-    let choice = current.file_access === 'stream' ? 'stream'
-               : (current.library_root ? 'mount' : 'same');
-    const option = (key, label, text) => `
-          <div class="form-row stacked is-clickable" data-files="${key}" role="radio" tabindex="0">
-            <div class="row-stack">
-              <span class="row-stack-lead"><span class="row-stack-label">${label}</span></span>
-              <span data-mark style="color:var(--color-amber);display:inline-flex;"></span>
-            </div>
-            <div class="row-stack-value" style="${muted}white-space:normal;">${text}</div>
-          </div>`;
     const overlay = document.createElement('div');
     overlay.className = 'add-gear-overlay';
     overlay.innerHTML = `
@@ -10418,7 +10400,7 @@
         </div>
         <div class="add-gear-row">
           <p style="margin:0;${muted}font-size:${px(12)};">
-            <b>localhost</b> on this machine, the LAN IP of an Embedded box otherwise — a Docker node cannot resolve <b>.local</b> names.
+            <b>localhost</b> on this machine, the LAN IP of an Embedded box otherwise — a Docker node cannot resolve <b>.local</b> names. An HQPlayer on this machine opens the files itself; any other streams them from here.
           </p>
           <label style="display:flex;flex-direction:column;gap:${px(4)};">
             <span style="${muted}font-size:${px(12)};">Host</span>
@@ -10428,17 +10410,6 @@
             <span style="${muted}font-size:${px(12)};">Port</span>
             <input class="add-gear-input" id="hqpPortInput" type="number" min="1" max="65535" placeholder="4321" value="${current.port || 4321}">
           </label>
-          <span style="${muted}font-size:${px(12)};">Files</span>
-          ${option('same', 'Same computer',
-                   'HQPlayer opens the files at their own paths.')}
-          ${option('mount', 'Mounted elsewhere',
-                   `HQPlayer mounts the library itself and sees <b>${escapeProfileHtml(localRoot || 'the library')}</b> at the path below.`)}
-          <label id="hqpRootField" style="display:flex;flex-direction:column;gap:${px(4)};">
-            <span style="${muted}font-size:${px(12)};">Library root as HQPlayer sees it</span>
-            <input class="add-gear-input" id="hqpRootInput" type="text" placeholder="/mnt/music" maxlength="1024" autocomplete="off" spellcheck="false" value="${escapeProfileHtml(current.library_root || '')}">
-          </label>
-          ${option('stream', 'Stream from Sautium',
-                   `Every track is fetched from this node at <b>${escapeProfileHtml(mediaAddr)}</b>.`)}
           <button class="profile-btn primary" data-confirm>Save</button>
           <div id="hqpConnMsg" style="font-size:${px(12)};color:var(--color-text-dim);min-height:${px(16)};"></div>
         </div>
@@ -10450,49 +10421,23 @@
     overlay.querySelector('[data-cancel]').addEventListener('click', close);
     const hostInput = overlay.querySelector('#hqpHostInput');
     const portInput = overlay.querySelector('#hqpPortInput');
-    const rootField = overlay.querySelector('#hqpRootField');
-    const rootInput = overlay.querySelector('#hqpRootInput');
     const msg = overlay.querySelector('#hqpConnMsg');
     const confirmBtn = overlay.querySelector('[data-confirm]');
-    const options = Array.from(overlay.querySelectorAll('[data-files]'));
-
-    const paint = () => {
-      options.forEach(el => {
-        const on = el.dataset.files === choice;
-        el.setAttribute('aria-checked', on ? 'true' : 'false');
-        el.querySelector('[data-mark]').innerHTML = on ? PROFILE_ICONS.check : '';
-      });
-      rootField.hidden = choice !== 'mount';
-    };
-    options.forEach(el => {
-      const pick = () => { choice = el.dataset.files; paint(); if (choice === 'mount') rootInput.focus(); };
-      el.addEventListener('click', pick);
-      el.addEventListener('keydown', e => {
-        if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); pick(); }
-      });
-    });
-    paint();
     setTimeout(() => hostInput.focus(), 100);
 
     const fail = (text) => { msg.style.color = 'var(--color-negative)'; msg.textContent = text; };
     const submit = async () => {
       const host = hostInput.value.trim();
       const port = parseInt(portInput.value, 10);
-      const root = rootInput.value.trim();
       if (!host) return fail('Host is required.');
       if (!port || port < 1 || port > 65535) return fail('Port must be 1–65535.');
-      if (choice === 'mount' && !root) return fail('The library root as HQPlayer sees it is required.');
       msg.style.color = 'var(--color-text-muted)';
       msg.textContent = 'Saving…';
       try {
         const r = await fetch('/api/settings/hqplayer', {
           method: 'PUT',
           headers: {'Content-Type': 'application/json'},
-          body: JSON.stringify({
-            host, port,
-            file_access: choice === 'stream' ? 'stream' : 'path',
-            library_root: choice === 'mount' ? root : '',
-          }),
+          body: JSON.stringify({ host, port }),
         });
         if (!r.ok) return fail(await r.text());
         msg.style.color = 'var(--color-positive)';
@@ -10503,7 +10448,7 @@
       }
     };
     confirmBtn.addEventListener('click', () => onceInFlight(confirmBtn, submit));
-    [hostInput, portInput, rootInput].forEach(el => {
+    [hostInput, portInput].forEach(el => {
       el.addEventListener('keydown', e => {
         if (e.key === 'Enter') {
           e.preventDefault();
@@ -13580,7 +13525,7 @@
             ? 'HQPlayer Desktop reads this node\'s own library — there is nothing to import. A library of its own lives only on an HQPlayer Embedded box.'
             : hl.synced
               ? `${escapeProfileHtml(fmtNum(hl.files))} files in ${escapeProfileHtml(fmtNum(hl.albums))} albums held by this HQPlayer. Its library is re-checked whenever the output attaches.`
-              : 'Not imported yet. Albums this HQPlayer holds in its own library become variants of yours: the copy plays natively there and streams elsewhere. Your own files it reaches by path are never imported as copies.'}</div>
+              : 'Not imported yet. Albums this HQPlayer holds in its own library become variants of yours: the copy plays natively there and streams elsewhere.'}</div>
         </div>`}
         ${otherRows}
       </div>
@@ -13662,10 +13607,9 @@
       }
       if (body && body.preview) {
         const p = body.preview;
-        const shared = p.shared ? ` ${escapeProfileHtml(fmtNum(p.shared))} are your own files it reaches by path and stay out.` : '';
         const ok = await window.confirmDestructive({
           title: 'Import the HQPlayer library?',
-          message: `<b>${escapeProfileHtml(p.name || p.endpoint)}</b> (${escapeProfileHtml(p.endpoint)}) lists ${escapeProfileHtml(fmtNum(p.files))} files, ${escapeProfileHtml(fmtNum(p.new))} of them new here.${shared} Albums it holds become variants of yours.`,
+          message: `<b>${escapeProfileHtml(p.name || p.endpoint)}</b> (${escapeProfileHtml(p.endpoint)}) lists ${escapeProfileHtml(fmtNum(p.files))} files, ${escapeProfileHtml(fmtNum(p.new))} of them new here. Albums it holds become variants of yours.`,
           confirmText: 'Import',
         });
         if (!ok) return;

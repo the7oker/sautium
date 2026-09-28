@@ -308,9 +308,6 @@ CREATE TABLE IF NOT EXISTS album_genres (
 -- by this row and not by its address (2026-09-28): a friend's streamer or the
 -- Pi after a DHCP lease comes back at another host:port and is the same
 -- library — the <LibraryGetHash/> the last complete sync saw recognises it.
--- library_root / library_root_local say where that HQPlayer mounts THIS
--- node's library (path mode), so files it already reaches by path are never
--- imported as copies.
 CREATE TABLE IF NOT EXISTS hqp_endpoints (
     id SERIAL PRIMARY KEY,
     name TEXT NOT NULL,                     -- the owner's label; HQPlayer's own name at first sight
@@ -319,8 +316,6 @@ CREATE TABLE IF NOT EXISTS hqp_endpoints (
     product TEXT,                           -- <GetInfo product="…"/>
     hqp_name TEXT,                          -- <GetInfo name="…"/>
     library_hash TEXT,                      -- <LibraryGetHash/> the last COMPLETE sync saw; NULL = never imported
-    library_root TEXT,
-    library_root_local TEXT,
     first_seen_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
     last_synced_at TIMESTAMPTZ,
     CONSTRAINT chk_hqp_endpoints_address CHECK ((host IS NULL) = (port IS NULL))

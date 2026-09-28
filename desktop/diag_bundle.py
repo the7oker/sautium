@@ -37,8 +37,7 @@ logger = logging.getLogger(__name__)
 SETTINGS_KEY_PREFIXES = ("sync.", "p2p.", "enrichment.", "output.", "albums.",
                          "musicbrainz.", "library.", "discovery.", "support.")
 SETTINGS_KEYS = ("ai.provider", "ai.model", "ai.canonization_enabled",
-                 "hqplayer.host", "hqplayer.port", "hqplayer.file_access",
-                 "hqplayer.library_root", "ui.language")
+                 "hqplayer.host", "hqplayer.port", "ui.language")
 CONFIG_KEYS = ("version", "music_path", "provider", "hqplayer", "ports",
                "claude_code_available", "codex_available", "first_run_complete",
                "sync", "mb_slice")

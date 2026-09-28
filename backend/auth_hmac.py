@@ -134,6 +134,21 @@ def _allowed_host_set() -> set:
     return allowed
 
 
+def is_own_address(host: Optional[str]) -> bool:
+    """Does this name or literal reach THIS machine — loopback, the Docker
+    host, one of our interfaces, one of our configured names? What the
+    Host guard accepts, asked about an address we dial out to: an HQPlayer
+    there shares this node's disks and opens the library by path; one
+    anywhere else is handed streams. Unset counts as here."""
+    if not host:
+        return True
+    h = host.strip().lower()
+    if h.startswith("[") and h.endswith("]"):
+        h = h[1:-1]
+    allowed = _allowed_host_set()
+    return h in allowed or f"[{h}]" in allowed or _own_ipv4_literal(h, allowed)
+
+
 def host_allowed(host_header: str) -> bool:
     if not host_header:
         return True          # HTTP/1.0 and health probes send none

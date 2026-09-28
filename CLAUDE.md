@@ -268,12 +268,14 @@ See:
   switch and re-reads each slot's way in for the new output
   (`QueueItem.play`, `playback/substitute.py`: a rip here, this
   HQPlayer's copy, else a lazily fetched stream) — `source` is the origin
-  and never changes. A file the HQPlayer reaches by path in THIS
-  node's own library (its mount of our root — `library_root` ↔ the node's
-  root — or a Desktop on this very disk) is never imported as a copy: the
-  sync skips it, the rescan forgets one imported before the mapping was
-  known. No path mapping of a moved disk: Rescan prunes the local rows,
-  the sync adds the copy, the UUID keeps the analysis.
+  and never changes. How an owned file reaches HQPlayer is read off its
+  address, never configured (`_stream_mode`, `auth_hmac.is_own_address`):
+  on this machine by path, anywhere else as a stream from the media proxy
+  — a share the HQPlayer would mount is an extra setup for the same bytes,
+  so there is no mount mode. Only an Embedded box has a library of its
+  own; a Desktop reads this node's folder and is never synced. No path
+  mapping of a moved disk: Rescan prunes the local rows, the sync adds the
+  copy, the UUID keeps the analysis.
 
 ---
 
@@ -411,8 +413,8 @@ below bind with or without it.
    remote HQPlayer's mirrored playlist survives one — and is served only
    while a queue has registered the file, never the library at large) and
    exist because HQPlayer — on this machine, or an HQPlayer Embedded box on
-   the LAN in `stream` mode — and DLNA renderers can neither sign HMAC nor
-   trust TLS. 8831 is the DLNA
+   the LAN, which is handed streams — and DLNA renderers can neither sign
+   HMAC nor trust TLS. 8831 is the DLNA
    GENA event listener (renderer → backend callbacks). The launcher
    node uses its own pair — 8832 (media) / 8833 (GENA), `ports.media`/
    `ports.gena` in config.json → `MEDIA_PROXY_PORT`/`DLNA_GENA_PORT` —

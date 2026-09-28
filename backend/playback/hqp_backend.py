@@ -19,14 +19,16 @@ user-initiated commands never contend for the same socket / lock:
 HQPlayer's control API accepts multiple concurrent TCP clients, so the
 two sockets co-exist cleanly on the HQP side.
 
-Where HQPlayer runs decides how a track reaches it (config.hqplayer_file_access):
-in `path` mode an owned file is a file:// URI HQPlayer opens itself — at the
-stored path, or under `hqplayer_library_root` when it mounts the same library
-elsewhere; in `stream` mode every owned file is an http URL on the media proxy,
-as a DLNA renderer gets, so an HQPlayer Embedded box on the LAN needs no path
-in common with this node. CUE slices, m4a transcodes and phantom previews are
-http URLs in both modes. Media URLs name the address HQPlayer can reach us at
-(streaming.media_host), never a fixed one.
+Where HQPlayer runs decides how a track reaches it, read off its address
+(`_stream_mode`, since 2026-09-28 — nothing to configure): an HQPlayer on
+THIS machine (loopback, the Docker host, one of our own addresses) shares
+the disks and opens an owned file as a file:// URI at the stored path; one
+anywhere else — a Desktop on another computer, an HQPlayer Embedded box on
+the LAN — gets every owned file as an http URL on the media proxy, as a
+DLNA renderer does, with no path in common with this node. CUE slices, m4a
+transcodes and phantom previews are http URLs either way. Media URLs name
+the address HQPlayer can reach us at (streaming.media_host), never a fixed
+one.
 """
 
 import logging
@@ -234,8 +236,8 @@ def _add_uris_with_retry(uris: list[str], *, clear_first: bool = False) -> int:
     if added < len(uris):
         if _stream_mode():
             logger.warning(
-                "HQPlayer refused %d of %d media URLs — in stream mode that "
-                "usually means it cannot reach %s:%d (a firewall, or the wrong "
+                "HQPlayer refused %d of %d media URLs — an HQPlayer elsewhere "
+                "fetches them from us, so that usually means it cannot reach %s:%d (a firewall, or the wrong "
                 "LAN address in MEDIA_PROXY_ADVERTISED_HOST / SAUTIUM_HOST_IPS)",
                 len(uris) - added, len(uris), hqp_media_host(),
                 settings.media_proxy_port)
@@ -287,7 +289,11 @@ _local_provider = None
 
 
 def _stream_mode() -> bool:
-    return settings.hqplayer_file_access == "stream"
+    """Streams, unless HQPlayer runs on this very machine (auth_hmac's
+    own-address test): a mounted share is an extra setup on the HQPlayer
+    side for bytes the proxy hands over just the same, so it is not a mode."""
+    from auth_hmac import is_own_address
+    return not is_own_address(settings.hqplayer_host)
 
 
 def hqp_media_host() -> str:
@@ -299,31 +305,18 @@ def hqp_media_host() -> str:
 
 
 def _library_uri(db_path: str) -> str:
-    """The file:// URI HQPlayer opens for a stored path: the path itself, or
-    the same path under `hqplayer_library_root` when HQPlayer mounts the
-    library elsewhere (a NAS, HQPlayer OS's SMB mount, a disk moved to the
-    HQPlayer box)."""
-    root = settings.hqplayer_library_root
-    db_root = settings.library_db_root()
-    if root and db_root and db_path.startswith(db_root + "/"):
-        db_path = root + db_path[len(db_root):]
+    """The file:// URI HQPlayer opens for a stored path — the path itself:
+    an HQPlayer handed file:// URIs runs on this machine."""
     return file_path_to_uri(db_path)
 
 
 def _library_db_path(uri: str) -> Optional[str]:
     """Inverse of `_library_uri`: the stored media_files.file_path behind a
     file:// URI HQPlayer reports — percent-escapes undone (HQPlayer escapes
-    brackets in the URIs it returns), the library-root remap reversed. None
-    for anything that is not a file, or lies outside the mapped root."""
+    brackets in the URIs it returns). None for anything that is not a file."""
     if not uri.startswith("file://"):
         return None
-    path = uri_to_file_path(uri).replace("\\", "/")
-    root = settings.hqplayer_library_root
-    if root:
-        if not path.startswith(root + "/"):
-            return None
-        path = settings.library_db_root() + path[len(root):]
-    return path
+    return uri_to_file_path(uri).replace("\\", "/")
 
 
 def _uri_file_path(uri: str) -> Optional[str]:
@@ -398,9 +391,10 @@ def _owned_play_uri(item: QueueItem, host: str) -> str:
     image, loudly logged. An m4a (MP4 container: HQPlayer decodes neither AAC
     nor ALAC) is transcoded to FLAC in memory and served from /preview/,
     displayed as owned, falling back to the raw file when streaming is off
-    or the transcode fails. Everything else is a file:// URI at the path
-    HQPlayer opens itself (`path` mode) or /file/{token} on the media proxy
-    (`stream` mode). `host` is the proxy address HQPlayer reaches."""
+    or the transcode fails. Everything else is a file:// URI at the path an
+    HQPlayer on this machine opens itself, or /file/{token} on the media
+    proxy for one anywhere else. `host` is the proxy address HQPlayer
+    reaches."""
     global _local_provider
     src = item.opener()
     media_file_id, db_path, file_format = (
@@ -736,7 +730,8 @@ class HqpBackend(PlayerBackend):
     def _status_of(self, status) -> PlaybackStatus:
         """One status tick as the manager reads it. HQPlayer's own tags are
         authoritative only for a slot it opened as a file; an http-served
-        slot (a preview, a transcode, every owned file in stream mode) is
+        slot (a preview, a transcode, every owned file for an HQPlayer
+        elsewhere) is
         described by the queue item, so those keys are left out and the
         manager falls back to it. While HQPlayer's playlist has drifted from
         the queue its slot index names nothing of ours: the tick is reported

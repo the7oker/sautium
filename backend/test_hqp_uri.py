@@ -18,8 +18,7 @@ def docker_paths(monkeypatch):
     """A Docker node: the scanner sees /music, the DB stores E:/Music/…"""
     monkeypatch.setattr(settings, "music_library_path", "/music")
     monkeypatch.setattr(settings, "music_host_path", "E:/Music")
-    monkeypatch.setattr(settings, "hqplayer_file_access", "path")
-    monkeypatch.setattr(settings, "hqplayer_library_root", None)
+    monkeypatch.setattr(settings, "hqplayer_host", "localhost")     # on this machine: by path
 
 
 @pytest.fixture
@@ -35,24 +34,26 @@ def _file(path, fmt="FLAC", **span):
                      title="T", artist="A", album="B")
 
 
-def test_library_uri_is_the_stored_path_without_a_root(docker_paths):
+def test_library_uri_is_the_stored_path(docker_paths):
     assert hb._library_uri("E:/Music/A/01.flac") == "file:///E:/Music/A/01.flac"
 
 
-def test_library_uri_remaps_under_the_root(docker_paths, monkeypatch):
-    monkeypatch.setattr(settings, "hqplayer_library_root", "/mnt/music")
-    assert hb._library_uri("E:/Music/A/01.flac") == "file:///mnt/music/A/01.flac"
-    # Outside the library root nothing is remapped — HQPlayer opens what it can.
-    assert hb._library_uri("F:/Other/x.flac") == "file:///F:/Other/x.flac"
-
-
-def test_library_db_path_is_the_inverse(docker_paths, monkeypatch):
+def test_library_db_path_is_the_inverse(docker_paths):
     assert hb._library_db_path("file:///E:/Music/A/%5BTR24%5D%2001.flac") == \
         "E:/Music/A/[TR24] 01.flac"
-    monkeypatch.setattr(settings, "hqplayer_library_root", "/mnt/music")
-    assert hb._library_db_path("file:///mnt/music/A/01.flac") == "E:/Music/A/01.flac"
-    assert hb._library_db_path("file:///media/usb/A/01.flac") is None   # outside the root
     assert hb._library_db_path("http://127.0.0.1:0/file/abc") is None
+
+
+def test_the_mode_is_read_off_the_address(docker_paths, monkeypatch):
+    """An HQPlayer on this machine opens the files by path; any other is
+    handed streams — nothing to configure."""
+    for own in ("localhost", "127.0.0.1", "host.docker.internal", "::1"):
+        monkeypatch.setattr(settings, "hqplayer_host", own)
+        assert hb._stream_mode() is False, own
+    monkeypatch.setattr(settings, "hqplayer_host", "192.168.1.253")
+    assert hb._stream_mode() is True
+    monkeypatch.setattr(settings, "hqplayer_host", "hqplayer-pi")
+    assert hb._stream_mode() is True
 
 
 def test_slot_identity_resolves_file_uris_and_owned_tokens(docker_paths, proxy):
@@ -76,16 +77,14 @@ def test_http_served_by_slot_kind_and_mode(docker_paths, monkeypatch):
                         source={"kind": "uri", "uri": "file:///X:/foreign.flac"},
                         title="", artist="")
     assert hb._http_served(foreign) is False
-    monkeypatch.setattr(settings, "hqplayer_file_access", "stream")
+    monkeypatch.setattr(settings, "hqplayer_host", "192.168.1.253")   # elsewhere: streams
     assert hb._http_served(_file("E:/Music/A/01.flac")) is True
 
 
 def test_owned_play_uri_by_mode(docker_paths, proxy, monkeypatch):
     item = _file("E:/Music/A/01.flac")
     assert hb._owned_play_uri(item, "192.168.1.188") == "file:///E:/Music/A/01.flac"
-    monkeypatch.setattr(settings, "hqplayer_library_root", "/mnt/music")
-    assert hb._owned_play_uri(item, "192.168.1.188") == "file:///mnt/music/A/01.flac"
-    monkeypatch.setattr(settings, "hqplayer_file_access", "stream")
+    monkeypatch.setattr(settings, "hqplayer_host", "192.168.1.253")
     tok = proxy.file_token("/music/A/01.flac")
     assert hb._owned_play_uri(item, "192.168.1.188") == f"http://192.168.1.188:0/file/{tok}"
     assert proxy.file_entry(tok).path == "/music/A/01.flac"
@@ -103,6 +102,6 @@ def test_cue_slice_rides_the_proxy_and_falls_back_to_the_image(docker_paths, pro
         raise OSError("no such image")
     monkeypatch.setattr(transcode, "flac_slice_path_for_file", boom)
     assert hb._owned_play_uri(item, "127.0.0.1") == "file:///E:/Music/A/img.flac"
-    monkeypatch.setattr(settings, "hqplayer_file_access", "stream")
+    monkeypatch.setattr(settings, "hqplayer_host", "192.168.1.253")
     whole = proxy.file_token("/music/A/img.flac")
     assert hb._owned_play_uri(item, "127.0.0.1") == f"http://127.0.0.1:0/file/{whole}"

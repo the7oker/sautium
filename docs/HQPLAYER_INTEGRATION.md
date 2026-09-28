@@ -36,11 +36,12 @@ either desktop version.
 - **Connection**: WSL2 → Windows (<windows-host-ip>:4321)
 - **HQPlayer Embedded 6** (engine 6.2.3, HQPlayer OS image on a Raspberry Pi 5,
   reached by LAN address from the Docker node): control protocol, status and the
-  DSP lists verified 2026-09-27; `stream` mode passed live the same day (album
+  DSP lists verified 2026-09-27; streaming passed live the same day (album
   playback, gapless advance, seek, transport, tracking; a backend restart
-  mid-album and an HQPlayer power cycle both recovered), and `path` mode with
-  `library_root=/smb` passed against the Windows share of the library mounted
-  through HQPlayer OS's NetworkMounts
+  mid-album and an HQPlayer power cycle both recovered). A mount mode — the
+  box reading a Windows share of the library through HQPlayer OS's
+  NetworkMounts — passed too and was retired 2026-09-28: the same bytes for
+  an extra setup on the HQPlayer side
 
 ### HQP6-only additions
 HQPlayer 6 exposes two extra fields that Sautium now uses when present. Both degrade
@@ -191,21 +192,25 @@ with HQPlayerConnection(host="<windows-host-ip>") as hqp:
     hqp.play()
 ```
 
-### Where HQPlayer runs: file access (since 2026-09-27)
+### Where HQPlayer runs: file access (read off the address, since 2026-09-28)
 
-How an owned track is handed to HQPlayer is a setting of the endpoint
-(`hqplayer.file_access`, More → HQPlayer → connection; env defaults
-`HQPLAYER_FILE_ACCESS` / `HQPLAYER_LIBRARY_ROOT`):
-
-| Mode | The owned track becomes | When |
-|---|---|---|
-| `path`, no root | `file:///E:/Music/…` — the stored path itself | HQPlayer on this machine (Desktop) — the default and the pre-2026-09-27 behaviour |
-| `path` + `library_root` | `file:///<root>/…` — the stored path with the library root replaced | HQPlayer mounts the same library elsewhere: a NAS share, HQPlayer OS's SMB mount, a disk moved to the HQPlayer box |
-| `stream` | `http://<our LAN address>:8830/file/{token}` on the media proxy | HQPlayer Embedded on another box — nothing in common with this node's paths; the same URLs a DLNA renderer gets |
+How an owned track is handed to HQPlayer is not a setting — it follows
+from the endpoint's address (`playback.hqp_backend._stream_mode`,
+`auth_hmac.is_own_address`): an HQPlayer on THIS machine — `localhost`,
+`host.docker.internal` (the Docker host), one of the node's own addresses
+or names — shares its disks and gets `file:///E:/Music/…`, the stored path
+itself; an HQPlayer anywhere else — a Desktop on another computer, an
+Embedded box on the LAN — gets `http://<our LAN address>:8830/file/{token}`
+on the media proxy, the same URLs a DLNA renderer gets. A mount mode (the
+same path under the root HQPlayer mounted the library at) existed for one
+day, 2026-09-27: the bytes are the same either way and the share is an
+extra setup on the HQPlayer side, so it went with its setting
+(`hqplayer.file_access` / `library_root`, migration 031). It returns only
+if Sautium ever scans files over the network itself.
 
 CUE slices (a cached FLAC cut), m4a (transcoded to FLAC in memory — HQPlayer
-decodes neither AAC nor ALAC) and phantom previews are http URLs in every
-mode. The address inside a media URL is chosen for the machine HQPlayer runs
+decodes neither AAC nor ALAC) and phantom previews are http URLs either
+way. The address inside a media URL is chosen for the machine HQPlayer runs
 on (`streaming/media_host.py`, shared with the DLNA output): a name for this
 machine keeps `MEDIA_PROXY_ADVERTISED_HOST`, any other host is resolved and
 handed the local address on its network. Owned-file tokens are an HMAC of the
@@ -271,11 +276,8 @@ HOST = "<windows-host-ip>"
 
 ### HQPlayer Embedded on the LAN
 Give the node the box's LAN address (a Docker node cannot resolve `.local`
-names; a DHCP reservation keeps the address stable) and choose `stream` as
-the file access, or `path` with the root HQPlayer OS mounted the library at —
-a share configured in its NetworkMounts page lands at `/smb` itself, not in a
-subdirectory (verified 2026-09-27), so the root is `/smb`.
-In `stream` mode the box fetches from the media proxy — on a Windows host
+names; a DHCP reservation keeps the address stable) — that is all: a box is
+not this machine, so it streams. The box fetches from the media proxy — on a Windows host
 with Docker Desktop that is the same port forward and firewall allow the
 DLNA output needs (CLAUDE.md Security Posture, rule 3); a launcher node
 serves it natively on 8832. The web interface (port 8088, default login
@@ -333,11 +335,7 @@ that inherits the address (name or product differ) is a new library and the
 old row keeps its files without an address. A friend's streamer brought over
 is one more row, imported through the same previewed first import, and goes
 with Settings › "Forget this library" (`forget_endpoint_id`) — never on its
-own. This node's own files seen through the HQPlayer — its mount of our
-library (`/smb/…` = `E:/Music/…`), or a Desktop on this very disk — are not
-copies: the sync leaves them out (`stats.shared`) and the rescan forgets any
-imported before the mapping was known; they play there by path.
-The queue survives an output switch, and since 2026-09-28 so does its
+own. The queue survives an output switch, and since 2026-09-28 so does its
 playability: the canonical queue holds identities (the track uuid and the
 enqueue-time origin, `QueueItem.source`, which never changes), and on every
 switch each slot is re-read for the NEW output (`QueueItem.play`,

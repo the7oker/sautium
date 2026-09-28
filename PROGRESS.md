@@ -356,11 +356,15 @@ implementation details live in the code, DB and git history.
 - **Path translation**: Container `/music/...` → Windows `E:/Music/...` before
   sending to HQPlayer. Both sides see the same files through different mount
   points.
-- **Where HQPlayer runs is a setting of the endpoint (2026-09-27).**
-  `hqplayer.file_access`: `path` hands HQPlayer `file://` URIs — the stored
-  path, or the same path under `hqplayer.library_root` when HQPlayer mounts the
-  library elsewhere; `stream` hands it `/file/{token}` URLs on the media proxy
-  like a DLNA renderer, which is what HQPlayer Embedded on a Raspberry Pi
+- **Where HQPlayer runs is read off its address (2026-09-28; a setting for
+  one day before that).** An HQPlayer on this machine — loopback, the Docker
+  host, one of our own addresses — is handed `file://` URIs at the stored
+  paths; any other — a Desktop elsewhere, HQPlayer Embedded on a Raspberry
+  Pi — gets `/file/{token}` URLs on the media proxy like a DLNA renderer.
+  The mount mode (the path under the root HQPlayer mounted the library at)
+  was the same bytes for an extra share on the HQPlayer side and went with
+  the setting (Valerii, 2026-09-28); it returns only if Sautium scans files
+  over the network itself. Streaming to the Pi
   needs (verified against Embedded 6.2.3 / HQPlayer OS: same control
   protocol, no client change). Media URLs name the address HQPlayer can reach
   us at (`streaming/media_host.py`, shared with DLNA), owned-file tokens are an

@@ -183,10 +183,6 @@ Edit `.env`:
 - `MUSIC_LIBRARY_PATH` — host path Docker mounts read-only (e.g. `E:\Music`).
 - `MUSIC_HOST_PATH` — native OS path stored in the DB so HQPlayer can open
   files directly (e.g. `E:/Music`).
-- `HQPLAYER_FILE_ACCESS` / `HQPLAYER_LIBRARY_ROOT` — how HQPlayer reaches the
-  files: `path` at the stored paths (or under the root it mounts the library
-  at), `stream` through the media proxy for an HQPlayer Embedded box on the
-  LAN. The Web UI's choice (More → HQPlayer) overrides both once saved.
 - `POSTGRES_PASSWORD` — database password.
 - `LASTFM_API_KEY` / `LASTFM_API_SECRET` — for enrichment + scrobbling (optional).
 - `SAUTIUM_HOST_IPS` — your host's LAN IP, so the backend accepts requests

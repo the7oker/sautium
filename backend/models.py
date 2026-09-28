@@ -445,8 +445,6 @@ class HqpEndpoint(Base):
     product = Column(Text)
     hqp_name = Column(Text)
     library_hash = Column(Text)
-    library_root = Column(Text)
-    library_root_local = Column(Text)
     first_seen_at = Column(DateTime(timezone=True), server_default=func.now())
     last_synced_at = Column(DateTime(timezone=True))
 

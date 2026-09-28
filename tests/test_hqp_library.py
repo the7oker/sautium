@@ -258,33 +258,6 @@ def test_the_same_library_at_a_new_address_keeps_its_row(db, monkeypatch):
     assert _one(db, "SELECT count(*) FROM hqp_library_files") == 0
 
 
-def test_own_files_seen_through_the_hqplayer_are_not_copies(db, monkeypatch):
-    """The Pi mounts this node's library at /smb: the files it lists there
-    are the rows media_files already holds, reachable by path — never a
-    second variant. Only what is not here (its own disk) is imported."""
-    from scanner import LOCAL_FILES, import_metadata
-    local_dir = f"E:/Music/{PRODIGY_DIR}"
-    import_metadata([(local_dir, _local_scan("Intro", 1)), (local_dir, _local_scan("Break & Enter", 2))],
-                    sink=LOCAL_FILES, stats={})
-    with db.cursor() as cur:
-        for key, value in (("hqplayer.host", PI[0]), ("hqplayer.port", PI[1]), ("hqplayer.library_root", "/smb")):
-            cur.execute("INSERT INTO user_settings (key, value) VALUES (%s, to_jsonb(%s::text)) "
-                        "ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value", (key, str(value)))
-    import config
-    monkeypatch.setattr(type(config.settings), "library_db_root", lambda self: "E:/Music")
-    monkeypatch.setattr(hqp_library, "library_hash", lambda h, p: "h3")
-    monkeypatch.setattr(hqp_library, "fetch_library", lambda h, p: LIBRARY)
-    monkeypatch.setattr(hqp_library, "get_info", lambda h, p: PI_INFO)
-    stats = hqp_library.sync(*PI)
-    # "Intro" under /smb is our own file (same path under the mount) and stays
-    # out; "Break & Enter" is named differently there, so it is a copy like
-    # Bonobo on the Pi's own disk
-    assert (stats["shared"], stats["added"], stats["known"]) == (1, 2, 0)
-    assert _one(db, "SELECT count(*) FROM hqp_library_files") == 2
-    assert _one(db, "SELECT count(*) FROM hqp_library_files WHERE hqp_path LIKE %s", "%Intro.flac") == 0
-    assert _one(db, "SELECT library_root || ' -> ' || library_root_local FROM hqp_endpoints") == "/smb -> E:/Music"
-
-
 def test_native_plays_follow_the_output(db, monkeypatch):
     """Each output opens its own copy of a queued track: a rip here for the
     browser, this HQPlayer's held copy when it is the output (outranking

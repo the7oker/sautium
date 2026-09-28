@@ -168,8 +168,6 @@ def fake(monkeypatch):
     monkeypatch.setattr(settings, "hqplayer_port", f.port)
     monkeypatch.setattr(settings, "music_library_path", "/music")
     monkeypatch.setattr(settings, "music_host_path", "E:/Music")
-    monkeypatch.setattr(settings, "hqplayer_file_access", "path")
-    monkeypatch.setattr(settings, "hqplayer_library_root", None)
     monkeypatch.setattr(settings, "media_proxy_advertised_host", "127.0.0.1")
     monkeypatch.setattr(streaming_service, "_proxy",
                         MediaProxy(port=0, advertised_host="127.0.0.1", file_token_key=b"k"))
@@ -237,19 +235,8 @@ def test_attach_mirrors_the_queue_in_path_mode(fake, monkeypatch):
         b.shutdown()
 
 
-def test_attach_mirrors_under_the_library_root(fake, monkeypatch):
-    monkeypatch.setattr(settings, "hqplayer_library_root", "/mnt/music")
-    mgr = PlaybackManager()
-    mgr.queue.replace([_item("E:/Music/A/01.flac", 1)])
-    b = _attach(mgr)
-    try:
-        assert fake.playlist == ["file:///mnt/music/A/01.flac"]
-    finally:
-        b.shutdown()
-
-
 def test_attach_streams_in_stream_mode(fake, monkeypatch):
-    monkeypatch.setattr(settings, "hqplayer_file_access", "stream")
+    monkeypatch.setattr(hb, "_stream_mode", lambda: True)   # HQPlayer elsewhere: streams
     mgr = PlaybackManager()
     mgr.queue.replace([_item("E:/Music/A/01.flac", 1)])
     b = _attach(mgr)
@@ -261,7 +248,7 @@ def test_attach_streams_in_stream_mode(fake, monkeypatch):
 
 
 def test_busy_attach_registers_tokens_without_touching_the_playlist(fake, monkeypatch):
-    monkeypatch.setattr(settings, "hqplayer_file_access", "stream")
+    monkeypatch.setattr(hb, "_stream_mode", lambda: True)   # HQPlayer elsewhere: streams
     proxy = streaming_service.get_proxy()
     tok = proxy.file_token("/music/A/01.flac")
     fake.playlist = [f"http://127.0.0.1:0/file/{tok}"]
@@ -314,7 +301,7 @@ def test_adopt_resolves_paths_tokens_and_foreign_uris(fake, monkeypatch):
 
 
 def test_status_omits_hqplayers_tags_for_http_slots(fake, monkeypatch):
-    monkeypatch.setattr(settings, "hqplayer_file_access", "stream")
+    monkeypatch.setattr(hb, "_stream_mode", lambda: True)   # HQPlayer elsewhere: streams
     mgr = PlaybackManager()
     mgr.queue.replace([_item("E:/Music/A/01.flac", 1)])
     b = HqpBackend(emit=mgr._on_backend_status, queue=mgr.queue)
@@ -323,7 +310,7 @@ def test_status_omits_hqplayers_tags_for_http_slots(fake, monkeypatch):
                      artist="HTTP stream", album="", song="HTTP stream")
     out = b._status_of(st)
     assert out.queue_index == 1 and "artist" not in out.extra and "song" not in out.extra
-    monkeypatch.setattr(settings, "hqplayer_file_access", "path")
+    monkeypatch.setattr(hb, "_stream_mode", lambda: False)
     out = b._status_of(st)
     assert out.extra["artist"] == "HTTP stream"
     b._drift = True
