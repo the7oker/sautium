@@ -1373,6 +1373,15 @@
         this._npProvider = null;
         this._npAlbumId = data.album_id || null;
         this._identity = 'mf:' + this._npMfId;
+      } else if (data.track_id) {
+        // A file held at the HQPlayer: no media_file here, no stream either
+        // — the detail is fetched by track uuid, the backend reading the
+        // held copy's format and the track's analysis.
+        this._npMfId = null;
+        this._npPreviewTid = data.track_id;
+        this._npProvider = null;
+        this._npAlbumId = data.album_id || null;
+        this._identity = 'tid:' + this._npPreviewTid + '|' + (this._npAlbumId || '');
       }
       if (this._identity !== this._detailKey) this.tryFetchDetail();
     },

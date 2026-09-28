@@ -1204,9 +1204,42 @@ def _preview_now_playing_detail(track_id: str, provider: Optional[str],
         WHERE ta.track_id = %(t)s::uuid
         LIMIT 1
     """, {"t": track_id})
-    row["quality"] = _stream_quality(provider)
+    held = None if provider else _held_copy(track_id)
+    if held:
+        # Not a stream: a file held at the HQPlayer that is the output plays
+        # natively there — its format and resolution are the badge, as an
+        # owned file's are; the analysis is the track's, keyed by uuid.
+        row.update(held)
+        sr, bd = held.get("sample_rate") or 0, held.get("bit_depth") or 0
+        row["quality"] = ("hi-res" if held.get("is_lossless") and sr >= 48000 and bd >= 24
+                          else "lossless" if held.get("is_lossless") else "lossy")
+    else:
+        row["quality"] = _stream_quality(provider)
     row["provider_cover_url"] = _resolved_artwork.get(track_id)
     return row
+
+
+def _held_copy(track_id: str) -> Optional[dict]:
+    """The held file of this track that is playing: the one a queue slot of
+    the track names (its path), else the best copy at the HQPlayer that is
+    the output. None when nothing is held there — a phantom, or another
+    output."""
+    hqp_id = active_hqp_endpoint()
+    paths = [it.source.get("path") for it in manager.queue.snapshot()
+             if it.track_id == track_id and it.source.get("kind") == "hqp"]
+    if hqp_id is None and not paths:
+        return None
+    return _db_query_one("""
+        SELECT hf.file_format, hf.is_lossless, hf.sample_rate, hf.bit_depth,
+               hf.duration_seconds
+        FROM hqp_library_files hf
+        JOIN album_variants av ON av.id = hf.album_variant_id
+        WHERE hf.track_id = %(tid)s::uuid
+          AND (hf.hqp_path = ANY(%(paths)s) OR av.hqp_endpoint_id = %(hqp)s)
+        ORDER BY (hf.hqp_path = ANY(%(paths)s)) DESC,
+                 hf.bit_depth DESC NULLS LAST, hf.sample_rate DESC NULLS LAST
+        LIMIT 1
+    """, {"tid": track_id, "paths": paths, "hqp": hqp_id})
 
 
 @router.get("/now-playing-detail")
