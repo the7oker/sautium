@@ -272,8 +272,10 @@ See:
   address, never configured (`_stream_mode`, `auth_hmac.is_own_address`):
   on this machine by path, anywhere else as a stream from the media proxy
   — a share the HQPlayer would mount is an extra setup for the same bytes,
-  so there is no mount mode. Only an Embedded box has a library of its
-  own; a Desktop reads this node's folder and is never synced. No path
+  so there is no mount mode. Only an HQPlayer on another machine has a
+  library of its own (an Embedded box, a Desktop on a second computer —
+  `has_own_library`, by address); one on this machine reads this node's
+  folder and is never synced. No path
   mapping of a moved disk: Rescan prunes the local rows, the sync adds the
   copy, the UUID keeps the analysis. Since 2026-09-29 `hqp_endpoints` is
   also the registry of every HQPlayer the owner picked (`hqp_library.
@@ -282,9 +284,9 @@ See:
   sent unicast in the same sweep as the DLNA M-SEARCH — broadcast dies at
   the docker bridge) or added by address (one "Add device by address" for
   HQPlayers and renderers, HQPlayer probed first), and tapping one makes
-  it the HQPlayer the node drives. This machine's aliases (`localhost`,
-  `host.docker.internal`, its LAN address) are one HQPlayer
-  (`address_key`); there is no connection editor.
+  it the HQPlayer the node drives; its screen syncs its library. This
+  machine's aliases (`localhost`, `host.docker.internal`, its LAN address)
+  are one HQPlayer (`address_key`); there is no connection editor.
 
 ---
 

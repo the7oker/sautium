@@ -113,6 +113,12 @@ def get_state() -> Dict[str, Any]:
     response["endpoint_id"] = ep["id"] if ep else None
     response["name"] = ep["name"] if ep else None
     response["label"] = hqp_library.label(ep["name"], ep["product"]) if ep else None
+    # Its library, when it has one of its own (another machine): what this
+    # node holds of it and the running job — the screen's Library section.
+    from routers.settings import _hqp_library_state
+    lib = _hqp_library_state()
+    response["library"] = {k: lib.get(k) for k in ("own_library", "synced", "files", "albums",
+                                                   "running", "progress", "last_synced_at")}
 
     try:
         with _hqp_status_lock:

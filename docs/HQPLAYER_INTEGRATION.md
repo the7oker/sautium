@@ -314,10 +314,12 @@ alias registered, and the row keeps the address it was registered at (on a
 Docker node `host.docker.internal` for a Desktop the scan sees at the LAN
 address). A row is listed while its box is off, like a pinned renderer;
 its `×` in the picker forgets it — the same confirmed goodbye Settings ›
-Library offers when the row holds copies; an Embedded row also carries its
-library's sync (the same previewed first import, the progress on the
-Library screen — a Desktop has no library to sync). The mini-player and the
-status name the selected one by the same label (`HQPlayer Desktop · VH11`).
+Library offers when the row holds copies. The HQPlayer screen (the gear
+on the selected row) carries a Library section for an HQPlayer on another
+machine — what this node holds of its library and a tap that syncs it (the
+same previewed first import, the progress on the Library screen). The
+mini-player and the status name the selected one by the same label
+(`HQPlayer Desktop · VH11`).
 
 ### HQPlayer Embedded on the LAN
 Open More → Audio output: the scan lists the box, or **Add device by
@@ -403,10 +405,12 @@ to a substituted stream as to any stream.
 Settings › Library shows the endpoint's section, and one row per library
 the node holds copies from, each with its own Sync (and Forget): a
 library that is not the configured output syncs only from that button —
-the attach-time re-check follows the output alone. Only an HQPlayer
-Embedded box has a library of its own; an HQPlayer Desktop reads this
-node's music folder, so it is refused everywhere (`is_embedded`, the
-preview, the job, the CLI) — importing it brought every album in as a copy
+the attach-time re-check follows the output alone. Only an HQPlayer on
+ANOTHER machine has a library of its own — an Embedded box, a Desktop on a
+second computer; one on this machine, whatever the product, reads this
+node's music folder and is refused everywhere (`has_own_library`, by
+address like the way files reach it — since 2026-09-29; the rule was
+"Embedded only" for a day) — importing it brought every album in as a copy
 once (2026-09-27) and was reverted with `python -m hqp_library
 --forget-endpoint`. The FIRST import of an Embedded box is a previewed
 decision (which HQPlayer, how many files, how many new, how many of them

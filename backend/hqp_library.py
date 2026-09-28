@@ -314,12 +314,18 @@ def resolve_endpoint(host: str, port: int) -> Tuple[Optional[Dict[str, Any]], Op
 
 
 def is_embedded(product: Optional[str]) -> bool:
-    """Only an HQPlayer Embedded box holds a library of its own — a disk on
-    it, a share it mounts. HQPlayer Desktop runs on a computer that reads
-    the node's own music folder: its library IS this catalogue, and
-    importing it would bring every album in as a copy (2026-09-27), so a
-    Desktop is never synced."""
     return "embedded" in (product or "").lower()
+
+
+def has_own_library(host: str) -> bool:
+    """Only an HQPlayer on ANOTHER machine has a library of its own — an
+    Embedded box with a disk, a Desktop on a second computer. One on this
+    machine, whatever the product, reads the node's own music folder: its
+    library IS this catalogue, and importing it brought every album in as
+    a copy once (2026-09-27), so it is never synced. Read off the address
+    (auth_hmac.is_own_address), as the way files reach it is."""
+    from auth_hmac import is_own_address
+    return not is_own_address(host)
 
 
 def ensure_endpoint(host: str, port: int, resolved=None) -> Dict[str, Any]:
@@ -403,16 +409,16 @@ def sync(host: str, port: int, *, force: bool = False,
                              "unsupported": 0, "known": 0, "added": 0, "errors": 0,
                              "unique_tracks": 0, "cancelled": False}
     resolved = resolve_endpoint(host, port)
-    if not is_embedded(resolved[2]["product"]):
-        logger.warning("HQPlayer at %s:%s is %r — a Desktop reads this node's own library; not synced",
-                       host, port, resolved[2]["product"])
-        # A Desktop's own row (the Output picker registers every HQPlayer
-        # the owner chose) keeps its address; a library row that still
-        # names this address met another HQPlayer here and has moved on.
+    if not has_own_library(host):
+        logger.warning("HQPlayer at %s:%s runs on this machine and reads this node's own library; not synced",
+                       host, port)
+        # Its own row (the Output picker registers every HQPlayer the owner
+        # chose) keeps its address; a library row that still names this
+        # address met another HQPlayer here and has moved on.
         if resolved[1] != "address":
             db_execute("UPDATE hqp_endpoints SET host = NULL, port = NULL WHERE host = %(h)s AND port = %(p)s",
                        {"h": host, "p": port})
-        stats["refused"] = "desktop"
+        stats["refused"] = "here"
         return stats
     ep = ensure_endpoint(host, port, resolved)
     current = ep["current_hash"]
@@ -525,8 +531,8 @@ def forget_missing(host: str, port: int) -> Dict[str, Any]:
     and every row would read as gone."""
     stats: Dict[str, Any] = {"refused": False, "checked": 0}
     resolved = resolve_endpoint(host, port)
-    if not is_embedded(resolved[2]["product"]):
-        stats["refused"] = "desktop"
+    if not has_own_library(host):
+        stats["refused"] = "here"
         return stats
     ep = ensure_endpoint(host, port, resolved)
     entries, _counts = parse_library(fetch_library(host, port))

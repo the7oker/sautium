@@ -8679,11 +8679,38 @@
       // Bits aren't directly exposed by the Control Protocol — leave
       // the row labelled "Bits" empty for now; it's read-only and
       // rarely interesting once Mode/Rate are picked.
+      // Its library, when it has one of its own — an HQPlayer on another
+      // machine (an Embedded box, a Desktop on a second computer); one on
+      // this computer reads this node's music and has nothing to import.
+      const lib = s.library || {};
+      const libRunning = !!lib.running && !_terminalRe.test(String(lib.progress || ''));
+      const libValue = libRunning ? 'Syncing…'
+        : lib.synced ? `${fmtNum(lib.files)} files · ${fmtNum(lib.albums)} albums`
+        : 'Not imported';
+      const libHint = libRunning ? String(lib.progress || '')
+        : lib.synced ? 'Variants of your albums; re-checked on attach. Tap to sync now.'
+        : 'Its albums become variants of yours. Tap to import.';
+      const libraryBlock = lib.own_library ? `
+        <section class="hqp-section">
+          <div class="hqp-section-label">Library</div>
+          <button class="hqp-row hqp-row-tap" type="button" data-action="sync-library" ${libRunning ? 'disabled' : ''}>
+            <span class="hqp-row-label">${lib.synced ? 'Held here' : 'Its library'}</span>
+            <span class="hqp-row-value">${escapeHtml(libValue)}</span>
+            <svg width="18" height="18" viewBox="0 0 24 24" fill="none"
+                 stroke="currentColor" stroke-width="1.6"
+                 stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+              <path d="M9 6l6 6-6 6"/>
+            </svg>
+          </button>
+          <p class="hqp-row-hint">${escapeProfileHtml(libHint)}</p>
+        </section>` : '';
+
       body.innerHTML = `
         <section class="hqp-section">
           <div class="hqp-section-label">Connection</div>
           ${connBlock}
         </section>
+        ${libraryBlock}
 
         <section class="hqp-section">
           <div class="hqp-section-label">Output</div>
@@ -8814,6 +8841,19 @@
 
       const connEl = body.querySelector('[data-action="pick-output"]');
       if (connEl) connEl.addEventListener('click', () => navigate('more/output'));
+      const syncEl = body.querySelector('[data-action="sync-library"]');
+      if (syncEl) {
+        syncEl.addEventListener('click', () => onceInFlight(syncEl, async () => {
+          // The same flow as Settings › Library (the previewed first import);
+          // the progress lives there, this screen shows the state on reload.
+          if (await hqpSyncFlow(s.endpoint_id)) {
+            notices.toast({ kind: 'info', key: 'hqp-sync', title: escapeProfileHtml(s.label || 'HQPlayer'),
+                            text: 'Syncing its library — the progress is on the Library screen.',
+                            action: { label: 'Open', run: () => navigate('more/library') } });
+          }
+          load();
+        }));
+      }
 
       body.querySelector('[data-action="open-filter"]').addEventListener('click', () => {
         openFilterPicker(s, (chosen) => serialized('hqp.config', async () => {
@@ -12382,9 +12422,6 @@
             <span class="row-stack-label">${escapeProfileHtml(h.label || 'HQPlayer')}</span>
             ${sel ? `<button class="row-stack-settings" type="button" data-action="hqp-settings"
                     aria-label="HQPlayer settings" hidden>${SETTINGS_ICONS.gear}</button>` : ''}
-            ${h.known && h.embedded ? `<button class="row-stack-settings" type="button" data-action="hqp-sync-row"
-                    data-endpoint-id="${escapeProfileHtml(String(h.endpoint_id))}" data-label="${escapeProfileHtml(h.label || '')}"
-                    aria-label="Sync its library" title="Sync its library">${SETTINGS_ICONS.refresh}</button>` : ''}
           </span>
           <span style="display:inline-flex;align-items:center;gap:calc(6*var(--px));">${forget}${mark(sel)}</span>
         </div>
@@ -12574,8 +12611,12 @@
       ${qualityGroup}`;
   }
 
+  // A job's progress text that ends it — the Library and HQPlayer screens
+  // read the same word.
+  const _terminalRe = /(complete|failed|cancelled)/i;
+
   /* The HQPlayer library sync, from wherever a library is named — Settings ›
-     Library's buttons and the Embedded row's action in the Output picker.
+     Library's buttons and the HQPlayer screen's Library row.
      The first import of an endpoint comes back as a preview — the decision
      names the HQPlayer and the size of what it would bring; a Desktop is
      refused: it reads this node's own library. Resolves true when a job
@@ -12589,10 +12630,10 @@
                       text: escapeProfileHtml(body.detail || 'Could not start the sync') });
       return false;
     }
-    if (body.refused === 'desktop') {
+    if (body.refused === 'here') {
       await window.notifyDialog({
         title: 'Nothing to import',
-        message: `<b>${escapeProfileHtml(body.name || body.endpoint)}</b> is HQPlayer Desktop: it reads this node's own library, so its library is yours already. A library of its own lives only on an HQPlayer Embedded box.`,
+        message: `<b>${escapeProfileHtml(body.name || body.endpoint)}</b> runs on this computer: it reads this node's own music, so its library is yours already. A library of its own is what an HQPlayer on another machine has.`,
         kind: 'info',
       });
       return false;
@@ -12637,20 +12678,6 @@
         // screen (filters, DSP) is the gear on the row, never a detour.
         putOutput({ type: 'hqplayer',
                     hqplayer: { host: el.dataset.host, port: parseInt(el.dataset.port, 10) || 4321 } })));
-    // An Embedded box has a library of its own: its row syncs it, the
-    // progress lives on the Library screen (a Desktop has no library to
-    // sync, so its row has no such button).
-    root.querySelectorAll('[data-action="hqp-sync-row"]').forEach(el =>
-      el.addEventListener('click', (e) => {
-        e.stopPropagation();   // the button sits inside the select-hqp row
-        onceInFlight(el, async () => {
-          if (await hqpSyncFlow(el.dataset.endpointId)) {
-            notices.toast({ kind: 'info', key: 'hqp-sync', title: escapeProfileHtml(el.dataset.label || 'HQPlayer'),
-                            text: 'Syncing its library — the progress is on the Library screen.',
-                            action: { label: 'Open', run: () => navigate('more/library') } });
-          }
-        });
-      }));
     root.querySelectorAll('[data-action="remove-hqplayer"]').forEach(el =>
       el.addEventListener('click', (e) => {
         e.stopPropagation();   // the × sits inside the select-hqp row
@@ -13422,7 +13449,6 @@
 
     const scanProgress   = String((lib.scan   && lib.scan.progress)   || '');
     const enrichProgress = String((lib.enrich && lib.enrich.progress) || '');
-    const _terminalRe    = /(complete|failed|cancelled)/i;
     // Mirror the polling-tick logic: if progress text already reads
     // as a terminal state, treat the worker as done even when the
     // running flag is still true (worker lingering between
@@ -13541,8 +13567,8 @@
             <span class="row-stack-value" style="font-family:var(--font-mono);letter-spacing:0.02em;">${escapeProfileHtml(e.address || 'not answering')}</span>
           </div>
           <div class="row-stack-sub">${escapeProfileHtml(fmtNum(e.files))} files in ${escapeProfileHtml(fmtNum(e.albums))} albums held there.</div>
-          <div class="btn-row${e.embedded !== false && e.address ? '' : ' single'}">
-            ${e.embedded !== false && e.address ? `<button class="btn btn-primary" data-action="hqp-sync" data-endpoint-id="${escapeProfileHtml(String(e.id))}">Sync</button>` : ''}
+          <div class="btn-row${e.own_library && e.address ? '' : ' single'}">
+            ${e.own_library && e.address ? `<button class="btn btn-primary" data-action="hqp-sync" data-endpoint-id="${escapeProfileHtml(String(e.id))}">Sync</button>` : ''}
             <button class="btn btn-secondary" data-action="hqp-forget" data-endpoint-id="${escapeProfileHtml(String(e.id))}" data-endpoint-name="${escapeProfileHtml(e.label || e.name || '')}">Forget this library</button>
           </div>
         </div>`).join('');
@@ -13556,8 +13582,8 @@
             <span class="row-stack-label">${escapeProfileHtml(hl.label || 'HQPlayer')}</span>
             <span class="row-stack-value" style="font-family:var(--font-mono);letter-spacing:0.02em;">${escapeProfileHtml(hl.endpoint)}</span>
           </div>
-          <div class="row-stack-sub">${hl.embedded === false
-            ? 'HQPlayer Desktop reads this node\'s own library — there is nothing to import. A library of its own lives only on an HQPlayer Embedded box.'
+          <div class="row-stack-sub">${hl.own_library === false
+            ? 'It runs on this computer and reads this node\'s own music — there is nothing to import. A library of its own is what an HQPlayer on another machine has.'
             : hl.synced
               ? `${escapeProfileHtml(fmtNum(hl.files))} files in ${escapeProfileHtml(fmtNum(hl.albums))} albums held by this HQPlayer. Its library is re-checked whenever the output attaches.`
               : 'Not imported yet. Albums this HQPlayer holds in its own library become variants of yours: the copy plays natively there and streams elsewhere.'}</div>
@@ -13570,7 +13596,7 @@
       </div>
       <div class="action-progress" data-progress-for="hqp">${escapeProfileHtml(hqpCancelling ? 'Finishing the current file…' : hqpProgress)}</div>
       ` : `
-      ${!hl.endpoint || hl.embedded === false ? '' : `
+      ${!hl.endpoint || hl.own_library === false ? '' : `
       <div class="btn-row${hl.synced ? '' : ' single'}">
         <button class="btn btn-primary" data-action="hqp-sync">${hl.synced ? 'Sync HQPlayer library' : 'Import HQPlayer library'}</button>
         ${hl.synced ? '<button class="btn btn-secondary" data-action="hqp-rescan">Rescan</button>' : ''}

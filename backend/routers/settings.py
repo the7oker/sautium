@@ -661,9 +661,8 @@ def _hqp_library_state() -> Dict[str, Any]:
     endpoints = [{"id": r["id"], "name": r["name"], "label": hqp_library.label(r["name"], r["product"]),
                   "address": f"{r['host']}:{r['port']}" if r["host"] else None,
                   "product": r["product"],
-                  # unknown until the box answered once (a row migration 030 minted
-                  # from an address): offered a Sync, which refuses a Desktop itself
-                  "embedded": hqp_library.is_embedded(r["product"]) if r["product"] else None,
+                  # a library of its own = an HQPlayer on another machine
+                  "own_library": hqp_library.has_own_library(r["host"]) if r["host"] else None,
                   "synced": bool(r["synced"]),
                   "last_synced_at": r["last_synced_at"].isoformat() if r["last_synced_at"] else None,
                   "files": int(r["files"] or 0), "albums": int(r["albums"] or 0),
@@ -671,15 +670,13 @@ def _hqp_library_state() -> Dict[str, Any]:
                                      and hqp_library.address_key(r["host"], r["port"]) == hqp_library.address_key(host, port))}
                  for r in rows]
     configured = next((e for e in endpoints if e["configured"]), None)
-    # The picker registers every HQPlayer the owner chose; a LIBRARY is an
-    # Embedded box (or whatever a row minted from an address alone turns
-    # out to be) — a Desktop's row is an output, not a source, and stays
-    # out of this list unless it somehow holds copies.
-    endpoints = [e for e in endpoints if e["embedded"] is not False or e["synced"] or e["files"]]
+    # The picker registers every HQPlayer the owner chose; a LIBRARY is one
+    # on another machine — the row of one on this machine is an output, not
+    # a source, and stays out of this list unless it somehow holds copies.
+    endpoints = [e for e in endpoints if e["own_library"] is not False or e["synced"] or e["files"]]
     if host:
-        # Only an Embedded box has a library of its own; a Desktop reads
-        # this node's music and is never synced. An endpoint never met
-        # answers what it is (one short probe), an unreachable one is unknown.
+        # An endpoint never met answers what it is (one short probe, for
+        # its label); an unreachable one is unknown.
         product = configured["product"] if configured else None
         if product is None:
             try:
@@ -689,12 +686,12 @@ def _hqp_library_state() -> Dict[str, Any]:
         state.update(endpoint=f"{host}:{port}", name=configured["name"] if configured else None,
                      label=hqp_library.label(configured["name"] if configured else None, product),
                      product=product,
-                     embedded=(hqp_library.is_embedded(product) if product else None),
+                     own_library=hqp_library.has_own_library(host),
                      files=configured["files"] if configured else 0,
                      albums=configured["albums"] if configured else 0,
                      synced=bool(configured and configured["synced"]))
     else:
-        state.update(endpoint=None, name=None, label=None, product=None, embedded=None,
+        state.update(endpoint=None, name=None, label=None, product=None, own_library=None,
                      files=0, albums=0, synced=False)
     state["endpoints"] = endpoints
     return state
@@ -2314,20 +2311,20 @@ def trigger_hqp_sync(force: bool = False, confirm: bool = False,
 
     The FIRST import of an endpoint is answered with a preview — which
     HQPlayer, how many files it lists, how many are new here — until the
-    caller repeats the request with `confirm`. An HQPlayer Desktop is
-    refused outright: it reads this node's own library, and importing that
-    brought every album in as a copy once (2026-09-27)."""
+    caller repeats the request with `confirm`. An HQPlayer on this machine
+    is refused outright: it reads this node's own library, and importing
+    that brought every album in as a copy once (2026-09-27)."""
     import hqp_library
     host, port = _hqp_target(endpoint_id)
     if not confirm:
+        if not hqp_library.has_own_library(host):
+            ep = hqp_library.endpoint_by_address(host, port) or {}
+            return {"success": False, "refused": "here", "endpoint": f"{host}:{port}",
+                    "name": hqp_library.label(ep.get("name"), ep.get("product"))}
         try:
             ep, how, facts = hqp_library.resolve_endpoint(host, port)
         except OSError as e:
             raise HTTPException(status_code=503, detail=f"HQPlayer at {host}:{port} is not answering: {e}")
-        if not hqp_library.is_embedded(facts["product"]):
-            return {"success": False, "refused": "desktop",
-                    "endpoint": f"{host}:{port}", "name": facts["hqp_name"] or host,
-                    "product": facts["product"]}
         if ep is None or ep["library_hash"] is None:
             # a library never imported: the decision names the HQPlayer and
             # the size of what it would bring (its own files excluded)

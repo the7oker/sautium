@@ -366,8 +366,11 @@ implementation details live in the code, DB and git history.
   does); "Add device by address" is one entry for both kinds, HQPlayer
   probed first (a box that is both — HQPlayer OS is a renderer too — is
   driven as the HQPlayer). The connection editor is gone. `hqp_endpoints`
-  became the registry of every HQPlayer the owner picked (a Desktop's row is
-  a device, never a library); this machine's aliases are one HQPlayer.
+  became the registry of every HQPlayer the owner picked; this machine's
+  aliases are one HQPlayer. A library of its own is an HQPlayer's on
+  ANOTHER machine — a Desktop on a second computer included — and the
+  HQPlayer screen syncs it; one on this machine reads this node's folder
+  (Valerii's rule, 2026-09-29, replacing "Embedded only").
 - **Where HQPlayer runs is read off its address (2026-09-28; a setting for
   one day before that).** An HQPlayer on this machine — loopback, the Docker
   host, one of our own addresses — is handed `file://` URIs at the stored
