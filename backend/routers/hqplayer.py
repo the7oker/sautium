@@ -112,6 +112,7 @@ def get_state() -> Dict[str, Any]:
     ep = hqp_library.endpoint_by_address(settings.hqplayer_host, settings.hqplayer_port)
     response["endpoint_id"] = ep["id"] if ep else None
     response["name"] = ep["name"] if ep else None
+    response["label"] = hqp_library.label(ep["name"], ep["product"]) if ep else None
 
     try:
         with _hqp_status_lock:

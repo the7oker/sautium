@@ -285,8 +285,12 @@ the bridge's port-restricted NAT lets through (`hqp_library.discover`).
 The Output picker's scan (`POST /api/player/outputs/scan`, on opening the
 picker and on Rescan) asks every LAN address for a renderer and for an
 HQPlayer in the same breath (`routers/player._unicast_sweep`), and lists
-each HQPlayer it heard as its own entry beside the renderers — "HQPlayer ·
-VH11 · this computer", "HQPlayer · HQPlayerEmbedded · 192.168.1.253".
+each HQPlayer it heard as its own entry beside the renderers, shaped like
+every other row — "HQPlayer Desktop · VH11 / Online · this computer",
+"HQPlayer Embedded / Online · 192.168.1.253" (`hqp_library.label`: the
+product and the name that tells two apart, a box's generic self-name
+dropped; the state dot is the box's, the check is the selection; the order
+never follows the selection).
 HQPlayer OS is a UPnP renderer as well (manufacturer Signalyst): a box that
 answered as an HQPlayer is offered once, as the HQPlayer — its renderer
 would be the same DSP with no queue and no filter control. Tapping an entry
@@ -311,7 +315,7 @@ Docker node `host.docker.internal` for a Desktop the scan sees at the LAN
 address). A row is listed while its box is off, like a pinned renderer;
 its `×` in the picker forgets it — the same confirmed goodbye Settings ›
 Library offers when the row holds copies. The mini-player and the status
-name the selected one (`HQPlayer · VH11`).
+name the selected one by the same label (`HQPlayer Desktop · VH11`).
 
 ### HQPlayer Embedded on the LAN
 Open More → Audio output: the scan lists the box, or **Add device by

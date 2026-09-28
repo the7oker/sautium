@@ -658,7 +658,8 @@ def _hqp_library_state() -> Dict[str, Any]:
         FROM hqp_endpoints e
         ORDER BY (e.host = %(h)s AND e.port = %(p)s) DESC, e.id
     """, {"h": host, "p": port})
-    endpoints = [{"id": r["id"], "name": r["name"], "address": f"{r['host']}:{r['port']}" if r["host"] else None,
+    endpoints = [{"id": r["id"], "name": r["name"], "label": hqp_library.label(r["name"], r["product"]),
+                  "address": f"{r['host']}:{r['port']}" if r["host"] else None,
                   "product": r["product"],
                   # unknown until the box answered once (a row migration 030 minted
                   # from an address): offered a Sync, which refuses a Desktop itself
@@ -686,13 +687,14 @@ def _hqp_library_state() -> Dict[str, Any]:
             except OSError:
                 product = None
         state.update(endpoint=f"{host}:{port}", name=configured["name"] if configured else None,
+                     label=hqp_library.label(configured["name"] if configured else None, product),
                      product=product,
                      embedded=(hqp_library.is_embedded(product) if product else None),
                      files=configured["files"] if configured else 0,
                      albums=configured["albums"] if configured else 0,
                      synced=bool(configured and configured["synced"]))
     else:
-        state.update(endpoint=None, name=None, product=None, embedded=None,
+        state.update(endpoint=None, name=None, label=None, product=None, embedded=None,
                      files=0, albums=0, synced=False)
     state["endpoints"] = endpoints
     return state

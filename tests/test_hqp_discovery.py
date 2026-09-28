@@ -71,3 +71,13 @@ def test_discover_is_none_where_nothing_answers():
         assert hqp_library.discover("127.0.0.1", quiet.getsockname()[1], timeout=0.3) is None
     finally:
         quiet.close()
+
+
+def test_the_label_names_the_product_and_what_tells_two_apart():
+    """A Desktop is told apart by its machine's name; a box's generic
+    self-name adds nothing to the product and is dropped."""
+    assert hqp_library.label("VH11", "Signalyst HQPlayer Desktop") == "HQPlayer Desktop · VH11"
+    assert hqp_library.label("HQPlayerEmbedded", "Signalyst HQPlayer Embedded 6") == "HQPlayer Embedded"
+    assert hqp_library.label("Living room", "Signalyst HQPlayer Embedded") == "HQPlayer Embedded · Living room"
+    assert hqp_library.label("192.168.1.253", None) == "HQPlayer · 192.168.1.253"
+    assert hqp_library.label(None, None) == "HQPlayer"

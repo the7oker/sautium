@@ -884,10 +884,11 @@ class HqpBackend(PlayerBackend):
 
     @property
     def label(self) -> str:
-        """Which HQPlayer, once there can be several: the name the picker
-        registered it under (HQPlayer's own — the machine's for a Desktop)."""
-        name = self._endpoint().get("name")
-        return f"HQPlayer · {name}" if name else "HQPlayer"
+        """Which HQPlayer, once there can be several — the one name for it
+        everywhere (hqp_library.label)."""
+        import hqp_library
+        ep = self._endpoint()
+        return hqp_library.label(ep.get("name"), ep.get("product")) if ep else "HQPlayer"
 
     def _uri_for(self, item: QueueItem) -> str:
         """Playable HQPlayer URI for a queue item — an owned file by

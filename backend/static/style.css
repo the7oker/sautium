@@ -6340,6 +6340,7 @@ html { -webkit-tap-highlight-color: transparent; }
 }
 .status-dot.green { background: var(--color-positive); }
 .status-dot.red   { background: var(--color-negative); }
+.status-dot.dim   { background: var(--color-text-dim); }
 
 /* Disabled (placeholder / "coming soon") form-row */
 .form-row.disabled .row-stack-label,

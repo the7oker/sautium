@@ -8592,28 +8592,27 @@
         ? `files streamed from ${escapeHtml(String(s.media_url_host || ''))}:${escapeHtml(String(s.media_url_port || ''))}`
         : 'files by path on this computer';
       const info = s.info || {};
-      const productLine = escapeHtml(info.product || 'Connected')
-        + (info.version ? ' · ' + escapeHtml(info.version) : '')
-        + (info.platform ? ' · ' + escapeHtml(info.platform) : '');
+      const productLine = [info.version, info.platform].filter(Boolean).map(escapeHtml).join(' · ')
+        || escapeHtml(info.product || 'online');
       // Which HQPlayer this is — the name the picker registered it under —
       // and where; a tap leads to Audio output, where another one is chosen
       // or added (there is no editor here since 2026-09-29).
-      const hqpName = s.name || info.name || '';
+      const hqpName = s.label || info.name || '';
       const hostLine = `${escapeHtml(s.host)}:${s.port}`;
       const connBlock = s.connected
         ? `<div class="hqp-conn ok is-clickable" data-action="pick-output" role="button" tabindex="0">
              <span class="hqp-conn-dot"></span>
              <div class="hqp-conn-text">
-               <div class="hqp-conn-host">${hqpName ? escapeHtml(hqpName) + ' · ' : ''}${hostLine}</div>
-               <div class="hqp-conn-sub">${productLine}</div>
+               <div class="hqp-conn-host">${escapeHtml(hqpName || 'HQPlayer')}</div>
+               <div class="hqp-conn-sub">${hostLine} · ${productLine}</div>
                <div class="hqp-conn-sub">${filesLine}</div>
              </div>
            </div>`
         : `<div class="hqp-conn err is-clickable" data-action="pick-output" role="button" tabindex="0">
              <span class="hqp-conn-dot"></span>
              <div class="hqp-conn-text">
-               <div class="hqp-conn-host">${hqpName ? escapeHtml(hqpName) + ' · ' : ''}${hostLine}</div>
-               <div class="hqp-conn-sub">Disconnected — tap to pick or add an HQPlayer in Audio output</div>
+               <div class="hqp-conn-host">${escapeHtml(hqpName || 'HQPlayer')}</div>
+               <div class="hqp-conn-sub">${hostLine} · offline — tap to pick or add an HQPlayer in Audio output</div>
                <div class="hqp-conn-sub">${filesLine}</div>
              </div>
            </div>`;
@@ -12355,37 +12354,39 @@
     const mono = `font-family:var(--font-mono);font-size:calc(11.5*var(--px));color:var(--color-text-dim);letter-spacing:0.04em;`;
 
     // One row per HQPlayer — found on the network, added by address, or
-    // chosen before — as one per renderer. The selected one carries the
-    // live dot and the gear to its screen; the others say whether the
-    // last scan heard them.
-    const hqpProduct = (h) => {
-      const m = /(Desktop|Embedded)\s*(\d+)?/i.exec(h.product || '');
-      return m ? m[1] + (m[2] ? ' ' + m[2] : '') : (h.product ? 'HQPlayer' : '');
+    // chosen before — shaped like every other row: its label, then a
+    // state dot and where it is. The check marks the selection; the dot
+    // says whether the box answers, which two boxes can at once. The
+    // selected one is asked live (the gear to its screen appears when it
+    // answers); the others carry the last scan's word, or "checking…"
+    // while a scan is on its way.
+    const hqpDot = (state) => {
+      const cls = state === 'online' ? 'green' : 'dim';
+      const text = { online: 'Online', offline: 'Offline', silent: 'Not answering', checking: 'checking…' }[state];
+      return `<span class="status-dot ${cls}"></span>${text}`;
     };
     const hqpRows = (hqp.hqplayers || []).map(h => {
       const sel = active.type === 'hqplayer' && h.configured;
       const where = h.here ? 'this computer' : `${h.host}${h.port && h.port !== 4321 ? ':' + h.port : ''}`;
-      const state = sel ? '' : h.seen ? 'found' : h.known ? 'not answering' : '';
-      const facts = [where, hqpProduct(h), state].filter(Boolean).map(x => escapeProfileHtml(x)).join(' · ');
+      const state = sel ? 'checking' : h.seen ? 'online' : _scanInFlight ? 'checking' : 'offline';
       const forget = h.known ? `
             <button data-action="remove-hqplayer" data-endpoint-id="${escapeProfileHtml(String(h.endpoint_id))}"
-              data-name="${escapeProfileHtml(h.name || '')}" data-files="${escapeProfileHtml(String(h.files || 0))}"
+              data-name="${escapeProfileHtml(h.label || '')}" data-files="${escapeProfileHtml(String(h.files || 0))}"
               style="background:none;border:none;color:var(--color-text-dim);font-size:calc(15*var(--px));padding:0 calc(4*var(--px));cursor:pointer;line-height:1;"
               title="Forget this HQPlayer">&times;</button>` : '';
       return `
       <div class="form-row stacked is-clickable" data-action="select-hqp" data-host="${escapeProfileHtml(h.host)}"
-           data-port="${escapeProfileHtml(String(h.port || 4321))}" data-configured="${h.configured ? '1' : '0'}">
+           data-port="${escapeProfileHtml(String(h.port || 4321))}">
         <div class="row-stack">
           <span class="row-stack-lead">
-            <span class="row-stack-label">HQPlayer${h.name ? ' · ' + escapeProfileHtml(h.name) : ''}</span>
+            <span class="row-stack-label">${escapeProfileHtml(h.label || 'HQPlayer')}</span>
             ${sel ? `<button class="row-stack-settings" type="button" data-action="hqp-settings"
                     aria-label="HQPlayer settings" hidden>${SETTINGS_ICONS.gear}</button>` : ''}
           </span>
           <span style="display:inline-flex;align-items:center;gap:calc(6*var(--px));">${forget}${mark(sel)}</span>
         </div>
-        <div class="row-stack-value" style="display:flex;align-items:center;gap:calc(8*var(--px));flex-wrap:wrap;">
-          ${sel ? `<span data-hqp-dot style="color:var(--color-text-muted);font-family:var(--font-mono);font-size:calc(12*var(--px));letter-spacing:0.02em;">checking…</span>` : ''}
-          <span style="${mono}">${facts}</span>
+        <div class="row-stack-value">
+          <span style="${mono}"><span${sel ? ' data-hqp-dot data-seen="' + (h.seen ? '1' : '0') + '"' : ''}>${hqpDot(state)}</span> · ${escapeProfileHtml(where)}</span>
         </div>
       </div>`;
     }).join('');
@@ -12590,17 +12591,12 @@
       await renderOutputSettings(root);
     });
     root.querySelectorAll('[data-action="select-hqp"]').forEach(el =>
-      el.addEventListener('click', async () => {
+      el.addEventListener('click', () =>
         // The tapped HQPlayer becomes the one this node drives: its address
-        // rides with the selection, exactly as a renderer's record does.
-        const first = el.dataset.configured !== '1';
-        await putOutput({ type: 'hqplayer',
-                          hqplayer: { host: el.dataset.host, port: parseInt(el.dataset.port, 10) || 4321 } });
-        // A newly chosen HQPlayer: show the screen that exists for it, so its
-        // filters and DSP are not a secret. Selection has already happened,
-        // so this informs rather than blocks.
-        if (first) navigate('more/hqplayer');
-      }));
+        // rides with the selection, exactly as a renderer's record does. Its
+        // screen (filters, DSP) is the gear on the row, never a detour.
+        putOutput({ type: 'hqplayer',
+                    hqplayer: { host: el.dataset.host, port: parseInt(el.dataset.port, 10) || 4321 } })));
     root.querySelectorAll('[data-action="remove-hqplayer"]').forEach(el =>
       el.addEventListener('click', (e) => {
         e.stopPropagation();   // the × sits inside the select-hqp row
@@ -12759,9 +12755,10 @@
     });
   }
 
-  // One state check paints the selected HQPlayer's dot and decides its
+  // One live check paints the selected HQPlayer's dot and decides its
   // settings gear: the HQPlayer screen operates HQPlayer, so it is offered
-  // only while there is one to talk to.
+  // only while there is one to talk to. A box the scan heard that refuses
+  // control (an Embedded past its trial half-hour) is "Not answering".
   async function _refreshOutputHqpDot(root) {
     const el = root.querySelector('[data-hqp-dot]');
     if (!el) return;
@@ -12771,10 +12768,9 @@
       const r = await fetch('/api/hqplayer/state');
       if (r.ok) connected = !!(await r.json()).connected;
     } catch (_) {}
-    el.style.color = connected ? 'var(--color-positive)' : 'var(--color-negative)';
-    el.innerHTML = connected
-      ? '<span class="status-dot green"></span>Connected'
-      : '<span class="status-dot red"></span>Disconnected';
+    const state = connected ? 'online' : el.dataset.seen === '1' ? 'silent' : 'offline';
+    const text = { online: 'Online', silent: 'Not answering', offline: 'Offline' }[state];
+    el.innerHTML = `<span class="status-dot ${connected ? 'green' : 'dim'}"></span>${text}`;
     if (gear) gear.hidden = !connected;
   }
 
@@ -13487,13 +13483,13 @@
     const otherRows = otherLibraries.map(e => `
         <div class="form-row stacked" data-hqp-endpoint="${escapeProfileHtml(String(e.id))}">
           <div class="row-stack">
-            <span class="row-stack-label">${escapeProfileHtml(e.name || '')}</span>
+            <span class="row-stack-label">${escapeProfileHtml(e.label || e.name || '')}</span>
             <span class="row-stack-value" style="font-family:var(--font-mono);letter-spacing:0.02em;">${escapeProfileHtml(e.address || 'not answering')}</span>
           </div>
           <div class="row-stack-sub">${escapeProfileHtml(fmtNum(e.files))} files in ${escapeProfileHtml(fmtNum(e.albums))} albums held there.</div>
           <div class="btn-row${e.embedded !== false && e.address ? '' : ' single'}">
             ${e.embedded !== false && e.address ? `<button class="btn btn-primary" data-action="hqp-sync" data-endpoint-id="${escapeProfileHtml(String(e.id))}">Sync</button>` : ''}
-            <button class="btn btn-secondary" data-action="hqp-forget" data-endpoint-id="${escapeProfileHtml(String(e.id))}" data-endpoint-name="${escapeProfileHtml(e.name || '')}">Forget this library</button>
+            <button class="btn btn-secondary" data-action="hqp-forget" data-endpoint-id="${escapeProfileHtml(String(e.id))}" data-endpoint-name="${escapeProfileHtml(e.label || e.name || '')}">Forget this library</button>
           </div>
         </div>`).join('');
     const configuredId = ((hl.endpoints || []).find(e => e.configured) || {}).id;
@@ -13503,7 +13499,7 @@
         ${!hl.endpoint ? '' : `
         <div class="form-row stacked">
           <div class="row-stack">
-            <span class="row-stack-label">${escapeProfileHtml(hl.name || 'HQPlayer')}</span>
+            <span class="row-stack-label">${escapeProfileHtml(hl.label || 'HQPlayer')}</span>
             <span class="row-stack-value" style="font-family:var(--font-mono);letter-spacing:0.02em;">${escapeProfileHtml(hl.endpoint)}</span>
           </div>
           <div class="row-stack-sub">${hl.embedded === false
@@ -13525,7 +13521,7 @@
         <button class="btn btn-primary" data-action="hqp-sync">${hl.synced ? 'Sync HQPlayer library' : 'Import HQPlayer library'}</button>
         ${hl.synced ? '<button class="btn btn-secondary" data-action="hqp-rescan">Rescan</button>' : ''}
       </div>
-      ${hl.synced && configuredId != null ? `<div class="btn-row single"><button class="btn btn-secondary" data-action="hqp-forget" data-endpoint-id="${escapeProfileHtml(String(configuredId))}" data-endpoint-name="${escapeProfileHtml(hl.name || '')}">Forget this library</button></div>` : ''}`}
+      ${hl.synced && configuredId != null ? `<div class="btn-row single"><button class="btn btn-secondary" data-action="hqp-forget" data-endpoint-id="${escapeProfileHtml(String(configuredId))}" data-endpoint-name="${escapeProfileHtml(hl.label || '')}">Forget this library</button></div>` : ''}`}
       ${hqpProgress ? `<div class="action-progress" data-progress-for="hqp">${escapeProfileHtml(hqpProgress)}</div>` : ''}
       `}
     `;

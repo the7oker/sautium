@@ -240,6 +240,21 @@ def parse_library(xml_text: str) -> Tuple[List[Entry], Dict[str, int]]:
 _ENDPOINT_COLS = "id, name, host, port, product, hqp_name, library_hash, last_synced_at"
 
 
+_GENERIC_NAMES = ("", "hqplayer", "hqplayerembedded", "hqplayerdesktop")
+
+
+def label(name: Optional[str], product: Optional[str]) -> str:
+    """What the UI calls an HQPlayer, everywhere it names one: the product —
+    Desktop, Embedded — and the name that tells two apart (a Desktop's is
+    its machine's), unless that name is the generic one a box gives itself
+    ("HQPlayerEmbedded" says nothing the product does not)."""
+    m = re.search(r"(desktop|embedded)", product or "", re.I)
+    kind = f"HQPlayer {m.group(1).capitalize()}" if m else "HQPlayer"
+    if re.sub(r"[^a-z0-9]", "", (name or "").lower()) in _GENERIC_NAMES:
+        return kind
+    return f"{kind} · {name}"
+
+
 def address_key(host: str, port: int) -> Tuple[str, int]:
     """One HQPlayer per box: this machine's aliases — localhost, the Docker
     host, its LAN address (auth_hmac.is_own_address) — name the same

@@ -317,8 +317,11 @@ def _hqplayer_entries() -> list:
                             "synced": False, "files": 0, "configured": True}
         else:
             e["configured"] = True
-    return sorted(entries.values(),
-                  key=lambda e: (not e["configured"], not e["here"], (e["name"] or e["host"]).lower()))
+    for e in entries.values():
+        e["label"] = hqp_library.label(e["name"], e["product"])
+    # A stable order — this machine first, then by label and address — so a
+    # tap never reshuffles the list under the finger.
+    return sorted(entries.values(), key=lambda e: (not e["here"], e["label"].lower(), e["host"]))
 
 
 def remember_location(record: dict, seen: dict | None = None) -> dict:
