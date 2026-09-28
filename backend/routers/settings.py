@@ -664,20 +664,53 @@ def _hqp_library_state() -> Dict[str, Any]:
         ORDER BY (e.host = %(h)s AND e.port = %(p)s) DESC, e.id
     """, {"h": host, "p": port})
     endpoints = [{"id": r["id"], "name": r["name"], "address": f"{r['host']}:{r['port']}" if r["host"] else None,
-                  "product": r["product"], "synced": bool(r["synced"]),
+                  "product": r["product"],
+                  # unknown until the box answered once (a row migration 030 minted
+                  # from an address): offered a Sync, which refuses a Desktop itself
+                  "embedded": hqp_library.is_embedded(r["product"]) if r["product"] else None,
+                  "synced": bool(r["synced"]),
                   "last_synced_at": r["last_synced_at"].isoformat() if r["last_synced_at"] else None,
                   "files": int(r["files"] or 0), "albums": int(r["albums"] or 0),
                   "configured": bool(host and r["host"] == host and r["port"] == port)} for r in rows]
     configured = next((e for e in endpoints if e["configured"]), None)
     if host:
+        # Only an Embedded box has a library of its own; a Desktop reads
+        # this node's music and is never synced. An endpoint never met
+        # answers what it is (one short probe), an unreachable one is unknown.
+        product = configured["product"] if configured else None
+        if product is None:
+            try:
+                product = hqp_library.get_info(host, port)["product"] or None
+            except OSError:
+                product = None
         state.update(endpoint=f"{host}:{port}", name=configured["name"] if configured else None,
+                     product=product,
+                     embedded=(hqp_library.is_embedded(product) if product else None),
                      files=configured["files"] if configured else 0,
                      albums=configured["albums"] if configured else 0,
                      synced=bool(configured and configured["synced"]))
     else:
-        state.update(endpoint=None, name=None, files=0, albums=0, synced=False)
+        state.update(endpoint=None, name=None, product=None, embedded=None,
+                     files=0, albums=0, synced=False)
     state["endpoints"] = endpoints
     return state
+
+
+def _hqp_target(endpoint_id: Optional[int]) -> tuple:
+    """The HQPlayer a library action names: the row's address when an
+    endpoint id is given (a library listed in Settings — a friend's box
+    that is not the configured output), else the configured endpoint."""
+    if endpoint_id is None:
+        host, port = _hqp_endpoint()
+        if not host:
+            raise HTTPException(status_code=400, detail="No HQPlayer endpoint is configured")
+        return host, port
+    row = db_query_one("SELECT host, port FROM hqp_endpoints WHERE id = %(e)s", {"e": endpoint_id})
+    if not row:
+        raise HTTPException(status_code=404, detail="No such HQPlayer library")
+    if not row["host"]:
+        raise HTTPException(status_code=409, detail="This HQPlayer's address is not known — it last answered elsewhere")
+    return row["host"], int(row["port"])
 
 
 def _ai_state() -> Dict[str, Any]:
@@ -2270,25 +2303,29 @@ async def cancel_enrich() -> Dict[str, Any]:
 
 
 @router.post("/library/hqp-sync")
-def trigger_hqp_sync(force: bool = False, confirm: bool = False) -> Dict[str, Any]:
-    """Bring the HQPlayer library at the saved endpoint into the catalogue
-    (hqp_library.sync): files known here are touched, new ones imported,
-    nothing removed. `force` ignores the stored library hash.
+def trigger_hqp_sync(force: bool = False, confirm: bool = False,
+                     endpoint_id: Optional[int] = None) -> Dict[str, Any]:
+    """Bring an HQPlayer's library into the catalogue (hqp_library.sync):
+    files known here are touched, new ones imported, nothing removed.
+    `force` ignores the stored library hash; `endpoint_id` names a library
+    listed in Settings instead of the configured endpoint.
 
     The FIRST import of an endpoint is answered with a preview — which
     HQPlayer, how many files it lists, how many are new here — until the
-    caller repeats the request with `confirm`: an HQPlayer Desktop on this
-    very library would otherwise import its tens of thousands of files as
-    a copy at one tap (it did, on 2026-09-27)."""
+    caller repeats the request with `confirm`. An HQPlayer Desktop is
+    refused outright: it reads this node's own library, and importing that
+    brought every album in as a copy once (2026-09-27)."""
     import hqp_library
-    host, port = _hqp_endpoint()
-    if not host:
-        raise HTTPException(status_code=400, detail="No HQPlayer endpoint is configured")
+    host, port = _hqp_target(endpoint_id)
     if not confirm:
         try:
             ep, how, facts = hqp_library.resolve_endpoint(host, port)
         except OSError as e:
             raise HTTPException(status_code=503, detail=f"HQPlayer at {host}:{port} is not answering: {e}")
+        if not hqp_library.is_embedded(facts["product"]):
+            return {"success": False, "refused": "desktop",
+                    "endpoint": f"{host}:{port}", "name": facts["hqp_name"] or host,
+                    "product": facts["product"]}
         if ep is None or ep["library_hash"] is None:
             # a library never imported: the decision names the HQPlayer and
             # the size of what it would bring (its own files excluded)
@@ -2309,13 +2346,11 @@ def trigger_hqp_sync(force: bool = False, confirm: bool = False) -> Dict[str, An
 
 
 @router.post("/library/hqp-rescan")
-def trigger_hqp_rescan() -> Dict[str, Any]:
+def trigger_hqp_rescan(endpoint_id: Optional[int] = None) -> Dict[str, Any]:
     """The explicit, confirmed rescan: files the HQPlayer library no longer
     lists are forgotten (hqp_library.forget_missing)."""
     import hqp_library
-    host, port = _hqp_endpoint()
-    if not host:
-        raise HTTPException(status_code=400, detail="No HQPlayer endpoint is configured")
+    host, port = _hqp_target(endpoint_id)
     if not hqp_library.start_job(host, port, rescan=True):
         raise HTTPException(status_code=409, detail="An HQPlayer library job is already running")
     return {"success": True}

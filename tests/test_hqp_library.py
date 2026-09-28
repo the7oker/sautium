@@ -241,20 +241,20 @@ def test_the_same_library_at_a_new_address_keeps_its_row(db, monkeypatch):
     assert _one(db, "SELECT count(*) FROM hqp_endpoints") == 1
     assert _one(db, "SELECT host FROM hqp_endpoints") == moved[0]
     assert _one(db, "SELECT count(*) FROM hqp_library_files") == 2
-    # a Desktop that took the old address: its own library, its own row; the
-    # Pi's row keeps its files and loses only the address
+    # a Desktop that took the old address is refused — no row of its own —
+    # and the Pi's row, evidently not there any more, keeps its files and
+    # loses only the address
     monkeypatch.setattr(hqp_library, "library_hash", lambda h, p: "h9")
     monkeypatch.setattr(hqp_library, "get_info", lambda h, p: {"name": "VH11", "product": "Signalyst HQPlayer Desktop"})
     monkeypatch.setattr(hqp_library, "fetch_library", lambda h, p: EMPTY)
-    hqp_library.sync(*moved)
-    assert _one(db, "SELECT count(*) FROM hqp_endpoints") == 2
+    assert hqp_library.sync(*moved)["refused"] == "desktop"
+    assert _one(db, "SELECT count(*) FROM hqp_endpoints") == 1
     assert _one(db, "SELECT host FROM hqp_endpoints WHERE hqp_name = 'HQPlayerEmbedded'") is None
-    assert _one(db, "SELECT name FROM hqp_endpoints WHERE host = %s", moved[0]) == "VH11"
     assert _one(db, "SELECT count(*) FROM hqp_library_files") == 2
     # the endpoint that went home is forgotten by its row, address or not
     gone = hqp_library.forget_endpoint_id(_one(db, "SELECT id FROM hqp_endpoints WHERE hqp_name = 'HQPlayerEmbedded'"))
     assert gone["forgotten"] == 2
-    assert _one(db, "SELECT count(*) FROM hqp_endpoints") == 1
+    assert _one(db, "SELECT count(*) FROM hqp_endpoints") == 0
     assert _one(db, "SELECT count(*) FROM hqp_library_files") == 0
 
 
@@ -323,3 +323,17 @@ def test_native_plays_follow_the_output(db, monkeypatch):
     assert [p and p["kind"] for p in native_plays(local, "hqplayer", ep)] == ["hqp", "hqp"]
     assert native_plays(local, "browser", None) == [None, None]
     assert native_plays(local, "hqplayer", ep + 1) == [None, None]
+
+
+def test_a_desktop_is_never_synced(db, monkeypatch):
+    """HQPlayer Desktop reads this node's own library: a sync refuses it
+    before any row is minted, whatever its library lists."""
+    monkeypatch.setattr(hqp_library, "library_hash", lambda h, p: "h5")
+    monkeypatch.setattr(hqp_library, "fetch_library", lambda h, p: LIBRARY)
+    monkeypatch.setattr(hqp_library, "get_info",
+                        lambda h, p: {"name": "VH11", "product": "Signalyst HQPlayer Desktop"})
+    stats = hqp_library.sync("192.168.1.188", 4321)
+    assert (stats["refused"], stats["added"]) == ("desktop", 0)
+    assert _one(db, "SELECT count(*) FROM hqp_endpoints") == 0
+    assert _one(db, "SELECT count(*) FROM hqp_library_files") == 0
+    assert hqp_library.forget_missing("192.168.1.188", 4321)["refused"] == "desktop"

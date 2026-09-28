@@ -245,13 +245,23 @@ def _mount_mapping(host: str, port: int) -> Tuple[Optional[str], Optional[str]]:
     return root, (app_settings.library_db_root() if root else None)
 
 
-def ensure_endpoint(host: str, port: int) -> Dict[str, Any]:
+def is_embedded(product: Optional[str]) -> bool:
+    """Only an HQPlayer Embedded box holds a library of its own — a disk on
+    it, a share it mounts. HQPlayer Desktop runs on a computer that reads
+    the node's own music folder: its library IS this catalogue, and
+    importing it would bring every album in as a copy (2026-09-27), so a
+    Desktop is never synced."""
+    return "embedded" in (product or "").lower()
+
+
+def ensure_endpoint(host: str, port: int, resolved=None) -> Dict[str, Any]:
     """The endpoint row for the library at this address — moved here when
     the same library answers from a new address, minted when it is new
     (named after what HQPlayer calls itself), the address freed from a row
     another HQPlayer left behind. Stores what the HQPlayer reported and the
-    mount mapping the node knows for it."""
-    ep, how, facts = resolve_endpoint(host, port)
+    mount mapping the node knows for it. `resolved` is a resolve_endpoint
+    answer the caller already holds."""
+    ep, how, facts = resolved or resolve_endpoint(host, port)
     root, root_local = _mount_mapping(host, port)
     if ep is None or how == "library":
         # the address is this library's now: whoever held it before has moved on
@@ -328,10 +338,19 @@ def sync(host: str, port: int, *, force: bool = False,
     library whose hash matches the last complete sync is skipped unless
     `force`. A cancelled run leaves the old hash, so the next sync resumes
     (known paths cost one query). Returns per-step counts."""
-    stats: Dict[str, Any] = {"unchanged": False, "library_files": 0, "unsupported": 0,
-                             "known": 0, "shared": 0, "added": 0, "errors": 0,
-                             "unique_tracks": 0, "cancelled": False}
-    ep = ensure_endpoint(host, port)
+    stats: Dict[str, Any] = {"unchanged": False, "refused": None, "library_files": 0,
+                             "unsupported": 0, "known": 0, "shared": 0, "added": 0,
+                             "errors": 0, "unique_tracks": 0, "cancelled": False}
+    resolved = resolve_endpoint(host, port)
+    if not is_embedded(resolved[2]["product"]):
+        logger.warning("HQPlayer at %s:%s is %r — a Desktop reads this node's own library; not synced",
+                       host, port, resolved[2]["product"])
+        # whatever library a row still names at this address is not there any more
+        db_execute("UPDATE hqp_endpoints SET host = NULL, port = NULL WHERE host = %(h)s AND port = %(p)s",
+                   {"h": host, "p": port})
+        stats["refused"] = "desktop"
+        return stats
+    ep = ensure_endpoint(host, port, resolved)
     current = ep["current_hash"]
     if not force and current == ep["library_hash"]:
         stats["unchanged"] = True
@@ -446,7 +465,11 @@ def forget_missing(host: str, port: int) -> Dict[str, Any]:
     empty tree: a library being rebuilt on the HQPlayer side lists nothing,
     and every row would read as gone."""
     stats: Dict[str, Any] = {"refused": False, "checked": 0, "shared": 0}
-    ep = ensure_endpoint(host, port)
+    resolved = resolve_endpoint(host, port)
+    if not is_embedded(resolved[2]["product"]):
+        stats["refused"] = "desktop"
+        return stats
+    ep = ensure_endpoint(host, port, resolved)
     entries, _counts = parse_library(fetch_library(host, port))
     listed = {md["file_path"] for _, md in entries}
     if not listed:
@@ -572,7 +595,10 @@ def _job(host: str, port: int, force: bool, rescan: bool) -> None:
         else:
             result = sync(host, port, force=force, progress_cb=progress_cb,
                           cancel_check=lambda: state["cancel_requested"])
-            if result["unchanged"]:
+            if result["refused"]:
+                state["progress"] = ("Not synced: HQPlayer Desktop reads this node's own library "
+                                     "— there is nothing to import")
+            elif result["unchanged"]:
                 state["progress"] = "HQPlayer library unchanged"
             elif result["cancelled"]:
                 state["progress"] = "Sync cancelled"

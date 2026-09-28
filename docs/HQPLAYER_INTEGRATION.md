@@ -355,12 +355,17 @@ http entry at ADD time, so a stream it has not buffered cannot sit there; a
 slot only a stream could serve on it (a file held at another HQPlayer with
 no rip here) stays unplayable and the stop names it. The demo ledger applies
 to a substituted stream as to any stream.
-Settings › Library shows the endpoint's section: the FIRST import is a
-previewed decision (which HQPlayer, how many files, how many new, how many
-of them this node's own — an HQPlayer Desktop scanning this same library
-would otherwise bring every album in as a copy at one tap, which happened
-once on 2026-09-27 and was reverted with `python -m hqp_library
---forget-endpoint`); after it the output re-checks
+Settings › Library shows the endpoint's section, and one row per library
+the node holds copies from, each with its own Sync (and Forget): a
+library that is not the configured output syncs only from that button —
+the attach-time re-check follows the output alone. Only an HQPlayer
+Embedded box has a library of its own; an HQPlayer Desktop reads this
+node's music folder, so it is refused everywhere (`is_embedded`, the
+preview, the job, the CLI) — importing it brought every album in as a copy
+once (2026-09-27) and was reverted with `python -m hqp_library
+--forget-endpoint`. The FIRST import of an Embedded box is a previewed
+decision (which HQPlayer, how many files, how many new, how many of them
+this node's own); after it the output re-checks
 `<LibraryGetHash/>` whenever it attaches or a restarted HQPlayer comes back
 and syncs only when the hash moved. A sync never removes rows; "Rescan"
 (confirmed) forgets what the library no longer lists and refuses an empty
