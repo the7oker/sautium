@@ -4366,13 +4366,15 @@ a.am-kind { text-decoration: none; }
   margin-top: calc(2 * var(--px));
 }
 
+.hqp-row-hint.is-left { text-align: left; }
 .hqp-fav-strip {
   padding: calc(8 * var(--px)) calc(14 * var(--px)) calc(14 * var(--px));
   display: flex;
   flex-wrap: wrap;
   gap: calc(6 * var(--px));
 }
-.hqp-fav-chip {
+.hqp-fav-chip,
+.hqp-chip-btn {
   display: inline-flex;
   align-items: center;
   gap: calc(6 * var(--px));
@@ -4385,6 +4387,7 @@ a.am-kind { text-decoration: none; }
   color: var(--color-text);
   cursor: pointer;
 }
+.hqp-chip-btn:disabled { color: var(--color-text-dim); cursor: default; }
 .hqp-fav-chip.is-current {
   background: var(--color-amber-weak);
   border-color: var(--color-amber);

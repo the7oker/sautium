@@ -8513,22 +8513,30 @@
         if (!r.ok) return;
         hl = (await r.json()).hqp_library || {};
       } catch (_) { return; }
-      const row = body.querySelector('[data-action="sync-library"]');
+      const btn = body.querySelector('[data-action="sync-library"]');
+      const btnText = body.querySelector('[data-hqp-lib-btn]');
       const value = body.querySelector('[data-hqp-lib-value]');
       const hint = body.querySelector('[data-hqp-lib-hint]');
-      if (!row || !value || !hint) { stop(); return; }
+      if (!btn || !value || !hint) { stop(); return; }
       const progress = String(hl.progress || '');
       if (!!hl.running && !_terminalRe.test(progress)) {
         if (progress && hint.textContent !== progress) hint.textContent = progress;
         return;
       }
-      row.disabled = false;
+      btn.disabled = false;
+      btnText.textContent = hl.synced ? 'Sync library' : 'Import library';
       value.textContent = hl.synced ? `${fmtNum(hl.files)} files · ${fmtNum(hl.albums)} albums` : 'Not imported';
-      hint.textContent = progress || (hl.synced ? 'Variants of your albums; re-checked on attach. Tap to sync now.'
-                                                : 'Its albums become variants of yours. Tap to import.');
+      hint.textContent = progress || _hqpLibHint(hl.synced);
       stop();
     });
   }
+  const _hqpLibHint = (synced) => synced
+    ? 'Variants of your albums here; re-checked whenever the output attaches.'
+    : 'Its albums become variants of yours: the copy plays natively there and streams elsewhere.';
+  const HQP_SYNC_ICON = `<svg width="14" height="14" viewBox="0 0 24 24" fill="none"
+        stroke="currentColor" stroke-width="1.8" stroke-linecap="round"
+        stroke-linejoin="round" aria-hidden="true">
+        <path d="M21 12a9 9 0 11-3-6.7L21 8"/><path d="M21 3v5h-5"/></svg>`;
 
   async function renderHqplayerSettings(root) {
     const screen = document.createElement('div');
@@ -8716,25 +8724,24 @@
       // this computer reads this node's music and has nothing to import.
       const lib = s.library || {};
       const libRunning = !!lib.running && !_terminalRe.test(String(lib.progress || ''));
-      const libValue = libRunning ? 'Syncing…'
-        : lib.synced ? `${fmtNum(lib.files)} files · ${fmtNum(lib.albums)} albums`
-        : 'Not imported';
-      const libHint = libRunning ? String(lib.progress || '')
-        : lib.synced ? 'Variants of your albums; re-checked on attach. Tap to sync now.'
-        : 'Its albums become variants of yours. Tap to import.';
+      const libValue = lib.synced ? `${fmtNum(lib.files)} files · ${fmtNum(lib.albums)} albums` : 'Not imported';
+      const libHint = libRunning ? String(lib.progress || '') : _hqpLibHint(lib.synced);
+      // The row states, the chip acts: a tap row read as "pick something or
+      // go somewhere", never as "sync" (Valerii, 2026-09-29).
       const libraryBlock = lib.own_library ? `
         <section class="hqp-section">
           <div class="hqp-section-label">Library</div>
-          <button class="hqp-row hqp-row-tap" type="button" data-action="sync-library" ${libRunning ? 'disabled' : ''}>
+          <div class="hqp-row">
             <span class="hqp-row-label">${lib.synced ? 'Held here' : 'Its library'}</span>
             <span class="hqp-row-value" data-hqp-lib-value>${escapeHtml(libValue)}</span>
-            <svg width="18" height="18" viewBox="0 0 24 24" fill="none"
-                 stroke="currentColor" stroke-width="1.6"
-                 stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
-              <path d="M9 6l6 6-6 6"/>
-            </svg>
-          </button>
-          <p class="hqp-row-hint" data-hqp-lib-hint>${escapeProfileHtml(libHint)}</p>
+          </div>
+          <div class="hqp-fav-strip">
+            <button type="button" class="hqp-chip-btn" data-action="sync-library" ${libRunning ? 'disabled' : ''}>
+              ${HQP_SYNC_ICON}
+              <span data-hqp-lib-btn>${libRunning ? 'Syncing…' : lib.synced ? 'Sync library' : 'Import library'}</span>
+            </button>
+          </div>
+          <p class="hqp-row-hint is-left" data-hqp-lib-hint>${escapeProfileHtml(libHint)}</p>
         </section>` : '';
 
       body.innerHTML = `
@@ -8877,8 +8884,8 @@
       if (syncEl) {
         syncEl.addEventListener('click', () => onceInFlight(syncEl, async () => {
           // The same flow as Settings › Library (the previewed first import);
-          // the reload paints the row as syncing and the wake channel then
-          // carries its progress and its end into the row in place.
+          // the reload paints the chip as syncing and the wake channel then
+          // carries the progress and the end into the row in place.
           await hqpSyncFlow(s.endpoint_id);
           load();
         }));
