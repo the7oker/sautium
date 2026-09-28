@@ -106,7 +106,9 @@ collapses back to mini-player bar.
 
 A **bottom-up sheet** with a vertical list of entries:
 
-- HQPlayer (status of the selected HQPlayer, quick-access to DSP; the
+- HQPlayer (status of the selected HQPlayer, quick-access to DSP, and —
+  last, for an HQPlayer on another machine — its library: import/sync,
+  rescan, forget, with the `hqp_library` guidance trail leading there; the
   connection itself is chosen in Audio output)
 - Audio output (`#more/output`) — the Output picker (HARDWARE-TIERS
   §2.6): every HQPlayer the network scan found or the owner added (one

@@ -8350,7 +8350,7 @@
             </button>
           </div>
           <div class="more-list">
-            <button class="more-row" type="button" data-go="more/hqplayer">
+            <button class="more-row" type="button" data-go="more/hqplayer" data-guide="hqp_library">
               <span class="more-icon">${ICON_HQP}</span>
               <span class="more-label">HQPlayer</span>
               <span class="more-hint" id="hqpHint">…</span>
@@ -8502,7 +8502,7 @@
   // (the one Settings › Library uses): the progress lands in the hint, the
   // end restores the row — in place, never a re-render of the DSP screen.
   let _hqpLibWakeCtrl = null;
-  function _watchHqpLibrary(body) {
+  function _watchHqpLibrary(body, reload) {
     if (_hqpLibWakeCtrl) { _hqpLibWakeCtrl.abort(); _hqpLibWakeCtrl = null; }
     const stop = () => { if (_hqpLibWakeCtrl) { _hqpLibWakeCtrl.abort(); _hqpLibWakeCtrl = null; } };
     _hqpLibWakeCtrl = libraryWake.on(async () => {
@@ -8513,21 +8513,14 @@
         if (!r.ok) return;
         hl = (await r.json()).hqp_library || {};
       } catch (_) { return; }
-      const btn = body.querySelector('[data-action="sync-library"]');
-      const btnText = body.querySelector('[data-hqp-lib-btn]');
-      const value = body.querySelector('[data-hqp-lib-value]');
-      const hint = body.querySelector('[data-hqp-lib-hint]');
-      if (!btn || !value || !hint) { stop(); return; }
       const progress = String(hl.progress || '');
       if (!!hl.running && !_terminalRe.test(progress)) {
-        if (progress && hint.textContent !== progress) hint.textContent = progress;
+        const hint = body.querySelector('[data-hqp-lib-hint]');
+        if (hint && progress && !hl.cancel_requested && hint.textContent !== progress) hint.textContent = progress;
         return;
       }
-      btn.disabled = false;
-      btnText.textContent = hl.synced ? 'Sync library' : 'Import library';
-      value.textContent = hl.synced ? `${fmtNum(hl.files)} files · ${fmtNum(hl.albums)} albums` : 'Not imported';
-      hint.textContent = progress || _hqpLibHint(hl.synced);
       stop();
+      reload();   // the job ended: the chips and its last word come from a fresh state
     });
   }
   const _hqpLibHint = (synced) => synced
@@ -8722,12 +8715,23 @@
       // Its library, when it has one of its own — an HQPlayer on another
       // machine (an Embedded box, a Desktop on a second computer); one on
       // this computer reads this node's music and has nothing to import.
+      // Its library — the one block for it, at the bottom: used rarely, but
+      // the guidance trail leads here (More tab → HQPlayer row → the Import
+      // chip, with the puck) while a remote HQPlayer chosen as the output
+      // has a library never imported. The row states, the chips act: a tap
+      // row read as "pick something or go somewhere", never as "sync".
       const lib = s.library || {};
-      const libRunning = !!lib.running && !_terminalRe.test(String(lib.progress || ''));
+      const libProgress = String(lib.progress || '');
+      const libRunning = !!lib.running && !_terminalRe.test(libProgress);
+      const libCancelling = libRunning && !!lib.cancel_requested;
       const libValue = lib.synced ? `${fmtNum(lib.files)} files · ${fmtNum(lib.albums)} albums` : 'Not imported';
-      const libHint = libRunning ? String(lib.progress || '') : _hqpLibHint(lib.synced);
-      // The row states, the chip acts: a tap row read as "pick something or
-      // go somewhere", never as "sync" (Valerii, 2026-09-29).
+      const libChips = libRunning
+        ? `<button type="button" class="hqp-chip-btn is-danger" data-action="cancel-library" ${libCancelling ? 'disabled' : ''}><span>${libCancelling ? 'Cancelling…' : 'Cancel'}</span></button>`
+        : lib.synced
+          ? `<button type="button" class="hqp-chip-btn" data-action="sync-library">${HQP_SYNC_ICON}<span>Sync library</span></button>
+             <button type="button" class="hqp-chip-btn" data-action="rescan-library"><span>Rescan</span></button>
+             <button type="button" class="hqp-chip-btn" data-action="forget-library"><span>Forget this library</span></button>`
+          : `<button type="button" class="hqp-chip-btn" data-action="sync-library" data-guide="hqp_library" data-guide-scroll>${HQP_SYNC_ICON}<span>Import library</span></button>`;
       const libraryBlock = lib.own_library ? `
         <section class="hqp-section">
           <div class="hqp-section-label">Library</div>
@@ -8735,13 +8739,10 @@
             <span class="hqp-row-label">${lib.synced ? 'Held here' : 'Its library'}</span>
             <span class="hqp-row-value" data-hqp-lib-value>${escapeHtml(libValue)}</span>
           </div>
-          <div class="hqp-fav-strip">
-            <button type="button" class="hqp-chip-btn" data-action="sync-library" ${libRunning ? 'disabled' : ''}>
-              ${HQP_SYNC_ICON}
-              <span data-hqp-lib-btn>${libRunning ? 'Syncing…' : lib.synced ? 'Sync library' : 'Import library'}</span>
-            </button>
-          </div>
-          <p class="hqp-row-hint is-left" data-hqp-lib-hint>${escapeProfileHtml(libHint)}</p>
+          <div class="hqp-fav-strip">${libChips}</div>
+          <p class="hqp-row-hint is-left" data-hqp-lib-hint>${escapeProfileHtml(
+            libRunning ? (libCancelling ? 'Finishing the current file…' : libProgress) : _hqpLibHint(lib.synced))}</p>
+          ${!libRunning && libProgress ? `<p class="hqp-row-hint is-left" style="font-family:var(--font-mono);letter-spacing:0.02em;">${escapeProfileHtml(libProgress)}</p>` : ''}
         </section>` : '';
 
       body.innerHTML = `
@@ -8749,7 +8750,6 @@
           <div class="hqp-section-label">Connection</div>
           ${connBlock}
         </section>
-        ${libraryBlock}
 
         <section class="hqp-section">
           <div class="hqp-section-label">Output</div>
@@ -8808,6 +8808,7 @@
           </div>
         </section>
         ` : ''}
+        ${libraryBlock}
       `;
 
       // A knob opens the app's own picker: a native <select> pops the OS's
@@ -8880,17 +8881,40 @@
 
       const connEl = body.querySelector('[data-action="pick-output"]');
       if (connEl) connEl.addEventListener('click', () => navigate('more/output'));
-      const syncEl = body.querySelector('[data-action="sync-library"]');
-      if (syncEl) {
-        syncEl.addEventListener('click', () => onceInFlight(syncEl, async () => {
-          // The same flow as Settings › Library (the previewed first import);
-          // the reload paints the chip as syncing and the wake channel then
-          // carries the progress and the end into the row in place.
-          await hqpSyncFlow(s.endpoint_id);
-          load();
-        }));
-      }
-      if (libRunning) _watchHqpLibrary(body);
+      // Every library action reloads the screen: the chips change with the
+      // job's state, and the wake channel carries a running job's progress
+      // into the hint and its end into a reload.
+      const endpointQ = s.endpoint_id != null ? '?endpoint_id=' + encodeURIComponent(s.endpoint_id) : '';
+      const libActions = {
+        'sync-library': () => hqpSyncFlow(s.endpoint_id),
+        'rescan-library': async () => {
+          const ok = await window.confirmDestructive({
+            title: 'Rescan the HQPlayer library?',
+            message: 'Its library is read again and files it no longer lists are forgotten here. Analysis, listening history and the music itself stay; an album stays wherever other files still hold it.',
+            confirmText: 'Rescan',
+          });
+          if (ok) await fetch('/api/settings/library/hqp-rescan' + endpointQ, { method: 'POST' });
+        },
+        'forget-library': async () => {
+          const ok = await window.confirmDestructive({
+            title: `Forget the library of ${escapeProfileHtml(s.label || 'this HQPlayer')}?`,
+            message: 'Every album and track only its library put here goes. Analysis, listening history and your own files stay; an album stays wherever other files still hold it.',
+            confirmText: 'Forget',
+          });
+          if (!ok) return;
+          const r = await fetch('/api/settings/library/hqp-forget' + endpointQ, { method: 'POST' });
+          if (!r.ok) notices.toast({ key: 'hqp-forget', text: 'Could not forget the library — a library job is running.' });
+        },
+        'cancel-library': () => fetch('/api/settings/library/hqp-sync/cancel', { method: 'POST' }),
+      };
+      Object.entries(libActions).forEach(([action, fn]) => {
+        const el = body.querySelector(`[data-action="${action}"]`);
+        if (el) el.addEventListener('click', () => onceInFlight(el, async () => { await fn(); load(); }));
+      });
+      if (libRunning) _watchHqpLibrary(body, load);
+      // Shown is seen: the trail retires for this HQPlayer.
+      if (lib.own_library) guide.seen('hqp_library');
+      guide.paint();
 
       body.querySelector('[data-action="open-filter"]').addEventListener('click', () => {
         openFilterPicker(s, (chosen) => serialized('hqp.config', async () => {
@@ -13596,61 +13620,6 @@
     // a node with no local files at all, which is the "disk on the HQPlayer
     // box" case this exists for. The first import is always this button;
     // after it the output re-checks the library on every attach.
-    const hl = lib.hqp_library || {};
-    const hqpProgress   = String(hl.progress || '');
-    const hqpRunning    = !!hl.running && !_terminalRe.test(hqpProgress);
-    const hqpCancelling = hqpRunning && !!hl.cancel_requested;
-    // Every library this node holds copies from is listed with its own
-    // "Forget": a friend's streamer that went home keeps its rows here
-    // until the owner says so — an address is not an identity, so the row
-    // outlives the DHCP lease and the visit alike.
-    const otherLibraries = (hl.endpoints || []).filter(e => !e.configured);
-    const otherRows = otherLibraries.map(e => `
-        <div class="form-row stacked" data-hqp-endpoint="${escapeProfileHtml(String(e.id))}">
-          <div class="row-stack">
-            <span class="row-stack-label">${escapeProfileHtml(e.label || e.name || '')}</span>
-            <span class="row-stack-value" style="font-family:var(--font-mono);letter-spacing:0.02em;">${escapeProfileHtml(e.address || 'not answering')}</span>
-          </div>
-          <div class="row-stack-sub">${escapeProfileHtml(fmtNum(e.files))} files in ${escapeProfileHtml(fmtNum(e.albums))} albums held there.</div>
-          <div class="btn-row${e.own_library && e.address ? '' : ' single'}">
-            ${e.own_library && e.address ? `<button class="btn btn-primary" data-action="hqp-sync" data-endpoint-id="${escapeProfileHtml(String(e.id))}">Sync</button>` : ''}
-            <button class="btn btn-secondary" data-action="hqp-forget" data-endpoint-id="${escapeProfileHtml(String(e.id))}" data-endpoint-name="${escapeProfileHtml(e.label || e.name || '')}">Forget this library</button>
-          </div>
-        </div>`).join('');
-    const configuredId = ((hl.endpoints || []).find(e => e.configured) || {}).id;
-    const hqpLibrary = !hl.endpoint && !otherLibraries.length ? '' : `
-      <div class="profile-group-label">HQPlayer library</div>
-      <div class="form-group">
-        ${!hl.endpoint ? '' : `
-        <div class="form-row stacked">
-          <div class="row-stack">
-            <span class="row-stack-label">${escapeProfileHtml(hl.label || 'HQPlayer')}</span>
-            <span class="row-stack-value" style="font-family:var(--font-mono);letter-spacing:0.02em;">${escapeProfileHtml(hl.endpoint)}</span>
-          </div>
-          <div class="row-stack-sub">${hl.own_library === false
-            ? 'It runs on this computer and reads this node\'s own music — there is nothing to import. A library of its own is what an HQPlayer on another machine has.'
-            : hl.synced
-              ? `${escapeProfileHtml(fmtNum(hl.files))} files in ${escapeProfileHtml(fmtNum(hl.albums))} albums held by this HQPlayer. Its library is re-checked whenever the output attaches.`
-              : 'Not imported yet. Albums this HQPlayer holds in its own library become variants of yours: the copy plays natively there and streams elsewhere.'}</div>
-        </div>`}
-        ${otherRows}
-      </div>
-      ${hqpRunning ? `
-      <div class="btn-row single">
-        <button class="btn btn-danger" data-cancel-hqp ${hqpCancelling ? 'disabled' : ''}>${hqpCancelling ? 'Cancelling…' : 'Cancel'}</button>
-      </div>
-      <div class="action-progress" data-progress-for="hqp">${escapeProfileHtml(hqpCancelling ? 'Finishing the current file…' : hqpProgress)}</div>
-      ` : `
-      ${!hl.endpoint || hl.own_library === false ? '' : `
-      <div class="btn-row${hl.synced ? '' : ' single'}">
-        <button class="btn btn-primary" data-action="hqp-sync">${hl.synced ? 'Sync HQPlayer library' : 'Import HQPlayer library'}</button>
-        ${hl.synced ? '<button class="btn btn-secondary" data-action="hqp-rescan">Rescan</button>' : ''}
-      </div>
-      ${hl.synced && configuredId != null ? `<div class="btn-row single"><button class="btn btn-secondary" data-action="hqp-forget" data-endpoint-id="${escapeProfileHtml(String(configuredId))}" data-endpoint-name="${escapeProfileHtml(hl.label || '')}">Forget this library</button></div>` : ''}`}
-      ${hqpProgress ? `<div class="action-progress" data-progress-for="hqp">${escapeProfileHtml(hqpProgress)}</div>` : ''}
-      `}
-    `;
-
     root.innerHTML = `
       <section class="screen screen-settings">
         ${_settingsHeader('Library')}
@@ -13681,7 +13650,6 @@
         </div>
 
         ${libraryStats}
-        ${hqpLibrary}
         ${emptyState}
         ${actions}
       </section>
@@ -13694,37 +13662,6 @@
     onAction('[data-action="enrich"]',     async () => { await fetch('/api/settings/library/enrich',        { method: 'POST' }); render(); });
     onAction('[data-cancel-scan]',         async () => { await fetch('/api/settings/library/scan/cancel',   { method: 'POST' }); render(); });
     onAction('[data-cancel-enrich]',       async () => { await fetch('/api/settings/library/enrich/cancel', { method: 'POST' }); render(); });
-    onAction('[data-action="hqp-sync"]',   async (e) => {
-      // The configured HQPlayer, or a library listed below (its endpoint id).
-      await hqpSyncFlow(e.currentTarget.getAttribute('data-endpoint-id'));
-      render();
-    });
-    onAction('[data-cancel-hqp]',          async () => { await fetch('/api/settings/library/hqp-sync/cancel', { method: 'POST' }); render(); });
-    onAction('[data-action="hqp-forget"]', async (e) => {
-      const btn = e.currentTarget;
-      const id = btn.getAttribute('data-endpoint-id');
-      const name = btn.getAttribute('data-endpoint-name') || 'this HQPlayer';
-      const ok = await window.confirmDestructive({
-        title: `Forget the library of ${escapeProfileHtml(name)}?`,
-        message: 'Every album and track only its library put here goes. Analysis, listening history and your own files stay; an album stays wherever other files still hold it.',
-        confirmText: 'Forget',
-      });
-      if (!ok) return;
-      const r = await fetch('/api/settings/library/hqp-forget?endpoint_id=' + encodeURIComponent(id), { method: 'POST' });
-      if (!r.ok) window.notices.toast({ key: 'hqp-forget', text: 'Could not forget the library — a library job is running.' });
-      render();
-    });
-    onAction('[data-action="hqp-rescan"]', async () => {
-      const ok = await window.confirmDestructive({
-        title: 'Rescan the HQPlayer library?',
-        message: 'Files its library no longer lists are forgotten here. Analysis, listening history and the music itself stay; an album stays wherever other files still hold it.',
-        confirmText: 'Rescan',
-      });
-      if (!ok) return;
-      await fetch('/api/settings/library/hqp-rescan', { method: 'POST' });
-      render();
-    });
-
     guide.paint();
     _subscribeLibraryStream(root);
   }
@@ -13758,13 +13695,6 @@
       const terminalRe = /(complete|failed|cancelled)/i;
       const scanRunning   = !!(lib.scan   && lib.scan.running)   && !terminalRe.test(scanProgress);
       const enrichRunning = !!(lib.enrich && lib.enrich.running) && !terminalRe.test(enrichProgress);
-      const hqpProgress   = String((lib.hqp_library && lib.hqp_library.progress) || '');
-      const hqpRunning    = !!(lib.hqp_library && lib.hqp_library.running) && !terminalRe.test(hqpProgress);
-
-      const hqpLine = root.querySelector('[data-progress-for="hqp"]');
-      if (hqpLine && hqpProgress && hqpLine.textContent !== hqpProgress) {
-        hqpLine.textContent = hqpProgress;
-      }
       const scanLine = root.querySelector('[data-progress-for="scan"]');
       if (scanLine && scanProgress && scanLine.textContent !== scanProgress) {
         scanLine.textContent = scanProgress;
@@ -13779,8 +13709,8 @@
       _refreshEnrichRow(root, 'lyrics',     lib.lyrics_done,     lib.total_tracks);
 
       // A worker finishing → full re-render, which flips its Cancel row back.
-      const scanEnrichWasRunning = !!root.querySelector('[data-cancel-scan], [data-cancel-enrich], [data-cancel-hqp]');
-      if (scanEnrichWasRunning && !scanRunning && !enrichRunning && !hqpRunning) {
+      const scanEnrichWasRunning = !!root.querySelector('[data-cancel-scan], [data-cancel-enrich]');
+      if (scanEnrichWasRunning && !scanRunning && !enrichRunning) {
         if (parseHash().startsWith('more/library')) render();
       }
     }

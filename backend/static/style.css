@@ -4388,6 +4388,23 @@ a.am-kind { text-decoration: none; }
   cursor: pointer;
 }
 .hqp-chip-btn:disabled { color: var(--color-text-dim); cursor: default; }
+.hqp-chip-btn.is-danger { color: var(--color-negative); }
+/* A guided chip: the trail's dot after its text, and an opaque ground
+   raised above the puck, as for .btn-secondary.is-guided. */
+.hqp-chip-btn.is-guided {
+  position: relative;
+  z-index: 21;
+  background: var(--color-foundation);
+  border-color: var(--color-amber);
+}
+.hqp-chip-btn.is-guided::after {
+  content: '';
+  width: calc(7 * var(--px));
+  height: calc(7 * var(--px));
+  border-radius: 50%;
+  background: var(--color-amber);
+  flex: none;
+}
 .hqp-fav-chip.is-current {
   background: var(--color-amber-weak);
   border-color: var(--color-amber);

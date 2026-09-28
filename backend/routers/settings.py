@@ -376,6 +376,7 @@ _DEFAULTS: Dict[str, Any] = {
     # Guidance trail (see _guidance_state): set once the owner has been
     # taken to the Audio output picker, whatever they chose there.
     "guidance.audio_output_seen": False,
+    "guidance.hqp_library_seen":  None,    # the HQPlayer address whose library block was shown
 }
 
 
@@ -687,12 +688,13 @@ def _hqp_library_state() -> Dict[str, Any]:
                      label=hqp_library.label(configured["name"] if configured else None, product),
                      product=product,
                      own_library=hqp_library.has_own_library(host),
+                     last_synced_at=configured["last_synced_at"] if configured else None,
                      files=configured["files"] if configured else 0,
                      albums=configured["albums"] if configured else 0,
                      synced=bool(configured and configured["synced"]))
     else:
         state.update(endpoint=None, name=None, label=None, product=None, own_library=None,
-                     files=0, albums=0, synced=False)
+                     last_synced_at=None, files=0, albums=0, synced=False)
     state["endpoints"] = endpoints
     return state
 
@@ -989,7 +991,7 @@ def _audio_output_state() -> Dict[str, Any]:
 # control itself) and a trail whose steps disagree points nowhere.
 # The client owns only the route each id maps to.
 
-_GUIDANCE_DISMISSIBLE = {"audio_output", "notices"}
+_GUIDANCE_DISMISSIBLE = {"audio_output", "notices", "hqp_library"}
 
 
 def _analysis_pending() -> bool:
@@ -1066,6 +1068,20 @@ def _guidance_state() -> Dict[str, Any]:
     # is visited. A re-armed condition (new `since`) lights it again.
     if any(not n["seen"] for n in _notices_state()["items"]):
         tasks.append("notices")
+
+    # The HQPlayer chosen as the output runs on another machine and has a
+    # library of its own that was never imported: the trail leads to the
+    # Library block at the bottom of the HQPlayer screen — More tab, the
+    # HQPlayer row, the Import chip — once per address; being shown it is
+    # the whole of it (importing is the owner's call).
+    if _read("output.type") == "hqplayer":
+        import hqp_library
+        host, port = _hqp_endpoint()
+        if host and hqp_library.has_own_library(host):
+            ep = hqp_library.endpoint_by_address(host, port)
+            if ((ep is None or ep["library_hash"] is None)
+                    and _read("guidance.hqp_library_seen") != f"{host}:{port}"):
+                tasks.append("hqp_library")
 
     return {"tasks": tasks}
 
@@ -1195,6 +1211,10 @@ def post_guidance_seen(task: str) -> Dict[str, Any]:
         # again while a lingering row stays retired.
         _write("notice.seen", {n["key"]: n["since"]
                                for n in _notices_state()["items"]})
+    elif task == "hqp_library":
+        # per HQPlayer: another one chosen later lights the trail again
+        host, port = _hqp_endpoint()
+        _write("guidance.hqp_library_seen", f"{host}:{port}")
     else:
         _write(f"guidance.{task}_seen", True)
     notify_library_subscribers()

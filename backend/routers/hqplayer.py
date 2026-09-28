@@ -118,7 +118,8 @@ def get_state() -> Dict[str, Any]:
     from routers.settings import _hqp_library_state
     lib = _hqp_library_state()
     response["library"] = {k: lib.get(k) for k in ("own_library", "synced", "files", "albums",
-                                                   "running", "progress", "last_synced_at")}
+                                                   "running", "cancel_requested", "progress",
+                                                   "last_synced_at")}
 
     try:
         with _hqp_status_lock:

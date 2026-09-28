@@ -318,10 +318,7 @@ alias registered, and the row keeps the address it was registered at (on a
 Docker node `host.docker.internal` for a Desktop the scan sees at the LAN
 address). A row is listed while its box is off, like a pinned renderer;
 its `×` in the picker forgets it — the same confirmed goodbye Settings ›
-Library offers when the row holds copies. The HQPlayer screen (the gear
-on the selected row) carries a Library section for an HQPlayer on another
-machine — what this node holds of its library and a tap that syncs it (the
-same previewed first import, the progress on the Library screen). The
+Library offered before 2026-09-29, when the block moved (below). The
 mini-player and the status name the selected one by the same label
 (`HQPlayer Desktop · VH11`).
 
@@ -406,10 +403,18 @@ http entry at ADD time, so a stream it has not buffered cannot sit there; a
 slot only a stream could serve on it (a file held at another HQPlayer with
 no rip here) stays unplayable and the stop names it. The demo ledger applies
 to a substituted stream as to any stream.
-Settings › Library shows the endpoint's section, and one row per library
-the node holds copies from, each with its own Sync (and Forget): a
-library that is not the configured output syncs only from that button —
-the attach-time re-check follows the output alone. Only an HQPlayer on
+The library belongs to one HQPlayer, so its one block is at the bottom of
+that HQPlayer's screen (the gear on the selected picker row; since
+2026-09-29, before that a section of Settings › Library): what this node
+holds of it, then chips — Import / Sync, Rescan, Forget this library,
+Cancel while a job runs with its progress in the hint (the library wake
+channel, in place). Used rarely, so it sits last; found anyway, because
+the guidance trail (`hqp_library`: More tab → the HQPlayer drawer row → the
+Import chip, with the puck) lights while the HQPlayer chosen as the output
+runs on another machine and its library was never imported, and retires
+once the block was shown, per address. A library of an HQPlayer that is not
+the output is forgotten from its picker row (`×`) and syncs once that
+HQPlayer is the output — the attach-time re-check follows the output alone. Only an HQPlayer on
 ANOTHER machine has a library of its own — an Embedded box, a Desktop on a
 second computer; one on this machine, whatever the product, reads this
 node's music folder and is refused everywhere (`has_own_library`, by
