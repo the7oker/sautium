@@ -10417,8 +10417,8 @@
           <button class="icon-btn" data-cancel aria-label="close">${PROFILE_ICONS.close}</button>
         </div>
         <div class="add-gear-row">
-          <p style="margin:0;${muted}font-size:${px(13)};">
-            Address of the HQPlayer Control Protocol endpoint. <b>localhost</b> when HQPlayer runs on the same machine, the LAN address of an HQPlayer Embedded box otherwise. Default port is 4321. A Docker node cannot resolve <b>.local</b> names — give it the IP (a DHCP reservation keeps it stable).
+          <p style="margin:0;${muted}font-size:${px(12)};">
+            <b>localhost</b> on this machine, the LAN IP of an Embedded box otherwise — a Docker node cannot resolve <b>.local</b> names.
           </p>
           <label style="display:flex;flex-direction:column;gap:${px(4)};">
             <span style="${muted}font-size:${px(12)};">Host</span>
@@ -10430,15 +10430,15 @@
           </label>
           <span style="${muted}font-size:${px(12)};">Files</span>
           ${option('same', 'Same computer',
-                   'HQPlayer opens the library files at their own paths.')}
+                   'HQPlayer opens the files at their own paths.')}
           ${option('mount', 'Mounted elsewhere',
-                   `HQPlayer mounts the library itself (a NAS share, HQPlayer OS's SMB mount) and sees <b>${escapeProfileHtml(localRoot || 'the library')}</b> at the path below. Phantom streams, CUE slices and m4a still come from Sautium.`)}
+                   `HQPlayer mounts the library itself and sees <b>${escapeProfileHtml(localRoot || 'the library')}</b> at the path below.`)}
           <label id="hqpRootField" style="display:flex;flex-direction:column;gap:${px(4)};">
             <span style="${muted}font-size:${px(12)};">Library root as HQPlayer sees it</span>
             <input class="add-gear-input" id="hqpRootInput" type="text" placeholder="/mnt/music" maxlength="1024" autocomplete="off" spellcheck="false" value="${escapeProfileHtml(current.library_root || '')}">
           </label>
           ${option('stream', 'Stream from Sautium',
-                   `Every track is fetched from this node at <b>${escapeProfileHtml(mediaAddr)}</b> — the address HQPlayer must reach on the LAN. Nothing to set up on the HQPlayer side.`)}
+                   `Every track is fetched from this node at <b>${escapeProfileHtml(mediaAddr)}</b>.`)}
           <button class="profile-btn primary" data-confirm>Save</button>
           <div id="hqpConnMsg" style="font-size:${px(12)};color:var(--color-text-dim);min-height:${px(16)};"></div>
         </div>

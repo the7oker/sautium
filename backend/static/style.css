@@ -5313,6 +5313,12 @@ a.am-kind { text-decoration: none; }
   grid-template-columns: 1fr;
   gap: calc(10 * var(--px));
   padding: calc(8 * var(--px)) calc(20 * var(--px));
+  /* The sheet is capped at 80vh; a body taller than that (the HQPlayer
+     connection editor on a phone) scrolls under the fixed handle + title
+     instead of being cut off below the fold. */
+  min-height: 0;
+  overflow-y: auto;
+  -webkit-overflow-scrolling: touch;
 }
 .add-gear-input {
   width: 100%;
