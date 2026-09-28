@@ -37,6 +37,7 @@ import os
 import re
 import socket
 import threading
+import time
 import xml.etree.ElementTree as ET
 from datetime import datetime, timezone
 from typing import Any, Callable, Dict, List, Optional, Tuple
@@ -90,6 +91,53 @@ def get_info(host: str, port: int) -> Dict[str, str]:
         m = re.search(rf'\b{k}="([^"]*)"', line)
         out[k] = m.group(1) if m else ""
     return out
+
+
+_DISCOVER_TIMEOUT = 1.5
+
+
+def parse_discover(reply: bytes) -> Optional[Dict[str, str]]:
+    """The answer to HQPlayer's own discovery datagram —
+    `<discover name="VH11" result="NA" version="Signalyst HQPlayer Desktop 6"/>`
+    — as name + product (the version string names the product, major
+    included, so `is_embedded` reads it like GetInfo's). None for anything
+    else on that port."""
+    tag = re.search(r"<discover\b([^>]*)", reply.decode("utf-8", "replace"))
+    if tag is None:
+        return None
+    out = {}
+    for k in ("name", "version"):
+        m = re.search(rf'\b{k}="([^"]*)"', tag.group(1))   # the XML prolog has a version too
+        out[k] = m.group(1) if m else ""
+    return {"name": out["name"], "product": out["version"]}
+
+
+def discover(host: str, port: int = 4321, timeout: float = _DISCOVER_TIMEOUT) -> Optional[Dict[str, str]]:
+    """Is there an HQPlayer at this address? Its control port answers a
+    `<discover/>` datagram (UDP, the same port number) with its name and
+    product — what HQPlayer Client broadcasts for, verified 2026-09-28
+    against Desktop 6 and Embedded 6. Sent unicast, so it crosses the
+    docker bridge like the DLNA sweep's M-SEARCH does, and the reply comes
+    back from 4321, which the bridge's port-restricted NAT lets through.
+    None when nothing HQPlayer-shaped answered in time."""
+    s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    s.settimeout(timeout)
+    try:
+        s.sendto(b"<discover/>\n", (host, port))
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline:
+            try:
+                data, addr = s.recvfrom(4096)
+            except socket.timeout:
+                return None
+            facts = parse_discover(data)
+            if facts is not None:
+                return facts
+        return None
+    except OSError:
+        return None
+    finally:
+        s.close()
 
 
 def library_hash(host: str, port: int) -> str:
@@ -192,10 +240,30 @@ def parse_library(xml_text: str) -> Tuple[List[Entry], Dict[str, int]]:
 _ENDPOINT_COLS = "id, name, host, port, product, hqp_name, library_hash, last_synced_at"
 
 
+def address_key(host: str, port: int) -> Tuple[str, int]:
+    """One HQPlayer per box: this machine's aliases — localhost, the Docker
+    host, its LAN address (auth_hmac.is_own_address) — name the same
+    HQPlayer, so they share a key; anywhere else the address is the key."""
+    from auth_hmac import is_own_address
+    return ("here" if is_own_address(host) else host.strip().lower(), int(port))
+
+
 def endpoint_by_address(host: str, port: int) -> Optional[Dict[str, Any]]:
+    """The row at this address — the alias of it another caller registered
+    included: a Desktop the picker met at host.docker.internal is the one
+    the scan sees at the LAN address."""
     rows = db_query(f"SELECT {_ENDPOINT_COLS} FROM hqp_endpoints WHERE host = %(h)s AND port = %(p)s",
                     {"h": host, "p": port})
-    return dict(rows[0]) if rows else None
+    if rows:
+        return dict(rows[0])
+    key = address_key(host, port)
+    if key[0] != "here":
+        return None
+    for r in db_query(f"SELECT {_ENDPOINT_COLS} FROM hqp_endpoints "
+                      "WHERE host IS NOT NULL AND port = %(p)s ORDER BY id", {"p": port}):
+        if address_key(r["host"], r["port"]) == key:
+            return dict(r)
+    return None
 
 
 def endpoint_id_for(host: Optional[str], port: Optional[int]) -> Optional[int]:
@@ -264,7 +332,10 @@ def ensure_endpoint(host: str, port: int, resolved=None) -> Dict[str, Any]:
         if how == "library":
             logger.info("HQPlayer library %r moved: %s:%s -> %s:%s", ep["name"], ep["host"], ep["port"], host, port)
         # a row minted from an address alone (migration 030) takes the name
-        # HQPlayer gives itself the first time it is heard
+        # HQPlayer gives itself the first time it is heard; a row met by an
+        # alias of its own address keeps the address it was registered at
+        if how == "address":
+            host, port = ep["host"], int(ep["port"])
         db_execute("""
             UPDATE hqp_endpoints
                SET host = %(h)s, port = %(p)s, product = %(product)s, hqp_name = %(hqp_name)s,
@@ -276,6 +347,22 @@ def ensure_endpoint(host: str, port: int, resolved=None) -> Dict[str, Any]:
     ep = endpoint_by_address(host, port)
     ep["current_hash"] = facts["current_hash"]
     return ep
+
+
+def register(host: str, port: int) -> Optional[Dict[str, Any]]:
+    """The row for an HQPlayer the owner chose or added: every HQPlayer
+    picked in the Output picker has one, a Desktop included — a LIBRARY
+    only for an Embedded, the sync refuses the rest. This machine's aliases
+    (localhost, the Docker host, its LAN address) are one HQPlayer: an own
+    address finds the row another alias minted (endpoint_by_address) and
+    leaves its address alone. None when the box does not answer control
+    right now — the address is the owner's choice all the same; the
+    output's attach registers it on the first contact."""
+    try:
+        return ensure_endpoint(host, port)
+    except OSError as e:
+        logger.info("HQPlayer at %s:%s is not answering — no endpoint row yet: %s", host, port, e)
+        return None
 
 
 def _known_paths(endpoint_id: int) -> Dict[str, int]:
@@ -304,9 +391,12 @@ def sync(host: str, port: int, *, force: bool = False,
     if not is_embedded(resolved[2]["product"]):
         logger.warning("HQPlayer at %s:%s is %r — a Desktop reads this node's own library; not synced",
                        host, port, resolved[2]["product"])
-        # whatever library a row still names at this address is not there any more
-        db_execute("UPDATE hqp_endpoints SET host = NULL, port = NULL WHERE host = %(h)s AND port = %(p)s",
-                   {"h": host, "p": port})
+        # A Desktop's own row (the Output picker registers every HQPlayer
+        # the owner chose) keeps its address; a library row that still
+        # names this address met another HQPlayer here and has moved on.
+        if resolved[1] != "address":
+            db_execute("UPDATE hqp_endpoints SET host = NULL, port = NULL WHERE host = %(h)s AND port = %(p)s",
+                       {"h": host, "p": port})
         stats["refused"] = "desktop"
         return stats
     ep = ensure_endpoint(host, port, resolved)
@@ -507,15 +597,17 @@ def cancel_job() -> bool:
 
 def request_sync(host: str, port: int) -> None:
     """Event-driven entry for the HQPlayer output: on attach and on every
-    return of a restarted HQPlayer, the library's hash is compared with the
-    last complete sync and a sync runs only when it moved. Only an endpoint
-    the owner has synced once is followed — the first import of a library
-    is always the explicit button, never a side effect of choosing an
-    output (an HQPlayer Desktop on this very library would otherwise import
-    its 39k files behind the owner's back). Off the caller's thread: the
+    return of a restarted HQPlayer, the endpoint is registered if it was
+    chosen while off, then the library's hash is compared with the last
+    complete sync and a sync runs only when it moved. Only an endpoint the
+    owner has synced once is followed — the first import of a library is
+    always the explicit button, never a side effect of choosing an output
+    (an HQPlayer Desktop on this very library would otherwise import its
+    39k files behind the owner's back). Off the caller's thread: the
     status poller must not wait on the control port."""
     def _check() -> None:
-        ep = endpoint_by_address(host, port)
+        # the first contact of an HQPlayer chosen while it was off registers it
+        ep = endpoint_by_address(host, port) or register(host, port)
         if ep is None or ep["library_hash"] is None:
             return
         try:

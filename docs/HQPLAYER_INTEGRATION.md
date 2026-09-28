@@ -274,8 +274,48 @@ HOST = "host.docker.internal"
 HOST = "<windows-host-ip>"
 ```
 
+### Finding HQPlayers (2026-09-29)
+HQPlayer has a discovery protocol of its own: a `<discover/>` datagram to
+its control port — UDP 4321 — is answered by Desktop and Embedded alike
+with `<discover name="VH11" result="NA" version="Signalyst HQPlayer
+Desktop 6"/>` (what HQPlayer Client broadcasts for; verified 2026-09-28
+against both). Sautium sends it unicast, so it crosses the docker bridge
+like the DLNA sweep's M-SEARCH, and the reply comes back from 4321, which
+the bridge's port-restricted NAT lets through (`hqp_library.discover`).
+The Output picker's scan (`POST /api/player/outputs/scan`, on opening the
+picker and on Rescan) asks every LAN address for a renderer and for an
+HQPlayer in the same breath (`routers/player._unicast_sweep`), and lists
+each HQPlayer it heard as its own entry beside the renderers — "HQPlayer ·
+VH11 · this computer", "HQPlayer · HQPlayerEmbedded · 192.168.1.253".
+HQPlayer OS is a UPnP renderer as well (manufacturer Signalyst): a box that
+answered as an HQPlayer is offered once, as the HQPlayer — its renderer
+would be the same DSP with no queue and no filter control. Tapping an entry
+makes it THE HQPlayer this node drives (`PUT /api/settings/output` with
+`hqplayer: {host, port}`; the address is the selection, as a renderer's
+record is for DLNA), and the way files reach it follows from that address.
+There is no connection editor any more: what the scan cannot see — another
+subnet, a box that was off — goes in through **Add device by address**
+(`POST /api/player/outputs/add`), shared with DLNA: a bare address is
+probed as an HQPlayer first (the datagram, then `<GetInfo/>` over TCP where
+a firewall passes only that) and as a renderer second; a full
+device-description URL is a renderer by definition.
+
+Every HQPlayer the owner chose or added is an `hqp_endpoints` row
+(`hqp_library.register`), a Desktop included — the row is the device's
+identity; a LIBRARY is only what an Embedded box has, and the sync refuses
+a Desktop without touching its row. This machine's aliases — `localhost`,
+`host.docker.internal`, its LAN address — are one HQPlayer
+(`hqp_library.address_key`): every lookup by address finds the row another
+alias registered, and the row keeps the address it was registered at (on a
+Docker node `host.docker.internal` for a Desktop the scan sees at the LAN
+address). A row is listed while its box is off, like a pinned renderer;
+its `×` in the picker forgets it — the same confirmed goodbye Settings ›
+Library offers when the row holds copies. The mini-player and the status
+name the selected one (`HQPlayer · VH11`).
+
 ### HQPlayer Embedded on the LAN
-Give the node the box's LAN address (a Docker node cannot resolve `.local`
+Open More → Audio output: the scan lists the box, or **Add device by
+address** takes its LAN address (a Docker node cannot resolve `.local`
 names; a DHCP reservation keeps the address stable) — that is all: a box is
 not this machine, so it streams. The box fetches from the media proxy — on a Windows host
 with Docker Desktop that is the same port forward and firewall allow the
@@ -327,8 +367,9 @@ every discography reconcile).
 
 Since 2026-09-28 the library has an identity of its own — an `hqp_endpoints`
 row (the owner's name for it, seeded from `<GetInfo/>`; what HQPlayer
-reports about itself; the `<LibraryGetHash/>` the last complete sync saw;
-where it mounts this node's library) and `album_variants.hqp_endpoint_id`
+reports about itself; the `<LibraryGetHash/>` the last complete sync saw —
+since 2026-09-29 the row of every HQPlayer the owner picked, a Desktop's
+included, see "Finding HQPlayers") and `album_variants.hqp_endpoint_id`
 points at it: the same library answering from a new address after a DHCP
 lease is recognised by its hash and the row moves; a different HQPlayer
 that inherits the address (name or product differ) is a new library and the

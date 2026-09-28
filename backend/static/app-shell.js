@@ -8595,20 +8595,25 @@
       const productLine = escapeHtml(info.product || 'Connected')
         + (info.version ? ' · ' + escapeHtml(info.version) : '')
         + (info.platform ? ' · ' + escapeHtml(info.platform) : '');
+      // Which HQPlayer this is — the name the picker registered it under —
+      // and where; a tap leads to Audio output, where another one is chosen
+      // or added (there is no editor here since 2026-09-29).
+      const hqpName = s.name || info.name || '';
+      const hostLine = `${escapeHtml(s.host)}:${s.port}`;
       const connBlock = s.connected
-        ? `<div class="hqp-conn ok is-clickable" data-action="edit-conn" role="button" tabindex="0">
+        ? `<div class="hqp-conn ok is-clickable" data-action="pick-output" role="button" tabindex="0">
              <span class="hqp-conn-dot"></span>
              <div class="hqp-conn-text">
-               <div class="hqp-conn-host">${escapeHtml(s.host)}:${s.port}</div>
+               <div class="hqp-conn-host">${hqpName ? escapeHtml(hqpName) + ' · ' : ''}${hostLine}</div>
                <div class="hqp-conn-sub">${productLine}</div>
                <div class="hqp-conn-sub">${filesLine}</div>
              </div>
            </div>`
-        : `<div class="hqp-conn err is-clickable" data-action="edit-conn" role="button" tabindex="0">
+        : `<div class="hqp-conn err is-clickable" data-action="pick-output" role="button" tabindex="0">
              <span class="hqp-conn-dot"></span>
              <div class="hqp-conn-text">
-               <div class="hqp-conn-host">${escapeHtml(s.host)}:${s.port}</div>
-               <div class="hqp-conn-sub">Disconnected — tap to change host, port or file access</div>
+               <div class="hqp-conn-host">${hqpName ? escapeHtml(hqpName) + ' · ' : ''}${hostLine}</div>
+               <div class="hqp-conn-sub">Disconnected — tap to pick or add an HQPlayer in Audio output</div>
                <div class="hqp-conn-sub">${filesLine}</div>
              </div>
            </div>`;
@@ -8808,12 +8813,8 @@
         });
       });
 
-      const connEl = body.querySelector('[data-action="edit-conn"]');
-      if (connEl) {
-        connEl.addEventListener('click', () => {
-          openHqpConnectionEditor({ host: s.host, port: s.port }, () => load());
-        });
-      }
+      const connEl = body.querySelector('[data-action="pick-output"]');
+      if (connEl) connEl.addEventListener('click', () => navigate('more/output'));
 
       body.querySelector('[data-action="open-filter"]').addEventListener('click', () => {
         openFilterPicker(s, (chosen) => serialized('hqp.config', async () => {
@@ -10382,80 +10383,6 @@
     };
     overlay.querySelector('[data-confirm]').addEventListener('click', submit);
     codeInput.addEventListener('keydown', e => { if (e.key === 'Enter') { e.preventDefault(); submit(); } });
-  }
-
-  async function openHqpConnectionEditor(current, onSaved) {
-    // Only where HQPlayer is: how the files reach it is read off the
-    // address — by path on this machine, streams from anywhere else.
-    const px = (n) => `calc(${n} * var(--px))`;
-    const muted = `color:var(--color-text-muted);font-size:${px(11.5)};line-height:1.5;`;
-    const overlay = document.createElement('div');
-    overlay.className = 'add-gear-overlay';
-    overlay.innerHTML = `
-      <div class="add-gear-sheet">
-        <div class="sheet-handle"></div>
-        <div class="add-gear-head">
-          <h2 class="add-gear-title">HQPlayer connection</h2>
-          <button class="icon-btn" data-cancel aria-label="close">${PROFILE_ICONS.close}</button>
-        </div>
-        <div class="add-gear-row">
-          <p style="margin:0;${muted}font-size:${px(12)};">
-            <b>localhost</b> on this machine, the LAN IP of an Embedded box otherwise — a Docker node cannot resolve <b>.local</b> names. An HQPlayer on this machine opens the files itself; any other streams them from here.
-          </p>
-          <label style="display:flex;flex-direction:column;gap:${px(4)};">
-            <span style="${muted}font-size:${px(12)};">Host</span>
-            <input class="add-gear-input" id="hqpHostInput" type="text" placeholder="localhost" maxlength="255" autocomplete="off" spellcheck="false" value="${escapeProfileHtml(current.host || '')}">
-          </label>
-          <label style="display:flex;flex-direction:column;gap:${px(4)};">
-            <span style="${muted}font-size:${px(12)};">Port</span>
-            <input class="add-gear-input" id="hqpPortInput" type="number" min="1" max="65535" placeholder="4321" value="${current.port || 4321}">
-          </label>
-          <button class="profile-btn primary" data-confirm>Save</button>
-          <div id="hqpConnMsg" style="font-size:${px(12)};color:var(--color-text-dim);min-height:${px(16)};"></div>
-        </div>
-      </div>
-    `;
-    document.body.appendChild(overlay);
-    const close = () => overlay.remove();
-    overlay.addEventListener('click', e => { if (e.target === overlay) close(); });
-    overlay.querySelector('[data-cancel]').addEventListener('click', close);
-    const hostInput = overlay.querySelector('#hqpHostInput');
-    const portInput = overlay.querySelector('#hqpPortInput');
-    const msg = overlay.querySelector('#hqpConnMsg');
-    const confirmBtn = overlay.querySelector('[data-confirm]');
-    setTimeout(() => hostInput.focus(), 100);
-
-    const fail = (text) => { msg.style.color = 'var(--color-negative)'; msg.textContent = text; };
-    const submit = async () => {
-      const host = hostInput.value.trim();
-      const port = parseInt(portInput.value, 10);
-      if (!host) return fail('Host is required.');
-      if (!port || port < 1 || port > 65535) return fail('Port must be 1–65535.');
-      msg.style.color = 'var(--color-text-muted)';
-      msg.textContent = 'Saving…';
-      try {
-        const r = await fetch('/api/settings/hqplayer', {
-          method: 'PUT',
-          headers: {'Content-Type': 'application/json'},
-          body: JSON.stringify({ host, port }),
-        });
-        if (!r.ok) return fail(await r.text());
-        msg.style.color = 'var(--color-positive)';
-        msg.textContent = 'Saved.';
-        setTimeout(() => { close(); if (onSaved) onSaved(); }, 400);
-      } catch (err) {
-        fail(String(err));
-      }
-    };
-    confirmBtn.addEventListener('click', () => onceInFlight(confirmBtn, submit));
-    [hostInput, portInput].forEach(el => {
-      el.addEventListener('keydown', e => {
-        if (e.key === 'Enter') {
-          e.preventDefault();
-          if (!confirmBtn.disabled && !confirmBtn.dataset.busy) onceInFlight(confirmBtn, submit);
-        }
-      });
-    });
   }
 
   async function openSetEmailFlow(current = '') {
@@ -12393,28 +12320,29 @@
     _wireOutputActions(root);
     _refreshOutputHqpDot(root);
     guide.seen('audio_output');
-    // Opening the picker IS the discovery intent: kick an SSDP scan in the
-    // background (multi-interface, ~10 s) and refresh the list once it lands
-    // — but only if the user is still on this screen.
-    if (!rescan) _dlnaScanOnce(root);
+    // Opening the picker IS the discovery intent: kick a network scan in the
+    // background (renderers and HQPlayers, multi-interface, ~10 s) and
+    // refresh the list once it lands — but only if the user is still on
+    // this screen.
+    if (!rescan) _scanOnce(root);
   }
 
   // Opening the picker starts a scan and so does the Rescan button. Both share
   // one request and one repaint: two would race to replace the same list, and
   // the loser's repaint would land after the button had already gone idle.
-  let _dlnaScanInFlight = null;
-  function _dlnaScanOnce(root) {
-    if (!_dlnaScanInFlight) {
-      _dlnaScanInFlight = fetch('/api/player/outputs/dlna/scan', { method: 'POST' })
+  let _scanInFlight = null;
+  function _scanOnce(root) {
+    if (!_scanInFlight) {
+      _scanInFlight = fetch('/api/player/outputs/scan', { method: 'POST' })
         .catch(() => {})
         .then(() => {
-          _dlnaScanInFlight = null;
+          _scanInFlight = null;
           if (root.querySelector('[data-output-content]')) {
             renderOutputSettings(root, 'soft');
           }
         });
     }
-    return _dlnaScanInFlight;
+    return _scanInFlight;
   }
 
   function _renderOutputs(data) {
@@ -12424,22 +12352,47 @@
     const mark = (sel) => sel
       ? `<span style="color:var(--color-amber);display:inline-flex;">${SETTINGS_ICONS.check}</span>`
       : `<span style="color:var(--color-text-dim);display:inline-flex;">${SETTINGS_ICONS.rightCh}</span>`;
+    const mono = `font-family:var(--font-mono);font-size:calc(11.5*var(--px));color:var(--color-text-dim);letter-spacing:0.04em;`;
 
-    const hqpRow = `
-      <div class="form-row stacked is-clickable" data-action="select-hqp"
-           data-configured="${hqp.available ? '1' : '0'}">
+    // One row per HQPlayer — found on the network, added by address, or
+    // chosen before — as one per renderer. The selected one carries the
+    // live dot and the gear to its screen; the others say whether the
+    // last scan heard them.
+    const hqpProduct = (h) => {
+      const m = /(Desktop|Embedded)\s*(\d+)?/i.exec(h.product || '');
+      return m ? m[1] + (m[2] ? ' ' + m[2] : '') : (h.product ? 'HQPlayer' : '');
+    };
+    const hqpRows = (hqp.hqplayers || []).map(h => {
+      const sel = active.type === 'hqplayer' && h.configured;
+      const where = h.here ? 'this computer' : `${h.host}${h.port && h.port !== 4321 ? ':' + h.port : ''}`;
+      const state = sel ? '' : h.seen ? 'found' : h.known ? 'not answering' : '';
+      const facts = [where, hqpProduct(h), state].filter(Boolean).map(x => escapeProfileHtml(x)).join(' · ');
+      const forget = h.known ? `
+            <button data-action="remove-hqplayer" data-endpoint-id="${escapeProfileHtml(String(h.endpoint_id))}"
+              data-name="${escapeProfileHtml(h.name || '')}" data-files="${escapeProfileHtml(String(h.files || 0))}"
+              style="background:none;border:none;color:var(--color-text-dim);font-size:calc(15*var(--px));padding:0 calc(4*var(--px));cursor:pointer;line-height:1;"
+              title="Forget this HQPlayer">&times;</button>` : '';
+      return `
+      <div class="form-row stacked is-clickable" data-action="select-hqp" data-host="${escapeProfileHtml(h.host)}"
+           data-port="${escapeProfileHtml(String(h.port || 4321))}" data-configured="${h.configured ? '1' : '0'}">
         <div class="row-stack">
           <span class="row-stack-lead">
-            <span class="row-stack-label">HQPlayer</span>
-            <button class="row-stack-settings" type="button" data-action="hqp-settings"
-                    aria-label="HQPlayer settings" hidden>${SETTINGS_ICONS.gear}</button>
+            <span class="row-stack-label">HQPlayer${h.name ? ' · ' + escapeProfileHtml(h.name) : ''}</span>
+            ${sel ? `<button class="row-stack-settings" type="button" data-action="hqp-settings"
+                    aria-label="HQPlayer settings" hidden>${SETTINGS_ICONS.gear}</button>` : ''}
           </span>
-          ${mark(active.type === 'hqplayer')}
+          <span style="display:inline-flex;align-items:center;gap:calc(6*var(--px));">${forget}${mark(sel)}</span>
         </div>
         <div class="row-stack-value" style="display:flex;align-items:center;gap:calc(8*var(--px));flex-wrap:wrap;">
-          <span data-hqp-dot style="color:var(--color-text-muted);font-family:var(--font-mono);font-size:calc(12*var(--px));letter-spacing:0.02em;">checking…</span>
-          <span style="font-family:var(--font-mono);color:var(--color-blue);font-size:calc(11.5*var(--px));letter-spacing:0.02em;">${escapeProfileHtml(String(hqp.host || '—'))}:${escapeProfileHtml(String(hqp.port || '—'))}</span>
+          ${sel ? `<span data-hqp-dot style="color:var(--color-text-muted);font-family:var(--font-mono);font-size:calc(12*var(--px));letter-spacing:0.02em;">checking…</span>` : ''}
+          <span style="${mono}">${facts}</span>
         </div>
+      </div>`;
+    }).join('');
+    const hqpRow = hqpRows || `
+      <div class="form-row stacked">
+        <div class="row-stack"><span class="row-stack-label">HQPlayer</span><span></span></div>
+        <div class="row-stack-sub">None found yet — turn on "Allow control from network" in HQPlayer and Rescan, or add it by address below.</div>
       </div>`;
 
     let deviceRows;
@@ -12520,14 +12473,7 @@
         <div class="form-row stacked">
           <div class="row-stack-sub">No renderers found yet — enable the device's network mode (e.g. AK Connect) and Rescan.</div>
         </div>`;
-      dlnaRows = rows + empty + `
-        <div class="form-row stacked is-clickable" data-action="add-renderer">
-          <div class="row-stack">
-            <span class="row-stack-label">Add renderer by address</span>
-            <span style="color:var(--color-text-dim);display:inline-flex;">${SETTINGS_ICONS.rightCh}</span>
-          </div>
-          <div class="row-stack-sub">When scanning can't see the device (Docker backends have no LAN multicast): enter its IP — the description URL is resolved automatically.</div>
-        </div>`;
+      dlnaRows = rows + empty;
     } else if (dlna) {
       dlnaRows = `
         <div class="form-row disabled stacked">
@@ -12536,12 +12482,22 @@
         </div>`;
     }
 
-    // The scan fills the renderer rows above it, so it sits under the device
-    // list, and only where there is a DLNA stack to scan with.
-    const rescanRow = (dlna && dlna.available) ? `
+    // One entry for whatever the scan cannot see — another subnet, a box
+    // that was off: Sautium tells an HQPlayer from a renderer itself.
+    const addRow = `
+        <div class="form-row stacked is-clickable" data-action="add-device">
+          <div class="row-stack">
+            <span class="row-stack-label">Add device by address</span>
+            <span style="color:var(--color-text-dim);display:inline-flex;">${SETTINGS_ICONS.rightCh}</span>
+          </div>
+          <div class="row-stack-sub">When the scan can't see it: enter its IP — an HQPlayer or a DLNA renderer, Sautium works out which.</div>
+        </div>`;
+    // The scan fills the HQPlayer and renderer rows above it, so it sits
+    // under the device list.
+    const rescanRow = `
       <div class="btn-row single">
-        <button class="btn btn-secondary" data-action="refresh-outputs">Rescan renderers</button>
-      </div>` : '';
+        <button class="btn btn-secondary" data-action="refresh-outputs">Rescan network</button>
+      </div>`;
 
     const browserSel = active.type === 'browser';
     const isRendererTab = browserSel && window.browserRenderer && window.browserRenderer.active;
@@ -12606,6 +12562,7 @@
         ${deviceRows}
         ${dlnaRows}
         ${browserRow}
+        ${addRow}
       </div>
       ${rescanRow}
       ${exclusiveGroup}
@@ -12634,17 +12591,36 @@
     });
     root.querySelectorAll('[data-action="select-hqp"]').forEach(el =>
       el.addEventListener('click', async () => {
-        // Always select. Sending the tap to the settings screen instead —
-        // which is what "not configured yet" used to do — meant the output
-        // could not be chosen at all: nothing on that screen needs saving when
-        // the defaults are already right, so it never became "configured" and
-        // every tap bounced back.
+        // The tapped HQPlayer becomes the one this node drives: its address
+        // rides with the selection, exactly as a renderer's record does.
         const first = el.dataset.configured !== '1';
-        await putOutput({ type: 'hqplayer' });
-        // First time only: show the screen that exists for HQPlayer, so its
-        // filters and DSP are not a secret. Selection has already happened, so
-        // this informs rather than blocks.
+        await putOutput({ type: 'hqplayer',
+                          hqplayer: { host: el.dataset.host, port: parseInt(el.dataset.port, 10) || 4321 } });
+        // A newly chosen HQPlayer: show the screen that exists for it, so its
+        // filters and DSP are not a secret. Selection has already happened,
+        // so this informs rather than blocks.
         if (first) navigate('more/hqplayer');
+      }));
+    root.querySelectorAll('[data-action="remove-hqplayer"]').forEach(el =>
+      el.addEventListener('click', (e) => {
+        e.stopPropagation();   // the × sits inside the select-hqp row
+        onceInFlight(el, async () => {
+          // A row that holds copies is a library: forgetting it is the same
+          // goodbye Settings › Library offers, and says so.
+          const files = parseInt(el.dataset.files, 10) || 0;
+          const name = el.dataset.name || 'this HQPlayer';
+          const ok = await window.confirmDestructive({
+            title: files ? `Forget the library of ${escapeProfileHtml(name)}?` : `Forget ${escapeProfileHtml(name)}?`,
+            message: files
+              ? 'Every album and track only its library put here goes. Analysis, listening history and your own files stay; an album stays wherever other files still hold it.'
+              : 'It leaves the list; a scan or its address brings it back.',
+            confirmText: 'Forget',
+          });
+          if (!ok) return;
+          const r = await fetch('/api/settings/library/hqp-forget?endpoint_id=' + encodeURIComponent(el.dataset.endpointId), { method: 'POST' });
+          if (!r.ok) notices.toast({ key: 'hqp-forget', text: 'Could not forget it — a library job is running.' });
+          renderOutputSettings(root);
+        });
       }));
     root.querySelectorAll('[data-action="select-device"]').forEach(el =>
       el.addEventListener('click', () =>
@@ -12664,7 +12640,7 @@
         // lasts exactly as long as the scan whose results it is waiting for.
         // The scan alone is what this does: reloading the machine's audio
         // drivers belongs to the Re-detect row in the device list.
-        await _dlnaScanOnce(root);
+        await _scanOnce(root);
       });
     }
     const redetect = root.querySelector('[data-action="redetect-devices"]');
@@ -12681,10 +12657,13 @@
         const r = dlna && (dlna.renderers || []).find(x => x.udn === el.dataset.udn);
         if (r) putOutput({ type: 'dlna', renderer: r });
       }));
-    root.querySelector('[data-action="hqp-settings"]').addEventListener('click', e => {
-      e.stopPropagation();   // the gear sits inside the select-hqp row
-      navigate('more/hqplayer');
-    });
+    const gear = root.querySelector('[data-action="hqp-settings"]');
+    if (gear) {
+      gear.addEventListener('click', e => {
+        e.stopPropagation();   // the gear sits inside the select-hqp row
+        navigate('more/hqplayer');
+      });
+    }
     root.querySelectorAll('[data-action="remove-renderer"]').forEach(el =>
       el.addEventListener('click', async (e) => {
         e.stopPropagation();   // the × sits inside the select-renderer row
@@ -12695,11 +12674,16 @@
         }).catch(() => {});
         renderOutputSettings(root);
       }));
-    const addRenderer = root.querySelector('[data-action="add-renderer"]');
-    if (addRenderer) {
-      addRenderer.addEventListener('click', () =>
-        openDlnaAddSheet(async (info) => {
-          await putOutput({ type: 'dlna', renderer: info });
+    const addDevice = root.querySelector('[data-action="add-device"]');
+    if (addDevice) {
+      addDevice.addEventListener('click', () =>
+        openAddDeviceSheet(async (info) => {
+          // Whatever answered is selected at once, as a tapped row would be.
+          if (info.kind === 'hqplayer') {
+            await putOutput({ type: 'hqplayer', hqplayer: { host: info.host, port: info.port } });
+          } else {
+            await putOutput({ type: 'dlna', renderer: info });
+          }
         }));
     }
     const browserRow = root.querySelector('[data-action="select-browser"]');
@@ -12714,24 +12698,25 @@
     }
   }
 
-  /* Manual renderer registration (the Docker path — no LAN multicast for
-     SSDP). Bottom-sheet with one URL input, same shell as the HQPlayer
-     connection editor. */
-  function openDlnaAddSheet(onAdded) {
+  /* A device the scan cannot see — another subnet, a box that was off —
+     added by address. One input; the backend tells an HQPlayer from a DLNA
+     renderer (POST /api/player/outputs/add answers with `kind`). */
+  function openAddDeviceSheet(onAdded) {
     const overlay = document.createElement('div');
     overlay.className = 'add-gear-overlay';
     overlay.innerHTML = `
       <div class="add-gear-sheet">
         <div class="sheet-handle"></div>
         <div class="add-gear-head">
-          <h2 class="add-gear-title">Add DLNA renderer</h2>
+          <h2 class="add-gear-title">Add device by address</h2>
           <button class="icon-btn" data-cancel aria-label="close">${PROFILE_ICONS.close}</button>
         </div>
         <div class="add-gear-row">
-          <label>Renderer IP
+          <label>IP address
             <input class="add-gear-input" type="text" inputmode="url" autocomplete="off" spellcheck="false"
                    placeholder="192.168.1.60" data-dlna-url>
           </label>
+          <div style="font-size:calc(11.5*var(--px));color:var(--color-text-muted);line-height:1.5;">An HQPlayer (Desktop or Embedded, with "Allow control from network" on) or a DLNA renderer — Sautium works out which.</div>
         </div>
         <button class="profile-btn primary" data-save>Add</button>
       </div>`;
@@ -12748,16 +12733,16 @@
       btn.disabled = true;
       btn.textContent = 'Checking…';
       try {
-        const r = await fetch('/api/player/outputs/dlna/add', {
+        const r = await fetch('/api/player/outputs/add', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ url }),
+          body: JSON.stringify({ address: url }),
         });
         if (!r.ok) {
           const err = await r.json().catch(() => ({}));
           await window.notifyDialog({
-            title: 'DLNA renderer',
-            message: escapeProfileHtml(err.detail || 'Renderer not reachable'),
+            title: 'Add device',
+            message: escapeProfileHtml(err.detail || 'Nothing answered at that address'),
             kind: 'error',
           });
           btn.disabled = false;
@@ -12774,9 +12759,9 @@
     });
   }
 
-  // One state check paints the row's dot and decides its settings gear:
-  // the HQPlayer screen operates HQPlayer, so it is offered only while
-  // there is one to talk to.
+  // One state check paints the selected HQPlayer's dot and decides its
+  // settings gear: the HQPlayer screen operates HQPlayer, so it is offered
+  // only while there is one to talk to.
   async function _refreshOutputHqpDot(root) {
     const el = root.querySelector('[data-hqp-dot]');
     if (!el) return;
@@ -12790,7 +12775,7 @@
     el.innerHTML = connected
       ? '<span class="status-dot green"></span>Connected'
       : '<span class="status-dot red"></span>Disconnected';
-    gear.hidden = !connected;
+    if (gear) gear.hidden = !connected;
   }
 
   /* Render entrypoint. */

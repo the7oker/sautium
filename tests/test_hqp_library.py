@@ -310,3 +310,45 @@ def test_a_desktop_is_never_synced(db, monkeypatch):
     assert _one(db, "SELECT count(*) FROM hqp_endpoints") == 0
     assert _one(db, "SELECT count(*) FROM hqp_library_files") == 0
     assert hqp_library.forget_missing("192.168.1.188", 4321)["refused"] == "desktop"
+
+
+def test_a_chosen_hqplayer_is_registered_once_across_its_own_aliases(db, monkeypatch):
+    """The Output picker registers every HQPlayer the owner chose, a Desktop
+    included; this machine's aliases — localhost, the Docker host, its LAN
+    address — are one HQPlayer and share the row, which keeps the address
+    it was registered at. A sync still refuses the Desktop and leaves its
+    row alone; a library row that moved away from that address loses it."""
+    monkeypatch.setattr(hqp_library, "library_hash", lambda h, p: "h0")
+    monkeypatch.setattr(hqp_library, "get_info",
+                        lambda h, p: {"name": "VH11", "product": "Signalyst HQPlayer Desktop"})
+    first = hqp_library.register("host.docker.internal", 4321)
+    assert (first["name"], first["host"]) == ("VH11", "host.docker.internal")
+    again = hqp_library.register("localhost", 4321)
+    assert (again["id"], again["host"]) == (first["id"], "host.docker.internal")
+    assert hqp_library.endpoint_by_address("127.0.0.1", 4321)["id"] == first["id"]
+    assert hqp_library.address_key("localhost", 4321) == hqp_library.address_key("host.docker.internal", 4321)
+    assert hqp_library.address_key("192.168.1.253", 4321) == ("192.168.1.253", 4321)
+    assert _one(db, "SELECT count(*) FROM hqp_endpoints") == 1
+    # the sync refuses a Desktop — and the Desktop's own row keeps its address
+    monkeypatch.setattr(hqp_library, "fetch_library", lambda h, p: LIBRARY)
+    assert hqp_library.sync("localhost", 4321)["refused"] == "desktop"
+    assert _one(db, "SELECT host FROM hqp_endpoints") == "host.docker.internal"
+    assert _one(db, "SELECT count(*) FROM hqp_library_files") == 0
+    # an Embedded library that moved away still names an address a Desktop
+    # now answers at: that row is freed, the Desktop's is not
+    monkeypatch.setattr(hqp_library, "get_info", lambda h, p: PI_INFO)
+    monkeypatch.setattr(hqp_library, "library_hash", lambda h, p: "h1")
+    monkeypatch.setattr(hqp_library, "fetch_library", lambda h, p: PRODIGY_ONLY)
+    assert hqp_library.sync(*PI)["added"] == 2
+    monkeypatch.setattr(hqp_library, "get_info",
+                        lambda h, p: {"name": "VH11", "product": "Signalyst HQPlayer Desktop"})
+    monkeypatch.setattr(hqp_library, "library_hash", lambda h, p: "h0")
+    assert hqp_library.sync(*PI)["refused"] == "desktop"
+    assert _one(db, "SELECT host FROM hqp_endpoints WHERE hqp_name = 'HQPlayerEmbedded'") is None
+    assert _one(db, "SELECT host FROM hqp_endpoints WHERE hqp_name = 'VH11'") == "host.docker.internal"
+    # not answering: no row, no error — the choice stands
+    def down(h, p):
+        raise OSError("refused")
+    monkeypatch.setattr(hqp_library, "get_info", down)
+    assert hqp_library.register("192.168.1.99", 4321) is None
+    assert _one(db, "SELECT count(*) FROM hqp_endpoints") == 2

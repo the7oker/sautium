@@ -666,8 +666,15 @@ def _hqp_library_state() -> Dict[str, Any]:
                   "synced": bool(r["synced"]),
                   "last_synced_at": r["last_synced_at"].isoformat() if r["last_synced_at"] else None,
                   "files": int(r["files"] or 0), "albums": int(r["albums"] or 0),
-                  "configured": bool(host and r["host"] == host and r["port"] == port)} for r in rows]
+                  "configured": bool(host and r["host"]
+                                     and hqp_library.address_key(r["host"], r["port"]) == hqp_library.address_key(host, port))}
+                 for r in rows]
     configured = next((e for e in endpoints if e["configured"]), None)
+    # The picker registers every HQPlayer the owner chose; a LIBRARY is an
+    # Embedded box (or whatever a row minted from an address alone turns
+    # out to be) — a Desktop's row is an output, not a source, and stays
+    # out of this list unless it somehow holds copies.
+    endpoints = [e for e in endpoints if e["embedded"] is not False or e["synced"] or e["files"]]
     if host:
         # Only an Embedded box has a library of its own; a Desktop reads
         # this node's music and is never synced. An endpoint never met
@@ -1875,30 +1882,41 @@ def get_hqplayer_prefs() -> Dict[str, Any]:
     }
 
 
-@router.put("/hqplayer")
-def put_hqplayer_prefs(req: HqplayerPrefs) -> Dict[str, Any]:
-    """Update the HQPlayer endpoint. Persisted to user_settings and overlaid
-    onto the runtime settings; when HQPlayer is the selected output the
-    backend is detached and re-attached, so a new address takes effect at
-    once — and with it the way files reach it, read off that address: the
-    attach mirrors the canonical queue in the URI form the address dictates.
-    (activate() is a no-op for an already-active type, so a plain
-    re-activate would leave HQPlayer holding URIs of the old form.)"""
+def _apply_hqplayer_address(host: Optional[str], port: Optional[int]) -> None:
+    """The one place the active HQPlayer's address is set: persisted to
+    user_settings, overlaid onto the runtime settings, the cached control
+    sockets dropped so the next status/command call reconnects against the
+    new address, and the HQPlayer registered as one the owner chose
+    (hqp_library.register — no row yet if it is not answering)."""
+    import hqp_library
     from config import settings as app_settings
-    if req.host is not None:
-        host = req.host.strip() or None
+    if host is not None:
+        host = host.strip() or None
         _write("hqplayer.host", host)
         if host:
             app_settings.hqplayer_host = host
-    if req.port is not None:
-        _write("hqplayer.port", req.port)
-        app_settings.hqplayer_port = req.port
+    if port is not None:
+        _write("hqplayer.port", port)
+        app_settings.hqplayer_port = port
     logger.info("HQPlayer settings updated: host=%s, port=%s",
                 app_settings.hqplayer_host, app_settings.hqplayer_port)
-    # Drop cached HQPlayer sockets so the next status/command call
-    # reconnects against the new address.
     from playback.hqp_backend import reset_all_clients as _reset_hqp
     _reset_hqp()
+    if app_settings.hqplayer_host:
+        hqp_library.register(app_settings.hqplayer_host, int(app_settings.hqplayer_port or 4321))
+
+
+@router.put("/hqplayer")
+def put_hqplayer_prefs(req: HqplayerPrefs) -> Dict[str, Any]:
+    """Update the HQPlayer endpoint by address (the Output picker's own
+    path is PUT /output with `hqplayer`). When HQPlayer is the selected
+    output the backend is detached and re-attached, so a new address takes
+    effect at once — and with it the way files reach it, read off that
+    address: the attach mirrors the canonical queue in the URI form the
+    address dictates. (activate() is a no-op for an already-active type,
+    so a plain re-activate would leave HQPlayer holding URIs of the old
+    form.)"""
+    _apply_hqplayer_address(req.host, req.port)
     # Only when HQPlayer IS the selection. Unset no longer means "HQPlayer
     # may have it" — an unset output resolves to this device, so saving an
     # address here must not quietly move playback. Nothing is sent to the
@@ -1926,6 +1944,7 @@ class OutputPrefs(BaseModel):
     device_id: Optional[str] = None     # local: "{hostapi}::{name}"
     exclusive: Optional[bool] = None    # local: WASAPI exclusive mode
     renderer: Optional[Dict[str, Any]] = None   # dlna: {udn, location, name}
+    hqplayer: Optional[Dict[str, Any]] = None   # hqplayer: {host, port} — WHICH HQPlayer
     stream_quality: Optional[str] = None    # lossless | opus_192 | opus_96
 
 
@@ -1958,6 +1977,19 @@ def put_output_prefs(req: OutputPrefs) -> Dict[str, Any]:
                        "(launcher mode) for WASAPI/ASIO/CoreAudio output")
     if req.type == "dlna" and not (req.renderer or _read("output.dlna_renderer")):
         raise HTTPException(status_code=409, detail="No DLNA renderer selected")
+    if req.hqplayer is not None:
+        # The picker lists every HQPlayer found or added; the tapped one
+        # becomes THE HQPlayer this node drives — its address is the
+        # selection, exactly as a renderer's record is for DLNA.
+        host = str(req.hqplayer.get("host") or "").strip()
+        if not host:
+            raise HTTPException(status_code=400, detail="hqplayer.host is required")
+        port = req.hqplayer.get("port") or 4321
+        try:
+            port = int(port)
+        except (TypeError, ValueError):
+            raise HTTPException(status_code=400, detail=f"hqplayer.port is not a port: {port!r}")
+        _apply_hqplayer_address(host, port)
     if req.stream_quality is not None:
         if req.stream_quality not in ("lossless", "opus_192", "opus_96"):
             raise HTTPException(status_code=400,
@@ -1977,7 +2009,8 @@ def put_output_prefs(req: OutputPrefs) -> Dict[str, Any]:
     # exactly the "current track plays out, change applies from the next
     # one" behavior. Re-activate only when the output identity changed.
     if not (req.type is not None or req.device_id is not None
-            or req.exclusive is not None or req.renderer is not None):
+            or req.exclusive is not None or req.renderer is not None
+            or req.hqplayer is not None):
         return get_output_prefs()
 
     otype = _read("output.type")

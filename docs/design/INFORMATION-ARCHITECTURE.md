@@ -106,12 +106,15 @@ collapses back to mini-player bar.
 
 A **bottom-up sheet** with a vertical list of entries:
 
-- HQPlayer (status, host, port, quick-access to DSP)
+- HQPlayer (status of the selected HQPlayer, quick-access to DSP; the
+  connection itself is chosen in Audio output)
 - Audio output (`#more/output`) — the Output picker (HARDWARE-TIERS
-  §2.6): HQPlayer, local devices via the built-in engine
+  §2.6): every HQPlayer the network scan found or the owner added (one
+  entry each), local devices via the built-in engine
   (WASAPI / ASIO / CoreAudio; listed only where the backend runs
-  natively) with an exclusive-mode toggle, DLNA renderers (auto-scan on
-  open + add-by-IP), and "This device" (browser playback). The drawer
+  natively) with an exclusive-mode toggle, DLNA renderers, and "This
+  device" (browser playback); one scan on open + Rescan, and one "Add
+  device by address" for HQPlayers and renderers alike. The drawer
   row's hint shows the active output's label from the SSE `output` field.
   Browser-renderer semantics: the tab that taps "This device" becomes
   the renderer (its tap doubles as the autoplay-unlock gesture); a

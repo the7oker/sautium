@@ -275,7 +275,16 @@ See:
   so there is no mount mode. Only an Embedded box has a library of its
   own; a Desktop reads this node's folder and is never synced. No path
   mapping of a moved disk: Rescan prunes the local rows, the sync adds the
-  copy, the UUID keeps the analysis.
+  copy, the UUID keeps the analysis. Since 2026-09-29 `hqp_endpoints` is
+  also the registry of every HQPlayer the owner picked (`hqp_library.
+  register`, a Desktop included): the Output picker lists each one found
+  by the network scan (HQPlayer's own `<discover/>` datagram on UDP 4321,
+  sent unicast in the same sweep as the DLNA M-SEARCH — broadcast dies at
+  the docker bridge) or added by address (one "Add device by address" for
+  HQPlayers and renderers, HQPlayer probed first), and tapping one makes
+  it the HQPlayer the node drives. This machine's aliases (`localhost`,
+  `host.docker.internal`, its LAN address) are one HQPlayer
+  (`address_key`); there is no connection editor.
 
 ---
 

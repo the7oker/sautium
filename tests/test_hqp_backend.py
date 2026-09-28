@@ -178,7 +178,7 @@ def fake(monkeypatch):
     import hqp_library
     monkeypatch.setattr(hqp_library, "request_sync", lambda host, port: None)
     # ...and its endpoint row: this HQPlayer's library is endpoint 7 here.
-    monkeypatch.setattr(hqp_library, "endpoint_id_for", lambda host, port: 7)
+    monkeypatch.setattr(hqp_library, "endpoint_by_address", lambda host, port: {"id": 7, "name": "fake"})
     # The output switch re-reads every slot's copies from the database
     # (playback.substitute); here every item opens as queued.
     from playback import substitute

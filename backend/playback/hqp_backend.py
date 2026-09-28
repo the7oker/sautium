@@ -491,7 +491,6 @@ class HqpBackend(PlayerBackend):
     one-way INTO HQPlayer's native playlist via the queue_* hooks."""
 
     id = "hqplayer"
-    label = "HQPlayer"
     # What the play-intent gate tells the user when reachable() says no.
     offline_hint = ("start HQPlayer, or pick another output in Settings → "
                     "Audio output (an HQPlayer Embedded in trial mode stops "
@@ -500,7 +499,7 @@ class HqpBackend(PlayerBackend):
     def __init__(self, emit, queue: CanonicalQueue):
         super().__init__(emit)
         self._queue = queue
-        self._endpoint_id: Optional[int] = None
+        self._endpoint_row: dict = {}
         self._wake = threading.Event()
         self._thread: Optional[threading.Thread] = None
         self._running = False
@@ -868,17 +867,27 @@ class HqpBackend(PlayerBackend):
 
     # -- canonical-queue mirror -------------------------------------------------------
 
+    def _endpoint(self) -> dict:
+        """The hqp_endpoints row of the HQPlayer this backend drives — empty
+        until the picker or the attach registered it (hqp_library.register).
+        Looked up on first use and kept once found: a row that lands while
+        the output is attached is found on the next ask."""
+        if not self._endpoint_row:
+            import hqp_library
+            self._endpoint_row = hqp_library.endpoint_by_address(
+                settings.hqplayer_host, settings.hqplayer_port) or {}
+        return self._endpoint_row
+
     @property
     def endpoint_id(self) -> Optional[int]:
-        """The hqp_endpoints id of the HQPlayer this backend drives — None
-        until its library was imported once (hqp_library.ensure_endpoint
-        mints the row). Looked up on first use and kept: an import that
-        lands while the output is attached is found on the next ask."""
-        if self._endpoint_id is None:
-            import hqp_library
-            self._endpoint_id = hqp_library.endpoint_id_for(settings.hqplayer_host,
-                                                            settings.hqplayer_port)
-        return self._endpoint_id
+        return self._endpoint().get("id")
+
+    @property
+    def label(self) -> str:
+        """Which HQPlayer, once there can be several: the name the picker
+        registered it under (HQPlayer's own — the machine's for a Desktop)."""
+        name = self._endpoint().get("name")
+        return f"HQPlayer · {name}" if name else "HQPlayer"
 
     def _uri_for(self, item: QueueItem) -> str:
         """Playable HQPlayer URI for a queue item — an owned file by

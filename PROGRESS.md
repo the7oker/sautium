@@ -356,6 +356,18 @@ implementation details live in the code, DB and git history.
 - **Path translation**: Container `/music/...` → Windows `E:/Music/...` before
   sending to HQPlayer. Both sides see the same files through different mount
   points.
+- **HQPlayers are found, not typed (2026-09-29).** HQPlayer answers its own
+  discovery datagram — `<discover/>` on UDP 4321, what HQPlayer Client
+  broadcasts — with its name and product; sent unicast it crosses the
+  docker bridge like the DLNA sweep's M-SEARCH, so the Output picker's scan
+  asks every LAN address for both in one pass and lists each HQPlayer as its
+  own entry beside the renderers. Tapping one makes it the HQPlayer the
+  node drives (the address rides with the selection, as a renderer's record
+  does); "Add device by address" is one entry for both kinds, HQPlayer
+  probed first (a box that is both — HQPlayer OS is a renderer too — is
+  driven as the HQPlayer). The connection editor is gone. `hqp_endpoints`
+  became the registry of every HQPlayer the owner picked (a Desktop's row is
+  a device, never a library); this machine's aliases are one HQPlayer.
 - **Where HQPlayer runs is read off its address (2026-09-28; a setting for
   one day before that).** An HQPlayer on this machine — loopback, the Docker
   host, one of our own addresses — is handed `file://` URIs at the stored

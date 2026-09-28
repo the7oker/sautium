@@ -106,6 +106,12 @@ def get_state() -> Dict[str, Any]:
         "media_url_host": hqp_media_host(),
         "media_url_port": settings.media_proxy_port,
     }
+    # The row the Output picker registered for this HQPlayer — its name
+    # is what the screen calls it, its id what Settings › Library keys on.
+    import hqp_library
+    ep = hqp_library.endpoint_by_address(settings.hqplayer_host, settings.hqplayer_port)
+    response["endpoint_id"] = ep["id"] if ep else None
+    response["name"] = ep["name"] if ep else None
 
     try:
         with _hqp_status_lock:

@@ -177,9 +177,9 @@ def get_outputs(rescan: bool = False):
 
     outputs = [{
         "type": "hqplayer",
-        "available": _hqp_configured(),
-        "host": _read("hqplayer.host") or app_settings.hqplayer_host,
-        "port": _read("hqplayer.port") or app_settings.hqplayer_port,
+        "available": True,
+        "configured": _hqp_configured(),
+        "hqplayers": _hqplayer_entries(),
     }]
     devices = local_devices.list_devices()
     if devices:
@@ -253,6 +253,74 @@ def _dlna_pins() -> dict[str, dict]:
     return {r["udn"]: r for r in (_read("output.dlna_pinned") or [])}
 
 
+# -- HQPlayer discovery -----------------------------------------------------------
+#
+# HQPlayer answers its own discovery datagram (hqp_library.discover) on the
+# control port, so the sweep that asks every LAN address for a renderer asks
+# it for an HQPlayer in the same breath. The last scan's snapshot, like the
+# renderers'; the HQPlayers the owner chose or added are rows in
+# hqp_endpoints (hqp_library.register) and are listed whether or not the box
+# is on — configuration, like a pinned renderer.
+_hqp_discovered: dict[tuple, dict] = {}
+
+
+def _hqp_key(host: str, port: int) -> tuple:
+    import hqp_library
+    return hqp_library.address_key(host, port)
+
+
+def _hqplayer_entries() -> list:
+    """Every HQPlayer the picker can offer: the registered rows, what the
+    last scan found, and the configured address itself (kept listed like
+    the active renderer, so the selection stays visible while its box is
+    off). A registered row keeps its own address as the one to dial — on a
+    Docker node that is host.docker.internal for a Desktop the scan sees at
+    the LAN address."""
+    import hqp_library
+    from auth_hmac import is_own_address
+    from config import settings as app_settings
+    from routers.settings import _read
+    entries: dict[tuple, dict] = {}
+    for r in _db_query("""
+        SELECT e.id, e.name, e.host, e.port, e.product, e.library_hash IS NOT NULL AS synced,
+               (SELECT count(*) FROM album_variants av JOIN hqp_library_files f ON f.album_variant_id = av.id
+                 WHERE av.hqp_endpoint_id = e.id) AS files
+          FROM hqp_endpoints e WHERE e.host IS NOT NULL ORDER BY e.id"""):
+        entries[_hqp_key(r["host"], r["port"])] = {
+            "endpoint_id": r["id"], "name": r["name"], "host": r["host"], "port": int(r["port"]),
+            "product": r["product"],
+            "embedded": hqp_library.is_embedded(r["product"]) if r["product"] else None,
+            "here": is_own_address(r["host"]), "known": True, "seen": False,
+            "synced": bool(r["synced"]), "files": int(r["files"] or 0), "configured": False}
+    for (host, port), d in _hqp_discovered.items():
+        key = _hqp_key(host, port)
+        e = entries.get(key)
+        if e is None:
+            entries[key] = {"endpoint_id": d.get("endpoint_id"), "name": d["name"], "host": host, "port": port,
+                            "product": d["product"], "embedded": hqp_library.is_embedded(d["product"]),
+                            "here": key[0] == "here", "known": False, "seen": True,
+                            "synced": False, "files": 0, "configured": False}
+        else:
+            e["seen"] = True
+            e["name"] = e["name"] or d["name"]
+            if not e["product"]:
+                e["product"] = d["product"]
+                e["embedded"] = hqp_library.is_embedded(d["product"])
+    host = _read("hqplayer.host") or app_settings.hqplayer_host
+    if host:
+        port = int(_read("hqplayer.port") or app_settings.hqplayer_port or 4321)
+        key = _hqp_key(host, port)
+        e = entries.get(key)
+        if e is None:
+            entries[key] = {"endpoint_id": None, "name": None, "host": host, "port": port, "product": None,
+                            "embedded": None, "here": key[0] == "here", "known": False, "seen": False,
+                            "synced": False, "files": 0, "configured": True}
+        else:
+            e["configured"] = True
+    return sorted(entries.values(),
+                  key=lambda e: (not e["configured"], not e["here"], (e["name"] or e["host"]).lower()))
+
+
 def remember_location(record: dict, seen: dict | None = None) -> dict:
     """Fold a freshly seen address into a renderer's history.
 
@@ -299,8 +367,8 @@ def _dlna_save_pins(pins: dict[str, dict]) -> None:
     _write("output.dlna_pinned", list(pins.values()))
 
 
-class DlnaAddRequest(BaseModel):
-    url: str   # renderer IP — or a full device-description URL
+class AddDeviceRequest(BaseModel):
+    address: str   # an IP or host name (an HQPlayer's control port is 4321, a renderer's SSDP 1900) — or a full device-description URL
 
 
 def _rehost(location: str, ip: str) -> str:
@@ -380,6 +448,7 @@ async def _dlna_describe(location: str) -> dict:
         "location": location,
         "name": renderer.friendly_name,
         "model": renderer.model_name,
+        "manufacturer": renderer.manufacturer,
     }
 
 
@@ -460,67 +529,88 @@ def _lan_subnets() -> list:
     return nets
 
 
-async def _unicast_sweep(found: dict) -> None:
+async def _unicast_sweep(found: dict, found_hqp: dict) -> None:
     """M-SEARCH every address of the LAN, one at a time rather than by
-    multicast.
+    multicast — and ask each for an HQPlayer in the same breath (the
+    `<discover/>` datagram HQPlayer Client broadcasts; hqp_library.discover).
 
     Multicast is the protocol's answer and it is the wrong one here: it dies
     at the docker bridge, so a containerised node has never discovered a
     single renderer and pinning by hand was the only way in. Unicast crosses
     the bridge like any other UDP, which the router answering this sweep from
-    inside the container proves. 254 datagrams is a rounding error next to a
-    user waiting for a device list."""
+    inside the container proves. 254 addresses, two datagrams each, is a
+    rounding error next to a user waiting for a device list."""
+    import hqp_library
     loop = asyncio.get_running_loop()
 
-    def _probe(ip: str) -> list:
+    def _probe(ip: str) -> tuple:
+        import select as sel
         import socket as sock
         msg = ("M-SEARCH * HTTP/1.1\r\nHOST: 239.255.255.250:1900\r\n"
                'MAN: "ssdp:discover"\r\nMX: 1\r\n'
                'ST: urn:schemas-upnp-org:device:MediaRenderer:1\r\n\r\n').encode()
         s = sock.socket(sock.AF_INET, sock.SOCK_DGRAM)
-        s.settimeout(0.4)
-        hits = []
+        d = sock.socket(sock.AF_INET, sock.SOCK_DGRAM)
+        hits, hqp = [], None
         try:
             s.sendto(msg, (ip, 1900))
-            deadline = time.time() + 1.5
+            d.sendto(b"<discover/>\n", (ip, 4321))
+            started = time.time()
+            deadline = started + 1.5
+            asked_again = False
             while time.time() < deadline:
-                try:
-                    data, addr = s.recvfrom(4096)
-                except OSError:
-                    continue
-                if addr[0] != ip:
-                    continue
-                loc = usn = ""
-                for line in data.decode(errors="replace").splitlines():
-                    low = line.lower()
-                    if low.startswith("location:"):
-                        loc = line.split(":", 1)[1].strip()
-                    elif low.startswith("usn:"):
-                        usn = line.split(":", 1)[1].strip()
-                if loc:
-                    hits.append((usn or loc, _rehost(loc, ip)))
+                ready, _, _ = sel.select([s, d], [], [], max(0.0, min(deadline, started + 0.6) - time.time()) or 0.05)
+                if hqp is None and not asked_again and time.time() >= started + 0.6:
+                    # one datagram can go missing (seen live: the Pi answered one
+                    # sweep and not the next); a second ask halfway costs nothing
+                    d.sendto(b"<discover/>\n", (ip, 4321))
+                    asked_again = True
+                for r in ready:
+                    try:
+                        data, addr = r.recvfrom(4096)
+                    except OSError:
+                        continue
+                    if addr[0] != ip:
+                        continue
+                    if r is d:
+                        hqp = hqp_library.parse_discover(data) or hqp
+                        continue
+                    loc = usn = ""
+                    for line in data.decode(errors="replace").splitlines():
+                        low = line.lower()
+                        if low.startswith("location:"):
+                            loc = line.split(":", 1)[1].strip()
+                        elif low.startswith("usn:"):
+                            usn = line.split(":", 1)[1].strip()
+                    if loc:
+                        hits.append((usn or loc, _rehost(loc, ip)))
         except OSError:
             pass
         finally:
             s.close()
-        return hits
+            d.close()
+        return hits, hqp
 
     targets = ([str(h) for net in _lan_subnets() for h in net.hosts()]
                + await asyncio.to_thread(_tailnet_peers))
     with ThreadPoolExecutor(max_workers=64) as pool:
-        for hits in await asyncio.gather(
-                *(loop.run_in_executor(pool, _probe, ip) for ip in targets)):
-            for usn, loc in hits:
-                found.setdefault(usn, loc)
+        results = await asyncio.gather(
+            *(loop.run_in_executor(pool, _probe, ip) for ip in targets))
+    for ip, (hits, hqp) in zip(targets, results):
+        for usn, loc in hits:
+            found.setdefault(usn, loc)
+        if hqp is not None:
+            found_hqp[ip] = hqp
 
 
-_dlna_scan_task: Optional[asyncio.Task] = None
+_scan_task: Optional[asyncio.Task] = None
 
 
-@router.post("/outputs/dlna/scan")
-async def dlna_scan():
-    """Find MediaRenderer devices. One scan at a time; concurrent callers wait
-    for the one already running instead of starting another.
+@router.post("/outputs/scan")
+async def scan_outputs():
+    """Find what plays on the network — MediaRenderer devices and HQPlayers.
+    One scan at a time; concurrent callers wait for the one already
+    running instead of starting another.
 
     Opening the Output picker starts a scan by itself, so pressing Rescan
     while that is in flight used to run two. Both end by replacing the
@@ -530,23 +620,26 @@ async def dlna_scan():
     was done" was: the two racing, not the device being slow. Two concurrent
     sweeps of the whole subnet also make discovery less reliable, not more,
     since a dozing phone renderer answers one M-SEARCH and drops the other."""
-    global _dlna_scan_task
-    if _dlna_scan_task is None or _dlna_scan_task.done():
-        _dlna_scan_task = asyncio.create_task(_dlna_scan_run())
+    global _scan_task
+    if _scan_task is None or _scan_task.done():
+        _scan_task = asyncio.create_task(_scan_run())
     # Not the task's owner, so a client that walks away cannot cancel the scan
     # everyone else is waiting on.
-    return await asyncio.shield(_dlna_scan_task)
+    return await asyncio.shield(_scan_task)
 
 
-async def _dlna_scan_run():
+async def _scan_run():
     """SSDP multicast from every local interface, then a unicast sweep for the
-    containerised case where multicast cannot leave the bridge."""
+    containerised case where multicast cannot leave the bridge — the sweep
+    finds the HQPlayers too."""
+    import hqp_library
     try:
         from async_upnp_client.search import async_search
     except ImportError:
         raise HTTPException(status_code=501, detail="async-upnp-client not installed")
 
     found: dict[str, str] = {}
+    found_hqp: dict[str, dict] = {}
 
     async def _on_response(headers) -> None:
         loc = headers.get("location") or headers.get("LOCATION")
@@ -568,7 +661,37 @@ async def _dlna_scan_run():
         except Exception as e:
             logger.debug("SSDP search on %s failed: %s", source, e)
 
-    await _unicast_sweep(found)
+    await _unicast_sweep(found, found_hqp)
+
+    hqps: dict[tuple, dict] = {}
+    for host, facts in found_hqp.items():
+        entry = {"name": facts["name"], "product": facts["product"], "endpoint_id": None}
+        try:
+            resolved = await asyncio.to_thread(hqp_library.resolve_endpoint, host, 4321)
+        except OSError as e:
+            # answers discovery, refuses control: an Embedded past its trial
+            # half-hour looks exactly like this — listed, not registered
+            logger.info("HQPlayer %r at %s answers discovery but not control: %s",
+                        facts["name"], host, e)
+        else:
+            ep, how, _facts = resolved
+            configured = _configured_hqp()
+            if ep is not None:
+                # the row learns what the box says about itself (a row minted
+                # from an address alone takes HQPlayer's own name); the same
+                # library at a new address (a DHCP lease later) has its row
+                # follow it — a match by an alias of its own address keeps
+                # the address it was registered at
+                ep = await asyncio.to_thread(hqp_library.ensure_endpoint, host, 4321, resolved)
+            elif configured and _hqp_key(host, 4321) == _hqp_key(*configured):
+                # the configured address is the owner's choice: its row comes
+                # on first contact, at the address the owner gave
+                ep = await asyncio.to_thread(hqp_library.register, *configured)
+            if ep is not None:
+                entry["endpoint_id"] = ep["id"]
+        hqps[(host, 4321)] = entry
+    _hqp_discovered.clear()
+    _hqp_discovered.update(hqps)
 
     renderers = []
     fresh: dict[str, dict] = {}
@@ -579,6 +702,8 @@ async def _dlna_scan_run():
         except Exception as e:
             logger.debug("DLNA describe failed for %s: %s", loc, e)
             continue
+        if _is_hqplayer_renderer(info, found_hqp):
+            continue
         # A scan finds the device where it is TODAY; whatever we knew about
         # where it used to be stays attached to it, so a phone found on the
         # LAN keeps its tunnel address as a fallback and vice versa.
@@ -587,23 +712,77 @@ async def _dlna_scan_run():
         renderers.append(info)
     _dlna_discovered.clear()
     _dlna_discovered.update(fresh)
-    return {"renderers": renderers}
+    return {"renderers": renderers, "hqplayers": _hqplayer_entries()}
 
 
-@router.post("/outputs/dlna/add")
-async def dlna_add(req: DlnaAddRequest):
-    """Register a renderer by IP (unicast M-SEARCH resolves its description
-    URL — the path multicast-less deployments use) or by a full
-    device-description URL."""
-    raw = req.url.strip()
+def _configured_hqp() -> Optional[tuple]:
+    from config import settings as app_settings
+    from routers.settings import _read
+    host = _read("hqplayer.host") or app_settings.hqplayer_host
+    if not host:
+        return None
+    return host, int(_read("hqplayer.port") or app_settings.hqplayer_port or 4321)
+
+
+def _is_hqplayer_renderer(info: dict, found_hqp: dict) -> bool:
+    """HQPlayer OS is a UPnP renderer as well (manufacturer Signalyst); a box
+    that answered as an HQPlayer is driven as one — its renderer would be the
+    same DSP with no queue and no filter control, so it is not offered twice."""
+    from urllib.parse import urlparse
+    if not (info.get("manufacturer") or "").lower().startswith("signalyst"):
+        return False
+    return urlparse(info.get("location") or "").hostname in found_hqp
+
+
+def _probe_hqplayer(host: str, port: int) -> Optional[dict]:
+    """The HQPlayer at an address, registered as one the owner added — or
+    None. The discovery datagram first; GetInfo over TCP where a firewall
+    passes only that."""
+    import hqp_library
+    facts = hqp_library.discover(host, port)
+    if facts is None:
+        try:
+            info = hqp_library.get_info(host, port)
+        except OSError:
+            return None
+        if not info.get("product"):
+            return None
+        facts = {"name": info["name"], "product": info["product"]}
+    entry = {"kind": "hqplayer", "host": host, "port": port, "name": facts["name"],
+             "product": facts["product"], "embedded": hqp_library.is_embedded(facts["product"]),
+             "endpoint_id": None}
+    ep = hqp_library.register(host, port)
+    if ep is not None:
+        entry["endpoint_id"], entry["name"] = ep["id"], ep["name"]
+    return entry
+
+
+@router.post("/outputs/add")
+async def add_device(req: AddDeviceRequest):
+    """Register whatever plays at an address, for what the scan cannot see
+    (another subnet, a box that was off): an HQPlayer before a DLNA
+    renderer, since a box that is both — HQPlayer OS is a renderer too —
+    is driven as the HQPlayer. A bare IP or name is probed on both ports; a
+    full device-description URL is a renderer by definition (unicast
+    M-SEARCH resolves one from an IP otherwise)."""
+    raw = req.address.strip()
+    if not raw:
+        raise HTTPException(status_code=400, detail="an address is required")
     if not raw.lower().startswith(("http://", "https://")):
-        ip = raw.split("/")[0].split(":")[0]
-        location = await asyncio.to_thread(_msearch_location, ip)
+        host, port = raw.split("/")[0], 4321
+        if host.count(":") == 1:
+            host, given = host.rsplit(":", 1)
+            port = int(given) if given.isdigit() else 4321
+        hqp = await asyncio.to_thread(_probe_hqplayer, host, port)
+        if hqp is not None:
+            return hqp
+        location = await asyncio.to_thread(_msearch_location, host)
         if not location:
             raise HTTPException(
                 status_code=502,
-                detail=f"no UPnP device answered at {ip}:1900 — is the "
-                       "renderer's network mode (e.g. AK Connect) enabled?")
+                detail=f"nothing answered at {host} — no HQPlayer on port {port} (is "
+                       "'Allow control from network' on?) and no UPnP device on 1900 "
+                       "(is the renderer's network mode, e.g. AK Connect, enabled?)")
         raw = location
     try:
         info = await _dlna_describe(raw)
@@ -618,7 +797,7 @@ async def dlna_add(req: DlnaAddRequest):
     info = remember_location(prior, info) if prior else remember_location(info)
     pins[info["udn"]] = info
     _dlna_save_pins(pins)
-    return info
+    return {"kind": "dlna", **info}
 
 
 class DlnaRemoveRequest(BaseModel):
