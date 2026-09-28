@@ -59,8 +59,7 @@ class FileSink:
     canonical entities are the same either way, so a copy at the HQPlayer
     lands on the tracks a local scan minted — one album, one more variant."""
     location: str = "local"
-    hqp_endpoint_host: Optional[str] = None
-    hqp_endpoint_port: Optional[int] = None
+    hqp_endpoint_id: Optional[int] = None
 
     @property
     def files_table(self) -> str:
@@ -104,9 +103,8 @@ def _classify_dirs(entries, sink: FileSink):
                    f.raw_album_artist, f.raw_artist, f.{path_col} AS file_path
             FROM album_variants av JOIN {sink.files_table} f ON f.album_variant_id = av.id
             WHERE av.directory_path = ANY(%(d)s)
-              AND av.hqp_endpoint_host IS NOT DISTINCT FROM %(h)s
-              AND av.hqp_endpoint_port IS NOT DISTINCT FROM %(p)s
-        """, {"d": list(by_dir), "h": sink.hqp_endpoint_host, "p": sink.hqp_endpoint_port}):
+              AND av.hqp_endpoint_id IS NOT DISTINCT FROM %(e)s
+        """, {"d": list(by_dir), "e": sink.hqp_endpoint_id}):
             existing[r["d"]].append(r)
     dir_albums = {}
     for hd, mds in by_dir.items():
@@ -271,8 +269,7 @@ def import_metadata(entries: List[Tuple[str, Dict[str, Any]]], *, sink: FileSink
                         variant = db.query(AlbumVariant).filter(
                             AlbumVariant.directory_path == dir_path,
                             AlbumVariant.album_id == album.id,
-                            AlbumVariant.hqp_endpoint_host == sink.hqp_endpoint_host,
-                            AlbumVariant.hqp_endpoint_port == sink.hqp_endpoint_port,
+                            AlbumVariant.hqp_endpoint_id == sink.hqp_endpoint_id,
                         ).first()
                         if not variant:
                             variant = AlbumVariant(
@@ -283,8 +280,7 @@ def import_metadata(entries: List[Tuple[str, Dict[str, Any]]], *, sink: FileSink
                                 bit_depth=metadata.get("bit_depth"),
                                 is_lossless=metadata.get("is_lossless", True),
                                 location=sink.location,
-                                hqp_endpoint_host=sink.hqp_endpoint_host,
-                                hqp_endpoint_port=sink.hqp_endpoint_port,
+                                hqp_endpoint_id=sink.hqp_endpoint_id,
                             )
                             db.add(variant)
                             db.flush()

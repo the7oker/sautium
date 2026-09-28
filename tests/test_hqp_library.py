@@ -27,6 +27,7 @@ PG = dict(host=os.environ.get("SAUTIUM_TEST_PGHOST", "postgres"),
           password=os.environ.get("SAUTIUM_TEST_PGPASSWORD", "supervisor"))
 DBNAME = "sautium_hqp_library_test"
 PI = ("192.168.1.253", 4321)
+PI_INFO = {"name": "HQPlayerEmbedded", "product": "Signalyst HQPlayer Embedded"}
 
 PRODIGY_DIR = "Electronic/Big beat/The Prodigy/[Vinyl]/Albums/Music for the Jilted Generation"
 
@@ -107,7 +108,7 @@ def db(dsn, monkeypatch):
     conn = psycopg2.connect(dsn, options="-c timezone=UTC")
     conn.autocommit = True
     with conn.cursor() as cur:
-        cur.execute("TRUNCATE tracks, albums, artists, genres, user_settings CASCADE")
+        cur.execute("TRUNCATE tracks, albums, artists, genres, user_settings, hqp_endpoints CASCADE")
     yield conn
     conn.close()
     pool.closeall()
@@ -138,22 +139,24 @@ def test_sync_lands_on_the_local_scan_and_is_idempotent(db, monkeypatch):
 
     monkeypatch.setattr(hqp_library, "library_hash", lambda h, p: "h1")
     monkeypatch.setattr(hqp_library, "fetch_library", lambda h, p: LIBRARY)
+    monkeypatch.setattr(hqp_library, "get_info", lambda h, p: PI_INFO)
     stats = hqp_library.sync(*PI)
     assert (stats["library_files"], stats["unsupported"], stats["known"], stats["added"], stats["errors"]) == (4, 1, 0, 3, 0)
+    # the library got its row, named after what HQPlayer calls itself
+    assert _one(db, "SELECT name || '@' || host || ':' || port || '#' || library_hash FROM hqp_endpoints") == \
+        f"HQPlayerEmbedded@{PI[0]}:{PI[1]}#h1"
     # The Prodigy copy at the HQPlayer is a second VARIANT of the album a local
     # scan minted — no twin tracks, no twin album; Bonobo is new and HQP-only.
     assert _one(db, "SELECT count(*) FROM tracks") == 3
     assert _one(db, "SELECT count(*) FROM albums") == 2
     assert _one(db, """SELECT count(*) FROM album_variants av JOIN albums al ON al.id = av.album_id
                        WHERE al.title = 'Music for the Jilted Generation'""") == 2
-    assert _one(db, """SELECT count(*) FROM album_variants
-                       WHERE location = 'hqplayer' AND hqp_endpoint_host = %s AND hqp_endpoint_port = %s""", *PI) == 2
+    assert _one(db, """SELECT count(*) FROM album_variants av JOIN hqp_endpoints e ON e.id = av.hqp_endpoint_id
+                       WHERE av.location = 'hqplayer' AND e.host = %s AND e.port = %s""", *PI) == 2
     assert _one(db, "SELECT count(*) FROM hqp_library_files") == 3
     assert _one(db, """SELECT count(*) FROM hqp_library_files f JOIN tracks t ON t.id = f.track_id
                        JOIN media_files mf ON mf.track_id = t.id""") == 2
     assert _one(db, "SELECT sample_rate FROM album_variants WHERE directory_path = 'E:/Music/Bonobo/Days to Come/CD2'") == 48000
-    assert _one(db, "SELECT value #>> '{}' FROM user_settings WHERE key = %s",
-                hqp_library.HASH_SETTING.format(host=PI[0], port=PI[1])) == "h1"
 
     # Same hash: nothing to do. Forced: everything is known, nothing added.
     assert hqp_library.sync(*PI)["unchanged"] is True
@@ -209,6 +212,7 @@ def test_credit_duplicates_fold_across_copies_never_within_one(db, dsn, monkeypa
                      (local_dir, scan("Kong", 3, 236.0))], sink=LOCAL_FILES, stats={})
     monkeypatch.setattr(hqp_library, "library_hash", lambda h, p: "h2")
     monkeypatch.setattr(hqp_library, "fetch_library", lambda h, p: CREDITS)
+    monkeypatch.setattr(hqp_library, "get_info", lambda h, p: PI_INFO)
     hqp_library.sync(*PI)
     assert _one(db, "SELECT count(*) FROM tracks") == 5          # Eyesdown x2, Kong, Canto x2
     assert _one(db, "SELECT count(*) FROM tracks WHERE title LIKE %s", "Eyesdown%") == 2
@@ -221,3 +225,61 @@ def test_credit_duplicates_fold_across_copies_never_within_one(db, dsn, monkeypa
                        WHERE t.title = 'Eyesdown (feat. Adreya Triana)'""") == 1
     assert _one(db, "SELECT count(*) FROM tracks WHERE title LIKE %s", "Canto della terra%") == 2
     assert content.fold_credit_duplicates(dry_run=False)["merged"] == 0
+
+
+def test_the_same_library_at_a_new_address_keeps_its_row(db, monkeypatch):
+    """A DHCP lease later the Pi answers from another address with the same
+    library: the endpoint row moves, nothing is imported twice. A different
+    HQPlayer that inherits the old address is a new library."""
+    monkeypatch.setattr(hqp_library, "library_hash", lambda h, p: "h1")
+    monkeypatch.setattr(hqp_library, "fetch_library", lambda h, p: PRODIGY_ONLY)
+    monkeypatch.setattr(hqp_library, "get_info", lambda h, p: PI_INFO)
+    assert hqp_library.sync(*PI)["added"] == 2
+    moved = ("192.168.1.77", 4321)
+    again = hqp_library.sync(*moved)
+    assert (again["unchanged"], again.get("added", 0)) == (True, 0)
+    assert _one(db, "SELECT count(*) FROM hqp_endpoints") == 1
+    assert _one(db, "SELECT host FROM hqp_endpoints") == moved[0]
+    assert _one(db, "SELECT count(*) FROM hqp_library_files") == 2
+    # a Desktop that took the old address: its own library, its own row; the
+    # Pi's row keeps its files and loses only the address
+    monkeypatch.setattr(hqp_library, "library_hash", lambda h, p: "h9")
+    monkeypatch.setattr(hqp_library, "get_info", lambda h, p: {"name": "VH11", "product": "Signalyst HQPlayer Desktop"})
+    monkeypatch.setattr(hqp_library, "fetch_library", lambda h, p: EMPTY)
+    hqp_library.sync(*moved)
+    assert _one(db, "SELECT count(*) FROM hqp_endpoints") == 2
+    assert _one(db, "SELECT host FROM hqp_endpoints WHERE hqp_name = 'HQPlayerEmbedded'") is None
+    assert _one(db, "SELECT name FROM hqp_endpoints WHERE host = %s", moved[0]) == "VH11"
+    assert _one(db, "SELECT count(*) FROM hqp_library_files") == 2
+    # the endpoint that went home is forgotten by its row, address or not
+    gone = hqp_library.forget_endpoint_id(_one(db, "SELECT id FROM hqp_endpoints WHERE hqp_name = 'HQPlayerEmbedded'"))
+    assert gone["forgotten"] == 2
+    assert _one(db, "SELECT count(*) FROM hqp_endpoints") == 1
+    assert _one(db, "SELECT count(*) FROM hqp_library_files") == 0
+
+
+def test_own_files_seen_through_the_hqplayer_are_not_copies(db, monkeypatch):
+    """The Pi mounts this node's library at /smb: the files it lists there
+    are the rows media_files already holds, reachable by path — never a
+    second variant. Only what is not here (its own disk) is imported."""
+    from scanner import LOCAL_FILES, import_metadata
+    local_dir = f"E:/Music/{PRODIGY_DIR}"
+    import_metadata([(local_dir, _local_scan("Intro", 1)), (local_dir, _local_scan("Break & Enter", 2))],
+                    sink=LOCAL_FILES, stats={})
+    with db.cursor() as cur:
+        for key, value in (("hqplayer.host", PI[0]), ("hqplayer.port", PI[1]), ("hqplayer.library_root", "/smb")):
+            cur.execute("INSERT INTO user_settings (key, value) VALUES (%s, to_jsonb(%s::text)) "
+                        "ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value", (key, str(value)))
+    import config
+    monkeypatch.setattr(type(config.settings), "library_db_root", lambda self: "E:/Music")
+    monkeypatch.setattr(hqp_library, "library_hash", lambda h, p: "h3")
+    monkeypatch.setattr(hqp_library, "fetch_library", lambda h, p: LIBRARY)
+    monkeypatch.setattr(hqp_library, "get_info", lambda h, p: PI_INFO)
+    stats = hqp_library.sync(*PI)
+    # "Intro" under /smb is our own file (same path under the mount) and stays
+    # out; "Break & Enter" is named differently there, so it is a copy like
+    # Bonobo on the Pi's own disk
+    assert (stats["shared"], stats["added"], stats["known"]) == (1, 2, 0)
+    assert _one(db, "SELECT count(*) FROM hqp_library_files") == 2
+    assert _one(db, "SELECT count(*) FROM hqp_library_files WHERE hqp_path LIKE %s", "%Intro.flac") == 0
+    assert _one(db, "SELECT library_root || ' -> ' || library_root_local FROM hqp_endpoints") == "/smb -> E:/Music"

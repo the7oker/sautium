@@ -432,6 +432,25 @@ class TrackMbid(Base):
 # Physical entities (SERIAL PKs, per-user)
 # ───────────────────────────────────────────────────────────────────────────
 
+class HqpEndpoint(Base):
+    """An HQPlayer whose own library this node holds as album variants —
+    identified by this row, never by its address: the same library at a
+    new host:port is recognised by the library hash the last sync saw."""
+    __tablename__ = "hqp_endpoints"
+
+    id = Column(Integer, primary_key=True)
+    name = Column(Text, nullable=False)
+    host = Column(Text)
+    port = Column(Integer)
+    product = Column(Text)
+    hqp_name = Column(Text)
+    library_hash = Column(Text)
+    library_root = Column(Text)
+    library_root_local = Column(Text)
+    first_seen_at = Column(DateTime(timezone=True), server_default=func.now())
+    last_synced_at = Column(DateTime(timezone=True))
+
+
 class AlbumVariant(Base):
     """A physical edition of an album (CD, Vinyl, Hi-Res, etc.)."""
     __tablename__ = "album_variants"
@@ -447,8 +466,7 @@ class AlbumVariant(Base):
     # held by the HQPlayer at (host, port): the same album copied to an
     # HQPlayer Embedded box is one more variant, like a CD rip next to a vinyl rip.
     location = Column(VariantLocationEnum, nullable=False, default="local", server_default="local")
-    hqp_endpoint_host = Column(Text)
-    hqp_endpoint_port = Column(Integer)
+    hqp_endpoint_id = Column(Integer, ForeignKey("hqp_endpoints.id", ondelete="CASCADE"))
 
     sample_rate = Column(Integer)
     bit_depth = Column(Integer)
@@ -464,7 +482,7 @@ class AlbumVariant(Base):
 
     __table_args__ = (
         Index("idx_album_variants_album_id", "album_id"),
-        UniqueConstraint("directory_path", "album_id", "hqp_endpoint_host", "hqp_endpoint_port",
+        UniqueConstraint("directory_path", "album_id", "hqp_endpoint_id",
                          name="album_variants_dir_album_endpoint_key",
                          postgresql_nulls_not_distinct=True),
     )

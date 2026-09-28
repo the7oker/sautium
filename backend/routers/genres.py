@@ -178,14 +178,14 @@ def get_genre(genre_id: str) -> dict:
     #
     # Tier ordering, weighting and the 5-row cap all happen in SQL.
     # `candidates` holds one row per track: the copy the ACTIVE output
-    # opens natively (params hqp_host / hqp_port — a local rip plays by
+    # opens natively (param hqp_id — a local rip plays by
     # its file, a copy held at the HQPlayer by track uuid, `location`),
     # while the tag is read over EVERY copy of the track (a song on an
     # album and on a best-of is one track — the copy that plays is picked
     # for the output, not for the tag); the outer SELECT applies the
     # two-tier order and LIMITs to top 5, so we never haul tens of
     # thousands of rows into Python for a genre with a large catalogue.
-    hqp_host, hqp_port = active_hqp_endpoint()
+    hqp_id = active_hqp_endpoint()
     genre["popular_tracks"] = db_query(f"""
         WITH g AS (
             SELECT id,
@@ -230,12 +230,12 @@ def get_genre(genre_id: str) -> dict:
             JOIN (
                 SELECT mf.id, mf.track_id, mf.duration_seconds,
                        mf.is_lossless, mf.sample_rate, mf.bit_depth,
-                       av.location, av.hqp_endpoint_host, av.hqp_endpoint_port, av.album_id
+                       av.location, av.hqp_endpoint_id, av.album_id
                 FROM media_files mf JOIN album_variants av ON av.id = mf.album_variant_id
                 UNION ALL
                 SELECT hf.id, hf.track_id, hf.duration_seconds,
                        hf.is_lossless, hf.sample_rate, hf.bit_depth,
-                       av.location, av.hqp_endpoint_host, av.hqp_endpoint_port, av.album_id
+                       av.location, av.hqp_endpoint_id, av.album_id
                 FROM hqp_library_files hf JOIN album_variants av ON av.id = hf.album_variant_id
             ) f ON f.track_id = t.id
             JOIN albums al ON al.id = f.album_id
@@ -256,7 +256,7 @@ def get_genre(genre_id: str) -> dict:
             local_plays * relevance_pct DESC,
             title
         LIMIT 5
-    """, {"id": genre_id, "hqp_host": hqp_host, "hqp_port": hqp_port})
+    """, {"id": genre_id, "hqp_id": hqp_id})
     # The credit line names ListenBrainz only where its numbers actually
     # ranked something on this page.
     genre["listenbrainz_used"] = any(t.pop("from_listenbrainz", False)

@@ -279,8 +279,8 @@ def get_album(
                 detail="variant not found for this album",
             )
 
-    hqp_host, hqp_port = active_hqp_endpoint()
-    params = {"id": album_id, "vid": variant_id, "hqp_host": hqp_host, "hqp_port": hqp_port}
+    hqp_id = active_hqp_endpoint()
+    params = {"id": album_id, "vid": variant_id, "hqp_id": hqp_id}
 
     album = db_query_one("""
         SELECT al.id::text AS id,
@@ -391,12 +391,11 @@ def get_album(
         WITH here AS (
             SELECT 1 FROM album_variants
             WHERE album_id = %(id)s::uuid AND location = 'hqplayer'
-              AND hqp_endpoint_host = %(hqp_host)s AND hqp_endpoint_port = %(hqp_port)s
+              AND hqp_endpoint_id = %(hqp_id)s
             LIMIT 1)
         SELECT av.id AS variant_id,
                av.location::text AS location,
-               av.hqp_endpoint_host,
-               av.hqp_endpoint_port,
+               av.hqp_endpoint_id,
                av.sample_rate,
                av.bit_depth,
                av.is_lossless,
@@ -414,8 +413,7 @@ def get_album(
         WHERE av.album_id = %(id)s::uuid
           AND CASE WHEN EXISTS (SELECT 1 FROM here)
                    THEN av.location = 'hqplayer'
-                        AND av.hqp_endpoint_host = %(hqp_host)s
-                        AND av.hqp_endpoint_port = %(hqp_port)s
+                        AND av.hqp_endpoint_id = %(hqp_id)s
                    ELSE av.location = 'local' END
         ORDER BY {best_rip_order('av')}
     """, params)

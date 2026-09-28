@@ -651,19 +651,32 @@ def _hqp_library_state() -> Dict[str, Any]:
     import hqp_library
     host, port = _hqp_endpoint()
     state = hqp_library.job_state()
+    # Every library this node holds copies from, the configured HQPlayer's
+    # first — a friend's streamer that went home still has its rows here
+    # until the owner forgets them (an address is not an identity).
+    rows = db_query("""
+        SELECT e.id, e.name, e.host, e.port, e.product, e.library_hash IS NOT NULL AS synced,
+               e.last_synced_at,
+               (SELECT count(*) FROM album_variants av JOIN hqp_library_files f ON f.album_variant_id = av.id
+                 WHERE av.hqp_endpoint_id = e.id) AS files,
+               (SELECT count(DISTINCT av.album_id) FROM album_variants av WHERE av.hqp_endpoint_id = e.id) AS albums
+        FROM hqp_endpoints e
+        ORDER BY (e.host = %(h)s AND e.port = %(p)s) DESC, e.id
+    """, {"h": host, "p": port})
+    endpoints = [{"id": r["id"], "name": r["name"], "address": f"{r['host']}:{r['port']}" if r["host"] else None,
+                  "product": r["product"], "synced": bool(r["synced"]),
+                  "last_synced_at": r["last_synced_at"].isoformat() if r["last_synced_at"] else None,
+                  "files": int(r["files"] or 0), "albums": int(r["albums"] or 0),
+                  "configured": bool(host and r["host"] == host and r["port"] == port)} for r in rows]
+    configured = next((e for e in endpoints if e["configured"]), None)
     if host:
-        counts = db_query_one("""
-            SELECT count(f.id) AS files, count(DISTINCT av.album_id) AS albums
-            FROM album_variants av
-            LEFT JOIN hqp_library_files f ON f.album_variant_id = av.id
-            WHERE av.location = 'hqplayer'
-              AND av.hqp_endpoint_host = %(h)s AND av.hqp_endpoint_port = %(p)s
-        """, {"h": host, "p": port}) or {}
-        state.update(endpoint=f"{host}:{port}", files=int(counts.get("files") or 0),
-                     albums=int(counts.get("albums") or 0),
-                     synced=_read(hqp_library.HASH_SETTING.format(host=host, port=port)) is not None)
+        state.update(endpoint=f"{host}:{port}", name=configured["name"] if configured else None,
+                     files=configured["files"] if configured else 0,
+                     albums=configured["albums"] if configured else 0,
+                     synced=bool(configured and configured["synced"]))
     else:
-        state.update(endpoint=None, files=0, albums=0, synced=False)
+        state.update(endpoint=None, name=None, files=0, albums=0, synced=False)
+    state["endpoints"] = endpoints
     return state
 
 
@@ -2271,16 +2284,25 @@ def trigger_hqp_sync(force: bool = False, confirm: bool = False) -> Dict[str, An
     host, port = _hqp_endpoint()
     if not host:
         raise HTTPException(status_code=400, detail="No HQPlayer endpoint is configured")
-    if not confirm and _read(hqp_library.HASH_SETTING.format(host=host, port=port)) is None:
+    if not confirm:
         try:
-            entries, counts = hqp_library.parse_library(hqp_library.fetch_library(host, port))
+            ep, how, facts = hqp_library.resolve_endpoint(host, port)
         except OSError as e:
             raise HTTPException(status_code=503, detail=f"HQPlayer at {host}:{port} is not answering: {e}")
-        known = hqp_library._known_paths(host, port)
-        return {"success": False, "preview": {
-            "endpoint": f"{host}:{port}", "files": counts["files"],
-            "unsupported": counts["unsupported"], "known": len(known),
-            "new": sum(1 for _, md in entries if md["file_path"] not in known)}}
+        if ep is None or ep["library_hash"] is None:
+            # a library never imported: the decision names the HQPlayer and
+            # the size of what it would bring (its own files excluded)
+            entries, counts = hqp_library.parse_library(hqp_library.fetch_library(host, port))
+            known = hqp_library._known_paths(ep["id"]) if ep else {}
+            fresh = [md["file_path"] for _, md in entries if md["file_path"] not in known]
+            probe = dict(ep or {}, **dict(zip(("library_root", "library_root_local"),
+                                             hqp_library._mount_mapping(host, port))))
+            shared = hqp_library._shared_paths(probe, fresh) if probe.get("library_root") or not ep else set()
+            return {"success": False, "preview": {
+                "endpoint": f"{host}:{port}", "name": facts["hqp_name"] or host,
+                "product": facts["product"], "files": counts["files"],
+                "unsupported": counts["unsupported"], "known": len(known),
+                "shared": len(shared), "new": len(fresh) - len(shared)}}
     if not hqp_library.start_job(host, port, force=force):
         raise HTTPException(status_code=409, detail="An HQPlayer library job is already running")
     return {"success": True}
@@ -2303,3 +2325,19 @@ def trigger_hqp_rescan() -> Dict[str, Any]:
 def cancel_hqp_sync() -> Dict[str, Any]:
     import hqp_library
     return {"success": hqp_library.cancel_job()}
+
+
+@router.post("/library/hqp-forget")
+def forget_hqp_library(endpoint_id: int) -> Dict[str, Any]:
+    """The explicit, confirmed goodbye to one HQPlayer's library — a
+    streamer that went home, a box retired: everything its library alone
+    put here goes (hqp_library.forget_endpoint_id), the analysis and the
+    listens of its tracks stay as they do for a vanished local rip."""
+    import hqp_library
+    if hqp_library.job_state()["running"]:
+        raise HTTPException(status_code=409, detail="An HQPlayer library job is already running")
+    if not db_query_one("SELECT 1 AS ok FROM hqp_endpoints WHERE id = %(e)s", {"e": endpoint_id}):
+        raise HTTPException(status_code=404, detail="No such HQPlayer library")
+    stats = hqp_library.forget_endpoint_id(endpoint_id)
+    notify_library_subscribers()
+    return {"success": True, **stats}

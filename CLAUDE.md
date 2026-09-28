@@ -250,7 +250,11 @@ See:
 - **A copy at the HQPlayer is a VARIANT, and "owned" means `owned_files`.**
   Since 2026-09-27 an album's copy in the library of the HQPlayer the node
   drives (a disk on an Embedded box, a mounted share, a hi-res subset copied
-  there) is an `album_variants` row with `location = 'hqplayer'` + endpoint,
+  there) is an `album_variants` row with `location = 'hqplayer'` +
+  `hqp_endpoint_id` → `hqp_endpoints` (the library's identity: a name, what
+  HQPlayer reports about itself, the library hash the last sync saw — the
+  same library at a new address keeps its row, an address is never an
+  identity; forgotten only by the owner's explicit "Forget this library"),
   its files in `hqp_library_files` (media_files' mirror without bytes: no
   analysis source, no CUE slices, no cover extraction; the canon stamps
   `recording_mbid` on both). It reaches the catalogue through
@@ -260,8 +264,12 @@ See:
   `media_files` alone — and per-file things (analysis, `file://` paths
   HQPlayer opens) stay where the bytes are. When that endpoint is the active
   output its variants outrank local ones; elsewhere an HQP-only track
-  streams like a phantom. No path mapping of a moved disk: Rescan prunes the
-  local rows, the sync adds the copy, the UUID keeps the analysis.
+  streams like a phantom. A file the HQPlayer reaches by path in THIS
+  node's own library (its mount of our root — `library_root` ↔ the node's
+  root — or a Desktop on this very disk) is never imported as a copy: the
+  sync skips it, the rescan forgets one imported before the mapping was
+  known. No path mapping of a moved disk: Rescan prunes the local rows,
+  the sync adds the copy, the UUID keeps the analysis.
 
 ---
 

@@ -323,11 +323,26 @@ assistant's prompt; a held album bound to its release group carries the
 Cover Art Archive front (`caa.fill_held_album_covers`, after a sync and on
 every discography reconcile).
 
+Since 2026-09-28 the library has an identity of its own — an `hqp_endpoints`
+row (the owner's name for it, seeded from `<GetInfo/>`; what HQPlayer
+reports about itself; the `<LibraryGetHash/>` the last complete sync saw;
+where it mounts this node's library) and `album_variants.hqp_endpoint_id`
+points at it: the same library answering from a new address after a DHCP
+lease is recognised by its hash and the row moves; a different HQPlayer
+that inherits the address (name or product differ) is a new library and the
+old row keeps its files without an address. A friend's streamer brought over
+is one more row, imported through the same previewed first import, and goes
+with Settings › "Forget this library" (`forget_endpoint_id`) — never on its
+own. This node's own files seen through the HQPlayer — its mount of our
+library (`/smb/…` = `E:/Music/…`), or a Desktop on this very disk — are not
+copies: the sync leaves them out (`stats.shared`) and the rescan forgets any
+imported before the mapping was known; they play there by path.
 Settings › Library shows the endpoint's section: the FIRST import is a
-previewed decision (which HQPlayer, how many files, how many new — an
-HQPlayer Desktop scanning this same library would bring every album in as a
-copy at one tap, which happened once on 2026-09-27 and was reverted with
-`python -m hqp_library --forget-endpoint`); after it the output re-checks
+previewed decision (which HQPlayer, how many files, how many new, how many
+of them this node's own — an HQPlayer Desktop scanning this same library
+would otherwise bring every album in as a copy at one tap, which happened
+once on 2026-09-27 and was reverted with `python -m hqp_library
+--forget-endpoint`); after it the output re-checks
 `<LibraryGetHash/>` whenever it attaches or a restarted HQPlayer comes back
 and syncs only when the hash moved. A sync never removes rows; "Rescan"
 (confirmed) forgets what the library no longer lists and refuses an empty

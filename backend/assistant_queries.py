@@ -56,7 +56,7 @@ _ALB_TRACKS = """
 
 # One row per track with both layers resolved: the owned file that would play
 # (if any — a local rip or a copy in the HQPlayer's library, the one the active
-# output opens natively first: params hqp_host / hqp_port) and the tracklist
+# output opens natively first: param hqp_id) and the tracklist
 # row that carries a not-owned track's album, length and cover.
 _OWN_LATERAL = f"""
     LEFT JOIN LATERAL (
@@ -64,13 +64,13 @@ _OWN_LATERAL = f"""
                f.is_lossless, f.track_number, f.disc_number, f.sample_rate, f.bit_depth,
                f.file_path, al.id AS album_id, al.title AS album, al.release_year
         FROM (
-            SELECT mf.id, av.location, av.hqp_endpoint_host, av.hqp_endpoint_port,
+            SELECT mf.id, av.location, av.hqp_endpoint_id,
                    mf.album_variant_id, mf.cover_id, mf.duration_seconds, mf.is_lossless,
                    mf.track_number, mf.disc_number, mf.sample_rate, mf.bit_depth, mf.file_path
             FROM media_files mf JOIN album_variants av ON av.id = mf.album_variant_id
             WHERE mf.track_id = t.id
             UNION ALL
-            SELECT hf.id, av.location, av.hqp_endpoint_host, av.hqp_endpoint_port,
+            SELECT hf.id, av.location, av.hqp_endpoint_id,
                    hf.album_variant_id, NULL::uuid, hf.duration_seconds, hf.is_lossless,
                    hf.track_number, hf.disc_number, hf.sample_rate, hf.bit_depth, hf.hqp_path
             FROM hqp_library_files hf JOIN album_variants av ON av.id = hf.album_variant_id
@@ -81,17 +81,21 @@ _OWN_LATERAL = f"""
         ORDER BY {owned_rank('f')}, {best_rip_order('f')} LIMIT 1) own ON true"""
 
 
-def active_hqp_endpoint(q) -> tuple:
-    """(host, port) of the HQPlayer that is the active output, else (None,
-    None) — from the saved settings, so the MCP server (its own process,
-    no playback manager) ranks copies the way the backend does."""
+def active_hqp_endpoint(q):
+    """The hqp_endpoints id of the HQPlayer that is the active output, else
+    None — from the saved settings, so the MCP server (its own process, no
+    playback manager) ranks copies the way the backend does."""
     rows = q("SELECT key, value FROM user_settings WHERE key IN "
              "('output.type', 'hqplayer.host', 'hqplayer.port')")
     kv = {r["key"]: r["value"] for r in rows}
     if kv.get("output.type") != "hqplayer":
-        return None, None
+        return None
     host = kv.get("hqplayer.host") or os.environ.get("HQPLAYER_HOST") or None
-    return host, int(kv.get("hqplayer.port") or os.environ.get("HQPLAYER_PORT") or 4321)
+    if not host:
+        return None
+    port = int(kv.get("hqplayer.port") or os.environ.get("HQPLAYER_PORT") or 4321)
+    rows = q("SELECT id FROM hqp_endpoints WHERE host = %(h)s AND port = %(p)s", {"h": host, "p": port})
+    return rows[0]["id"] if rows else None
 
 _PH_LATERAL = """
     LEFT JOIN LATERAL (
@@ -134,9 +138,9 @@ def search_tracks(q, query: str = "", artist: str = "", album: str = "",
     """Metadata search over the catalog. The first term given IS the candidate
     source (query > artist > album > genre); the rest narrow it. corpus='owned'
     keeps only tracks with a file, 'all' includes the streamable ones."""
-    hqp_host, hqp_port = active_hqp_endpoint(q)
+    hqp_id = active_hqp_endpoint(q)
     params: dict = {"limit": min(limit, 50), "pool": max(limit * 4, 40),
-                    "owned_only": corpus != "all", "hqp_host": hqp_host, "hqp_port": hqp_port}
+                    "owned_only": corpus != "all", "hqp_id": hqp_id}
     ctes: list[str] = []
     cand: list[str] = []
     filters: list[str] = []
@@ -256,7 +260,7 @@ def track_info(q, track_uuid: str):
         {_PH_LATERAL}
         WHERE t.id = %(track_id)s::uuid
     """, {"track_id": track_uuid,
-          **dict(zip(("hqp_host", "hqp_port"), active_hqp_endpoint(q)))})
+          "hqp_id": active_hqp_endpoint(q)})
     return rows[0] if rows else None
 
 

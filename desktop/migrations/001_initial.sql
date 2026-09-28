@@ -304,6 +304,29 @@ CREATE TABLE IF NOT EXISTS album_genres (
 -- Physical entities (SERIAL PKs, per-user)
 -- ============================================================
 
+-- An HQPlayer whose own library this node holds as album variants, identified
+-- by this row and not by its address (2026-09-28): a friend's streamer or the
+-- Pi after a DHCP lease comes back at another host:port and is the same
+-- library — the <LibraryGetHash/> the last complete sync saw recognises it.
+-- library_root / library_root_local say where that HQPlayer mounts THIS
+-- node's library (path mode), so files it already reaches by path are never
+-- imported as copies.
+CREATE TABLE IF NOT EXISTS hqp_endpoints (
+    id SERIAL PRIMARY KEY,
+    name TEXT NOT NULL,                     -- the owner's label; HQPlayer's own name at first sight
+    host TEXT,                              -- the address last seen answering; NULL once another HQPlayer took it
+    port INTEGER,
+    product TEXT,                           -- <GetInfo product="…"/>
+    hqp_name TEXT,                          -- <GetInfo name="…"/>
+    library_hash TEXT,                      -- <LibraryGetHash/> the last COMPLETE sync saw; NULL = never imported
+    library_root TEXT,
+    library_root_local TEXT,
+    first_seen_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    last_synced_at TIMESTAMPTZ,
+    CONSTRAINT chk_hqp_endpoints_address CHECK ((host IS NULL) = (port IS NULL))
+);
+CREATE UNIQUE INDEX IF NOT EXISTS uq_hqp_endpoints_address ON hqp_endpoints(host, port) WHERE host IS NOT NULL;
+
 CREATE TABLE IF NOT EXISTS album_variants (
     id SERIAL PRIMARY KEY,
     album_id UUID NOT NULL REFERENCES albums(id) ON DELETE CASCADE ON UPDATE CASCADE,
@@ -315,13 +338,12 @@ CREATE TABLE IF NOT EXISTS album_variants (
     bit_depth INTEGER,
     is_lossless BOOLEAN DEFAULT TRUE,
     -- 'local' = media_files rows on this node's disk; 'hqplayer' = rows in
-    -- hqp_library_files held by the HQPlayer at (host, port) — the same album
-    -- copied to an HQPlayer Embedded box is one more variant, like a CD rip
-    -- next to a vinyl rip. When that endpoint is the active output its
-    -- variants outrank the local ones (sql_queries.best_rip_order).
+    -- hqp_library_files held by the HQPlayer hqp_endpoint_id names — the same
+    -- album copied to an HQPlayer Embedded box is one more variant, like a CD
+    -- rip next to a vinyl rip. When that endpoint is the active output its
+    -- variants outrank the local ones (sql_queries.owned_rank).
     location variant_location NOT NULL DEFAULT 'local',
-    hqp_endpoint_host TEXT,
-    hqp_endpoint_port INTEGER,
+    hqp_endpoint_id INTEGER REFERENCES hqp_endpoints(id) ON DELETE CASCADE,
     -- Denormalised MAX(media_files.file_modified_at) across this variant's
     -- files. Maintained by FOR EACH STATEMENT triggers on media_files so the
     -- Home "New in my collection" feed sorts by an indexed column instead of a
@@ -333,11 +355,13 @@ CREATE TABLE IF NOT EXISTS album_variants (
     -- HQPlayer on this very box scans, so the endpoint is part of the key;
     -- local rows carry NULLs and NULLS NOT DISTINCT keeps them unique.
     CONSTRAINT album_variants_dir_album_endpoint_key
-        UNIQUE NULLS NOT DISTINCT (directory_path, album_id, hqp_endpoint_host, hqp_endpoint_port),
+        UNIQUE NULLS NOT DISTINCT (directory_path, album_id, hqp_endpoint_id),
     CONSTRAINT chk_album_variants_location CHECK (
-        (location = 'local' AND hqp_endpoint_host IS NULL AND hqp_endpoint_port IS NULL)
-        OR (location = 'hqplayer' AND hqp_endpoint_host IS NOT NULL AND hqp_endpoint_port IS NOT NULL))
+        (location = 'local' AND hqp_endpoint_id IS NULL)
+        OR (location = 'hqplayer' AND hqp_endpoint_id IS NOT NULL))
 );
+CREATE INDEX IF NOT EXISTS idx_album_variants_hqp_endpoint
+    ON album_variants(hqp_endpoint_id) WHERE hqp_endpoint_id IS NOT NULL;
 
 -- Phantom-album tracklists (Phantom Discovery, Stage B). Owned albums keep
 -- the authoritative albums → album_variants → media_files → tracks chain;

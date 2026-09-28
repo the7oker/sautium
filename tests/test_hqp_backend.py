@@ -179,6 +179,8 @@ def fake(monkeypatch):
     # these tests have none.
     import hqp_library
     monkeypatch.setattr(hqp_library, "request_sync", lambda host, port: None)
+    # ...and its endpoint row: this HQPlayer's library is endpoint 7 here.
+    monkeypatch.setattr(hqp_library, "endpoint_id_for", lambda host, port: 7)
     yield f
     hb.reset_all_clients()
     f.close()
@@ -190,11 +192,10 @@ def _item(path, mfid, fmt="FLAC", **span):
                      title=f"Song {mfid}", artist="Artist", album="Album")
 
 
-def _held(path, n, port):
+def _held(path, n, endpoint_id=7):
     """A file the HQPlayer holds in its own library (hqp_library.sync)."""
     return QueueItem(track_id=f"held-{n}", media_file_id=None,
-                     source={"kind": "hqp", "path": path, "format": "FLAC",
-                             "host": "127.0.0.1", "port": port},
+                     source={"kind": "hqp", "path": path, "format": "FLAC", "endpoint": endpoint_id},
                      title=f"Held {n}", artist="Artist", album="Album")
 
 
@@ -396,7 +397,7 @@ def test_held_files_mirror_as_their_own_paths_and_drift_clean(fake):
     back as the same slot through HQPlayer's escaping of brackets."""
     mgr = PlaybackManager()
     mgr.queue.replace([_item("E:/Music/A/01.flac", 1),
-                       _held("/media/FLASH/Bonobo [FLAC]/01. Intro.flac", 1, fake.port)])
+                       _held("/media/FLASH/Bonobo [FLAC]/01. Intro.flac", 1)])
     b = _attach(mgr)
     try:
         assert fake.playlist == ["file:///E:/Music/A/01.flac",
@@ -422,10 +423,10 @@ def test_adopt_resolves_a_held_file_by_its_path(fake, monkeypatch):
     fake.track = 1
     monkeypatch.setattr(queue_mod, "items_for_file_spans", lambda spans: {})
 
-    def held(paths, host, port):
+    def held(paths, endpoint_id):
         assert paths == ["/media/FLASH/Bonobo [FLAC]/01. Intro.flac"]
-        assert (host, port) == ("127.0.0.1", fake.port)
-        return {paths[0]: _held(paths[0], 7, port)}
+        assert endpoint_id == 7
+        return {paths[0]: _held(paths[0], 7)}
     monkeypatch.setattr(queue_mod, "items_for_hqp_paths", held)
     mgr = PlaybackManager()
     b = _attach(mgr)

@@ -85,10 +85,11 @@ _DB_SCHEMA = """\
 ## Physical entities (SERIAL primary keys)
 
 **album_variants** (id SERIAL, album_id UUID, directory_path, sample_rate, bit_depth, is_lossless BOOLEAN, \
-location ENUM 'local'|'hqplayer', hqp_endpoint_host, hqp_endpoint_port)
+location ENUM 'local'|'hqplayer', hqp_endpoint_id → hqp_endpoints)
   - A physical edition of an album (CD, Vinyl, Hi-Res, etc.). `location` says where its files live: \
 this node's disk, or an HQPlayer's own library (a copy the HQPlayer holds — one more edition, like a \
-CD rip next to a vinyl rip).
+CD rip next to a vinyl rip). **hqp_endpoints** (id, name, host, port) names that HQPlayer — a friend's \
+streamer, the box in the living room; the same library at a new address keeps its row.
 
 **media_files** (id SERIAL, track_id UUID, album_variant_id INT, file_path, file_format, \
 is_lossless BOOLEAN, sample_rate, bit_depth, bitrate, channels, duration_seconds, \

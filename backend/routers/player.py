@@ -2418,7 +2418,7 @@ def _album_media_rows(album_id: str) -> list[dict]:
     another HQPlayer is left out: this output cannot open it, and an album
     with nothing else streams like a phantom. Rows carry `id` + `location`
     (queue.items_for_owned_rows) and the track UUID."""
-    hqp_host, hqp_port = active_hqp_endpoint()
+    hqp_id = active_hqp_endpoint()
     return _db_query(f"""
         SELECT id, location, track_id, title, track_number, artist, album FROM (
             SELECT DISTINCT ON (f.track_id)
@@ -2431,11 +2431,11 @@ def _album_media_rows(album_id: str) -> list[dict]:
             JOIN artists a ON a.id = ta.artist_id
             JOIN albums al ON al.id = %(id)s::uuid
             WHERE f.location = 'local'
-               OR (f.hqp_endpoint_host = %(hqp_host)s AND f.hqp_endpoint_port = %(hqp_port)s)
+               OR f.hqp_endpoint_id = %(hqp_id)s
             ORDER BY f.track_id, {owned_rank('f')}, {best_rip_order('f')}
         ) picked
         ORDER BY disc_number NULLS FIRST, track_number
-    """, {"id": album_id, "hqp_host": hqp_host, "hqp_port": hqp_port})
+    """, {"id": album_id, "hqp_id": hqp_id})
 
 
 def _push_segment(segments: list, kind: str, items: list) -> None:
@@ -2462,14 +2462,14 @@ def _entity_segments(refs: list) -> tuple[list, list]:
         else:
             # The track's best copy the ACTIVE output can open (local, or
             # held at the HQPlayer that is the output); none → a stream.
-            hqp_host, hqp_port = active_hqp_endpoint()
+            hqp_id = active_hqp_endpoint()
             row = _db_query_one(f"""
                 SELECT f.id, f.location::text AS location FROM ({TRACK_FILES}) f
                 WHERE f.location = 'local'
-                   OR (f.hqp_endpoint_host = %(hqp_host)s AND f.hqp_endpoint_port = %(hqp_port)s)
+                   OR f.hqp_endpoint_id = %(hqp_id)s
                 ORDER BY {owned_rank('f')}, {best_rip_order('f')}
                 LIMIT 1
-            """, {"tid": ref.id, "hqp_host": hqp_host, "hqp_port": hqp_port})
+            """, {"tid": ref.id, "hqp_id": hqp_id})
             if row:
                 kind, items = "owned", [row]
             else:
@@ -2664,7 +2664,7 @@ def _session_segments(session_id: str) -> tuple[list, int]:
     slot's album_id keeps the edition the listener pressed — and a slot
     whose album no longer lists the track (or never had one) gets the
     display edition."""
-    hqp_host, hqp_port = active_hqp_endpoint()
+    hqp_id = active_hqp_endpoint()
     rows = _db_query(f"""
         SELECT st.track_id::text AS track_id, st.album_id::text AS album_id,
                f.id AS file_id, f.location::text AS location
@@ -2672,24 +2672,24 @@ def _session_segments(session_id: str) -> tuple[list, int]:
         LEFT JOIN LATERAL (
             SELECT f.id, f.location
             FROM (
-                SELECT mf.id, av.location, av.hqp_endpoint_host, av.hqp_endpoint_port,
+                SELECT mf.id, av.location, av.hqp_endpoint_id,
                        mf.is_lossless, mf.sample_rate, mf.bit_depth,
                        (mf.id = st.media_file_id) AS own
                 FROM media_files mf JOIN album_variants av ON av.id = mf.album_variant_id
                 WHERE mf.track_id = st.track_id
                 UNION ALL
-                SELECT hf.id, av.location, av.hqp_endpoint_host, av.hqp_endpoint_port,
+                SELECT hf.id, av.location, av.hqp_endpoint_id,
                        hf.is_lossless, hf.sample_rate, hf.bit_depth, false
                 FROM hqp_library_files hf JOIN album_variants av ON av.id = hf.album_variant_id
                 WHERE hf.track_id = st.track_id
             ) f
             WHERE f.location = 'local'
-               OR (f.hqp_endpoint_host = %(hqp_host)s AND f.hqp_endpoint_port = %(hqp_port)s)
+               OR f.hqp_endpoint_id = %(hqp_id)s
             ORDER BY {owned_rank('f')}, f.own DESC, {best_rip_order('f')}
             LIMIT 1) f ON true
         WHERE st.session_id = %(id)s::uuid
         ORDER BY st.position
-    """, {"id": session_id, "hqp_host": hqp_host, "hqp_port": hqp_port})
+    """, {"id": session_id, "hqp_id": hqp_id})
 
     by_album: dict[Optional[str], list[str]] = {}
     for r in rows:

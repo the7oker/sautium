@@ -13549,18 +13549,35 @@
     const hqpProgress   = String(hl.progress || '');
     const hqpRunning    = !!hl.running && !_terminalRe.test(hqpProgress);
     const hqpCancelling = hqpRunning && !!hl.cancel_requested;
-    const hqpLibrary = !hl.endpoint ? '' : `
+    // Every library this node holds copies from is listed with its own
+    // "Forget": a friend's streamer that went home keeps its rows here
+    // until the owner says so — an address is not an identity, so the row
+    // outlives the DHCP lease and the visit alike.
+    const otherLibraries = (hl.endpoints || []).filter(e => !e.configured);
+    const otherRows = otherLibraries.map(e => `
+        <div class="form-row stacked" data-hqp-endpoint="${escapeProfileHtml(String(e.id))}">
+          <div class="row-stack">
+            <span class="row-stack-label">${escapeProfileHtml(e.name || '')}</span>
+            <span class="row-stack-value" style="font-family:var(--font-mono);letter-spacing:0.02em;">${escapeProfileHtml(e.address || 'not answering')}</span>
+          </div>
+          <div class="row-stack-sub">${escapeProfileHtml(fmtNum(e.files))} files in ${escapeProfileHtml(fmtNum(e.albums))} albums held there.</div>
+          <div class="btn-row single"><button class="btn btn-secondary" data-action="hqp-forget" data-endpoint-id="${escapeProfileHtml(String(e.id))}" data-endpoint-name="${escapeProfileHtml(e.name || '')}">Forget this library</button></div>
+        </div>`).join('');
+    const configuredId = ((hl.endpoints || []).find(e => e.configured) || {}).id;
+    const hqpLibrary = !hl.endpoint && !otherLibraries.length ? '' : `
       <div class="profile-group-label">HQPlayer library</div>
       <div class="form-group">
+        ${!hl.endpoint ? '' : `
         <div class="form-row stacked">
           <div class="row-stack">
-            <span class="row-stack-label">HQPlayer</span>
+            <span class="row-stack-label">${escapeProfileHtml(hl.name || 'HQPlayer')}</span>
             <span class="row-stack-value" style="font-family:var(--font-mono);letter-spacing:0.02em;">${escapeProfileHtml(hl.endpoint)}</span>
           </div>
           <div class="row-stack-sub">${hl.synced
             ? `${escapeProfileHtml(fmtNum(hl.files))} files in ${escapeProfileHtml(fmtNum(hl.albums))} albums held by this HQPlayer. Its library is re-checked whenever the output attaches.`
-            : 'Not imported yet. Albums this HQPlayer holds in its own library become variants of yours: the copy plays natively there and streams elsewhere.'}</div>
-        </div>
+            : 'Not imported yet. Albums this HQPlayer holds in its own library become variants of yours: the copy plays natively there and streams elsewhere. Your own files it reaches by path are never imported as copies.'}</div>
+        </div>`}
+        ${otherRows}
       </div>
       ${hqpRunning ? `
       <div class="btn-row single">
@@ -13568,10 +13585,12 @@
       </div>
       <div class="action-progress" data-progress-for="hqp">${escapeProfileHtml(hqpCancelling ? 'Finishing the current file…' : hqpProgress)}</div>
       ` : `
+      ${!hl.endpoint ? '' : `
       <div class="btn-row${hl.synced ? '' : ' single'}">
         <button class="btn btn-primary" data-action="hqp-sync">${hl.synced ? 'Sync HQPlayer library' : 'Import HQPlayer library'}</button>
         ${hl.synced ? '<button class="btn btn-secondary" data-action="hqp-rescan">Rescan</button>' : ''}
       </div>
+      ${hl.synced && configuredId != null ? `<div class="btn-row single"><button class="btn btn-secondary" data-action="hqp-forget" data-endpoint-id="${escapeProfileHtml(String(configuredId))}" data-endpoint-name="${escapeProfileHtml(hl.name || '')}">Forget this library</button></div>` : ''}`}
       ${hqpProgress ? `<div class="action-progress" data-progress-for="hqp">${escapeProfileHtml(hqpProgress)}</div>` : ''}
       `}
     `;
@@ -13626,9 +13645,10 @@
       const body = r.ok ? await r.json() : null;
       if (body && body.preview) {
         const p = body.preview;
+        const shared = p.shared ? ` ${escapeProfileHtml(fmtNum(p.shared))} are your own files it reaches by path and stay out.` : '';
         const ok = await window.confirmDestructive({
           title: 'Import the HQPlayer library?',
-          message: `<b>${escapeProfileHtml(p.endpoint)}</b> lists ${escapeProfileHtml(fmtNum(p.files))} files, ${escapeProfileHtml(fmtNum(p.new))} of them new here. Albums it holds become variants of yours; an HQPlayer that scans this same library would bring every album in as a copy.`,
+          message: `<b>${escapeProfileHtml(p.name || p.endpoint)}</b> (${escapeProfileHtml(p.endpoint)}) lists ${escapeProfileHtml(fmtNum(p.files))} files, ${escapeProfileHtml(fmtNum(p.new))} of them new here.${shared} Albums it holds become variants of yours.`,
           confirmText: 'Import',
         });
         if (!ok) return;
@@ -13637,6 +13657,20 @@
       render();
     });
     onAction('[data-cancel-hqp]',          async () => { await fetch('/api/settings/library/hqp-sync/cancel', { method: 'POST' }); render(); });
+    onAction('[data-action="hqp-forget"]', async (e) => {
+      const btn = e.currentTarget;
+      const id = btn.getAttribute('data-endpoint-id');
+      const name = btn.getAttribute('data-endpoint-name') || 'this HQPlayer';
+      const ok = await window.confirmDestructive({
+        title: `Forget the library of ${escapeProfileHtml(name)}?`,
+        message: 'Every album and track only its library put here goes. Analysis, listening history and your own files stay; an album stays wherever other files still hold it.',
+        confirmText: 'Forget',
+      });
+      if (!ok) return;
+      const r = await fetch('/api/settings/library/hqp-forget?endpoint_id=' + encodeURIComponent(id), { method: 'POST' });
+      if (!r.ok) window.notices.toast({ key: 'hqp-forget', text: 'Could not forget the library — a library job is running.' });
+      render();
+    });
     onAction('[data-action="hqp-rescan"]', async () => {
       const ok = await window.confirmDestructive({
         title: 'Rescan the HQPlayer library?',

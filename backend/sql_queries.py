@@ -54,29 +54,29 @@ def best_rip_order(alias: str) -> str:
 def owned_rank(alias: str, style: str = "psycopg") -> str:
     """ORDER BY term ahead of best_rip_order: the copy the active output
     plays natively first. A variant at the HQPlayer that IS the output
-    (params `hqp_host` / `hqp_port` — NULL when another output is active,
+    (param `hqp_id`, its hqp_endpoints id — NULL when another output is
+    active or that HQPlayer's library was never imported,
     playback.manager.active_hqp_endpoint) outranks the local files, which
     outrank copies at other HQPlayers (those play only as streams). The row
-    needs album_variants' location and endpoint columns (ALBUM_FILES).
+    needs album_variants' location and hqp_endpoint_id (ALBUM_FILES).
     `style` names the placeholder syntax: psycopg's %(name)s or
     SQLAlchemy's :name."""
-    h, p = ("%(hqp_host)s", "%(hqp_port)s") if style == "psycopg" else (":hqp_host", ":hqp_port")
+    e = "%(hqp_id)s" if style == "psycopg" else ":hqp_id"
     return (f"CASE WHEN {alias}.location = 'hqplayer' "
-            f"AND {alias}.hqp_endpoint_host = {h} "
-            f"AND {alias}.hqp_endpoint_port = {p} THEN 0 "
+            f"AND {alias}.hqp_endpoint_id = {e} THEN 0 "
             f"WHEN {alias}.location = 'local' THEN 1 ELSE 2 END")
 
 
 # One track's files (%(tid)s) from both places files live — the per-track
 # form of ALBUM_FILES below, for a play/queue by track uuid.
 TRACK_FILES = """
-    SELECT mf.id, av.location, av.hqp_endpoint_host, av.hqp_endpoint_port,
+    SELECT mf.id, av.location, av.hqp_endpoint_id,
            mf.is_lossless, mf.sample_rate, mf.bit_depth
     FROM media_files mf
     JOIN album_variants av ON av.id = mf.album_variant_id
     WHERE mf.track_id = %(tid)s::uuid
     UNION ALL
-    SELECT hf.id, av.location, av.hqp_endpoint_host, av.hqp_endpoint_port,
+    SELECT hf.id, av.location, av.hqp_endpoint_id,
            hf.is_lossless, hf.sample_rate, hf.bit_depth
     FROM hqp_library_files hf
     JOIN album_variants av ON av.id = hf.album_variant_id
@@ -88,7 +88,7 @@ TRACK_FILES = """
 # endpoint, so a picker can rank copies with owned_rank + best_rip_order.
 # `id` is the row's id IN ITS TABLE; read it with `location`.
 ALBUM_FILES = """
-    SELECT mf.id, av.location, av.hqp_endpoint_host, av.hqp_endpoint_port,
+    SELECT mf.id, av.location, av.hqp_endpoint_id,
            mf.track_id, mf.album_variant_id, mf.is_lossless, mf.sample_rate,
            mf.bit_depth, mf.duration_seconds, mf.disc_number, mf.track_number,
            mf.file_format, mf.file_path AS path
@@ -96,7 +96,7 @@ ALBUM_FILES = """
     JOIN album_variants av ON av.id = mf.album_variant_id
     WHERE av.album_id = %(id)s::uuid
     UNION ALL
-    SELECT hf.id, av.location, av.hqp_endpoint_host, av.hqp_endpoint_port,
+    SELECT hf.id, av.location, av.hqp_endpoint_id,
            hf.track_id, hf.album_variant_id, hf.is_lossless, hf.sample_rate,
            hf.bit_depth, hf.duration_seconds, hf.disc_number, hf.track_number,
            hf.file_format, hf.hqp_path

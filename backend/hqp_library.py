@@ -51,8 +51,6 @@ from uuid_utils import is_lossless
 
 logger = logging.getLogger(__name__)
 
-# user_settings key per endpoint: the library hash the last COMPLETE sync saw.
-HASH_SETTING = "hqp_library.hash:{host}:{port}"
 
 _CONNECT_TIMEOUT = 2.0
 _HASH_TIMEOUT = 10.0
@@ -81,6 +79,17 @@ def _command(host: str, port: int, xml: str, timeout: float) -> bytes:
                     f"HQPlayer at {host}:{port} closed the connection mid-answer")
             buf += chunk
     return bytes(buf)
+
+
+def get_info(host: str, port: int) -> Dict[str, str]:
+    """What HQPlayer says about itself: name (the machine's on Desktop, a
+    generic "HQPlayerEmbedded" on a box) and product."""
+    line = _command(host, port, "<GetInfo/>", _HASH_TIMEOUT).decode("utf-8", "replace")
+    out = {}
+    for k in ("name", "product"):
+        m = re.search(rf'\b{k}="([^"]*)"', line)
+        out[k] = m.group(1) if m else ""
+    return out
 
 
 def library_hash(host: str, port: int) -> str:
@@ -180,15 +189,135 @@ def parse_library(xml_text: str) -> Tuple[List[Entry], Dict[str, int]]:
     return entries, counts
 
 
-def _known_paths(host: str, port: int) -> Dict[str, int]:
+_ENDPOINT_COLS = ("id, name, host, port, product, hqp_name, library_hash, "
+                  "library_root, library_root_local, last_synced_at")
+
+
+def endpoint_by_address(host: str, port: int) -> Optional[Dict[str, Any]]:
+    rows = db_query(f"SELECT {_ENDPOINT_COLS} FROM hqp_endpoints WHERE host = %(h)s AND port = %(p)s",
+                    {"h": host, "p": port})
+    return dict(rows[0]) if rows else None
+
+
+def endpoint_id_for(host: Optional[str], port: Optional[int]) -> Optional[int]:
+    """The id of the endpoint answering at this address, None when its
+    library was never imported (no row) — the ranking callers' key."""
+    if not host:
+        return None
+    ep = endpoint_by_address(host, port)
+    return ep["id"] if ep else None
+
+
+def resolve_endpoint(host: str, port: int) -> Tuple[Optional[Dict[str, Any]], Optional[str], Dict[str, Any]]:
+    """Which library answers at this address: the row at the address, if the
+    HQPlayer there is still the one the row met (same name and product —
+    another box that inherited the address is another library); else the
+    row whose last complete sync saw this very library hash (the same
+    HQPlayer at a new address); else nothing yet. Returns (row | None, how:
+    'address' | 'library' | None, facts) — facts = what the HQPlayer
+    reported plus the hash, for ensure_endpoint to store. Reads only."""
+    info = get_info(host, port)
+    facts = {"hqp_name": info["name"], "product": info["product"],
+             "current_hash": library_hash(host, port)}
+    ep = endpoint_by_address(host, port)
+    if ep and (ep["hqp_name"] or info["name"]) == info["name"] \
+          and (ep["product"] or info["product"]) == info["product"]:
+        return ep, "address", facts
+    rows = db_query(f"SELECT {_ENDPOINT_COLS} FROM hqp_endpoints "
+                    "WHERE library_hash = %(h)s AND library_hash IS NOT NULL ORDER BY id",
+                    {"h": facts["current_hash"]})
+    if rows:
+        return dict(rows[0]), "library", facts
+    return None, None, facts
+
+
+def _mount_mapping(host: str, port: int) -> Tuple[Optional[str], Optional[str]]:
+    """Where the HQPlayer at this address mounts THIS node's library — the
+    saved endpoint's `hqplayer.library_root` (its view) and the node's own
+    root (ours), for the one HQPlayer the node drives; another endpoint
+    keeps what its row remembers."""
+    from config import settings as app_settings
+    from routers.settings import _read
+    if (host, int(port)) != (_read("hqplayer.host") or app_settings.hqplayer_host,
+                             int(_read("hqplayer.port") or app_settings.hqplayer_port or 4321)):
+        return None, None
+    root = (_read("hqplayer.library_root") or "").rstrip("/") or None
+    return root, (app_settings.library_db_root() if root else None)
+
+
+def ensure_endpoint(host: str, port: int) -> Dict[str, Any]:
+    """The endpoint row for the library at this address — moved here when
+    the same library answers from a new address, minted when it is new
+    (named after what HQPlayer calls itself), the address freed from a row
+    another HQPlayer left behind. Stores what the HQPlayer reported and the
+    mount mapping the node knows for it."""
+    ep, how, facts = resolve_endpoint(host, port)
+    root, root_local = _mount_mapping(host, port)
+    if ep is None or how == "library":
+        # the address is this library's now: whoever held it before has moved on
+        db_execute("UPDATE hqp_endpoints SET host = NULL, port = NULL "
+                   "WHERE host = %(h)s AND port = %(p)s AND id IS DISTINCT FROM %(id)s",
+                   {"h": host, "p": port, "id": ep["id"] if ep else None})
+    if ep is None:
+        row = db_execute("""
+            INSERT INTO hqp_endpoints (name, host, port, product, hqp_name, library_root, library_root_local)
+            VALUES (%(name)s, %(h)s, %(p)s, %(product)s, %(hqp_name)s, %(root)s, %(root_local)s)
+            RETURNING id
+        """, {"name": facts["hqp_name"] or host, "h": host, "p": port, "product": facts["product"],
+              "hqp_name": facts["hqp_name"], "root": root, "root_local": root_local})
+        logger.info("HQPlayer library at %s:%s is new here: endpoint %s %r", host, port, row["id"],
+                    facts["hqp_name"] or host)
+    else:
+        if how == "library":
+            logger.info("HQPlayer library %r moved: %s:%s -> %s:%s", ep["name"], ep["host"], ep["port"], host, port)
+        # a row minted from an address alone (migration 030) takes the name
+        # HQPlayer gives itself the first time it is heard
+        db_execute("""
+            UPDATE hqp_endpoints
+               SET host = %(h)s, port = %(p)s, product = %(product)s, hqp_name = %(hqp_name)s,
+                   name = CASE WHEN name = host OR name = %(h)s THEN COALESCE(NULLIF(%(hqp_name)s, ''), name)
+                               ELSE name END,
+                   library_root = COALESCE(%(root)s, library_root),
+                   library_root_local = COALESCE(%(root_local)s, library_root_local)
+             WHERE id = %(id)s
+        """, {"h": host, "p": port, "product": facts["product"], "hqp_name": facts["hqp_name"],
+              "root": root, "root_local": root_local, "id": ep["id"]})
+    ep = endpoint_by_address(host, port)
+    ep["current_hash"] = facts["current_hash"]
+    return ep
+
+
+def _known_paths(endpoint_id: int) -> Dict[str, int]:
     """hqp_path → row id for everything this endpoint's variants hold."""
     rows = db_query("""
         SELECT f.id, f.hqp_path
         FROM hqp_library_files f
         JOIN album_variants av ON av.id = f.album_variant_id
-        WHERE av.hqp_endpoint_host = %(h)s AND av.hqp_endpoint_port = %(p)s
-    """, {"h": host, "p": port})
+        WHERE av.hqp_endpoint_id = %(e)s
+    """, {"e": endpoint_id})
     return {r["hqp_path"]: r["id"] for r in rows}
+
+
+def _local_path(ep: Dict[str, Any], hqp_path: str) -> str:
+    """The path THIS node would know the file by: under the endpoint's mount
+    of our library the root is swapped, elsewhere (an HQPlayer Desktop on
+    this very disk) the path is ours already."""
+    root, local = ep.get("library_root"), ep.get("library_root_local")
+    if root and local and (hqp_path == root or hqp_path.startswith(root + "/")):
+        return local.rstrip("/") + hqp_path[len(root):]
+    return hqp_path
+
+
+def _shared_paths(ep: Dict[str, Any], paths: List[str]) -> set:
+    """Of these library paths, the ones that are files of THIS node's own
+    library seen through the HQPlayer — the same bytes, reachable by path
+    (file_access=path), never a copy. Windows paths compare case-blind."""
+    if not paths:
+        return set()
+    by_local = {_local_path(ep, p).lower(): p for p in paths}
+    rows = db_query("SELECT file_path FROM media_files WHERE lower(file_path) = ANY(%(p)s)",
+                    {"p": list(by_local)})
+    return {by_local[r["file_path"].lower()] for r in rows if r["file_path"].lower() in by_local}
 
 
 def sync(host: str, port: int, *, force: bool = False,
@@ -199,23 +328,27 @@ def sync(host: str, port: int, *, force: bool = False,
     library whose hash matches the last complete sync is skipped unless
     `force`. A cancelled run leaves the old hash, so the next sync resumes
     (known paths cost one query). Returns per-step counts."""
-    from routers.settings import _read, _write
     stats: Dict[str, Any] = {"unchanged": False, "library_files": 0, "unsupported": 0,
-                             "known": 0, "added": 0, "errors": 0, "unique_tracks": 0,
-                             "cancelled": False}
-    key = HASH_SETTING.format(host=host, port=port)
-    current = library_hash(host, port)
-    if not force and current == _read(key):
+                             "known": 0, "shared": 0, "added": 0, "errors": 0,
+                             "unique_tracks": 0, "cancelled": False}
+    ep = ensure_endpoint(host, port)
+    current = ep["current_hash"]
+    if not force and current == ep["library_hash"]:
         stats["unchanged"] = True
         return stats
     if progress_cb:
         progress_cb("Reading the HQPlayer library...", stats)
     entries, counts = parse_library(fetch_library(host, port))
     stats["library_files"], stats["unsupported"] = counts["files"], counts["unsupported"]
-    known = _known_paths(host, port)
+    known = _known_paths(ep["id"])
     seen_ids = [known[md["file_path"]] for _, md in entries if md["file_path"] in known]
     new = [e for e in entries if e[1]["file_path"] not in known]
-    stats["known"] = len(seen_ids)
+    # This node's own files seen through the HQPlayer (its mount of our
+    # library, or a Desktop on this very disk) are not copies: it reaches
+    # them by path already. They are neither imported nor counted as new.
+    shared = _shared_paths(ep, [md["file_path"] for _, md in new])
+    new = [e for e in new if e[1]["file_path"] not in shared]
+    stats["known"], stats["shared"] = len(seen_ids), len(shared)
     if seen_ids:
         db_execute("UPDATE hqp_library_files SET last_seen_at = CURRENT_TIMESTAMP "
                    "WHERE id = ANY(%(ids)s)", {"ids": seen_ids})
@@ -231,7 +364,7 @@ def sync(host: str, port: int, *, force: bool = False,
              WHERE av.id = hf.album_variant_id AND av.raw_title IS NULL
         """, {"ids": [i for i, _ in tagged], "titles": [t for _, t in tagged]})
     if new:
-        import_metadata(new, sink=FileSink("hqplayer", host, port), stats=stats,
+        import_metadata(new, sink=FileSink("hqplayer", ep["id"]), stats=stats,
                         progress_cb=progress_cb, cancel_check=cancel_check)
         # A copy that just arrived is new in the collection: the Home feed
         # sorts variants by file_modified_at, which media_files' triggers keep
@@ -242,13 +375,14 @@ def sync(host: str, port: int, *, force: bool = False,
                SET file_modified_at = (SELECT MIN(f.first_seen_at) FROM hqp_library_files f
                                        WHERE f.album_variant_id = av.id)
              WHERE av.location = 'hqplayer' AND av.file_modified_at IS NULL
-               AND av.hqp_endpoint_host = %(h)s AND av.hqp_endpoint_port = %(p)s
-        """, {"h": host, "p": port})
+               AND av.hqp_endpoint_id = %(e)s
+        """, {"e": ep["id"]})
     if cancel_check and cancel_check():
         stats["cancelled"] = True
         return stats
-    _write(key, current)
-    logger.info("HQPlayer library %s:%s synced: %s", host, port, stats)
+    db_execute("UPDATE hqp_endpoints SET library_hash = %(h)s, last_synced_at = CURRENT_TIMESTAMP "
+               "WHERE id = %(e)s", {"h": current, "e": ep["id"]})
+    logger.info("HQPlayer library %r (%s:%s) synced: %s", ep["name"], host, port, stats)
     return stats
 
 
@@ -311,21 +445,27 @@ def forget_missing(host: str, port: int) -> Dict[str, Any]:
     _forget). An empty answer is refused the way the scanner refuses an
     empty tree: a library being rebuilt on the HQPlayer side lists nothing,
     and every row would read as gone."""
-    stats: Dict[str, Any] = {"refused": False, "checked": 0}
+    stats: Dict[str, Any] = {"refused": False, "checked": 0, "shared": 0}
+    ep = ensure_endpoint(host, port)
     entries, _counts = parse_library(fetch_library(host, port))
     listed = {md["file_path"] for _, md in entries}
     if not listed:
         logger.error("HQPlayer library %s:%s answered with no files — nothing forgotten", host, port)
         stats["refused"] = True
         return stats
-    known = _known_paths(host, port)
+    known = _known_paths(ep["id"])
     stats["checked"] = len(known)
-    gone = [row_id for path, row_id in known.items() if path not in listed]
+    # Rows the library no longer lists, and rows that were this node's own
+    # files all along (imported before the mount mapping was known) — the
+    # HQPlayer reaches those by path; a copy of them here is a mistake.
+    shared = _shared_paths(ep, [p for p in known if p in listed])
+    stats["shared"] = len(shared)
+    gone = [row_id for path, row_id in known.items() if path not in listed or path in shared]
     if gone:
         with get_db_context() as db:
             stats.update(_forget(db, gone))
             db.commit()
-    logger.info("HQPlayer library %s:%s rescan: %s", host, port, stats)
+    logger.info("HQPlayer library %r rescan: %s", ep["name"], stats)
     return stats
 
 
@@ -333,13 +473,24 @@ def forget_endpoint(host: str, port: int, since: Optional[datetime] = None) -> D
     """Everything this endpoint's library put into the catalogue goes (see
     _forget) — the HQPlayer was retired, or an import ran against the wrong
     one. ``since`` also drops the artists that import minted."""
-    known = _known_paths(host, port)
+    ep = endpoint_by_address(host, port)
+    if ep is None:
+        return {"checked": 0}
+    return forget_endpoint_id(ep["id"], since)
+
+
+def forget_endpoint_id(endpoint_id: int, since: Optional[datetime] = None) -> Dict[str, Any]:
+    """forget_endpoint by row — an endpoint that no longer answers anywhere
+    (a friend's streamer that went home) has no address to name it by. The
+    row goes with its rows."""
+    known = _known_paths(endpoint_id)
     stats: Dict[str, Any] = {"checked": len(known)}
     if known:
         with get_db_context() as db:
             stats.update(_forget(db, list(known.values()), since))
             db.commit()
-    logger.info("HQPlayer library %s:%s forgotten: %s", host, port, stats)
+    db_execute("DELETE FROM hqp_endpoints WHERE id = %(e)s", {"e": endpoint_id})
+    logger.info("HQPlayer library endpoint %s forgotten: %s", endpoint_id, stats)
     return stats
 
 
@@ -392,12 +543,11 @@ def request_sync(host: str, port: int) -> None:
     its 39k files behind the owner's back). Off the caller's thread: the
     status poller must not wait on the control port."""
     def _check() -> None:
-        from routers.settings import _read
-        last = _read(HASH_SETTING.format(host=host, port=port))
-        if last is None:
+        ep = endpoint_by_address(host, port)
+        if ep is None or ep["library_hash"] is None:
             return
         try:
-            if library_hash(host, port) != last:
+            if library_hash(host, port) != ep["library_hash"]:
                 start_job(host, port)
         except OSError as e:
             logger.warning("HQPlayer library check at %s:%s skipped: %s", host, port, e)
@@ -461,11 +611,14 @@ if __name__ == "__main__":
     args = ap.parse_args()
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
     if args.dry_run:
+        ep, how, facts = resolve_endpoint(args.host, args.port)
         found, found_counts = parse_library(fetch_library(args.host, args.port))
-        have = _known_paths(args.host, args.port)
-        fresh = sum(1 for _, md in found if md["file_path"] not in have)
-        print(f"library: {found_counts['files']} files ({found_counts['unsupported']} unsupported); "
-              f"known here: {len(have)}; new: {fresh}")
+        have = _known_paths(ep["id"]) if ep else {}
+        fresh = [md["file_path"] for _, md in found if md["file_path"] not in have]
+        shared = _shared_paths(ep, fresh) if ep else set()
+        print(f"endpoint: {ep['name'] + ' (by ' + how + ')' if ep else 'new — ' + (facts['hqp_name'] or args.host)}; "
+              f"library: {found_counts['files']} files ({found_counts['unsupported']} unsupported); "
+              f"known here: {len(have)}; new: {len(fresh) - len(shared)}; this node's own files: {len(shared)}")
     elif args.forget_missing:
         print(forget_missing(args.host, args.port))
     elif args.forget_endpoint:

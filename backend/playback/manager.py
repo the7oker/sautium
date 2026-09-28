@@ -708,12 +708,13 @@ class PlaybackManager:
 manager = PlaybackManager()
 
 
-def active_hqp_endpoint() -> tuple:
-    """(host, port) of the HQPlayer that IS the active output, else
-    (None, None). The copy of an album held at that HQPlayer is what it
-    plays natively — sql_queries.owned_rank ranks it first; a copy at any
-    other HQPlayer is left to the streams."""
+def active_hqp_endpoint():
+    """The hqp_endpoints id of the HQPlayer that IS the active output, else
+    None (another output, or that HQPlayer's library was never imported).
+    The copy of an album held at that HQPlayer is what it plays natively —
+    sql_queries.owned_rank ranks it first; a copy at any other HQPlayer is
+    left to the streams."""
     b = manager.active
     if b is not None and b.id == "hqplayer":
-        return settings.hqplayer_host, settings.hqplayer_port
-    return None, None
+        return b.endpoint_id
+    return None

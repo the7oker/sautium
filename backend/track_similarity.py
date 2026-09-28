@@ -94,7 +94,7 @@ def similar_tracks(seed_uuid: str, exclude=(), limit: int = 20,
     silently die mid-session.
     """
     from playback.manager import active_hqp_endpoint
-    hqp_host, hqp_port = active_hqp_endpoint()
+    hqp_id = active_hqp_endpoint()
     return db_query_with_ef_search(f"""
         WITH target AS (SELECT vector FROM embeddings WHERE track_id = %(seed)s::uuid),
         seed_seg AS (
@@ -150,10 +150,9 @@ def similar_tracks(seed_uuid: str, exclude=(), limit: int = 20,
                    (mf_rep.id IS NOT NULL) AS is_owned,
                    -- the active output opens this copy itself: a local file, or
                    -- one held at the HQPlayer that IS the output (params
-                   -- hqp_host / hqp_port); a copy held elsewhere streams
+                   -- hqp_id); a copy held elsewhere streams
                    COALESCE(mf_rep.location = 'local'
-                            OR (mf_rep.hqp_endpoint_host = %(hqp_host)s
-                                AND mf_rep.hqp_endpoint_port = %(hqp_port)s), false) AS playable,
+                            OR mf_rep.hqp_endpoint_id = %(hqp_id)s, false) AS playable,
                    t.title, a.name AS artist, ta.artist_id,
                    COALESCE(mf_rep.album_title, ph_rep.album) AS album,
                    COALESCE(mf_rep.release_year, ph_rep.release_year) AS year,
@@ -167,17 +166,17 @@ def similar_tracks(seed_uuid: str, exclude=(), limit: int = 20,
             JOIN track_artists ta ON ta.track_id = t.id AND ta.role = 'primary'
             JOIN artists a ON a.id = ta.artist_id
             LEFT JOIN LATERAL (
-                SELECT f.id, f.location, f.hqp_endpoint_host, f.hqp_endpoint_port,
+                SELECT f.id, f.location, f.hqp_endpoint_id,
                        f.file_path, f.file_format,
                        al.title AS album_title, al.release_year, al.cover_url AS album_cover_url
                 FROM (
-                    SELECT mf.id, av.location, av.hqp_endpoint_host, av.hqp_endpoint_port,
+                    SELECT mf.id, av.location, av.hqp_endpoint_id,
                            mf.album_variant_id, mf.file_path, mf.file_format,
                            mf.is_lossless, mf.sample_rate, mf.bit_depth
                     FROM media_files mf JOIN album_variants av ON av.id = mf.album_variant_id
                     WHERE mf.track_id = t.id
                     UNION ALL
-                    SELECT hf.id, av.location, av.hqp_endpoint_host, av.hqp_endpoint_port,
+                    SELECT hf.id, av.location, av.hqp_endpoint_id,
                            hf.album_variant_id, hf.hqp_path, hf.file_format,
                            hf.is_lossless, hf.sample_rate, hf.bit_depth
                     FROM hqp_library_files hf JOIN album_variants av ON av.id = hf.album_variant_id
@@ -234,7 +233,7 @@ def similar_tracks(seed_uuid: str, exclude=(), limit: int = 20,
         WHERE artist_rank <= %(artist_cap)s
         ORDER BY score * (1 + %(jitter)s * random())
         LIMIT %(limit)s
-    """, {"hqp_host": hqp_host, "hqp_port": hqp_port, "seed": seed_uuid, "exclude": list(exclude), "limit": limit,
+    """, {"hqp_id": hqp_id, "seed": seed_uuid, "exclude": list(exclude), "limit": limit,
           "pool": pool, "artist_cap": artist_cap, "jitter": jitter,
           "kin_cap": KIN_ARM_CAP, "w_tag": W_TAG},
         ef_search=max(pool, 500))

@@ -506,6 +506,7 @@ class HqpBackend(PlayerBackend):
     def __init__(self, emit, queue: CanonicalQueue):
         super().__init__(emit)
         self._queue = queue
+        self._endpoint_id: Optional[int] = None
         self._wake = threading.Event()
         self._thread: Optional[threading.Thread] = None
         self._running = False
@@ -653,7 +654,7 @@ class HqpBackend(PlayerBackend):
             return
         if not hqp_tracks:
             return
-        items = _items_from_hqp_tracks(hqp_tracks)
+        items = _items_from_hqp_tracks(hqp_tracks, self.endpoint_id)
         if items:
             self._queue.replace(items)
             logger.info("adopted %d tracks from the running HQPlayer playlist",
@@ -872,6 +873,18 @@ class HqpBackend(PlayerBackend):
 
     # -- canonical-queue mirror -------------------------------------------------------
 
+    @property
+    def endpoint_id(self) -> Optional[int]:
+        """The hqp_endpoints id of the HQPlayer this backend drives — None
+        until its library was imported once (hqp_library.ensure_endpoint
+        mints the row). Looked up on first use and kept: an import that
+        lands while the output is attached is found on the next ask."""
+        if self._endpoint_id is None:
+            import hqp_library
+            self._endpoint_id = hqp_library.endpoint_id_for(settings.hqplayer_host,
+                                                            settings.hqplayer_port)
+        return self._endpoint_id
+
     def _uri_for(self, item: QueueItem) -> str:
         """Playable HQPlayer URI for a queue item — an owned file by
         file-access mode (`_owned_play_uri`), a preview by its proxy URL,
@@ -1019,7 +1032,7 @@ class HqpBackend(PlayerBackend):
         }
 
 
-def _items_from_hqp_tracks(hqp_tracks: list) -> list[QueueItem]:
+def _items_from_hqp_tracks(hqp_tracks: list, endpoint_id: Optional[int]) -> list[QueueItem]:
     """Reverse-map HQPlayer's raw playlist into QueueItems (adopt-on-attach):
     file:// URIs and owned /file/ URLs resolve through media_files by
     (path, cue_start) — `_slot_identity` undoes HQPlayer's escapes, the
@@ -1042,7 +1055,7 @@ def _items_from_hqp_tracks(hqp_tracks: list) -> list[QueueItem]:
                   if t.get("uri", "").startswith("file://")
                   and by_span.get(identities.get(t.get("uri", ""))) is None]
     by_held = queue_mod.items_for_hqp_paths(
-        [h for h in held_paths if h], settings.hqplayer_host, settings.hqplayer_port
+        [h for h in held_paths if h], endpoint_id
     ) if any(held_paths) else {}
 
     items: list[QueueItem] = []

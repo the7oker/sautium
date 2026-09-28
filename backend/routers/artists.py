@@ -455,7 +455,7 @@ def get_artist(
     # counts still names the hits, and they stream like any phantom row
     # (media_file_id NULL, the album as play context). Tier ordering and
     # the 5-row cap happen entirely in SQL.
-    hqp_host, hqp_port = active_hqp_endpoint()
+    hqp_id = active_hqp_endpoint()
     artist["popular_tracks"] = db_query(f"""
         WITH track_pop AS (
             SELECT tm.track_id, SUM(lr.listen_count) AS listens
@@ -465,7 +465,7 @@ def get_artist(
         ),
         owned AS (
             -- the copy the ACTIVE output opens natively first (params
-            -- hqp_host / hqp_port): a local rip plays by its file, a copy
+            -- hqp_id): a local rip plays by its file, a copy
             -- held at the HQPlayer by track uuid (`location`)
             SELECT DISTINCT ON (t.id)
                    t.id::text AS track_id,
@@ -482,13 +482,13 @@ def get_artist(
             JOIN LATERAL (
                 SELECT f.id, f.location, f.album_variant_id, f.duration_seconds
                 FROM (
-                    SELECT mf.id, av.location, av.hqp_endpoint_host, av.hqp_endpoint_port,
+                    SELECT mf.id, av.location, av.hqp_endpoint_id,
                            mf.album_variant_id, mf.duration_seconds,
                            mf.is_lossless, mf.sample_rate, mf.bit_depth
                     FROM media_files mf JOIN album_variants av ON av.id = mf.album_variant_id
                     WHERE mf.track_id = t.id
                     UNION ALL
-                    SELECT hf.id, av.location, av.hqp_endpoint_host, av.hqp_endpoint_port,
+                    SELECT hf.id, av.location, av.hqp_endpoint_id,
                            hf.album_variant_id, hf.duration_seconds,
                            hf.is_lossless, hf.sample_rate, hf.bit_depth
                     FROM hqp_library_files hf JOIN album_variants av ON av.id = hf.album_variant_id
@@ -540,7 +540,7 @@ def get_artist(
             local_plays DESC,
             title
         LIMIT 5
-    """, {"id": artist_id, "album_ids": album_ids, "hqp_host": hqp_host, "hqp_port": hqp_port})
+    """, {"id": artist_id, "album_ids": album_ids, "hqp_id": hqp_id})
     # The credit line names ListenBrainz only where its numbers actually
     # ranked something on this page (the Popularity sort counts too).
     artist["listenbrainz_used"] = (

@@ -46,7 +46,7 @@ class QueueItem:
     tells a backend how to reach the audio:
       {"kind": "file",  "path": <db file_path>, "format": <file_format>}
       {"kind": "hqp",   "path": <hqp_path>, "format": <file_format>,
-                        "host": <endpoint host>, "port": <endpoint port>}
+                        "endpoint": <hqp_endpoints id>}
                         — a file held in an HQPlayer's own library: that
                         HQPlayer opens it as file://<path>; no other output
                         can (it is played as a stream there)
@@ -295,7 +295,7 @@ def items_for_media_ids(ids: list[int]) -> list[QueueItem]:
 
 
 _HQP_ITEM_SQL = """
-    SELECT hf.id, hf.hqp_path, hf.file_format, av.hqp_endpoint_host, av.hqp_endpoint_port,
+    SELECT hf.id, hf.hqp_path, hf.file_format, av.hqp_endpoint_id,
            t.id::text AS track_uuid, t.title, hf.track_number, hf.duration_seconds,
            (SELECT mf.cover_id::text FROM media_files mf
             JOIN album_variants av2 ON av2.id = mf.album_variant_id
@@ -315,7 +315,7 @@ def _item_from_hqp_row(r: dict) -> QueueItem:
         track_id=r["track_uuid"],
         media_file_id=None,
         source={"kind": "hqp", "path": r["hqp_path"], "format": r["file_format"],
-                "host": r["hqp_endpoint_host"], "port": r["hqp_endpoint_port"]},
+                "endpoint": r["hqp_endpoint_id"]},
         title=r["title"],
         artist=r["artist"],
         album=r.get("album") or "",
@@ -337,15 +337,15 @@ def items_for_hqp_ids(ids: list[int]) -> list[QueueItem]:
     return [_item_from_hqp_row(r) for r in rows]
 
 
-def items_for_hqp_paths(paths: list[str], host: str, port: int) -> dict[str, QueueItem]:
-    """QueueItems for files held at the HQPlayer (host, port), keyed by
-    hqp_path — the reverse mapping when adopting a playlist HQPlayer still
-    holds after a backend restart."""
-    if not paths:
+def items_for_hqp_paths(paths: list[str], endpoint_id: Optional[int]) -> dict[str, QueueItem]:
+    """QueueItems for files held at the HQPlayer `endpoint_id` names, keyed
+    by hqp_path — the reverse mapping when adopting a playlist HQPlayer
+    still holds after a backend restart."""
+    if not paths or endpoint_id is None:
         return {}
     rows = _db_query(_HQP_ITEM_SQL + " WHERE hf.hqp_path = ANY(%(paths)s) "
-                     "AND av.hqp_endpoint_host = %(h)s AND av.hqp_endpoint_port = %(p)s",
-                     {"paths": paths, "h": host, "p": port})
+                     "AND av.hqp_endpoint_id = %(e)s",
+                     {"paths": paths, "e": endpoint_id})
     return {r["hqp_path"]: _item_from_hqp_row(r) for r in rows}
 
 
