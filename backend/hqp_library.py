@@ -119,21 +119,28 @@ def discover(host: str, port: int = 4321, timeout: float = _DISCOVER_TIMEOUT) ->
     against Desktop 6 and Embedded 6. Sent unicast, so it crosses the
     docker bridge like the DLNA sweep's M-SEARCH does, and the reply comes
     back from 4321, which the bridge's port-restricted NAT lets through.
-    None when nothing HQPlayer-shaped answered in time."""
+    None when nothing HQPlayer-shaped answered in time. The socket is
+    CONNECTED to the address asked, so the kernel hands over only that
+    box's datagrams — a stray or crafted reply from elsewhere on the LAN
+    cannot name this HQPlayer; the wait is one deadline, whatever arrives."""
     s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-    s.settimeout(timeout)
     try:
-        s.sendto(b"<discover/>\n", (host, port))
+        s.settimeout(timeout)
+        s.connect((host, port))
+        s.send(b"<discover/>\n")
         deadline = time.monotonic() + timeout
-        while time.monotonic() < deadline:
+        while True:
+            left = deadline - time.monotonic()
+            if left <= 0:
+                return None
+            s.settimeout(left)
             try:
-                data, addr = s.recvfrom(4096)
+                data = s.recv(4096)
             except socket.timeout:
                 return None
             facts = parse_discover(data)
             if facts is not None:
                 return facts
-        return None
     except OSError:
         return None
     finally:
@@ -281,15 +288,6 @@ def endpoint_by_address(host: str, port: int) -> Optional[Dict[str, Any]]:
     return None
 
 
-def endpoint_id_for(host: Optional[str], port: Optional[int]) -> Optional[int]:
-    """The id of the endpoint answering at this address, None when its
-    library was never imported (no row) — the ranking callers' key."""
-    if not host:
-        return None
-    ep = endpoint_by_address(host, port)
-    return ep["id"] if ep else None
-
-
 def resolve_endpoint(host: str, port: int) -> Tuple[Optional[Dict[str, Any]], Optional[str], Dict[str, Any]]:
     """Which library answers at this address: the row at the address, if the
     HQPlayer there is still the one the row met (same name and product —
@@ -341,9 +339,13 @@ def ensure_endpoint(host: str, port: int, resolved=None) -> Dict[str, Any]:
                    "WHERE host = %(h)s AND port = %(p)s AND id IS DISTINCT FROM %(id)s",
                    {"h": host, "p": port, "id": ep["id"] if ep else None})
     if ep is None:
+        # the attach's first contact and a scan can mint the same box at
+        # once: the address's partial unique index makes the second a no-op
         row = db_execute("""
             INSERT INTO hqp_endpoints (name, host, port, product, hqp_name)
             VALUES (%(name)s, %(h)s, %(p)s, %(product)s, %(hqp_name)s)
+            ON CONFLICT (host, port) WHERE host IS NOT NULL
+            DO UPDATE SET product = EXCLUDED.product, hqp_name = EXCLUDED.hqp_name
             RETURNING id
         """, {"name": facts["hqp_name"] or host, "h": host, "p": port, "product": facts["product"],
               "hqp_name": facts["hqp_name"]})
@@ -378,7 +380,9 @@ def register(host: str, port: int) -> Optional[Dict[str, Any]]:
     address finds the row another alias minted (endpoint_by_address) and
     leaves its address alone. None when the box does not answer control
     right now — the address is the owner's choice all the same; the
-    output's attach registers it on the first contact."""
+    output's attach registers it on the first contact (request_sync), and
+    so does the scan for the configured address. Never on a request's
+    thread: two control round-trips against a slow box are seconds."""
     try:
         return ensure_endpoint(host, port)
     except OSError as e:

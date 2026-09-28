@@ -1905,9 +1905,9 @@ def _apply_hqplayer_address(host: Optional[str], port: Optional[int]) -> None:
     """The one place the active HQPlayer's address is set: persisted to
     user_settings, overlaid onto the runtime settings, the cached control
     sockets dropped so the next status/command call reconnects against the
-    new address, and the HQPlayer registered as one the owner chose
-    (hqp_library.register — no row yet if it is not answering)."""
-    import hqp_library
+    new address. Its endpoint row comes from the output's first contact
+    (hqp_library.request_sync) or the next scan — never from here: a save
+    must return at once, not after two control round-trips."""
     from config import settings as app_settings
     if host is not None:
         host = host.strip() or None
@@ -1921,8 +1921,6 @@ def _apply_hqplayer_address(host: Optional[str], port: Optional[int]) -> None:
                 app_settings.hqplayer_host, app_settings.hqplayer_port)
     from playback.hqp_backend import reset_all_clients as _reset_hqp
     _reset_hqp()
-    if app_settings.hqplayer_host:
-        hqp_library.register(app_settings.hqplayer_host, int(app_settings.hqplayer_port or 4321))
 
 
 @router.put("/hqplayer")

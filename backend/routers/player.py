@@ -245,6 +245,11 @@ def get_outputs(rescan: bool = False):
 # for 1900-replying devices, and on Docker pinning a full description URL
 # remains the way in for the rest; backend/dlna_locate.py, run where no NAT is
 # in the path, prints one.
+#
+# Both snapshots are REPLACED, never mutated: /outputs runs on a worker
+# thread and iterates them while the scan lands on the event loop, and a
+# dict changing size under an iteration is a RuntimeError. A rebind is
+# atomic and a reader keeps the dict it started with.
 _dlna_discovered: dict[str, dict] = {}
 
 
@@ -352,6 +357,7 @@ def note_renderer_location(udn: str, location: str) -> None:
     """Promote the address a renderer actually answered on, wherever that
     renderer is remembered. Called from the DLNA backend after an attach
     lands on something other than the stored address."""
+    global _dlna_discovered
     from routers.settings import _read, _write
     pins = _dlna_pins()
     if udn in pins:
@@ -362,8 +368,8 @@ def note_renderer_location(udn: str, location: str) -> None:
         _write("output.dlna_renderer",
                remember_location(active, {"location": location}))
     if udn in _dlna_discovered:
-        _dlna_discovered[udn] = remember_location(
-            _dlna_discovered[udn], {"location": location})
+        _dlna_discovered = {**_dlna_discovered,
+                            udn: remember_location(_dlna_discovered[udn], {"location": location})}
 
 
 def _dlna_save_pins(pins: dict[str, dict]) -> None:
@@ -667,13 +673,21 @@ async def _scan_run():
 
     await _unicast_sweep(found, found_hqp)
 
+    # Each box found is asked over control (GetInfo + the library hash) —
+    # all of them at once: one that is slow or closes its port at once must
+    # not hold the scan for the others.
+    async def _resolve(host: str) -> tuple:
+        try:
+            return host, await asyncio.to_thread(hqp_library.resolve_endpoint, host, 4321), None
+        except OSError as e:
+            return host, None, e
     hqps: dict[tuple, dict] = {}
-    for host, facts in found_hqp.items():
+    configured = _configured_hqp()
+    for host, resolved, err in await asyncio.gather(*(_resolve(h) for h in found_hqp)):
+        facts = found_hqp[host]
         entry = {"name": facts["name"], "product": facts["product"], "endpoint_id": None,
                  "control": True}
-        try:
-            resolved = await asyncio.to_thread(hqp_library.resolve_endpoint, host, 4321)
-        except OSError as e:
+        if err is not None:
             # Answers discovery, refuses control: an Embedded past its trial
             # half-hour looks exactly like this (the daemon still answers the
             # datagram while the control port closes at once) — listed as
@@ -681,11 +695,10 @@ async def _scan_run():
             # row gets from its live check, so a box reads the same whether
             # it is the output or not.
             logger.info("HQPlayer %r at %s answers discovery but not control: %s",
-                        facts["name"], host, e)
+                        facts["name"], host, err)
             entry["control"] = False
         else:
             ep, how, _facts = resolved
-            configured = _configured_hqp()
             if ep is not None:
                 # the row learns what the box says about itself (a row minted
                 # from an address alone takes HQPlayer's own name); the same
@@ -700,8 +713,8 @@ async def _scan_run():
             if ep is not None:
                 entry["endpoint_id"] = ep["id"]
         hqps[(host, 4321)] = entry
-    _hqp_discovered.clear()
-    _hqp_discovered.update(hqps)
+    global _hqp_discovered, _dlna_discovered
+    _hqp_discovered = hqps
 
     renderers = []
     fresh: dict[str, dict] = {}
@@ -720,8 +733,7 @@ async def _scan_run():
         info = remember_location(known.get(info["udn"], {}), info)
         fresh[info["udn"]] = info
         renderers.append(info)
-    _dlna_discovered.clear()
-    _dlna_discovered.update(fresh)
+    _dlna_discovered = fresh
     return {"renderers": renderers, "hqplayers": _hqplayer_entries()}
 
 
@@ -825,7 +837,10 @@ async def dlna_remove(req: DlnaRemoveRequest):
     pins = _dlna_pins()
     removed = pins.pop(req.udn, None) is not None
     _dlna_save_pins(pins)
-    removed = _dlna_discovered.pop(req.udn, None) is not None or removed
+    global _dlna_discovered
+    if req.udn in _dlna_discovered:
+        _dlna_discovered = {k: v for k, v in _dlna_discovered.items() if k != req.udn}
+        removed = True
     active = _read("output.dlna_renderer")
     if active and active.get("udn") == req.udn:
         _write("output.dlna_renderer", None)
