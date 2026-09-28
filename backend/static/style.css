@@ -4336,12 +4336,15 @@ a.am-kind { text-decoration: none; }
   background-repeat: no-repeat;
 }
 
+/* Shaped like .hqp-row: the text at the left edge, the state dot at the
+   right (the dot used to lead, which indented the text past every other
+   block's label — Valerii, 2026-09-29). */
 .hqp-conn {
   display: grid;
-  grid-template-columns: calc(10 * var(--px)) 1fr;
+  grid-template-columns: 1fr auto;
   align-items: center;
   gap: calc(12 * var(--px));
-  padding: calc(14 * var(--px));
+  padding: calc(12 * var(--px)) calc(14 * var(--px));
   border-top: 1px solid var(--color-divider);
 }
 .hqp-conn:first-of-type { border-top: 0; }

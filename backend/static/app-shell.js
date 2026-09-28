@@ -8619,35 +8619,31 @@
       const isSdm = modeUpper.includes('SDM') || modeUpper.includes('DSD');
       const shaperLabel = isPcm ? 'Dither' : isSdm ? 'Modulator' : 'Shaper';
 
-      // How HQPlayer reaches the files — shown beside the endpoint because
-      // a remote HQPlayer that fetches nothing is diagnosed from here.
-      const filesLine = s.file_access === 'stream'
-        ? `files streamed from ${escapeHtml(String(s.media_url_host || ''))}:${escapeHtml(String(s.media_url_port || ''))}`
-        : 'files by path on this computer';
       const info = s.info || {};
       const productLine = [info.version, info.platform].filter(Boolean).map(escapeHtml).join(' · ')
         || escapeHtml(info.product || 'online');
       // Which HQPlayer this is — the name the picker registered it under —
       // and where; a tap leads to Audio output, where another one is chosen
-      // or added (there is no editor here since 2026-09-29).
+      // or added (there is no editor here since 2026-09-29). The text sits
+      // at the left edge like every other block's label, the state dot at
+      // the right; how the files reach it is not said here — read off the
+      // address, it is nothing to configure and read as the only way.
       const hqpName = s.label || info.name || '';
       const hostLine = `${escapeHtml(s.host)}:${s.port}`;
       const connBlock = s.connected
         ? `<div class="hqp-conn ok is-clickable" data-action="pick-output" role="button" tabindex="0">
-             <span class="hqp-conn-dot"></span>
              <div class="hqp-conn-text">
                <div class="hqp-conn-host">${escapeHtml(hqpName || 'HQPlayer')}</div>
                <div class="hqp-conn-sub">${hostLine} · ${productLine}</div>
-               <div class="hqp-conn-sub">${filesLine}</div>
              </div>
+             <span class="hqp-conn-dot"></span>
            </div>`
         : `<div class="hqp-conn err is-clickable" data-action="pick-output" role="button" tabindex="0">
-             <span class="hqp-conn-dot"></span>
              <div class="hqp-conn-text">
                <div class="hqp-conn-host">${escapeHtml(hqpName || 'HQPlayer')}</div>
                <div class="hqp-conn-sub">${hostLine} · offline — tap to pick or add an HQPlayer in Audio output</div>
-               <div class="hqp-conn-sub">${filesLine}</div>
              </div>
+             <span class="hqp-conn-dot"></span>
            </div>`;
 
       // HQPlayer's Control Protocol exposes only the "auto / [source]"
