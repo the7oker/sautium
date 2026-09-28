@@ -290,7 +290,11 @@ every other row — "HQPlayer Desktop · VH11 / Online · this computer",
 "HQPlayer Embedded / Online · 192.168.1.253" (`hqp_library.label`: the
 product and the name that tells two apart, a box's generic self-name
 dropped; the state dot is the box's, the check is the selection; the order
-never follows the selection).
+never follows the selection). The dot's word is discovery AND control: an
+Embedded past its trial half-hour still answers the datagram while its
+control port closes at once, and reads "Not answering" whether or not it
+is the selected output (the scan's `control` verdict, the selected row's
+live check).
 HQPlayer OS is a UPnP renderer as well (manufacturer Signalyst): a box that
 answered as an HQPlayer is offered once, as the HQPlayer — its renderer
 would be the same DSP with no queue and no filter control. Tapping an entry

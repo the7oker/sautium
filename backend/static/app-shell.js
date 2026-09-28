@@ -12408,7 +12408,12 @@
     const hqpRows = (hqp.hqplayers || []).map(h => {
       const sel = active.type === 'hqplayer' && h.configured;
       const where = h.here ? 'this computer' : `${h.host}${h.port && h.port !== 4321 ? ':' + h.port : ''}`;
-      const state = sel ? 'checking' : h.seen ? 'online' : _scanInFlight ? 'checking' : 'offline';
+      // The scan's word is discovery AND control: a box that answers the
+      // datagram but closes its control port (an Embedded past its trial
+      // half-hour) is "Not answering" here as it is when selected.
+      const state = sel ? 'checking'
+        : h.seen ? (h.control === false ? 'silent' : 'online')
+        : _scanInFlight ? 'checking' : 'offline';
       const forget = h.known ? `
             <button data-action="remove-hqplayer" data-endpoint-id="${escapeProfileHtml(String(h.endpoint_id))}"
               data-name="${escapeProfileHtml(h.label || '')}" data-files="${escapeProfileHtml(String(h.files || 0))}"

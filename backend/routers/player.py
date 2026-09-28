@@ -290,7 +290,7 @@ def _hqplayer_entries() -> list:
             "endpoint_id": r["id"], "name": r["name"], "host": r["host"], "port": int(r["port"]),
             "product": r["product"],
             "embedded": hqp_library.is_embedded(r["product"]) if r["product"] else None,
-            "here": is_own_address(r["host"]), "known": True, "seen": False,
+            "here": is_own_address(r["host"]), "known": True, "seen": False, "control": None,
             "synced": bool(r["synced"]), "files": int(r["files"] or 0), "configured": False}
     for (host, port), d in _hqp_discovered.items():
         key = _hqp_key(host, port)
@@ -298,10 +298,11 @@ def _hqplayer_entries() -> list:
         if e is None:
             entries[key] = {"endpoint_id": d.get("endpoint_id"), "name": d["name"], "host": host, "port": port,
                             "product": d["product"], "embedded": hqp_library.is_embedded(d["product"]),
-                            "here": key[0] == "here", "known": False, "seen": True,
+                            "here": key[0] == "here", "known": False, "seen": True, "control": d["control"],
                             "synced": False, "files": 0, "configured": False}
         else:
             e["seen"] = True
+            e["control"] = d["control"]
             e["name"] = e["name"] or d["name"]
             if not e["product"]:
                 e["product"] = d["product"]
@@ -314,7 +315,7 @@ def _hqplayer_entries() -> list:
         if e is None:
             entries[key] = {"endpoint_id": None, "name": None, "host": host, "port": port, "product": None,
                             "embedded": None, "here": key[0] == "here", "known": False, "seen": False,
-                            "synced": False, "files": 0, "configured": True}
+                            "control": None, "synced": False, "files": 0, "configured": True}
         else:
             e["configured"] = True
     for e in entries.values():
@@ -668,14 +669,20 @@ async def _scan_run():
 
     hqps: dict[tuple, dict] = {}
     for host, facts in found_hqp.items():
-        entry = {"name": facts["name"], "product": facts["product"], "endpoint_id": None}
+        entry = {"name": facts["name"], "product": facts["product"], "endpoint_id": None,
+                 "control": True}
         try:
             resolved = await asyncio.to_thread(hqp_library.resolve_endpoint, host, 4321)
         except OSError as e:
-            # answers discovery, refuses control: an Embedded past its trial
-            # half-hour looks exactly like this — listed, not registered
+            # Answers discovery, refuses control: an Embedded past its trial
+            # half-hour looks exactly like this (the daemon still answers the
+            # datagram while the control port closes at once) — listed as
+            # not answering, not registered. The same verdict the selected
+            # row gets from its live check, so a box reads the same whether
+            # it is the output or not.
             logger.info("HQPlayer %r at %s answers discovery but not control: %s",
                         facts["name"], host, e)
+            entry["control"] = False
         else:
             ep, how, _facts = resolved
             configured = _configured_hqp()
