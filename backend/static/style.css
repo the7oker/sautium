@@ -5309,17 +5309,21 @@ a.am-kind { text-decoration: none; }
   color: var(--color-text);
 }
 .add-gear-row {
-  display: grid;
-  grid-template-columns: 1fr;
+  /* A single column of stacked controls. A flex column, not a grid: the
+     body scrolls (below), and a scrolling grid on a phone kept stale row
+     heights when a row's text wrapped after a field appeared — the
+     HQPlayer connection editor drew its label over the row above it. */
+  display: flex;
+  flex-direction: column;
   gap: calc(10 * var(--px));
   padding: calc(8 * var(--px)) calc(20 * var(--px));
-  /* The sheet is capped at 80vh; a body taller than that (the HQPlayer
-     connection editor on a phone) scrolls under the fixed handle + title
-     instead of being cut off below the fold. */
+  /* The sheet is capped at 80vh; a body taller than that scrolls under
+     the fixed handle + title instead of being cut off below the fold. */
   min-height: 0;
   overflow-y: auto;
-  -webkit-overflow-scrolling: touch;
+  overscroll-behavior: contain;
 }
+.add-gear-row > * { flex-shrink: 0; }
 .add-gear-input {
   width: 100%;
   height: calc(44 * var(--px));
