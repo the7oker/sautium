@@ -6583,19 +6583,32 @@
       btn.addEventListener('click', async () => {
         if (btn.disabled || !ctx.tracks || !ctx.tracks.length) return;
         const ids = ctx.tracks.map(t => t.media_file_id).filter(Boolean);
-        const body = { track_ids: ids };
-        if (ctx.playOrigin) {
-          body.origin = ctx.playOrigin;
-          if (ctx.originAlbumId) body.origin_album_id = ctx.originAlbumId;
-        }
         btn.disabled = true;            // block double-fire; faded while in flight
         window.maybeClaimRenderer();
         try {
-          const resp = await fetch('/api/player/play-tracks', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify(body),
-          }).catch(() => null);
+          let resp;
+          if (ctx.albumId && ids.length < ctx.tracks.length && ctx.tracks.some(t => t.location === 'hqplayer')) {
+            // A pick that lives in the HQPlayer's own library has no file id:
+            // the album plays by uuid, the backend picking each track's copy
+            // for the output — natively on that HQPlayer, a stream elsewhere
+            // (the Queue button beside it goes the same way).
+            resp = await fetch('/api/player/play-entities', {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({ items: [{ kind: 'album', id: ctx.albumId }] }),
+            }).catch(() => null);
+          } else {
+            const body = { track_ids: ids };
+            if (ctx.playOrigin) {
+              body.origin = ctx.playOrigin;
+              if (ctx.originAlbumId) body.origin_album_id = ctx.originAlbumId;
+            }
+            resp = await fetch('/api/player/play-tracks', {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify(body),
+            }).catch(() => null);
+          }
           await reportPlaybackResult(resp);
         } finally { btn.disabled = false; }
       });
