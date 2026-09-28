@@ -283,3 +283,43 @@ def test_own_files_seen_through_the_hqplayer_are_not_copies(db, monkeypatch):
     assert _one(db, "SELECT count(*) FROM hqp_library_files") == 2
     assert _one(db, "SELECT count(*) FROM hqp_library_files WHERE hqp_path LIKE %s", "%Intro.flac") == 0
     assert _one(db, "SELECT library_root || ' -> ' || library_root_local FROM hqp_endpoints") == "/smb -> E:/Music"
+
+
+def test_native_plays_follow_the_output(db, monkeypatch):
+    """Each output opens its own copy of a queued track: a rip here for the
+    browser, this HQPlayer's held copy when it is the output (outranking
+    the rip), a stream only where no copy is reachable."""
+    from scanner import LOCAL_FILES, import_metadata
+    from playback.queue import items_for_hqp_ids, items_for_media_ids
+    from playback.substitute import native_plays
+    local_dir = f"E:/Music/{PRODIGY_DIR}"
+    import_metadata([(local_dir, _local_scan("Intro", 1)), (local_dir, _local_scan("Break & Enter", 2))],
+                    sink=LOCAL_FILES, stats={})
+    monkeypatch.setattr(hqp_library, "library_hash", lambda h, p: "h4")
+    monkeypatch.setattr(hqp_library, "fetch_library", lambda h, p: LIBRARY)
+    monkeypatch.setattr(hqp_library, "get_info", lambda h, p: PI_INFO)
+    hqp_library.sync(*PI)
+    ep = _one(db, "SELECT id FROM hqp_endpoints")
+    with db.cursor() as cur:
+        cur.execute("SELECT hf.id FROM hqp_library_files hf JOIN tracks t ON t.id = hf.track_id ORDER BY t.title")
+        hqp_ids = [r[0] for r in cur.fetchall()]           # Break & Enter, Intro, Ketto
+        cur.execute("SELECT mf.id FROM media_files mf JOIN tracks t ON t.id = mf.track_id ORDER BY t.title")
+        media_ids = [r[0] for r in cur.fetchall()]         # Break & Enter, Intro
+    held = items_for_hqp_ids(hqp_ids)
+    assert [it.source["kind"] for it in held] == ["hqp"] * 3
+
+    # the browser: the Prodigy copies fall back to the rips here, Bonobo waits for a stream
+    plays = native_plays(held, "browser", None)
+    assert [p and p["kind"] for p in plays] == ["file", "file", "pending"]
+    assert plays[1]["path"] == f"{local_dir}/The Prodigy - 01. Intro.flac"
+    assert plays[1]["media_file_id"] == media_ids[1]
+    # the HQPlayer that holds them: as queued
+    assert native_plays(held, "hqplayer", ep) == [None, None, None]
+    # another HQPlayer: the rips here, and Bonobo has nothing it could open
+    other = native_plays(held, "hqplayer", ep + 1)
+    assert [p and p["kind"] for p in other] == ["file", "file", "unplayable"]
+    # a rip queued on the browser, played on the HQPlayer that holds a copy: its copy
+    local = items_for_media_ids(media_ids)
+    assert [p and p["kind"] for p in native_plays(local, "hqplayer", ep)] == ["hqp", "hqp"]
+    assert native_plays(local, "browser", None) == [None, None]
+    assert native_plays(local, "hqplayer", ep + 1) == [None, None]

@@ -154,6 +154,11 @@ class PlayerBackend(ABC):
         remove|reorder|clear. Default: nothing to do (HQPlayer acted in the
         mirror hooks)."""
 
+    def slot_ready(self, index: int) -> None:
+        """A slot this output could not open when it was reached now can —
+        a stream substitute landed on it (playback.substitute). Default:
+        nothing; an output that parked a play there starts it."""
+
     def queue_replace(self, items: list, *, play: bool, probe_first: bool = False) -> int:
         return len(items)
 

@@ -295,8 +295,8 @@ class Engine:
 
         if not self._open_stream(rate, channels):
             return
-        cue_start = item.source.get("cue_start") or 0.0
-        cue_end = item.source.get("cue_end")
+        cue_start = item.opener().get("cue_start") or 0.0
+        cue_end = item.opener().get("cue_end")
         cue_dur = (cue_end - cue_start) if cue_end is not None else None
         self._current = item
         self._index = index
@@ -333,7 +333,8 @@ class Engine:
         return True
 
     def _source_url(self, item: QueueItem) -> Optional[str]:
-        src = item.source
+        # What THIS output opens (QueueItem.play, playback.substitute).
+        src = item.opener()
         if src["kind"] == "file":
             return settings.translate_to_local_path(src["path"])
         if src["kind"] == "proxy":
@@ -524,8 +525,8 @@ class Engine:
             index += 1
         rate, channels, duration = probed
         if rate == self._stream_rate and channels == self._stream_channels:
-            cue_start = item.source.get("cue_start") or 0.0
-            cue_end = item.source.get("cue_end")
+            cue_start = item.opener().get("cue_start") or 0.0
+            cue_end = item.opener().get("cue_end")
             cue_dur = (cue_end - cue_start) if cue_end is not None else None
             with self._written_lock:
                 start = self._written_frames

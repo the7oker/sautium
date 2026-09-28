@@ -337,6 +337,24 @@ own. This node's own files seen through the HQPlayer — its mount of our
 library (`/smb/…` = `E:/Music/…`), or a Desktop on this very disk — are not
 copies: the sync leaves them out (`stats.shared`) and the rescan forgets any
 imported before the mapping was known; they play there by path.
+The queue survives an output switch, and since 2026-09-28 so does its
+playability: the canonical queue holds identities (the track uuid and the
+enqueue-time origin, `QueueItem.source`, which never changes), and on every
+switch each slot is re-read for the NEW output (`QueueItem.play`,
+`playback/substitute.py`, the album page's rule applied to the queue): a rip
+here for any output; this HQPlayer's own copy when it is the output — and
+preferred there over the rip, as on the album page; else a stream through
+the media proxy standing in for a copy the output cannot reach, resolved
+lazily a lead window (3 slots) ahead of the playhead on the status ticks
+and landed on the slot as it buffers (`PlayerBackend.slot_ready` starts a
+play parked on it — the browser output stands on the slot as "loading"
+until then). Switching back to the HQPlayer that holds the copies plays
+them natively again, nothing rebuilt. The HQPlayer output takes only native
+copies — it mirrors one playlist entry per slot and HQPlayer fetches an
+http entry at ADD time, so a stream it has not buffered cannot sit there; a
+slot only a stream could serve on it (a file held at another HQPlayer with
+no rip here) stays unplayable and the stop names it. The demo ledger applies
+to a substituted stream as to any stream.
 Settings › Library shows the endpoint's section: the FIRST import is a
 previewed decision (which HQPlayer, how many files, how many new, how many
 of them this node's own — an HQPlayer Desktop scanning this same library

@@ -413,6 +413,23 @@ implementation details live in the code, DB and git history.
   folder names (CD1/CD2/CD3, Disc 2) — the local scanner leaves
   `disc_number` at 1 for such rips — and the fingerprint titles run
   through `normalize` (3 more folds on the master).
+  Morning of 2026-09-28: an HQPlayer library became a thing with an
+  identity (`hqp_endpoints`, migration 030: name, GetInfo facts, the
+  library hash the last sync saw, the mount mapping) — a friend's streamer
+  or the Pi after a DHCP lease is recognised at a new address by its hash,
+  a different box that inherits an address is a new library, and the
+  owner forgets a library from Settings; the node's own files seen through
+  the HQPlayer's mount are never imported as copies. Then the queue: an
+  output switch keeps identities and re-reads each slot for the new
+  output (`QueueItem.play`, `playback/substitute.py`) — a rip here, this
+  HQPlayer's own copy, or a stream fetched a lead window ahead and landed
+  on the slot as it buffers; `source` never changes, so the way back to
+  the HQPlayer that opens it natively is free. The HQPlayer output takes
+  native copies only (HQPlayer fetches an http entry at add time, so an
+  unbuffered stream cannot sit in its 1:1 mirror). Trap: the harness's
+  safety classifier refused every file-creating command for a stretch —
+  edits went through, new files did not; the queue substitute unit test
+  waits for it.
   Lesson: the first import of an
   endpoint is a previewed decision — a tap on the Desktop endpoint imported
   21k files of the same library as copies before it was cancelled and

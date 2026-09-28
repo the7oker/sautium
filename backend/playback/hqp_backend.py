@@ -402,9 +402,9 @@ def _owned_play_uri(item: QueueItem, host: str) -> str:
     HQPlayer opens itself (`path` mode) or /file/{token} on the media proxy
     (`stream` mode). `host` is the proxy address HQPlayer reaches."""
     global _local_provider
-    src = item.source
+    src = item.opener()
     media_file_id, db_path, file_format = (
-        item.media_file_id, src["path"], src.get("format"))
+        src.get("media_file_id", item.media_file_id), src["path"], src.get("format"))
 
     def whole_file_uri() -> str:
         """The file itself — for a CUE slice, the raw image (cut failed)."""
@@ -778,7 +778,7 @@ class HqpBackend(PlayerBackend):
         drift = len(hqp_tracks) != len(snapshot)
         if not drift:
             for t, it in zip(hqp_tracks, snapshot):
-                src = it.source
+                src = it.opener()
                 if src["kind"] == "hqp":
                     # A file in HQPlayer's own library: the URI's path is
                     # the identity, no remap.
@@ -891,7 +891,9 @@ class HqpBackend(PlayerBackend):
         both naming the address HQPlayer reaches us at. May transcode (m4a)
         — call OUTSIDE `_hqp_lock`; a slow transcode must never hold the
         command socket hostage."""
-        src = item.source
+        # What THIS output opens (QueueItem.play, playback.substitute): its
+        # own held copy or a rip here for a slot queued elsewhere.
+        src = item.opener()
         if src["kind"] == "file":
             return _owned_play_uri(item, self._url_host)
         if src["kind"] == "hqp":
@@ -901,6 +903,12 @@ class HqpBackend(PlayerBackend):
             from streaming import service as streaming_service
             return streaming_service.get_proxy().url_for(src["token"],
                                                          host=self._url_host)
+        if src["kind"] in ("pending", "unplayable"):
+            # Nothing this HQPlayer can open: the origin's path, which it
+            # drops (a file it does not hold) — the slot reads as drift
+            # until the queue moves on. No stream is minted for the mirror:
+            # HQPlayer fetches an http entry at add time.
+            return file_path_to_uri(item.source.get("path") or "")
         return src["uri"]
 
     def queue_replace(self, items: list, *, play: bool, probe_first: bool = False) -> int:

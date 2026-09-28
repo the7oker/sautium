@@ -69,6 +69,18 @@ class QueueItem:
     # A 30 s excerpt, not the recording: shown as [30s], never a listen, and
     # `duration_seconds` is the clip's own length.
     excerpt: bool = False
+    # How the ACTIVE output opens this slot when that differs from `source`
+    # (playback.substitute, recomputed on every output switch): a `file` /
+    # `hqp` copy the new output opens itself, a `proxy` stream that stands
+    # in for a copy it cannot, `pending` while that stream is on its way,
+    # `unplayable` when nothing can serve the slot here. None = as `source`
+    # says. `source` is the enqueue-time origin and never changes, so the
+    # way back to the output that opened it natively is free.
+    play: Optional[dict] = None
+
+    def opener(self) -> dict:
+        """What the active output reads to open this slot."""
+        return self.play or self.source
 
 
 class CanonicalQueue:
@@ -120,7 +132,8 @@ class CanonicalQueue:
         with self._lock:
             changed = False
             for it in self._items:
-                if it.source.get("kind") != "proxy" or it.source.get("token") != token:
+                if not any(s.get("kind") == "proxy" and s.get("token") == token
+                           for s in (it.source, it.play or {})):
                     continue
                 new = (provider, excerpt, duration_seconds)
                 if new != (it.provider, it.excerpt, it.duration_seconds):
@@ -129,6 +142,30 @@ class CanonicalQueue:
             if changed:
                 self._version += 1
             return changed
+
+    def reresolve(self, resolve) -> int:
+        """Recompute how the ACTIVE output opens every slot (`QueueItem.play`)
+        — an output switch keeps the queue, and each output opens its own
+        copy of a track (playback.substitute.native_plays). `resolve` maps
+        the items, in order, to their `play` (None = as `source` says).
+        Returns the number of slots left `pending` a stream."""
+        with self._lock:
+            plays = list(resolve(list(self._items)))
+            for it, play in zip(self._items, plays):
+                it.play = play
+            self._version += 1
+            return sum(1 for p in plays if p and p.get("kind") == "pending")
+
+    def set_play(self, item: "QueueItem", play: Optional[dict]) -> Optional[int]:
+        """A substitute landed on (or failed for) this very item: its 1-based
+        slot, or None when the item left the queue meanwhile."""
+        with self._lock:
+            for i, it in enumerate(self._items):
+                if it is item:
+                    it.play = play
+                    self._version += 1
+                    return i + 1
+            return None
 
     # -- mutations (serialized by the manager's mutate lock) ----------------
 
@@ -201,6 +238,10 @@ class CanonicalQueue:
 
     @staticmethod
     def _row(item: QueueItem, idx: int) -> dict:
+        # `play` names how the active output opens the slot when that is not
+        # what `source` says (playback.substitute): a stream standing in for a
+        # held copy shows as such, a slot still waiting for one as pending.
+        play = (item.play or {}).get("kind")
         if item.media_file_id is not None:
             return {
                 "id": item.media_file_id,
@@ -212,8 +253,9 @@ class CanonicalQueue:
                 "duration_seconds": item.duration_seconds,
                 "cover_id": item.cover_id,
                 "index": idx,
+                "play": play,
             }
-        if item.preview:
+        if item.preview or play == "proxy":
             return {
                 "id": None,
                 "title": item.title or "Unknown",
@@ -222,7 +264,7 @@ class CanonicalQueue:
                 "album": item.album or "",
                 "duration_seconds": (item.duration_seconds
                                      or resolved_durations.get(item.track_id)),
-                "cover_id": None,
+                "cover_id": item.cover_id,
                 "preview": True,
                 "provider": item.provider,
                 "excerpt": item.excerpt,
@@ -230,15 +272,20 @@ class CanonicalQueue:
                 "cover_url": item.cover_url,
                 "provider_cover_url": resolved_artwork.get(item.track_id),
                 "index": idx,
+                "play": play,
             }
         return {
             "id": None,
             "title": item.title or "Unknown",
             "track_number": None,
             "artist": item.artist or "Unknown",
-            "duration_seconds": None,
-            "cover_id": None,
+            "album": item.album or "",
+            "duration_seconds": item.duration_seconds,
+            "cover_id": item.cover_id,
+            "cover_url": item.cover_url,
+            "track_id": item.track_id,
             "index": idx,
+            "play": play,
         }
 
 

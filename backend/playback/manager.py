@@ -57,6 +57,11 @@ class PlaybackManager:
         self._observers: list[Callable] = []
         self._persist_timer: Optional[threading.Timer] = None
         self._preview_window_key = None   # (slot, queue version) the window last ran for
+        # The streams standing in for slots the active output cannot open
+        # natively (playback.substitute): reset on every switch, fed from
+        # the status ticks a lead window ahead of the playhead.
+        from playback.substitute import Substitutes
+        self._subs = Substitutes(self.queue, self._slot_ready)
 
     # -- backend lifecycle ---------------------------------------------------
 
@@ -174,6 +179,12 @@ class PlaybackManager:
                 backend = BrowserBackend(emit=self._on_backend_status, queue=self.queue)
             else:
                 raise ValueError(f"unknown output type: {output_type}")
+            # Every slot is re-read for THIS output before it mirrors or
+            # loads anything: the copy it opens itself, or a stream to come
+            # (playback.substitute) — the queue survives the switch, the way
+            # in does not.
+            self._subs.reset()
+            self._reresolve(backend)
             # Assigned before start() so early emits resolve their output
             # info — but a failed start MUST roll back: a half-constructed
             # backend left as "active" is a zombie that swallows every
@@ -198,7 +209,26 @@ class PlaybackManager:
                                 prev_idx, backend.id)
                 except Exception as e:
                     logger.debug("resume_at(%d) failed: %s", prev_idx, e)
+            # The streams for what this output cannot open natively, from
+            # the slot it resumes at — the play press finds them buffering.
+            self._subs.maintain(prev_idx if prev_idx >= 1 else 1)
             logger.info("playback backend activated: %s", backend.id)
+
+    def _reresolve(self, backend: PlayerBackend) -> None:
+        """Recompute `QueueItem.play` for every slot against this output
+        (playback.substitute.native_plays); the HQPlayer output names the
+        endpoint whose library it holds so its own copies rank first."""
+        from playback.substitute import native_plays
+        endpoint_id = getattr(backend, "endpoint_id", None)
+        pending = self.queue.reresolve(
+            lambda items: native_plays(items, backend.id, endpoint_id))
+        if pending:
+            logger.info("%d queued slot(s) need a stream on %s", pending, backend.id)
+
+    def _slot_ready(self, index: int) -> None:
+        b = self._active
+        if b is not None:
+            b.slot_ready(index)
 
     def init_from_settings(self) -> None:
         """Boot-time output activation from persisted settings.
@@ -410,7 +440,10 @@ class PlaybackManager:
 
         idx = s.queue_index
         item = self.queue.item_at(idx)
-        preview = bool(item and item.preview)
+        # A stream — queued as one, or standing in for a copy this output
+        # cannot reach (playback.substitute): the provider's own metadata
+        # and badges either way.
+        preview = bool(item and (item.preview or (item.play or {}).get("kind") == "proxy"))
         # Phantom previews carry 'HTTP stream' in the player's own metadata —
         # surface the provider's real artist/title from the queue item. For
         # non-preview rows a backend with authoritative metadata (HQPlayer
@@ -480,6 +513,7 @@ class PlaybackManager:
         # this records each play.
         tracker.track_play_event(new_data["state"], s.position, s.length, item)
         self._maintain_preview_window(idx)
+        self._subs.maintain(idx)
 
         # Natural end-of-queue: the player stopped on the last track. Archive
         # the active session so a fully-listened album/queue lands in history

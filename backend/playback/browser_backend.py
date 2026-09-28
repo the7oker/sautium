@@ -100,6 +100,16 @@ class BrowserBackend(PlayerBackend):
         self._position = 0.0
         self._emit_now()
 
+    def slot_ready(self, index: int) -> None:
+        """The stream for a slot landed (playback.substitute): a play parked
+        on that slot starts now; a tab waiting on it with nothing to play
+        learns the slot is loadable on its next status."""
+        if self._pending_play_index == index and self._index == index:
+            self._pending_play_index = None
+            self._start_at(index, play=True)
+        elif self._index == index and self._state != "playing":
+            self._emit_now()
+
     # -- renderer-tab channel (called from the SSE endpoint) -----------------
 
     def attach_tab(self, tab: str, channel: asyncio.Queue,
@@ -284,9 +294,12 @@ class BrowserBackend(PlayerBackend):
         # fresh per track so a mid-session change applies from the next one.
         from routers.settings import _read
         q = _read("output.stream_quality")
-        src = item.source
+        # What THIS output opens (QueueItem.play, playback.substitute): a rip
+        # here, or the stream standing in for a copy held elsewhere.
+        src = item.opener()
         if src["kind"] == "file":
-            return media_urls.signed_media_url("file", str(item.media_file_id), q)
+            return media_urls.signed_media_url(
+                "file", str(src.get("media_file_id", item.media_file_id)), q)
         if src["kind"] == "proxy":
             return media_urls.signed_media_url("preview", src["token"], q)
         return None
@@ -306,9 +319,9 @@ class BrowserBackend(PlayerBackend):
         """Stable media identity for the renderer's blob cache — queue
         indexes shift on replace/reorder, so slot numbers alone would let a
         stale blob impersonate a different track."""
-        if item.media_file_id:
-            return f"f{item.media_file_id}"
-        src = item.source
+        src = item.opener()
+        if src.get("kind") == "file" and (src.get("media_file_id") or item.media_file_id):
+            return f"f{src.get('media_file_id') or item.media_file_id}"
         if src.get("kind") == "proxy":
             return f"p{src.get('token')}"
         return None
@@ -358,7 +371,8 @@ class BrowserBackend(PlayerBackend):
         but that HQPlayer opens; it stays in the queue across an output
         switch, so the stop must say so instead of looking like the end."""
         held = sum(1 for i in range(skipped)
-                   if (self._queue.item_at(first + i).source or {}).get("kind") == "hqp")
+                   if (self._queue.item_at(first + i).opener() or {}).get("kind")
+                   in ("hqp", "unplayable"))
         if held == skipped:
             return (f"{held} queued track(s) live in the HQPlayer's own library "
                     "— only that HQPlayer can play them. Pick it as the output, "
@@ -379,6 +393,20 @@ class BrowserBackend(PlayerBackend):
                 return False
             url = self._media_url(item)
             if url is None:
+                if item.opener().get("kind") == "pending":
+                    # Its stream is on its way (playback.substitute): stand
+                    # on the slot and say so; slot_ready starts it.
+                    self._unplayable = None
+                    self._index = index
+                    self._current_ident = None
+                    self._position = 0.0
+                    self._length = item.duration_seconds or 0.0
+                    self._pending_play_index = index if play else None
+                    self._state = "loading" if play else "stopped"
+                    logger.info("browser output: slot %d waits for its stream (%s — %s)",
+                                index, item.artist, item.title)
+                    self._emit_now()
+                    return True
                 logger.warning("browser output: skipping unreachable item %s — %s",
                                item.artist, item.title)
                 index += 1

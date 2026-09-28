@@ -782,7 +782,9 @@ class DlnaBackend(PlayerBackend):
 
     def _url_for(self, item: QueueItem, *, qs: Optional[str] = None) -> Optional[str]:
         from streaming import service as streaming_service
-        src = item.source
+        # What THIS output opens (QueueItem.play, playback.substitute): a rip
+        # here, or the stream standing in for a copy held elsewhere.
+        src = item.opener()
         host = media_host(self._peer_host)
         # Snapshot the global quality setting into the URL — the proxy
         # transcodes to Opus for the remote/bandwidth tiers. HQPlayer's own
@@ -984,11 +986,11 @@ class DlnaBackend(PlayerBackend):
         inside = outside = streamed = unreadable = held = 0
         for i in range(skipped):
             item = self._queue.item_at(first + i)
-            src = (item.source or {}) if item else {}
+            src = (item.opener() or {}) if item else {}
             if src.get("kind") == "proxy":
                 streamed += 1
                 continue
-            if src.get("kind") == "hqp":
+            if src.get("kind") in ("hqp", "pending", "unplayable"):
                 # A file in an HQPlayer's own library (hqp_library.sync):
                 # only that HQPlayer can open it; every other output plays
                 # the album afresh as a stream.

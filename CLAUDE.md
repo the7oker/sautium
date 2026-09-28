@@ -264,7 +264,11 @@ See:
   `media_files` alone — and per-file things (analysis, `file://` paths
   HQPlayer opens) stay where the bytes are. When that endpoint is the active
   output its variants outrank local ones; elsewhere an HQP-only track
-  streams like a phantom. A file the HQPlayer reaches by path in THIS
+  streams like a phantom. The queue keeps identities across an output
+  switch and re-reads each slot's way in for the new output
+  (`QueueItem.play`, `playback/substitute.py`: a rip here, this
+  HQPlayer's copy, else a lazily fetched stream) — `source` is the origin
+  and never changes. A file the HQPlayer reaches by path in THIS
   node's own library (its mount of our root — `library_root` ↔ the node's
   root — or a Desktop on this very disk) is never imported as a copy: the
   sync skips it, the rescan forgets one imported before the mapping was
