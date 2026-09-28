@@ -12411,9 +12411,12 @@
       // The scan's word is discovery AND control: a box that answers the
       // datagram but closes its control port (an Embedded past its trial
       // half-hour) is "Not answering" here as it is when selected.
-      const state = sel ? 'checking'
-        : h.seen ? (h.control === false ? 'silent' : 'online')
-        : _scanInFlight ? 'checking' : 'offline';
+      // The selected row starts from the scan's word too and the live
+      // check refines it — a control port that closes at once takes
+      // seconds to give up on, and "checking…" that long reads as broken.
+      const scanned = h.seen ? (h.control === false ? 'silent' : 'online') : null;
+      const state = sel ? (scanned || 'checking')
+        : scanned || (_scanInFlight ? 'checking' : 'offline');
       const forget = h.known ? `
             <button data-action="remove-hqplayer" data-endpoint-id="${escapeProfileHtml(String(h.endpoint_id))}"
               data-name="${escapeProfileHtml(h.label || '')}" data-files="${escapeProfileHtml(String(h.files || 0))}"
