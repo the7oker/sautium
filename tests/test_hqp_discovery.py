@@ -76,8 +76,30 @@ def test_discover_is_none_where_nothing_answers():
 def test_the_label_names_the_product_and_what_tells_two_apart():
     """A Desktop is told apart by its machine's name; a box's generic
     self-name adds nothing to the product and is dropped."""
-    assert hqp_library.label("VH11", "Signalyst HQPlayer Desktop") == "HQPlayer Desktop · VH11"
+    assert hqp_library.label("STUDIO-PC", "Signalyst HQPlayer Desktop") == "HQPlayer Desktop · STUDIO-PC"
     assert hqp_library.label("HQPlayerEmbedded", "Signalyst HQPlayer Embedded 6") == "HQPlayer Embedded"
     assert hqp_library.label("Living room", "Signalyst HQPlayer Embedded") == "HQPlayer Embedded · Living room"
-    assert hqp_library.label("192.168.1.253", None) == "HQPlayer · 192.168.1.253"
+    assert hqp_library.label("192.168.1.53", None) == "HQPlayer · 192.168.1.53"
     assert hqp_library.label(None, None) == "HQPlayer"
+
+
+def test_a_renderer_at_an_alias_of_a_found_hqplayer_is_that_hqplayer(monkeypatch):
+    """A Desktop's UPnP renderer answers the interface-bound search on a
+    virtual adapter's address while its datagram was answered on the LAN
+    one; both are this machine, so the renderer is not a second device. A
+    Signalyst renderer where no HQPlayer answered stays a renderer, and any
+    other maker's renderer is never an HQPlayer."""
+    import auth_hmac
+    import routers.player as player
+    own = {"192.168.1.88", "172.26.80.1", "localhost"}
+    monkeypatch.setattr(auth_hmac, "is_own_address", lambda h: (h or "").lower() in own)
+    found = {"192.168.1.88": {"name": "STUDIO-PC", "product": "Signalyst HQPlayer Desktop 6"},
+             "192.168.1.53": {"name": "HQPlayerEmbedded", "product": "Signalyst HQPlayer Embedded 6"}}
+
+    def renderer(host, maker="Signalyst"):
+        return {"manufacturer": maker, "location": f"http://{host}:2870/desc.xml"}
+
+    assert player._is_hqplayer_renderer(renderer("172.26.80.1"), found)
+    assert player._is_hqplayer_renderer(renderer("192.168.1.53"), found)
+    assert not player._is_hqplayer_renderer(renderer("192.168.1.60"), found)
+    assert not player._is_hqplayer_renderer(renderer("192.168.1.53", "Astell&Kern"), found)

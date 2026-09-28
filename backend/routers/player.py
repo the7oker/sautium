@@ -747,13 +747,24 @@ def _configured_hqp() -> Optional[tuple]:
 
 
 def _is_hqplayer_renderer(info: dict, found_hqp: dict) -> bool:
-    """HQPlayer OS is a UPnP renderer as well (manufacturer Signalyst); a box
-    that answered as an HQPlayer is driven as one — its renderer would be the
-    same DSP with no queue and no filter control, so it is not offered twice."""
+    """HQPlayer is a UPnP renderer as well (manufacturer Signalyst — Desktop
+    and HQPlayer OS alike); a box that answered as an HQPlayer is driven as
+    one — its renderer would be the same DSP with no queue and no filter
+    control, so it is not offered twice.
+
+    One box answers on several addresses: the datagram on the LAN address the
+    sweep probed, the interface-bound M-SEARCH on a virtual adapter's (a
+    Desktop on a host with WSL/Hyper-V). The match is therefore by `_hqp_key`,
+    under which every alias of this machine is one key — never by the
+    literal address, which listed the Desktop's renderer as a second device."""
     from urllib.parse import urlparse
     if not (info.get("manufacturer") or "").lower().startswith("signalyst"):
         return False
-    return urlparse(info.get("location") or "").hostname in found_hqp
+    host = urlparse(info.get("location") or "").hostname
+    if not host:
+        return False
+    key = _hqp_key(host, 4321)
+    return any(_hqp_key(h, 4321) == key for h in found_hqp)
 
 
 def _probe_hqplayer(host: str, port: int) -> Optional[dict]:

@@ -295,9 +295,14 @@ Embedded past its trial half-hour still answers the datagram while its
 control port closes at once, and reads "Not answering" whether or not it
 is the selected output (the scan's `control` verdict, the selected row's
 live check).
-HQPlayer OS is a UPnP renderer as well (manufacturer Signalyst): a box that
-answered as an HQPlayer is offered once, as the HQPlayer — its renderer
-would be the same DSP with no queue and no filter control. Tapping an entry
+HQPlayer OS is a UPnP renderer as well (manufacturer Signalyst), and so is a
+Desktop: a box that answered as an HQPlayer is offered once, as the HQPlayer
+— its renderer would be the same DSP with no queue and no filter control.
+The match is by `address_key`, never the literal address (since 2026-09-28):
+one box answers the datagram on the LAN address and the interface-bound
+M-SEARCH on a virtual adapter's (WSL, Hyper-V), and every alias of this
+machine is one key — by address the Desktop's renderer was a second row.
+Tapping an entry
 makes it THE HQPlayer this node drives (`PUT /api/settings/output` with
 `hqplayer: {host, port}`; the address is the selection, as a renderer's
 record is for DLNA), and the way files reach it follows from that address.
