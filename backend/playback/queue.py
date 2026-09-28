@@ -295,7 +295,7 @@ _MEDIA_ITEM_SQL = """
     SELECT mf.id, mf.file_path, mf.file_format, t.id::text AS track_uuid,
            t.title, mf.track_number, mf.duration_seconds,
            mf.cue_start_seconds, mf.cue_end_seconds,
-           mf.cover_id::text AS cover_id, a.name AS artist, al.title AS album,
+           mf.cover_id::text AS cover_id, al.cover_url, a.name AS artist, al.title AS album,
            al.id::text AS album_id
     FROM media_files mf
     JOIN tracks t ON mf.track_id = t.id
@@ -328,6 +328,9 @@ def _item_from_media_row(r: dict) -> QueueItem:
         duration_seconds=(float(r["duration_seconds"])
                           if r["duration_seconds"] is not None else None),
         cover_id=r["cover_id"],
+        # the album's own URL only where no file carries a cover — the rule
+        # every album surface follows (coverUrl() prefers the URL)
+        cover_url=None if r["cover_id"] else r.get("cover_url"),
     )
 
 
@@ -347,7 +350,7 @@ _HQP_ITEM_SQL = """
            (SELECT mf.cover_id::text FROM media_files mf
             JOIN album_variants av2 ON av2.id = mf.album_variant_id
             WHERE av2.album_id = al.id AND mf.cover_id IS NOT NULL LIMIT 1) AS cover_id,
-           a.name AS artist, al.title AS album, al.id::text AS album_id
+           al.cover_url, a.name AS artist, al.title AS album, al.id::text AS album_id
     FROM hqp_library_files hf
     JOIN tracks t ON hf.track_id = t.id
     JOIN track_artists ta ON t.id = ta.track_id AND ta.role = 'primary'
@@ -371,12 +374,18 @@ def _item_from_hqp_row(r: dict) -> QueueItem:
         duration_seconds=(float(r["duration_seconds"])
                           if r["duration_seconds"] is not None else None),
         cover_id=r["cover_id"],
+        # No bytes here to read a cover from: the album's own URL (the Cover
+        # Art Archive front a held album is given) is what the mini-player
+        # and Now Playing show, as the album page does — unless a local rip
+        # of the album carries a cover.
+        cover_url=None if r["cover_id"] else r.get("cover_url"),
     )
 
 
 def items_for_hqp_ids(ids: list[int]) -> list[QueueItem]:
     """QueueItems for files held at an HQPlayer (hqp_library_files ids),
-    order-preserving — the album's cover, when a local rip carries one."""
+    order-preserving — the album's cover when a local rip carries one, else
+    the album's cover URL."""
     if not ids:
         return []
     rows = _db_query(_HQP_ITEM_SQL + " WHERE hf.id = ANY(%(ids)s) ORDER BY array_position(%(ids)s, hf.id)",
