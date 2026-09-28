@@ -26,7 +26,7 @@ PG = dict(host=os.environ.get("SAUTIUM_TEST_PGHOST", "postgres"),
           user=os.environ.get("SAUTIUM_TEST_PGUSER", "musicai"),
           password=os.environ.get("SAUTIUM_TEST_PGPASSWORD", "supervisor"))
 DBNAME = "sautium_hqp_library_test"
-PI = ("192.168.1.253", 4321)
+PI = ("192.168.1.53", 4321)
 PI_INFO = {"name": "HQPlayerEmbedded", "product": "Signalyst HQPlayer Embedded"}
 
 PRODIGY_DIR = "Electronic/Big beat/The Prodigy/[Vinyl]/Albums/Music for the Jilted Generation"
@@ -307,7 +307,7 @@ def test_an_hqplayer_on_this_machine_is_never_synced(db, monkeypatch):
     monkeypatch.setattr(hqp_library, "library_hash", lambda h, p: "h5")
     monkeypatch.setattr(hqp_library, "fetch_library", lambda h, p: LIBRARY)
     monkeypatch.setattr(hqp_library, "get_info",
-                        lambda h, p: {"name": "VH11", "product": "Signalyst HQPlayer Desktop"})
+                        lambda h, p: {"name": "STUDIO-PC", "product": "Signalyst HQPlayer Desktop"})
     stats = hqp_library.sync("localhost", 4321)
     assert (stats["refused"], stats["added"]) == ("here", 0)
     assert _one(db, "SELECT count(*) FROM hqp_endpoints") == 0
@@ -329,14 +329,14 @@ def test_a_chosen_hqplayer_is_registered_once_across_its_own_aliases(db, monkeyp
     row alone; a library row that moved away from that address loses it."""
     monkeypatch.setattr(hqp_library, "library_hash", lambda h, p: "h0")
     monkeypatch.setattr(hqp_library, "get_info",
-                        lambda h, p: {"name": "VH11", "product": "Signalyst HQPlayer Desktop"})
+                        lambda h, p: {"name": "STUDIO-PC", "product": "Signalyst HQPlayer Desktop"})
     first = hqp_library.register("host.docker.internal", 4321)
-    assert (first["name"], first["host"]) == ("VH11", "host.docker.internal")
+    assert (first["name"], first["host"]) == ("STUDIO-PC", "host.docker.internal")
     again = hqp_library.register("localhost", 4321)
     assert (again["id"], again["host"]) == (first["id"], "host.docker.internal")
     assert hqp_library.endpoint_by_address("127.0.0.1", 4321)["id"] == first["id"]
     assert hqp_library.address_key("localhost", 4321) == hqp_library.address_key("host.docker.internal", 4321)
-    assert hqp_library.address_key("192.168.1.253", 4321) == ("192.168.1.253", 4321)
+    assert hqp_library.address_key("192.168.1.53", 4321) == ("192.168.1.53", 4321)
     assert _one(db, "SELECT count(*) FROM hqp_endpoints") == 1
     # the sync refuses an HQPlayer on this machine — and its own row keeps
     # its address
@@ -352,12 +352,12 @@ def test_a_chosen_hqplayer_is_registered_once_across_its_own_aliases(db, monkeyp
     monkeypatch.setattr(hqp_library, "fetch_library", lambda h, p: PRODIGY_ONLY)
     assert hqp_library.sync(*PI)["added"] == 2
     monkeypatch.setattr(hqp_library, "get_info",
-                        lambda h, p: {"name": "VH11", "product": "Signalyst HQPlayer Desktop"})
+                        lambda h, p: {"name": "STUDIO-PC", "product": "Signalyst HQPlayer Desktop"})
     monkeypatch.setattr(hqp_library, "library_hash", lambda h, p: "h0")
     monkeypatch.setattr(hqp_library, "has_own_library", lambda h: False)
     assert hqp_library.sync(*PI)["refused"] == "here"
     assert _one(db, "SELECT host FROM hqp_endpoints WHERE hqp_name = 'HQPlayerEmbedded'") is None
-    assert _one(db, "SELECT host FROM hqp_endpoints WHERE hqp_name = 'VH11'") == "host.docker.internal"
+    assert _one(db, "SELECT host FROM hqp_endpoints WHERE hqp_name = 'STUDIO-PC'") == "host.docker.internal"
     # not answering: no row, no error — the choice stands
     def down(h, p):
         raise OSError("refused")

@@ -22,9 +22,9 @@ def test_same_network_is_a_slash_24_except_cgnat_which_is_one():
 
 
 def test_candidate_on_the_peers_network_wins(monkeypatch):
-    monkeypatch.setattr(settings, "media_proxy_advertised_host", "192.168.1.188")
+    monkeypatch.setattr(settings, "media_proxy_advertised_host", "192.168.1.88")
     monkeypatch.setenv("SAUTIUM_HOST_IPS", "100.101.102.103")
-    assert media_host("192.168.1.253") == "192.168.1.188"
+    assert media_host("192.168.1.53") == "192.168.1.88"
     assert media_host("100.64.5.5") == "100.101.102.103"
 
 
@@ -36,11 +36,11 @@ def test_a_name_for_this_machine_keeps_the_advertised_host(monkeypatch):
 
 
 def test_a_lan_address_picks_the_lan_candidate(monkeypatch):
-    monkeypatch.setattr(settings, "media_proxy_advertised_host", "192.168.1.188")
+    monkeypatch.setattr(settings, "media_proxy_advertised_host", "192.168.1.88")
     monkeypatch.delenv("SAUTIUM_HOST_IPS", raising=False)
-    assert media_host_for_name("192.168.1.253") == "192.168.1.188"
+    assert media_host_for_name("192.168.1.53") == "192.168.1.88"
 
 
 def test_an_unresolvable_name_falls_back_to_the_advertised_host(monkeypatch):
-    monkeypatch.setattr(settings, "media_proxy_advertised_host", "192.168.1.188")
-    assert media_host_for_name("no-such-host.invalid") == "192.168.1.188"
+    monkeypatch.setattr(settings, "media_proxy_advertised_host", "192.168.1.88")
+    assert media_host_for_name("no-such-host.invalid") == "192.168.1.88"

@@ -8649,7 +8649,7 @@
         || escapeHtml(info.product || 'online');
       // Which HQPlayer this is — the name the picker registered it under —
       // and where; a tap leads to Audio output, where another one is chosen
-      // or added (there is no editor here since 2026-09-29). The text sits
+      // or added (there is no editor here since 2026-09-28). The text sits
       // at the left edge like every other block's label, the state dot at
       // the right; how the files reach it is not said here — read off the
       // address, it is nothing to configure and read as the only way.

@@ -20,14 +20,14 @@ hqp_library = pytest.importorskip("hqp_library")
 PI_REPLY = (b'<?xml version="1.0" encoding="utf-8"?>'
             b'<discover name="HQPlayerEmbedded" result="NA" version="Signalyst HQPlayer Embedded 6"/>')
 DESKTOP_REPLY = (b'<?xml version="1.0" encoding="utf-8"?>'
-                 b'<discover name="VH11" result="NA" version="Signalyst HQPlayer Desktop 6"/>')
+                 b'<discover name="STUDIO-PC" result="NA" version="Signalyst HQPlayer Desktop 6"/>')
 
 
 def test_the_reply_names_the_hqplayer_and_its_product():
     assert hqp_library.parse_discover(PI_REPLY) == {"name": "HQPlayerEmbedded",
                                                     "product": "Signalyst HQPlayer Embedded 6"}
     desk = hqp_library.parse_discover(DESKTOP_REPLY)
-    assert (desk["name"], hqp_library.is_embedded(desk["product"])) == ("VH11", False)
+    assert (desk["name"], hqp_library.is_embedded(desk["product"])) == ("STUDIO-PC", False)
     assert hqp_library.is_embedded(hqp_library.parse_discover(PI_REPLY)["product"])
     # anything else on that port is not an HQPlayer
     assert hqp_library.parse_discover(b"HTTP/1.1 200 OK\r\n\r\n") is None
@@ -61,7 +61,7 @@ def responder():
 
 def test_discover_finds_the_box_on_its_control_port(responder):
     assert hqp_library.discover("127.0.0.1", responder, timeout=1.0) == {
-        "name": "VH11", "product": "Signalyst HQPlayer Desktop 6"}
+        "name": "STUDIO-PC", "product": "Signalyst HQPlayer Desktop 6"}
 
 
 def test_discover_is_none_where_nothing_answers():

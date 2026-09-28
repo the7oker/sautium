@@ -98,7 +98,7 @@ _DISCOVER_TIMEOUT = 1.5
 
 def parse_discover(reply: bytes) -> Optional[Dict[str, str]]:
     """The answer to HQPlayer's own discovery datagram —
-    `<discover name="VH11" result="NA" version="Signalyst HQPlayer Desktop 6"/>`
+    `<discover name="STUDIO-PC" result="NA" version="Signalyst HQPlayer Desktop 6"/>`
     — as name + product (the version string names the product, major
     included, so `is_embedded` reads it like GetInfo's). None for anything
     else on that port."""

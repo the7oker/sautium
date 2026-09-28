@@ -418,7 +418,7 @@ def get_album(
         ORDER BY {best_rip_order('av')}
     """, params)
     # A copy held at an HQPlayer says whose: two rips on the same box read
-    # alike otherwise, and one of them was taken for a stream (2026-09-29).
+    # alike otherwise, and one of them was taken for a stream (2026-09-28).
     held = {v["hqp_endpoint_id"] for v in album["variants"] if v["hqp_endpoint_id"]}
     if held:
         import hqp_library

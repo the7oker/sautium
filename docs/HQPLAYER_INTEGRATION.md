@@ -274,10 +274,10 @@ HOST = "host.docker.internal"
 HOST = "<windows-host-ip>"
 ```
 
-### Finding HQPlayers (2026-09-29)
+### Finding HQPlayers (2026-09-28)
 HQPlayer has a discovery protocol of its own: a `<discover/>` datagram to
 its control port — UDP 4321 — is answered by Desktop and Embedded alike
-with `<discover name="VH11" result="NA" version="Signalyst HQPlayer
+with `<discover name="STUDIO-PC" result="NA" version="Signalyst HQPlayer
 Desktop 6"/>` (what HQPlayer Client broadcasts for; verified 2026-09-28
 against both). Sautium sends it unicast, so it crosses the docker bridge
 like the DLNA sweep's M-SEARCH, and the reply comes back from 4321, which
@@ -286,8 +286,8 @@ The Output picker's scan (`POST /api/player/outputs/scan`, on opening the
 picker and on Rescan) asks every LAN address for a renderer and for an
 HQPlayer in the same breath (`routers/player._unicast_sweep`), and lists
 each HQPlayer it heard as its own entry beside the renderers, shaped like
-every other row — "HQPlayer Desktop · VH11 / Online · this computer",
-"HQPlayer Embedded / Online · 192.168.1.253" (`hqp_library.label`: the
+every other row — "HQPlayer Desktop · STUDIO-PC / Online · this computer",
+"HQPlayer Embedded / Online · 192.168.1.53" (`hqp_library.label`: the
 product and the name that tells two apart, a box's generic self-name
 dropped; the state dot is the box's, the check is the selection; the order
 never follows the selection). The dot's word is discovery AND control: an
@@ -318,9 +318,9 @@ alias registered, and the row keeps the address it was registered at (on a
 Docker node `host.docker.internal` for a Desktop the scan sees at the LAN
 address). A row is listed while its box is off, like a pinned renderer;
 its `×` in the picker forgets it — the same confirmed goodbye Settings ›
-Library offered before 2026-09-29, when the block moved (below). The
+Library offered before 2026-09-28, when the block moved (below). The
 mini-player and the status name the selected one by the same label
-(`HQPlayer Desktop · VH11`).
+(`HQPlayer Desktop · STUDIO-PC`).
 
 ### HQPlayer Embedded on the LAN
 Open More → Audio output: the scan lists the box, or **Add device by
@@ -377,7 +377,7 @@ every discography reconcile).
 Since 2026-09-28 the library has an identity of its own — an `hqp_endpoints`
 row (the owner's name for it, seeded from `<GetInfo/>`; what HQPlayer
 reports about itself; the `<LibraryGetHash/>` the last complete sync saw —
-since 2026-09-29 the row of every HQPlayer the owner picked, a Desktop's
+since 2026-09-28 the row of every HQPlayer the owner picked, a Desktop's
 included, see "Finding HQPlayers") and `album_variants.hqp_endpoint_id`
 points at it: the same library answering from a new address after a DHCP
 lease is recognised by its hash and the row moves; a different HQPlayer
@@ -405,7 +405,7 @@ no rip here) stays unplayable and the stop names it. The demo ledger applies
 to a substituted stream as to any stream.
 The library belongs to one HQPlayer, so its one block is at the bottom of
 that HQPlayer's screen (the gear on the selected picker row; since
-2026-09-29, before that a section of Settings › Library): what this node
+2026-09-28, before that a section of Settings › Library): what this node
 holds of it, then chips — Import / Sync, Rescan, Forget this library,
 Cancel while a job runs with its progress in the hint (the library wake
 channel, in place). Used rarely, so it sits last; found anyway, because
@@ -418,7 +418,7 @@ HQPlayer is the output — the attach-time re-check follows the output alone. On
 ANOTHER machine has a library of its own — an Embedded box, a Desktop on a
 second computer; one on this machine, whatever the product, reads this
 node's music folder and is refused everywhere (`has_own_library`, by
-address like the way files reach it — since 2026-09-29; the rule was
+address like the way files reach it — since 2026-09-28; the rule was
 "Embedded only" for a day) — importing it brought every album in as a copy
 once (2026-09-27) and was reverted with `python -m hqp_library
 --forget-endpoint`. The FIRST import of an Embedded box is a previewed

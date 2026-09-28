@@ -356,7 +356,7 @@ implementation details live in the code, DB and git history.
 - **Path translation**: Container `/music/...` → Windows `E:/Music/...` before
   sending to HQPlayer. Both sides see the same files through different mount
   points.
-- **HQPlayers are found, not typed (2026-09-29).** HQPlayer answers its own
+- **HQPlayers are found, not typed (2026-09-28).** HQPlayer answers its own
   discovery datagram — `<discover/>` on UDP 4321, what HQPlayer Client
   broadcasts — with its name and product; sent unicast it crosses the
   docker bridge like the DLNA sweep's M-SEARCH, so the Output picker's scan
@@ -370,7 +370,7 @@ implementation details live in the code, DB and git history.
   aliases are one HQPlayer. A library of its own is an HQPlayer's on
   ANOTHER machine — a Desktop on a second computer included — and the
   HQPlayer screen syncs it; one on this machine reads this node's folder
-  (Valerii's rule, 2026-09-29, replacing "Embedded only").
+  (Valerii's rule, 2026-09-28, replacing "Embedded only").
 - **Where HQPlayer runs is read off its address (2026-09-28; a setting for
   one day before that).** An HQPlayer on this machine — loopback, the Docker
   host, one of our own addresses — is handed `file://` URIs at the stored
