@@ -314,8 +314,10 @@ alias registered, and the row keeps the address it was registered at (on a
 Docker node `host.docker.internal` for a Desktop the scan sees at the LAN
 address). A row is listed while its box is off, like a pinned renderer;
 its `×` in the picker forgets it — the same confirmed goodbye Settings ›
-Library offers when the row holds copies. The mini-player and the status
-name the selected one by the same label (`HQPlayer Desktop · VH11`).
+Library offers when the row holds copies; an Embedded row also carries its
+library's sync (the same previewed first import, the progress on the
+Library screen — a Desktop has no library to sync). The mini-player and the
+status name the selected one by the same label (`HQPlayer Desktop · VH11`).
 
 ### HQPlayer Embedded on the LAN
 Open More → Audio output: the scan lists the box, or **Add device by

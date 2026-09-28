@@ -12382,6 +12382,9 @@
             <span class="row-stack-label">${escapeProfileHtml(h.label || 'HQPlayer')}</span>
             ${sel ? `<button class="row-stack-settings" type="button" data-action="hqp-settings"
                     aria-label="HQPlayer settings" hidden>${SETTINGS_ICONS.gear}</button>` : ''}
+            ${h.known && h.embedded ? `<button class="row-stack-settings" type="button" data-action="hqp-sync-row"
+                    data-endpoint-id="${escapeProfileHtml(String(h.endpoint_id))}" data-label="${escapeProfileHtml(h.label || '')}"
+                    aria-label="Sync its library" title="Sync its library">${SETTINGS_ICONS.refresh}</button>` : ''}
           </span>
           <span style="display:inline-flex;align-items:center;gap:calc(6*var(--px));">${forget}${mark(sel)}</span>
         </div>
@@ -12571,6 +12574,43 @@
       ${qualityGroup}`;
   }
 
+  /* The HQPlayer library sync, from wherever a library is named — Settings ›
+     Library's buttons and the Embedded row's action in the Output picker.
+     The first import of an endpoint comes back as a preview — the decision
+     names the HQPlayer and the size of what it would bring; a Desktop is
+     refused: it reads this node's own library. Resolves true when a job
+     was started (its progress lives on the Library screen). */
+  async function hqpSyncFlow(endpointId) {
+    const target = endpointId ? '?endpoint_id=' + encodeURIComponent(endpointId) : '';
+    const r = await fetch('/api/settings/library/hqp-sync' + target, { method: 'POST' });
+    const body = await r.json().catch(() => ({}));
+    if (!r.ok) {
+      notices.toast({ kind: 'error', key: 'hqp-sync', title: 'HQPlayer library',
+                      text: escapeProfileHtml(body.detail || 'Could not start the sync') });
+      return false;
+    }
+    if (body.refused === 'desktop') {
+      await window.notifyDialog({
+        title: 'Nothing to import',
+        message: `<b>${escapeProfileHtml(body.name || body.endpoint)}</b> is HQPlayer Desktop: it reads this node's own library, so its library is yours already. A library of its own lives only on an HQPlayer Embedded box.`,
+        kind: 'info',
+      });
+      return false;
+    }
+    if (body.preview) {
+      const p = body.preview;
+      const ok = await window.confirmDestructive({
+        title: 'Import the HQPlayer library?',
+        message: `<b>${escapeProfileHtml(p.name || p.endpoint)}</b> (${escapeProfileHtml(p.endpoint)}) lists ${escapeProfileHtml(fmtNum(p.files))} files, ${escapeProfileHtml(fmtNum(p.new))} of them new here. Albums it holds become variants of yours.`,
+        confirmText: 'Import',
+      });
+      if (!ok) return false;
+      const c = await fetch('/api/settings/library/hqp-sync?confirm=true' + (endpointId ? '&endpoint_id=' + encodeURIComponent(endpointId) : ''), { method: 'POST' });
+      return c.ok;
+    }
+    return !!body.success;
+  }
+
   function _wireOutputActions(root) {
     // Every PUT tears the active backend down and rebuilds it, so two in
     // flight would end on whichever the server applied last: the chain
@@ -12597,6 +12637,20 @@
         // screen (filters, DSP) is the gear on the row, never a detour.
         putOutput({ type: 'hqplayer',
                     hqplayer: { host: el.dataset.host, port: parseInt(el.dataset.port, 10) || 4321 } })));
+    // An Embedded box has a library of its own: its row syncs it, the
+    // progress lives on the Library screen (a Desktop has no library to
+    // sync, so its row has no such button).
+    root.querySelectorAll('[data-action="hqp-sync-row"]').forEach(el =>
+      el.addEventListener('click', (e) => {
+        e.stopPropagation();   // the button sits inside the select-hqp row
+        onceInFlight(el, async () => {
+          if (await hqpSyncFlow(el.dataset.endpointId)) {
+            notices.toast({ kind: 'info', key: 'hqp-sync', title: escapeProfileHtml(el.dataset.label || 'HQPlayer'),
+                            text: 'Syncing its library — the progress is on the Library screen.',
+                            action: { label: 'Open', run: () => navigate('more/library') } });
+          }
+        });
+      }));
     root.querySelectorAll('[data-action="remove-hqplayer"]').forEach(el =>
       el.addEventListener('click', (e) => {
         e.stopPropagation();   // the × sits inside the select-hqp row
@@ -13570,32 +13624,8 @@
     onAction('[data-cancel-scan]',         async () => { await fetch('/api/settings/library/scan/cancel',   { method: 'POST' }); render(); });
     onAction('[data-cancel-enrich]',       async () => { await fetch('/api/settings/library/enrich/cancel', { method: 'POST' }); render(); });
     onAction('[data-action="hqp-sync"]',   async (e) => {
-      // The configured HQPlayer, or a library listed below (its endpoint
-      // id). The first import of an endpoint comes back as a preview — the
-      // decision names the HQPlayer and the size of what it would bring;
-      // a Desktop is refused: it reads this node's own library.
-      const endpointId = e.currentTarget.getAttribute('data-endpoint-id');
-      const target = endpointId ? '?endpoint_id=' + encodeURIComponent(endpointId) : '';
-      const r = await fetch('/api/settings/library/hqp-sync' + target, { method: 'POST' });
-      const body = r.ok ? await r.json() : null;
-      if (body && body.refused === 'desktop') {
-        await window.notifyDialog({
-          title: 'Nothing to import',
-          message: `<b>${escapeProfileHtml(body.name || body.endpoint)}</b> is HQPlayer Desktop: it reads this node's own library, so its library is yours already. A library of its own lives only on an HQPlayer Embedded box.`,
-          kind: 'info',
-        });
-        return;
-      }
-      if (body && body.preview) {
-        const p = body.preview;
-        const ok = await window.confirmDestructive({
-          title: 'Import the HQPlayer library?',
-          message: `<b>${escapeProfileHtml(p.name || p.endpoint)}</b> (${escapeProfileHtml(p.endpoint)}) lists ${escapeProfileHtml(fmtNum(p.files))} files, ${escapeProfileHtml(fmtNum(p.new))} of them new here. Albums it holds become variants of yours.`,
-          confirmText: 'Import',
-        });
-        if (!ok) return;
-        await fetch('/api/settings/library/hqp-sync?confirm=true' + (endpointId ? '&endpoint_id=' + encodeURIComponent(endpointId) : ''), { method: 'POST' });
-      }
+      // The configured HQPlayer, or a library listed below (its endpoint id).
+      await hqpSyncFlow(e.currentTarget.getAttribute('data-endpoint-id'));
       render();
     });
     onAction('[data-cancel-hqp]',          async () => { await fetch('/api/settings/library/hqp-sync/cancel', { method: 'POST' }); render(); });
