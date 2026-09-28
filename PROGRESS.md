@@ -426,10 +426,9 @@ implementation details live in the code, DB and git history.
   on the slot as it buffers; `source` never changes, so the way back to
   the HQPlayer that opens it natively is free. The HQPlayer output takes
   native copies only (HQPlayer fetches an http entry at add time, so an
-  unbuffered stream cannot sit in its 1:1 mirror). Trap: the harness's
-  safety classifier refused every file-creating command for a stretch —
-  edits went through, new files did not; the queue substitute unit test
-  waits for it.
+  unbuffered stream cannot sit in its 1:1 mirror). The pure substitute
+  test drives a fake proxy through the lead window; the copy resolution
+  is a database test over both file tables.
   Lesson: the first import of an
   endpoint is a previewed decision — a tap on the Desktop endpoint imported
   21k files of the same library as copies before it was cancelled and
