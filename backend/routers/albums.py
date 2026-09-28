@@ -417,6 +417,15 @@ def get_album(
                    ELSE av.location = 'local' END
         ORDER BY {best_rip_order('av')}
     """, params)
+    # A copy held at an HQPlayer says whose: two rips on the same box read
+    # alike otherwise, and one of them was taken for a stream (2026-09-29).
+    held = {v["hqp_endpoint_id"] for v in album["variants"] if v["hqp_endpoint_id"]}
+    if held:
+        import hqp_library
+        labels = {r["id"]: hqp_library.label(r["name"], r["product"]) for r in db_query(
+            "SELECT id, name, product FROM hqp_endpoints WHERE id = ANY(%(ids)s)", {"ids": list(held)})}
+        for v in album["variants"]:
+            v["hqp_label"] = labels.get(v["hqp_endpoint_id"])
     album["selected_variant_id"] = (variant_id if variant_id is not None
                                     else qrow["variant_id"])
     album["is_owned"] = True

@@ -5452,7 +5452,10 @@
     const specs = [sr, bd, fmt].filter(Boolean).join(' · ');
     const tailParts = (v.directory_path || '').split(/[\\/]/).filter(Boolean).slice(-2);
     const tail = tailParts.join('/');
-    return specs && tail ? `${specs} · ${tail}` : (specs || tail || ('Variant ' + v.variant_id));
+    const base = specs && tail ? `${specs} · ${tail}` : (specs || tail || ('Variant ' + v.variant_id));
+    // Where the copy lives: a rip held at an HQPlayer names it; a local rip
+    // says nothing, as before.
+    return v.location === 'hqplayer' ? `${base} · at ${v.hqp_label || 'HQPlayer'}` : base;
   }
 
   const ALL_VARIANTS_LABEL = 'All variants · best per track';
