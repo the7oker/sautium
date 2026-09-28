@@ -658,8 +658,8 @@ def _job(host: str, port: int, force: bool, rescan: bool) -> None:
             result = sync(host, port, force=force, progress_cb=progress_cb,
                           cancel_check=lambda: state["cancel_requested"])
             if result["refused"]:
-                state["progress"] = ("Not synced: HQPlayer Desktop reads this node's own library "
-                                     "— there is nothing to import")
+                state["progress"] = ("Not synced: an HQPlayer on this machine reads this node's "
+                                     "own library — there is nothing to import")
             elif result["unchanged"]:
                 state["progress"] = "HQPlayer library unchanged"
             elif result["cancelled"]:

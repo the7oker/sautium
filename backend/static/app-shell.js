@@ -8498,6 +8498,38 @@
     if (el.textContent !== next) el.textContent = next;
   }
 
+  // The Library row follows a running sync over the library wake channel
+  // (the one Settings › Library uses): the progress lands in the hint, the
+  // end restores the row — in place, never a re-render of the DSP screen.
+  let _hqpLibWakeCtrl = null;
+  function _watchHqpLibrary(body) {
+    if (_hqpLibWakeCtrl) { _hqpLibWakeCtrl.abort(); _hqpLibWakeCtrl = null; }
+    const stop = () => { if (_hqpLibWakeCtrl) { _hqpLibWakeCtrl.abort(); _hqpLibWakeCtrl = null; } };
+    _hqpLibWakeCtrl = libraryWake.on(async () => {
+      if (!parseHash().startsWith('more/hqplayer') || !body.isConnected) { stop(); return; }
+      let hl;
+      try {
+        const r = await fetch('/api/settings/library');
+        if (!r.ok) return;
+        hl = (await r.json()).hqp_library || {};
+      } catch (_) { return; }
+      const row = body.querySelector('[data-action="sync-library"]');
+      const value = body.querySelector('[data-hqp-lib-value]');
+      const hint = body.querySelector('[data-hqp-lib-hint]');
+      if (!row || !value || !hint) { stop(); return; }
+      const progress = String(hl.progress || '');
+      if (!!hl.running && !_terminalRe.test(progress)) {
+        if (progress && hint.textContent !== progress) hint.textContent = progress;
+        return;
+      }
+      row.disabled = false;
+      value.textContent = hl.synced ? `${fmtNum(hl.files)} files · ${fmtNum(hl.albums)} albums` : 'Not imported';
+      hint.textContent = progress || (hl.synced ? 'Variants of your albums; re-checked on attach. Tap to sync now.'
+                                                : 'Its albums become variants of yours. Tap to import.');
+      stop();
+    });
+  }
+
   async function renderHqplayerSettings(root) {
     const screen = document.createElement('div');
     screen.className = 'screen hqp-screen';
@@ -8695,14 +8727,14 @@
           <div class="hqp-section-label">Library</div>
           <button class="hqp-row hqp-row-tap" type="button" data-action="sync-library" ${libRunning ? 'disabled' : ''}>
             <span class="hqp-row-label">${lib.synced ? 'Held here' : 'Its library'}</span>
-            <span class="hqp-row-value">${escapeHtml(libValue)}</span>
+            <span class="hqp-row-value" data-hqp-lib-value>${escapeHtml(libValue)}</span>
             <svg width="18" height="18" viewBox="0 0 24 24" fill="none"
                  stroke="currentColor" stroke-width="1.6"
                  stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
               <path d="M9 6l6 6-6 6"/>
             </svg>
           </button>
-          <p class="hqp-row-hint">${escapeProfileHtml(libHint)}</p>
+          <p class="hqp-row-hint" data-hqp-lib-hint>${escapeProfileHtml(libHint)}</p>
         </section>` : '';
 
       body.innerHTML = `
@@ -8845,15 +8877,13 @@
       if (syncEl) {
         syncEl.addEventListener('click', () => onceInFlight(syncEl, async () => {
           // The same flow as Settings › Library (the previewed first import);
-          // the progress lives there, this screen shows the state on reload.
-          if (await hqpSyncFlow(s.endpoint_id)) {
-            notices.toast({ kind: 'info', key: 'hqp-sync', title: escapeProfileHtml(s.label || 'HQPlayer'),
-                            text: 'Syncing its library — the progress is on the Library screen.',
-                            action: { label: 'Open', run: () => navigate('more/library') } });
-          }
+          // the reload paints the row as syncing and the wake channel then
+          // carries its progress and its end into the row in place.
+          await hqpSyncFlow(s.endpoint_id);
           load();
         }));
       }
+      if (libRunning) _watchHqpLibrary(body);
 
       body.querySelector('[data-action="open-filter"]').addEventListener('click', () => {
         openFilterPicker(s, (chosen) => serialized('hqp.config', async () => {
