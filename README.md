@@ -37,7 +37,7 @@ Website and guides: https://sautium.net · Downloads: https://sautium.net/downlo
   (Claude Code or OpenAI Codex, selectable) driving two MCP servers: Sautium's
   own (41 tools — search, playback, queue, HQPlayer DSP, gear, dump control)
   and a read-only PostgreSQL one, instead of a custom RAG pipeline. Pluggable
-  LLM providers for the non-agent paths (Claude API, OpenAI, Groq,
+  LLM providers for the non-agent paths (Claude API, OpenAI,
   OpenAI-compatible endpoints).
 - **Metadata enrichment** — Last.fm bios, tags, similar artists and album
   wikis in normalized tables (node-local: Last.fm's terms don't allow

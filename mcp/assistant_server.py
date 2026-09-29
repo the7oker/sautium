@@ -1461,8 +1461,8 @@ def gear_advisor_report() -> str:
 @mcp.tool()
 def gear_system_report() -> str:
     """Deterministic pair-compatibility matrix over the user's gear park:
-    SPL headroom, damping, gain staging, format chains, measured caveats
-    and community pair-synergy notes, each with provenance tiers."""
+    SPL headroom, damping, gain staging, measured caveats and community
+    pair-synergy notes, each with provenance tiers."""
     try:
         import json as _json
         return _json.dumps(_backend_get("/api/profile/gear/system", {}), ensure_ascii=False)

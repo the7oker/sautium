@@ -113,7 +113,6 @@ class Settings(BaseSettings):
 
     # Multi-provider LLM support
     openai_api_key: Optional[str] = None
-    groq_api_key: Optional[str] = None
     openai_compat_base_url: Optional[str] = None
     openai_compat_api_key: Optional[str] = None
     openai_compat_model: Optional[str] = None

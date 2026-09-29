@@ -44,6 +44,7 @@ from typing import Any, Callable, Dict, List, Optional, Tuple
 
 from sqlalchemy import text
 
+from caa import fill_held_album_covers
 from canon.identity import ORPHAN_TRACK_SQL
 from database import get_db_context
 from db_pool import db_execute, db_query
@@ -672,7 +673,7 @@ def _job(host: str, port: int, force: bool, rescan: bool) -> None:
                 if result["added"]:
                     from canon import post_import
                     post_import.run(state, result, started)
-                    result["covers"] = caa.fill_held_album_covers()
+                    result["covers"] = fill_held_album_covers()
                 state["progress"] = (f"Sync complete: {result['added']} added, "
                                      f"{result['known']} already here")
         state["result"] = result

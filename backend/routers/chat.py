@@ -591,7 +591,7 @@ def _generate_session_title(
 ) -> Optional[str]:
     """Summarise the first exchange into a short chat title via the
     SAME provider that just answered. ChatGPT user → ChatGPT title;
-    Groq user → Groq title; Claude Code user → Claude Code title
+    Claude Code user → Claude Code title
     (subprocess). This keeps billing/credentials consistent — if the
     main chat works, title gen works.
 
@@ -655,7 +655,7 @@ def _resolve_provider(req_provider: Optional[str]) -> str:
     if not providers:
         raise HTTPException(
             status_code=503,
-            detail="No LLM providers configured. Set CLAUDE_CODE_ENABLED, ANTHROPIC_API_KEY, GROQ_API_KEY, or OPENAI_API_KEY.",
+            detail="No LLM providers configured. Set CLAUDE_CODE_ENABLED, ANTHROPIC_API_KEY, or OPENAI_API_KEY.",
         )
 
     name = req_provider or _user_settings_value("ai.provider")

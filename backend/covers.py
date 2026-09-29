@@ -593,6 +593,7 @@ def resolve_cover_for_folder(db: Session, media_file_id: int) -> Optional[uuid.U
     if still_unresolved:
         meta = _lookup_album_artist(db, media_file_id)
         lastfm_cover_id: Optional[uuid.UUID] = None
+        url: Optional[str] = None
         transient = False
         if meta and settings.lastfm_api_key:
             if api_cooldown.cooling_down('lastfm'):

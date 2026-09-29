@@ -9,7 +9,7 @@ prompt line quietly learned it back.
 
 Three variants:
   - CLAUDE_SYSTEM_PROMPT: for Claude Code (subprocess with MCP tools)
-  - API_SYSTEM_PROMPT: for API providers (Anthropic, OpenAI, Groq, etc.)
+  - API_SYSTEM_PROMPT: for API providers (Anthropic, OpenAI, etc.)
   - CODEX_SYSTEM_PROMPT: the Claude text with the codex harness-discipline
     block spliced in; it replaces codex's built-in coding-agent prompt
 """

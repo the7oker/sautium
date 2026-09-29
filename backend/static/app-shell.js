@@ -6811,70 +6811,22 @@
       return;
     }
 
-    bar.querySelector('[data-confirm="end"]').addEventListener('click', e => {
-      e.stopPropagation();
-      onceInFlight(bar, async () => {
-        bar.querySelectorAll('.track-confirm-btn').forEach(b => { b.disabled = true; });
-        const resp = await fetch('/api/player/queue-tracks', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ track_ids: [mfId] }),
-        }).catch(() => null);
-        closeQueueConfirm(row);
-        await reportPlaybackResult(resp);
-      });
-    });
-    bar.querySelector('[data-confirm="next"]').addEventListener('click', e => {
-      e.stopPropagation();
-      onceInFlight(bar, async () => {
-        bar.querySelectorAll('.track-confirm-btn').forEach(b => { b.disabled = true; });
-        let resp = null;
-        try {
-        // 1. Pull current playing index + freshest playlist so we
-        //    can build the new order from a consistent snapshot.
-        //    HQPlayer's track_index is 1-based; convert to JS index.
-        const [statusResp, plResp] = await Promise.all([
-          fetch('/api/player/status'),
-          fetch('/api/player/playlist'),
-        ]);
-        const status = statusResp.ok ? await statusResp.json() : null;
-        const pl = plResp.ok ? await plResp.json() : null;
-        const tracks = (pl && pl.tracks) || [];
-        const currentIdx = status && status.track_index
-          ? status.track_index - 1
-          : -1;
-        // 2. Append the new track so HQPlayer has it in the
-        //    playlist (the protocol has no insert primitive).
-        resp = await fetch('/api/player/queue-tracks', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ track_ids: [mfId] }),
+    // The endpoint owns the next/end insert, as for a phantom row: the queue
+    // is the server's, and a client that appended and then reordered lost
+    // the track to any queue change in between.
+    ['next', 'end'].forEach(pos => {
+      bar.querySelector(`[data-confirm="${pos}"]`).addEventListener('click', e => {
+        e.stopPropagation();
+        onceInFlight(bar, async () => {
+          bar.querySelectorAll('.track-confirm-btn').forEach(b => { b.disabled = true; });
+          const resp = await fetch('/api/player/queue-tracks', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ track_ids: [mfId], position: pos }),
+          }).catch(() => null);
+          closeQueueConfirm(row);
+          await reportPlaybackResult(resp);
         });
-        // 3. Reorder: splice the just-appended track into the slot
-        //    right after the currently playing one. /reorder takes
-        //    the FULL new order including the current slot at its
-        //    original position. If we don't know the current index
-        //    (stopped / no playlist), we leave it at the end — same
-        //    fallback as a plain End. Skip when the append itself failed.
-        if (resp.ok && currentIdx >= 0 && currentIdx < tracks.length) {
-          // Refetch: /reorder is keyed on track UUIDs now, and the
-          // appended row's UUID only exists in the fresh playlist.
-          const fresh = await fetch('/api/player/playlist')
-            .then(r => r.json()).catch(() => null);
-          const rows = (fresh && fresh.tracks) || [];
-          if (rows.length > 1) {
-            const newOrder = rows.map(t => t.track_id);
-            newOrder.splice(currentIdx + 1, 0, newOrder.pop());
-            await fetch('/api/player/reorder', {
-              method: 'POST',
-              headers: { 'Content-Type': 'application/json' },
-              body: JSON.stringify({ order: newOrder }),
-            });
-          }
-        }
-      } catch (err) { console.warn('queue-tracks (next) failed', err); }
-        closeQueueConfirm(row);
-        await reportPlaybackResult(resp);
       });
     });
   }
@@ -6903,60 +6855,19 @@
     if (queueBtn) wrap.insertBefore(bar, queueBtn);
     else wrap.appendChild(bar);
 
-    bar.querySelector('[data-confirm="end"]').addEventListener('click', e => {
-      e.stopPropagation();
-      onceInFlight(bar, async () => {
-        bar.querySelectorAll('.track-confirm-btn').forEach(b => { b.disabled = true; });
-        const resp = await fetch('/api/player/queue-tracks', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ track_ids: ids }),
-        }).catch(() => null);
-        closeAlbumQueueConfirm(wrap);
-        await reportPlaybackResult(resp);
-      });
-    });
-    bar.querySelector('[data-confirm="next"]').addEventListener('click', e => {
-      e.stopPropagation();
-      onceInFlight(bar, async () => {
-        bar.querySelectorAll('.track-confirm-btn').forEach(b => { b.disabled = true; });
-        let resp = null;
-        try {
-        // Same approach as single-track Next: snapshot current
-        // index + playlist, append the whole album, then reorder
-        // so the appended block lands right after the current slot.
-        const [statusResp, plResp] = await Promise.all([
-          fetch('/api/player/status'),
-          fetch('/api/player/playlist'),
-        ]);
-        const status = statusResp.ok ? await statusResp.json() : null;
-        const pl = plResp.ok ? await plResp.json() : null;
-        const tracks = (pl && pl.tracks) || [];
-        const currentIdx = status && status.track_index
-          ? status.track_index - 1
-          : -1;
-        resp = await fetch('/api/player/queue-tracks', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ track_ids: ids }),
-        });
-        if (resp.ok && currentIdx >= 0 && currentIdx < tracks.length) {
-          // The new ids were just appended in `ids` order. Build the
-          // full new order: existing playlist + appended block,
-          // then splice the appended block out and re-insert it
-          // immediately after the current slot.
-          const fullOrder = tracks.map(t => t.id).concat(ids);
-          const tail = fullOrder.splice(fullOrder.length - ids.length, ids.length);
-          fullOrder.splice(currentIdx + 1, 0, ...tail);
-          await fetch('/api/player/reorder', {
+    ['next', 'end'].forEach(pos => {
+      bar.querySelector(`[data-confirm="${pos}"]`).addEventListener('click', e => {
+        e.stopPropagation();
+        onceInFlight(bar, async () => {
+          bar.querySelectorAll('.track-confirm-btn').forEach(b => { b.disabled = true; });
+          const resp = await fetch('/api/player/queue-tracks', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ order: fullOrder }),
-          });
-        }
-      } catch (err) { console.warn('queue-album (next) failed', err); }
-        closeAlbumQueueConfirm(wrap);
-        await reportPlaybackResult(resp);
+            body: JSON.stringify({ track_ids: ids, position: pos }),
+          }).catch(() => null);
+          closeAlbumQueueConfirm(wrap);
+          await reportPlaybackResult(resp);
+        });
       });
     });
   }
@@ -7805,9 +7716,6 @@
             <label class="token-right"><input type="checkbox" id="tkMsg"
               ${!token || token.rights.includes('can_message') ? 'checked' : ''}>
               <span>Can message me</span></label>
-            <label class="token-right"><input type="checkbox" id="tkSearch"
-              ${token && token.rights.includes('can_search') ? 'checked' : ''}>
-              <span>Can search my library <i>(future)</i></span></label>
           </div>
           <label style="display:flex;flex-direction:column;gap:calc(4*var(--px));">
             <span style="color:var(--color-text-muted);font-size:calc(12*var(--px));">Max uses (empty = unlimited)</span>
@@ -7852,7 +7760,6 @@
     overlay.querySelector('[data-confirm]').addEventListener('click', () => onceInFlight(overlay, async () => {
       const rights = [];
       if (overlay.querySelector('#tkMsg').checked) rights.push('can_message');
-      if (overlay.querySelector('#tkSearch').checked) rights.push('can_search');
       const usesRaw = overlay.querySelector('#tkUses').value.trim();
       const body = {
         label: overlay.querySelector('#tkLabel').value.trim(),

@@ -135,3 +135,30 @@ def test_empty_backend_tags_fall_back_to_the_queue_item():
                               extra={"artist": "", "album": "", "song": ""}))
     st = mgr.latest_status
     assert (st["artist"], st["album"], st["song"]) == ("Artist", "Album", "Song")
+
+
+def test_a_next_block_that_rolls_in_keeps_its_order(monkeypatch):
+    """A block queued Next whose tracks land one by one (a CUE album, an m4a
+    set) extends its own run: each track follows the one before it, right
+    behind the playing slot — not at the end, and not backwards."""
+    import routers.player as player
+
+    def item(n):
+        return QueueItem(track_id=f"t{n}", media_file_id=n,
+                         source={"kind": "file", "path": f"/m/{n}.flac",
+                                 "format": "FLAC"},
+                         title=f"T{n}", artist="A")
+
+    mgr = PlaybackManager()
+    # The test database is the live one: the queue snapshot stays out of it.
+    monkeypatch.setattr(mgr, "_schedule_persist", lambda: None)
+    monkeypatch.setattr(player, "manager", mgr)
+    mgr.queue.replace([item(1), item(2)])
+    mgr._latest_status = {"state": "playing", "track_index": 1}
+
+    first, rest = item(10), [item(11), item(12)]
+    assert mgr.append([first], "next") == 1
+    player._owned_filler(rest, mgr.queue.generation, position="next", after=first)
+
+    assert [it.track_id for it in mgr.queue.snapshot()] == [
+        "t1", "t10", "t11", "t12", "t2"]

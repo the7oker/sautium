@@ -1691,6 +1691,27 @@ warm case.
   than the unified 001): every album tile's artist, cover and first file
   scanned `album_variants`. Migration 024.
 
+### Next is the server's to place (2026-09-29)
+
+An owned album's "+ Queue → Next" landed at the end of the queue. The page
+did what it had done since HQPlayer owned the playlist: append, read the
+queue back, send the whole new order to `/reorder`. That endpoint has been
+keyed on track UUIDs since 2026-07-23 (a streamed slot has no file id); the
+single-track handler was moved to them, the album handler kept sending
+media-file ids, the server refused the permutation and nobody read the
+answer. The answer was never the client's to compute: three round trips,
+and any change to the queue between them — a radio refill, another device —
+took the block with it.
+
+`POST /api/player/queue-tracks` takes `position` (`next` | `end`) like the
+phantom, entity and session endpoints already did, and `manager.append`
+places the block behind the playing slot in one step. A block that rolls in
+track by track (a CUE image, an m4a set) extends its own run:
+`_owned_filler` passes each track the one before it as its anchor, the way
+`_phantom_insert_next` does for streams — before that only the first track
+went Next and the rest to the end, on every endpoint that offered Next for
+owned music. The Queue sheet's drag is the one caller `/reorder` has left.
+
 ## Known Gotchas
 
 - **Docker restores containers in no order, and a failed restore is final.**

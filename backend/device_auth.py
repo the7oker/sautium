@@ -12,9 +12,10 @@ once, by proving one of two things:
   * knowledge of the account password — re-deriving the Argon2id identity and
     checking that it yields this node's public key. Nothing about the password
     is stored anywhere, not even a hash: the account IS the derivation.
-  * possession of a pairing PIN shown on the host (launcher Settings), for
-    the anonymous accounts the wizard creates with a random password its owner
-    has never seen.
+  * possession of a pairing PIN the launcher hands over as a QR code or a
+    link (it is never shown as text, and a Docker node has no surface for
+    one), for the anonymous accounts the wizard creates with a random
+    password its owner has never seen.
 
 The token is a pure function of a server-side EPOCH, so "log out everywhere"
 is `epoch += 1` — one integer, no device table. That is a deliberate trade:

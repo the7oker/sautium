@@ -117,6 +117,7 @@ class PlayTracksRequest(BaseModel):
 
 class QueueTracksRequest(BaseModel):
     track_ids: list[int]
+    position: str = "end"   # 'next' | 'end'
 
 class EntityRef(BaseModel):
     kind: str              # 'track' | 'album'
@@ -1590,13 +1591,20 @@ def _filler_append(item, gen: int, *, position: str = "end",
     return False
 
 
-def _owned_filler(items: list, gen: int) -> None:
+def _owned_filler(items: list, gen: int, *, position: str = "end",
+                  after=None) -> None:
     """Append the rest of an owned set as each item is ready — a plain file
     instantly, an m4a after its in-memory transcode (inside the HQP mirror) — in order,
-    stopping if a new playback supersedes this one (generation)."""
+    stopping if a new playback supersedes this one (generation). A 'next'
+    block extends its own run (`after` = the item the caller placed): each
+    track follows the one before it, or the album would play backwards."""
+    cursor = after
     for item in items:
-        if _filler_append(item, gen) is None:
+        placed = _filler_append(item, gen, position=position, after=cursor)
+        if placed is None:
             return
+        if placed:
+            cursor = item
 
 
 def _add_owned(rows: list, *, clear_first: bool, position: str = "end") -> int:
@@ -1635,6 +1643,8 @@ def _add_owned(rows: list, *, clear_first: bool, position: str = "end") -> int:
         gen = manager.queue.generation
     if added and rest:
         threading.Thread(target=_owned_filler, args=(rest, gen),
+                         kwargs={"position": "end" if clear_first else position,
+                                 "after": first},
                          daemon=True, name="owned-fill").start()
     return len(items) if added else 0
 
@@ -3154,12 +3164,17 @@ def play_tracks(req: PlayTracksRequest):
 
 @router.post("/queue-tracks")
 def queue_tracks(req: QueueTracksRequest):
-    """Append the given tracks to the current queue, in order, without
-    clearing. Used by the per-track "+" button and the "Queue album"
-    action — these expect "add exactly these tracks", not the
-    similarity-driven batches Radio Mode appends."""
+    """Add the given tracks to the current queue, in order, without
+    clearing — at the end, or right after the playing track ('next'). Used
+    by the per-track "+" button and the "Queue album" action — these expect
+    "add exactly these tracks", not the similarity-driven batches Radio Mode
+    appends. The position is the server's to apply: the client appending and
+    then reordering took three round trips and lost the block to any queue
+    change in between."""
     if not req.track_ids:
         raise HTTPException(status_code=400, detail="No track IDs provided")
+    if req.position not in ("next", "end"):
+        raise HTTPException(status_code=400, detail="position must be 'next' or 'end'")
 
     rows = _db_query("""
         SELECT mf.id, mf.file_path, mf.file_format, t.title, a.name as artist, al.title as album
@@ -3177,7 +3192,7 @@ def queue_tracks(req: QueueTracksRequest):
         raise HTTPException(status_code=404, detail="No tracks found")
 
     try:
-        added = _add_owned(rows, clear_first=False, position="end")
+        added = _add_owned(rows, clear_first=False, position=req.position)
         if added < len(rows):
             raise HTTPException(
                 status_code=503,
