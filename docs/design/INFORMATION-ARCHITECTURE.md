@@ -467,7 +467,8 @@ Mobile-first vertical layout, minimal by default:
 - BPM range
 - Key + Mode
 - Vocalist / Gender
-- Danceable / Energy
+- Danceable / Energy (of the Danceable chips only "Yes" filters; "No" is
+  accepted and ignored — whether it should filter is undecided, 2026-09-29)
 - Instruments (multi-select from AudioSet labels)
 - Genre and Artist typeaheads
 
@@ -554,14 +555,12 @@ The existing UI is kept mostly as-is for this phase:
 - Tap friend → push chat thread
 - Chat interface: message list + input
 
-**Deferred until later**:
-
-- Browsing a friend's library (their artists / albums / queue)
-- Shared queues / listening together
-- Library-wide music similarity comparison
+The 2026-04 blueprint deferred three things here — browsing a friend's
+library, shared queues, a library-wide similarity comparison. They left
+the roadmap on 2026-09-21 and are not planned.
 
 Integration point with the rest of the app: none beyond the friend
-list. Friends tab stays isolated in MVP.
+list. Friends tab stays isolated.
 
 ---
 
@@ -585,7 +584,7 @@ Top to bottom:
   friendly form, distinct from @login), `@login + invite code` (mono
   blue), city (optional, editable), bio (3-line max, editable inline).
 - **Account** — email + verification badge (✓ / ⚠), change password,
-  Last.fm connect/disconnect, scrobbling toggle (enabled only when
+  Last.fm connect (there is no disconnect), scrobbling toggle (enabled only when
   Last.fm is connected), and — when connected — the imported listening
   history: listens imported, scrobbles waiting — those the canon is still
   placing apart from those MusicBrainz cannot place (an unknown artist, an

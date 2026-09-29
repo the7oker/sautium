@@ -39,8 +39,8 @@ Website and guides: https://sautium.net · Downloads: https://sautium.net/downlo
   and a read-only PostgreSQL one, instead of a custom RAG pipeline. Pluggable
   LLM providers for the non-agent paths (Claude API, OpenAI,
   OpenAI-compatible endpoints).
-- **Metadata enrichment** — Last.fm bios, tags, similar artists and album
-  wikis in normalized tables (node-local: Last.fm's terms don't allow
+- **Metadata enrichment** — Last.fm bios, tags, similar artists and genre
+  descriptions in normalized tables (node-local: Last.fm's terms don't allow
   redistributing its answers); ListenBrainz listening statistics from the
   public CC0 dump, whole on a dump node or as signed per-artist slices over
   P2P; an optional local MusicBrainz dump as the canonicalization spine;
@@ -55,9 +55,9 @@ Website and guides: https://sautium.net · Downloads: https://sautium.net/downlo
   **HQPlayer** (XML control over TCP 4321 — on this machine, or a Desktop or
   HQPlayer Embedded on another machine on the LAN; found by the network
   scan, fed by path here and streamed from the node anywhere else; transport,
-  DSP filter/shaper selection, matrix profiles, convolution, parametric-EQ
-  preset generation), **DLNA** renderers, the **browser** itself, and the
-  host's local sound device. An album's copy in the library of an HQPlayer on
+  DSP filter/shaper selection, matrix profiles; convolution and parametric-EQ
+  preset generation through the assistant), **DLNA** renderers, the
+  **browser** itself, and the host's local sound device. An album's copy in the library of an HQPlayer on
   another machine joins the catalogue as one more variant of that album, and
   plays natively when that HQPlayer is the output. Play tracking
   (`listening_history` + Last.fm scrobbling) lives in the backend and is
@@ -90,7 +90,7 @@ Website and guides: https://sautium.net · Downloads: https://sautium.net/downlo
   carriers for a git clone that updates itself.
 - **Gear advisor** — the audio chain as data: researched specs and community
   sentiment per component, a deterministic pair engine (impedance, SPL
-  headroom, gain staging, format chains) and an upgrade advisor that diagnoses
+  headroom, damping, gain staging) and an upgrade advisor that diagnoses
   where the chain has measurably plateaued. Verdicts carry provenance; nothing
   is averaged into a score. See `docs/design/GEAR-ADVISOR.md`.
 - **Node backup and restore** — one encrypted `.sbk` file per node (the
@@ -420,7 +420,8 @@ isolation:
   and the P2P UPnP layer never maps it.
 - All API requests are signed with **HMAC-SHA256** (`backend/auth_hmac.py`)
   using a per-browser device token, earned once with the account password or a
-  pairing PIN; `auth.js` signs every `fetch`. The page carries no key.
+  pairing code the launcher shows as a QR code; `auth.js` signs every
+  `fetch`. The page carries no key.
 - The Web UI rides **plain HTTP**: no certificate a phone would trust can exist
   for a LAN address, so the exchange that earns the token (password or PIN in,
   token out) is boxed end to end to a per-exchange key the node's identity

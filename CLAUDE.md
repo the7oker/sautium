@@ -24,7 +24,7 @@ See:
 - **NVIDIA RTX 4090** for GPU work (CLAP embeddings, BGE-M3 text encoding)
 - **librosa** + CLAP zero-shot for audio feature extraction (no essentia)
 - **CLAP** (`laion/clap-htsat-unfused`) — 512-d audio embeddings
-- **BGE-M3** — 1024-d multilingual text embeddings (not sentence-transformers)
+- **BGE-M3** — 1024-d multilingual text embeddings (replaced all-MiniLM-L6-v2; loaded through `sentence-transformers`, `backend/text_embedder.py`)
 - **MADLAD-400-3B-MT** (`google/madlad400-3b-mt`, **Apache 2.0**) — local
   any-language→English query translation for the English-only CLAP text
   encoder (`backend/translation.py`), running on **CTranslate2 int8, CPU**
@@ -364,7 +364,8 @@ See:
   strangers' requests in 64 MiB tasks; arming is a release decision, see
   P2P-SYNC-INTEGRITY.md § "Pricing formula v1"), `support.diagnostics_enabled`
   (default on: answer the master's signed diagnostic warrants and send
-  content-free event reports — silent by design, the switch and the
+  content-free event reports — the LAUNCHER does both; a Docker node records
+  the events and sends nothing — silent by design, the switch and the
   "Support" row are the disclosure; P2P_NETWORK.md § "Support diagnostics").
 
 ---

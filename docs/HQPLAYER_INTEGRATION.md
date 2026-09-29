@@ -79,8 +79,6 @@ unchanged without them.
 - `stop()` - Stop playback
 - `next()` - Next track
 - `previous()` - Previous track
-- `forward()` - Fast forward
-- `backward()` - Rewind
 - `seek(position)` - Seek to position in seconds
 - `select_track(index)` - Select track by playlist index
 
@@ -88,7 +86,6 @@ unchanged without them.
 - `set_volume(value)` - Set volume level
 - `volume_up()` - Increase volume
 - `volume_down()` - Decrease volume
-- `volume_mute()` - Toggle mute
 
 ### ✅ Playlist Management
 - `playlist_add(uri, clear, queued)` - Add track to playlist
@@ -109,9 +106,14 @@ unchanged without them.
   - Platform
   - Engine version
 
-### ✅ Settings
-- `set_repeat(mode)` - Set repeat mode (NONE/SINGLE/ALL)
-- `set_random(enabled)` - Enable/disable shuffle
+### In the client, not exposed
+Methods `hqplayer_client.py` implements and nothing calls — no route, no
+assistant tool, no control in the Web UI (as of 2026-09-29):
+- `forward()` / `backward()` - Fast forward, rewind
+- `volume_mute()` - Toggle mute
+- `set_repeat(mode)` - Repeat mode (NONE/SINGLE/ALL)
+- `set_random(enabled)` - Shuffle
+- `get_inputs()` - Available input devices (there is no `set_input`)
 
 ### ✅ DSP Settings & Control
 - `get_modes()` / `set_mode(index)` - Output mode (PCM/DSD)
@@ -123,7 +125,8 @@ unchanged without them.
   - 36+ shapers: DSD5, ASDM5, ASDM7, etc.
 - `get_rates()` / `set_rate(index)` - Output sample rate
   - 20 rates: 2.048 MHz to 98.304 MHz (DSD)
-- `get_inputs()` - Available input devices
+- `set_convolution(enabled)` - Convolution engine on/off — reached through
+  the assistant (`hqplayer_set_convolution`); the Web UI has no control for it
 
 ## Usage
 

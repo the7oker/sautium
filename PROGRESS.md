@@ -10,7 +10,7 @@ implementation details live in the code, DB and git history.
 | Phase | Scope | Status |
 |-------|-------|--------|
 | **P1** | Docker env, scanner, CLAP embeddings, audio similarity search, Claude integration | DONE |
-| **P2** | Last.fm enrichment (bios, tags, similar, album wiki), text embeddings (BGE-M3), enhanced RAG | DONE |
+| **P2** | Last.fm enrichment (bios, tags, similar; the album wiki fetch was removed 2026-06-09), text embeddings (BGE-M3), enhanced RAG | DONE |
 | **P3.1** | Audio feature extraction (librosa + CLAP zero-shot, no essentia) | DONE |
 | **P3.2** | HQPlayer control via XML protocol (port 4321) | DONE |
 | **P3.3** | MCP server for HQPlayer + PostgreSQL + search + gear (41 tools) | DONE |

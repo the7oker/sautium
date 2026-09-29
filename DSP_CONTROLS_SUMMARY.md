@@ -96,13 +96,16 @@ DAC: 20 rates is what one Desktop 5 instance reported in SDM mode.
 
 ---
 
-#### 5. **Input Devices**
+#### 5. **Input Devices** (in the client, not exposed)
 ```python
 inputs = hqp.get_inputs()
 # Result: ["cd:"]
 
 # Note: the input device list depends on HQPlayer's own configuration
 ```
+
+The client can read the list; nothing in Sautium calls it, and there is no
+`set_input` — no route, assistant tool or control selects an input.
 
 ---
 
@@ -232,11 +235,13 @@ state.
 - ✅ 77 filters (IIR, FIR, poly-sinc, sinc, closed-form)
 - ✅ 36 noise shapers (DSD5, ASDM5, ASDM7 series)
 - ✅ 20 sample rates (up to DSD2048 / 90.3168 MHz)
-- ✅ Input devices
-- ✅ Convolution toggle + matrix profiles + generated EQ presets
+- ✅ Convolution toggle and generated EQ presets (through the assistant),
+  matrix profiles (Web UI and assistant)
+- Input devices: the client reads the list, nothing exposes it
 
 ❌ **Not available:**
 - Output device selection (configure it in the GUI)
+- Input selection, repeat, shuffle, mute: not exposed by Sautium
 
 ---
 

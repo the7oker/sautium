@@ -68,7 +68,7 @@ the pick does.
 ✅ **Playback control**
 - play, pause, stop
 - next, previous
-- seek, forward, backward
+- seek
 
 ✅ **Playlist**
 - playlist_add
@@ -82,11 +82,10 @@ the pick does.
 ✅ **Volume**
 - set_volume
 - volume_up, volume_down
-- volume_mute
 
 ✅ **DSP**
 - modes, filters, shapers, rates (discovered at runtime)
-- matrix profiles, convolution
+- matrix profiles; convolution through the assistant
 - parametric-EQ preset generation (`generate_eq_preset`)
 
 ## Files

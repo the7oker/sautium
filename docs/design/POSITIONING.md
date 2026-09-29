@@ -159,10 +159,12 @@ library**, served visually.
    originate audio, so an Output picker stopped being a UI lie and
    became the honest representation of the chain.) The invariant that
    survives: no control may appear unless it has a technical effect on
-   the audio actually playing. Volume, seek and exclusive-mode toggles
-   are shown per the active output's capabilities() — an output that
-   can't seek shows no seek affordance; when HQPlayer is the output, the
-   web UI still never pretends to produce audio itself.
+   the audio actually playing. Seek and the exclusive-mode toggle are
+   shown per the active output's capabilities() — an output that can't
+   seek shows no seek affordance; when HQPlayer is the output, the web
+   UI still never pretends to produce audio itself. Volume has one
+   control today, ±1 dB on the HQPlayer screen; a control for the local,
+   DLNA and browser outputs is planned (decided 2026-09-29).
 
 ---
 
