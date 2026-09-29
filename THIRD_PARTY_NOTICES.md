@@ -48,7 +48,7 @@ the browser loads as-is, because the Web UI has no build step.
 |---|---|---|
 | `laion/clap-htsat-unfused` | Apache-2.0 | audio embeddings |
 | `BAAI/bge-m3` | MIT | multilingual text embeddings |
-| `google/madlad400-3b-mt` (CTranslate2 int8 conversion) | Apache-2.0 | query translation |
+| `google/madlad400-3b-mt`, as the prebuilt CTranslate2 int8 conversion `Nextcloud-AI/madlad400-3b-mt-ct2-int8` (pinned revision; converted locally from the Google source when that repository is unavailable) | Apache-2.0 | query translation |
 | `MIT/ast-finetuned-audioset-10-10-0.4593` | BSD-3-Clause | instrument tagging |
 | PaSST weights via `hear21passt` | Apache-2.0 | instrument tagging |
 
@@ -59,7 +59,8 @@ the browser loads as-is, because the Web UI has no build step.
 customtkinter (MIT) · pystray (LGPL-3.0) · Pillow (MIT-CMU) · qrcode (BSD) ·
 psutil (BSD-3-Clause) · psycopg2-binary (LGPL with exceptions) · cryptography
 (Apache-2.0 OR BSD-3-Clause) · aiohttp (Apache-2.0 AND MIT) · libtorrent (BSD) ·
-argon2-cffi (MIT) · PyNaCl (Apache-2.0).
+argon2-cffi (MIT) · PyNaCl (Apache-2.0) · miniupnpc (BSD-3-Clause, installed
+by the launcher on first start for the UPnP port mapping).
 
 pystray and psycopg2-binary are LGPL. They are installed by pip on the
 user's machine as separate, replaceable modules (not statically linked);
@@ -76,7 +77,7 @@ imagehash (BSD-2-Clause) · torch, torchvision, torchaudio (BSD-3-Clause) ·
 transformers (Apache-2.0) · sentence-transformers (Apache-2.0) · hear21passt
 (Apache-2.0) · librosa (ISC) · ctranslate2 (MIT) · anthropic (MIT) · openai
 (Apache-2.0) · mcp (MIT) · pylast (Apache-2.0) · lyricsgenius (MIT) ·
-argon2-cffi (MIT) · cryptography (Apache-2.0 OR BSD-3-Clause) · python-dotenv
+argon2-cffi (MIT) · PyNaCl (Apache-2.0) · cryptography (Apache-2.0 OR BSD-3-Clause) · python-dotenv
 (BSD-3-Clause) · psutil (BSD-3-Clause) · click (BSD-3-Clause) · tqdm (MPL-2.0
 AND MIT) · numpy (BSD-3-Clause) · pandas (BSD-3-Clause) · scipy
 (BSD-3-Clause) · httpx (BSD-3-Clause) · zstandard (BSD-3-Clause) · requests (Apache-2.0) · aiohttp
@@ -90,8 +91,12 @@ Sautium. Source: https://github.com/quodlibet/mutagen.
 
 ## Services and data
 
-- **Last.fm** — metadata enrichment and scrobbling through the Last.fm API,
-  under Last.fm's API terms of service. The application key ships in source,
+- **Last.fm** — metadata enrichment, scrobbling and, since 2026-09-24, the
+  import of the owner's own listening history (`user.getRecentTracks`)
+  through the Last.fm API, under Last.fm's API terms of service. Imported
+  scrobbles wait as raw strings only until they are placed on a canonical
+  track (clause 4.3.4: a small, temporary portion), and leave the node in
+  nothing but the owner's own backup. The application key ships in source,
   as desktop scrobblers do; scrobbling still needs the user's own session
   authorisation. What the API answers stays on the node that asked: it is
   not part of the P2P protocol, the share export or the seed bundle — every
@@ -126,4 +131,15 @@ Sautium. Source: https://github.com/quodlibet/mutagen.
   full at most once, after which it falls back to the catalog's 30 s excerpt.
   A terms-of-service matter for the user, not anti-circumvention.
 - **Cloudflare Workers** — the project's verification/notary service
-  (`worker/`), operated by the maintainer.
+  (`worker/`), operated by the maintainer; **Resend** delivers the mails
+  that Worker sends (verification codes, invites).
+- **HQPlayer** (Signalyst) — a separate commercial product the node drives
+  over its network control protocol and finds by its discovery datagram;
+  nothing of it is shipped.
+- **spinorama.org** — loudspeaker measurements (CEA-2034 aggregates) for the
+  gear registry, fetched as `metadata.json` when the owner refreshes it;
+  **AutoEq** — headphone measurements, imported from a clone the owner
+  mounts. Neither is redistributed.
+- **Google Fonts** — the Web UI page loads Inter Tight and JetBrains Mono
+  from `fonts.googleapis.com`: the one request the browser makes to a third
+  party on its own.

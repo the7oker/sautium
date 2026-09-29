@@ -67,7 +67,10 @@ A. Outbound destinations. List every host the software can connect to, with
    what data leaves the machine. Start with:
      backend/mb_dump_load.py and backend/lb_dump_load.py (MusicBrainz and
        ListenBrainz dump downloads — opt-in dump nodes),
-     backend/lrclib.py (lyrics), backend/lastfm.py, backend/musicbrainz.py,
+     backend/lrclib.py and backend/genius.py (lyrics), backend/lastfm.py,
+       backend/lastfm_auth.py and backend/lastfm_history.py (the owner's
+       Last.fm sign-in and the import of their own scrobble history),
+       backend/musicbrainz.py,
        backend/caa.py, backend/routers/covers.py,
        backend/deezer_photos.py, backend/streaming/deezer_catalog.py,
        backend/streaming/deezer_preview.py (metadata, artwork, 30 s excerpts),
@@ -97,9 +100,17 @@ A. Outbound destinations. List every host the software can connect to, with
        downloader updates itself from PyPI at backend start),
      backend/gear_registry.py and backend/routers/gear_models.py (the
        loudspeaker measurement registry, on the owner's request),
+     backend/model_cache.py, backend/clap_model.py, backend/translation.py,
+       backend/ensemble_instruments.py (models from Hugging Face on first
+       use — no URL literal, the grep below will not show them),
+     backend/routers/player.py (the output scan: SSDP and HQPlayer
+       discovery datagrams to every address of the LAN and to online
+       tailnet peers), backend/hqp_library.py, backend/hqplayer_client.py,
+       backend/playback/ (HQPlayer and DLNA renderers on the LAN: control,
+       and an HQPlayer's library read over its control port),
      backend/static/index.html (requests the BROWSER makes when it opens the
        Web UI page).
-   Then run `git grep -nE 'https?://[a-zA-Z0-9.-]+' -- backend desktop worker mcp`
+   Then run `git grep -nE 'https?://[a-zA-Z0-9.-]+' -- backend desktop worker mcp ':!mcp/uv.lock'`
    and account for every host you did not already list.
 
 B. Listening ports and bind addresses. From backend/config.py, backend/main.py,
@@ -108,7 +119,11 @@ B. Listening ports and bind addresses. From backend/config.py, backend/main.py,
    desktop/service_manager.py (the launcher's backend bind), desktop/portmap.py
    (UPnP and PCP), desktop/p2p/upnp_service.py, desktop/p2p/p2p_manager.py,
    desktop/p2p/sync_server.py, desktop/p2p/dht_service.py and
-   desktop/p2p/lan_discovery.py (the UDP ports): every port, its bind address (all interfaces /
+   desktop/p2p/lan_discovery.py (the UDP ports), backend/streaming/service.py
+   and backend/streaming/proxy.py (the media proxy),
+   backend/playback/dlna_backend.py (the GENA listener),
+   backend/routers/player.py and backend/hqp_library.py (the discovery
+   sockets — outbound, unbound): every port, its bind address (all interfaces /
    LAN / loopback), what authenticates a request on it, and whether anything
    can forward it to the internet (UPnP, portmap). Compare with the Surfaces
    table in SECURITY.md and report every difference.
@@ -217,8 +232,15 @@ and by design; the report should list them as matches, not discrepancies:
 - Sync pulls on the peer surface are **unauthenticated by design** (gated by
   the `sync.p2p_enabled` setting); chat, relay and diagnostics are not.
 - The **Last.fm keys ship in source** (`backend/app_keys.py`), as in every
-  desktop scrobbler; `.gitleaks.toml` allowlists exactly those and the master
-  node's public pins.
+  desktop scrobbler; `.gitleaks.toml` allowlists those, the master node's
+  public pins, the test vectors and fixtures, and one type annotation.
+- The **output scan** sends two datagrams (SSDP to UDP 1900, HQPlayer's
+  `<discover/>` to UDP 4321) to every address of the node's own subnets when
+  the Output picker opens; nothing listens for it and nothing in it
+  identifies the node (`SECURITY.md` § Surfaces).
+- The **owner's Last.fm history** is read through `user.getRecentTracks`
+  once Last.fm is connected: the username goes to Last.fm, the scrobbles
+  stay on the node.
 - Support diagnostics are **on by default**, with the switch "Share
   diagnostics with support" in Settings; the reports are content-free events,
   and a bundle answers only a warrant the node received from the pinned

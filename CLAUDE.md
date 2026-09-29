@@ -28,8 +28,10 @@ See:
 - **MADLAD-400-3B-MT** (`google/madlad400-3b-mt`, **Apache 2.0**) — local
   any-language→English query translation for the English-only CLAP text
   encoder (`backend/translation.py`), running on **CTranslate2 int8, CPU**
-  (~3 GB RAM, 0 VRAM; one-time conversion from the BYO ~12 GB HF source,
-  written next to the HF cache). No source-language detection: the model
+  (~3 GB RAM, 0 VRAM; a fresh node downloads the prebuilt int8 conversion,
+  `Nextcloud-AI/madlad400-3b-mt-ct2-int8` at a PINNED revision, next to the
+  HF cache — converting the ~12 GB HF source locally is the fallback if
+  that repository disappears). No source-language detection: the model
   infers the input language, only the `<2en>` target prefix is set — that
   property is load-bearing, LID alternatives are rejected. **ASCII queries
   bypass MT entirely** (measured: int8 beam is not identity-safe for
@@ -385,6 +387,11 @@ See:
   its KEY in memory, but the Worker-issued certificate and the mined
   proof-of-work must survive container recreation; same file names as the
   launcher so the export/import bundle moves between the two).
+- Build identity: `./.git` → `/app/.git:ro` in all three compose files
+  (since 2026-09-21). `config.build_identity()` is the one reader — `/config`,
+  the backup manifest and the share export report the running commit through
+  it; HEAD is read from `.git` by hand (`desktop/updater.head_commit`), never
+  by spawning git.
 - **Never bake models into the image.** Cache lives on the host, survives container deletes.
 - **Restart backend after model/prompt changes**: `docker restart sautium-backend` then check logs for "Application startup complete".
 
@@ -621,6 +628,8 @@ toast takes no pointer events and never blocks the user (see
 | `backend/play_stats.py` | `local_play_stats` is DERIVED from `listening_history` — the one statement the play tracker and the merge share; never increment those counters in place. Also the one "same listen" rule (`same_listen`, `LISTENS_LOCK_KEY`) and the repair of pre-2026-09-24 naive listen starts |
 | `backend/lastfm_history.py` + `backend/canon/scrobbles.py` | The Last.fm history import: the walk into the waiting room (single flight, resumable, event-triggered) and the canon that places waiting scrobbles on canonical tracks (stages A–E, one consumer thread woken by events; `python -m canon.scrobbles --eval / --report` measure it read-only) |
 | `desktop/p2p/mb_slice_cycle.py` + `desktop/p2p/slice_sources.py` | The MB slice requester shared by the launcher's P2PManager and the Docker backend (the pending tiers incl. imported-scrobble names, `mb.search_sources`, `mb_slice.status`) and the source finder both slice families share (every DHT holder; the directory and the master hint whenever no primary source is usable; the verified set kept between runs) |
+| `backend/track_similarity.py` | The ONE "similar tracks" scorer — recall by mean-KNN plus a kin arm, rank by segment chamfer minus a Last.fm tag bonus — behind radio, the Now Playing Similar shelf, `play-similar` and Discovery's seed (`_SEED_SCORE` imports its weights). Radio itself (the drifting batch fill, the refill observer on the status tick, `manager.radio_mode`) is `backend/routers/player.py` § "Radio mode"; the decisions are in PROGRESS.md § "Radio and track similarity" |
+| `backend/hqp_library.py` + `backend/playback/substitute.py` | An HQPlayer's own library as album variants (`<LibraryGet/>` → `scanner.import_metadata` with an HQPlayer `FileSink`; `hqp_endpoints` as the library's identity and the registry of chosen HQPlayers; a sync never removes rows) and what the ACTIVE output opens for each queue slot (`QueueItem.play`, re-read on an output switch: a rip here, that HQPlayer's copy, else a stream fetched lazily a lead window ahead of the playhead) |
 | `backend/streaming/demo.py` | The demo policy: the `demo_plays` ledger (one full demo-channel listen per track), the resolve's per-track provider order, the proxy's fetch-time gate (`link_admissible`), the status observer that spends the listen past 90 % and drops the spent buffer |
 | `backend/streaming/deezer_catalog.py` + `deezer_preview.py` | Deezer public API in core: the catalog resolve (barcode → album tracklist → track gate, one pacer + memo per process) shared as `DeezerCatalogProvider` by the BYO lossless module and the core 30 s excerpt provider (`deezer_preview`, `manifest.excerpt`, always last in `providers_preferred()`) |
 

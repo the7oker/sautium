@@ -38,12 +38,13 @@ The repository root carries the rest: `CLAUDE.md` (spec and conventions),
 - **[HQPLAYER_INTEGRATION.md](HQPLAYER_INTEGRATION.md)** — technical
   documentation of the HQPlayer integration
   - API reference
+  - Where HQPlayer runs and how files reach it; finding HQPlayers on the
+    network; the HQPlayer's own library as a catalogue source
   - Usage examples
   - Troubleshooting
-  - ~60 KB, the complete picture
 
-- **[HQPLAYER_KNOWLEDGE_BASE.md](HQPLAYER_KNOWLEDGE_BASE.md)** — knowledge base
-  for the AI agent
+- **[HQPLAYER_KNOWLEDGE_BASE.md](HQPLAYER_KNOWLEDGE_BASE.md)** — a reference
+  for people, compiled from the HQPlayer 5 manual
   - Distilled from the official manual
   - Every DSP setting explained
   - Recommendations per scenario
@@ -68,11 +69,13 @@ The repository root carries the rest: `CLAUDE.md` (spec and conventions),
   - Every available setting
   - Code snippets
 
-## Use by the AI agent
+## Reading the HQPlayer documents
 
-### Context for understanding HQPlayer
+These files are for people. The assistant does not load them: it works from
+its prompt (`backend/assistant_prompt.py`) and from the filter, shaper and
+mode lists it reads live through `hqplayer_get_settings`.
 
-The agent has access to:
+### What each one covers
 
 1. **Technical specifications** (HQPLAYER_INTEGRATION.md)
    - How to connect
@@ -145,8 +148,10 @@ Hi-res FLAC (192 kHz/24-bit) + R2R DAC
 
 - ✅ Automatic setting selection based on the track — the assistant reads the
   status and applies filters/shapers/matrix profiles through its MCP tools
-- ✅ Profiles per genre
-- ✅ Optimization for a specific DAC
+- ✅ Saved matrix profiles and favourite filters, switched from the HQPlayer
+  screen or by the assistant
+- Per-genre and per-DAC choices are a conversation with the assistant, not
+  a stored profile
 
 ### Where the integration lives
 
@@ -179,5 +184,6 @@ When adding information:
 ---
 
 **HQPlayer version tested:** Desktop 6 — the daily configuration as of
-2026-09-21; Desktop 5.16.3 (Engine 5.34.14) also tested, same client
-**Last reviewed:** 2026-09-21
+2026-09-21; Desktop 5.16.3 (Engine 5.34.14) also tested; HQPlayer Embedded 6
+(engine 6.2.3) verified 2026-09-27 — same client
+**Last reviewed:** 2026-09-29

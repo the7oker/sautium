@@ -37,9 +37,9 @@ Sautium Node
 └── UI layer:     Connect/Disconnect, peers list, Friends/Chat
 ```
 
-Node A (Kyiv) ↔ Node B (Berlin) ↔ Node C (Tokyo) — direct UDP/TCP connections
-through NAT (UPnP + STUN-style hole punching), bootstrapped off the public
-BitTorrent DHT.
+Node A (Kyiv) ↔ Node B (Berlin) ↔ Node C (Tokyo) — direct connections
+through a port the router maps (UPnP, PCP) or, where none can be mapped, a
+relay's wake stream — bootstrapped off the public BitTorrent DHT.
 
 ---
 
@@ -48,7 +48,7 @@ BitTorrent DHT.
 | Component | Library | Why |
 |-----------|---------|-----|
 | DHT | **libtorrent** (C++ with Python bindings) | Access to the public BT DHT, pip-installable |
-| NAT traversal | **miniupnpc** (UPnP) + STUN | UPnP for the router, STUN to learn the external IP |
+| NAT traversal | **miniupnpc** (UPnP); PCP by hand (`desktop/portmap.py`) | The router maps the peer port and names the external address; reachability is measured by the master's `probe-connect`; an unreachable node is reached through relays. STUN and hole punching were in the first sketch and were never built |
 | Transport | **HTTP + JSON + gzip** | The same protocol sync already speaks; no custom binary format |
 | Identity | **cryptography** (Ed25519) + **argon2-cffi** | Standard, compact 32-byte keys; Argon2id for deterministic identity |
 | Chat encryption | **PyNaCl** (NaCl Box) | Curve25519 + XSalsa20-Poly1305, simple API |
@@ -70,9 +70,10 @@ on Windows/Linux/Mac.
 ### "Serverless"
 
 Free public resources (no server to rent):
-- **DHT bootstrap**: `router.bittorrent.com:6881`, `dht.transmissionbt.com:6881`
-- **STUN**: `stun.l.google.com:19302`, `stun.cloudflare.com:3478`
-- **Relay fallback**: Oracle Cloud Free Tier, or relaying through other peers
+- **DHT bootstrap**: `router.bittorrent.com:6881`,
+  `dht.transmissionbt.com:6881`, `router.utorrent.com:6881`
+- **Relays**: any reachable node (peer-relays, 2026-08-06), the master as
+  relay #0
 
 ---
 
@@ -142,8 +143,10 @@ latency-bound, nothing to meter.
 
 ```
 Trigger — the first SOURCE after start (a LAN beacon or the DHT bootstrap,
-60 s cap), NOTIFY sautium_sync_request after a scan that added files, a LAN
-peer appearing, the interval timer (sync.auto_interval_min). No buttons.
+60 s cap), NOTIFY sautium_sync_request when the gap set grew (a scan that
+added files, new phantom albums or similars, imported scrobbles placed on
+tracks — since 2026-09-24), a LAN peer appearing, the interval timer
+(sync.auto_interval_min). No buttons.
      │
      ├── the node-key DHT lookup and the Worker directory fetch start NOW,
      │   in the background — their windows overlap the LAN work
@@ -395,25 +398,33 @@ lookups. Lookups and the LAN beacon keep working.
 
 ## Data Format for P2P Exchange
 
-### Catalog entry (per track)
+The first sketch (2026-03) exchanged a catalog entry per track — album,
+genres, the formats a node held — after an artist-UUID overlap report. None
+of that travels: the synced unit is the sealed segment bundle, the
+inventory is asked by track UUID (the artist axis left on 2026-09-19), and
+nothing on the wire describes the author's copy.
+
+### Segment bundle (per track — `POST /api/sync/pull/segments`)
 ```json
 {
-  "track_uuid": "550e8400-...",
-  "title": "Comfortably Numb",
-  "artist_uuid": "6ba7b810-...",
-  "artist_name": "Pink Floyd",
-  "album_uuid": "7ca7b810-...",
-  "album_title": "The Wall",
-  "year": 1979,
-  "genres": [{"uuid": "...", "name": "Progressive Rock"}],
-  "duration_seconds": 382,
-  "available_formats": [
-    {"format": "FLAC", "sample_rate": 96000, "bit_depth": 24, "lossless": true}
-  ]
+  "track_uuid": "...",
+  "model_uuid": "...",
+  "model_name": "laion/clap-htsat-unfused",
+  "analysis_version": 2,
+  "provenance": {"chromaprint": "...", "duration_seconds": 382,
+                 "grid_version": 0, "is_lossless": true},
+  "segments": [{"i": 0, "v": "<base64 float32-LE>", "author_pubkey": "...",
+                "signature": "...", "batch_root": "...", "proof": ["..."]}]
 }
 ```
 
-### Embedding exchange (on demand)
+The response's `batches` map carries each root's Worker timestamp, so the
+whole chain travels with the records and survives a relay. The provenance
+is the material declaration the signature commits to — no format, sample
+rate, bit depth or provider. The importer derives the track-level mean
+itself.
+
+### Mean embedding (legacy pull, for peers without `segments`)
 ```json
 {
   "track_uuid": "...",
@@ -423,17 +434,13 @@ lookups. Lookups and the LAN beacon keep working.
 }
 ```
 
-### Bulk protocol
+### Exchange
 ```
-Phase 1: Catalog sync
-  A → B: artist UUIDs set (compact)
-  B → A: overlap report + unique artists (gzip JSON)
-
-Phase 2 & 3: Embeddings + features (lazy, on demand, gzip)
+GET  /api/sync/holdings          Bloom filter of the tracks a peer holds sealed analysis for
+POST /api/sync/inventory         track uuids → what the peer holds for them
+POST /api/sync/pull/{category}   segments | embeddings (legacy) | audio-features
+POST /api/sync/offer, /push/{…}  carry: segments, audio_features, track_mbids
 ```
-
-**Compression**: 30k tracks of metadata ≈ 15MB JSON → ~3MB gzip. Embeddings
-(512 floats × 30k) ≈ 60MB → ~25MB gzip.
 
 ---
 
@@ -461,18 +468,19 @@ Phase 2 & 3: Embeddings + features (lazy, on demand, gzip)
   difficulty), a background-mined ~2 GiB Argon2id proof for pow
   identities, a per-node identity registry (`p2p_identities`) with lazy
   one-time proof verification, the invite-token gate demanding the proof.
-- Sync and MB endpoints (`/api/sync/*`, `/api/mb/*`) accept **wire format
+- Sync, MB and LB endpoints (`/api/sync/*`, `/api/mb/*`, and `/api/lb/*`
+  since 2026-09-20) accept **wire format
   v1** signatures (`X-Sautium-Peer-Pubkey/-Ts/-Sig`, ±60 s, bound to the
   recipient's pubkey) and the `X-Sautium-Peer-Cert` introduction; unsigned
   requests remain the anonymous lane. Both surfaces answer
   `X-Sautium-Peer-Identity` / `X-Sautium-Peer-Lane`. In the golden age the
-  lanes share one set of limits — the plumbing decides and reports, the
-  admission gate and pricing arrive in later phases. Format + vectors:
+  lanes share one set of limits; the admission gate and pricing shipped
+  2026-08-18 and run in shadow (`p2p.gate_mode`) — the would-be price is
+  computed and logged, nothing is charged. Format + vectors:
   P2P-SYNC-INTEGRITY.md § "Wire format v1", `tests/p2p/vectors/`.
 
 ### Future
 - Bandwidth limiting
-- IP reputation (auto-ban flood/spam)
 
 ---
 
@@ -518,11 +526,14 @@ Phase 2 & 3: Embeddings + features (lazy, on demand, gzip)
    shared by tail announces and rare-artist lookups (the lookups used to run
    20 traversals at once, outside every brake), and the tail itself is gated
    on the size of the network — "Two keys" above.
-5. **Slice replication and freshness**: a replica holds the blob of the dump
-   version it was signed under. Once a dump node updates, two generations of
-   one name's blob coexist in the network. Today whoever answers first wins
-   (replicas are asked first), and it only self-corrects when the name is
-   re-opened. Whether selection should consider `dump_version` is open.
+5. **MB slice replication and freshness**: a replica holds the blob of the
+   dump version it was signed under. Once a dump node updates, two
+   generations of one name's blob coexist in the network. Today whoever
+   answers first wins (replicas are asked first), and it only self-corrects
+   when the name is re-opened. Whether selection should consider
+   `dump_version` is open. The LB family answered it for itself on
+   2026-09-20 (versioned requests, "LB slices" below); the MB family has
+   not been given the same rule.
 
 ---
 
@@ -533,7 +544,8 @@ relay-selection criteria (no data source); the taste profile for finding nodes w
 turned out not to need it — the phantom catalogue materializes it); the
 phase-A wake channel that grows linearly with the network ("alive only while a
 support thread is"); the mbid bridge for the "recording matches, uuid does not"
-class (price: a v3 seal format and re-signing the corpus).
+class (price: a new seal format — v3 is the chromaprint-only payload of
+2026-09-18 — and re-signing the corpus).
 
 ---
 ## Shipped network phases (2026-08)
@@ -654,7 +666,8 @@ did not exist — `sign_audio` **materializes** them from file tags before every
 signing pass (`_materialize_owned_tracklists`: disc, position, duration,
 recording — this node's first-hand observation, incremental, an MB-minted row
 keeps its slot). Only rows of tracks with SIGNABLE FIRST-HAND ANALYSIS are
-signed — an owned rip or a lossless stream (`_SIGNABLE_SRC`); the ~3M
+signed — an owned rip or a first-hand stream, lossy included since
+2026-09-02 (`_SIGNABLE_SRC`: the source is not imported); the ~3M
 MB-minted phantom tracklist rows nobody analyzed stay unsigned (attesting them
 would mean signing a copy of MusicBrainz).
 
@@ -707,9 +720,10 @@ deleters (`_reconcile_phantoms`, `prune_missing_files`) unconditionally spare a
 track that carries embeddings.
 
 A side effect accepted deliberately: the carrier's background Last.fm
-enrichment will fetch bios/tags for carried artists on its own (it gates on
-`track_artists`, not `media_files`; similars are owned-gated, so there is no
-blowup). This is "a relay accumulates data it can use itself": a carried artist
+enrichment will fetch bios/tags for carried artists on its own (since
+2026-08-25 the bio step gates on engagement, an MB anchor or a similar
+edge, so a carried artist qualifies only through one of those; similars
+are engagement-gated, so there is no blowup). This is "a relay accumulates data it can use itself": a carried artist
 becomes visible in the carrier's search, and carried phantom tracks with
 segments are material for its discovery.
 
@@ -844,10 +858,13 @@ name closes only on the author's **signed** zero-match, never on transport
 silence.
 
 **A "Music catalogue" wizard step** with the box pre-ticked when the disk has
-3× the dump size (~21 GB): the case stated plainly (discographies beyond the
+room for the load (~31 GB: the 7.5 GB archive, ~21 GB of tables, a margin;
+the ListenBrainz statistics are a second box, ~32 GB while they install):
+the case stated plainly (discographies beyond the
 shelf → streaming and recommendations; exact identity → search, radio,
 duplicates; canonization → what peers can exchange analysis about at all), the
-cost shown explicitly, and **Settings → Delete catalogue** as the reverse
+cost shown explicitly, and **More → Offline databases → Delete** (since
+2026-09-21; Settings before that) as the reverse
 action — that is what makes a bold default fair. The download starts once after
 the first launch (the flag clears immediately, so a restart never repeats a
 multi-GB transfer).
@@ -968,7 +985,7 @@ replaces Last.fm track stats" has the loader; this is the protocol.
 sees a peer's address: every published port is reached through user-space
 hops — `netsh portproxy` (Windows) and Docker Desktop's own port forwarder —
 that rewrite the source, so inside the container `scope["client"]` is the
-bridge gateway (`172.22.0.1` here) for everyone. Measured on the master before
+bridge gateway (`172.x.0.1`) for everyone. Measured on the master before
 the change: all 261 contact events and all 5 registry rows carried ONE addr
 token. Consequences: the similarity addr/subnet axes are blind, the per-address
 backstop is really a global one, and `/api/relay/probe-connect` — the
@@ -1084,7 +1101,9 @@ watchdog), `agent.signin_opened/signin_failed/signin_timeout/state_changed`
 nobody reported is exactly this, and `signin_failed` carries the CLI's
 last line), `chat.error`, `sync.failed`, `sync.import_failed`
 (one category that never lands — the run's totals read "0 items" and hide
-it), `update.failed`. The master accepts any well-formed `family.name`, so
+it), `update.failed`, `mb_slice.failed` / `lb_slice.failed` (a slice cycle
+that raised; since 2026-09-24 / 2026-09-20). The master accepts any
+well-formed `family.name`, so
 a node one release ahead is never refused a whole report over a new kind.
 Before a database exists (wizard, a PostgreSQL that did not start) events
 wait in `<data_dir>/diag/spool.jsonl` and are drained at the next start.

@@ -3,7 +3,7 @@
 > **Status:** BUILT — `backend/discovery_engine.py` is the engine described
 > here (tools, sources, bridges, corpus-aware composition; vector floors/ceils
 > calibrated from live score distributions 2026-07-02). Phases 0–2 and 4–6 are
-> in; what remains is listed in §Proposed phasing. This file stays the
+> in; what remains is listed in §Phasing — what landed. This file stays the
 > rationale: why the design is shaped this way.
 > **Supersedes:** the v1 brief (2026-04-28). v1 assumed two axes
 > (target × dimensions), owned-only results, track-grain genre, and no
@@ -106,7 +106,7 @@ level — typically `EXISTS`).
 | `key`, `mode` | track | 100% populated |
 | `energy` | track | `energy_db` buckets low/mid/high (100%) |
 | `danceable` | track | `danceability >= 0.5` (100%) |
-| `moods` | track | `audio_features.moods` JSONB, **100% populated**, fixed 6-label set (happy/calm/sad/aggressive/dark/energetic). Ready-made; not yet exposed. |
+| `moods` | track | `audio_features.moods` JSONB, **100% populated**, fixed 8-label set ("happy and upbeat", "sad and melancholic", "energetic and intense", "calm and relaxing", "dark and ominous", "romantic and dreamy", "aggressive and angry", "mysterious and atmospheric"). A tool in the engine registry; not exposed by the endpoint or the UI. |
 | `instruments` | track | `audio_features.instruments` JSONB `?|`. **Sparse by catalog nature** (54% empty — ambient). Valid filter where present; pair with `clap` for recall. |
 | `genre` | **album** | **album-grain now** via `album_genres` (track_genres dropped). `EXISTS (album_genres ⋈ genres)`. Present on phantoms too (mb source). |
 | `year` | album | `albums.release_year` |
@@ -155,7 +155,7 @@ anywhere in the DB** today. We generate it.
   textbook recipe.
   - `мадонна` → `madonna` (0 edits to "Madonna").
   - query `Vysotskiy` ↔ stored `vysotskiy` (from `Высоцкий`) — exact / 1-edit.
-- **Stack** (all permissive — the PyInstaller `.exe` bundles deps, so GPL is
+- **Stack** (all permissive — the installers carry the dependencies, so GPL is
   disqualifying): **`anyascii`** (ISC) as the universal symmetric folder
   (BGN-phonetic Cyrillic + perfect accented-Latin fold), with script-dispatched
   CJK overrides **`pypinyin`** (MIT, Chinese) / **`cutlet`** (MIT, Japanese
@@ -262,11 +262,11 @@ phantom: YouTube lossy / a lossless provider).
 The owned/phantom split is LOCAL — only `track↔album` differs; `artist↔track`,
 `artist↔album`, `album↔genre` are corpus-agnostic. So compose a **shared CTE head**
 (the corpus-agnostic prefix — e.g. the matching album/artist ids) and **two thin
-tails** off it (owned via `media_files`, phantom via `album_tracks`), UNION'd — the
+tails** off it (owned via `owned_files`, phantom via `album_tracks`), UNION'd — the
 head computes once. UNION vs LEFT-JOIN-both for the tails is decided by `EXPLAIN`,
 not theory. A deferred option: extend `album_tracks` to owned rows too, making
 `track↔album` a single corpus-agnostic 1-hop and removing the split — at the cost of
-duplicating the owned link (`media_files` keeps the physical edition). Not needed if
+duplicating the owned link (`owned_files` keeps the physical edition). Not needed if
 the CTE-head/tails path performs.
 
 ## `composed-text-vector` decision (revive vs delete) — still open
@@ -290,7 +290,7 @@ relevance-source set** — delete only if bio + genre-desc prove to cover it.
 | **3** | **Entity targets `artist`/`album`** — cross-level promotion (EXISTS / aggregation). | ✅ targets shipped. **Open:** album/track title aliases (CJK multi-form + human file tags) — copy the `artist_name_aliases` pattern to `album_title_aliases` / `track_title_aliases` (separate FK-CASCADE tables, **not** a polymorphic `name_aliases` — poly loses the FK and canon rewrites album/track UUIDs — and **not** a `text[]` column — `gin_trgm_ops` needs a normalized/unnested table) |
 | **4** | **Corpus layers** — owned/phantom/all as a bridge choice, mixed ranking, owned attribute, stable tiebreak. | ✅ shipped (`corpus` defaults to `all` on the endpoint, `owned` on the assistant's catalog tools) |
 | **5** | **Absorb all clients** — `discovery.py` and the MCP search tools on the engine. | ✅ for Discovery and the assistant's search tools. **Open:** `search.py` still carries `_apply_filters` for the lyrics/text paths |
-| **6** | **UI** — corpus control, dimensions (genre/mood/year/instruments), composite chip+text. | ✅ shipped |
+| **6** | **UI** — genre and instrument dimensions, composite chip+text. | ✅ shipped. **Open:** no corpus control in the UI (the endpoint defaults to `all`); the `moods` and `year` tools are registered in the engine and reachable from neither the endpoint nor the UI |
 
 Also open: the `composed-text-vector` decision above — `text_embeddings` is
 still built and still read by nothing.
@@ -312,15 +312,17 @@ still built and still read by nothing.
 - Browse mode (no relevance source) must stay useful — default ordering per
   entity lives in the entity registry.
 
-## Reference — current-state files (to be absorbed)
+## Reference — current-state files
 
 - `backend/discovery_engine.py` — the engine (registries, composition, bridges).
 - `backend/routers/discovery.py` — the endpoints, now thin over the engine;
   `_filter_clauses` is gone.
-- `backend/search.py` — `search_by_text/lyrics/...` and `_apply_filters`: the
-  remaining pre-engine filter site.
-- `mcp/assistant_server.py` — the `search_*` / `play_similar` tools, which call
-  the engine through `/api/discovery/search` and carry `corpus`.
+- `backend/search.py` — `search_similar_tracks` / `search_by_text` /
+  `search_by_features` and `_apply_filters`: the remaining pre-engine filter
+  site, reached from `cli.py` only (the engine borrows its vector helpers).
+- `mcp/assistant_server.py` — the `search_*` tools, which call the engine
+  through `/api/discovery/search` and carry `corpus`; `play_similar` goes to
+  the two-tier track scorer (`backend/track_similarity.py`) instead.
 - `backend/static/app-shell.js` — the Discovery filter UI.
 - `backend/text_embeddings.py` — builder for the still-unread
   `composed-text-vector`.

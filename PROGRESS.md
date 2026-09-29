@@ -121,16 +121,23 @@ implementation details live in the code, DB and git history.
 
 ### Embeddings & search
 
-- **CLAP (laion/clap-htsat-unfused) for audio**, 512-d, middle 30s of each
-  track for consistency. Batched on GPU.
+- **CLAP (laion/clap-htsat-unfused) for audio**, 512-d, batched on GPU.
+  Until 2026-07-05 one vector from the middle 30 s of a track; since then
+  the normalized mean of 10 s segment embeddings on a canonical grid
+  (12/16/24 windows by duration), the segments kept — they are what is
+  signed and synced, and what ranks similar tracks (§ "Radio and track
+  similarity").
 - **BGE-M3 for text embeddings** (1024-d, multilingual). Switched from
   all-MiniLM-L6-v2 after multilingual queries broke. Text is composed from
   ALL available metadata per track (tags, bios, genres) in one SQL query
   with JOINs and LATERALs.
-- **Hybrid search default: 70% text + 30% audio**. Text captures semantic/
-  conceptual similarity, audio captures sonic. Tunable per query.
-- **Retrieval floor: 0.3 min_similarity, cap at 30 tracks for context**. Wide
-  pool, let Claude decide. Higher thresholds caused false "nothing found".
+- **Hybrid search default: 70% text + 30% audio** — historical (the RAG
+  assistant, removed; the search is one engine that normalizes each source
+  against calibrated bounds, `docs/design/DISCOVERY-SEARCH-ENGINE.md`). Text
+  captures semantic/conceptual similarity, audio captures sonic.
+- **Retrieval floor: 0.3 min_similarity, cap at 30 tracks for context** —
+  historical, the same RAG. Wide pool, let Claude decide. Higher thresholds
+  caused false "nothing found".
 - **Subtle popularity boost (15%, log-scale)** — historical: the boost was
   ripped out of search later, and since 2026-09-20 popularity is a
   ListenBrainz rank, not a Last.fm figure. Listeners range from 6 to 300k+
@@ -140,8 +147,10 @@ implementation details live in the code, DB and git history.
 ### Audio analysis
 
 - **No catalog audio-features API**. The industry one closed to new apps on
-  Nov 27, 2024. Replaced with own pipeline: librosa (tempo, spectral, MFCC) +
-  CLAP zero-shot (instruments, moods, danceability).
+  Nov 27, 2024. Replaced with own pipeline: librosa (tempo, key/mode,
+  energy, brightness, dynamic range) + CLAP zero-shot (moods,
+  vocal/instrumental, danceability); instruments moved to the AST + PaSST
+  ensemble on 2026-04-19.
 - **CLAP zero-shot instead of essentia**. essentia brings TensorFlow dependency
   and trained models; CLAP already loaded, works out of the box with text
   prompts ("energetic rock song", "ambient pad"). Simpler, no TF.
@@ -181,7 +190,8 @@ implementation details live in the code, DB and git history.
   The sync itself runs on events — first source after start, a scan that
   added files, a LAN peer appearing, the interval — and the manual buttons
   (launcher "Sync Library", web "Force sync now") are gone; the web button
-  was already dead on a Docker node, which never pulls. Peer-search
+  was already dead on a Docker node, which did not pull then (it walks the
+  network like a launcher since 2026-09-08). Peer-search
   details in P2P_NETWORK.md § Layered sync flow.
 - **Analysis is the last step of setup, and only the Web UI starts it
   (2026-09-09).** The launcher's "Analyse Library" button is gone. Running
@@ -202,13 +212,13 @@ implementation details live in the code, DB and git history.
   the phantom layer makes the tracks-first shape 2.9 s against 46 ms.
 - **The text half of the analysis drains itself (2026-09-09).** Steps 6-8
   of the background loop — text, lyrics and bio/genre-wiki embeddings —
-  moved out of the manual run into `background_enrichment`. They are work
+  are drained by `background_enrichment` as well as by the manual run. They are work
   that loop creates: the bio was fetched two steps up, the lyric one step
   up, no peer carries these vectors (not sync categories) and nothing else
   computes them. Under the old split a person had to authorise embedding a
   bio the machine had just fetched, with no way to know it was owed — the
   first node asked was sitting on 7.3k unembedded bios. The manual run
-  keeps the AUDIO phase, which only a new file creates and which therefore
+  exists for the AUDIO phase, which only a new file creates and which therefore
   converges to zero; that is what the guidance trail can honestly point at.
   Two supporting fixes: the loop now calls `notify_library_subscribers()`
   at pass end (a producer that mutates state and tells nobody is what
@@ -262,6 +272,107 @@ implementation details live in the code, DB and git history.
   the drain read as "back off", and held the step to 30 artists per 30 min
   instead of a few thousand an hour.
 
+### Radio and track similarity
+
+- **Radio is a state of the queue, not a playlist (2026-05-26).** The Radio
+  toggle on Now Playing — it took the Repeat button's place — starts a
+  station from the track that is playing: the seed plays on, every other
+  slot of the queue is cleared, and similar tracks flow in behind (`POST
+  /api/player/radio/start`, `manager.clear_for_radio`). Stop
+  (`/radio/stop`) only drops the flag: the queue stays as it is and stops
+  growing. `radio_mode` rides in every status payload, so the toggle follows
+  SSE and never asks. Every endpoint that REPLACES the queue with picked
+  content — play-track, play-album, play-tracks, play-similar, the phantom
+  plays, a session replay — leaves radio through `_exit_radio_mode`; the
+  append paths ("+", Queue album) leave the flag alone, they extend the
+  station. The flag is process state: a backend restart restores the queue
+  and comes back with radio off.
+- **The station drifts (2026-06-29).** A batch is seeded from the track
+  playing when the refill fires, not from the track the station started on,
+  and what the station has already queued is excluded for its whole life
+  (`_radio_played`). The refill is an observer of the status tick
+  (`manager.subscribe_status`): three or fewer tracks ahead of the playhead
+  start one background fill, one at a time. Every filler captures the queue
+  generation (`PlaybackQueue.generation`); a new start or any replace bumps
+  it, and a fill that finds another generation stops appending while the
+  proxy drops the fetches bound to the old one.
+- **Owned and streamed tracks share a batch (2026-06-29).** Ten tracks per
+  fill, at most four of them streamed and, while owned candidates remain,
+  never first and never adjacent: two owned tracks between streams are the
+  buffer time the single-lane fetcher needs, so a slow stream cannot starve
+  the playhead. The batch is appended in order — an owned row at once, a
+  streamed row when the proxy has buffered it; a track no provider resolved
+  is dropped, one that never buffers is skipped, and the station keeps
+  flowing. Streams resolve like any other, so the demo ledger applies: a
+  track whose full demo listen is spent arrives as its 30 s excerpt. With
+  no stream provider enabled the station is owned tracks only. The seed may
+  itself be a streamed track (`track_uuid` in the request); a seed without
+  an audio embedding is refused with 409 "isn't analysed yet" rather than
+  answered with an empty station. Since 2026-09-27 "owned" in a batch means
+  the ACTIVE output opens the copy itself — a local file, or one held at
+  the HQPlayer that is the output; a copy at another HQPlayer streams like
+  a phantom.
+- **One scorer for every "similar" (2026-07-13, reworked 2026-07-23).**
+  `track_similarity.similar_tracks` feeds radio, the Now Playing "Similar"
+  shelf (`GET /api/player/similar/{track_uuid}`, no jitter), `play-similar`
+  (the assistant's `play_similar`: a fixed list, archived as a radio
+  session, the mode stays off) and, as `_SEED_SCORE`, Discovery's "Similar
+  to now playing". Two stages, one statement. Recall: the 600 nearest track
+  means (HNSW) UNION a kin arm — every analysed track by the seed's primary
+  artists and their Last.fm similars, capped at 1200 by exact mean
+  distance. Rank: segment chamfer — for each of the seed's 10 s windows the
+  candidate's best window, averaged — minus 0.08 × the weighted Jaccard of
+  the two artists' Last.fm tag profiles. The mean only shortlists: a whole
+  radio batch fits in distance 0.042–0.070 while one track's own windows
+  spread ~0.19, so mean ordering is near-noise, and its recall misses the
+  neighbourhood a listener hears — for a Smooth Operator seed, Sade's own
+  The Sweetest Taboo sat at mean-rank 678.
+- **What the listening probes removed (2026-07-23).** Album-genre overlap
+  (broad file tags handed "Pop" rock the maximum bonus against a Sade seed
+  while Anita Baker's adjacent tags earned nothing), octave-folded BPM
+  distance (the beat tracker locks on non-octave metrical levels, and one
+  bad SEED detection poisons the whole pool's column) and the energy delta
+  (RMS encodes master loudness, not musical drive) all went, each by
+  measurement; artist bio embeddings and instrument profiles were measured
+  as candidates and rejected. Hungarian assignment and all-pairs averaging
+  scored worse at track grain — all-pairs is mathematically the mean again,
+  a one-to-one assignment lets odd intro and outro windows dominate — and
+  stay with albums (`album_similarity.py`). The figures are kept in the
+  `track_similarity.py` docstring.
+- **Tags rank, never gate; the artist cap is structural.** The tag bonus
+  lifts an artist's whole catalogue uniformly and raw KNN clusters hard (a
+  Tangerine Dream seed put Edgar Froese in 10 of the top 30), so radio keeps
+  each artist to two rows of a pool and avoids the same artist back to
+  back, the queue tail included — the playing track's own artist is usually
+  its nearest neighbour. A jitter of 0.2 on the final score reshuffles
+  near-ties: one seed never yields the same station twice, while the shelf
+  stays deterministic. Tags and similars are the node's own Last.fm layer
+  (local-only since 2026-09-19): a node without it ranks by chamfer alone
+  and its kin arm holds the seed's artists only. `artist_tags.weight` is
+  INTEGER — the `::numeric` casts keep the Jaccard division from flooring
+  to zero.
+- **The station dried up after four batches (2026-07-06).** HNSW's default
+  40-candidate wave was eaten whole by the growing exclude list and the fill
+  silently returned nothing. Every similarity query goes through
+  `db_query_with_ef_search` with `ef_search ≥ pool` and iterative scan.
+- **Every output has to hear a refill.** Tracks appended behind the playhead
+  reach HQPlayer as playlist entries; the other outputs each lost the
+  station once. A dozing phone's SSE channel is dead exactly when a refill
+  matters, so the browser output hands the fresh queue tail back on the
+  renderer's own POST (2026-07-12); the DLNA poll restarts on a gapless
+  auto-advance, or the backend goes deaf and radio dies on the next
+  boundary (2026-07-23); the local engine reopens its tail when items land
+  behind the end of the queue.
+- **A radio queue is an ordinary queue.** Reorder is keyed on track UUIDs
+  (2026-07-23), the one identity owned and streamed slots both carry — by
+  media-file id a station could not be reordered. The start is
+  single-flight (2026-09-13): a second start while one runs answers 409.
+  In Listening history a station is archived with origin `radio`, titled by
+  its seed and labelled "Radio", and replays as a `mix` — the snapshot is a
+  static list, and replaying it does not turn radio on. On every hardware
+  profile radio is pure pgvector over the embeddings the node holds,
+  imported ones included (`docs/design/HARDWARE-TIERS.md`).
+
 ### AI assistant
 
 - **Claude Code + MCP tools, not custom RAG**. Earlier version had a 557-line
@@ -270,11 +381,15 @@ implementation details live in the code, DB and git history.
   MCP tools writes SQL directly — more flexible, less code, traceable through
   MCP logs. Main trade-off: each query costs tokens for SQL, but quality is
   higher and maintenance drops.
-- **Cyrillic queries translated via Haiku**, not transliteration. "шульце"
+- **Queries are translated, not transliterated.** "шульце"
   → "shultse" (lossy) vs "Schulze" (correct). Algorithmic transliteration
-  destroys proper names and grammatical cases ("від шульца" = genitive). Haiku
-  adds ~$0.001 and ~0.3s per Cyrillic query; non-Cyrillic queries bypass
-  translation entirely.
+  destroys proper names and grammatical cases ("від шульца" = genitive).
+  Historical: the first translator was Haiku (~$0.001 and ~0.3 s per
+  Cyrillic query) in front of the RAG assistant. Since 2026-07 the
+  translation is local — MADLAD-400 on CTranslate2
+  (`backend/translation.py`), for the English-only CLAP text encoder; the
+  trigger is a non-ASCII query, not a Cyrillic one, and ASCII queries bypass
+  it.
 - **The chat stream reconnects; it never reports a dead socket as a failure.**
   A phone that sleeps mid-generation loses the TLS connection, and the reader
   surfaces that as `TypeError: network error` — which used to be printed in
@@ -353,9 +468,10 @@ implementation details live in the code, DB and git history.
 
 - **XML protocol over TCP port 4321**. HQPlayer Desktop API is simple
   request/response. No auth for local control.
-- **Path translation**: Container `/music/...` → Windows `E:/Music/...` before
-  sending to HQPlayer. Both sides see the same files through different mount
-  points.
+- **Path translation**: Container `/music/...` → Windows `E:/Music/...` at
+  scan time — the database stores the path the host sees, which an HQPlayer
+  on this machine opens as is; the container translates back for its own
+  reads. Both sides see the same files through different mount points.
 - **HQPlayers are found, not typed (2026-09-28).** HQPlayer answers its own
   discovery datagram — `<discover/>` on UDP 4321, what HQPlayer Client
   broadcasts — with its name and product; sent unicast it crosses the
@@ -379,9 +495,9 @@ implementation details live in the code, DB and git history.
   The mount mode (the path under the root HQPlayer mounted the library at)
   was the same bytes for an extra share on the HQPlayer side and went with
   the setting (Valerii, 2026-09-28); it returns only if Sautium scans files
-  over the network itself. Streaming to the Pi
-  needs (verified against Embedded 6.2.3 / HQPlayer OS: same control
-  protocol, no client change). Media URLs name the address HQPlayer can reach
+  over the network itself. Streaming is what HQPlayer Embedded on a
+  Raspberry Pi needs (verified against Embedded 6.2.3 / HQPlayer OS: same
+  control protocol, no client change). Media URLs name the address HQPlayer can reach
   us at (`streaming/media_host.py`, shared with DLNA), owned-file tokens are an
   HMAC of the path under the node secret (stable across restarts), the drift
   canary and adopt read the playlist back through the same rules, and the
@@ -392,7 +508,7 @@ implementation details live in the code, DB and git history.
   mirror is re-mirrored by the next play through the play-intent gate. The
   gate's liveness probe asks `GetInfo` — the trial stop keeps the port open
   and closes every connection.
-  **The HQPlayer library as a source** (same day, evening): `hqp_library`
+  **The HQPlayer library as a source** (2026-09-27, evening): `hqp_library`
   imports `<LibraryGet/>` as album variants located at that HQPlayer
   (`location`/endpoint on `album_variants`, `hqp_library_files`), through
   the scanner's `import_metadata` with a file sink; the canon reads the
@@ -400,7 +516,7 @@ implementation details live in the code, DB and git history.
   Pi's 928-file library (a flash drive + one shared folder) landed 429 of 845
   tracks on existing rows, 45 albums gained a second variant; 8 local/copy
   pairs stayed twin "(Alt)" editions — editions are resolved per album row,
-  the release-group fold is a canon follow-up. Later that night every
+  the release-group fold followed the same night (below). Later that night every
   owned gate, page and tool took the `owned_files` rule: the artist and
   genre pages, the Home shelves, `library_stats` (migration 029), session
   replay, radio and play-similar (the copy the ACTIVE output opens
@@ -434,11 +550,14 @@ implementation details live in the code, DB and git history.
   through `normalize` (3 more folds on the master).
   Morning of 2026-09-28: an HQPlayer library became a thing with an
   identity (`hqp_endpoints`, migration 030: name, GetInfo facts, the
-  library hash the last sync saw, the mount mapping) — a friend's streamer
+  library hash the last sync saw; the mount mapping it also carried went
+  the same day with the mount mode, migration 031) — a friend's streamer
   or the Pi after a DHCP lease is recognised at a new address by its hash,
   a different box that inherits an address is a new library, and the
-  owner forgets a library from Settings; the node's own files seen through
-  the HQPlayer's mount are never imported as copies. Then the queue: an
+  owner forgets a library on the HQPlayer screen ("Forget this library") or
+  by the `×` on its picker row; an HQPlayer on this machine is never synced
+  (`has_own_library`, read off the address), so the node's own files are
+  never imported as copies. Then the queue: an
   output switch keeps identities and re-reads each slot for the new
   output (`QueueItem.play`, `playback/substitute.py`) — a rip here, this
   HQPlayer's own copy, or a stream fetched a lead window ahead and landed
@@ -453,17 +572,22 @@ implementation details live in the code, DB and git history.
   21k files of the same library as copies before it was cancelled and
   reverted (`--forget-endpoint`); `album_genres.count` for the albums that
   import touched stayed roughly doubled (no per-file record to undo it).
-- **2s delay after playlist load, 1s after track selection**. HQPlayer needs
-  time to process. Skipping the delays caused random "track not found" errors.
+- **A SelectTrack on a stopped HQPlayer needs a beat.** One second between
+  select and play on a resume (`hqp_backend.play`) — a boundary exception:
+  HQPlayer cannot say it is ready. The first client's 2 s wait after a
+  playlist load is gone.
 - **Stop-clear-add-select-play sequence** for `play_track`/`play_album`. Without
   explicit stop, HQPlayer occasionally started the wrong track from the
   existing queue.
 
 ### MCP server
 
-- **Outside Docker**. Claude Code spawns MCP servers as child processes — must
-  be on the WSL2/native host, not inside a container. All heavy work is
-  delegated to the Docker backend via HTTP.
+- **Spawned by the agent CLI, wherever it runs.** Claude Code and Codex
+  spawn MCP servers as child processes, so the servers live beside the CLI:
+  inside the backend container on a Docker node (both CLIs are baked into
+  the image, the config is `/app/mcp-docker.json`), on the host under the
+  launcher (`backend/mcp-windows.json`, regenerated at every start). All
+  heavy work is delegated to the backend via HTTP.
 - **Lazy connections** (HQPlayer / DB / backend). Connect on first use,
   auto-reconnect on failure. A cold MCP startup is fast; only the first tool
   call pays the connection cost.
@@ -532,8 +656,9 @@ The short version of the hard-learned lessons:
   alone by every later DMG — a disk image must not roll a node back to whatever
   snapshot it happens to carry. The cost is deliberate and accepted: an install
   tracks `main` with no release branch between it and a work in progress.
-- **A packaged install cannot pull, and no longer pretends to.** The unpacked
-  tree is not a checkout, so the update check returned "no updates" and the UI
+- **An install that could not clone cannot pull, and does not pretend to.**
+  The offline fallback (the bundle's snapshot, stamped `.sautium_build`) is
+  not a checkout; there the update check returned "no updates" and the UI
   said "You're up to date!" — a guess worn as a fact. Worse, `is_git_repo()`
   asked `--is-inside-work-tree`, which also answers for the nearest repository
   ABOVE the directory, and the tree now lives under `$HOME` — which plenty of
@@ -541,8 +666,8 @@ The short version of the hard-learned lessons:
   own root now, "Check for Updates" becomes "Refresh Registries" (the other,
   real half of that button), the window title carries the build id, and the
   startup check does not shell out to `git` at all — on a Mac without the
-  command line tools, invoking it pops the Xcode installer. New builds arrive
-  as a new DMG.
+  command line tools, invoking it pops the Xcode installer. That copy is
+  replaced by a newer package, or by a clone on a start that reaches GitHub.
 
 ### Desktop packaging (Windows, 2026-09-14)
 
@@ -850,9 +975,12 @@ for a Last.fm cooldown (30 min doubling to 24 h) that reads as "Idle".
 - **The honest number came from fixing the cause.** `Retry-After` on the
   peer surfaces' 429 and a one-minute wait-and-retry in the slice cycle
   turned "next attempt in six hours" into "about a minute"; the published
-  `next_attempt_at` is the timed loop's real deadline. Left for later: the
-  same 429 awareness in the pull walk, a slice loop on dump-less Docker
-  nodes, and the remaining silent states (music mount, media tools).
+  `next_attempt_at` is the timed loop's real deadline. Shipped since: the
+  same 429 awareness in the pull (2026-09-13, `sync_client` re-asks after
+  `Retry-After`), the remaining silent states as notices the same evening
+  (`library.mount_missing`, `tools.missing`, `streaming.silent`), and the
+  slice loop on dump-less Docker nodes (2026-09-24,
+  `desktop/p2p/mb_slice_cycle.py`).
 
 ### A double-tap is one tap (2026-09-13)
 
@@ -1244,14 +1372,15 @@ untouched: Valerii's call, track level only.
   artist's hits render as phantom rows and stream like any other.
 - **One cycle for both runtimes.** `desktop/p2p/lb_slice_cycle.py` runs
   in the launcher's P2PManager and in the Docker backend (the walk's
-  `connect_peer` injected), which the MB family never got — a dump-less
-  Docker node has no MB slice loop to this day. `verified` and `missing`
+  `connect_peer` injected). The MB family got the same on 2026-09-24
+  (`desktop/p2p/mb_slice_cycle.py`); until then a dump-less Docker node had
+  no MB slice loop. `verified` and `missing`
   are two explicit sets: `mb_slice_client.py`'s `missing` expression has an
   `and`/`or` precedence hole that drops a name whose blob failed
-  verification. Discovery mirrors `_find_dump_peers` (replicas first, DHT
-  `lbdump`, the Worker directory's `lbslices`/`lbdump`, the master hint
-  last); moving the MB family onto `LbSliceCycle.find_sources` is the
-  follow-up.
+  verification. Both families find their sources through one finder since
+  2026-09-24 (`desktop/p2p/slice_sources.py`: every holder of the DHT
+  capability key, the Worker directory and the master hint whenever no
+  primary source is usable; the verified set kept between runs).
 - **One dump-job runner** (`backend/dump_job.py`): the MB job's
   state/progress/budget/auto-update machinery generalised over a family,
   two instances, ONE worker thread — the wizard can tick both downloads
@@ -1393,6 +1522,174 @@ and the header, the tracklist and that answer come from one pick
 (`albums._PICKED_FILES`). A mixed default — 36 of the 61 multi-variant
 albums on the master, mostly a disc per folder — reads "All variants · best
 per track", with that row in the sheet to come back to.
+
+Since 2026-09-27 one term sorts ahead of it (`sql_queries.owned_rank`): a
+copy at the HQPlayer that is the active output first, local files next,
+copies at other HQPlayers last — those play only as streams.
+
+### The Last.fm history makes a new node's Home (2026-09-24)
+
+A new node's Home had nothing to go on. Connecting Last.fm now imports the
+owner's scrobbles, so Favourite artists, Listening history and the seeds of
+Recommendations start from the owner's own listening.
+
+- **Strings first, entities born canonical.** The first idea — mint an
+  artist, album and track from each scrobble's names and canonicalize them
+  later — broke on today's canon: every canon entry point selects artists that
+  own files, the content match needs durations a scrobble does not have,
+  tracks converge only on exact normalized titles, the discography reconcile
+  deleted file-less tracks (listens with them), and migration 007 had just
+  made phantoms "born canonical". So scrobbles wait as raw strings; the canon
+  resolves the artist from the heard titles and albums (the owned canon's
+  anchor, with heard albums in place of owned ones), mints its discography,
+  and binds a scrobble to a recording through every track and recording name
+  credited to the artist — only then is there a listen, on a canonical track,
+  with a length. Measured before any write: 235 of 247 verified owned artists
+  resolved, 0 wrong; with one title and no album, 216 right, 0 wrong.
+- **"The same listen" is time, not identity.** Sautium scrobbles what it
+  plays, so the history hands its own listens back — a second off, possibly
+  renamed by Last.fm's autocorrect. A start within 10 s of a completed record
+  is that listen (a scrobble needs 30 s of listening), and the native record
+  wins, in the import and in the life merge alike; two native records keep
+  the exact key, since two machines can play at once. It needed a prior fix:
+  the tracker stamped starts with naive local time under a UTC session, so a
+  launcher's history sat hours off the scrobbles (54 of 54 rows on the stand).
+- **Last.fm knows no duration.** A scrobble only says the scrobble rule was
+  met; the listen takes the track's length. NULL would have hidden imported
+  listens from every time-weighted consumer (Favourite artists filter on
+  listening time; Home seeds weigh by it and sort NULL first).
+- **No timer.** Last.fm pushes nothing, so the walk runs on events: the
+  connection, the Sync button, a restart mid-walk. The canon's consumer wakes
+  on the events that can place a waiting scrobble — new scrobbles for a name,
+  a slice or a dump for it, a mint of its artist, a scan.
+- **One pace per process.** The import made Last.fm's lack of a shared
+  throttle visible: every service object had its own pylast limiter. Its
+  first live run also showed that a bio cost seven requests (five getInfo),
+  now three.
+- **What the master's own history showed** (80,267 scrobbles back to 2009):
+  a page with one nameless scrobble ended the first walk after 25,063 (the
+  end is now read from what Last.fm sent, not from what parsed), and the
+  canon lock — also the dump lock — held for a whole batch read to the shelf
+  step as a dump reload. After both fixes: 69,568 listens placed; 4,314
+  scrobbles wait on artists MusicBrainz cannot place (mostly `&` credits it
+  holds no entity for), 2,724 on tracks no minted album carries (singles,
+  compilations, live).
+- **A listened song needs no album.** On the launcher stand — the same
+  account, 430 owned tracks instead of 37,138 — 14.5k scrobbles (18 %)
+  still waited once the canon was done: on the master the owner's files had
+  been carrying what the phantom layer never mints. `python -m
+  canon.scrobbles --gap` split them: 6.3k titles naming no recording of the
+  artist, then compilations 3.2k, bonus tracks 2.0k, albums never fully
+  timed 1.1k, singles 0.8k, remixes 0.7k, live 0.2k. Titles are now
+  compared by a folded key (lowered, unaccented, typography folded, a
+  store's "(as originally performed by …)" or "-1956" dropped) — artist
+  resolution went 235 → 239 of 247 right, none wrong — and a recording no
+  album here carries gets its own canonical track (MB's name and length,
+  primary to the resolved artist). Minting its album instead would have put
+  4.2k singles and compilations on artist pages, the release types the
+  discography keeps out on purpose. On the stand that places ~9.6k of the
+  14.3k; what waits is a title MB does not know (4.2k), a recording MB never
+  timed (0.4k), a guest spot.
+- **MB slices for Docker too.** The resolver needs MB data for names a node
+  has never seen, and only the launcher asked for slices; the cycle is now
+  shared (`desktop/p2p/mb_slice_cycle.py`) with a tier for the names imported
+  scrobbles wait on.
+- **A favourite fades.** Fifteen years of imported scrobbles turned the
+  all-time Favourite artists row into the owner of 2010. A listen now weighs
+  its duration × exp(−age / 90 days) — the Recommendations' recency weight on
+  a slower clock: their seeds follow the week (τ = 7 days), a favourite the
+  season. Age runs from the newest listen, not from now: an exponential orders
+  the same from any anchor, so the anchor only places the two-year window,
+  and an account that went quiet keeps its last era instead of the seed
+  picks. The rewrite also resolves ownership after the cut — the planner had
+  hashed the ownership of every artist in the catalogue: 552 → 118 ms on the
+  master.
+- **Home is the Home the listener left.** Recommendations counted their
+  60-day seed window, their decay and their "forgotten" threshold from now,
+  so two months without a listen sent a node with history to the cold start
+  — an imported account that went quiet never got past it. All three now
+  run from the newest listen, like the favourites: nothing moves for an
+  active listener (the master's shelf came out identical), and a returning
+  one finds the shelf of their last day, the records heard just before the
+  break still counted as heard.
+
+### Credit keys the planner can price; statistics that survive a crash (2026-09-24)
+
+Two faults under the Home rewrite, neither in its code.
+
+- **Role goes second in the credit keys.** Readers probe a credit by its
+  track or album and its role (`ta.track_id = … AND ta.role = 'primary'`,
+  ~120 sites). With role last, behind artist_id, PostgreSQL 18 prices the
+  probe as a skip scan over artist_id whenever the sampled distinct-artist
+  estimate stays under the index's page count — 28,732 estimated against
+  301,879 real on the master, and no ANALYZE raises it — so one probe cost
+  55,720 instead of 8 and the planner read all 3.8M rows instead. Migration
+  022 reorders both keys, `(track_id, role, artist_id)` and
+  `(album_id, role, artist_id)` (album_artists was 2.6× growth from the same
+  cliff); a probe by (track, artist) now skips over role's three values.
+  New in my collection went 285 → 74 ms, an album page 19 → 5 ms, and
+  Favourite artists 116 → 32 ms once its anchor went in as a value — from a
+  subquery the planner guessed a third of all history and hashed the table.
+- **A crash recovery took autovacuum's memory.** PostgreSQL discards its
+  cumulative statistics after one, and autovacuum schedules from exactly
+  those counters, so a large table waits for another 10-20 % of churn from
+  zero. The master had three recoveries on 2026-09-23 (the WSL VM went away
+  under the container); a day later 98 of 113 tables had no analysis on
+  record and the four churned life tables were 8-23 % all-visible with
+  ~1.15M dead rows between them. A launcher lost the same on every Windows
+  shutdown: Windows ends a session by terminating its processes, and the
+  stand's PostgreSQL came back in crash recovery the morning after a
+  restart. Now the backend ANALYZEs, at start, every table with no analysis
+  on record (`db_migrate.analyze_unrecorded` — PostgreSQL's remedy after a
+  statistics reset, which also re-estimates the dead rows vacuum waits on;
+  96 tables in 18 s on the master), and the launcher stops the database
+  inside WM_ENDSESSION from a hidden window on its own thread
+  (`utils.watch_session_end`; Tk surfaces only the query, which another app
+  can still veto). One VACUUM brought the master back to 100 % visible.
+- **The lesson** is in the diagnosis: "stale statistics" read well for the
+  10× distinct-artist gap and was wrong — an ANALYZE inside a rolled-back
+  transaction left it unchanged, because the gap is the sampling estimator's,
+  and the planner cost with it. The lost counters did their damage on the
+  vacuum side instead.
+
+### Recommendations rebuilt on a listen; no JIT (2026-09-26)
+
+Home's Recommendations took 1.1 s per visit on the master, and that was the
+warm case.
+
+- **JIT was most of it.** The work was 0.2 s; 0.86 s was LLVM compiling the
+  query. The Last.fm history import (listening history 4k → 75k rows) had
+  pushed the planner's cost estimate past the inline/optimize thresholds —
+  the estimate follows the data, not the work. The discovery engine and the
+  assistant's MCP server had each switched JIT off for themselves before, so
+  `jit=off` now sits with the appliance's other server settings
+  (docker-compose `command`, the launcher's `postgresql.conf` through
+  `db_init`) and the per-site switches are gone. A Docker node takes it on
+  `docker compose up -d postgres`, a launcher on its next PostgreSQL start.
+- **The "played" check read the whole history.** Telling a candidate album
+  never-played from forgotten mapped every played track to its albums —
+  14.5k tracks after the import — to label ~800 candidates. It starts from
+  the candidates' member tracks now (set joins, ~11k rows): 210 → 113 ms,
+  and it no longer grows with the history.
+- **Rebuilt when listening changes, read by the visit.** Every clock of the
+  ranking runs from the newest listen, so only `listening_history` moves it.
+  A statement trigger (migration 025) NOTIFYs `sautium_listens` on every
+  write — the tracker, the scrobble canon, a Last.fm removal, a life merge
+  from the CLI — and a backend thread rebuilds the ranking (one at a time,
+  a burst folded, again on every reconnect); Home reads the stored album ids
+  and renders their tiles live, 13 ms. Per visit, eight HNSW walks ran each
+  time Home opened, and a background pass (the sync walk alone reads more of
+  `tracks` and `album_tracks` than `shared_buffers` holds) evicted the
+  vector index between visits: the first visit after one paid ~1 s of cold
+  reads.
+- **"It never rebuilds" was the ranking, not a cache.** There was none; the
+  shelf changed with every completed listen. A day of one artist's records
+  filled five of the eight seed slots, and 45 minutes of another record
+  then moved 1 of the 20 tiles.
+- **Index drift.** The master lacked `idx_album_variants_album_id`, which
+  001 has declared since the canonical-tracks schema (its database is older
+  than the unified 001): every album tile's artist, cover and first file
+  scanned `album_variants`. Migration 024.
 
 ## Known Gotchas
 
@@ -1563,8 +1860,9 @@ per track", with that row in the sheet to come back to.
   — without this flag `dht_get_peers_alert` is silently not generated.
 - **libtorrent `dht_announce()`** in 2.0.11 Python bindings takes 3 args
   (sha1, port, flags=0) — flags parameter is required.
-- **libtorrent on Windows** needs OpenSSL 1.1 DLLs — `libtorrent-windows-dll`
-  PyPI package auto-installed at launcher startup.
+- **libtorrent on Windows** needs OpenSSL 1.1 DLLs its wheel does not carry —
+  the launcher copies them into the package from wherever the system has
+  them (`_fix_libtorrent_openssl`) and logs a warning when it finds none.
 - **`regexp_count`** needs double-escaped word boundaries in Python strings
   (`\\yword\\y`) but single-escape in raw SQL files (`\yword\y`).
 - **Bulk COPY into indexed tables is the slow path.** The MB dump loader
@@ -1612,170 +1910,6 @@ per track", with that row in the sheet to come back to.
 - **A BYO plugin's fetch tool writes its tracebacks to STDOUT.** Every failure
   on the Windows launcher surfaced as a bare `rc=1`; the lossless plugin now
   runs its tool with a per-process config and reads stdout for the real error.
-
-### The Last.fm history makes a new node's Home (2026-09-24)
-
-A new node's Home had nothing to go on. Connecting Last.fm now imports the
-owner's scrobbles, so Favourite artists, Listening history and the seeds of
-Recommendations start from the owner's own listening.
-
-- **Strings first, entities born canonical.** The first idea — mint an
-  artist, album and track from each scrobble's names and canonicalize them
-  later — broke on today's canon: every canon entry point selects artists that
-  own files, the content match needs durations a scrobble does not have,
-  tracks converge only on exact normalized titles, the discography reconcile
-  deleted file-less tracks (listens with them), and migration 007 had just
-  made phantoms "born canonical". So scrobbles wait as raw strings; the canon
-  resolves the artist from the heard titles and albums (the owned canon's
-  anchor, with heard albums in place of owned ones), mints its discography,
-  and binds a scrobble to a recording through every track and recording name
-  credited to the artist — only then is there a listen, on a canonical track,
-  with a length. Measured before any write: 235 of 247 verified owned artists
-  resolved, 0 wrong; with one title and no album, 216 right, 0 wrong.
-- **"The same listen" is time, not identity.** Sautium scrobbles what it
-  plays, so the history hands its own listens back — a second off, possibly
-  renamed by Last.fm's autocorrect. A start within 10 s of a completed record
-  is that listen (a scrobble needs 30 s of listening), and the native record
-  wins, in the import and in the life merge alike; two native records keep
-  the exact key, since two machines can play at once. It needed a prior fix:
-  the tracker stamped starts with naive local time under a UTC session, so a
-  launcher's history sat hours off the scrobbles (54 of 54 rows on the stand).
-- **Last.fm knows no duration.** A scrobble only says the scrobble rule was
-  met; the listen takes the track's length. NULL would have hidden imported
-  listens from every time-weighted consumer (Favourite artists filter on
-  listening time; Home seeds weigh by it and sort NULL first).
-- **No timer.** Last.fm pushes nothing, so the walk runs on events: the
-  connection, the Sync button, a restart mid-walk. The canon's consumer wakes
-  on the events that can place a waiting scrobble — new scrobbles for a name,
-  a slice or a dump for it, a mint of its artist, a scan.
-- **One pace per process.** The import made Last.fm's lack of a shared
-  throttle visible: every service object had its own pylast limiter. Its
-  first live run also showed that a bio cost seven requests (five getInfo),
-  now three.
-- **What the master's own history showed** (80,267 scrobbles back to 2009):
-  a page with one nameless scrobble ended the first walk after 25,063 (the
-  end is now read from what Last.fm sent, not from what parsed), and the
-  canon lock — also the dump lock — held for a whole batch read to the shelf
-  step as a dump reload. After both fixes: 69,568 listens placed; 4,314
-  scrobbles wait on artists MusicBrainz cannot place (mostly `&` credits it
-  holds no entity for), 2,724 on tracks no minted album carries (singles,
-  compilations, live).
-- **A listened song needs no album.** On the launcher stand — the same
-  account, 430 owned tracks instead of 37,138 — 14.5k scrobbles (18 %)
-  still waited once the canon was done: on the master the owner's files had
-  been carrying what the phantom layer never mints. `python -m
-  canon.scrobbles --gap` split them: 6.3k titles naming no recording of the
-  artist, then compilations 3.2k, bonus tracks 2.0k, albums never fully
-  timed 1.1k, singles 0.8k, remixes 0.7k, live 0.2k. Titles are now
-  compared by a folded key (lowered, unaccented, typography folded, a
-  store's "(as originally performed by …)" or "-1956" dropped) — artist
-  resolution went 235 → 239 of 247 right, none wrong — and a recording no
-  album here carries gets its own canonical track (MB's name and length,
-  primary to the resolved artist). Minting its album instead would have put
-  4.2k singles and compilations on artist pages, the release types the
-  discography keeps out on purpose. On the stand that places ~9.6k of the
-  14.3k; what waits is a title MB does not know (4.2k), a recording MB never
-  timed (0.4k), a guest spot.
-- **MB slices for Docker too.** The resolver needs MB data for names a node
-  has never seen, and only the launcher asked for slices; the cycle is now
-  shared (`desktop/p2p/mb_slice_cycle.py`) with a tier for the names imported
-  scrobbles wait on.
-- **A favourite fades.** Fifteen years of imported scrobbles turned the
-  all-time Favourite artists row into the owner of 2010. A listen now weighs
-  its duration × exp(−age / 90 days) — the Recommendations' recency weight on
-  a slower clock: their seeds follow the week (τ = 7 days), a favourite the
-  season. Age runs from the newest listen, not from now: an exponential orders
-  the same from any anchor, so the anchor only places the two-year window,
-  and an account that went quiet keeps its last era instead of the seed
-  picks. The rewrite also resolves ownership after the cut — the planner had
-  hashed the ownership of every artist in the catalogue: 552 → 118 ms on the
-  master.
-- **Home is the Home the listener left.** Recommendations counted their
-  60-day seed window, their decay and their "forgotten" threshold from now,
-  so two months without a listen sent a node with history to the cold start
-  — an imported account that went quiet never got past it. All three now
-  run from the newest listen, like the favourites: nothing moves for an
-  active listener (the master's shelf came out identical), and a returning
-  one finds the shelf of their last day, the records heard just before the
-  break still counted as heard.
-
-### Credit keys the planner can price; statistics that survive a crash (2026-09-24)
-
-Two faults under the Home rewrite, neither in its code.
-
-- **Role goes second in the credit keys.** Readers probe a credit by its
-  track or album and its role (`ta.track_id = … AND ta.role = 'primary'`,
-  ~120 sites). With role last, behind artist_id, PostgreSQL 18 prices the
-  probe as a skip scan over artist_id whenever the sampled distinct-artist
-  estimate stays under the index's page count — 28,732 estimated against
-  301,879 real on the master, and no ANALYZE raises it — so one probe cost
-  55,720 instead of 8 and the planner read all 3.8M rows instead. Migration
-  022 reorders both keys, `(track_id, role, artist_id)` and
-  `(album_id, role, artist_id)` (album_artists was 2.6× growth from the same
-  cliff); a probe by (track, artist) now skips over role's three values.
-  New in my collection went 285 → 74 ms, an album page 19 → 5 ms, and
-  Favourite artists 116 → 32 ms once its anchor went in as a value — from a
-  subquery the planner guessed a third of all history and hashed the table.
-- **A crash recovery took autovacuum's memory.** PostgreSQL discards its
-  cumulative statistics after one, and autovacuum schedules from exactly
-  those counters, so a large table waits for another 10-20 % of churn from
-  zero. The master had three recoveries on 2026-09-23 (the WSL VM went away
-  under the container); a day later 98 of 113 tables had no analysis on
-  record and the four churned life tables were 8-23 % all-visible with
-  ~1.15M dead rows between them. A launcher lost the same on every Windows
-  shutdown: Windows ends a session by terminating its processes, and the
-  stand's PostgreSQL came back in crash recovery the morning after a
-  restart. Now the backend ANALYZEs, at start, every table with no analysis
-  on record (`db_migrate.analyze_unrecorded` — PostgreSQL's remedy after a
-  statistics reset, which also re-estimates the dead rows vacuum waits on;
-  96 tables in 18 s on the master), and the launcher stops the database
-  inside WM_ENDSESSION from a hidden window on its own thread
-  (`utils.watch_session_end`; Tk surfaces only the query, which another app
-  can still veto). One VACUUM brought the master back to 100 % visible.
-- **The lesson** is in the diagnosis: "stale statistics" read well for the
-  10× distinct-artist gap and was wrong — an ANALYZE inside a rolled-back
-  transaction left it unchanged, because the gap is the sampling estimator's,
-  and the planner cost with it. The lost counters did their damage on the
-  vacuum side instead.
-
-### Recommendations rebuilt on a listen; no JIT (2026-09-26)
-
-Home's Recommendations took 1.1 s per visit on the master, and that was the
-warm case.
-
-- **JIT was most of it.** The work was 0.2 s; 0.86 s was LLVM compiling the
-  query. The Last.fm history import (listening history 4k → 75k rows) had
-  pushed the planner's cost estimate past the inline/optimize thresholds —
-  the estimate follows the data, not the work. The discovery engine and the
-  assistant's MCP server had each switched JIT off for themselves before, so
-  `jit=off` now sits with the appliance's other server settings
-  (docker-compose `command`, the launcher's `postgresql.conf` through
-  `db_init`) and the per-site switches are gone. A Docker node takes it on
-  `docker compose up -d postgres`, a launcher on its next PostgreSQL start.
-- **The "played" check read the whole history.** Telling a candidate album
-  never-played from forgotten mapped every played track to its albums —
-  14.5k tracks after the import — to label ~800 candidates. It starts from
-  the candidates' member tracks now (set joins, ~11k rows): 210 → 113 ms,
-  and it no longer grows with the history.
-- **Rebuilt when listening changes, read by the visit.** Every clock of the
-  ranking runs from the newest listen, so only `listening_history` moves it.
-  A statement trigger (migration 025) NOTIFYs `sautium_listens` on every
-  write — the tracker, the scrobble canon, a Last.fm removal, a life merge
-  from the CLI — and a backend thread rebuilds the ranking (one at a time,
-  a burst folded, again on every reconnect); Home reads the stored album ids
-  and renders their tiles live, 13 ms. Per visit, eight HNSW walks ran each
-  time Home opened, and a background pass (the sync walk alone reads more of
-  `tracks` and `album_tracks` than `shared_buffers` holds) evicted the
-  vector index between visits: the first visit after one paid ~1 s of cold
-  reads.
-- **"It never rebuilds" was the ranking, not a cache.** There was none; the
-  shelf changed with every completed listen. A day of one artist's records
-  filled five of the eight seed slots, and 45 minutes of another record
-  then moved 1 of the 20 tiles.
-- **Index drift.** The master lacked `idx_album_variants_album_id`, which
-  001 has declared since the canonical-tracks schema (its database is older
-  than the unified 001): every album tile's artist, cover and first file
-  scanned `album_variants`. Migration 024.
 
 ---
 

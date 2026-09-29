@@ -24,12 +24,13 @@ Website and guides: https://sautium.net · Downloads: https://sautium.net/downlo
 ## Features
 
 - **Audio content analysis** — 512-d CLAP audio embeddings (`laion/clap-htsat-unfused`)
-  on GPU, plus librosa DSP features (tempo, spectral, MFCC) and an AST + PaSST
-  ensemble for multi-label instrument tagging.
+  on GPU — a mean over 10 s segments, the segments kept for ranking — plus
+  librosa DSP features (tempo, key and mode, energy, brightness, dynamic
+  range) and an AST + PaSST ensemble for multi-label instrument tagging.
 - **Hybrid semantic search** — one engine composes heterogeneous signals per
   query: CLAP text→audio, 1024-d multilingual text embeddings (BGE-M3) over
   bios and lyrics, trigram identity matching across scripts, and binary gates
-  (vocalist, gender, energy, instruments, year…). Each source is normalized
+  (vocalist, gender, energy, instruments, genre…). Each source is normalized
   against calibrated bounds rather than rank-fused, so magnitude survives, and
   owned files and phantom rows are corpus layers of the same query.
 - **AI assistant** — natural-language music discovery through an agent CLI
@@ -45,18 +46,36 @@ Website and guides: https://sautium.net · Downloads: https://sautium.net/downlo
   P2P; an optional local MusicBrainz dump as the canonicalization spine;
   bio-derived classifiers (gender, vocalist); artist photos and catalog
   lookups from the Deezer public API. Idempotent and incremental.
+- **Your Last.fm history, imported** — connecting Last.fm walks the
+  account's scrobbles into the node and places each on a canonical track,
+  so Favourite artists, Listening history and Recommendations start from
+  the listener's own years rather than from nothing. Node-local: nothing of
+  it leaves the node but your own backup.
 - **Audio outputs** — one canonical queue behind an output picker:
-  **HQPlayer** (XML control over TCP 4321 — Desktop on this machine or
-  HQPlayer Embedded on a box on the LAN, fed by path or streamed from the
-  node; transport, DSP filter/shaper selection, matrix profiles, convolution,
-  parametric-EQ preset generation), **DLNA** renderers, the **browser**
-  itself, and the host's local sound device. Play tracking (`listening_history` + Last.fm scrobbling) lives in
-  the backend and is keyed on the track UUID, so a streamed track counts like
-  an owned file.
+  **HQPlayer** (XML control over TCP 4321 — on this machine, or a Desktop or
+  HQPlayer Embedded on another machine on the LAN; found by the network
+  scan, fed by path here and streamed from the node anywhere else; transport,
+  DSP filter/shaper selection, matrix profiles, convolution, parametric-EQ
+  preset generation), **DLNA** renderers, the **browser** itself, and the
+  host's local sound device. An album's copy in the library of an HQPlayer on
+  another machine joins the catalogue as one more variant of that album, and
+  plays natively when that HQPlayer is the output. Play tracking
+  (`listening_history` + Last.fm scrobbling) lives in the backend and is
+  keyed on the track UUID, so a streamed track counts like an owned file.
 - **Music beyond the library** — artists, albums and tracklists the node does
   not own are minted as phantom rows and play through the demo channel: one
   full listen per track, then the catalog's 30 s excerpt. A bring-your-own
   lossless provider plugs into the same registry.
+- **Radio and similar tracks** — the Radio toggle on Now Playing starts a
+  station from the track that is playing, and the station drifts: each
+  refill is seeded from what plays at that moment, mixes owned files with a
+  few streamed tracks, and never repeats a track. One scorer ranks every
+  "similar" — radio, the Now Playing shelf, Discovery's "Similar to now
+  playing" and the assistant's `play_similar`: CLAP segment matching (for
+  each 10 s window of the seed, the candidate's best window) plus the
+  overlap of the two artists' Last.fm tags, over candidates recalled from
+  the nearest tracks and from the seed artist's kin. See `PROGRESS.md`
+  § "Radio and track similarity".
 - **Web UI** — phone-first vanilla HTML/CSS/JS (no build step, no framework)
   served by FastAPI, with a tokens-based design system and SSE-driven player.
 - **Serverless P2P network** — share sealed audio analysis (CLAP segments,
@@ -64,7 +83,7 @@ Website and guides: https://sautium.net · Downloads: https://sautium.net/downlo
   Last.fm answered; deterministic identity (Argon2id → Ed25519); E2E
   encrypted chat (NaCl Box); relays for nodes behind hostile NAT, carry
   (push-seeding analysis nobody asked for yet), and signed MusicBrainz /
-  ListenBrainz slices instead of every node holding a 19 GB dump. See
+  ListenBrainz slices instead of every node holding a 21 GB dump. See
   `P2P_NETWORK.md`.
 - **Desktop launcher** — CustomTkinter app that manages the backend, P2P
   layer and account; ships as a Windows installer and a macOS bundle, both
@@ -75,7 +94,8 @@ Website and guides: https://sautium.net · Downloads: https://sautium.net/downlo
   where the chain has measurably plateaued. Verdicts carry provenance; nothing
   is averaged into a score. See `docs/design/GEAR-ADVISOR.md`.
 - **Node backup and restore** — one encrypted `.sbk` file per node (the
-  database without the MusicBrainz layer, plus the identity documents),
+  database without the MusicBrainz and ListenBrainz layers, plus the
+  identity documents),
   keyed by the account password through Argon2id in its own salt domain and
   streamed through chunked XChaCha20-Poly1305. The launcher writes and
   restores it (Settings & Tools › Backup & Restore; the setup wizard restores too); a
@@ -101,7 +121,7 @@ Sautium node
 │   ├── static/            Web UI (index.html + app-shell.js + player.js + tokens.css)
 │   └── p2p_app.py         the peer surface (own TLS, pinned to the node key)
 ├── MCP servers            assistant (41 tools) + a read-only postgres one,
-│                          spawned for the agent CLI on the host
+│                          spawned by the agent CLI beside the backend
 ├── Desktop launcher       CustomTkinter; owns UPnP + DHT for P2P
 │   └── p2p/               sync server, DHT, chat, NAT traversal, account identity,
 │                          the shared sync walk both surfaces import
@@ -122,7 +142,8 @@ devices that cannot sign a request: the media proxy (`8830`, launcher
 - **PostgreSQL 18 + pgvector** — vector similarity + relational data
 - **SQLAlchemy** ORM + `psycopg2` for raw SQL / batch operations
 - **Docker + Docker Compose** (WSL2 on Windows, native on macOS)
-- **NVIDIA RTX 4090** for GPU work (CLAP embeddings, BGE-M3 text encoding)
+- **CUDA or Apple MPS** for GPU work (CLAP embeddings, BGE-M3 text
+  encoding); a CPU-only node imports analysis from peers
 - **CLAP** (audio, 512-d) + **BGE-M3** (text, 1024-d) + **librosa** + AST/PaSST
 - **MADLAD-400** on CTranslate2 int8 (CPU) — any-language → English query
   translation for the English-only CLAP text encoder
@@ -159,8 +180,9 @@ tracks, plus the optional ~21 GB MusicBrainz catalogue.
   `~/.claude` is mounted into the backend (default provider is `claude_code`);
   an OpenAI Codex CLI login works as the second selectable agent.
 - A Last.fm API key for metadata enrichment and scrobbling (optional).
-- HQPlayer, a DLNA renderer or neither — the browser and the host's own sound
-  device work out of the box.
+- HQPlayer, a DLNA renderer or neither — the browser plays out of the box;
+  the host's own sound device needs the desktop launcher (a Docker backend
+  sees no audio devices).
 
 ## Quick Start
 
@@ -183,6 +205,9 @@ Edit `.env`:
 - `MUSIC_LIBRARY_PATH` — host path Docker mounts read-only (e.g. `E:\Music`).
 - `MUSIC_HOST_PATH` — native OS path stored in the DB so HQPlayer can open
   files directly (e.g. `E:/Music`).
+- `SAUTIUM_WSL_HOME` — only for `docker-compose.wsl.yml`: the WSL home whose
+  `~/.claude` and `~/.codex` are mounted (e.g. `/home/<user>`); that compose
+  file refuses to start without it.
 - `POSTGRES_PASSWORD` — database password.
 - `LASTFM_API_KEY` / `LASTFM_API_SECRET` — for enrichment + scrobbling (optional).
 - `SAUTIUM_HOST_IPS` — your host's LAN IP, so the backend accepts requests
@@ -217,7 +242,9 @@ docker compose logs -f backend     # wait for "Application startup complete"
 ```
 
 - **Web UI:** `http://localhost:8800/`
-- **API docs:** `http://localhost:8800/docs`
+
+(`/docs` and `/openapi.json` sit behind the request signing like the rest
+of the API, so a bare browser tab gets 401 there.)
 
 The backend is also reachable from phones/tablets on the same Wi-Fi at
 `http://<host-LAN-IP>:8800/` — list that address in `SAUTIUM_HOST_IPS`.
@@ -337,17 +364,20 @@ sautium/
 ├── P2P_NETWORK.md                  # P2P architecture and security model
 ├── backend/
 │   ├── main.py                     # FastAPI entry point
-│   ├── entrypoint.py               # startup (migrations, model cache, uvicorn)
+│   ├── entrypoint.py               # Docker startup (waits for the database, model cache, uvicorn)
 │   ├── p2p_app.py                  # the peer surface (TLS pinned to the node key)
 │   ├── models.py                   # SQLAlchemy ORM models
 │   ├── uuid_utils.py               # UUID v5 generators + normalization
 │   ├── discovery_engine.py         # the search engine (tools, sources, bridges)
+│   ├── track_similarity.py         # the one "similar tracks" scorer (radio, Now Playing, Discovery)
 │   ├── lastfm.py / covers.py       # enrichment + artist/album artwork
+│   ├── lastfm_history.py           # the owner's Last.fm scrobble history import
 │   ├── lb_dump_load.py             # ListenBrainz statistics dump loader
 │   ├── audio_analysis.py           # librosa features + CLAP embeddings
 │   ├── ensemble_instruments.py     # AST + PaSST instrument tagger
 │   ├── notary.py / sign_audio.py   # sealing: author signature + Merkle timestamp
 │   ├── hqplayer_client.py          # HQPlayer XML control client
+│   ├── hqp_library.py              # an HQPlayer's own library as album variants
 │   ├── auth_hmac.py / device_auth.py  # request signing, device tokens, boxed credential exchange
 │   ├── assistant_prompt.py         # AI assistant system prompt + schema description
 │   ├── backup.py / share.py        # node backup, share export/import, life merge
@@ -376,7 +406,8 @@ sautium/
 │   ├── design/                     # POSITIONING, INFORMATION-ARCHITECTURE, BACKUP,
 │   │                               # P2P-SYNC-INTEGRITY, HARDWARE-TIERS, GEAR-ADVISOR…
 │   └── HQPLAYER_*.md               # HQPlayer integration + knowledge base
-└── data/                           # postgres data, model cache, node identity (persistent)
+└── data/                           # bind mounts: model cache, node identity, dumps, backups, exports
+                                    # (the database is the postgres-data volume)
 ```
 
 ## Security Posture (read before touching network/auth)
@@ -432,6 +463,10 @@ and launcher alike — and the deltas after it. Highlights:
   MUSIC** — everything above the file speaks the UUID, which is what makes
   not-owned music playable through the same API. A single-file rip with a
   `.cue` sheet is N rows on one file, each bounded by its start/end offsets.
+- **"Owned" is the `owned_files` view** (since 2026-09-27): this node's
+  `media_files` plus `hqp_library_files`, the copies of an album held in the
+  library of an HQPlayer on another machine — an album variant located
+  there, with no bytes here.
 - **Deterministic UUID v5** for all shareable entities (Artist, Album, Track,
   Genre, Tag, EmbeddingModel) so the same data on different nodes collapses to
   the same ID. Namespace `adc1ec0b-2c81-5e26-9938-a369c6f7a5e1`.
@@ -453,7 +488,8 @@ docker compose start backend
 
 rebuilds the node from it (`--db music_ai_test` restores beside the live
 database; `python -m backup selftest` round-trips and compares row counts).
-The `mb_*` tables come back empty — the MusicBrainz dump loader refills them.
+The `mb_*` and `lb_*` tables come back empty — the dump loaders or the P2P
+slice cycles refill them.
 Share exports (`python -m backup export`) go to `./data/export/`.
 
 ## Development
@@ -482,7 +518,8 @@ docker compose down
   own), then `docker restart sautium-backend`.
 - **`Claude Code error` on AI queries** — the mounted `~/.claude` credentials
   are stale or missing. Use the Compose variant that matches where you ran
-  `claude /login` (Windows vs WSL).
+  `claude /login` (Windows vs WSL), or sign in again from More › AI
+  assistant.
 
 ## Documentation
 
@@ -503,7 +540,7 @@ docker compose down
 | `docs/design/BACKUP.md` | Backup, share export/import, life-data merge |
 | `docs/design/HARDWARE-TIERS.md` | Resource map + the `full/standard/lite` profiles |
 | `docs/design/GEAR-ADVISOR.md` | Audio-chain analysis and upgrade strategy |
-| `docs/HQPLAYER_INTEGRATION.md` | HQPlayer integration + knowledge base |
+| `docs/HQPLAYER_INTEGRATION.md` | HQPlayer integration: control protocol, outputs, the HQPlayer library as a source |
 
 ## License
 

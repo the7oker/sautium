@@ -245,9 +245,10 @@ so that the implementation can render it pixel-perfectly.
 - Containers (`100%`, `aspect-ratio`) still expand naturally with the
   viewport, so wider phones get more breathing room around same-sized
   typography.
-- Above 768px the frame changes, not the scale: a nav rail
-  (768–1199) or a sidebar (≥ 1200) takes the left edge, overlays
-  become cards or a docked panel, and content grows into columns.
+- At 768px and above the frame changes, not the scale: a nav rail
+  takes the left edge, the mini-player becomes a bar beside it and
+  every sheet a centred card (the `tablet` mode, shipped 2026-09-11);
+  a `desktop` mode with a docked panel is reserved, not designed.
   Modes and chrome mapping: `INFORMATION-ARCHITECTURE.md` §"Layout
   modes"; the variable contract: `backend/static/CLAUDE.md` §"Layout
   modes".
@@ -288,8 +289,8 @@ Priority order for the first DS iteration:
 5. **Friends & Chat** — outdoor MVP surface. Minimal, contact-driven.
 6. **Settings** — lowest priority, mostly forms and toggles.
 
-Each surface gets functional parity with the current prototype first,
-visual upgrade second, new features (like the instrument filter) third.
+Each surface got functional parity with the prototype first, the visual
+upgrade second, new features (like the instrument filter) third.
 
 ---
 
@@ -364,13 +365,14 @@ visual upgrade second, new features (like the instrument filter) third.
 
 ---
 
-_Next artifacts to produce inside Claude Design:_
+_Artifacts produced in Claude Design (kept under
+`docs/design/reference/`):_
 
-- Design tokens (colours, type scale, spacing, radii) encoded in the
-  DS format.
-- Component library v1 (buttons, chips, cards, album tile, track row,
-  metadata pill, slider, toggle, tab bar).
+- Design tokens (colours, type scale, spacing, radii) and the component
+  library — `Design System v1.html`, encoded in
+  `backend/static/tokens.css`.
+- The mobile comp set: the four Sessions, Now Playing v4 and v5, the
+  HQPlayer screen (Session 3 v2) — `claude-design-bundle/`.
 - Tablet / desktop comp set — drafted from 2026-09 as Claude Design
   canvases built from the live tokens; working artboards under
   `docs/design/reference/wide-layout/`.
-- Now Playing / HQPlayer remote mobile comp set.

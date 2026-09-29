@@ -37,6 +37,14 @@ this file carries the mechanics.
   rule (`uuid_utils.IDENTITY_RULE`) is re-normalized at startup when the
   recorded rule is older than the code's. Bump the constant with every
   change to `normalize`/`normalize_key`; never change the rule without it.
+  The one-time steps carry markers of their own, each run once per node:
+  `play_stats_derived_v1` (`local_play_stats` re-derived from the history),
+  `sub_floor_analysis_v1` (own analysis of material under the floor dropped,
+  2026-09-18), `listen_times_utc_v1` (naive listen starts moved to the
+  instant they meant) and `scrobble_title_key_v1` (every waiting imported
+  scrobble name reopened under the folded title key) — both 2026-09-24 —
+  and `seed_v{N}`, the seed bundle's version. The module docstring of
+  `db_migrate.py` is the ledger of what each one did.
 - **Trying DDL out** happens on the rehearsal database, not the live one:
   restore the latest `data/backup/*.dump` into `music_ai_test`
   (`pg_restore -L` without the `mb_*` / `lb_*` data), run the delta there, then

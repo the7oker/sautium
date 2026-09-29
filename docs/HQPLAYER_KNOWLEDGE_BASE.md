@@ -1519,10 +1519,11 @@ poly-sinc-gauss-*, poly-sinc-ext2-*, IIR*, FIR*:
 - **DAC-specific** settings (ESS, R2R, multi-element)
 - **Source-specific** guidance (hi-res, CD, vinyl, MP3, DSD)
 
-### 🎯 AI agent readiness
+### 🎯 What a choice of settings depends on
 
-The agent now has **the full picture** for choosing HQPlayer settings
-intelligently, based on:
+The file covers what choosing HQPlayer settings depends on (the assistant
+itself works from its prompt and the lists it reads live from HQPlayer, not
+from this file):
 - Source quality (sample rate, bit depth, format)
 - DAC type (when known)
 - Musical genre
@@ -1530,7 +1531,7 @@ intelligently, based on:
 - Focus (transients/timbre/space)
 - Special needs (apodizing, vinyl cleanup, MP3 enhancement)
 
-**Example of the AI at work:**
+**The reasoning, as a worked example:**
 ```
 User: "Play Pink Floyd - Comfortably Numb (CD FLAC 44.1kHz/16bit)"
 The agent reasons:
@@ -1549,5 +1550,5 @@ The agent picks:
 **Last updated:** 2026-09-18 (HQP6 note)
 **HQPlayer version:** compiled against 5.16.3 (Engine 5.34.14); HQPlayer 6
 availability is read live, not from this file
-**Status:** ✅ **Complete knowledge base — ready to use**
-**Control API coverage:** 100% (every parameter documented)
+**Status:** compiled from the HQPlayer 5 manual; a reference for people
+since 2026-09-18

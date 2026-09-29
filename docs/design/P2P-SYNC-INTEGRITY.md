@@ -1,6 +1,7 @@
 # P2P Sync Integrity — Data-Poisoning Defense
 
-> **Status: phase 1 SHIPPED (2026-07-05/06), rest is design.** Shipped:
+> **Status: sealing, the wire and the import gate are SHIPPED; the trust
+> fabric is design.** Shipped:
 > per-segment + audio_features author signatures, Merkle batches, Worker
 > `/timestamp` notary; **provenance refactor 2026-07-06** — content-address
 > captured AT ANALYSIS TIME into `analysis_sources` (one row per
@@ -18,9 +19,15 @@
 > stream (any provider tier and YouTube since 2026-09-02 — lossless-only
 > before); **Tier-0 lite on import** — signed/first-hand rows never
 > overwritten by sync, `analysis_sources.imported` excludes synced-in
-> provenance from signing. Still design: signed records on the wire +
-> import verify, segments sync, full Tier 0 (per-node origin, purge),
-> karma/verification fabric. **Origin:** poisoning concern raised by
+> provenance from signing; **signed records on the wire, verify-on-import
+> and segment sync (2026-07-11)** — a record without a valid seal is
+> dropped at the one import gate; identity certificates, the registry and
+> wire format v1 (2026-08-17/18); the admission gate, pool, pricing and
+> similarity in shadow (2026-08-18); peer TLS pinned to the node key
+> (2026-08-24); the identity-priced notary in shadow (2026-09-06). Still
+> design: full Tier 0 (per-node origin, purge), the recompute ladder, flag
+> reports, local standing, karma/verification fabric. **Origin:**
+> poisoning concern raised by
 > Valerii 2026-06-02 (verifiable/subjective split, tiers,
 > master-as-cache); expanded 2026-07-03 (signature cost, atomicity,
 > redistribution, Sybil mass-purge, legitimate-material ambiguity →
@@ -53,18 +60,22 @@
 ## Problem
 
 Sautium's P2P network distributes audio analysis (CLAP embeddings, audio
-features, BPM) and metadata (canonical names, MBIDs, tags, stats) between
+features, BPM) and metadata (recording bindings, MusicBrainz and
+ListenBrainz slices) between
 collectors. A hostile actor — e.g. a competitor out to discredit the
 project — can inject plausible-looking fake analysis. Once poison spreads,
 detection alone doesn't help: there is no way to tell poisoned rows from
 honest ones, so the network's answers degrade and trust is gone.
 
-**Current state (2026-07):** Ed25519 signatures authenticate the *sender*
-of a sync request, but nothing vouches for the *content*. Worse, the
-importer takes the `source` label from the payload and applies
-`ON CONFLICT DO UPDATE` — a malicious peer can spoof `source='lastfm'`
-and overwrite authoritative first-party rows. The only bound today is the
-friends-only (mutual-invite) topology.
+**Where this started (2026-07):** Ed25519 signatures authenticated the
+*sender* of a sync request, but nothing vouched for the *content*. Worse,
+the importer took the `source` label from the payload and applied
+`ON CONFLICT DO UPDATE` — a malicious peer could spoof `source='lastfm'`
+and overwrite authoritative first-party rows. The only bound was the
+friends-only (mutual-invite) topology. All three are closed: records carry
+author seals and an unsealed one is dropped on import (2026-07-11), the
+Last.fm tables left the protocol (2026-09-19), and sync pulls are open by
+design because the seal, not the topology, is the bound.
 
 ## Threat model
 
@@ -172,7 +183,7 @@ identity exceeds the payoff of the fakes it can push before it burns.**
 | Verifiable by recompute | CLAP embeddings, audio features, BPM, duration | Any node owning the same material | Recompute ladder (below) |
 | Verifiable by authority | MBIDs, canonical names, aliases, album existence | Local MB dump / owned-album overlap | Hint + local re-verify; never peer-driven merges |
 | Subjective | similar-artist opinions, tags, curatorial notes | none (no ground truth) | Trust-based: friends-only, reputation, local flags — the Last.fm-fetched ones never travel since 2026-09-19 (below) |
-| Self-reported | play stats | none | Trust-based; low blast radius, provenance-labeled — Last.fm track stats never travel since 2026-09-19 |
+| Self-reported | play stats | none | Trust-based; low blast radius, provenance-labeled — Last.fm track stats never travelled after 2026-09-19 and were replaced by ListenBrainz slices on 2026-09-20 |
 
 **Mutable-source caveat (2026-07-05).** Authority- and source-fetched
 data (bios, tags, external descriptions) legitimately changes upstream
@@ -190,7 +201,10 @@ not allow redistributing its answers. Their tables carry no seal columns
 (migration 019), the enrichment grammar keeps only the carry canon layer
 (`album`, `album_track`, `track_mbid`), and every node fetches its own by
 name. For Last.fm the open question above is closed: nothing of it is
-signed, because nothing of it travels.
+signed, because nothing of it travels. `track_stats` itself was dropped on
+2026-09-20 (migration 020): listening statistics come from the ListenBrainz
+dump (CC0) and travel as per-artist slices under the dump node's signature
+— an authority-class record, P2P_NETWORK.md § "LB slices".
 
 The **public/friends flag** is data-class-aware: public mode accepts only
 verifiable (and verified) classes; subjective data stays friends-only.
@@ -198,6 +212,11 @@ The flag changes *exposure*, never disables defenses. Serving (privacy
 exposure) and pulling (poisoning exposure) may later split into two flags.
 
 ## Signed record format
+
+The first sketch (2026-07). The shipped payloads are under "The signed
+segment record" below and carry no per-record `version`: a record is bound
+to its content address and its Worker-stamped batch, and an import never
+overwrites a signed or first-hand row.
 
 ```
 {
@@ -274,9 +293,18 @@ a *verified owner* recomputes and endorses it.
    claimed**, and a verifier who owns the official version recomputes and
    confirms. Enrichment provenance (the fingerprint) is deliberately
    decoupled from the playback file: the signature attests to what was
-   analyzed, not to what is played. This needs a provenance bit on the
-   record (`origin ∈ {local, stream}`) so re-enrich knows what not to
-   clobber.
+   analyzed, not to what is played. The provenance is
+   `analysis_sources.provider_id` (NULL = the node's own file; an `origin`
+   enum until 2026-09-18), which is what re-enrich reads before it
+   overwrites.
+
+**Since 2026-07-07 tiers 1 and 2 are one.** The purchase gate (the
+per-album `signing_whitelist`) was dropped two days after it was written:
+an unsigned network breaks integrity testing and the sync verify chain, so
+every first-hand analysis of an owned file signs
+(`sign_audio._SIGNABLE_SRC`: the source is not imported). What is never
+signed here is what arrived over P2P — the author's seal travels with it.
+Tier 3 stands as written.
 
 **The signed and synced unit is the segment, not the mean (2026-07-05,
 Valerii).** CLAP analysis is windowed — a track is a canonical 10s grid
@@ -956,7 +984,7 @@ certificate invalid` — a bug or version skew, not a ban.
 
 **3. Whitelist.** Never signed, never gated: `GET /health`,
 `GET /api/gate/quote`, `GET /api/relay/voucher`. Identity-bound:
-`/api/sync/*`, `/api/mb/*`.
+`/api/sync/*`, `/api/mb/*`, `/api/lb/*` (since 2026-09-20).
 
 **4. Gate slots (dormant until priced — Ф8/Ф10, pool in Ф9/Ф11).**
 
@@ -1691,9 +1719,11 @@ The one blockchain-adjacent idea worth keeping in the back pocket is a
 **signed append-only head** (certificate-transparency-lite): an author
 periodically publishes `sign(merkle_root, seq)` over his own record log,
 making version-replay and split-view (serving different people different
-data) detectable via gossip — with zero consensus machinery. For the
-MVP, the monotonic `version` field inside each signed record is enough
-replay protection.
+data) detectable via gossip — with zero consensus machinery. The shipped
+records carry no replay counter (the `version` field of the first sketch
+was not built): a record is bound to its content address and its
+Worker-stamped batch, and an import never overwrites a signed or
+first-hand row.
 
 ## Rollout and open questions
 

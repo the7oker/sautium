@@ -42,14 +42,14 @@ plus user-facing minimum/recommended configurations.
 | Backend idle RSS | 709 MB | models live on GPU; on CPU-only they'd sit in RAM instead |
 | Postgres RSS | 1.32 GB | stock config (`shared_buffers=128MB` — untuned everywhere) |
 | VRAM resident after prewarm | ~~4.3 GB~~ → 2.68 GB (2026-07-11) → **1.44 GB measured** (2026-07-21, §6.17) | CLAP bf16 0.31 + BGE-M3 **bf16 1.14**; allocated == reserved (zero parked cache). The translator left the GPU entirely (MADLAD on CTranslate2 int8, CPU). History: the 2.68 GB figure included NLLB bf16 1.2, and before the bf16 switch BGE-M3 ran fp32 (2.27 GB) |
-| VRAM during analysis | +0.5–2 GB + batch audio | AST+PaSST lazy-load; adaptive budget `device.py:123-150` |
+| VRAM during analysis | +0.5–2 GB + batch audio | AST+PaSST lazy-load; adaptive budget `device.py` |
 | Whole stack envelope | fits in **15.5 GB** WSL2 VM | i.e. real floor is ~16 GB host for the full profile, not 32 |
 | Model cold-load from NTFS | BGE-M3 **2m15s–5m10s** (logged) | startup latency driver; worse on HDD |
 
 ### Key model facts
-- 5 singletons (`model_cache.py`), **never unloaded**; `InstrumentEnsembleTagger.unload()` exists with zero callers (`ensemble_instruments.py:186`).
-- 4 models pre-warmed unconditionally at every boot (`main.py:278-284`), no toggle.
-- dtype tiers (`device.py:41-52`): CUDA Ampere+ → bf16, Turing → fp16, MPS → bf16, CPU → fp32.
+- 5 singletons (`model_cache.py`), **never unloaded**; `InstrumentEnsembleTagger.unload()` exists with zero callers (`ensemble_instruments.py`).
+- 4 models pre-warmed unconditionally at every boot (`main.py`), no toggle.
+- dtype tiers (`device.py`): CUDA Ampere+ → bf16, Turing → fp16, MPS → bf16, CPU → fp32.
 - **dtype variance is an accepted property, not corruption.** Vectors were
   never bit-deterministic across the network — the tier policy itself gives
   different nodes different dtypes, and GPU inference isn't bit-stable even
@@ -62,8 +62,8 @@ plus user-facing minimum/recommended configurations.
   fp32 vectors are strictly higher-precision than a bf16 re-run would be;
   (b) any P2P verify-by-recompute (P2P-SYNC-INTEGRITY: "recompute is the
   detector") must compare with a tolerance, never byte-equality.
-- **fp32 holes on the bf16 tiers:** BGE-M3 (`text_embedder.py:56-58`) and PaSST
-  (`ensemble_instruments.py:178-179`) call `.half()` only on the fp16 tier, so on
+- **fp32 holes on the bf16 tiers:** BGE-M3 (`text_embedder.py`) and PaSST
+  (`ensemble_instruments.py`) call `.half()` only on the fp16 tier, so on
   Ampere/MPS they run fp32 → ~+1.5 GB VRAM vs what the tiering intends.
   Ironic consequence: a 6 GB Turing card holds the resident set (~2.5 GB, all fp16)
   while a 4 GB Ampere card OOMs on prewarm (~4.3 GB).
@@ -77,11 +77,11 @@ Per track: ffmpeg full decode to 48kHz mono f32 (**11.5 MB/min RAM**), CLAP over
 K segment windows (balanced K = 12/16/24 by duration), librosa amplitude pass
 (whole track, CPU), CLAP zero-shot + AST+PaSST windowed instruments (10s window
 / 30s stride, batch 12). Already well-guarded on VRAM: adaptive duration budget
-(`device.py:123-150`, env `SAUTIUM_ACCEL_MEMORY_GB`, `SAUTIUM_AUDIO_BUDGET_MIN`),
+(`device.py`, env `SAUTIUM_ACCEL_MEMORY_GB`, `SAUTIUM_AUDIO_BUDGET_MIN`),
 OOM catch-and-skip, NaN guard, per-batch `empty_cache`.
 
-**Not guarded on CPU:** hardcoded 16-worker I/O pool (`embeddings.py:422`,
-comment says "for i9-14900HX"), CLAP batch 16 hardcoded (`audio_analysis.py:460`),
+**Not guarded on CPU:** hardcoded 16-worker I/O pool (`embeddings.py`,
+comment says "for i9-14900HX"), CLAP batch 16 hardcoded (`audio_analysis.py`),
 and **no `torch.set_num_threads` anywhere** — torch grabs all cores. On a 4-core
 laptop this oversubscribes badly.
 
@@ -94,13 +94,13 @@ beyond ~2–3k tracks)**. Feasibility of local analysis is a function of
 ### 2.2 Steady-state background load
 | Loop | Interval | Toggle today |
 |---|---|---|
-| HQPlayer status poller (`routers/player.py:335`) | **1 s** always | **none** — runs even with no HQPlayer configured |
-| DHT alert pump ×2 (backend `dht_service.py:314`, launcher `p2p/dht_service.py:420`) | **0.5 s** | via `p2p_enabled` only |
+| HQPlayer status poller (`playback/hqp_backend.py`, `_poll_loop`) | **1 s** while HQPlayer is the active output | owned by the active backend (§6.12); at the time of the audit it ran always, even with no HQPlayer configured |
+| DHT alert pump ×2 (backend `dht_service.py`, launcher `p2p/dht_service.py`) | **0.5 s** | via `p2p_enabled` only |
 | DHT re-announce (∝ enriched artists) | 15 min | announce_limit setting |
 | Background enrichment (network-only) | 30 min interval; a network backlog drains pass-to-pass (DB-only steps stay on the timer); wakes on the playback falling edge and the canon trigger — no sync coupling since 2026-09-22 (the Last.fm layer is node-local); 1s cancel ticks | `enrichment.background_enabled` (default **on**) |
 | P2P auto-sync (launcher) | first source after start (LAN beacon / DHT ready, ≤60 s), after a scan that added files, when a LAN peer appears, then every `sync.auto_interval_min` (30 min) | interval setting — no manual button since 2026-09-05 |
 | Launcher stats poll / health watchdog / friend resolve | 60 s / 10 s / 15 s | none |
-| Model prewarm at boot | every boot | **none** |
+| Model prewarm at boot | every boot | profile-driven (§6.6); none at the time of the audit |
 | 2 idle psycopg2 LISTEN connections (launcher chat+sync) | permanent | — |
 
 Frontend is clean — SSE-driven, zero `setInterval` polling.
@@ -139,7 +139,7 @@ import-only node:
 Per text query: encode on whichever of CLAP-text/BGE/the translator is
 **already warm** —
 cold models are skipped gracefully (block shows `loading`) and `kick_load`ed in
-background (`discovery_engine.py:806-816`). Similar-tracks/radio = pure pgvector,
+background (`discovery_engine.py`). Similar-tracks/radio = pure pgvector,
 zero inference. This means search degrades *already*; the missing piece is only
 a policy for what to warm per profile. On CPU, single-query encodes are 1–3 s —
 acceptable.
@@ -153,14 +153,14 @@ DLNA is SSDP multicast + HTTP serving + SOAP; browser playback costs the backend
 nothing) — **outputs are not a hardware-tier concern and profiles must not gate
 them**. They matter for tiers in two other ways:
 
-1. **They complete the lite tier as a product.** Today playback requires
-   HQPlayer — a heavy, paid, enthusiast component. Without it Sautium is a
-   library/discovery app with no sound. The built-in player is effectively a
-   *prerequisite* for the lite tier, not an optimization.
-2. **They multiply stream-enrichment contribution** (§2.7): today only HQPlayer
-   owners can stream phantoms at all, because HQP is the only consumer of the
-   streaming proxy. The enrichment hook fires on the proxy's *fetch* loop
-   (`proxy.py:261` → `on_track_ready`), not on the output — so built-in player,
+1. **They complete the lite tier as a product.** Until 2026-07-10 playback
+   required HQPlayer — a heavy, paid, enthusiast component. Without it Sautium
+   was a library/discovery app with no sound. The built-in player is effectively
+   a *prerequisite* for the lite tier, not an optimization.
+2. **They multiply stream-enrichment contribution** (§2.7): until then only
+   HQPlayer owners could stream phantoms at all, because HQP was the only
+   consumer of the streaming proxy. The enrichment hook fires on the proxy's
+   *fetch* loop (`proxy.track_ready_hooks`), not on the output — so built-in player,
    DLNA renderers and browser playback all trigger the same enrichment with
    zero extra wiring. Mass-audience outputs = mass-audience network contribution.
 
@@ -175,13 +175,13 @@ Architecture sketch — an output-backend abstraction:
   built-in player = fully event-driven (we own the engine); DLNA = GENA event
   subscription for state changes + `GetPositionInfo` poll only *while playing*
   (RelTime is not evented — another boundary-forced poll).
-- Real refactor costs to plan for: (a) **queue ownership** — HQP owns its
-  playlist today; local/DLNA outputs need a Sautium-canonical queue with an HQP
-  adapter mirroring into HQPlayer; (b) **browser playback auth** — `<audio>`
-  elements can't set HMAC headers (the `auth.js` fetch monkey-patch doesn't
-  cover them), so media URLs need signed-URL query params or a scoped whitelist —
-  touch the Security Posture rules when this lands; (c) DLNA renderer quirks
-  (FLAC support, DLNA.ORG content-features headers) need a capability probe.
+- What the refactor cost (all shipped 2026-07-10/11): (a) **queue ownership**
+  — HQP owned its playlist; local/DLNA outputs needed a Sautium-canonical
+  queue with an HQP adapter mirroring into HQPlayer; (b) **browser playback
+  auth** — `<audio>` elements can't set HMAC headers (the `auth.js` fetch
+  monkey-patch doesn't cover them), so media URLs carry signed query params
+  (`backend/media_urls.py`, Security Posture rule 3); (c) DLNA renderer quirks
+  (FLAC support, DLNA.ORG content-features headers) — a capability probe.
 
 ### 2.7 Stream enrichment is network contribution — do not shed it first
 
@@ -219,15 +219,15 @@ zero-shot + AST/PaSST windows + librosa) on a mid 4-core is ~0.5–3 min per
    pins torch 2.1.2 / transformers 4.37.2 while the backend needs torch 2.12 /
    transformers 4.57.6 / sentence-transformers 5.5.1 / hear21passt≥0.0.26.
 2. **Media tools bootstrap has no retry:** ffmpeg/fpcalc/flac install only inside
-   the first-run wizard (`wizard.py:1358-1365`); normal startup only PATH-adds
-   them (`service_manager.py:309-312`). Failure → silent "0/N enriched". Linux
-   never auto-installs them at all (`db_init.py:468`).
+   the first-run wizard (`wizard.py`); normal startup only PATH-adds
+   them (`service_manager.py`). Failure → silent "0/N enriched". Linux
+   never auto-installs them at all (`db_init.py`).
 3. **WSL/Mac compose regressions:** no `shm_size`, abandoned pgvector image (§2.3).
 4. **4 GB Ampere GPUs OOM on prewarm** due to the BGE-M3 fp32 hole (§1).
-5. UPnP maps once with a 1 h lease and no renewal loop (`upnp_service.py:19`,
-   `p2p_manager.py:259`) — reachability lapses; found during audit, not a
+5. UPnP maps once with a 1 h lease and no renewal loop (`upnp_service.py`,
+   `p2p_manager.py`) — reachability lapses; found during audit, not a
    resource item.
-6. Dead config: `audio_analysis_batch_size=8` (`config.py:53`) unreferenced;
+6. Dead config: `audio_analysis_batch_size=8` (`config.py`) unreferenced;
    real value 16 hardcoded.
 
 ---
@@ -237,9 +237,11 @@ zero-shot + AST/PaSST windows + librosa) on a mid 4-core is ~0.5–3 min per
 Selection is **automatic** (Valerii, 2026-07-10: no manual picker — detection
 must be good enough on its own; `SAUTIUM_PROFILE` env stays as the diagnostics
 override). Auto-detection via `mem_get_info`/psutil at backend startup:
-- NVIDIA ≥8 GB or Apple Silicon ≥24 GB unified → **full**
-- NVIDIA/Apple Silicon with less → **standard**
-- else → **lite** — every CPU-only machine, whatever its RAM. (`standard`
+- NVIDIA ≥8 GB (7.5 GiB measured) or Apple Silicon ≥24 GB unified (23 GiB)
+  → **full**
+- NVIDIA ≥6 GB (5.5 GiB) or Apple Silicon ≥16 GB (15 GiB) → **standard**
+- a machine with less than 12 GB of system RAM drops one tier
+- else → **lite** — a smaller GPU, and every CPU-only machine, whatever its RAM. (`standard`
   there would switch on bulk local analysis, and CLAP on CPU takes days for
   a 35k library. This doc used to promise `standard` to ≥16 GB CPU-only
   boxes; the code never did, and since the phantom layer left the tier
@@ -265,7 +267,7 @@ wiring, not new machinery):
 The MB dump is **not** in the matrix: it is already an independent opt-in today
 (manual load; `musicbrainz.auto_update` default off) and slices arrive via P2P
 on every profile. Profiles must not gate what is already optional — the tier
-descriptions only note its +19 GB disk / shm requirement, which makes it
+descriptions only note its +21 GB disk / shm requirement, which makes it
 realistic on full-tier machines.
 
 Search UX per profile: full/standard = as today; lite = SQL/filter blocks
@@ -285,7 +287,7 @@ the node still contributes phantom analysis to the network); phantom discovery
 listen to — never by tier). Not available:
 bulk local library analysis (P2P import instead; an explicit opt-in with a
 bench-estimated ETA can stay for small libraries). MB dump technically possible but infeasible at this disk
-size (+19 GB) — slices via P2P cover canon needs.
+size (+21 GB) — slices via P2P cover canon needs.
 
 **Recommended ("Standard"):** 6+ cores; **16 GB RAM**; 40 GB SSD; NVIDIA ≥6 GB
 (Turing OK — fp16 tier) or Apple Silicon 16 GB. Everything works; analyzing a
@@ -293,7 +295,7 @@ large library is an overnight-scale job; instruments optional.
 
 **Full ("Curator"):** 8+ cores; **32 GB RAM** (Mac: 24 GB+ unified); NVIDIA
 ≥8 GB Ampere+ / M-Pro-class; NVMe with 100 GB+ free (image/venv + models 11 GB
-+ DB ~13 GB per 40k tracks + optional 19 GB MB dump). Analysis of a 30k library
++ DB ~13 GB per 40k tracks + optional 21 GB MB dump). Analysis of a 30k library
 in hours–a day; serves MB slices and analysis to peers.
 
 Unsupported: <8 GB RAM, HDD, 32-bit.
@@ -380,8 +382,9 @@ cards, so the standard-tier VRAM floor deliberately stays at ≥5.5 GB until
 16. ✅ Dead `audio_analysis_batch_size` removed.
 17. ✅ MADLAD translator off the GPU (SHIPPED 2026-07-21): CTranslate2 int8
     CPU (~3 GB RAM, 0 VRAM — backend resident VRAM 1.44 GB measured, was
-    ~7 GB with torch bf16 MADLAD), one-time conversion from the BYO HF
-    source (fp16 staging, tmp-dir + rename), warm-up call at load pays the
+    ~7 GB with torch bf16 MADLAD); a fresh node downloads the prebuilt
+    conversion at a pinned revision, and converting the BYO HF source
+    locally (fp16 staging, tmp-dir + rename) is the fallback; the warm-up call at load pays the
     cold-mmap page-in (~60s on NTFS) inside the pre-warm thread. Per-query
     sound-scope gating shipped with it: `_clap_servable` = clap AND
     (ascii OR translate-ready), profile-vetoed kick-loads, `limited` UI

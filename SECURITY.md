@@ -26,11 +26,19 @@ that does not is an ordinary issue.
 
 | Surface | Bind | Authentication |
 |---|---|---|
-| Web UI and API (backend, 8800) | all interfaces, plain HTTP | HMAC-SHA256 request signing with a per-browser device token, earned once with the account password or a pairing PIN shown on the host, through an exchange boxed end to end (NaCl box to a per-exchange key the node's identity signs; the browser pins that identity on first sign-in); 60 s replay window |
-| Media proxy and DLNA eventing (8830/8831; launcher 8832/8833) | LAN, plain HTTP | unguessable per-file tokens (an HMAC of the file's path under the node secret, served only while a queue registers the file) — exist because HQPlayer, on this machine or an Embedded box on the LAN, and DLNA renderers cannot sign requests |
+| Web UI and API (backend, 8800; launcher 18000) | all interfaces, plain HTTP | HMAC-SHA256 request signing with a per-browser device token, earned once with the account password or a pairing PIN shown on the host, through an exchange boxed end to end (NaCl box to a per-exchange key the node's identity signs; the browser pins that identity on first sign-in); 60 s replay window |
+| Media proxy and DLNA eventing (8830/8831; launcher 8832/8833) | all interfaces, plain HTTP; for the LAN, never forwarded | unguessable tokens — an owned file's is an HMAC of its path under the node secret, served only while a queue registers the file; a stream buffer's and a cover's are random and die with the queue — exist because HQPlayer, on this machine or on another one on the LAN, and DLNA renderers cannot sign requests |
 | Peer surface (launcher: a random port in 20000–29999, UPnP-mapped; Docker: 8801) | internet, TLS pinned to the node's Ed25519 key | per-IP limits; sync pulls are open by design; chat, relay and diagnostics need an invite-code↔pubkey binding plus timestamp-bound Ed25519 signatures |
 | Peer discovery (DHT `19001/udp`, launcher: peer port + 1; LAN discovery `19002/udp`, launcher only) | all interfaces | none — public DHT announces and a LAN JSON broadcast carry no secrets; everything that follows goes through the peer surface |
 | PostgreSQL (5432; launcher 15432) | loopback only | — |
+
+The table lists what listens. One thing only sends: opening the Output
+picker (or Rescan) asks the LAN for players — an SSDP M-SEARCH to UDP 1900
+and HQPlayer's `<discover/>` datagram to UDP 4321, unicast to every address
+of the node's own subnets and, on a natively run node, to the online peers
+of its tailnet (since 2026-09-28). The datagrams carry no identity and no
+secret; an HQPlayer's control port (TCP 4321) is then spoken to in the
+clear, as its protocol requires, and only on the LAN.
 
 Design rules: the device token lives in `localStorage`, which is per-origin,
 so a foreign page cannot forge a signature (CSRF); a client-supplied `Host`
@@ -73,4 +81,5 @@ per-user credentials, not only a TLS front.
 The node's Ed25519 identity and the API signing secret live in the identity
 directory with owner-only permissions. The repository ships no credentials
 except the Last.fm desktop-application keys, which are semi-public by design;
-`.gitleaks.toml` allowlists exactly those.
+`.gitleaks.toml` allowlists those, the master's public token id, the test
+vectors and fixtures, and one type annotation — none of them a secret.

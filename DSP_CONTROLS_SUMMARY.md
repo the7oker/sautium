@@ -73,9 +73,9 @@ hqp.set_shaping(15)  # ASDM7EC-super 512+fs
 rates = hqp.get_rates()
 # Result: 20 sample rates
 
-# Examples:
-# PCM: 2.048, 3.072, 4.096, 6.144, 8.192, 12.288 MHz
-# DSD: 2.8224 (DSD64), 5.6448 (DSD128), 11.2896 (DSD256), 22.5792 (DSD512), 45.1584 (DSD1024), 90.3168 (DSD2048)
+# Examples (SDM rates, as one Desktop 5 instance reported them):
+# multiples of 48 and 32 kHz: 2.048, 3.072, 4.096, 6.144, 8.192, 12.288 MHz
+# multiples of 44.1 kHz: 2.8224 (DSD64), 5.6448 (DSD128), 11.2896 (DSD256), 22.5792 (DSD512), 45.1584 (DSD1024), 90.3168 (DSD2048)
 
 hqp.set_rate(8)   # 11.2896 MHz (DSD256)
 hqp.set_rate(12)  # 22.5792 MHz (DSD512)
@@ -88,10 +88,11 @@ hqp.set_rate(12)  # 22.5792 MHz (DSD512)
 - **DSD512**: 22.5792 MHz
 - **DSD1024**: 45.1584 MHz
 - **DSD2048**: 90.3168 MHz
-- **PCM rates**: 2.048, 3.072, 4.096, 6.144, 8.192, 12.288, 16.384, 24.576,
-  32.768, 49.152, 98.304 MHz
+- **SDM rates on the 48 kHz and 32 kHz bases**: 2.048, 3.072, 4.096, 6.144,
+  8.192, 12.288, 16.384, 24.576, 32.768, 49.152, 98.304 MHz
 
-**Total:** 20 rates
+The list is read from HQPlayer at runtime and depends on the mode and the
+DAC: 20 rates is what one Desktop 5 instance reported in SDM mode.
 
 ---
 
@@ -113,7 +114,7 @@ profiles = hqp.matrix_list_profiles()   # saved matrix profiles, by name
 hqp.matrix_get_profile()                # the active one
 hqp.matrix_set_profile("Elite PEQ")     # switch profile
 
-hqp.get_dsp_state()   # mode, filter, shaper, rate, convolution, matrix profile
+hqp.get_state()       # mode, filter, shaper, rate, convolution, matrix profile
 ```
 
 Sautium also *writes* matrix material: `backend/eq_generator.py` emits
@@ -218,8 +219,9 @@ def auto_configure_for_track(hqp, track):
 ## Testing
 
 Live checks run through the assistant tools against a running HQPlayer
-(`hqplayer_get_status`, `hqplayer_get_settings`, `hqplayer_set_filter`, …);
-the backend's `/health` reports the HQPlayer connection state.
+that is the selected output (`hqplayer_get_status`, `hqplayer_get_settings`,
+`hqplayer_set_filter`, …); `GET /api/hqplayer/state` reports the connection
+state.
 
 ---
 
@@ -240,23 +242,25 @@ the backend's `/health` reports the HQPlayer connection state.
 
 ## Integration with Sautium
 
-Shipped: every call above is an assistant tool (`hqplayer_get_settings`,
-`hqplayer_set_filter`, `hqplayer_set_shaper`, `hqplayer_set_convolution`,
-`hqplayer_*_matrix_profile`, `hqplayer_get_dsp_state`, `generate_eq_preset`),
-so mode/filter choice per track or per genre is a conversation, and the
-HQPlayer settings screen in the Web UI drives the same client. Chat
-sketch, working today:
+Shipped: filter, shaper, convolution and matrix profile are assistant tools
+(`hqplayer_get_settings`, `hqplayer_set_filter`, `hqplayer_set_shaper`,
+`hqplayer_set_convolution`, `hqplayer_*_matrix_profile`,
+`hqplayer_get_dsp_state`, `generate_eq_preset`), so filter choice per track
+or per genre is a conversation. Mode and rate are set on the HQPlayer screen
+of the Web UI (`POST /api/hqplayer/config`), which drives the same client;
+no assistant tool changes them. Chat sketch, working today:
 
 ```
-User: "Set the best quality for this track"
-AI:   "Setting DSD256 with the ASDM7EC-super shaper for maximum quality"
+User: "Give this track a softer filter"
+AI:   "Switching the filter to poly-sinc-gauss-long"
 
-User: "Switch to PCM mode"
-AI:   "Switching to PCM with the poly-sinc-ext2 filter"
+User: "Turn the room correction on"
+AI:   "Convolution is on"
 ```
 
 ---
 
 **Status**: ✅ **Ready to use**
 **Tested with**: HQPlayer Desktop 6 — the daily configuration as of 2026-09-21;
-Desktop 5.16.3 (Engine 5.34.14) also tested, same client, one protocol
+Desktop 5.16.3 (Engine 5.34.14) also tested; HQPlayer Embedded 6 (engine
+6.2.3) verified 2026-09-27 — same client, one protocol

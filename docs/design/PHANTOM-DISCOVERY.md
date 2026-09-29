@@ -18,9 +18,10 @@
 > "Phases" table and "Design decisions" below are the original plan, kept for
 > rationale; "Implementation status" records what actually landed.
 > **Origin:** proposed 2026-06-01 by Valerii.
-> **Relates to:** `DISCOVERY-SEARCH-ENGINE.md` (the engine that will
-> surface phantom entities alongside local ones),
-> `reference_artist_photos.md` (Deezer integration pattern + throttle).
+> **Relates to:** `DISCOVERY-SEARCH-ENGINE.md` (the engine that surfaces
+> phantom entities alongside local ones), `backend/routers/covers.py` and
+> `backend/api_cooldown.py` (the Deezer integration pattern + the global
+> photo throttle).
 
 ## Goal
 
@@ -39,10 +40,12 @@ and show **new albums the user is missing**.
 
 ## Vocabulary
 
-- **Local entity** — artist/album/track with at least one row in
-  `media_files` (a physical file on disk).
+- **Local (owned) entity** — artist/album/track with at least one row in
+  `owned_files`: a file on this node's disk (`media_files`) or, since
+  2026-09-27, a copy in the library of an HQPlayer the node drives
+  (`hqp_library_files`).
 - **Phantom entity** — an artist/album/track row that exists for
-  enrichment/discovery purposes but has **no** `media_files`. Same
+  enrichment/discovery purposes but has **no** `owned_files` row. Same
   table, same UUID space, no physical file.
 
 ## The architecture already supports this (schema is permissive)
@@ -50,25 +53,25 @@ and show **new albums the user is missing**.
 Investigated 2026-06-01. The schema does **not** tie enrichment to
 physical files — locality is enforced by *code*, not constraints:
 
-- `artists` (`desktop/migrations/001_initial.sql:43-57`) has **no**
+- `artists` (`desktop/migrations/001_initial.sql`) has **no**
   `is_local`/`has_files` flag and **no** FK to `media_files`/`tracks`.
   An artist row can exist with zero tracks.
-- `albums` (`:59-71`) has no FK to artists and no requirement for
+- `albums` has no FK to artists and no requirement for
   `album_variants`/`media_files`.
-- `tracks` (`:73-78`) is referenced *by* `media_files.track_id`, not
+- `tracks` is referenced *by* `media_files.track_id`, not
   the reverse — a track with no file is legal.
 - All enrichment tables — `artist_bios`, `artist_tags`,
   `similar_artists`, `album_descriptions` — FK only to the
   logical entity, never to a file, and all carry a `source` column
   for provenance.
-- `similar_artists` (`:307-317`): both `artist_id` and
+- `similar_artists`: both `artist_id` and
   `similar_artist_id` FK to `artists(id)`; they require the artist
   **row** to exist, **not** any `media_files`.
 
 **What enforces the bound today (the engagement gates):**
 
 - `backend/lastfm.py` `enrich_artist` — bio-time similars are fetched
-  for OWNED artists only (`track_artists JOIN media_files`).
+  for OWNED artists only (`track_artists JOIN owned_files`).
 - `backend/lastfm.py` `backfill_similar` — the engagement gate: owned
   file OR a completed, unskipped listen (`listening_history`); run as
   the background `similar` step, it is how listened phantoms
@@ -153,7 +156,7 @@ appear only in the *preview* path (D4), never the *metadata* path.
 
 Reuse the **global throttle + cooldown** already protecting Deezer
 in `routers/covers.py` — Deezer/Last.fm ban the IP under concurrent
-load. (See `reference_artist_photos.md`; do not remove that throttle.)
+load. (See `backend/routers/covers.py`; do not remove that throttle.)
 
 ### D4. Phantom preview: audition through the user's own chain
 
@@ -167,7 +170,6 @@ providers are bring-your-own and out of tree (`backend/streaming/`).
 Preview quality is flagged in the UI (lossless / lossy) so it is never
 mistaken for the local hi-res experience. Shipped 2026-06-28; the earlier
 virtual-cable / live-input design is superseded.
-Premature to spike HQP live-input now.
 
 **The demo policy (2026-09-17).** The core channel is an acquaintance
 tool, not a free replacement for a streaming service: a track streams
@@ -268,7 +270,7 @@ sync. This is a genuine network-effect moat.
 Phantoms have no audio, so no CLAP embedding is possible — but a
 **BGE-M3 text embedding from bio + tags is**. That makes
 "find me ambient artists I don't own" work via text similarity even
-without audio. This feeds directly into the planned Discovery
+without audio. This feeds the Discovery
 engine: a phantom is just another row the engine can target and
 score (`DISCOVERY-SEARCH-ENGINE.md` §4).
 
@@ -377,7 +379,8 @@ now carry their canonical MB tracklist as first-class `tracks` +
 (album_id, track_id, disc, position, recording_mbid; PK = album/disc/
 position slot). Owned albums keep the authoritative
 `album_variants → media_files` chain — a track is *owned* iff it has
-`media_files`, mirroring the album discriminator, and a later rip
+`media_files` (`owned_files` since 2026-09-27: a file here or a copy held
+at the HQPlayer), mirroring the album discriminator, and a later rip
 collapses onto the same `track_uuid` row (gains files, no migration).
 
 - **Canonical release pick:** among `fetch_release_tracklists(rg)` —
@@ -401,7 +404,9 @@ collapses onto the same `track_uuid` row (gains files, no migration).
   tracks): Last.fm track-stats candidates, lyrics batch (already
   media-joined), BGE-M3 text-embedding candidates, assistant-prompt library
   count, `library_stats.total_tracks` — all gated on
-  `EXISTS media_files`. P2P sync inventory is safe by construction
+  `EXISTS media_files` (on `owned_files` since 2026-09-27; `library_stats`
+  by migration 029; the Last.fm track-stats step left with `track_stats` on
+  2026-09-20). P2P sync inventory is safe by construction
   (tracks rows are never synced; enrichment is requested for the
   importer's local tracks only).
 - **Index drift fixed live:** `idx_track_artists_artist_id`,
@@ -417,7 +422,7 @@ canonical artist identity*. Two things break that:
 1. **Collaboration mis-normalization.** Sautium's Pass2 keeps ad-hoc
    collabs ("GMO & Dense", "DJ Snake & Lil Jon") as single `verified_band`
    rows because its Last.fm check only splits when a component clears
-   `>=1000 listeners` (`normalize_artists.py:671`) — niche artists never
+   `>=1000 listeners` — niche artists never
    do. Deezer/MB have no entity for such combos, so a blind name search
    returns the wrong artist → risk of attributing a wrong discography.
 2. **Non-canonical names fragment identity.** Diacritics ("Tomas Dvorak"
@@ -455,36 +460,22 @@ canonical artist identity*. Two things break that:
 - **Auto-act only at high confidence; leave the rest as-is.** No review UI
   (the user may not know the right answer either). Uncertain → no-op, marked
   attempted so we don't re-query.
-- **`artist_aliases` (1:1, synced) is the convergence layer.** Collab
-  1:many decomposition stays in `artist_members`. Identity name-derived +
-  aliases synced over P2P means nodes converge by sharing the dirty→canonical
-  map; a node that ran MB reaches the same canonical UUID independently.
+- **An alias table (1:1, synced) as the convergence layer** was the first
+  cut's answer: collab 1:many decomposition in `artist_members`, identity
+  name-derived, the dirty→canonical map shared over P2P. It lasted a week
+  (below).
 
-### Rollout
+### What landed
 
-1. **Foundation — SHIPPED (2026-06-01).** `artist_aliases` table + ORM +
-   `backend/artist_aliases.py` (`resolve_alias`/`record_alias`). Wired the
-   resolver into `scanner.get_or_create_artist` (a rescan of an aliased
-   variant now converges instead of re-fragmenting) and `record_alias` into
-   the clean-pass merge+rename branches (`normalize_artists.py`) so existing
-   normalization is durable. Empty table = exact prior behaviour (safe).
-   `resolve_artist` still to wire into Last.fm-similar + P2P import.
-2. **Read-only MB audit — NEXT.** Per-artist MB resolve + overlap, report
-   `name → MB canonical, MBID, score, overlap, proposed action
-   (keep/rename/merge/split/unsure)`, mutate nothing. Calibrate the gates on
-   real data (how often overlap confirms, how many dups, how many MB-unknown).
-3. **MB background pass.** At the calibrated confidence, write aliases +
-   MBID (overlap-anchored). Pure async enhancement; 1 req/s, own UA + 503
-   cooldown. Priority (4 tiers): listened → enriched → similar-of-listened
-   → rest by file mtime; gate `last_mb_sync IS NULL`, artists with ≥1 owned
-   album. Once an artist has its MBID, discography sync uses it for
-   release-group classification (the original record_type-noise fix).
-4. **Sync MBID as enriched data.** Most artists match their normalized
-   name, so `artists.musicbrainz_id` (+ `artist_aliases`) should sync over
-   P2P as part of enrichment — one node's MB resolution spares every other
-   node the lookup, cutting MB-service load network-wide. `last_mb_sync` is
-   per-node state, not synced. Touches the sync layer (`sync_queries.py`,
-   `routers/sync.py`, `sync_client.py`).
+The alias table of the first cut (`artist_aliases`, 2026-06-02) was
+replaced a week later by the MBID model (2026-06-09): `artist_mbids`, 1:N —
+one name-derived artist can map to several MusicBrainz entities — with the
+MB-canonical name kept per MBID. The read-only audit is
+`backend/mb_audit.py`; the background pass is the `backend/canon/` package
+(2026-06-18), which replaced `normalize_artists.py`. Nothing of it is
+synced as rows: a node without the dump receives MB slices and derives the
+same identities from them (D6), which is what "one node's MB resolution
+spares every other node the lookup" became.
 
 ## Risks
 
@@ -513,17 +504,18 @@ canonical artist identity*. Two things break that:
 
 ## References
 
-- Schema: `desktop/migrations/001_initial.sql` (artists `:43`, albums
-  `:59`, tracks `:73`, media_files `:191`, enrichment `:281-395`,
-  similar_artists `:307`).
+- Schema: `desktop/migrations/001_initial.sql` (`artists`, `albums`,
+  `tracks`, `media_files`, the enrichment tables, `similar_artists`, the
+  `owned_files` view).
 - Locality filters that were relaxed in Phase 2: `backend/lastfm.py`.
-- UUID formulas: `backend/uuid_utils.py:27-54`.
+- UUID formulas: `backend/uuid_utils.py`.
 - Sync inventory joins (structure stays out by design, D6):
   `desktop/p2p/sync_queries.py`, `backend/routers/sync.py`.
 - Slice replication, the mechanism that replaced Phase 4:
   `desktop/p2p/mb_slice_queries.py`, `desktop/mb_slice_client.py`.
-- Playback path (local-file only): `mcp/assistant_server.py:751-1005`
-  (`file_path_to_uri` → `playlist_add`).
+- Playback path: the assistant's play tools take track UUIDs
+  (`mcp/assistant_server.py` — `play_track`, `play_album`, `play_all`), so a
+  phantom track plays through the same tools as an owned one.
 - Deezer integration + throttle: `backend/routers/covers.py`,
-  `reference_artist_photos.md`.
+  `backend/api_cooldown.py`.
 - Discovery engine that surfaces phantoms: `DISCOVERY-SEARCH-ENGINE.md`.

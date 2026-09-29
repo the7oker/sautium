@@ -10,8 +10,10 @@ redistributed in this repository. Get them from the vendor:
 
 What Sautium keeps in-tree is its own, independently written material:
 
-- `HQPLAYER_KNOWLEDGE_BASE.md` — the structured reference the AI assistant
-  reads (filters, modulators, shapers, rates, per-scenario recommendations).
+- `HQPLAYER_KNOWLEDGE_BASE.md` — a structured reference for people (filters,
+  modulators, shapers, rates, per-scenario recommendations), compiled from
+  the HQPlayer 5 manual; the assistant reads the live lists from HQPlayer,
+  not this file.
   Checked 2026-09-12 against both manuals: no manual prose appears verbatim;
   the only overlap is filter names and genre labels inside the tables.
 - `HQPLAYER_INTEGRATION.md` — the control protocol as Sautium uses it.
@@ -21,5 +23,8 @@ Version notes that matter to Sautium:
 
 - The control protocol is the same on HQPlayer 5 and 6, so one client
   implementation talks to either (`HQPLAYER_INTEGRATION.md`, "SDK Version").
-- HQPlayer 6 exposes two extra status fields that Sautium uses when present
-  and degrades without (`HQPLAYER_INTEGRATION.md`, the HQPlayer 6 notes).
+- HQPlayer 6 exposes two extra fields — a per-filter description and
+  `process_speed` in Status — that Sautium uses when present and degrades
+  without (`HQPLAYER_INTEGRATION.md`, the HQPlayer 6 notes).
+- HQPlayer Embedded 6 speaks the same protocol (verified 2026-09-27, engine
+  6.2.3); its library is configured and scanned in its own web interface.

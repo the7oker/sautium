@@ -97,7 +97,6 @@ genre_descriptions:
   summary (short description)
   content (full description with history)
   url (source link)
-  reach (Last.fm popularity metric)
 ```
 
 **Purpose**: Detailed genre/style descriptions
@@ -116,8 +115,8 @@ genre_descriptions:
 ```sql
 external_metadata:
   entity_type metadata_entity_type  -- artist | album | track | genre
-  entity_id   TEXT                  -- polymorphic, NOT an FK: uuid for
-                                    -- artist/album/track, int for genre
+  entity_id   TEXT                  -- polymorphic, NOT an FK: the entity's
+                                    -- uuid as text (genres included)
   source      VARCHAR(50)           -- 'lastfm' | 'genius' | 'lrclib' | ...
   metadata_type metadata_kind       -- bio | info | stats | lyrics | description
   data        JSONB                 -- the response, or what identifies it
@@ -145,6 +144,11 @@ Written by `backend/lastfm.py`, `backend/lrclib.py`, `backend/genius.py`.
 | lastfm | bio | 83 | 111 | 40 |
 | lastfm | info | 92 | — | — |
 | lastfm | description | — | 16 | — |
+
+The `lastfm` / `stats` rows left two days later with migration 020
+(2026-09-20), when track statistics moved to ListenBrainz. Nothing writes
+`stats` or `info` since — Last.fm's calls are ledgered as `bio` and
+`description` — though both remain values of `metadata_kind`.
 
 The ledger is node-local: it describes this node's own calls, so it rides in a
 node backup but in no share file and in no sync category
@@ -265,7 +269,9 @@ instruments from the AST + PaSST ensemble — no catalog API is in that path,
 and none is planned.
 
 Sources still open:
-- MusicBrainz: detailed credits, recording info (the `mb_*` dump layer)
+- MusicBrainz as a source of prose and credits: it already anchors identity
+  (`artist_mbids`, `track_mbids`, `album_tracks.recording_mbid`, from the
+  optional `mb_*` dump or the P2P slices) but feeds none of the tables above
 - Wikipedia: structured data, infoboxes
 - User-generated: custom tags, ratings, notes
 

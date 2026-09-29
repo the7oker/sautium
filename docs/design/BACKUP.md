@@ -50,17 +50,19 @@ own data ≈ 11 GB live, ≈ 3 GB as a compressed dump.
 |---|---|---|---|---|
 | **MusicBrainz layer** | `mb_*` | no (re-load) | no | no |
 | **ListenBrainz statistics layer** | `lb_*` (counts + the slice ledgers) | no (re-load / slices) | no | no |
-| **Catalog** (identity graph, owned + phantom) | `artists`, `albums`, `tracks`, `album_tracks`, `track_artists`, `album_artists`, `artist_mbids`, `genres`, `tags`, `embedding_models` | yes | yes — the structural rows the records hang off, in FK order (`seed_export.structural_sections`; `tags` and `embedding_models` are minted by the import gate, not carried) | — |
-| **Catalog, node-local** | `media_files` (this node's files and their cue bounds), `album_variants`, `artist_name_aliases`, `artist_members`, `seed_picks` | yes | no — nothing here means anything on another node | — |
+| **Catalog** (identity graph, owned + phantom) | `artists`, `albums`, `tracks`, `album_tracks`, `track_artists`, `album_artists`, `artist_mbids`, `genres`, `embedding_models` | yes | yes — the structural rows the records hang off, in FK order (`seed_export.structural_sections`; `embedding_models` is minted by the import gate, not carried) | — |
+| **Catalog, node-local** | `media_files` (this node's files and their cue bounds), `album_variants` (local ones and, since 2026-09-27, the copies held at an HQPlayer — migration 026), `hqp_library_files`, `hqp_endpoints` (migration 030, 2026-09-28), `artist_name_aliases`, `artist_members`, `seed_picks`, `stream_providers` (the snapshot of every provider manifest this backend has loaded) | yes | no — nothing here means anything on another node | — |
 | **Analysis** (sealed, travels) | `embedding_segments`, `embeddings`, `analysis_sources`, `signing_batches`, `audio_features`, `track_mbids` | yes | **yes — sealed records only**, own and received alike, each under its author's seal (decided 2026-09-14; the sketch said first-hand only). Analysis travels as segments with their provenance and batch map; the track-level mean is derived by the importer | — |
-| **Last.fm layer** (node-local) | `artist_bios`, `artist_tags`, `similar_artists`, `genre_descriptions` | yes | no — Last.fm's API terms do not allow redistribution: out of the protocol, the share file (format v2) and the seed bundle since 2026-09-19; every node fetches its own by name | — |
+| **Last.fm layer** (node-local) | `artist_bios`, `artist_tags` (and the `tags` it names), `similar_artists`, `genre_descriptions` | yes | no — Last.fm's API terms do not allow redistribution: out of the protocol, the share file (format v2) and the seed bundle since 2026-09-19; every node fetches its own by name | — |
 | **Album-grain enrichment** | `album_genres`, `album_descriptions` — outside the sync contour (albums never sync by UUID), but structural rows in a file, where albums do travel under their seal | yes | yes | — |
 | **Text vectors** (derived) | `text_embeddings`, `lyrics_embeddings`, `artist_bio_embeddings`, `genre_desc_embeddings` | yes | no — a BGE-M3 vector is a deterministic function of text the file already carries and of the local metadata composed around it; every node encodes its own in background enrichment, on every profile (`lite` on the CPU, smaller slices) | — |
 | **Local ledgers** | `external_metadata` (which source was asked for what and whether it answered — `not_found` included, so a step never re-asks), `covers` (fetched art) | yes | no — a record of this node's own fetches | — |
 | **Lyrics** | `track_lyrics` | yes | no — the one category that is verbatim copyrighted text; out of the sync protocol since 2026-07-11, every node fetches its own from the public sources | — |
-| **Life data** (personal) | `listening_history`, `demo_plays`, `listening_sessions`, `session_tracks`, `local_play_stats`, `friends`, `friend_rights`, `friend_grants`, `friend_grant_rights`, `invite_tokens`, `invite_token_rights`, `sent_invites`, `p2p_messages`, `chat_sessions`, `chat_messages`, `user_profile`, `user_gear`, `gear_pair_notes`, `pending_key_rotations`, `p2p_identities`, `p2p_node_bans`, `support_*`, `diag_*` | yes, encrypted | no | **yes, keyed dedup** (§ Phase 3) |
+| **Life data** (personal) | `listening_history`, `demo_plays`, `listening_sessions`, `session_tracks`, `local_play_stats`, `friends`, `friend_rights`, `friend_grants`, `friend_grant_rights`, `invite_tokens`, `invite_token_rights`, `sent_invites`, `p2p_messages`, `chat_sessions`, `chat_messages`, `user_profile`, `user_gear`, `gear_pair_notes`, `pending_key_rotations`, `p2p_identities`, `p2p_node_bans`, `support_*`, `diag_*` | yes, encrypted | no | **yes, keyed dedup** for the tables § Phase 3 lists; `local_play_stats` is recomputed; `invite_token_rights`, `pending_key_rotations`, `support_*` and `diag_*` stay with the node that wrote them |
+| **Last.fm history import** (node-local, since 2026-09-24, migration 021) | `lastfm_import` (the walk's cursor), `pending_scrobbles`, `pending_scrobble_artists` (the waiting room of raw strings, kept only until placed) | yes (in the dump) | no | no — a placed scrobble merges as its `listening_history` row (`source = 'lastfm'`); the cursor and the waiting room stay with the node that walked |
+| **Gear catalogue** | `gear_brands`, `gear_models`, `gear_specs`, `gear_spec_attributes`, `gear_technologies`, `gear_model_technologies`, `gear_sentiment_terms`, `gear_measured_caveats`, `gear_registry_entries` | yes | no | the `gear_brands` / `gear_models` rows the owner's chain names come along with `user_gear`; research stays where it was done |
 | **Node settings** | `user_settings` | yes (in the dump) | no | allowlist only |
-| **Runtime, re-creatable** | `p2p_gate_pool`, `p2p_contact_events`, `p2p_action_costs`, `p2p_dht_state`, `p2p_nodes_seen`, `external_api_cooldown`, `_gap`, `_schema_migrations` (travels with the dump, see restore) | in the dump, harmless | no | no |
+| **Runtime, re-creatable** | `p2p_gate_pool`, `p2p_contact_events`, `p2p_action_costs`, `p2p_dht_state`, `p2p_nodes_seen`, `external_api_cooldown`, `_schema_migrations` (travels with the dump, see restore) | in the dump, harmless | no | no |
 | **Files** | identity dir: `info.json`, `birth_certificate.json`, `identity_proof.json`, `previous/` (rotation archive), `.api_secret` | yes, encrypted | no | — |
 | **Files, elsewhere** | `.env`, MCP config, launcher `config.json`, a provider plugin's `secrets.json` | **not here** — the maintainer's private repo / the user's own secret store | no | no |
 
@@ -174,8 +176,8 @@ are inside the dump, so the data-migration ledger is consistent.
 
 ### Verification (integration, real database)
 
-`python -m backup --selftest`: dump this node → restore into `music_ai_test`
-→ compare row counts of every non-`mb_*` table and the sha256 of the
+`python -m backup selftest`: dump this node → restore into `music_ai_test`
+→ compare row counts of every table outside `mb_*` / `lb_*` and the sha256 of the
 manifest → drop the test database. Pure-logic tests
 (`tests/test_backup_format.py`): KDF vector, chunk round-trip, truncated
 stream, flipped header byte, wrong password — each must fail closed.
@@ -232,7 +234,9 @@ launcher runs the CLI, as for backups). Departures from the sketch above:
   "signature"}`: the exporter's node key over the running digest of every
   byte above. **The signature is inside the file**, not detached: one
   thing to hand over, the same guarantee (who packed it, nothing cut or
-  edited). Both ends stream; memory is one chunk.
+  edited). Both ends stream; memory is one chunk. The file is
+  `sautium-export-<node>-<date>.jsonl.gz`, `<node>` being the first 12 hex
+  digits of the exporter's key.
 - **Two passes on import.** A streamed import can take nothing back, so
   pass one reads the whole file — hash, trailer, header (format, version,
   identity rule), summary — and only a file that passes is applied in pass
@@ -347,7 +351,8 @@ for a reason found while building:
   PostgreSQL cannot query across databases, and a plaintext dump on disk
   is what the format forbids. The dump member streams once through
   `pg_restore --data-only -t <life tables> -f -` — pg_restore selects the
-  twenty tables out of a non-seekable stream in one pass (3.3 GB in ~20 s
+  life tables (`life_merge.LIFE_TABLES`, 21 since `demo_plays` joined on
+  2026-09-17) out of a non-seekable stream in one pass (3.3 GB in ~20 s
   on the master) — and the `COPY … FROM stdin` blocks of the script it
   emits are parsed and COPY'd into `_merge.<table>` (`LIKE public.<table>
   INCLUDING DEFAULTS`, dump-only columns added as text). The keyed inserts
@@ -360,10 +365,21 @@ for a reason found while building:
   it as waiting, and the next merge of the same file lands it once the
   track has arrived (sync, or a share import). Keyed idempotence makes
   "merge again later" free.
-- **Concurrency.** The backend keeps serving: the merge only adds rows and
+- **Concurrency.** The backend keeps serving: the merge adds rows and
   recomputes stats from history, so a listen recorded during the merge is
   not lost and not double counted — both writers derive, neither
-  increments.
+  increments. Since 2026-09-24 it also lets a native record replace the
+  imported Last.fm record of the same listen and rebuilds the cards
+  generated from imported listens (`rebuild_imported_sessions`); every
+  writer that reconciles listens against each other — the Last.fm import,
+  the scrobble canon, this merge — holds one transaction-scoped advisory
+  lock (`play_stats.LISTENS_LOCK_KEY`). A backup written before that date
+  has its naive listen starts repaired in the scratch copy before anything
+  is matched (`repair_naive_listen_times`).
+
+The Last.fm case has its own acceptance test (`tests/test_same_listen.py`,
+2026-09-24): two nodes that imported one Last.fm history merge to one
+listen per scrobble.
 
 Acceptance run 2026-09-14 (`tests/test_life_merge.py`, two databases built
 from the migrations on the container's cluster): clones with divergent
@@ -382,7 +398,8 @@ loaded 3,894 listens, 657 sessions, 5,729 session tracks and the rest in
 The format and the drivers live in **`desktop/node_backup.py`** — shared by
 the launcher (its own process restores) and the backend (which imports it
 the way `db_migrate` imports `db_init`), not in `backend/backup.py` as
-sketched; that module is the backend binding (job, SSE, CLI). Departures
+sketched; that module is the node binding (the job and the CLI; no Web UI
+surface since 2026-09-14). Departures
 from the sketch above, each for a reason found while building:
 
 - **AEAD with associated data, not SecretBox.** The header must be
@@ -513,8 +530,8 @@ from the sketch above, each for a reason found while building:
   passes its `pgsql/bin` (or Homebrew's) as `PG_BIN` in `backend.env`, and
   `BACKUP_DIR=<data_dir>/backup`; Docker mounts `./data/backup`.
 - **Anonymous identities cannot back up**: the key is the account password
-  and a minted one was never seen. The Settings card says so and points at
-  Profile.
+  and a minted one was never seen. `python -m backup create` refuses with
+  that message and points at Profile (`backup.py`, `nb.Refused`).
 
 Entry points: launcher Settings & Tools › Backup & Restore › "Create backup…" and
 "Restore from backup…", the wizard's identity step ("Restore from a
@@ -604,15 +621,16 @@ launcher helpers); the database half is `python -m backup selftest`.
 ## Open questions
 
 - Scheduling: manual button first. A "backup is older than N days" reminder
-  in the Settings card is cheap; automatic backups to a folder are a
-  later switch.
+  in the launcher's Backup & Restore tab is cheap; automatic backups to a
+  folder are a later switch.
 - Recovery key: a second wrapped copy of the data key under a printed
   random key, for users who would rather not tie backups to the account
   password. Format v1 leaves room (a list of wrapped keys); UI later.
 - `covers` (471 MB of art in the database) stays in the dump for now;
   moving art to files is a separate question.
-- Restore into a node that already has data: v1 refuses (fresh database
-  only); merge is Product C (built). A merge from a *different* account's
-  backup (the same person under two names without a rotation record) is
-  refused today; a "listens and preferences only" mode for that case is
-  a possible follow-up.
+- Restore into a node that already has data replaces it, and only on an
+  explicit confirm / `--replace` (the old database is kept as
+  `<db>__previous`); adding to it instead is Product C (built). A merge
+  from a *different* account's backup (the same person under two names
+  without a rotation record) is refused today; a "listens and preferences
+  only" mode for that case is a possible follow-up.

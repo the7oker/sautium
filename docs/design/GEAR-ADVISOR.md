@@ -49,7 +49,8 @@ psychoacoustic thresholds ("below audibility" is a first-class verdict).
    this layer with **no LLM at runtime**.
 2. **Community consensus** — praise/criticism terms, camps, pair synergies.
    Stored in `gear_sentiment_terms` + aggregate columns. Pair-level synergy is
-   researched on demand and cached (future), never mass-scraped.
+   researched on demand and cached in `gear_pair_notes` (since 2026-07-13),
+   never mass-scraped.
 3. **User context** — the unfair advantage no forum has: sample-rate
    distribution of actual listening, genre profile (sub-bass share!), measured
    DR percentiles of the library, playback outputs in use. Turns generic specs
@@ -81,7 +82,7 @@ listener), drains the whole queue on wake-up, and re-queues orphaned
 
 AI call, in preference order:
 
-1. **Claude Code CLI** (`call_claude_code(..., timeout_seconds=480,
+1. **Claude Code CLI** (`call_claude_code(..., timeout_seconds=600,
    mcp=False)`) — built-in WebSearch/WebFetch, subscription-billed, the same
    runner the AI assistant chat and ai_canon use. No MCP config: research needs the
    web, not the library.
@@ -97,7 +98,8 @@ accompanying `new_attributes` definition are skipped; AI-proposed attributes
 and technologies land with `seeded=FALSE` for later review.
 
 `failed` rows stay failed — research burns real tokens/time, so retry is a
-deliberate user action (future Retry button), never an automatic loop.
+deliberate user action (the Retry button on a failed model and Refresh on a
+researched one, since 2026-07-13/15), never an automatic loop.
 
 Cost/latency envelope per model: minutes, not seconds (a full manual run of
 one model took 6–14 min with a deep multi-product prompt; the focused
@@ -221,4 +223,5 @@ hosts are region-blocked, head-fi renders JS-only.
 6. P2P: sync researched gear facts (same signing rails as audio analytics),
    co-ownership graph, pair-synergy cache sharing.
 7. Refresh policy: re-research staleness (`researched_at` TTL per category),
-   re-research on newly reachable sources, Retry button for `failed`.
+   re-research on newly reachable sources. (Retry for `failed` and a manual
+   refresh shipped 2026-07-13/15.)

@@ -44,10 +44,10 @@ with the viewport, so wider phones get more breathing room around the
 same-sized typography and controls.
 
 Above 768px the **frame** changes, not the scale — see "Layout modes"
-below. (Until the frame ships, `tokens.css` still centres `body` at
-468px there; that rule goes away with the frame, because `max-width`
-on `body` never contained the fixed chrome — on a monitor the nav and
-the sheets spanned the whole viewport around a 468px column.)
+below. (Before the frame shipped on 2026-09-11, `tokens.css` centred
+`body` at 468px there; the rule went with it, because `max-width` on
+`body` never contained the fixed chrome — on a monitor the nav and the
+sheets spanned the whole viewport around a 468px column.)
 
 **Why not pure fluid scaling?** Fluid scaling at all widths inflates
 the design on phones wider than the 360 baseline (a 19px reference
@@ -60,8 +60,9 @@ spec and horizontal layout predictable.
 
 _Contract decided 2026-09-11 (`docs/design/INFORMATION-ARCHITECTURE.md`
 §"Layout modes" has the chrome mapping and the reasoning). Status: the
-compact chrome is what is implemented today; the frame PR turns this
-section into code. Tablet artboards live under
+tablet frame shipped 2026-09-11 (`tokens.css` sets `--layout-mode: tablet`
+at 768px; the chrome is `style.css` § "Tablet layout mode"). Tablet
+artboards live under
 `docs/design/reference/wide-layout/`; the desktop is a later cycle._
 
 One DOM, modes selected purely by raw-px media queries: `compact`
@@ -86,11 +87,11 @@ is the only place the breakpoint numbers and the chrome geometry live:
 }
 @media (min-width: 768px) { :root { --layout-mode: tablet; --nav-h: 0px; --nav-w: calc(80 * var(--px)); } }
 
-body { --player-h-active: 0px; --fab-clear-active: var(--fab-clear); --panel-w-active: 0px; }
+body { --player-h-active: 0px; --fab-clear-active: var(--fab-clear); }
 body.has-miniplayer { --player-h-active: var(--player-h); }
 body.no-fab         { --fab-clear-active: 0px; }
 body { --chrome-bottom: calc(var(--nav-h) + var(--player-h-active) + var(--safe-bottom)); }
-#app { padding: 0 var(--panel-w-active) calc(var(--chrome-bottom) + var(--fab-clear-active)) var(--nav-w); }
+#app { padding-top: var(--strip-h); padding-bottom: calc(var(--chrome-bottom) + var(--fab-clear-active)); padding-left: var(--nav-w); }
 ```
 
 On the tablet `#more/<section>` routes are **modal**: `render()` keeps
@@ -115,7 +116,7 @@ Rules:
 - **CSS owns the mode.** No `matchMedia`, no resize listener. Anything
   positioned against the chrome (FAB, guide puck, sticky filter bar,
   drawer, chat screen height) references `--chrome-bottom` /
-  `--nav-w` / `--panel-w-active` — never its own copy of the sum.
+  `--nav-w` / `--panel-w` — never its own copy of the sum.
 - **JS asks, never decides.** A read of the live mode
   (`getComputedStyle(document.documentElement).getPropertyValue('--layout-mode')`)
   is allowed only where `[hidden]` would otherwise force a mobile-only
@@ -169,7 +170,9 @@ amber's job.
 
 1. **Open the reference HTML** for that screen under
    `docs/design/reference/claude-design-bundle/project/`. For Now
-   Playing it's `Now Playing v4.html`; sessions cover the rest.
+   Playing it's `Now Playing v4.html`, with the five-button transport
+   row of `Now Playing v5.html` (where the shipped UI puts the Radio
+   toggle in Repeat's place); sessions cover the rest.
    Read the file **top to bottom** — DOM structure, every CSS class,
    every dimension, every colour. Do not implement from memory of
    what the design "felt like". The reference is pixel-perfect
@@ -214,9 +217,11 @@ Claude Design handoff covering the full MVP screen set: Design
 System v1 HTML, all four Session HTML files (Session 1: shell +
 Home + Now Playing mini/expanded · Session 2 v3: Discovery + Artist
 + Album + Queue + Genre · Session 3 v2: AI sheet + More + Profile +
-Settings + HQPlayer · Session 4: Friends + chat thread), plus the
-canonical Now Playing v4 iteration and the cover/artist assets used
-across mockups. Treat it as **reference for visual intent**, not
+Settings + HQPlayer · Session 4: Friends + chat thread), plus Now
+Playing v4 and v5, the later single-screen handoffs (AI chat
+master-detail, Artist albums sort, Profile gear sheet, Settings), and
+gradient placeholders where the mockups had cover art (since
+2026-09-12). Treat it as **reference for visual intent**, not
 source to paste — recreate visual output in our tokens-based vanilla
 stack.
 
@@ -262,7 +267,7 @@ architecture is **done**, and the legacy single-file prototype
   Queue sheet), the AI overlay, and most screen-scoped `fetch` calls.
 - **`player.js`** — transport/SSE primitives shared across screens:
   the `/api/events` subscription (one multiplexed stream per tab:
-  status, preview, notices, chat, research) plus `window.playerCmd`,
+  status, preview, research, chat, mb, lb, notice) plus `window.playerCmd`,
   `window.playTrack`, `window.togglePlayPause`, `window.fetchPlaylist`,
   `window.currentPlaylist`.
 
@@ -338,7 +343,7 @@ Use the HTML equivalents wired into the design system instead:
   (delete friend, drop scan, reset key). Returns `Promise<boolean>`.
 - **For text input** (`prompt()` replacement) build a small overlay
   in the `add-gear-sheet` style — see `openEmailVerifyFlow` and
-  `openHqpConnectionEditor` in `app-shell.js` for the pattern.
+  `openAddDeviceSheet` in `app-shell.js` for the pattern.
 
 Both dialogs live in `app-shell.js` and share the `.confirm-overlay
 / .confirm-sheet` shell in `style.css`. The `kind` accent and the
