@@ -19,6 +19,8 @@ from dataclasses import dataclass, field
 from typing import Optional
 
 from db_pool import db_query as _db_query
+from hqplayer_client import file_path_to_uri
+from sql_queries import best_rip_order
 
 logger = logging.getLogger(__name__)
 
@@ -52,6 +54,9 @@ class QueueItem:
                         can (it is played as a stream there)
       {"kind": "proxy", "token": <media-proxy token>}
       {"kind": "uri",   "uri": <verbatim>}   — foreign/out-of-library
+      {"kind": "track"} — its file left the library and no other copy of
+                        the track is here (rebind_origins): every output
+                        opens whatever copy it reaches, else a stream
     """
     track_id: Optional[str]
     media_file_id: Optional[int]
@@ -74,8 +79,10 @@ class QueueItem:
     # `hqp` copy the new output opens itself, a `proxy` stream that stands
     # in for a copy it cannot, `pending` while that stream is on its way,
     # `unplayable` when nothing can serve the slot here. None = as `source`
-    # says. `source` is the enqueue-time origin and never changes, so the
-    # way back to the output that opened it natively is free.
+    # says. `source` is the enqueue-time origin, which no output switch
+    # touches, so the way back to the output that opened it natively is
+    # free; it changes only when the file it names leaves the library
+    # (CanonicalQueue.rebind).
     play: Optional[dict] = None
 
     def opener(self) -> dict:
@@ -155,6 +162,32 @@ class CanonicalQueue:
                 it.play = play
             self._version += 1
             return sum(1 for p in plays if p and p.get("kind") == "pending")
+
+    def rebind(self, origins, plays) -> list[QueueItem]:
+        """The file layer changed under the queue (PlaybackManager.
+        rebind_files). `origins` maps the items, in order, to what each must
+        change (rebind_origins): None where nothing does, else the fields to
+        set — none when only its way in named a gone file. Every item that
+        changed has its `play` re-read through `plays` (the active output's
+        native_plays), or cleared with no output attached: the attach
+        re-reads every slot. Items change in place, so the playing one stays
+        the object the backends and the tracker hold. Returns the items that
+        changed; the version is bumped when any did."""
+        with self._lock:
+            items = list(self._items)
+            moved = []
+            for it, change in zip(items, origins(items)):
+                if change is None:
+                    continue
+                for name, value in change.items():
+                    setattr(it, name, value)
+                moved.append(it)
+            if moved:
+                new_plays = plays(moved) if plays is not None else [None] * len(moved)
+                for it, play in zip(moved, new_plays):
+                    it.play = play
+                self._version += 1
+            return moved
 
     def set_play(self, item: "QueueItem", play: Optional[dict]) -> Optional[int]:
         """A substitute landed on (or failed for) this very item: its 1-based
@@ -307,7 +340,9 @@ _MEDIA_ITEM_SQL = """
 """
 
 
-def _item_from_media_row(r: dict) -> QueueItem:
+def file_source(r: dict) -> dict:
+    """The `file` source of a media_files row (file_path, file_format, the
+    CUE bounds)."""
     source = {"kind": "file", "path": r["file_path"], "format": r["file_format"]}
     if r.get("cue_start_seconds") is not None:
         # CUE image slice — every backend must consume [cue_start, cue_end)
@@ -316,10 +351,14 @@ def _item_from_media_row(r: dict) -> QueueItem:
         source["cue_start"] = float(r["cue_start_seconds"])
         source["cue_end"] = (float(r["cue_end_seconds"])
                              if r["cue_end_seconds"] is not None else None)
+    return source
+
+
+def _item_from_media_row(r: dict) -> QueueItem:
     return QueueItem(
         track_id=r["track_uuid"],
         media_file_id=r["id"],
-        source=source,
+        source=file_source(r),
         title=r["title"],
         artist=r["artist"],
         album=r.get("album") or "",
@@ -332,6 +371,79 @@ def _item_from_media_row(r: dict) -> QueueItem:
         # every album surface follows (coverUrl() prefers the URL)
         cover_url=None if r["cover_id"] else r.get("cover_url"),
     )
+
+
+# The owned slots' bindings against the file layer, in one pass over the
+# queue: which slots name a media_files row that is gone — as their origin or
+# as their way in — and, for a gone origin, the best live copy of the track
+# (one on the album the slot was queued from first) and whether the track
+# itself is still in the catalogue.
+_REBIND_SQL = f"""
+    WITH q AS (
+        SELECT s.*,
+               s.mid IS NOT NULL AND NOT EXISTS (
+                   SELECT 1 FROM media_files mf WHERE mf.id = s.mid) AS origin_gone,
+               s.pmid IS NOT NULL AND NOT EXISTS (
+                   SELECT 1 FROM media_files mf WHERE mf.id = s.pmid) AS play_gone
+        FROM unnest(%(mids)s::int[], %(pmids)s::int[], %(tids)s::uuid[], %(aids)s::uuid[])
+             WITH ORDINALITY AS s(mid, pmid, track_id, album_id, slot)
+    )
+    SELECT q.slot, q.origin_gone,
+           EXISTS (SELECT 1 FROM tracks t WHERE t.id = q.track_id) AS track_kept,
+           c.id, c.file_path, c.file_format, c.duration_seconds,
+           c.cue_start_seconds, c.cue_end_seconds
+    FROM q
+    LEFT JOIN LATERAL (
+        SELECT mf.id, mf.file_path, mf.file_format::text AS file_format,
+               mf.duration_seconds, mf.cue_start_seconds, mf.cue_end_seconds
+        FROM media_files mf
+        JOIN album_variants av ON av.id = mf.album_variant_id
+        WHERE q.origin_gone AND mf.track_id = q.track_id
+        ORDER BY (av.album_id = q.album_id) DESC NULLS LAST, {best_rip_order('mf')}
+        LIMIT 1
+    ) c ON true
+    WHERE q.origin_gone OR q.play_gone
+"""
+
+
+def rebind_origins(items: list[QueueItem]) -> list[Optional[dict]]:
+    """What each slot must change now that files have left the library
+    (CanonicalQueue.rebind). A slot whose own file row is gone takes the best
+    live copy of its track, one on the album it was queued from first; with
+    none left here it becomes the track itself (`{"kind": "track"}`: the
+    output opens whatever copy it reaches, else streams it like any
+    phantom); a track that went with its file has left the catalogue, and
+    the slot stays under its old name as an inert foreign entry. A slot whose
+    way in (`play`) named a gone file changes nothing else — `{}`, its play
+    is re-read. None for every other slot."""
+    out: list[Optional[dict]] = [None] * len(items)
+    bound = [(i, it) for i, it in enumerate(items)
+             if (it.source.get("kind") == "file" and it.media_file_id is not None)
+             or (it.play or {}).get("media_file_id") is not None]
+    if not bound:
+        return out
+    rows = _db_query(_REBIND_SQL, {
+        "mids": [it.media_file_id if it.source.get("kind") == "file" else None
+                 for _, it in bound],
+        "pmids": [(it.play or {}).get("media_file_id") for _, it in bound],
+        "tids": [it.track_id for _, it in bound],
+        "aids": [it.album_id for _, it in bound],
+    })
+    for r in rows:
+        i, it = bound[r["slot"] - 1]
+        if not r["origin_gone"]:
+            out[i] = {}
+        elif r["id"] is not None:
+            change = {"media_file_id": r["id"], "source": file_source(r)}
+            if r["duration_seconds"] is not None:
+                change["duration_seconds"] = float(r["duration_seconds"])
+            out[i] = change
+        elif r["track_kept"]:
+            out[i] = {"media_file_id": None, "source": {"kind": "track"}}
+        else:
+            out[i] = {"track_id": None, "media_file_id": None,
+                      "source": {"kind": "uri", "uri": file_path_to_uri(it.source["path"])}}
+    return out
 
 
 def items_for_media_ids(ids: list[int]) -> list[QueueItem]:

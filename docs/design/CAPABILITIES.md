@@ -105,6 +105,7 @@ code disagree, the code is what this file records and § 14 names the doc.
 - [API] Volume routes exist for every output; the only volume control in the Web UI is ±1 dB on the HQPlayer screen — `POST /api/player/volume`, `/volume/up`, `/volume/down`
 - [auto] Switching the output keeps the queue; each slot is re-read for the new output, and a copy it cannot open is streamed — `playback/substitute.py`; `QueueItem.play`
 - [auto] The queue of an engine-rendered output survives a restart, stopped — `playback/manager.py: _persist_queue`
+- [auto] A queued file that leaves the library (a rescan's prune, a superseded CUE image) moves its slot to a live copy of the track, else to the track itself, streamed; the persisted queue is re-bound on restore — `playback/manager.py: rebind_files`, woken by the `media_files` delete trigger (`032_files_removed_notify.sql`); `playback/queue.py: rebind_origins`
 - [auto] Status reaches every tab over one event stream — `GET /api/events`
 - [auto] Listens are recorded per track identity; Last.fm scrobble after half the track or 4 minutes — `playback/tracker.py: _SCROBBLE_MIN_SECONDS`
 - [auto] Lock-screen metadata and play, pause, previous, next — browser output only — `static/player.js: _mediaSession`

@@ -758,35 +758,40 @@ class HqpBackend(PlayerBackend):
         if self._failures >= STATUS_FAILURE_THRESHOLD:
             self._emit(PlaybackStatus(state="disconnected"))
 
-    def _check_drift(self, hqp_tracks: list) -> bool:
-        """Compare HQPlayer's playlist against the canonical queue. Preview
-        and transcode slots are skipped (their tokens are re-minted); every
-        other file slot must resolve to the same (path, cue_start) —
-        `_slot_identity` undoes HQPlayer's percent-escapes and the
-        library-root remap and looks /file/ tokens up in the proxy, so raw
-        URI equality is never relied on. Returns whether they differ."""
+    def _first_divergence(self, hqp_tracks: list, snapshot: list) -> Optional[int]:
+        """The first 1-based slot, over the length the two share, at which
+        HQPlayer's entry names another file than the queue's; None when none
+        does. Preview and transcode slots are skipped (their tokens are
+        re-minted); every other file slot must resolve to the same (path,
+        cue_start) — `_slot_identity` undoes HQPlayer's percent-escapes and
+        the library-root remap and looks /file/ tokens up in the proxy, so
+        raw URI equality is never relied on."""
         from streaming import service as streaming_service
         from streaming.local import TRANSCODE_FORMATS
         proxy = streaming_service.get_proxy()
+        for i, (t, it) in enumerate(zip(hqp_tracks, snapshot), start=1):
+            src = it.opener()
+            if src["kind"] == "hqp":
+                # A file in HQPlayer's own library: the URI's path is the
+                # identity, no remap.
+                if _uri_file_path(t.get("uri") or "") != src["path"]:
+                    return i
+                continue
+            if (src["kind"] != "file"
+                    or (src.get("format") or "").upper() in TRANSCODE_FORMATS):
+                continue
+            if (_slot_identity(t.get("uri") or "", proxy)
+                    != (src["path"], src.get("cue_start"))):
+                return i
+        return None
+
+    def _check_drift(self, hqp_tracks: list) -> bool:
+        """Compare HQPlayer's playlist against the canonical queue — the
+        lengths, then every slot (_first_divergence). Returns whether they
+        differ."""
         snapshot = self._queue.snapshot()
-        drift = len(hqp_tracks) != len(snapshot)
-        if not drift:
-            for t, it in zip(hqp_tracks, snapshot):
-                src = it.opener()
-                if src["kind"] == "hqp":
-                    # A file in HQPlayer's own library: the URI's path is
-                    # the identity, no remap.
-                    if _uri_file_path(t.get("uri") or "") != src["path"]:
-                        drift = True
-                        break
-                    continue
-                if (src["kind"] != "file"
-                        or (src.get("format") or "").upper() in TRANSCODE_FORMATS):
-                    continue
-                if (_slot_identity(t.get("uri") or "", proxy)
-                        != (src["path"], src.get("cue_start"))):
-                    drift = True
-                    break
+        drift = (len(hqp_tracks) != len(snapshot)
+                 or self._first_divergence(hqp_tracks, snapshot) is not None)
         self._drift = drift
         if drift and not self._drift_logged:
             logger.warning(
@@ -916,6 +921,100 @@ class HqpBackend(PlayerBackend):
             return file_path_to_uri(item.source.get("path") or "")
         return src["uri"]
 
+    def queue_changed(self, kind: str, *, play: bool = False) -> None:
+        """Every mutation is mirrored in the queue_* hooks, before its commit.
+        A re-bind happens under the queue — files left the library
+        (PlaybackManager.rebind_files) — with nothing to mirror first, so
+        HQPlayer converges on it here."""
+        if kind == "rebind":
+            self._converge_mirror()
+
+    def _converge_mirror(self) -> None:
+        """Bring HQPlayer's playlist back in step after slots were re-bound to
+        another copy of their track: its entries still name files that are
+        gone. Only a mirror that was in step is converged — a playlist of
+        another length is the drift canary's and the play press's. Stopped,
+        HQPlayer takes the queue afresh and the play press resumes at the
+        slot it was on. Busy, the slot it reads is never touched while the
+        first changed entry lies past it: the entries from there are removed
+        and appended again, as queue_insert_next does. One at or before it
+        cannot be put back in place — the protocol has no insert — so a
+        playing HQPlayer is rebuilt around its position (the gap a reorder
+        rebuild costs), and a paused one takes the queue afresh and resumes
+        that slot from its start on the play press."""
+        snapshot = self._queue.snapshot()
+        try:
+            with _hqp_lock:
+                hqp = _get_hqp()
+                status = hqp.get_status()
+                playlist = hqp.get_playlist()
+        except (BrokenPipeError, ConnectionError, OSError) as e:
+            logger.info("re-bound slots: HQPlayer unreachable (%s) — the queue "
+                        "is re-mirrored on the next play", e)
+            self._mirror_lost = True
+            return
+        if status is None or len(playlist) != len(snapshot):
+            return
+        first = self._first_divergence(playlist, snapshot)
+        if first is None:
+            return
+        current = status.track_index
+        busy = status.state in (PlaybackState.PLAYING, PlaybackState.PAUSED)
+        if busy and not 1 <= current <= len(snapshot):
+            return          # it reads a slot we cannot place: the canary's
+        try:
+            if busy and first > current:
+                uris = [self._uri_for(it) for it in snapshot[first - 1:]]
+                with _hqp_lock:
+                    # The URIs took their time: a playhead that moved on to
+                    # a changed entry meanwhile is not removed from under
+                    # itself — that entry names a gone file, and the play
+                    # press re-mirrors.
+                    now = _get_hqp().get_status()
+                    converged = now is not None and now.track_index < first
+                    if converged:
+                        for _ in uris:
+                            _hqp_safe(lambda h: h.playlist_remove(first))
+                        converged = _add_uris_with_retry(uris) == len(uris)
+                self.poke()
+            elif status.state == PlaybackState.PLAYING:
+                converged = self._rebuild([self._uri_for(it) for it in snapshot],
+                                          current, int(status.position), resume=True)
+            else:
+                converged = self.queue_replace(snapshot, play=False) == len(snapshot)
+                if 1 <= current <= len(snapshot):
+                    self._resume_index = current
+        except (BrokenPipeError, ConnectionError, OSError) as e:
+            logger.warning("re-bound slots: HQPlayer's playlist could not follow "
+                           "(%s) — the queue is re-mirrored on the next play", e)
+            converged = False
+        if converged:
+            self._drift = False
+            logger.info("HQPlayer's playlist follows the re-bound slots from %d", first)
+        else:
+            self._mirror_lost = True
+
+    def _rebuild(self, uris: list, index: int, position: int, *, resume: bool) -> bool:
+        """Clear and reload HQPlayer's playlist and land on slot `index` at
+        `position` — the ~300 ms gap of every change that needs an insert the
+        protocol lacks. The URIs come made (_uri_for may transcode; never
+        under `_hqp_lock`). hqp.stop() is mandatory — HQPlayer ignores
+        PlaylistAdd(clear=True) while playing, silently appending instead,
+        which would double every track and land select_track on the wrong
+        slot. Returns whether HQPlayer accepted every entry."""
+        with _hqp_lock:
+            hqp = _get_hqp()
+            hqp.stop()
+            accepted = [hqp.playlist_add(uris[0], clear=True)]
+            accepted += [hqp.playlist_add(uri) for uri in uris[1:]]
+            hqp.select_track(index)
+            if position > 0:
+                hqp.seek(position)
+            if resume:
+                hqp.play()
+        self.poke()
+        return all(accepted)
+
     def queue_replace(self, items: list, *, play: bool, probe_first: bool = False) -> int:
         uris = [self._uri_for(it) for it in items]
         with _hqp_lock:
@@ -1021,23 +1120,10 @@ class HqpBackend(PlayerBackend):
 
         # Fallback: clear+rebuild. Required for cases that need an insert
         # (swap inside before, after→before crossing, current right-shift).
-        # hqp.stop() is mandatory — HQPlayer ignores PlaylistAdd(clear=True)
-        # while playing, silently appending instead, which would double every
-        # track and land select_track on the wrong slot.
         uri_by_id = {mid: self._uri_for(plan.items_by_id[mid])
                      for mid in plan.order}
-        with _hqp_lock:
-            hqp = _get_hqp()
-            hqp.stop()
-            hqp.playlist_add(uri_by_id[plan.order[0]], clear=True)
-            for mid in plan.order[1:]:
-                hqp.playlist_add(uri_by_id[mid])
-            hqp.select_track(plan.new_status_idx)
-            if plan.position > 0:
-                hqp.seek(plan.position)
-            if plan.resume:
-                hqp.play()
-        self.poke()
+        self._rebuild([uri_by_id[mid] for mid in plan.order], plan.new_status_idx,
+                      plan.position, resume=plan.resume)
         return {
             "removed": len(plan.order),
             "added": len(plan.order),

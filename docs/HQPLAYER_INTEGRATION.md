@@ -402,7 +402,9 @@ is one more row, imported through the same previewed first import, and goes
 with "Forget this library" on its HQPlayer screen or the `×` on its picker
 row (`forget_endpoint_id`) — never on its own. The queue survives an output switch, and since 2026-09-28 so does its
 playability: the canonical queue holds identities (the track uuid and the
-enqueue-time origin, `QueueItem.source`, which never changes), and on every
+enqueue-time origin, `QueueItem.source`, which no switch touches — since
+2026-09-30 only a file leaving the library moves it to a live copy of the
+track, or to the track itself), and on every
 switch each slot is re-read for the NEW output (`QueueItem.play`,
 `playback/substitute.py`, the album page's rule applied to the queue): a rip
 here for any output; this HQPlayer's own copy when it is the output — and

@@ -269,8 +269,11 @@ See:
   streams like a phantom. The queue keeps identities across an output
   switch and re-reads each slot's way in for the new output
   (`QueueItem.play`, `playback/substitute.py`: a rip here, this
-  HQPlayer's copy, else a lazily fetched stream) — `source` is the origin
-  and never changes. How an owned file reaches HQPlayer is read off its
+  HQPlayer's copy, else a lazily fetched stream) — `source` is the origin,
+  which no switch touches; since 2026-09-30 it changes only when its file
+  leaves the library (the `media_files` delete trigger wakes
+  `PlaybackManager.rebind_files`: a live copy of the track, else the track
+  itself, streamed). How an owned file reaches HQPlayer is read off its
   address, never configured (`_stream_mode`, `auth_hmac.is_own_address`):
   on this machine by path, anywhere else as a stream from the media proxy
   — a share the HQPlayer would mount is an extra setup for the same bytes,

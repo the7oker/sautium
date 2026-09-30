@@ -173,13 +173,27 @@ def _archive_and_open_session(
                 if active is not None:
                     snapshot = _snapshot_slots_for(cur, active, old_slots)
                     if snapshot:
+                        # Each reference as its foreign key keeps it. The
+                        # snapshot is written after the fact, so a file or an
+                        # album that left the catalogue while queued is NULL
+                        # (ON DELETE SET NULL) and a track that did is no row
+                        # (ON DELETE CASCADE) — what those deletes would have
+                        # left of a row written before them. The queue re-binds
+                        # a slot whose file went (PlaybackManager.rebind_files);
+                        # this covers the moment before that lands.
                         psycopg2.extras.execute_values(
                             cur,
                             "INSERT INTO session_tracks "
                             "(session_id, position, track_id, media_file_id, album_id) "
-                            "VALUES %s",
+                            "SELECT v.session_id, v.position, t.id, mf.id, al.id "
+                            "FROM (VALUES %s) AS v(session_id, position, track_id, "
+                            "                      media_file_id, album_id) "
+                            "JOIN tracks t ON t.id = v.track_id "
+                            "LEFT JOIN media_files mf ON mf.id = v.media_file_id "
+                            "LEFT JOIN albums al ON al.id = v.album_id",
                             [(active["id"], i, tid, mid, aid)
                              for i, (tid, mid, aid) in enumerate(snapshot)],
+                            template="(%s::uuid, %s, %s::uuid, %s::int, %s::uuid)",
                         )
                         title, subtitle, cover_id, cover_url = _compute_session_card(
                             cur, active, snapshot,

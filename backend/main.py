@@ -407,6 +407,11 @@ async def lifespan(app: FastAPI):
     from playback.manager import manager as playback_manager
     playback_manager.init_from_settings()
 
+    # Re-bind queued slots whose file leaves the library (the media_files
+    # delete trigger NOTIFYs sautium_files_removed)
+    from playback.manager import start_files_listener, stop_files_listener
+    start_files_listener()
+
     # Start streaming-preview service (media proxy + provider registry).
     # No-op unless streaming_preview_enabled — costs nothing when off.
     try:
@@ -892,6 +897,7 @@ async def lifespan(app: FastAPI):
         _dht_service = None
 
     stop_status_poller()
+    stop_files_listener()
     stop_chat_listener()
     stop_sync_listener()
     stop_gear_research_worker()

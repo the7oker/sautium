@@ -561,8 +561,10 @@ implementation details live in the code, DB and git history.
   output switch keeps identities and re-reads each slot for the new
   output (`QueueItem.play`, `playback/substitute.py`) — a rip here, this
   HQPlayer's own copy, or a stream fetched a lead window ahead and landed
-  on the slot as it buffers; `source` never changes, so the way back to
-  the HQPlayer that opens it natively is free. The HQPlayer output takes
+  on the slot as it buffers; no switch touches `source`, so the way back to
+  the HQPlayer that opens it natively is free (only a file leaving the
+  library moves it, since 2026-09-30 — "A queued file that leaves the
+  library"). The HQPlayer output takes
   native copies only (HQPlayer fetches an http entry at add time, so an
   unbuffered stream cannot sit in its 1:1 mirror). The pure substitute
   test drives a fake proxy through the lead window; the copy resolution
@@ -1711,6 +1713,45 @@ track by track (a CUE image, an m4a set) extends its own run:
 `_phantom_insert_next` does for streams — before that only the first track
 went Next and the rest to the end, on every endpoint that offered Next for
 owned music. The Queue sheet's drag is the one caller `/reorder` has left.
+
+### A queued file that leaves the library (2026-09-30)
+
+An album moved from one folder to another; the Rescan imported the new
+path as a new `media_files` row and pruned the old one. The queue — one
+slot of that album, restored at boot from `player.queue` — still named the
+old row, and nothing told it otherwise. Now Playing asked for the file's
+detail and got a 404 (no key, BPM or quality, though the analysis was
+intact), the path no longer opened, and every Play from anywhere answered
+500: a destructive play archives the old queue first, and `session_tracks`
+refused the gone id on its foreign key. A restart would not have helped —
+the persisted queue carried the same id.
+
+A statement trigger on `media_files` DELETE NOTIFYs `sautium_files_removed`
+whenever rows went (migration 032), so every deleter announces itself — the
+prune, the CUE reconcile, a cascade, the CLI in another process — and the
+playback manager's listener re-binds (`PlaybackManager.rebind_files`, one
+SQL pass over the queue, `playback.queue.rebind_origins`): a slot whose row
+is gone takes the best live copy of its track, the album it was queued from
+first; with none left it becomes the track itself (`source` kind `track`,
+resolved per output like a copy held elsewhere — streamed, or unplayable on
+HQPlayer); a track that went with its file leaves the slot an inert foreign
+entry. A slot whose way in (`play`) named a gone file is re-read. The
+restore of a persisted queue runs the same pass, and so does every
+(re)connect of the listener. The output converges through
+`queue_changed("rebind")`: the engine, the browser and DLNA re-read their
+tail; HQPlayer re-appends the entries past the playing slot, and rebuilds
+around the position only when a changed entry lies at or before it (the
+protocol has no insert). The two writers of the queue's file id —
+the session snapshot and the listen — write each reference as its foreign
+key keeps it, which covers the moment between the delete's commit and the
+re-bind. The missing length was the view's: a stopped HQPlayer Desktop
+reports track 0 and length 0, so Now Playing shows the queue head
+(`withQueueFallback`, player.js), which carried every field of it but the
+length; it carries the length and the track id now.
+
+Lesson: a queue that persists bindings to rows must hear when those rows
+go. `source` "never changes" was right for an output switch and wrong for
+the library under it.
 
 ## Known Gotchas
 

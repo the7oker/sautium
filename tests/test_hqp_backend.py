@@ -429,3 +429,102 @@ def test_adopt_resolves_a_held_file_by_its_path(fake, monkeypatch):
         assert not [c for c, _ in fake.commands if c == "PlaylistAdd"]
     finally:
         b.shutdown()
+
+
+# -- a file that left the library under the mirrored queue ----------------------
+#
+# PlaybackManager.rebind_files re-binds the slot in the canonical queue and
+# tells the output; HQPlayer's playlist still names the gone path. The backend
+# is mirrored by hand and never started: a PLAYING fake would otherwise feed
+# the manager's tracker from the poller.
+
+def _mirrored(mgr):
+    b = HqpBackend(emit=lambda *_: None, queue=mgr.queue)
+    assert b.queue_replace(mgr.queue.snapshot(), play=False) == len(mgr.queue)
+    return b
+
+
+def _move(mgr, slot, path, mfid):
+    """What rebind_files leaves on a slot whose file moved: re-bound in place."""
+    moved = mgr.queue.rebind(
+        lambda items: [{"media_file_id": mfid,
+                        "source": {"kind": "file", "path": path, "format": "FLAC"}}
+                       if i == slot else None for i, _ in enumerate(items, start=1)],
+        None)
+    assert len(moved) == 1
+
+
+def _album(n):
+    mgr = PlaybackManager()
+    mgr.queue.replace([_item(f"E:/Music/A/0{i}.flac", i) for i in range(1, n + 1)])
+    return mgr
+
+
+def test_a_rebind_while_stopped_remirrors_and_resumes_at_the_slot(fake):
+    mgr = _album(3)
+    b = _mirrored(mgr)
+    fake.track = 2                                  # stopped on slot 2
+    _move(mgr, 3, "E:/Music/B/03.flac", 30)
+    b.queue_changed("rebind")
+    assert fake.playlist == ["file:///E:/Music/A/01.flac", "file:///E:/Music/A/02.flac",
+                             "file:///E:/Music/B/03.flac"]
+    assert b._resume_index == 2 and b.healthy()
+
+
+def test_a_rebind_past_the_playing_slot_reappends_the_tail(fake):
+    mgr = _album(4)
+    b = _mirrored(mgr)
+    fake.state, fake.track = int(PlaybackState.PLAYING), 1
+    fake.commands.clear()
+    _move(mgr, 3, "E:/Music/B/03.flac", 30)
+    b.queue_changed("rebind")
+    assert fake.playlist == ["file:///E:/Music/A/01.flac", "file:///E:/Music/A/02.flac",
+                             "file:///E:/Music/B/03.flac", "file:///E:/Music/A/04.flac"]
+    sent = [c for c, _ in fake.commands]
+    assert "Stop" not in sent and "SelectTrack" not in sent   # the playing slot is never touched
+    assert [a["index"] for c, a in fake.commands if c == "PlaylistRemove"] == ["3", "3"]
+    assert (fake.state, fake.track) == (int(PlaybackState.PLAYING), 1)
+
+
+def test_a_rebind_before_the_playing_slot_rebuilds_around_it(fake):
+    mgr = _album(3)
+    b = _mirrored(mgr)
+    fake.state, fake.track = int(PlaybackState.PLAYING), 2
+    fake.commands.clear()
+    _move(mgr, 1, "E:/Music/B/01.flac", 10)
+    b.queue_changed("rebind")
+    assert fake.playlist == ["file:///E:/Music/B/01.flac", "file:///E:/Music/A/02.flac",
+                             "file:///E:/Music/A/03.flac"]
+    assert [(c, a) for c, a in fake.commands if c in ("Stop", "SelectTrack", "Play")] == [
+        ("Stop", {}), ("SelectTrack", {"index": "2"}), ("Play", {})]
+    assert (fake.state, fake.track) == (int(PlaybackState.PLAYING), 2)
+
+
+def test_a_rebind_at_the_paused_slot_resumes_it_on_the_play_press(fake):
+    mgr = _album(2)
+    b = _mirrored(mgr)
+    fake.state, fake.track = int(PlaybackState.PAUSED), 2
+    _move(mgr, 2, "E:/Music/B/02.flac", 20)
+    b.queue_changed("rebind")
+    assert fake.playlist == ["file:///E:/Music/A/01.flac", "file:///E:/Music/B/02.flac"]
+    assert fake.state == int(PlaybackState.STOPPED) and b._resume_index == 2
+
+
+def test_a_rebind_leaves_a_drifted_playlist_to_the_canary(fake):
+    mgr = _album(2)
+    b = _mirrored(mgr)
+    fake.playlist.append("file:///X:/foreign.flac")    # an edit in HQPlayer's own GUI
+    fake.commands.clear()
+    _move(mgr, 1, "E:/Music/B/01.flac", 10)
+    b.queue_changed("rebind")
+    assert [c for c, _ in fake.commands if c not in ("Status", "PlaylistGet")] == []
+    assert b.healthy()
+
+
+def test_a_rebind_hqplayer_cannot_follow_is_remirrored_on_the_next_play(fake):
+    mgr = _album(2)
+    b = _mirrored(mgr)
+    fake.close()
+    _move(mgr, 1, "E:/Music/B/01.flac", 10)
+    b.queue_changed("rebind")
+    assert not b.healthy()           # the play-intent gate re-attaches and re-mirrors

@@ -23,6 +23,10 @@ fetches an http entry at ADD time, so a stream it has not buffered cannot
 sit in that playlist: on that output only native copies are resolved, and a
 slot only a stream could serve (a file held at another HQPlayer with no rip
 here) stays unplayable there, named as such.
+
+A slot whose file left the library with no other copy here (`source` kind
+`track`, playback.queue.rebind_origins) has no copy of its own: every output
+resolves it as it resolves a copy held elsewhere.
 """
 
 import logging
@@ -30,9 +34,14 @@ import threading
 from typing import Callable, Optional
 
 from db_pool import db_query
+from playback.queue import file_source
 from sql_queries import best_rip_order, owned_rank
 
 logger = logging.getLogger(__name__)
+
+# The origins resolved against the track's copies: the rest (a stream, a
+# foreign uri) open as they are on every output.
+_BY_TRACK = ("file", "hqp", "track")
 
 # Slots ahead of the playhead whose streams are fetched before they are
 # reached — enough to absorb a provider's resolve and download at album
@@ -62,13 +71,7 @@ _COPIES_SQL = f"""
 
 
 def _file_play(r: dict) -> dict:
-    play = {"kind": "file", "path": r["file_path"], "format": r["file_format"],
-            "media_file_id": r["id"]}
-    if r["cue_start_seconds"] is not None:
-        play["cue_start"] = float(r["cue_start_seconds"])
-        play["cue_end"] = (float(r["cue_end_seconds"])
-                           if r["cue_end_seconds"] is not None else None)
-    return play
+    return {**file_source(r), "media_file_id": r["id"]}
 
 
 def native_plays(items: list, output_id: Optional[str],
@@ -79,7 +82,7 @@ def native_plays(items: list, output_id: Optional[str],
     foreign uris are as they are on every output; owned items are looked up
     once for the whole queue, every copy of every track in one query."""
     owned = [it for it in items
-             if it.track_id and it.source.get("kind") in ("file", "hqp")]
+             if it.track_id and it.source.get("kind") in _BY_TRACK]
     by_track: dict = {}
     if owned:
         for r in db_query(_COPIES_SQL, {"ids": sorted({it.track_id for it in owned}),
@@ -89,7 +92,7 @@ def native_plays(items: list, output_id: Optional[str],
     for it in items:
         src = it.source
         kind = src.get("kind")
-        if kind not in ("file", "hqp") or not it.track_id:
+        if kind not in _BY_TRACK or not it.track_id:
             out.append(None)
             continue
         rows = by_track.get(it.track_id, [])
@@ -109,7 +112,8 @@ def native_plays(items: list, output_id: Optional[str],
                 out.append(_file_play(local))
             else:
                 out.append({"kind": "unplayable",
-                            "reason": "held in another HQPlayer's library"})
+                            "reason": ("held in another HQPlayer's library" if kind == "hqp"
+                                       else "its file left the library")})
         else:
             if kind == "file":
                 out.append(None)

@@ -174,15 +174,22 @@
   // ONCE, here, where the status becomes the np-update every screen reads.
   // The mini-player used to patch this in privately, which is exactly why it
   // could show a track while Now Playing sat blank on the same status.
+  // The length as the server's status spells it (MM:SS): a stopped HQPlayer
+  // reports 0 for it, and the queue knows the track's.
+  const mmss = (s) => `${String(Math.floor(s / 60)).padStart(2, '0')}:`
+    + String(Math.floor(s % 60)).padStart(2, '0');
   function withQueueFallback(data) {
     if (data.state !== 'stopped' || data.song) return data;
     const first = (window.currentPlaylist || [])[0];
     if (!first) return data;
+    const length = first.duration_seconds || 0;
     return { ...data, song: first.title, artist: first.artist,
              album: first.album || '', cover_id: first.cover_id,
-             media_file_id: first.id, cover_url: first.cover_url,
+             media_file_id: first.id, track_id: first.track_id,
+             cover_url: first.cover_url,
              provider_cover_url: first.provider_cover_url,
-             excerpt: !!first.excerpt };
+             excerpt: !!first.excerpt,
+             length, length_formatted: mmss(length) };
   }
 
   async function processStatusEvent(data, seq) {

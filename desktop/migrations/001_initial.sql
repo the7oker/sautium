@@ -1493,6 +1493,28 @@ DO $$ BEGIN
     FOR EACH STATEMENT EXECUTE FUNCTION notify_listens_changed();
 EXCEPTION WHEN duplicate_object THEN NULL; END $$;
 
+-- The canonical play queue binds each owned slot to a media_files row, and a
+-- row deleted under it — a rescan pruning a moved or deleted file, a CUE
+-- image superseded, a track merge cascading — must not stay named there: its
+-- id is written into session_tracks and listening_history, its path opened by
+-- the output. Every deleter wakes the backend's listener, which re-binds such
+-- slots to a live copy of their track (backend/playback/manager.py,
+-- rebind_files). Per statement, and only when rows went.
+CREATE OR REPLACE FUNCTION notify_files_removed() RETURNS TRIGGER AS $$
+BEGIN
+    IF EXISTS (SELECT 1 FROM gone) THEN
+        PERFORM pg_notify('sautium_files_removed', '');
+    END IF;
+    RETURN NULL;
+END $$ LANGUAGE plpgsql;
+
+DO $$ BEGIN
+    CREATE TRIGGER trg_media_files_removed_notify
+    AFTER DELETE ON media_files
+    REFERENCING OLD TABLE AS gone
+    FOR EACH STATEMENT EXECUTE FUNCTION notify_files_removed();
+EXCEPTION WHEN duplicate_object THEN NULL; END $$;
+
 DO $$ BEGIN CREATE TRIGGER trg_covers_updated_at BEFORE UPDATE ON covers
     FOR EACH ROW EXECUTE FUNCTION update_updated_at_column();
 EXCEPTION WHEN duplicate_object THEN NULL; END $$;

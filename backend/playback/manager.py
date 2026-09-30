@@ -17,9 +17,14 @@ mutations so canonical and mirrored order can't interleave.
 """
 
 import logging
+import select
 import threading
+import time
 from dataclasses import asdict
 from typing import Callable, Optional
+
+import psycopg2
+import psycopg2.extensions
 
 from config import settings, ui_build
 from hqplayer_client import format_time
@@ -681,6 +686,43 @@ class PlaybackManager:
             self._schedule_persist()
             return result
 
+    def rebind_files(self) -> None:
+        """Re-bind every slot whose file left the library: it takes a live
+        copy of its track, or the track itself, and a slot whose way in named
+        a gone file is re-read for the active output (playback.queue.
+        rebind_origins). The media_files delete trigger wakes the files
+        listener below — a rescan's prune, a superseded CUE image, a cascade,
+        whichever process ran it — and the restore of a persisted queue calls
+        it once. A gone id left in a slot is written into session_tracks and
+        listening_history against their foreign keys (every Play died on the
+        archive of the old queue) and its path no longer opens. The output
+        converges through queue_changed("rebind"); the status is re-published
+        with the playing slot's new binding so Now Playing refetches."""
+        from playback.queue import rebind_origins
+        from playback.substitute import native_plays
+        with self._mutate_lock:
+            backend = self._active
+            plays = None
+            if backend is not None:
+                endpoint_id = getattr(backend, "endpoint_id", None)
+                plays = lambda items: native_plays(items, backend.id, endpoint_id)
+            moved = self.queue.rebind(rebind_origins, plays)
+            if not moved:
+                return
+            logger.info("%d queued slot(s) re-bound: their file left the library",
+                        len(moved))
+            if backend is not None:
+                backend.queue_changed("rebind")
+            self._schedule_persist()
+            status = self._latest_status
+            if status.get("state") not in (None, "disconnected"):
+                update = {"playlist_version": self.queue.version}
+                item = self.queue.item_at(status.get("track_index"))
+                if item is not None:
+                    update.update(media_file_id=item.media_file_id,
+                                  track_id=item.track_id)
+                self._push_status({**status, **update})
+
     def jump(self, index: int) -> bool:
         # select() loads AND plays the slot (PlayerBackend contract). The
         # play() that used to follow raced the DLNA load: it resumed the
@@ -706,7 +748,10 @@ class PlaybackManager:
     # have no external keeper, so the canonical queue is snapshotted into
     # user_settings (debounced) and restored on boot — stopped, never
     # auto-playing. Proxy-backed items are skipped: their in-memory stream
-    # sessions die with the process and would restore as dead tokens.
+    # sessions die with the process and would restore as dead tokens. A slot
+    # whose file left the library (`track`) is kept: it names no session, and
+    # the attach resolves it again. The files named may leave the library
+    # while the queue sits in storage, so the restore re-binds it.
 
     def _schedule_persist(self) -> None:
         if self._persist_timer is not None:
@@ -720,7 +765,7 @@ class PlaybackManager:
         try:
             from routers.settings import _write
             items = [asdict(it) for it in self.queue.snapshot()
-                     if it.source.get("kind") == "file"]
+                     if it.source.get("kind") in ("file", "track")]
             _write("player.queue", {"items": items})
         except Exception as e:
             logger.warning("queue persist failed: %s", e)
@@ -737,9 +782,64 @@ class PlaybackManager:
             self.queue.replace(items)
             logger.info("restored %d queued tracks from the previous session",
                         len(items))
+            self.rebind_files()
 
 
 manager = PlaybackManager()
+
+_files_listener: Optional[threading.Thread] = None
+_files_listener_running = False
+
+
+def _files_removed_listener() -> None:
+    """Re-bind the queue on sautium_files_removed (the media_files delete
+    trigger). A burst — a CUE reconcile commits per image — folds into few
+    passes: whatever lands during one waits on the socket and is cleared
+    together. Every (re)connect re-binds too, since a NOTIFY only reaches a
+    live listener. Keepalives as in gear_research_worker: an idle socket
+    reaped without an RST would swallow every later NOTIFY."""
+    while _files_listener_running:
+        conn = None
+        try:
+            conn = psycopg2.connect(
+                settings.database_url,
+                keepalives=1, keepalives_idle=30,
+                keepalives_interval=10, keepalives_count=3,
+            )
+            conn.set_isolation_level(psycopg2.extensions.ISOLATION_LEVEL_AUTOCOMMIT)
+            with conn.cursor() as cur:
+                cur.execute("LISTEN sautium_files_removed")
+            manager.rebind_files()
+            while _files_listener_running:
+                if select.select([conn], [], [], 5)[0]:
+                    conn.poll()
+                    if conn.notifies:
+                        conn.notifies.clear()
+                        manager.rebind_files()
+        except (psycopg2.OperationalError, psycopg2.InterfaceError) as e:
+            logger.warning("queue files listener: %s — reconnecting", e)
+        except Exception:
+            logger.exception("queue re-bind failed")
+        finally:
+            if conn:
+                conn.close()
+        if _files_listener_running:
+            time.sleep(2)
+
+
+def start_files_listener() -> None:
+    global _files_listener, _files_listener_running
+    if _files_listener and _files_listener.is_alive():
+        return
+    _files_listener_running = True
+    _files_listener = threading.Thread(
+        target=_files_removed_listener, daemon=True, name="queue-files-listener")
+    _files_listener.start()
+
+
+def stop_files_listener() -> None:
+    global _files_listener_running
+    _files_listener_running = False
 
 
 def active_hqp_endpoint():

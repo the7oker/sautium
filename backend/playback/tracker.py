@@ -155,12 +155,17 @@ def _save_play_session(s: "_PlaySession") -> None:
         skipped = not s.scrobble_ready
         # Both ends from the one clock the start came from: an end stamped by
         # PostgreSQL's now() landed up to ~2 s before its own start on the master.
+        # The references as their foreign keys keep them — the row is written
+        # when the listen ends, after the fact: a file that left the library
+        # meanwhile is NULL (ON DELETE SET NULL), a track that did takes the
+        # listen with it (ON DELETE CASCADE).
         _db_execute(
             "INSERT INTO listening_history "
             "(media_file_id, track_id, started_at, ended_at, "
             " duration_listened, percent_listened, completed, skipped) "
-            "VALUES (%(mf)s, %(tid)s::uuid, %(start)s, %(end)s, "
-            "        %(dur)s, %(pct)s, %(comp)s, %(skip)s)",
+            "SELECT (SELECT mf.id FROM media_files mf WHERE mf.id = %(mf)s), t.id, "
+            "       %(start)s, %(end)s, %(dur)s, %(pct)s, %(comp)s, %(skip)s "
+            "FROM tracks t WHERE t.id = %(tid)s::uuid",
             {"mf": s.media_file_id, "tid": s.track_id, "start": s.started_at,
              "end": datetime.now(timezone.utc),
              "dur": s.max_position, "pct": s.percent_listened,
