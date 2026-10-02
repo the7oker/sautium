@@ -251,9 +251,10 @@ The backend is also reachable from phones/tablets on the same Wi-Fi at
 
 ### Desktop launcher (optional)
 
-> **Public beta (2026-09-21).** The Windows build is unsigned and the macOS
-> build ad-hoc signed, so both systems warn on first launch — the steps are
-> below. Downloads: https://sautium.net/download and
+> **Public beta (2026-09-21).** Since release 0.1.1 (2026-10-02) the macOS
+> DMGs — Apple Silicon and Intel — are signed with a Developer ID and
+> notarised; the Windows build is unsigned, so SmartScreen warns on first
+> launch. Downloads: https://sautium.net/download and
 > [GitHub Releases](https://github.com/the7oker/sautium/releases). An
 > installed app updates itself from `main`.
 
