@@ -32,6 +32,7 @@ the directory's (compilations, classical).
 """
 
 import argparse
+import functools
 import logging
 import os
 import re
@@ -245,7 +246,9 @@ def parse_library(xml_text: str) -> Tuple[List[Entry], Dict[str, int]]:
     return entries, counts
 
 
-_ENDPOINT_COLS = "id, name, host, port, product, hqp_name, library_hash, last_synced_at"
+_ENDPOINT_COLS = ("id, name, host, port, product, hqp_name, library_hash, last_synced_at, "
+                  "hqp_version, hqp_engine, hqp_platform, cuda, host_cpu, host_cores, "
+                  "host_gpu, host_ram_gb")
 
 
 _GENERIC_NAMES = ("", "hqplayer", "hqplayerembedded", "hqplayerdesktop")
@@ -310,6 +313,89 @@ def resolve_endpoint(host: str, port: int) -> Tuple[Optional[Dict[str, Any]], Op
     if rows:
         return dict(rows[0]), "library", facts
     return None, None, facts
+
+
+@functools.lru_cache(maxsize=1)
+def _this_machine() -> Dict[str, Any]:
+    """The machine this node runs on, as it sees it — in Docker the CPU and
+    GPU are the host's, the RAM what the VM was given."""
+    import hardware_profile
+    from desktop.p2p.identity_pow import cpu_label
+    hw = hardware_profile.resolve()
+    return {"cpu": cpu_label(), "cores": os.cpu_count(),
+            "gpu": hw.accel_name, "ram_gb": round(hw.ram_gb, 1) if hw.ram_gb else None}
+
+
+_CUDA_SETTING = {"0": "off", "1": "full"}
+
+
+def local_cuda() -> Tuple[bool, Optional[str]]:
+    """CUDA offload as this machine's HQPlayer saved it (<engine cuda="…"/>
+    in its settings.xml): (read, value). "1" is the fully checked box
+    (Desktop 6, observed 2026-10-02); the grayed state — convolution only —
+    has not been seen written, so a value other than 0 or 1 reads as not
+    known (None) rather than leaving an older answer standing. Not read at
+    all — no such file here, a data folder that is not mounted or not
+    readable, HQPlayer rewriting it this very moment — keeps what is
+    stored."""
+    from playback.hqp_diagnostics import local_log_dir
+    d = local_log_dir()
+    if d is None:
+        return False, None
+    path = d / "settings.xml"
+    try:
+        mtime = path.stat().st_mtime_ns
+    except OSError:               # absent, or a drvfs mount that dropped (ENODEV, EIO, ESTALE)
+        return False, None
+    return _read_cuda(str(path), mtime)
+
+
+@functools.lru_cache(maxsize=4)
+def _read_cuda(path: str, mtime: int) -> Tuple[bool, Optional[str]]:
+    """settings.xml read once per version of it (`mtime` keys the cache):
+    the HQPlayer screen asks on every open, the poller on every return."""
+    try:
+        node = ET.parse(path).getroot().find(".//engine")
+    except (OSError, ET.ParseError) as e:
+        logger.warning("HQPlayer's settings.xml not readable: %s", e)
+        return False, None
+    return True, _CUDA_SETTING.get(node.get("cuda")) if node is not None else None
+
+
+def note_info(endpoint_id: int, info: Dict[str, str], *, here: bool) -> None:
+    """Keep what HQPlayer last reported about itself on its row — on every
+    answered <GetInfo/>: the build (`engine`) is what DSP measurements are
+    valid for, and an update makes the old ones stale. For an HQPlayer on
+    this machine, the machine and the CUDA offload its settings hold — as
+    they hold it, a value not known included (local_cuda)."""
+    facts = {"id": endpoint_id, "version": info.get("version") or None,
+             "engine": info.get("engine") or None, "platform": info.get("platform") or None,
+             "cuda_read": False, "cuda": None, "cpu": None, "cores": None, "gpu": None,
+             "ram_gb": None}
+    if here:
+        cuda_read, cuda = local_cuda()
+        facts.update(_this_machine(), cuda_read=cuda_read, cuda=cuda)
+    db_execute("""
+        UPDATE hqp_endpoints
+           SET hqp_version = %(version)s, hqp_engine = %(engine)s, hqp_platform = %(platform)s,
+               cuda = CASE WHEN %(cuda_read)s THEN %(cuda)s::hqp_cuda ELSE cuda END,
+               host_cpu = COALESCE(%(cpu)s, host_cpu), host_cores = COALESCE(%(cores)s, host_cores),
+               host_gpu = COALESCE(%(gpu)s, host_gpu), host_ram_gb = COALESCE(%(ram_gb)s, host_ram_gb)
+         WHERE id = %(id)s
+           AND (hqp_version, hqp_engine, hqp_platform, cuda, host_cpu, host_cores, host_gpu, host_ram_gb)
+               IS DISTINCT FROM
+               (%(version)s, %(engine)s, %(platform)s,
+                CASE WHEN %(cuda_read)s THEN %(cuda)s::hqp_cuda ELSE cuda END,
+                COALESCE(%(cpu)s, host_cpu), COALESCE(%(cores)s::smallint, host_cores),
+                COALESCE(%(gpu)s, host_gpu), COALESCE(%(ram_gb)s::real, host_ram_gb))
+    """, facts)
+
+
+def set_cuda(endpoint_id: int, value: Optional[str]) -> None:
+    """The owner's answer about CUDA offload, for an HQPlayer whose settings
+    this node cannot read (another machine). None = not known."""
+    db_execute("UPDATE hqp_endpoints SET cuda = %(v)s::hqp_cuda WHERE id = %(id)s",
+               {"v": value, "id": endpoint_id})
 
 
 def is_embedded(product: Optional[str]) -> bool:

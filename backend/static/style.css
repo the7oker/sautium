@@ -4555,6 +4555,78 @@ a.am-kind { text-decoration: none; }
 .hqp-diag-row.is-failed .hqp-diag-verdict { color: var(--color-negative); }
 .hqp-row-hint.hqp-diag-empty { margin-top: calc(4 * var(--px)); }
 
+/* ---- How a setting runs on this HQPlayer (hqpHeadroomMark): the class
+   in the dot, the measured speed in mono — technical blue while it keeps
+   up, amber when tight, terracotta when it cannot. The Benchmark block's
+   results sheet lays the same marks out per axis. ---- */
+.hqp-hr {
+  display: inline-flex;
+  align-items: center;
+  gap: calc(4 * var(--px));
+  margin-left: calc(6 * var(--px));
+  font-family: var(--font-mono);
+  font-size: calc(11 * var(--px));
+  letter-spacing: 0.02em;
+  color: var(--color-blue);
+  white-space: nowrap;
+  vertical-align: middle;
+}
+.hqp-hr-dot {
+  width: calc(6 * var(--px));
+  height: calc(6 * var(--px));
+  border-radius: 50%;
+  flex: none;
+}
+.hqp-hr.is-ok .hqp-hr-dot { background: var(--color-positive); }
+.hqp-hr.is-tight { color: var(--color-amber); }
+.hqp-hr.is-tight .hqp-hr-dot { background: var(--color-amber); }
+.hqp-hr.is-no { color: var(--color-negative); }
+.hqp-hr.is-no .hqp-hr-dot { background: var(--color-negative); }
+.hqp-row-label .hqp-hr { margin-left: calc(4 * var(--px)); }
+/* While a benchmark holds HQPlayer its knobs wait. */
+.hqp-select:disabled,
+.hqp-row-tap:disabled,
+.hqp-vol-btn:disabled,
+.hqp-fav-chip:disabled { opacity: 0.45; cursor: default; }
+.hqp-bench-table {
+  width: 100%;
+  border-collapse: collapse;
+  margin: 0 0 calc(12 * var(--px));
+  font-size: calc(11.5 * var(--px));
+}
+.hqp-bench-table th,
+.hqp-bench-table td {
+  padding: calc(4 * var(--px)) calc(3 * var(--px));
+  border-bottom: 1px solid var(--color-divider);
+  text-align: right;
+  white-space: nowrap;
+}
+.hqp-bench-table thead th {
+  font-family: var(--font-mono);
+  font-weight: 400;
+  font-size: calc(10 * var(--px));
+  color: var(--color-text-dim);
+}
+.hqp-bench-table tbody th {
+  min-width: calc(96 * var(--px));
+  text-align: left;
+  font-weight: 400;
+  color: var(--color-text-muted);
+  white-space: normal;
+  overflow-wrap: break-word;
+}
+.hqp-bench-table .hqp-hr { margin-left: 0; gap: calc(3 * var(--px)); font-size: calc(10.5 * var(--px)); }
+.hqp-row-label.is-nowrap { white-space: nowrap; }
+.hqp-row-value.is-words { word-break: normal; }
+.hqp-bench-none { color: var(--color-text-dim); }
+.hqp-bench-drop { margin-left: calc(3 * var(--px)); color: var(--color-negative); }
+.hqp-bench-init {
+  display: block;
+  font-family: var(--font-mono);
+  font-size: calc(10 * var(--px));
+  color: var(--color-text-dim);
+}
+
 /* ---- HQPlayer filter picker (modal sheet) ---- */
 .hqp-sheet {
   position: fixed;

@@ -136,12 +136,16 @@ Controlled:
 - [auto] On this machine it is handed paths, anywhere else streams; nothing to configure — `playback/hqp_backend.py: _stream_mode`
 - [UI][CLI] Library import: an HQPlayer on another machine lists its library (`<LibraryGet/>`), which joins the catalogue as album variants; first import previewed, then sync, rescan, forget, cancel; re-synced when its hash moved — `hqp_library.py: sync`, `forget_missing`, `request_sync`; `POST /api/settings/library/hqp-sync`, `/hqp-rescan`, `/hqp-forget`, `/hqp-sync/cancel`
 - [auto] A playlist edited in HQPlayer itself is reported as external playback and nothing is tracked against it — `playback/hqp_backend.py: _check_drift`
+- [UI][API] Benchmark: muted test noise through the settings of the current mode that no listen or earlier run measured (the other mode on request), the owner's own setting first and last, the dropout boundary probed on a first run; the output lent for the run and everything put back — `playback/hqp_benchmark.py`; `GET`/`POST /api/hqplayer/benchmark`, `/benchmark/cancel`
+- [UI] CUDA offload of an HQPlayer on another machine, said once (one here is read from its settings) — `PUT /api/hqplayer/cuda`
 
 Read-only:
 
 - [UI][AI] Product, version, platform, engine, the lists of modes, filters, shapers and rates, the DSP speed factor — `GET /api/hqplayer/state`; `hqplayer_client.py: get_info`, `get_state`
 - [UI][API] Why a play did not play: every play intent on the HQPlayer output traced (what the slot was handed as, every command with HQPlayer's own answer, ten seconds of status, the media proxy's requests for that file) and judged — unreachable, played, too slow, another controller, a media-server error, never fetched, refused, not played; a toast, a "Why didn't it play?" tag on Now Playing, the HQPlayer screen's Diagnostics, the `hqplayer.failing` notice after three alike; HQPlayer's own log read on demand (a Desktop's file on this machine, an Embedded box's `/log` page) — `playback/hqp_diagnostics.py`; `GET /api/player/diagnostics/hqplayer`, `/{attempt_id}`, `/log`
 - [UI][AI] A refused DSP change or command quoted in HQPlayer's own words — `hqplayer_client.py: HQPlayerClient.refusal`, `last_errors`; `POST /api/hqplayer/config` (`failed`)
+- [auto] DSP samples: every listen leaves HQPlayer's processing speed for what it runs, keyed by build, setting and source, with a rollup per key — `playback/hqp_load.py: Sampler`, `write`
+- [UI] How each filter, modulator and rate runs on this HQPlayer, as a mark in its picker (ok / tight / too slow, the speed, never a guess) — `GET /api/hqplayer/state?dsp=1` (`headroom`); `playback/hqp_load.py: headroom`
 
 Not implemented — searched over `backend desktop mcp`, only the definitions match:
 

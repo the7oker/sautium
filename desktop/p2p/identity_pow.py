@@ -188,14 +188,37 @@ def _peak_rss_mib() -> Optional[float]:
             return None
 
 
-def _cpu_label() -> str:
-    try:
-        with open("/proc/cpuinfo") as f:
-            for line in f:
-                if line.startswith("model name"):
-                    return line.split(":", 1)[1].strip()
-    except OSError:
-        pass
+def cpu_label() -> str:
+    """The CPU's model name, where each OS keeps it: /proc/cpuinfo (a Docker
+    node reads the host's), the registry on Windows, sysctl on macOS.
+    platform.processor() is the last resort — on Windows it is a family
+    code ("Intel64 Family 6 Model 183 …"), not a name."""
+    import sys
+    if sys.platform == "win32":
+        try:
+            import winreg
+            with winreg.OpenKey(winreg.HKEY_LOCAL_MACHINE,
+                                r"HARDWARE\DESCRIPTION\System\CentralProcessor\0") as key:
+                return str(winreg.QueryValueEx(key, "ProcessorNameString")[0]).strip()
+        except OSError:
+            pass
+    elif sys.platform == "darwin":
+        import subprocess
+        try:
+            out = subprocess.run(["sysctl", "-n", "machdep.cpu.brand_string"],
+                                 capture_output=True, text=True, timeout=5)
+            if out.returncode == 0 and out.stdout.strip():
+                return out.stdout.strip()
+        except (OSError, subprocess.SubprocessError):
+            pass
+    else:
+        try:
+            with open("/proc/cpuinfo") as f:
+                for line in f:
+                    if line.startswith("model name"):
+                        return line.split(":", 1)[1].strip()
+        except OSError:
+            pass
     import platform
     return platform.processor() or platform.machine()
 
@@ -256,7 +279,7 @@ def _difficulty_table(seconds_per_call: float) -> None:
 
 def _bench(repeats: int) -> None:
     challenge = os.urandom(64)
-    print(f"identity_pow bench — {_cpu_label()}, {os.cpu_count()} threads, "
+    print(f"identity_pow bench — {cpu_label()}, {os.cpu_count()} threads, "
           f"MemAvailable "
           f"{(mem_available_kib() or 0) // 1024} MiB")
     print(f"  {'warm-up (64 MiB)':<28} {_time_call(PowParams(0, 64 * 1024, 1, 1), challenge):.3f}s")

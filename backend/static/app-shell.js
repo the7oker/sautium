@@ -6251,6 +6251,14 @@
       await reportOutputUnavailable(detail);
       return false;
     }
+    // 409 while the benchmark has HQPlayer: the output is busy, not broken —
+    // the way out is the run's Cancel on the HQPlayer screen, not the picker.
+    if (resp && resp.status === 409 && window.currentStatus && window.currentStatus.hold) {
+      notices.toast({ kind: 'info', key: 'player.held', title: 'HQPlayer is being measured',
+                      text: escapeProfileHtml(detail),
+                      action: { label: 'HQPlayer', run: () => navigate('more/hqplayer') } });
+      return false;
+    }
     // Past the 503 the audio output is not implicated: a thrown fetch (resp
     // null) is the browser's link to the node — a phone tab thawing after
     // sleep loses its first tap that way — and any other status is the
@@ -8676,6 +8684,247 @@
       </section>`;
   }
 
+  // How a setting runs on this HQPlayer, measured (playback.hqp_load): a dot
+  // in its class's colour and the speed in mono — on every picker entry
+  // measured here; on a knob only when its setting is tight or too slow.
+  // An entry never measured is unmarked: nothing is guessed. "~" = the
+  // benchmark's readings did not settle within 15 s.
+  function hqpHeadroomMark(entry, { onlyShort = false } = {}) {
+    if (!entry || (onlyShort && entry.class === 'ok')) return '';
+    const n = entry.n || 0;
+    const title = `Runs at ${entry.speed.toFixed(2)}× on this HQPlayer (${n} sample${n === 1 ? '' : 's'})`
+      + (entry.settled ? '' : ' — the readings did not settle within 15 s');
+    return `<span class="hqp-hr is-${entry.class}" title="${escapeHtml(title)}"><span class="hqp-hr-dot"></span>${
+      entry.settled ? '' : '~'}${entry.speed.toFixed(1)}×</span>`;
+  }
+
+  const HQP_CUDA = { full: 'Filters and convolution', convolution: 'Convolution only', off: 'Off' };
+
+  // What forgetting an HQPlayer also takes: the DSP load measured on it is
+  // that box's, and goes with its row.
+  function hqpMeasuredGone(measured) {
+    return measured ? `, and with it the DSP load measured on it (${measured} setting${measured === 1 ? '' : 's'})` : '';
+  }
+  const HQP_BENCH_OUTCOME = { done: 'finished', cancelled: 'was cancelled', failed: 'failed',
+                              interrupted: 'was cut short' };
+
+  function fmtAbout(seconds) {
+    const m = Math.max(1, Math.round((seconds || 0) / 60));
+    return m < 60 ? `about ${m} min` : `about ${Math.floor(m / 60)} h ${m % 60} min`;
+  }
+
+  // The run's progress as the player status carries it (hold.progress):
+  // the point, what it measures, the time left.
+  function hqpBenchProgress(hold) {
+    const p = (hold && hold.progress) || {};
+    if (!p.point || !p.total) return p.point_label || 'Preparing…';
+    return `Point ${p.point} of ${p.total} · ${p.point_label}`
+      + (p.eta_s != null ? ` · ${fmtAbout(p.eta_s)} left` : '');
+  }
+
+  // The Benchmark block: what this HQPlayer keeps up with is measured
+  // (listens leave samples; a run plays muted test noise through the
+  // settings no sample covers yet), shown as the pickers' headroom marks.
+  // While HQPlayer does not answer (a heavy point can hold its control port)
+  // the block keeps the run's progress and its Cancel.
+  function hqpBenchmarkBlock(s) {
+    const b = s.benchmark;
+    if (!b) return '';
+    const job = b.job || {};
+    const run = b.last_run;
+    const est = b.estimate;
+    const hold = window.currentStatus && window.currentStatus.hold;
+    const lastRun = run
+      ? new Date(run.started_at).toLocaleDateString([], { day: 'numeric', month: 'short' })
+      : 'Never';
+    const lastRunFacts = run
+      ? `${escapeHtml(run.hqp_engine)} · ${run.points_measured} points${
+          run.seconds != null ? ' · ' + fmtAbout(run.seconds).replace('about ', '') : ''}`
+      : '';
+    let hint;
+    if (job.running) {
+      hint = escapeHtml(hqpBenchProgress(hold));
+    } else if (!s.connected) {
+      hint = 'HQPlayer is not answering — a run can start once it does.';
+    } else if (est && est.points <= 2) {
+      hint = `Every ${escapeHtml(est.mode)} setting is measured on this HQPlayer — a run only checks your own setting again.`;
+    } else if (est) {
+      hint = `Plays test noise${b.volume_control ? " at HQPlayer's lowest volume" : ''} through the ${est.points} ${escapeHtml(est.mode)} settings not measured here yet — ${fmtAbout(est.seconds)}.`;
+    } else {
+      hint = 'HQPlayer\'s mode follows the source here ([source]): measure PCM or SDM with a button above.';
+    }
+    // How the last attempt ended: a job that never opened a run (it could
+    // not start) says so itself; a run says its outcome and its note.
+    const jobOnly = !job.running && job.outcome
+      && (!run || Date.parse(run.started_at) / 1000 < job.started_at - 1);
+    if (jobOnly) {
+      hint = `The benchmark did not run${job.note ? ': ' + escapeHtml(job.note) : ''}. ` + hint;
+    } else if (!job.running && run && !run.outcome) {
+      hint = 'The last run was cut short — HQPlayer\'s settings are put back when it answers again. ' + hint;
+    } else if (!job.running && run && HQP_BENCH_OUTCOME[run.outcome] && (run.outcome !== 'done' || run.note)) {
+      hint = `The last run ${HQP_BENCH_OUTCOME[run.outcome]}${run.note ? ': ' + escapeHtml(run.note) : ''}. ` + hint;
+    }
+    const cuda = !('cuda_read' in b) ? ''
+      : b.cuda_read
+        ? `<span class="hqp-row-value">${escapeHtml(HQP_CUDA[b.cuda] || 'Not known')}</span>`
+        : `<button class="hqp-select" type="button" data-action="bench-cuda"${job.running ? ' disabled' : ''}>${
+            escapeHtml(HQP_CUDA[b.cuda] || 'Not known')}</button>`;
+    // "Intel(R) Core(TM) i9-14900HX" → "i9-14900HX": the model, as a spec sheet names it
+    const model = (name) => (name || '').replace(/\((R|TM)\)/g, '')
+      .replace(/\b(Intel|AMD|NVIDIA|GeForce|Core|CPU|GPU|Processor)\b/g, '').replace(/\s+/g, ' ').trim();
+    const host = b.host && (b.host.cpu || b.host.gpu)
+      ? `<div class="hqp-row"><span class="hqp-row-label is-nowrap">This computer</span>
+           <span class="hqp-row-value is-words">${escapeHtml([model(b.host.cpu), model(b.host.gpu)].filter(Boolean).join(' · '))}</span></div>`
+      : '';
+    const chips = job.running
+      ? `<button type="button" class="hqp-chip-btn is-danger" data-action="bench-cancel" ${job.cancel_requested ? 'disabled' : ''}><span>${job.cancel_requested ? 'Cancelling…' : 'Cancel'}</span></button>`
+      : !s.connected ? ''
+      : `${est ? `<button type="button" class="hqp-chip-btn" data-action="bench-run"><span>${run && run.stale ? 'Re-run' : 'Run benchmark'}</span></button>` : ''}
+         ${(b.other_modes || []).map(m => `<button type="button" class="hqp-chip-btn" data-action="bench-other" data-mode="${escapeHtml(m)}"><span>Measure ${escapeHtml(m.toUpperCase())}</span></button>`).join('')}
+         ${run ? '<button type="button" class="hqp-chip-btn" data-action="bench-results"><span>Results</span></button>' : ''}`;
+    return `
+      <section class="hqp-section" data-hqp-bench>
+        <div class="hqp-section-label">Benchmark</div>
+        <div class="hqp-row"><span class="hqp-row-label">Last run</span>
+          <span class="hqp-row-value mono">${lastRun}</span></div>
+        ${lastRunFacts ? `<p class="hqp-row-hint">${lastRunFacts}</p>` : ''}
+        ${run && run.stale ? `<p class="hqp-row-hint is-left">HQPlayer is now ${escapeHtml(s.info && s.info.engine || '')} — these results are for ${escapeHtml(run.hqp_engine)}.</p>` : ''}
+        ${cuda ? `<div class="hqp-row"><span class="hqp-row-label is-nowrap">CUDA offload</span>${cuda}</div>` : ''}
+        ${host}
+        ${chips.trim() ? `<div class="hqp-fav-strip">${chips}</div>` : ''}
+        <p class="hqp-row-hint is-left" data-hqp-bench-hint>${hint}</p>
+      </section>`;
+  }
+
+  async function runHqpBenchmark(s, mode) {
+    const b = s.benchmark || {};
+    const est = !mode && b.estimate;
+    const what = mode ? `its ${mode.toUpperCase()} settings — HQPlayer switches to ${mode.toUpperCase()} and back`
+      : `the ${est ? est.points + ' ' : ''}${escapeHtml(est ? est.mode : '')} settings not measured here yet`;
+    const lines = [
+      `Sautium stops playback and plays test noise through ${escapeProfileHtml(s.label || 'HQPlayer')}${
+        b.volume_control ? ' at its lowest volume' : ''}${est ? ' for ' + fmtAbout(est.seconds) : ''}, through ${what}.`,
+      'The DAC may click its relays when the rate changes. Your queue comes back when it is done.',
+    ];
+    if (!b.volume_control) lines.push('<b>HQPlayer cannot turn the noise down below your level on this output — turn your amplifier down first.</b>');
+    if (!b.cuda) lines.push('CUDA offload is not known for this HQPlayer: what is measured now is kept apart from runs after you set it.');
+    const ok = await window.confirmDestructive({
+      title: 'Run the benchmark?', message: lines.join('<br><br>'),
+      confirmText: 'Run', confirmKind: 'primary',
+    });
+    if (!ok) return;
+    let r, out;
+    try {
+      r = await fetch('/api/hqplayer/benchmark', {
+        method: 'POST', headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({ mode: mode || null, fixed_volume_ok: !b.volume_control }),
+      });
+      out = await r.json();
+    } catch (err) {
+      notices.toast({ kind: 'error', key: 'hqp.bench', title: 'The benchmark did not start',
+                      text: 'The node is not answering right now.' });
+      return;
+    }
+    if (!r.ok) {
+      notices.toast({ kind: 'error', key: 'hqp.bench', title: 'The benchmark did not start',
+                      text: escapeProfileHtml(out.detail || `HTTP ${r.status}`) });
+    }
+  }
+
+  // The results sheet: every key measured in the current context, laid out
+  // per axis — modulators across the rates at the current filter, filters
+  // at the current modulator (dither) — with the class colours.
+  function hqpBenchCell(row) {
+    if (!row) return '<td class="hqp-bench-none">—</td>';
+    if (row.class === 'refused') return '<td class="hqp-bench-none" title="HQPlayer refuses this combination">⊘</td>';
+    const settled = row.bench_settled !== false;
+    const title = `${row.speed.toFixed(2)}× (${row.n} sample${row.n === 1 ? '' : 's'})`
+      + (settled ? '' : ' — did not settle') + (row.dropout ? ' — dropped out' : '');
+    return `<td title="${escapeHtml(title)}"><span class="hqp-hr is-${row.class}"><span class="hqp-hr-dot"></span>${
+      settled ? '' : '~'}${row.speed.toFixed(1)}</span>${row.dropout ? '<span class="hqp-bench-drop">✕</span>' : ''}</td>`;
+  }
+
+  // A table header's rate: fmtRateLabel's name, squeezed — "705.6k" in PCM,
+  // "×256" at the DSD rates of the 44.1k family ("48k×64" for the others).
+  // An asked automatic rate (a refused combination) is "auto".
+  function hqpRateShort(hz) {
+    if (!hz) return 'auto';
+    return fmtRateLabel(hz).replace(' kHz', 'k').replace(' MHz', 'M')
+      .replace(/^44\.1k × /, '×').replace(' × ', '×');
+  }
+
+  // Columns are keyed "rate" or "rate|source rate", ordered by those numbers.
+  function hqpBenchTable(title, rows, rowKey, colKey, colLabel, extra) {
+    if (!rows.length) return '';
+    const num = (k) => k.split('|').map(Number);
+    const cols = [...new Set(rows.map(colKey))].sort((a, b) => {
+      const [a1, a2 = 0] = num(a), [b1, b2 = 0] = num(b);
+      return a1 - b1 || a2 - b2;
+    });
+    const names = [...new Set(rows.map(rowKey))];
+    const cell = new Map(rows.map(r => [rowKey(r) + '\u0000' + colKey(r), r]));
+    return `
+      <div class="hqp-diag-label">${escapeHtml(title)}</div>
+      <table class="hqp-bench-table">
+        <thead><tr><th></th>${cols.map(c => `<th>${escapeHtml(colLabel(c))}</th>`).join('')}</tr></thead>
+        <tbody>${names.map(n => `<tr><th>${escapeHtml(n)}${extra ? extra(n) : ''}</th>${
+          cols.map(c => hqpBenchCell(cell.get(n + '\u0000' + c))).join('')}</tr>`).join('')}</tbody>
+      </table>`;
+  }
+
+  async function openHqpBenchResults() {
+    let b;
+    try {
+      const r = await fetch('/api/hqplayer/benchmark', { cache: 'no-store' });
+      if (!r.ok) throw new Error('HTTP ' + r.status);
+      b = await r.json();
+    } catch (err) {
+      notices.toast({ kind: 'error', key: 'hqp.bench', title: 'Results unavailable',
+                      text: 'HQPlayer or the node is not answering right now.' });
+      return;
+    }
+    const ctx = b.context || {};
+    const cur = b.current || {};
+    const th = b.thresholds || {};
+    const rows = b.rows || [];
+    const sdm = /SDM|DSD/i.test(ctx.mode || '');
+    const rate = (hz) => fmtRateLabel(hz);
+    const init = new Map(rows.filter(r => r.init_s >= 1 && r.shaper === cur.shaper)
+                             .map(r => [r.filter, r.init_s]));
+    const initOf = n => init.has(n) ? `<span class="hqp-bench-init">init ${init.get(n).toFixed(1)} s</span>` : '';
+    const sources = [...new Set(rows.map(r => r.src_rate))].sort((a, b) => a - b);
+    const tables = (sdm
+      ? [hqpBenchTable(`Modulators · ${cur.filter || ''} · 44.1 kHz source`,
+                       rows.filter(r => r.filter === cur.filter && r.src_rate === 44100),
+                       r => r.shaper, r => String(r.rate_out), k => hqpRateShort(Number(k))),
+         hqpBenchTable(`Filters · ${cur.shaper || ''} · ${rate(cur.rate_out)}`,
+                       rows.filter(r => r.shaper === cur.shaper && r.rate_out === cur.rate_out),
+                       r => r.filter, r => String(r.src_rate), k => `${hqpRateShort(Number(k))} src`, initOf)]
+      : sources.map(src => hqpBenchTable(`Filters · ${cur.shaper || ''} · ${rate(src)} source`,
+                                         rows.filter(r => r.shaper === cur.shaper && r.src_rate === src),
+                                         r => r.filter, r => String(r.rate_out),
+                                         k => hqpRateShort(Number(k)), initOf))
+    ).join('');
+    const stale = b.last_run && b.last_run.stale;
+    const { el, close } = openModal(`
+      <div class="confirm-sheet hqp-diag hqp-bench">
+        <h2 class="confirm-title">What this HQPlayer keeps up with</h2>
+        <p class="confirm-message">${escapeHtml([ctx.mode, ctx.engine, ctx.cuda ? 'CUDA ' + (HQP_CUDA[ctx.cuda] || ctx.cuda).toLowerCase() : null,
+          ctx.matrix_profile ? 'matrix ' + ctx.matrix_profile : null, ctx.convolution ? 'convolution on' : null].filter(Boolean).join(' · '))}</p>
+        ${stale ? `<p class="hqp-diag-next">HQPlayer has been updated since: these are ${escapeHtml(ctx.engine || '')}'s results.</p>` : ''}
+        ${tables || '<p class="hqp-diag-note">Nothing measured in this context yet.</p>'}
+        <p class="hqp-diag-note"><span class="hqp-hr is-ok"><span class="hqp-hr-dot"></span></span> from ${th.ok}× ·
+          <span class="hqp-hr is-tight"><span class="hqp-hr-dot"></span></span> tight ·
+          <span class="hqp-hr is-no"><span class="hqp-hr-dot"></span></span> under ${th.no}×${
+          th.dropout_speed ? ` (it dropped out at ${th.dropout_speed.toFixed(2)}× here)` : ''} · ~ did not settle · ✕ dropped out · ⊘ refused by HQPlayer</p>
+        <div class="confirm-actions single">
+          <button class="profile-btn primary" type="button" data-close>Close</button>
+        </div>
+      </div>`, () => {}, null);
+    el.querySelector('[data-close]').addEventListener('click', () => close());
+    el.querySelector('[data-close]').focus();
+  }
+
   // Every DSP change from the HQPlayer screen goes through here. HQPlayer
   // can refuse one (a filter its current mode cannot run, a profile that is
   // gone) and says why: the route returns `failed` in its words, toasted —
@@ -8735,6 +8984,10 @@
     // A play judged failed while this screen is open joins its Diagnostics
     // list — the status event that carries it is the signal, no polling.
     let shownDiagnosis = (window.currentStatus && window.currentStatus.diagnosis || {}).id;
+    // A benchmark run lends HQPlayer away: its progress rides the player
+    // status (`hold`) into the Benchmark hint, and the screen reloads when
+    // the output comes back.
+    let shownHold = !!(window.currentStatus && window.currentStatus.hold);
     const detachDiag = () => {
       document.removeEventListener('np-update', onDiagnosis);
       window.removeEventListener('sautium:route', onRoute);
@@ -8743,6 +8996,12 @@
       if (!document.contains(screen)) return detachDiag();
       const d = e.detail && e.detail.diagnosis;
       if (d && d.id !== shownDiagnosis) { shownDiagnosis = d.id; load(); }
+      const hold = e.detail && e.detail.hold;
+      if (hold) {
+        const hint = screen.querySelector('[data-hqp-bench-hint]');
+        if (hint) hint.textContent = hqpBenchProgress(hold);
+      }
+      if (!!hold !== shownHold) { shownHold = !!hold; load(); }
     };
     const onRoute = () => { if (!document.contains(screen)) detachDiag(); };
     document.addEventListener('np-update', onDiagnosis);
@@ -8770,7 +9029,7 @@
         // backend just resolved — without it Chrome serves a stale GET
         // after a PUT /api/settings/hqplayer reconfig, and the UI
         // keeps saying "connected" even when the socket is gone.
-        const r = await fetch('/api/hqplayer/state', { cache: 'no-store' });
+        const r = await fetch('/api/hqplayer/state?dsp=1', { cache: 'no-store' });
         if (!r.ok) throw new Error('HTTP ' + r.status);
         s = await r.json();
       } catch (err) {
@@ -8793,6 +9052,16 @@
       const filterDescription = (activeFilter && activeFilter.description) || '';
       const shaperName = shaperNameFromIndex(st.shaper, s.shapers);
       const matrixActive = st.matrix_profile || '';
+      // How each entry runs here (hqpHeadroomMark); while a benchmark holds
+      // HQPlayer every knob waits for it.
+      const hr = s.headroom || {};
+      const held = !!(s.benchmark && s.benchmark.job && s.benchmark.job.running);
+      const currentRateHz = ((s.rates || []).find(r => r.index === st.rate) || {}).rate || st.active_rate;
+      const shortMark = {
+        shaper: hqpHeadroomMark((hr.shapers || {})[shaperName], { onlyShort: true }),
+        rate: hqpHeadroomMark((hr.rates || {})[String(currentRateHz)], { onlyShort: true }),
+        filter: hqpHeadroomMark((hr.filters || {})[filterName], { onlyShort: true }),
+      };
       const profiles = s.matrix_profiles || [];
       const favourites = s.favorite_filters || [];
       // process_speed is HQPlayer's realtime DSP factor, delivered on the
@@ -8858,16 +9127,18 @@
         mode: { title: 'Mode', current: st.mode,
                 options: (s.modes || []).map(m => ({ id: m.index, label: m.name })) },
         rate: { title: 'Rate', current: st.rate,
-                options: (s.rates || []).map(r => ({ id: r.index, label: r.rate ? fmtRateLabel(r.rate) : 'Auto' })) },
+                options: (s.rates || []).map(r => ({ id: r.index, label: r.rate ? fmtRateLabel(r.rate) : 'Auto',
+                                                     meta: r.rate ? hqpHeadroomMark((hr.rates || {})[String(r.rate)]) : '' })) },
         shaper: { title: shaperLabel, current: st.shaper,
-                  options: (s.shapers || []).map(sh => ({ id: sh.index, label: sh.name })) },
+                  options: (s.shapers || []).map(sh => ({ id: sh.index, label: sh.name,
+                                                          meta: hqpHeadroomMark((hr.shapers || {})[sh.name]) })) },
         matrix_profile: { title: 'Matrix profile', current: matrixActive,
                           options: profiles.map(p => ({ id: p, label: p })) },
       };
       const knobTrigger = (knob, id) => {
         const k = knobs[knob];
         const cur = k.options.find(o => String(o.id) === String(k.current));
-        return `<button class="hqp-select" type="button" id="${id}" data-knob="${knob}">${
+        return `<button class="hqp-select" type="button" id="${id}" data-knob="${knob}"${held ? ' disabled' : ''}>${
           escapeHtml(cur ? cur.label : (knob === 'matrix_profile' ? '(none)' : '—'))}</button>`;
       };
 
@@ -8888,7 +9159,8 @@
             const available = availableNames.has(name);
             return `<button type="button" class="hqp-fav-chip${
               isCurrent ? ' is-current' : ''}${available ? '' : ' is-unavailable'}"${
-              available ? '' : ' title="Not available in the current output mode/rate"'} data-fav="${escapeHtml(name)}">
+              available ? '' : ' title="Not available in the current output mode/rate"'}${
+              held ? ' disabled' : ''} data-fav="${escapeHtml(name)}">
               <span class="hqp-fav-star">★</span>
               <span class="hqp-fav-name">${escapeHtml(name)}</span>
             </button>`;
@@ -8947,7 +9219,7 @@
             ${knobTrigger('mode', 'hqpMode')}
           </div>
           <div class="hqp-row">
-            <span class="hqp-row-label">Rate</span>
+            <span class="hqp-row-label">Rate ${shortMark.rate}</span>
             ${showRateDropdown
               ? knobTrigger('rate', 'hqpRate')
               : `<span class="hqp-row-value mono">${escapeHtml(activeRateLabel)}</span>`}
@@ -8955,9 +9227,9 @@
           <div class="hqp-row hqp-volume-row">
             <span class="hqp-row-label">Volume</span>
             <div class="hqp-volume-ctrl">
-              <button class="hqp-vol-btn" type="button" data-vol="-1" aria-label="Volume -1 dB">−</button>
+              <button class="hqp-vol-btn" type="button" data-vol="-1" aria-label="Volume -1 dB"${held ? ' disabled' : ''}>−</button>
               <span class="hqp-vol-value mono">${fmtVolume(Number(st.volume) || 0)}</span>
-              <button class="hqp-vol-btn" type="button" data-vol="+1" aria-label="Volume +1 dB">+</button>
+              <button class="hqp-vol-btn" type="button" data-vol="+1" aria-label="Volume +1 dB"${held ? ' disabled' : ''}>+</button>
             </div>
           </div>
           ${processSpeed > 0 ? `
@@ -8969,8 +9241,8 @@
 
         <section class="hqp-section">
           <div class="hqp-section-label">Filter</div>
-          <button class="hqp-row hqp-row-tap" type="button" data-action="open-filter">
-            <span class="hqp-row-label">Active</span>
+          <button class="hqp-row hqp-row-tap" type="button" data-action="open-filter"${held ? ' disabled' : ''}>
+            <span class="hqp-row-label">Active ${shortMark.filter}</span>
             <span class="hqp-row-value">${escapeHtml(filterName)}</span>
             <svg width="18" height="18" viewBox="0 0 24 24" fill="none"
                  stroke="currentColor" stroke-width="1.6"
@@ -8983,7 +9255,7 @@
             : ''}
           ${favouritesStrip}
           <div class="hqp-row">
-            <label class="hqp-row-label" for="hqpShaper">${escapeHtml(shaperLabel)}</label>
+            <label class="hqp-row-label" for="hqpShaper">${escapeHtml(shaperLabel)} ${shortMark.shaper}</label>
             ${knobTrigger('shaper', 'hqpShaper')}
           </div>
         </section>
@@ -8997,6 +9269,7 @@
           </div>
         </section>
         ` : ''}
+        ${hqpBenchmarkBlock(s)}
         ${hqpDiagnosticsBlock(s.diagnostics)}
         ${libraryBlock}
       `;
@@ -9078,12 +9351,16 @@
         'forget-library': async () => {
           const ok = await window.confirmDestructive({
             title: `Forget the library of ${escapeProfileHtml(s.label || 'this HQPlayer')}?`,
-            message: 'Every album and track only its library put here goes. Analysis, listening history and your own files stay; an album stays wherever other files still hold it.',
+            message: 'Every album and track only its library put here goes' + hqpMeasuredGone(lib.measured)
+              + '. Analysis, listening history and your own files stay; an album stays wherever other files still hold it.',
             confirmText: 'Forget',
           });
           if (!ok) return;
           const r = await fetch('/api/settings/library/hqp-forget' + endpointQ, { method: 'POST' });
-          if (!r.ok) notices.toast({ key: 'hqp-forget', text: 'Could not forget the library — a library job is running.' });
+          if (!r.ok) {
+            const out = await r.json().catch(() => ({}));
+            notices.toast({ key: 'hqp-forget', text: escapeProfileHtml(out.detail || 'Could not forget the library.') });
+          }
         },
         'cancel-library': () => fetch('/api/settings/library/hqp-sync/cancel', { method: 'POST' }),
       };
@@ -9101,6 +9378,34 @@
           await postHqpConfig({filter: chosen.index, filter1x: chosen.index});
           await load();
         }));
+      });
+
+      const benchActions = {
+        'bench-run': () => runHqpBenchmark(s, null),
+        'bench-other': (el) => runHqpBenchmark(s, el.dataset.mode),
+        'bench-cancel': () => fetch('/api/hqplayer/benchmark/cancel', { method: 'POST' }),
+        'bench-results': () => openHqpBenchResults(),
+        'bench-cuda': async () => {
+          const picked = await openSettingsPicker({
+            title: 'CUDA offload',
+            options: [...Object.entries(HQP_CUDA).map(([id, label]) => ({ id, label })),
+                      { id: 'unknown', label: 'Not sure' }],
+            currentId: s.benchmark.cuda || 'unknown',
+          });
+          if (picked == null) return;
+          await fetch('/api/hqplayer/cuda', {
+            method: 'PUT', headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify({ value: picked === 'unknown' ? null : picked }),
+          });
+        },
+      };
+      Object.entries(benchActions).forEach(([action, fn]) => {
+        body.querySelectorAll(`[data-action="${action}"]`).forEach(el => {
+          el.addEventListener('click', () => onceInFlight(el, async () => {
+            await fn(el);
+            if (action !== 'bench-results') load();
+          }));
+        });
       });
     }
 
@@ -9134,6 +9439,7 @@
     const filters = state.filters || [];
     const favs = new Set(state.favorite_filters || []);
     const currentIdx = (state.state && state.state.filter) ?? -1;
+    const measured = (state.headroom && state.headroom.filters) || {};
     const search = sheet.querySelector('.hqp-sheet-search');
     const body = sheet.querySelector('#hqpSheetBody');
 
@@ -9170,6 +9476,7 @@
                 <span class="hqp-sheet-row-head">
                   ${r.index === currentIdx ? '<span class="hqp-sheet-dot"></span>' : ''}
                   ${escapeHtml(r.name)}
+                  ${hqpHeadroomMark(measured[r.name])}
                 </span>
                 ${r.description
                   ? `<span class="hqp-sheet-row-desc">${escapeHtml(r.description)}</span>`
@@ -11753,7 +12060,7 @@
               <div class="add-gear-result${current ? ' is-current' : ''}" data-pick="${escapeProfileHtml(String(o.id))}">
                 <div>
                   <div class="gear-line1">
-                    <span class="gear-model">${escapeProfileHtml(o.label)}</span>
+                    <span class="gear-model">${escapeProfileHtml(o.label)}</span>${o.meta || ''}
                   </div>
                 </div>
                 ${current ? `<span style="color:var(--color-amber);">${SETTINGS_ICONS.check}</span>` : `<span class="gear-chev">${SETTINGS_ICONS.rightCh}</span>`}
@@ -12661,6 +12968,7 @@
       const forget = h.known ? `
             <button data-action="remove-hqplayer" data-endpoint-id="${escapeProfileHtml(String(h.endpoint_id))}"
               data-name="${escapeProfileHtml(h.label || '')}" data-files="${escapeProfileHtml(String(h.files || 0))}"
+              data-measured="${escapeProfileHtml(String(h.measured || 0))}"
               style="background:none;border:none;color:var(--color-text-dim);font-size:calc(15*var(--px));padding:0 calc(4*var(--px));cursor:pointer;line-height:1;"
               title="Forget this HQPlayer">&times;</button>` : '';
       return `
@@ -12934,17 +13242,24 @@
           // A row that holds copies is a library: forgetting it is the same
           // goodbye Settings › Library offers, and says so.
           const files = parseInt(el.dataset.files, 10) || 0;
+          const measured = parseInt(el.dataset.measured, 10) || 0;
           const name = el.dataset.name || 'this HQPlayer';
           const ok = await window.confirmDestructive({
             title: files ? `Forget the library of ${escapeProfileHtml(name)}?` : `Forget ${escapeProfileHtml(name)}?`,
             message: files
-              ? 'Every album and track only its library put here goes. Analysis, listening history and your own files stay; an album stays wherever other files still hold it.'
-              : 'It leaves the list; a scan or its address brings it back.',
+              ? 'Every album and track only its library put here goes' + hqpMeasuredGone(measured)
+                + '. Analysis, listening history and your own files stay; an album stays wherever other files still hold it.'
+              : measured
+                ? `It leaves the list${hqpMeasuredGone(measured)}. A scan or its address brings the HQPlayer back, not what was measured.`
+                : 'It leaves the list; a scan or its address brings it back.',
             confirmText: 'Forget',
           });
           if (!ok) return;
           const r = await fetch('/api/settings/library/hqp-forget?endpoint_id=' + encodeURIComponent(el.dataset.endpointId), { method: 'POST' });
-          if (!r.ok) notices.toast({ key: 'hqp-forget', text: 'Could not forget it — a library job is running.' });
+          if (!r.ok) {
+            const out = await r.json().catch(() => ({}));
+            notices.toast({ key: 'hqp-forget', text: escapeProfileHtml(out.detail || 'Could not forget it.') });
+          }
           renderOutputSettings(root);
         });
       }));

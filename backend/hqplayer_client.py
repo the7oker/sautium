@@ -111,7 +111,10 @@ class TrackStatus:
     genre: str = ""
     convolution: bool = False
     matrix_profile: str = ""
-    process_speed: float = 0.0  # HQP6 realtime-processing factor; 0.0 on HQP5
+    # Processing speed over playback speed (HQPlayer's running average of its
+    # last processing units); None when HQPlayer does not report it — before
+    # 5.17.0.
+    process_speed: Optional[float] = None
     # The engine's input and output buffer fill (the SDK's statusIO); None
     # when HQPlayer does not report them.
     input_fill: Optional[float] = None
@@ -123,6 +126,12 @@ class TrackStatus:
     active_filter: str = ""
     active_shaper: str = ""
     active_rate: int = 0
+    # The source HQPlayer decodes (<metadata samplerate bits channels sdm>):
+    # active_rate and its siblings are the OUTPUT. None while nothing plays.
+    src_rate: Optional[int] = None
+    src_bits: Optional[int] = None
+    src_channels: Optional[int] = None
+    src_sdm: Optional[bool] = None
 
     @property
     def is_playing(self) -> bool:
@@ -153,7 +162,8 @@ class HQPlayerClient:
     _error_ring: deque = deque(maxlen=50)
     _error_lock = threading.Lock()
 
-    def __init__(self, host: str = "localhost", port: int = 4321, timeout: float = 5.0):
+    def __init__(self, host: str = "localhost", port: int = 4321, timeout: float = 5.0,
+                 *, ring: bool = True):
         """
         Initialize HQPlayer client
 
@@ -161,10 +171,14 @@ class HQPlayerClient:
             host: HQPlayer host (use host.docker.internal for Docker, or Windows IP)
             port: Control port (default 4321)
             timeout: Socket timeout in seconds
+            ring: whether this instance's failures join the shared ring — the
+                benchmark's client says no: it asks for settings HQPlayer may
+                refuse by design, and records each refusal in its own log
         """
         self.host = host
         self.port = port
         self.timeout = timeout
+        self.ring = ring
         self.socket: Optional[socket.socket] = None
         self.buffer = b""
         # The failure of this instance's latest command (None when HQPlayer
@@ -200,8 +214,9 @@ class HQPlayerClient:
                                  result=result, message=message, during=during)
         if outcome.failed:
             self.last_error = outcome
-            with self._error_lock:
-                self._error_ring.append(outcome)
+            if self.ring:
+                with self._error_lock:
+                    self._error_ring.append(outcome)
         if self.on_outcome is not None:
             self.on_outcome(outcome)
 
@@ -450,9 +465,30 @@ class HQPlayerClient:
         return response is not None
 
     def volume_mute(self) -> bool:
-        """Toggle mute"""
+        """Toggle mute — a toggle whose state neither State nor Status reports"""
         response = self._execute_command("VolumeMute")
         return response is not None
+
+    def volume_range(self) -> Optional[Dict[str, Any]]:
+        """The volume HQPlayer allows: {min, max} in dB, `enabled` False when
+        its volume is fixed on this output, `adaptive` its own levelling.
+        None unless HQPlayer gave the range: a refusal or an answer without
+        `min`/`max` says nothing a caller may lower the volume by. A missing
+        `enabled` is a fixed volume, as Signalyst's own client reads it."""
+        response = self._execute_command("VolumeRange")
+        if (response is None or response.tag != "VolumeRange"
+                or response.get("result") == "Error"):
+            return None
+        try:
+            low, high = float(response.get("min")), float(response.get("max"))
+        except (TypeError, ValueError):
+            return None
+        return {
+            "min": low,
+            "max": high,
+            "enabled": response.get("enabled") == "1",
+            "adaptive": response.get("adaptive") == "1",
+        }
 
     def set_volume(self, value: float) -> bool:
         """
@@ -555,6 +591,7 @@ class HQPlayerClient:
         try:
             # Parse status
             in_fill, out_fill = response.get("input_fill"), response.get("output_fill")
+            speed = response.get("process_speed")
             status = TrackStatus(
                 state=PlaybackState(int(response.get("state", 0))),
                 track_index=int(response.get("track", 0)),
@@ -562,7 +599,7 @@ class HQPlayerClient:
                 position=float(response.get("position", 0.0)),
                 length=float(response.get("length", 0.0)),
                 volume=float(response.get("volume", 0.0)),
-                process_speed=float(response.get("process_speed", 0.0)),
+                process_speed=float(speed) if speed is not None else None,
                 input_fill=float(in_fill) if in_fill is not None else None,
                 output_fill=float(out_fill) if out_fill is not None else None,
                 tracks_total=int(response.get("tracks_total", 0)),
@@ -579,6 +616,11 @@ class HQPlayerClient:
                 status.album = metadata.get("album", "")
                 status.song = metadata.get("song", "")
                 status.genre = metadata.get("genre", "")
+                if metadata.get("samplerate"):
+                    status.src_rate = int(metadata.get("samplerate"))
+                    status.src_bits = int(metadata.get("bits") or 0) or None
+                    status.src_channels = int(metadata.get("channels") or 0) or None
+                    status.src_sdm = metadata.get("sdm") == "1"
 
             return status
         except Exception as e:
@@ -606,6 +648,9 @@ class HQPlayerClient:
                 "mode": int(response.get("mode", 0)),
                 "filter": int(response.get("filter", 0)),
                 "filter1x": int(response.get("filter1x", -1)),
+                # The Nx slot SetFilter's `value` sets; `filter` read as the
+                # 1x slot while a 44.1 kHz source played (Desktop 6.2.3)
+                "filterNx": int(response.get("filterNx", response.get("filter", 0))),
                 "shaper": int(response.get("shaper", 0)),
                 "rate": int(response.get("rate", 0)),
                 "active_mode": int(response.get("active_mode", 0)),
@@ -613,6 +658,7 @@ class HQPlayerClient:
                 "convolution": bool(int(response.get("convolution", 0))),
                 "matrix_profile": response.get("matrix_profile", ""),
                 "invert": bool(int(response.get("invert", 0))),
+                "adaptive": bool(int(response.get("adaptive", 0))),
                 "volume": float(response.get("volume", 0.0)),
             }
         except Exception as e:
@@ -691,9 +737,10 @@ class HQPlayerClient:
 
         Returns:
             List of dicts with: index, name, value, arg, description
-            `description` is the HQP6 per-filter blurb; empty string on HQP5.
-            Example: [{"index": 0, "name": "poly-sinc-ext2", "value": 0, "arg": 1,
-                       "description": "Closed form interpolation with 16 million taps"}, ...]
+            `description` is HQPlayer 6's own line for the filter (its rating,
+            focus and ratio); empty string on HQP5.
+            Example: [{"index": 6, "name": "poly-sinc-lp", "value": 0, "arg": 2,
+                       "description": "4/5 space ⥣ Any"}, ...]
         """
         response = self._execute_command("GetFilters")
         if response is None or response.tag != "GetFilters":
@@ -732,7 +779,8 @@ class HQPlayerClient:
         Get available dither/noise shapers
 
         Returns:
-            List of dicts with: index, name, value
+            List of dicts with: index, name, value, description — HQPlayer 6.1+
+            names a modulator's generation there ("Gen7"); empty before.
         """
         response = self._execute_command("GetShapers")
         if response is None or response.tag != "GetShapers":
@@ -745,6 +793,7 @@ class HQPlayerClient:
                 "index": int(item.get("index", 0)),
                 "name": item.get("name", ""),
                 "value": int(item.get("value", 0)),
+                "description": item.get("description", ""),
             })
 
         return shapers
@@ -860,6 +909,45 @@ class HQPlayerClient:
         """
         response = self._execute_command("MatrixSetProfile", {"value": profile})
         return response is not None and response.get("result") != "Error"
+
+    def apply_settings(self, *, mode: Optional[int] = None, rate: Optional[int] = None,
+                       filter: Optional[int] = None, filter1x: Optional[int] = None,
+                       shaper: Optional[int] = None,
+                       matrix_profile: Optional[str] = None) -> tuple:
+        """Apply any subset of the DSP knobs, one Set* command each, in the
+        order HQPlayer needs: the mode decides which rate, filter and shaper
+        lists the indices after it point into. Returns (applied, failed) —
+        a refused knob carries HQPlayer's reason and the rest still go."""
+        applied: Dict[str, Any] = {}
+        failed: Dict[str, str] = {}
+        if mode is not None:
+            if self.set_mode(mode):
+                applied["mode"] = mode
+            else:
+                failed["mode"] = self.refusal()
+        if rate is not None:
+            if self.set_rate(rate):
+                applied["rate"] = rate
+            else:
+                failed["rate"] = self.refusal()
+        if filter is not None:
+            if self.set_filter(filter, filter1x):
+                applied["filter"] = filter
+                if filter1x is not None:
+                    applied["filter1x"] = filter1x
+            else:
+                failed["filter"] = self.refusal()
+        if shaper is not None:
+            if self.set_shaping(shaper):
+                applied["shaper"] = shaper
+            else:
+                failed["shaper"] = self.refusal()
+        if matrix_profile is not None:
+            if self.matrix_set_profile(matrix_profile):
+                applied["matrix_profile"] = matrix_profile
+            else:
+                failed["matrix_profile"] = self.refusal()
+        return applied, failed
 
 
 # ========== Context Manager Support ==========

@@ -148,12 +148,13 @@ def _hqp_endpoint() -> tuple[str, int]:
     return HQPLAYER_HOST, HQPLAYER_PORT
 
 
-def _active_output() -> str:
-    """Which output the node is playing through, per the backend."""
+def _output_prefs() -> dict:
+    """Which output the node is playing through, and what it is lent to
+    meanwhile (the HQPlayer benchmark), per the backend."""
     try:
-        return (_backend_get("/api/settings/output", {}) or {}).get("type") or ""
+        return _backend_get("/api/settings/output", {}) or {}
     except Exception:
-        return ""          # backend unreachable: don't block on a guess
+        return {}          # backend unreachable: don't block on a guess
 
 
 def _get_hqp() -> HQPlayerClient:
@@ -165,13 +166,20 @@ def _get_hqp() -> HQPlayerClient:
     will reach for one: asking to change a filter, or to skip a track, while
     the sound is going to a phone over DLNA would reconfigure — or start —
     a device in another room, with the canonical queue none the wiser."""
-    active = _active_output()
+    prefs = _output_prefs()
+    active = prefs.get("type") or ""
     if active and active != "hqplayer":
         raise ConnectionError(
             f"HQPlayer is not the active audio output (currently: {active}). "
             "Its transport and DSP controls are unavailable. Use play_track / "
             "play_album / play_similar / add_to_queue, which play through "
             "whatever output the user has chosen."
+        )
+    if prefs.get("held"):
+        raise ConnectionError(
+            f"HQPlayer is busy: {prefs['held']}. Its transport and DSP controls "
+            "come back when it finishes; the user can cancel it on the HQPlayer "
+            "screen."
         )
     global _hqp_client
     host, port = _hqp_endpoint()

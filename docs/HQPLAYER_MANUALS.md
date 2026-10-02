@@ -23,8 +23,9 @@ Version notes that matter to Sautium:
 
 - The control protocol is the same on HQPlayer 5 and 6, so one client
   implementation talks to either (`HQPLAYER_INTEGRATION.md`, "SDK Version").
-- HQPlayer 6 exposes two extra fields — a per-filter description and
-  `process_speed` in Status — that Sautium uses when present and degrades
-  without (`HQPLAYER_INTEGRATION.md`, the HQPlayer 6 notes).
+- Two fields of recent builds — a per-filter description (HQPlayer 6) and
+  `process_speed` in Status (since 5.17.0) — that Sautium uses when present
+  and degrades without (`HQPLAYER_INTEGRATION.md`, "Additions of recent
+  builds"); `process_speed` is what the DSP load measurements are made of.
 - HQPlayer Embedded 6 speaks the same protocol (verified 2026-09-27, engine
   6.2.3); its library is configured and scanned in its own web interface.

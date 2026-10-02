@@ -196,6 +196,11 @@ def fake(monkeypatch):
     # these tests have none.
     import hqp_library
     monkeypatch.setattr(hqp_library, "request_sync", lambda host, port: None)
+    # ...and what GetInfo said goes on the endpoint row, and a benchmark the
+    # process died in is put back — both in the database.
+    from playback import hqp_benchmark
+    monkeypatch.setattr(hqp_library, "note_info", lambda *a, **k: None)
+    monkeypatch.setattr(hqp_benchmark, "recover", lambda endpoint_id: None)
     # ...and its endpoint row: this HQPlayer's library is endpoint 7 here.
     monkeypatch.setattr(hqp_library, "endpoint_by_address", lambda host, port: {"id": 7, "name": "fake"})
     # The output switch re-reads every slot's copies from the database

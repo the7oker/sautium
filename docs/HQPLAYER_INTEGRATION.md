@@ -43,15 +43,20 @@ either desktop version.
   NetworkMounts — passed too and was retired 2026-09-28: the same bytes for
   an extra setup on the HQPlayer side
 
-### HQP6-only additions
-HQPlayer 6 exposes two extra fields that Sautium now uses when present. Both degrade
-gracefully to absent on HQP5 — the integration reads them opportunistically and works
-unchanged without them.
+### Additions of recent builds
+Two fields Sautium uses when present. Both are read opportunistically and absent on
+older builds — the integration works unchanged without them.
 
-- **Per-filter `description`** — a human-readable blurb returned alongside each filter in
-  the discovery response. Sautium surfaces it live in the HQPlayer settings screen and
-  passes it to the AI assistant, so filter choices are explained in the player's own words.
-- **`process_speed` in Status** — a DSP load readout reported by `GetStatus`.
+- **Per-filter `description`** (HQPlayer 6) — HQPlayer's own line for each filter in
+  the discovery response: on 6.2.3 its technical rating, focus and ratio ("4/5 space ⥣
+  Any"); `<GetShapers/>` names a modulator's generation the same way ("Gen7"). Sautium
+  surfaces the filter's live in the HQPlayer settings screen and passes it to the AI
+  assistant, so filter choices are explained in the player's own words.
+- **`process_speed` in Status** (since 5.17.0, March 2026, not only HQPlayer 6;
+  5.17.0 computed it wrongly for a DSD source, fixed in the next release) —
+  processing speed over playback speed, a running average of the last processing
+  units (Jussi Laako; Signalyst publishes no definition). What the DSP load
+  measurements are made of (§ "DSP load").
 
 ## Files
 
@@ -86,6 +91,12 @@ unchanged without them.
 - `set_volume(value)` - Set volume level
 - `volume_up()` - Increase volume
 - `volume_down()` - Decrease volume
+- `volume_range()` - `{min, max, enabled, adaptive}`: `<VolumeRange min="-60" max="0"
+  enabled="1" adaptive="1"/>` on Desktop 6.2.3; `enabled` is false when the volume is
+  fixed on the output — and when the attribute is missing, as Signalyst's own client
+  reads it. `None` for a refusal or an answer without `min`/`max`: nothing may lower
+  the volume by a range HQPlayer did not give. The benchmark lowers HQPlayer to `min`
+  (§ "DSP load")
 
 ### ✅ Playlist Management
 - `playlist_add(uri, clear, queued)` - Add track to playlist
@@ -99,7 +110,14 @@ unchanged without them.
   - Position and length
   - Volume level
   - Metadata (artist, album, song, genre)
-  - `process_speed` - DSP load readout (HQP6 only; absent on HQP5)
+  - The SOURCE HQPlayer decodes, from the `<metadata>` child while something
+    plays (`samplerate`, `bits`, `channels`, `sdm`; it also carries `float`,
+    `bitrate`, `uri`, `gain`): `src_rate`, `src_bits`, `src_channels`,
+    `src_sdm`, None while stopped. `active_rate`, `active_bits` and
+    `active_channels` are the OUTPUT — 11 289 600 Hz, 1 bit, 2 channels at
+    DSD256 (read 2026-10-02)
+  - `process_speed` - processing speed over playback speed (since 5.17.0;
+    `None` when HQPlayer does not report it)
   - `input_fill` / `output_fill` - the engine's input and output buffer fill
     (the SDK's `statusIO`): fractions of the buffer, 0.0 while stopped; measured
     on Desktop 6.2.3 playing a local file at DSD256 (2026-10-02): `output_fill`
@@ -119,7 +137,8 @@ unchanged without them.
 Methods `hqplayer_client.py` implements and nothing calls — no route, no
 assistant tool, no control in the Web UI (as of 2026-09-29):
 - `forward()` / `backward()` - Fast forward, rewind
-- `volume_mute()` - Toggle mute
+- `volume_mute()` - Toggle mute — a toggle whose state neither `<State/>` nor
+  `<Status/>` reports, which is why nothing trusts it with the owner's ears
 - `set_repeat(mode)` - Repeat mode (NONE/SINGLE/ALL)
 - `set_random(enabled)` - Shuffle
 - `get_inputs()` - Available input devices (there is no `set_input`)
@@ -136,6 +155,17 @@ assistant tool, no control in the Web UI (as of 2026-09-29):
   - 20 rates: 2.048 MHz to 98.304 MHz (DSD)
 - `set_convolution(enabled)` - Convolution engine on/off — reached through
   the assistant (`hqplayer_set_convolution`); the Web UI has no control for it
+- `apply_settings(mode, rate, filter, filter1x, shaper, matrix_profile)` - any
+  subset, one Set* command each, in the order HQPlayer needs (the mode decides
+  which lists the indices after it point into); returns what was applied and
+  each refusal in HQPlayer's words — the one apply core of `POST
+  /api/hqplayer/config` and the benchmark
+- `get_state()` - the selection as indices into the current mode's lists, plus
+  `filterNx` (the Nx slot `SetFilter value` sets — `filter` read as the 1x
+  slot while a 44.1 kHz source played), `filter1x`, `adaptive`,
+  `matrix_profile`, `volume`; no mute flag. HQPlayer keeps one selection per mode (its `settings.xml`
+  `<defaults>` hold `filter`/`dither`/`samplerate` for PCM and
+  `oversampling`/`modulator`/`bitrate` for SDM)
 
 ### Answers: `result` and HQPlayer's reason
 Setters and transport commands echo their element with `result="OK"` or
@@ -611,6 +641,111 @@ for by name, with every path cut to its last two components (drive, UNC and
 any absolute POSIX path alike) and every media-proxy token to its first six
 characters — a token is the capability that serves the file.
 
+### DSP load — what this HQPlayer keeps up with (2026-10-02)
+
+Whether a filter or a modulator keeps up depends on the HQPlayer host — the CPU
+build, CUDA offload (filters can run on the GPU, modulators never do), memory,
+cooling — so Sautium measures it instead of predicting it
+(`backend/playback/hqp_load.py`, `hqp_benchmark.py`):
+
+- **process_speed: observed** on Desktop 6.2.3 (i9-14900HX, RTX 4090, full CUDA
+  offload) playing a 44.1 kHz FLAC at DSD256 with poly-sinc-gauss-xla and
+  ASDM7ECv3: 2.50–2.64 from one second to the next (±3 % of jitter on a steady
+  setting), `output_fill` 0.99–1.0, `input_fill` -1. What it means at the
+  boundary is measured per host: the benchmark records the speed at which a
+  point dropped out.
+- **The build is the key.** `<GetInfo version="6"/>` is the product generation,
+  `engine="6.2.3"` the build — filter names and costs hold for a build (5.15
+  renamed poly-sinc-ext3, 6.1 added AHMxEC4B). Every answered GetInfo keeps
+  version, engine and platform on the `hqp_endpoints` row, and for an HQPlayer
+  on this machine the machine (CPU, threads, GPU, RAM as this node sees them)
+  and the CUDA offload from its `settings.xml`: `<engine cuda="1">` is the
+  fully checked box on Desktop 6 (the grayed, convolution-only state has not
+  been seen written). For an HQPlayer elsewhere the owner says it once on the
+  HQPlayer screen.
+- **Listens leave samples** (the status poller): HQPlayer playing a slot of
+  ours (never while another controller drives it), its speed and the source
+  reported, 15 s into the track and 15 s past the last change of the setting
+  or the source — a matrix profile or convolution switched under the same
+  `<Status/>`, seen in the `<State/>` read with the sample, counts as one;
+  then on every change, or once a minute. A sample is keyed by
+  what HQPlayer reports it RUNS — `active_mode`, `active_rate`,
+  `active_filter` (the 1x or Nx one the source needs), `active_shaper` — with
+  the build, CUDA, matrix profile, convolution and the source's rate and
+  channels: each changes the cost. Samples live 90 days (pruned at most once
+  a day by the writer); `hqp_dsp_speed` is the per-key rollup (`n`, p10,
+  median), refreshed in the same transaction from the key's newest benchmark
+  point and every listen after it.
+- **Headroom** on the HQPlayer screen: `GET /api/hqplayer/state?dsp=1` (the
+  screen's own read; the More drawer and the Output picker's dot ask the plain
+  state, a connection check) carries `headroom` — every filter at the current modulator and rate, every modulator
+  at the current filter and rate, every rate at the current filter and
+  modulator, for the source the owner hears (the one playing, else the file the
+  queue plays next) — and each measured picker entry carries a dot and its
+  speed: ok from 1.25×, tight from 1.0×, no under it. The boundaries are the
+  host's own once a benchmark point dropped out there: "no" starts just above
+  the fastest speed one dropped out at, for that build and mode, from runs
+  that ended or were cancelled. Nothing is blocked; an entry never measured is
+  unmarked.
+- **The benchmark** (`POST /api/hqplayer/benchmark`, `GET` for its state and
+  the results, `…/cancel`): one mode — the one HQPlayer is in; the other only
+  when asked (`{"mode": "pcm"}`) — and only the points nothing covers yet
+  within 90 days: a benchmark sample or three listens of the key, or an
+  earlier run's point that ASKED for it and ended in an answer
+  (`hqp_benchmark_points`: measured, unsettled, dropped out, refused — not one
+  that failed to run). A repeat run fills gaps: a combination HQPlayer refuses
+  ("…512+fs" below 512×) and an adaptive output rate that plays another rate
+  than the one asked are never samples of the asked key, and the ledger is
+  what keeps them from being planned again.
+  SDM: every modulator at every DSD rate with the owner's filter, every filter
+  at the owner's rate with the owner's modulator; PCM: every filter at the
+  owner's rate and the highest, from 44.1 and 96 kHz sources; the owner's own
+  setting first and last (the thermal drift check); on an endpoint's first run
+  every modulator (PCM: filter) at the highest rate right after it — the
+  dropout boundary. On Desktop 6.2.3 in SDM (77 filters, 36 modulators, four
+  DSD rates) a first run is 221 points. The run borrows the output
+  (`PlaybackManager.hold`): it begins once a queue replace still adding
+  tracks and a play intent still attaching are through, the backend detaches
+  as on an output switch — a command of that backend still on its way is
+  refused from then on — every other Sautium path to HQPlayer answers 409
+  (busy, not broken: the UI points at the run's Cancel, not at the Output
+  picker), an output or address change included, and the queue mirrors back
+  when it ends. HQPlayer goes to the bottom of its `VolumeRange` first, read
+  back, when that lies below the owner's level (otherwise the owner confirms
+  the amplifier is down); the signals are pink noise at about -20 dBFS,
+  24-bit FLAC, 120 s, handed over as media proxy URLs — and the owner's last
+  DSD file, while it is still there, only when the plan has DSD-source
+  points. A point is Stop → its changed knobs → State read back (the
+  selection the run set last is kept on its row) → SelectTrack, then
+  `<Status/>` until it names the slot (2 s at most: a SelectTrack on a
+  stopped HQPlayer needs a beat) → Play; another entry playing is selected
+  once more. Its readings count after 5 s of moving position (counted again
+  when the position stalls for two ticks before them), are accepted when the
+  last five stay within ±2 % of their mean with no trend (a running average
+  can be equal three times and still lag), and are recorded unsettled at
+  15 s; the p10 is stored with the time to start and to settle. A dropout is
+  the DSP falling behind and only that: once the readings run, the output
+  under 0.1 for three ticks while the input holds, the position frozen for
+  two, or the transport stopped, at a speed under 1.5×; before the readings
+  (the buffer still filling, the average still holding the initialisation)
+  the same signs count only under 1×. Anything else that ends a point — a
+  stop at a healthy speed, a stream that starved, no verdict 90 s after
+  Play — fails it, and a later run measures it again. The run talks to
+  HQPlayer on its own connection, which reconnects when HQPlayer drops it (at
+  once, then after 1, 2, 4 and 8 s): HQPlayer may have restarted under the
+  run, so the volume is lowered and read back and the signals loaded again
+  before the point plays again. Everything is put back at the end, on cancel,
+  on failure and when the app stops (it waits up to six seconds); a run cut
+  short before that — the process died, HQPlayer stayed away — is put back
+  the next time HQPlayer answers, at the attach or when the poller sees it
+  return, while HQPlayer still shows a mark of the run: its signals, the
+  lowered volume, or the selection it set last (an HQPlayer that restarted
+  keeps that, maybe nothing else). Forgetting the HQPlayer takes its
+  measurements with it; it is refused while a run measures it.
+
+Measurements stay on this node: in the `.sbk` backup, not in the life-data
+merge (their endpoint is this node's registry), not in P2P sync.
+
 ### Windows Firewall
 Ensure port 4321 is accessible:
 1. Open Windows Firewall settings
@@ -768,7 +903,7 @@ class TrackStatus:
     genre: str
     convolution: bool
     matrix_profile: str
-    process_speed: float  # HQP6; 0.0 on HQP5
+    process_speed: Optional[float]  # since 5.17.0; None before
     input_fill: Optional[float]   # None when not reported
     output_fill: Optional[float]
     tracks_total: int

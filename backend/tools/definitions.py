@@ -34,6 +34,7 @@ def _get_hqp():
     from config import settings
     from hqplayer_client import HQPlayerClient
     from routers.settings import _read
+    from playback.manager import manager
     active = _read("output.type")
     if active and active != "hqplayer":
         raise ConnectionError(
@@ -41,6 +42,13 @@ def _get_hqp():
             "Its transport and DSP controls are unavailable. Use play_track / "
             "play_album / play_similar / add_to_queue, which play through "
             "whatever output the user has chosen."
+        )
+    hold = manager.held
+    if hold is not None:
+        raise ConnectionError(
+            f"HQPlayer is busy: {hold['label']}. Its transport and DSP controls "
+            "come back when it finishes; the user can cancel it on the HQPlayer "
+            "screen."
         )
     endpoint = (settings.hqplayer_host, settings.hqplayer_port)
     if (_hqp_client is None or not _hqp_client.is_connected()

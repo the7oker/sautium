@@ -1,0 +1,621 @@
+{
+ "recorded": "HQPlayer Desktop 6, engine 6.2.3, 2026-10-02 (read-only queries)",
+ "state": {
+  "mode": 2,
+  "rate": 3,
+  "filter": 49,
+  "filter1x": 49,
+  "filterNx": 53,
+  "shaper": 21,
+  "active_mode": 1,
+  "active_rate": 11289600
+ },
+ "modes": [
+  {
+   "index": 0,
+   "name": "[source]",
+   "value": -1
+  },
+  {
+   "index": 1,
+   "name": "PCM",
+   "value": 0
+  },
+  {
+   "index": 2,
+   "name": "SDM (DSD)",
+   "value": 1
+  }
+ ],
+ "rates": [
+  {
+   "index": 0,
+   "rate": 0
+  },
+  {
+   "index": 1,
+   "rate": 2822400
+  },
+  {
+   "index": 2,
+   "rate": 5644800
+  },
+  {
+   "index": 3,
+   "rate": 11289600
+  },
+  {
+   "index": 4,
+   "rate": 22579200
+  }
+ ],
+ "filters": [
+  {
+   "index": 0,
+   "name": "IIR",
+   "value": 64
+  },
+  {
+   "index": 1,
+   "name": "IIR2",
+   "value": 65
+  },
+  {
+   "index": 2,
+   "name": "FIR",
+   "value": 61
+  },
+  {
+   "index": 3,
+   "name": "asymFIR",
+   "value": 62
+  },
+  {
+   "index": 4,
+   "name": "minphaseFIR",
+   "value": 63
+  },
+  {
+   "index": 5,
+   "name": "FFT",
+   "value": 60
+  },
+  {
+   "index": 6,
+   "name": "poly-sinc-lp",
+   "value": 0
+  },
+  {
+   "index": 7,
+   "name": "poly-sinc-mp",
+   "value": 1
+  },
+  {
+   "index": 8,
+   "name": "poly-sinc-short-lp",
+   "value": 2
+  },
+  {
+   "index": 9,
+   "name": "poly-sinc-short-mp",
+   "value": 3
+  },
+  {
+   "index": 10,
+   "name": "poly-sinc-long-lp",
+   "value": 24
+  },
+  {
+   "index": 11,
+   "name": "poly-sinc-long-ip",
+   "value": 25
+  },
+  {
+   "index": 12,
+   "name": "poly-sinc-long-mp",
+   "value": 26
+  },
+  {
+   "index": 13,
+   "name": "poly-sinc-hb",
+   "value": 5
+  },
+  {
+   "index": 14,
+   "name": "poly-sinc-hb-xs-2s",
+   "value": 56
+  },
+  {
+   "index": 15,
+   "name": "poly-sinc-hb-s-2s",
+   "value": 57
+  },
+  {
+   "index": 16,
+   "name": "poly-sinc-hb-m-2s",
+   "value": 58
+  },
+  {
+   "index": 17,
+   "name": "poly-sinc-hb-l-2s",
+   "value": 59
+  },
+  {
+   "index": 18,
+   "name": "poly-sinc-ext",
+   "value": 11
+  },
+  {
+   "index": 19,
+   "name": "poly-sinc-ext2",
+   "value": 22
+  },
+  {
+   "index": 20,
+   "name": "poly-sinc-ext2-short",
+   "value": 70
+  },
+  {
+   "index": 21,
+   "name": "poly-sinc-ext2-medium",
+   "value": 71
+  },
+  {
+   "index": 22,
+   "name": "poly-sinc-ext2-long",
+   "value": 72
+  },
+  {
+   "index": 23,
+   "name": "poly-sinc-ext2-xla",
+   "value": 32
+  },
+  {
+   "index": 24,
+   "name": "poly-sinc-ext2-xl",
+   "value": 73
+  },
+  {
+   "index": 25,
+   "name": "poly-sinc-ext2-hires-lp",
+   "value": 74
+  },
+  {
+   "index": 26,
+   "name": "poly-sinc-ext2-hires-ip",
+   "value": 75
+  },
+  {
+   "index": 27,
+   "name": "poly-sinc-ext2-hires-mp",
+   "value": 76
+  },
+  {
+   "index": 28,
+   "name": "poly-sinc-mqa/mp3-lp",
+   "value": 14
+  },
+  {
+   "index": 29,
+   "name": "poly-sinc-mqa/mp3-mp",
+   "value": 15
+  },
+  {
+   "index": 30,
+   "name": "poly-sinc-xtr-lp",
+   "value": 17
+  },
+  {
+   "index": 31,
+   "name": "poly-sinc-xtr-mp",
+   "value": 18
+  },
+  {
+   "index": 32,
+   "name": "poly-sinc-xtr-short-lp",
+   "value": 34
+  },
+  {
+   "index": 33,
+   "name": "poly-sinc-xtr-short-mp",
+   "value": 35
+  },
+  {
+   "index": 34,
+   "name": "poly-sinc-lp-2s",
+   "value": 6
+  },
+  {
+   "index": 35,
+   "name": "poly-sinc-mp-2s",
+   "value": 7
+  },
+  {
+   "index": 36,
+   "name": "poly-sinc-short-lp-2s",
+   "value": 8
+  },
+  {
+   "index": 37,
+   "name": "poly-sinc-short-mp-2s",
+   "value": 9
+  },
+  {
+   "index": 38,
+   "name": "poly-sinc-long-lp-2s",
+   "value": 27
+  },
+  {
+   "index": 39,
+   "name": "poly-sinc-long-ip-2s",
+   "value": 28
+  },
+  {
+   "index": 40,
+   "name": "poly-sinc-long-mp-2s",
+   "value": 29
+  },
+  {
+   "index": 41,
+   "name": "poly-sinc-hb-2s",
+   "value": 10
+  },
+  {
+   "index": 42,
+   "name": "poly-sinc-xtr-lp-2s",
+   "value": 19
+  },
+  {
+   "index": 43,
+   "name": "poly-sinc-xtr-mp-2s",
+   "value": 20
+  },
+  {
+   "index": 44,
+   "name": "poly-sinc-xtr-short-lp-2s",
+   "value": 36
+  },
+  {
+   "index": 45,
+   "name": "poly-sinc-xtr-short-mp-2s",
+   "value": 37
+  },
+  {
+   "index": 46,
+   "name": "poly-sinc-gauss-short",
+   "value": 38
+  },
+  {
+   "index": 47,
+   "name": "poly-sinc-gauss-medium",
+   "value": 39
+  },
+  {
+   "index": 48,
+   "name": "poly-sinc-gauss-long",
+   "value": 40
+  },
+  {
+   "index": 49,
+   "name": "poly-sinc-gauss-xla",
+   "value": 42
+  },
+  {
+   "index": 50,
+   "name": "poly-sinc-gauss-xl",
+   "value": 41
+  },
+  {
+   "index": 51,
+   "name": "poly-sinc-gauss-hires-lp",
+   "value": 43
+  },
+  {
+   "index": 52,
+   "name": "poly-sinc-gauss-hires-ip",
+   "value": 44
+  },
+  {
+   "index": 53,
+   "name": "poly-sinc-gauss-hires-mp",
+   "value": 45
+  },
+  {
+   "index": 54,
+   "name": "poly-sinc-gauss-halfband",
+   "value": 54
+  },
+  {
+   "index": 55,
+   "name": "poly-sinc-gauss-halfband-s",
+   "value": 55
+  },
+  {
+   "index": 56,
+   "name": "polynomial-1",
+   "value": 66
+  },
+  {
+   "index": 57,
+   "name": "polynomial-2",
+   "value": 67
+  },
+  {
+   "index": 58,
+   "name": "minringFIR-lp",
+   "value": 4
+  },
+  {
+   "index": 59,
+   "name": "minringFIR-mp",
+   "value": 16
+  },
+  {
+   "index": 60,
+   "name": "closed-form",
+   "value": 12
+  },
+  {
+   "index": 61,
+   "name": "closed-form-fast",
+   "value": 13
+  },
+  {
+   "index": 62,
+   "name": "closed-form-16M",
+   "value": 21
+  },
+  {
+   "index": 63,
+   "name": "sinc-S",
+   "value": 30
+  },
+  {
+   "index": 64,
+   "name": "sinc-M",
+   "value": 23
+  },
+  {
+   "index": 65,
+   "name": "sinc-Mx",
+   "value": 33
+  },
+  {
+   "index": 66,
+   "name": "sinc-MG",
+   "value": 49
+  },
+  {
+   "index": 67,
+   "name": "sinc-MGa",
+   "value": 50
+  },
+  {
+   "index": 68,
+   "name": "sinc-L",
+   "value": 31
+  },
+  {
+   "index": 69,
+   "name": "sinc-Ls",
+   "value": 46
+  },
+  {
+   "index": 70,
+   "name": "sinc-Lm",
+   "value": 47
+  },
+  {
+   "index": 71,
+   "name": "sinc-Ll",
+   "value": 48
+  },
+  {
+   "index": 72,
+   "name": "sinc-Lh",
+   "value": 68
+  },
+  {
+   "index": 73,
+   "name": "sinc-short",
+   "value": 51
+  },
+  {
+   "index": 74,
+   "name": "sinc-medium",
+   "value": 52
+  },
+  {
+   "index": 75,
+   "name": "sinc-long",
+   "value": 53
+  },
+  {
+   "index": 76,
+   "name": "sinc-long-h",
+   "value": 69
+  }
+ ],
+ "shapers": [
+  {
+   "index": 0,
+   "name": "DSD5",
+   "value": 0
+  },
+  {
+   "index": 1,
+   "name": "DSD5v2",
+   "value": 1
+  },
+  {
+   "index": 2,
+   "name": "DSD5v2 256+fs",
+   "value": 3
+  },
+  {
+   "index": 3,
+   "name": "DSD5EC",
+   "value": 9
+  },
+  {
+   "index": 4,
+   "name": "ASDM5",
+   "value": 5
+  },
+  {
+   "index": 5,
+   "name": "ASDM5EC",
+   "value": 10
+  },
+  {
+   "index": 6,
+   "name": "ASDM5ECv2",
+   "value": 13
+  },
+  {
+   "index": 7,
+   "name": "ASDM5ECv3",
+   "value": 15
+  },
+  {
+   "index": 8,
+   "name": "ASDM5EC-ul",
+   "value": 28
+  },
+  {
+   "index": 9,
+   "name": "ASDM5EC-light",
+   "value": 17
+  },
+  {
+   "index": 10,
+   "name": "ASDM5EC-fast",
+   "value": 32
+  },
+  {
+   "index": 11,
+   "name": "ASDM5EC-super",
+   "value": 19
+  },
+  {
+   "index": 12,
+   "name": "ASDM5EC-ul 512+fs",
+   "value": 30
+  },
+  {
+   "index": 13,
+   "name": "ASDM5EC-light 512+fs",
+   "value": 21
+  },
+  {
+   "index": 14,
+   "name": "ASDM5EC-fast 512+fs",
+   "value": 34
+  },
+  {
+   "index": 15,
+   "name": "ASDM5EC-super 512+fs",
+   "value": 23
+  },
+  {
+   "index": 16,
+   "name": "DSD7",
+   "value": 2
+  },
+  {
+   "index": 17,
+   "name": "DSD7 256+fs",
+   "value": 4
+  },
+  {
+   "index": 18,
+   "name": "ASDM7",
+   "value": 6
+  },
+  {
+   "index": 19,
+   "name": "ASDM7EC",
+   "value": 11
+  },
+  {
+   "index": 20,
+   "name": "ASDM7ECv2",
+   "value": 14
+  },
+  {
+   "index": 21,
+   "name": "ASDM7ECv3",
+   "value": 16
+  },
+  {
+   "index": 22,
+   "name": "ASDM7EC-ul",
+   "value": 29
+  },
+  {
+   "index": 23,
+   "name": "ASDM7EC-light",
+   "value": 18
+  },
+  {
+   "index": 24,
+   "name": "ASDM7EC-fast",
+   "value": 33
+  },
+  {
+   "index": 25,
+   "name": "ASDM7EC-super",
+   "value": 20
+  },
+  {
+   "index": 26,
+   "name": "ASDM7EC-ul 512+fs",
+   "value": 31
+  },
+  {
+   "index": 27,
+   "name": "ASDM7EC-light 512+fs",
+   "value": 22
+  },
+  {
+   "index": 28,
+   "name": "ASDM7EC-fast 512+fs",
+   "value": 35
+  },
+  {
+   "index": 29,
+   "name": "ASDM7EC-super 512+fs",
+   "value": 24
+  },
+  {
+   "index": 30,
+   "name": "AMSDM7 512+fs",
+   "value": 7
+  },
+  {
+   "index": 31,
+   "name": "AMSDM7EC 512+fs",
+   "value": 12
+  },
+  {
+   "index": 32,
+   "name": "AHM5EC4B",
+   "value": 26
+  },
+  {
+   "index": 33,
+   "name": "AHM7EC4B",
+   "value": 8
+  },
+  {
+   "index": 34,
+   "name": "AHM5EC8B",
+   "value": 27
+  },
+  {
+   "index": 35,
+   "name": "AHM7EC8B",
+   "value": 25
+  }
+ ]
+}

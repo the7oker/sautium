@@ -486,8 +486,11 @@ async def lifespan(app: FastAPI):
         import hardware_profile as _hp
 
         def _playing() -> bool:
+            # A held output plays test signals (the HQPlayer benchmark): the
+            # model steps and backups yield to it as they do to the music.
             from playback.manager import manager as _pm
-            return _pm.latest_status.get("state") in ("playing", "loading")
+            return (_pm.latest_status.get("state") in ("playing", "loading")
+                    or _pm.held is not None)
 
         _load_meter = _lm.install(_lm.LoadMeter(_hp.resolve().name, playback_probe=_playing))
 
@@ -849,6 +852,11 @@ async def lifespan(app: FastAPI):
     yield
 
     # Shutdown
+    # A benchmark run drives HQPlayer on its own connection: cancelled, and
+    # given the seconds to put HQPlayer back (its volume, its settings)
+    # before anything else stops — Docker allows ten in all.
+    from playback import hqp_benchmark
+    await asyncio.to_thread(hqp_benchmark.shutdown, 6.0)
     if _load_meter is not None:
         _load_meter.stop()
     if _playback_signal is not None:
@@ -1332,6 +1340,9 @@ async def scan_start(
     prune: bool = False,
 ) -> Dict[str, Any]:
     """Start library scan as a background task. Poll /scan/status for progress."""
+    from playback import hqp_benchmark
+    if hqp_benchmark.measures_here():
+        raise HTTPException(status_code=409, detail=hqp_benchmark.HERE_BUSY)
     with _scan_lock:
         if _scan_state["running"]:
             raise HTTPException(status_code=409, detail="Scan already running")
@@ -1635,6 +1646,9 @@ async def enrich_start(limit: Optional[int] = None) -> Dict[str, Any]:
             detail="No ML runtime on this node — analysis arrives via P2P import",
         )
     local_analysis = profile.local_analysis
+    from playback import hqp_benchmark
+    if hqp_benchmark.measures_here():
+        raise HTTPException(status_code=409, detail=hqp_benchmark.HERE_BUSY)
 
     with _enrich_lock:
         if _enrich_state["running"]:

@@ -38,6 +38,11 @@ VariantLocationEnum = ENUM(
     name="variant_location",
     create_type=False,
 )
+HqpCudaEnum = ENUM(
+    "off", "full", "convolution",
+    name="hqp_cuda",
+    create_type=False,
+)
 ArtistGenderEnum = ENUM(
     "unknown", "female", "male", "mixed",
     name="artist_gender",
@@ -447,6 +452,14 @@ class HqpEndpoint(Base):
     library_hash = Column(Text)
     first_seen_at = Column(DateTime(timezone=True), server_default=func.now())
     last_synced_at = Column(DateTime(timezone=True))
+    hqp_version = Column(Text)
+    hqp_engine = Column(Text)
+    hqp_platform = Column(Text)
+    cuda = Column(HqpCudaEnum)
+    host_cpu = Column(Text)
+    host_cores = Column(SmallInteger)
+    host_gpu = Column(Text)
+    host_ram_gb = Column(Float)
 
 
 class AlbumVariant(Base):

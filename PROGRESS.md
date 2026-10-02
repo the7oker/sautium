@@ -596,6 +596,40 @@ implementation details live in the code, DB and git history.
   weighed before any absence of it: a Next onto a track HQPlayer pre-buffered
   sends no GET, and with Roon in charge our file is never asked for — the
   media server's silence is a verdict only once nothing better explains it.
+- **DSP load is measured, not predicted (2026-10-02).** Whether a filter or a
+  modulator keeps up depends on the HQPlayer host — CPU build, CUDA (filters
+  can offload, modulators never do), memory, cooling — and no spec sheet
+  predicts it, so the pickers badge what HQPlayer's own `process_speed` said
+  on THIS HQPlayer (`playback/hqp_load.py`, `hqp_benchmark.py`; the rules in
+  `docs/HQPLAYER_INTEGRATION.md` § "DSP load"). Passive first: every listen
+  leaves samples, keyed by what HQPlayer reports it runs and the build it runs
+  — names, never indices; a build change makes the old ones another key, so
+  "stale" is derived, never stored. The benchmark only fills gaps: one mode,
+  the points nothing covers — a sample of the key, or an earlier run's point
+  that ASKED for it (a refused combination or an adaptive output rate never
+  becomes a sample of what was asked; the ledger `hqp_benchmark_points` is
+  what keeps them from coming back on every run) — and the owner's own setting
+  first and last. Its settling rule waits out a running average that can be
+  equal three times and still lag, and records an unsettled point marked
+  rather than dropping it — the time a heavy filter takes to initialise is
+  data too. The class boundaries come from where points dropped out on that
+  host, not from the author's rule of thumb — so a dropout is the DSP falling
+  behind and nothing else: a sign held for ticks once the readings run, at a
+  speed under 1.5× (before them, under 1×); a stop at a healthy speed fails
+  the point, which a later run measures again. One output buffer still filling
+  at 2.5× once marked a whole host red. One owner of HQPlayer during a run:
+  the output is lent (`PlaybackManager.hold`) the way an output switch
+  detaches it, after a queue replace still adding and a play intent still
+  attaching are through, and the detached backend refuses what was already on
+  its way — so no tick reaches the tracker, no mirror fights the run, and the
+  canonical queue, never replaced, mirrors back when the output returns. The
+  run's own connection survives HQPlayer dropping it (a trial Embedded stops
+  every 30 minutes) and lowers the volume again before anything plays, and a
+  run cut short is put back the next time HQPlayer answers, while a mark of
+  the run remains — the lowered volume, its signals, or the selection it set
+  last. Mute is the bottom of `VolumeRange`, read back, because `VolumeMute`
+  is a toggle no reply reports. Sharing over P2P is deferred to its own design, in this shape: the
+  host class (CPU, GPU, CUDA, build) + the setting + the speed, never a track.
 
 ### MCP server
 

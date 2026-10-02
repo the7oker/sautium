@@ -31,7 +31,7 @@ from playback import queue as queue_mod
 from playback import sessions
 from playback.base import ReorderPlan
 from playback.hqp_backend import _get_hqp, _hqp_lock
-from playback.manager import manager, active_hqp_endpoint
+from playback.manager import OutputHeld, active_hqp_endpoint, manager
 from playback.queue import resolved_artwork as _resolved_artwork
 from playback.queue import resolved_durations as _resolved_durations
 from playback.sessions import _SESSION_ORIGINS
@@ -78,8 +78,11 @@ def start_status_poller():
 def stop_status_poller():
     """Detach the active backend WITHOUT touching playback — clearing the
     HQPlayer host or shutting the app down must leave an externally-
-    running player alone (the next start adopts its queue)."""
-    manager.activate(None, stop_old=False)
+    running player alone (the next start adopts its queue). A lent output
+    is detached already: the app stopping while a benchmark still puts
+    HQPlayer back (hqp_benchmark.shutdown) leaves it to that."""
+    if manager.held is None:
+        manager.activate(None, stop_old=False)
 
 
 # -- Request models -----------------------------------------------------------
@@ -290,14 +293,16 @@ def _hqplayer_entries() -> list:
     for r in _db_query("""
         SELECT e.id, e.name, e.host, e.port, e.product, e.library_hash IS NOT NULL AS synced,
                (SELECT count(*) FROM album_variants av JOIN hqp_library_files f ON f.album_variant_id = av.id
-                 WHERE av.hqp_endpoint_id = e.id) AS files
+                 WHERE av.hqp_endpoint_id = e.id) AS files,
+               (SELECT count(*) FROM hqp_dsp_speed s WHERE s.hqp_endpoint_id = e.id) AS measured
           FROM hqp_endpoints e WHERE e.host IS NOT NULL ORDER BY e.id"""):
         entries[_hqp_key(r["host"], r["port"])] = {
             "endpoint_id": r["id"], "name": r["name"], "host": r["host"], "port": int(r["port"]),
             "product": r["product"],
             "embedded": hqp_library.is_embedded(r["product"]) if r["product"] else None,
             "here": is_own_address(r["host"]), "known": True, "seen": False, "control": None,
-            "synced": bool(r["synced"]), "files": int(r["files"] or 0), "configured": False}
+            "synced": bool(r["synced"]), "files": int(r["files"] or 0),
+            "measured": int(r["measured"] or 0), "configured": False}
     for (host, port), d in _hqp_discovered.items():
         key = _hqp_key(host, port)
         e = entries.get(key)
@@ -305,7 +310,7 @@ def _hqplayer_entries() -> list:
             entries[key] = {"endpoint_id": d.get("endpoint_id"), "name": d["name"], "host": host, "port": port,
                             "product": d["product"], "embedded": hqp_library.is_embedded(d["product"]),
                             "here": key[0] == "here", "known": False, "seen": True, "control": d["control"],
-                            "synced": False, "files": 0, "configured": False}
+                            "synced": False, "files": 0, "measured": 0, "configured": False}
         else:
             e["seen"] = True
             e["control"] = d["control"]
@@ -321,7 +326,8 @@ def _hqplayer_entries() -> list:
         if e is None:
             entries[key] = {"endpoint_id": None, "name": None, "host": host, "port": port, "product": None,
                             "embedded": None, "here": key[0] == "here", "known": False, "seen": False,
-                            "control": None, "synced": False, "files": 0, "configured": True}
+                            "control": None, "synced": False, "files": 0, "measured": 0,
+                            "configured": True}
         else:
             e["configured"] = True
     for e in entries.values():
@@ -1397,7 +1403,7 @@ def play():
     try:
         return {"ok": manager.ensure_active().play()}
     except Exception as e:
-        raise HTTPException(status_code=503, detail=str(e))
+        raise _output_error(e)
 
 
 @router.post("/pause")
@@ -1405,7 +1411,7 @@ def pause():
     try:
         return {"ok": manager.backend().pause()}
     except Exception as e:
-        raise HTTPException(status_code=503, detail=str(e))
+        raise _output_error(e)
 
 
 @router.post("/stop")
@@ -1413,7 +1419,7 @@ def stop():
     try:
         return {"ok": manager.backend().stop()}
     except Exception as e:
-        raise HTTPException(status_code=503, detail=str(e))
+        raise _output_error(e)
 
 
 @router.post("/next")
@@ -1421,7 +1427,7 @@ def next_track():
     try:
         return {"ok": manager.ensure_active().next()}
     except Exception as e:
-        raise HTTPException(status_code=503, detail=str(e))
+        raise _output_error(e)
 
 
 @router.post("/previous")
@@ -1429,7 +1435,7 @@ def previous_track():
     try:
         return {"ok": manager.ensure_active().previous()}
     except Exception as e:
-        raise HTTPException(status_code=503, detail=str(e))
+        raise _output_error(e)
 
 
 @router.post("/volume/up")
@@ -1437,7 +1443,7 @@ def volume_up():
     try:
         return {"ok": manager.backend().volume_up()}
     except Exception as e:
-        raise HTTPException(status_code=503, detail=str(e))
+        raise _output_error(e)
 
 
 @router.post("/volume/down")
@@ -1445,7 +1451,7 @@ def volume_down():
     try:
         return {"ok": manager.backend().volume_down()}
     except Exception as e:
-        raise HTTPException(status_code=503, detail=str(e))
+        raise _output_error(e)
 
 
 @router.post("/volume")
@@ -1453,7 +1459,7 @@ def set_volume(req: VolumeRequest):
     try:
         return {"ok": manager.backend().set_volume(req.level)}
     except Exception as e:
-        raise HTTPException(status_code=503, detail=str(e))
+        raise _output_error(e)
 
 
 @router.post("/seek")
@@ -1465,7 +1471,7 @@ def seek(req: SeekRequest):
     try:
         return {"ok": manager.backend().seek(int(req.position))}
     except Exception as e:
-        raise HTTPException(status_code=503, detail=str(e))
+        raise _output_error(e)
 
 
 # -- Smart play ----------------------------------------------------------------
@@ -1480,7 +1486,7 @@ def remove(req: RemoveRequest):
     try:
         ok = manager.remove(req.index, track_id=req.track_id)
     except Exception as e:
-        raise HTTPException(status_code=503, detail=str(e))
+        raise _output_error(e)
     if not ok and req.track_id:
         raise HTTPException(status_code=409, detail="queue changed — refresh and try again")
     return {"ok": ok, "index": req.index}
@@ -1597,7 +1603,7 @@ def reorder(req: ReorderRequest):
         return {"ok": True, "anchor_index": new_status_idx, **result}
     except Exception as e:
         logger.error(f"reorder failed: {e}", exc_info=True)
-        raise HTTPException(status_code=503, detail=str(e))
+        raise _output_error(e)
 
 @router.post("/jump")
 def jump(req: JumpRequest):
@@ -1612,7 +1618,7 @@ def jump(req: JumpRequest):
         ok = manager.jump(req.index)
         return {"ok": ok, "index": req.index}
     except Exception as e:
-        raise HTTPException(status_code=503, detail=str(e))
+        raise _output_error(e)
 
 
 def _filler_append(item, gen: int, *, position: str = "end",
@@ -1730,7 +1736,7 @@ def play_track(req: PlayTrackRequest):
     except HTTPException:
         raise
     except Exception as e:
-        raise HTTPException(status_code=503, detail=str(e))
+        raise _output_error(e)
 
 
 @router.post("/play-album")
@@ -1829,7 +1835,7 @@ def _play_album_rows(best_album: dict):
     except HTTPException:
         raise
     except Exception as e:
-        raise HTTPException(status_code=503, detail=str(e))
+        raise _output_error(e)
 
 
 # -- Phantom-album streaming buffer policy ------------------------------------
@@ -2413,6 +2419,21 @@ class PlayPhantomAlbumRequest(BaseModel):
     position: str = "end"     # queue endpoint only: 'next' | 'end'
 
 
+def _output_error(e: Exception) -> HTTPException:
+    """What a play intent or transport command the output did not take
+    answers: 409 while the output is lent (the HQPlayer benchmark — busy,
+    not broken: the UI must not send the owner to the Output picker), 503
+    when it cannot take it. A backend detached by the hold that an intent
+    took just before refuses with a plain ConnectionError — the hold
+    names it."""
+    if isinstance(e, OutputHeld):
+        return HTTPException(status_code=409, detail=str(e))
+    hold = manager.held
+    if hold is not None and isinstance(e, ConnectionError):
+        return HTTPException(status_code=409, detail=str(OutputHeld(hold)))
+    return HTTPException(status_code=503, detail=str(e))
+
+
 def _ensure_output_ready() -> None:
     """Fast offline pre-flight for the streaming paths: fail with a clear
     503 BEFORE resolving/buffering a whole album, so a powered-off renderer
@@ -2420,7 +2441,7 @@ def _ensure_output_ready() -> None:
     try:
         manager.ensure_active()
     except ConnectionError as e:
-        raise HTTPException(status_code=503, detail=str(e))
+        raise _output_error(e)
 
 
 def _streaming_503(msg: str) -> HTTPException:
@@ -2555,7 +2576,7 @@ def play_phantom_album(req: PlayPhantomAlbumRequest):
     except HTTPException:
         raise
     except Exception as e:
-        raise HTTPException(status_code=503, detail=str(e))
+        raise _output_error(e)
 
 
 class PlayPhantomTrackRequest(BaseModel):
@@ -2617,7 +2638,7 @@ def play_phantom_track(req: PlayPhantomTrackRequest):
     except HTTPException:
         raise
     except Exception as e:
-        raise HTTPException(status_code=503, detail=str(e))
+        raise _output_error(e)
 
 
 @router.post("/queue-phantom-track")
@@ -2940,7 +2961,7 @@ def play_entities(req: QueueEntitiesRequest):
     except HTTPException:
         raise
     except Exception as e:
-        raise HTTPException(status_code=503, detail=str(e))
+        raise _output_error(e)
     return {"ok": True, "playing": req.autoplay, "queued": owned,
             "streaming": phantom, "not_found": missing}
 
@@ -3062,7 +3083,7 @@ def play_session(req: PlaySessionRequest):
     except HTTPException:
         raise
     except Exception as e:
-        raise HTTPException(status_code=503, detail=str(e))
+        raise _output_error(e)
     return {"ok": True, "queued": owned, "streaming": phantom, "missing": missing}
 
 
@@ -3132,7 +3153,7 @@ def play_similar(req: PlaySimilarRequest):
     except HTTPException:
         raise
     except Exception as e:
-        raise HTTPException(status_code=503, detail=str(e))
+        raise _output_error(e)
 
     return {
         "ok": True,
@@ -3203,7 +3224,7 @@ def play_tracks(req: PlayTracksRequest):
         raise
     except Exception as e:
         logger.error(f"play-tracks failed: {e}")
-        raise HTTPException(status_code=503, detail=str(e))
+        raise _output_error(e)
 
 
 @router.post("/queue-tracks")
@@ -3254,7 +3275,7 @@ def queue_tracks(req: QueueTracksRequest):
     except HTTPException:
         raise
     except Exception as e:
-        raise HTTPException(status_code=503, detail=str(e))
+        raise _output_error(e)
 
 
 # -- Radio mode (mixed: owned + streamed phantom) -----------------------------

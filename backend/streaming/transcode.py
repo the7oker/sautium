@@ -89,10 +89,11 @@ def _opus_args(bitrate: int) -> list:
             "-application", "audio", "-f", "ogg"]
 
 
-def _run_ffmpeg(args_in: list, out_args: list, out_path: Path,
-                stdin_bytes: Optional[bytes]) -> None:
-    """args_in end with the -i input; out_args carry map/metadata/codec/format
-    (an explicit -f is mandatory — the .part temp name defeats inference)."""
+def run_ffmpeg(args_in: list, out_args: list, out_path: Path,
+               stdin_bytes: Optional[bytes]) -> None:
+    """One ffmpeg encode into `out_path`, written whole or not at all. args_in
+    end with the -i input; out_args carry map/metadata/codec/format (an
+    explicit -f is mandatory — the .part temp name defeats inference)."""
     tmp = out_path.parent / (out_path.name + ".part")
     cmd = ["ffmpeg", "-hide_banner", "-loglevel", "error", "-y",
            *args_in, "-vn", *out_args, str(tmp)]
@@ -102,7 +103,7 @@ def _run_ffmpeg(args_in: list, out_args: list, out_path: Path,
         os.replace(tmp, out_path)               # atomic — no half file is ever served
     except subprocess.CalledProcessError as e:
         err = (e.stderr or b"").decode(errors="replace")[-300:]
-        raise RuntimeError(f"transcode failed: {err}") from e
+        raise RuntimeError(f"ffmpeg failed: {err}") from e
     finally:
         tmp.unlink(missing_ok=True)
 
@@ -179,7 +180,7 @@ def _produce(key: str, *, suffix: str, label: str, args_in: list,
             return str(out)
         _CACHE_DIR.mkdir(parents=True, exist_ok=True)
         started = time.monotonic()
-        _run_ffmpeg(args_in, out_args, out, stdin_bytes)
+        run_ffmpeg(args_in, out_args, out, stdin_bytes)
         logger.info("%s transcode in %.1fs (%s)", label,
                     time.monotonic() - started, out.name)
     with _index_lock:

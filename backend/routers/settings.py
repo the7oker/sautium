@@ -655,7 +655,8 @@ def _hqp_library_state() -> Dict[str, Any]:
                e.last_synced_at,
                (SELECT count(*) FROM album_variants av JOIN hqp_library_files f ON f.album_variant_id = av.id
                  WHERE av.hqp_endpoint_id = e.id) AS files,
-               (SELECT count(DISTINCT av.album_id) FROM album_variants av WHERE av.hqp_endpoint_id = e.id) AS albums
+               (SELECT count(DISTINCT av.album_id) FROM album_variants av WHERE av.hqp_endpoint_id = e.id) AS albums,
+               (SELECT count(*) FROM hqp_dsp_speed s WHERE s.hqp_endpoint_id = e.id) AS measured
         FROM hqp_endpoints e
         ORDER BY (e.host = %(h)s AND e.port = %(p)s) DESC, e.id
     """, {"h": host, "p": port})
@@ -667,6 +668,9 @@ def _hqp_library_state() -> Dict[str, Any]:
                   "synced": bool(r["synced"]),
                   "last_synced_at": r["last_synced_at"].isoformat() if r["last_synced_at"] else None,
                   "files": int(r["files"] or 0), "albums": int(r["albums"] or 0),
+                  # DSP settings measured on it (playback.hqp_load): they go
+                  # with the row when it is forgotten
+                  "measured": int(r["measured"] or 0),
                   "configured": bool(host and r["host"]
                                      and hqp_library.address_key(r["host"], r["port"]) == hqp_library.address_key(host, port))}
                  for r in rows]
@@ -691,10 +695,11 @@ def _hqp_library_state() -> Dict[str, Any]:
                      last_synced_at=configured["last_synced_at"] if configured else None,
                      files=configured["files"] if configured else 0,
                      albums=configured["albums"] if configured else 0,
+                     measured=configured["measured"] if configured else 0,
                      synced=bool(configured and configured["synced"]))
     else:
         state.update(endpoint=None, name=None, label=None, product=None, own_library=None,
-                     last_synced_at=None, files=0, albums=0, synced=False)
+                     last_synced_at=None, files=0, albums=0, measured=0, synced=False)
     state["endpoints"] = endpoints
     return state
 
@@ -1943,26 +1948,33 @@ def put_hqplayer_prefs(req: HqplayerPrefs) -> Dict[str, Any]:
     address dictates. (activate() is a no-op for an already-active type,
     so a plain re-activate would leave HQPlayer holding URIs of the old
     form.)"""
-    _apply_hqplayer_address(req.host, req.port)
-    # Only when HQPlayer IS the selection. Unset no longer means "HQPlayer
-    # may have it" — an unset output resolves to this device, so saving an
-    # address here must not quietly move playback. Nothing is sent to the
-    # previous endpoint (stop_old=False): an HQPlayer the owner just pointed
-    # away from is left as it was.
-    if _read("output.type") == "hqplayer":
-        from playback.manager import manager
-        from routers.player import _hqp_configured, stop_status_poller
-        if _hqp_configured():
-            manager.activate(None, stop_old=False)
-            try:
-                manager.activate("hqplayer")
-            except Exception as e:
-                # The address is saved either way; the picker shows the
-                # endpoint as disconnected until it answers.
-                logger.warning("HQPlayer re-attach after a settings change "
-                               "failed: %s", e)
-        else:
-            stop_status_poller()
+    from playback.manager import OutputHeld, manager
+    # Not while the benchmark drives HQPlayer: its connection follows the
+    # address, and nothing of the change is written meanwhile.
+    try:
+        with manager.output_change():
+            _apply_hqplayer_address(req.host, req.port)
+            # Only when HQPlayer IS the selection. Unset no longer means
+            # "HQPlayer may have it" — an unset output resolves to this
+            # device, so saving an address here must not quietly move
+            # playback. Nothing is sent to the previous endpoint
+            # (stop_old=False): an HQPlayer the owner just pointed away from
+            # is left as it was.
+            if _read("output.type") == "hqplayer":
+                from routers.player import _hqp_configured, stop_status_poller
+                if _hqp_configured():
+                    manager.activate(None, stop_old=False)
+                    try:
+                        manager.activate("hqplayer")
+                    except Exception as e:
+                        # The address is saved either way; the picker shows
+                        # the endpoint as disconnected until it answers.
+                        logger.warning("HQPlayer re-attach after a settings change "
+                                       "failed: %s", e)
+                else:
+                    stop_status_poller()
+    except OutputHeld as e:
+        raise HTTPException(status_code=409, detail=str(e))
     return get_hqplayer_prefs()
 
 
@@ -1977,12 +1989,17 @@ class OutputPrefs(BaseModel):
 
 @router.get("/output")
 def get_output_prefs() -> Dict[str, Any]:
+    from playback.manager import manager
+    hold = manager.held
     return {
         "type": _read("output.type"),
         "device_id": _read("output.local_device"),
         "exclusive": bool(_read("output.local_exclusive")),
         "renderer": _read("output.dlna_renderer"),
         "stream_quality": _read("output.stream_quality") or "lossless",
+        # What the output is lent to (the HQPlayer benchmark) — the MCP
+        # assistant reads it to keep its HQPlayer tools off meanwhile.
+        "held": hold["label"] if hold else None,
     }
 
 
@@ -1991,8 +2008,19 @@ def put_output_prefs(req: OutputPrefs) -> Dict[str, Any]:
     """Select the playback output (Output picker). Persisted, then applied
     live: the old backend stops, the canonical queue survives, playback does
     not auto-resume — the user presses play on the new output."""
-    from playback.manager import manager
+    from playback.manager import OutputHeld, manager
 
+    # Not while the benchmark has the output: checked under the lock a hold
+    # takes, so nothing of the change is written while one lasts.
+    try:
+        with manager.output_change():
+            return _put_output_prefs(req)
+    except OutputHeld as e:
+        raise HTTPException(status_code=409, detail=str(e))
+
+
+def _put_output_prefs(req: OutputPrefs) -> Dict[str, Any]:
+    from playback.manager import manager
     if req.type is not None and req.type not in ("hqplayer", "local", "dlna", "browser"):
         raise HTTPException(status_code=400, detail=f"unknown output type: {req.type}")
     if req.type == "local":
@@ -2389,11 +2417,18 @@ def cancel_hqp_sync() -> Dict[str, Any]:
 def forget_hqp_library(endpoint_id: int) -> Dict[str, Any]:
     """The explicit, confirmed goodbye to one HQPlayer's library — a
     streamer that went home, a box retired: everything its library alone
-    put here goes (hqp_library.forget_endpoint_id), the analysis and the
-    listens of its tracks stay as they do for a vanished local rip."""
+    put here goes (hqp_library.forget_endpoint_id), and with its row the
+    DSP load measured on it (playback.hqp_load — what that box keeps up
+    with); the analysis and the listens of its tracks stay as they do for a
+    vanished local rip. Never in the middle of a benchmark run on it."""
     import hqp_library
+    from playback import hqp_benchmark
     if hqp_library.job_state()["running"]:
         raise HTTPException(status_code=409, detail="An HQPlayer library job is already running")
+    job = hqp_benchmark.state()
+    if job["running"] and job["endpoint_id"] == endpoint_id:
+        raise HTTPException(status_code=409, detail="The benchmark is measuring this HQPlayer — "
+                                                    "cancel it first")
     if not db_query_one("SELECT 1 AS ok FROM hqp_endpoints WHERE id = %(e)s", {"e": endpoint_id}):
         raise HTTPException(status_code=404, detail="No such HQPlayer library")
     stats = hqp_library.forget_endpoint_id(endpoint_id)

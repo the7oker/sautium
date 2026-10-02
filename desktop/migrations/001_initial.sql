@@ -83,6 +83,26 @@ DO $$ BEGIN
     CREATE TYPE variant_location AS ENUM ('local', 'hqplayer');
 EXCEPTION WHEN duplicate_object THEN NULL; END $$;
 
+-- HQPlayer's CUDA offload ('full' = filters and convolution on the GPU,
+-- 'convolution' = only convolution), where a DSP sample came from, how a
+-- benchmark run ended ('interrupted' = the process died mid-run), and how
+-- one of its points did.
+DO $$ BEGIN
+    CREATE TYPE hqp_cuda AS ENUM ('off', 'full', 'convolution');
+EXCEPTION WHEN duplicate_object THEN NULL; END $$;
+
+DO $$ BEGIN
+    CREATE TYPE hqp_sample_source AS ENUM ('listen', 'benchmark');
+EXCEPTION WHEN duplicate_object THEN NULL; END $$;
+
+DO $$ BEGIN
+    CREATE TYPE hqp_bench_outcome AS ENUM ('done', 'cancelled', 'failed', 'interrupted');
+EXCEPTION WHEN duplicate_object THEN NULL; END $$;
+
+DO $$ BEGIN
+    CREATE TYPE hqp_point_result AS ENUM ('measured', 'unsettled', 'dropout', 'refused', 'failed');
+EXCEPTION WHEN duplicate_object THEN NULL; END $$;
+
 DO $$ BEGIN
     CREATE TYPE cover_source_type AS ENUM ('external', 'embedded', 'sentinel');
 EXCEPTION WHEN duplicate_object THEN NULL; END $$;
@@ -318,9 +338,154 @@ CREATE TABLE IF NOT EXISTS hqp_endpoints (
     library_hash TEXT,                      -- <LibraryGetHash/> the last COMPLETE sync saw; NULL = never imported
     first_seen_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
     last_synced_at TIMESTAMPTZ,
+    hqp_version TEXT,                       -- <GetInfo version="…"/>: the product generation ("6")
+    hqp_engine TEXT,                        -- <GetInfo engine="…"/>: the build ("6.2.3") filter names and DSP costs hold for
+    hqp_platform TEXT,                      -- <GetInfo platform="…"/>
+    cuda hqp_cuda,                          -- CUDA offload: HQPlayer's settings.xml here, the owner's answer elsewhere; NULL = not known
+    host_cpu TEXT,                          -- the machine it runs on — known only for an HQPlayer on this one
+    host_cores SMALLINT,
+    host_gpu TEXT,
+    host_ram_gb REAL,
     CONSTRAINT chk_hqp_endpoints_address CHECK ((host IS NULL) = (port IS NULL))
 );
 CREATE UNIQUE INDEX IF NOT EXISTS uq_hqp_endpoints_address ON hqp_endpoints(host, port) WHERE host IS NOT NULL;
+
+-- What a DSP setting costs on an HQPlayer's host, measured (2026-10-02):
+-- process_speed (processing speed over playback speed) from <Status/> — a
+-- sample while the owner listens, and the benchmark's points. Settings are
+-- kept by name (lists differ per mode and per build) with the build they
+-- were measured on. Samples live 90 days; hqp_dsp_speed is the per-key
+-- rollup the pickers badge from, refreshed by the writer of each sample.
+CREATE TABLE IF NOT EXISTS hqp_benchmark_runs (
+    id SERIAL PRIMARY KEY,
+    hqp_endpoint_id INTEGER NOT NULL REFERENCES hqp_endpoints(id) ON DELETE CASCADE,
+    hqp_engine TEXT NOT NULL,
+    mode TEXT NOT NULL,                     -- the mode measured, by name
+    started_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    finished_at TIMESTAMPTZ,                -- NULL while it runs; NULL with no run going = the process died mid-run
+    outcome hqp_bench_outcome,
+    points_planned INTEGER NOT NULL,
+    points_measured INTEGER NOT NULL DEFAULT 0,
+    dropout_speed REAL,                     -- the fastest process_speed a point dropped out at; NULL = none did
+    first_speed REAL,                       -- the owner's own setting, measured first ...
+    last_speed REAL,                        -- ... and again last: the thermal drift check
+    note TEXT,                              -- why it stopped short, and what could not be put back
+    -- What the run puts back, as State indices: the mode HQPlayer was in, its
+    -- selection there and its volume
+    pre_mode INTEGER NOT NULL,
+    pre_rate INTEGER NOT NULL,
+    pre_filter INTEGER NOT NULL,            -- State filterNx
+    pre_filter1x INTEGER NOT NULL,
+    pre_shaper INTEGER NOT NULL,
+    pre_matrix_profile TEXT,
+    pre_volume REAL NOT NULL,
+    mute_volume REAL,                       -- the level the run lowered HQPlayer to; NULL = it could not lower it
+    -- The context it measured in: its points are covered in it only
+    cuda hqp_cuda,
+    matrix_profile TEXT,
+    convolution BOOLEAN,
+    -- The measured mode's own selection as the run found it, when the run
+    -- switched HQPlayer to that mode (HQPlayer keeps one selection per
+    -- mode); NULL = it measured the mode HQPlayer was in, pre_* holds it
+    own_mode INTEGER,
+    own_rate INTEGER,
+    own_filter INTEGER,
+    own_filter1x INTEGER,
+    own_shaper INTEGER,
+    -- The selection the run set last: an HQPlayer still on it is the run's
+    -- mark like its lowered volume and its signals — a run cut short is put
+    -- back only while one remains (one that restarted under the run keeps
+    -- its selection, maybe nothing else)
+    last_rate INTEGER,
+    last_filter INTEGER,
+    last_filter1x INTEGER,
+    last_shaper INTEGER,
+    CONSTRAINT chk_hqp_benchmark_runs_finished CHECK ((finished_at IS NULL) = (outcome IS NULL))
+);
+CREATE INDEX IF NOT EXISTS idx_hqp_benchmark_runs_endpoint
+    ON hqp_benchmark_runs(hqp_endpoint_id, started_at DESC);
+
+CREATE TABLE IF NOT EXISTS hqp_dsp_samples (
+    id BIGSERIAL PRIMARY KEY,
+    hqp_endpoint_id INTEGER NOT NULL REFERENCES hqp_endpoints(id) ON DELETE CASCADE,
+    hqp_engine TEXT NOT NULL,
+    cuda hqp_cuda,
+    sampled_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    source hqp_sample_source NOT NULL,
+    run_id INTEGER REFERENCES hqp_benchmark_runs(id) ON DELETE SET NULL,
+    mode TEXT NOT NULL,                     -- <Status active_mode>: what ran, by name
+    rate_out INTEGER NOT NULL,              -- <Status active_rate>, Hz
+    filter TEXT NOT NULL,                   -- <Status active_filter>: the 1x or Nx one, whichever the source needs
+    shaper TEXT NOT NULL,                   -- <Status active_shaper>: the modulator (SDM) or the dither (PCM)
+    matrix_profile TEXT,                    -- NULL = none
+    convolution BOOLEAN NOT NULL,
+    adaptive BOOLEAN NOT NULL,
+    src_rate INTEGER NOT NULL,              -- <Status><metadata samplerate>: what HQPlayer decodes
+    src_bits SMALLINT,
+    src_channels SMALLINT NOT NULL,
+    src_sdm BOOLEAN NOT NULL,
+    process_speed REAL NOT NULL,            -- a listen: one reading; a benchmark point: the p10 of its accepted readings
+    input_fill REAL,                        -- -1 = HQPlayer reads a file it opened itself
+    output_fill REAL,                       -- a benchmark point: the lowest seen
+    dropout BOOLEAN,                        -- benchmark only: the output drained or playback stopped (speed = the one just before)
+    settled BOOLEAN,                        -- benchmark only: FALSE = the readings never settled within 15 s, recorded anyway
+    init_s REAL,                            -- benchmark only: Play until the position moved
+    settle_s REAL,                          -- benchmark only: the position moving until the readings settled
+    CONSTRAINT chk_hqp_dsp_samples_benchmark CHECK (
+        source = 'benchmark'
+        OR (run_id IS NULL AND dropout IS NULL AND settled IS NULL
+            AND init_s IS NULL AND settle_s IS NULL))
+);
+CREATE INDEX IF NOT EXISTS idx_hqp_dsp_samples_key
+    ON hqp_dsp_samples(hqp_endpoint_id, hqp_engine, mode, rate_out, filter, shaper, src_rate);
+CREATE INDEX IF NOT EXISTS idx_hqp_dsp_samples_sampled_at ON hqp_dsp_samples(sampled_at);
+
+-- Each benchmark point by what was ASKED — the selected rate (0 = auto),
+-- the filter and modulator by name, the source — and how it ended. A
+-- repeat run skips what was asked before: a combination HQPlayer refuses,
+-- or an adaptive rate that plays another one, never shows up as a sample
+-- of the asked key.
+CREATE TABLE IF NOT EXISTS hqp_benchmark_points (
+    id BIGSERIAL PRIMARY KEY,
+    run_id INTEGER NOT NULL REFERENCES hqp_benchmark_runs(id) ON DELETE CASCADE,
+    rate_hz INTEGER NOT NULL,
+    filter TEXT NOT NULL,
+    shaper TEXT NOT NULL,
+    src_rate INTEGER NOT NULL,
+    src_channels SMALLINT NOT NULL,
+    result hqp_point_result NOT NULL,
+    note TEXT,                              -- HQPlayer's refusal, or why it failed
+    sample_id BIGINT REFERENCES hqp_dsp_samples(id) ON DELETE SET NULL,
+    at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+CREATE INDEX IF NOT EXISTS idx_hqp_benchmark_points_run ON hqp_benchmark_points(run_id);
+
+CREATE TABLE IF NOT EXISTS hqp_dsp_speed (
+    id SERIAL PRIMARY KEY,
+    hqp_endpoint_id INTEGER NOT NULL REFERENCES hqp_endpoints(id) ON DELETE CASCADE,
+    hqp_engine TEXT NOT NULL,
+    cuda hqp_cuda,
+    mode TEXT NOT NULL,
+    rate_out INTEGER NOT NULL,
+    filter TEXT NOT NULL,
+    shaper TEXT NOT NULL,
+    matrix_profile TEXT,
+    convolution BOOLEAN NOT NULL,
+    src_rate INTEGER NOT NULL,
+    src_channels SMALLINT NOT NULL,
+    n INTEGER NOT NULL,                     -- the samples since the key's newest benchmark point (all, without one)
+    speed_p10 REAL NOT NULL,
+    speed_median REAL NOT NULL,
+    last_seen TIMESTAMPTZ NOT NULL,
+    bench_at TIMESTAMPTZ,                   -- the newest benchmark point of the key, and what it saw
+    bench_settled BOOLEAN,
+    bench_init_s REAL,
+    bench_settle_s REAL,
+    dropout BOOLEAN NOT NULL DEFAULT FALSE,
+    CONSTRAINT uq_hqp_dsp_speed_key UNIQUE NULLS NOT DISTINCT
+        (hqp_endpoint_id, hqp_engine, cuda, mode, rate_out, filter, shaper,
+         matrix_profile, convolution, src_rate, src_channels)
+);
 
 CREATE TABLE IF NOT EXISTS album_variants (
     id SERIAL PRIMARY KEY,

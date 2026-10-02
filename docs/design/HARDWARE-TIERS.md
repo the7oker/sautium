@@ -183,6 +183,21 @@ Architecture sketch — an output-backend abstraction:
   (`backend/media_urls.py`, Security Posture rule 3); (c) DLNA renderer quirks
   (FLAC support, DLNA.ORG content-features headers) — a capability probe.
 
+**This node's tier is not the HQPlayer host's headroom** (2026-10-02). The
+profile above decides what Sautium computes on the machine it runs on. What
+HQPlayer can run is a property of the machine HQPlayer runs on — often
+another one (a Pi 5 running HQPlayer OS, a second PC), and even when it is
+this one, HQPlayer's filters and modulators load it in their own way (filters
+can offload to CUDA, modulators never do). That headroom is never inferred
+from the profile or from a spec sheet: it is measured from HQPlayer's own
+`process_speed`, per HQPlayer endpoint and build — samples while the owner
+listens, a benchmark for the settings never listened through
+(`docs/HQPLAYER_INTEGRATION.md` § "DSP load") — and shown in the HQPlayer
+screen's pickers. The one place the two meet: on a machine that runs both,
+Sautium's own GPU and CPU work competes with HQPlayer's, so a benchmark run
+counts as playback (the model steps yield, backups wait) and a manual
+analysis and a benchmark of this machine's HQPlayer refuse each other.
+
 ### 2.7 Stream enrichment is network contribution — do not shed it first
 
 When a node streams a phantom track, the post-buffer enrichment (CLAP + librosa

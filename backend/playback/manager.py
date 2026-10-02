@@ -20,8 +20,9 @@ import logging
 import select
 import threading
 import time
+from contextlib import contextmanager
 from dataclasses import asdict
-from typing import Callable, Optional
+from typing import Callable, Iterator, Optional
 
 import psycopg2
 import psycopg2.extensions
@@ -39,6 +40,16 @@ _PREVIEW_AHEAD = 4    # slots past the playing one kept fetched (gapless horizon
 _PREVIEW_BEHIND = 1   # instant "previous"
 
 
+class OutputHeld(ConnectionError):
+    """The output is lent to a job that drives the device on its own
+    connection (the HQPlayer benchmark): nothing else may play, switch or
+    reconfigure it until the job ends or is cancelled."""
+
+    def __init__(self, hold: dict):
+        super().__init__(f"{hold['label']} — it gives the output back when it "
+                         "finishes, or cancel it on the HQPlayer screen")
+
+
 class PlaybackManager:
     def __init__(self):
         self.queue = CanonicalQueue()
@@ -54,6 +65,9 @@ class PlaybackManager:
         self._last_slot = 0
         self._mutate_lock = threading.RLock()
         self.radio_mode = False
+        # What the output is lent to (hold), with the job's progress; every
+        # status payload carries it while it lasts.
+        self._hold: Optional[dict] = None
 
         self._latest_status: dict = {"state": "disconnected"}
         self._status_version = 0
@@ -71,10 +85,83 @@ class PlaybackManager:
     # -- backend lifecycle ---------------------------------------------------
 
     def backend(self) -> PlayerBackend:
+        self._refuse_if_held()
         b = self._active
         if b is None:
             raise ConnectionError("No playback output configured")
         return b
+
+    @property
+    def held(self) -> Optional[dict]:
+        """What the output is lent to, while it is (see hold)."""
+        return self._hold
+
+    def _refuse_if_held(self) -> None:
+        hold = self._hold
+        if hold is not None:
+            raise OutputHeld(hold)
+
+    @contextmanager
+    def hold(self, by: str, label: str) -> Iterator[None]:
+        """Lend the HQPlayer output to `by` (the benchmark), which drives
+        HQPlayer on a connection of its own. The backend is detached exactly
+        as an output switch detaches it — stopped, its poller ended, so no
+        tick reaches the tracker and no mirror fights the job — and while the
+        hold lasts every play intent, transport command and output switch is
+        refused (OutputHeld). The canonical queue stays the owner's: an edit
+        lands in it as it does with no output attached. The release attaches
+        HQPlayer again — still held, so no switch lands in between — and the
+        attach mirrors the queue back into it and keeps its slot.
+
+        The hold begins only once nothing else is driving HQPlayer: it takes
+        the mutation lock (a queue replace still adding its tracks finishes
+        first) and the ensure lock (a play intent attaching finishes first),
+        and claims the output under the active lock, where activate() checks
+        it — the detach itself makes the backend refuse what is already in
+        flight (HqpBackend.shutdown)."""
+        with self._mutate_lock, self._ensure_lock:
+            with self._active_lock:
+                self._refuse_if_held()
+                b = self._active
+                if b is None or b.id != "hqplayer" or not b.healthy():
+                    raise ConnectionError("HQPlayer is not the attached output")
+                self._hold = {"by": by, "label": label, "progress": None}
+            try:
+                self.activate(None, by_hold=True)
+                self._push_status({"state": "stopped"})
+            except BaseException:
+                self._hold = None
+                raise
+        try:
+            yield
+        finally:
+            with self._mutate_lock, self._ensure_lock:
+                try:
+                    self.activate("hqplayer", by_hold=True)
+                except Exception as e:      # activate rolled back and said "disconnected"
+                    logger.warning("HQPlayer not re-attached after the %s (%s) — "
+                                   "the next play attaches it", by, e)
+                finally:
+                    self._hold = None
+                    self._push_status(dict(self._latest_status))
+
+    def update_hold(self, **progress) -> None:
+        """Publish the holding job's progress on the status channel."""
+        hold = self._hold
+        if hold is None:
+            return
+        self._hold = {**hold, "progress": progress}
+        self._push_status(dict(self._latest_status))
+
+    @contextmanager
+    def output_change(self) -> Iterator[None]:
+        """An output change from the picker or an address change — never
+        while the output is lent: checked under the lock the hold takes, so
+        a change that passed the check lands before a hold can begin, and
+        none of its settings is written while one lasts."""
+        with self._ensure_lock:
+            self._refuse_if_held()
+            yield
 
     def ensure_active(self) -> PlayerBackend:
         """Play-intent gate for a daemon whose outputs come and go (dozing
@@ -84,6 +171,7 @@ class PlaybackManager:
         from the persisted settings right here; pause/stop/volume keep
         using backend() and never wake a device."""
         with self._ensure_lock:
+            self._refuse_if_held()
             b = self._active
             # Fast offline-fail: a powered-off DLNA renderer must 503 within
             # the probe window with a clear message, not after stacked SOAP +
@@ -128,7 +216,7 @@ class PlaybackManager:
         return self._active
 
     def activate(self, output_type: Optional[str], *, stop_old: bool = True,
-                 **cfg) -> None:
+                 by_hold: bool = False, **cfg) -> None:
         """Switch the active output. The old backend is stopped (while it
         still believes its device reachable) and shut down; the canonical
         queue survives the switch; playback does NOT auto-resume — the user
@@ -137,8 +225,13 @@ class PlaybackManager:
         `stop_old=False` detaches without touching playback — app shutdown
         and clearing the HQPlayer host must leave an externally-running
         player alone (a backend restart mid-listening adopts the still-
-        playing queue on the next start)."""
+        playing queue on the next start).
+
+        While the output is lent (hold) only the hold itself switches it
+        (`by_hold`); anyone else gets OutputHeld."""
         with self._active_lock:
+            if not by_hold:
+                self._refuse_if_held()
             if (output_type is not None and self._active is not None
                     and self._active.id == output_type):
                 return
@@ -352,6 +445,10 @@ class PlaybackManager:
         # the picker still showed it selected.
         if "output" not in new_data:
             new_data["output"] = self.output_info
+        if self._hold is not None:
+            new_data["hold"] = self._hold
+        else:
+            new_data.pop("hold", None)      # a re-published payload from the held stretch
         if new_data != self._latest_status:
             self._latest_status = new_data
             self._status_version += 1
