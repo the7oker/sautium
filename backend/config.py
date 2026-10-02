@@ -14,7 +14,7 @@ class Settings(BaseSettings):
 
     # Application Info
     app_name: str = "Sautium"
-    app_version: str = "0.1.0"
+    app_version: str = "0.1.1"
     debug: bool = False
 
     # Database Configuration
