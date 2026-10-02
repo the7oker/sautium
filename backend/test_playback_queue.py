@@ -74,20 +74,27 @@ def test_payload_shapes():
     ])
     rows = q.payload()["tracks"]
 
+    # `play` is how the active output opens a slot when that differs from its
+    # source (playback.substitute; tests/test_queue_substitutes.py) — None here.
     owned = rows[0]
     assert owned == {"id": 7, "track_id": "t-owned", "title": "Owned",
                      "track_number": 1, "artist": "A", "album": "B",
-                     "duration_seconds": 100.0, "cover_id": None, "index": 0}
+                     "duration_seconds": 100.0, "cover_id": None, "index": 0,
+                     "play": None}
 
     ph = rows[1]
     assert ph["preview"] is True and ph["provider"] == "deezer"
-    assert ph["excerpt"] is False
+    assert ph["excerpt"] is False and ph["play"] is None
     assert ph["id"] is None and ph["track_id"] == "t-ph"
     assert "provider_cover_url" in ph and "cover_url" in ph
 
+    # The file-less row is also a copy held at an HQPlayer and a track whose
+    # file left the library, so it carries what Now Playing shows for those.
     foreign = rows[2]
-    assert foreign["id"] is None and "album" not in foreign
-    assert "preview" not in foreign and "track_id" not in foreign
+    assert foreign == {"id": None, "title": "Foreign", "track_number": None,
+                       "artist": "A", "album": "B", "duration_seconds": 100.0,
+                       "cover_id": None, "cover_url": None, "track_id": None,
+                       "index": 2, "play": None}
 
 
 def test_refresh_proxy_items_patches_every_slot_on_the_token():
