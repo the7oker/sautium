@@ -82,15 +82,35 @@ digests = {name: sha for sha, name in (line.split() for line in open(sums))}
 prefix = f"Sautium-{version}-"
 
 
+def notarised(path):
+    """A DMG carrying a stapled notarisation ticket: its code-signature
+    superblob (magic 0xfade0cc0, written by codesign near the end of the
+    image) indexes a ticket slot (0x10002) once `stapler staple` ran. Read
+    off the artefact, never asserted by whoever runs this script."""
+    with open(path, "rb") as handle:
+        handle.seek(max(0, os.path.getsize(path) - (4 << 20)))
+        tail = handle.read()
+    at = tail.rfind(b"\xfa\xde\x0c\xc0")
+    while at != -1:
+        count = int.from_bytes(tail[at + 8:at + 12], "big")
+        index = tail[at + 12:at + 12 + 8 * count]
+        if any(int.from_bytes(index[i:i + 4], "big") == 0x10002 for i in range(0, len(index), 8)):
+            return True
+        at = tail.rfind(b"\xfa\xde\x0c\xc0", 0, at)
+    return False
+
+
 def asset(path):
     name = os.path.basename(path)
     stem = name[len(prefix):].rsplit(".", 1)[0]
     if name.endswith(".exe"):
-        os_name, arch = "windows", "x64"          # sautium.iss: ArchitecturesAllowed=x64compatible
+        # sautium.iss: ArchitecturesAllowed=x64compatible; no certificate yet
+        os_name, arch, signed = "windows", "x64", False
     else:
         os_name, arch = "macos", {"arm64": "arm64", "x86_64": "x64"}[stem]
+        signed = notarised(path)
     return {"os": os_name, "arch": arch, "name": name, "url": f"{download}/{name}",
-            "sha256": digests[name], "size": os.path.getsize(path)}
+            "sha256": digests[name], "size": os.path.getsize(path), "signed": signed}
 
 
 document = {
@@ -99,7 +119,6 @@ document = {
     "commit": commit,
     "published_at": datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
     "notes_url": f"https://github.com/{repo}/releases/tag/{tag}",
-    "signed": False,
     "assets": [asset(path) for path in files],
 }
 with open(target, "w", encoding="utf-8") as handle:
@@ -121,14 +140,28 @@ api() {
 }
 field() { python3 -c 'import json, sys; d = json.load(sys.stdin); print(eval(sys.argv[1]))' "$1"; }
 
+# What the first launch looks like on macOS, from the signed flag each DMG
+# carries in downloads.json.
+macos_signed=$(python3 -c 'import json, sys
+a = [x for x in json.load(open(sys.argv[1]))["assets"] if x["os"] == "macos"]
+print("none" if not a else "all" if all(x["signed"] for x in a) else "some")' "$out/downloads.json")
 default_notes() {
     cat <<EOF
 Sautium $version — public beta.
 
-The Windows installer is unsigned and the macOS build is ad-hoc signed, so both systems warn on first launch:
-
-- **Windows** — SmartScreen says the publisher is unknown: choose **More info → Run anyway**. The install is per-user, without an administrator prompt.
-- **macOS** — open the DMG, drag Sautium onto Applications. The first launch is blocked: open it once, then System Settings → Privacy & Security → **Open Anyway** (or run \`xattr -dr com.apple.quarantine /Applications/Sautium.app\` first).
+- **Windows** — the installer is unsigned, so SmartScreen says the publisher is unknown: choose **More info → Run anyway**. The install is per-user, without an administrator prompt.
+EOF
+    case "$macos_signed" in
+        all) cat <<EOF
+- **macOS** — signed with a Developer ID and notarised by Apple: open the DMG, drag Sautium onto Applications, open it. Apple Silicon and Intel each have their own DMG.
+EOF
+            ;;
+        some) cat <<EOF
+- **macOS** — open the DMG, drag Sautium onto Applications. A DMG that is not notarised is blocked on first launch: open it once, then System Settings → Privacy & Security → **Open Anyway** (or run \`xattr -dr com.apple.quarantine /Applications/Sautium.app\` first).
+EOF
+            ;;
+    esac
+    cat <<EOF
 
 Check a download against \`SHA256SUMS.txt\` (\`sha256sum -c SHA256SUMS.txt --ignore-missing\` beside the file). The installer is a carrier: the first launch clones \`main\` and the app updates itself from there. How to verify what the tree does, and that this payload was built from it: [docs/AUDIT.md](https://github.com/$repo/blob/$tag/docs/AUDIT.md).
 

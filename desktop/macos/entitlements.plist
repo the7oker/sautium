@@ -1,0 +1,18 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<!-- The bundled python3 runs from a copy in the data root and loads the
+	     extension modules pip puts there — PyPI wheels, signed by nobody or by
+	     another team, which library validation would refuse. -->
+	<key>com.apple.security.cs.disable-library-validation</key>
+	<true/>
+	<!-- ctypes / cffi callbacks (PyNaCl, psycopg2, libtorrent bindings) write
+	     trampolines into memory they then execute. -->
+	<key>com.apple.security.cs.allow-unsigned-executable-memory</key>
+	<true/>
+	<!-- torch's JIT paths on arm64. -->
+	<key>com.apple.security.cs.allow-jit</key>
+	<true/>
+</dict>
+</plist>

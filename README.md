@@ -285,12 +285,17 @@ Freezing was rejected: the launcher provisions and then RUNS a Python
 frozen bundle `sys.executable` is the bundle. A new package is therefore only
 ever a new runtime; `desktop/build_common.py` holds what the two builds share.
 
-The Windows build is unsigned and the macOS build ad-hoc signed by default.
-With a Developer ID:
+The Windows build is unsigned. `build_macos.py` signs ad-hoc by default; with
+a Developer ID it signs every Mach-O under the hardened runtime (the
+executables with `desktop/macos/entitlements.plist`: the bundled Python loads
+PyPI wheels' extension modules, which library validation would refuse), signs
+the DMG, submits it to Apple, staples the ticket and checks the result as
+Gatekeeper will. `--arch x86_64` cross-builds the Intel DMG on Apple Silicon.
 
 ```bash
+xcrun notarytool store-credentials <keychain-profile> --apple-id <id> --team-id <team>   # once
 python desktop/build_macos.py --sign "Developer ID Application: ..." \
-                              --notarize <keychain-profile>
+                              --notarize <keychain-profile> [--arch x86_64]
 ```
 
 Since 2026-09-21 a build is published by `scripts/release-publish.sh`: it

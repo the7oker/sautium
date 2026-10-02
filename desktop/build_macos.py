@@ -26,6 +26,7 @@ from desktop.build_common import (  # noqa: E402
 from desktop.icon import render_icon  # noqa: E402
 
 BUILD = BUILD_DIR / "macos"
+ENTITLEMENTS = Path(__file__).parent / "macos" / "entitlements.plist"
 BUNDLE_ID = "net.sautium.launcher"
 MIN_MACOS = "12.0"
 
@@ -124,6 +125,21 @@ def _macho_files(app: Path) -> list:
     return sorted(found, key=lambda p: len(p.parts), reverse=True)
 
 
+def _is_executable(path: Path) -> bool:
+    """A Mach-O main executable (MH_EXECUTE) rather than a library: the
+    hardened runtime reads entitlements from the process's executable only.
+    The runtime's binaries are thin; a fat one is judged by its first slice."""
+    with path.open("rb") as handle:
+        header = handle.read(64)
+    if header[:4] == b"\xca\xfe\xba\xbe":
+        offset = int.from_bytes(header[16:20], "big")
+        with path.open("rb") as handle:
+            handle.seek(offset)
+            header = handle.read(16)
+    return header[:4] in (b"\xcf\xfa\xed\xfe", b"\xce\xfa\xed\xfe") \
+        and int.from_bytes(header[12:16], "little") == 2
+
+
 def sign(app: Path, identity: str) -> None:
     adhoc = identity == "-"
     options = [] if adhoc else ["--options", "runtime", "--timestamp"]
@@ -131,9 +147,11 @@ def sign(app: Path, identity: str) -> None:
     # deprecated for distribution and silently skips things notarization then
     # rejects.
     for binary in _macho_files(app):
-        run(["codesign", "--force", "--sign", identity, *options, binary],
+        extra = ["--entitlements", ENTITLEMENTS] if not adhoc and _is_executable(binary) else []
+        run(["codesign", "--force", "--sign", identity, *options, *extra, binary],
             capture_output=True)
-    run(["codesign", "--force", "--sign", identity, *options, app])
+    extra = [] if adhoc else ["--entitlements", ENTITLEMENTS]
+    run(["codesign", "--force", "--sign", identity, *options, *extra, app])
     run(["codesign", "--verify", "--strict", "--verbose=2", app])
     print(f"Signed with {'an ad-hoc signature' if adhoc else identity}")
 
@@ -144,18 +162,21 @@ def sign(app: Path, identity: str) -> None:
 
 # Gatekeeper blocks an ad-hoc build before any of our own UI can explain
 # itself, and the disk-image window is the only surface left to say it on.
+# A notarised build opens like any other app, so its note skips that step.
+GATEKEEPER_STEP = """
+   macOS will refuse the first time, saying it "cannot be opened because
+   Apple cannot check it for malicious software" — this build is signed by
+   whoever built it, not notarised by Apple. Open System Settings ->
+   Privacy & Security, scroll down, press "Open Anyway", and open Sautium
+   again.
+"""
+
 FIRST_LAUNCH_NOTE = """Sautium — first launch on macOS
 ===============================
 
 1. Drag Sautium onto the Applications folder in this window.
 
-2. Open it. macOS will refuse the first time, saying it "cannot be opened
-   because Apple cannot check it for malicious software" — this build is
-   signed by its author rather than by Apple.
-
-   Open System Settings -> Privacy & Security, scroll down, press
-   "Open Anyway", and open Sautium again.
-
+2. Open it.{gatekeeper}
 3. The first launch sets itself up (a few minutes). If Homebrew is missing
    it will ask for it: the command is copied for you — paste it into
    Terminal, let it finish, and press "Check again". PostgreSQL, ffmpeg and
@@ -166,8 +187,7 @@ FIRST_LAUNCH_NOTE = """Sautium — first launch on macOS
    just want to look around.
 
 5. In the launcher window: "Scan Library" points Sautium at your music
-   folder, "Open Web UI" opens the player (accept the certificate warning
-   once — the connection is to your own machine).
+   folder, "Open Web UI" opens the player in your browser.
 
 Sautium keeps everything in three folders. Deleting them and the app removes
 it completely:
@@ -178,14 +198,15 @@ it completely:
 """
 
 
-def make_dmg(app: Path, arch: str) -> Path:
+def make_dmg(app: Path, arch: str, adhoc: bool) -> Path:
     DIST_DIR.mkdir(parents=True, exist_ok=True)
     stage = BUILD / "dmg"
     shutil.rmtree(stage, ignore_errors=True)
     stage.mkdir(parents=True)
     shutil.copytree(app, stage / app.name, symlinks=True)
     (stage / "Applications").symlink_to("/Applications")
-    (stage / "First launch.txt").write_text(FIRST_LAUNCH_NOTE, encoding="utf-8")
+    note = FIRST_LAUNCH_NOTE.format(gatekeeper=GATEKEEPER_STEP if adhoc else "\n")
+    (stage / "First launch.txt").write_text(note, encoding="utf-8")
 
     dmg = DIST_DIR / f"{APP_NAME}-{VERSION}-{arch}.dmg"
     dmg.unlink(missing_ok=True)
@@ -195,10 +216,21 @@ def make_dmg(app: Path, arch: str) -> Path:
     return dmg
 
 
+def sign_dmg(dmg: Path, identity: str) -> None:
+    run(["codesign", "--force", "--sign", identity, "--timestamp", dmg])
+
+
 def notarize(dmg: Path, profile: str) -> None:
+    """Submit, wait, staple the ticket to the disk image — the outermost
+    container, whose ticket covers the app inside it — and check the result
+    as Gatekeeper will. `notarytool submit --wait` exits 0 on an Invalid
+    verdict too; the staple then fails, and `notarytool log <id>` says why."""
     run(["xcrun", "notarytool", "submit", dmg,
          "--keychain-profile", profile, "--wait"])
     run(["xcrun", "stapler", "staple", dmg])
+    run(["xcrun", "stapler", "validate", dmg])
+    run(["spctl", "--assess", "--type", "open",
+         "--context", "context:primary-signature", "--verbose=2", dmg])
 
 
 # ================================================================
@@ -237,7 +269,9 @@ def main() -> None:
 
     if args.skip_dmg:
         return
-    dmg = make_dmg(app, args.arch)
+    dmg = make_dmg(app, args.arch, adhoc=args.sign == "-")
+    if args.sign != "-":
+        sign_dmg(dmg, args.sign)
     if args.notarize:
         notarize(dmg, args.notarize)
     print(f"{dmg}  ({dmg.stat().st_size / 1e6:.0f} MB)")
