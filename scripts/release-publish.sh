@@ -9,8 +9,12 @@
 # assets, then fetches every asset back over the public URL and checks it
 # against SHA256SUMS.txt.
 #
-#   scripts/release-publish.sh [--version V] [--notes FILE] [--dry-run] <artefact>...
+#   scripts/release-publish.sh [--tree DIR] [--version V] [--notes FILE] [--dry-run] <artefact>...
 #
+# --tree is the checkout the installers were built from — by default this
+# repository; a clean `git worktree add --detach <dir> <commit>` when the main
+# checkout carries work in progress (the build copies the WORKING tree into
+# the payload, so it must be clean, and so must this check).
 # --version defaults to desktop/build_common.py VERSION; --notes replaces the
 # default release body; --dry-run writes SHA256SUMS.txt and downloads.json
 # into dist/ ($DIST_DIR) and stops before the first API call. Token as in
@@ -21,14 +25,15 @@ export GIT_TERMINAL_PROMPT=0
 repo=the7oker/sautium
 root=$(cd "$(dirname "$0")/.." && pwd)
 out=${DIST_DIR:-$root/dist}
-usage="usage: $0 [--version V] [--notes FILE] [--dry-run] <artefact>..."
+usage="usage: $0 [--tree DIR] [--version V] [--notes FILE] [--dry-run] <artefact>..."
 
-version=$(sed -n 's/^VERSION = "\(.*\)"$/\1/p' "$root/desktop/build_common.py")
+version=""
 notes=""
 dry_run=0
 artefacts=()
 while [ $# -gt 0 ]; do
     case "$1" in
+        --tree) root=$(cd "$2" && pwd); out=${DIST_DIR:-$root/dist}; shift 2 ;;
         --version) version=$2; shift 2 ;;
         --notes) notes=$2; shift 2 ;;
         --dry-run) dry_run=1; shift ;;
@@ -38,6 +43,7 @@ while [ $# -gt 0 ]; do
     esac
 done
 [ ${#artefacts[@]} -gt 0 ] || { echo "$usage" >&2; exit 2; }
+[ -n "$version" ] || version=$(sed -n 's/^VERSION = "\(.*\)"$/\1/p' "$root/desktop/build_common.py")
 [ -n "$version" ] || { echo "no version in desktop/build_common.py — pass --version" >&2; exit 2; }
 [ -z "$notes" ] || [ -f "$notes" ] || { echo "no notes file at $notes" >&2; exit 2; }
 
@@ -51,15 +57,21 @@ done
 
 # The release is a statement about one commit of main: the payload stamp
 # inside every installer (build_common.stage_payload) is what docs/AUDIT.md
-# compares against the tagged tree, so the tree that built them must be it.
-branch=$(git -C "$root" rev-parse --abbrev-ref HEAD)
+# compares against the tagged tree, so the tree that built them must be
+# clean, its commit must be on origin/main, and the tag goes on THAT commit —
+# never on whatever main points at by the time this runs (another push may
+# have landed while the DMGs were being notarised).
+git -C "$root" fetch -q origin main
+full=$(git -C "$root" rev-parse HEAD)
 dirty=$(git -C "$root" status --porcelain --untracked-files=no)
-if [ "$branch" != main ] || [ -n "$dirty" ]; then
-    state="on $branch"; [ -z "$dirty" ] || state="$state, uncommitted changes"
+problem=""
+[ -z "$dirty" ] || problem="uncommitted changes in $root"
+git -C "$root" merge-base --is-ancestor "$full" origin/main || problem="${problem:+$problem; }$full is not on origin/main"
+if [ -n "$problem" ]; then
     if [ $dry_run -eq 1 ]; then
-        echo "dry run: the tree is not clean on main ($state) — a real run stops here"
+        echo "dry run: $problem — a real run stops here"
     else
-        echo "the tree must be clean and on main ($state)" >&2; exit 1
+        echo "$problem" >&2; exit 1
     fi
 fi
 commit=$(git -C "$root" rev-parse --short=12 HEAD)
@@ -175,9 +187,9 @@ if [ -z "$release" ]; then
     release=$(api -X POST "https://api.github.com/repos/$repo/releases" -d "$(python3 -c '
 import json, sys
 print(json.dumps({
-    "tag_name": sys.argv[1], "target_commitish": "main", "name": "Sautium " + sys.argv[2],
+    "tag_name": sys.argv[1], "target_commitish": sys.argv[3], "name": "Sautium " + sys.argv[2],
     "body": sys.stdin.read(), "prerelease": False, "make_latest": "true",
-}))' "$tag" "$version" <<<"$body")")
+}))' "$tag" "$version" "$full" <<<"$body")")
     echo "created release $tag"
 fi
 rid=$(field 'd["id"]' <<<"$release")
