@@ -1,0 +1,73 @@
+{
+ "expect": "no_fetch",
+ "note": "Stream mode, the add refused and no request ever arrived: the box cannot reach us.",
+ "facts": {
+  "intent": "replace",
+  "started": 1000.0,
+  "t0": 1000.2,
+  "closed": 1000.6,
+  "end": "hard",
+  "error": null,
+  "slot": 1,
+  "expected_uri": "http://192.168.1.88:8830/file/AbCdEfGhIjKlMnOpQrSt",
+  "uri": "http://192.168.1.88:8830/file/AbCdEfGhIjKlMnOpQrSt",
+  "mode": "stream",
+  "token": "AbCdEfGhIjKlMnOpQrSt",
+  "handover": {
+   "uri": "http://192.168.1.88:8830/file/AbCdEfGhIjKlMnOpQrSt",
+   "ts": 1000.05,
+   "add_ts": 1000.1,
+   "mode": "stream",
+   "track_id": "t-3",
+   "media_file_id": 33,
+   "title": "Track",
+   "artist": "Artist",
+   "ok": false,
+   "result": "Error",
+   "message": ""
+  },
+  "steps": [
+   {
+    "ts": 1000.3,
+    "command": "Play",
+    "result": "Error",
+    "message": "Empty transport",
+    "attributes": {}
+   }
+  ],
+  "adds": {
+   "count": 0,
+   "failed": []
+  },
+  "ticks": [],
+  "misses": [],
+  "proxy": [],
+  "playlist": null,
+  "item": {
+   "track_id": "t-3",
+   "media_file_id": 33,
+   "title": "Track",
+   "artist": "Artist",
+   "album": "Album",
+   "kind": "file"
+  },
+  "context": {
+   "hqplayer": "192.168.1.53:4321",
+   "media_url": "192.168.1.88:8830",
+   "remote": true,
+   "drift": false,
+   "endpoint_id": 7,
+   "info": {
+    "name": "HQPlayerEmbedded",
+    "product": "Signalyst HQPlayer Embedded",
+    "version": "6",
+    "platform": "Linux",
+    "engine": "6.2.3"
+   },
+   "dsp": {
+    "matrix_profile": null
+   }
+  },
+  "generation": 4
+ }
+}

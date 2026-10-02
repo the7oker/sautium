@@ -1,0 +1,20 @@
+file_not_found	# 2026/09/30 15:16:16 clPlaylist::AddURI("file:///E:/Music/Album/03. Track.flac"): clStreamReaderFile::clStreamReaderFile(): clFileIO::Open(): CreateFile("E:\Music\Album\03. Track.flac"): The system cannot find the path specified.
+proxy_404	# 2026/09/22 18:38:31 clPlaylist::AddURI("http://192.168.1.88:8830/preview/Qm7Ld2Vt9Xc4Hp1S"): clStreamReaderHTTP::clStreamReaderHTTP(): clStreamReaderHTTP::GetHead(): 404
+unsupported_stream	# 2026/06/26 13:42:43 clPlaylist::AddURI(): unknown mime type: audio/mp4
+empty_transport	# 2026/06/26 13:42:44 clControlThread::ParseMsg(): clHQPlayerEngine::Play(): Empty transport
+fetch_failed	# 2026/06/28 11:02:12 clStreamReaderHTTP::GetHead(): clSocket::WaitReadWrite(): socket error
+device_busy	# 2026/10/01 21:38:27 NAA output clNetEngine::Connect(): initialize: clALSAEngine::Initialize(): snd_pcm_open(): Device or resource busy
+device_missing	# 2026/10/01 21:38:27 NAA output clNetEngine::Connect(): initialize: clALSAEngine::Initialize(): snd_pcm_open(): No such device
+device_missing	! 2026/06/05 19:40:02 createEngine(): clHQPlayerEngine::Initialize(): clASIOEngine::InitAudioBase(): ASIOInit(): (-1000) No device is connected to the PC.
+naa_lost	! 2026/06/05 19:41:10 NAA output clNetEngine::PushSDM(): not connected to adapter
+naa_lost	# 2026/06/05 19:41:09 NAA output network timeout
+naa_lost	# 2026/10/02 11:52:43 NAA output network Audio Adapter keepalive: clNetEngine::RecvResponse(): clSocket::WaitRead()
+rate_filter	# 2026/06/12 21:15:33 Requested filter not possible with this rate combination 48000/22579200, stop
+format_rejected	# 2026/02/16 14:11:43 WASAPI output virtual clWinEngine::Execute: clWinEngine::StartAudioClient(): no formats available
+proxy_404	# 2026/06/27 23:05:11 clStreamReaderHTTP::Execute(): clStreamReaderHTTP::RequestOffset(): 404 for range request
+decode_failed	! 2026/06/27 23:05:37 clHQPlayerEngine::Execute(): clReadFLAC::Read(): FLAC error: FLAC__STREAM_DECODER_SEEK_ERROR
+open_failed	# 2026/06/20 17:05:44 clMainWindow::setTransport(): clHQPlayerEngine::SetTransport(): failed
+-	# 2026/09/27 12:49:28 ReadFLACErrorCB(): lost sync
+-	& 2026/09/27 12:48:17 Playlist add URI: http://192.168.1.88:8830/file/Fx3kQp9TzL0aWm2Rb7Yd
+-	+ 2026/09/27 12:48:19 ALSA output engine started at: 384000 (384000)
+-	# 2026/09/27 12:45:24 ALSA output snd_hctl_open() failed: No such file or directory

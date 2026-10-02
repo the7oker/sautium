@@ -1269,6 +1269,50 @@ def _held_copy(track_id: str) -> Optional[dict]:
     """, {"tid": track_id, "paths": paths, "hqp": hqp_id})
 
 
+# -- HQPlayer diagnostics (playback.hqp_diagnostics) ---------------------------
+# Why a slot did not play on the HQPlayer output. In memory only; whole here,
+# paths cut to their last two components on the way into a support bundle.
+
+def _hqp_info() -> dict:
+    b = manager.active
+    return b.info if b is not None and b.id == "hqplayer" else {}
+
+
+@router.get("/diagnostics/hqplayer")
+def hqplayer_diagnostics():
+    from hqplayer_client import HQPlayerClient
+    from playback import hqp_diagnostics as diag
+    return {"attempts": [diag.summary(a) for a in diag.attempts()],
+            "failing": diag.failing_run(),
+            "log_source": diag.log_source(settings.hqplayer_host, _hqp_info()),
+            "client_errors": HQPlayerClient.last_errors()}
+
+
+@router.get("/diagnostics/hqplayer/log")
+def hqplayer_log():
+    """HQPlayer's own log, read now — never tailed in the background."""
+    from playback import hqp_diagnostics as diag
+    info = _hqp_info()
+    return diag.read_log(diag.log_source(settings.hqplayer_host, info), info)
+
+
+@router.get("/diagnostics/hqplayer/bundle")
+def hqplayer_diagnostics_bundle():
+    """The `playback` scope of a support warrant (desktop/diag_bundle.py)."""
+    from playback import hqp_diagnostics as diag
+    info = _hqp_info()
+    return diag.bundle_view(diag.log_source(settings.hqplayer_host, info), info)
+
+
+@router.get("/diagnostics/hqplayer/{attempt_id}")
+def hqplayer_attempt(attempt_id: int):
+    from playback import hqp_diagnostics as diag
+    attempt = diag.find(attempt_id)
+    if attempt is None:
+        raise HTTPException(status_code=404, detail="No such attempt (only the last 20 are kept)")
+    return diag.public(attempt, redact=False)
+
+
 @router.get("/now-playing-detail")
 def now_playing_detail(media_file_id: int = None, track_id: str = None,
                        provider: str = None, album_id: str = None):

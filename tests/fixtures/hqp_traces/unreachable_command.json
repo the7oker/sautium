@@ -1,0 +1,92 @@
+{
+ "expect": "unreachable",
+ "note": "The command never reached HQPlayer.",
+ "facts": {
+  "intent": "select",
+  "started": 1000.0,
+  "t0": null,
+  "closed": 1000.4,
+  "end": "hard",
+  "error": "Play: HQPlayer unreachable (circuit open)",
+  "slot": 3,
+  "expected_uri": "http://192.168.1.88:8830/file/AbCdEfGhIjKlMnOpQrSt",
+  "uri": "http://192.168.1.88:8830/file/AbCdEfGhIjKlMnOpQrSt",
+  "mode": "stream",
+  "token": "AbCdEfGhIjKlMnOpQrSt",
+  "handover": {
+   "uri": "http://192.168.1.88:8830/file/AbCdEfGhIjKlMnOpQrSt",
+   "ts": 900.0,
+   "add_ts": 900.1,
+   "mode": "stream",
+   "track_id": "t-3",
+   "media_file_id": 33,
+   "title": "Track",
+   "artist": "Artist",
+   "ok": true,
+   "result": null,
+   "message": ""
+  },
+  "steps": [
+   {
+    "ts": 1000.2,
+    "command": "Play",
+    "result": "refused",
+    "message": "HQPlayer unreachable (circuit open)",
+    "attributes": {}
+   }
+  ],
+  "adds": {
+   "count": 0,
+   "failed": []
+  },
+  "ticks": [],
+  "misses": [],
+  "proxy": [
+   {
+    "ts": 900.1,
+    "client": "172.18.0.1",
+    "method": "HEAD",
+    "range": null,
+    "kind": "file",
+    "status": 200,
+    "bytes": 0
+   },
+   {
+    "ts": 1000.5,
+    "client": "172.18.0.1",
+    "method": "GET",
+    "range": "bytes=0-",
+    "kind": "file",
+    "status": 206,
+    "bytes": 4194304
+   }
+  ],
+  "playlist": null,
+  "item": {
+   "track_id": "t-3",
+   "media_file_id": 33,
+   "title": "Track",
+   "artist": "Artist",
+   "album": "Album",
+   "kind": "file"
+  },
+  "context": {
+   "hqplayer": "192.168.1.53:4321",
+   "media_url": "192.168.1.88:8830",
+   "remote": true,
+   "drift": false,
+   "endpoint_id": 7,
+   "info": {
+    "name": "HQPlayerEmbedded",
+    "product": "Signalyst HQPlayer Embedded",
+    "version": "6",
+    "platform": "Linux",
+    "engine": "6.2.3"
+   },
+   "dsp": {
+    "matrix_profile": null
+   }
+  },
+  "generation": 4
+ }
+}

@@ -463,8 +463,10 @@ The active set comes from the server as a **snapshot** on
 `/api/events` (`{"t": "notice"}`), derived in
 `backend/routers/settings.py::_notices_state()` from the cooldown
 ledger, the launcher's `mb_slice.status` row, the music folder (owned
-files known but the path empty), the media binaries on PATH and the
-stream providers' health (`streaming.service.provider_health`) — the
+files known but the path empty), the media binaries on PATH, the
+stream providers' health (`streaming.service.provider_health`) and the
+HQPlayer output's playback trace (the same failure three plays in a row,
+`playback.hqp_diagnostics.failing_run`) — the
 rule for WHEN a condition exists lives there, the words and the clock
 (local time, mono) live in `NOTICE_COPY` here. A condition with no ledger
 keeps its `since` in `_derived_since`; its producers wake the channel on

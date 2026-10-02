@@ -85,6 +85,9 @@ services:
       HQPLAYER_HOST: ${HQPLAYER_HOST:-host.docker.internal}
       HQPLAYER_PORT: ${HQPLAYER_PORT:-4321}
       HQPLAYER_ENABLED: ${HQPLAYER_ENABLED:-false}
+      # HQPlayer Desktop's folder on the host, mounted read-only below:
+      # the diagnostics read its log there (settings.xml + HQPlayer*Desktop.log).
+      HQPLAYER_DATA_DIR: /hqplayer
 
       # Native OS path prefix for DB-stored paths
       MUSIC_HOST_PATH: ${MUSIC_HOST_PATH:-}
@@ -137,6 +140,10 @@ services:
       # Mount music library as read-only
       # Mac path example: /Users/username/Music -> /music in container
       - ${MUSIC_LIBRARY_PATH:-/Users/Shared/Music}:/music:ro
+      # HQPlayer Desktop's data folder on this host, read-only — the playback
+      # diagnostics read its log (only settings.xml and HQPlayer*Desktop.log are
+      # opened). Unset: an empty folder, and the diagnostics say where the log is.
+      - ${HQPLAYER_DATA_DIR:-./data/hqplayer}:/hqplayer:ro
       # Claude Code auth (OAuth tokens). USERPROFILE on Windows shells,
       # HOME everywhere else — see the matching note in docker-compose.yml.
       # Mount the WHOLE .claude directory (not just .credentials.json) so

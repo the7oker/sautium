@@ -248,7 +248,7 @@ def hqplayer_play() -> str:
     try:
         hqp = _get_hqp()
         ok = hqp.play()
-        return "Playback started." if ok else "Failed to start playback."
+        return "Playback started." if ok else f"Failed to start playback: {hqp.refusal()}"
     except Exception as e:
         return f"Error: {e}"
 
@@ -1218,7 +1218,7 @@ def hqplayer_set_filter(filter_name: str) -> str:
 
         ok = hqp.set_filter(match["index"])
         if not ok:
-            return f"Failed to set filter to {match['name']}."
+            return f"Failed to set filter to {match['name']}: {hqp.refusal()}"
         desc = match.get("description", "")
         return f"Filter set to: {match['name']}" + (f" — {desc}" if desc else "")
     except Exception as e:
@@ -1260,7 +1260,8 @@ def hqplayer_set_shaper(shaper_name: str) -> str:
             return f"Shaper '{shaper_name}' not found. Available shapers: {available}"
 
         ok = hqp.set_shaping(match["index"])
-        return f"Dither/shaper set to: {match['name']}" if ok else f"Failed to set shaper to {match['name']}."
+        return (f"Dither/shaper set to: {match['name']}" if ok
+                else f"Failed to set shaper to {match['name']}: {hqp.refusal()}")
     except Exception as e:
         return f"Error setting shaper: {e}"
 
@@ -1283,7 +1284,7 @@ def hqplayer_set_convolution(enabled: bool) -> str:
         hqp = _get_hqp()
         ok = hqp.set_convolution(enabled)
         state = "enabled" if enabled else "disabled"
-        return f"Convolution {state}." if ok else f"Failed to {state} convolution."
+        return f"Convolution {state}." if ok else f"Failed to {state} convolution: {hqp.refusal()}"
     except Exception as e:
         return f"Error: {e}"
 
@@ -1353,7 +1354,8 @@ def hqplayer_set_matrix_profile(profile_name: str) -> str:
             profile_name = match
 
         ok = hqp.matrix_set_profile(profile_name)
-        return f"Matrix profile set to: '{profile_name}'" if ok else f"Failed to set matrix profile to '{profile_name}'."
+        return (f"Matrix profile set to: '{profile_name}'" if ok
+                else f"Failed to set matrix profile to '{profile_name}': {hqp.refusal()}")
     except Exception as e:
         return f"Error: {e}"
 

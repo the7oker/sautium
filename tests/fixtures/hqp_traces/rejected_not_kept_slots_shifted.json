@@ -1,0 +1,241 @@
+{
+ "expect": "rejected",
+ "note": "The expected file is absent from HQPlayer's playlist; it plays the next one in its place.",
+ "facts": {
+  "intent": "select",
+  "started": 1000.0,
+  "t0": 1000.2,
+  "closed": 1010.4,
+  "end": "window",
+  "error": null,
+  "slot": 3,
+  "expected_uri": "file:///E:/Music/Genre/Artist/Album/03. Track.flac",
+  "uri": "file:///E:/Music/Genre/Artist/Album/03. Track.flac",
+  "mode": "path",
+  "token": null,
+  "handover": {
+   "uri": "file:///E:/Music/Genre/Artist/Album/03. Track.flac",
+   "ts": 900.0,
+   "add_ts": 900.1,
+   "mode": "path",
+   "track_id": "t-3",
+   "media_file_id": 33,
+   "title": "Track",
+   "artist": "Artist",
+   "ok": true,
+   "result": null,
+   "message": ""
+  },
+  "steps": [
+   {
+    "ts": 1000.2,
+    "command": "SelectTrack",
+    "result": "OK",
+    "message": "",
+    "attributes": {
+     "index": "3"
+    }
+   },
+   {
+    "ts": 1000.3,
+    "command": "Play",
+    "result": "OK",
+    "message": "",
+    "attributes": {}
+   }
+  ],
+  "adds": {
+   "count": 0,
+   "failed": []
+  },
+  "ticks": [
+   {
+    "ts": 1001.2,
+    "state": "playing",
+    "track": 3,
+    "position": 0.8,
+    "length": 300.0,
+    "speed": 1.6,
+    "in_fill": 0.9,
+    "out_fill": 0.9,
+    "tracks_total": 12,
+    "mode": "SDM (DSD)",
+    "filter": "poly-sinc-gauss-xla",
+    "shaper": "ASDM7ECv3",
+    "rate": 22579200
+   },
+   {
+    "ts": 1002.2,
+    "state": "playing",
+    "track": 3,
+    "position": 1.8,
+    "length": 300.0,
+    "speed": 1.6,
+    "in_fill": 0.9,
+    "out_fill": 0.9,
+    "tracks_total": 12,
+    "mode": "SDM (DSD)",
+    "filter": "poly-sinc-gauss-xla",
+    "shaper": "ASDM7ECv3",
+    "rate": 22579200
+   },
+   {
+    "ts": 1003.2,
+    "state": "playing",
+    "track": 3,
+    "position": 2.8,
+    "length": 300.0,
+    "speed": 1.6,
+    "in_fill": 0.9,
+    "out_fill": 0.9,
+    "tracks_total": 12,
+    "mode": "SDM (DSD)",
+    "filter": "poly-sinc-gauss-xla",
+    "shaper": "ASDM7ECv3",
+    "rate": 22579200
+   },
+   {
+    "ts": 1004.2,
+    "state": "playing",
+    "track": 3,
+    "position": 3.8,
+    "length": 300.0,
+    "speed": 1.6,
+    "in_fill": 0.9,
+    "out_fill": 0.9,
+    "tracks_total": 12,
+    "mode": "SDM (DSD)",
+    "filter": "poly-sinc-gauss-xla",
+    "shaper": "ASDM7ECv3",
+    "rate": 22579200
+   },
+   {
+    "ts": 1005.2,
+    "state": "playing",
+    "track": 3,
+    "position": 4.8,
+    "length": 300.0,
+    "speed": 1.6,
+    "in_fill": 0.9,
+    "out_fill": 0.9,
+    "tracks_total": 12,
+    "mode": "SDM (DSD)",
+    "filter": "poly-sinc-gauss-xla",
+    "shaper": "ASDM7ECv3",
+    "rate": 22579200
+   },
+   {
+    "ts": 1006.2,
+    "state": "playing",
+    "track": 3,
+    "position": 5.8,
+    "length": 300.0,
+    "speed": 1.6,
+    "in_fill": 0.9,
+    "out_fill": 0.9,
+    "tracks_total": 12,
+    "mode": "SDM (DSD)",
+    "filter": "poly-sinc-gauss-xla",
+    "shaper": "ASDM7ECv3",
+    "rate": 22579200
+   },
+   {
+    "ts": 1007.2,
+    "state": "playing",
+    "track": 3,
+    "position": 6.8,
+    "length": 300.0,
+    "speed": 1.6,
+    "in_fill": 0.9,
+    "out_fill": 0.9,
+    "tracks_total": 12,
+    "mode": "SDM (DSD)",
+    "filter": "poly-sinc-gauss-xla",
+    "shaper": "ASDM7ECv3",
+    "rate": 22579200
+   },
+   {
+    "ts": 1008.2,
+    "state": "playing",
+    "track": 3,
+    "position": 7.8,
+    "length": 300.0,
+    "speed": 1.6,
+    "in_fill": 0.9,
+    "out_fill": 0.9,
+    "tracks_total": 12,
+    "mode": "SDM (DSD)",
+    "filter": "poly-sinc-gauss-xla",
+    "shaper": "ASDM7ECv3",
+    "rate": 22579200
+   },
+   {
+    "ts": 1009.2,
+    "state": "playing",
+    "track": 3,
+    "position": 8.8,
+    "length": 300.0,
+    "speed": 1.6,
+    "in_fill": 0.9,
+    "out_fill": 0.9,
+    "tracks_total": 12,
+    "mode": "SDM (DSD)",
+    "filter": "poly-sinc-gauss-xla",
+    "shaper": "ASDM7ECv3",
+    "rate": 22579200
+   },
+   {
+    "ts": 1010.2,
+    "state": "playing",
+    "track": 3,
+    "position": 9.8,
+    "length": 300.0,
+    "speed": 1.6,
+    "in_fill": 0.9,
+    "out_fill": 0.9,
+    "tracks_total": 12,
+    "mode": "SDM (DSD)",
+    "filter": "poly-sinc-gauss-xla",
+    "shaper": "ASDM7ECv3",
+    "rate": 22579200
+   }
+  ],
+  "misses": [],
+  "proxy": null,
+  "playlist": {
+   "read": true,
+   "count": 11,
+   "at_slot": "file:///E:/Music/Genre/Artist/Album/04. Next.flac",
+   "at_slot_ours": true,
+   "at_slot_expected": false,
+   "expected_present": false,
+   "foreign": 0
+  },
+  "item": {
+   "track_id": "t-3",
+   "media_file_id": 33,
+   "title": "Track",
+   "artist": "Artist",
+   "album": "Album",
+   "kind": "file"
+  },
+  "context": {
+   "hqplayer": "host.docker.internal:4321",
+   "media_url": "192.168.1.88:8830",
+   "remote": false,
+   "drift": false,
+   "endpoint_id": 7,
+   "info": {
+    "name": "STUDIO-PC",
+    "product": "Signalyst HQPlayer Desktop",
+    "version": "6",
+    "platform": "Windows",
+    "engine": "6.2.3"
+   },
+   "dsp": {
+    "matrix_profile": null
+   }
+  },
+  "generation": 4
+ }
+}

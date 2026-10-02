@@ -32,15 +32,18 @@ one.
 """
 
 import logging
+import re
 import socket
 import threading
 import time
+from contextlib import contextmanager, nullcontext
 from typing import Optional
 
 from config import settings
 from hqplayer_client import (HQPlayerClient, PlaybackState, file_path_to_uri,
-                             uri_to_file_path)
+                             redact_uri, uri_to_file_path)
 
+from playback import hqp_diagnostics as diag
 from playback import queue as queue_mod
 from playback.base import Capabilities, PlaybackStatus, PlayerBackend, ReorderPlan
 from playback.queue import CanonicalQueue, QueueItem
@@ -52,6 +55,21 @@ _hqp_lock = threading.Lock()  # cmd commands
 
 _hqp_status_client: Optional[HQPlayerClient] = None
 _hqp_status_lock = threading.Lock()  # status poller
+
+# The attached backend, whose playback trace hears every answer on the command
+# client (HqpBackend._on_outcome) — what was actually sent, whoever sent it.
+_listener: Optional["HqpBackend"] = None
+
+
+def _route_outcome(outcome) -> None:
+    b = _listener
+    if b is not None:
+        b._on_outcome(outcome)
+
+
+def _notify_notices() -> None:
+    from db_pool import db_execute
+    db_execute("NOTIFY sautium_notices")
 
 
 def _make_client(timeout: float) -> HQPlayerClient:
@@ -123,6 +141,7 @@ def _get_hqp() -> HQPlayerClient:
     """Get or create HQPlayer command client. Must be called inside _hqp_lock."""
     global _hqp_client
     _hqp_client = _ensure_connected(_hqp_client, timeout=5.0, label="cmd")
+    _hqp_client.on_outcome = _route_outcome
     return _hqp_client
 
 
@@ -213,11 +232,17 @@ def _add_uris_with_retry(uris: list[str], *, clear_first: bool = False) -> int:
     for i, uri in enumerate(uris):
         clear = clear_first and i == 0
         ok = False
+        result, refusal = None, ""
         for attempt in (1, 2):
             try:
-                ok = _get_hqp().playlist_add(uri, clear=clear)
-            except (BrokenPipeError, ConnectionError, OSError):
+                hqp = _get_hqp()
+                ok = hqp.playlist_add(uri, clear=clear)
+                if not ok:
+                    # Read now: the playlist check below replaces it.
+                    result, refusal = _refusal(hqp)
+            except (BrokenPipeError, ConnectionError, OSError) as e:
                 ok = False
+                result, refusal = "refused", str(e)
             if ok:
                 break
             if attempt == 1:
@@ -229,10 +254,12 @@ def _add_uris_with_retry(uris: list[str], *, clear_first: bool = False) -> int:
                     ok = True
                     break
                 _reset_hqp()  # force a fresh socket before the single retry
+        diag.note_add(uri, ok, None if ok else result, "" if ok else refusal)
         if ok:
             added += 1
         else:
-            logger.warning(f"playlist_add failed after reconnect: {uri}")
+            logger.warning("playlist_add failed after reconnect: %s — %s",
+                           redact_uri(uri), refusal)
     if added < len(uris):
         if _stream_mode():
             logger.warning(
@@ -244,24 +271,68 @@ def _add_uris_with_retry(uris: list[str], *, clear_first: bool = False) -> int:
         else:
             # HQPlayer refuses a file it cannot open — a dropped music mount
             # looks exactly like this; the notices channel re-derives.
-            from db_pool import db_execute
-            db_execute("NOTIFY sautium_notices")
+            _notify_notices()
     return added
 
 
-def _hqp_safe(action) -> None:
+def _refusal(hqp: HQPlayerClient) -> tuple:
+    """(result, reason) of the client's latest refusal, as the ledger keeps it."""
+    return (hqp.last_error.result if hqp.last_error else None), hqp.refusal()
+
+
+def _add_one(hqp: HQPlayerClient, uri: str, *, clear: bool = False) -> bool:
+    """A PlaylistAdd whose answer is final as it stands (the rebuild and
+    reorder paths do not retry), kept in the hand-over ledger."""
+    ok = hqp.playlist_add(uri, clear=clear)
+    result, message = (None, "") if ok else _refusal(hqp)
+    diag.note_add(uri, ok, result, message)
+    return ok
+
+
+def _hqp_safe(action, command: str) -> None:
     """Run one HQPlayer command (stop / play / clear / select_track)
     tolerantly inside an existing `_hqp_lock`: one reconnect-and-retry,
     never raises. Frames a resilient multi-add so a churning control port
     can't abort the whole operation at its stop()/play() bookends before
-    the add even runs."""
+    the add even runs. A command the retry could not send either is a step
+    of the play intent it served — it never reached HQPlayer, so its client
+    heard nothing."""
     for attempt in (1, 2):
         try:
             action(_get_hqp())
             return
-        except (BrokenPipeError, ConnectionError, OSError):
+        except (BrokenPipeError, ConnectionError, OSError) as e:
             if attempt == 1:
                 _reset_hqp()
+            elif _listener is not None:
+                _listener._refused(command, str(e))
+
+
+def _slot_key(item: QueueItem) -> tuple:
+    """What a slot is, as the hand-over ledger indexes it (a QueueItem is no
+    dict key): the track, the file, and the way this output opens it."""
+    src = item.opener()
+    return (item.track_id, item.media_file_id,
+            src.get("path") or src.get("token") or src.get("uri"), src.get("cue_start"))
+
+
+_TOKEN = re.compile(r"/(?:file|preview)/([^?/#]+)")
+
+
+def _token_of(uri: str) -> Optional[str]:
+    m = _TOKEN.search(uri)
+    return m.group(1) if m else None
+
+
+def _same_entry(a: str, b: str) -> bool:
+    """Do two playlist URIs name the same entry — HQPlayer reports a
+    file:// URI with its own escapes, a media URL by the host it was given."""
+    if a.startswith("file://") and b.startswith("file://"):
+        return _uri_file_path(a) == _uri_file_path(b)
+    ta, tb = _token_of(a), _token_of(b)
+    if ta or tb:
+        return ta == tb
+    return a == b
 
 
 def _skip_to_first_playable(added: int) -> None:
@@ -524,10 +595,30 @@ class HqpBackend(PlayerBackend):
         self._url_host = hqp_media_host()
         # Slot to select on the first play after an output switch (resume_at).
         self._resume_index: Optional[int] = None
+        # The play intent being watched (playback.hqp_diagnostics), and the
+        # ones an intent superseded or the owner ended, waiting for the
+        # poller to judge them.
+        self._attempt: Optional[diag.Attempt] = None
+        self._closing: list = []
+        self._att_lock = threading.Lock()
+        # The intent each thread is carrying out: two can overlap (a Next
+        # pressed while a replace still adds), and each one's commands are its
+        # own steps — never the owner ending the other.
+        self._local = threading.local()
+        self._last_closed: Optional[diag.Attempt] = None
+        self._last_track = 0
+        self._info: dict = {}
 
     # -- lifecycle -------------------------------------------------------------
 
     def start(self) -> None:
+        global _listener
+        _listener = self
+        try:
+            with _hqp_status_lock:
+                self._info = _get_hqp_status().get_info() or {}
+        except (BrokenPipeError, ConnectionError, OSError) as e:
+            logger.info("HQPlayer GetInfo at attach failed: %s", e)
         adopted = self._adopt_hqp_playlist()
         if not adopted and len(self._queue):
             # Output switch with a live queue (§2.6): HQPlayer becomes the
@@ -568,10 +659,19 @@ class HqpBackend(PlayerBackend):
         hqp_library.request_sync(settings.hqplayer_host, settings.hqplayer_port)
 
     def shutdown(self) -> None:
+        global _listener
         self._running = False
         self._wake.set()
         if self._thread:
             self._thread.join(timeout=3)
+        if _listener is self:
+            _listener = None
+        with self._att_lock:
+            att, self._attempt = self._attempt, None
+            if att is not None:
+                att.request_end("shutdown")
+                self._closing.append(att)
+        self._settle(None, None)
         logger.info("HQPlayer status poller stopped")
 
     def capabilities(self) -> Capabilities:
@@ -593,9 +693,20 @@ class HqpBackend(PlayerBackend):
                 s.settimeout(2.0)
                 s.sendall(b"<GetInfo/>")
                 reply = s.recv(4096)
-        except OSError:
+        except OSError as e:
+            self._unreachable(f"GetInfo: {e}")
             return False
-        return b"product=" in reply
+        if b"product=" in reply:
+            return True
+        self._unreachable("GetInfo: the connection closed without an answer" if not reply
+                          else "GetInfo: answered without naming a product")
+        return False
+
+    def _unreachable(self, message: str) -> None:
+        """A play intent the gate stops here never reaches HQPlayer: it is
+        an attempt of its own, closed at once."""
+        if diag.record_unreachable(message, self._context()):
+            _notify_notices()
 
     def _register_serving(self) -> None:
         """HQPlayer plays on through a backend restart: its playlist is
@@ -660,6 +771,9 @@ class HqpBackend(PlayerBackend):
     def _poll_loop(self) -> None:
         tick = 0
         while self._running:
+            status = None
+            reads = None
+            att = self._attempt
             try:
                 hqp_playlist = None
                 with _hqp_status_lock:
@@ -686,12 +800,19 @@ class HqpBackend(PlayerBackend):
                     if (before is not None and hqp is not before) or self._failures > 0:
                         self._verify_mirror = True
                         self._library_check()
+                        self._info = hqp.get_info() or self._info
                     if status is not None and (self._verify_mirror
                                                or tick % DRIFT_CHECK_EVERY == 0):
                         try:
                             hqp_playlist = hqp.get_playlist()
                         except (BrokenPipeError, ConnectionError, OSError) as e:
                             logger.debug("drift check playlist read failed: %s", e)
+                    if att is not None and status is not None:
+                        att.tick(status, STATE_NAMES.get(status.state, "unknown"))
+                        if att.due(time.time()) is not None:
+                            # Judged on what HQPlayer holds NOW, read on this
+                            # socket — a command thread never takes this lock.
+                            reads = self._close_reads(hqp, att)
 
                 if status is None:
                     # Transient read miss (e.g. HQPlayer stalled past the
@@ -699,6 +820,8 @@ class HqpBackend(PlayerBackend):
                     self._register_failure()
                 else:
                     self._failures = 0
+                    if status.track_index >= 1:
+                        self._last_track = status.track_index
                     if hqp_playlist is not None:
                         if self._check_drift(hqp_playlist) and self._verify_mirror:
                             self._mirror_lost = True
@@ -707,8 +830,15 @@ class HqpBackend(PlayerBackend):
                                            "re-mirrored on the next play")
                         self._verify_mirror = False
                     self._emit(self._status_of(status))
+                    if diag.note_answered():
+                        _notify_notices()
             except Exception:
                 self._register_failure()
+            if att is not None and status is None:
+                err = _hqp_status_client.last_error if _hqp_status_client else None
+                att.miss(err.message if err else "no status answer")
+            self._settle(att if att is not None and att.due(time.time()) is not None
+                         else None, reads)
 
             # Back off when HQPlayer stops answering. It accepts the TCP
             # connect but doesn't reply to <Status/> (control thread busy
@@ -746,10 +876,231 @@ class HqpBackend(PlayerBackend):
         if item is None or not _http_served(item):
             extra.update(artist=status.artist, album=status.album,
                          song=status.song)
+        diagnosis = self._diagnosis(status)
+        if diagnosis is not None:
+            extra["diagnosis"] = diagnosis
         return PlaybackStatus(
             state=STATE_NAMES.get(status.state, "unknown"),
             position=status.position, length=status.length,
             queue_index=idx, volume=status.volume, extra=extra)
+
+    def _diagnosis(self, status) -> Optional[dict]:
+        """The failed attempt Now Playing offers to explain: this backend's
+        latest, while no newer one runs, the queue is the one it was made
+        for, and HQPlayer is not playing something meanwhile. An attempt that
+        never reached HQPlayer is left to the play route's own answer."""
+        last = self._last_closed
+        if last is None or self._attempt is not None or status.state == PlaybackState.PLAYING:
+            return None
+        v, f = last.verdict or {}, last.facts or {}
+        if (v.get("code") in (None, "played", "interrupted", "unreachable")
+                or f.get("generation") != self._queue.generation):
+            return None
+        return {"id": last.id, "code": v["code"], "title": v["title"], "next": v["next"],
+                "track_id": (f.get("item") or {}).get("track_id"),
+                "failing": diag.failing_run() is not None}
+
+    # -- the playback trace (playback.hqp_diagnostics) ------------------------------
+
+    @contextmanager
+    def _intent(self, intent: str, *, slot: Optional[int] = None,
+                uris: Optional[list] = None, items: Optional[list] = None):
+        """One play intent watched as an attempt. Its commands are steps (the
+        command client reports them on the thread that sent them); the exit
+        judges whether a final refusal or a command that never left already
+        settles it."""
+        att = diag.Attempt(intent=intent, slot=slot, uris=uris, items=items)
+        with self._att_lock:
+            old, self._attempt = self._attempt, att
+            if old is not None:
+                old.request_end("superseded")
+                self._closing.append(old)
+        self._local.attempt = att
+        exc = None
+        try:
+            yield att
+        except (BrokenPipeError, ConnectionError, OSError) as e:
+            exc = e
+            raise
+        finally:
+            self._local.attempt = None
+            att.intent_done(exc)
+            self.poke()
+
+    def _on_outcome(self, outcome) -> None:
+        """An answer on the command client. Sent by an intent, it is a step of
+        that intent's attempt (superseded or not); from anywhere else a stop,
+        a pause, a DSP change or a replaced playlist means the owner moved on."""
+        mine = getattr(self._local, "attempt", None)
+        if mine is not None:
+            mine.record(outcome)
+            return
+        att = self._attempt
+        if att is None:
+            return
+        a = outcome.attributes
+        if (outcome.command in diag.OWNER_COMMANDS
+                or (outcome.command == "PlaylistAdd" and a.get("clear") == "1")
+                or (outcome.command == "PlaylistRemove"
+                    and str(a.get("index")) == str(att.slot))):
+            att.request_end("owner")
+            self.poke()
+
+    def _refused(self, command: str, message: str) -> None:
+        mine = getattr(self._local, "attempt", None)
+        if mine is not None:
+            mine.refused(command, message)
+
+    def _command(self, name: str, fn) -> bool:
+        """One transport command; a refusal is logged in HQPlayer's words."""
+        def run(h):
+            ok = fn(h)
+            return ok, (None if ok else h.refusal())
+        ok, refusal = _hqp_cmd(run)
+        if not ok:
+            logger.warning("HQPlayer refused %s: %s", name, diag.redact_text(refusal))
+        return ok
+
+    def _close_reads(self, hqp: HQPlayerClient, att: diag.Attempt) -> dict:
+        """What HQPlayer holds as the attempt closes — its playlist (whose
+        entries are ours, which one it plays) and, for a slot that never
+        played, its matrix profile. Called inside _hqp_status_lock."""
+        entries = hqp.get_playlist()
+        reads = {"playlist": None if hqp.last_error is not None
+                 else [t.get("uri", "") for t in entries]}
+        if not att.played_so_far():
+            reads["state"] = hqp.get_state()
+        return reads
+
+    def _settle(self, due_att: Optional[diag.Attempt], reads: Optional[dict]) -> None:
+        """Judge what is ready: the attempts superseded or ended by the owner,
+        and the watched one once it is due. Runs on the poller (and at
+        shutdown) only."""
+        with self._att_lock:
+            ready, self._closing = self._closing, []
+            if due_att is not None and due_att is self._attempt:
+                self._attempt = None
+                ready.append(due_att)
+        for att in ready:
+            self._finalize(att, reads if att is due_att else None)
+
+    def _finalize(self, att: diag.Attempt, reads: Optional[dict]) -> None:
+        facts = self._facts(att, reads)
+        changed = diag.close(att, facts)
+        self._last_closed = att
+        v = att.verdict
+        if v["code"] not in ("played", "interrupted"):
+            logger.info("HQPlayer %s attempt %d: %s — %s", att.intent, att.id, v["code"],
+                        diag.redact_text(v["sentence"]))
+        if changed:
+            _notify_notices()
+        if v["code"] in ("not_played", "unknown") or (v["code"] == "rejected"
+                                                      and not v.get("quote")):
+            # HQPlayer's log names what the protocol did not — read once, now.
+            threading.Thread(target=self._attach_log, args=(att, facts.get("uri")),
+                             daemon=True, name="hqp-log").start()
+
+    def _attach_log(self, att: diag.Attempt, uri: Optional[str]) -> None:
+        source = diag.log_source(settings.hqplayer_host, self._info)
+        diag.attach_log(att, diag.read_log(source, self._info, uri))
+
+    @property
+    def info(self) -> dict:
+        """What HQPlayer said of itself (GetInfo) at attach or its return."""
+        return dict(self._info)
+
+    def _context(self) -> dict:
+        return {"hqplayer": f"{settings.hqplayer_host}:{settings.hqplayer_port}",
+                "media_url": f"{self._url_host}:{settings.media_proxy_port}",
+                "remote": _stream_mode(), "drift": self._drift,
+                "endpoint_id": self.endpoint_id, "info": dict(self._info)}
+
+    def _facts(self, att: diag.Attempt, reads: Optional[dict]) -> dict:
+        """Everything the verdict weighs, gathered as the attempt closes —
+        the shape tests/fixtures/hqp_traces records."""
+        from streaming import service as streaming_service
+        proxy = streaming_service.get_proxy()
+        f = att.snapshot()
+        uris = f.pop("uris")
+        ticks = f["ticks"]
+        explicit = f["slot"] is not None
+        slot = f["slot"]
+        if slot is None:
+            slot = (next((t["track"] for t in ticks if t["state"] == "playing" and t["track"] >= 1), None)
+                    or next((t["track"] for t in reversed(ticks) if t["track"] >= 1), None))
+        item = expected = None
+        if slot is not None:
+            if uris and slot <= len(uris):
+                expected = uris[slot - 1]
+                item = att.items[slot - 1] if att.items and slot <= len(att.items) else None
+            else:
+                item = self._queue.item_at(slot)
+                if item is not None and explicit:
+                    expected = diag.handed_uri(_slot_key(item))
+        playlist, at = None, None
+        listed = (reads or {}).get("playlist")
+        if listed is not None:
+            refs = self._queue_refs()
+            at = listed[slot - 1] if slot and 1 <= slot <= len(listed) else None
+            playlist = {
+                "read": True, "count": len(listed), "at_slot": at,
+                "at_slot_ours": at is not None and self._ours(at, refs, proxy),
+                "at_slot_expected": bool(expected and at and _same_entry(at, expected)),
+                "expected_present": (any(_same_entry(u, expected) for u in listed)
+                                     if expected else None),
+                "foreign": sum(1 for u in listed if not self._ours(u, refs, proxy))}
+        uri = expected or at or (diag.handed_uri(_slot_key(item)) if item is not None else None)
+        handover = diag.handover(uri) or (
+            diag.handover_like(lambda handed: _same_entry(handed, uri)) if uri else None)
+        if handover:
+            uri = handover["uri"]          # as Sautium handed it
+        mode = handover["mode"] if handover else (diag.mode_of(uri) if uri else None)
+        token = _token_of(uri) if uri else None
+        hits = (proxy.hits(token) if proxy is not None and token else []) \
+            if mode in diag.HTTP_MODES else None
+        if item is not None:
+            who = {"track_id": item.track_id, "media_file_id": item.media_file_id,
+                   "title": item.title, "artist": item.artist, "album": item.album,
+                   "kind": item.opener()["kind"]}
+        elif handover:
+            who = {k: handover.get(k) for k in ("track_id", "media_file_id", "title", "artist")}
+        else:
+            who = None
+        if who is not None and mode == "preview" and proxy is not None and token:
+            who["chain"] = proxy.chain_summary(token)
+        state = (reads or {}).get("state") or {}
+        return {**f, "closed": time.time(), "slot": slot, "expected_uri": expected,
+                "uri": uri, "mode": mode, "token": token, "handover": handover,
+                "proxy": hits, "playlist": playlist, "item": who,
+                "context": {**self._context(),
+                            "dsp": {"matrix_profile": state.get("matrix_profile") or None}},
+                "generation": self._queue.generation}
+
+    def _queue_refs(self) -> set:
+        """Every path and verbatim URI the queue hands over, as HQPlayer's
+        playlist names them — what counts as ours there."""
+        refs = set()
+        for it in self._queue.snapshot():
+            for src in (it.source, it.play or {}):
+                if src.get("path"):
+                    refs.add(src["path"].replace("\\", "/"))
+                if src.get("uri"):
+                    refs.add(src["uri"])
+        return refs
+
+    @staticmethod
+    def _ours(uri: str, refs: set, proxy) -> bool:
+        """Is this playlist entry one Sautium handed over? A path of a queued
+        file (or of one HQPlayer holds for a slot), a /file/ token the proxy
+        registered, a preview it knows — all survive a backend restart."""
+        if uri.startswith("file://"):
+            return _uri_file_path(uri) in refs
+        token = _token_of(uri)
+        if token and proxy is not None:
+            if "/file/" in uri:
+                return proxy.file_entry(token) is not None
+            return proxy.preview_meta(token) is not None
+        return uri in refs
 
     def _register_failure(self) -> None:
         """Tolerate a short burst of misses; emit 'disconnected' only past
@@ -805,15 +1156,16 @@ class HqpBackend(PlayerBackend):
     # -- transport -----------------------------------------------------------------
 
     def play(self) -> bool:
-        if self._resume_index is not None:
-            idx, self._resume_index = self._resume_index, None
-            logger.info("play: honoring resume slot %d", idx)
-            if self.select(idx):
-                # A SelectTrack on a STOPPED HQPlayer needs a beat to
-                # register before Play honors it — the resume-watcher's
-                # documented 1s boundary exception (04c46b8), same quirk.
-                time.sleep(1.0)
-        ok = _hqp_cmd(lambda h: h.play())
+        with self._intent("play", slot=self._resume_index):
+            if self._resume_index is not None:
+                idx, self._resume_index = self._resume_index, None
+                logger.info("play: honoring resume slot %d", idx)
+                if self._select_play(idx):
+                    # A SelectTrack on a STOPPED HQPlayer needs a beat to
+                    # register before Play honors it — the resume-watcher's
+                    # documented 1s boundary exception (04c46b8), same quirk.
+                    time.sleep(1.0)
+            ok = self._command("Play", lambda h: h.play())
         self.poke()
         return ok
 
@@ -829,13 +1181,17 @@ class HqpBackend(PlayerBackend):
 
     def next(self) -> bool:
         self._resume_index = None    # explicit navigation overrides resume
-        ok = _hqp_cmd(lambda h: h.next())
+        # Watched only when there is a next slot to land on.
+        with (self._intent("next") if 1 <= self._last_track < len(self._queue)
+              else nullcontext()):
+            ok = self._command("Next", lambda h: h.next())
         self.poke()
         return ok
 
     def previous(self) -> bool:
         self._resume_index = None    # explicit navigation overrides resume
-        ok = _hqp_cmd(lambda h: h.previous())
+        with self._intent("previous") if self._last_track > 1 else nullcontext():
+            ok = self._command("Previous", lambda h: h.previous())
         self.poke()
         return ok
 
@@ -844,9 +1200,26 @@ class HqpBackend(PlayerBackend):
         SelectTrack alone leaves a STOPPED player stopped, so the Play that
         jump() used to send from the manager follows here, same order."""
         self._resume_index = None    # explicit navigation overrides resume
-        ok = _hqp_cmd(lambda h: h.select_track(index))
+        with self._intent("select", slot=index):
+            ok = self._select_play(index)
+        self.poke()
+        return ok
+
+    def _select_play(self, index: int) -> bool:
+        ok = self._command("SelectTrack", lambda h: h.select_track(index))
         if ok:
-            ok = _hqp_cmd(lambda h: h.play())
+            ok = self._command("Play", lambda h: h.play())
+        return ok
+
+    def resume_after_rebuild(self, index: int, position: int) -> bool:
+        """Back to the slot and second a DSP change stopped — select, seek,
+        play as ONE attempt (routers.hqplayer._resume_after_dsp_change)."""
+        self._resume_index = None
+        with self._intent("resume", slot=index):
+            ok = self._select_play(index)
+            if position > 0:
+                _hqp_cmd(lambda h: h.seek(int(position)))
+            ok = self._command("Play", lambda h: h.play()) and ok
         self.poke()
         return ok
 
@@ -905,21 +1278,27 @@ class HqpBackend(PlayerBackend):
         # own held copy or a rip here for a slot queued elsewhere.
         src = item.opener()
         if src["kind"] == "file":
-            return _owned_play_uri(item, self._url_host)
-        if src["kind"] == "hqp":
+            uri = _owned_play_uri(item, self._url_host)
+            mode = ("path" if uri.startswith("file://")
+                    else "transcode" if "/preview/" in uri
+                    else "cut" if src.get("cue_start") is not None else "stream")
+        elif src["kind"] == "hqp":
             # Held in HQPlayer's own library: it opens the path itself.
-            return file_path_to_uri(src["path"])
-        if src["kind"] == "proxy":
+            uri, mode = file_path_to_uri(src["path"]), "held"
+        elif src["kind"] == "proxy":
             from streaming import service as streaming_service
-            return streaming_service.get_proxy().url_for(src["token"],
-                                                         host=self._url_host)
-        if src["kind"] in ("pending", "unplayable"):
+            uri = streaming_service.get_proxy().url_for(src["token"], host=self._url_host)
+            mode = "preview"
+        elif src["kind"] in ("pending", "unplayable"):
             # Nothing this HQPlayer can open: the origin's path, which it
             # drops (a file it does not hold) — the slot reads as drift
             # until the queue moves on. No stream is minted for the mirror:
             # HQPlayer fetches an http entry at add time.
-            return file_path_to_uri(item.source.get("path") or "")
-        return src["uri"]
+            uri, mode = file_path_to_uri(item.source.get("path") or ""), "unplayable"
+        else:
+            uri, mode = src["uri"], "foreign"
+        diag.note_handover(uri, _slot_key(item), item, mode)
+        return uri
 
     def queue_changed(self, kind: str, *, play: bool = False) -> None:
         """Every mutation is mirrored in the queue_* hooks, before its commit.
@@ -974,7 +1353,7 @@ class HqpBackend(PlayerBackend):
                     converged = now is not None and now.track_index < first
                     if converged:
                         for _ in uris:
-                            _hqp_safe(lambda h: h.playlist_remove(first))
+                            _hqp_safe(lambda h: h.playlist_remove(first), "PlaylistRemove")
                         converged = _add_uris_with_retry(uris) == len(uris)
                 self.poke()
             elif status.state == PlaybackState.PLAYING:
@@ -1002,30 +1381,35 @@ class HqpBackend(PlayerBackend):
         PlaylistAdd(clear=True) while playing, silently appending instead,
         which would double every track and land select_track on the wrong
         slot. Returns whether HQPlayer accepted every entry."""
-        with _hqp_lock:
-            hqp = _get_hqp()
-            hqp.stop()
-            accepted = [hqp.playlist_add(uris[0], clear=True)]
-            accepted += [hqp.playlist_add(uri) for uri in uris[1:]]
-            hqp.select_track(index)
-            if position > 0:
-                hqp.seek(position)
-            if resume:
-                hqp.play()
+        with self._intent("rebuild", slot=index, uris=uris) if resume else nullcontext():
+            with _hqp_lock:
+                hqp = _get_hqp()
+                hqp.stop()
+                accepted = [_add_one(hqp, uris[0], clear=True)]
+                accepted += [_add_one(hqp, uri) for uri in uris[1:]]
+                hqp.select_track(index)
+                if position > 0:
+                    hqp.seek(position)
+                if resume:
+                    hqp.play()
         self.poke()
         return all(accepted)
 
     def queue_replace(self, items: list, *, play: bool, probe_first: bool = False) -> int:
         uris = [self._uri_for(it) for it in items]
-        with _hqp_lock:
-            _hqp_safe(lambda h: h.stop())
-            added = _add_uris_with_retry(uris, clear_first=True)
-            if added == len(uris):
-                self._drift = self._mirror_lost = False   # mirrored afresh
-            if added and play:
-                _hqp_safe(lambda h: h.play())
-                if probe_first:
-                    _skip_to_first_playable(added)
+        # Watched with the items themselves: the canonical queue still holds
+        # the old ones until the manager commits this replace.
+        with (self._intent("replace", slot=1, uris=uris, items=list(items))
+              if play and uris else nullcontext()):
+            with _hqp_lock:
+                _hqp_safe(lambda h: h.stop(), "Stop")
+                added = _add_uris_with_retry(uris, clear_first=True)
+                if added == len(uris):
+                    self._drift = self._mirror_lost = False   # mirrored afresh
+                if added and play:
+                    _hqp_safe(lambda h: h.play(), "Play")
+                    if probe_first:
+                        _skip_to_first_playable(added)
         self.poke()
         return added
 
@@ -1054,7 +1438,7 @@ class HqpBackend(PlayerBackend):
                 # shift down into), then re-append it behind the new tracks.
                 after = [t.get("uri") for t in raw[idx:] if t.get("uri")]
                 for _ in range(len(after)):
-                    _hqp_safe(lambda h: h.playlist_remove(idx + 1))
+                    _hqp_safe(lambda h: h.playlist_remove(idx + 1), "PlaylistRemove")
                 added = _add_uris_with_retry(uris, clear_first=False)
                 if after:
                     _add_uris_with_retry(after, clear_first=False)
@@ -1070,7 +1454,7 @@ class HqpBackend(PlayerBackend):
         # PlaylistClear keeps the reading slot intact — it erases everything
         # queued around the current track while the seed plays on.
         with _hqp_lock:
-            _hqp_safe(lambda h: h.playlist_clear())
+            _hqp_safe(lambda h: h.playlist_clear(), "PlaylistClear")
         self.poke()
         return True
 
@@ -1101,7 +1485,7 @@ class HqpBackend(PlayerBackend):
                 for _ in range(len(plan.old_after)):
                     hqp.playlist_remove(plan.status_idx + 1)
                 for mid in plan.new_after:
-                    hqp.playlist_add(uri_by_id[mid])
+                    _add_one(hqp, uri_by_id[mid])
                 cursor = 1
                 new_before_remaining = list(plan.new_before)
                 for old_track in plan.old_before:

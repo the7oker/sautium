@@ -27,6 +27,7 @@ import logging
 import secrets
 import threading
 import time
+from collections import OrderedDict, deque
 from dataclasses import dataclass, field
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Callable, Optional
@@ -38,6 +39,8 @@ from .events import preview_events
 logger = logging.getLogger(__name__)
 
 _UNSET_TIMEOUT = object()   # wait_ready sentinel: "use the proxy default"
+_HIT_TOKENS = 256           # tokens whose requests are remembered
+_HITS_PER_TOKEN = 16
 
 # Content type by media_files.file_format — the one table every URL-serving
 # output reads (DLNA DIDL, the browser route, an HQPlayer elsewhere).
@@ -116,6 +119,10 @@ class MediaProxy:
         # by the manager. Work bound to any other generation has no consumer left.
         self._live_generation: Optional[int] = None
         self._files: dict[str, _FileEntry] = {}          # /file/{token} registry
+        # What each /file/ and /preview/ token was actually asked for — the
+        # consumer's side of a hand-over, which the HQPlayer playback trace
+        # joins on the token (playback.hqp_diagnostics). Newest tokens kept.
+        self._hits: OrderedDict[str, deque] = OrderedDict()
         self._blobs: dict[str, tuple[bytes, str]] = {}   # /art/{token} → (data, mime)
         self._blob_tokens_by_key: dict[str, str] = {}    # cover key → token
         self._httpd: Optional[ThreadingHTTPServer] = None
@@ -575,6 +582,37 @@ class MediaProxy:
     def art_url(self, token: str, *, host: Optional[str] = None) -> str:
         return f"http://{host or self._advertised_host}:{self.port}/art/{token}"
 
+    def record_hit(self, token: str, client: str, method: str,
+                   range_header: Optional[str], kind: str) -> dict:
+        """Open the record of one request for `token`; the handler stamps
+        its status and adds the bytes it writes as they go out."""
+        hit = {"ts": time.time(), "client": client, "method": method,
+               "range": range_header, "kind": kind, "status": None, "bytes": 0}
+        with self._lock:
+            ring = self._hits.pop(token, None) or deque(maxlen=_HITS_PER_TOKEN)
+            ring.append(hit)
+            self._hits[token] = ring
+            while len(self._hits) > _HIT_TOKENS:
+                self._hits.popitem(last=False)
+        return hit
+
+    def hits(self, token: str) -> list[dict]:
+        with self._lock:
+            return [dict(h) for h in self._hits.get(token, ())]
+
+    def chain_summary(self, token: str) -> Optional[dict]:
+        """Where a preview token's audio comes from: the provider chain in
+        order, the provider that served it, and how the fetch ended."""
+        with self._lock:
+            e = self._entries.get(token)
+        if e is None:
+            return None
+        return {"chain": [p.manifest.id for p, _ in e.chain],
+                "provider": e.provider.manifest.id if e.provider else None,
+                "ready": e.ready.is_set(), "error": e.error,
+                "excerpt": bool(e.audio is not None and e.audio.excerpt),
+                "fetch_seconds": e.fetch_seconds}
+
     def preview_meta(self, token: str) -> Optional[dict]:
         """Provider metadata for a current-session preview token — Now
         Playing / the queue panel use it because HQPlayer only knows the
@@ -719,8 +757,21 @@ def _make_handler(proxy: MediaProxy):
         # connections; keep-alive (1.1) desynced those and playback never
         # started. Matches the plain http.server that played reliably in bring-up.
 
+        # The /file/ or /preview/ request being served, as the proxy records
+        # it (record_hit): its status and the bytes that actually went out.
+        hit: Optional[dict] = None
+
         def log_message(self, fmt, *a):  # quiet by default; -d to trace probes
             logger.debug("proxy %s: %s", self.address_string(), fmt % a)
+
+        def send_response(self, code, message=None):
+            if self.hit is not None:
+                self.hit["status"] = code
+            super().send_response(code, message)
+
+        def _open_hit(self, token: str, kind: str) -> None:
+            self.hit = proxy.record_hit(token, self.client_address[0], self.command,
+                                        self.headers.get("Range"), kind)
 
         def _token(self) -> Optional[str]:
             if not self.path.startswith("/preview/"):
@@ -778,6 +829,10 @@ def _make_handler(proxy: MediaProxy):
             return None
 
         def _serve_file(self, token: str, *, body: bool):
+            fe = proxy.file_entry(token)
+            self._open_hit(token, "opus" if transcode.wants_opus(self._q())
+                           else "cut" if fe is not None and fe.start is not None
+                           else "file")
             try:
                 path, mime, size = proxy.materialize_file(
                     token, self._q(), self._ss())
@@ -817,6 +872,8 @@ def _make_handler(proxy: MediaProxy):
                             break
                         self.wfile.write(chunk)
                         remaining -= len(chunk)
+                        if self.hit is not None:
+                            self.hit["bytes"] += len(chunk)
             except (BrokenPipeError, ConnectionResetError):
                 pass   # renderers probe-then-reset, like HQPlayer
             except OSError as e:
@@ -862,6 +919,7 @@ def _make_handler(proxy: MediaProxy):
             tok = self._token()
             if tok is None:
                 return
+            self._open_hit(tok, "opus" if transcode.wants_opus(self._q()) else "preview")
             try:
                 e = proxy._ensure_ready(tok, proxy._prepare_timeout, front=True)
             except KeyError:
@@ -898,6 +956,7 @@ def _make_handler(proxy: MediaProxy):
             tok = self._token()
             if tok is None:
                 return
+            self._open_hit(tok, "opus" if transcode.wants_opus(self._q()) else "preview")
             try:
                 e = proxy._ensure_ready(tok, proxy._prepare_timeout, front=True)
             except KeyError:
@@ -948,11 +1007,18 @@ def _make_handler(proxy: MediaProxy):
             self._dlna_headers()
             self.end_headers()
 
-        def _write(self, chunk: bytes):
+        def _write(self, data: bytes):
             # HQPlayer probes then resets connections — that's normal, not an error.
+            # In slices, so the hit record counts what has gone out while a
+            # slow reader is still taking a whole track's buffer.
+            view = memoryview(data)
             try:
-                self.wfile.write(chunk)
+                for start in range(0, len(view), 262144):
+                    piece = view[start:start + 262144]
+                    self.wfile.write(piece)
+                    if self.hit is not None:
+                        self.hit["bytes"] += len(piece)
             except (BrokenPipeError, ConnectionResetError):
-                pass
+                return
 
     return Handler

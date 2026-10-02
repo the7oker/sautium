@@ -91,6 +91,9 @@ services:
       HQPLAYER_HOST: ${HQPLAYER_HOST:-host.docker.internal}
       HQPLAYER_PORT: ${HQPLAYER_PORT:-4321}
       HQPLAYER_ENABLED: ${HQPLAYER_ENABLED:-false}
+      # HQPlayer Desktop's folder on the host, mounted read-only below:
+      # the diagnostics read its log there (settings.xml + HQPlayer*Desktop.log).
+      HQPLAYER_DATA_DIR: /hqplayer
       # Phantom-album streaming preview (media proxy on a separate plain-http port;
       # advertised_host is what HQPlayer puts in the URL — 127.0.0.1 = the published
       # port on this host).
@@ -157,6 +160,10 @@ services:
       # the running commit (desktop/updater.head_commit reads HEAD by hand).
       - ./.git:/app/.git:ro
       - ${MUSIC_LIBRARY_PATH:-/mnt/e/Music}:/music:ro
+      # HQPlayer Desktop's data folder on this host, read-only — the playback
+      # diagnostics read its log (only settings.xml and HQPlayer*Desktop.log are
+      # opened). Unset: an empty folder, and the diagnostics say where the log is.
+      - ${HQPLAYER_DATA_DIR:-./data/hqplayer}:/hqplayer:ro
       # Claude Code OAuth credentials from WSL home — refreshed by `claude`
       # running inside WSL. We can't use ${HOME} here: when compose is
       # invoked via docker.exe from a WSL shell, the WSL HOME variable

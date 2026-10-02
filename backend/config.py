@@ -69,6 +69,11 @@ class Settings(BaseSettings):
     hqplayer_host: str = "localhost"
     hqplayer_port: int = 4321
     hqplayer_enabled: bool = False
+    # Where an HQPlayer Desktop on this machine keeps its log
+    # (HQPlayer<major>Desktop.log beside settings.xml). Empty = the platform's
+    # own place for the launcher (%LOCALAPPDATA%\HQPlayer, ~/.hqplayer); the
+    # Docker node sees the host's directory through a read-only mount.
+    hqplayer_data_dir: str = ""
 
     # Streaming preview (phantom albums) — stream missing albums onto HQPlayer
     # via pluggable providers (YouTube in core; DRM providers are external BYO

@@ -100,6 +100,15 @@ unchanged without them.
   - Volume level
   - Metadata (artist, album, song, genre)
   - `process_speed` - DSP load readout (HQP6 only; absent on HQP5)
+  - `input_fill` / `output_fill` - the engine's input and output buffer fill
+    (the SDK's `statusIO`): fractions of the buffer, 0.0 while stopped; measured
+    on Desktop 6.2.3 playing a local file at DSD256 (2026-10-02): `output_fill`
+    0.98–1.0 and `process_speed` 2.3–3.0, `input_fill` **-1** — a file HQPlayer
+    opens itself has no input buffer; `tracks_total` - the playlist's
+    length, `active_mode` / `active_filter` / `active_shaper` / `active_rate` -
+    what the engine runs right now, by name (read since 2026-10-02 for the
+    playback trace; `<Status>` carries more still: `track_serial`,
+    `transport_serial`, `active_bits`, `clips`, `queued`, `output_delay`)
 - `get_info()` - Get HQPlayer info
   - Product name
   - Version
@@ -127,6 +136,38 @@ assistant tool, no control in the Web UI (as of 2026-09-29):
   - 20 rates: 2.048 MHz to 98.304 MHz (DSD)
 - `set_convolution(enabled)` - Convolution engine on/off — reached through
   the assistant (`hqplayer_set_convolution`); the Web UI has no control for it
+
+### Answers: `result` and HQPlayer's reason
+Setters and transport commands echo their element with `result="OK"` or
+`result="Error"`, and on an error the element's TEXT is HQPlayer's reason —
+`<Play result="Error">Empty transport</Play>`. Queries carry no `result`, and
+some setters answer with a bare element, which is acceptance; only an explicit
+`Error` is a refusal. The Signalyst SDK's own client reads that text at the
+start tag, where Qt's stream reader holds none, so SDK-based controllers never
+show it; `hqplayer_client` parses the whole line and keeps it (since
+2026-10-02): every command leaves a `CommandOutcome`, a refusal is
+`last_error` on the client (`refusal()` words it), and every failure — a
+refusal, a dropped connection (`command="<connection>"`, `during` naming the
+command it carried), a `Status`/`State` that did not parse — lands in one ring
+of 50 shared by all client instances (`HQPlayerClient.last_errors()`, paths
+cut to their last two components). The DSP screen's `/config`, the
+assistant's HQPlayer tools and the playback backend's warnings quote it.
+HQPlayer logs the same reason on its side as `clControlThread::ParseMsg():
+<reason>`. A `PlaylistAdd` of a file HQPlayer cannot open may still answer OK
+and add nothing (seen on the Pi, 2026-09-27); its log then names the file in
+`clPlaylist::AddURI("<uri>"): <reason>`.
+
+### Ports
+Checked with netstat on the Desktop 6 host (2026-10-02):
+
+| Port | What |
+|---|---|
+| TCP 4321 | the control protocol |
+| UDP 4321 | discovery (`<discover/>`) |
+| TCP 4322 | the metering stream — the SDK's `clMeterInterface` connects to the control port + 1; binary frames (a header, then per channel a level block and transform data); HQPlayer logs "Meter connection … Metering started" |
+| TCP 8019, UDP 1900 | the UPnP renderer and its SSDP |
+| TCP 8088 | Embedded: the web interface. Desktop 6 listens too but answers `404 Error` to `/` and `/log` |
+| TCP 4323 | nothing listens |
 
 ## Usage
 
@@ -475,6 +516,101 @@ The scan itself starts in HQPlayer's web interface (or by a Digest-
 authenticated `POST /library` — an unauthenticated POST is dropped without a
 401; leave "Perform analysis" off, it costs ~1.5 min per album on a Pi 5).
 
+### Diagnostics — why didn't it play? (2026-10-02)
+
+Every play intent on the HQPlayer output — play, a jump, next/previous, a
+queue replaced with play, a rebuild that resumes, the resume after a DSP
+change — is watched as one ATTEMPT (`backend/playback/hqp_diagnostics.py`, fed
+by `hqp_backend`): what the slot was handed as (a path HQPlayer opens, a
+stream from the media proxy, a CUE cut, a transcode, a preview, a copy in
+HQPlayer's own library) with the PlaylistAdd's final answer, every command of
+the intent with HQPlayer's answer (the command client reports them through
+`on_outcome`), the status for ten seconds after the first transport command
+(state, track, position, speed, buffer fills, the DSP by name), what the media
+proxy saw for that file's token (each request's status, range and bytes —
+`MediaProxy.hits`), and, read as it closes, HQPlayer's playlist: whether the
+expected entry is in it and whose entry it plays. A stop, a pause, a DSP change
+or a replaced playlist sent through any of the backend's own HQPlayer
+connections (the HQPlayer screen, the in-process assistant tools) ends an
+attempt as the owner's, and so does a DSP change made anywhere — it shows in
+the status, and HQPlayer stops to rebuild. A Stop sent by the assistant's MCP
+server (a connection of its own, in another process) cannot be told from
+HQPlayer stopping by itself. Two intents may overlap (a Next pressed while a
+replace still adds): each one's commands stay its own steps. The
+last 20 are kept in memory (never in the database), and each gets a verdict,
+checked in this order — positive evidence before any absence of it:
+
+| Verdict | When | The owner's next step |
+|---|---|---|
+| `unreachable` | a command never reached HQPlayer (or the play gate's GetInfo got no answer) | start HQPlayer; an Embedded in trial mode stops every 30 minutes |
+| `played` | `playing`, the position moving, on our entry (over http: its token was served) | — |
+| `too_slow` | it played, but past start-up `process_speed` < 1 on three ticks in a row (one dip plays through), or the output buffer drained while the input held (`input_fill` -1 = a file, no input buffer) | a lighter filter or modulator, a lower rate (the setting is named) |
+| `external` | HQPlayer plays an entry Sautium did not put there | stop the other controller (Roon?), play again here |
+| `proxy_error` | the media proxy answered 404 (token not registered — the restart race), 500 (file gone, CUE cut failed), 502/504 (provider), 401/403 (a bug) | play again / check the music folder |
+| `no_fetch` | an http hand-over HQPlayer never requested (none from the hand-over to 5 s after Play) | same LAN, the firewall for the media port, the Docker forward — host and port named |
+| `rejected` | PlaylistAdd or Play refused (HQPlayer's words quoted; "Empty transport" = nothing was taken), or the expected entry missing from its playlist | the file must be readable here; a copy in HQPlayer's library: Rescan it |
+| `not_played` | taken (bytes served, or a path) but never `playing`, or it stopped again | HQPlayer's log, the DSP line |
+| `unknown` / `interrupted` | nothing explains it / another action took over first (not counted) | HQPlayer's log |
+
+The brief's order put the proxy before positive evidence and drift last;
+measured traces show why not: a Next onto a track HQPlayer pre-buffered for
+gapless sends no GET, a stream-mode PlaylistAdd refusal usually means the
+add-time fetch could not reach us, and with another controller in charge our
+file is never asked for. A failed attempt rides the status as `diagnosis`:
+one toast, a "Why didn't it play?" tag on Now Playing beside that track, and
+a sheet with the sentence, the next step and the raw trace; the HQPlayer
+screen lists the recent attempts. The same failure three plays in a row is
+the `hqplayer.failing` notice (an `unreachable` run ends on HQPlayer's first
+answer). API: `GET /api/player/diagnostics/hqplayer` (attempts, the failing
+run, `client_errors`), `…/hqplayer/{id}` (one whole trace), `…/hqplayer/log`.
+
+**HQPlayer's own log** is read only on demand — the Diagnostics screen, an
+attempt that ends `not_played` / `unknown` / `rejected` without HQPlayer's
+words, a support warrant — never tailed. Lines read `<mark> YYYY/MM/DD
+HH:MM:SS <text>` on Desktop and Embedded alike, in HQPlayer's LOCAL time (the
+Pi logs UTC, the Desktop here local time, the Docker node runs UTC), so an
+attempt's lines are found by its URI, never by time — the cause is read from
+its own add onward, and when no line names it, the newest cause in the tail
+answers. Where it lives:
+
+- **HQPlayer Desktop, Windows**: `%LOCALAPPDATA%\HQPlayer\HQPlayer6Desktop.log`
+  (Desktop 6) and `HQPlayer5Desktop.log` (Desktop 5) side by side, named by
+  the major version, beside `settings.xml`, whose `<log enabled="1"/>` turns it
+  on (on by default on the maintainer's machine; hundreds of MB, so it is read
+  backwards to the last 200 meaningful lines — the NAA discovery heartbeat,
+  `clUPnP::OnRequest()` and startup listings are dropped).
+- **HQPlayer Desktop, macOS**: data in `~/.hqplayer/`; on the test Mac
+  `<log enabled="0"/>` and no log file, so the file name with logging on is not
+  recorded here.
+- **HQPlayer Embedded / HQPlayer OS**: `GET http://<box>:8088/log` — plain
+  text, the whole log since hqplayerd started, **no login** (verified
+  2026-10-02 on HQPlayer OS, Embedded 6.1.0 / engine 6.2.3; the other admin
+  pages answer HTTP Digest).
+- **HQPlayer Desktop on another computer**: no source from here; the sheet
+  says where its log lives.
+
+A Docker node reads the Desktop's folder through a read-only mount
+(`HQPLAYER_DATA_DIR` in `.env` → `/hqplayer`; only `settings.xml` and
+`HQPlayer*Desktop.log` are opened); the launcher reads its platform's own
+place. Recognised causes — every pattern seen in the maintainer's Desktop 5/6
+and Embedded logs, anything else shown raw: a file not found
+(`AddURI(…): … CreateFile(): The system cannot find the path specified`), the
+proxy's 404 (`AddURI(…): …GetHead(): 404`, `404 for range request`), a stream
+type refused (`unknown mime type`), the media server unreachable
+(`GetHead(): … socket error`), an empty playlist (`Empty transport`), the
+device busy or missing (`snd_pcm_open()`, `ASIOInit()`), the NAA lost, a
+filter impossible at the rate combination, an output accepting no format
+(`StartAudioClient(): no formats available`), a decode failure, a file that
+would not open (`SetTransport(): failed`). `ReadFLACErrorCB(): lost sync`
+alone is a transient of FLAC over HTTP, not a cause. No licence or trial line
+appears in either installation's logs.
+
+Traces and logs are content (paths, track identities): whole through the
+local API, and in a support warrant only under the `playback` scope, asked
+for by name, with every path cut to its last two components (drive, UNC and
+any absolute POSIX path alike) and every media-proxy token to its first six
+characters — a token is the capability that serves the file.
+
 ### Windows Firewall
 Ensure port 4321 is accessible:
 1. Open Windows Firewall settings
@@ -587,7 +723,9 @@ Failed to connect to HQPlayer at <windows-host-ip>:4321
 **Solutions**:
 1. Check HQPlayer is not in error state
 2. Ensure playlist has tracks loaded
-3. Verify command response in logs
+3. A refused command is quoted in HQPlayer's words — in the toast, in the
+   HQPlayer screen's Diagnostics, in `GET /api/player/diagnostics/hqplayer`
+   (`client_errors`)
 4. Try reconnecting
 
 ### Docker Connection Issues
@@ -631,6 +769,13 @@ class TrackStatus:
     convolution: bool
     matrix_profile: str
     process_speed: float  # HQP6; 0.0 on HQP5
+    input_fill: Optional[float]   # None when not reported
+    output_fill: Optional[float]
+    tracks_total: int
+    active_mode: str
+    active_filter: str
+    active_shaper: str
+    active_rate: int
 ```
 
 ## Performance Notes

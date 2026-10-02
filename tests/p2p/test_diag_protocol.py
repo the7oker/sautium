@@ -68,6 +68,16 @@ def test_verify_accepts_and_rejects():
         dp.sign_warrant(MASTER.sign, target=NODE_PUB, scopes=["nope"], issuer=MASTER_PUB)
 
 
+def test_the_playback_scope_is_signed_and_verified_but_only_asked_for_by_name():
+    w = _warrant(scopes=["playback", "logs"])
+    assert w["scopes"] == ["logs", "playback"]
+    assert dp.verify_warrant(w, NODE_PUB, now=NOW + 5, issuer=MASTER_PUB) == (True, None)
+    # A node that has not updated refuses a warrant naming a scope it does not
+    # know, so the default stays the seven every deployed node has.
+    assert "playback" in dp.SCOPES and "playback" not in dp.DEFAULT_SCOPES
+    assert set(dp.DEFAULT_SCOPES) == set(dp.SCOPES) - {"playback"}
+
+
 def test_frame_shape():
     frame = dp.warrant_frame(_warrant())
     assert frame["type"] == dp.FRAME_TYPE == "diag_warrant"

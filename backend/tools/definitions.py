@@ -56,6 +56,10 @@ def _get_hqp():
                 "Make sure HQPlayer is running (an HQPlayer Embedded in trial "
                 "mode stops every 30 minutes and must be restarted)."
             )
+        # A stop or a DSP change asked of the assistant is the owner's: the
+        # playback trace watching a play must hear it (playback.hqp_diagnostics).
+        from playback.hqp_backend import _route_outcome
+        _hqp_client.on_outcome = _route_outcome
     return _hqp_client
 
 
@@ -324,7 +328,8 @@ def _h_add_to_queue(ids: list) -> str:
 
 def _h_hqplayer_play() -> str:
     try:
-        return "Playback started." if _get_hqp().play() else "Failed to start playback."
+        hqp = _get_hqp()
+        return "Playback started." if hqp.play() else f"Failed to start playback: {hqp.refusal()}"
     except Exception as e:
         return f"Error: {e}"
 
@@ -465,7 +470,7 @@ def _h_hqplayer_set_filter(filter_name: str) -> str:
             return f"Filter '{filter_name}' not found. Available filters: {available}"
         ok = hqp.set_filter(match["index"])
         if not ok:
-            return f"Failed to set filter to {match['name']}."
+            return f"Failed to set filter to {match['name']}: {hqp.refusal()}"
         desc = match.get("description", "")
         return f"Filter set to: {match['name']}" + (f" — {desc}" if desc else "")
     except Exception as e:
@@ -492,16 +497,18 @@ def _h_hqplayer_set_shaper(shaper_name: str) -> str:
             available = ", ".join(s["name"] for s in shapers)
             return f"Shaper '{shaper_name}' not found. Available shapers: {available}"
         ok = hqp.set_shaping(match["index"])
-        return f"Dither/shaper set to: {match['name']}" if ok else f"Failed to set shaper to {match['name']}."
+        return (f"Dither/shaper set to: {match['name']}" if ok
+                else f"Failed to set shaper to {match['name']}: {hqp.refusal()}")
     except Exception as e:
         return f"Error setting shaper: {e}"
 
 
 def _h_hqplayer_set_convolution(enabled: bool) -> str:
     try:
-        ok = _get_hqp().set_convolution(enabled)
+        hqp = _get_hqp()
+        ok = hqp.set_convolution(enabled)
         state = "enabled" if enabled else "disabled"
-        return f"Convolution {state}." if ok else f"Failed to {state} convolution."
+        return f"Convolution {state}." if ok else f"Failed to {state} convolution: {hqp.refusal()}"
     except Exception as e:
         return f"Error: {e}"
 
@@ -549,7 +556,8 @@ def _h_hqplayer_set_matrix_profile(profile_name: str) -> str:
                 return f"Profile '{profile_name}' not found. Available: {available}"
             profile_name = match
         ok = hqp.matrix_set_profile(profile_name)
-        return f"Matrix profile set to: '{profile_name}'" if ok else f"Failed to set profile."
+        return (f"Matrix profile set to: '{profile_name}'" if ok
+                else f"Failed to set profile: {hqp.refusal()}")
     except Exception as e:
         return f"Error: {e}"
 

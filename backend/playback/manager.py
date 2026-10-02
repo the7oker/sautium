@@ -511,6 +511,10 @@ class PlaybackManager:
         # the slot above is 0 so nothing is tracked against a wrong track.
         if s.extra.get("source"):
             new_data["source"] = s.extra["source"]
+        # Why the slot did not play (HQPlayer's playback trace): its own key —
+        # `error` is a string the UI toasts as it stands.
+        if s.extra.get("diagnosis"):
+            new_data["diagnosis"] = s.extra["diagnosis"]
 
         # Per-track listening history + scrobble (source-agnostic: owned and
         # streamed phantom items both carry the track UUID). Separate from the
@@ -649,7 +653,7 @@ class PlaybackManager:
         first = self.queue.item_at(slot) or self.queue.item_at(1)
         if first is None:
             return   # empty queue — leave the current status untouched
-        self._push_status({
+        idle = {
             "state": "stopped",
             "artist": first.artist, "album": first.album or "", "song": first.title,
             "genre": "", "position": 0.0, "length": first.duration_seconds or 0.0,
@@ -669,7 +673,12 @@ class PlaybackManager:
             "excerpt": bool(first.excerpt) if first.preview else False,
             "output": self.output_info,
             "ui_build": ui_build(),
-        })
+        }
+        # A queue edit while stopped keeps the explanation of the last play
+        # on screen; the backend's next tick decides whether it still holds.
+        if self._latest_status.get("diagnosis"):
+            idle["diagnosis"] = self._latest_status["diagnosis"]
+        self._push_status(idle)
 
     def apply_reorder(self, plan: ReorderPlan) -> dict:
         """Execute a validated reorder. The mirror runs first (it can raise

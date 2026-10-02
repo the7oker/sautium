@@ -35,7 +35,12 @@ from desktop.p2p.master_node import MASTER_PUBKEY_HEX
 PROTOCOL_VERSION = 1
 FRAME_TYPE = "diag_warrant"          # SSE frame type on the master's wake stream
 
-SCOPES = ("system", "settings", "p2p", "jobs", "events", "logs", "chat")
+SCOPES = ("system", "settings", "p2p", "jobs", "events", "logs", "chat", "playback")
+# What a warrant asks for when the maintainer names no scopes: the ones every
+# deployed node has known since the protocol shipped. A node refuses a warrant
+# that names a scope it does not know, so a scope added later — `playback`,
+# the HQPlayer playback traces (2026-10-02) — is asked for by name.
+DEFAULT_SCOPES = ("system", "settings", "p2p", "jobs", "events", "logs", "chat")
 
 EVENT_KINDS = frozenset({
     "node.started",

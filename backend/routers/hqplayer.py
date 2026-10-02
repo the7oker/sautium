@@ -142,9 +142,10 @@ def get_state() -> Dict[str, Any]:
         return {**response, "error": str(e)}
 
     # TCP connect() on its own isn't proof of being talking to the
-    # HQPlayer control protocol — HQPlayer also listens on 4322
-    # (UPnP) and 4323 (events), and a stray service can hold any
-    # port. Treat the connection as healthy only when GetInfo came
+    # HQPlayer control protocol — HQPlayer also listens on 4322 (its
+    # metering stream, the control port + 1), on 8019 (the UPnP renderer)
+    # and, Embedded, on 8088 (the web interface); and a stray service can
+    # hold any port. Treat the connection as healthy only when GetInfo came
     # back with the actual `product` field — that's protocol-level
     # confirmation that the other side is HQPlayer.
     really_connected = bool(info and info.get("product"))
@@ -185,10 +186,7 @@ def _resume_after_dsp_change(pre_index: int, pre_position: int, generation: int)
             if backend is None or backend.id != "hqplayer":
                 return
             try:
-                backend.select(pre_index)
-                if pre_position > 0:
-                    backend.seek(pre_position)
-                backend.play()
+                backend.resume_after_rebuild(pre_index, pre_position)
                 logger.info("resumed playback after DSP rebuild "
                             "(track %d @ %ds)", pre_index, pre_position)
             except Exception as e:
@@ -223,13 +221,13 @@ def set_config(req: ConfigRequest) -> Dict[str, Any]:
                 if hqp.set_mode(req.mode):
                     applied["mode"] = req.mode
                 else:
-                    failed["mode"] = "set_mode rejected"
+                    failed["mode"] = hqp.refusal()
 
             if req.rate is not None:
                 if hqp.set_rate(req.rate):
                     applied["rate"] = req.rate
                 else:
-                    failed["rate"] = "set_rate rejected"
+                    failed["rate"] = hqp.refusal()
 
             if req.filter is not None:
                 if hqp.set_filter(req.filter, req.filter1x):
@@ -237,19 +235,19 @@ def set_config(req: ConfigRequest) -> Dict[str, Any]:
                     if req.filter1x is not None:
                         applied["filter1x"] = req.filter1x
                 else:
-                    failed["filter"] = "set_filter rejected"
+                    failed["filter"] = hqp.refusal()
 
             if req.shaper is not None:
                 if hqp.set_shaping(req.shaper):
                     applied["shaper"] = req.shaper
                 else:
-                    failed["shaper"] = "set_shaping rejected"
+                    failed["shaper"] = hqp.refusal()
 
             if req.matrix_profile is not None:
                 if hqp.matrix_set_profile(req.matrix_profile):
                     applied["matrix_profile"] = req.matrix_profile
                 else:
-                    failed["matrix_profile"] = "matrix_set_profile rejected"
+                    failed["matrix_profile"] = hqp.refusal()
     except (BrokenPipeError, ConnectionError, OSError) as e:
         raise HTTPException(status_code=503, detail=f"HQPlayer not reachable: {e}")
 

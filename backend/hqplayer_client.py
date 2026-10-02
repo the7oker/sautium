@@ -10,14 +10,75 @@ Default port: 4321
 """
 
 import logging
+import re
 import socket
+import threading
+import time
 import xml.etree.ElementTree as ET
-from typing import Optional, Dict, Any, List
-from dataclasses import dataclass
+from collections import deque
+from typing import Callable, Optional, Dict, Any, List
+from dataclasses import asdict, dataclass
 from enum import IntEnum
 from urllib.parse import unquote
 
 logger = logging.getLogger(__name__)
+
+
+# -- Redaction -------------------------------------------------------------------
+# A path names what the owner listens to, so anything that leaves this process
+# (the diagnostic bundle, a log line about a refused file) carries only its last
+# two components — the album folder and the file — never where the library lives.
+
+_TOKEN_URL = re.compile(r"^(https?://[^/]+/(?:file|preview)/)([^?/#]+)")
+
+
+def redact_path(path: str) -> str:
+    parts = [p for p in re.split(r"[\\/]+", path) if p]
+    if len(parts) <= 2:
+        return path
+    return "…/" + "/".join(parts[-2:])
+
+
+def redact_uri(uri: str) -> str:
+    """A file:// URI or a bare path down to its last two components; a media
+    proxy URL down to the first characters of its token (the token is the
+    capability that serves the file)."""
+    m = _TOKEN_URL.match(uri)
+    if m:
+        return f"{m.group(1)}{m.group(2)[:6]}…"
+    if uri.startswith("file://"):
+        return "file://" + redact_path(uri[len("file://"):])
+    if re.match(r"^(?:[A-Za-z]:[\\/]|/|\\\\)", uri):      # a drive, POSIX or UNC path
+        return redact_path(uri)
+    return uri
+
+
+@dataclass(frozen=True)
+class CommandOutcome:
+    """What HQPlayer answered to one command. `result` is the element's own
+    `result` attribute — "OK", "Error" (`message` is HQPlayer's reason, the
+    element's text) or None (queries carry none, some setters answer bare) —
+    or what went wrong below the protocol: "refused" (no connection), "lost"
+    (no answer: the socket dropped, timed out, or returned no XML; `during`
+    names the command it was carrying) or "unparsed" (a Status/State answer
+    that did not parse)."""
+    ts: float
+    host: str
+    port: int
+    command: str
+    attributes: dict
+    result: Optional[str]
+    message: str = ""
+    during: Optional[str] = None
+
+    @property
+    def failed(self) -> bool:
+        return self.result not in ("OK", None)
+
+    def public(self) -> dict:
+        d = asdict(self)
+        d["attributes"] = {k: redact_uri(str(v)) for k, v in self.attributes.items()}
+        return d
 
 
 class PlaybackState(IntEnum):
@@ -51,6 +112,17 @@ class TrackStatus:
     convolution: bool = False
     matrix_profile: str = ""
     process_speed: float = 0.0  # HQP6 realtime-processing factor; 0.0 on HQP5
+    # The engine's input and output buffer fill (the SDK's statusIO); None
+    # when HQPlayer does not report them.
+    input_fill: Optional[float] = None
+    output_fill: Optional[float] = None
+    tracks_total: int = 0
+    # What the engine is running right now, by name — the DSP line of a
+    # playback trace without three more round-trips.
+    active_mode: str = ""
+    active_filter: str = ""
+    active_shaper: str = ""
+    active_rate: int = 0
 
     @property
     def is_playing(self) -> bool:
@@ -69,7 +141,17 @@ class HQPlayerClient:
 
     Implements basic control functions without authentication.
     For full feature set including encrypted commands, authentication would be needed.
+
+    Every failed command lands in one ring shared by all instances
+    (`last_errors()`): the playback backend replaces its client on every
+    reconnect, and the drop that killed one instance must outlive it.
+
+    A DSP setter is refused only by an explicit `result="Error"`: some
+    answer with a bare element, which is HQPlayer accepting it.
     """
+
+    _error_ring: deque = deque(maxlen=50)
+    _error_lock = threading.Lock()
 
     def __init__(self, host: str = "localhost", port: int = 4321, timeout: float = 5.0):
         """
@@ -85,6 +167,43 @@ class HQPlayerClient:
         self.timeout = timeout
         self.socket: Optional[socket.socket] = None
         self.buffer = b""
+        # The failure of this instance's latest command (None when HQPlayer
+        # accepted it) — what a caller quotes when a setter returns False.
+        self.last_error: Optional[CommandOutcome] = None
+        # Called with every outcome, failures and successes alike — the
+        # playback backend's trace listens on its command client.
+        self.on_outcome: Optional[Callable[[CommandOutcome], None]] = None
+        self._io_error: Optional[str] = None
+
+    @classmethod
+    def last_errors(cls, since: Optional[float] = None) -> List[Dict[str, Any]]:
+        """The ring of failed commands, newest first, attributes redacted."""
+        with cls._error_lock:
+            entries = list(cls._error_ring)
+        return [e.public() for e in reversed(entries) if since is None or e.ts >= since]
+
+    def refusal(self) -> str:
+        """Why the latest command was not accepted, in HQPlayer's words when
+        it gave any — what a caller reports when a command returns False."""
+        e = self.last_error
+        if e is None:
+            return "HQPlayer did not confirm it"
+        if e.message:
+            return e.message
+        return f"HQPlayer refused {e.command}" if e.result == "Error" else f"HQPlayer: {e.result}"
+
+    def _outcome(self, command: str, attributes: Optional[Dict[str, str]],
+                 result: Optional[str], message: str = "",
+                 during: Optional[str] = None) -> None:
+        outcome = CommandOutcome(ts=time.time(), host=self.host, port=self.port,
+                                 command=command, attributes=dict(attributes or {}),
+                                 result=result, message=message, during=during)
+        if outcome.failed:
+            self.last_error = outcome
+            with self._error_lock:
+                self._error_ring.append(outcome)
+        if self.on_outcome is not None:
+            self.on_outcome(outcome)
 
     def connect(self) -> bool:
         """
@@ -123,6 +242,8 @@ class HQPlayerClient:
         except Exception as e:
             logger.error(f"Failed to connect to HQPlayer: {e}")
             self.socket = None
+            self._outcome("<connection>", None, "refused",
+                          f"connect to {self.host}:{self.port}: {e}")
             return False
 
     def disconnect(self):
@@ -152,6 +273,7 @@ class HQPlayerClient:
         """
         if not self.socket:
             logger.error("Not connected to HQPlayer")
+            self._io_error = "not connected"
             return False
 
         try:
@@ -159,6 +281,7 @@ class HQPlayerClient:
             return True
         except Exception as e:
             logger.error(f"Failed to send command: {e}")
+            self._io_error = f"send failed: {e}"
             self.disconnect()
             return False
 
@@ -170,6 +293,7 @@ class HQPlayerClient:
             Parsed XML element or None
         """
         if not self.socket:
+            self._io_error = "not connected"
             return None
 
         try:
@@ -182,6 +306,7 @@ class HQPlayerClient:
                     # _ensure_connected peek happens to notice it (which, with
                     # backoff, can be up to 30s away — and on the command
                     # socket, until the user's next action).
+                    self._io_error = "closed by HQPlayer"
                     self.disconnect()
                     return None
                 self.buffer += chunk
@@ -194,9 +319,16 @@ class HQPlayerClient:
                 if xml_str:
                     return ET.fromstring(xml_str)
 
+            self._io_error = "empty answer"
+            return None
+        except (ET.ParseError, UnicodeDecodeError) as e:
+            logger.error(f"Failed to read response: {e}")
+            self._io_error = f"unreadable answer: {e}"
+            self.disconnect()
             return None
         except Exception as e:
             logger.error(f"Failed to read response: {e}")
+            self._io_error = f"no answer: {e}"
             self.disconnect()
             return None
 
@@ -212,7 +344,14 @@ class HQPlayerClient:
 
         Returns:
             Response element or None
+
+        Every command leaves a CommandOutcome (`_outcome`): HQPlayer's own
+        `result`, and on "Error" its reason — the element's text, which is
+        the only place HQPlayer says why (the Signalyst SDK's client reads it
+        at the start tag, where Qt's stream reader has no text yet).
         """
+        self.last_error = None
+        self._io_error = None
         # Build XML command
         root = ET.Element(command)
         if attributes:
@@ -223,11 +362,21 @@ class HQPlayerClient:
 
         # Send command
         if not self._send_command(xml_str):
+            self._outcome("<connection>", attributes, "lost",
+                          f"{command}: {self._io_error}", during=command)
             return None
 
         # Read response if expected
         if expect_response:
-            return self._read_response()
+            response = self._read_response()
+            if response is None:
+                self._outcome("<connection>", attributes, "lost",
+                              f"{command}: {self._io_error}", during=command)
+                return None
+            result = response.get("result")
+            self._outcome(command, attributes, result,
+                          (response.text or "").strip() if result == "Error" else "")
+            return response
 
         return None
 
@@ -397,11 +546,15 @@ class HQPlayerClient:
         """
         response = self._execute_command("Status", {"subscribe": "0"})
 
-        if response is None or response.tag != "Status":
+        if response is None:
+            return None
+        if response.tag != "Status":
+            self._outcome("Status", None, "unparsed", f"answered <{response.tag}>")
             return None
 
         try:
             # Parse status
+            in_fill, out_fill = response.get("input_fill"), response.get("output_fill")
             status = TrackStatus(
                 state=PlaybackState(int(response.get("state", 0))),
                 track_index=int(response.get("track", 0)),
@@ -410,6 +563,13 @@ class HQPlayerClient:
                 length=float(response.get("length", 0.0)),
                 volume=float(response.get("volume", 0.0)),
                 process_speed=float(response.get("process_speed", 0.0)),
+                input_fill=float(in_fill) if in_fill is not None else None,
+                output_fill=float(out_fill) if out_fill is not None else None,
+                tracks_total=int(response.get("tracks_total", 0)),
+                active_mode=response.get("active_mode", ""),
+                active_filter=response.get("active_filter", ""),
+                active_shaper=response.get("active_shaper", ""),
+                active_rate=int(response.get("active_rate") or 0),
             )
 
             # Parse metadata if present
@@ -423,6 +583,7 @@ class HQPlayerClient:
             return status
         except Exception as e:
             logger.error(f"Failed to parse status: {e}")
+            self._outcome("Status", None, "unparsed", str(e))
             return None
 
     def get_state(self) -> Optional[Dict[str, Any]]:
@@ -434,7 +595,10 @@ class HQPlayerClient:
         """
         response = self._execute_command("State")
 
-        if response is None or response.tag != "State":
+        if response is None:
+            return None
+        if response.tag != "State":
+            self._outcome("State", None, "unparsed", f"answered <{response.tag}>")
             return None
 
         try:
@@ -453,6 +617,7 @@ class HQPlayerClient:
             }
         except Exception as e:
             logger.error(f"Failed to parse state: {e}")
+            self._outcome("State", None, "unparsed", str(e))
             return None
 
     def get_info(self) -> Optional[Dict[str, str]]:
@@ -518,7 +683,7 @@ class HQPlayerClient:
             index: Mode index from get_modes()
         """
         response = self._execute_command("SetMode", {"value": str(index)})
-        return response is not None
+        return response is not None and response.get("result") != "Error"
 
     def get_filters(self) -> List[Dict[str, Any]]:
         """
@@ -560,7 +725,7 @@ class HQPlayerClient:
             attrs["value1x"] = str(index_1x)
 
         response = self._execute_command("SetFilter", attrs)
-        return response is not None
+        return response is not None and response.get("result") != "Error"
 
     def get_shapers(self) -> List[Dict[str, Any]]:
         """
@@ -592,7 +757,7 @@ class HQPlayerClient:
             index: Shaper index from get_shapers()
         """
         response = self._execute_command("SetShaping", {"value": str(index)})
-        return response is not None
+        return response is not None and response.get("result") != "Error"
 
     def get_rates(self) -> List[Dict[str, Any]]:
         """
@@ -624,7 +789,7 @@ class HQPlayerClient:
             index: Rate index from get_rates()
         """
         response = self._execute_command("SetRate", {"value": str(index)})
-        return response is not None
+        return response is not None and response.get("result") != "Error"
 
     def get_inputs(self) -> List[str]:
         """
@@ -654,7 +819,7 @@ class HQPlayerClient:
             enabled: True to enable, False to disable
         """
         response = self._execute_command("SetConvolution", {"value": "1" if enabled else "0"})
-        return response is not None
+        return response is not None and response.get("result") != "Error"
 
     def matrix_list_profiles(self) -> List[str]:
         """
@@ -694,7 +859,7 @@ class HQPlayerClient:
             profile: Profile name (must exist in HQPlayer)
         """
         response = self._execute_command("MatrixSetProfile", {"value": profile})
-        return response is not None
+        return response is not None and response.get("result") != "Error"
 
 
 # ========== Context Manager Support ==========

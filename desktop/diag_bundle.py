@@ -9,7 +9,9 @@ Never in a bundle: p2p_messages (friends' private E2E chat — the master
 already has its own thread with this node), credentials of any kind
 (ai.api_key, the Last.fm session, config.json api_keys / postgres_password,
 node keys, TLS keys, .api_secret, the agents' auth files). Log tails go
-through diag_protocol.scrub_secrets.
+through diag_protocol.scrub_secrets. The `playback` scope — the HQPlayer
+output's playback traces and HQPlayer's own log, which are content — comes
+from the backend with every path already cut to its last two components.
 """
 
 import io
@@ -324,6 +326,16 @@ def collect(*, db_dsn: str, data_dir: Path, config: dict, warrant: dict,
                     add(f"logs/{Path(name).name}", scrub_secrets(text), truncated)
             scope("logs", _logs)
             scope("chat", lambda: add("chat/sessions.json", _json(chat_export(conn, since))))
+
+            def _playback() -> None:
+                # The traces live in the backend process's memory only. A fresh
+                # tail of an Embedded box's log rides along: give it time.
+                data = _backend_client(config)._get_json(
+                    "/api/player/diagnostics/hqplayer/bundle", timeout=30)
+                if data is None:
+                    raise RuntimeError("the backend did not return its playback traces")
+                add("playback/hqplayer.json", scrub_secrets(_json(data)))
+            scope("playback", _playback)
             add("manifest.json", _json(manifest))
     finally:
         conn.close()

@@ -1,0 +1,126 @@
+{
+ "expect": "unknown",
+ "note": "Play was accepted; only the status socket missed (the WSL2 hop) — not unreachable.",
+ "facts": {
+  "intent": "select",
+  "started": 1000.0,
+  "t0": 1000.2,
+  "closed": 1020.4,
+  "end": "window",
+  "error": null,
+  "slot": 3,
+  "expected_uri": "http://192.168.1.88:8830/file/AbCdEfGhIjKlMnOpQrSt",
+  "uri": "http://192.168.1.88:8830/file/AbCdEfGhIjKlMnOpQrSt",
+  "mode": "stream",
+  "token": "AbCdEfGhIjKlMnOpQrSt",
+  "handover": {
+   "uri": "http://192.168.1.88:8830/file/AbCdEfGhIjKlMnOpQrSt",
+   "ts": 900.0,
+   "add_ts": 900.1,
+   "mode": "stream",
+   "track_id": "t-3",
+   "media_file_id": 33,
+   "title": "Track",
+   "artist": "Artist",
+   "ok": true,
+   "result": null,
+   "message": ""
+  },
+  "steps": [
+   {
+    "ts": 1000.2,
+    "command": "SelectTrack",
+    "result": "OK",
+    "message": "",
+    "attributes": {
+     "index": "3"
+    }
+   },
+   {
+    "ts": 1000.3,
+    "command": "Play",
+    "result": "OK",
+    "message": "",
+    "attributes": {}
+   }
+  ],
+  "adds": {
+   "count": 0,
+   "failed": []
+  },
+  "ticks": [],
+  "misses": [
+   {
+    "ts": 1001.2,
+    "message": "Status: no answer: timed out"
+   },
+   {
+    "ts": 1002.2,
+    "message": "Status: no answer: timed out"
+   },
+   {
+    "ts": 1003.2,
+    "message": "Status: no answer: timed out"
+   },
+   {
+    "ts": 1004.2,
+    "message": "Status: no answer: timed out"
+   },
+   {
+    "ts": 1005.2,
+    "message": "Status: no answer: timed out"
+   },
+   {
+    "ts": 1006.2,
+    "message": "Status: no answer: timed out"
+   }
+  ],
+  "proxy": [
+   {
+    "ts": 900.1,
+    "client": "172.18.0.1",
+    "method": "HEAD",
+    "range": null,
+    "kind": "file",
+    "status": 200,
+    "bytes": 0
+   },
+   {
+    "ts": 1000.5,
+    "client": "172.18.0.1",
+    "method": "GET",
+    "range": "bytes=0-",
+    "kind": "file",
+    "status": 206,
+    "bytes": 4194304
+   }
+  ],
+  "playlist": null,
+  "item": {
+   "track_id": "t-3",
+   "media_file_id": 33,
+   "title": "Track",
+   "artist": "Artist",
+   "album": "Album",
+   "kind": "file"
+  },
+  "context": {
+   "hqplayer": "192.168.1.53:4321",
+   "media_url": "192.168.1.88:8830",
+   "remote": true,
+   "drift": false,
+   "endpoint_id": 7,
+   "info": {
+    "name": "HQPlayerEmbedded",
+    "product": "Signalyst HQPlayer Embedded",
+    "version": "6",
+    "platform": "Linux",
+    "engine": "6.2.3"
+   },
+   "dsp": {
+    "matrix_profile": null
+   }
+  },
+  "generation": 4
+ }
+}

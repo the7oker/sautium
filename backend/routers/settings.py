@@ -1183,6 +1183,16 @@ def _notices_state() -> Dict[str, Any]:
                       "data": {"provider": pid,
                                "name": streaming_service.provider_name(pid),
                                "reason": health["reason"]}})
+    # A dead HQPlayer output, as opposed to one track that would not play: the
+    # same failure three plays in a row (playback.hqp_diagnostics). One failed
+    # track is the toast Now Playing raises.
+    from playback import hqp_diagnostics
+    run = hqp_diagnostics.failing_run()
+    if run and _read("output.type") == "hqplayer":
+        items.append({"key": "hqplayer.failing", "kind": "error",
+                      "since": run["since"], "until": None,
+                      "data": {"code": run["code"], "count": run["count"],
+                               "title": run["title"]}})
     seen = _read("notice.seen") or {}
     for item in items:
         item["seen"] = seen.get(item["key"]) == item["since"]

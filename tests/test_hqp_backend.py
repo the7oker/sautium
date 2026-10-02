@@ -19,12 +19,13 @@ if str(BACKEND) not in sys.path:
 import pytest  # noqa: E402
 
 from config import settings  # noqa: E402
-from hqplayer_client import PlaybackState, TrackStatus  # noqa: E402
+from hqplayer_client import HQPlayerClient, PlaybackState, TrackStatus  # noqa: E402
 from playback import hqp_backend as hb  # noqa: E402
+from playback import hqp_diagnostics as diag  # noqa: E402
 from playback import queue as queue_mod  # noqa: E402
 from playback.hqp_backend import HqpBackend  # noqa: E402
 from playback.manager import PlaybackManager  # noqa: E402
-from playback.queue import QueueItem  # noqa: E402
+from playback.queue import CanonicalQueue, QueueItem  # noqa: E402
 from streaming import service as streaming_service  # noqa: E402
 from streaming.proxy import MediaProxy  # noqa: E402
 
@@ -46,6 +47,10 @@ class FakeHqp:
         self.playlist: list[str] = []
         self.state = int(PlaybackState.STOPPED)
         self.track = 0
+        self.position = 0.0
+        # Answers that replace the normal one, by command — what a refusing
+        # HQPlayer says (`<Play result="Error">Empty transport</Play>`).
+        self.replies: dict[str, str] = {}
         self.escape_brackets = escape_brackets
         self.commands: list[tuple] = []
         self._lock = threading.Lock()
@@ -93,9 +98,17 @@ class FakeHqp:
     def _dispatch(self, cmd: str, attrs: dict) -> str:
         with self._lock:
             self.commands.append((cmd, attrs))
+            if cmd in self.replies:
+                return self.replies[cmd]
             if cmd == "Status":
+                if self.state == int(PlaybackState.PLAYING):
+                    self.position += 1.0
                 return (f'<Status state="{self.state}" track="{self.track}" '
-                        f'position="0" length="0" volume="-3">'
+                        f'position="{self.position}" length="300" volume="-3" '
+                        f'tracks_total="{len(self.playlist)}" process_speed="1.6" '
+                        f'input_fill="0.9" output_fill="0.9" active_mode="PCM" '
+                        f'active_filter="poly-sinc-gauss-long" active_shaper="none" '
+                        f'active_rate="705600">'
                         f'<metadata artist="Fake artist" album="Fake album" '
                         f'song="Fake song" genre=""/></Status>')
             if cmd == "GetInfo":
@@ -104,6 +117,7 @@ class FakeHqp:
             if cmd == "PlaylistAdd":
                 if attrs.get("clear") == "1":
                     self.playlist = []
+                    self.track = 0
                 self.playlist.append(attrs["uri"])
                 return '<PlaylistAdd result="OK"/>'
             if cmd == "PlaylistGet":
@@ -121,6 +135,8 @@ class FakeHqp:
                 return '<PlaylistRemove result="OK"/>'
             if cmd == "Play":
                 if self.playlist:
+                    if self.state != int(PlaybackState.PLAYING):
+                        self.position = 0.0
                     self.state = int(PlaybackState.PLAYING)
                     self.track = self.track or 1
                 return '<Play result="OK"/>'
@@ -132,6 +148,7 @@ class FakeHqp:
                 return '<Pause result="OK"/>'
             if cmd == "SelectTrack":
                 self.track = int(attrs["index"])
+                self.position = 0.0
                 return '<SelectTrack result="OK"/>'
             return f'<{cmd} result="OK"/>'
 
@@ -173,6 +190,8 @@ def fake(monkeypatch):
                         MediaProxy(port=0, advertised_host="127.0.0.1", file_token_key=b"k"))
     hb.reset_all_clients()
     hb._hqp_unreachable_until = 0.0
+    # A failing run wakes the notices channel through the database.
+    monkeypatch.setattr(hb, "_notify_notices", lambda: None)
     # The attach re-checks the HQPlayer library hash through the database;
     # these tests have none.
     import hqp_library
@@ -528,3 +547,151 @@ def test_a_rebind_hqplayer_cannot_follow_is_remirrored_on_the_next_play(fake):
     _move(mgr, 1, "E:/Music/B/01.flac", 10)
     b.queue_changed("rebind")
     assert not b.healthy()           # the play-intent gate re-attaches and re-mirrors
+
+
+# -- the playback trace (playback.hqp_diagnostics) ------------------------------------
+# A backend with its status going nowhere: no manager, so no play tracker —
+# a test play never writes a listen or reaches Last.fm.
+
+@pytest.fixture
+def traced(fake, monkeypatch):
+    monkeypatch.setattr(diag, "OBSERVE_S", 1.5)
+    with diag._lock:
+        diag._ring.clear()
+        diag._ledger.clear()
+        diag._by_slot.clear()
+    diag._run_key = None
+    HQPlayerClient._error_ring.clear()
+    q = CanonicalQueue()
+    # Brackets: HQPlayer reports them escaped, never as it was handed them.
+    q.replace([_item("E:/Music/A [TR24]/01.flac", 1), _item("E:/Music/A [TR24]/02.flac", 2)])
+    b = HqpBackend(emit=lambda *_: None, queue=q)
+    b.start()
+    yield b
+    b.shutdown()
+
+
+def _closed(timeout=10.0):
+    assert _wait(lambda: diag.attempts(), timeout=timeout), "the attempt never closed"
+    return diag.attempts()[0]
+
+
+def test_a_jump_that_plays_is_judged_played(traced, fake):
+    assert traced.select(2)
+    a = _closed()
+    assert a.intent == "select" and a.end == "window"
+    assert a.verdict["code"] == "played", a.verdict
+    f = a.facts
+    assert f["slot"] == 2 and f["mode"] == "path" and f["proxy"] is None
+    assert f["expected_uri"] == f["uri"] == "file:///E:/Music/A [TR24]/02.flac"
+    assert f["playlist"]["at_slot"] == "file:///E:/Music/A %5BTR24%5D/02.flac"
+    assert f["handover"]["ok"] is True and f["handover"]["title"] == "Song 2"
+    assert [s["command"] for s in f["steps"]] == ["SelectTrack", "Play"]
+    assert f["playlist"]["at_slot_expected"] and f["ticks"][-1]["filter"] == "poly-sinc-gauss-long"
+    assert f["item"]["title"] == "Song 2"
+
+
+def test_a_refused_play_is_judged_at_once_in_hqplayers_words(traced, fake):
+    fake.replies["Play"] = '<Play result="Error">Empty transport</Play>'
+    assert traced.play() is False
+    a = _closed(timeout=5.0)
+    assert a.end == "hard" and a.verdict["code"] == "rejected"
+    assert a.verdict["quote"] == "Empty transport"
+    assert HQPlayerClient.last_errors()[0]["message"] == "Empty transport"
+
+
+def test_an_unanswered_play_intent_is_an_unreachable_attempt(traced, fake):
+    fake.close()
+    assert traced.reachable() is False
+    a = diag.attempts()[0]
+    assert a.verdict["code"] == "unreachable" and "GetInfo" in a.verdict["sentence"]
+
+
+def test_a_stop_from_elsewhere_ends_the_watch_as_the_owners(traced, fake, monkeypatch):
+    monkeypatch.setattr(diag, "OBSERVE_S", 60.0)
+    assert traced.select(1)
+    stopper = threading.Thread(target=traced.stop)
+    stopper.start()
+    stopper.join(5)
+    a = _closed(timeout=5.0)
+    assert a.end == "owner" and a.verdict["code"] in ("played", "interrupted")
+
+
+def test_replacing_the_queue_with_play_is_one_attempt_and_never_deadlocks(traced, fake):
+    items = [_item("E:/Music/B/01.flac", 11), _item("E:/Music/B/02.flac", 12)]
+    done = threading.Event()
+
+    def replace():
+        traced.queue_replace(items, play=True)
+        traced._queue.replace(items)     # the manager's commit after the mirror
+        done.set()
+    threading.Thread(target=replace, daemon=True).start()
+    assert done.wait(10), "queue_replace(play=True) hung"
+    a = _closed()
+    assert a.intent == "replace" and a.verdict["code"] == "played", a.verdict
+    assert a.facts["expected_uri"] == "file:///E:/Music/B/01.flac"
+    assert a.facts["adds"]["count"] == 2
+    assert [s["command"] for s in a.facts["steps"]] == ["Stop", "Play"]
+
+
+def test_hqplayers_error_text_reaches_the_caller(fake):
+    fake.replies["SetFilter"] = '<SetFilter result="Error">Filter not available in this mode</SetFilter>'
+    c = HQPlayerClient("127.0.0.1", fake.port)
+    assert c.connect()
+    try:
+        assert c.set_filter(3) is False
+        assert c.refusal() == "Filter not available in this mode"
+        assert c.last_error.command == "SetFilter"
+        fake.replies["SetFilter"] = "<SetFilter/>"      # a bare answer is acceptance
+        assert c.set_filter(3) is True and c.last_error is None
+    finally:
+        c.disconnect()
+
+
+def test_a_dropped_connection_is_a_connection_outcome(fake):
+    HQPlayerClient._error_ring.clear()
+    c = HQPlayerClient("127.0.0.1", fake.port, timeout=2.0)
+    assert c.connect()
+    fake.close()
+    assert c.get_status() is None
+    e = HQPlayerClient.last_errors()[0]
+    assert e["command"] == "<connection>" and e["during"] == "Status" and e["result"] == "lost"
+
+
+def test_overlapping_intents_keep_their_own_commands(fake):
+    """A Next pressed while a replace still runs: each intent's commands are
+    its own steps — the first one's Stop is not the owner ending the second,
+    and the first one finishing does not blind the second."""
+    from hqplayer_client import CommandOutcome
+    b = HqpBackend(emit=lambda *_: None, queue=CanonicalQueue())
+    out = lambda cmd, result="OK": CommandOutcome(1.0, "h", 1, cmd, {}, result)  # noqa: E731
+    a_open, b_open, a_done = threading.Event(), threading.Event(), threading.Event()
+    seen = {}
+
+    def first():
+        with b._intent("replace", slot=1) as att:
+            seen["a"] = att
+            a_open.set()
+            b_open.wait(5)
+            b._on_outcome(out("Stop"))          # A's own Stop, after B took over
+        a_done.set()
+
+    def second():
+        a_open.wait(5)
+        with b._intent("next") as att:
+            seen["b"] = att
+            b_open.set()
+            a_done.wait(5)
+            b._on_outcome(out("Next"))          # B's step, after A has finished
+
+    threads = [threading.Thread(target=first), threading.Thread(target=second)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join(10)
+    a, nxt = seen["a"], seen["b"]
+    assert [s["command"] for s in a.steps] == ["Stop"] and a.end == "superseded"
+    assert [s["command"] for s in nxt.steps] == ["Next"] and nxt.t0 == 1.0
+    assert nxt.end is None                       # not ended as the owner's
+    b._on_outcome(out("Stop"))                   # a Stop from no intent at all is
+    assert nxt.end == "owner"

@@ -581,6 +581,21 @@ implementation details live in the code, DB and git history.
 - **Stop-clear-add-select-play sequence** for `play_track`/`play_album`. Without
   explicit stop, HQPlayer occasionally started the wrong track from the
   existing queue.
+- **Why didn't it play — traces in memory, scoped as content (2026-10-02).**
+  Each play intent on the HQPlayer output is watched for ten seconds and
+  judged (`playback/hqp_diagnostics.py`; the verdicts and HQPlayer's log in
+  `docs/HQPLAYER_INTEGRATION.md` § "Diagnostics"). The last 20 live in the
+  backend's memory and nowhere else: a trace is paths and track identities,
+  which is what the owner listens to, so it is not a row to sync, back up or
+  migrate, it is gone with a restart — the question it answers is about the
+  last few minutes — and it never enters the content-free event reports. It
+  leaves the process only through the local API, whole, or in a support
+  bundle under the `playback` scope, which a warrant must name, with every
+  path cut to its last two components. HQPlayer's own log follows the same
+  rule and is read only on demand, never tailed. Positive evidence of play is
+  weighed before any absence of it: a Next onto a track HQPlayer pre-buffered
+  sends no GET, and with Roon in charge our file is never asked for — the
+  media server's silence is a verdict only once nothing better explains it.
 
 ### MCP server
 

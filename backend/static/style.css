@@ -1386,6 +1386,23 @@ body.sautium-base {
   background: rgba(237, 226, 212, 0.02);
   text-transform: none;
 }
+/* "Why didn't it play?" — the HQPlayer output judged the last play of this
+   track failed (playback/hqp_diagnostics.py). A tappable status tag: the
+   lossy badge's error tint, set in the prose face (mono is for numbers). */
+.np-why {
+  display: inline-flex;
+  align-items: center;
+  padding: calc(4 * var(--px)) calc(9 * var(--px));
+  border-radius: calc(3 * var(--px));
+  border: 1px solid rgba(193, 86, 78, 0.35);
+  background: rgba(193, 86, 78, 0.06);
+  color: var(--color-negative);
+  font-family: var(--font-sans);
+  font-size: var(--text-caption);
+  font-weight: 600;
+  cursor: pointer;
+  flex-shrink: 0;
+}
 
 .np-key-pill {
   padding: calc(4 * var(--px)) calc(8 * var(--px));
@@ -4457,6 +4474,87 @@ a.am-kind { text-decoration: none; }
   border-top-right-radius: 0;
 }
 
+/* ---- HQPlayer diagnostics: the sheet behind "Why didn't it play?" and
+   the Diagnostics block of the HQPlayer screen ---- */
+.confirm-sheet.hqp-diag {
+  max-height: 100%;
+  overflow-y: auto;
+}
+.hqp-diag-next {
+  margin: calc(-8 * var(--px)) 0 calc(16 * var(--px));
+  font-size: calc(13 * var(--px));
+  line-height: var(--lh-normal);
+  color: var(--color-text);
+}
+.hqp-diag-next b { font-weight: 600; }
+.hqp-diag-note {
+  margin: calc(8 * var(--px)) 0;
+  font-size: var(--text-caption);
+  line-height: var(--lh-normal);
+  color: var(--color-text-dim);
+  word-break: break-word;
+}
+.hqp-diag .hqp-advanced { margin: 0 0 calc(12 * var(--px)); }
+.hqp-diag .hqp-advanced[open] > summary { margin-bottom: calc(10 * var(--px)); }
+.hqp-diag-facts {
+  display: grid;
+  grid-template-columns: auto 1fr;
+  gap: calc(4 * var(--px)) calc(12 * var(--px));
+  margin: 0 0 calc(12 * var(--px));
+  font-size: calc(12 * var(--px));
+}
+.hqp-diag-facts dt { color: var(--color-text-dim); }
+.hqp-diag-facts dd { margin: 0; color: var(--color-text-muted); word-break: break-word; }
+.hqp-diag-uri { word-break: break-all; }
+.hqp-diag-label {
+  margin: calc(10 * var(--px)) 0 calc(4 * var(--px));
+  font-family: var(--font-mono);
+  font-size: calc(10 * var(--px));
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+  color: var(--color-text-dim);
+}
+.hqp-diag-list {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  font-size: calc(12 * var(--px));
+  line-height: var(--lh-normal);
+  color: var(--color-text-muted);
+}
+.hqp-diag-list li { word-break: break-word; }
+.hqp-log {
+  max-height: calc(260 * var(--px));
+  overflow-y: auto;
+  padding: calc(8 * var(--px)) calc(10 * var(--px));
+  border-radius: var(--radius-sm);
+  background: var(--color-surface-lo);
+  font-size: calc(11 * var(--px));
+  line-height: var(--lh-normal);
+  color: var(--color-text-muted);
+}
+.hqp-log-line { white-space: pre-wrap; word-break: break-word; }
+.hqp-log-line.is-cause { color: var(--color-negative); }
+.hqp-diag-what {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  text-align: left;
+}
+.hqp-diag-track {
+  font-size: calc(13.5 * var(--px));
+  color: var(--color-text);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.hqp-diag-verdict {
+  font-size: var(--text-caption);
+  color: var(--color-text-dim);
+}
+.hqp-diag-row.is-failed .hqp-diag-verdict { color: var(--color-negative); }
+.hqp-row-hint.hqp-diag-empty { margin-top: calc(4 * var(--px)); }
+
 /* ---- HQPlayer filter picker (modal sheet) ---- */
 .hqp-sheet {
   position: fixed;
@@ -5973,7 +6071,8 @@ html { -webkit-tap-highlight-color: transparent; }
 .notice-row.kind-error   .row-stack-label { color: var(--color-negative); }
 .notice-row.kind-success .row-stack-label { color: var(--color-positive); }
 .notice-row .row-stack-sub .num,
-.card-note .num {
+.card-note .num,
+.hqp-diag .num {
   font-family: var(--font-mono);
   color: var(--color-blue);
   letter-spacing: 0.02em;

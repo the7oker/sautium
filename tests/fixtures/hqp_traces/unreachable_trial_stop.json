@@ -1,0 +1,46 @@
+{
+ "expect": "unreachable",
+ "note": "The play-intent gate: port open, connection closed at once (Embedded past its trial).",
+ "facts": {
+  "intent": "play",
+  "started": 1000.0,
+  "t0": null,
+  "closed": 1000.1,
+  "end": "hard",
+  "error": "GetInfo: the connection closed without an answer",
+  "slot": null,
+  "expected_uri": null,
+  "uri": null,
+  "mode": null,
+  "token": null,
+  "handover": null,
+  "steps": [],
+  "adds": {
+   "count": 0,
+   "failed": []
+  },
+  "ticks": [],
+  "misses": [],
+  "proxy": null,
+  "playlist": null,
+  "item": null,
+  "context": {
+   "hqplayer": "192.168.1.53:4321",
+   "media_url": "192.168.1.88:8830",
+   "remote": true,
+   "drift": false,
+   "endpoint_id": 7,
+   "info": {
+    "name": "HQPlayerEmbedded",
+    "product": "Signalyst HQPlayer Embedded",
+    "version": "6",
+    "platform": "Linux",
+    "engine": "6.2.3"
+   },
+   "dsp": {
+    "matrix_profile": null
+   }
+  },
+  "generation": 4
+ }
+}

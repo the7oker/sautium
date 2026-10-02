@@ -38,9 +38,6 @@ BACKEND_URL = os.getenv("BACKEND_URL", "http://localhost:8800")
 CONTAINER_DATA = "/app/data"
 HOST_DATA = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "data"))
 
-SCOPES = ("system", "settings", "p2p", "jobs", "events", "logs", "chat")
-
-
 # -- Signed backend HTTP (mirror of mcp/assistant_server.py) ------------------
 
 _API_SECRET: bytes | None = None
@@ -211,7 +208,9 @@ def support_reply(node: str, text: str) -> str:
 def support_issue_warrant(node: str, scopes: Optional[list] = None, since: str = "",
                           note: str = "", expires_hours: int = 168) -> str:
     """Ask a node for a diagnostic bundle. `scopes` ⊆ system, settings, p2p,
-    jobs, events, logs, chat (default: all); `since` (ISO 8601) bounds the
+    jobs, events, logs, chat, playback (default: all but playback — the
+    HQPlayer playback traces, asked for by name: a node that has not updated
+    refuses a warrant naming a scope it does not know); `since` (ISO 8601) bounds the
     chat/events window (default 14 days). The warrant is signed by the
     master, bound to that node, single-use there, and rides the node's own
     wake stream — `dispatched: true` means the node is connected now,
@@ -219,8 +218,10 @@ def support_issue_warrant(node: str, scopes: Optional[list] = None, since: str =
     expires_hours). The bundle arrives encrypted; see support_bundles /
     support_open_bundle."""
     try:
-        body = {"node": node, "scopes": list(scopes or SCOPES), "since": since or None,
+        body = {"node": node, "since": since or None,
                 "note": note or None, "expires_hours": expires_hours}
+        if scopes:
+            body["scopes"] = list(scopes)
         return _dump(_backend_post("/api/support/warrants", body))
     except Exception as e:
         return f"Error: {e}"

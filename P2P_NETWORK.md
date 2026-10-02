@@ -1071,7 +1071,12 @@ good. `diag_warrants.id` (PRIMARY KEY, `INSERT … ON CONFLICT DO NOTHING
 RETURNING`) decides first receipt; a re-delivery resumes an unfinished
 upload and a finished one is a no-op — **single-use and retry-safe with
 one row**. `desktop/diag_bundle.py` collects the scopes — `system`,
-`settings`, `p2p`, `jobs`, `events`, `logs`, `chat` — each a fixed
+`settings`, `p2p`, `jobs`, `events`, `logs`, `chat`, and since 2026-10-02
+`playback` (the HQPlayer output's playback traces and HQPlayer's own log,
+from the backend's memory with every path cut to its last two components;
+asked for by name — a node refuses a warrant naming a scope it does not
+know, so the master's default stays the seven every deployed node has,
+`diag_protocol.DEFAULT_SCOPES`) — each a fixed
 collector over fixed sources with allowlists (never `ai.api_key`, Last.fm
 sessions, config.json `api_keys`/`postgres_password`, keys, `.api_secret`,
 the agents' auth files, and never `p2p_messages`: friends' E2E chat is not

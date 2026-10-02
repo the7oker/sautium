@@ -994,6 +994,7 @@
       this.year = document.getElementById('npYearText');
       this.qBadge = document.getElementById('npQBadge');
       this.excerptBadge = document.getElementById('npExcerptBadge');
+      this.whyBtn = document.getElementById('npWhy');
       this.keyPill = document.getElementById('npKeyPill');
       this.bpm = document.getElementById('npBpm');
       this.bpmNum = document.getElementById('npBpmNum');
@@ -1018,6 +1019,11 @@
 
       this.close.addEventListener('click', () => this.hide());
       this.el.addEventListener('click', e => { if (e.target === this.el) this.hide(); });
+      this.whyBtn.addEventListener('click', e => {
+        e.stopPropagation();
+        if (e.detail > 1) return;
+        onceInFlight(this.whyBtn, () => openHqpDiagnosis(this.whyBtn.dataset.attempt));
+      });
       this.playPause.addEventListener('click', e => {
         e.stopPropagation();
         if (typeof window.togglePlayPause === 'function') window.togglePlayPause();
@@ -1281,6 +1287,13 @@
       // a replay into an excerpt), and the quality badge beside it stays the
       // provider's tier from the detail.
       if (this.excerptBadge) this.excerptBadge.hidden = !data.excerpt;
+      // The HQPlayer output judged the last play of this track failed
+      // (playback/hqp_diagnostics.py) — offered beside the track it is about,
+      // never beside the queue head a stopped status falls back to.
+      const diag = data.diagnosis;
+      const why = !!diag && (!diag.track_id || diag.track_id === data.track_id);
+      this.whyBtn.hidden = !why;
+      this.whyBtn.dataset.attempt = why ? diag.id : '';
 
       // Track length for the scrub → seek-target math (seconds).
       this._trackLength = data.length || 0;
@@ -6189,6 +6202,25 @@
                     text: escapeProfileHtml(err) });
   });
 
+  // A play the HQPlayer output judged failed (playback/hqp_diagnostics.py):
+  // one toast per attempt, with the way to its explanation. Not when the
+  // same failure repeats on a dead output — the `hqplayer.failing` notice
+  // speaks then (`failing`, decided by the server) — and not for an
+  // HQPlayer that did not answer: the play route's 503 already said so.
+  // The status a tab connects with paints the tag only, never a stale toast.
+  let lastDiagnosisSeen;
+  document.addEventListener('np-update', (e) => {
+    const d = e.detail && e.detail.diagnosis;
+    const id = d ? d.id : null;
+    const first = lastDiagnosisSeen === undefined;
+    if (id === lastDiagnosisSeen) return;
+    lastDiagnosisSeen = id;
+    if (!d || first || d.failing || d.code === 'unreachable') return;
+    notices.toast({ kind: 'error', key: 'hqplayer.diagnosis', title: escapeHtml(d.title),
+                    text: escapeHtml(d.next || ''),
+                    action: { label: 'Why?', run: () => openHqpDiagnosis(d.id) } });
+  });
+
   // Surface a queue/play failure as a toast instead of a swallowed
   // console.warn — the ONE reporter for every play intent, the transport
   // commands in player.js included (window.reportPlaybackResult): a 503 is
@@ -8463,6 +8495,213 @@
         stroke-linejoin="round" aria-hidden="true">
         <path d="M21 12a9 9 0 11-3-6.7L21 8"/><path d="M21 3v5h-5"/></svg>`;
 
+  /* ---------- HQPlayer diagnostics: why a slot did not play ----------
+     The backend watches every play intent on the HQPlayer output and judges
+     it (playback/hqp_diagnostics.py). A failed one rides the status as
+     `diagnosis`: a toast once, the tag on Now Playing while it concerns the
+     track on screen, and this sheet with the trace behind it. Everything in
+     a trace or a log line came from HQPlayer or the disk — escaped. */
+  const HQP_INTENTS = {
+    play: 'Play', select: 'Play this track', next: 'Next', previous: 'Previous',
+    replace: 'Play a new queue', rebuild: 'Queue rebuilt', resume: 'Resume after a DSP change',
+  };
+  const HQP_HANDED = {
+    path: 'a path HQPlayer opens itself', stream: 'a stream from the media server',
+    cut: 'a CUE slice, streamed', transcode: 'an m4a transcoded to FLAC, streamed',
+    held: "a file in HQPlayer's own library", preview: 'a streamed copy',
+    unplayable: 'nothing this HQPlayer can open', foreign: 'an entry from elsewhere',
+  };
+  const HQP_LOG_SOURCES = { local: 'On this computer', web: 'From its web interface', none: 'On its own computer' };
+  const HQP_CHEVRON = `<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+    stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M9 6l6 6-6 6"/></svg>`;
+
+  const fmtClock = (iso) => new Date(iso).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' });
+  const fmtKiB = (n) => n >= 1048576 ? `${(n / 1048576).toFixed(1)} MiB` : `${Math.round(n / 1024)} KiB`;
+
+  function hqpTraceHtml(a) {
+    const f = a.facts || {};
+    const t0 = f.t0 || f.started;
+    const rel = (ts) => `<span class="num">${ts >= t0 ? '+' : '−'}${Math.abs(ts - t0).toFixed(1)} s</span>`;
+    const item = f.item || {};
+    const ctx = f.context || {};
+    const info = ctx.info || {};
+    const pl = f.playlist;
+    const facts = [
+      ['Intent', escapeHtml(HQP_INTENTS[a.intent] || a.intent)],
+      ['Slot', f.slot != null ? `<span class="num">${f.slot}</span>` : '—'],
+      ['Track', escapeHtml([item.artist, item.title].filter(Boolean).join(' — ') || '—')],
+      ['Handed as', escapeHtml(HQP_HANDED[f.mode] || f.mode || '—')],
+      ['URI', `<span class="hqp-diag-uri">${escapeHtml(f.uri || '—')}</span>`],
+      ['HQPlayer', escapeHtml([info.product, info.version, info.platform].filter(Boolean).join(' · ')
+                              || ctx.hqplayer || '—')],
+      ['Media server', escapeHtml(ctx.media_url || '—')],
+      ['Its playlist', pl ? `<span class="num">${pl.count}</span> entries${pl.foreign ? `, <span class="num">${pl.foreign}</span> not from Sautium` : ''}` : 'not read'],
+    ];
+    const lines = [];
+    const ho = f.handover;
+    if (ho && ho.add_ts) {
+      lines.push(`${rel(ho.add_ts)} PlaylistAdd (this slot) · ${ho.ok ? 'OK' : escapeHtml(ho.result || 'refused')}${ho.message ? ` — ${escapeHtml(ho.message)}` : ''}`);
+    }
+    if (f.adds && f.adds.count) {
+      const bad = (f.adds.failed || []).map(x => escapeHtml(x.message || x.result || '')).join('; ');
+      lines.push(`PlaylistAdd ×<span class="num">${f.adds.count}</span>${bad ? ` — refused: ${bad}` : ''}`);
+    }
+    for (const st of f.steps || []) {
+      lines.push(`${rel(st.ts)} ${escapeHtml(st.command)} · ${escapeHtml(st.result || 'answered')}${st.message ? ` — ${escapeHtml(st.message)}` : ''}`);
+    }
+    for (const t of f.ticks || []) {
+      // A negative input fill is no input buffer (HQPlayer reads a file itself).
+      const fillOf = (v) => (v == null || v < 0) ? '—' : v.toFixed(2);
+      const fill = t.out_fill != null
+        ? ` · fill <span class="num">${fillOf(t.in_fill)}</span>/<span class="num">${fillOf(t.out_fill)}</span>` : '';
+      const speed = t.speed ? ` · <span class="num">${t.speed.toFixed(2)}×</span>` : '';
+      lines.push(`${rel(t.ts)} ${escapeHtml(t.state)} · track <span class="num">${t.track}</span> · <span class="num">${t.position.toFixed(1)} s</span>${speed}${fill}`);
+    }
+    for (const m of f.misses || []) lines.push(`${rel(m.ts)} no status — ${escapeHtml(m.message || '')}`);
+    const hits = !f.mode
+      ? '<li>Nothing was handed over.</li>'
+      : f.proxy === null
+      ? '<li>A path HQPlayer opens itself — nothing went through the media server.</li>'
+      : (f.proxy || []).length
+        ? f.proxy.map(h => `<li>${rel(h.ts)} ${escapeHtml(h.method)} <span class="num">${h.status ?? '…'}</span>${h.range ? ` ${escapeHtml(h.range)}` : ''} · <span class="num">${fmtKiB(h.bytes)}</span> · ${escapeHtml(h.client || '')}</li>`).join('')
+        : '<li>No request reached the media server for this file.</li>';
+    return `
+      <dl class="hqp-diag-facts">${facts.map(([k, v]) => `<dt>${k}</dt><dd>${v}</dd>`).join('')}</dl>
+      <div class="hqp-diag-label">What was sent, and the status after it</div>
+      <ul class="hqp-diag-list">${lines.map(l => `<li>${l}</li>`).join('') || '<li>Nothing reached HQPlayer.</li>'}</ul>
+      <div class="hqp-diag-label">What the media server saw</div>
+      <ul class="hqp-diag-list">${hits}</ul>`;
+  }
+
+  function hqpLogHtml(log) {
+    const cause = log.cause
+      ? `<p class="hqp-diag-next"><b>${escapeHtml(log.cause.sentence)}</b></p>` : '';
+    const note = log.note ? `<p class="hqp-diag-note">${escapeHtml(log.note)}</p>` : '';
+    const where = log.where ? `<p class="hqp-diag-note">${escapeHtml(log.where)}</p>` : '';
+    const rows = (log.lines || []).map(line => {
+      const m = /^(.) (\d{4}\/\d\d\/\d\d) (\d\d:\d\d:\d\d) ?(.*)$/.exec(line);
+      const hit = log.cause && log.cause.line === line ? ' is-cause' : '';
+      return m
+        ? `<div class="hqp-log-line${hit}" title="${escapeHtml(m[2])}"><span class="num">${m[3]}</span> ${escapeHtml(m[4])}</div>`
+        : `<div class="hqp-log-line${hit}">${escapeHtml(line)}</div>`;
+    }).join('');
+    return `${cause}${note}${rows ? `<div class="hqp-log">${rows}</div>` : ''}${where}`;
+  }
+
+  async function loadHqpLog(container) {
+    container.innerHTML = `<p class="hqp-diag-note">Reading HQPlayer's log…</p>`;
+    try {
+      const r = await fetch('/api/player/diagnostics/hqplayer/log', { cache: 'no-store' });
+      if (!r.ok) throw new Error('HTTP ' + r.status);
+      container.innerHTML = hqpLogHtml(await r.json());
+    } catch (err) {
+      container.innerHTML = `<p class="hqp-diag-note">Could not read HQPlayer's log (${escapeHtml(String(err.message || err))}).</p>`;
+    }
+  }
+
+  async function openHqpDiagnosis(id) {
+    let a;
+    try {
+      const r = await fetch('/api/player/diagnostics/hqplayer/' + encodeURIComponent(id), { cache: 'no-store' });
+      if (!r.ok) throw new Error('HTTP ' + r.status);
+      a = await r.json();
+    } catch (err) {
+      notices.toast({ kind: 'error', key: 'hqplayer.diagnosis', title: 'That play is no longer on record',
+                      text: 'The node keeps its last 20 plays on HQPlayer, and none from before it restarted.' });
+      return;
+    }
+    const v = a.verdict || {};
+    const failed = v.code && v.code !== 'played';
+    const { el, close } = openModal(`
+      <div class="confirm-sheet hqp-diag">
+        <h2 class="confirm-title${failed ? ' error' : ''}">${escapeHtml(v.title || 'Playback')}</h2>
+        <p class="confirm-message">${escapeHtml(v.sentence || '')}</p>
+        ${v.next ? `<p class="hqp-diag-next">${escapeHtml(v.next)}</p>` : ''}
+        <details class="hqp-advanced hqp-diag-more"><summary>Details</summary>${hqpTraceHtml(a)}</details>
+        <details class="hqp-advanced hqp-diag-more" data-log><summary>HQPlayer log</summary>
+          <div data-log-body>${a.hqp_log ? hqpLogHtml(a.hqp_log) : ''}</div></details>
+        <div class="confirm-actions single">
+          <button class="profile-btn primary" type="button" data-close>Close</button>
+        </div>
+      </div>`, () => {}, null);
+    el.querySelector('[data-close]').addEventListener('click', () => close());
+    el.querySelector('[data-close]').focus();
+    const logBox = el.querySelector('[data-log]');
+    if (!a.hqp_log) {
+      logBox.addEventListener('toggle', () => {
+        if (logBox.open) loadHqpLog(logBox.querySelector('[data-log-body]'));
+      }, { once: true });
+    }
+  }
+
+  function openHqpLog() {
+    const { el, close } = openModal(`
+      <div class="confirm-sheet hqp-diag">
+        <h2 class="confirm-title">HQPlayer log</h2>
+        <div data-log-body></div>
+        <div class="confirm-actions single">
+          <button class="profile-btn primary" type="button" data-close>Close</button>
+        </div>
+      </div>`, () => {}, null);
+    el.querySelector('[data-close]').addEventListener('click', () => close());
+    el.querySelector('[data-close]').focus();
+    loadHqpLog(el.querySelector('[data-log-body]'));
+  }
+
+  // The HQPlayer screen's Diagnostics block: the plays it watched, newest
+  // first, each opening its sheet; and HQPlayer's own log on demand.
+  function hqpDiagnosticsBlock(d) {
+    if (!d) return '';
+    const rows = (d.attempts || []).slice(0, 8).map(a => {
+      const v = a.verdict || {};
+      const who = [a.artist, a.title].filter(Boolean).join(' — ') || HQP_INTENTS[a.intent] || a.intent;
+      const failed = v.code && v.code !== 'played' && v.code !== 'interrupted';
+      return `<button class="hqp-row hqp-row-tap hqp-diag-row${failed ? ' is-failed' : ''}" type="button" data-attempt="${a.id}">
+          <span class="hqp-row-value mono">${fmtClock(a.started)}</span>
+          <span class="hqp-diag-what"><span class="hqp-diag-track">${escapeHtml(who)}</span>
+            <span class="hqp-diag-verdict">${escapeHtml(v.title || '')}</span></span>
+          ${HQP_CHEVRON}
+        </button>`;
+    }).join('');
+    const src = (d.log_source && d.log_source.kind) || 'none';
+    return `
+      <section class="hqp-section" data-hqp-diag>
+        <div class="hqp-section-label">Diagnostics</div>
+        ${rows || '<p class="hqp-row-hint is-left hqp-diag-empty">Every play on this HQPlayer is traced here — none yet since the node started.</p>'}
+        <button class="hqp-row hqp-row-tap" type="button" data-action="hqp-log">
+          <span class="hqp-row-label">HQPlayer log</span>
+          <span class="hqp-row-value">${escapeHtml(HQP_LOG_SOURCES[src] || '')}</span>
+          ${HQP_CHEVRON}
+        </button>
+      </section>`;
+  }
+
+  // Every DSP change from the HQPlayer screen goes through here. HQPlayer
+  // can refuse one (a filter its current mode cannot run, a profile that is
+  // gone) and says why: the route returns `failed` in its words, toasted —
+  // the screen used to drop it in the console.
+  async function postHqpConfig(payload) {
+    const title = 'HQPlayer did not take the change';
+    let r, out;
+    try {
+      r = await fetch('/api/hqplayer/config', {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify(payload),
+      });
+      out = await r.json();
+    } catch (err) {
+      notices.toast({ kind: 'error', key: 'hqp.config', title,
+                      text: 'The node is not answering right now.' });
+      return;
+    }
+    const reasons = r.ok ? Object.values(out.failed || {}) : [out.detail || `HTTP ${r.status}`];
+    if (reasons.length) {
+      notices.toast({ kind: 'error', key: 'hqp.config', title,
+                      text: escapeProfileHtml(reasons.join(' · ')) });
+    }
+  }
+
   async function renderHqplayerSettings(root) {
     const screen = document.createElement('div');
     screen.className = 'screen hqp-screen';
@@ -8493,6 +8732,22 @@
 
     let lastState = null;
 
+    // A play judged failed while this screen is open joins its Diagnostics
+    // list — the status event that carries it is the signal, no polling.
+    let shownDiagnosis = (window.currentStatus && window.currentStatus.diagnosis || {}).id;
+    const detachDiag = () => {
+      document.removeEventListener('np-update', onDiagnosis);
+      window.removeEventListener('sautium:route', onRoute);
+    };
+    const onDiagnosis = (e) => {
+      if (!document.contains(screen)) return detachDiag();
+      const d = e.detail && e.detail.diagnosis;
+      if (d && d.id !== shownDiagnosis) { shownDiagnosis = d.id; load(); }
+    };
+    const onRoute = () => { if (!document.contains(screen)) detachDiag(); };
+    document.addEventListener('np-update', onDiagnosis);
+    window.addEventListener('sautium:route', onRoute);
+
     async function load() {
       const fresh = claimFresh('hqp.load');
       const body = screen.querySelector('#hqpBody');
@@ -8505,6 +8760,11 @@
         body.innerHTML = `<div class="hqp-loading">Loading…</div>`;
       }
       let s;
+      // The Diagnostics block is optional: its fetch failing leaves the
+      // block out, never the screen.
+      const diagnostics = fetch('/api/player/diagnostics/hqplayer', { cache: 'no-store' })
+        .then(r => (r.ok ? r.json() : null))
+        .catch(err => { console.warn('HQPlayer diagnostics unavailable', err); return null; });
       try {
         // cache: 'no-store' so the connection state reflects what the
         // backend just resolved — without it Chrome serves a stale GET
@@ -8518,6 +8778,7 @@
         body.innerHTML = `<div class="hqp-error">Could not reach HQPlayer.</div>`;
         return;
       }
+      s.diagnostics = await diagnostics;
       if (!fresh()) return;          // a later load owns the panel
       lastState = s;
       renderBody(body, s);
@@ -8736,8 +8997,15 @@
           </div>
         </section>
         ` : ''}
+        ${hqpDiagnosticsBlock(s.diagnostics)}
         ${libraryBlock}
       `;
+
+      body.querySelectorAll('[data-attempt]').forEach(row => {
+        row.addEventListener('click', () => onceInFlight(row, () => openHqpDiagnosis(row.dataset.attempt)));
+      });
+      const logRow = body.querySelector('[data-action="hqp-log"]');
+      if (logRow) logRow.addEventListener('click', e => { if (e.detail < 2) openHqpLog(); });
 
       // A knob opens the app's own picker: a native <select> pops the OS's
       // chrome (a Material dialog on Android), which no stylesheet reaches.
@@ -8753,17 +9021,7 @@
           const payload = {};
           payload[knob] = (knob === 'matrix_profile') ? picked : parseInt(picked, 10);
           serialized('hqp.config', async () => {
-            try {
-              const r = await fetch('/api/hqplayer/config', {
-                method: 'POST',
-                headers: {'Content-Type': 'application/json'},
-                body: JSON.stringify(payload),
-              });
-              const out = await r.json();
-              if (!r.ok || !out.ok) {
-                console.warn('hqp config rejected:', out);
-              }
-            } catch (err) { console.warn('hqp config failed', err); }
+            await postHqpConfig(payload);
             // Reload to reconcile (server-side change may cascade —
             // e.g. mode flip changes filter availability).
             await load();
@@ -8777,13 +9035,7 @@
           const filt = (s.filters || []).find(f => f.name === name);
           if (!filt) return;
           serialized('hqp.config', async () => {
-            try {
-              await fetch('/api/hqplayer/config', {
-                method: 'POST',
-                headers: {'Content-Type': 'application/json'},
-                body: JSON.stringify({filter: filt.index, filter1x: filt.index}),
-              });
-            } catch (err) { console.warn('filter switch failed', err); }
+            await postHqpConfig({filter: filt.index, filter1x: filt.index});
             await load();
           });
         });
@@ -8846,13 +9098,7 @@
 
       body.querySelector('[data-action="open-filter"]').addEventListener('click', () => {
         openFilterPicker(s, (chosen) => serialized('hqp.config', async () => {
-          try {
-            await fetch('/api/hqplayer/config', {
-              method: 'POST',
-              headers: {'Content-Type': 'application/json'},
-              body: JSON.stringify({filter: chosen.index, filter1x: chosen.index}),
-            });
-          } catch (err) { console.warn('filter switch failed', err); }
+          await postHqpConfig({filter: chosen.index, filter1x: chosen.index});
           await load();
         }));
       });
@@ -10130,6 +10376,12 @@
   NOTICE_COPY['library.mount_missing'] = n => ({
     title: 'Music folder unreachable',
     text: `<span class="num">${escapeHtml((n.data && n.data.path) || '')}</span> is empty or not mounted — your own tracks cannot play until it is back.`,
+  });
+  // The same failure on three plays in a row (playback/hqp_diagnostics.py):
+  // the output, not a track. The facts come from the server; the words here.
+  NOTICE_COPY['hqplayer.failing'] = n => ({
+    title: 'HQPlayer is not playing',
+    text: `${escapeHtml((n.data && n.data.title) || 'Plays fail')} — <span class="num">${(n.data && n.data.count) || 3}</span> plays in a row. More → HQPlayer → Diagnostics has the cause and what to do.`,
   });
   NOTICE_COPY['tools.missing'] = n => ({
     title: 'Media tools missing',

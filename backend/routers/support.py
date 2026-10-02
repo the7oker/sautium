@@ -197,7 +197,7 @@ def support_reports(node: str = "", kind: str = "", since: str = "",
 
 class WarrantRequest(BaseModel):
     node: str = Field(..., max_length=128)
-    scopes: List[str] = Field(default_factory=lambda: list(diag_protocol.SCOPES))
+    scopes: List[str] = Field(default_factory=lambda: list(diag_protocol.DEFAULT_SCOPES))
     since: Optional[str] = None            # ISO 8601 — chat/events window
     note: Optional[str] = Field(None, max_length=500)
     expires_hours: int = Field(168, ge=1, le=24 * 30)

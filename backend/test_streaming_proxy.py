@@ -274,3 +274,75 @@ def test_file_tokens_are_deterministic_per_node_key_and_span():
     assert len(t) == 20 and set(t) <= set(string.ascii_letters + string.digits + "-_")
     assert a.file_url(t, host="192.168.1.5") == f"http://192.168.1.5:0/file/{t}"
     assert a.file_url(t) == f"http://127.0.0.1:0/file/{t}"
+
+
+def test_the_proxy_remembers_what_each_token_was_asked_for(tmp_path):
+    """The consumer's side of a hand-over, for the HQPlayer playback trace:
+    each request's status, range and the bytes that actually went out."""
+    import time
+    import urllib.error
+    import urllib.request
+    proxy = MediaProxy(port=0, advertised_host="127.0.0.1", file_token_key=b"k",
+                       bind_host="127.0.0.1")
+    proxy.start()
+    port = proxy._httpd.server_address[1]
+    track = tmp_path / "t.flac"
+    track.write_bytes(b"x" * 600_000)
+    tok = proxy.register_file(str(track), "audio/flac")
+    try:
+        req = urllib.request.Request(f"http://127.0.0.1:{port}/file/{tok}",
+                                     headers={"Range": "bytes=100-"})
+        with urllib.request.urlopen(req, timeout=5) as r:
+            assert r.status == 206 and len(r.read()) == 599_900
+        with pytest.raises(urllib.error.HTTPError) as e:
+            urllib.request.urlopen(f"http://127.0.0.1:{port}/file/NotRegistered0000000", timeout=5)
+        assert e.value.code == 404
+    finally:
+        proxy._httpd.shutdown()
+    deadline = time.monotonic() + 5
+    while proxy.hits(tok)[-1]["bytes"] < 599_900 and time.monotonic() < deadline:
+        time.sleep(0.05)      # the handler counts a chunk after its write returns
+    hit = proxy.hits(tok)[-1]
+    assert (hit["method"], hit["status"], hit["range"], hit["kind"], hit["client"]) == \
+        ("GET", 206, "bytes=100-", "file", "127.0.0.1")
+    assert hit["bytes"] == 599_900
+    assert [h["status"] for h in proxy.hits("NotRegistered0000000")] == [404]
+
+
+def test_the_hit_record_keeps_the_newest_tokens():
+    proxy = _proxy()
+    for i in range(300):
+        proxy.record_hit(f"tok{i}", "127.0.0.1", "GET", None, "file")
+    assert proxy.hits("tok0") == [] and proxy.hits("tok299")
+    for _ in range(20):
+        proxy.record_hit("tok299", "127.0.0.1", "GET", None, "file")
+    assert len(proxy.hits("tok299")) == 16
+
+
+def test_a_preview_counts_the_bytes_it_sends_as_they_go(tmp_path):
+    """A whole-track buffer goes out in slices, so the HQPlayer trace sees a
+    slow reader already being served, not 0 until the last byte."""
+    import time
+    import urllib.request
+
+    class _Big(StreamProvider):
+        manifest = ProviderManifest(id="big", name="Big", kind="direct_url", lossless=True)
+
+        def fetch(self, query):
+            return FetchedAudio(data=b"f" * 1_000_000, mime="audio/flac", lossless=True)
+
+    proxy = MediaProxy(port=0, advertised_host="127.0.0.1", file_token_key=b"k",
+                       bind_host="127.0.0.1")
+    proxy.start()
+    port = proxy._httpd.server_address[1]
+    tok = _session(proxy, _Big(), "a")[0]
+    try:
+        with urllib.request.urlopen(f"http://127.0.0.1:{port}/preview/{tok}", timeout=10) as r:
+            assert len(r.read()) == 1_000_000
+    finally:
+        proxy._httpd.shutdown()
+    deadline = time.monotonic() + 5
+    while proxy.hits(tok)[-1]["bytes"] < 1_000_000 and time.monotonic() < deadline:
+        time.sleep(0.05)
+    hit = proxy.hits(tok)[-1]
+    assert (hit["status"], hit["bytes"], hit["kind"]) == (200, 1_000_000, "preview")

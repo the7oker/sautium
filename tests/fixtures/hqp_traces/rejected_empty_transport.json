@@ -1,0 +1,73 @@
+{
+ "expect": "rejected",
+ "note": "Play refused: HQPlayer's playlist was empty — the add was taken but nothing kept.",
+ "facts": {
+  "intent": "replace",
+  "started": 1000.0,
+  "t0": 1000.2,
+  "closed": 1000.5,
+  "end": "hard",
+  "error": null,
+  "slot": 1,
+  "expected_uri": "file:///E:/Music/Genre/Artist/Album/03. Track.flac",
+  "uri": "file:///E:/Music/Genre/Artist/Album/03. Track.flac",
+  "mode": "path",
+  "token": null,
+  "handover": {
+   "uri": "file:///E:/Music/Genre/Artist/Album/03. Track.flac",
+   "ts": 900.0,
+   "add_ts": 900.1,
+   "mode": "path",
+   "track_id": "t-3",
+   "media_file_id": 33,
+   "title": "Track",
+   "artist": "Artist",
+   "ok": true,
+   "result": null,
+   "message": ""
+  },
+  "steps": [
+   {
+    "ts": 1000.2,
+    "command": "Play",
+    "result": "Error",
+    "message": "Empty transport",
+    "attributes": {}
+   }
+  ],
+  "adds": {
+   "count": 0,
+   "failed": []
+  },
+  "ticks": [],
+  "misses": [],
+  "proxy": null,
+  "playlist": null,
+  "item": {
+   "track_id": "t-3",
+   "media_file_id": 33,
+   "title": "Track",
+   "artist": "Artist",
+   "album": "Album",
+   "kind": "file"
+  },
+  "context": {
+   "hqplayer": "host.docker.internal:4321",
+   "media_url": "192.168.1.88:8830",
+   "remote": false,
+   "drift": false,
+   "endpoint_id": 7,
+   "info": {
+    "name": "STUDIO-PC",
+    "product": "Signalyst HQPlayer Desktop",
+    "version": "6",
+    "platform": "Windows",
+    "engine": "6.2.3"
+   },
+   "dsp": {
+    "matrix_profile": null
+   }
+  },
+  "generation": 4
+ }
+}

@@ -140,6 +140,8 @@ Controlled:
 Read-only:
 
 - [UI][AI] Product, version, platform, engine, the lists of modes, filters, shapers and rates, the DSP speed factor — `GET /api/hqplayer/state`; `hqplayer_client.py: get_info`, `get_state`
+- [UI][API] Why a play did not play: every play intent on the HQPlayer output traced (what the slot was handed as, every command with HQPlayer's own answer, ten seconds of status, the media proxy's requests for that file) and judged — unreachable, played, too slow, another controller, a media-server error, never fetched, refused, not played; a toast, a "Why didn't it play?" tag on Now Playing, the HQPlayer screen's Diagnostics, the `hqplayer.failing` notice after three alike; HQPlayer's own log read on demand (a Desktop's file on this machine, an Embedded box's `/log` page) — `playback/hqp_diagnostics.py`; `GET /api/player/diagnostics/hqplayer`, `/{attempt_id}`, `/log`
+- [UI][AI] A refused DSP change or command quoted in HQPlayer's own words — `hqplayer_client.py: HQPlayerClient.refusal`, `last_errors`; `POST /api/hqplayer/config` (`failed`)
 
 Not implemented — searched over `backend desktop mcp`, only the definitions match:
 
