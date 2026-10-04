@@ -957,8 +957,8 @@ def start(mode: Optional[str] = None, *, fixed_volume_ok: bool = False) -> Dict[
     # attach could not make (HQPlayer not up yet, 2026-10-03) is none: the
     # run sets HQPlayer's playlist itself, and the attach that takes the
     # output back mirrors the queue afresh. Another controller is, while it
-    # plays.
-    if b.drift and status.state in (PlaybackState.PLAYING, PlaybackState.PAUSED):
+    # plays: the status just read names an entry that is not in the queue.
+    if b.reads_foreign(status):
         raise BenchmarkRefused("Another controller is playing through HQPlayer — the "
                                "benchmark waits until Sautium is its source again")
     if status.process_speed is None:

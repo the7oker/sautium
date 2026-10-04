@@ -22,7 +22,9 @@ from config import settings  # noqa: E402
 from hqplayer_client import HQPlayerClient, PlaybackState, TrackStatus  # noqa: E402
 from playback import hqp_backend as hb  # noqa: E402
 from playback import hqp_diagnostics as diag  # noqa: E402
+from playback.base import PlaybackStatus  # noqa: E402
 from playback import queue as queue_mod  # noqa: E402
+from playback import tracker  # noqa: E402
 from playback.hqp_backend import HqpBackend  # noqa: E402
 from playback.manager import PlaybackManager  # noqa: E402
 from playback.queue import CanonicalQueue, QueueItem  # noqa: E402
@@ -57,6 +59,10 @@ class FakeHqp:
         # long filter initialising before any audio leaves.
         self.start_polls = 0
         self._starting = 0
+        # PLAYING polls that still say track 0, length 0 while the metadata
+        # names the entry being opened — Desktop 6.2.3's first tick after a
+        # Play from stopped.
+        self.opening = 0
         self.mute = False
         self._down = False
         # Until when it answers nothing, on any connection — busy building a
@@ -121,19 +127,27 @@ class FakeHqp:
             if cmd in self.replies:
                 return self.replies[cmd]
             if cmd == "Status":
-                if self.state == int(PlaybackState.PLAYING):
+                opening = self.state == int(PlaybackState.PLAYING) and self.opening > 0
+                if opening:
+                    self.opening -= 1
+                elif self.state == int(PlaybackState.PLAYING):
                     if self._starting:
                         self._starting -= 1
                     else:
                         self.position += 1.0
-                return (f'<Status state="{self.state}" track="{self.track}" '
-                        f'position="{self.position}" length="300" volume="-3" '
+                # The entry it reads, named as its playlist names it (Desktop
+                # 6.2.3 sends it to an unauthenticated client).
+                uri = (f' uri="{self._uri_out(self.playlist[self.track - 1])}"'
+                       if 1 <= self.track <= len(self.playlist) else "")
+                track, length = (0, 0) if opening else (self.track, 300)
+                return (f'<Status state="{self.state}" track="{track}" '
+                        f'position="{self.position}" length="{length}" volume="-3" '
                         f'tracks_total="{len(self.playlist)}" process_speed="1.6" '
                         f'input_fill="0.9" output_fill="0.9" active_mode="PCM" '
                         f'active_filter="poly-sinc-gauss-long" active_shaper="none" '
                         f'active_rate="705600">'
                         f'<metadata artist="Fake artist" album="Fake album" '
-                        f'song="Fake song" genre=""/></Status>')
+                        f'song="Fake song" genre=""{uri}/></Status>')
             if cmd == "GetInfo":
                 return ('<GetInfo name="fake" product="Signalyst HQPlayer Fake" '
                         'version="6" platform="Linux" engine="6.2.3"/>')
@@ -237,9 +251,16 @@ def fake(monkeypatch):
     from playback import substitute
     monkeypatch.setattr(substitute, "native_plays",
                         lambda items, output_id, endpoint_id: [None] * len(items))
+    # The hand-over ledger is process-wide: each test starts and leaves it empty.
+    with diag._lock:
+        diag._ledger.clear()
+        diag._by_slot.clear()
     yield f
     hb.reset_all_clients()
     f.close()
+    with diag._lock:
+        diag._ledger.clear()
+        diag._by_slot.clear()
 
 
 def test_a_queue_handed_to_an_hqplayer_that_does_not_answer_gives_up_at_once(fake, monkeypatch,
@@ -373,17 +394,297 @@ def test_status_omits_hqplayers_tags_for_http_slots(fake, monkeypatch):
     mgr = PlaybackManager()
     mgr.queue.replace([_item("E:/Music/A/01.flac", 1)])
     b = HqpBackend(emit=mgr._on_backend_status, queue=mgr.queue)
+    # No entry named (a build that sends no URI): the index stands, and the
+    # canary's drift makes the tick external.
     st = TrackStatus(state=PlaybackState.PLAYING, track_index=1, track_id="",
                      position=5.0, length=200.0, volume=-3.0,
                      artist="HTTP stream", album="", song="HTTP stream")
-    out = b._status_of(st)
+    out = b._status_of(st, b._playing(st))
     assert out.queue_index == 1 and "artist" not in out.extra and "song" not in out.extra
     monkeypatch.setattr(hb, "_stream_mode", lambda: False)
-    out = b._status_of(st)
+    out = b._status_of(st, b._playing(st))
     assert out.extra["artist"] == "HTTP stream"
     b._drift = True
-    out = b._status_of(st)
+    out = b._status_of(st, b._playing(st))
     assert out.queue_index == 0 and out.extra["source"] == "external"
+
+
+def _reading_at(b, uri, track=1):
+    """What _playing makes of a PLAYING tick at HQPlayer's slot `track` that
+    names `uri`."""
+    return b._playing(TrackStatus(state=PlaybackState.PLAYING, track_index=track, track_id="",
+                                  position=3.0, length=200.0, volume=-3.0, uri=uri))
+
+
+@pytest.fixture
+def listens(monkeypatch):
+    """The play tracker's writes and Last.fm calls, recorded instead of made."""
+    writes, lastfm = [], []
+    monkeypatch.setattr(tracker, "_db_execute", lambda sql, params=None: writes.append((sql, params)))
+    monkeypatch.setattr(tracker, "_scrobble_async", lambda method, **kw: lastfm.append(method))
+    monkeypatch.setattr(tracker, "_scrobbling_enabled", lambda: True)
+    monkeypatch.setattr(tracker, "_play_session", None)
+    return writes, lastfm
+
+
+def _statuses_after(fake, n, count=3):
+    """Has the fake answered `count` Status polls since it had `n` commands?"""
+    return sum(1 for c, _ in fake.commands[n:] if c == "Status") >= count
+
+
+def test_the_entry_hqplayer_reads_names_its_slot_whatever_the_index(fake):
+    q = CanonicalQueue()
+    q.replace([_item("E:/Music/A [TR24]/01.flac", 1), _item("E:/Music/A [TR24]/02.flac", 2)])
+    b = HqpBackend(emit=lambda *_: None, queue=q)
+    # Desktop 6 names a file file://E:/… with its brackets escaped
+    assert _reading_at(b, "file://E:/Music/A %5BTR24%5D/01.flac") == (1, q.item_at(1), False)
+    # a mutation moved the entry before the queue committed: it is the slot it names
+    assert _reading_at(b, "file://E:/Music/A %5BTR24%5D/02.flac") == (2, q.item_at(2), False)
+    # an edit in HQPlayer's own window: not ours, whatever slot it sits at
+    assert _reading_at(b, "file://D:/elsewhere/ref768.wav") == (0, None, True)
+    # the canary's drift (a slot HQPlayer dropped, an edit elsewhere in the
+    # playlist) takes no listen of ours away
+    b._drift = True
+    assert _reading_at(b, "file://E:/Music/A %5BTR24%5D/01.flac") == (1, q.item_at(1), False)
+    # HQPlayer opening the entry (PLAYING at track 0): the slot comes with the next tick
+    assert _reading_at(b, "file://E:/Music/A %5BTR24%5D/01.flac", track=0) is None
+
+
+def test_a_stream_is_named_by_its_track_and_a_token_of_another_session_by_nothing(
+        fake, monkeypatch):
+    proxy = streaming_service.get_proxy()
+    meta = {"tokP": {"track_id": "track-9", "media_file_id": None},   # a phantom's stream
+            "tokM": {"track_id": None, "media_file_id": 4}}           # an m4a transcoded on play
+    monkeypatch.setattr(proxy, "preview_meta", lambda token: meta.get(token))
+    q = CanonicalQueue()
+    q.replace([_item("E:/Music/A/01.flac", 1),
+               QueueItem(track_id="track-9", media_file_id=None,
+                         source={"kind": "proxy", "token": "tokP"}, title="P", artist="X"),
+               _item("E:/Music/A/04.m4a", 4, fmt="M4A")])
+    b = HqpBackend(emit=lambda *_: None, queue=q)
+    ours = lambda token: proxy.url_for(token, host=b._url_host)          # noqa: E731
+    assert _reading_at(b, ours("tokP"), 1) == (2, q.item_at(2), False)
+    assert _reading_at(b, ours("tokM"), 3) == (3, q.item_at(3), False)
+    # another node's media proxy, a NAS path: not ours, whatever the token
+    assert _reading_at(b, "http://192.0.2.7:8832/preview/tokP", 2) == (0, None, True)
+    assert _reading_at(b, "http://nas.invalid/music/file/x.flac", 1) == (0, None, True)
+    # a token at our address this process does not know cannot say: the
+    # index stands, external only while the canary says the playlist differs
+    assert _reading_at(b, ours("gone"), 2) == (2, q.item_at(2), False)
+    b._drift = True
+    assert _reading_at(b, ours("gone"), 2) == (0, None, True)
+
+
+def test_a_cue_slice_is_named_by_its_start(fake):
+    proxy = streaming_service.get_proxy()
+    tok = proxy.register_file("/music/A/disc.flac", "audio/flac", start=200.0, end=400.0)
+    q = CanonicalQueue()
+    q.replace([_item("E:/Music/A/disc.flac", 1, cue_start=0.0, cue_end=200.0),
+               _item("E:/Music/A/disc.flac", 2, cue_start=200.0, cue_end=400.0)])
+    b = HqpBackend(emit=lambda *_: None, queue=q)
+    assert _reading_at(b, proxy.file_url(tok, host=b._url_host), 1) == (2, q.item_at(2), False)
+
+
+def test_a_cue_image_whose_cut_failed_stays_with_the_slice_at_hqplayers_slot(fake, monkeypatch):
+    from streaming import transcode
+
+    def no_cut(*a, **k):
+        raise RuntimeError("ffmpeg failed")
+    monkeypatch.setattr(transcode, "flac_slice_path_for_file", no_cut)
+    q = CanonicalQueue()
+    q.replace([_item("E:/Music/A/disc.flac", 1, cue_start=0.0, cue_end=200.0),
+               _item("E:/Music/A/disc.flac", 2, cue_start=200.0, cue_end=400.0)])
+    b = HqpBackend(emit=lambda *_: None, queue=q)
+    # every slice is handed the whole image: the ledger keeps the last one
+    assert {b._uri_for(it) for it in q.snapshot()} == {"file:///E:/Music/A/disc.flac"}
+    assert _reading_at(b, "file://E:/Music/A/disc.flac", 1) == (1, q.item_at(1), False)
+    assert _reading_at(b, "file://E:/Music/A/disc.flac", 2) == (2, q.item_at(2), False)
+
+
+def test_an_entry_started_in_hqplayers_own_window_is_external_from_its_first_tick(fake):
+    # The status goes nowhere but this list: no manager, no play tracker.
+    q = CanonicalQueue()
+    q.replace([_item("E:/Music/A/01.flac", 1), _item("E:/Music/A/02.flac", 2)])
+    seen = []
+    b = HqpBackend(emit=lambda sender, s: seen.append(s), queue=q)
+    b.start()
+    try:
+        with fake._lock:
+            fake.state, fake.track = int(PlaybackState.PLAYING), 1
+        assert _wait(lambda: seen and seen[-1].state == "playing" and seen[-1].queue_index == 1)
+        assert "source" not in seen[-1].extra and seen[-1].item is q.item_at(1)
+        # the owner clears HQPlayer's playlist in its window and plays a file of their own
+        with fake._lock:
+            fake.playlist = ["file:///D:/elsewhere/ref768.wav"]
+            fake.position = 0.0
+        assert _wait(lambda: seen[-1].extra.get("source") == "external", timeout=3.0)
+        assert seen[-1].queue_index == 0 and seen[-1].item is None
+        assert not b.drift          # the canary has not looked again: the entry said it
+    finally:
+        b.shutdown()
+
+
+@pytest.mark.parametrize("theirs", [
+    ["file:///D:/elsewhere/ref768.wav"],                                 # a playlist of another length
+    ["file:///D:/elsewhere/a.wav", "file:///D:/elsewhere/b.wav"],        # the same length as the queue
+])
+def test_a_file_played_from_hqplayers_own_window_is_never_a_listen(fake, listens, theirs):
+    writes, lastfm = listens
+    mgr = PlaybackManager()
+    mgr.queue.replace([_item("E:/Music/A/01.flac", 1), _item("E:/Music/A/02.flac", 2)])
+    b = _attach(mgr)
+    try:
+        # past the first tick, which is a canary's: the edit lands between two
+        assert _wait(lambda: _statuses_after(fake, 0, 2))
+        with fake._lock:          # the owner replaces HQPlayer's playlist and plays it
+            fake.playlist = list(theirs)
+            fake.state, fake.track, fake.position = int(PlaybackState.PLAYING), 1, 0.0
+        assert _wait(lambda: mgr._latest_status.get("source") == "external", timeout=3.0)
+        n = len(fake.commands)
+        assert _wait(lambda: _statuses_after(fake, n))
+        assert mgr._latest_status["track_index"] == 0
+        assert lastfm == [] and writes == [] and tracker._play_session is None
+    finally:
+        b.shutdown()
+
+
+def test_a_listen_cut_by_hqplayers_own_window_keeps_only_its_own_seconds(fake, listens):
+    writes, lastfm = listens
+    mgr = PlaybackManager()
+    mgr.queue.replace([_item("E:/Music/A/01.flac", 1)])
+    b = _attach(mgr)
+    try:
+        with fake._lock:
+            fake.state, fake.track, fake.position = int(PlaybackState.PLAYING), 1, 0.0
+        assert _wait(lambda: tracker._play_session is not None
+                     and tracker._play_session.max_position >= 3.0)
+        with fake._lock:          # their file, from the top: it outplays ours
+            ours = fake.position
+            fake.playlist = ["file:///D:/elsewhere/ref768.wav"]
+            fake.position = 0.0
+        assert _wait(lambda: tracker._play_session is None)
+        assert _wait(lambda: fake.position >= ours + 3)
+        rows = [p for sql, p in writes if "INSERT INTO listening_history" in sql]
+        assert len(rows) == 1 and rows[0]["tid"] == "track-1"
+        assert rows[0]["dur"] <= ours and not rows[0]["comp"]
+        assert lastfm == ["update_now_playing"]
+    finally:
+        b.shutdown()
+
+
+def test_a_listen_started_on_hqplayers_opening_tick_knows_the_tracks_length(fake, listens):
+    mgr = PlaybackManager()
+    mgr.queue.replace([_item("E:/Music/A/01.flac", 1)])
+    b = _attach(mgr)
+    try:
+        assert _wait(lambda: _statuses_after(fake, 0, 2))
+        with fake._lock:          # Play from stopped: the first tick names the entry, track 0, length 0
+            fake.state, fake.track, fake.position, fake.opening = int(PlaybackState.PLAYING), 1, 0.0, 1
+        assert _wait(lambda: tracker._play_session is not None
+                     and tracker._play_session.max_position >= 2.0)
+        assert tracker._play_session.track_length == 300
+    finally:
+        b.shutdown()
+
+
+def test_the_item_a_status_names_keeps_its_slot_through_a_commit(fake, listens):
+    mgr = PlaybackManager()
+    mgr.queue.replace([_item("E:/Music/A/01.flac", 1), _item("E:/Music/A/02.flac", 2),
+                       _item("E:/Music/A/03.flac", 3)])
+    b = HqpBackend(emit=mgr._on_backend_status, queue=mgr.queue)
+    mgr._active = b
+    playing = mgr.queue.item_at(3)
+    st = PlaybackStatus(state="playing", position=10.0, length=300.0, queue_index=3, item=playing)
+    mgr.queue.remove(1)           # committed after the backend looked: it is slot 2 now
+    mgr._on_backend_status(b, st)
+    assert mgr._latest_status["track_index"] == 2
+    assert mgr._latest_status["track_id"] == "track-3"
+    assert tracker._play_session.track_id == "track-3"
+
+
+def test_a_mutation_in_flight_holds_the_verdict_on_an_entry_the_queue_lacks(fake):
+    q = CanonicalQueue()
+    q.replace([_item("E:/Music/A/01.flac", 1), _item("E:/Music/A/02.flac", 2)])
+    b = HqpBackend(emit=lambda *_: None, queue=q)
+    with q.mutation():
+        # a replace plays its first track before the queue commits it
+        assert _reading_at(b, "file://E:/Music/B/01.flac") is None
+        # a removal shifted HQPlayer's index first: slot 2 of this queue is
+        # another item once the removal commits
+        assert _reading_at(b, "file://E:/Music/A/02.flac", 1) is None
+        assert _reading_at(b, "file://E:/Music/A/01.flac") == (1, q.item_at(1), False)
+    assert _reading_at(b, "file://E:/Music/B/01.flac") == (0, None, True)
+    assert _reading_at(b, "file://E:/Music/A/02.flac", 1) == (2, q.item_at(2), False)
+
+
+def test_the_canary_gives_no_verdict_on_a_mutation_in_flight(fake, monkeypatch):
+    monkeypatch.setattr(hb, "DRIFT_CHECK_EVERY", 1)
+    q = CanonicalQueue()
+    q.replace([_item("E:/Music/A/01.flac", 1)])
+    b = HqpBackend(emit=lambda *_: None, queue=q)
+    b.start()
+
+    def reads(count=2):
+        n = len(fake.commands)
+        return _wait(lambda: sum(1 for c, _ in fake.commands[n:] if c == "PlaylistGet") >= count)
+    try:
+        with q.mutation():        # the manager's append: mirrored first, committed after
+            with fake._lock:
+                fake.playlist.append("file:///E:/Music/A/02.flac")
+            assert reads() and not b.drift
+            q.append([_item("E:/Music/A/02.flac", 2)])
+        assert reads() and not b.drift
+        with fake._lock:          # an entry nobody of ours added
+            fake.playlist.append("file:///D:/elsewhere/x.wav")
+        assert _wait(lambda: b.drift)
+    finally:
+        b.shutdown()
+
+
+def test_a_slot_re_bound_under_its_listen_stays_ours(fake):
+    q = CanonicalQueue()
+    q.replace([_item("E:/Music/A/01.flac", 1)])
+    b = HqpBackend(emit=lambda *_: None, queue=q)
+    b._uri_for(q.item_at(1))      # handed over: the ledger names its track
+    # queue_insert_next re-appends HQPlayer's own form: a track-less entry
+    diag.note_add("file://E:/Music/A/01.flac", True, "OK", "")
+    q.rebind(lambda items: [{"media_file_id": 5,
+                             "source": {"kind": "file", "path": "E:/Music/B/01.flac",
+                                        "format": "FLAC"}}], None)
+    # the file left the library: the slot is another copy of its track, and
+    # HQPlayer still reads the file it was handed
+    assert _reading_at(b, "file://E:/Music/A/01.flac") == (1, q.item_at(1), False)
+
+
+def test_a_slot_that_is_the_file_itself_is_the_entry_whatever_the_ledger_says(fake):
+    handed = _item("E:/Music/A/01.flac", 1)
+    q = CanonicalQueue()
+    q.replace([handed])
+    b = HqpBackend(emit=lambda *_: None, queue=q)
+    b._uri_for(handed)            # the ledger: track-1
+    # its track left the catalogue: the slot is the file, passed through
+    q.replace([QueueItem(track_id=None, media_file_id=None,
+                         source={"kind": "uri", "uri": "file:///E:/Music/A/01.flac"},
+                         title="01", artist="")])
+    assert _reading_at(b, "file://E:/Music/A/01.flac") == (1, q.item_at(1), False)
+
+
+def test_a_pass_through_entry_of_the_queue_is_ours_though_it_names_no_track(fake):
+    q = CanonicalQueue()
+    q.replace([QueueItem(track_id=None, media_file_id=None,      # adopted from HQPlayer's playlist
+                         source={"kind": "uri", "uri": "http://elsewhere.invalid/a.flac"},
+                         title="A", artist="X")])
+    b = HqpBackend(emit=lambda *_: None, queue=q)
+    b._uri_for(q.item_at(1))      # handed over verbatim: the ledger holds it with no track
+    assert _reading_at(b, "http://elsewhere.invalid/a.flac") == (1, q.item_at(1), False)
+    assert _reading_at(b, "http://elsewhere.invalid/b.flac") == (0, None, True)
+
+
+def test_both_forms_hqplayer_names_a_file_by_are_one_path():
+    from hqplayer_client import uri_to_file_path
+    # as handed, and as Desktop 6 reports it back: two slashes, brackets escaped
+    assert (uri_to_file_path("file:///D:/ai/x [y].wav")
+            == uri_to_file_path("file://D:/ai/x %5By%5D.wav") == "D:/ai/x [y].wav")
 
 
 def test_restart_loses_the_mirror_and_the_play_intent_remirrors(fake, monkeypatch):

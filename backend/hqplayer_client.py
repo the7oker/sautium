@@ -149,6 +149,11 @@ class TrackStatus:
     src_bits: Optional[int] = None
     src_channels: Optional[int] = None
     src_sdm: Optional[bool] = None
+    # The entry HQPlayer is reading, in the form its playlist names it
+    # (<metadata uri>, while a track is loaded; Desktop 6.2.3 sends it to an
+    # unauthenticated client). The slot index names an entry only through
+    # the playlist; this names it outright.
+    uri: str = ""
 
     @property
     def is_playing(self) -> bool:
@@ -649,6 +654,7 @@ class HQPlayerClient:
                 status.album = metadata.get("album", "")
                 status.song = metadata.get("song", "")
                 status.genre = metadata.get("genre", "")
+                status.uri = metadata.get("uri", "")
                 if metadata.get("samplerate"):
                     status.src_rate = int(metadata.get("samplerate"))
                     status.src_bits = int(metadata.get("bits") or 0) or None

@@ -374,8 +374,10 @@ cards, so the standard-tier VRAM floor deliberately stays at ≥5.5 GB until
     `output` field, tracker feed above the abstraction), Sautium-canonical
     `CanonicalQueue` with a one-way HQP mirror (adopt-on-attach restores
     the queue after a backend restart; a 30-tick drift canary logs external
-    HQPlayer edits, never reconciles). HQPlayer = 1 s poll (documented
-    boundary exception), gated on a configured endpoint as before.
+    HQPlayer edits, never reconciles — what plays is identified on every
+    tick from the entry HQPlayer's status names, since 2026-10-04). HQPlayer
+    = 1 s poll (documented boundary exception), gated on a configured
+    endpoint as before.
 13. ✅ Per-tier Postgres tuning (SHIPPED 2026-07-10): compose files run
     `postgres -c` with env-overridable defaults targeting the 16GB+ Docker
     host (`PG_SHARED_BUFFERS:-1GB`, `PG_EFFECTIVE_CACHE_SIZE:-6GB`,

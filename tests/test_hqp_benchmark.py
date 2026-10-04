@@ -1304,6 +1304,7 @@ def test_a_playlist_not_ours_holds_a_run_back_only_while_it_plays(run, monkeypat
     with fake._lock:
         fake.playlist = ["http://elsewhere.invalid/a.flac"]       # another controller's
         fake.state, fake.track = int(PlaybackState.PLAYING), 1
+    # this fake's status names no entry: the canary's drift decides
     assert _wait(lambda: b.drift, 15)
     with pytest.raises(bench.BenchmarkRefused, match="Another controller"):
         bench.start()

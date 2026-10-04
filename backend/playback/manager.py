@@ -544,8 +544,14 @@ class PlaybackManager:
             self._push_status({"state": "disconnected"})
             return
 
-        idx = s.queue_index
-        item = self.queue.item_at(idx)
+        if s.item is not None:
+            # Identified by the backend: its slot is wherever it sits now —
+            # gone with a mutation that committed meanwhile, it is no slot.
+            idx = self.queue.index_of(s.item) or 0
+            item = s.item if idx else None
+        else:
+            idx = s.queue_index
+            item = self.queue.item_at(idx)
         # A stream — queued as one, or standing in for a copy this output
         # cannot reach (playback.substitute): the provider's own metadata
         # and badges either way.
@@ -621,7 +627,8 @@ class PlaybackManager:
         # streamed phantom items both carry the track UUID). Separate from the
         # session/Home-shelf archival below — that snapshots the whole queue,
         # this records each play.
-        tracker.track_play_event(new_data["state"], s.position, s.length, item)
+        tracker.track_play_event(new_data["state"], s.position, s.length, item,
+                                 external=s.extra.get("source") == "external")
         self._maintain_preview_window(idx)
         self._subs.maintain(idx)
 
@@ -656,11 +663,18 @@ class PlaybackManager:
     # that prefix lands in the canonical queue. A failed mirror leaves the
     # canonical queue untouched (matching the player's unchanged state).
 
+    @contextmanager
+    def _mutation(self) -> Iterator[None]:
+        """One queue mutation: serialised, and marked on the queue while the
+        output holds it ahead of the commit (CanonicalQueue.mutation)."""
+        with self._mutate_lock, self.queue.mutation():
+            yield
+
     def replace_queue(self, items: list[QueueItem], *, play: bool,
                       probe_first: bool = False) -> tuple[int, int]:
         """Replace the queue (and start playback). Returns (added, generation);
         generation is what background fillers must guard their appends with."""
-        with self._mutate_lock:
+        with self._mutation():
             backend = self.ensure_active() if play else self.backend()
             added = backend.queue_replace(items, play=play,
                                           probe_first=probe_first)
@@ -692,7 +706,7 @@ class PlaybackManager:
         needs no live device. A None/absent backend just skips the mirror —
         the user can queue tracks before any output is reachable and press
         play once it is (that press attaches/probes the output)."""
-        with self._mutate_lock:
+        with self._mutation():
             if generation is not None and self.queue.generation != generation:
                 return None
             backend = self._active
@@ -730,7 +744,7 @@ class PlaybackManager:
     def remove(self, index: int, track_id: Optional[str] = None) -> bool:
         """`track_id`, when given, is a precondition: the slot must still
         hold that track, else nothing is removed and False comes back."""
-        with self._mutate_lock:
+        with self._mutation():
             item = self.queue.item_at(index)
             if item is None or (track_id and item.track_id != track_id):
                 return False
@@ -786,7 +800,7 @@ class PlaybackManager:
         mid-way — then the canonical queue is left untouched and the drift
         canary flags the divergence; a retry reconverges); on success the
         canonical queue adopts the new order."""
-        with self._mutate_lock:
+        with self._mutation():
             backend = self._active   # queue reorder is output-independent
             result = (backend.queue_reorder(plan) if backend
                       else {"removed": 0, "added": 0, "interrupted": False})
@@ -810,7 +824,7 @@ class PlaybackManager:
         with the playing slot's new binding so Now Playing refetches."""
         from playback.queue import rebind_origins
         from playback.substitute import native_plays
-        with self._mutate_lock:
+        with self._mutation():
             backend = self._active
             plays = None
             if backend is not None:
@@ -842,7 +856,7 @@ class PlaybackManager:
     def clear_for_radio(self) -> int:
         """Radio start: clear everything after the playing slot (the seed
         plays on). Returns the new generation for the radio filler."""
-        with self._mutate_lock:
+        with self._mutation():
             backend = self.backend()
             backend.queue_clear_after_current()
             gen = self.queue.clear_for_radio(self._latest_status.get("track_index"))

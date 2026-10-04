@@ -301,10 +301,43 @@ The playlist canary (`_check_drift`) and adopt-on-attach read HQPlayer's
 playlist back through the same rules — a `file://` URI with HQPlayer's
 percent-escapes undone (the stored path, or the path of a copy in its own
 library), a `/file/{token}` URL through the proxy's registry — so both
-work whether HQPlayer opens paths or is handed streams. While the playlist differs
-from the queue (edited in HQPlayer's own GUI, another source playing), the
-status is reported as external playback (slot 0) and nothing is tracked
-against the wrong track.
+work whether HQPlayer opens paths or is handed streams.
+
+**What plays is checked on every status tick, not by the canary.** HQPlayer's
+`<Status>` names the entry it reads (`<metadata uri>`, sent to an
+unauthenticated client by Desktop 6.2.3), and `_playing` resolves it against
+one view of the queue (`CanonicalQueue.view()`: items, version and whether a
+mutation is in flight, read together) to the slot it is, nearest HQPlayer's
+index first. A slot is the entry when either says so: the hand-over ledger —
+the track Sautium handed that URI for, still right after the slot was re-bound
+to another copy — or the URI itself by the same rules, a `/preview/` stream by
+its session's track, an m4a transcode by its file. A CUE image whose cut
+failed is handed for every slice, so the ledger alone would name the last one;
+the path keeps the slice at HQPlayer's slot. A token counts only at the
+address this backend hands HQPlayer: another node's media proxy or a NAS URL
+with `/file/` in its path is foreign. The status carries the item it found,
+and the manager reads the slot off the item: a mutation that committed between
+the two looks cannot make an index name another track. An entry that is not in
+the queue (a file played from HQPlayer's own GUI, another controller) is
+external playback (slot 0) from its first tick: no listen, no Last.fm call, no
+DSP sample, the benchmark holds back, and the listen that was open ends there.
+Two ticks give no verdict and are not emitted. One is the tick on which
+HQPlayer opens an entry: PLAYING at track 0 and length 0, with the URI already
+named; a listen opened there froze a length of 0. The other is an entry the
+queue does not hold at HQPlayer's index while a mutation is in flight. Sautium's
+own mutations mirror into HQPlayer before the queue commits them, and every
+queue mutation of the manager runs inside `CanonicalQueue.mutation()`: a
+replace plays its first track before its commit, and a removal shifts
+HQPlayer's index first. While a mutation is in flight the canary judges
+nothing either, and its verdict comes before the slot is read, since the
+fallback rests on it. A verdict is kept per (entry, index, queue version): a
+foreign entry played for an hour is looked for once.
+Until 2026-10-04 the slot came from the index alone and only the canary (every
+30 polls) caught an external edit, so for up to half a minute such a file was
+tracked and scrobbled as the queued track at that index; and a queue holding a
+slot HQPlayer drops (one it cannot open) went untracked while the canary said
+drift. A build whose status names no entry, or a stream token of an earlier
+session, leaves the index standing, external while the playlist differs.
 
 **A restarted HQPlayer re-mirrors on the next play.** The status poller
 notices HQPlayer coming back — a dropped socket answered on the immediate
@@ -757,8 +790,9 @@ cooling — so Sautium measures it instead of predicting it
   of a start — not the backend's queue mirror: the attach may not have
   mirrored the queue (HQPlayer was not up yet), the run sets HQPlayer's
   playlist itself and the attach that takes the output back mirrors afresh;
-  a playlist not Sautium's holds a run back only while HQPlayer plays it
-  (another controller). The run borrows the output
+  what holds a run back is HQPlayer playing an entry that is not in the
+  queue, read off the status the start itself asks for
+  (`HqpBackend.reads_foreign` — another controller). The run borrows the output
   (`PlaybackManager.hold`): it begins once a queue replace still adding
   tracks and a play intent still attaching are through, the backend detaches
   as on an output switch — a command of that backend still on its way is

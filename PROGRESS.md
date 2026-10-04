@@ -581,6 +581,44 @@ implementation details live in the code, DB and git history.
 - **Stop-clear-add-select-play sequence** for `play_track`/`play_album`. Without
   explicit stop, HQPlayer occasionally started the wrong track from the
   existing queue.
+- **What plays is the entry HQPlayer names, not its index (2026-10-04).**
+  The poller mapped `<Status track>` onto the canonical queue and left an
+  external edit to the 30-tick drift canary. The loopback measurement run
+  found the cost: a file played from HQPlayer's own window was tracked,
+  now-played and scrobbled as the queued track at that index for up to half
+  a minute, and once the canary flagged drift the open listen went on
+  growing on the foreign file's positions (the tracker's stale-index rule)
+  until a stop. Desktop 6.2.3 names the entry it reads in every Status
+  (`<metadata uri>`, to an unauthenticated client too), so `_playing`
+  checks it each tick without a round trip: the hand-over ledger first (the
+  track Sautium handed that URI for — still right after the slot was
+  re-bound to another copy), then the path and CUE start, the proxy's
+  `/file/` registry, a preview's session track. The design weighed against
+  it, a `PlaylistGet` on every track change, costs a round trip per change
+  on a control port that stalls under DSP load and misses a replacement of
+  the same length. Sautium's own mutations mirror before they commit:
+  `CanonicalQueue.mutation()`, entered by every queue mutation of the
+  manager, marks that stretch, and both the per-tick check and the canary
+  give no verdict while it lasts (the canary could read a playlist halfway
+  through a mirror as drift). External playback ends the open listen
+  (`track_play_event(external=)`); only a stale index without that flag
+  still carries it. The live test caught what the index had hidden: the
+  first PLAYING tick after a Play from stopped says track 0 and length 0
+  while it already names the entry, so the listen opened there froze a
+  length of 0 and a fully heard track was saved as a 0 % skip (corrected by
+  hand). That tick now gives no verdict, and a listen opened before the
+  player knew the length takes the first one a tick brings
+  (`_PlaySession.update`). A review the same day settled four more points:
+  - The ledger alone misnames a CUE image handed whole for every slice, so a
+    slot is the entry when the ledger or the path names it.
+  - A token counts only at our own proxy address; another node's stream is
+    foreign.
+  - The status carries the item it found, and the manager reads the slot off
+    it rather than looking the index up again after a commit.
+  - The queue is read as one view (items, version, in-flight flag).
+  Deferred: crediting an external play to the library
+  track its file is (`_items_from_hqp_tracks` resolves files that way) —
+  today it is nobody's listen.
 - **Why didn't it play — traces in memory, scoped as content (2026-10-02).**
   Each play intent on the HQPlayer output is watched for ten seconds and
   judged (`playback/hqp_diagnostics.py`; the verdicts and HQPlayer's log in

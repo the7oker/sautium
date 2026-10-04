@@ -48,6 +48,41 @@ def test_an_excerpt_is_not_a_listen_but_ends_the_one_before_it(recorder):
     assert lastfm == ["update_now_playing", "scrobble"]    # no now-playing, no scrobble for it
 
 
+def test_a_listen_opened_before_the_player_knew_the_length_takes_it_from_the_next_tick(recorder):
+    writes, lastfm = recorder
+    # HQPlayer's first PLAYING tick after a Play: the track is not open yet
+    tracker.track_play_event("playing", 0.0, 0.0, _item("t1"))
+    for pos in (1.0, 120.0, 226.0):
+        tracker.track_play_event("playing", pos, 231.3, _item("t1"))
+    assert tracker._play_session.track_length == 231.3
+    assert tracker._play_session.percent_listened > 97
+    # a boundary tick bringing the next track's length leaves this one's
+    tracker.track_play_event("playing", 227.0, 600.0, _item("t1"))
+    assert tracker._play_session.track_length == 231.3
+    tracker.track_play_event("stopped", 0.0, 0.0, None)
+    assert len(_history_rows(writes)) == 1
+    assert lastfm == ["update_now_playing", "scrobble"]      # half heard: a listen, scrobbled
+
+
+def test_external_playback_ends_the_open_listen_and_is_never_one(recorder):
+    writes, lastfm = recorder
+    tracker.track_play_event("playing", 10.0, 200.0, _item("t1"))
+    tracker.track_play_event("playing", 40.0, 200.0, _item("t1"))
+    # A tick without identity (the backend's index stale mid-mutation)
+    # carries the listen on.
+    tracker.track_play_event("playing", 41.0, 200.0, None)
+    assert tracker._play_session is not None and tracker._play_session.max_position == 41.0
+    # HQPlayer starts an entry of its own: t1's listen is written as it stood,
+    # and the foreign seconds are nobody's.
+    tracker.track_play_event("playing", 0.0, 16.0, None, external=True)
+    assert len(_history_rows(writes)) == 1 and tracker._play_session is None
+    for pos in (5.0, 15.0):
+        tracker.track_play_event("playing", pos, 16.0, None, external=True)
+    tracker.track_play_event("stopped", 0.0, 0.0, None)
+    assert len(_history_rows(writes)) == 1
+    assert lastfm == ["update_now_playing"]
+
+
 def test_a_full_stream_after_an_excerpt_opens_its_own_listen(recorder):
     writes, lastfm = recorder
     tracker.track_play_event("playing", 20.0, 30.0, _item("t2", excerpt=True))

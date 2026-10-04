@@ -71,6 +71,16 @@ class _PlaySession:
     def update_position(self, position: float) -> None:
         self.max_position = max(self.max_position, position)
 
+    def update(self, position: float, length: float) -> None:
+        """A tick of this very track. A listen opened before the player knew
+        the length takes the first one a tick brings — a length frozen at 0
+        made a listen under 240 s a 0 % skip (live, 2026-10-04) — and keeps
+        it: a boundary tick carrying the next track's length is not this
+        track's."""
+        self.update_position(position)
+        if self.track_length <= 0 < length:
+            self.track_length = length
+
 
 def _get_scrobbler():
     """The Last.fm network scrobbles go through, built from the session the
@@ -189,7 +199,7 @@ def _save_play_session(s: "_PlaySession") -> None:
 
 
 def track_play_event(state_name: str, position: float, length: float,
-                     item) -> None:
+                     item, *, external: bool = False) -> None:
     """Advance listening-history / scrobble state from one status tick. Mirrors
     the retired daemon's _handle_event, but resolves identity from the
     canonical queue item (source-agnostic) — so phantom previews are tracked
@@ -202,10 +212,21 @@ def track_play_event(state_name: str, position: float, length: float,
     closed+reopened on every shift, spraying a phantom play + scrobble per
     removal. A tick whose slot resolves to no item (mid-mutation, the
     backend's index momentarily stale) carries no identity: it only advances
-    the current session and must never close it. The same track re-starting
+    the current session and must never close it. A tick the backend reports
+    as `external` is no such gap — the output reads an entry that is not
+    ours — so the listen before it ends there. The same track re-starting
     from the top (repeat-one, a duplicate slot, a deliberate replay) IS a new
     listen — detected by the position falling back to the start."""
     global _play_session
+
+    if external:
+        # HQPlayer's playlist edited in its own window, another controller:
+        # nothing of this is a listen, and carrying the open one on would
+        # credit its seconds to the track before it.
+        if _play_session is not None:
+            _save_play_session(_play_session)
+            _play_session = None
+        return
 
     ident = _play_identity(item)
     same_track = (_play_session is not None and ident is not None
@@ -253,7 +274,7 @@ def track_play_event(state_name: str, position: float, length: float,
             title=ident["title"] or "", album=ident.get("album"),
             duration=int(ident["duration"]) if ident.get("duration") else None)
 
-    _play_session.update_position(position)
+    _play_session.update(position, length)
     if (not _play_session.scrobbled and _play_session.scrobble_ready
             and _scrobbling_enabled()):
         _scrobble_async(

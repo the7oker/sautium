@@ -38,6 +38,7 @@ import threading
 import time
 from contextlib import contextmanager, nullcontext
 from typing import Optional
+from urllib.parse import urlsplit
 
 import psycopg2
 
@@ -473,6 +474,70 @@ def _slot_identity(uri: str, proxy) -> Optional[tuple]:
     return None
 
 
+def _handed(uri: str) -> Optional[tuple]:
+    """("track", track_id, media_file_id) for a URI Sautium handed over for a
+    track — still the slot's track after the slot was re-bound to another
+    copy. HQPlayer reports a file as file://E:/…, so the form it was handed
+    in is asked too; an entry with no track (a pass-through, or one
+    queue_insert_next re-appended from HQPlayer's own playlist) says nothing."""
+    keys = [uri]
+    if uri.startswith("file://"):
+        keys.append(file_path_to_uri(_uri_file_path(uri)))
+    for key in keys:
+        e = diag.handover(key)
+        if e is not None and (e["track_id"] is not None or e["media_file_id"] is not None):
+            return ("track", e["track_id"], e["media_file_id"])
+    return None
+
+
+def _reading(uri: str, proxy, ours: str) -> Optional[tuple]:
+    """What a URI names by itself: ("file", path, cue_start) for a file://
+    path or an owned /file/ token, ("track", track_id, media_file_id) for a
+    /preview/ stream (a phantom's, or an m4a transcoded from its file), and
+    ("uri", uri, None) for any other address — another node's media proxy or
+    a NAS path among them: a token counts only at `ours`, the address this
+    backend hands HQPlayer. None for a token at ours this process does not
+    know (a stream of an earlier session): nothing can be said."""
+    if uri.startswith("file://"):
+        return ("file", _uri_file_path(uri), None)
+    token = _token_of(uri)
+    if token is None or proxy is None or urlsplit(uri).netloc != ours:
+        return ("uri", uri, None)
+    if "/file/" in uri:
+        entry = proxy.file_entry(token)
+        return ("file", settings.translate_to_host_path(entry.path), entry.start) if entry else None
+    meta = proxy.preview_meta(token)
+    return ("track", meta["track_id"], meta["media_file_id"]) if meta else None
+
+
+def _reads_item(reading: tuple, item: QueueItem) -> bool:
+    """Is what a reading names this queue item: its track, by the track's
+    UUID or the file a transcode was made from, or the file it opens here — a
+    CUE slice by its start, the whole image when the cut failed?"""
+    kind, a, b = reading
+    if kind == "track":
+        return (a is not None and a == item.track_id) or (
+            b is not None and b == item.media_file_id)
+    src = item.opener()
+    if kind == "uri":
+        return src["kind"] == "uri" and _same_entry(src["uri"], a)
+    if src["kind"] in ("file", "hqp"):
+        path = src["path"]
+    elif src["kind"] == "uri" and src["uri"].startswith("file://"):
+        path = _uri_file_path(src["uri"])
+    else:
+        return False
+    return path == a and (b is None or b == src.get("cue_start"))
+
+
+def _outward(idx: int, n: int):
+    """The slots 1..n, nearest to `idx` first."""
+    for d in range(max(idx - 1, n - idx) + 1):
+        for j in ((idx - d, idx + d) if d else (idx,)):
+            if 1 <= j <= n:
+                yield j
+
+
 def _owned_play_uri(item: QueueItem, host: str) -> str:
     """HQPlayer URI for an owned track.
 
@@ -570,7 +635,8 @@ STATUS_FAILURE_THRESHOLD = 5
 
 # Every N poll ticks: read HQPlayer's playlist and compare against the
 # canonical queue (drift canary). One-way mirror per §2.6 — external edits
-# in HQPlayer's own GUI are logged, never reconciled.
+# in HQPlayer's own GUI are logged, never reconciled. What plays is not the
+# canary's to say: every tick checks the entry HQPlayer reads (_playing).
 DRIFT_CHECK_EVERY = 30
 
 
@@ -599,6 +665,10 @@ class HqpBackend(PlayerBackend):
         # external edit, or HQPlayer came back empty after a restart): the
         # slot index names nothing of ours until the next mirror.
         self._drift = False
+        # The last verdict of _playing, by (entry, HQPlayer's index, queue
+        # version): a foreign entry played for an hour is looked for in the
+        # queue once, not every second.
+        self._verdict: Optional[tuple] = None
         # Set when a RECONNECT found that difference — HQPlayer restarted (a
         # trial-mode Embedded stops every 30 minutes) and lost the mirror —
         # so the play-intent gate re-attaches and re-mirrors before playing.
@@ -854,6 +924,7 @@ class HqpBackend(PlayerBackend):
         tick = 0
         while self._running:
             status = None
+            playing = None
             reads = None
             sample = None
             reconnected = False
@@ -888,10 +959,23 @@ class HqpBackend(PlayerBackend):
                         reconnected = True
                     if status is not None and (self._verify_mirror
                                                or tick % DRIFT_CHECK_EVERY == 0):
+                        _, version, pending = self._queue.view()
                         try:
                             hqp_playlist = hqp.get_playlist()
                         except (BrokenPipeError, ConnectionError, OSError) as e:
                             logger.debug("drift check playlist read failed: %s", e)
+                        # Judged against the queue it was read with — never a
+                        # read made while a mutation was in flight, nor one a
+                        # commit overtook — and before the slot below, which
+                        # falls back on the verdict.
+                        if (hqp_playlist is not None and not pending
+                                and self._queue.view()[1:] == (version, False)):
+                            if self._check_drift(hqp_playlist) and self._verify_mirror:
+                                self._mirror_lost = True
+                                logger.warning("HQPlayer came back with a different "
+                                               "playlist (restarted?) — the queue is "
+                                               "re-mirrored on the next play")
+                            self._verify_mirror = False
                     if att is not None and status is not None:
                         att.tick(status, STATE_NAMES.get(status.state, "unknown"))
                         if att.due(time.time()) is not None:
@@ -899,8 +983,9 @@ class HqpBackend(PlayerBackend):
                             # socket — a command thread never takes this lock.
                             reads = self._close_reads(hqp, att)
                     now = time.monotonic()
-                    if status is not None and self._sampler.due(
-                            status, ours=not self._drift,
+                    playing = self._playing(status) if status is not None else None
+                    if playing is not None and self._sampler.due(
+                            status, ours=playing[1] is not None,
                             engine=self._info.get("engine"), now=now):
                         dsp = hqp.get_state()
                         if dsp is None:
@@ -930,21 +1015,15 @@ class HqpBackend(PlayerBackend):
                     self._failures = 0
                     if status.track_index >= 1:
                         self._last_track = status.track_index
-                    if hqp_playlist is not None:
-                        if self._check_drift(hqp_playlist) and self._verify_mirror:
-                            self._mirror_lost = True
-                            logger.warning("HQPlayer came back with a different "
-                                           "playlist (restarted?) — the queue is "
-                                           "re-mirrored on the next play")
-                        self._verify_mirror = False
-                    # The slot playing on, its position moving and the DSP
-                    # keeping up: a failure judged on it explains nothing now.
-                    if (status.state == PlaybackState.PLAYING and not self._drift
-                            and status.position >= 1.0
-                            and (status.process_speed is None or status.process_speed >= 1.0)
-                            and diag.note_playing(status.track_index, self._queue.generation)):
-                        _notify_notices()
-                    self._emit(self._status_of(status))
+                    if playing is not None:
+                        # The slot playing on, its position moving and the DSP
+                        # keeping up: a failure judged on it explains nothing now.
+                        if (status.state == PlaybackState.PLAYING and playing[1] is not None
+                                and status.position >= 1.0
+                                and (status.process_speed is None or status.process_speed >= 1.0)
+                                and diag.note_playing(playing[0], self._queue.generation)):
+                            _notify_notices()
+                        self._emit(self._status_of(status, playing))
                     if diag.note_answered():
                         _notify_notices()
                     if sample is not None:
@@ -970,22 +1049,75 @@ class HqpBackend(PlayerBackend):
             self._wake.clear()
             tick += 1
 
-    def _status_of(self, status) -> PlaybackStatus:
-        """One status tick as the manager reads it. HQPlayer's own tags are
-        authoritative only for a slot it opened as a file; an http-served
-        slot (a preview, a transcode, every owned file for an HQPlayer
-        elsewhere) is
-        described by the queue item, so those keys are left out and the
-        manager falls back to it. While HQPlayer's playlist has drifted from
-        the queue its slot index names nothing of ours: the tick is reported
-        as external playback (slot 0), so nothing is tracked against the
-        wrong track."""
+    def _playing(self, status) -> Optional[tuple]:
+        """Which queue slot HQPlayer reads: (index, item, foreign), or None —
+        no verdict this tick. Its index names our slot only while its playlist
+        is our mirror, and the canary compares the two every DRIFT_CHECK_EVERY
+        ticks — an entry started in HQPlayer's own window was tracked and
+        scrobbled as the queued track at that index until then. So every tick
+        checks the entry its status names against one view of the queue: ours
+        at that slot, ours at another (the nearest), or foreign; a slot is the
+        entry when the hand-over or the URI itself names it.
+
+        No verdict while HQPlayer opens an entry (PLAYING at track 0 and
+        length 0 — the slot comes with the next tick), nor for an entry the
+        queue does not hold at HQPlayer's index while a mutation is in
+        flight: a replace plays its first track before the queue commits, a
+        removal shifts HQPlayer's index first — an index read off the queue
+        before the commit names another item after it. With nothing that
+        names the entry (no URI from this build; a stream token of an earlier
+        session) the index stands, external while the canary says the
+        playlist differs."""
         idx = status.track_index
+        items, version, pending = self._queue.view()
+        item = items[idx - 1] if 1 <= idx <= len(items) else None
+        if status.state not in (PlaybackState.PLAYING, PlaybackState.PAUSED):
+            return idx, item, False
+        if idx < 1:
+            return None
+        readings = self._readings(status.uri)
+        if not readings:
+            return (0, None, True) if self._drift else (idx, item, False)
+        key = (status.uri, idx, version)
+        cached = self._verdict
+        if cached is not None and cached[0] == key:
+            return cached[1]
+        found = next((j for j in _outward(idx, len(items))
+                      if any(_reads_item(r, items[j - 1]) for r in readings)), None)
+        if pending and found != idx:
+            return None
+        verdict = (found, items[found - 1], False) if found else (0, None, True)
+        self._verdict = (key, verdict)
+        return verdict
+
+    def _readings(self, uri: str) -> list:
+        """What names the entry at `uri`: the hand-over (_handed) and the URI
+        itself (_reading) — a CUE image whose cut failed was handed for every
+        slice, so neither alone settles the slot."""
+        if not uri:
+            return []
+        from streaming import service as streaming_service
+        proxy = streaming_service.get_proxy()
+        ours = f"{self._url_host}:{proxy.port}" if proxy is not None else ""
+        return [r for r in (_handed(uri), _reading(uri, proxy, ours)) if r is not None]
+
+    def reads_foreign(self, status) -> bool:
+        """Does HQPlayer, as this status finds it, read an entry that is not
+        in the queue — another controller playing, a file from its own window?"""
+        playing = self._playing(status)
+        return playing is not None and playing[2]
+
+    def _status_of(self, status, playing: tuple) -> PlaybackStatus:
+        """One status tick as the manager reads it, at the slot `_playing`
+        found. HQPlayer's own tags are authoritative only for a slot it
+        opened as a file; an http-served slot (a preview, a transcode, every
+        owned file for an HQPlayer elsewhere) is described by the queue item,
+        so those keys are left out and the manager falls back to it. An entry
+        that is not ours is reported as external playback (slot 0), so
+        nothing is tracked against a queued track."""
+        idx, item, foreign = playing
         extra = {"genre": status.genre, "process_speed": status.process_speed}
-        item = self._queue.item_at(idx)
-        if self._drift and status.state in (PlaybackState.PLAYING,
-                                            PlaybackState.PAUSED):
-            idx, item = 0, None
+        if foreign:
             extra["source"] = "external"
         if item is None or not _http_served(item):
             extra.update(artist=status.artist, album=status.album,
@@ -996,7 +1128,7 @@ class HqpBackend(PlayerBackend):
         return PlaybackStatus(
             state=STATE_NAMES.get(status.state, "unknown"),
             position=status.position, length=status.length,
-            queue_index=idx, volume=status.volume, extra=extra)
+            queue_index=idx, volume=status.volume, extra=extra, item=item)
 
     def _diagnosis(self, status) -> Optional[dict]:
         """The failed attempt Now Playing offers to explain: this backend's

@@ -17,7 +17,10 @@ defaults.
 
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
-from typing import Callable, Optional
+from typing import TYPE_CHECKING, Callable, Optional
+
+if TYPE_CHECKING:
+    from playback.queue import QueueItem
 
 
 @dataclass
@@ -33,6 +36,11 @@ class PlaybackStatus:
     queue_index: Optional[int] = None   # 1-based slot in the canonical queue
     volume: Optional[float] = None
     extra: dict = field(default_factory=dict)
+    # The queue item a backend identified as playing (HQPlayer names the
+    # entry it reads): the manager takes it as it is and reads its slot off
+    # it — a mutation may have committed between the backend's look and the
+    # manager's, and an index looked up again would name another item.
+    item: Optional["QueueItem"] = None
 
 
 @dataclass

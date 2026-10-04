@@ -15,6 +15,7 @@ the instant the user moves to another queue.
 
 import logging
 import threading
+from contextlib import contextmanager
 from dataclasses import dataclass, field
 from typing import Optional
 
@@ -96,6 +97,7 @@ class CanonicalQueue:
         self._items: list[QueueItem] = []
         self._version = 0
         self._generation = 0
+        self._pending = 0
 
     def __len__(self) -> int:
         with self._lock:
@@ -108,6 +110,26 @@ class CanonicalQueue:
     @property
     def generation(self) -> int:
         return self._generation
+
+    @contextmanager
+    def mutation(self):
+        """A mutation in flight: the output mirrors it first and this queue
+        commits it after (PlaybackManager._mutation), so until it ends the
+        output's playlist and this queue differ by design — whoever compares
+        the two (HQPlayer's poller) holds its verdict meanwhile."""
+        with self._lock:
+            self._pending += 1
+        try:
+            yield
+        finally:
+            with self._lock:
+                self._pending -= 1
+
+    def view(self) -> tuple[list[QueueItem], int, bool]:
+        """The items, the version and whether a mutation is in flight, read
+        together: what the output reports is judged against one state."""
+        with self._lock:
+            return list(self._items), self._version, self._pending > 0
 
     def snapshot(self) -> list[QueueItem]:
         with self._lock:
