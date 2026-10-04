@@ -195,8 +195,12 @@ listens, a benchmark for the settings never listened through
 (`docs/HQPLAYER_INTEGRATION.md` § "DSP load") — and shown in the HQPlayer
 screen's pickers. The one place the two meet: on a machine that runs both,
 Sautium's own GPU and CPU work competes with HQPlayer's, so a benchmark run
-counts as playback (the model steps yield, backups wait) and a manual
-analysis and a benchmark of this machine's HQPlayer refuse each other.
+counts as playback (the model steps yield, backups wait), a manual
+analysis and a benchmark of this machine's HQPlayer refuse each other, and a
+benchmark does not start while the node still loads its models (the startup
+pre-warm included: a run started a minute after a restart measured its
+first point — the owner's own, the drift reference — under the translation
+model's CPU load, 2026-10-03).
 
 ### 2.7 Stream enrichment is network contribution — do not shed it first
 

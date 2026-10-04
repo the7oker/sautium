@@ -290,6 +290,10 @@ services:
               count: 1
               capabilities: [gpu]
     restart: unless-stopped
+    # Docker kills a container ~3 s after SIGTERM unless told otherwise
+    # (Docker 29, measured 2026-10-03); the backend's shutdown needs more —
+    # a benchmark run puts the owner's HQPlayer back (entrypoint.py).
+    stop_grace_period: 10s
     command: python entrypoint.py
 
 networks:

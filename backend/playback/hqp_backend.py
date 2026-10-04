@@ -201,6 +201,14 @@ def _uri_in_playlist(uri: str) -> bool:
         return False
 
 
+def _poll_interval(failures: int) -> float:
+    """Seconds to the next status read: 1 while HQPlayer answers, then 2, 4,
+    8, 15. The exponent stops where the cap does: a float power overflows
+    past 2**1023, and a night with HQPlayer switched off — a miss every
+    ~17 s — got there and killed the poller (OverflowError, 2026-10-04)."""
+    return 1.0 if failures <= 0 else min(2.0 ** min(failures, 4), 15.0)
+
+
 def _add_uris_with_retry(uris: list[str], *, clear_first: bool = False) -> int:
     """Append URIs to the HQPlayer playlist, surviving a mid-batch
     connection drop. MUST be called while holding `_hqp_lock`.
@@ -219,22 +227,31 @@ def _add_uris_with_retry(uris: list[str], *, clear_first: bool = False) -> int:
     mid-batch reconnect never re-clears already-added tracks.
     """
     added = 0
+    refused = 0         # adds HQPlayer answered, and did not take
+    unanswered = False
+    gave_up = False
     for i, uri in enumerate(uris):
         clear = clear_first and i == 0
         ok = False
         result, refusal = None, ""
         for attempt in (1, 2):
+            silent = False
             try:
                 hqp = _get_hqp()
                 ok = hqp.playlist_add(uri, clear=clear)
                 if not ok:
                     # Read now: the playlist check below replaces it.
                     result, refusal = _refusal(hqp)
+                    silent = hqp.timed_out
+                    unanswered = silent or not hqp.is_connected()
             except (BrokenPipeError, ConnectionError, OSError) as e:
-                ok = False
+                ok, unanswered = False, True
                 result, refusal = "refused", str(e)
             if ok:
+                unanswered = False
                 break
+            if silent:
+                break       # the check and the retry would wait out the same silence
             if attempt == 1:
                 # The add may have LANDED but its response was lost (slow
                 # HQPlayer read-timeout); re-adding an append would DUPLICATE the
@@ -250,18 +267,30 @@ def _add_uris_with_retry(uris: list[str], *, clear_first: bool = False) -> int:
         else:
             logger.warning("playlist_add failed after reconnect: %s — %s",
                            redact_uri(uri), refusal)
-    if added < len(uris):
-        if _stream_mode():
-            logger.warning(
-                "HQPlayer refused %d of %d media URLs — an HQPlayer elsewhere "
-                "fetches them from us, so that usually means it cannot reach %s:%d (a firewall, or the wrong "
-                "LAN address in MEDIA_PROXY_ADVERTISED_HOST / SAUTIUM_HOST_IPS)",
-                len(uris) - added, len(uris), hqp_media_host(),
-                settings.media_proxy_port)
-        else:
-            # HQPlayer refuses a file it cannot open — a dropped music mount
-            # looks exactly like this; the notices channel re-derives.
-            _notify_notices()
+            if unanswered:
+                # Not a refusal: HQPlayer did not answer, and every add after
+                # this one would wait out the same silence — a Pi 5 playing
+                # a setting it could not keep up with answered nothing for
+                # minutes, and a queue of 19 took five of them to fail.
+                gave_up = True
+                break
+            refused += 1
+    # Each reason the batch is short is told: the silence that stopped it,
+    # and what HQPlayer refused before it
+    if gave_up:
+        logger.warning("HQPlayer is not answering — %d of %d tracks were not handed over; "
+                       "the queue is mirrored again on the next play",
+                       len(uris) - added, len(uris))
+    if refused and _stream_mode():
+        logger.warning(
+            "HQPlayer refused %d of %d media URLs — an HQPlayer elsewhere "
+            "fetches them from us, so that usually means it cannot reach %s:%d (a firewall, or the wrong "
+            "LAN address in MEDIA_PROXY_ADVERTISED_HOST / SAUTIUM_HOST_IPS)",
+            refused, len(uris), hqp_media_host(), settings.media_proxy_port)
+    elif refused:
+        # HQPlayer refuses a file it cannot open — a dropped music mount
+        # looks exactly like this; the notices channel re-derives.
+        _notify_notices()
     return added
 
 
@@ -603,6 +632,9 @@ class HqpBackend(PlayerBackend):
         # Set by shutdown under _hqp_lock: from then on no command of this
         # instance reaches HQPlayer (_check_attached).
         self._detached = False
+        # A cut-short benchmark run is put back once HQPlayer answers: at the
+        # attach if GetInfo did, else at the first status that does
+        self._recover_due = False
 
     # -- lifecycle -------------------------------------------------------------
 
@@ -614,8 +646,13 @@ class HqpBackend(PlayerBackend):
                 self._info = _get_hqp_status().get_info() or {}
         except (BrokenPipeError, ConnectionError, OSError) as e:
             logger.info("HQPlayer GetInfo at attach failed: %s", e)
+        if self._detached:
+            return              # switched away while the attach waited on HQPlayer
         self._note_info()
-        self._recover()
+        if self._info:
+            self._recover()
+        else:
+            self._recover_due = True
         adopted = self._adopt_hqp_playlist()
         if not adopted and len(self._queue):
             # Output switch with a live queue (§2.6): HQPlayer becomes the
@@ -642,10 +679,15 @@ class HqpBackend(PlayerBackend):
             else:
                 self._register_serving()
         self._library_check()
-        self._running = True
-        self._thread = threading.Thread(target=self._poll_loop, daemon=True,
-                                        name="hqp-status-poller")
-        self._thread.start()
+        with _hqp_lock:
+            # shutdown() detaches under this lock: past it, a poller started
+            # here is one it joins — never one nothing stops
+            if self._detached:
+                return
+            self._running = True
+            self._thread = threading.Thread(target=self._poll_loop, daemon=True,
+                                            name="hqp-status-poller")
+            self._thread.start()
         logger.info("HQPlayer status poller started")
 
     def _note_info(self) -> None:
@@ -869,9 +911,18 @@ class HqpBackend(PlayerBackend):
 
                 if reconnected:
                     self._note_info()
+                # Only when it answered: a trial-stopped Embedded takes the
+                # connection and closes it at once, tick after tick.
+                if status is not None and (reconnected or self._recover_due):
+                    self._recover_due = False
                     self._recover()
 
-                if status is None:
+                if status is not None and not status.state.known:
+                    # A state the SDK does not name (Embedded said 5 while it
+                    # started a play): it answered, nothing to act on — the
+                    # last good status stands, no listen closes, no miss.
+                    self._failures = 0
+                elif status is None:
                     # Transient read miss (e.g. HQPlayer stalled past the
                     # socket timeout). Keep serving the last good status.
                     self._register_failure()
@@ -886,6 +937,13 @@ class HqpBackend(PlayerBackend):
                                            "playlist (restarted?) — the queue is "
                                            "re-mirrored on the next play")
                         self._verify_mirror = False
+                    # The slot playing on, its position moving and the DSP
+                    # keeping up: a failure judged on it explains nothing now.
+                    if (status.state == PlaybackState.PLAYING and not self._drift
+                            and status.position >= 1.0
+                            and (status.process_speed is None or status.process_speed >= 1.0)
+                            and diag.note_playing(status.track_index, self._queue.generation)):
+                        _notify_notices()
                     self._emit(self._status_of(status))
                     if diag.note_answered():
                         _notify_notices()
@@ -895,7 +953,8 @@ class HqpBackend(PlayerBackend):
                 self._register_failure()
             if att is not None and status is None:
                 err = _hqp_status_client.last_error if _hqp_status_client else None
-                att.miss(err.message if err else "no status answer")
+                att.miss(err.message if err else "no status answer",
+                         silent=bool(_hqp_status_client and _hqp_status_client.timed_out))
             self._settle(att if att is not None and att.due(time.time()) is not None
                          else None, reads)
 
@@ -907,11 +966,7 @@ class HqpBackend(PlayerBackend):
             # it recover; a successful poll resets to 1s. Capped at 15 s —
             # the WSL2→Windows hop flaps for seconds at a time, and a 30 s
             # cap kept the UI on "disconnected" long after HQP was back.
-            if self._failures > 0:
-                poll_interval = min(2.0 ** self._failures, 15.0)
-            else:
-                poll_interval = 1.0
-            self._wake.wait(timeout=poll_interval)
+            self._wake.wait(timeout=_poll_interval(self._failures))
             self._wake.clear()
             tick += 1
 
@@ -946,10 +1001,12 @@ class HqpBackend(PlayerBackend):
     def _diagnosis(self, status) -> Optional[dict]:
         """The failed attempt Now Playing offers to explain: this backend's
         latest, while no newer one runs, the queue is the one it was made
-        for, and HQPlayer is not playing something meanwhile. An attempt that
-        never reached HQPlayer is left to the play route's own answer."""
+        for, HQPlayer is not playing something meanwhile, and it has not
+        played that slot since (diag.note_playing). An attempt that never
+        reached HQPlayer is left to the play route's own answer."""
         last = self._last_closed
-        if last is None or self._attempt is not None or status.state == PlaybackState.PLAYING:
+        if (last is None or last.cleared or self._attempt is not None
+                or status.state == PlaybackState.PLAYING):
             return None
         v, f = last.verdict or {}, last.facts or {}
         if (v.get("code") in (None, "played", "interrupted", "unreachable")
@@ -1338,6 +1395,10 @@ class HqpBackend(PlayerBackend):
                 settings.hqplayer_host, settings.hqplayer_port) or {}
         return self._endpoint_row
 
+    def endpoint_forgotten(self) -> None:
+        """Its row was forgotten (and registered afresh): looked up again."""
+        self._endpoint_row = {}
+
     @property
     def endpoint_id(self) -> Optional[int]:
         return self._endpoint().get("id")
@@ -1415,7 +1476,9 @@ class HqpBackend(PlayerBackend):
                         "is re-mirrored on the next play", e)
             self._mirror_lost = True
             return
-        if status is None or len(playlist) != len(snapshot):
+        # A state the SDK does not name is HQPlayer starting a play: a replace
+        # now would stop it — the next rebind, or the play press, converges
+        if status is None or not status.state.known or len(playlist) != len(snapshot):
             return
         first = self._first_divergence(playlist, snapshot)
         if first is None:

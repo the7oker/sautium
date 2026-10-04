@@ -1,5 +1,5 @@
 """What a DSP setting costs on an HQPlayer's host (backend/playback/hqp_load.py)
-and the schema behind it (migrations 033 and 034).
+and the schema behind it (migrations 033, 034 and 035).
 
 The sampler's gate is pure. The rollup, the coverage the benchmark skips by,
 the headroom classes and the retention run on a real PostgreSQL — a
@@ -30,7 +30,8 @@ PG = dict(host=os.environ.get("SAUTIUM_TEST_PGHOST", "postgres"),
           password=os.environ.get("SAUTIUM_TEST_PGPASSWORD", "supervisor"))
 DBNAME = "sautium_hqp_load_test"
 MIGRATIONS = [Path(__file__).resolve().parent.parent / "desktop" / "migrations" / name
-              for name in ("033_hqp_dsp_load.sql", "034_hqp_benchmark_points.sql")]
+              for name in ("033_hqp_dsp_load.sql", "034_hqp_benchmark_points.sql",
+                           "035_hqp_point_unstarted.sql")]
 
 
 def _status(**kw) -> TrackStatus:
@@ -189,7 +190,7 @@ def _ctx(conn, **kw):
 
 
 def _schema(conn):
-    """What 033 and 034 touch, as the catalogue describes it."""
+    """What 033, 034 and 035 touch, as the catalogue describes it."""
     tables = ("hqp_endpoints", "hqp_benchmark_runs", "hqp_dsp_samples", "hqp_dsp_speed",
               "hqp_benchmark_points")
     return (
@@ -208,7 +209,7 @@ def _schema(conn):
     )
 
 
-def test_033_and_034_re_apply_and_build_what_001_declares():
+def test_033_to_035_re_apply_and_build_what_001_declares():
     name = "sautium_hqp_load_mig_test"
     admin, nb = _make_db(name)
     try:
@@ -238,7 +239,8 @@ def test_033_and_034_re_apply_and_build_what_001_declares():
                              DROP COLUMN last_rate, DROP COLUMN last_filter, DROP COLUMN last_filter1x,
                              DROP COLUMN last_shaper;
                            DROP TYPE hqp_point_result;""")
-            cur.execute(MIGRATIONS[1].read_text())
+            for m in MIGRATIONS[1:]:               # 034 as it shipped, then 035
+                cur.execute(m.read_text())
         assert _schema(conn) == declared
         conn.close()
     finally:
@@ -317,31 +319,89 @@ def test_covered_by_what_a_run_asked_and_heard_back(db):
     _asked(db, run, "measured", rate=0, shaper="A")                            # an asked auto rate
     _asked(db, run, "failed", shaper="B")                                      # did not run: again
     _asked(db, run, "unsettled", shaper="C", at="now() - interval '100 days'")  # past the retention
+    _asked(db, run, "refused", rate=22579200, shaper="D", at="now() - interval '1 day'")
+    _asked(db, run, "unstarted", rate=22579200, shaper="D")    # the host did not build it in time
     covered = hqp_load.covered(_ctx(db))
     assert covered == {(5644800, "poly-sinc-gauss-xla", "ASDM7EC-light 512+fs", 44100, 2),
-                       (0, "poly-sinc-gauss-xla", "A", 44100, 2)}
+                       (0, "poly-sinc-gauss-xla", "A", 44100, 2),
+                       (22579200, "poly-sinc-gauss-xla", "D", 44100, 2)}
     # in another context the run asked nothing
     assert hqp_load.covered(_ctx(db, cuda="off")) == set()
     assert hqp_load.covered(_ctx(db, mode="PCM")) == set()
     assert hqp_load.covered(_ctx(db, engine="6.2.4")) == set()
-    # the results sheet shows the refusal, until a sample of the key exists
-    refused = [r for r in hqp_load.results(_ctx(db)) if r["class"] == "refused"]
-    assert [(r["rate_out"], r["shaper"], r["speed"]) for r in refused] == \
-        [(5644800, "ASDM7EC-light 512+fs", None)]
+    # the results sheet shows each key's newest answer without a speed, until
+    # a sample of the key exists
+    asked = [(r["rate_out"], r["shaper"], r["class"]) for r in hqp_load.results(_ctx(db))
+             if r["speed"] is None]
+    assert asked == [(5644800, "ASDM7EC-light 512+fs", "refused"), (22579200, "D", "unstarted")]
     hqp_load.write(_sample(db, 1.4, rate_out=5644800, shaper="ASDM7EC-light 512+fs"))
     assert [r for r in hqp_load.results(_ctx(db)) if r["class"] == "refused"] == []
 
 
-def test_the_boundary_comes_from_runs_of_this_build_and_mode_that_said_it(db):
-    from datetime import datetime, timezone
-    now = datetime.now(timezone.utc)
-    _run_row(db, outcome="failed", finished_at=now, dropout_speed=2.3)       # lost its connection
-    _run_row(db, mode="PCM", outcome="done", finished_at=now, dropout_speed=1.6)
-    _run_row(db, hqp_engine="6.1.0", outcome="done", finished_at=now, dropout_speed=1.4)
+def test_keeps_up_by_the_hosts_boundary_never_a_dropout_or_a_point_that_never_started(db):
+    def bench_point(speed, shaper, dropout=False):
+        hqp_load.write(_sample(db, speed, shaper=shaper, source="benchmark", settled=True,
+                               init_s=1.0, settle_s=5.0, dropout=dropout))
+    bench_point(1.6, "A")                       # ok: at 1.25× or above
+    bench_point(1.1, "B")                       # tight
+    bench_point(0.8, "C", dropout=True)         # dropped out (the boundary stays at 1×)
+    _asked(db, _run_row(db), "unstarted", shaper="D")
+    for v in (2.0, 2.1):                        # two listens: not known yet
+        hqp_load.write(_sample(db, v, shaper="E"))
+    # a DSD source plays HQPlayer's integrator whatever filter was asked: the
+    # point is known by its ask as well as by what played
+    sid = hqp_load.write(_sample(db, 0.5, filter="FIR2/XFi", src_rate=5644800, src_sdm=True,
+                                 source="benchmark", settled=False, init_s=9.0, settle_s=None,
+                                 dropout=True))
+    with db.cursor() as cur:
+        cur.execute("""INSERT INTO hqp_benchmark_points (run_id, rate_hz, filter, shaper, src_rate,
+                         src_channels, result, sample_id)
+                       VALUES (%s, 11289600, 'poly-sinc-gauss-hires-mp', 'ASDM7ECv3', 5644800, 2,
+                               'dropout', %s)""", (_run_row(db), sid))
+    known = hqp_load.keeps_up(_ctx(db))
+    assert known == {**{(11289600, "poly-sinc-gauss-xla", sh, 44100, 2): ok
+                        for sh, ok in (("A", True), ("B", False), ("C", False), ("D", False))},
+                     (11289600, "poly-sinc-gauss-hires-mp", "ASDM7ECv3", 5644800, 2): False,
+                     (11289600, "FIR2/XFi", "ASDM7ECv3", 5644800, 2): False}
+    assert hqp_load.keeps_up(_ctx(db, engine="6.2.4")) == {}
+
+
+def _dropped(conn, speed, **kw):
+    """A benchmark point that dropped out — however its run ended."""
+    return hqp_load.write(_sample(conn, speed, source="benchmark", dropout=True, settled=False, **kw))
+
+
+def test_the_boundary_is_the_speed_the_point_dropped_out_at_not_the_listens_after(db):
+    # the rollup's p10 takes in every listen after the benchmark point: twenty
+    # at 2× would have read as a dropout at ~2× and reclassed the whole host
+    _dropped(db, 1.3, shaper="A")
+    for _ in range(20):
+        hqp_load.write(_sample(db, 2.0, shaper="A"))
+    th = hqp_load.thresholds(_ctx(db))
+    assert th["dropout_speed"] == pytest.approx(1.3) and th["no"] == 1.35
+
+
+def test_the_boundary_comes_from_points_that_dropped_out_on_this_build_and_mode(db):
+    _dropped(db, 1.6, shaper="P", mode="PCM")
+    with db.cursor() as cur:                       # another build's
+        cur.execute("UPDATE hqp_endpoints SET hqp_engine = '6.1.0'")
+    _dropped(db, 1.4, shaper="Q")
+    with db.cursor() as cur:
+        cur.execute("UPDATE hqp_endpoints SET hqp_engine = '6.2.3'")
     assert hqp_load.thresholds(_ctx(db)) == {"ok": 1.25, "no": 1.0, "dropout_speed": None}
-    _run_row(db, outcome="cancelled", finished_at=now, dropout_speed=1.12)
+    # a run a trial-mode Embedded cut short still says where this host gives up
+    _dropped(db, 1.12, shaper="A")
     assert hqp_load.thresholds(_ctx(db)) == {"ok": 1.44, "no": 1.15, "dropout_speed": pytest.approx(1.12)}
     assert hqp_load.thresholds(_ctx(db, mode="PCM"))["no"] == 1.65
+    # a key measured again without dropping out no longer counts ...
+    _dropped(db, 1.3, shaper="B")
+    assert hqp_load.thresholds(_ctx(db))["no"] == 1.35
+    hqp_load.write(_sample(db, 2.4, shaper="B", source="benchmark", dropout=False, settled=True))
+    assert hqp_load.thresholds(_ctx(db))["no"] == 1.15
+    # ... and neither does one past the retention
+    with db.cursor() as cur:
+        cur.execute("UPDATE hqp_dsp_speed SET bench_at = now() - interval '100 days' WHERE shaper = 'A'")
+    assert hqp_load.thresholds(_ctx(db))["dropout_speed"] is None
 
 
 def test_headroom_classes_by_axis_and_the_hosts_own_boundary(db):
@@ -364,13 +424,9 @@ def test_headroom_classes_by_axis_and_the_hosts_own_boundary(db):
     other = hqp_load.headroom(_ctx(db), rate_out=cur_r, filter=cur_f, shaper=cur_s,
                               src_rate=96000, src_channels=2)
     assert (other["filters"], other["shapers"], other["rates"]) == ({}, {}, {})
-    # a run that dropped out at 1.12× moves "no" just above it on this host
-    with db.cursor() as cur:
-        cur.execute("""INSERT INTO hqp_benchmark_runs (hqp_endpoint_id, hqp_engine, mode, points_planned,
-                         finished_at, outcome, dropout_speed, pre_mode, pre_rate, pre_filter, pre_filter1x,
-                         pre_shaper, pre_volume)
-                       VALUES (%s, '6.2.3', 'SDM (DSD)', 10, now(), 'done', 1.12, 2, 3, 53, 49, 21, -3)""",
-                    (db.endpoint_id,))
+    # a point that dropped out at 1.12× (from a 96 kHz source: on no picker
+    # here) moves "no" just above it on this host
+    _dropped(db, 1.12, filter="sinc-M", src_rate=96000)
     hr = hqp_load.headroom(_ctx(db), rate_out=cur_r, filter=cur_f, shaper=cur_s,
                            src_rate=44100, src_channels=2)
     assert hr["thresholds"] == {"ok": 1.44, "no": 1.15, "dropout_speed": pytest.approx(1.12)}
@@ -422,10 +478,13 @@ def test_local_cuda_reads_hqplayers_engine_setting(tmp_path, monkeypatch):
     from playback import hqp_diagnostics
     monkeypatch.setattr(hqp_diagnostics, "local_log_dir", lambda: tmp_path)
     assert hqp_library.local_cuda() == (False, None)
-    for value, expect in (("1", "full"), ("0", "off"), ("2", None)):
+    # the three states of HQPlayer's CUDA box as Desktop 6.2.3 writes them,
+    # and a value never seen: not known, not the answer before it
+    for i, (value, expect) in enumerate((("1", "full"), ("convolution", "convolution"),
+                                         ("0", "off"), ("2", None)), start=1):
         path = tmp_path / "settings.xml"
         path.write_text(f'<?xml version="1.0"?><hqplayer><engine cuda="{value}" type="asio"/></hqplayer>')
-        os.utime(path, ns=(0, len(value) + int(value) * 1000))      # a new version of the file
+        os.utime(path, ns=(0, i * 1000))                            # a new version of the file
         assert hqp_library.local_cuda() == (True, expect)
     # a data folder that is there but cannot be read (a mount that dropped)
     monkeypatch.setattr(hqp_diagnostics, "local_log_dir", lambda: tmp_path / "gone")

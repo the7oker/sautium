@@ -166,7 +166,12 @@ services:
         condition: service_healthy
     # No GPU reservation — Apple Silicon GPU (MPS) is not available inside Docker
     restart: unless-stopped
-    command: uvicorn main:app --host 0.0.0.0 --port 8000 --reload
+    # Docker kills a container ~3 s after SIGTERM unless told otherwise
+    # (Docker 29, measured 2026-10-03); the backend's shutdown needs more —
+    # a benchmark run puts the owner's HQPlayer back. The Web UI's event
+    # streams never end on their own: 2 s for them, then the shutdown runs.
+    stop_grace_period: 10s
+    command: uvicorn main:app --host 0.0.0.0 --port 8000 --reload --timeout-graceful-shutdown 2
 
 networks:
   sautium-network:

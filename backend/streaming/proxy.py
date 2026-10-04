@@ -39,6 +39,7 @@ from .events import preview_events
 logger = logging.getLogger(__name__)
 
 _UNSET_TIMEOUT = object()   # wait_ready sentinel: "use the proxy default"
+UNSATISFIABLE = object()    # parse_byte_range: a span that starts past the end
 _HIT_TOKENS = 256           # tokens whose requests are remembered
 _HITS_PER_TOKEN = 16
 
@@ -89,6 +90,32 @@ class _Entry:
     # request that made it still owns it (a start_session still pre-buffering, an
     # owned m4a transcode); a bound entry dies with its generation.
     generation: Optional[int] = None
+
+
+
+def parse_byte_range(header: Optional[str], total: int):
+    """The span a Range header asks for, (start, end) inclusive: None for
+    none, or one a server ignores (a malformed or a multi-range header — the
+    whole body answers it); UNSATISFIABLE for one past the end, answered 416
+    and never with the whole body: HQPlayer resumes a stream cut short with
+    "bytes=<offset>-" and APPENDS what comes back, so the whole file served
+    for an offset at its end fed it the file again and again (Embedded
+    6.2.3, 2026-10-03). "bytes=-N" is the last N bytes. The media proxy and
+    the browser output's media route answer with it alike."""
+    if not (header and header.startswith("bytes=")):
+        return None
+    s, _, en = header[len("bytes="):].partition("-")
+    try:
+        if not s:
+            n = int(en)
+            return (max(0, total - n), total - 1) if n > 0 and total else UNSATISFIABLE
+        start = int(s)
+        end = min(int(en), total - 1) if en else total - 1
+    except ValueError:
+        return None
+    if start >= total:
+        return UNSATISFIABLE
+    return (start, end) if start <= end else None
 
 
 class MediaProxy:
@@ -814,19 +841,13 @@ def _make_handler(proxy: MediaProxy):
             self.send_header("transferMode.dlna.org", "Streaming")
 
         def _parse_range(self, total: int):
-            rng = self.headers.get("Range")
-            if not (rng and rng.startswith("bytes=")):
-                return None
-            try:
-                s, _, en = rng[len("bytes="):].partition("-")
-                start = int(s) if s else 0
-                end = int(en) if en else total - 1
-                end = min(end, total - 1)
-                if 0 <= start <= end:
-                    return start, end
-            except ValueError:
-                pass
-            return None
+            return parse_byte_range(self.headers.get("Range"), total)
+
+        def _unsatisfiable(self, total: int):
+            self.send_response(416)
+            self.send_header("Content-Range", f"bytes */{total}")
+            self.send_header("Content-Length", "0")
+            self.end_headers()
 
         def _serve_file(self, token: str, *, body: bool):
             fe = proxy.file_entry(token)
@@ -847,6 +868,9 @@ def _make_handler(proxy: MediaProxy):
 
         def _serve_disk_file(self, path: str, mime: str, size: int, *, body: bool):
             span = self._parse_range(size)
+            if span is UNSATISFIABLE:
+                self._unsatisfiable(size)
+                return
             if span:
                 start, end = span
                 self.send_response(206)
@@ -977,19 +1001,11 @@ def _make_handler(proxy: MediaProxy):
                 return
             data = e.audio.data
             total = len(data)
-            rng = self.headers.get("Range")
-            start, end = 0, total - 1
-            partial = False
-            if rng and rng.startswith("bytes="):
-                try:
-                    s, _, en = rng[len("bytes="):].partition("-")
-                    start = int(s) if s else 0
-                    end = int(en) if en else total - 1
-                    end = min(end, total - 1)
-                    partial = 0 <= start <= end
-                except ValueError:
-                    partial = False
-            if partial:
+            span = self._parse_range(total)
+            if span is UNSATISFIABLE:
+                self._unsatisfiable(total)
+            elif span:
+                start, end = span
                 self._send_headers(e, end - start + 1, full=False, body=True,
                                    start=start, end=end, total=total)
                 self._write(data[start:end + 1])

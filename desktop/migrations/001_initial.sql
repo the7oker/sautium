@@ -86,7 +86,9 @@ EXCEPTION WHEN duplicate_object THEN NULL; END $$;
 -- HQPlayer's CUDA offload ('full' = filters and convolution on the GPU,
 -- 'convolution' = only convolution), where a DSP sample came from, how a
 -- benchmark run ended ('interrupted' = the process died mid-run), and how
--- one of its points did.
+-- one of its points did ('unstarted' = HQPlayer still building it past the
+-- run's build limit, once a setting that started earlier in the run started
+-- again: this host does not get it going, or hung).
 DO $$ BEGIN
     CREATE TYPE hqp_cuda AS ENUM ('off', 'full', 'convolution');
 EXCEPTION WHEN duplicate_object THEN NULL; END $$;
@@ -100,7 +102,8 @@ DO $$ BEGIN
 EXCEPTION WHEN duplicate_object THEN NULL; END $$;
 
 DO $$ BEGIN
-    CREATE TYPE hqp_point_result AS ENUM ('measured', 'unsettled', 'dropout', 'refused', 'failed');
+    CREATE TYPE hqp_point_result AS ENUM ('measured', 'unsettled', 'dropout', 'refused',
+                                          'unstarted', 'failed');
 EXCEPTION WHEN duplicate_object THEN NULL; END $$;
 
 DO $$ BEGIN
@@ -454,7 +457,7 @@ CREATE TABLE IF NOT EXISTS hqp_benchmark_points (
     src_rate INTEGER NOT NULL,
     src_channels SMALLINT NOT NULL,
     result hqp_point_result NOT NULL,
-    note TEXT,                              -- HQPlayer's refusal, or why it failed
+    note TEXT,                              -- HQPlayer's refusal, or why it did not play
     sample_id BIGINT REFERENCES hqp_dsp_samples(id) ON DELETE SET NULL,
     at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP
 );

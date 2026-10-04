@@ -19,7 +19,7 @@ import media_urls
 from config import settings
 from db_pool import db_execute, db_query_one
 from streaming import transcode
-from streaming.proxy import MIME_BY_FORMAT
+from streaming.proxy import MIME_BY_FORMAT, UNSATISFIABLE, parse_byte_range
 
 logger = logging.getLogger(__name__)
 
@@ -28,19 +28,8 @@ router = APIRouter(prefix="/api/player/media", tags=["media"])
 _CHUNK = 262144
 
 
-def _parse_range(request: Request, total: int) -> Optional[tuple[int, int]]:
-    rng = request.headers.get("range")
-    if not (rng and rng.startswith("bytes=")):
-        return None
-    try:
-        s, _, e = rng[len("bytes="):].partition("-")
-        start = int(s) if s else 0
-        end = min(int(e), total - 1) if e else total - 1
-        if 0 <= start <= end:
-            return start, end
-    except ValueError:
-        pass
-    return None
+def _unsatisfiable(total: int) -> Response:
+    return Response(status_code=416, headers={"Content-Range": f"bytes */{total}"})
 
 
 def _range_headers(start: int, end: int, total: int, mime: str) -> dict:
@@ -63,7 +52,9 @@ def _serve_disk(path: str, mime: str, request: Request):
         db_execute("NOTIFY sautium_notices")
         raise HTTPException(status_code=404, detail="file missing on disk")
     notices_recheck("library.mount_missing")   # served = the folder is back
-    span = _parse_range(request, total)
+    span = parse_byte_range(request.headers.get("range"), total)
+    if span is UNSATISFIABLE:
+        return _unsatisfiable(total)
     start, end = span if span else (0, total - 1)
 
     def reader():
@@ -178,7 +169,9 @@ def media_preview(token: str, request: Request,
     data, mime = e.audio.data, e.audio.mime
     total = len(data)
 
-    span = _parse_range(request, total)
+    span = parse_byte_range(request.headers.get("range"), total)
+    if span is UNSATISFIABLE:
+        return _unsatisfiable(total)
     if span:
         start, end = span
         return Response(data[start:end + 1], status_code=206,

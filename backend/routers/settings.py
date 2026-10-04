@@ -2431,6 +2431,17 @@ def forget_hqp_library(endpoint_id: int) -> Dict[str, Any]:
                                                     "cancel it first")
     if not db_query_one("SELECT 1 AS ok FROM hqp_endpoints WHERE id = %(e)s", {"e": endpoint_id}):
         raise HTTPException(status_code=404, detail="No such HQPlayer library")
+    driven = hqp_library.endpoint_by_address(app_settings.hqplayer_host, app_settings.hqplayer_port)
     stats = hqp_library.forget_endpoint_id(endpoint_id)
+    if driven is not None and driven["id"] == endpoint_id:
+        # The HQPlayer the node drives stays the owner's pick without its
+        # library: registered afresh — no library, nothing measured — and
+        # the attached backend looks its row up again. Left unregistered,
+        # the benchmark refused it until the Output picker was opened
+        # (2026-10-03).
+        hqp_library.request_sync(app_settings.hqplayer_host, app_settings.hqplayer_port)
+        from playback.manager import manager
+        if manager.active is not None and manager.active.id == "hqplayer":
+            manager.active.endpoint_forgotten()
     notify_library_subscribers()
     return {"success": True, **stats}

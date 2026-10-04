@@ -261,11 +261,12 @@ def _benchmark_block(ep: Optional[dict], state: Optional[dict], lists: dict,
     kinds = {hqp_benchmark.mode_kind(m["name"]) for m in lists["modes"]} - {None}
     out["other_modes"] = sorted(kinds - {kind})
     if kind is not None:
-        points = hqp_benchmark.plan(ep, kind=kind, mode_name=mode, state=state,
-                                    filters=lists["filters"], shapers=lists["shapers"],
-                                    rates=lists["rates"])
-        out["estimate"] = {"mode": mode, "points": len(points),
-                           "seconds": round(len(points) * hqp_benchmark.pace(ep["id"]))}
+        grid = hqp_benchmark.plan(ep, kind=kind, mode_name=mode, state=state,
+                                  filters=lists["filters"], shapers=lists["shapers"],
+                                  rates=lists["rates"])
+        asks = grid.asks()
+        out["estimate"] = {"mode": mode, "points": asks,
+                           "seconds": round(asks * hqp_benchmark.pace(ep["id"]))}
     return out
 
 

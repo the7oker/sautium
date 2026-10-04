@@ -44,7 +44,12 @@ logger = logging.getLogger(__name__)
 
 OBSERVE_S = 10.0       # watched this long after the first transport command
 FETCH_WINDOW_S = 5.0   # an http hand-over HQPlayer has not fetched by then never reached us
-EXTEND_S = 10.0        # once, when only the status socket missed the window
+# ... and up to this long while HQPlayer is still making the start — it says
+# it plays, or its control port is silent, and the position has not moved: a
+# long filter initialises for seconds before any audio leaves (sinc-MGa at
+# DSD256 on a laptop's CPU: 5–7 s, the port answering no Status meanwhile —
+# observed 2026-10-03; the WSL2 hop flaps for seconds while music plays on).
+START_LIMIT_S = 60.0
 RING_SIZE = 20
 LEDGER_SIZE = 2048
 LOG_LINES = 200
@@ -155,11 +160,12 @@ class Attempt:
     misses: list = field(default_factory=list)
     error: Optional[str] = None          # raised before a command reached HQPlayer
     end: Optional[str] = None            # window | hard | owner | superseded | shutdown
-    extended: bool = False
     facts: Optional[dict] = None
     verdict: Optional[dict] = None
     hqp_log: Optional[dict] = None
-    cleared: bool = False                # an `unreachable` that HQPlayer has since answered
+    # A failure HQPlayer has since gone past — answered (an `unreachable`),
+    # or played that very slot (note_playing): it explains nothing any more.
+    cleared: bool = False
 
     def record(self, o: CommandOutcome) -> None:
         """A command this intent sent, with HQPlayer's answer."""
@@ -199,10 +205,12 @@ class Attempt:
                 "mode": status.active_mode, "filter": status.active_filter,
                 "shaper": status.active_shaper, "rate": status.active_rate})
 
-    def miss(self, message: str) -> None:
+    def miss(self, message: str, *, silent: bool = False) -> None:
+        """A status read that got nothing: `silent` when HQPlayer took it and
+        did not answer (busy building), not when it refused or closed."""
         with _lock:
             if self.t0 is not None:
-                self.misses.append({"ts": time.time(), "message": message})
+                self.misses.append({"ts": time.time(), "message": message, "silent": silent})
 
     def intent_done(self, exc: Optional[BaseException]) -> None:
         """The intent returned: a fact that settles it now — a command that
@@ -224,22 +232,33 @@ class Attempt:
                 self.end = why
 
     def due(self, now: float) -> Optional[str]:
-        """Why it closes now, or None while it is still watching."""
+        """Why it closes now, or None while it is still watching: the
+        window, and past it a start HQPlayer is still making (see
+        START_LIMIT_S) — judged before the audio leaves, a play that
+        initialises for seven seconds read as nothing explaining it."""
         with _lock:
             if self.end is not None:
                 return self.end
-            if self.t0 is None:
+            if self.t0 is None or now < self.t0 + OBSERVE_S:
                 return None
-            deadline = self.t0 + OBSERVE_S + (EXTEND_S if self.extended else 0.0)
-            if now < deadline:
-                return None
-            if not self.extended and not self.ticks and self.misses:
-                # Only the status socket missed (the WSL2 hop flaps for
-                # seconds while the music plays on): one more window.
-                self.extended = True
+            if now < self.t0 + START_LIMIT_S and self._starting():
                 return None
             self.end = "window"
             return self.end
+
+    def _starting(self) -> bool:
+        """The position has not moved, and HQPlayer's last word was that it
+        plays, a state its SDK does not name (Embedded said 5 while it
+        started a play) — or silence: it took the read and said nothing (a
+        build). Refused or closed is HQPlayer away, judged at the window.
+        Called under _lock."""
+        if _moved(self.ticks):
+            return False
+        last_tick = self.ticks[-1] if self.ticks else None
+        last_miss = self.misses[-1] if self.misses else None
+        if last_miss is not None and (last_tick is None or last_miss["ts"] > last_tick["ts"]):
+            return last_miss.get("silent", False)
+        return last_tick is not None and last_tick["state"] in ("playing", "unknown")
 
     def snapshot(self) -> dict:
         with _lock:
@@ -292,6 +311,29 @@ def note_answered() -> bool:
         if newest is None or newest.cleared or newest.verdict["code"] != "unreachable":
             return False
         newest.cleared = True
+    return _run_changed()
+
+
+def note_playing(slot: int, generation: int) -> bool:
+    """HQPlayer plays this slot of this queue, its position moving and its
+    speed keeping up: a failure judged on that very slot explains nothing
+    any more — it is cleared, Now Playing stops offering it and a failing
+    run ends. Without this, the end of an album brought back a failure from
+    its start: a failed attempt is held back only while something plays.
+    Returns whether the run changed."""
+    with _lock:
+        # Every failure judged on this slot of this queue, not the newest
+        # alone: an unreachable attempt closed after it (a Play pressed again
+        # while HQPlayer was still silent) kept the failure for good
+        failed = [a for a in _ring
+                  if a.verdict and not a.cleared
+                  and a.verdict["code"] not in ("played", "interrupted")
+                  and (a.facts or {}).get("slot") == slot
+                  and (a.facts or {}).get("generation") == generation]
+        if not failed:
+            return False
+        for a in failed:
+            a.cleared = True
     return _run_changed()
 
 
@@ -395,6 +437,13 @@ def _ran_out(tick: dict) -> bool:
     return bool(tick.get("length")) and tick["position"] >= tick["length"] - 2.0
 
 
+def _moved(ticks: list) -> bool:
+    """The position moved while HQPlayer said it played: audio left."""
+    playing = [t for t in ticks if t["state"] == "playing"]
+    return (any(t["position"] >= 1.0 for t in playing)
+            or (len(playing) >= 2 and playing[-1]["position"] > playing[0]["position"]))
+
+
 def _dsp_changed(ticks: list) -> bool:
     """Someone changed the DSP while the track was loaded — HQPlayer stops to
     rebuild, so the stop that follows is the owner's, whoever sent it (the
@@ -420,9 +469,7 @@ def verdict(f: dict) -> dict:
     hits = ([h for h in f["proxy"] if h["ts"] >= since]
             if mode in HTTP_MODES and f.get("proxy") is not None else None)
     playing = [t for t in ticks if t["state"] == "playing"]
-    started = (bool(playing)
-               and (any(t["position"] >= 1.0 for t in playing)
-                    or (len(playing) >= 2 and playing[-1]["position"] > playing[0]["position"]))
+    started = (_moved(ticks)
                and (not pl.get("read") or (pl.get("at_slot_ours")
                                            and (not f.get("expected_uri") or pl.get("at_slot_expected"))))
                and (hits is None or any(h.get("bytes", 0) > 0 for h in hits)))

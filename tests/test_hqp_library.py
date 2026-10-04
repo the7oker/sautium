@@ -9,6 +9,7 @@ variant. Skipped where there is no cluster.
 
 import os
 import sys
+import time
 from pathlib import Path
 
 import pytest
@@ -27,7 +28,8 @@ PG = dict(host=os.environ.get("SAUTIUM_TEST_PGHOST", "postgres"),
           password=os.environ.get("SAUTIUM_TEST_PGPASSWORD", "supervisor"))
 DBNAME = "sautium_hqp_library_test"
 PI = ("192.168.1.53", 4321)
-PI_INFO = {"name": "HQPlayerEmbedded", "product": "Signalyst HQPlayer Embedded"}
+PI_INFO = {"name": "HQPlayerEmbedded", "product": "Signalyst HQPlayer Embedded",
+           "version": "6", "engine": "6.2.3", "platform": "Linux"}
 
 PRODIGY_DIR = "Electronic/Big beat/The Prodigy/[Vinyl]/Albums/Music for the Jilted Generation"
 
@@ -257,6 +259,34 @@ def test_the_same_library_at_a_new_address_keeps_its_row(db, monkeypatch):
     assert gone["forgotten"] == 2
     assert _one(db, "SELECT count(*) FROM hqp_endpoints") == 1
     assert _one(db, "SELECT count(*) FROM hqp_library_files") == 0
+
+
+def test_forgetting_the_driven_hqplayers_library_keeps_it_registered(db, monkeypatch):
+    """The owner's explicit goodbye to the library of the HQPlayer the node
+    drives takes the library and what was measured on it — not the pick: a
+    fresh row, no library, and nothing imported again."""
+    from config import settings
+    from routers import settings as settings_router
+    monkeypatch.setattr(hqp_library, "library_hash", lambda h, p: "h1")
+    monkeypatch.setattr(hqp_library, "fetch_library", lambda h, p: PRODIGY_ONLY)
+    monkeypatch.setattr(hqp_library, "get_info", lambda h, p: PI_INFO)
+    monkeypatch.setattr(settings, "hqplayer_host", PI[0])
+    monkeypatch.setattr(settings, "hqplayer_port", PI[1])
+    assert hqp_library.sync(*PI)["added"] == 2
+    old = hqp_library.endpoint_by_address(*PI)["id"]
+    assert settings_router.forget_hqp_library(old)["forgotten"] == 2
+    deadline = time.monotonic() + 10
+    while time.monotonic() < deadline and hqp_library.endpoint_by_address(*PI) is None:
+        time.sleep(0.05)
+    fresh = hqp_library.endpoint_by_address(*PI)
+    assert fresh is not None and fresh["id"] != old and fresh["library_hash"] is None
+    assert _one(db, "SELECT count(*) FROM hqp_library_files") == 0
+    # with its build: a listen's DSP sample is written for a row that has one
+    deadline = time.monotonic() + 10
+    while time.monotonic() < deadline and _one(
+            db, f"SELECT hqp_engine FROM hqp_endpoints WHERE id = {fresh['id']}") is None:
+        time.sleep(0.05)
+    assert _one(db, f"SELECT hqp_engine FROM hqp_endpoints WHERE id = {fresh['id']}") == "6.2.3"
 
 
 def test_native_plays_follow_the_output(db, monkeypatch):

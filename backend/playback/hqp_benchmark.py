@@ -8,22 +8,39 @@ one HQPlayer is in; the other only when the owner asks for it — and only
 through the points no sample and no earlier run covers yet, so a repeat run
 after weeks of listening takes minutes. The grid (build_grid):
 
-- PCM: every filter × {the owner's output rate, the highest} × {44.1, 96 kHz
-  sources}, with the owner's dither;
-- SDM: every modulator × every DSD rate on a 44.1 kHz source with the owner's
-  filter, and every filter at the owner's rate with the owner's modulator;
+- PCM: every filter on a 44.1 and a 96 kHz source, with the owner's dither;
+- SDM: every modulator on a 44.1 kHz source with the owner's filter, and
+  every filter at the owner's rate with the owner's modulator — once the
+  owner's own setting keeps up here (the filters measure the modulator
+  otherwise);
 - a DSD-source slice when the owner has listened to a DSD file that is still
   there (that file is the source; none is generated);
+- a source plays at the rates of its own family (same_family) and at the
+  owner's rate: another family takes an asynchronous conversion some
+  filters refuse, and nobody plays a 44.1 kHz source at 48k × 1024 by mistake;
 - the owner's own setting first and again last — the thermal drift check;
-  on an endpoint's first run the probe row right after it: every modulator
-  (in PCM every filter) at the highest rate, where the host's dropout
-  boundary shows (which one is heaviest is what is being measured).
+- each modulator (in PCM each filter) on a source is a ladder over the
+  rates of its family (LADDER_START): measured from DSD256 (PCM: 8×, 352.8
+  or 384 kHz) up while it keeps up, and below that only while the rate
+  above it does not — that rung next, before anything else; a rate a
+  neighbour on its ladder answers for is never measured (a setting's speed
+  falls as its rate rises), and the host's dropout boundary shows where the
+  ladders stop. The starts and every point of a single rate go first, then
+  the steps by their distance from the start, down before up, each step
+  shuffled.
 
 Each point leaves a row in hqp_benchmark_points by what it ASKED — measured,
-unsettled, dropped out, refused by HQPlayer, or failed — and a later run
-skips every point asked before that did not fail (hqp_load.covered): a
-combination HQPlayer refuses is never a sample, and an adaptive output rate
-plays another rate than the one asked.
+unsettled, dropped out, refused by HQPlayer, never started here, or
+failed — and a later run skips every point asked before that did not fail
+(hqp_load.covered): a combination HQPlayer refuses is never a sample, and an
+adaptive output rate plays another rate than the one asked. HQPlayer refuses
+a combination either at the Set* command or at Play, stopping at once
+("Requested filter not possible with this rate combination …" in its log):
+a point stopped again after its one re-Play, never having moved, is refused
+too. HQPlayer builds a setting in silence, for minutes at times: a point
+waits it out and is measured, the build counted into its start; one that
+keeps HQPlayer silent past BUILD_LIMIT_S did not start on this host at all
+(or HQPlayer hung) — not asked again, and the run ends.
 
 The signals are pink noise at about -20 dBFS, 24-bit stereo FLAC — the
 decoder path owned files take — made once into the node's data dir and
@@ -34,10 +51,12 @@ One owner of HQPlayer at a time: the run borrows the output
 (PlaybackManager.hold) — the backend is detached as an output switch
 detaches it, every other Sautium path is refused until the output comes
 back, and the canonical queue mirrors back into HQPlayer when it does. The
-run drives HQPlayer on a connection of its own (_Link), which survives
-HQPlayer dropping it: a command that finds it gone reconnects, and what
-HQPlayer holds is made again before anything plays — it may have restarted
-under the run. HQPlayer's volume goes to the bottom of its range first and
+run drives HQPlayer on a connection of its own (_Link), which waits out
+HQPlayer's silence while it builds a setting — its control port answers
+nothing until the build is done, and a command given up on would still be
+carried out later, out of order — and survives HQPlayer dropping it: a
+command that finds it gone reconnects, and what HQPlayer holds is made
+again before anything plays — it may have restarted under the run. HQPlayer's volume goes to the bottom of its range first and
 is read back: <VolumeMute/> is a toggle no reply reports, so it cannot be
 trusted with the owner's ears. Everything the run changed is put back at the
 end, on cancel, on failure and when the app stops (shutdown); a run cut
@@ -55,6 +74,7 @@ thresholds).
 
 import logging
 import random
+import socket
 import threading
 import time
 from dataclasses import dataclass, replace
@@ -86,12 +106,32 @@ _SIGNAL_DIR = Path(__file__).resolve().parent.parent / "data" / "hqp_bench"
 # the value less than SETTLE_TREND across them); at SETTLE_CAP_S of moving
 # position record them anyway, marked unsettled.
 STABLE_AFTER_S = 5.0
+# An output that keeps no time (HQPlayer's ALSA null device) plays the
+# signal at the DSP's own speed — 120 s out in five on a Pi 5 at 24×
+# (2026-10-04): its stable seconds are counted in audio as well, and the
+# signal ending is no failure. Twice real time is past any DAC's clock.
+OUTRAN = 2.0
 SETTLE_WINDOW = 5
 SETTLE_BAND = 0.02
 SETTLE_TREND = 0.01
 SETTLE_CAP_S = 15.0
 # Play until the position moves: a heavy filter initialises for seconds.
 START_DEADLINE_S = 60.0
+# How long the run waits on one answer before it asks again on a new
+# connection. Building a setting blocks HQPlayer's control port from the
+# start until the build is done — on the laptop (Desktop 6.2.3, 2026-10-03)
+# 10 to 27 s for sinc-MGa at 512× and 1024×, 56 s for poly-sinc-mp and
+# 3 min 13 s for poly-sinc-long-lp at 44.1k × 256 — and a command given up
+# on is not withdrawn: HQPlayer carries it out once it is free, after
+# anything sent since (a Stop sent to set it up again stopped the setting
+# just built, and an interrupted build failed inside HQPlayer). So a point
+# asks for <Status/> again until HQPlayer answers (_outlast); HQPlayer
+# keeps a design it built, and the same setting starts in a second after.
+ANSWER_WAIT_S = 45.0
+# Building this long — silent, or answering that it plays with nothing out
+# yet (_building, Embedded) — this host does not get the setting going: the
+# point is `unstarted`; a silent HQPlayer is taken for hung, and the run ends.
+BUILD_LIMIT_S = 600.0
 # A point that has not decided by then never will (a frozen output that
 # still says it plays).
 POINT_DEADLINE_S = 90.0
@@ -100,10 +140,18 @@ POINT_DEADLINE_S = 90.0
 # input holds, the position frozen for STALLED_TICKS, or the transport
 # stopped. Before the readings the buffer is still filling and the average
 # still holds the initialisation, so the same signs count only under 1×.
+# A tick counts only when HQPlayer refreshed its <Status/> since the last
+# one: Embedded refreshes it per output block — position, speed and fills
+# frozen together for up to 7.6 s at 32× (Pi 5, engine 6.2.3, 2026-10-03),
+# where Desktop refreshes it every second — so the same snapshot again is
+# no news, and a frozen position is a refreshed one that did not move.
 DROPOUT_FILL = 0.1
 DRAINED_TICKS = 3
 STALLED_TICKS = 2
 TICK_S = 1.0
+# Stopped this many ticks in a row, the position never having moved: HQPlayer
+# did not start it — once to start it again, twice to call it refused.
+STOP_TICKS = 3
 # A SelectTrack on a stopped HQPlayer needs a beat to register before Play
 # honours it (the resume watcher's quirk, 04c46b8): the run reads <Status/>
 # until it names the slot, this long at most.
@@ -112,15 +160,33 @@ SELECT_POLL_S = 0.2
 # Seconds a point takes before this endpoint has run one: start, five stable
 # seconds, five readings.
 POINT_S = 14.0
+# A ladder — one modulator (PCM: one filter) on one source across the rates
+# of its family — starts where most hosts keep up and climbs while the
+# setting does (Valerii, 2026-10-03): its speed falls as the rate rises
+# (every ladder measured on the laptop, ASDM7ECv2 5.47× → 2.79× → 2.11× →
+# 1.09× → 0.64× from 64× to 1024×), so nothing is learnt above a rate that
+# is tight or too slow, nor below one that keeps up. It starts at
+# LADDER_START × the family's base rate (DSD256 and 352.8/384 kHz) and goes
+# below only while the rate above does not keep up — a weaker host, where
+# that rung is measured next, before anything else. Refusals say nothing
+# about speed and stop nothing: HQPlayer refuses the AHM modulators from 64×
+# to 512× and runs them at 1024×.
+LADDER_START = {"sdm": 256, "pcm": 8}
 # A dropped connection is tried again at once, then after these pauses.
 _RECONNECT_PAUSES = (1.0, 2.0, 4.0, 8.0)
 _DB_EPS = 0.05                    # volumes read back within this are the same
+# Putting HQPlayer back waits this long for each answer: a cancel can land in
+# a build HQPlayer is silent through, and what it does not answer at once is
+# left to recover — never waited out ANSWER_WAIT_S a command, nor sent again.
+RESTORE_ANSWER_S = 5.0
 
 _lock = threading.Lock()
 _cancel = threading.Event()
 # The app is stopping: putting HQPlayer back does not wait for it to come back.
 _halt = threading.Event()
 _thread: Optional[threading.Thread] = None
+# The run's own connection, for a cancel to wake a read it is waiting on.
+_live: Optional["_Link"] = None
 _state: Dict[str, Any] = {"running": False, "cancel_requested": False, "endpoint_id": None,
                           "mode": None, "point": 0, "total": 0, "point_label": "",
                           "eta_s": None, "started_at": None, "outcome": None, "note": None}
@@ -262,6 +328,47 @@ class Point:
     label: str
     key: tuple                # what was asked: (rate_hz, filter, shaper, src_rate, src_channels)
     own: bool = False
+    ladder: Optional[tuple] = None    # a ladder's rung: (filter, filter1x, shaper, source)
+    step: int = 0                     # rungs above the ladder's start; below it, negative
+
+
+@dataclass
+class Plan:
+    """A run's points in order; every rung of every ladder, rates ascending
+    and covered ones included, with what is known of them — the run steps
+    down a ladder by these when its start does not keep up."""
+    points: List[Point]
+    rungs: Dict[tuple, List[Point]]
+    known: Dict[tuple, bool]          # key → keeps up here (hqp_load.keeps_up)
+    covered: frozenset
+    # SDM: every filter at the owner's rate with the owner's modulator — what
+    # waits for a setting of the owner's that keeps up here (_points)
+    sweep: frozenset = frozenset()
+
+    def deferred(self, p: Point, known: Dict[tuple, bool]) -> bool:
+        """A filter of the sweep while the owner's own setting does not keep
+        up here: every one would measure the modulator, not the filter (on a
+        Pi 5, ASDM7EC-ul at DSD128 ran 0.26–0.30× under four filters from
+        halfband to long-ip-2s, 2026-10-03). The ladders show what does keep
+        up; the filters wait for it."""
+        return not p.own and p.key in self.sweep and known.get(self.points[0].key) is False
+
+    def asks(self) -> int:
+        """The points a run would ask by what is known now — the estimate's."""
+        return sum(1 for p in self.points if not self.deferred(p, self.known))
+
+
+def same_family(rate_hz: int, src_rate: int) -> bool:
+    """An output rate the source reaches by a whole power of two — its own
+    family (44.1 kHz: 88.2 kHz … 44.1k × 1024). Every filter runs those;
+    another family takes an asynchronous conversion some refuse at Play
+    (sinc-MGa: "Requested filter not possible with this rate combination
+    44100/49152000", Desktop 6.2.3, 2026-10-03)."""
+    high, low = max(rate_hz, src_rate), min(rate_hz, src_rate)
+    if low <= 0 or high % low:
+        return False
+    ratio = high // low
+    return ratio & (ratio - 1) == 0
 
 
 def running_filter(names: Dict[int, str], nx: int, x1: int, src_rate: int) -> str:
@@ -272,9 +379,12 @@ def running_filter(names: Dict[int, str], nx: int, x1: int, src_rate: int) -> st
 
 def build_grid(kind: str, *, filters: List[dict], shapers: List[dict], rates: List[dict],
                current: Dict[str, int], srcs: Dict[str, dict], covered: set,
-               first_run: bool, rng: random.Random) -> List[Point]:
-    """The points of one run (see the module docstring), minus every key
-    already covered — the owner's own setting, first and last, excepted."""
+               keeps_up: Dict[tuple, bool], rng: random.Random) -> Plan:
+    """The points of one run (see the module docstring): the owner's own
+    setting first and last; between them the ladders' starts with every
+    point of one rate, shuffled, then each step up the ladders and down
+    those whose start already does not keep up, each shuffled — less every
+    key covered and every rung a neighbour already answers for."""
     fname = {f["index"]: f["name"] for f in filters}
     sname = {s["index"]: s["name"] for s in shapers}
     hz = {r["index"]: r["rate"] for r in rates}
@@ -291,45 +401,112 @@ def build_grid(kind: str, *, filters: List[dict], shapers: List[dict], rates: Li
     cur_rate, nx, x1, cur_shaper = (current["rate"], current["filterNx"],
                                     current["filter1x"], current["shaper"])
     real_rates = [r["index"] for r in rates if r["rate"] > 0]
-    top = max(real_rates, key=lambda i: hz[i]) if real_rates else cur_rate
-    grid: List[Point] = []
-    probe: List[Point] = []
+
+    def family(src: str) -> List[int]:
+        return [i for i in real_rates if same_family(hz[i], srcs[src]["rate"])]
+
+    def rates_for(src: str) -> List[int]:
+        """Its family's rates and the owner's own, whatever its family —
+        never under a PCM source's own rate: HQPlayer does not downsample PCM
+        ("clHQPlayerEngine::Execute(): lInRate > lOutRate", then it stops —
+        Embedded 6.2.3, a 96 kHz source at 48 kHz, 2026-10-03). A DSD source
+        goes down to PCM rates, which is its conversion."""
+        floor = 0 if src == "dsd" else srcs[src]["rate"]
+        owners = [cur_rate] if cur_rate in real_rates else []
+        return [i for i in dict.fromkeys(family(src) + owners) if hz[i] >= floor]
+
+    ladders: Dict[tuple, Dict[int, Point]] = {}
+    singles: List[Point] = []
+
+    def add(rate: int, f_nx: int, f_x1: int, shaper: int, src: str) -> None:
+        """A rate of the source's family is a rung of its ladder; an
+        automatic rate, or the owner's from another family, a point alone."""
+        p = point(rate, f_nx, f_x1, shaper, src)
+        if p.rate_hz and same_family(p.rate_hz, srcs[src]["rate"]):
+            ladders.setdefault((f_nx, f_x1, shaper, src), {})[p.rate_hz] = p
+        else:
+            singles.append(p)
+
+    sweep: List[Point] = []
     if kind == "pcm":
-        for f in filters:
-            for rate in dict.fromkeys((cur_rate, top)):
-                for src in ("pcm44", "pcm96"):
-                    p = point(rate, f["index"], f["index"], cur_shaper, src)
-                    (probe if rate == top and src == "pcm44" else grid).append(p)
+        for src in ("pcm44", "pcm96"):
+            for f in filters:
+                for rate in rates_for(src):
+                    add(rate, f["index"], f["index"], cur_shaper, src)
     else:
         for sh in shapers:
-            for rate in real_rates:
-                p = point(rate, nx, x1, sh["index"], "pcm44")
-                (probe if rate == top else grid).append(p)
+            for rate in rates_for("pcm44"):
+                add(rate, nx, x1, sh["index"], "pcm44")
         for f in filters:
-            grid.append(point(cur_rate, f["index"], f["index"], cur_shaper, "pcm44"))
+            sweep.append(point(cur_rate, f["index"], f["index"], cur_shaper, "pcm44"))
+        singles += sweep
     if "dsd" in srcs:
-        for rate in real_rates:
-            grid.append(point(rate, nx, x1, cur_shaper, "dsd"))
+        for rate in rates_for("dsd"):
+            add(rate, nx, x1, cur_shaper, "dsd")
 
     own = point(cur_rate, nx, x1, cur_shaper, "pcm44", own=True)
+    rungs: Dict[tuple, List[Point]] = {}
+    steps: Dict[int, List[Point]] = {0: [p for p in singles if p.key not in covered]}
+    for lid, by_rate in ladders.items():
+        ordered = [by_rate[r] for r in sorted(by_rate)]
+        first = _ladder_start(kind, ordered, srcs[lid[3]]["rate"])
+        ladder = [replace(p, ladder=lid, step=i - first) for i, p in enumerate(ordered)]
+        rungs[lid] = ladder
+        for p in ladder:
+            if p.key == own.key:            # the owner's setting is one of its rungs
+                own = replace(own, ladder=lid, step=p.step)
+        for p in ladder[first:]:
+            if p.key != own.key and p.key not in covered and not _implied(p, ladder, keeps_up):
+                steps.setdefault(p.step, []).append(p)
+        below = _descend(ladder, keeps_up, set(covered))
+        if below is not None:
+            steps.setdefault(below.step, []).append(below)
+
     seen = {own.key}
+    points = [own]
+    for step in sorted(steps, key=lambda n: (abs(n), n > 0)):
+        batch = []
+        for p in steps[step]:
+            if p.key not in seen:
+                seen.add(p.key)
+                batch.append(p)
+        rng.shuffle(batch)
+        points += batch
+    return Plan(points=[*points, own], rungs=rungs, known=dict(keeps_up),
+                covered=frozenset(covered), sweep=frozenset(p.key for p in sweep))
 
-    def fresh(points: List[Point]) -> List[Point]:
-        out = []
-        for p in points:
-            if p.key in seen or p.key in covered:
-                continue
-            seen.add(p.key)
-            out.append(p)
-        return out
 
-    if first_run:
-        probe = fresh(probe)
-        rest = fresh(grid)
-    else:                       # on a later run the probe row is grid like the rest
-        rest, probe = fresh(probe + grid), []
-    rng.shuffle(rest)
-    return [own, *probe, *rest, own]
+def _ladder_start(kind: str, rungs: List[Point], src_rate: int) -> int:
+    """Where a ladder starts: at its highest rung up to LADDER_START × the
+    source family's base rate — its lowest when none is that low."""
+    base = 44100 if src_rate % 11025 == 0 else 48000
+    return max((i for i, p in enumerate(rungs) if p.rate_hz <= LADDER_START[kind] * base),
+               default=0)
+
+
+def _implied(p: Point, rungs: List[Point], known: Dict[tuple, bool]) -> bool:
+    """A neighbour on its ladder already answers for this rung: one below
+    it that does not keep up, or one above it that does."""
+    for r in rungs:
+        k = known.get(r.key)
+        if (k is False and r.rate_hz < p.rate_hz) or (k is True and r.rate_hz > p.rate_hz):
+            return True
+    return False
+
+
+def _descend(rungs: List[Point], known: Dict[tuple, bool], passed: set) -> Optional[Point]:
+    """The next rung down a ladder while nothing at or under its start keeps
+    up: below the lowest rung known not to, the first not yet asked
+    (`passed`: asked, or refused — a refusal says nothing about speed). None
+    once a rung there keeps up, or while none is known not to. A start
+    HQPlayer refused leaves the rungs above to say it: one of them too slow
+    sends the ladder under the start all the same."""
+    under = [r for r in rungs if r.step <= 0]
+    failing = [r for r in rungs if known.get(r.key) is False]
+    if not failing or any(known.get(r.key) is True for r in under):
+        return None
+    lowest = min(r.rate_hz for r in failing)
+    return next((r for r in reversed(under) if r.rate_hz < lowest and r.key not in passed), None)
 
 
 def _fmt_rate(hz: int) -> str:
@@ -358,6 +535,18 @@ def _p10(values: List[float]) -> float:
     return v[lo] + (v[hi] - v[lo]) * (pos - lo)
 
 
+def _building(status: TrackStatus) -> bool:
+    """HQPlayer answers and says it plays, but nothing has come out yet —
+    still building the setting: Embedded on a Pi 5 answers all through a
+    25–70 s build like this (position 0, speed 0, output buffer empty;
+    2026-10-03), where Desktop falls silent. A state the SDK does not name
+    counts as it: Embedded said 5 while it started a play."""
+    return (status.state not in (PlaybackState.STOPPED, PlaybackState.PAUSED,
+                                 PlaybackState.STOPREQ)
+            and status.position <= 0
+            and not status.process_speed and not (status.output_fill or 0) > 0)
+
+
 def _steady(window: List[float]) -> bool:
     """Within the band of their mean and no trend across them."""
     n = len(window)
@@ -372,22 +561,42 @@ def _steady(window: List[float]) -> bool:
 
 class Settle:
     """When one point's readings count — fed one <Status/> per tick from the
-    Play that started it. feed() answers None until it has decided, then a
-    dict: `speed` (the p10 of the accepted readings, or the speed seen just
-    before a dropout), `settled`, `dropout`, `init_s` (Play until the
-    position moved), `settle_s` (the position moving until accepted),
-    `out_fill`/`in_fill` (the lowest seen once it moved), `readings`,
-    `status` (the last one taken while it played); or `failed` with why —
-    a point that failed is measured again by a later run."""
+    select that started it; one HQPlayer has not refreshed since the last is
+    no news (see STALLED_TICKS). feed() answers None until it has decided, then
+    a dict: `speed` (the p10 of the accepted readings, or the speed seen
+    just before a dropout), `settled`, `dropout`, `init_s` (the start until
+    the position moved, a silent build included), `settle_s` (the position
+    moving until accepted), `out_fill`/`in_fill` (the lowest seen once it
+    moved), `readings`, `status` (the last one taken while it played); or
+    `failed` with why — a point that failed is measured again by a later
+    run. The time HQPlayer spent building — silent (paused), or answering
+    that it plays with nothing out yet (_building) — is not held against its
+    deadlines: they bound a start, a build is bounded by BUILD_LIMIT_S, past
+    which the point is `unstarted`."""
 
-    def __init__(self, t0: float):
+    def __init__(self, t0: float, *, build_limit: Optional[float] = None,
+                 start_only: bool = False):
         self.t0 = t0
+        self.build_limit = BUILD_LIMIT_S if build_limit is None else build_limit
+        # Decided once the position moves: the control of a point that never
+        # started asks only whether HQPlayer still starts anything (_points)
+        self.start_only = start_only
+        self._silent = 0.0
+        self._last: Optional[float] = None
         self.init_s: Optional[float] = None
         # The last <Status/> taken while it played — what the sample keys on:
         # a stopped one carries no <metadata> and may name the next setting.
         self.playing: Optional[TrackStatus] = None
         self._moving_since: Optional[float] = None
+        self._seen: Optional[tuple] = None
         self._last_pos = 0.0
+        # Where the position stood when it first moved, when the stable
+        # count began, and where it played last (OUTRAN)
+        self._first_pos = 0.0
+        self._moved_from = 0.0
+        self._play_pos = 0.0
+        self._fresh_at: Optional[float] = None    # when HQPlayer last refreshed its status
+        self._outran_start = False                # its first move already past real time
         self._last_speed: Optional[float] = None
         self._stalls = 0
         self._drained = 0
@@ -420,25 +629,78 @@ class Settle:
             return self._done(now, settled=False, dropout=True)
         return {"failed": f"{what} at {speed:.2f}× — not the DSP falling behind"}
 
+    def outran(self, now: float) -> bool:
+        """HQPlayer played the slot faster than real time (OUTRAN): its stop,
+        or its going on to the next entry, is the signal running out."""
+        return self.moved and (self._outran_start or self._play_pos - self._first_pos
+                               > OUTRAN * (now - self.t0 - self.init_s) + 2.0)
+
+    def ran_out(self, now: float) -> dict:
+        """The signal ran out on an output that keeps no time: the readings
+        so far are the point, unsettled — the DSP ran flat out under them.
+        None yet: it played, and could not be read (`outran` — no sign of a
+        broken output, which three points in a row that do not play are)."""
+        if self._readings:
+            return self._done(now, settled=False)
+        return {"failed": "HQPlayer played the signal out before its speed could be read — "
+                          "its output keeps no time (its null device?)", "outran": True}
+
+    def paused(self, seconds: float) -> None:
+        self._silent += seconds
+        # Counted whole: a first answer that still says it builds must not
+        # add the same gap again from the tick before the silence
+        self._last = None
+        if self.moved:
+            # Stuck silent while it played: what follows is read afresh — the
+            # stable and settle clocks run on wall time, and the first answer
+            # after a minute's silence would have closed the point "unsettled"
+            # on one reading, the drained output never ticked
+            self._moving_since, self._readings, self._drained, self._stalls = None, [], 0, 0
+
     def feed(self, now: float, status: TrackStatus) -> Optional[dict]:
-        if now - self.t0 > POINT_DEADLINE_S:
+        building = not self.moved and _building(status)
+        if building and self._last is not None:
+            self._silent += now - self._last        # the build's time, not the start's
+        self._last = now
+        if building and now - self.t0 > self.build_limit:
+            return {"unstarted": f"HQPlayer was still starting it {self.build_limit / 60:.0f} min "
+                                 "after Play — this host does not get it going"}
+        elapsed = now - self.t0 - self._silent
+        if elapsed > POINT_DEADLINE_S:
             return {"failed": f"no verdict within {POINT_DEADLINE_S:.0f} s of Play"}
         playing = status.state == PlaybackState.PLAYING
         if playing and status.src_rate:
             self.playing = status
         if playing and status.process_speed:
             self._last_speed = status.process_speed
-        moving = playing and status.position > self._last_pos
-        self._last_pos = status.position if playing else 0.0
-        self._stalls = 0 if moving or not playing else self._stalls + 1
+        seen = (status.state, status.track_index, status.position, status.process_speed,
+                status.output_fill, status.input_fill)
+        fresh, self._seen = seen != self._seen, seen
+        moving = fresh and playing and status.position > self._last_pos
+        if fresh:
+            if moving and not self.moved and self._fresh_at is not None:
+                # a filter so light the signal is out within the next tick
+                # leaves only this jump to tell (`none`, ~100×, 2026-10-04)
+                self._outran_start = (status.position - self._last_pos
+                                      > OUTRAN * (now - self._fresh_at) + 2.0)
+            self._fresh_at = now
+            self._last_pos = status.position if playing else 0.0
+            self._stalls = 0 if moving or not playing else self._stalls + 1
         if not self.moved:
             if moving:
                 self.init_s, self._moving_since = now - self.t0, now
-            elif now - self.t0 > START_DEADLINE_S:
-                return {"failed": f"HQPlayer did not start it within {START_DEADLINE_S:.0f} s"}
+                self._first_pos = self._moved_from = self._play_pos = status.position
+                if self.start_only:
+                    return {"started": True, "init_s": self.init_s}
+            elif elapsed > START_DEADLINE_S:
+                return {"failed": f"HQPlayer answered, but it did not move within "
+                                  f"{START_DEADLINE_S:.0f} s of Play"}
             return None
+        if not fresh or not status.state.known:
+            return None             # unnamed: HQPlayer between two states, no stop
         if not playing:
-            return self._behind(now, "it stopped")
+            return self.ran_out(now) if self.outran(now) else self._behind(now, "it stopped")
+        self._play_pos = status.position
         for v, seen in ((status.output_fill, self._outs), (status.input_fill, self._ins)):
             if v is not None:
                 seen.append(v)
@@ -458,9 +720,10 @@ class Settle:
             self._moving_since = None       # a heavy start recovering: count again
         if self._moving_since is None:
             if moving:
-                self._moving_since = now
+                self._moving_since, self._moved_from = now, status.position
             return None
-        if now - self._moving_since < STABLE_AFTER_S:
+        if (now - self._moving_since < STABLE_AFTER_S
+                and status.position - self._moved_from < STABLE_AFTER_S):
             return None
         if status.process_speed:
             self._readings.append(status.process_speed)
@@ -491,19 +754,32 @@ class _Reopened(Exception):
     starts again from what HQPlayer holds."""
 
 
+class _Silent(_Reopened):
+    """HQPlayer took a command and answered nothing for the whole wait —
+    still building a setting, or gone without closing. The connection was
+    replaced all the same. Within a point it is waited out (_outlast),
+    anywhere else a _Reopened like any other."""
+
+
+class _Hung(_Lost):
+    """HQPlayer stayed silent past BUILD_LIMIT_S."""
+
+
 class _Link:
     """The run's own connection to HQPlayer: it never meets the playback
     backend's sockets, and its expected refusals stay out of the diagnostics
-    ring (ring=False). HQPlayer drops connections — a trial-mode Embedded
-    stops every 30 minutes, the WSL2 hop flaps for seconds — so a command
-    that finds it gone, or loses it, connects again (at once, then after
-    each of _RECONNECT_PAUSES; `wait` answering True gives up early) and
-    raises _Reopened instead of carrying on blind; one that cannot is
-    _Lost."""
+    ring (ring=False). It waits `answer_s` for each answer — the run's own
+    link ANSWER_WAIT_S. HQPlayer drops
+    connections — a trial-mode Embedded stops every 30 minutes, the WSL2
+    hop flaps for seconds — so a command that finds it gone, or loses it,
+    connects again (at once, then after each of _RECONNECT_PAUSES; `wait`
+    answering True gives up early) and raises _Reopened (_Silent when
+    HQPlayer never answered) instead of carrying on blind; one that cannot
+    is _Lost."""
 
-    def __init__(self, wait: Callable[[float], bool]):
+    def __init__(self, wait: Callable[[float], bool], *, answer_s: float = 10.0):
         self.c = HQPlayerClient(host=settings.hqplayer_host, port=settings.hqplayer_port,
-                                timeout=10.0, ring=False)
+                                timeout=answer_s, ring=False)
         self.wait = wait
 
     def connect(self) -> bool:
@@ -512,37 +788,60 @@ class _Link:
     def close(self) -> None:
         self.c.disconnect()
 
+    def interrupt(self) -> None:
+        """Wake a read waiting on HQPlayer's answer — a cancel from another
+        thread: it ends as a dropped connection. A shutdown wakes it on
+        Linux; Windows leaves the read blocked until the socket is closed."""
+        sock = self.c.socket
+        if sock is not None:
+            for wake in (lambda: sock.shutdown(socket.SHUT_RDWR), sock.close):
+                try:
+                    wake()
+                except OSError:
+                    pass    # closed meanwhile: nothing waits on it
+
     def refusal(self) -> str:
         return self.c.refusal()
 
     def __call__(self, method: str, *args, **kwargs):
         if not self.c.is_connected():
-            self._reconnect()
+            self._reconnect(silent=False)      # nothing went out on this one
         result = getattr(self.c, method)(*args, **kwargs)
         if not self.c.is_connected():
-            self._reconnect()
+            self._reconnect(silent=self.c.timed_out)
         return result
 
-    def _reconnect(self) -> None:
+    def _reconnect(self, *, silent: bool) -> None:
         why = self.c.refusal()
         for pause in (0.0, *_RECONNECT_PAUSES):
             if pause and self.wait(pause):
                 break
             if self.c.connect():
                 logger.info("HQPlayer benchmark: connected again after %s", why)
-                raise _Reopened(why)
+                raise (_Silent if silent else _Reopened)(why)
         raise _Lost(f"HQPlayer stopped answering ({why})")
 
 
-def _again(step: Callable[[], Any]) -> Any:
+def _again(step: Callable[[], Any], *, silent_ends: bool = False,
+           stop: Optional[Callable[[], bool]] = None) -> Any:
     """A step that comes out the same however often it runs, run again
-    whenever the connection was replaced under it."""
+    whenever the connection was replaced under it — not after a silence
+    when `silent_ends`: HQPlayer took what was sent and carries it out once
+    it is free; nor once `stop` says so (a cancel wakes a read by dropping
+    its connection)."""
     for _ in range(3):
         try:
             return step()
-        except _Reopened:
-            continue
-    raise _Lost("HQPlayer kept dropping the connection")
+        except _Silent as e:
+            if silent_ends:
+                raise _Lost("HQPlayer is busy and did not answer") from e
+            last = e
+        except _Reopened as e:
+            last = e
+        if stop is not None and stop():
+            raise _Lost("cancelled") from last
+    raise _Lost("HQPlayer stopped answering" if isinstance(last, _Silent)
+                else "HQPlayer kept dropping the connection")
 
 
 # -- the run ---------------------------------------------------------------------
@@ -560,35 +859,38 @@ def _mode_name(modes: List[dict], index: int) -> Optional[str]:
     return next((m["name"] for m in modes if m["index"] == index), None)
 
 
-def _first_run(endpoint_id: int) -> bool:
-    return db_query_one("SELECT 1 AS x FROM hqp_benchmark_runs WHERE hqp_endpoint_id = %(e)s LIMIT 1",
-                        {"e": endpoint_id}) is None
-
-
 def pace(endpoint_id: int) -> float:
-    """Seconds a point takes here — the pace of the last run that ran to its
-    end (a cut-short one ends in a wait for HQPlayer, not in points)."""
+    """Seconds a point takes here — the median of the points of the last run
+    that ran to its end or was cancelled (a failed or cut-short one ends in a
+    wait for HQPlayer, not in points; on a trial-mode Embedded the owner
+    cancels each run before the half hour is up): its wall time over the
+    points it measured counted a 10-minute "never started" and a silent
+    build as points' time, and put a typical point at ten times its length."""
     row = db_query_one("""
-        SELECT extract(epoch FROM finished_at - started_at) / points_measured AS s
-          FROM hqp_benchmark_runs
-         WHERE hqp_endpoint_id = %(e)s AND outcome = 'done' AND points_measured >= 5
-         ORDER BY started_at DESC LIMIT 1
+        WITH last AS (
+            SELECT id, started_at FROM hqp_benchmark_runs
+             WHERE hqp_endpoint_id = %(e)s AND outcome IN ('done', 'cancelled')
+               AND points_measured >= 5
+             ORDER BY started_at DESC LIMIT 1
+        ), each AS (
+            SELECT extract(epoch FROM p.at - lag(p.at, 1, l.started_at) OVER (ORDER BY p.at)) AS s
+              FROM hqp_benchmark_points p JOIN last l ON l.id = p.run_id
+        )
+        SELECT percentile_cont(0.5) WITHIN GROUP (ORDER BY s) AS s FROM each
     """, {"e": endpoint_id})
-    return float(row["s"]) if row else POINT_S
+    return float(row["s"]) if row and row["s"] is not None else POINT_S
 
 
 def plan(endpoint: dict, *, kind: str, mode_name: str, state: dict, filters: List[dict],
          shapers: List[dict], rates: List[dict], srcs: Optional[Dict[str, dict]] = None,
-         first_run: Optional[bool] = None, rng: Optional[random.Random] = None) -> List[Point]:
-    """The points a run of this mode would measure now. `first_run` is
-    known to a run before its own row exists; anyone else asks the table."""
+         rng: Optional[random.Random] = None) -> Plan:
+    """What a run of this mode would measure now."""
     srcs = srcs if srcs is not None else sources(kind, endpoint.get("hqp_engine"))
     ctx = hqp_load.context(endpoint, mode=mode_name, state=state)
     return build_grid(kind, filters=filters, shapers=shapers, rates=rates,
                       current={"rate": state["rate"], "filterNx": state["filterNx"],
                                "filter1x": state["filter1x"], "shaper": state["shaper"]},
-                      srcs=srcs, covered=hqp_load.covered(ctx),
-                      first_run=_first_run(endpoint["id"]) if first_run is None else first_run,
+                      srcs=srcs, covered=hqp_load.covered(ctx), keeps_up=hqp_load.keeps_up(ctx),
                       rng=rng or random.Random())
 
 
@@ -621,18 +923,20 @@ def start(mode: Optional[str] = None, *, fixed_volume_ok: bool = False) -> Dict[
     b = manager.active
     if b is None or b.id != "hqplayer":
         raise BenchmarkRefused("Pick this HQPlayer as the audio output first")
-    if not b.healthy():
-        raise BenchmarkRefused("HQPlayer has to answer Sautium first — press Play once, "
-                               "or check that it runs")
-    if b.drift:
-        raise BenchmarkRefused("Another controller is playing through HQPlayer — the "
-                               "benchmark waits until Sautium is its source again")
     from playback.hqp_backend import _stream_mode
     if not _stream_mode():
         import main
+        import model_cache
         if main._scan_state["running"] or main._enrich_state["running"]:
             raise BenchmarkRefused("A library scan or analysis is running on this computer "
                                    "— it would skew what HQPlayer measures here")
+        if model_cache.loading():
+            # A run started a minute after a restart (2026-10-03): the
+            # translation model loading on the CPU ran through its first
+            # point — the owner's own, the drift check's reference.
+            raise BenchmarkRefused("Sautium is still loading its models on this computer — "
+                                   "it would skew what HQPlayer measures here; try again in "
+                                   "a minute")
     ep = _endpoint()
     if ep is None or not ep.get("hqp_engine"):
         raise BenchmarkRefused("This HQPlayer is not registered yet — try again once it "
@@ -649,6 +953,14 @@ def start(mode: Optional[str] = None, *, fixed_volume_ok: bool = False) -> Dict[
         link.close()
     if status is None or st is None:
         raise BenchmarkRefused("HQPlayer did not report its state")
+    # HQPlayer answering is the whole precondition — a queue mirror the
+    # attach could not make (HQPlayer not up yet, 2026-10-03) is none: the
+    # run sets HQPlayer's playlist itself, and the attach that takes the
+    # output back mirrors the queue afresh. Another controller is, while it
+    # plays.
+    if b.drift and status.state in (PlaybackState.PLAYING, PlaybackState.PAUSED):
+        raise BenchmarkRefused("Another controller is playing through HQPlayer — the "
+                               "benchmark waits until Sautium is its source again")
     if status.process_speed is None:
         raise BenchmarkRefused("This HQPlayer does not report its processing speed "
                                "(HQPlayer 5.17 and later do)")
@@ -680,12 +992,15 @@ def cancel() -> bool:
             return False
         _state["cancel_requested"] = True
     _cancel.set()
+    live = _live
+    if live is not None:
+        live.interrupt()            # not after ANSWER_WAIT_S of a silent build
     return True
 
 
 def shutdown(timeout: float) -> None:
     """The app is stopping: a run is cancelled and given `timeout` seconds
-    to put HQPlayer back — what the process has left (Docker allows ten).
+    to put HQPlayer back — what the process has left of the stop's ten.
     Putting back does not wait for an HQPlayer that is away; a run that
     could not be put back stays open, and the next start puts it back
     (recover)."""
@@ -744,9 +1059,11 @@ def _finish(outcome: str, note: Optional[str]) -> None:
 def _measure(ep: dict, kind: str) -> Tuple[str, Optional[str]]:
     """The run proper, inside the hold: read what is to be put back, open
     the run row, measure, and put everything back whatever happens."""
-    link = _Link(_cancel.wait)
+    global _live
+    link = _Link(_cancel.wait, answer_s=ANSWER_WAIT_S)
     if not link.connect():
         return "failed", "HQPlayer is not answering"
+    _live = link
     try:
         pre, modes, vr = _again(lambda: (link("get_state"), link("get_modes"),
                                          link("volume_range")))
@@ -757,12 +1074,11 @@ def _measure(ep: dict, kind: str) -> Tuple[str, Optional[str]]:
             return "failed", f"This HQPlayer's output offers no {kind.upper()} mode"
         mode_name = _mode_name(modes, mode_index)
         mute = mute_level(vr, pre["volume"])
-        first_run = _first_run(ep["id"])          # before this run's own row exists
         run_id = _open_run(ep, mode_name, pre, mute)
         switched = pre["mode"] != mode_index
         own: Optional[dict] = None
         stats: Dict[str, Any] = {"measured": 0, "dropouts": [], "own": [], "refused": 0,
-                                 "failed": 0}
+                                 "unstarted": 0, "failed": 0, "implied": 0, "deferred": 0}
         outcome, note = "failed", None
         try:
             st, filters, shapers, rates = _again(lambda: _enter_mode(link, mode_index, switched))
@@ -771,19 +1087,21 @@ def _measure(ep: dict, kind: str) -> Tuple[str, Optional[str]]:
                        "filter1x": st["filter1x"], "shaper": st["shaper"]}
                 _note_own(run_id, own)
             srcs = sources(kind, ep.get("hqp_engine"))
-            points = plan(ep, kind=kind, mode_name=mode_name, state=st, filters=filters,
-                          shapers=shapers, rates=rates, srcs=srcs, first_run=first_run)
-            _progress(point=0, total=len(points), point_label="Preparing the test signals…",
+            grid = plan(ep, kind=kind, mode_name=mode_name, state=st, filters=filters,
+                        shapers=shapers, rates=rates, srcs=srcs)
+            _progress(point=0, total=grid.asks(), point_label="Preparing the test signals…",
                       eta_s=None)
-            used = {p.source for p in points}
+            used = {p.source for p in grid.points}
             uris = {name: (_dsd_uri(s["file"]) if name == "dsd"
                            else _signal_uri(ensure_signal(s["rate"])))
                     for name, s in srcs.items() if name in used}
             db_execute("UPDATE hqp_benchmark_runs SET points_planned = %(n)s WHERE id = %(id)s",
-                       {"n": len(points), "id": run_id})
-            slots = _prepare(link, uris, mute)
-            outcome, note = _points(link, points, slots, uris, srcs, mute, ep, run_id, st,
-                                    mode_name, stats)
+                       {"n": grid.asks(), "id": run_id})
+            mode = (mode_index, _lists_key(filters, shapers, rates))
+            slots = _prepare(link, uris, mute, mode)
+            outcome, note = _points(link, grid, slots, uris, srcs, mute, mode, ep, run_id, st,
+                                    hqp_load.context(ep, mode=mode_name, state=st), mode_name,
+                                    stats)
         except _Abort as e:
             outcome, note = "failed", str(e)
         except _Lost as e:
@@ -792,6 +1110,7 @@ def _measure(ep: dict, kind: str) -> Tuple[str, Optional[str]]:
             logger.exception("HQPlayer benchmark failed")
             outcome, note = "failed", _why(e)
         finally:
+            _live = None                # a second cancel must not cut the put-back
             reached, restore_note = _restore(link, pre, own, mute)
             note = "; ".join(x for x in (note, restore_note) if x) or None
             # An HQPlayer that did not answer the restore keeps the run
@@ -799,6 +1118,7 @@ def _measure(ep: dict, kind: str) -> Tuple[str, Optional[str]]:
             _close_run(run_id, outcome, note, stats, finished=reached)
         return outcome, note
     finally:
+        _live = None
         link.close()
 
 
@@ -813,13 +1133,36 @@ def _enter_mode(link: _Link, mode_index: int, switched: bool) -> tuple:
     return st, link("get_filters"), link("get_shapers"), link("get_rates")
 
 
-def _prepare(link: _Link, uris: Dict[str, str], mute: Optional[float]) -> Dict[str, int]:
+def _lists_key(filters: List[dict], shapers: List[dict], rates: List[dict]) -> tuple:
+    """What the indices a point sends name — the run's plan holds only as
+    long as HQPlayer's lists do."""
+    return (tuple((f["index"], f["name"]) for f in filters),
+            tuple((x["index"], x["name"]) for x in shapers),
+            tuple((r["index"], r["rate"]) for r in rates))
+
+
+def _prepare(link: _Link, uris: Dict[str, str], mute: Optional[float], mode: tuple, *,
+             again: bool = False) -> Dict[str, int]:
     """What every point stands on — made again whenever the connection was
-    replaced, before anything plays: HQPlayer stopped, lowered (read back),
-    and holding the run's sources in order. The slot of each source,
-    1-based."""
+    replaced, before anything plays: HQPlayer stopped, in the measured mode
+    with the lists the plan was made from (`again`: it may have restarted
+    under the run, back in the mode it saved — an Embedded restarted into
+    PCM read the run's SDM modulators as "invalid shaper" and played PCM,
+    2026-10-03), lowered (read back), and holding the run's sources in
+    order. The slot of each source, 1-based."""
+    mode_index, lists = mode
+
     def once() -> Dict[str, int]:
         link("stop")
+        if again:
+            st = link("get_state")
+            if st is None:
+                raise _Abort("HQPlayer did not report its state")
+            if st["mode"] != mode_index and not link("set_mode", mode_index):
+                raise _Abort(f"HQPlayer did not go back to the measured mode: {link.refusal()}")
+            if _lists_key(link("get_filters"), link("get_shapers"), link("get_rates")) != lists:
+                raise _Abort("HQPlayer came back with other lists — the run's settings would "
+                             "name others")
         if mute is not None:
             link("set_volume", mute)
             got = link("get_state")
@@ -833,54 +1176,143 @@ def _prepare(link: _Link, uris: Dict[str, str], mute: Optional[float]) -> Dict[s
             raise _Abort("HQPlayer took the run's sources but does not hold them — "
                          "it could not open them (see its log)")
         return {name: i + 1 for i, name in enumerate(uris)}
-    return _again(once)
+    return _again(once, stop=_cancel.is_set)
 
 
-def _points(link: _Link, points: List[Point], slots: Dict[str, int], uris: Dict[str, str],
-            srcs: Dict[str, dict], mute: Optional[float], ep: dict, run_id: int, st: dict,
-            mode_name: str, stats: dict) -> Tuple[str, Optional[str]]:
+def _points(link: _Link, grid: Plan, slots: Dict[str, int], uris: Dict[str, str],
+            srcs: Dict[str, dict], mute: Optional[float], mode: tuple, ep: dict, run_id: int,
+            st: dict, ctx: Dict[str, Any], mode_name: str,
+            stats: dict) -> Tuple[str, Optional[str]]:
+    """The plan's points in order, its ladders kept as the run goes: a rung
+    a neighbour has answered for is passed over, and a rung at or under a
+    start that does not keep up (or, under it, says nothing; or above a
+    start HQPlayer refused) sends the run a rung further down, before the
+    owner's setting comes again."""
+    points = list(grid.points)
+    known = dict(grid.known)
+    passed = set(grid.covered)          # and what this run has asked so far
+
+    def step_down(p: Point) -> None:
+        if p.ladder is None or i == len(points):
+            return
+        below = _descend(grid.rungs[p.ladder], known, passed)
+        if below is None:
+            return
+        # A rung the plan holds further on is asked next instead — the
+        # ladder goes down a rung at a time, never past one not yet asked
+        later = next((j for j in range(i, len(points) - 1) if points[j].key == below.key), None)
+        points.insert(i, points.pop(later) if later is not None else below)
+
     applied: Dict[str, Any] = {}
     failures = 0
+    asked = 0
+    # The first point this run saw start, and how long its start took: the
+    # control a point that never starts is checked against
+    control: Optional[Tuple[Point, float]] = None
     t_run = time.monotonic()
-    for i, p in enumerate(points, 1):
-        done = i - 1
-        eta = (time.monotonic() - t_run) / done * (len(points) - done) if done else \
-            len(points) * pace(ep["id"])
-        _progress(point=i, total=len(points), point_label=p.label, eta_s=round(eta))
+    i = 0
+    while i < len(points):
+        p = points[i]
+        i += 1
+        if not p.own and p.ladder is not None and _implied(p, grid.rungs[p.ladder], known):
+            stats["implied"] += 1
+            continue
+        if grid.deferred(p, known):
+            stats["deferred"] += 1
+            continue
+        asked += 1
+        passed.add(p.key)
+        total = len(points) - stats["implied"] - stats["deferred"]
+        each = (time.monotonic() - t_run) / (asked - 1) if asked > 1 else pace(ep["id"])
+        _progress(point=asked, total=total, point_label=p.label,
+                  eta_s=round(each * (total - asked + 1)))
         if _cancel.is_set():
             return "cancelled", None
         try:
             result = _point(link, p, slots, applied, run_id, srcs)
         except _Reopened:
-            # HQPlayer may have restarted under the point: lowered again, its
-            # sources loaded again, the knobs sent again — then once more.
+            if _cancel.is_set():
+                return "cancelled", None        # the cancel woke a read (interrupt)
+            # HQPlayer may have restarted under the point: back in the
+            # measured mode, lowered again, its sources loaded again, the
+            # knobs sent again — then once more.
             applied.clear()
-            slots = _prepare(link, uris, mute)
+            slots = _prepare(link, uris, mute, mode, again=True)
             try:
                 result = _point(link, p, slots, applied, run_id, srcs)
-            except _Reopened:
+            except _Reopened as e:
+                if _cancel.is_set():
+                    return "cancelled", None
                 applied.clear()
-                slots = _prepare(link, uris, mute)
-                result = {"failed": "HQPlayer dropped the connection during it twice"}
+                slots = _prepare(link, uris, mute, mode, again=True)
+                result = {"failed": f"HQPlayer dropped the connection during it twice ({e})"}
         if result.get("cancelled"):
             return "cancelled", None
-        line = f"benchmark {i}/{len(points)} · {mode_name} · {p.label}: "
+        if result.get("at_play") or ("unstarted" in result and not result.get("hung")):
+            # A stop at Play and a build past the limit are kept for good
+            # ("refused", "never started here"), so HQPlayer must still
+            # start what it started earlier in this run: an Embedded whose
+            # output engine had stopped starting anything (its stream fed
+            # the same file over and over, 2026-10-03) built every setting
+            # past the limit, and an output that went away stops every Play.
+            # Nothing started yet, nothing tells them apart — an engine hung
+            # before the run (2026-10-04) would have marked the owner's own
+            # setting "never started" for good, and an owner's setting HQPlayer
+            # refuses from the 44.1 kHz signal must not stop every run: the
+            # point failed, asked again next run, and three in a row stop it.
+            if control is None:
+                result = {"failed": f"{result.get('refused') or result['unstarted']} — not "
+                                    "kept: nothing had started yet in this run to check "
+                                    "HQPlayer against"}
+            else:
+                c, c_init = control
+                limit = max(START_DEADLINE_S, 3 * c_init)
+                try:
+                    again = _point(link, c, slots, applied, run_id, srcs,
+                                   build_limit=limit, start_only=True)
+                except _Reopened:
+                    if _cancel.is_set():
+                        return "cancelled", None
+                    applied.clear()
+                    slots = _prepare(link, uris, mute, mode, again=True)
+                    continue              # it says nothing of this point: asked next run
+                if again.get("cancelled"):
+                    return "cancelled", None
+                if not again.get("started"):
+                    raise _Abort(f"HQPlayer stopped starting anything: {c.label} started "
+                                 f"earlier in this run and did not start again within "
+                                 f"{limit:.0f} s — restart HQPlayer, and check its output is there")
+        line = f"benchmark {asked}/{total} · {mode_name} · {p.label}: "
         if "refused" in result:
             logger.info(line + "refused — " + result["refused"])
             _ledger(run_id, p, "refused", result["refused"])
             stats["refused"] += 1
             failures = 0
+            if p.step < 0:
+                step_down(p)
             continue
         status: Optional[TrackStatus] = result.get("status")
-        if "failed" not in result and status is None:
+        if not ("failed" in result or "unstarted" in result) and status is None:
             result = {"failed": "it never played with its source reported"}
-        if "failed" in result:
-            logger.info(line + result["failed"])
-            _ledger(run_id, p, "failed", result["failed"])
-            stats["failed"] += 1
-            failures += 1
+        # Not played: measured again next run when it failed, not asked again
+        # when this host did not get it going — HQPlayer silent past
+        # BUILD_LIMIT_S, which ends the run too (`hung`). Three failures in a
+        # row stop it: the output is broken.
+        missed = "unstarted" if "unstarted" in result else "failed" if "failed" in result else None
+        if missed is not None:
+            logger.info(line + result[missed])
+            _ledger(run_id, p, missed, result[missed])
+            if result.get("hung"):
+                raise _Lost(result[missed])
+            stats[missed] += 1
+            failures = 0 if result.get("outran") else failures + 1     # that one played
             if failures >= 3:
-                raise _Abort(f"three points in a row did not play: {result['failed']}")
+                raise _Abort(f"three points in a row did not play: {result[missed]}")
+            if missed == "unstarted":
+                known[p.key] = False                # it does not keep up, by any measure
+                step_down(p)
+            elif p.step < 0:
+                step_down(p)
             continue
         failures = 0
         sample = hqp_load.Sample.of(status, st, endpoint_id=ep["id"])
@@ -895,11 +1327,17 @@ def _points(link: _Link, points: List[Point], slots: Dict[str, int], uris: Dict[
         _ledger(run_id, p, "dropout" if result["dropout"]
                 else "measured" if result["settled"] else "unsettled", None, sample_id)
         stats["measured"] += 1
+        if control is None:
+            control = (p, result["init_s"])
         if result["dropout"]:
             stats["dropouts"].append(result["speed"])
         if p.own:
             stats["own"].append(result["speed"])
         logger.info(line + _verdict(result))
+        known[p.key] = (not result["dropout"]
+                        and result["speed"] >= hqp_load.thresholds(ctx)["ok"])
+        if not known[p.key]:
+            step_down(p)
     return "done", _tally(stats)
 
 
@@ -909,9 +1347,19 @@ def _tally(stats: dict) -> Optional[str]:
     if stats["refused"]:
         parts.append(f"HQPlayer refused {stats['refused']} combination"
                      f"{'s' if stats['refused'] != 1 else ''}")
+    if stats["unstarted"]:
+        parts.append(f"{stats['unstarted']} setting{'s' if stats['unstarted'] != 1 else ''} "
+                     f"never started here within {BUILD_LIMIT_S / 60:.0f} min — not asked again")
     if stats["failed"]:
         parts.append(f"{stats['failed']} point{'s' if stats['failed'] != 1 else ''} did not "
                      "play through and are measured again next run")
+    if stats["implied"]:
+        parts.append(f"{stats['implied']} rate{'s' if stats['implied'] != 1 else ''} not "
+                     "measured — the rate next to it on its ladder answers for it")
+    if stats["deferred"]:
+        parts.append(f"{stats['deferred']} filter{'s' if stats['deferred'] != 1 else ''} left "
+                     "for later — your own setting does not keep up here; they are measured "
+                     "with one that does")
     return "; ".join(parts) or None
 
 
@@ -932,10 +1380,12 @@ def _verdict(r: dict) -> str:
 
 
 def _point(link: _Link, p: Point, slots: Dict[str, int], applied: Dict[str, Any],
-           run_id: int, srcs: Dict[str, dict]) -> dict:
+           run_id: int, srcs: Dict[str, dict], **watch) -> dict:
     """One point: stop, send only the knobs that change and note what
     HQPlayer holds now (the run's mark, recover), start its source, feed
     Settle a <Status/> a second until it decides."""
+    if _cancel.is_set():
+        return {"cancelled": True}      # before its SelectTrack starts it
     link("stop")
     knobs = {"rate": p.rate, "filter": p.filter, "filter1x": p.filter1x, "shaper": p.shaper}
     change = {k: v for k, v in knobs.items() if applied.get(k) != v}
@@ -953,79 +1403,171 @@ def _point(link: _Link, p: Point, slots: Dict[str, int], applied: Dict[str, Any]
             return {"refused": "; ".join(f"{k}: {v}" for k, v in failed.items())}
     slot = slots[p.source]
     src_rate = None if p.source == "dsd" else srcs[p.source]["rate"]
-    verdict = _play(link, slot, src_rate, len(slots))
+    verdict = _play(link, slot, src_rate, len(slots), **watch)
     if verdict.get("elsewhere"):
-        verdict = _play(link, slot, src_rate, len(slots))
+        verdict = _play(link, slot, src_rate, len(slots), **watch)
     return verdict
 
 
-def _select(link: _Link, slot: int) -> None:
+def _select(send: Callable[..., Any], read: Callable[[], Optional[TrackStatus]],
+            slot: int) -> None:
     """SelectTrack, then <Status/> until it names the slot — at most
     SELECT_WAIT_S: HQPlayer cannot say when it is ready, and the Play right
-    after must find the slot taken (a misplay is caught on the ticks)."""
-    if not link("select_track", slot):
+    after must find the slot taken (a misplay is caught on the ticks). A
+    stopped HQPlayer starts playing the slot it is given (Desktop 5 and 6:
+    "GoTo 1", then "Play (1/0)" in its log): the point starts here, and the
+    build of its setting may silence HQPlayer from here."""
+    if not send("select_track", slot):
         return
     deadline = time.monotonic() + SELECT_WAIT_S
     while time.monotonic() < deadline:
-        now = link("get_status")
+        now = read()
         if now is not None and now.track_index == slot:
             return
         if _cancel.wait(SELECT_POLL_S):
             return
 
 
-def _play(link: _Link, slot: int, src_rate: Optional[int], entries: int) -> dict:
-    """Play the slot and feed Settle until it decides. HQPlayer playing
+def _play(link: _Link, slot: int, src_rate: Optional[int], entries: int, *,
+          build_limit: Optional[float] = None, start_only: bool = False) -> dict:
+    """Start the slot and feed Settle until it decides. HQPlayer playing
     another entry than the slot (or a generated signal at another rate) is
-    `elsewhere` — the caller selects it once more."""
-    _select(link, slot)
-    if _cancel.is_set():
-        return {"cancelled": True}
-    if not link("play"):
-        return {"failed": f"HQPlayer did not play it: {link.refusal()}"}
-    settle = Settle(time.monotonic())
-    misses = 0
-    replayed = False
-    while True:
-        if _cancel.wait(TICK_S):
+    `elsewhere` — the caller selects it once more. Whatever HQPlayer is
+    asked from the select on may meet the silence of a build: it is waited
+    out (_outlast) and the point watched on; past the build limit the point
+    is `unstarted` (`failed` once it had moved) and `hung` ends the run."""
+    settle = Settle(time.monotonic(), build_limit=build_limit, start_only=start_only)
+
+    def read() -> Optional[TrackStatus]:
+        try:
+            return link("get_status")
+        except _Silent:
+            return _outlast(link, settle)
+
+    def send(method: str, *args) -> Any:
+        try:
+            return link(method, *args)
+        except _Silent:
+            # Taken before HQPlayer fell silent: it carries it out once free.
+            _outlast(link, settle)
+            return True
+
+    try:
+        _select(send, read, slot)
+        if _cancel.is_set():
             return {"cancelled": True}
-        status = link("get_status")
-        if status is None:
-            misses += 1
-            if misses >= 5:
-                raise _Abort(f"HQPlayer stopped reporting its status: {link.refusal()}")
-            continue
+        if not send("play"):
+            return {"failed": f"HQPlayer did not play it: {link.refusal()}"}
         misses = 0
-        if status.tracks_total and status.tracks_total != entries:
-            raise _Abort("HQPlayer's playlist changed under the benchmark — another "
-                         "controller is using it")
-        if status.state == PlaybackState.PLAYING and (
-                status.track_index != slot
-                or (src_rate is not None and status.src_rate and status.src_rate != src_rate)):
-            return {"elsewhere": True,
-                    "failed": f"HQPlayer played entry {status.track_index} instead of {slot}"}
-        if (status.state == PlaybackState.STOPPED and not settle.moved and not replayed
-                and settle.playing is not None):
-            # It stopped to rebuild for a heavy setting before its position
-            # ever moved: start it again, once.
-            replayed = True
-            _select(link, slot)
-            link("play")
+        stopped = 0
+        replayed = False
+        while True:
+            if _cancel.wait(TICK_S):
+                return {"cancelled": True}
+            status = read()
+            if status is None:
+                misses += 1
+                if misses >= 5:
+                    raise _Abort(f"HQPlayer stopped reporting its status: {link.refusal()}")
+                continue
+            misses = 0
+            if status.tracks_total and status.tracks_total != entries:
+                raise _Abort("HQPlayer's playlist changed under the benchmark — another "
+                             "controller is using it")
+            if status.state == PlaybackState.PLAYING and (
+                    status.track_index != slot
+                    or (src_rate is not None and status.src_rate and status.src_rate != src_rate)):
+                if settle.outran(time.monotonic()):     # went on to the next entry by itself
+                    return settle.ran_out(time.monotonic())
+                return {"elsewhere": True,
+                        "failed": f"HQPlayer played entry {status.track_index} instead of {slot}"}
+            if status.state == PlaybackState.STOPPED and not settle.moved:
+                stopped += 1
+                if not replayed and (settle.playing is not None or stopped >= STOP_TICKS):
+                    # HQPlayer stops the transport once a heavy setting is
+                    # built and does not start again by itself (the DSP
+                    # resume watcher's quirk), or it stopped at once: start
+                    # it again, once.
+                    replayed, stopped = True, 0
+                    _select(send, read, slot)
+                    send("play")
+                    continue
+                if replayed and stopped >= STOP_TICKS:
+                    # Stopped again, never having moved: HQPlayer does not
+                    # run this combination ("Requested filter not possible
+                    # with this rate combination …, stop" in its log). Asked,
+                    # answered — a later run does not ask again.
+                    return {"refused": "HQPlayer stopped it again without playing — it does "
+                                       "not run this combination (its log says why)",
+                            "at_play": True}
+            else:
+                stopped = 0
+            verdict = settle.feed(time.monotonic(), status)
+            if verdict is not None:
+                if verdict.get("dropout"):
+                    # The DSP falling behind, or HQPlayer going away — a
+                    # trial-mode Embedded stops its transport and closes
+                    # every connection: the next read tells them apart
+                    # (_Reopened makes the point again, _Lost ends the run;
+                    # neither records a dropout).
+                    if _cancel.wait(TICK_S):
+                        return {"cancelled": True}
+                    read()
+                return verdict
+    except _Hung as e:
+        return {"failed" if settle.moved else "unstarted": str(e), "hung": True}
+
+
+def _outlast(link: _Link, settle: Settle) -> TrackStatus:
+    """HQPlayer took the point's setting and fell silent building it (or
+    stuck while it played): ask for its <Status/> again on each new
+    connection until it answers — the build is done then. The silence is
+    given back to the point's deadlines; its start keeps it (init_s). A
+    cancel ends the wait at the next ask; past BUILD_LIMIT_S, _Hung."""
+    began = time.monotonic() - ANSWER_WAIT_S          # the ask that met the silence
+    while True:
+        if _cancel.is_set():
+            raise _Lost("cancelled while HQPlayer was still building a setting")
+        if time.monotonic() - began >= settle.build_limit:
+            raise _Hung(f"HQPlayer stayed silent {settle.build_limit / 60:.0f} min building it — "
+                        "this host does not get it going, or HQPlayer hung")
+        try:
+            status = link("get_status")
+        except _Silent:
             continue
-        verdict = settle.feed(time.monotonic(), status)
-        if verdict is not None:
-            return verdict
+        except _Reopened:
+            if not _cancel.is_set():
+                raise
+            continue                # the cancel woke the read (interrupt)
+        silent = time.monotonic() - began
+        if status is not None and status.state in (PlaybackState.STOPPED, PlaybackState.STOPREQ):
+            # Built and stopped, or restarted — a box reset mid-point goes
+            # silent the same way, and its stop read as a dropout: made
+            # again (a design it built starts in a second the next time)
+            raise _Reopened(f"HQPlayer came back stopped after {silent:.0f} s of silence")
+        settle.paused(silent)
+        logger.info("HQPlayer benchmark: HQPlayer answered again after %.0f s of silence", silent)
+        return status
 
 
 def _restore(link: _Link, pre: dict, own: Optional[dict],
              mute: Optional[float]) -> Tuple[bool, Optional[str]]:
     """Put back what the run changed, whatever ended it. Returns (HQPlayer
     answered, what could not be put back). Only the app stopping cuts the
-    wait for an HQPlayer that is away short."""
+    wait for an HQPlayer that is away short; one that is there but silent —
+    a cancel in the middle of a build — is left to recover (RESTORE_ANSWER_S)."""
     link.wait = _halt.wait
+    link.c.timeout = RESTORE_ANSWER_S
+    sock = link.c.socket
+    if sock is not None:
+        if sock.fileno() < 0:
+            link.close()        # closed under it by a cancel's interrupt: connects anew
+        else:
+            sock.settimeout(RESTORE_ANSWER_S)
     try:
-        problems = _again(lambda: _put_back(link, pre=pre, own=own, mute=mute, clear=True))
-        after = _again(lambda: link("get_state"))
+        problems = _again(lambda: _put_back(link, pre=pre, own=own, mute=mute, clear=True),
+                          silent_ends=True)
+        after = _again(lambda: link("get_state"), silent_ends=True)
     except _Lost:
         return False, "HQPlayer did not answer to be put back — it is when it answers again"
     if after is None:

@@ -190,6 +190,11 @@ _KEY = """hqp_endpoint_id = %(endpoint_id)s AND hqp_engine = %(engine)s
           AND cuda IS NOT DISTINCT FROM %(cuda)s::hqp_cuda AND mode = %(mode)s
           AND matrix_profile IS NOT DISTINCT FROM %(matrix_profile)s
           AND convolution = %(convolution)s"""
+# The same context on a benchmark run (`r`), for the points it asked.
+_RUN_KEY = """r.hqp_endpoint_id = %(endpoint_id)s AND r.hqp_engine = %(engine)s
+          AND r.mode = %(mode)s AND r.cuda IS NOT DISTINCT FROM %(cuda)s::hqp_cuda
+          AND r.matrix_profile IS NOT DISTINCT FROM %(matrix_profile)s
+          AND r.convolution = %(convolution)s"""
 
 _ROLLUP_SQL = f"""
     WITH s AS (
@@ -271,9 +276,9 @@ def covered(ctx: Dict[str, Any]) -> set:
     this build and context — (rate, filter, shaper, src_rate, src_channels):
     a benchmark point or PASSIVE_COVER listens of what HQPlayer PLAYED, and
     every point a run ASKED for that ended in an answer (measured, unsettled,
-    dropped out, refused by HQPlayer — not a point that failed to run): a
-    refused combination, or an adaptive rate that plays another one, is
-    never a sample of the key that was asked."""
+    dropped out, refused by HQPlayer, never started on this host — not
+    a point that failed to run): a refused combination, or an adaptive rate
+    that plays another one, is never a sample of the key that was asked."""
     rows = db_query(f"""
         SELECT rate_out AS rate, filter, shaper, src_rate, src_channels FROM hqp_dsp_speed
          WHERE {_KEY}
@@ -282,13 +287,40 @@ def covered(ctx: Dict[str, Any]) -> set:
         UNION
         SELECT p.rate_hz, p.filter, p.shaper, p.src_rate, p.src_channels
           FROM hqp_benchmark_points p JOIN hqp_benchmark_runs r ON r.id = p.run_id
-         WHERE r.hqp_endpoint_id = %(endpoint_id)s AND r.hqp_engine = %(engine)s
-           AND r.mode = %(mode)s AND r.cuda IS NOT DISTINCT FROM %(cuda)s::hqp_cuda
-           AND r.matrix_profile IS NOT DISTINCT FROM %(matrix_profile)s
-           AND r.convolution = %(convolution)s
+         WHERE {_RUN_KEY}
            AND p.result <> 'failed' AND p.at >= now() - make_interval(days => %(days)s)
     """, {**ctx, "days": RETENTION_DAYS, "cover": PASSIVE_COVER})
     return {(r["rate"], r["filter"], r["shaper"], r["src_rate"], r["src_channels"]) for r in rows}
+
+
+def keeps_up(ctx: Dict[str, Any]) -> Dict[tuple, bool]:
+    """Whether each key known in this context keeps up here — at the host's
+    "ok" boundary or above, and never one that dropped out. Keyed both by
+    what a benchmark point ASKED (its sample: a DSD source plays HQPlayer's
+    integrator, "FIR2/XFi", whatever filter was asked) and by what HQPlayer
+    PLAYED (the keys covered() counts as measured, listens included — what
+    played outweighs what was asked); a point that never started
+    (unstarted) does not keep up. The benchmark's ladders climb by it."""
+    rows = db_query(f"""
+        SELECT 0 AS prio, p.at, p.rate_hz AS rate, p.filter, p.shaper, p.src_rate,
+               p.src_channels, (p.result <> 'unstarted' AND s.process_speed >= %(ok)s
+                                AND NOT s.dropout) AS ok
+          FROM hqp_benchmark_points p JOIN hqp_benchmark_runs r ON r.id = p.run_id
+          LEFT JOIN hqp_dsp_samples s ON s.id = p.sample_id
+         WHERE {_RUN_KEY}
+           AND (s.id IS NOT NULL OR p.result = 'unstarted')
+           AND p.at >= now() - make_interval(days => %(days)s)
+        UNION ALL
+        SELECT 1, last_seen, rate_out, filter, shaper, src_rate, src_channels,
+               speed_p10 >= %(ok)s AND NOT coalesce(dropout, FALSE)
+          FROM hqp_dsp_speed
+         WHERE {_KEY}
+           AND last_seen >= now() - make_interval(days => %(days)s)
+           AND (bench_at IS NOT NULL OR n >= %(cover)s)
+         ORDER BY prio, at
+    """, {**ctx, **thresholds(ctx), "days": RETENTION_DAYS, "cover": PASSIVE_COVER})
+    return {(r["rate"], r["filter"], r["shaper"], r["src_rate"], r["src_channels"]): r["ok"]
+            for r in rows}
 
 
 def thresholds(ctx: Dict[str, Any]) -> Dict[str, Any]:
@@ -296,15 +328,29 @@ def thresholds(ctx: Dict[str, Any]) -> Dict[str, Any]:
     defaults hold until a benchmark point dropped out there: then "no" starts
     just above the fastest speed one dropped out at — the host's own
     boundary, its buffers and its load spikes — and "tight" keeps the
-    default proportion above. Only a run that ran to its end or was
-    cancelled says it (a failed one lost its connection), and only a
-    dropout under DROPOUT_CEILING was the DSP (runs record that already)."""
+    default proportion above. Every key whose newest benchmark point dropped
+    out within the retention counts, however its run ended — one a
+    trial-mode Embedded cut short included: a dropout is recorded only as
+    the DSP falling behind, under DROPOUT_CEILING, with HQPlayer still
+    answering after it (playback.hqp_benchmark), and a key measured again
+    without one no longer counts. The speed is that point's own — the
+    rollup's p10 takes in every listen after it, so twenty listens at 2×
+    would have moved the boundary off the dropout."""
     row = db_query_one("""
-        SELECT dropout_speed FROM hqp_benchmark_runs
-         WHERE hqp_endpoint_id = %(endpoint_id)s AND hqp_engine = %(engine)s AND mode = %(mode)s
-           AND outcome IN ('done', 'cancelled') AND dropout_speed IS NOT NULL
-         ORDER BY started_at DESC LIMIT 1
-    """, ctx)
+        SELECT max(s.process_speed) AS dropout_speed
+          FROM hqp_dsp_speed d
+          JOIN hqp_dsp_samples s
+            ON s.source = 'benchmark' AND s.sampled_at = d.bench_at
+           AND s.hqp_endpoint_id = d.hqp_endpoint_id AND s.hqp_engine = d.hqp_engine
+           AND s.cuda IS NOT DISTINCT FROM d.cuda AND s.mode = d.mode
+           AND s.rate_out = d.rate_out AND s.filter = d.filter AND s.shaper = d.shaper
+           AND s.matrix_profile IS NOT DISTINCT FROM d.matrix_profile
+           AND s.convolution = d.convolution
+           AND s.src_rate = d.src_rate AND s.src_channels = d.src_channels
+         WHERE d.hqp_endpoint_id = %(endpoint_id)s AND d.hqp_engine = %(engine)s
+           AND d.mode = %(mode)s
+           AND d.dropout AND d.bench_at >= now() - make_interval(days => %(days)s)
+    """, {**ctx, "days": RETENTION_DAYS})
     dropout = row["dropout_speed"] if row else None
     no = NO_BELOW if dropout is None else max(NO_BELOW, math.floor(dropout * 20) / 20 + 0.05)
     return {"ok": round(max(OK_AT, no * OK_AT / NO_BELOW), 2), "no": round(no, 2),
@@ -347,7 +393,8 @@ def headroom(ctx: Dict[str, Any], *, rate_out: int, filter: str, shaper: str,
 
 def results(ctx: Dict[str, Any]) -> list:
     """Every key measured in this context, classed, and every combination a
-    run asked for and HQPlayer refused (class 'refused', no speed) — the
+    run asked for that HQPlayer refused or never got going here
+    (class 'refused' / 'unstarted', no speed; the newest answer) — the
     benchmark's results sheet lays them out per axis."""
     th = thresholds(ctx)
     return db_query(f"""
@@ -357,23 +404,23 @@ def results(ctx: Dict[str, Any]) -> list:
           FROM hqp_dsp_speed
          WHERE {_KEY}
         UNION ALL
-        SELECT DISTINCT ON (p.rate_hz, p.filter, p.shaper, p.src_rate, p.src_channels)
-               p.filter, p.shaper, p.rate_hz, p.src_rate, p.src_channels, 0,
-               NULL::float, 'refused', NULL::boolean, NULL::float, FALSE
-          FROM hqp_benchmark_points p JOIN hqp_benchmark_runs r ON r.id = p.run_id
-         WHERE p.result = 'refused' AND r.hqp_endpoint_id = %(endpoint_id)s
-           AND r.hqp_engine = %(engine)s AND r.mode = %(mode)s
-           AND r.cuda IS NOT DISTINCT FROM %(cuda)s::hqp_cuda
-           AND r.matrix_profile IS NOT DISTINCT FROM %(matrix_profile)s
-           AND r.convolution = %(convolution)s
-           AND NOT EXISTS (
-               SELECT 1 FROM hqp_dsp_speed s
-                WHERE s.hqp_endpoint_id = r.hqp_endpoint_id AND s.hqp_engine = r.hqp_engine
-                  AND s.mode = r.mode AND s.cuda IS NOT DISTINCT FROM r.cuda
-                  AND s.matrix_profile IS NOT DISTINCT FROM r.matrix_profile
-                  AND s.convolution = r.convolution AND s.rate_out = p.rate_hz
-                  AND s.filter = p.filter AND s.shaper = p.shaper
-                  AND s.src_rate = p.src_rate AND s.src_channels = p.src_channels)
+        SELECT filter, shaper, rate_hz, src_rate, src_channels, 0, NULL::float, result,
+               NULL::boolean, NULL::float, FALSE
+          FROM (SELECT DISTINCT ON (p.rate_hz, p.filter, p.shaper, p.src_rate, p.src_channels)
+                       p.filter, p.shaper, p.rate_hz, p.src_rate, p.src_channels,
+                       p.result::text AS result
+                  FROM hqp_benchmark_points p JOIN hqp_benchmark_runs r ON r.id = p.run_id
+                 WHERE p.result IN ('refused', 'unstarted') AND {_RUN_KEY}
+                   AND NOT EXISTS (
+                       SELECT 1 FROM hqp_dsp_speed s
+                        WHERE s.hqp_endpoint_id = r.hqp_endpoint_id AND s.hqp_engine = r.hqp_engine
+                          AND s.mode = r.mode AND s.cuda IS NOT DISTINCT FROM r.cuda
+                          AND s.matrix_profile IS NOT DISTINCT FROM r.matrix_profile
+                          AND s.convolution = r.convolution AND s.rate_out = p.rate_hz
+                          AND s.filter = p.filter AND s.shaper = p.shaper
+                          AND s.src_rate = p.src_rate AND s.src_channels = p.src_channels)
+                 ORDER BY p.rate_hz, p.filter, p.shaper, p.src_rate, p.src_channels,
+                          p.at DESC) asked
         ORDER BY src_rate, rate_out, shaper, filter
     """, {**ctx, **th})
 

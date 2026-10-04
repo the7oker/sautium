@@ -216,6 +216,13 @@ def _default_gateway() -> Optional[str]:
     return None
 
 
+# uvicorn hands SIGTERM to the server that captured it last — this one,
+# started inside the main app's lifespan — and passes it on only once this
+# one has stopped: its open streams (a wake stream every launcher holds to
+# the master) would hold the main app's shutdown back until Docker kills.
+_PEER_GRACE_S = 1
+
+
 async def _serve_p2p(port: int) -> None:
     """Serve the peer surface (p2p_app) on its own port, HTTPS pinned to the
     node key (tls_gen) — the Web UI itself is plain HTTP. A second uvicorn in
@@ -272,6 +279,7 @@ async def _serve_p2p(port: int) -> None:
         config = uvicorn.Config(
             peer_app, host="0.0.0.0", port=port, log_level="info",
             proxy_headers=True, forwarded_allow_ips=gateway,
+            timeout_graceful_shutdown=_PEER_GRACE_S,
         )
     else:
         from p2p_identity import tls_binding
@@ -282,6 +290,7 @@ async def _serve_p2p(port: int) -> None:
         config = uvicorn.Config(
             peer_app, host="0.0.0.0", port=port, log_level="info",
             ssl_keyfile=str(key_path), ssl_certfile=str(cert_path),
+            timeout_graceful_shutdown=_PEER_GRACE_S,
         )
     try:
         await uvicorn.Server(config).serve()
@@ -792,13 +801,15 @@ async def lifespan(app: FastAPI):
         # serialises their `from transformers import …` statements through
         # the main-thread import lock.
         import embeddings, enrichment_embeddings, lyrics_embeddings, translation  # noqa: F401
+        import model_cache
         from routers.discovery import (_clap_loader, _enrichment_loader,
                                        _lyrics_loader, _translate_loader)
         factories = {"clap": _clap_loader, "enrichment": _enrichment_loader,
                      "lyrics": _lyrics_loader, "translate": _translate_loader}
-        for key in _profile.prewarm_keys:
-            label, factory = _prewarm_labels[key], factories[key]
-            await _prewarm(label, key, factory)
+        with model_cache.warming_up():
+            for key in _profile.prewarm_keys:
+                label, factory = _prewarm_labels[key], factories[key]
+                await _prewarm(label, key, factory)
         # Model loads stage tensors through the caching allocator (HF
         # from_pretrained staging, dtype conversions); the freed blocks
         # otherwise sit reserved for the process lifetime and read as
@@ -854,7 +865,8 @@ async def lifespan(app: FastAPI):
     # Shutdown
     # A benchmark run drives HQPlayer on its own connection: cancelled, and
     # given the seconds to put HQPlayer back (its volume, its settings)
-    # before anything else stops — Docker allows ten in all.
+    # before anything else stops — the compose files give a stop ten in all,
+    # the first two to open requests (entrypoint.py).
     from playback import hqp_benchmark
     await asyncio.to_thread(hqp_benchmark.shutdown, 6.0)
     if _load_meter is not None:

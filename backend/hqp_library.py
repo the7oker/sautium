@@ -86,10 +86,11 @@ def _command(host: str, port: int, xml: str, timeout: float) -> bytes:
 
 def get_info(host: str, port: int) -> Dict[str, str]:
     """What HQPlayer says about itself: name (the machine's on Desktop, a
-    generic "HQPlayerEmbedded" on a box) and product."""
+    generic "HQPlayerEmbedded" on a box), product, and its build (version,
+    engine, platform — note_info)."""
     line = _command(host, port, "<GetInfo/>", _HASH_TIMEOUT).decode("utf-8", "replace")
     out = {}
-    for k in ("name", "product"):
+    for k in ("name", "product", "version", "engine", "platform"):
         m = re.search(rf'\b{k}="([^"]*)"', line)
         out[k] = m.group(1) if m else ""
     return out
@@ -302,7 +303,7 @@ def resolve_endpoint(host: str, port: int) -> Tuple[Optional[Dict[str, Any]], Op
     reported plus the hash, for ensure_endpoint to store. Reads only."""
     info = get_info(host, port)
     facts = {"hqp_name": info["name"], "product": info["product"],
-             "current_hash": library_hash(host, port)}
+             "current_hash": library_hash(host, port), "info": info}
     ep = endpoint_by_address(host, port)
     if ep and (ep["hqp_name"] or info["name"]) == info["name"] \
           and (ep["product"] or info["product"]) == info["product"]:
@@ -326,18 +327,19 @@ def _this_machine() -> Dict[str, Any]:
             "gpu": hw.accel_name, "ram_gb": round(hw.ram_gb, 1) if hw.ram_gb else None}
 
 
-_CUDA_SETTING = {"0": "off", "1": "full"}
+# What Desktop 6.2.3 writes for its three-state CUDA box: "1" the fully
+# checked box (filters and convolution, observed 2026-10-02), the word
+# "convolution" the grayed one (observed 2026-10-03); "0" the clear box.
+_CUDA_SETTING = {"0": "off", "1": "full", "convolution": "convolution"}
 
 
 def local_cuda() -> Tuple[bool, Optional[str]]:
     """CUDA offload as this machine's HQPlayer saved it (<engine cuda="…"/>
-    in its settings.xml): (read, value). "1" is the fully checked box
-    (Desktop 6, observed 2026-10-02); the grayed state — convolution only —
-    has not been seen written, so a value other than 0 or 1 reads as not
-    known (None) rather than leaving an older answer standing. Not read at
-    all — no such file here, a data folder that is not mounted or not
-    readable, HQPlayer rewriting it this very moment — keeps what is
-    stored."""
+    in its settings.xml): (read, value). A value other than those seen
+    (_CUDA_SETTING) reads as not known (None) rather than leaving an older
+    answer standing. Not read at all — no such file here, a data folder that
+    is not mounted or not readable, HQPlayer rewriting it this very moment —
+    keeps what is stored."""
     from playback.hqp_diagnostics import local_log_dir
     d = local_log_dir()
     if d is None:
@@ -455,6 +457,11 @@ def ensure_endpoint(host: str, port: int, resolved=None) -> Dict[str, Any]:
         """, {"h": host, "p": port, "product": facts["product"], "hqp_name": facts["hqp_name"],
               "id": ep["id"]})
     ep = endpoint_by_address(host, port)
+    # The build its DSP measurements are valid for, from the GetInfo just
+    # read: a row minted again after a forget had none, and every listen's
+    # sample was dropped until the output reconnected (2026-10-04)
+    from auth_hmac import is_own_address
+    note_info(ep["id"], facts["info"], here=is_own_address(host))
     ep["current_hash"] = facts["current_hash"]
     return ep
 

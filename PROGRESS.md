@@ -615,9 +615,51 @@ implementation details live in the code, DB and git history.
   data too. The class boundaries come from where points dropped out on that
   host, not from the author's rule of thumb — so a dropout is the DSP falling
   behind and nothing else: a sign held for ticks once the readings run, at a
-  speed under 1.5× (before them, under 1×); a stop at a healthy speed fails
-  the point, which a later run measures again. One output buffer still filling
-  at 2.5× once marked a whole host red. One owner of HQPlayer during a run:
+  speed under 1.5× (before them, under 1×), recorded only once HQPlayer
+  answers again (a trial-mode Embedded stops its transport before it drops
+  every connection); a stop at a healthy speed fails the point, which a later
+  run measures again. One output buffer still filling at 2.5× once marked a
+  whole host red. A source is measured at its own rate family only (and at the
+  owner's rate): the first live run (2026-10-03) put a 44.1 kHz signal through
+  sinc-MGa at 48k × 1024 on its probe row, HQPlayer stopped each one at Play
+  ("Requested filter not possible with this rate combination"), and the run
+  waited 60 s per point and gave up — a stop at Play is a refusal now,
+  recorded in seconds. The second run that day failed on HQPlayer's silence:
+  its control port answers nothing while it builds a setting (10–27 s for
+  sinc-MGa at 512× and 1024×), the run gave up on an answer after 10 s,
+  reconnected and sent Stop to set HQPlayer up again, and HQPlayer, once
+  free, carried that Stop out on the setting it had just built — the
+  silence was read as a lost connection. A point now waits the silence out
+  however long the build takes (poly-sinc-long-lp at 44.1k × 256: 3 min
+  13 s) and is measured — HQPlayer keeps a design it built, so a slow first
+  build is a start time, not a setting the host cannot run (poly-sinc-mp
+  built in 56 s, then started in a second and ran at 1.5×). The third run
+  read that wrong twice: it took a silent build past three waits for an
+  HQPlayer gone, and it held the silence to the Play when a stopped
+  HQPlayer already plays the slot a SelectTrack gives it. Only a point that
+  HQPlayer is still building 10 minutes after Play is `unstarted` — never
+  asked again, once a setting that started earlier in the run starts again;
+  a silent HQPlayer ends the run there. The grid is ladders since (Valerii's call, 2026-10-03): a
+  setting's speed falls as the rate rises in every ladder measured, so each
+  modulator starts at DSD256 and climbs while it keeps up, and goes lower
+  only while DSD256 does not — the 1024× points it passes over were the
+  slowest and the heaviest on the machine; the probe row (every modulator
+  at the top rate first) is gone. Embedded on a Pi 5 (6.2.3, a DAP as the
+  USB DAC, same day) taught three more: it answers all through a build —
+  playing, position 0, speed 0, nothing out — so that is a build too, not a
+  start that failed at 60 s; a run there needs what the host does run
+  first, so a ladder steps down at once, and the filters wait while the
+  owner's own setting does not keep up (they only measure the modulator
+  then); and an HQPlayer that takes connections but answers nothing made
+  the output's return wait out a 5 s timeout per queued track — the queue
+  hand-over now stops at the first unanswered add. A fourth that evening:
+  Embedded refreshes its `<Status/>` per output block, not every second —
+  position, speed and fills frozen together for up to 7.6 s at 32× — and
+  the run read each repeat as a frozen position: every setting near or
+  above real time ended "no verdict within 90 s", and at 9–32× "its
+  position froze — not the DSP". A tick counts only when HQPlayer refreshed
+  the status since the last one. One owner of HQPlayer
+  during a run:
   the output is lent (`PlaybackManager.hold`) the way an output switch
   detaches it, after a queue replace still adding and a play intent still
   attaching are through, and the detached backend refuses what was already on
@@ -1803,6 +1845,37 @@ go. `source` "never changes" was right for an output switch and wrong for
 the library under it.
 
 ## Known Gotchas
+
+- **A Docker stop never reached the backend's shutdown.** Two things,
+  measured 2026-10-03: uvicorn waits for open connections before the
+  lifespan's shutdown, with no limit unless given one, and the Web UI's
+  event streams never close on their own; and Docker 29 sends SIGKILL ~3 s
+  after SIGTERM to a container without a stop timeout (`docker stop`,
+  `docker restart` alike — not the 10 s the code assumed). So every stop
+  ended in exit 137 with the shutdown unrun — a benchmark run's
+  put-back of the owner's HQPlayer was left to the next start's recovery.
+  The launcher already passed `--timeout-graceful-shutdown 5`; the Docker
+  entrypoint now gives open requests 2 s, the peer surface 1 s
+  (`main._PEER_GRACE_S` — uvicorn hands SIGTERM to the server that captured
+  it last, the peer surface started inside the main app's lifespan, which
+  passes it on only once stopped: a launcher's wake stream to the master
+  held it forever), and the compose files give the stop 10 s
+  (`stop_grace_period`, after `docker compose up -d`). Measured 2026-10-04:
+  the shutdown now starts 2–3 s in; the benchmark's put-back, first in it,
+  is done in a second, and the steps after it (DHT, walks, models — none
+  of them logs) still ran past 10 s.
+
+- **A range past the end is 416, never the whole file.** HQPlayer resumes
+  a stream cut short with `Range: bytes=<offset>-` and appends what comes
+  back. The media proxy answered an offset at the file's end with 200 and
+  the whole file, so HQPlayer took it again and again — "Stream of size
+  168968256 terminated at 12067029", "End of track at 1722.32/120" — and
+  its output engine did not start again until a restart (Embedded 6.2.3,
+  2026-10-03; the benchmark recorded a 10-minute "unstarted" for a light
+  filter). One `parse_byte_range` (`streaming/proxy.py`) answers the media
+  proxy's files and preview buffers and the browser output's media route:
+  416 with `Content-Range: bytes */<size>` past the end, `bytes=-N` the
+  last N.
 
 - **Docker restores containers in no order, and a failed restore is final.**
   After a WSL restart Docker Desktop brings `restart: unless-stopped`

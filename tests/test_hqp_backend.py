@@ -53,12 +53,24 @@ class FakeHqp:
         self.replies: dict[str, str] = {}
         self.escape_brackets = escape_brackets
         self.commands: list[tuple] = []
+        # Status polls after a Play during which the position stays at 0 — a
+        # long filter initialising before any audio leaves.
+        self.start_polls = 0
+        self._starting = 0
+        self.mute = False
+        self._down = False
+        # Until when it answers nothing, on any connection — busy building a
+        # setting, or its CPU taken by one it cannot keep up with — and then
+        # carries out what it was sent meanwhile (silence()).
+        self._silent_until = 0.0
         self._lock = threading.Lock()
         self._conns: list[socket.socket] = []
         fake = self
 
         class Handler(socketserver.BaseRequestHandler):
             def handle(self):
+                if fake.mute or fake._down:
+                    return              # a trial-stopped Embedded, or a box going down: dropped at once
                 with fake._lock:
                     fake._conns.append(self.request)
                 buf = ""
@@ -73,7 +85,12 @@ class FakeHqp:
                     last = 0
                     for m in _CMD_RE.finditer(buf):
                         attrs = dict(_ATTR_RE.findall(m.group(2)))
+                        wait = fake._silent_until - time.monotonic()
+                        if wait > 0:
+                            time.sleep(wait)
                         reply = fake._dispatch(m.group(1), attrs)
+                        if reply is None:
+                            return      # gone mid-conversation: the connection drops unanswered
                         try:
                             self.request.sendall(reply.encode() + b"\n")
                         except OSError:
@@ -84,6 +101,9 @@ class FakeHqp:
         self._handler = Handler
         self.port = 0
         self._serve()
+
+    def silence(self, seconds: float) -> None:
+        self._silent_until = time.monotonic() + seconds
 
     def _serve(self) -> None:
         self._srv = _ReusableServer(("127.0.0.1", self.port), self._handler)
@@ -102,7 +122,10 @@ class FakeHqp:
                 return self.replies[cmd]
             if cmd == "Status":
                 if self.state == int(PlaybackState.PLAYING):
-                    self.position += 1.0
+                    if self._starting:
+                        self._starting -= 1
+                    else:
+                        self.position += 1.0
                 return (f'<Status state="{self.state}" track="{self.track}" '
                         f'position="{self.position}" length="300" volume="-3" '
                         f'tracks_total="{len(self.playlist)}" process_speed="1.6" '
@@ -137,6 +160,7 @@ class FakeHqp:
                 if self.playlist:
                     if self.state != int(PlaybackState.PLAYING):
                         self.position = 0.0
+                        self._starting = self.start_polls
                     self.state = int(PlaybackState.PLAYING)
                     self.track = self.track or 1
                 return '<Play result="OK"/>'
@@ -168,13 +192,18 @@ class FakeHqp:
             c.close()
 
     def close(self) -> None:
-        """Powered off: every connection dropped, the port refuses."""
-        self.restart()
+        """Powered off: every connection dropped, the port refuses. The port
+        stops first: a client reconnecting while the server winds down got
+        an answering connection that outlived the "power-off" (the long
+        outage test failed about one run in eight on it)."""
+        self._down = True
         self._srv.shutdown()
         self._srv.server_close()
+        self.restart()
 
     def come_back(self) -> None:
         """Booted again on the same port — playlist and transport empty."""
+        self._down = False
         self._serve()
 
 
@@ -211,6 +240,21 @@ def fake(monkeypatch):
     yield f
     hb.reset_all_clients()
     f.close()
+
+
+def test_a_queue_handed_to_an_hqplayer_that_does_not_answer_gives_up_at_once(fake, monkeypatch,
+                                                                              caplog):
+    make = hb._make_client
+    monkeypatch.setattr(hb, "_make_client", lambda timeout: make(timeout=0.3))
+    fake.silence(30)
+    t = time.monotonic()
+    with hb._hqp_lock:
+        added = hb._add_uris_with_retry([f"http://127.0.0.1:1/file/t{i}" for i in range(6)],
+                                        clear_first=True)
+    # one track's two tries, not six tracks' — and in what it is, not a refusal
+    assert added == 0 and time.monotonic() - t < 3
+    assert "HQPlayer is not answering — 6 of 6 tracks were not handed over" in caplog.text
+    assert "refused 6 of 6" not in caplog.text
 
 
 def _item(path, mfid, fmt="FLAC", **span):
@@ -369,33 +413,41 @@ def test_a_return_after_a_long_outage_also_loses_the_mirror(fake, monkeypatch):
     failed polls had already reset the status client, so a same-tick socket
     comparison saw no reconnect, the empty playlist passed as an external
     edit and Play landed on nothing."""
+    # The breaker's wall clock is not under test: a failed tick between the
+    # return and a hand reset re-armed it, and the back-off then outlasted
+    # the wait (the test failed about one run in eight).
+    monkeypatch.setattr(hb, "HQP_CIRCUIT_COOLDOWN", 0.0)
     mgr = PlaybackManager()
     mgr.queue.replace([_item("E:/Music/A/01.flac", 1), _item("E:/Music/A/02.flac", 2)])
     b = _attach(mgr)
-    assert len(fake.playlist) == 2
-
-    fake.close()
-    # Not merely a failed tick: the first one only finds the socket dead and
-    # keeps the client object, which a same-tick socket comparison still
-    # catches on the return. The shape that fooled it live is a failed
-    # CONNECT — the client reset to None while HQPlayer stays away.
-    assert _wait(lambda: b._failures >= 1 and hb._hqp_status_client is None,
-                 timeout=15.0), "the outage never reset the status client"
-    fake.come_back()
-    hb._hqp_unreachable_until = 0.0      # the breaker's wall clock is not under test
-    b.poke()
-    assert _wait(lambda: not b.healthy(), timeout=15.0), "the return never flagged the lost mirror"
-    assert fake.playlist == []
-
-    from routers import settings as settings_router
-    prefs = {"output.type": "hqplayer"}
-    monkeypatch.setattr(settings_router, "_read", lambda key: prefs.get(key))
-    live = mgr.ensure_active()
     try:
-        assert live is not b and live.healthy()
-        assert fake.playlist == ["file:///E:/Music/A/01.flac", "file:///E:/Music/A/02.flac"]
+        assert len(fake.playlist) == 2
+
+        fake.close()
+        # Not merely a failed tick: the first one only finds the socket dead
+        # and keeps the client object, which a same-tick socket comparison
+        # still catches on the return. The shape that fooled it live is a
+        # failed CONNECT — the client reset to None while HQPlayer stays away.
+        assert _wait(lambda: b._failures >= 1 and hb._hqp_status_client is None,
+                     timeout=15.0), "the outage never reset the status client"
+        fake.come_back()
+        assert _wait(lambda: (b.poke(), not b.healthy())[1], timeout=15.0), \
+            "the return never flagged the lost mirror"
+        assert fake.playlist == []
+
+        from routers import settings as settings_router
+        prefs = {"output.type": "hqplayer"}
+        monkeypatch.setattr(settings_router, "_read", lambda key: prefs.get(key))
+        live = mgr.ensure_active()
+        try:
+            assert live is not b and live.healthy()
+            assert fake.playlist == ["file:///E:/Music/A/01.flac", "file:///E:/Music/A/02.flac"]
+        finally:
+            live.shutdown()
     finally:
-        live.shutdown()
+        # A poller left running reads the NEXT test's fake through the
+        # module's shared status client.
+        b.shutdown()
 
 
 def test_reachable_needs_a_protocol_answer(fake):
@@ -596,6 +648,101 @@ def test_a_jump_that_plays_is_judged_played(traced, fake):
     assert f["item"]["title"] == "Song 2"
 
 
+def test_a_run_cut_short_is_put_back_only_once_hqplayer_answers(fake, monkeypatch):
+    from playback import hqp_benchmark
+    calls = []
+    monkeypatch.setattr(hqp_benchmark, "recover", lambda endpoint_id: calls.append(endpoint_id))
+    b = _attach(PlaybackManager())
+    try:
+        assert calls == [7]                       # at the attach: GetInfo answered
+        fake.mute = True                          # a trial-stopped Embedded: it takes every
+        fake.restart()                            # connection and drops it unanswered
+        assert _wait(lambda: (b.poke(), b._failures >= 2)[1], 15)
+        assert calls == [7]                       # reconnected, never answered: not yet
+        fake.mute = False
+        assert _wait(lambda: (b.poke(), len(calls) == 2)[1], 15)
+    finally:
+        b.shutdown()
+
+
+def test_a_run_cut_short_is_put_back_at_the_first_answer_when_getinfo_missed_the_attach(
+        fake, monkeypatch):
+    from playback import hqp_benchmark
+    calls = []
+    monkeypatch.setattr(hqp_benchmark, "recover", lambda endpoint_id: calls.append(endpoint_id))
+    fake.replies["GetInfo"] = "<Busy/>"               # no info at the attach
+    b = _attach(PlaybackManager())
+    try:
+        assert calls == []
+        assert _wait(lambda: (b.poke(), calls == [7])[1], 15)   # the first status that answered
+        b.poke()
+        time.sleep(0.5)
+        assert calls == [7]                                      # once, not on every tick
+    finally:
+        b.shutdown()
+
+
+def test_the_poll_backs_off_to_15_s_and_survives_a_night_of_misses():
+    # HQPlayer switched off overnight: ~1000 misses made 2.0 ** failures
+    # overflow and the poller thread died (OverflowError, 2026-10-04)
+    assert [hb._poll_interval(n) for n in (0, 1, 2, 3, 4, 5)] == [1.0, 2.0, 4.0, 8.0, 15.0, 15.0]
+    assert hb._poll_interval(5000) == 15.0
+
+
+def test_a_refusal_before_the_silence_that_stops_the_batch_still_wakes_the_notices(monkeypatch):
+    # "a" refused (the file cannot be opened); "b"'s add met HQPlayer's
+    # silence and stops the batch at once — no playlist check, no retry,
+    # each would wait out the same silence. Both reasons are told: the
+    # notices re-derive for the refusal (a dropped music mount)
+    class Stub:
+        timed_out = False
+
+        def is_connected(self):
+            return True
+
+        def playlist_add(self, uri, clear=False):
+            self.timed_out = uri == "b"
+            return uri not in ("a", "b")
+    stub = Stub()
+    monkeypatch.setattr(hb, "_get_hqp", lambda: stub)
+    monkeypatch.setattr(hb, "_reset_hqp", lambda: None)
+    monkeypatch.setattr(hb, "_refusal", lambda hqp: ("Error", "cannot open it"))
+    checked = []
+    monkeypatch.setattr(hb, "_uri_in_playlist", lambda uri: checked.append(uri) or uri == "b")
+    monkeypatch.setattr(hb, "_stream_mode", lambda: False)
+    woke = []
+    monkeypatch.setattr(hb, "_notify_notices", lambda: woke.append(True))
+    assert hb._add_uris_with_retry(["a", "c", "b"]) == 1
+    assert woke == [True] and "b" not in checked
+
+
+def test_a_play_that_initialises_for_seconds_is_judged_played(traced, fake):
+    # HQPlayer says it plays while a long filter initialises — the position at
+    # 0 for several polls — and the audio leaves past the window (sinc-MGa at
+    # DSD256, 7 s from Play to sound, 2026-10-03): still played, not unknown
+    fake.start_polls = 4
+    assert traced.select(2)
+    a = _closed(timeout=15.0)
+    assert a.verdict["code"] == "played", a.verdict
+    assert a.facts["ticks"][0]["position"] == 0.0
+
+
+def test_a_failure_the_slot_then_played_is_not_offered_when_it_stops(traced, fake, monkeypatch):
+    monkeypatch.setattr(diag, "START_LIMIT_S", 3.0)     # judged before the long start is over
+    fake.start_polls = 6
+    assert traced.select(2)
+    a = _closed(timeout=10.0)
+    assert a.verdict["code"] == "unknown"
+    assert _wait(lambda: traced._last_closed is a, 5.0)       # kept by the backend right after the ring
+    stopped = TrackStatus(state=PlaybackState.STOPPED, track_index=2, track_id="", position=0.0,
+                          length=300.0, volume=-3.0)
+    assert traced._diagnosis(stopped)["code"] == "unknown"     # nothing has played since
+    # then the slot plays on, the position moving, the speed keeping up — the
+    # end of the album (HQPlayer stopping) does not bring the failure back
+    assert _wait(lambda: a.cleared, 10.0)
+    assert traced._diagnosis(stopped) is None
+
+
 def test_a_refused_play_is_judged_at_once_in_hqplayers_words(traced, fake):
     fake.replies["Play"] = '<Play result="Error">Empty transport</Play>'
     assert traced.play() is False
@@ -649,6 +796,20 @@ def test_hqplayers_error_text_reaches_the_caller(fake):
         assert c.last_error.command == "SetFilter"
         fake.replies["SetFilter"] = "<SetFilter/>"      # a bare answer is acceptance
         assert c.set_filter(3) is True and c.last_error is None
+    finally:
+        c.disconnect()
+
+
+def test_a_state_the_sdk_does_not_name_keeps_the_status(fake):
+    # Embedded 6.2.3 answered state="5" while it started a play after a reset
+    fake.replies["Status"] = ('<Status state="5" track="1" position="0" length="120" '
+                              'volume="-3" process_speed="0" input_fill="0" output_fill="0"/>')
+    c = HQPlayerClient("127.0.0.1", fake.port)
+    assert c.connect()
+    try:
+        st = c.get_status()
+        assert st is not None and st.state == 5 and st.state != PlaybackState.PLAYING
+        assert hb.STATE_NAMES.get(st.state, "unknown") == "unknown"
     finally:
         c.disconnect()
 

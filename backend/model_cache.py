@@ -10,6 +10,7 @@ Typical first-request latency: 3-10s (cold model load).
 Subsequent requests: <100ms (singleton already resident).
 """
 
+import contextlib
 import logging
 import threading
 
@@ -26,6 +27,27 @@ _load_events: dict[str, threading.Event] = {}
 # thread-safe — two concurrent from_pretrained calls can hand one loader
 # meta tensors ("Cannot copy out of meta tensor" on .to(device)).
 _factory_lock = threading.Lock()
+# The startup pre-warm chain (main.lifespan), from its first load to its
+# last — the gaps between two loads included.
+_warming = False
+
+
+@contextlib.contextmanager
+def warming_up():
+    global _warming
+    _warming = True
+    try:
+        yield
+    finally:
+        _warming = False
+
+
+def loading() -> bool:
+    """A model loads in this process now, or the startup chain is still
+    going: CPU, disk and memory this machine's other work shares — a
+    benchmark of an HQPlayer here refuses to start meanwhile."""
+    with _lock:
+        return _warming or bool(_load_events)
 
 
 def is_loaded(key: str) -> bool:

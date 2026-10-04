@@ -123,7 +123,11 @@ class PlaybackManager:
             with self._active_lock:
                 self._refuse_if_held()
                 b = self._active
-                if b is None or b.id != "hqplayer" or not b.healthy():
+                # Not its health: an HQPlayer back from a restart has lost
+                # the mirror until the next play, and the hold detaches the
+                # backend anyway — the release attaches it afresh, mirror and
+                # all. Whether HQPlayer answers is the job's own check.
+                if b is None or b.id != "hqplayer":
                     raise ConnectionError("HQPlayer is not the attached output")
                 self._hold = {"by": by, "label": label, "progress": None}
             try:

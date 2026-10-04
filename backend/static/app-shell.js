@@ -8837,6 +8837,7 @@
   function hqpBenchCell(row) {
     if (!row) return '<td class="hqp-bench-none">—</td>';
     if (row.class === 'refused') return '<td class="hqp-bench-none" title="HQPlayer refuses this combination">⊘</td>';
+    if (row.class === 'unstarted') return '<td class="hqp-bench-none" title="HQPlayer never got it going on this host (still building it 10 minutes after Play)">○</td>';
     const settled = row.bench_settled !== false;
     const title = `${row.speed.toFixed(2)}× (${row.n} sample${row.n === 1 ? '' : 's'})`
       + (settled ? '' : ' — did not settle') + (row.dropout ? ' — dropped out' : '');
@@ -8846,7 +8847,7 @@
 
   // A table header's rate: fmtRateLabel's name, squeezed — "705.6k" in PCM,
   // "×256" at the DSD rates of the 44.1k family ("48k×64" for the others).
-  // An asked automatic rate (a refused combination) is "auto".
+  // An asked automatic rate (a refused or unstarted combination) is "auto".
   function hqpRateShort(hz) {
     if (!hz) return 'auto';
     return fmtRateLabel(hz).replace(' kHz', 'k').replace(' MHz', 'M')
@@ -8916,7 +8917,7 @@
         <p class="hqp-diag-note"><span class="hqp-hr is-ok"><span class="hqp-hr-dot"></span></span> from ${th.ok}× ·
           <span class="hqp-hr is-tight"><span class="hqp-hr-dot"></span></span> tight ·
           <span class="hqp-hr is-no"><span class="hqp-hr-dot"></span></span> under ${th.no}×${
-          th.dropout_speed ? ` (it dropped out at ${th.dropout_speed.toFixed(2)}× here)` : ''} · ~ did not settle · ✕ dropped out · ⊘ refused by HQPlayer</p>
+          th.dropout_speed ? ` (it dropped out at ${th.dropout_speed.toFixed(2)}× here)` : ''} · ~ did not settle · ✕ dropped out · ⊘ refused by HQPlayer · ○ never started here · — not measured (above a rate that does not keep up, or below ${/^PCM/.test(ctx.mode || '') ? '8×' : 'DSD256'} when it does)</p>
         <div class="confirm-actions single">
           <button class="profile-btn primary" type="button" data-close>Close</button>
         </div>

@@ -556,7 +556,12 @@ stream from the media proxy, a CUE cut, a transcode, a preview, a copy in
 HQPlayer's own library) with the PlaylistAdd's final answer, every command of
 the intent with HQPlayer's answer (the command client reports them through
 `on_outcome`), the status for ten seconds after the first transport command
-(state, track, position, speed, buffer fills, the DSP by name), what the media
+(state, track, position, speed, buffer fills, the DSP by name) — longer, up to
+a minute, while HQPlayer is still making the start: it says it plays, or its
+control port is silent, and the position has not moved (a long filter
+initialises before any audio leaves: sinc-MGa at DSD256 on a laptop's CPU took
+5–7 s, the port answering no Status meanwhile, 2026-10-03; judged at ten
+seconds, those plays read `unknown`) — what the media
 proxy saw for that file's token (each request's status, range and bytes —
 `MediaProxy.hits`), and, read as it closes, HQPlayer's playlist: whether the
 expected entry is in it and whose entry it plays. A stop, a pause, a DSP change
@@ -586,12 +591,15 @@ The brief's order put the proxy before positive evidence and drift last;
 measured traces show why not: a Next onto a track HQPlayer pre-buffered for
 gapless sends no GET, a stream-mode PlaylistAdd refusal usually means the
 add-time fetch could not reach us, and with another controller in charge our
-file is never asked for. A failed attempt rides the status as `diagnosis`:
-one toast, a "Why didn't it play?" tag on Now Playing beside that track, and
-a sheet with the sentence, the next step and the raw trace; the HQPlayer
-screen lists the recent attempts. The same failure three plays in a row is
-the `hqplayer.failing` notice (an `unreachable` run ends on HQPlayer's first
-answer). API: `GET /api/player/diagnostics/hqplayer` (attempts, the failing
+file is never asked for. A failed attempt rides the status as `diagnosis`
+while HQPlayer is not playing: one toast, a "Why didn't it play?" tag on Now
+Playing beside that track, and a sheet with the sentence, the next step and
+the raw trace; the HQPlayer screen lists the recent attempts. Once HQPlayer
+plays that very slot — the position moving, the speed keeping up — the
+failure is cleared and offered no more: before, the end of an album brought
+back a failure from its start. The same failure three plays in a row is the
+`hqplayer.failing` notice (a run ends on HQPlayer's first answer after an
+`unreachable`, or on that slot playing). API: `GET /api/player/diagnostics/hqplayer` (attempts, the failing
 run, `client_errors`), `…/hqplayer/{id}` (one whole trace), `…/hqplayer/log`.
 
 **HQPlayer's own log** is read only on demand — the Diagnostics screen, an
@@ -659,10 +667,11 @@ cooling — so Sautium measures it instead of predicting it
   renamed poly-sinc-ext3, 6.1 added AHMxEC4B). Every answered GetInfo keeps
   version, engine and platform on the `hqp_endpoints` row, and for an HQPlayer
   on this machine the machine (CPU, threads, GPU, RAM as this node sees them)
-  and the CUDA offload from its `settings.xml`: `<engine cuda="1">` is the
-  fully checked box on Desktop 6 (the grayed, convolution-only state has not
-  been seen written). For an HQPlayer elsewhere the owner says it once on the
-  HQPlayer screen.
+  and the CUDA offload from its `settings.xml`, whose `<engine cuda>` keeps
+  the three-state box: `"1"` fully checked (filters and convolution,
+  observed 2026-10-02), the word `"convolution"` grayed (convolution only,
+  2026-10-03), `"0"` clear; a value not seen yet reads as not known. For an
+  HQPlayer elsewhere the owner says it once on the HQPlayer screen.
 - **Listens leave samples** (the status poller): HQPlayer playing a slot of
   ours (never while another controller drives it), its speed and the source
   reported, 15 s into the track and 15 s past the last change of the setting
@@ -684,26 +693,72 @@ cooling — so Sautium measures it instead of predicting it
   queue plays next) — and each measured picker entry carries a dot and its
   speed: ok from 1.25×, tight from 1.0×, no under it. The boundaries are the
   host's own once a benchmark point dropped out there: "no" starts just above
-  the fastest speed one dropped out at, for that build and mode, from runs
-  that ended or were cancelled. Nothing is blocked; an entry never measured is
-  unmarked.
+  the fastest speed one dropped out at — every key of that build and mode
+  whose newest benchmark point dropped out within 90 days, however its run
+  ended (a run a trial-mode Embedded cut short at the half hour included),
+  at the speed that point itself showed, never the key's p10 that later
+  listens move. A key measured again without a dropout no longer counts.
+  Nothing is blocked; an entry never measured is unmarked.
 - **The benchmark** (`POST /api/hqplayer/benchmark`, `GET` for its state and
   the results, `…/cancel`): one mode — the one HQPlayer is in; the other only
   when asked (`{"mode": "pcm"}`) — and only the points nothing covers yet
   within 90 days: a benchmark sample or three listens of the key, or an
   earlier run's point that ASKED for it and ended in an answer
-  (`hqp_benchmark_points`: measured, unsettled, dropped out, refused — not one
-  that failed to run). A repeat run fills gaps: a combination HQPlayer refuses
+  (`hqp_benchmark_points`: measured, unsettled, dropped out, refused, never
+  started on this host — not one that failed to run). A repeat run fills gaps: a combination HQPlayer refuses
   ("…512+fs" below 512×) and an adaptive output rate that plays another rate
   than the one asked are never samples of the asked key, and the ledger is
-  what keeps them from being planned again.
-  SDM: every modulator at every DSD rate with the owner's filter, every filter
-  at the owner's rate with the owner's modulator; PCM: every filter at the
-  owner's rate and the highest, from 44.1 and 96 kHz sources; the owner's own
-  setting first and last (the thermal drift check); on an endpoint's first run
-  every modulator (PCM: filter) at the highest rate right after it — the
-  dropout boundary. On Desktop 6.2.3 in SDM (77 filters, 36 modulators, four
-  DSD rates) a first run is 221 points. The run borrows the output
+  what keeps them from being planned again. HQPlayer refuses a combination at
+  the Set* command, or at Play: it stops at once ("Requested filter not
+  possible with this rate combination 44100/49152000, stop" — sinc-MGa asked
+  to take a 44.1 kHz source to 48k × 1024, 2026-10-03). A point stopped again
+  after its one re-Play, its position never having moved, is refused in
+  seconds, not waited out — the first run on that HQPlayer waited 60 s each
+  and gave up after three — once a setting that started earlier in the run
+  starts again: an output that went away stops every Play the same way, and
+  then the run ends with nothing marked refused. A cancel wakes whatever the
+  run waits on, a silent build included; putting HQPlayer back waits 5 s an
+  answer and leaves a still-silent HQPlayer to the recovery, never resending.
+  SDM: every modulator across the DSD rates with the owner's filter, every
+  filter at the owner's rate with the owner's modulator — once the owner's
+  own setting keeps up there: with one that does not, every filter measures
+  the modulator (on a Pi 5, ASDM7EC-ul at DSD128 ran 0.26–0.30× under four
+  filters from halfband to long-ip-2s), so the filters wait for a setting
+  that does and the run says so; PCM: every filter across the rates, from
+  44.1 and 96 kHz sources. A source
+  plays at the rates of its own family — a whole power of two away, 44.1 kHz:
+  88.2 kHz … 44.1k × 1024 — and at the owner's rate: another family takes an
+  asynchronous conversion some filters refuse. A PCM source is never asked
+  under its own rate: HQPlayer does not downsample PCM (Embedded 6.2.3, a
+  96 kHz source at 48 kHz: "clHQPlayerEngine::Execute(): lInRate >
+  lOutRate", then it reset itself and played another entry); a DSD source
+  goes down to PCM rates, its conversion. Each modulator (PCM: filter)
+  on a source is a ladder over its family's rates (Valerii, 2026-10-03): it
+  starts at DSD256 (PCM: 8×, 352.8 or 384 kHz), climbs while the setting
+  keeps up — at the host's "ok" boundary or above, no dropout — and goes
+  under its start only while the rate above does not (a start HQPlayer
+  refuses leaves it to the rungs above), that rung measured
+  next, before anything else: a weak host shows what it does run first. A setting's speed falls as the rate rises (every ladder on a laptop:
+  ASDM7ECv2 5.47× → 2.79× → 2.11× → 1.09× → 0.64× from 64× to 1024×), so a
+  rate a neighbour answers for — above one that is tight or too slow, below
+  one that keeps up — is never measured, during a run or by a later one. A
+  refusal says nothing about speed and stops no climb: HQPlayer refuses the
+  AHM modulators from 64× to 512× and runs them at 1024×. The owner's own
+  setting goes first and last (the thermal drift check); between them the
+  ladders' starts with every point of a single rate, then the steps by their
+  distance from the start, down before up, each shuffled — the dropout
+  boundary shows where the ladders stop. Until 2026-10-03 every modulator was measured at every rate,
+  the highest first (the probe row). On Desktop 6.2.3 in
+  SDM (77 filters, 36 modulators) a first run plans 149 points with four DSD
+  rates of one family and 185 with the ten rates of both families an NAA
+  output offers (221 and 262 before the ladders, 447 when every rate was
+  measured), and asks fewer: a rung above one that does not keep up is
+  passed over as the run goes. HQPlayer answering is the whole precondition
+  of a start — not the backend's queue mirror: the attach may not have
+  mirrored the queue (HQPlayer was not up yet), the run sets HQPlayer's
+  playlist itself and the attach that takes the output back mirrors afresh;
+  a playlist not Sautium's holds a run back only while HQPlayer plays it
+  (another controller). The run borrows the output
   (`PlaybackManager.hold`): it begins once a queue replace still adding
   tracks and a play intent still attaching are through, the backend detaches
   as on an output switch — a command of that backend still on its way is
@@ -728,20 +783,94 @@ cooling — so Sautium measures it instead of predicting it
   under 0.1 for three ticks while the input holds, the position frozen for
   two, or the transport stopped, at a speed under 1.5×; before the readings
   (the buffer still filling, the average still holding the initialisation)
-  the same signs count only under 1×. Anything else that ends a point — a
-  stop at a healthy speed, a stream that starved, no verdict 90 s after
-  Play — fails it, and a later run measures it again. The run talks to
-  HQPlayer on its own connection, which reconnects when HQPlayer drops it (at
-  once, then after 1, 2, 4 and 8 s): HQPlayer may have restarted under the
-  run, so the volume is lowered and read back and the signals loaded again
-  before the point plays again. Everything is put back at the end, on cancel,
+  the same signs count only under 1×. A tick counts only when HQPlayer
+  refreshed its `<Status/>` since the last one: Desktop refreshes it every
+  second, Embedded on a Pi 5 per output block — position (in steps of about
+  one second of audio), speed and fills frozen together for up to 7.6 s at
+  32× (engine 6.2.3, 2026-10-03). Read as a frozen position, that reset the
+  count before the readings forever ("no verdict within 90 s" at every
+  setting near or above real time) and failed a point at 9–32× once they ran;
+  the same snapshot again is no news, and a frozen position is a refreshed
+  status that did not move. An output that keeps no time — HQPlayer's ALSA
+  null device, an Embedded with no DAC chosen — plays the signal out at the
+  DSP's speed (120 s in five on a Pi 5 at 24×, 2026-10-04): the stable
+  seconds count in audio as well as in time, and a slot played faster than
+  twice real time that stops, or goes on to the next entry, ran out — its
+  readings so far are the point, unsettled; three of them in a row ended
+  runs as "did not play" until then. A dropout is recorded only once
+  HQPlayer answers the next read: a trial-mode Embedded running out stops its
+  transport and then drops every connection, and that stop is not the DSP —
+  the point is made again or the run ends. Anything else that ends a point — a
+  stop at a healthy speed, a stream that starved, a position that does not
+  move 60 s after Play while HQPlayer answers, no verdict 90 s after Play —
+  fails it, and a later run measures it again. HQPlayer answers nothing on
+  its control port while it builds a setting — from the start until the
+  build is done, on every connection: on a laptop (Desktop 6.2.3,
+  2026-10-03) 10 to 27 s for sinc-MGa at 512× and 1024×, 56 s for
+  poly-sinc-mp and 3 min 13 s for poly-sinc-long-lp at 44.1k × 256 — and
+  carries out what it was sent meanwhile once it is free (Embedded does not:
+  a command on a connection that closed meanwhile is dropped). Embedded on a
+  Pi 5 answers all through a build instead — playing, position 0, speed 0,
+  nothing out, for 15 to 70 s — and that time too is the build's, not held
+  against the start (`_building`). It keeps a design
+  it built: the same setting asked again starts in a second, so a slow
+  first build is a start time (`init_s`), not a setting the host cannot
+  run. A point starts at the SelectTrack (a stopped HQPlayer plays the slot
+  it is given — "GoTo 1", then "Play (1/0)" in its log), and from there the
+  run asks for `<Status/>` again on a new connection every 45 s until
+  HQPlayer answers, then watches the point on — the silence is not held
+  against its start and point deadlines. The second live run gave up after
+  10 s instead and set HQPlayer up again: its Stop arrived right after the
+  build and stopped what had just been built, and a build it interrupted
+  failed inside HQPlayer (`ThreadPoolCreate(): lThreadCntr != 0`, `Stop
+  request (reset)`). A point still building after 10 minutes never started
+  on this host (`unstarted`): not asked again by a later run, which would
+  only take the machine back where the build took it (the second run met
+  HQPlayer grown to 38 GB on a 32 GB laptop, swapping); its ladder steps
+  down from it, and three points in a row that do not play stop the run.
+  Kept for good, that mark waits for a control: the first setting the run
+  saw start is played again, and only if it starts (within three times its
+  first start, a minute at least) is the point recorded — otherwise HQPlayer
+  stopped starting anything and the run ends with nothing marked. An
+  Embedded whose output engine no longer came up after its stream had fed
+  it one file over and over (2026-10-03) left a light filter "never
+  started"; a DAC switched off mid-run would do the same. Before anything
+  in the run has started there is no control: the point failed instead,
+  asked again by the next run, and three in a row end it — an engine hung
+  before the run would otherwise have marked the owner's own setting, and an
+  owner's setting HQPlayer stops at Play from the 44.1 kHz signal would have
+  ended every run at its first point. A silence after which HQPlayer
+  answers stopped is a reset or a build that stopped: the point is made
+  again, never a dropout at the speed it showed last; a silence while it
+  played starts the point's reading afresh, its drained output then ticks. On HQPlayer's ALSA null device the lightest
+  filters (`none`, polynomial, IIR) make Embedded's stream reader cut its
+  stream short, resume it, seek past its end ("416 for range request",
+  `FLAC__STREAM_DECODER_SEEK_ERROR`) and stop — after which its output
+  engine may not start again until HQPlayer restarts (2026-10-04): a DAC
+  as its output is what the benchmark should run against.
+  An HQPlayer silent that long is taken for hung, and the run ends there. A
+  setting far below real time can take a weak host down with it: on a Pi 5,
+  poly-sinc-long-lp with ASDM7EC-ul at DSD128 left HQPlayer playing it after
+  a cancel, its control port answering nothing for minutes, until it was
+  restarted (2026-10-03). A run does not start while Sautium still loads
+  its models on the same computer (the startup pre-warm included: a run
+  begun a minute after a restart measured the owner's own setting at 1.73×
+  under the translation model's CPU load, 2.18× after). The run's
+  connection reconnects when HQPlayer drops it (at once, then after 1, 2, 4
+  and 8 s): HQPlayer may have restarted under the run, so the volume is
+  lowered and read back and the signals loaded again before the point plays
+  again. Everything is put back at the end, on cancel,
   on failure and when the app stops (it waits up to six seconds); a run cut
   short before that — the process died, HQPlayer stayed away — is put back
   the next time HQPlayer answers, at the attach or when the poller sees it
   return, while HQPlayer still shows a mark of the run: its signals, the
   lowered volume, or the selection it set last (an HQPlayer that restarted
-  keeps that, maybe nothing else). Forgetting the HQPlayer takes its
-  measurements with it; it is refused while a run measures it.
+  keeps that, maybe nothing else) — only once HQPlayer answers, never on a
+  trial-stopped box that takes a connection and drops it. Forgetting the
+  HQPlayer takes its measurements with it; it is refused while a run measures
+  it. The estimate of a run's length takes the pace of the last run that
+  ended or was cancelled (on a trial-mode Embedded the owner cancels before
+  the half hour is up and runs again: a repeat run measures only the gaps).
 
 Measurements stay on this node: in the `.sbk` backup, not in the life-data
 merge (their endpoint is this node's registry), not in P2P sync.
@@ -883,6 +1012,7 @@ class PlaybackState(IntEnum):
     PAUSED = 1
     PLAYING = 2
     STOPREQ = 3
+    # states the SDK does not name stay their number (Embedded 6.2.3 said 5)
 
 class RepeatMode(IntEnum):
     NONE = 0

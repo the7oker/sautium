@@ -1,0 +1,177 @@
+{
+ "expect": "played",
+ "note": "A long filter initialising before any audio leaves (modelled on HQPlayer Desktop 6.2.3's log of 2026-10-03: sinc-MGa at DSD256, Play, 5 s of initialisation with the control port answering no Status, the NAA output started 7 s after Play). Playing at position 0, silence, then the position moving: it played — the watch runs past the window until the position moves (Attempt.due).",
+ "facts": {
+  "intent": "play",
+  "started": 1000.0,
+  "t0": 1000.2,
+  "closed": 1011.4,
+  "end": "window",
+  "error": null,
+  "slot": 3,
+  "expected_uri": "file:///E:/Music/[bandcamp]/Artist/Album/Artist - 03. Track.flac",
+  "uri": "file:///E:/Music/[bandcamp]/Artist/Album/Artist - 03. Track.flac",
+  "mode": "path",
+  "token": null,
+  "handover": {
+   "uri": "file:///E:/Music/[bandcamp]/Artist/Album/Artist - 03. Track.flac",
+   "ts": 900.0,
+   "add_ts": 900.1,
+   "mode": "path",
+   "track_id": "t-3",
+   "media_file_id": 33,
+   "title": "Track",
+   "artist": "Artist",
+   "ok": true,
+   "result": null,
+   "message": ""
+  },
+  "steps": [
+   {
+    "ts": 1000.2,
+    "command": "Play",
+    "result": "OK",
+    "message": "",
+    "attributes": {}
+   }
+  ],
+  "adds": {
+   "count": 0,
+   "failed": []
+  },
+  "ticks": [
+   {
+    "ts": 1001.2,
+    "state": "playing",
+    "track": 3,
+    "position": 0.0,
+    "length": 228.0,
+    "speed": 0.0,
+    "in_fill": -1.0,
+    "out_fill": 0.0,
+    "tracks_total": 12,
+    "mode": "SDM (DSD)",
+    "filter": "sinc-MGa",
+    "shaper": "ASDM7ECv3",
+    "rate": 11289600
+   },
+   {
+    "ts": 1002.2,
+    "state": "playing",
+    "track": 3,
+    "position": 0.0,
+    "length": 228.0,
+    "speed": 0.0,
+    "in_fill": -1.0,
+    "out_fill": 0.0,
+    "tracks_total": 12,
+    "mode": "SDM (DSD)",
+    "filter": "sinc-MGa",
+    "shaper": "ASDM7ECv3",
+    "rate": 11289600
+   },
+   {
+    "ts": 1003.2,
+    "state": "playing",
+    "track": 3,
+    "position": 0.0,
+    "length": 228.0,
+    "speed": 0.0,
+    "in_fill": -1.0,
+    "out_fill": 0.0,
+    "tracks_total": 12,
+    "mode": "SDM (DSD)",
+    "filter": "sinc-MGa",
+    "shaper": "ASDM7ECv3",
+    "rate": 11289600
+   },
+   {
+    "ts": 1009.2,
+    "state": "playing",
+    "track": 3,
+    "position": 0.6,
+    "length": 228.0,
+    "speed": 2.6,
+    "in_fill": -1.0,
+    "out_fill": 0.97,
+    "tracks_total": 12,
+    "mode": "SDM (DSD)",
+    "filter": "sinc-MGa",
+    "shaper": "ASDM7ECv3",
+    "rate": 11289600
+   },
+   {
+    "ts": 1010.2,
+    "state": "playing",
+    "track": 3,
+    "position": 1.6,
+    "length": 228.0,
+    "speed": 2.5,
+    "in_fill": -1.0,
+    "out_fill": 0.99,
+    "tracks_total": 12,
+    "mode": "SDM (DSD)",
+    "filter": "sinc-MGa",
+    "shaper": "ASDM7ECv3",
+    "rate": 11289600
+   },
+   {
+    "ts": 1011.2,
+    "state": "playing",
+    "track": 3,
+    "position": 2.6,
+    "length": 228.0,
+    "speed": 2.6,
+    "in_fill": -1.0,
+    "out_fill": 0.99,
+    "tracks_total": 12,
+    "mode": "SDM (DSD)",
+    "filter": "sinc-MGa",
+    "shaper": "ASDM7ECv3",
+    "rate": 11289600
+   }
+  ],
+  "misses": [
+   {
+    "ts": 1008.2,
+    "message": "Status: no answer: timed out"
+   }
+  ],
+  "proxy": null,
+  "playlist": {
+   "read": true,
+   "count": 4,
+   "at_slot": "file://E:/Music/%5Bbandcamp%5D/Artist/Album/Artist - 03. Track.flac",
+   "at_slot_ours": true,
+   "at_slot_expected": true,
+   "expected_present": true,
+   "foreign": 0
+  },
+  "item": {
+   "track_id": "t-3",
+   "media_file_id": 33,
+   "title": "Track",
+   "artist": "Artist",
+   "album": "Album",
+   "kind": "file"
+  },
+  "context": {
+   "hqplayer": "192.168.1.53:4321",
+   "media_url": "192.168.1.88:8830",
+   "remote": true,
+   "drift": false,
+   "endpoint_id": 7,
+   "info": {
+    "name": "HQPlayerEmbedded",
+    "product": "Signalyst HQPlayer Embedded",
+    "version": "6",
+    "platform": "Linux",
+    "engine": "6.2.3"
+   },
+   "dsp": {
+    "matrix_profile": null
+   }
+  },
+  "generation": 4
+ }
+}

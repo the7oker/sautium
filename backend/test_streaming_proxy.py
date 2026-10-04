@@ -309,6 +309,52 @@ def test_the_proxy_remembers_what_each_token_was_asked_for(tmp_path):
     assert [h["status"] for h in proxy.hits("NotRegistered0000000")] == [404]
 
 
+def test_a_range_past_the_end_is_416_never_the_whole_file(tmp_path):
+    """HQPlayer resumes a stream cut short with "bytes=<offset>-" and appends
+    what comes back: the whole file for an offset at its end fed it the file
+    again and again (Embedded 6.2.3, 2026-10-03)."""
+    import urllib.error
+    import urllib.request
+    proxy = MediaProxy(port=0, advertised_host="127.0.0.1", file_token_key=b"k",
+                       bind_host="127.0.0.1")
+    proxy.start()
+    port = proxy._httpd.server_address[1]
+    track = tmp_path / "t.flac"
+    track.write_bytes(bytes(range(256)) * 400)            # 102 400 bytes
+    tok = proxy.register_file(str(track), "audio/flac")
+    url = f"http://127.0.0.1:{port}/file/{tok}"
+
+    def get(rng):
+        req = urllib.request.Request(url, headers={"Range": rng} if rng else {})
+        try:
+            with urllib.request.urlopen(req, timeout=5) as r:
+                return r.status, r.headers.get("Content-Range"), r.read()
+        except urllib.error.HTTPError as e:
+            return e.code, e.headers.get("Content-Range"), e.read()
+    try:
+        data = track.read_bytes()
+        assert get("bytes=102400-") == (416, "bytes */102400", b"")
+        assert get("bytes=200000-300000") == (416, "bytes */102400", b"")
+        assert get("bytes=-1000") == (206, "bytes 101400-102399/102400", data[-1000:])
+        assert get("bytes=100-199") == (206, "bytes 100-199/102400", data[100:200])
+        assert get("bytes=102399-") == (206, "bytes 102399-102399/102400", data[-1:])
+        assert get("bytes=abc-") == (200, None, data)               # ignored, not refused
+        assert get("bytes=0-1,5-6") == (200, None, data)            # multi-range: the whole body
+        assert get(None) == (200, None, data)
+    finally:
+        proxy._httpd.shutdown()
+
+
+def test_one_range_parser_answers_the_proxy_and_the_browser_route():
+    from routers import media
+    from streaming.proxy import UNSATISFIABLE, parse_byte_range
+    assert parse_byte_range("bytes=100-", 1000) == (100, 999)
+    assert parse_byte_range("bytes=1000-", 1000) is UNSATISFIABLE
+    assert parse_byte_range("bytes=-100", 1000) == (900, 999)
+    assert parse_byte_range("bytes=x-", 1000) is None
+    assert media.parse_byte_range is parse_byte_range
+
+
 def test_the_hit_record_keeps_the_newest_tokens():
     proxy = _proxy()
     for i in range(300):

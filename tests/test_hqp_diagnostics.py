@@ -126,6 +126,101 @@ def test_a_different_failure_breaks_the_run(fresh):
     assert diag.failing_run() is None
 
 
+def test_a_failure_the_slot_has_played_through_is_cleared(fresh):
+    # Three plays judged failed on slot 3 of queue 7 — a failing run ...
+    attempts = [_close("not_played_stream", slot=3, generation=7)[0] for _ in range(3)]
+    assert diag.failing_run()["count"] == 3
+    # ... another slot, another queue playing: they still explain it
+    assert diag.note_playing(2, 7) is False
+    assert diag.note_playing(3, 8) is False
+    assert diag.failing_run()["count"] == 3
+    # that very slot playing: the newest failure explains nothing now, the run ends
+    assert diag.note_playing(3, 7) is True
+    assert attempts[-1].cleared and diag.failing_run() is None
+    assert diag.note_playing(3, 7) is False
+    # a played attempt has nothing to clear
+    played, _ = _close("played_stream", slot=3, generation=7)
+    assert diag.note_playing(3, 7) is False and not played.cleared
+
+
+def test_a_failure_behind_a_later_unreachable_attempt_is_still_cleared(fresh):
+    # Play pressed again while HQPlayer was still silent: the gate's GetInfo
+    # timed out, an unreachable attempt is the newest — the failure on slot 3
+    # must still clear once HQPlayer plays it, not come back at the album's end
+    failed, _ = _close("not_played_stream", slot=3, generation=7)
+    diag.record_unreachable("GetInfo: timed out", {})
+    diag.note_playing(3, 7)
+    assert failed.cleared
+
+
+def _ticked(a, ts, state, position):
+    a.ticks.append({"ts": ts, "state": state, "track": 3, "position": position, "length": 300.0,
+                    "speed": 2.0, "in_fill": -1.0, "out_fill": 0.9, "tracks_total": 4,
+                    "mode": "SDM (DSD)", "filter": "sinc-MGa", "shaper": "ASDM7ECv3",
+                    "rate": 11289600})
+
+
+def test_a_start_still_initialising_is_watched_until_the_position_moves():
+    # Play, then HQPlayer says it plays while a long filter initialises —
+    # the position at 0, its control port silent for a while — and the
+    # audio leaves seven seconds after Play (HQPlayer's log, 2026-10-03)
+    a = diag.Attempt(intent="play", slot=3)
+    a.t0 = 1000.0
+    for ts in (1001.0, 1002.0, 1003.0):
+        _ticked(a, ts, "playing", 0.0)
+    a.misses.append({"ts": 1008.0, "message": "Status: no answer within 4 s", "silent": True})
+    assert a.due(1010.5) is None                       # past the window: still starting
+    _ticked(a, 1011.0, "playing", 0.4)
+    assert a.due(1011.5) == "window"                   # it moved: judged now, as played
+
+
+def test_a_state_hqplayer_does_not_name_is_watched_like_a_start():
+    # Embedded 6.2.3 said state 5 while it started a play (2026-10-03)
+    a = diag.Attempt(intent="play", slot=3)
+    a.t0 = 1000.0
+    for ts in (1001.0, 1004.0, 1008.0):
+        _ticked(a, ts, "unknown", 0.0)
+    assert a.due(1010.5) is None                       # past the window: still starting
+    _ticked(a, 1011.0, "playing", 1.5)
+    assert a.due(1011.5) == "window"
+
+
+def test_an_hqplayer_gone_mid_start_is_judged_at_the_window():
+    # it refused the reads (a trial stop, a power cut): away, not building
+    a = diag.Attempt(intent="play", slot=3)
+    a.t0 = 1000.0
+    _ticked(a, 1001.0, "playing", 0.0)
+    a.misses.append({"ts": 1004.0, "message": "connect to hqp:4321: refused", "silent": False})
+    assert a.due(1000.0 + diag.OBSERVE_S + 0.5) == "window"
+
+
+def test_a_start_that_never_moves_is_judged_at_the_limit():
+    a = diag.Attempt(intent="play", slot=3)
+    a.t0 = 1000.0
+    for i in range(1, 70):
+        _ticked(a, 1000.0 + i, "playing", 0.0)
+    assert a.due(1000.0 + diag.START_LIMIT_S - 1) is None
+    assert a.due(1000.0 + diag.START_LIMIT_S) == "window"
+
+
+def test_a_stopped_hqplayer_is_judged_at_the_window():
+    a = diag.Attempt(intent="play", slot=3)
+    a.t0 = 1000.0
+    for ts in range(1001, 1010):
+        _ticked(a, float(ts), "stopped", 0.0)
+    assert a.due(1000.0 + diag.OBSERVE_S) == "window"
+
+
+def test_only_a_silent_status_socket_is_watched_like_a_start():
+    # the WSL2 hop flapping while the music plays on: no tick at all yet
+    a = diag.Attempt(intent="select", slot=3)
+    a.t0 = 1000.0
+    a.misses.append({"ts": 1004.0, "message": "Status: no answer within 4 s", "silent": True})
+    assert a.due(1010.5) is None
+    _ticked(a, 1012.0, "playing", 12.0)
+    assert a.due(1012.5) == "window"
+
+
 def test_an_unreachable_run_ends_when_hqplayer_answers(fresh):
     for _ in range(3):
         diag.record_unreachable("GetInfo: timed out", {})

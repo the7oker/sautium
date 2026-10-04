@@ -91,11 +91,18 @@ def main() -> int:
     _enable_hf_offline_if_cached()
     _wait_for_database()
     print(f"[entrypoint] uvicorn HTTP on {HOST}:{PORT} (reload={RELOAD})", flush=True)
+    # The Web UI's event streams never end on their own: without a limit
+    # uvicorn waits on them until Docker kills the process, and the
+    # lifespan's shutdown — a benchmark run putting the owner's HQPlayer
+    # back — never runs (exit 137, 2026-10-03). The compose files give the
+    # stop 10 s (stop_grace_period); these 2 are the open requests' share,
+    # after the peer surface's 1 (main._PEER_GRACE_S: SIGTERM reaches it first).
     uvicorn.run(
         "main:app",
         host=HOST,
         port=PORT,
         reload=RELOAD,
+        timeout_graceful_shutdown=2,
     )
     return 0
 

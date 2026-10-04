@@ -82,11 +82,28 @@ class CommandOutcome:
 
 
 class PlaybackState(IntEnum):
-    """HQPlayer playback states"""
+    """HQPlayer playback states as its control SDK (6.0.1) names them.
+    HQPlayer reports others it does not name — Embedded 6.2.3 said 5 while
+    it started a play after it had reset itself (2026-10-03) — and those
+    stay their number: one unnamed state is no reason to lose the status."""
     STOPPED = 0
     PAUSED = 1
     PLAYING = 2
     STOPREQ = 3
+
+    @classmethod
+    def _missing_(cls, value):
+        if not isinstance(value, int):
+            return None
+        state = int.__new__(cls, value)
+        state._name_, state._value_ = f"STATE_{value}", value
+        return state
+
+    @property
+    def known(self) -> bool:
+        """Named by the SDK. An unnamed state is HQPlayer between two of
+        them: no verdict on it — not stopped, not idle."""
+        return self._name_ in type(self).__members__
 
 
 class RepeatMode(IntEnum):
@@ -188,6 +205,13 @@ class HQPlayerClient:
         # playback backend's trace listens on its command client.
         self.on_outcome: Optional[Callable[[CommandOutcome], None]] = None
         self._io_error: Optional[str] = None
+        # A command since the last connect found HQPlayer there and got no
+        # answer within the timeout — as opposed to a connection that closed
+        # or refused. Building a heavy setting blocks HQPlayer's control port
+        # for many seconds (playback.hqp_benchmark waits it out). Kept until
+        # the next connect: the commands after the silent one in a step
+        # (apply_settings) fail as "not connected", and still mean it.
+        self.timed_out = False
 
     @classmethod
     def last_errors(cls, since: Optional[float] = None) -> List[Dict[str, Any]]:
@@ -227,6 +251,7 @@ class HQPlayerClient:
         Returns:
             True if connected successfully
         """
+        self.timed_out = False      # a failed connect is HQPlayer away, never its silence
         try:
             self.socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
             # Connect must be quick on LAN/localhost. A stalled HQPlayer that
@@ -339,6 +364,14 @@ class HQPlayerClient:
         except (ET.ParseError, UnicodeDecodeError) as e:
             logger.error(f"Failed to read response: {e}")
             self._io_error = f"unreadable answer: {e}"
+            self.disconnect()
+            return None
+        except TimeoutError:
+            # The connection goes all the same: the late answer would be
+            # read as the next command's.
+            logger.warning(f"HQPlayer did not answer within {self.timeout:g} s")
+            self._io_error = f"no answer within {self.timeout:g} s"
+            self.timed_out = True
             self.disconnect()
             return None
         except Exception as e:
