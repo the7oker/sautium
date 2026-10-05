@@ -10,8 +10,11 @@ Manages three processes:
 import logging
 import os
 import platform
+import secrets
+import select
 import shutil
 import signal
+import socket
 import subprocess
 import sys
 import threading
@@ -27,6 +30,11 @@ logger = logging.getLogger(__name__)
 # loop — the restart budget resets.
 _STABLE_UPTIME_SECONDS = 300
 _MAX_CRASH_RESTARTS = 3
+# main.lifespan NOTIFYs this channel with the start token it was given once
+# its startup is done. The window hears "down" after the patience, but the
+# wait goes on (_await_ready).
+_READY_CHANNEL = "sautium_backend"
+_READY_PATIENCE_SECONDS = 120
 
 
 class ServiceManager:
@@ -38,6 +46,11 @@ class ServiceManager:
         # Watchdog wiring: on_backend_event(state, message) fires from the
         # watchdog thread with state ∈ {"crashed", "restarted", "gave_up"}.
         self.on_backend_event: Optional[Callable[[str, str], None]] = None
+        # on_backend_state(up, status, detail): the backend is up, or a start
+        # failed (status, detail) — from whichever thread started it, a
+        # backend that answered late included. The one source the window
+        # follows; never fired for a start refused while closing.
+        self.on_backend_state: Optional[Callable[[bool, str, str], None]] = None
         self._backend_stopping = False
         self._backend_started_at = 0.0
         self._crash_restarts = 0
@@ -350,14 +363,24 @@ class ServiceManager:
         return True
 
     def start_backend(self, progress_cb: Optional[Callable] = None) -> bool:
-        """Start the FastAPI backend."""
+        """Start the FastAPI backend and say whether it is up. The window
+        hears it either way (on_backend_state), a failure with its reason."""
+        failure = self._start_backend(progress_cb)
+        if failure is not None and not self._closed:
+            self._backend_state(False, "Failed to start services", failure)
+        return failure is None
+
+    def _start_backend(self, progress_cb: Optional[Callable]) -> Optional[str]:
+        """None once the backend is up, otherwise why it is not."""
+        import psycopg2
+
         if self.backend_proc and self.backend_proc.poll() is None:
             logger.info("Backend already running")
-            return True
+            return None
 
         # Auto-install dependencies if missing
         if not self._ensure_backend_deps(progress_cb):
-            return False
+            return "The backend's packages did not install"
 
         if progress_cb:
             progress_cb("Starting backend server...")
@@ -414,6 +437,8 @@ class ServiceManager:
                 ", ".join(missing),
             )
         env = self.backend_env(media_tool_dirs())
+        token = secrets.token_hex(8)
+        env["SAUTIUM_START_TOKEN"] = token
 
         # Plain HTTP (PROGRESS.md "HTTP on the LAN"): no certificate a phone
         # would trust can exist for a LAN address, so there is none, and the
@@ -450,10 +475,16 @@ class ServiceManager:
         log_dir = get_data_dir()
         log_dir.mkdir(parents=True, exist_ok=True)
         backend_log = log_dir / "backend.log"
+        try:
+            listener = self._ready_listener()
+        except psycopg2.Error as e:
+            logger.error(f"Backend not started: the database does not answer — {e}")
+            return "The database does not answer"
         with self._lifecycle:
             if self._closed:
+                listener.close()
                 logger.info("Backend not started: the launcher is quitting")
-                return False
+                return "The launcher is quitting"
             # Log backend output to file instead of PIPE (PIPE can block on
             # Windows). The previous run's log survives as backend.log.1: a
             # crash tail has to outlive the restart that follows it, or
@@ -483,17 +514,120 @@ class ServiceManager:
             except Exception as e:
                 logger.error(f"Failed to start backend: {e}")
                 self._backend_log_file.close()
-                return False
+                listener.close()
+                return f"The backend could not be started: {e}"
 
-        # Wait for /health endpoint
         if progress_cb:
             progress_cb("Waiting for backend to be ready...")
-        if not self._wait_for_backend(port):
-            return False
+        return self._await_ready(self.backend_proc, listener, token, port)
+
+    def _ready_listener(self):
+        """LISTEN on _READY_CHANNEL, opened before the spawn: a backend that
+        comes up fast must not NOTIFY into nobody."""
+        import psycopg2
+
+        from desktop.config_manager import local_db_dsn
+        conn = psycopg2.connect(local_db_dsn(self.config), connect_timeout=5)
+        conn.autocommit = True
+        with conn.cursor() as cur:
+            cur.execute(f"LISTEN {_READY_CHANNEL}")
+        return conn
+
+    def _await_ready(self, proc: subprocess.Popen, listener, token: str,
+                     port: int) -> Optional[str]:
+        """None once the backend is up, otherwise why not. Two events end the
+        wait, no /health poll: the backend's NOTIFY carrying this start's
+        token (main.lifespan), or the process ending first (_signal_exit).
+        After _READY_PATIENCE_SECONDS the caller is told it is down, but the
+        wait goes on behind it — a backend that answers late (a data
+        migration, a slow first seed) is reported up the moment it does."""
+        wake_r, wake_w = socket.socketpair()
+        threading.Thread(target=self._signal_exit, args=(proc, wake_w),
+                         daemon=True, name="backend-exit").start()
+        verdict = self._next_verdict(listener, wake_r, token, _READY_PATIENCE_SECONDS)
+        if verdict is None:
+            logger.error(f"Backend did not become ready within {_READY_PATIENCE_SECONDS}s "
+                         f"— still waiting for it. Log: {self._read_backend_log_tail()}")
+            threading.Thread(target=self._late_ready,
+                             args=(proc, listener, wake_r, token, port),
+                             daemon=True, name="backend-late-ready").start()
+            return f"No answer from the backend for {_READY_PATIENCE_SECONDS // 60} minutes"
+        listener.close()
+        wake_r.close()
+        if verdict == "exited":
+            logger.error(f"Backend exited early: {self._read_backend_log_tail()}")
+            return "The backend stopped while starting"
+        if verdict == "lost":
+            logger.error("Backend start: the LISTEN connection broke")
+            return "The database connection broke while the backend started"
+        return self._backend_up(proc, port)
+
+    @staticmethod
+    def _next_verdict(listener, wake_r: socket.socket, token: str,
+                      timeout: Optional[float]) -> Optional[str]:
+        """"ready", "exited", "lost" (the LISTEN connection broke), or None
+        when `timeout` passed first. Blocks on the two sockets alone."""
+        import psycopg2
+        deadline = None if timeout is None else time.monotonic() + timeout
+        while True:
+            wait = None if deadline is None else max(0.0, deadline - time.monotonic())
+            readable, _, _ = select.select([listener, wake_r], [], [], wait)
+            if not readable:
+                return None
+            if wake_r in readable:
+                return "exited"
+            try:
+                listener.poll()
+            except psycopg2.Error:
+                return "lost"
+            tokens = {n.payload for n in listener.notifies}
+            listener.notifies.clear()
+            if token in tokens:
+                return "ready"
+
+    def _late_ready(self, proc: subprocess.Popen, listener, wake_r: socket.socket,
+                    token: str, port: int) -> None:
+        """The rest of _await_ready's wait, after its caller stopped waiting."""
+        try:
+            verdict = self._next_verdict(listener, wake_r, token, None)
+        finally:
+            listener.close()
+            wake_r.close()
+        if verdict != "ready" or proc is not self.backend_proc:
+            logger.info(f"The backend that missed its start window did not come up ({verdict})")
+            return
+        logger.info("Backend answered after its start window")
+        self._backend_up(proc, port)
+
+    @staticmethod
+    def _signal_exit(proc: subprocess.Popen, wake_w: socket.socket) -> None:
+        """Wake the readiness wait when the process ends — proc.wait() is the
+        event; select() cannot take a process handle on every platform."""
+        proc.wait()
+        try:
+            wake_w.send(b"x")
+        except OSError:
+            pass        # the wait ended first and closed its side: nobody to wake
+        finally:
+            wake_w.close()
+
+    def _backend_up(self, proc: subprocess.Popen, port: int) -> Optional[str]:
+        """The backend said it is up. One short /health look covers the
+        moment between the end of its startup and uvicorn's bind; then the
+        watchdog, the sleep hold, and the window."""
+        from desktop.utils import keep_awake
+        if not self._wait_for_backend(port, timeout=10):
+            return "The backend reported ready but does not answer"
         self._backend_started_at = time.time()
-        threading.Thread(target=self._watch_backend, args=(self.backend_proc,),
+        threading.Thread(target=self._watch_backend, args=(proc,),
                          daemon=True, name="backend-watchdog").start()
-        return True
+        keep_awake(True)
+        self._backend_state(True, "", "")
+        return None
+
+    def _backend_state(self, up: bool, status: str, detail: str) -> None:
+        if self.on_backend_state is not None:
+            self.on_backend_state(up, status, detail)
 
     def stop_backend(self) -> None:
         """Stop the backend process."""
@@ -523,9 +657,10 @@ class ServiceManager:
         crash = {"rc": proc.returncode, "uptime_s": int(uptime),
                  "restarts": self._crash_restarts, "log_tail": tail}
         if self._crash_restarts > _MAX_CRASH_RESTARTS:
-            self._notify_backend_event(
-                "gave_up", f"Backend crashed {self._crash_restarts} times in "
-                "a row — not restarting, see backend.log", **crash)
+            message = (f"Backend crashed {self._crash_restarts} times in a row — "
+                       "not restarting, see backend.log")
+            self._notify_backend_event("gave_up", message, **crash)
+            self._backend_state(False, "Backend down", message)
             return
         self._notify_backend_event(
             "crashed", f"Backend crashed (exit {proc.returncode}) — restarting...",
@@ -616,17 +751,18 @@ class ServiceManager:
     # ================================================================
 
     def start_all(self, progress_cb: Optional[Callable] = None) -> bool:
-        """Start all services in order: PostgreSQL -> backend -> tracker, and
-        hold off the host's idle sleep for as long as they run — a suspended
-        host is an offline node (see utils.keep_awake)."""
-        from desktop.utils import keep_awake
+        """Start all services in order: PostgreSQL -> backend -> tracker. The
+        backend that comes up holds off the host's idle sleep for as long as
+        it runs — a suspended host is an offline node (_backend_up)."""
         if not self.start_postgres(progress_cb):
+            if not self._closed:
+                self._backend_state(False, "Failed to start services",
+                                    "The database did not start")
             return False
         if not self.start_backend(progress_cb):
             return False
         if not self.start_tracker(progress_cb):
             return False
-        keep_awake(True)
         if progress_cb:
             progress_cb("All services running!")
         return True

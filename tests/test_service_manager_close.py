@@ -10,6 +10,7 @@ spawned "backend" is a real process; the steps before the spawn are stubbed."""
 import subprocess
 import sys
 import threading
+import types
 
 import pytest
 
@@ -33,7 +34,10 @@ def sm(tmp_path, monkeypatch):
     monkeypatch.setattr(ServiceManager, "_ensure_firewall_rule", staticmethod(lambda *a, **k: None))
     monkeypatch.setattr(ServiceManager, "_get_backend_python", lambda self: sys.executable)
     monkeypatch.setattr(ServiceManager, "backend_env", lambda self, dirs=None: {})
-    monkeypatch.setattr(ServiceManager, "_wait_for_backend", lambda self, port, timeout=120: True)
+    monkeypatch.setattr(ServiceManager, "_ready_listener",
+                        lambda self: types.SimpleNamespace(close=lambda: None))
+    monkeypatch.setattr(ServiceManager, "_await_ready",
+                        lambda self, proc, listener, token, port: None)
     monkeypatch.setattr(ServiceManager, "stop_postgres", lambda self: True)
     manager = ServiceManager({"ports": {"web": 18999, "postgres": 15999}})
     manager._backend_dir = tmp_path

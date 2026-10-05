@@ -860,6 +860,20 @@ async def lifespan(app: FastAPI):
     except Exception as e:
         logger.warning(f"dump auto-update check failed: {e}")
 
+    # The launcher waits on this instead of polling /health
+    # (desktop/service_manager.py, _await_ready); the token tells this start
+    # from an earlier one's. A Docker start has none, and no one listening.
+    import os
+    start_token = os.getenv("SAUTIUM_START_TOKEN")
+    if start_token:
+        conn = psycopg2.connect(settings.database_url)
+        try:
+            conn.autocommit = True
+            with conn.cursor() as cur:
+                cur.execute("SELECT pg_notify('sautium_backend', %s)", (start_token,))
+        finally:
+            conn.close()
+
     yield
 
     # Shutdown
