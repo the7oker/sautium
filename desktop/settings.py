@@ -257,8 +257,9 @@ class SettingsDialog(ctk.CTkToplevel):
 
     @staticmethod
     def _open(path) -> None:
-        from desktop.backup_task import open_folder
-        open_folder(path)
+        from desktop.utils import show_in_file_manager
+        path.mkdir(parents=True, exist_ok=True)
+        show_in_file_manager(path)
 
     def destroy(self):
         if self._unsubscribe_job:

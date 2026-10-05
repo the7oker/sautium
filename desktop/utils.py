@@ -762,10 +762,18 @@ def check_port_in_use(port: int) -> bool:
         return True
 
 
-def reveal_in_file_manager(path: Path) -> None:
-    """Finder / Explorer on the folder holding `path`, the file selected —
-    ready to drag into a mail or a chat."""
-    if sys.platform == "win32":
+def show_in_file_manager(path: Path) -> None:
+    """The host's file manager on `path`: a folder opened (where the backups
+    land), a file selected in the folder holding it — ready to drag into a
+    mail or a chat (the support report)."""
+    if path.is_dir():
+        if sys.platform == "win32":
+            os.startfile(str(path))                  # type: ignore[attr-defined]
+        elif sys.platform == "darwin":
+            subprocess.Popen(["open", str(path)])
+        else:
+            subprocess.Popen(["xdg-open", str(path)])
+    elif sys.platform == "win32":
         # One string, not a list: explorer parses its own command line, and
         # /select wants the quoted path glued to the comma.
         subprocess.Popen(f'explorer /select,"{path}"')
@@ -788,6 +796,9 @@ def reveal_in_file_manager(path: Path) -> None:
 # sleep — lid, power button, Start menu — is untouched by both APIs, so the
 # machine still obeys its owner.
 _awake_release: Optional[threading.Event] = None
+# Every backend that comes up asks (service_manager._backend_up) — the first
+# start, a restart, the watchdog's, a late answer — from its own thread.
+_awake_lock = threading.Lock()
 
 
 def _windows_stay_awake(release: threading.Event) -> None:
@@ -810,6 +821,11 @@ def keep_awake(enabled: bool) -> None:
     """Hold (or drop) the idle-sleep inhibition. Idempotent — a second acquire
     is a no-op. Never fatal: a node that cannot inhibit sleep still works, it
     just sleeps."""
+    with _awake_lock:
+        _keep_awake(enabled)
+
+
+def _keep_awake(enabled: bool) -> None:
     global _awake_release
     if enabled == (_awake_release is not None):
         return

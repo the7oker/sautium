@@ -663,10 +663,12 @@ def _download_tool(binary: str, url: str, progress_cb: Optional[Callable] = None
                 return False
             # ffmpeg's Windows zip ships ffprobe alongside.
             sources = list(hits[0].parent.glob("*.exe")) if IS_WINDOWS else hits[:1]
+            # The tool itself last: the next start asks only whether IT
+            # exists, so it must not be there before its siblings are.
+            sources.sort(key=lambda src: src.name == exe)
             for src in sources:
                 # Renamed into place: a binary that exists is a whole one, and
-                # executable (zipfile drops the archive's mode bits) — the
-                # next start only asks whether it exists.
+                # executable (zipfile drops the archive's mode bits).
                 part = bin_dir / f"{src.name}.part"
                 shutil.copy2(src, part)
                 part.chmod(0o755)

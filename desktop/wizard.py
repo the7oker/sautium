@@ -2098,8 +2098,11 @@ class SetupWizard(ctk.CTkToplevel):
 
     def _save_report(self, error: str):
         """Off the Tk thread (the system facts probe the tools), then shown
-        selected in the file manager, one drag away from a mail or a chat."""
-        self._report_note.configure(text="Collecting the report…")
+        selected in the file manager, one drag away from a mail or a chat.
+        One report at a time: the button waits for it."""
+        button, note = self._report_button, self._report_note
+        button.configure(state="disabled")
+        note.configure(text="Collecting the report…")
 
         def _run():
             from desktop import diag_bundle
@@ -2110,7 +2113,14 @@ class SetupWizard(ctk.CTkToplevel):
             except Exception as e:
                 logger.error("Diagnostic report failed: %s", e, exc_info=True)
                 line = f"Report not saved: {e}"
-            self.ui_call(lambda: self._report_note.configure(text=line))
+
+            def show():
+                # Back rebuilds the page: a report that finishes after that
+                # has no line of its own to land on.
+                if note.winfo_exists():
+                    note.configure(text=line)
+                    button.configure(state="normal")
+            self.ui_call(show)
 
         threading.Thread(target=_run, daemon=True).start()
 

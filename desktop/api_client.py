@@ -137,7 +137,7 @@ class BackendAPIClient:
             if peer is not None and self.base_url.startswith("https://") else None
         )
         self._streams: list = []
-        self._stream_closed = False
+        self._stream_generation = 0     # close_streams() ends every reader of the current one
         self.peer = peer
         self._server_pubkey: Optional[str] = None
         self._introduced = False
@@ -444,7 +444,9 @@ class BackendAPIClient:
         backend under itself (a scan does exactly that) and a tight retry
         would spin through the whole restart."""
         delay = 1.0
-        stopped = lambda: self._stream_closed or (stop is not None and stop.is_set())
+        generation = self._stream_generation
+        stopped = lambda: (self._stream_generation != generation
+                           or (stop is not None and stop.is_set()))
         while not stopped():
             try:
                 url = f"{self.base_url}{path}"
@@ -482,19 +484,16 @@ class BackendAPIClient:
     def close_streams(self) -> None:
         """Unblock every reader so launcher shutdown does not wait on a
         connection that is, by design, never going to end on its own. Only
-        ends the read — each reader closes its own response (_read_breaker)."""
-        self._stream_closed = True
+        ends the read — each reader closes its own response (_read_breaker).
+        A generation, not a flag: every reader that exists now ends, one
+        asleep in its reconnect backoff included, while a reader started
+        later (a relaunch that failed and stays) runs."""
+        self._stream_generation += 1
         for breaker in list(self._streams):
             try:
                 breaker.shutdown(socket.SHUT_RDWR)
             except OSError:
                 pass   # that stream ended in between and its reader closed the breaker
-
-    def reopen_streams(self) -> None:
-        """Undo close_streams() for the one caller that stays after all: a
-        relaunch whose successor could not be started. Readers ended by the
-        close are gone; the caller starts new ones."""
-        self._stream_closed = False
 
     def mb_slice(self, names: list[str]) -> Optional[dict]:
         """Fetch raw mb_* rows for artist names from a dump-holding peer.

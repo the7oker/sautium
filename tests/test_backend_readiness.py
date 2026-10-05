@@ -1,8 +1,11 @@
 """The backend's readiness is two events (desktop/service_manager.py,
-_await_ready): its NOTIFY carrying this start's token, or its process
-ending — no /health poll. A socket that carries notify payloads stands in
-for the LISTEN connection; the processes are real."""
+_await_ready): its announcement carrying this start's token, sent once
+uvicorn is bound (desktop/backend_serve.py), or its process ending — no
+/health poll. The signal itself runs through PostgreSQL; the wait's other
+verdicts use a socket that carries notify payloads in place of the LISTEN
+connection, and real processes."""
 
+import os
 import socket
 import subprocess
 import sys
@@ -12,8 +15,13 @@ import types
 import psycopg2
 import pytest
 
-from desktop import service_manager
+from desktop import backend_serve, service_manager
 from desktop.service_manager import ServiceManager
+
+PG = dict(host=os.environ.get("SAUTIUM_TEST_PGHOST", "postgres"),
+          port=int(os.environ.get("SAUTIUM_TEST_PGPORT", "5432")),
+          user=os.environ.get("SAUTIUM_TEST_PGUSER", "musicai"),
+          password=os.environ.get("SAUTIUM_TEST_PGPASSWORD", "supervisor"))
 
 
 class FakeListener:
@@ -52,6 +60,28 @@ def wake():
     w.close()
 
 
+@pytest.fixture
+def dsn():
+    url = f"postgresql://{PG['user']}:{PG['password']}@{PG['host']}:{PG['port']}/postgres"
+    try:
+        psycopg2.connect(url, connect_timeout=3).close()
+    except psycopg2.OperationalError as e:
+        pytest.skip(f"no PostgreSQL for the readiness signal test: {e}")
+    return url
+
+
+def test_the_announcement_reaches_the_listener_through_postgres(dsn, wake):
+    """Both ends of the real signal over one channel: the backend's
+    announce_ready and the launcher's listen_for_ready."""
+    listener = backend_serve.listen_for_ready(dsn)
+    try:
+        backend_serve.announce_ready(dsn, "an-earlier-start")
+        backend_serve.announce_ready(dsn, "tok")
+        assert ServiceManager._next_verdict(listener, wake[0], "tok", 5) == "ready"
+    finally:
+        listener.close()
+
+
 def test_ready_is_this_starts_token(wake):
     listener = FakeListener()
     listener.notify("an-earlier-start")
@@ -88,13 +118,13 @@ def test_a_backend_that_answers_after_its_window_is_reported_up(tmp_path, monkey
     monkeypatch.setattr(service_manager, "_READY_PATIENCE_SECONDS", 0.3)
     came_up = threading.Event()
     monkeypatch.setattr(ServiceManager, "_backend_up",
-                        lambda self, proc, port: came_up.set())
+                        lambda self, proc: came_up.set())
     sm = ServiceManager({"ports": {"web": 18999}})
     listener = FakeListener()
     proc = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(30)"])
     sm.backend_proc = proc
     try:
-        failure = sm._await_ready(proc, listener, "tok", 18999)
+        failure = sm._await_ready(proc, listener, "tok")
         assert failure and "No answer" in failure      # the caller hears "down"…
         assert not came_up.is_set()
         listener.notify("tok")                          # …and the late answer still lands
@@ -111,13 +141,13 @@ def test_a_backend_that_dies_after_its_window_is_not_reported_up(tmp_path, monke
     monkeypatch.setattr(service_manager, "_READY_PATIENCE_SECONDS", 0.3)
     came_up = threading.Event()
     monkeypatch.setattr(ServiceManager, "_backend_up",
-                        lambda self, proc, port: came_up.set())
+                        lambda self, proc: came_up.set())
     sm = ServiceManager({"ports": {"web": 18999}})
     listener = FakeListener()
     proc = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(30)"])
     sm.backend_proc = proc
     before = set(threading.enumerate())
-    assert sm._await_ready(proc, listener, "tok", 18999)
+    assert sm._await_ready(proc, listener, "tok")
     late = next(t for t in set(threading.enumerate()) - before if t.name == "backend-late-ready")
     proc.kill()
     late.join(10)

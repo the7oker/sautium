@@ -14,7 +14,7 @@ import types
 
 import pytest
 
-from desktop import config_manager, db_init, service_manager, utils
+from desktop import backend_serve, config_manager, db_init, service_manager, utils
 from desktop.service_manager import ServiceManager
 
 REAL_POPEN = subprocess.Popen
@@ -29,15 +29,15 @@ def sm(tmp_path, monkeypatch):
     monkeypatch.setattr(db_init, "ensure_media_tools", lambda *a, **k: {})
     monkeypatch.setattr(db_init, "media_tool_dirs", lambda *a, **k: [])
     monkeypatch.setattr(utils, "keep_awake", lambda enabled: None)
-    monkeypatch.setattr(ServiceManager, "_ensure_backend_deps", lambda self, cb=None: True)
+    monkeypatch.setattr(ServiceManager, "_ensure_backend_deps", lambda self, cb=None: None)
     monkeypatch.setattr(ServiceManager, "_kill_orphan_on_port", staticmethod(lambda port: None))
     monkeypatch.setattr(ServiceManager, "_ensure_firewall_rule", staticmethod(lambda *a, **k: None))
     monkeypatch.setattr(ServiceManager, "_get_backend_python", lambda self: sys.executable)
     monkeypatch.setattr(ServiceManager, "backend_env", lambda self, dirs=None: {})
-    monkeypatch.setattr(ServiceManager, "_ready_listener",
-                        lambda self: types.SimpleNamespace(close=lambda: None))
+    monkeypatch.setattr(backend_serve, "listen_for_ready",
+                        lambda dsn: types.SimpleNamespace(close=lambda: None))
     monkeypatch.setattr(ServiceManager, "_await_ready",
-                        lambda self, proc, listener, token, port: None)
+                        lambda self, proc, listener, token: None)
     monkeypatch.setattr(ServiceManager, "stop_postgres", lambda self: True)
     manager = ServiceManager({"ports": {"web": 18999, "postgres": 15999}})
     manager._backend_dir = tmp_path

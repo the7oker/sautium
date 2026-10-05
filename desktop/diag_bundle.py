@@ -404,10 +404,10 @@ def save_and_show(*, data_dir: Path, config: dict, state: str, detail: str) -> s
     the window shows — the path itself when the file manager would not open,
     so a report that was written is never reported lost. Raises only when the
     report could not be written."""
-    from desktop.utils import reveal_in_file_manager
+    from desktop.utils import show_in_file_manager
     path = save_report(data_dir=data_dir, config=config, state=state, detail=detail)
     try:
-        reveal_in_file_manager(path)
+        show_in_file_manager(path)
     except OSError as e:
         logger.warning("Diagnostic report saved, file manager not opened: %s", e)
         return f"Report saved: {path}"

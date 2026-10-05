@@ -116,13 +116,13 @@ def test_a_report_that_was_written_is_never_reported_lost(tmp_path, monkeypatch)
 
     def no_file_manager(path):
         raise FileNotFoundError(2, "No such file or directory", "xdg-open")
-    monkeypatch.setattr(utils, "reveal_in_file_manager", no_file_manager)
+    monkeypatch.setattr(utils, "show_in_file_manager", no_file_manager)
     line = diag_bundle.save_and_show(data_dir=tmp_path, config={}, state="s", detail="d")
     saved = next((tmp_path / "reports").iterdir())
     assert line == f"Report saved: {saved}"
 
     shown = []
-    monkeypatch.setattr(utils, "reveal_in_file_manager", shown.append)
+    monkeypatch.setattr(utils, "show_in_file_manager", shown.append)
     line = diag_bundle.save_and_show(data_dir=tmp_path, config={}, state="s", detail="d")
     assert line.startswith("Saved and selected in the file manager")
     assert shown and shown[0].parent == tmp_path / "reports"

@@ -337,7 +337,9 @@ class LauncherApp(ctk.CTk):
                 return
             if not success:
                 diag_events.spool(data_dir, "service.start_failed",
-                                  {"step": "start_all", "error": "a service did not start"})
+                                  {"step": "start_all",
+                                   "error": self.service_manager.last_failure
+                                   or "a service did not start"})
 
         threading.Thread(target=_start, daemon=True).start()
 
@@ -988,13 +990,16 @@ class LauncherApp(ctk.CTk):
         # keeps the failure it explains.
         note = ctk.CTkLabel(panel, text="", text_color="gray", font=ctk.CTkFont(size=11),
                             wraplength=WINDOW_WIDTH - 80, justify="center")
-        ctk.CTkButton(panel, text="Save Report for Support", width=200,
-                      command=lambda: self._save_report(status, detail, note)).pack()
+        button = ctk.CTkButton(panel, text="Save Report for Support", width=200)
+        button.configure(command=lambda: self._save_report(status, detail, button, note))
+        button.pack()
         note.pack(pady=(6, 0))
 
-    def _save_report(self, status: str, detail: str, note) -> None:
+    def _save_report(self, status: str, detail: str, button, note) -> None:
         """Off the Tk thread (the system facts probe the tools), then shown
-        selected in the file manager, one drag away from a mail or a chat."""
+        selected in the file manager, one drag away from a mail or a chat.
+        One report at a time: the button waits for it."""
+        button.configure(state="disabled")
         note.configure(text="Collecting the report…")
 
         def _run():
@@ -1012,6 +1017,7 @@ class LauncherApp(ctk.CTk):
                 # happen while the report is being written.
                 if note.winfo_exists():
                     note.configure(text=line)
+                    button.configure(state="normal")
             self.ui_call(show)
 
         threading.Thread(target=_run, daemon=True).start()
@@ -1574,14 +1580,21 @@ class LauncherApp(ctk.CTk):
             def progress(msg):
                 self.ui_call(lambda: self._progress_text.configure(text=msg))
 
-            # perform_update stops P2P, and the restart's "up" starts it
-            # again (_on_services_ready) only into an empty slot — emptied
-            # before, or the Tk thread can get there first.
-            p2p, self.p2p_manager = self.p2p_manager, None
+            # P2P first — it holds the sync port — and emptied only once it
+            # has stopped: the update's restart reports "up", and
+            # _on_services_ready starts P2P into an empty slot. Emptied any
+            # earlier, an "up" from elsewhere (the watchdog's, a late answer)
+            # started a second manager on the port the first still held.
+            progress("Stopping services for update...")
+            with self._p2p_lifecycle:
+                if self.p2p_manager:
+                    try:
+                        self.p2p_manager.stop()
+                    except Exception as e:
+                        logger.warning(f"P2P stop during update: {e}")
+                self.p2p_manager = None
             success, changelog, relaunch, services_up = perform_update(
-                self.service_manager, self.config, progress_cb=progress,
-                p2p_manager=p2p,
-            )
+                self.service_manager, self.config, progress_cb=progress)
 
             if relaunch:
                 self.ui_call(lambda: self._restart_self(changelog))
@@ -1794,14 +1807,15 @@ class LauncherApp(ctk.CTk):
             except (OSError, subprocess.SubprocessError) as e:
                 logger.error(f"Relaunch failed: {e}")
                 # This process stays after all. _stop_everything closed the
-                # services (PostgreSQL included, which the backend needs) and
-                # P2P, _restart_self the event streams: all of it comes back
-                # as at a start.
-                # Not quitting any more, before the start: its "up" or "down"
-                # must not meet a window that still thinks it is.
+                # services (PostgreSQL included, which the backend needs), P2P
+                # and the session marker, _restart_self the event streams: all
+                # of it comes back as at a start — not quitting any more first,
+                # so the start's "up" or "down" meets a window that knows it.
+                from desktop.config_manager import get_data_dir
+                from desktop.p2p import diag_events
                 self._shutting_down = False
+                diag_events.write_session_marker(get_data_dir())
                 self.service_manager.reopen()
-                self.api_client.reopen_streams()
                 self._streams_started = False
                 self.p2p_manager = None
                 ok = self.service_manager.start_all()

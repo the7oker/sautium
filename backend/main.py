@@ -792,15 +792,6 @@ async def lifespan(app: FastAPI):
     async def _prewarm_all():
         if not _profile.prewarm_keys:
             return
-        # Eagerly import model modules in the main thread before pre-warm
-        # tasks spawn worker threads. The transformers package uses
-        # _LazyModule whose __getattr__ is not thread-safe — concurrent
-        # first-time imports from sibling pre-warm threads (CLAP +
-        # sentence_transformers + lyrics) race and one of them surfaces as
-        # `cannot import name 'ClapProcessor'`. Loading the modules here
-        # serialises their `from transformers import …` statements through
-        # the main-thread import lock.
-        import embeddings, enrichment_embeddings, lyrics_embeddings, translation  # noqa: F401
         import model_cache
         from routers.discovery import (_clap_loader, _enrichment_loader,
                                        _lyrics_loader, _translate_loader)
@@ -830,6 +821,19 @@ async def lifespan(app: FastAPI):
         else:
             logger.info("Pre-warm chain complete")
 
+    # Eagerly import the model modules in the main thread before the
+    # pre-warm tasks spawn worker threads. The transformers package uses
+    # _LazyModule whose __getattr__ is not thread-safe — concurrent
+    # first-time imports from sibling pre-warm threads (CLAP +
+    # sentence_transformers + lyrics) race and one of them surfaces as
+    # `cannot import name 'ClapProcessor'`. Loading the modules here
+    # serialises their `from transformers import …` statements through the
+    # main-thread import lock. Here in the lifespan, not in the task: they
+    # hold the loop for seconds, and a task ran them somewhere around
+    # uvicorn's bind — after a launcher start already heard "ready"
+    # (desktop/backend_serve.py) from a backend that answered nothing yet.
+    if _profile.prewarm_keys:
+        import embeddings, enrichment_embeddings, lyrics_embeddings, translation  # noqa: F401
     asyncio.create_task(_prewarm_all())
 
     # Background (network-only) enrichment — gated by the
@@ -859,20 +863,6 @@ async def lifespan(app: FastAPI):
         maybe_auto_update()
     except Exception as e:
         logger.warning(f"dump auto-update check failed: {e}")
-
-    # The launcher waits on this instead of polling /health
-    # (desktop/service_manager.py, _await_ready); the token tells this start
-    # from an earlier one's. A Docker start has none, and no one listening.
-    import os
-    start_token = os.getenv("SAUTIUM_START_TOKEN")
-    if start_token:
-        conn = psycopg2.connect(settings.database_url)
-        try:
-            conn.autocommit = True
-            with conn.cursor() as cur:
-                cur.execute("SELECT pg_notify('sautium_backend', %s)", (start_token,))
-        finally:
-            conn.close()
 
     yield
 

@@ -340,11 +340,11 @@ def perform_update(
     service_manager,
     config: dict,
     progress_cb: Optional[Callable] = None,
-    p2p_manager=None,
 ) -> Tuple[bool, List[str], bool, bool]:
     """
-    Full update sequence:
-    1. Stop backend + tracker + P2P (keep PostgreSQL)
+    Full update sequence, with P2P already stopped by the caller (it owns the
+    manager, and the slot it empties is what the restart's "up" refills):
+    1. Stop backend + tracker (keep PostgreSQL)
     2. Make the checkout equal to origin/main (fetch + reset --hard; a
        managed tree's own edits are set aside as a patch first)
     3. Run migrations if new ones exist
@@ -366,17 +366,6 @@ def perform_update(
         services_up says whether the backend answered after the restart;
         always False with a relaunch, whose successor starts them.
     """
-    if progress_cb:
-        progress_cb("Stopping services for update...")
-
-    # Stop P2P first (releases sync server port)
-    if p2p_manager:
-        try:
-            p2p_manager.stop()
-        except Exception as e:
-            logger.warning(f"P2P stop during update: {e}")
-
-    # Stop backend and tracker
     service_manager.stop_tracker()
     service_manager.stop_backend()
 

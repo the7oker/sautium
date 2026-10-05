@@ -57,19 +57,6 @@ def latest_backup(directory: Optional[Path] = None) -> Optional[dict]:
     return entry
 
 
-def open_folder(path: Path) -> None:
-    """The host's file manager on `path` — where the files land."""
-    import os
-    import subprocess
-    path.mkdir(parents=True, exist_ok=True)
-    if sys.platform == "win32":
-        os.startfile(str(path))                      # type: ignore[attr-defined]
-    elif sys.platform == "darwin":
-        subprocess.Popen(["open", str(path)])
-    else:
-        subprocess.Popen(["xdg-open", str(path)])
-
-
 def fmt_bytes(n: int) -> str:
     if n >= 1024 ** 3:
         return f"{n / 1024 ** 3:.1f} GB"

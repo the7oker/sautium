@@ -30,10 +30,8 @@ logger = logging.getLogger(__name__)
 # loop — the restart budget resets.
 _STABLE_UPTIME_SECONDS = 300
 _MAX_CRASH_RESTARTS = 3
-# main.lifespan NOTIFYs this channel with the start token it was given once
-# its startup is done. The window hears "down" after the patience, but the
-# wait goes on (_await_ready).
-_READY_CHANNEL = "sautium_backend"
+# The backend announces itself bound (desktop/backend_serve.py). The window
+# hears "down" after this patience, but the wait goes on (_await_ready).
 _READY_PATIENCE_SECONDS = 120
 
 
@@ -51,6 +49,7 @@ class ServiceManager:
         # backend that answered late included. The one source the window
         # follows; never fired for a start refused while closing.
         self.on_backend_state: Optional[Callable[[bool, str, str], None]] = None
+        self.last_failure: Optional[str] = None     # the detail of the last "down"
         self._backend_stopping = False
         self._backend_started_at = 0.0
         self._crash_restarts = 0
@@ -72,6 +71,10 @@ class ServiceManager:
 
     def start_postgres(self, progress_cb: Optional[Callable] = None) -> bool:
         """Start PostgreSQL and run migrations."""
+        return self._start_postgres(progress_cb) is None
+
+    def _start_postgres(self, progress_cb: Optional[Callable]) -> Optional[str]:
+        """None once PostgreSQL is up and migrated, otherwise why not."""
         from desktop.db_init import (
             start_postgres, is_postgres_running, run_migrations,
             get_pg_bin_dir, download_portable_postgres, initialize_cluster,
@@ -85,13 +88,13 @@ class ServiceManager:
         # in place). Bare-metal Linux is expected to provide PostgreSQL itself.
         if sys.platform in ("win32", "darwin"):
             if not download_portable_postgres(progress_cb):
-                return False
+                return "PostgreSQL could not be installed"
         else:
             try:
                 get_pg_bin_dir()
             except FileNotFoundError:
                 logger.error("PostgreSQL not found. Install it manually.")
-                return False
+                return "PostgreSQL is not installed"
 
         # Initialize cluster if needed
         initialize_cluster(password, progress_cb=progress_cb)
@@ -99,14 +102,14 @@ class ServiceManager:
         with self._lifecycle:
             if self._closed:
                 logger.info("PostgreSQL not started: the launcher is quitting")
-                return False
+                return "The launcher is quitting"
             if is_postgres_running():
                 logger.info("PostgreSQL already running")
             else:
                 if progress_cb:
                     progress_cb("Starting PostgreSQL...")
                 if not start_postgres(port=port):
-                    return False
+                    return "PostgreSQL did not start"
 
         # Create database/role if needed (first run)
         if progress_cb:
@@ -120,7 +123,7 @@ class ServiceManager:
         if progress_cb:
             progress_cb("Connecting to database...")
         if not self._wait_for_postgres(password, port):
-            return False
+            return "PostgreSQL does not accept connections"
 
         # Run pending migrations
         if progress_cb:
@@ -129,9 +132,9 @@ class ServiceManager:
             run_migrations(password, port=port, progress_cb=progress_cb)
         except Exception as e:
             logger.error(f"Migration failed: {e}")
-            return False
+            return f"A database migration failed: {str(e)[:200]}"
 
-        return True
+        return None
 
     def stop_postgres(self) -> bool:
         """Stop PostgreSQL."""
@@ -180,8 +183,9 @@ class ServiceManager:
 
         return download_embedded_python(progress_cb)
 
-    def _ensure_backend_deps(self, progress_cb: Optional[Callable] = None) -> bool:
-        """Install backend dependencies if missing or out-of-date.
+    def _ensure_backend_deps(self, progress_cb: Optional[Callable] = None) -> Optional[str]:
+        """Install backend dependencies if missing or out-of-date: None when
+        they are in place, otherwise why not.
 
         Skip-fast condition: a marker file at <data_dir>/.backend_deps_<env> holds
         the SHA-256 of requirements.txt from the last successful install into THAT
@@ -193,7 +197,7 @@ class ServiceManager:
         """
         # Ensure embedded Python 3.12 is available
         if not self._ensure_backend_python(progress_cb):
-            return False
+            return "No Python for the backend"
         # Installs provisioned before the .pth existed get it here, every
         # start — cheap, and the backend's `desktop.*` imports depend on it.
         from desktop.python_env import ensure_project_pth
@@ -205,7 +209,7 @@ class ServiceManager:
         req_file = self._backend_dir / "requirements.txt"
         if not req_file.exists():
             logger.error(f"requirements.txt not found: {req_file}")
-            return False
+            return "backend/requirements.txt is missing"
 
         import hashlib
         from desktop.config_manager import get_data_dir
@@ -219,7 +223,7 @@ class ServiceManager:
         marker = get_data_dir() / f".backend_deps_{env_key}"
         if marker.exists() and marker.read_text().strip() == req_hash:
             logger.info("Backend dependencies already up to date")
-            return True
+            return None
 
         _cflags = subprocess.CREATE_NO_WINDOW if sys.platform == "win32" else 0
         is_macos = sys.platform == "darwin"
@@ -354,13 +358,14 @@ class ServiceManager:
         result = subprocess.run(cmd, **kwargs)
         if result.returncode != 0:
             logger.error(f"pip install failed: {result.stderr}")
-            if progress_cb:
-                progress_cb(f"Failed to install dependencies: {result.stderr[:200]}")
-            return False
+            # pip's last line names what failed ("No matching distribution
+            # found for …"); it rides into the window and the report.
+            last = (result.stderr.strip().splitlines() or ["pip failed"])[-1]
+            return f"The backend's packages did not install: {last[:200]}"
 
         marker.write_text(req_hash)
         logger.info("Backend dependencies installed")
-        return True
+        return None
 
     def start_backend(self, progress_cb: Optional[Callable] = None) -> bool:
         """Start the FastAPI backend and say whether it is up. The window
@@ -379,8 +384,9 @@ class ServiceManager:
             return None
 
         # Auto-install dependencies if missing
-        if not self._ensure_backend_deps(progress_cb):
-            return "The backend's packages did not install"
+        failure = self._ensure_backend_deps(progress_cb)
+        if failure is not None:
+            return failure
 
         if progress_cb:
             progress_cb("Starting backend server...")
@@ -440,16 +446,12 @@ class ServiceManager:
         token = secrets.token_hex(8)
         env["SAUTIUM_START_TOKEN"] = token
 
-        # Plain HTTP (PROGRESS.md "HTTP on the LAN"): no certificate a phone
-        # would trust can exist for a LAN address, so there is none, and the
-        # credential exchange is boxed end to end instead.
-        cmd = [
-            backend_python, "-m", "uvicorn",
-            "main:app",
-            "--host", "0.0.0.0",
-            "--port", str(port),
-            "--timeout-graceful-shutdown", "5",
-        ]
+        # uvicorn on 0.0.0.0 through desktop/backend_serve.py, which also
+        # announces the bind _await_ready waits on. Plain HTTP (PROGRESS.md
+        # "HTTP on the LAN"): no certificate a phone would trust can exist for
+        # a LAN address, so there is none, and the credential exchange is
+        # boxed end to end instead.
+        cmd = [backend_python, "-m", "desktop.backend_serve", str(port)]
 
         # The backend's own peer surface (p2p_app.py), when this install runs
         # one, mints its pinned TLS cert itself — point it at the data dir, or
@@ -475,8 +477,10 @@ class ServiceManager:
         log_dir = get_data_dir()
         log_dir.mkdir(parents=True, exist_ok=True)
         backend_log = log_dir / "backend.log"
+        from desktop.backend_serve import listen_for_ready
+        from desktop.config_manager import local_db_dsn
         try:
-            listener = self._ready_listener()
+            listener = listen_for_ready(local_db_dsn(self.config))
         except psycopg2.Error as e:
             logger.error(f"Backend not started: the database does not answer — {e}")
             return "The database does not answer"
@@ -519,28 +523,16 @@ class ServiceManager:
 
         if progress_cb:
             progress_cb("Waiting for backend to be ready...")
-        return self._await_ready(self.backend_proc, listener, token, port)
+        return self._await_ready(self.backend_proc, listener, token)
 
-    def _ready_listener(self):
-        """LISTEN on _READY_CHANNEL, opened before the spawn: a backend that
-        comes up fast must not NOTIFY into nobody."""
-        import psycopg2
-
-        from desktop.config_manager import local_db_dsn
-        conn = psycopg2.connect(local_db_dsn(self.config), connect_timeout=5)
-        conn.autocommit = True
-        with conn.cursor() as cur:
-            cur.execute(f"LISTEN {_READY_CHANNEL}")
-        return conn
-
-    def _await_ready(self, proc: subprocess.Popen, listener, token: str,
-                     port: int) -> Optional[str]:
+    def _await_ready(self, proc: subprocess.Popen, listener, token: str) -> Optional[str]:
         """None once the backend is up, otherwise why not. Two events end the
-        wait, no /health poll: the backend's NOTIFY carrying this start's
-        token (main.lifespan), or the process ending first (_signal_exit).
-        After _READY_PATIENCE_SECONDS the caller is told it is down, but the
-        wait goes on behind it — a backend that answers late (a data
-        migration, a slow first seed) is reported up the moment it does."""
+        wait, no /health poll: the announcement that carries this start's
+        token, sent once uvicorn is bound (desktop/backend_serve.py), or the
+        process ending first (_signal_exit). After _READY_PATIENCE_SECONDS the
+        caller is told it is down, but the wait goes on behind it — a backend
+        that answers late (a data migration, a slow first seed) is reported up
+        the moment it does."""
         wake_r, wake_w = socket.socketpair()
         threading.Thread(target=self._signal_exit, args=(proc, wake_w),
                          daemon=True, name="backend-exit").start()
@@ -548,8 +540,7 @@ class ServiceManager:
         if verdict is None:
             logger.error(f"Backend did not become ready within {_READY_PATIENCE_SECONDS}s "
                          f"— still waiting for it. Log: {self._read_backend_log_tail()}")
-            threading.Thread(target=self._late_ready,
-                             args=(proc, listener, wake_r, token, port),
+            threading.Thread(target=self._late_ready, args=(proc, listener, wake_r, token),
                              daemon=True, name="backend-late-ready").start()
             return f"No answer from the backend for {_READY_PATIENCE_SECONDS // 60} minutes"
         listener.close()
@@ -558,9 +549,10 @@ class ServiceManager:
             logger.error(f"Backend exited early: {self._read_backend_log_tail()}")
             return "The backend stopped while starting"
         if verdict == "lost":
-            logger.error("Backend start: the LISTEN connection broke")
+            self._stop_unheard(proc)
             return "The database connection broke while the backend started"
-        return self._backend_up(proc, port)
+        self._backend_up(proc)
+        return None
 
     @staticmethod
     def _next_verdict(listener, wake_r: socket.socket, token: str,
@@ -586,18 +578,28 @@ class ServiceManager:
                 return "ready"
 
     def _late_ready(self, proc: subprocess.Popen, listener, wake_r: socket.socket,
-                    token: str, port: int) -> None:
+                    token: str) -> None:
         """The rest of _await_ready's wait, after its caller stopped waiting."""
         try:
             verdict = self._next_verdict(listener, wake_r, token, None)
         finally:
             listener.close()
             wake_r.close()
-        if verdict != "ready" or proc is not self.backend_proc:
-            logger.info(f"The backend that missed its start window did not come up ({verdict})")
-            return
-        logger.info("Backend answered after its start window")
-        self._backend_up(proc, port)
+        if verdict == "ready":
+            logger.info("Backend answered after its start window")
+            self._backend_up(proc)
+        elif verdict == "lost":
+            self._stop_unheard(proc)
+        else:
+            logger.info("The backend that missed its start window did not come up")
+
+    def _stop_unheard(self, proc: subprocess.Popen) -> None:
+        """The LISTEN connection broke while the backend started: its
+        announcement can no longer be heard, so it is stopped — "down" stays
+        true, and the port is free for the next start."""
+        logger.error("Backend start: the LISTEN connection broke — stopping the backend")
+        if proc is self.backend_proc:
+            self.stop_backend()
 
     @staticmethod
     def _signal_exit(proc: subprocess.Popen, wake_w: socket.socket) -> None:
@@ -611,21 +613,23 @@ class ServiceManager:
         finally:
             wake_w.close()
 
-    def _backend_up(self, proc: subprocess.Popen, port: int) -> Optional[str]:
-        """The backend said it is up. One short /health look covers the
-        moment between the end of its startup and uvicorn's bind; then the
-        watchdog, the sleep hold, and the window."""
+    def _backend_up(self, proc: subprocess.Popen) -> None:
+        """The backend announced itself bound: the watchdog, the sleep hold,
+        and the window. A process stopped or replaced while it was starting
+        is nobody's news."""
+        if proc is not self.backend_proc:
+            return
         from desktop.utils import keep_awake
-        if not self._wait_for_backend(port, timeout=10):
-            return "The backend reported ready but does not answer"
+        logger.info("Backend is ready")
         self._backend_started_at = time.time()
         threading.Thread(target=self._watch_backend, args=(proc,),
                          daemon=True, name="backend-watchdog").start()
         keep_awake(True)
         self._backend_state(True, "", "")
-        return None
 
     def _backend_state(self, up: bool, status: str, detail: str) -> None:
+        if not up:
+            self.last_failure = detail
         if self.on_backend_state is not None:
             self.on_backend_state(up, status, detail)
 
@@ -682,43 +686,6 @@ class ServiceManager:
         if self.on_backend_event is not None:
             self.on_backend_event(state, message)
 
-    def _wait_for_backend(self, port: int, timeout: int = 120) -> bool:
-        """Wait for the backend /health endpoint to respond."""
-        import urllib.request
-        import urllib.error
-
-        url = f"http://127.0.0.1:{port}/health"
-        for i in range(timeout):
-            # Check if process died
-            if self.backend_proc and self.backend_proc.poll() is not None:
-                err_msg = self._read_backend_log_tail()
-                logger.error(f"Backend exited early: {err_msg}")
-                return False
-            try:
-                req = urllib.request.urlopen(url, timeout=5)
-                if req.status == 200:
-                    # Safety net behind the orphan sweep: a 200 from a
-                    # process that is not our child means someone else owns
-                    # the port and we would report a stale backend as ours.
-                    if self.backend_proc and self.backend_proc.poll() is not None:
-                        logger.error(
-                            "Port %d answers /health but our backend exited "
-                            "(%s) — another process owns the port: %s",
-                            port, self.backend_proc.returncode,
-                            self._read_backend_log_tail(),
-                        )
-                        return False
-                    logger.info("Backend is ready")
-                    return True
-            except Exception as e:
-                if i % 10 == 0:
-                    logger.debug(f"Health check attempt {i}: {type(e).__name__}: {e}")
-                time.sleep(1)
-
-        err_msg = self._read_backend_log_tail()
-        logger.error(f"Backend did not become ready within {timeout}s. Log: {err_msg}")
-        return False
-
     def _read_backend_log_tail(self) -> str:
         """Read last lines from backend log file."""
         try:
@@ -754,10 +721,10 @@ class ServiceManager:
         """Start all services in order: PostgreSQL -> backend -> tracker. The
         backend that comes up holds off the host's idle sleep for as long as
         it runs — a suspended host is an offline node (_backend_up)."""
-        if not self.start_postgres(progress_cb):
+        failure = self._start_postgres(progress_cb)
+        if failure is not None:
             if not self._closed:
-                self._backend_state(False, "Failed to start services",
-                                    "The database did not start")
+                self._backend_state(False, "Failed to start services", failure)
             return False
         if not self.start_backend(progress_cb):
             return False
