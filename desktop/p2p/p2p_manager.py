@@ -1154,9 +1154,15 @@ class P2PManager:
         # can find zero nodes while HTTPS works — without this tier such a
         # node has NO route to the support/dump/relay node at all. Purely a
         # discovery candidate: the handshake still checks the pinned pubkey.
-        if not (peers or lan_others):
-            from desktop.p2p.master_node import MASTER_PUBKEY_HEX
-            if pubkey == MASTER_PUBKEY_HEX:
+        # The master is known by its invite code as well as its key: a
+        # newborn's contact is still `pending:`, and its first handshake is
+        # the very call this tier is for. Nor do untargeted LAN peers stand
+        # in for it — they are other nodes, not a route to this one.
+        # (2026-10-05: a node born while the master was down never resolved
+        # it; on that network the DHT answered no user key at all.)
+        if not peers:
+            from desktop.p2p.master_node import MASTER_INVITE_CODE, MASTER_PUBKEY_HEX
+            if pubkey == MASTER_PUBKEY_HEX or invite_code == MASTER_INVITE_CODE:
                 from desktop.p2p import master_hint
                 hint = await asyncio.get_event_loop().run_in_executor(
                     None, master_hint.fetch)
@@ -2270,7 +2276,7 @@ class P2PManager:
         master = self._chat_service.get_friend_by_public_key(
             MASTER_PUBKEY_HEX)
         if not master:
-            return _ProbeResult(None, "master contact not seeded yet",
+            return _ProbeResult(None, "master contact not resolved yet",
                                 retry_soon=True)
         peers = await self._find_friend_peers(master)
         vantages = [p for p in peers if is_internet_vantage(p[0])]
