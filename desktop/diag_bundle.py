@@ -83,19 +83,25 @@ def _schema_head(conn) -> Optional[str]:
 # system — also node.started's detail
 # ---------------------------------------------------------------------------
 
-def system_facts(config: dict, conn=None) -> dict:
+def system_facts(config: dict, conn=None, probe_backend: bool = True) -> dict:
     """Build, machine, tools and agent states. Backend-owned facts come over
-    the signed local API and read None while the backend is not answering."""
+    the signed local API and read None while the backend is not answering —
+    or without asking, when the caller knows it is down: six probes at a dead
+    port cost ~2 s each on Windows, at a hung one 5 s each."""
     from desktop import updater
     from desktop.utils import (detect_claude_cli, detect_codex_cli, detect_gpu,
                                detect_node_version)
 
     gpu_ok, gpu_name, vram_gb = detect_gpu()
     node_ver = detect_node_version()
-    client = _backend_client(config)
-    cfg = client._get_json("/config") or {}
-    ai = client._get_json("/api/settings/ai") or {}
-    health = client._get_json("/health") or {}
+    client = _backend_client(config) if probe_backend else None
+
+    def backend(path: str) -> Optional[dict]:
+        return client._get_json(path) if client else None
+
+    cfg = backend("/config") or {}
+    ai = backend("/api/settings/ai") or {}
+    health = backend("/health") or {}
     facts = {
         "commit": updater.current_commit(),
         "build": updater.installed_build(),
@@ -109,13 +115,13 @@ def system_facts(config: dict, conn=None) -> dict:
             "claude_cli": detect_claude_cli(),
             "codex_cli": detect_codex_cli(),
         },
-        "hardware": client._get_json("/api/settings/hardware"),
+        "hardware": backend("/api/settings/hardware"),
         "agents": {
             "provider": ai.get("provider"),
             "model": ai.get("model"),
             "auth_state": ai.get("auth_state"),
-            "claude": (client._get_json("/api/settings/ai/claude/state") or {}).get("state"),
-            "codex": (client._get_json("/api/settings/ai/codex/state") or {}).get("state"),
+            "claude": (backend("/api/settings/ai/claude/state") or {}).get("state"),
+            "codex": (backend("/api/settings/ai/codex/state") or {}).get("state"),
         },
         "backend": {"status": health.get("status"), "checks": health.get("checks")},
         "ports": config.get("ports"),
@@ -361,7 +367,7 @@ def save_report(*, data_dir: Path, config: dict, state: str, detail: str) -> Pat
     caller reveals it in the file manager."""
     now = datetime.now().astimezone()
     try:
-        system = _json(system_facts(config))
+        system = _json(system_facts(config, probe_backend=False))
     except Exception as e:
         # The logs are what the report is for; a fact collector that broke
         # must not take them down with it — the report says what is missing.
@@ -373,10 +379,15 @@ def save_report(*, data_dir: Path, config: dict, state: str, detail: str) -> Pat
              f"Detail: {detail or '-'}",
              "", "== system ==", system]
     for name in LOG_FILES:
-        path = data_dir / name
-        if not path.exists():
+        try:
+            text, truncated = tail(data_dir / name, REPORT_LOG_TAIL_BYTES)
+        except FileNotFoundError:
+            continue                    # not every install writes every log
+        except OSError as e:
+            # One log that cannot be read must not cost the others.
+            logger.warning("diag report: %s not read: %s", name, e)
+            parts += ["", f"== {name} ==", f"(not read: {e})"]
             continue
-        text, truncated = tail(path, REPORT_LOG_TAIL_BYTES)
         cut = f" (last {REPORT_LOG_TAIL_BYTES // 1024} KB)" if truncated else ""
         parts += ["", f"== {name}{cut} ==", text]
     out_dir = data_dir / "reports"
@@ -385,3 +396,19 @@ def save_report(*, data_dir: Path, config: dict, state: str, detail: str) -> Pat
     out.write_text(scrub_secrets("\n".join(parts)), encoding="utf-8")
     logger.info("Diagnostic report saved: %s", out)
     return out
+
+
+def save_and_show(*, data_dir: Path, config: dict, state: str, detail: str) -> str:
+    """The action behind both "Save Report for Support" buttons (launcher,
+    wizard): save_report, then the file manager on the file. Returns the line
+    the window shows — the path itself when the file manager would not open,
+    so a report that was written is never reported lost. Raises only when the
+    report could not be written."""
+    from desktop.utils import reveal_in_file_manager
+    path = save_report(data_dir=data_dir, config=config, state=state, detail=detail)
+    try:
+        reveal_in_file_manager(path)
+    except OSError as e:
+        logger.warning("Diagnostic report saved, file manager not opened: %s", e)
+        return f"Report saved: {path}"
+    return "Saved and selected in the file manager — attach it to your message"

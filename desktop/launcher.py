@@ -24,7 +24,7 @@ from desktop.api_client import BackendAPIClient
 from desktop.config_manager import load_config, save_config, update_config
 from desktop.service_manager import ServiceManager
 from desktop.utils import (get_local_ip, get_project_root, get_tailscale_ip,
-                           generate_qr_ctk, reveal_in_file_manager, watch_session_end)
+                           generate_qr_ctk, watch_session_end)
 
 logger = logging.getLogger(__name__)
 
@@ -953,7 +953,10 @@ class LauncherApp(ctk.CTk):
         from outside: no backend, often no PostgreSQL, no P2P for a support
         warrant to arrive on. The QR block has nothing to show without a
         backend, so it becomes the way out: a report the user sends by hand.
-        The next services-ready draw puts the codes back over it."""
+        The next services-ready draw puts the codes back over it. Not while
+        quitting: a start that close() refused is no failure."""
+        if self._shutting_down:
+            return
         self._node_down = True
         self._set_status("error", status)
         self._progress_text.configure(text=detail)
@@ -976,40 +979,46 @@ class LauncherApp(ctk.CTk):
             text=("Sautium is not running. Save a report (the logs, without "
                   "passwords or keys) and send it to support by email or any "
                   "messenger."),
-        ).pack(pady=(28, 12))
+        ).pack(pady=(16, 10))
+        # The report's outcome has a line of its own: the progress line
+        # keeps the failure it explains.
+        note = ctk.CTkLabel(panel, text="", text_color="gray", font=ctk.CTkFont(size=11),
+                            wraplength=WINDOW_WIDTH - 80, justify="center")
         ctk.CTkButton(panel, text="Save Report for Support", width=200,
-                      command=lambda: self._save_report(status, detail)).pack()
+                      command=lambda: self._save_report(status, detail, note)).pack()
+        note.pack(pady=(6, 0))
 
     def _services_settled(self, ok: bool, detail: str):
-        """Where a restart lands (settings, restore, update): up → the running
-        state, down → the node-down panel. A start whose result was dropped
-        showed "All services running" over a dead backend, with no report to
-        send."""
+        """Where a restart lands (settings, restore, update, a failed
+        relaunch): up → the running state, down → the node-down panel. A
+        start whose result was dropped showed "All services running" over a
+        dead backend, with no report to send."""
         if ok:
             self._on_services_ready()
         else:
             self._show_node_down("Failed to start services", detail)
 
-    def _save_report(self, status: str, detail: str):
-        """Off the Tk thread — the system facts probe the backend and the
-        tools — then shown selected in the file manager, one drag away from
-        a mail or a chat."""
-        self._progress_text.configure(text="Collecting the report…")
+    def _save_report(self, status: str, detail: str, note) -> None:
+        """Off the Tk thread (the system facts probe the tools), then shown
+        selected in the file manager, one drag away from a mail or a chat."""
+        note.configure(text="Collecting the report…")
 
         def _run():
             from desktop import diag_bundle
             from desktop.config_manager import get_data_dir
             try:
-                path = diag_bundle.save_report(data_dir=get_data_dir(), config=self.config,
-                                               state=status, detail=detail)
-                reveal_in_file_manager(path)
+                line = diag_bundle.save_and_show(data_dir=get_data_dir(), config=self.config,
+                                                 state=status, detail=detail)
             except Exception as e:
                 logger.error("Diagnostic report failed: %s", e, exc_info=True)
-                message = f"Report not saved: {e}"
-                self.ui_call(lambda: self._progress_text.configure(text=message))
-                return
-            self.ui_call(lambda: self._progress_text.configure(
-                text="Report saved and shown in the file manager — attach it to your message"))
+                line = f"Report not saved: {e}"
+
+            def show():
+                # The panel goes when the services come back, which can
+                # happen while the report is being written.
+                if note.winfo_exists():
+                    note.configure(text=line)
+            self.ui_call(show)
 
         threading.Thread(target=_run, daemon=True).start()
 
@@ -1368,15 +1377,16 @@ class LauncherApp(ctk.CTk):
                 self.p2p_manager = None
             self.service_manager.stop_tracker()
             self.service_manager.stop_backend()
+            failure = None
             try:
                 result = restore_launcher_node(path, password, config=self.config,
                                                replace=True, identity=True,
                                                progress=progress)
             except Exception as e:
                 logger.error(f"Restore failed: {e}", exc_info=True)
-                message = str(e)[:200]
+                failure = str(e)[:200]
                 self.ui_call(lambda: self._set_status("error", "Restore failed"))
-                self.ui_call(lambda: self._progress_text.configure(text=message))
+                self.ui_call(lambda: self._progress_text.configure(text=failure))
             else:
                 # The file may carry another node's .api_secret — re-read it
                 # before the first signed call to the restarted backend.
@@ -1389,7 +1399,13 @@ class LauncherApp(ctk.CTk):
                 self.ui_call(lambda: self._progress_text.configure(text=note))
             ok = (self.service_manager.start_backend(progress_cb=progress)
                   and self.service_manager.start_tracker())
-            self.ui_call(lambda: self._services_settled(ok, "Restarting after the restore"))
+            self.ui_call(lambda: self._services_settled(
+                ok, f"Restore failed: {failure}" if failure else "Restarting after the restore"))
+            if ok and failure:
+                # Back on the database it had — the window says so, not
+                # "All services running".
+                self.ui_call(lambda: self._set_status("error", "Restore failed"))
+                self.ui_call(lambda: self._progress_text.configure(text=failure))
             self.ui_call(lambda: self._btn_settings.configure(state="normal"))
 
         threading.Thread(target=_run, daemon=True).start()
@@ -1579,19 +1595,22 @@ class LauncherApp(ctk.CTk):
 
             if relaunch:
                 self.ui_call(lambda: self._restart_self(changelog))
-            elif not services_up:
-                self.ui_call(lambda: self._show_node_down(
-                    "Failed to start services",
-                    "Restarting after the update" if success
-                    else "The update failed, and so did the restart"))
-                self.ui_call(self._update_flow_idle)
-            elif not success:
+                return
+            # Up or down, the window follows the services — a failed checkout
+            # restarted them too, and P2P was stopped either way.
+            self.ui_call(lambda: self._services_settled(
+                services_up, "Restarting after the update" if success
+                else "The update failed, and so did the restart"))
+            if services_up and not success:
                 self.ui_call(lambda: self._set_status("error", "Update failed"))
-                self.ui_call(self._update_flow_idle)
-            else:
+            elif services_up:
                 self.ui_call(lambda: self._show_changelog(changelog))
-                self.ui_call(self._on_services_ready)
-                self.ui_call(self._update_flow_idle)
+            elif success:
+                def keep_changelog():
+                    # Installed but not running: the next start shows it.
+                    self.config = update_config({"_pending_changelog": changelog})
+                self.ui_call(keep_changelog)
+            self.ui_call(self._update_flow_idle)
 
         threading.Thread(target=_update, daemon=True).start()
 
@@ -1790,17 +1809,21 @@ class LauncherApp(ctk.CTk):
             except (OSError, subprocess.SubprocessError) as e:
                 logger.error(f"Relaunch failed: {e}")
                 # This process stays after all. _stop_everything closed the
-                # services — PostgreSQL included, which the backend needs.
+                # services (PostgreSQL included, which the backend needs) and
+                # P2P, _restart_self the event streams: all of it comes back
+                # as at a start.
                 self.service_manager.reopen()
+                self.api_client.reopen_streams()
+                self._streams_started = False
+                self.p2p_manager = None
                 ok = self.service_manager.start_all()
                 self._shutting_down = False
                 self.ui_call(self._uncover)
+                self.ui_call(lambda: self._services_settled(
+                    ok, "Starting again after a failed restart"))
                 if ok:
                     self.ui_call(lambda: self._set_status(
                         "error", "Restart failed — the update applies on the next start"))
-                else:
-                    self.ui_call(lambda: self._show_node_down(
-                        "Failed to start services", "Starting again after a failed restart"))
                 self.ui_call(self._update_flow_idle)
                 return
             self.ui_call(self._final_quit)

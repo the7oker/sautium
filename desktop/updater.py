@@ -341,7 +341,7 @@ def perform_update(
     config: dict,
     progress_cb: Optional[Callable] = None,
     p2p_manager=None,
-) -> Tuple[bool, List[str], bool]:
+) -> Tuple[bool, List[str], bool, bool]:
     """
     Full update sequence:
     1. Stop backend + tracker + P2P (keep PostgreSQL)

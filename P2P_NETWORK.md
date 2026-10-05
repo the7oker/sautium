@@ -1141,7 +1141,8 @@ wizard puts one in its progress bar's place when initialization fails.
 `<data_dir>/reports/`: the `system` facts and the last 256 KB of every
 `LOG_FILES` entry (`bootstrap.log` among them since the same day), through
 `scrub_secrets`. The file manager opens on it, selected, for the user to
-send by mail or a messenger; nothing is uploaded.
+send by mail or a messenger (where none opens, the window shows the path);
+nothing is uploaded.
 
 ### Last.fm data is node-local — 2026-09-19
 

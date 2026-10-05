@@ -56,7 +56,8 @@ def test_tail_cuts_at_a_line_boundary(tmp_path):
 
 
 def test_report_carries_scrubbed_log_tails_and_the_failure(tmp_path, monkeypatch):
-    monkeypatch.setattr(diag_bundle, "system_facts", lambda config: {"commit": "abc1234"})
+    monkeypatch.setattr(diag_bundle, "system_facts",
+                        lambda config, **kw: {"commit": "abc1234", **kw})
     (tmp_path / "launcher.log").write_text(
         "INFO: Backend started\n"
         "ERROR: connect postgresql://sautium:hunter2@127.0.0.1:15432/sautium refused\n"
@@ -72,6 +73,7 @@ def test_report_carries_scrubbed_log_tails_and_the_failure(tmp_path, monkeypatch
     assert "State: Failed to start services" in text
     assert "Detail: Waiting for backend to be ready..." in text
     assert '"commit": "abc1234"' in text
+    assert '"probe_backend": false' in text              # the report never asks a dead port
     assert "== launcher.log ==" in text
     assert f"== backend.log (last {diag_bundle.REPORT_LOG_TAIL_BYTES // 1024} KB) ==" in text
     assert text.endswith(lines[-1] + "\n") and "line 00000 " not in text
@@ -79,7 +81,7 @@ def test_report_carries_scrubbed_log_tails_and_the_failure(tmp_path, monkeypatch
 
 
 def test_report_survives_a_broken_fact_collector(tmp_path, monkeypatch):
-    def broken(config):
+    def broken(config, **kw):
         raise RuntimeError("nvidia-smi hung")
     monkeypatch.setattr(diag_bundle, "system_facts", broken)
     (tmp_path / "bootstrap.log").write_text("pip install failed\n", encoding="utf-8")
@@ -88,6 +90,42 @@ def test_report_survives_a_broken_fact_collector(tmp_path, monkeypatch):
     assert "(not collected: nvidia-smi hung)" in text
     assert "Detail: -" in text
     assert "== bootstrap.log ==\npip install failed" in text
+
+
+def test_report_keeps_the_logs_it_can_read(tmp_path, monkeypatch):
+    monkeypatch.setattr(diag_bundle, "system_facts", lambda config, **kw: {})
+    (tmp_path / "pgdata").mkdir()
+    (tmp_path / "pgdata" / "server.log").write_text("FATAL: lock file\n", encoding="utf-8")
+    (tmp_path / "launcher.log").write_text("Startup failed\n", encoding="utf-8")
+    real_tail = diag_bundle.tail
+
+    def tail(path, limit):
+        if path.name == "server.log":
+            raise PermissionError(13, "Permission denied", str(path))
+        return real_tail(path, limit)
+    monkeypatch.setattr(diag_bundle, "tail", tail)
+    text = diag_bundle.save_report(data_dir=tmp_path, config={}, state="s",
+                                   detail="d").read_text(encoding="utf-8")
+    assert "== pgdata/server.log ==\n(not read: [Errno 13] Permission denied" in text
+    assert "== launcher.log ==\nStartup failed" in text
+
+
+def test_a_report_that_was_written_is_never_reported_lost(tmp_path, monkeypatch):
+    from desktop import utils
+    monkeypatch.setattr(diag_bundle, "system_facts", lambda config, **kw: {})
+
+    def no_file_manager(path):
+        raise FileNotFoundError(2, "No such file or directory", "xdg-open")
+    monkeypatch.setattr(utils, "reveal_in_file_manager", no_file_manager)
+    line = diag_bundle.save_and_show(data_dir=tmp_path, config={}, state="s", detail="d")
+    saved = next((tmp_path / "reports").iterdir())
+    assert line == f"Report saved: {saved}"
+
+    shown = []
+    monkeypatch.setattr(utils, "reveal_in_file_manager", shown.append)
+    line = diag_bundle.save_and_show(data_dir=tmp_path, config={}, state="s", detail="d")
+    assert line.startswith("Saved and selected in the file manager")
+    assert shown and shown[0].parent == tmp_path / "reports"
 
 
 def test_spool_and_session_marker(tmp_path):

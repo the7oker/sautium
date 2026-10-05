@@ -334,7 +334,7 @@ re-downloads every asset over the public URL and verifies it.
    notarized build skips this step.
 3. The first launch unpacks the app and builds its Python environment, then
    asks for **Homebrew** if it is missing — PostgreSQL 18, pgvector, ffmpeg,
-   flac, fpcalc and deno all arrive through it.
+   flac and fpcalc arrive through it; deno comes from Deno's own release.
 4. The setup wizard creates the account and the database. Its MusicBrainz
    catalogue step is pre-ticked when the disk has room (~21 GB in the
    background) — untick it for a quick trial. Finishing the wizard starts the

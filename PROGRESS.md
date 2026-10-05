@@ -773,9 +773,12 @@ The short version of the hard-learned lessons:
   brings it back, and `::tk::mac::Quit` routes Cmd+Q into `_quit` so
   PostgreSQL and the backend are stopped rather than orphaned.
 - **Homebrew stays the macOS dependency.** PostgreSQL 18 + pgvector, ffmpeg,
-  flac, fpcalc and deno all arrive through it (`db_init`), so the bundle asks
+  flac and fpcalc arrive through it (`db_init`), so the bundle asks
   for brew once — command ready to paste — instead of carrying relocated
-  dylibs it would then have to keep patched.
+  dylibs it would then have to keep patched. deno left it on 2026-10-05:
+  Homebrew carries Intel Macs at Tier 3 (no bottles), deno's formula then
+  wants a full Xcode to compile, and a fresh Intel install never got it, so
+  macOS takes Deno's release zip, as Windows always has.
 - **The dependency install got an hour, not ten minutes.** The first backend
   start pulls ~1.3 GB of wheels; a 600 s cap is a guess about the builder's
   link speed, and when it expires the node has no backend at all.

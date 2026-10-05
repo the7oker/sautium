@@ -490,6 +490,12 @@ class BackendAPIClient:
             except OSError:
                 pass   # that stream ended in between and its reader closed the breaker
 
+    def reopen_streams(self) -> None:
+        """Undo close_streams() for the one caller that stays after all: a
+        relaunch whose successor could not be started. Readers ended by the
+        close are gone; the caller starts new ones."""
+        self._stream_closed = False
+
     def mb_slice(self, names: list[str]) -> Optional[dict]:
         """Fetch raw mb_* rows for artist names from a dump-holding peer.
         Long timeout: a batch of prolific namesakes is a large payload."""

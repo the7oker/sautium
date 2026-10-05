@@ -648,7 +648,11 @@ def _download_tool(binary: str, url: str, progress_cb: Optional[Callable] = None
     try:
         if progress_cb:
             progress_cb(f"Downloading {binary}...")
-        urllib.request.urlretrieve(url, str(zip_path))
+        # Every backend start runs this until the tool is there: a stalled
+        # connection must fail after a minute of silence, not hold the start
+        # forever (urlretrieve has no timeout at all).
+        with urllib.request.urlopen(url, timeout=60) as resp, open(zip_path, "wb") as out:
+            shutil.copyfileobj(resp, out)
         bin_dir.mkdir(parents=True, exist_ok=True)
         with tempfile.TemporaryDirectory() as tmp:
             with zipfile.ZipFile(zip_path, "r") as zf:
@@ -657,12 +661,16 @@ def _download_tool(binary: str, url: str, progress_cb: Optional[Callable] = None
             if not hits:
                 logger.error("%s not found in downloaded archive", exe)
                 return False
-            if IS_WINDOWS:
-                for f in hits[0].parent.glob("*.exe"):   # ffmpeg ships ffprobe alongside
-                    shutil.copy2(f, bin_dir / f.name)
-            else:
-                shutil.copy2(hits[0], bin_dir / exe)
-                (bin_dir / exe).chmod(0o755)             # zipfile drops the archive's mode bits
+            # ffmpeg's Windows zip ships ffprobe alongside.
+            sources = list(hits[0].parent.glob("*.exe")) if IS_WINDOWS else hits[:1]
+            for src in sources:
+                # Renamed into place: a binary that exists is a whole one, and
+                # executable (zipfile drops the archive's mode bits) — the
+                # next start only asks whether it exists.
+                part = bin_dir / f"{src.name}.part"
+                shutil.copy2(src, part)
+                part.chmod(0o755)
+                os.replace(part, bin_dir / src.name)
         logger.info("%s installed to %s", binary, bin_dir)
         return (bin_dir / exe).exists()
     except Exception as e:

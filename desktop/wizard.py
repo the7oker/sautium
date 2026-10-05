@@ -1801,9 +1801,17 @@ class SetupWizard(ctk.CTkToplevel):
         self._progress_bar.set(0)
         self._progress_bar.pack_forget()  # Hidden until start
 
-        # Packed by _offer_report when initialization fails.
+        # Packed by _offer_report when initialization fails. The outcome
+        # stands beside the button, not in the progress line: that line keeps
+        # the error it is about, and the window has no height to spare.
+        self._report_row = ctk.CTkFrame(self.content_frame, fg_color="transparent")
         self._report_button = ctk.CTkButton(
-            self.content_frame, text="Save Report for Support", width=220)
+            self._report_row, text="Save Report for Support", width=220)
+        self._report_button.pack(side="left")
+        self._report_note = ctk.CTkLabel(
+            self._report_row, text="", text_color="gray", font=ctk.CTkFont(size=12),
+            wraplength=330, justify="left")
+        self._report_note.pack(side="left", padx=(12, 0))
 
     @staticmethod
     def _ensure_crypto_deps(progress_cb=None):
@@ -2086,30 +2094,23 @@ class SetupWizard(ctk.CTkToplevel):
         self._progress_bar.stop()
         self._progress_bar.pack_forget()
         self._report_button.configure(command=lambda: self._save_report(error))
-        self._report_button.pack(pady=5)
+        self._report_row.pack(pady=5)
 
     def _save_report(self, error: str):
         """Off the Tk thread (the system facts probe the tools), then shown
         selected in the file manager, one drag away from a mail or a chat."""
-        self._progress_label.configure(text="Collecting the report…", text_color="gray")
+        self._report_note.configure(text="Collecting the report…")
 
         def _run():
             from desktop import diag_bundle
             from desktop.config_manager import get_data_dir
-            from desktop.utils import reveal_in_file_manager
             try:
-                path = diag_bundle.save_report(data_dir=get_data_dir(), config=self.config,
-                                               state="Setup failed", detail=error)
-                reveal_in_file_manager(path)
+                line = diag_bundle.save_and_show(data_dir=get_data_dir(), config=self.config,
+                                                 state="Setup failed", detail=error)
             except Exception as e:
                 logger.error("Diagnostic report failed: %s", e, exc_info=True)
-                message = f"Report not saved: {e}"
-                self.ui_call(lambda: self._progress_label.configure(
-                    text=message, text_color="red"))
-                return
-            self.ui_call(lambda: self._progress_label.configure(
-                text="Report saved and shown in the file manager — attach it to your message",
-                text_color="gray"))
+                line = f"Report not saved: {e}"
+            self.ui_call(lambda: self._report_note.configure(text=line))
 
         threading.Thread(target=_run, daemon=True).start()
 
