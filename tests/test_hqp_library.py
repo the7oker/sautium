@@ -19,7 +19,7 @@ if str(BACKEND) not in sys.path:
     sys.path.insert(0, str(BACKEND))
 
 psycopg2 = pytest.importorskip("psycopg2")
-sqlalchemy = pytest.importorskip("sqlalchemy")
+pytest.importorskip("sqlalchemy")
 hqp_library = pytest.importorskip("hqp_library")
 
 PG = dict(host=os.environ.get("SAUTIUM_TEST_PGHOST", "postgres"),
@@ -104,7 +104,7 @@ def db(dsn, monkeypatch):
     import db_pool
     from sqlalchemy.orm import sessionmaker
     pool = psycopg2.pool.ThreadedConnectionPool(1, 4, dsn=dsn, options="-c timezone=UTC")
-    engine = sqlalchemy.create_engine(dsn)
+    engine = database.make_engine(dsn)
     monkeypatch.setattr(db_pool, "_pool", pool)
     monkeypatch.setattr(database, "SessionLocal", sessionmaker(bind=engine))
     conn = psycopg2.connect(dsn, options="-c timezone=UTC")
@@ -199,10 +199,11 @@ def test_credit_duplicates_fold_across_copies_never_within_one(db, dsn, monkeypa
     """A featuring credit spelt two ways minted two rows for one track — a
     rip here and the HQPlayer's reading of a copy; they fold. Two duets with
     different guests in ONE folder are two tracks and stay."""
+    import database
     from sqlalchemy.orm import sessionmaker
     from scanner import LOCAL_FILES, import_metadata
     from canon import content
-    monkeypatch.setattr(content, "SessionLocal", sessionmaker(bind=sqlalchemy.create_engine(dsn)))
+    monkeypatch.setattr(content, "SessionLocal", sessionmaker(bind=database.make_engine(dsn)))
     local_dir = "E:/Music/Bonobo/Black Sands"
 
     def scan(title, number, seconds):

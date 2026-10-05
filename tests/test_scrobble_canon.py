@@ -19,7 +19,7 @@ if str(BACKEND) not in sys.path:
     sys.path.insert(0, str(BACKEND))
 
 psycopg2 = pytest.importorskip("psycopg2")
-sqlalchemy = pytest.importorskip("sqlalchemy")
+pytest.importorskip("sqlalchemy")
 scrobbles = pytest.importorskip("canon.scrobbles")
 
 PG = dict(host=os.environ.get("SAUTIUM_TEST_PGHOST", "postgres"),
@@ -59,7 +59,7 @@ def db(dsn, monkeypatch):
     import mb_backend
     from sqlalchemy.orm import sessionmaker
     pool = psycopg2.pool.ThreadedConnectionPool(1, 4, dsn=dsn, options="-c timezone=UTC")
-    engine = sqlalchemy.create_engine(dsn)
+    engine = database.make_engine(dsn)
     monkeypatch.setattr(db_pool, "_pool", pool)
     monkeypatch.setattr(database, "SessionLocal", sessionmaker(bind=engine))
     monkeypatch.setattr(mb_backend, "LOCAL_DUMP", True)

@@ -20,7 +20,7 @@ if str(BACKEND) not in sys.path:
     sys.path.insert(0, str(BACKEND))
 
 psycopg2 = pytest.importorskip("psycopg2")
-sqlalchemy = pytest.importorskip("sqlalchemy")
+pytest.importorskip("sqlalchemy")
 identity = pytest.importorskip("canon.identity")
 
 PG = dict(host=os.environ.get("SAUTIUM_TEST_PGHOST", "postgres"),
@@ -63,8 +63,9 @@ def conn(dsn):
 
 @pytest.fixture
 def session(dsn):
+    import database
     from sqlalchemy.orm import Session
-    engine = sqlalchemy.create_engine(dsn)
+    engine = database.make_engine(dsn)
     with Session(engine) as s:
         yield s
     engine.dispose()
