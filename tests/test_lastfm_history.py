@@ -25,7 +25,12 @@ psycopg2 = pytest.importorskip("psycopg2")
 lastfm = pytest.importorskip("lastfm")
 lastfm_history = pytest.importorskip("lastfm_history")
 
-T0 = datetime(2026, 9, 20, 18, 0, tzinfo=timezone.utc)
+# Yesterday at 18:00 UTC, not a date: the walk's top is the real clock
+# (_open_walk), and a later sync re-reads only LATE_SCROBBLE_WINDOW behind it.
+# The fixed 2026-09-20 fell out of that window on 2026-10-04 and the second
+# sync's new scrobble with it.
+T0 = (datetime.now(timezone.utc) - timedelta(days=1)).replace(
+    hour=18, minute=0, second=0, microsecond=0)
 
 PAGE = """<?xml version="1.0" encoding="utf-8"?>
 <lfm status="ok"><recenttracks user="vale" page="1" perPage="200" totalPages="1" total="3">
