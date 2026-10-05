@@ -453,17 +453,23 @@ def _link_pgvector_to_pg(brew: str) -> None:
 # (requirements.txt) which streaming/youtube.py runs as `-m yt_dlp`, and the
 # backend keeps it on the nightly channel itself (streaming/service.py).
 
-# (binary, macOS brew formula, Windows static-build zip URL). The ffmpeg zip
-# also carries ffprobe; the Windows extractor copies every .exe beside it.
+# (binary, macOS brew formula, macOS zip URL, Windows static-build zip URL).
+# A tool with a macOS zip comes from upstream's own build there: deno, because
+# Homebrew carries Intel Macs at Tier 3 — no bottles — and deno's formula then
+# demands a full Xcode to compile, so a fresh Intel install never got it and
+# paid ~40 s for the attempt on every launch (2026-10-05). {arch} is the
+# interpreter's, as the runtime under Rosetta is x86_64. The ffmpeg zip also
+# carries ffprobe; the Windows extractor copies every .exe beside it.
 _MEDIA_TOOLS = [
-    ("ffmpeg", "ffmpeg",
+    ("ffmpeg", "ffmpeg", None,
      "https://www.gyan.dev/ffmpeg/builds/ffmpeg-release-essentials.zip"),
-    ("fpcalc", "chromaprint",
+    ("fpcalc", "chromaprint", None,
      "https://github.com/acoustid/chromaprint/releases/download/v1.5.1/"
      "chromaprint-fpcalc-1.5.1-windows-x86_64.zip"),
-    ("flac", "flac",
+    ("flac", "flac", None,
      "https://ftp.osuosl.org/pub/xiph/releases/flac/flac-1.4.3-win.zip"),
-    ("deno", "deno",
+    ("deno", None,
+     "https://github.com/denoland/deno/releases/latest/download/deno-{arch}-apple-darwin.zip",
      "https://github.com/denoland/deno/releases/latest/download/deno-x86_64-pc-windows-msvc.zip"),
 ]
 
@@ -475,13 +481,14 @@ _MACOS_BREW_BIN_DIRS = ["/opt/homebrew/bin", "/usr/local/bin"]
 def media_tool_dirs() -> list:
     """Dirs to prepend to a child-process PATH so the media binaries resolve,
     independent of how the launcher itself was started."""
+    from desktop.utils import get_project_root
+    root = get_project_root()
+    downloaded = [str(root / b / "bin") for b, *_ in _MEDIA_TOOLS
+                  if (root / b / "bin").exists()]
     if IS_MACOS:
-        return [d for d in _MACOS_BREW_BIN_DIRS if os.path.isdir(d)]
+        return downloaded + [d for d in _MACOS_BREW_BIN_DIRS if os.path.isdir(d)]
     if IS_WINDOWS:
-        from desktop.utils import get_project_root
-        root = get_project_root()
-        return [str(root / b / "bin") for b, _, _ in _MEDIA_TOOLS
-                if (root / b / "bin").exists()]
+        return downloaded
     return []
 
 
@@ -503,14 +510,17 @@ def ensure_media_tools(progress_cb: Optional[Callable] = None) -> dict:
     Idempotent per tool. Non-fatal — a failure leaves that one step degraded,
     never blocks setup. Returns {binary: present?}."""
     result = {}
-    for binary, formula, win_url in _MEDIA_TOOLS:
+    for binary, formula, mac_url, win_url in _MEDIA_TOOLS:
         if _which_tool(binary):
             result[binary] = True
             continue
-        if IS_MACOS:
+        if IS_MACOS and mac_url:
+            arch = "aarch64" if platform.machine() == "arm64" else "x86_64"
+            result[binary] = _download_tool(binary, mac_url.format(arch=arch), progress_cb)
+        elif IS_MACOS:
             result[binary] = _brew_install(binary, formula, progress_cb)
         elif IS_WINDOWS:
-            result[binary] = _download_win_tool(binary, win_url, progress_cb)
+            result[binary] = _download_tool(binary, win_url, progress_cb)
         else:
             logger.warning("%s not found on PATH — install it via your package manager", binary)
             result[binary] = False
@@ -625,11 +635,13 @@ def _brew_install(binary: str, formula: str, progress_cb: Optional[Callable] = N
     return True
 
 
-def _download_win_tool(binary: str, url: str, progress_cb: Optional[Callable] = None) -> bool:
+def _download_tool(binary: str, url: str, progress_cb: Optional[Callable] = None) -> bool:
+    """Upstream's zip, unpacked into <project root>/<binary>/bin: beside the
+    tree, gitignored, one of media_tool_dirs()."""
     import tempfile
     from desktop.utils import get_project_root
     bin_dir = get_project_root() / binary / "bin"
-    exe = binary + ".exe"
+    exe = binary + ".exe" if IS_WINDOWS else binary
     if (bin_dir / exe).exists():
         return True
     zip_path = get_project_root() / f"_{binary}_download.zip"
@@ -645,8 +657,12 @@ def _download_win_tool(binary: str, url: str, progress_cb: Optional[Callable] = 
             if not hits:
                 logger.error("%s not found in downloaded archive", exe)
                 return False
-            for f in hits[0].parent.glob("*.exe"):   # ffmpeg ships ffprobe alongside
-                shutil.copy2(f, bin_dir / f.name)
+            if IS_WINDOWS:
+                for f in hits[0].parent.glob("*.exe"):   # ffmpeg ships ffprobe alongside
+                    shutil.copy2(f, bin_dir / f.name)
+            else:
+                shutil.copy2(hits[0], bin_dir / exe)
+                (bin_dir / exe).chmod(0o755)             # zipfile drops the archive's mode bits
         logger.info("%s installed to %s", binary, bin_dir)
         return (bin_dir / exe).exists()
     except Exception as e:
