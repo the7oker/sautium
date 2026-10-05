@@ -1129,6 +1129,20 @@ backend start so the previous run's crash survives into the `logs`
 scope. Retention: 90 d locally, 180 d reports / 30 d bundles on the
 master (swept once per start).
 
+**When the network cannot ask: the report sent by hand** (since
+2026-10-05). Services that did not start leave nothing for a warrant to
+reach: no backend, often no PostgreSQL, no P2P. The launcher then puts a
+*Save Report for Support* button where the QR codes stand — after a
+failed start, the watchdog's give-up, or a restart (settings, restore,
+update, music folder) whose backend did not come back, a result the
+launcher used to drop and show "All services running" over — and the
+wizard puts one in its progress bar's place when initialization fails.
+`diag_bundle.save_report` writes one UTF-8 text file to
+`<data_dir>/reports/`: the `system` facts and the last 256 KB of every
+`LOG_FILES` entry (`bootstrap.log` among them since the same day), through
+`scrub_secrets`. The file manager opens on it, selected, for the user to
+send by mail or a messenger; nothing is uploaded.
+
 ### Last.fm data is node-local — 2026-09-19
 
 Until now the five Last.fm-fetched tables — `artist_bios`, `artist_tags`,

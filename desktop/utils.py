@@ -762,6 +762,19 @@ def check_port_in_use(port: int) -> bool:
         return True
 
 
+def reveal_in_file_manager(path: Path) -> None:
+    """Finder / Explorer on the folder holding `path`, the file selected —
+    ready to drag into a mail or a chat."""
+    if sys.platform == "win32":
+        # One string, not a list: explorer parses its own command line, and
+        # /select wants the quoted path glued to the comma.
+        subprocess.Popen(f'explorer /select,"{path}"')
+    elif sys.platform == "darwin":
+        subprocess.Popen(["open", "-R", str(path)])
+    else:
+        subprocess.Popen(["xdg-open", str(path.parent)])
+
+
 # ================================================================
 # Idle-sleep inhibition (held while the node's services are up)
 # ================================================================

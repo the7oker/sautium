@@ -44,7 +44,9 @@ CONFIG_KEYS = ("version", "music_path", "provider", "hqplayer", "ports",
                "claude_code_available", "codex_available", "first_run_complete",
                "sync", "mb_slice")
 CONFIG_P2P_KEYS = ("node_name", "listen_port", "docker_ports", "chat_enabled")
-LOG_FILES = ("launcher.log", "backend.log", "backend.log.1", "pgdata/server.log")
+LOG_FILES = ("launcher.log", "backend.log", "backend.log.1", "pgdata/server.log",
+             "bootstrap.log")
+REPORT_LOG_TAIL_BYTES = 256 * 1024     # per log in a report sent by hand
 CHAT_MAX_MESSAGES = 5000
 SYSTEM_SETTINGS_KEYS = ("p2p.reachability", "p2p.reachability_detail", "p2p.identity",
                         "sync.last_at", "sync.last_items_received", "ui.language")
@@ -343,3 +345,43 @@ def collect(*, db_dsn: str, data_dir: Path, config: dict, warrant: dict,
     if len(data) > BUNDLE_MAX_BYTES:
         raise ValueError(f"bundle is {len(data)} bytes, cap is {BUNDLE_MAX_BYTES}")
     return data
+
+
+# ---------------------------------------------------------------------------
+# The report a person sends by hand
+# ---------------------------------------------------------------------------
+
+def save_report(*, data_dir: Path, config: dict, state: str, detail: str) -> Path:
+    """The node's own report for when the network cannot ask for a bundle:
+    services that did not start leave no backend, often no PostgreSQL, and no
+    P2P for a warrant to arrive on. One text file under <data_dir>/reports
+    for the user to send by mail or a messenger — the `system` facts and the
+    tails of the `logs` scope, scrubbed the same way. Written in the data dir
+    because Desktop and Downloads are behind a macOS privacy prompt; the
+    caller reveals it in the file manager."""
+    now = datetime.now().astimezone()
+    try:
+        system = _json(system_facts(config))
+    except Exception as e:
+        # The logs are what the report is for; a fact collector that broke
+        # must not take them down with it — the report says what is missing.
+        logger.warning("diag report: system facts failed: %s", e)
+        system = f"(not collected: {e})"
+    parts = ["Sautium diagnostic report",
+             f"Created: {now:%Y-%m-%d %H:%M:%S %z}",
+             f"State: {state}",
+             f"Detail: {detail or '-'}",
+             "", "== system ==", system]
+    for name in LOG_FILES:
+        path = data_dir / name
+        if not path.exists():
+            continue
+        text, truncated = tail(path, REPORT_LOG_TAIL_BYTES)
+        cut = f" (last {REPORT_LOG_TAIL_BYTES // 1024} KB)" if truncated else ""
+        parts += ["", f"== {name}{cut} ==", text]
+    out_dir = data_dir / "reports"
+    out_dir.mkdir(parents=True, exist_ok=True)
+    out = out_dir / f"sautium-report-{now:%Y%m%d-%H%M%S}.txt"
+    out.write_text(scrub_secrets("\n".join(parts)), encoding="utf-8")
+    logger.info("Diagnostic report saved: %s", out)
+    return out

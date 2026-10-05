@@ -55,6 +55,41 @@ def test_tail_cuts_at_a_line_boundary(tmp_path):
     assert part.endswith(lines[-1] + "\n") and len(part.encode()) <= 1000
 
 
+def test_report_carries_scrubbed_log_tails_and_the_failure(tmp_path, monkeypatch):
+    monkeypatch.setattr(diag_bundle, "system_facts", lambda config: {"commit": "abc1234"})
+    (tmp_path / "launcher.log").write_text(
+        "INFO: Backend started\n"
+        "ERROR: connect postgresql://sautium:hunter2@127.0.0.1:15432/sautium refused\n"
+        "WARNING: retry with password=hunter2\n", encoding="utf-8")
+    lines = [f"line {i:05d} " + "x" * 60 for i in range(6000)]
+    (tmp_path / "backend.log").write_text("\n".join(lines) + "\n", encoding="utf-8")
+
+    path = diag_bundle.save_report(data_dir=tmp_path, config={}, state="Failed to start services",
+                                   detail="Waiting for backend to be ready...")
+    assert path.parent == tmp_path / "reports" and path.suffix == ".txt"
+    text = path.read_text(encoding="utf-8")
+    assert "hunter2" not in text
+    assert "State: Failed to start services" in text
+    assert "Detail: Waiting for backend to be ready..." in text
+    assert '"commit": "abc1234"' in text
+    assert "== launcher.log ==" in text
+    assert f"== backend.log (last {diag_bundle.REPORT_LOG_TAIL_BYTES // 1024} KB) ==" in text
+    assert text.endswith(lines[-1] + "\n") and "line 00000 " not in text
+    assert "server.log" not in text                      # absent logs are skipped
+
+
+def test_report_survives_a_broken_fact_collector(tmp_path, monkeypatch):
+    def broken(config):
+        raise RuntimeError("nvidia-smi hung")
+    monkeypatch.setattr(diag_bundle, "system_facts", broken)
+    (tmp_path / "bootstrap.log").write_text("pip install failed\n", encoding="utf-8")
+    text = diag_bundle.save_report(data_dir=tmp_path, config={}, state="Setup failed",
+                                   detail="").read_text(encoding="utf-8")
+    assert "(not collected: nvidia-smi hung)" in text
+    assert "Detail: -" in text
+    assert "== bootstrap.log ==\npip install failed" in text
+
+
 def test_spool_and_session_marker(tmp_path):
     assert diag_events.write_session_marker(tmp_path, build="abc") is None
     marker = json.loads((tmp_path / "diag" / "session.json").read_text())

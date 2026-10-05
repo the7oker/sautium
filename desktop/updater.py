@@ -362,7 +362,9 @@ def perform_update(
     Windows, a timeout on every torch bump anywhere.
 
     Returns:
-        (success, changelog_lines, relaunch_launcher)
+        (success, changelog_lines, relaunch_launcher, services_up) —
+        services_up says whether the backend answered after the restart;
+        always False with a relaunch, whose successor starts them.
     """
     if progress_cb:
         progress_cb("Stopping services for update...")
@@ -386,9 +388,9 @@ def perform_update(
         logger.error(f"update failed: {error}")
         _update_failed(config, "checkout", error)
         # Restart services even if the checkout could not be moved
-        service_manager.start_backend(progress_cb)
-        service_manager.start_tracker(progress_cb)
-        return False, [], False
+        services_up = (service_manager.start_backend(progress_cb)
+                       and service_manager.start_tracker(progress_cb))
+        return False, [], False, services_up
 
     changelog = get_update_changelog(old_hash)
     if set_aside:
@@ -420,15 +422,15 @@ def perform_update(
         # to stop them again a second later.
         if progress_cb:
             progress_cb("Update complete — restarting Sautium...")
-        return True, changelog, True
+        return True, changelog, True, False
 
     if progress_cb:
         progress_cb("Restarting services...")
 
-    service_manager.start_backend(progress_cb)
-    service_manager.start_tracker(progress_cb)
+    services_up = (service_manager.start_backend(progress_cb)
+                   and service_manager.start_tracker(progress_cb))
 
-    if progress_cb:
+    if progress_cb and services_up:
         progress_cb("Update complete!")
 
-    return True, changelog, False
+    return True, changelog, False, services_up
