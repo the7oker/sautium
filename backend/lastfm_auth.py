@@ -108,6 +108,32 @@ def persist(session_key: str, username: Optional[str]) -> None:
         settings.lastfm_username = username
 
 
+# Last.fm's error 9, "Invalid session key - Please re-authenticate": the owner
+# revoked the access, or the session was issued to an app this node no longer
+# uses — the API key changed on 2026-10-05.
+_INVALID_SESSION = "9"
+
+
+def rejects_session(exc: BaseException) -> bool:
+    return isinstance(exc, pylast.WSError) and str(exc.status) == _INVALID_SESSION
+
+
+def session_rejected() -> None:
+    """Last.fm no longer honours the session: forget it — the row and the copy
+    in `settings` — so Profile › Last.fm offers to connect again instead of
+    reading "connected" over scrobbles that go nowhere. A session that came
+    from .env (LASTFM_SESSION_KEY) returns at the next start; it belongs
+    there only on a node without the in-app flow."""
+    global _last_error
+    from db_pool import db_execute
+    db_execute("DELETE FROM user_settings WHERE key = %s", (_SESSION_KEY_KEY,))
+    settings.lastfm_session_key = None
+    with _lock:
+        _last_error = "Last.fm no longer accepts this node's connection — connect it again."
+    logger.warning("Last.fm rejected the session key — the connection is dropped")
+    _notify()
+
+
 def load_from_db() -> None:
     """Overlay the user_settings credentials onto `settings`. DB wins over env."""
     try:

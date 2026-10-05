@@ -283,9 +283,15 @@ def _run(user: str, reason: str) -> None:
                     "on the next sync", pages, e)
         _set(paused="Last.fm is not answering — Sync again later; the import resumes where it stopped.")
     except pylast.WSError as e:
-        message = ("Your Last.fm profile hides its recent listening — allow it in Last.fm's "
-                   "privacy settings, then Sync again." if str(e.status) == _PRIVATE_PROFILE
-                   else f"Last.fm refused the history: {e}")
+        import lastfm_auth
+        if lastfm_auth.rejects_session(e):
+            lastfm_auth.session_rejected()
+            message = "Last.fm no longer accepts this node's connection — connect it again, then Sync."
+        elif str(e.status) == _PRIVATE_PROFILE:
+            message = ("Your Last.fm profile hides its recent listening — allow it in Last.fm's "
+                       "privacy settings, then Sync again.")
+        else:
+            message = f"Last.fm refused the history: {e}"
         logger.warning("Last.fm history: %s", message)
         db_execute("UPDATE lastfm_import SET last_error = %s WHERE username = %s", (message, user))
         _set(error=message)

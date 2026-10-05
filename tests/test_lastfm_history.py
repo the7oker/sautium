@@ -187,6 +187,35 @@ def test_a_second_sync_reads_behind_the_watermark_and_adds_nothing_twice(walk):
     assert after is not None and after < T0   # two weeks behind the watermark
 
 
+def test_a_session_last_fm_no_longer_honours_is_forgotten(walk, monkeypatch):
+    """Error 9: the owner revoked the access, or the session was issued to the
+    app this node used before its API key changed. The connection is dropped,
+    so the window offers to connect again instead of reading "connected"."""
+    import pylast
+    import lastfm as lastfm_module
+    import lastfm_auth
+    from config import settings
+    monkeypatch.setattr(lastfm_auth, "_notify", lambda: None)
+    monkeypatch.setattr(lastfm_auth, "_last_error", None)
+    lastfm_auth.persist("sk-of-the-old-app", "Vale")
+    _FakeLastFm.history = [_scrobble(0)]
+
+    class _Rejects(_FakeLastFm):
+        def recent_tracks_page(self, user, before, after):
+            raise pylast.WSError(None, "9", "Invalid session key - Please re-authenticate")
+
+    monkeypatch.setattr(lastfm_module, "LastFmService", _Rejects)
+    lastfm_history._run("vale", "sync")
+
+    assert settings.lastfm_session_key is None
+    assert lastfm_auth.status()["authorized"] is False
+    assert "connect it again" in lastfm_auth.status()["error"]
+    assert "connect it again" in lastfm_history.status()["error"]
+    with walk.cursor() as cur:
+        cur.execute("SELECT count(*) FROM user_settings WHERE key = 'lastfm.session_key'")
+        assert cur.fetchone() == (0,)
+
+
 def test_a_walk_interrupted_by_a_restart_resumes_from_its_cursor(walk):
     _FakeLastFm.history = [_scrobble(m) for m in range(0, 70, 10)]
 

@@ -11,6 +11,7 @@ ships here. Set GENIUS_ACCESS_TOKEN in .env to enable the plain-text lyrics
 fallback; without it LRCLIB still serves synced lyrics, no key needed.
 """
 
-# Last.fm — registered app "Sautium"
-LASTFM_API_KEY = "45a94c0bb5961bc76f5724c325ef27ef"
-LASTFM_API_SECRET = "896a4015a5fc5014740c4b5a461d726d"
+# Last.fm — registered app "Sautium" (since 2026-10-05; Last.fm cannot rename
+# an app, and the first one still bore the project's working name)
+LASTFM_API_KEY = "6ee4acf6eb57e0e5eca1cf6bf6dde291"
+LASTFM_API_SECRET = "c364e382b3bae77f5c80903df5129a74"

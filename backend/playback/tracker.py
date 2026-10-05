@@ -117,6 +117,9 @@ def _scrobble_async(method: str, **kwargs) -> None:
                         kwargs.get("artist"), kwargs.get("title"))
         except Exception as e:
             logger.error("Last.fm %s failed: %s", method, e)
+            import lastfm_auth
+            if lastfm_auth.rejects_session(e):
+                lastfm_auth.session_rejected()
 
     threading.Thread(target=_work, daemon=True, name="lastfm").start()
 
