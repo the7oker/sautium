@@ -144,3 +144,13 @@ def test_spool_and_session_marker(tmp_path):
     rows = [json.loads(l) for l in (tmp_path / "diag" / "spool.jsonl").read_text().splitlines()]
     assert [r["kind"] for r in rows] == ["agent.signin_timeout", "service.start_failed"]
     assert rows[0]["detail"]["agent"] == "claude" and rows[0]["ts"]
+
+
+def test_an_event_neither_the_database_nor_the_disk_takes_costs_only_itself(tmp_path, caplog):
+    # The watchdog records a crash before it restarts the backend or shows the
+    # node down: a full disk under a dead PostgreSQL must not end it there
+    not_a_dir = tmp_path / "data"
+    not_a_dir.write_text("")                     # diag/ cannot be made under a file
+    assert diag_events.record_or_spool("postgresql://x:y@127.0.0.1:1/z", not_a_dir,
+                                       "backend.crashed", {"rc": 1}) is False
+    assert "backend.crashed lost — neither the database nor the spool took it" in caplog.text

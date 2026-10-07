@@ -1150,6 +1150,19 @@ wizard puts one in its progress bar's place when initialization fails.
 send by mail or a messenger (where none opens, the window shows the path);
 nothing is uploaded.
 
+Since 2026-10-07 no way down misses the button. A node that goes down
+while the window sits in the tray brings the window back; a start that
+fails before the services do (a session marker a full disk refused) lands
+in the same panel instead of hanging on "Starting services…"; a crash the
+watchdog cannot record (no database, no disk for the spool) costs the
+event, never the restart or the panel (`diag_events.record_or_spool`). A
+launcher that cannot start at all — an import or its own window failing —
+dies in `python -m desktop` (`desktop/__main__.py`), which logs the error
+to `launcher.log` and shows a bare Tk window with the same button (a
+failed report names the log's path instead). A GUI launch has no console,
+so the log also keeps what used to go to a stderr nobody read: an error
+that ends a worker thread, a failed Tk or `ui_call` callback.
+
 ### Last.fm data is node-local — 2026-09-19
 
 Until now the five Last.fm-fetched tables — `artist_bios`, `artist_tags`,

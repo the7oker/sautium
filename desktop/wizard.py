@@ -197,8 +197,8 @@ class SetupWizard(ctk.CTkToplevel):
                 break
             try:
                 fn()
-            except Exception as e:
-                logger.debug(f"ui_call callback failed: {e}")
+            except Exception:
+                logger.error("ui_call callback failed", exc_info=True)
         if self.winfo_exists():
             self.after(100, self._drain_ui_queue)
 

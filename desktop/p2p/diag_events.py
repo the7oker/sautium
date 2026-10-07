@@ -75,7 +75,10 @@ def record_or_spool(dsn: str, data_dir: Path, kind: str,
                     detail: Optional[dict] = None) -> bool:
     """Record through a short-lived connection; when the database is not
     there (PostgreSQL down, tables not yet migrated, first run) the event
-    waits in the spool instead. True when it reached the database."""
+    waits in the spool instead. True when it reached the database. A disk
+    that takes no spool either costs the event, never the caller's work:
+    the watchdog that records a crash restarts the backend, or shows the
+    node down, after it."""
     import psycopg2
     try:
         conn = psycopg2.connect(dsn, connect_timeout=3)
@@ -87,8 +90,11 @@ def record_or_spool(dsn: str, data_dir: Path, kind: str,
         return True
     except psycopg2.Error as e:
         logger.debug("diag: database unavailable, spooling %s (%s)", kind, e)
+    try:
         spool(data_dir, kind, detail)
-        return False
+    except OSError as e:
+        logger.error("diag: %s lost — neither the database nor the spool took it (%s)", kind, e)
+    return False
 
 
 def drain_unreported(conn, max_age_days: int = REPORT_MAX_AGE_DAYS,

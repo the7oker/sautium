@@ -285,8 +285,8 @@ class LauncherApp(ctk.CTk):
                 break
             try:
                 fn()
-            except Exception as e:
-                logger.debug(f"ui_call callback failed: {e}")
+            except Exception:
+                logger.error("ui_call callback failed", exc_info=True)
         # The pump outlives _shutting_down ON PURPOSE: the quit worker's
         # LAST act is ui_call(self._final_quit) — a pump that stopped on the
         # flag left that callback queued forever and the window hung on Quit
@@ -296,6 +296,11 @@ class LauncherApp(ctk.CTk):
                 self.after(100, self._drain_ui_queue)
         except Exception:
             pass                       # Tcl interp already torn down
+
+    def report_callback_exception(self, exc, val, tb):
+        """Tk prints a callback's error to stderr, which a launch from Finder
+        or Explorer does not have: the log keeps it, and with it the report."""
+        logger.error("Tk callback failed", exc_info=(exc, val, tb))
 
     def _show_pending_changelog(self):
         """An update that restarted the launcher left its changelog behind
@@ -318,22 +323,27 @@ class LauncherApp(ctk.CTk):
             from desktop.p2p import diag_events
             self.ui_call(lambda: self._set_status("starting", "Starting services..."))
             data_dir = get_data_dir()
-            # Left behind by a session that never reached _shutdown → the
-            # previous run ended uncleanly; node.started carries that. The
-            # session's first "up" records it, however late it comes.
-            self._session_start = (data_dir, diag_events.write_session_marker(data_dir))
 
             def progress(msg):
                 self.ui_call(lambda: self._progress_text.configure(text=msg))
 
+            # One try for the whole start: whatever stops it ends in the
+            # node-down panel — a session marker a full disk refused used to
+            # end the thread behind "Starting services..." with no way out.
             try:
+                # Left behind by a session that never reached _shutdown → the
+                # previous run ended uncleanly; node.started carries that. The
+                # session's first "up" records it, however late it comes.
+                self._session_start = (data_dir, diag_events.write_session_marker(data_dir))
                 success = self.service_manager.start_all(progress_cb=progress)
             except Exception as e:
                 logger.error(f"Startup failed: {e}", exc_info=True)
+                err_msg = str(e)[:200]
+                # The panel before the spool: the spool writes to the disk
+                # that may be what failed.
+                self.ui_call(lambda: self._show_node_down("Startup failed", err_msg))
                 diag_events.spool(data_dir, "service.start_failed",
                                   {"step": "start_all", "error": str(e)[:500]})
-                err_msg = str(e)[:200]
-                self.ui_call(lambda: self._show_node_down("Startup failed", err_msg))
                 return
             if not success:
                 diag_events.spool(data_dir, "service.start_failed",
@@ -952,6 +962,10 @@ class LauncherApp(ctk.CTk):
         if self._shutting_down:
             return
         self._node_down = True
+        # Out of the tray: a node that went down while the window was put
+        # away (the watchdog gave up, a restart failed) is seen, with its way out.
+        self.deiconify()
+        self.lift()
         self._set_status("error", status)
         self._progress_text.configure(text=detail)
         self._btn_open.configure(state="disabled")
@@ -1838,8 +1852,15 @@ class LauncherApp(ctk.CTk):
         self.destroy()
 
 
+def _log_thread_exception(args: threading.ExceptHookArgs) -> None:
+    if args.exc_type is not SystemExit:
+        logger.error("Thread %s ended on an error", args.thread.name if args.thread else "?",
+                     exc_info=(args.exc_type, args.exc_value, args.exc_traceback))
+
+
 def main():
-    """Entry point for the launcher."""
+    """Entry point for the launcher (`python -m desktop`, whose __main__
+    shows what stopped it before its window could)."""
     from desktop.config_manager import get_data_dir
 
     # A GUI launch (Finder .app, Explorer shortcut) inherits stdout/stderr on
@@ -1863,6 +1884,9 @@ def main():
         format="%(asctime)s [%(name)s] %(levelname)s: %(message)s",
         handlers=handlers,
     )
+    # Nor is there a console for a worker thread's last words: one that ends
+    # on an error (the start sequence, P2P, a flow) leaves them in the log.
+    threading.excepthook = _log_thread_exception
 
     # Before anything looks for a tool: a GUI launch has no Homebrew on PATH.
     from desktop.utils import claim_windows_app_identity, repair_gui_path
