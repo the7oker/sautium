@@ -323,18 +323,23 @@ class LauncherApp(ctk.CTk):
             from desktop.p2p import diag_events
             self.ui_call(lambda: self._set_status("starting", "Starting services..."))
             data_dir = get_data_dir()
+            # Left behind by a session that never reached _shutdown → the
+            # previous run ended uncleanly; node.started carries that. The
+            # session's first "up" records it, however late it comes. A
+            # marker the disk refused costs that note, never the start — it
+            # used to end this thread behind "Starting services..." with no
+            # way out (record_or_spool's rule: the event, not the work).
+            try:
+                previous = diag_events.write_session_marker(data_dir)
+            except OSError as e:
+                logger.warning(f"diag: session marker not written — {e}")
+                previous = None
+            self._session_start = (data_dir, previous)
 
             def progress(msg):
                 self.ui_call(lambda: self._progress_text.configure(text=msg))
 
-            # One try for the whole start: whatever stops it ends in the
-            # node-down panel — a session marker a full disk refused used to
-            # end the thread behind "Starting services..." with no way out.
             try:
-                # Left behind by a session that never reached _shutdown → the
-                # previous run ended uncleanly; node.started carries that. The
-                # session's first "up" records it, however late it comes.
-                self._session_start = (data_dir, diag_events.write_session_marker(data_dir))
                 success = self.service_manager.start_all(progress_cb=progress)
             except Exception as e:
                 logger.error(f"Startup failed: {e}", exc_info=True)

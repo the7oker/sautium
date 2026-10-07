@@ -10,19 +10,28 @@ import queue
 import sys
 import threading
 from pathlib import Path
+from typing import Optional
 
 logger = logging.getLogger("desktop")
 
 
 def cannot_start(error: Exception) -> None:
-    from desktop.config_manager import get_data_dir
-    data_dir = get_data_dir()
-    if not logging.getLogger().handlers:      # it died before main() set up the log
-        logging.basicConfig(filename=data_dir / "launcher.log", level=logging.INFO,
-                            format="%(asctime)s [%(name)s] %(levelname)s: %(message)s")
-    logger.critical("Sautium could not start", exc_info=error)
+    detail = f"{type(error).__name__}: {error}"
+    data_dir = None
     try:
-        _offer_report(data_dir, f"{type(error).__name__}: {error}")
+        from desktop.config_manager import get_data_dir
+        data_dir = get_data_dir()
+        if not logging.getLogger().handlers:      # it died before main() set up the log
+            logging.basicConfig(filename=data_dir / "launcher.log", encoding="utf-8",
+                                level=logging.INFO,
+                                format="%(asctime)s [%(name)s] %(levelname)s: %(message)s")
+        logger.critical("Sautium could not start", exc_info=error)
+    except Exception as e:
+        # The data folder, or the log in it, is what failed: the window
+        # still says why, and that nothing could be written.
+        detail += f"\n\nNothing could be written either — {type(e).__name__}: {e}"
+    try:
+        _offer_report(data_dir, detail)
     except Exception:
         logger.error("Sautium could not show why it did not start", exc_info=True)
 
@@ -39,54 +48,76 @@ def save_report(data_dir: Path, detail: str) -> str:
         return f"Report not saved: {e}. The log: {data_dir / 'launcher.log'}"
 
 
-def _offer_report(data_dir: Path, detail: str) -> None:
+def _report_window(tk):
+    """The window the report is offered in. One Tk per process: on Aqua a
+    second root ran the idle work of a first one whose window was gone, and
+    trapped (Tk 9, SIGTRAP in showRootWindow, 2026-10-07). So when the
+    launcher died with its own root built, the report is a window of that
+    root — hidden, its timers (the start sequence among them) cancelled."""
+    stale = tk._default_root
+    if stale is None:
+        return tk.Tk()
+    stale.tk.eval("foreach id [after info] {after cancel $id}")
+    stale.tk.call("wm", "withdraw", ".")
+    return tk.Toplevel(stale)
+
+
+def _offer_report(data_dir: Optional[Path], detail: str) -> None:
     import tkinter as tk
     from tkinter import font as tkfont
 
-    root = tk.Tk()
-    root.title("Sautium")
-    root.resizable(False, False)
-    heading = tkfont.nametofont("TkDefaultFont").copy()
+    win = _report_window(tk)
+    win.title("Sautium")
+    win.resizable(False, False)
+    win.protocol("WM_DELETE_WINDOW", win.quit)
+    heading = tkfont.nametofont("TkDefaultFont", root=win).copy()
     heading.configure(size=15, weight="bold")
-    body = tk.Frame(root, padx=24, pady=20)
+    body = tk.Frame(win, padx=24, pady=20)
     body.pack(fill="both")
     tk.Label(body, text="Sautium could not start", font=heading).pack(anchor="w")
     tk.Label(body, text=detail, wraplength=420, justify="left").pack(anchor="w", pady=(6, 0))
     tk.Label(body, wraplength=420, justify="left",
-             text="Save a report (the logs, without passwords or keys) and send it to "
-                  "support by email or any messenger.").pack(anchor="w", pady=(14, 12))
+             text=("Save a report (the logs, without passwords or keys) and send it to "
+                   "support by email or any messenger." if data_dir is not None else
+                   "Send a screenshot of this window to support by email or any "
+                   "messenger.")).pack(anchor="w", pady=(14, 12))
     row = tk.Frame(body)
     row.pack(anchor="w")
-    button = tk.Button(row, text="Save Report for Support")
-    button.pack(side="left")
-    tk.Button(row, text="Quit", command=root.destroy).pack(side="left", padx=(8, 0))
     note = tk.Label(body, text="", wraplength=420, justify="left")
+    if data_dir is not None:
+        button = tk.Button(row, text="Save Report for Support")
+        button.pack(side="left", padx=(0, 8))
+        outcome: queue.Queue = queue.Queue()
+
+        def collect():
+            # The launcher's ui_call pump in small: Tk is touched from its own
+            # thread only (LauncherApp.ui_call says why), while a report is made.
+            try:
+                line = outcome.get_nowait()
+            except queue.Empty:
+                win.after(100, collect)
+                return
+            note.configure(text=line)
+            button.configure(state="normal")
+
+        def save():
+            # Off the Tk thread: the system facts probe the tools.
+            button.configure(state="disabled")
+            note.configure(text="Collecting the report…")
+            threading.Thread(target=lambda: outcome.put(save_report(data_dir, detail)),
+                             daemon=True).start()
+            win.after(100, collect)
+
+        button.configure(command=save)
+    # Quit leaves the loop and the process ends with it: tearing a root down
+    # before exit is the Aqua path above.
+    tk.Button(row, text="Quit", command=win.quit).pack(side="left")
     note.pack(anchor="w", pady=(10, 0))
-    outcome: queue.Queue = queue.Queue()
-
-    def collect():
-        # The launcher's ui_call pump in small: Tk is touched from its own
-        # thread only (LauncherApp.ui_call says why), while a report is made.
-        try:
-            line = outcome.get_nowait()
-        except queue.Empty:
-            root.after(100, collect)
-            return
-        note.configure(text=line)
-        button.configure(state="normal")
-
-    def save():
-        # Off the Tk thread: the system facts probe the tools.
-        button.configure(state="disabled")
-        note.configure(text="Collecting the report…")
-        threading.Thread(target=lambda: outcome.put(save_report(data_dir, detail)),
-                         daemon=True).start()
-        root.after(100, collect)
-
-    button.configure(command=save)
-    root.lift()
-    root.focus_force()
-    root.mainloop()
+    win.lift()
+    win.focus_force()
+    # The loop itself, not a dead launcher's override of it (customtkinter's
+    # shows its window).
+    tk.Misc.mainloop(win)
 
 
 if __name__ == "__main__":
