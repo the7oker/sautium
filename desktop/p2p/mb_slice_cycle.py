@@ -144,6 +144,7 @@ class MbSliceCycle:
         self._lock: Optional[asyncio.Lock] = None
         self._probe_lock: Optional[asyncio.Lock] = None
         self._next_at: Optional[float] = None
+        self._status_cleared = False       # a dump node dropped its row this process
         self._running = False
 
     # ------------------------------------------------------------ lifecycle
@@ -295,8 +296,11 @@ class MbSliceCycle:
             return {}
         if await loop.run_in_executor(None, local_dump_available, self.db_dsn):
             # A dump node serves; it has nothing to ask for — and nothing to
-            # report: a status left from before its load must not outlive it.
-            await loop.run_in_executor(None, clear_status, self.db_dsn, STATUS_KEY)
+            # report: the row from before its load goes, once per process,
+            # not on every wake.
+            if not self._status_cleared:
+                await loop.run_in_executor(None, clear_status, self.db_dsn, STATUS_KEY)
+                self._status_cleared = True
             return {}
         # Source discovery runs BEFORE the pending-names early return: it also
         # persists mb.search_sources for the backend's remote MB search, which
@@ -385,6 +389,7 @@ class MbSliceCycle:
         Published on every cycle — an all-clear included — so the condition
         the backend derives from it (`mb_slice.deferred`) ends the moment it
         stops being true."""
+        self._status_cleared = False
         state = {
             "pending": pending,
             # the pending set is capped per cycle: at the cap the true

@@ -1159,9 +1159,12 @@ def _notices_state() -> Dict[str, Any]:
             "data": {"source": row["source"], "strikes": row["strikes"],
                      "reason": row["reason"] or ""},
         })
-    for family in ("mb_slice", "lb_slice"):
+    # A node that holds a family's dump asks nobody for it: no deferral,
+    # whatever its cycle's row still says (a run that raced the load).
+    for family, dump_marker in (("mb_slice", "musicbrainz.db_version"),
+                                ("lb_slice", "listenbrainz.db_version")):
         slices = _read(f"{family}.status") or {}
-        if slices.get("unserved"):
+        if slices.get("unserved") and not _read(dump_marker):
             items.append({
                 "key": f"{family}.deferred",
                 "kind": "info",

@@ -171,18 +171,15 @@ def notify(dsn: str, channel: str) -> None:
         conn.close()
 
 
-def clear_status(dsn: str, key: str) -> bool:
-    """Drop a slice cycle's status row — a dump node asks nobody, so a status
-    written before its load landed ("no source reachable") would otherwise
-    keep the derived notice alive for good. True when a row was dropped."""
+def clear_status(dsn: str, key: str) -> None:
+    """Drop a slice cycle's status row on a node that now holds the dump. The
+    notice is gone already — routers/settings._notices_state ignores the row
+    once the family's dump marker is set — but a status published before the
+    load would come back as a deferral the day the dump is deleted."""
     conn = _connect(dsn)
     try:
         with conn.cursor() as cur:
             cur.execute("DELETE FROM user_settings WHERE key = %s", (key,))
-            dropped = cur.rowcount > 0
-            if dropped:
-                cur.execute("NOTIFY sautium_notices")
-        return dropped
     finally:
         conn.close()
 
@@ -195,8 +192,10 @@ def publish_status(dsn: str, key: str, state: dict) -> None:
     per run, the same "looking for a node" toast came back on every wake,
     every few seconds while a Last.fm history import grew the MBID set
     (2026-10-07). An unchanged row is not rewritten and wakes nobody — the
-    NOTIFY says a condition moved, not that a run happened. One writer per
-    database: each cycle publishes under its run lock."""
+    NOTIFY says a condition moved, not that a run happened. The cycle is the
+    row's only writer, under its run lock: a dump loader just wakes the
+    notices channel, since a node holding a family's dump shows no deferral
+    for it (routers/settings._notices_state)."""
     conn = _connect(dsn)
     try:
         with conn.cursor() as cur:
@@ -270,6 +269,7 @@ class LbSliceCycle:
         self._notify: Optional[asyncio.Event] = None
         self._lock: Optional[asyncio.Lock] = None
         self._next_at: Optional[float] = None
+        self._status_cleared = False       # a dump node dropped its row this process
         self._running = False
 
     # ------------------------------------------------------------ lifecycle
@@ -408,8 +408,11 @@ class LbSliceCycle:
             return {}
         if await loop.run_in_executor(None, local_dump_available, self.db_dsn):
             # A dump node serves; it has nothing to ask for — and nothing to
-            # report: a status left from before its load must not outlive it.
-            await loop.run_in_executor(None, clear_status, self.db_dsn, STATUS_KEY)
+            # report: the row from before its load goes, once per process,
+            # not on every wake.
+            if not self._status_cleared:
+                await loop.run_in_executor(None, clear_status, self.db_dsn, STATUS_KEY)
+                self._status_cleared = True
             return {}
 
         sources, newest = await self.find_sources()
@@ -542,6 +545,7 @@ class LbSliceCycle:
         about this cycle; published on every run — an all-clear included —
         so the derived notice (`lb_slice.deferred`) ends the moment it stops
         being true."""
+        self._status_cleared = False
         next_at = self._next_at
         state = {
             "pending": pending,

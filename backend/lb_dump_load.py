@@ -406,9 +406,8 @@ def _mark_loaded(version: str) -> None:
             cur.execute("DELETE FROM lb_slice_fetches")
             cur.execute("DELETE FROM lb_slice_requests")
             cur.execute("TRUNCATE lb_slice_blobs")
-            # The cycle's status from before the load ("no source reachable")
-            # would keep the derived notice alive on a node that asks nobody.
-            cur.execute("DELETE FROM user_settings WHERE key = 'lb_slice.status'")
+            # The marker ends the "looking for a statistics node" notice
+            # (routers/settings._notices_state): wake the channel that shows it.
             cur.execute("NOTIFY sautium_notices")
             cur.execute("COMMIT")
 

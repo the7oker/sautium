@@ -246,7 +246,7 @@ def _wakes(listener, conn, action) -> int:
 def test_status_row_keeps_the_onset_and_wakes_only_on_change(conn):
     """The derived notice toasts when its `since` moves: a run that leaves
     the same artists waiting must neither move it nor wake the channel. A
-    dump node drops the row (and the notice with it) once."""
+    dump node drops the row quietly — its marker ended the notice already."""
     key = lb_slice_cycle.STATUS_KEY
     dsn = psycopg2.extensions.make_dsn(dbname=DBNAME, **PG)
     with conn.cursor() as cur:
@@ -280,11 +280,9 @@ def test_status_row_keeps_the_onset_and_wakes_only_on_change(conn):
         assert since() is None
         assert publish() == 1
         assert since() not in (None, onset)      # waiting again is a new onset
-        clear = lambda: lb_slice_cycle.clear_status(dsn, key)
-        assert _wakes(listener, conn, clear) == 1
+        assert _wakes(listener, conn, lambda: lb_slice_cycle.clear_status(dsn, key)) == 0
         with conn.cursor() as cur:
             cur.execute("SELECT 1 FROM user_settings WHERE key = %s", (key,))
             assert cur.fetchone() is None
-        assert _wakes(listener, conn, clear) == 0
     finally:
         listener.close()
