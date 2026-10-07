@@ -314,12 +314,15 @@ def _hqp_safe(action, command: str) -> None:
     tolerantly inside an existing `_hqp_lock`: one reconnect-and-retry,
     never raises. Frames a resilient multi-add so a churning control port
     can't abort the whole operation at its stop()/play() bookends before
-    the add even runs. A command the retry could not send either is a step
-    of the play intent it served — it never reached HQPlayer, so its client
-    heard nothing."""
+    the add even runs. One HQPlayer did not take is logged in its words; a
+    command the retry could not send either is a step of the play intent it
+    served — it never reached HQPlayer, so its client heard nothing."""
     for attempt in (1, 2):
         try:
-            action(_get_hqp())
+            hqp = _get_hqp()
+            if not action(hqp):
+                logger.warning("HQPlayer did not take %s: %s", command,
+                               diag.redact_text(hqp.refusal()))
             return
         except (BrokenPipeError, ConnectionError, OSError) as e:
             if attempt == 1:
@@ -1178,13 +1181,14 @@ class HqpBackend(PlayerBackend):
     def _on_outcome(self, outcome) -> None:
         """An answer on the command client. Sent by an intent, it is a step of
         that intent's attempt (superseded or not); from anywhere else a stop,
-        a pause, a DSP change or a replaced playlist means the owner moved on."""
+        a pause, a DSP change or a replaced playlist HQPlayer took means the
+        owner moved on — one it refused changed nothing."""
         mine = getattr(self._local, "attempt", None)
         if mine is not None:
             mine.record(outcome)
             return
         att = self._attempt
-        if att is None:
+        if att is None or outcome.failed:
             return
         a = outcome.attributes
         if (outcome.command in diag.OWNER_COMMANDS
@@ -1217,13 +1221,14 @@ class HqpBackend(PlayerBackend):
                 return func(_get_hqp())
 
     def _command(self, name: str, fn) -> bool:
-        """One transport command; a refusal is logged in HQPlayer's words."""
+        """One command on the command client; one HQPlayer did not take is
+        logged in its words."""
         def run(h):
             ok = fn(h)
             return ok, (None if ok else h.refusal())
         ok, refusal = self._hqp_cmd(run)
         if not ok:
-            logger.warning("HQPlayer refused %s: %s", name, diag.redact_text(refusal))
+            logger.warning("HQPlayer did not take %s: %s", name, diag.redact_text(refusal))
         return ok
 
     def _close_reads(self, hqp: HQPlayerClient, att: diag.Attempt) -> dict:
@@ -1441,12 +1446,12 @@ class HqpBackend(PlayerBackend):
         return ok
 
     def pause(self) -> bool:
-        ok = self._hqp_cmd(lambda h: h.pause())
+        ok = self._command("Pause", lambda h: h.pause())
         self.poke()
         return ok
 
     def stop(self) -> bool:
-        ok = self._hqp_cmd(lambda h: h.stop())
+        ok = self._command("Stop", lambda h: h.stop())
         self.poke()
         return ok
 
@@ -1489,28 +1494,28 @@ class HqpBackend(PlayerBackend):
         with self._intent("resume", slot=index):
             ok = self._select_play(index)
             if position > 0:
-                self._hqp_cmd(lambda h: h.seek(int(position)))
+                self._command("Seek", lambda h: h.seek(int(position)))
             ok = self._command("Play", lambda h: h.play()) and ok
         self.poke()
         return ok
 
     def seek(self, seconds: int) -> bool:
-        ok = self._hqp_cmd(lambda h: h.seek(int(seconds)))
+        ok = self._command("Seek", lambda h: h.seek(int(seconds)))
         self.poke()
         return ok
 
     def set_volume(self, level: float) -> bool:
-        ok = self._hqp_cmd(lambda h: h.set_volume(level))
+        ok = self._command("Volume", lambda h: h.set_volume(level))
         self.poke()
         return ok
 
     def volume_up(self) -> bool:
-        ok = self._hqp_cmd(lambda h: h.volume_up())
+        ok = self._command("VolumeUp", lambda h: h.volume_up())
         self.poke()
         return ok
 
     def volume_down(self) -> bool:
-        ok = self._hqp_cmd(lambda h: h.volume_down())
+        ok = self._command("VolumeDown", lambda h: h.volume_down())
         self.poke()
         return ok
 
@@ -1729,7 +1734,7 @@ class HqpBackend(PlayerBackend):
         return added
 
     def queue_remove(self, index: int) -> bool:
-        ok = self._hqp_cmd(lambda h: h.playlist_remove(index))
+        ok = self._command("PlaylistRemove", lambda h: h.playlist_remove(index))
         self.poke()
         return ok
 

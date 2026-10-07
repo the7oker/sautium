@@ -4583,7 +4583,8 @@ a.am-kind { text-decoration: none; }
 .hqp-hr.is-no { color: var(--color-negative); }
 .hqp-hr.is-no .hqp-hr-dot { background: var(--color-negative); }
 .hqp-row-label .hqp-hr { margin-left: calc(4 * var(--px)); }
-/* While a benchmark holds HQPlayer its knobs wait. */
+/* While a benchmark holds HQPlayer its knobs wait; a volume step also rests
+   at the edge of HQPlayer's range, and while HQPlayer holds the volume fixed. */
 .hqp-select:disabled,
 .hqp-row-tap:disabled,
 .hqp-vol-btn:disabled,

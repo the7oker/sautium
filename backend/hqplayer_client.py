@@ -23,6 +23,11 @@ from urllib.parse import unquote
 
 logger = logging.getLogger(__name__)
 
+# A volume HQPlayer holds fixed, in words: its own answer to a Volume command
+# is a bare result="Error". Direct SDM fixes it (Desktop 6.2.3, seen live).
+VOLUME_FIXED = ("HQPlayer holds its volume fixed — Direct SDM or a fixed volume "
+                "is on in its settings")
+
 
 # -- Redaction -------------------------------------------------------------------
 # A path names what the owner listens to, so anything that leaves this process
@@ -177,8 +182,9 @@ class HQPlayerClient:
     (`last_errors()`): the playback backend replaces its client on every
     reconnect, and the drop that killed one instance must outlive it.
 
-    A DSP setter is refused only by an explicit `result="Error"`: some
-    answer with a bare element, which is HQPlayer accepting it.
+    A command is refused only by an explicit `result="Error"` (`_accepted`):
+    some answer with a bare element, which is HQPlayer accepting it. Play,
+    SelectTrack and PlaylistAdd count only an explicit OK.
     """
 
     _error_ring: deque = deque(maxlen=50)
@@ -433,6 +439,15 @@ class HQPlayerClient:
 
         return None
 
+    def _accepted(self, command: str, attributes: Optional[Dict[str, str]] = None) -> bool:
+        """Sent, answered, and not refused. An answer alone is no acceptance:
+        HQPlayer answers <Volume result="Error"/> while its volume is fixed,
+        and HQPlayer 6 without internet access refuses every state change
+        of an unauthenticated client ("not authenticated and no internet
+        access")."""
+        response = self._execute_command(command, attributes)
+        return response is not None and response.get("result") != "Error"
+
     # ========== Playback Control ==========
 
     def play(self) -> bool:
@@ -442,33 +457,27 @@ class HQPlayerClient:
 
     def pause(self) -> bool:
         """Pause playback"""
-        response = self._execute_command("Pause")
-        return response is not None
+        return self._accepted("Pause")
 
     def stop(self) -> bool:
         """Stop playback"""
-        response = self._execute_command("Stop")
-        return response is not None
+        return self._accepted("Stop")
 
     def next(self) -> bool:
         """Skip to next track"""
-        response = self._execute_command("Next")
-        return response is not None
+        return self._accepted("Next")
 
     def previous(self) -> bool:
         """Go to previous track"""
-        response = self._execute_command("Previous")
-        return response is not None
+        return self._accepted("Previous")
 
     def forward(self) -> bool:
         """Fast forward"""
-        response = self._execute_command("Forward")
-        return response is not None
+        return self._accepted("Forward")
 
     def backward(self) -> bool:
         """Rewind"""
-        response = self._execute_command("Backward")
-        return response is not None
+        return self._accepted("Backward")
 
     def seek(self, position: int) -> bool:
         """
@@ -477,8 +486,7 @@ class HQPlayerClient:
         Args:
             position: Position in seconds
         """
-        response = self._execute_command("Seek", {"position": str(position)})
-        return response is not None
+        return self._accepted("Seek", {"position": str(position)})
 
     def select_track(self, index: int) -> bool:
         """
@@ -494,18 +502,15 @@ class HQPlayerClient:
 
     def volume_up(self) -> bool:
         """Increase volume"""
-        response = self._execute_command("VolumeUp")
-        return response is not None
+        return self._accepted("VolumeUp")
 
     def volume_down(self) -> bool:
         """Decrease volume"""
-        response = self._execute_command("VolumeDown")
-        return response is not None
+        return self._accepted("VolumeDown")
 
     def volume_mute(self) -> bool:
         """Toggle mute — a toggle whose state neither State nor Status reports"""
-        response = self._execute_command("VolumeMute")
-        return response is not None
+        return self._accepted("VolumeMute")
 
     def volume_range(self) -> Optional[Dict[str, Any]]:
         """The volume HQPlayer allows: {min, max} in dB, `enabled` False when
@@ -528,6 +533,14 @@ class HQPlayerClient:
             "adaptive": response.get("adaptive") == "1",
         }
 
+    def volume_refusal(self) -> str:
+        """Why the latest volume command was not taken: a volume HQPlayer
+        holds fixed, said so — its own answer is a bare Error — else
+        `refusal()`."""
+        why = self.refusal()
+        span = self.volume_range()
+        return VOLUME_FIXED if span is not None and not span["enabled"] else why
+
     def set_volume(self, value: float) -> bool:
         """
         Set volume level
@@ -535,8 +548,7 @@ class HQPlayerClient:
         Args:
             value: Volume level (range depends on HQPlayer configuration)
         """
-        response = self._execute_command("Volume", {"value": str(value)})
-        return response is not None
+        return self._accepted("Volume", {"value": str(value)})
 
     # ========== Playlist Control ==========
 
@@ -559,13 +571,11 @@ class HQPlayerClient:
 
     def playlist_clear(self) -> bool:
         """Clear playlist"""
-        response = self._execute_command("PlaylistClear")
-        return response is not None
+        return self._accepted("PlaylistClear")
 
     def playlist_remove(self, index: int) -> bool:
         """Remove track from playlist by index"""
-        response = self._execute_command("PlaylistRemove", {"index": str(index)})
-        return response is not None
+        return self._accepted("PlaylistRemove", {"index": str(index)})
 
     def get_playlist(self) -> List[Dict[str, Any]]:
         """
@@ -727,13 +737,11 @@ class HQPlayerClient:
 
     def set_repeat(self, mode: RepeatMode) -> bool:
         """Set repeat mode"""
-        response = self._execute_command("SetRepeat", {"value": str(int(mode))})
-        return response is not None
+        return self._accepted("SetRepeat", {"value": str(int(mode))})
 
     def set_random(self, enabled: bool) -> bool:
         """Enable/disable random playback"""
-        response = self._execute_command("SetRandom", {"value": "1" if enabled else "0"})
-        return response is not None
+        return self._accepted("SetRandom", {"value": "1" if enabled else "0"})
 
     # ========== DSP Settings ==========
 
@@ -767,8 +775,7 @@ class HQPlayerClient:
         Args:
             index: Mode index from get_modes()
         """
-        response = self._execute_command("SetMode", {"value": str(index)})
-        return response is not None and response.get("result") != "Error"
+        return self._accepted("SetMode", {"value": str(index)})
 
     def get_filters(self) -> List[Dict[str, Any]]:
         """
@@ -810,8 +817,7 @@ class HQPlayerClient:
         if index_1x is not None:
             attrs["value1x"] = str(index_1x)
 
-        response = self._execute_command("SetFilter", attrs)
-        return response is not None and response.get("result") != "Error"
+        return self._accepted("SetFilter", attrs)
 
     def get_shapers(self) -> List[Dict[str, Any]]:
         """
@@ -844,8 +850,7 @@ class HQPlayerClient:
         Args:
             index: Shaper index from get_shapers()
         """
-        response = self._execute_command("SetShaping", {"value": str(index)})
-        return response is not None and response.get("result") != "Error"
+        return self._accepted("SetShaping", {"value": str(index)})
 
     def get_rates(self) -> List[Dict[str, Any]]:
         """
@@ -876,8 +881,7 @@ class HQPlayerClient:
         Args:
             index: Rate index from get_rates()
         """
-        response = self._execute_command("SetRate", {"value": str(index)})
-        return response is not None and response.get("result") != "Error"
+        return self._accepted("SetRate", {"value": str(index)})
 
     def get_inputs(self) -> List[str]:
         """
@@ -906,8 +910,7 @@ class HQPlayerClient:
         Args:
             enabled: True to enable, False to disable
         """
-        response = self._execute_command("SetConvolution", {"value": "1" if enabled else "0"})
-        return response is not None and response.get("result") != "Error"
+        return self._accepted("SetConvolution", {"value": "1" if enabled else "0"})
 
     def matrix_list_profiles(self) -> List[str]:
         """
@@ -946,8 +949,7 @@ class HQPlayerClient:
         Args:
             profile: Profile name (must exist in HQPlayer)
         """
-        response = self._execute_command("MatrixSetProfile", {"value": profile})
-        return response is not None and response.get("result") != "Error"
+        return self._accepted("MatrixSetProfile", {"value": profile})
 
     def apply_settings(self, *, mode: Optional[int] = None, rate: Optional[int] = None,
                        filter: Optional[int] = None, filter1x: Optional[int] = None,

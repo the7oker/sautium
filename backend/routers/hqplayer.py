@@ -28,6 +28,7 @@ from config import settings
 
 logger = logging.getLogger(__name__)
 from db_pool import db_execute, db_query_one
+from hqplayer_client import VOLUME_FIXED
 from playback.hqp_backend import (
     _hqp_lock,
     _hqp_status_lock,
@@ -105,10 +106,10 @@ class VolumeRequest(BaseModel):
 @router.get("/state")
 def get_state(dsp: bool = False) -> Dict[str, Any]:
     """Snapshot everything the HQPlayer settings screen needs. `dsp` adds
-    what only that screen shows — the headroom marks and the Benchmark
-    block, a dozen queries and two more round-trips — and records what
-    HQPlayer said of itself; the More drawer and the Output picker's dot
-    ask the plain state, a connection check."""
+    what only that screen shows — the headroom marks, the Benchmark block
+    and the volume range, a dozen queries and two more round-trips — and
+    records what HQPlayer said of itself; the More drawer and the Output
+    picker's dot ask the plain state, a connection check."""
     from playback.hqp_backend import _stream_mode, hqp_media_host
     response: Dict[str, Any] = {
         "host": settings.hqplayer_host,
@@ -191,6 +192,7 @@ def get_state(dsp: bool = False) -> Dict[str, Any]:
              "rates": rates or []}
     response["headroom"] = _headroom(ep, state, status, lists)
     response["benchmark"] = _benchmark_block(ep, state, lists, volume_range)
+    response["volume_range"] = volume_range
     return response
 
 
@@ -355,12 +357,14 @@ def set_config(req: ConfigRequest) -> Dict[str, Any]:
 
 @router.post("/volume")
 def nudge_volume(req: VolumeRequest) -> Dict[str, Any]:
-    """Step the master volume by ±N dB.
+    """Step the master volume by ±N dB within the range HQPlayer allows.
 
     HQPlayer's own VolumeUp/Down jumps in 0.5 dB increments, which is
-    too granular for a tap-tap-tap UI. Read current volume from
-    State, add the delta, write back via SetVolume; clamp into
-    HQP's typical range so we don't slam the dB to silly values."""
+    too granular for a tap-tap-tap UI. Read the current volume from
+    State and the range from VolumeRange, write back via Volume. A
+    volume HQPlayer holds fixed is refused here with the reason — its
+    own answer to the Volume is a bare Error; with no range given, the
+    step is HQPlayer's to judge."""
     try:
         with _hqp_lock:
             _refuse_while_held()
@@ -372,13 +376,18 @@ def nudge_volume(req: VolumeRequest) -> Dict[str, Any]:
             state = hqp.get_state()
             if state is None:
                 raise HTTPException(status_code=503, detail="HQPlayer state unavailable")
-            current = float(state.get("volume", 0.0))
-            new_vol = max(-120.0, min(0.0, current + float(req.delta)))
+            span = hqp.volume_range()
+            if span is not None and not span["enabled"]:
+                raise HTTPException(status_code=409, detail=VOLUME_FIXED)
+            new_vol = state["volume"] + req.delta
+            if span is not None:
+                new_vol = max(span["min"], min(span["max"], new_vol))
             ok = hqp.set_volume(new_vol)
+            refusal = None if ok else hqp.refusal()
     except (BrokenPipeError, ConnectionError, OSError) as e:
         raise HTTPException(status_code=503, detail=f"HQPlayer not reachable: {e}")
     if not ok:
-        raise HTTPException(status_code=503, detail="set_volume rejected")
+        raise HTTPException(status_code=503, detail=refusal)
     return {"volume": new_vol}
 
 

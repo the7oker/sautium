@@ -19,7 +19,8 @@ if str(BACKEND) not in sys.path:
 import pytest  # noqa: E402
 
 from config import settings  # noqa: E402
-from hqplayer_client import HQPlayerClient, PlaybackState, TrackStatus  # noqa: E402
+from hqplayer_client import (VOLUME_FIXED, HQPlayerClient, PlaybackState,  # noqa: E402
+                             RepeatMode, TrackStatus)
 from playback import hqp_backend as hb  # noqa: E402
 from playback import hqp_diagnostics as diag  # noqa: E402
 from playback.base import PlaybackStatus  # noqa: E402
@@ -1070,6 +1071,22 @@ def test_a_stop_from_elsewhere_ends_the_watch_as_the_owners(traced, fake, monkey
     assert a.end == "owner" and a.verdict["code"] in ("played", "interrupted")
 
 
+def test_a_stop_hqplayer_refuses_leaves_the_watch_running(traced, fake, monkeypatch):
+    monkeypatch.setattr(diag, "OBSERVE_S", 60.0)
+    assert traced.select(1)
+    a = traced._attempt
+    fake.replies["Stop"] = '<Stop result="Error">not authenticated and no internet access</Stop>'
+    stopper = threading.Thread(target=traced.stop)
+    stopper.start()
+    stopper.join(5)
+    assert traced._attempt is a and a.end is None       # nothing stopped: the owner moved nowhere
+    del fake.replies["Stop"]
+    stopper = threading.Thread(target=traced.stop)
+    stopper.start()
+    stopper.join(5)
+    assert _closed(timeout=5.0).end == "owner"
+
+
 def test_replacing_the_queue_with_play_is_one_attempt_and_never_deadlocks(traced, fake):
     items = [_item("E:/Music/B/01.flac", 11), _item("E:/Music/B/02.flac", 12)]
     done = threading.Event()
@@ -1099,6 +1116,114 @@ def test_hqplayers_error_text_reaches_the_caller(fake):
         assert c.set_filter(3) is True and c.last_error is None
     finally:
         c.disconnect()
+
+
+def test_an_answer_that_refuses_is_no_success(fake):
+    """Fifteen commands said True for any answer: a fixed volume answers
+    <Volume result="Error" /> (Direct SDM, Desktop 6.2.3, seen live), and
+    HQPlayer 6 without internet access refuses every state change so."""
+    c = HQPlayerClient("127.0.0.1", fake.port)
+    assert c.connect()
+    try:
+        calls = {"Pause": c.pause, "Stop": c.stop, "Next": c.next, "Previous": c.previous,
+                 "Forward": c.forward, "Backward": c.backward, "Seek": lambda: c.seek(30),
+                 "VolumeUp": c.volume_up, "VolumeDown": c.volume_down,
+                 "VolumeMute": c.volume_mute, "Volume": lambda: c.set_volume(-3.0),
+                 "PlaylistClear": c.playlist_clear, "PlaylistRemove": lambda: c.playlist_remove(1),
+                 "SetRepeat": lambda: c.set_repeat(RepeatMode.ALL),
+                 "SetRandom": lambda: c.set_random(True)}
+        for command, call in calls.items():
+            fake.replies[command] = f'<{command} result="Error" />'
+            assert call() is False, command
+            assert c.last_error.command == command
+            fake.replies[command] = f"<{command}/>"
+            assert call() is True, command
+    finally:
+        c.disconnect()
+
+
+def test_a_fixed_volume_is_named_where_hqplayer_says_only_error(fake):
+    fake.replies["Volume"] = '<Volume result="Error" />'
+    fake.replies["VolumeRange"] = '<VolumeRange enabled="0" adaptive="0" min="-60" max="0"/>'
+    c = HQPlayerClient("127.0.0.1", fake.port)
+    assert c.connect()
+    try:
+        assert c.set_volume(0.0) is False
+        assert c.volume_refusal() == VOLUME_FIXED
+        fake.replies["VolumeRange"] = '<VolumeRange enabled="1" adaptive="0" min="-60" max="0"/>'
+        assert c.set_volume(0.0) is False
+        assert c.volume_refusal() == "HQPlayer refused Volume"
+    finally:
+        c.disconnect()
+
+
+def test_a_command_hqplayer_refuses_is_logged_in_its_words(fake, caplog):
+    fake.replies["Stop"] = '<Stop result="Error">not authenticated and no internet access</Stop>'
+    fake.replies["Volume"] = '<Volume result="Error" />'
+    fake.replies["PlaylistClear"] = '<PlaylistClear result="Error">busy</PlaylistClear>'
+    b = HqpBackend(emit=lambda *_: None, queue=CanonicalQueue())
+    assert b.stop() is False and b.set_volume(-10.0) is False
+    b.queue_clear_after_current()
+    assert "HQPlayer did not take Stop: not authenticated and no internet access" in caplog.text
+    assert "HQPlayer did not take Volume: HQPlayer refused Volume" in caplog.text
+    assert "HQPlayer did not take PlaylistClear: busy" in caplog.text
+
+
+def test_a_slot_hqplayer_does_not_remove_stays_in_the_queue(fake):
+    # Mirror first: the canonical queue drops the slot only once HQPlayer did
+    mgr = PlaybackManager()
+    mgr.queue.replace([_item("E:/Music/A/01.flac", 1), _item("E:/Music/A/02.flac", 2)])
+    b = _attach(mgr)
+    try:
+        fake.replies["PlaylistRemove"] = '<PlaylistRemove result="Error" />'
+        assert mgr.remove(2) is False
+        assert len(mgr.queue) == 2 and len(fake.playlist) == 2
+        del fake.replies["PlaylistRemove"]
+        assert mgr.remove(2) is True
+        assert len(mgr.queue) == 1 and len(fake.playlist) == 1
+    finally:
+        b.shutdown()
+
+
+def test_the_volume_step_keeps_to_hqplayers_range_and_a_fixed_one_says_why(fake):
+    from fastapi import HTTPException
+    from routers import hqplayer as hqp_router
+
+    def step(delta):
+        return hqp_router.nudge_volume(hqp_router.VolumeRequest(delta=delta))
+    fake.replies["VolumeRange"] = '<VolumeRange enabled="1" adaptive="0" min="-60" max="0"/>'
+    fake.replies["State"] = '<State volume="-0.5"/>'
+    assert step(1) == {"volume": 0.0} and fake.commands[-1] == ("Volume", {"value": "0.0"})
+    fake.replies["State"] = '<State volume="-59.5"/>'
+    assert step(-1) == {"volume": -60.0} and fake.commands[-1] == ("Volume", {"value": "-60.0"})
+    # Direct SDM holds the volume: said so, and nothing is sent
+    fake.replies["VolumeRange"] = '<VolumeRange enabled="0" adaptive="0" min="-60" max="0"/>'
+    with pytest.raises(HTTPException) as e:
+        step(1)
+    assert e.value.status_code == 409 and e.value.detail == VOLUME_FIXED
+    assert fake.commands[-1][0] == "VolumeRange"
+    # a refusal the range did not foretell: HQPlayer's words, never a step it did not take
+    fake.replies["VolumeRange"] = '<VolumeRange enabled="1" adaptive="0" min="-60" max="0"/>'
+    fake.replies["Volume"] = '<Volume result="Error">not authenticated and no internet access</Volume>'
+    with pytest.raises(HTTPException) as e:
+        step(1)
+    assert e.value.status_code == 503
+    assert e.value.detail == "not authenticated and no internet access"
+
+
+def test_the_assistant_says_the_volume_is_fixed_instead_of_increased(fake, monkeypatch):
+    from routers import settings as settings_router
+    from tools import definitions
+    monkeypatch.setattr(settings_router, "_read",
+                        lambda key: {"output.type": "hqplayer"}.get(key))
+    monkeypatch.setattr(definitions, "_hqp_client", None)
+    fake.replies["VolumeUp"] = '<VolumeUp result="Error" />'
+    fake.replies["VolumeRange"] = '<VolumeRange enabled="0" adaptive="0" min="-60" max="0"/>'
+    assert definitions._h_hqplayer_volume_up() == f"Failed to change volume: {VOLUME_FIXED}"
+    fake.replies["Pause"] = '<Pause result="Error">not authenticated and no internet access</Pause>'
+    assert definitions._h_hqplayer_pause() == \
+        "Failed to pause: not authenticated and no internet access"
+    definitions._hqp_client.disconnect()
 
 
 def test_a_state_the_sdk_does_not_name_keeps_the_status(fake):

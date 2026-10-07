@@ -344,28 +344,33 @@ def _h_hqplayer_play() -> str:
 
 def _h_hqplayer_pause() -> str:
     try:
-        return "Playback paused." if _get_hqp().pause() else "Failed to pause."
+        hqp = _get_hqp()
+        return "Playback paused." if hqp.pause() else f"Failed to pause: {hqp.refusal()}"
     except Exception as e:
         return f"Error: {e}"
 
 
 def _h_hqplayer_stop() -> str:
     try:
-        return "Playback stopped." if _get_hqp().stop() else "Failed to stop."
+        hqp = _get_hqp()
+        return "Playback stopped." if hqp.stop() else f"Failed to stop: {hqp.refusal()}"
     except Exception as e:
         return f"Error: {e}"
 
 
 def _h_hqplayer_next() -> str:
     try:
-        return "Skipped to next track." if _get_hqp().next() else "Failed to skip."
+        hqp = _get_hqp()
+        return "Skipped to next track." if hqp.next() else f"Failed to skip: {hqp.refusal()}"
     except Exception as e:
         return f"Error: {e}"
 
 
 def _h_hqplayer_previous() -> str:
     try:
-        return "Went to previous track." if _get_hqp().previous() else "Failed to go back."
+        hqp = _get_hqp()
+        return ("Went to previous track." if hqp.previous()
+                else f"Failed to go back: {hqp.refusal()}")
     except Exception as e:
         return f"Error: {e}"
 
@@ -400,22 +405,27 @@ def _h_hqplayer_get_status() -> str:
 
 def _h_hqplayer_volume_up() -> str:
     try:
-        return "Volume increased." if _get_hqp().volume_up() else "Failed to change volume."
+        hqp = _get_hqp()
+        return ("Volume increased." if hqp.volume_up()
+                else f"Failed to change volume: {hqp.volume_refusal()}")
     except Exception as e:
         return f"Error: {e}"
 
 
 def _h_hqplayer_volume_down() -> str:
     try:
-        return "Volume decreased." if _get_hqp().volume_down() else "Failed to change volume."
+        hqp = _get_hqp()
+        return ("Volume decreased." if hqp.volume_down()
+                else f"Failed to change volume: {hqp.volume_refusal()}")
     except Exception as e:
         return f"Error: {e}"
 
 
 def _h_hqplayer_set_volume(level: float) -> str:
     try:
-        ok = _get_hqp().set_volume(level)
-        return f"Volume set to {level}." if ok else "Failed to set volume."
+        hqp = _get_hqp()
+        return (f"Volume set to {level}." if hqp.set_volume(level)
+                else f"Failed to set volume: {hqp.volume_refusal()}")
     except Exception as e:
         return f"Error: {e}"
 

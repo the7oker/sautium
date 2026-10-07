@@ -634,6 +634,17 @@ implementation details live in the code, DB and git history.
   weighed before any absence of it: a Next onto a track HQPlayer pre-buffered
   sends no GET, and with Roon in charge our file is never asked for — the
   media server's silence is a verdict only once nothing better explains it.
+- **An answer is not an acceptance (2026-10-07).** HQPlayer answers a command
+  it will not carry out: `<Volume result="Error" />` while Direct SDM holds
+  PCM at −3 dB (Desktop 6.2.3, seen live), and every state change of an
+  unauthenticated client while HQPlayer 6 has no internet access. Fifteen
+  client commands counted any answer as done — the volume routes said `ok`,
+  the assistant said "Volume increased.", a refused PlaylistRemove dropped
+  the slot from the canonical queue while HQPlayer kept it. One rule now
+  (`HQPlayerClient._accepted`): only `result="Error"` refuses, a bare element
+  is acceptance, and every caller tells a refusal in HQPlayer's words. The
+  HQPlayer screen's volume steps within `VolumeRange` and rests while it is
+  fixed, with the reason: HQPlayer's own refusal says only Error.
 - **DSP load is measured, not predicted (2026-10-02).** Whether a filter or a
   modulator keeps up depends on the HQPlayer host — CPU build, CUDA (filters
   can offload, modulators never do), memory, cooling — and no spec sheet

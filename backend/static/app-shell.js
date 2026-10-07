@@ -8926,15 +8926,16 @@
     el.querySelector('[data-close]').focus();
   }
 
-  // Every DSP change from the HQPlayer screen goes through here. HQPlayer
-  // can refuse one (a filter its current mode cannot run, a profile that is
-  // gone) and says why: the route returns `failed` in its words, toasted —
-  // the screen used to drop it in the console.
-  async function postHqpConfig(payload) {
+  // Every change from the HQPlayer screen — a DSP knob, a volume step —
+  // goes through here. HQPlayer can refuse one (a filter its current mode
+  // cannot run, a profile that is gone, a volume it holds fixed) and says
+  // why: /config returns `failed` in its words, /volume a refusal's
+  // detail, toasted — the screen used to drop both in the console.
+  async function postHqpChange(path, payload) {
     const title = 'HQPlayer did not take the change';
     let r, out;
     try {
-      r = await fetch('/api/hqplayer/config', {
+      r = await fetch(path, {
         method: 'POST',
         headers: {'Content-Type': 'application/json'},
         body: JSON.stringify(payload),
@@ -9120,6 +9121,14 @@
         ? fmtRateLabel(st.active_rate)
         : '—';
 
+      // The volume steps within the range HQPlayer reports; a fixed one
+      // takes no step at all (Direct SDM holds PCM at −3 dB). No range
+      // given leaves each tap to HQPlayer's own answer.
+      const vr = s.volume_range;
+      const volume = Number(st.volume) || 0;
+      const volumeFixed = !!vr && !vr.enabled;
+      const volOff = atEdge => (held || volumeFixed || atEdge) ? ' disabled' : '';
+
       // What each knob's picker lists. The trigger's label and the picker's
       // options come from the same entries, so the two cannot disagree. No
       // "(none)" option for the matrix: HQPlayer has no call that clears the
@@ -9228,11 +9237,12 @@
           <div class="hqp-row hqp-volume-row">
             <span class="hqp-row-label">Volume</span>
             <div class="hqp-volume-ctrl">
-              <button class="hqp-vol-btn" type="button" data-vol="-1" aria-label="Volume -1 dB"${held ? ' disabled' : ''}>−</button>
-              <span class="hqp-vol-value mono">${fmtVolume(Number(st.volume) || 0)}</span>
-              <button class="hqp-vol-btn" type="button" data-vol="+1" aria-label="Volume +1 dB"${held ? ' disabled' : ''}>+</button>
+              <button class="hqp-vol-btn" type="button" data-vol="-1" aria-label="Volume -1 dB"${volOff(!!vr && volume <= vr.min)}>−</button>
+              <span class="hqp-vol-value mono">${fmtVolume(volume)}</span>
+              <button class="hqp-vol-btn" type="button" data-vol="+1" aria-label="Volume +1 dB"${volOff(!!vr && volume >= vr.max)}>+</button>
             </div>
           </div>
+          ${volumeFixed ? `<p class="hqp-row-hint is-left">HQPlayer holds its volume fixed — Direct SDM or a fixed volume is on in its settings. Turn your amplifier instead.</p>` : ''}
           ${processSpeed > 0 ? `
           <div class="hqp-row" data-hqp-dsp>
             <span class="hqp-row-label">DSP</span>
@@ -9295,7 +9305,7 @@
           const payload = {};
           payload[knob] = (knob === 'matrix_profile') ? picked : parseInt(picked, 10);
           serialized('hqp.config', async () => {
-            await postHqpConfig(payload);
+            await postHqpChange('/api/hqplayer/config', payload);
             // Reload to reconcile (server-side change may cascade —
             // e.g. mode flip changes filter availability).
             await load();
@@ -9309,25 +9319,21 @@
           const filt = (s.filters || []).find(f => f.name === name);
           if (!filt) return;
           serialized('hqp.config', async () => {
-            await postHqpConfig({filter: filt.index, filter1x: filt.index});
+            await postHqpChange('/api/hqplayer/config', {filter: filt.index, filter1x: filt.index});
             await load();
           });
         });
       });
 
       // Volume is tap-tap-tap by design (±1 dB per tap); the chain keeps
-      // the nudges in order, it does not swallow them.
+      // the nudges in order, it does not swallow them. A step HQPlayer did
+      // not take is told like a knob's (its volume fixed since the screen
+      // was drawn, its own refusal), and the reload repaints what it holds.
       body.querySelectorAll('[data-vol]').forEach(btn => {
         btn.addEventListener('click', () => {
           const delta = parseFloat(btn.dataset.vol);
           serialized('hqp.config', async () => {
-            try {
-              await fetch('/api/hqplayer/volume', {
-                method: 'POST',
-                headers: {'Content-Type': 'application/json'},
-                body: JSON.stringify({delta}),
-              });
-            } catch (err) { console.warn('volume nudge failed', err); }
+            await postHqpChange('/api/hqplayer/volume', {delta});
             await load();
           });
         });
@@ -9376,7 +9382,7 @@
 
       body.querySelector('[data-action="open-filter"]').addEventListener('click', () => {
         openFilterPicker(s, (chosen) => serialized('hqp.config', async () => {
-          await postHqpConfig({filter: chosen.index, filter1x: chosen.index});
+          await postHqpChange('/api/hqplayer/config', {filter: chosen.index, filter1x: chosen.index});
           await load();
         }));
       });

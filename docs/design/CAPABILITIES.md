@@ -127,7 +127,7 @@ Controlled:
 - [UI][AI] Transport, through the mirrored queue — `playback/hqp_backend.py: HqpBackend`; `hqplayer_client.py: play`, `pause`, `stop`, `next`, `previous`, `seek`, `select_track`
 - [UI] Mode (PCM / SDM), rate, filter with its 1x filter, dither / modulator, matrix profile — `POST /api/hqplayer/config` (`ConfigRequest`)
 - [AI] Filter, shaper, matrix profile by name — `mcp/assistant_server.py: hqplayer_set_filter`, `hqplayer_set_shaper`, `hqplayer_set_matrix_profile`
-- [UI][AI] Volume: ±1 dB steps in the Web UI, steps and an exact level for the assistant — `POST /api/hqplayer/volume`; `hqplayer_set_volume`
+- [UI][AI] Volume: ±1 dB steps in the Web UI within HQPlayer's `VolumeRange`, steps and an exact level for the assistant; a volume HQPlayer holds fixed (Direct SDM) rests the buttons with the reason, and a step it refuses is told in its words — `POST /api/hqplayer/volume`; `hqplayer_set_volume`
 - [UI] Favourite filters: starred in the filter picker, one tap to switch — `POST /api/hqplayer/favorites/filter`
 - [AI] Convolution on and off — the assistant only, no control in the Web UI — `hqplayer_set_convolution`
 - [AI] Parametric-EQ preset written as a Room EQ Wizard file the owner loads into the Matrix Processor — `generate_eq_preset`; `eq_generator.py: save_eq_preset`; `GET /api/eq/presets`, `/download/{filename}`

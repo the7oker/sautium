@@ -267,7 +267,7 @@ def hqplayer_pause() -> str:
     try:
         hqp = _get_hqp()
         ok = hqp.pause()
-        return "Playback paused." if ok else "Failed to pause."
+        return "Playback paused." if ok else f"Failed to pause: {hqp.refusal()}"
     except Exception as e:
         return f"Error: {e}"
 
@@ -278,7 +278,7 @@ def hqplayer_stop() -> str:
     try:
         hqp = _get_hqp()
         ok = hqp.stop()
-        return "Playback stopped." if ok else "Failed to stop."
+        return "Playback stopped." if ok else f"Failed to stop: {hqp.refusal()}"
     except Exception as e:
         return f"Error: {e}"
 
@@ -289,7 +289,7 @@ def hqplayer_next() -> str:
     try:
         hqp = _get_hqp()
         ok = hqp.next()
-        return "Skipped to next track." if ok else "Failed to skip."
+        return "Skipped to next track." if ok else f"Failed to skip: {hqp.refusal()}"
     except Exception as e:
         return f"Error: {e}"
 
@@ -300,7 +300,7 @@ def hqplayer_previous() -> str:
     try:
         hqp = _get_hqp()
         ok = hqp.previous()
-        return "Went to previous track." if ok else "Failed to go back."
+        return "Went to previous track." if ok else f"Failed to go back: {hqp.refusal()}"
     except Exception as e:
         return f"Error: {e}"
 
@@ -358,7 +358,7 @@ def hqplayer_volume_up() -> str:
     try:
         hqp = _get_hqp()
         ok = hqp.volume_up()
-        return "Volume increased." if ok else "Failed to change volume."
+        return "Volume increased." if ok else f"Failed to change volume: {hqp.volume_refusal()}"
     except Exception as e:
         return f"Error: {e}"
 
@@ -369,7 +369,7 @@ def hqplayer_volume_down() -> str:
     try:
         hqp = _get_hqp()
         ok = hqp.volume_down()
-        return "Volume decreased." if ok else "Failed to change volume."
+        return "Volume decreased." if ok else f"Failed to change volume: {hqp.volume_refusal()}"
     except Exception as e:
         return f"Error: {e}"
 
@@ -384,7 +384,7 @@ def hqplayer_set_volume(level: float) -> str:
     try:
         hqp = _get_hqp()
         ok = hqp.set_volume(level)
-        return f"Volume set to {level}." if ok else "Failed to set volume."
+        return f"Volume set to {level}." if ok else f"Failed to set volume: {hqp.volume_refusal()}"
     except Exception as e:
         return f"Error: {e}"
 
