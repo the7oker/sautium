@@ -1137,8 +1137,8 @@ def _notices_state() -> Dict[str, Any]:
     network has not served yet. Like the guidance trail, the rule for WHEN
     a condition exists lives here next to the workers that create it; the
     view layer owns the words and the clock. Derived, never stored — the
-    cooldown ledger and the launcher's `mb_slice.status` row are the
-    sources, so a condition ends the moment its source does.
+    cooldown ledger and the slice cycles' status rows are the sources, so a
+    condition ends the moment its source does.
 
     Each item: `key` (stable — what toasts coalesce on), `kind`, `since`
     (a re-arm bumps it, which re-lights the trail), `until` (when the
@@ -1165,7 +1165,7 @@ def _notices_state() -> Dict[str, Any]:
             items.append({
                 "key": f"{family}.deferred",
                 "kind": "info",
-                "since": slices.get("at"),
+                "since": slices.get("since"),
                 "until": slices.get("next_attempt_at"),
                 "data": {k: slices.get(k) for k in
                          ("unserved", "pending", "pending_capped", "served",

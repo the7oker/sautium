@@ -1093,7 +1093,7 @@ for a Last.fm cooldown (30 min doubling to 24 h) that reads as "Idle".
 - **Three layers, not one.** A toast on the transition, a row on Sync & P2P
   lit by the guidance trail until visited, and the consequence explained
   where it shows (the bare card says the discography is on its way and
-  when the network is asked next). A toast that nobody saw costs nothing
+  why it waits). A toast that nobody saw costs nothing
   because the other two layers still hold the fact.
 - **`pointer-events: none` for the passive toast.** A tap goes to what is
   beneath, so a toast never blocks a control and the second tap of a
@@ -1103,18 +1103,26 @@ for a Last.fm cooldown (30 min doubling to 24 h) that reads as "Idle".
   reconnecting strip sits in flow and pushes the app down.
 - **Snapshots, not events.** The server publishes the whole active set on
   `/api/events` and the client diffs it; the connect-time copy paints state
-  only. Conditions are DERIVED (cooldown ledger, the launcher's
-  `mb_slice.status` row), never stored as a list, so one ends the moment
-  its source does.
+  only. Conditions are DERIVED (cooldown ledger, the slice cycles' status
+  rows), never stored as a list, so one ends the moment its source does.
+  A condition's `since` is its ONSET, never its source's last write: the
+  slice rows were stamped per run, so every wake of the cycle re-raised
+  the same "looking for a node" toast — every few seconds while a Last.fm
+  history import grew the MBID set. Since 2026-10-07 the row keeps the
+  onset while artists stay unserved (`lb_slice_cycle.publish_status`, both
+  families), and an unchanged row wakes nobody.
 - **The honest number came from fixing the cause.** `Retry-After` on the
   peer surfaces' 429 and a one-minute wait-and-retry in the slice cycle
   turned "next attempt in six hours" into "about a minute"; the published
-  `next_attempt_at` is the timed loop's real deadline. Shipped since: the
-  same 429 awareness in the pull (2026-09-13, `sync_client` re-asks after
-  `Retry-After`), the remaining silent states as notices the same evening
-  (`library.mount_missing`, `tools.missing`, `streaming.silent`), and the
-  slice loop on dump-less Docker nodes (2026-09-24,
-  `desktop/p2p/mb_slice_cycle.py`).
+  `next_attempt_at` is the timed loop's real deadline. The copy names it
+  only where a retry is all it takes (a rate limit, a node that did not
+  answer): while no node holds the data, the timer says nothing about when
+  it arrives, and "on schedule at 20:02" read as a promise (2026-10-07).
+  Shipped since: the same 429 awareness in the pull (2026-09-13,
+  `sync_client` re-asks after `Retry-After`), the remaining silent states
+  as notices the same evening (`library.mount_missing`, `tools.missing`,
+  `streaming.silent`), and the slice loop on dump-less Docker nodes
+  (2026-09-24, `desktop/p2p/mb_slice_cycle.py`).
 
 ### A double-tap is one tap (2026-09-13)
 

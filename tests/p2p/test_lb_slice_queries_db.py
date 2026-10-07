@@ -1,7 +1,8 @@
 """desktop/p2p/lb_slice_queries against a real PostgreSQL built from the
 migrations (the test_life_merge pattern): the pending tiers and the version
-rules, the serve matrix against min_version, the forward-only import, and
-backend/lb_dump_load's staging aggregation. Skipped without a cluster."""
+rules, the serve matrix against min_version, the forward-only import,
+backend/lb_dump_load's staging aggregation, and the status row both slice
+cycles publish (lb_slice_cycle.publish_status). Skipped without a cluster."""
 
 import base64
 import gzip
@@ -9,6 +10,7 @@ import hashlib
 import io
 import json
 import os
+import select
 import sys
 import uuid
 from pathlib import Path
@@ -21,6 +23,7 @@ psycopg2.extras.register_uuid()
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "backend"))
 
+from desktop.p2p import lb_slice_cycle  # noqa: E402
 from desktop.p2p import lb_slice_queries as q  # noqa: E402
 
 ed25519 = pytest.importorskip("cryptography.hazmat.primitives.asymmetric.ed25519")
@@ -222,3 +225,59 @@ def test_loader_aggregation_is_a_lower_bound_sum_over_users(conn):
         assert [r[0] for r in cur.fetchall()] == ["idx_lb_recording_artists", "lb_recording_pkey"]
         cur.execute("SELECT to_regclass('lb_stage_recording')")
         assert cur.fetchone()[0] is None
+
+
+def _wakes(listener, conn, action) -> int:
+    """The sautium_notices wakes `action` sent, counted up to a sentinel
+    NOTIFY committed after it — an absent wake is proven, not waited out."""
+    action()
+    with conn.cursor() as cur:
+        cur.execute("NOTIFY sautium_notices, 'sentinel'")
+    count = 0
+    while True:
+        assert select.select([listener], [], [], 5)[0], "the sentinel never arrived"
+        listener.poll()
+        while listener.notifies:
+            if listener.notifies.pop(0).payload == "sentinel":
+                return count
+            count += 1
+
+
+def test_status_row_keeps_the_onset_and_wakes_only_on_change(conn):
+    """The derived notice toasts when its `since` moves: a run that leaves
+    the same artists waiting must neither move it nor wake the channel."""
+    key = lb_slice_cycle.STATUS_KEY
+    dsn = psycopg2.extensions.make_dsn(dbname=DBNAME, **PG)
+    with conn.cursor() as cur:
+        cur.execute("DELETE FROM user_settings WHERE key = %s", (key,))
+    listener = psycopg2.connect(dbname=DBNAME, **PG)
+    listener.autocommit = True
+    with listener.cursor() as cur:
+        cur.execute("LISTEN sautium_notices")
+
+    def publish(**facts) -> int:
+        state = {"pending": 200, "pending_capped": True, "served": 0, "unserved": 200,
+                 "reason": "no_sources", "sources": 0, "newest_version": None,
+                 "next_attempt_at": None, **facts}
+        return _wakes(listener, conn,
+                      lambda: lb_slice_cycle.publish_status(dsn, key, state))
+
+    def since():
+        with conn.cursor() as cur:
+            cur.execute("SELECT value->>'since' FROM user_settings WHERE key = %s", (key,))
+            return cur.fetchone()[0]
+
+    try:
+        assert publish() == 1
+        onset = since()
+        assert onset
+        assert publish() == 0                    # a wake that changed nothing
+        assert since() == onset
+        assert publish(reason="rate_limited", sources=1) == 1
+        assert since() == onset                  # still waiting: the same condition
+        assert publish(served=200, unserved=0, reason="ok") == 1
+        assert since() is None
+        assert publish() == 1
+        assert since() not in (None, onset)      # waiting again is a new onset
+    finally:
+        listener.close()

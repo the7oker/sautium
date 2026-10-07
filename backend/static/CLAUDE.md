@@ -462,7 +462,8 @@ visual language:
 The active set comes from the server as a **snapshot** on
 `/api/events` (`{"t": "notice"}`), derived in
 `backend/routers/settings.py::_notices_state()` from the cooldown
-ledger, the launcher's `mb_slice.status` row, the music folder (owned
+ledger, the slice cycles' status rows (`mb_slice.status`,
+`lb_slice.status`), the music folder (owned
 files known but the path empty), the media binaries on PATH, the
 stream providers' health (`streaming.service.provider_health`) and the
 HQPlayer output's playback trace (the same failure three plays in a row,
@@ -471,7 +472,10 @@ rule for WHEN a condition exists lives there, the words and the clock
 (local time, mono) live in `NOTICE_COPY` here. A condition with no ledger
 keeps its `since` in `_derived_since`; its producers wake the channel on
 the bad AND the good transition (`notices_recheck`). The client diffs snapshots: a key
-that appears or re-arms toasts once; the connect-time snapshot is
+that appears or re-arms toasts once — so `since` is the condition's
+ONSET, stable while it lasts: a producer that restamps it per run
+re-raises the same toast on every run (the slice rows did, every few
+seconds — `lb_slice_cycle.publish_status` keeps it now); the connect-time snapshot is
 `initial` and paints state only, so a tab that slept through a change
 wakes to the rows, never to a burst of stale toasts. Wake the channel
 with `NOTIFY sautium_notices` after changing a source.

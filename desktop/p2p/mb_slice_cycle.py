@@ -50,7 +50,7 @@ import psycopg2
 from desktop.api_client import BackendAPIClient
 from desktop.mb_slice_client import MBSliceClient
 from desktop.p2p import mb_slice_queries
-from desktop.p2p.lb_slice_cycle import load_bans, notify, read_interval
+from desktop.p2p.lb_slice_cycle import load_bans, notify, publish_status, read_interval
 from desktop.p2p.slice_sources import SourceFinder
 from desktop.p2p.sync_walk import write_settings
 
@@ -196,8 +196,9 @@ class MbSliceCycle:
         """The fallback cadence and the retry path after peer failures, on
         mb_slice.auto_interval_min re-read each cycle. The first run waits for
         a source (the walk's event) and then the first sync walk's head start.
-        The deadline of the next timed run is published with every status: it
-        is the one honest answer to "when will the albums appear"."""
+        The deadline of the next timed run is published with every status —
+        the latest retry, which the notice names where a retry is all it
+        takes (a rate limit, a node that did not answer)."""
         evt = self._first_source() if self._first_source else None
         if evt is not None:
             try:
@@ -374,11 +375,10 @@ class MbSliceCycle:
         """One row, `mb_slice.status`, is the whole of what the UI knows about
         this cycle: how many names canon waits on, how many a peer served,
         why the rest stayed pending and when the timed loop asks again.
-        Written on every cycle — an all-clear included — so the condition the
-        backend derives from it (`mb_slice.deferred`) ends the moment it stops
-        being true."""
+        Published on every cycle — an all-clear included — so the condition
+        the backend derives from it (`mb_slice.deferred`) ends the moment it
+        stops being true."""
         state = {
-            "at": datetime.now(timezone.utc).isoformat(),
             "pending": pending,
             # the pending set is capped per cycle: at the cap the true
             # backlog is unknown, and the copy says "200+".
@@ -392,7 +392,6 @@ class MbSliceCycle:
         }
         loop = asyncio.get_event_loop()
         try:
-            await loop.run_in_executor(None, write_settings, self.db_dsn, {STATUS_KEY: state})
-            await loop.run_in_executor(None, notify, self.db_dsn, "sautium_notices")
+            await loop.run_in_executor(None, publish_status, self.db_dsn, STATUS_KEY, state)
         except Exception as e:
             logger.warning(f"MB slice: status publish failed: {e}")

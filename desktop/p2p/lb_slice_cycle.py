@@ -41,6 +41,7 @@ for the whole handshake — see sync_walk).
 """
 
 import asyncio
+import json
 import logging
 import time
 from datetime import datetime, timezone
@@ -51,7 +52,6 @@ import psycopg2
 from desktop.api_client import BackendAPIClient
 from desktop.p2p import lb_slice_queries
 from desktop.p2p.slice_sources import SourceFinder
-from desktop.p2p.sync_walk import write_settings
 
 logger = logging.getLogger(__name__)
 
@@ -182,6 +182,43 @@ def clear_status(dsn: str) -> bool:
             if dropped:
                 cur.execute("NOTIFY sautium_notices")
         return dropped
+    finally:
+        conn.close()
+
+
+def publish_status(dsn: str, key: str, state: dict) -> None:
+    """A slice cycle's status row (`mb_slice.status` / `lb_slice.status`),
+    shared by both families. `since` is when the current deferral BEGAN —
+    kept while artists stay unserved, new once they start waiting again —
+    because the derived notice toasts whenever its `since` moves: stamped
+    per run, the same "looking for a node" toast came back on every wake,
+    every few seconds while a Last.fm history import grew the MBID set
+    (2026-10-07). An unchanged row is not rewritten and wakes nobody — the
+    NOTIFY says a condition moved, not that a run happened. One writer per
+    database: each cycle publishes under its run lock."""
+    conn = _connect(dsn)
+    try:
+        with conn.cursor() as cur:
+            cur.execute("SELECT value FROM user_settings WHERE key = %s", (key,))
+            row = cur.fetchone()
+            prev = row[0] if row else None
+            since = None
+            if state["unserved"]:
+                since = (prev or {}).get("since") or datetime.now(timezone.utc).isoformat()
+            value = {**state, "since": since}
+            if value == prev:
+                return
+            cur.execute(
+                """
+                INSERT INTO user_settings (key, value)
+                VALUES (%s, %s::jsonb)
+                ON CONFLICT (key) DO UPDATE
+                    SET value = EXCLUDED.value,
+                        updated_at = CURRENT_TIMESTAMP
+                """,
+                (key, json.dumps(value)),
+            )
+            cur.execute("NOTIFY sautium_notices")
     finally:
         conn.close()
 
@@ -498,12 +535,11 @@ class LbSliceCycle:
     async def _publish(self, *, pending: int, served: int, unserved: int,
                        reason: str, sources: int, newest: Optional[str]) -> None:
         """One row, `lb_slice.status`, is the whole of what the UI knows
-        about this cycle; written on every run — an all-clear included — so
-        the derived notice (`lb_slice.deferred`) ends the moment it stops
-        being true. The NOTIFY wakes the backend's notices channel."""
+        about this cycle; published on every run — an all-clear included —
+        so the derived notice (`lb_slice.deferred`) ends the moment it stops
+        being true."""
         next_at = self._next_at
         state = {
-            "at": datetime.now(timezone.utc).isoformat(),
             "pending": pending,
             "pending_capped": pending >= PENDING_PER_CYCLE,
             "served": served,
@@ -516,7 +552,6 @@ class LbSliceCycle:
         }
         loop = asyncio.get_event_loop()
         try:
-            await loop.run_in_executor(None, write_settings, self.db_dsn, {STATUS_KEY: state})
-            await loop.run_in_executor(None, notify, self.db_dsn, "sautium_notices")
+            await loop.run_in_executor(None, publish_status, self.db_dsn, STATUS_KEY, state)
         except Exception as e:
             logger.warning(f"LB slice: status publish failed: {e}")

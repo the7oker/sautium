@@ -10644,6 +10644,9 @@
       const who = `<span class="num">${fmtNum(d.unserved || 0)}${capped ? '+' : ''}</span> artist${d.unserved === 1 ? '' : 's'}`;
       // Every network pass (a walk, a LAN peer, new pending names) runs the
       // cycle again; `until` is only its fallback timer, the latest retry.
+      // Named only where a retry is all it takes (a node that asked to slow
+      // down or did not answer): while no node holds the data, the timer
+      // says nothing about when it arrives.
       const sched = n.until ? `, and on schedule ${fmtUntil(n.until)}` : '';
       switch (d.reason) {
         case 'rate_limited':
@@ -10651,10 +10654,10 @@
                    text: `The catalog node asked to slow down — ${who} still wait for their albums. Asked again with the next network pass${sched}.` };
         case 'no_sources':
           return { title: 'Looking for a catalog node',
-                   text: `${who} wait for their albums until a node holding the MusicBrainz catalog turns up. Sautium looks with every network pass${sched}.` };
+                   text: `${who} wait for their albums until a node holding the MusicBrainz catalog turns up. Sautium looks with every network pass.` };
         case 'missing':
           return { title: 'Catalog data not found yet',
-                   text: `No node found so far holds the catalog entries for ${who}. Asked again with the next network pass${sched}.` };
+                   text: `No node found so far holds the catalog entries for ${who}. Asked again with the next network pass.` };
         default:
           return { title: 'Catalog data delayed',
                    text: `A catalog node did not answer — ${who} still wait for their albums. Asked again with the next network pass${sched}.` };
@@ -10671,10 +10674,10 @@
                    text: `The statistics node asked to slow down — ${who} still wait for their listening statistics. Asked again with the next network pass${sched}.` };
         case 'no_sources':
           return { title: 'Looking for a statistics node',
-                   text: `${who} wait for their listening statistics until a node holding the ListenBrainz data turns up. Sautium looks with every network pass${sched}.` };
+                   text: `${who} wait for their listening statistics until a node holding the ListenBrainz data turns up. Sautium looks with every network pass.` };
         case 'missing':
           return { title: 'Listening statistics not found yet',
-                   text: `No node found so far holds listening statistics for ${who}. Asked again with the next network pass${sched}.` };
+                   text: `No node found so far holds listening statistics for ${who}. Asked again with the next network pass.` };
         default:
           return { title: 'Listening statistics delayed',
                    text: `A statistics node did not answer — ${who} still wait for their listening statistics. Asked again with the next network pass${sched}.` };
