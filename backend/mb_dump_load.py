@@ -553,6 +553,10 @@ def download_and_load(progress_cb: ProgressCb = _noop, force: bool = False) -> D
         "('musicbrainz.db_version', %s::jsonb) "
         "ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value",
         (_json.dumps(version),))
+    # The slice cycle's status from before the load ("no source reachable")
+    # would keep the derived notice alive on a node that asks nobody.
+    db_execute("DELETE FROM user_settings WHERE key = 'mb_slice.status'")
+    db_execute("NOTIFY sautium_notices")
     # Wake the mb-capability listener: the Discovery chip flips to the
     # enabled 'local' state the moment the full load lands.
     db_execute("NOTIFY sautium_mb_sources")

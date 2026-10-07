@@ -50,7 +50,8 @@ import psycopg2
 from desktop.api_client import BackendAPIClient
 from desktop.mb_slice_client import MBSliceClient
 from desktop.p2p import mb_slice_queries
-from desktop.p2p.lb_slice_cycle import load_bans, notify, publish_status, read_interval
+from desktop.p2p.lb_slice_cycle import (clear_status, load_bans, notify, publish_status,
+                                        read_interval)
 from desktop.p2p.slice_sources import SourceFinder
 from desktop.p2p.sync_walk import write_settings
 
@@ -290,6 +291,9 @@ class MbSliceCycle:
         if not self.config.get("fetch", True):
             return {}
         if await loop.run_in_executor(None, local_dump_available, self.db_dsn):
+            # A dump node serves; it has nothing to ask for — and nothing to
+            # report: a status left from before its load must not outlive it.
+            await loop.run_in_executor(None, clear_status, self.db_dsn, STATUS_KEY)
             return {}
         # Source discovery runs BEFORE the pending-names early return: it also
         # persists mb.search_sources for the backend's remote MB search, which
