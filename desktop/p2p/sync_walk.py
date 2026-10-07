@@ -290,6 +290,37 @@ async def listen_notifications(db_dsn: str,
                     pass
 
 
+class DeadAddresses:
+    """Discovered addresses (the DHT, the Worker directory, the master hint)
+    that did not answer, each backing off 30 min, doubling to a day. One
+    record per process: the walk and the slice source finders
+    (desktop/p2p/slice_sources.py) skip and feed the same one, so an address
+    one of them found dead is not dialled by the others on their own
+    cadence — a slice cycle woken every few seconds by a history import
+    spent a 5 s /health timeout on the same dead address per wake
+    (2026-10-07). Manual and LAN peers never enter it: they are asked every
+    time."""
+
+    def __init__(self) -> None:
+        self._entries: dict[str, tuple[float, int]] = {}   # addr -> (retry_after, strikes)
+
+    def backing_off(self, addr: str) -> bool:
+        return self._entries.get(addr, (0.0, 0))[0] > time.time()
+
+    def failed(self, addr: str) -> None:
+        """A strike per window, not per probe: the walk and a cycle that
+        probed the same address side by side double its delay once."""
+        retry_after, strikes = self._entries.get(addr, (0.0, 0))
+        now = time.time()
+        if retry_after > now:
+            return
+        delay = min(UNREACHABLE_BACKOFF_BASE * (2 ** strikes), UNREACHABLE_BACKOFF_MAX)
+        self._entries[addr] = (now + delay, strikes + 1)
+
+    def answered(self, addr: str) -> None:
+        self._entries.pop(addr, None)
+
+
 class SyncWalk:
     """One node's pull side. Construct once per process, `bind()` on the
     event loop that will run `dispatch_loop`/`interval_loop`, then
@@ -338,7 +369,7 @@ class SyncWalk:
         self._diag_record = diag_record
         self._after_run = after_run
         self._on_enriched_count = on_enriched_count
-        self._unreachable: dict[str, tuple[float, int]] = {}   # addr -> (retry_after, strikes)
+        self.dead = DeadAddresses()                            # shared with the slice finders
         self._holdings_cache: dict = {}                        # peer pubkey -> published holdings filters
         self._empty_peers: dict[str, float] = {}               # addr -> ignore until
         # Reachable peers met in the current run, (pubkey, host, port): the
@@ -569,8 +600,7 @@ class SyncWalk:
                 if addr in dht_seen or addr in skip_dht_addrs:
                     continue
                 dht_seen.add(addr)
-                retry_after, _ = self._unreachable.get(addr, (0.0, 0))
-                if retry_after > now or self._empty_peers.get(addr, 0.0) > now:
+                if self.dead.backing_off(addr) or self._empty_peers.get(addr, 0.0) > now:
                     continue
                 out.append(addr)
             return out
@@ -728,21 +758,14 @@ class SyncWalk:
             async with sem:
                 api = await self.connect_peer(addr)
             if api is None:
-                self._note_unreachable(addr)
+                self.dead.failed(addr)
             else:
-                self._unreachable.pop(addr, None)
+                self.dead.answered(addr)
                 self._note_sighting(api)
             return addr, api
 
         results = await asyncio.gather(*(probe(a) for a in addrs))
         return [(addr, api) for addr, api in results if api is not None]
-
-    def _note_unreachable(self, addr: str) -> None:
-        """Back a dead address off: 30 min, doubling to a day."""
-        _, strikes = self._unreachable.get(addr, (0.0, 0))
-        delay = min(UNREACHABLE_BACKOFF_BASE * (2 ** strikes),
-                    UNREACHABLE_BACKOFF_MAX)
-        self._unreachable[addr] = (time.time() + delay, strikes + 1)
 
     def _note_sighting(self, api: BackendAPIClient) -> None:
         """A peer that answered /health on a verified channel: one capture

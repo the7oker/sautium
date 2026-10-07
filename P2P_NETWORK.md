@@ -171,9 +171,10 @@ background enrichment runs a pass for what no peer had
 
 Peer-search memory is address-keyed and process-local — never per-peer sync
 state: a dead address backs off (30 min, doubling to a day — a DHT entry
-outlives its node by up to 30 min, so every lookup keeps returning it), and a
-reachable peer that answered with nothing for us is left alone until our gap
-set grows (a scan, a LAN peer). The DHT routing table itself is persisted
+outlives its node by up to 30 min, so every lookup keeps returning it; one
+record, `sync_walk.DeadAddresses`, which the walk and both slice finders skip
+and feed since 2026-10-07), and a reachable peer that answered with nothing
+for us is left alone until our gap set grows (a scan, a LAN peer). The DHT routing table itself is persisted
 (`p2p_dht_state`, saved at every key re-announce and on stop), so a restart
 rejoins from live neighbours in seconds, and the bootstrap never blocks the
 rest of P2P: announces and lookups await readiness, chat and friends do not.
@@ -917,9 +918,15 @@ a batch is the protocol's 50. Every run used to probe every candidate twice,
 and a history import triggers runs every few seconds: the probes of the nodes
 behind one router spent the master's per-IP window, and a 429 on a probe read
 as "no source". The Docker peer surface counts `/health` in a window of its
-own. A run that finds no source retries on the next network event — a walk,
-a LAN peer, new pending names; the 6 h timer is only the latest retry, and
-the notice says so.
+own. A run that finds no source keeps that answer for the wakes that cannot
+change who serves — new pending names, an artist page's request — and
+searches again on the next network pass: a walk (a LAN peer starts one), the
+timer, this node's own dump loaded or deleted (2026-10-07: a history import
+woke the cycles every few seconds, and each wake searched the network again,
+a 5 s `/health` per dead address included). A discovered address that did not
+answer is skipped through the walk's dead-address record, which every slice
+probe feeds; manual and LAN peers are asked every time. The 6 h timer is only
+the latest retry.
 
 E2E: dump → client (2 matched, 12277 rows, zero-match closed) → a dump-less
 replica re-serves a verified blob → a second hop verifies it **against the dump

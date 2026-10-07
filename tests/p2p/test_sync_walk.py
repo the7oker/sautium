@@ -3,7 +3,6 @@ neither network nor DB: the self-address guard, the request/bind handshake,
 the dead-address backoff."""
 
 import asyncio
-import time
 
 from desktop.p2p import sync_walk
 from desktop.p2p.sync_walk import SyncWalk
@@ -54,14 +53,22 @@ def test_request_before_bind_is_delivered():
     asyncio.run(go())
 
 
-def test_dead_address_backs_off_doubling_to_a_day():
-    walk = _walk()
+def test_dead_address_backs_off_doubling_to_a_day(monkeypatch):
+    clock = [1_000_000.0]
+    monkeypatch.setattr(sync_walk.time, "time", lambda: clock[0])
+    dead = _walk().dead
+    addr = "198.51.100.7:8801"
+    delays = []
     for _ in range(8):
-        walk._note_unreachable("198.51.100.7:8801")
-    retry_after, strikes = walk._unreachable["198.51.100.7:8801"]
-    assert strikes == 8
-    assert retry_after - time.time() <= sync_walk.UNREACHABLE_BACKOFF_MAX + 1
-    walk._unreachable.clear()
-    walk._note_unreachable("198.51.100.7:8801")
-    first, _ = walk._unreachable["198.51.100.7:8801"]
-    assert abs((first - time.time()) - sync_walk.UNREACHABLE_BACKOFF_BASE) < 2
+        dead.failed(addr)
+        dead.failed(addr)            # a probe of the same window (a slice cycle's)
+        assert dead.backing_off(addr)
+        retry_after, _ = dead._entries[addr]
+        delays.append(retry_after - clock[0])
+        clock[0] = retry_after
+        assert not dead.backing_off(addr)
+    base, cap = sync_walk.UNREACHABLE_BACKOFF_BASE, sync_walk.UNREACHABLE_BACKOFF_MAX
+    assert delays == [min(base * 2 ** n, cap) for n in range(8)]
+    dead.answered(addr)
+    dead.failed(addr)
+    assert dead._entries[addr][0] - clock[0] == base     # an answer resets the strikes

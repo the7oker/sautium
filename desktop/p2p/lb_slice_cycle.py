@@ -51,7 +51,8 @@ import psycopg2
 
 from desktop.api_client import BackendAPIClient
 from desktop.p2p import lb_slice_queries
-from desktop.p2p.slice_sources import SourceFinder
+from desktop.p2p.slice_sources import SourceFinder, network_pass
+from desktop.p2p.sync_walk import DeadAddresses
 
 logger = logging.getLogger(__name__)
 
@@ -233,6 +234,7 @@ class LbSliceCycle:
         db_dsn: str,
         *,
         connect: Callable[[str], Awaitable[Optional[BackendAPIClient]]],
+        dead: DeadAddresses,
         config: Optional[dict] = None,
         dht=None,
         lan=None,
@@ -244,6 +246,7 @@ class LbSliceCycle:
         """
         connect: async (addr) -> BackendAPIClient | None — the walk's
             connect_peer: health, the TLS-pinned key, the own-address guard.
+        dead: the walk's record of dead discovered addresses (`walk.dead`).
         config: the `lb_slice` block (fetch / auto_interval_min).
         dht / lan: the runtime's DHTService / LANDiscovery (either None).
         manual_peers: explicit `scheme://host:port` entries, tried first.
@@ -257,7 +260,8 @@ class LbSliceCycle:
         self._sources = SourceFinder(
             "LB slice", capability="lbdump", directory=("lbslices", "lbdump"),
             usable=lambda h: bool(h.get("lb_dump") or h.get("lb_slices")),
-            connect=connect, dht=dht, lan=lan, manual_peers=list(manual_peers or []),
+            connect=connect, dead=dead, dht=dht, lan=lan,
+            manual_peers=list(manual_peers or []),
             load_bans=load_bans_fn or (lambda: load_bans(self.db_dsn)),
             addr_uuid=lb_slice_queries.addr_uuid)
         self._diag_record = diag_record
@@ -375,12 +379,14 @@ class LbSliceCycle:
 
     # -------------------------------------------------------------- sources
 
-    async def find_sources(self) -> tuple[list[tuple[BackendAPIClient, str, Optional[str]]],
-                                          Optional[str]]:
+    async def find_sources(self, refresh: bool = False,
+                           ) -> tuple[list[tuple[BackendAPIClient, str, Optional[str]]],
+                                      Optional[str]]:
         """Reachable slice sources as (client, node_id, version), REPLICAS
         FIRST, and the newest dump version any of them holds — read from the
-        /health each answered when it was probed."""
-        sources, _ = await self._sources.find()
+        /health each answered when it was probed. `refresh`: a network pass,
+        which searches again after a search that found nothing."""
+        sources, _ = await self._sources.find(refresh)
         replicas: list = []
         dumps: list = []
         newest: Optional[str] = None
@@ -408,7 +414,7 @@ class LbSliceCycle:
             await loop.run_in_executor(None, clear_status, self.db_dsn, STATUS_KEY)
             return {}
 
-        sources, newest = await self.find_sources()
+        sources, newest = await self.find_sources(refresh=network_pass(trigger))
         pending = await loop.run_in_executor(
             None, pending_slice_mbids, self.db_dsn, PENDING_PER_CYCLE, newest)
         if not pending:

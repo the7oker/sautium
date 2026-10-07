@@ -52,8 +52,8 @@ from desktop.mb_slice_client import MBSliceClient
 from desktop.p2p import mb_slice_queries
 from desktop.p2p.lb_slice_cycle import (clear_status, load_bans, notify, publish_status,
                                         read_interval)
-from desktop.p2p.slice_sources import SourceFinder
-from desktop.p2p.sync_walk import write_settings
+from desktop.p2p.slice_sources import SourceFinder, network_pass
+from desktop.p2p.sync_walk import DeadAddresses, write_settings
 
 logger = logging.getLogger(__name__)
 
@@ -102,6 +102,7 @@ class MbSliceCycle:
         db_dsn: str,
         *,
         connect: Callable[[str], Awaitable[Optional[BackendAPIClient]]],
+        dead: DeadAddresses,
         after_import: Callable[[], None],
         config: Optional[dict] = None,
         dht=None,
@@ -114,6 +115,7 @@ class MbSliceCycle:
         """
         connect: async (addr) -> BackendAPIClient | None — the walk's
             connect_peer: health, the TLS-pinned key, the own-address guard.
+        dead: the walk's record of dead discovered addresses (`walk.dead`).
         after_import: () -> None, executor-safe — hand the freshly imported
             facts to the canon (the launcher's POST /canonicalize, the
             backend's in-process trigger).
@@ -130,7 +132,8 @@ class MbSliceCycle:
         self._sources = SourceFinder(
             "MB slice", capability="mbdump", directory=("mbslices", "mbdump"),
             usable=lambda h: bool(h.get("mb_dump") or h.get("mb_slices")),
-            connect=connect, dht=dht, lan=lan, manual_peers=list(manual_peers or []),
+            connect=connect, dead=dead, dht=dht, lan=lan,
+            manual_peers=list(manual_peers or []),
             load_bans=load_bans_fn or (lambda: load_bans(self.db_dsn)),
             addr_uuid=mb_slice_queries.addr_uuid)
         self._after_import = after_import
@@ -264,14 +267,14 @@ class MbSliceCycle:
 
     # -------------------------------------------------------------- sources
 
-    async def find_sources(self) -> list[tuple[BackendAPIClient, str]]:
+    async def find_sources(self, refresh: bool = False) -> list[tuple[BackendAPIClient, str]]:
         """Reachable slice sources as (client, node_id), REPLICAS FIRST: a
         dump-less peer with mb_slices > 0 re-serves the blobs it verified —
         asking those first spreads the load off the few dump nodes; misses
         fall through to a dump holder. A newly probed set is persisted for
         the backend's request-time consumers (remote MB search,
         click-to-mint); desktop/p2p/slice_sources.py keeps it between runs."""
-        sources, probed = await self._sources.find()
+        sources, probed = await self._sources.find(refresh)
         replicas = [(api, node) for api, node, health in sources if not health.get("mb_dump")]
         dumps = [(api, node) for api, node, health in sources if health.get("mb_dump")]
         if probed:
@@ -298,7 +301,7 @@ class MbSliceCycle:
         # Source discovery runs BEFORE the pending-names early return: it also
         # persists mb.search_sources for the backend's remote MB search, which
         # a dump-less node needs even when canon has no work (2026-08-10).
-        peers = await self.find_sources()
+        peers = await self.find_sources(refresh=network_pass(trigger))
         pending = await loop.run_in_executor(None, pending_names, self.db_dsn, PENDING_PER_CYCLE)
         if not pending:
             await self._publish(pending=0, served=0, unserved=0, reason="idle", sources=len(peers))

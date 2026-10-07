@@ -18,6 +18,16 @@ Re-probing every candidate on every run spent one /health (two, with the
 connect) per candidate per trigger, and during a history import the triggers
 came every few seconds: the budget a node shares with everything behind its
 router went to probes, and a 429 on a probe read as "no source".
+
+A search that found nothing is kept as well, for the wakes that cannot change
+who serves — new MBIDs, the names imported scrobbles wait on, minted similars.
+Those came every few seconds during a history import too, and each one
+searched again: a DHT traversal, and a 5 s /health per dead address
+(2026-10-07). A network pass — a sync walk, the timed loop, this node's own
+dump loaded or deleted — searches again, so a source that turns up is asked at
+the next pass. A discovered address that did not answer is skipped through the
+record the walk keeps (sync_walk.DeadAddresses), and every probe here feeds
+it; manual and LAN peers are asked every time, as the walk asks them.
 """
 
 import asyncio
@@ -28,14 +38,28 @@ from typing import Awaitable, Callable, List, Optional, Tuple
 from desktop.api_client import BackendAPIClient
 from desktop.p2p import master_hint, node_hints
 from desktop.p2p.addrs import fmt_addr
+from desktop.p2p.sync_walk import DeadAddresses
 
 logger = logging.getLogger(__name__)
 
 SOURCES_TTL = 15 * 60
 PROBE_CONCURRENCY = 4
+# The wakes that can change who serves: a sync walk (the network pass — new
+# peers, a LAN beacon, a fresher DHT view), the timed loop, this node's own
+# dump loaded or deleted. Every other wake is local data growing.
+NETWORK_TRIGGERS = frozenset({"sync", "auto", "sources"})
 
 # (client, node id, the /health it answered)
 Source = Tuple[BackendAPIClient, str, dict]
+# (address, discovered) — a discovered one (DHT, directory, master hint) is
+# subject to the dead-address record, a manual or LAN peer never
+Candidate = Tuple[str, bool]
+
+
+def network_pass(trigger: str) -> bool:
+    """Whether a run's trigger — the dispatcher's merged reasons, `a+b` —
+    includes a wake that can change who serves."""
+    return not NETWORK_TRIGGERS.isdisjoint(trigger.split("+"))
 
 
 class SourceFinder:
@@ -47,6 +71,7 @@ class SourceFinder:
         directory: Tuple[str, ...],
         usable: Callable[[dict], bool],
         connect: Callable[[str], Awaitable[Optional[BackendAPIClient]]],
+        dead: DeadAddresses,
         dht,
         lan,
         manual_peers: List[str],
@@ -61,12 +86,15 @@ class SourceFinder:
         usable: /health → whether the node serves this family at all.
         connect: the walk's connect_peer — the /health probe, the TLS-pinned
             key, the own-address guard.
+        dead: the walk's record of dead discovered addresses — skipped here,
+            and told how every probe of one went.
         """
         self.label = label
         self.capability = capability
         self.directory = directory
         self._usable = usable
         self._connect = connect
+        self._dead = dead
         self.dht = dht
         self.lan = lan
         self.manual_peers = list(manual_peers)
@@ -76,17 +104,22 @@ class SourceFinder:
         self._kept_at = 0.0
 
     def drop(self, node_id: str) -> None:
-        """A source that failed a request leaves the kept set; the next find
-        probes again."""
+        """A source that failed a request leaves the kept set; once none is
+        left, the next find searches again."""
         self._kept = [s for s in self._kept if s[1] != node_id]
+        if not self._kept:
+            self._kept_at = 0.0
 
     def forget(self) -> None:
         self._kept, self._kept_at = [], 0.0
 
-    async def find(self) -> Tuple[List[Source], bool]:
-        """(sources, probed): the kept set while it is fresh and not empty,
-        else a new one — `probed` tells the caller it is new."""
-        if self._kept and time.monotonic() - self._kept_at < SOURCES_TTL:
+    async def find(self, refresh: bool = False) -> Tuple[List[Source], bool]:
+        """(sources, probed): the last search's result while it is fresh,
+        else a new one — `probed` tells the caller it is new. A found set
+        serves until a source fails or SOURCES_TTL passes; an empty one
+        serves as long, unless `refresh` (a network pass) asks again."""
+        fresh = self._kept_at and time.monotonic() - self._kept_at < SOURCES_TTL
+        if fresh and (self._kept or not refresh):
             return list(self._kept), False
         loop = asyncio.get_event_loop()
         banned_keys, banned_addrs = await loop.run_in_executor(None, self._load_bans)
@@ -97,46 +130,50 @@ class SourceFinder:
         self._kept, self._kept_at = found, time.monotonic()
         return list(found), True
 
-    async def _primary(self) -> List[str]:
-        candidates = list(self.manual_peers)
+    async def _primary(self) -> List[Candidate]:
+        candidates = [(addr, False) for addr in self.manual_peers]
         if self.lan is not None:
             for ip, port in self.lan.peers:
                 info = self.lan.get_peer_info(ip, port) or {}
-                candidates.append(f"{info.get('scheme', 'https')}://{fmt_addr(ip, port)}")
+                candidates.append(
+                    (f"{info.get('scheme', 'https')}://{fmt_addr(ip, port)}", False))
         if self.dht is not None:
             try:
                 for ip, port in await self.dht.lookup_capability(self.capability, want_all=True):
-                    candidates.append(fmt_addr(ip, port))
+                    candidates.append((fmt_addr(ip, port), True))
             except Exception as e:
                 logger.warning(f"{self.label}: DHT capability lookup failed: {e}")
         return candidates
 
-    async def _fallback(self) -> List[str]:
+    async def _fallback(self) -> List[Candidate]:
         """The Worker directory's volunteers FIRST, the master hint LAST —
         that ordering is the de-specialization (Ф16c)."""
         loop = asyncio.get_event_loop()
-        candidates: List[str] = []
+        candidates: List[Candidate] = []
         for cap in self.directory:
             for host, hport, _pk in await loop.run_in_executor(None, node_hints.fetch, cap):
-                candidates.append(fmt_addr(host, hport))
+                candidates.append((fmt_addr(host, hport), True))
         hint = await loop.run_in_executor(None, master_hint.fetch)
         if hint:
-            candidates.append(fmt_addr(*hint))
+            candidates.append((fmt_addr(*hint), True))
         return candidates
 
-    async def _probe(self, candidates: List[str], seen: set,
+    async def _probe(self, candidates: List[Candidate], seen: set,
                      banned_keys: set, banned_addrs: set) -> List[Source]:
         """The usable sources among `candidates`, in their order, one per node
-        (a LAN and a public address of one node are one source)."""
-        addrs = []
-        for addr in candidates:
+        (a LAN and a public address of one node are one source). A discovered
+        address the record holds as dead is not dialled."""
+        addrs: List[Candidate] = []
+        for addr, discovered in candidates:
             if addr in seen:
                 continue
             seen.add(addr)
             if self._addr_uuid(addr) in banned_addrs:
                 logger.info(f"{self.label}: skipping banned address {addr}")
                 continue
-            addrs.append(addr)
+            if discovered and self._dead.backing_off(addr):
+                continue
+            addrs.append((addr, discovered))
         sem = asyncio.Semaphore(PROBE_CONCURRENCY)
 
         async def probe(addr: str) -> Optional[BackendAPIClient]:
@@ -144,7 +181,13 @@ class SourceFinder:
                 return await self._connect(addr)
 
         found: List[Source] = []
-        for api in await asyncio.gather(*(probe(a) for a in addrs)):
+        apis = await asyncio.gather(*(probe(addr) for addr, _ in addrs))
+        for (addr, discovered), api in zip(addrs, apis):
+            if discovered:
+                if api is None:
+                    self._dead.failed(addr)
+                else:
+                    self._dead.answered(addr)
             if api is None or not api.last_health:
                 continue
             health = api.last_health

@@ -248,6 +248,7 @@ class P2PManager:
         self._lb_cycle = LbSliceCycle(
             self.db_dsn,
             connect=self._walk.connect_peer,
+            dead=self._walk.dead,
             config=self.config.get("lb_slice", {}),
             dht=self._dht_service,
             lan=self._lan_discovery,
@@ -262,6 +263,7 @@ class P2PManager:
         self._mb_cycle = MbSliceCycle(
             self.db_dsn,
             connect=self._walk.connect_peer,
+            dead=self._walk.dead,
             after_import=self._canonicalize_locally,
             config=self.config.get("mb_slice", {}),
             dht=self._dht_service,

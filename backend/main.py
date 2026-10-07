@@ -147,6 +147,7 @@ def _build_mb_cycle(walk):
     return MbSliceCycle(
         settings.database_url,
         connect=walk.connect_peer,
+        dead=walk.dead,
         after_import=_start_canon_trigger,
         config={"fetch": True, "auto_interval_min": 360},
         diag_record=_diag_record,
@@ -162,6 +163,7 @@ def _build_lb_cycle(walk):
     return LbSliceCycle(
         settings.database_url,
         connect=walk.connect_peer,
+        dead=walk.dead,
         config={"fetch": True, "auto_interval_min": 360},
         diag_record=_diag_record,
         first_source=lambda: walk.first_source,

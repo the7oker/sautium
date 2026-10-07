@@ -9,7 +9,8 @@ import inspect
 import pytest
 
 from desktop.p2p import slice_sources
-from desktop.p2p.slice_sources import SourceFinder
+from desktop.p2p.slice_sources import SourceFinder, network_pass
+from desktop.p2p.sync_walk import DeadAddresses
 
 DUMP = {"mb_dump": "20260920-001", "mb_slices": 0}
 REPLICA = {"mb_dump": None, "mb_slices": 4210}
@@ -73,11 +74,12 @@ def hints(monkeypatch):
     return state
 
 
-def _finder(net, *, dht=None, lan=None, manual=(), bans=(set(), set())):
+def _finder(net, *, dht=None, lan=None, manual=(), bans=(set(), set()), dead=None):
     return SourceFinder(
         "MB slice", capability="mbdump", directory=("mbslices", "mbdump"),
         usable=lambda h: bool(h.get("mb_dump") or h.get("mb_slices")),
-        connect=net.connect, dht=dht, lan=lan, manual_peers=list(manual),
+        connect=net.connect, dead=dead if dead is not None else DeadAddresses(),
+        dht=dht, lan=lan, manual_peers=list(manual),
         load_bans=lambda: bans, addr_uuid=lambda addr: addr)
 
 
@@ -177,16 +179,58 @@ def test_the_kept_set_ages_out_and_forget_drops_it(hints, monkeypatch):
     assert len(net.probed) == 3
 
 
-def test_no_source_is_never_kept(hints):
+def test_an_empty_search_serves_local_wakes_until_a_network_pass(hints, monkeypatch):
+    # A history import woke the cycles every few seconds on local data, and
+    # with no source anywhere every wake searched the network again.
+    clock = [1000.0]
+    monkeypatch.setattr(slice_sources.time, "monotonic", lambda: clock[0])
+    dht = _Dht([("203.0.113.5", 21001)])                 # a holder that is gone
     net = _Net({})
-    dht = _Dht([("203.0.113.5", 21001)])
     finder = _finder(net, dht=dht)
 
     async def go():
         assert await finder.find() == ([], True)
-        assert await finder.find() == ([], True)
+        assert await finder.find() == ([], False)        # new MBIDs: no search
+        assert len(dht.asked) == 1
+        assert await finder.find(refresh=True) == ([], True)    # a network pass
+        assert len(dht.asked) == 2
+        clock[0] += slice_sources.SOURCES_TTL
+        assert (await finder.find())[1] is True          # aged out like a found set
     asyncio.run(go())
-    assert net.probed == ["203.0.113.5:21001"] * 2
+    assert net.probed == ["203.0.113.5:21001"]           # dead: dialled once, not per search
+
+
+def test_one_dead_address_record_for_the_walk_and_both_families(hints):
+    dead = DeadAddresses()
+    dht = _Dht([("203.0.113.5", 21001)])
+    net = _Net({})
+    mb, lb = _finder(net, dht=dht, dead=dead), _finder(net, dht=dht, dead=dead)
+
+    async def go():
+        await mb.find()
+        await lb.find()
+    asyncio.run(go())
+    assert net.probed == ["203.0.113.5:21001"]           # the other family did not dial it
+    assert dead.backing_off("203.0.113.5:21001")         # and the walk skips it too
+
+
+def test_manual_and_lan_peers_are_asked_on_every_search(hints):
+    lan = _Lan([("192.0.2.10", 22000, "https")])
+    dead = DeadAddresses()
+    net = _Net({})
+    finder = _finder(net, lan=lan, manual=["https://192.0.2.20:22000"], dead=dead)
+
+    async def go():
+        await finder.find()
+        await finder.find(refresh=True)
+    asyncio.run(go())
+    assert net.probed == ["https://192.0.2.20:22000", "https://192.0.2.10:22000"] * 2
+    assert not dead.backing_off("https://192.0.2.10:22000")
+
+
+def test_a_network_pass_is_a_walk_the_timer_or_this_nodes_dump():
+    assert all(network_pass(t) for t in ("sync", "auto", "sources", "pending+sync"))
+    assert not any(network_pass(t) for t in ("pending", "request", "enrich+scrobbles"))
 
 
 def test_both_runtimes_dht_take_the_same_calls():
