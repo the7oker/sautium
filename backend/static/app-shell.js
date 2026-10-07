@@ -11153,7 +11153,6 @@
           </div>
           <div id="lfmWaitRow" style="display:none;">
             <a id="lfmReopen" target="_blank" rel="noopener" style="display:block;font-size:calc(12*var(--px));color:var(--color-accent);word-break:break-all;text-decoration:underline;margin-bottom:calc(10*var(--px));">Reopen authorisation page</a>
-            <button class="profile-btn" data-finish>Finish without the redirect</button>
           </div>
           <div id="lfmMsg" style="font-size:calc(12*var(--px));color:var(--color-text-dim);min-height:calc(16*var(--px));"></div>
         </div>
@@ -11171,7 +11170,7 @@
     const reopen = overlay.querySelector('#lfmReopen');
     const say = (text, tone) => { msg.style.color = tone; msg.textContent = text; };
     const connected = (username) => {
-      if (done) return;          // the wake and a manual finish may both report it
+      if (done) return;          // a second wake may land before the sheet closes
       done = true;
       say(username ? `Connected as ${username}.` : 'Connected.', 'var(--color-positive)');
       setTimeout(() => { close(); render(); }, 700);
@@ -11207,22 +11206,6 @@
         waitRow.style.display = '';
         say('Allow access in the Last.fm tab — this sheet finishes by itself when the browser comes back.', 'var(--color-text-muted)');
         if (!wake) wake = window.sseStream('/lastfm/auth/stream', onWake, () => {});
-      } catch (err) {
-        say(String(err), 'var(--color-negative)');
-      }
-    }));
-
-    overlay.querySelector('[data-finish]').addEventListener('click', (e) => onceInFlight(e.currentTarget, async () => {
-      say('Confirming…', 'var(--color-text-muted)');
-      try {
-        const r = await fetch('/lastfm/auth/complete', { method: 'POST' });
-        if (!r.ok) {
-          let detail = await r.text();
-          try { detail = JSON.parse(detail).detail || detail; } catch (_) {}
-          say(detail, 'var(--color-negative)');
-          return;
-        }
-        connected((await r.json()).username);
       } catch (err) {
         say(String(err), 'var(--color-negative)');
       }

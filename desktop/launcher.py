@@ -844,9 +844,8 @@ class LauncherApp(ctk.CTk):
         wakes /lastfm/auth/stream, the dialog reads the outcome over /status
         and closes itself. No button asks the user whether the browser step
         is over — the first version did, and a click a moment early failed
-        with "Unauthorized Token". "Finish manually" remains for a browser
-        that never comes back: it exchanges the token this node minted,
-        which works once access is granted."""
+        with "Unauthorized Token". What is left is a lost tab (Reopen page)
+        and connecting later (Skip)."""
         dialog = ctk.CTkToplevel(self)
         dialog.title("Last.fm Authorization")
         dialog.geometry("460x230")
@@ -908,28 +907,10 @@ class LauncherApp(ctk.CTk):
         def _reopen():
             threading.Thread(target=self._open_lastfm_page, daemon=True).start()
 
-        def _finish_manually():
-            _say("Checking...", "gray")
-
-            def _complete():
-                result = self.api_client.lastfm_auth_complete()
-                if result and result.get("success"):
-                    self.ui_call(lambda: _connected(result.get("username") or ""))
-                else:
-                    detail = (result or {}).get("detail") or ""
-                    self.ui_call(lambda: _say(
-                        f"Authorization failed.\n{detail}".strip(), "#ef4444"))
-
-            threading.Thread(target=_complete, daemon=True).start()
-
         btn_frame = ctk.CTkFrame(dialog, fg_color="transparent")
         btn_frame.pack(pady=10)
         ctk.CTkButton(
             btn_frame, text="Reopen page", width=120, command=_reopen,
-        ).pack(side="left", padx=5)
-        ctk.CTkButton(
-            btn_frame, text="Finish manually", width=130,
-            fg_color="transparent", border_width=1, command=_finish_manually,
         ).pack(side="left", padx=5)
         ctk.CTkButton(
             btn_frame, text="Skip", width=80,

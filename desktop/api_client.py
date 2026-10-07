@@ -368,10 +368,6 @@ class BackendAPIClient:
         """The flow's outcome, read after a wake on /lastfm/auth/stream."""
         return self._get_json("/lastfm/auth/status", timeout=5)
 
-    def lastfm_auth_complete(self) -> Optional[dict]:
-        """The manual fallback: exchange the token the node minted itself."""
-        return self._post_json("/lastfm/auth/complete", timeout=15)
-
     def canonicalize(self) -> Optional[dict]:
         """Trigger backend canonicalization in the background (returns immediately)."""
         return self._post_json("/canonicalize", timeout=10)

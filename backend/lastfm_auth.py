@@ -1,20 +1,22 @@
 """Last.fm account authorization — the flow behind Profile › Last.fm in the
 Web UI and the launcher's first-run dialog.
 
-Last.fm's browser step ends in a redirect. The authorization page is opened
-with a callback (`cb`) naming this node, and when the user grants access
-Last.fm sends the browser to it carrying the authorised token. That redirect
-IS the completion event: /lastfm/auth/callback/<nonce> exchanges the token
-for the session key, persists it and wakes every client on
-/lastfm/auth/stream — nobody has to guess when the browser step is over.
+Last.fm's web flow ends in a redirect. The authorization page is opened with
+the API key and a callback (`cb`) naming this node, and when the user grants
+access Last.fm mints a token and sends the browser to the callback with it.
+That redirect IS the completion event: /lastfm/auth/callback/<nonce>
+exchanges the token for the session key, persists it and wakes every client
+on /lastfm/auth/stream — nobody has to guess when the browser step is over.
 The first version asked the user to (a "Complete" button), and a click a
-moment early, or a Last.fm redirect nobody saw land, failed with
-"Unauthorized Token" (launcher first run, 2026-09-22).
+moment early failed with "Unauthorized Token" (launcher first run,
+2026-09-22).
 
-The desktop flow stays underneath as the fallback: the page also carries a
-token this node minted (auth.getToken), so a browser that never comes back
-can still be finished by hand — POST /lastfm/auth/complete exchanges that
-token.
+The page carries no token of the node's own. A `token` parameter makes it
+Last.fm's desktop flow, whose browser step ends on Last.fm's own page —
+the user is told to go back to the application — and which ignores `cb`:
+the version of 2026-09-22 minted one (auth.getToken) as a manual fallback
+and put `cb` beside it, and on a real account the browser never came back
+(2026-10-07).
 
 The callback is unsigned by necessity (a browser redirect from last.fm
 cannot carry HMAC headers) and is admitted by the whitelist on the nonce
@@ -32,7 +34,7 @@ import threading
 import time
 from dataclasses import dataclass
 from typing import Any, Dict, Optional
-from urllib.parse import quote, urlsplit
+from urllib.parse import urlencode, urlsplit
 
 import pylast
 from fastapi import APIRouter, HTTPException
@@ -46,12 +48,13 @@ logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/lastfm/auth", tags=["lastfm"])
 
+AUTH_PAGE = "https://www.last.fm/api/auth/"
 CALLBACK_PREFIX = "/lastfm/auth/callback/"
 
-# A Last.fm token lives 60 minutes from auth.getToken. The flow expires a
-# little earlier so every callback it still accepts carries a live token —
-# and a slow login with 2FA on the Last.fm side stays inside the window.
-FLOW_TTL_SECONDS = 50 * 60
+# The flow is what an unsigned callback has to match. It outlives a slow
+# login on the Last.fm side and not much more, so a Last.fm tab found later
+# in the browser's history connects nothing.
+FLOW_TTL_SECONDS = 30 * 60
 
 _SESSION_KEY_KEY = "lastfm.session_key"
 _USERNAME_KEY = "lastfm.username"
@@ -64,9 +67,7 @@ class FlowError(Exception):
 @dataclass
 class Flow:
     nonce: str
-    token: str                                  # minted by auth.getToken
     auth_url: str
-    generator: pylast.SessionKeyGenerator
     started_at: float
 
     def alive(self) -> bool:
@@ -170,68 +171,49 @@ def _callback_base(origin: str) -> str:
 
 def start(origin: str) -> str:
     """The URL to open in the browser. A live flow is handed back as-is: a
-    second start would mint a token the open tab is not authorising, and a
+    second start would replace the nonce the open tab comes back with, and a
     double tap on the button must produce one page, not two."""
     global _flow, _last_error
     callback_base = _callback_base(origin)
     with _lock:
         if _flow is not None and _flow.alive():
             return _flow.auth_url
-        generator = pylast.SessionKeyGenerator(_network())
-        desktop_url = generator.get_web_auth_url()          # auth.getToken
-        token = generator.web_auth_tokens[desktop_url]
         nonce = secrets.token_urlsafe(16)
-        auth_url = f"{desktop_url}&cb={quote(callback_base + nonce, safe='')}"
-        _flow = Flow(nonce, token, auth_url, generator, time.time())
+        auth_url = AUTH_PAGE + "?" + urlencode({"api_key": settings.lastfm_api_key,
+                                                "cb": callback_base + nonce})
+        _flow = Flow(nonce, auth_url, time.time())
         _last_error = None
         return auth_url
 
 
 def callback(nonce: str, token: str) -> str:
-    """The browser is back from last.fm. Returns the username; raises
-    FlowError with the sentence for the page when nothing was earned. A
-    stale or foreign nonce changes nothing and wakes nobody."""
+    """The browser is back from last.fm with the token Last.fm minted at the
+    grant. Returns the username; raises FlowError with the sentence for the
+    page when nothing was earned. A stale or foreign nonce changes nothing
+    and wakes nobody; the matching one is spent before the exchange, so a
+    reloaded redirect cannot exchange twice."""
+    global _flow, _last_error
     with _lock:
         flow = _flow
         if flow is None or not flow.alive() or not secrets.compare_digest(flow.nonce, nonce):
             raise FlowError("This authorisation link has expired. "
                             "Return to Sautium and start again.")
-    if not token:
-        raise FlowError("Last.fm sent the browser back without a token. "
-                        "Return to Sautium and start again.")
-    # A token Last.fm itself sent and then refuses is not worth a second
-    # try — the flow ends, and the next start mints a fresh one.
-    return _finish(flow, token, keep_on_error=False)
-
-
-def complete() -> str:
-    """The manual fallback: exchange the token this node minted. Fails with
-    Last.fm's own words while the user has not granted access yet, and the
-    flow stays open for the moment they do."""
-    with _lock:
-        flow = _flow
-    if flow is None or not flow.alive():
-        raise FlowError("Auth flow not started. Call /lastfm/auth/start first.")
-    return _finish(flow, flow.token, keep_on_error=True)
-
-
-def _finish(flow: Flow, token: str, *, keep_on_error: bool) -> str:
-    global _flow, _last_error
+        if not token:
+            raise FlowError("Last.fm sent the browser back without a token. "
+                            "Return to Sautium and start again.")
+        _flow = None
     try:
-        session_key, username = flow.generator.get_web_auth_session_key_username(None, token)
+        generator = pylast.SessionKeyGenerator(_network())
+        session_key, username = generator.get_web_auth_session_key_username(None, token)
     except Exception as e:
-        detail = str(e)
-        if not keep_on_error:
-            with _lock:
-                if _flow is flow:
-                    _flow = None
-                _last_error = detail
-            _notify()
-        raise FlowError(detail) from e
+        # A token Last.fm itself sent and then refuses is not worth a second
+        # try: the flow is over, and the next start mints a fresh one.
+        with _lock:
+            _last_error = str(e)
+        _notify()
+        raise FlowError(str(e)) from e
     persist(session_key, username)
     with _lock:
-        if _flow is flow:
-            _flow = None
         _last_error = None
     logger.info("Last.fm authorized as %s", username)
     _notify()
@@ -347,19 +329,6 @@ async def auth_stream() -> StreamingResponse:
             "X-Accel-Buffering": "no",
         },
     )
-
-
-@router.post("/complete")
-async def auth_complete() -> Dict[str, Any]:
-    """The manual fallback for a browser that did not come back."""
-    try:
-        username = await asyncio.to_thread(complete)
-    except FlowError as e:
-        raise HTTPException(
-            status_code=400,
-            detail=f"Authorization failed. Make sure you allowed access in the browser. ({e})",
-        )
-    return {"success": True, "username": username, "lastfm_authorized": True}
 
 
 def _page(title: str, body_html: str) -> str:

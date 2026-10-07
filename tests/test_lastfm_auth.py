@@ -1,15 +1,24 @@
-"""The Last.fm authorization flow (backend/lastfm_auth.py): the callback is
-the completion event, the nonce is the admission, the minted token is the
-manual fallback. pylast and the database are stubbed — the exchange is one
-network call, the persistence one upsert per key."""
+"""The Last.fm authorization flow (backend/lastfm_auth.py): Last.fm's web
+flow — the page names this node as the callback, the redirect is the
+completion event, the nonce is the admission. pylast, the database and the
+history walk are stubbed — the exchange is one network call, the
+persistence one upsert per key."""
+
+import sys
+from pathlib import Path
+from urllib.parse import parse_qs, urlsplit
 
 import pytest
 
+BACKEND = Path(__file__).resolve().parent.parent / "backend"
+if str(BACKEND) not in sys.path:
+    sys.path.insert(0, str(BACKEND))
+
 import auth_hmac
 import lastfm_auth
+import lastfm_history
 
 ORIGIN = "http://127.0.0.1:18000"
-DESKTOP_URL = "https://www.last.fm/api/auth/?api_key=k&token=minted"
 
 
 class FakeGenerator:
@@ -17,11 +26,7 @@ class FakeGenerator:
     exchanged: list = []
 
     def __init__(self, network):
-        self.web_auth_tokens = {}
-
-    def get_web_auth_url(self):
-        self.web_auth_tokens[DESKTOP_URL] = "minted"
-        return DESKTOP_URL
+        pass
 
     def get_web_auth_session_key_username(self, url, token=""):
         FakeGenerator.exchanged.append(token)
@@ -32,33 +37,42 @@ class FakeGenerator:
 
 @pytest.fixture(autouse=True)
 def flow(monkeypatch):
-    """A fresh module: no flow, no session, the network and the database
-    replaced, every wake counted."""
-    persisted, wakes = [], []
+    """A fresh module: no flow, no session, the network, the database and the
+    history walk replaced, every wake counted."""
+    persisted, wakes, walks = [], [], []
     FakeGenerator.refused = set()
     FakeGenerator.exchanged = []
     monkeypatch.setattr(lastfm_auth.pylast, "SessionKeyGenerator", FakeGenerator)
     monkeypatch.setattr(lastfm_auth, "_network", lambda: None)
     monkeypatch.setattr(lastfm_auth, "_upsert", lambda key, value: persisted.append((key, value)))
     monkeypatch.setattr(lastfm_auth, "_notify", lambda: wakes.append(1))
+    monkeypatch.setattr(lastfm_history, "start", walks.append)
     monkeypatch.setattr(auth_hmac, "host_allowed", lambda host: host == "127.0.0.1:18000")
     monkeypatch.setattr(lastfm_auth, "_flow", None)
     monkeypatch.setattr(lastfm_auth, "_last_error", None)
+    monkeypatch.setattr(lastfm_auth.settings, "lastfm_api_key", "k")
     monkeypatch.setattr(lastfm_auth.settings, "lastfm_session_key", None)
     monkeypatch.setattr(lastfm_auth.settings, "lastfm_username", None)
-    return persisted, wakes
+    return persisted, wakes, walks
 
 
 def _nonce() -> str:
     return lastfm_auth._flow.nonce
 
 
-def test_start_names_this_node_as_the_callback():
+def test_start_opens_the_web_flow_with_this_node_as_the_callback():
     url = lastfm_auth.start(ORIGIN)
     nonce = _nonce()
-    assert url.startswith(DESKTOP_URL + "&cb=")
-    assert url.endswith("http%3A%2F%2F127.0.0.1%3A18000%2Flastfm%2Fauth%2Fcallback%2F" + nonce)
+    parts = urlsplit(url)
+    assert f"{parts.scheme}://{parts.netloc}{parts.path}" == "https://www.last.fm/api/auth/"
+    # Exactly the key and the callback: a `token` would make the page the
+    # desktop flow, which ends on Last.fm's own page and never redirects.
+    assert parse_qs(parts.query) == {
+        "api_key": ["k"],
+        "cb": ["http://127.0.0.1:18000/lastfm/auth/callback/" + nonce],
+    }
     assert len(nonce) >= 21          # 16 random bytes, urlsafe
+    assert FakeGenerator.exchanged == []
     # The redirect cannot sign: the callback path is admitted unsigned, the
     # rest of the flow is not.
     assert auth_hmac._is_whitelisted(lastfm_auth.CALLBACK_PREFIX + nonce)
@@ -73,7 +87,6 @@ def test_a_live_flow_is_handed_back():
     nonce = _nonce()
     assert lastfm_auth.start(ORIGIN) == first
     assert _nonce() == nonce
-    assert FakeGenerator.exchanged == []
 
 
 def test_an_expired_flow_is_replaced():
@@ -101,7 +114,7 @@ def test_an_origin_that_is_not_this_node_is_refused(origin):
 
 
 def test_the_callback_finishes_the_flow(flow):
-    persisted, wakes = flow
+    persisted, wakes, walks = flow
     lastfm_auth.start(ORIGIN)
     nonce = _nonce()
 
@@ -112,6 +125,7 @@ def test_the_callback_finishes_the_flow(flow):
     assert lastfm_auth.status() == {
         "authorized": True, "username": "listener", "pending": False, "auth_url": None, "error": None}
     assert wakes == [1]
+    assert walks == ["connected"]
     # Single use: the same link a second time earns nothing.
     with pytest.raises(lastfm_auth.FlowError, match="expired"):
         lastfm_auth.callback(nonce, "granted")
@@ -119,19 +133,19 @@ def test_the_callback_finishes_the_flow(flow):
 
 
 def test_a_foreign_nonce_changes_nothing(flow):
-    persisted, wakes = flow
+    persisted, wakes, walks = flow
     lastfm_auth.start(ORIGIN)
     nonce = _nonce()
     with pytest.raises(lastfm_auth.FlowError, match="expired"):
         lastfm_auth.callback("not-the-nonce", "granted")
     with pytest.raises(lastfm_auth.FlowError, match="without a token"):
         lastfm_auth.callback(nonce, "")
-    assert FakeGenerator.exchanged == [] and persisted == [] and wakes == []
+    assert FakeGenerator.exchanged == [] and persisted == [] and wakes == [] and walks == []
     assert _nonce() == nonce and lastfm_auth.status()["pending"] is True
 
 
 def test_a_refused_callback_token_ends_the_flow_and_says_why(flow):
-    persisted, wakes = flow
+    persisted, wakes, walks = flow
     lastfm_auth.start(ORIGIN)
     nonce = _nonce()
     FakeGenerator.refused = {"granted"}
@@ -139,42 +153,10 @@ def test_a_refused_callback_token_ends_the_flow_and_says_why(flow):
     with pytest.raises(lastfm_auth.FlowError, match="Unauthorized Token"):
         lastfm_auth.callback(nonce, "granted")
 
-    assert persisted == [] and wakes == [1]
+    assert persisted == [] and wakes == [1] and walks == []
     status = lastfm_auth.status()
     assert status["pending"] is False and "Unauthorized Token" in status["error"]
     # The next start mints a fresh flow and forgets the refusal.
     lastfm_auth.start(ORIGIN)
     assert _nonce() != nonce
     assert lastfm_auth.status()["error"] is None
-
-
-def test_manual_completion_exchanges_the_minted_token(flow):
-    persisted, wakes = flow
-    with pytest.raises(lastfm_auth.FlowError, match="not started"):
-        lastfm_auth.complete()
-    lastfm_auth.start(ORIGIN)
-
-    assert lastfm_auth.complete() == "listener"
-
-    assert FakeGenerator.exchanged == ["minted"]
-    assert persisted[0] == ("lastfm.session_key", "sk-minted")
-    assert lastfm_auth.status()["authorized"] is True and wakes == [1]
-
-
-def test_manual_completion_keeps_the_flow_while_access_is_not_granted(flow):
-    persisted, wakes = flow
-    lastfm_auth.start(ORIGIN)
-    nonce = _nonce()
-    FakeGenerator.refused = {"minted"}
-
-    with pytest.raises(lastfm_auth.FlowError, match="Unauthorized Token"):
-        lastfm_auth.complete()
-
-    # The user has not clicked "allow" yet: the flow, the token and the
-    # page stay, and nobody is woken for a non-event.
-    assert _nonce() == nonce and lastfm_auth.status()["pending"] is True
-    assert lastfm_auth.status()["error"] is None and wakes == []
-
-    FakeGenerator.refused = set()
-    assert lastfm_auth.complete() == "listener"
-    assert FakeGenerator.exchanged == ["minted", "minted"] and wakes == [1]

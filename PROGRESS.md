@@ -1589,11 +1589,20 @@ were wrong, one hidden behind the other.
   cannot carry HMAC headers) and admitted on the nonce: 128 bits, minted
   only for a signed caller, single use, gone with the flow; the page it
   renders names the user and nothing else (`backend/lastfm_auth.py`).
-- **The desktop token stays as the fallback.** The page also carries a token
-  this node minted (`auth.getToken`), so a Last.fm page that ignores `cb`
-  can still be finished by hand ("Finish manually" in the launcher, "Finish
-  without the redirect" in the sheet — both exchange that token). Kept until
-  the callback is seen landing on a real account; then it goes.
+- **The page carries the key and `cb`, nothing else (2026-10-07).** The
+  first cut kept a desktop token as a manual fallback: it opened pylast's
+  auth URL (`auth.getToken`'s token in it) and appended `cb`. On a real
+  account — a fresh launcher node, the wizard's Last.fm box — the browser
+  never came back: the backend saw `/start`, `/stream` and `/status` and no
+  callback, and the dialog sat over a connection Last.fm had already
+  granted, offering "Finish manually" with nothing to say it was the
+  button. A `token` makes the page Last.fm's desktop flow, whose browser
+  step ends on Last.fm's own "return to your application" page; `cb`
+  belongs to the web flow, where Last.fm mints the token at the grant and
+  hands it to the callback. The page now opens the web flow, and without a
+  token of the node's own there is nothing to finish by hand: "Finish
+  manually", "Finish without the redirect" and `/lastfm/auth/complete` are
+  gone.
 - **Scrobbling never saw the in-app session.** `playback/tracker.py` built
   its network from `LASTFM_SESSION_KEY` in the environment, once, at the
   first scrobble — the session the flow had been persisting to
