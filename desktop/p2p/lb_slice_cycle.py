@@ -51,7 +51,7 @@ import psycopg2
 
 from desktop.api_client import BackendAPIClient
 from desktop.p2p import lb_slice_queries
-from desktop.p2p.slice_sources import SourceFinder, network_pass
+from desktop.p2p.slice_sources import SourceFinder
 from desktop.p2p.sync_walk import DeadAddresses
 
 logger = logging.getLogger(__name__)
@@ -379,14 +379,12 @@ class LbSliceCycle:
 
     # -------------------------------------------------------------- sources
 
-    async def find_sources(self, refresh: bool = False,
-                           ) -> tuple[list[tuple[BackendAPIClient, str, Optional[str]]],
-                                      Optional[str]]:
+    async def find_sources(self) -> tuple[list[tuple[BackendAPIClient, str, Optional[str]]],
+                                          Optional[str]]:
         """Reachable slice sources as (client, node_id, version), REPLICAS
         FIRST, and the newest dump version any of them holds — read from the
-        /health each answered when it was probed. `refresh`: a network pass,
-        which searches again after a search that found nothing."""
-        sources, _ = await self._sources.find(refresh)
+        /health each answered when it was probed."""
+        sources, _ = await self._sources.find()
         replicas: list = []
         dumps: list = []
         newest: Optional[str] = None
@@ -414,7 +412,7 @@ class LbSliceCycle:
             await loop.run_in_executor(None, clear_status, self.db_dsn, STATUS_KEY)
             return {}
 
-        sources, newest = await self.find_sources(refresh=network_pass(trigger))
+        sources, newest = await self.find_sources()
         pending = await loop.run_in_executor(
             None, pending_slice_mbids, self.db_dsn, PENDING_PER_CYCLE, newest)
         if not pending:

@@ -19,13 +19,13 @@ connect) per candidate per trigger, and during a history import the triggers
 came every few seconds: the budget a node shares with everything behind its
 router went to probes, and a 429 on a probe read as "no source".
 
-A search that found nothing is kept as well, for the wakes that cannot change
-who serves — new MBIDs, the names imported scrobbles wait on, minted similars.
-Those came every few seconds during a history import too, and each one
-searched again: a DHT traversal, and a 5 s /health per dead address
-(2026-10-07). A network pass — a sync walk, the timed loop, this node's own
-dump loaded or deleted — searches again, so a source that turns up is asked at
-the next pass. A discovered address that did not answer is skipped through the
+A search that found nothing is kept too, for NO_SOURCE_TTL: the wakes came
+every few seconds during a history import, and each one searched again — a DHT
+traversal, and a 5 s /health per dead address (2026-10-07). Keying the
+re-search to the sync walk instead did not hold, because the import's canon
+starts a walk after every pass. A LAN peer that turns up, or the DHT attached
+after the cycle exists, ends an empty result at once: those tiers cost nothing
+to list. A discovered address that did not answer is skipped through the
 record the walk keeps (sync_walk.DeadAddresses), which the walk's connect
 feeds with how every probe went — a node that refused is busy, not dead;
 manual and LAN peers are asked every time, as the walk asks them.
@@ -44,23 +44,16 @@ from desktop.p2p.sync_walk import DeadAddresses
 logger = logging.getLogger(__name__)
 
 SOURCES_TTL = 15 * 60
+# Shorter for an empty search: "nothing found" is often a node that refused or
+# timed out once, and an opened artist page waits on the next search.
+NO_SOURCE_TTL = 5 * 60
 PROBE_CONCURRENCY = 4
-# The wakes that can change who serves: a sync walk (the network pass — new
-# peers, a LAN beacon, a fresher DHT view), the timed loop, this node's own
-# dump loaded or deleted. Every other wake is local data growing.
-NETWORK_TRIGGERS = frozenset({"sync", "auto", "sources"})
 
 # (client, node id, the /health it answered)
 Source = Tuple[BackendAPIClient, str, dict]
 # (address, discovered) — a discovered one (DHT, directory, master hint) is
 # subject to the dead-address record, a manual or LAN peer never
 Candidate = Tuple[str, bool]
-
-
-def network_pass(trigger: str) -> bool:
-    """Whether a run's trigger — the dispatcher's merged reasons, `a+b` —
-    includes a wake that can change who serves."""
-    return not NETWORK_TRIGGERS.isdisjoint(trigger.split("+"))
 
 
 class SourceFinder:
@@ -103,6 +96,7 @@ class SourceFinder:
         self._addr_uuid = addr_uuid
         self._kept: List[Source] = []
         self._kept_at = 0.0
+        self._kept_inputs: Optional[tuple] = None
 
     def drop(self, node_id: str) -> None:
         """A source that failed a request leaves the kept set; once none is
@@ -114,22 +108,33 @@ class SourceFinder:
     def forget(self) -> None:
         self._kept, self._kept_at = [], 0.0
 
-    async def find(self, refresh: bool = False) -> Tuple[List[Source], bool]:
-        """(sources, probed): the last search's result while it is fresh,
-        else a new one — `probed` tells the caller it is new. A found set
-        serves until a source fails or SOURCES_TTL passes; an empty one
-        serves as long, unless `refresh` (a network pass) asks again."""
-        fresh = self._kept_at and time.monotonic() - self._kept_at < SOURCES_TTL
-        if fresh and (self._kept or not refresh):
-            return list(self._kept), False
+    async def find(self) -> Tuple[List[Source], bool]:
+        """(sources, probed): the last search's result while it holds, else a
+        new one — `probed` tells the caller it is new. A found set holds
+        until a source fails or SOURCES_TTL passes; an empty one holds
+        NO_SOURCE_TTL, and only while the LAN table and the DHT offer what
+        they offered then."""
+        if self._kept_at:
+            age = time.monotonic() - self._kept_at
+            if self._kept and age < SOURCES_TTL:
+                return list(self._kept), False
+            if not self._kept and age < NO_SOURCE_TTL and self._inputs() == self._kept_inputs:
+                return [], False
+        inputs = self._inputs()
         loop = asyncio.get_event_loop()
         banned_keys, banned_addrs = await loop.run_in_executor(None, self._load_bans)
         seen: set = set()
         found = await self._probe(await self._primary(), seen, banned_keys, banned_addrs)
         if not found:
             found = await self._probe(await self._fallback(), seen, banned_keys, banned_addrs)
-        self._kept, self._kept_at = found, time.monotonic()
+        self._kept, self._kept_at, self._kept_inputs = found, time.monotonic(), inputs
         return list(found), True
+
+    def _inputs(self) -> tuple:
+        """What the tiers that cost nothing to list offer right now: the LAN
+        table, and whether there is a DHT to ask."""
+        lan = frozenset(self.lan.peers) if self.lan is not None else frozenset()
+        return lan, self.dht is not None
 
     async def _primary(self) -> List[Candidate]:
         candidates = [(addr, False) for addr in self.manual_peers]

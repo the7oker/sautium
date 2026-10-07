@@ -5,11 +5,12 @@ LAN table and the two hint services are stand-ins."""
 
 import asyncio
 import inspect
+from types import SimpleNamespace
 
 import pytest
 
 from desktop.p2p import slice_sources
-from desktop.p2p.slice_sources import SourceFinder, network_pass
+from desktop.p2p.slice_sources import SourceFinder
 from desktop.p2p.sync_walk import DeadAddresses
 
 DUMP = {"mb_dump": "20260920-001", "mb_slices": 0}
@@ -57,11 +58,25 @@ class _Dht:
 
 class _Lan:
     def __init__(self, peers):
-        self.peers = [(ip, port) for ip, port, _ in peers]
-        self._scheme = {(ip, port): scheme for ip, port, scheme in peers}
+        self.peers: list = []
+        self._scheme: dict = {}
+        for peer in peers:
+            self.beacon(*peer)
+
+    def beacon(self, ip, port, scheme):
+        self.peers.append((ip, port))
+        self._scheme[(ip, port)] = scheme
 
     def get_peer_info(self, ip, port):
         return {"scheme": self._scheme[(ip, port)]}
+
+
+def _clock(monkeypatch, start=1000.0):
+    """The finder's monotonic clock, and only the finder's — asyncio reads
+    time.monotonic too."""
+    clock = [start]
+    monkeypatch.setattr(slice_sources, "time", SimpleNamespace(monotonic=lambda: clock[0]))
+    return clock
 
 
 @pytest.fixture
@@ -171,8 +186,7 @@ def test_the_kept_set_ages_out_and_forget_drops_it(hints, monkeypatch):
     dht = _Dht([("203.0.113.5", 21001)])
     net = _Net({"203.0.113.5:21001": {**DUMP, "node_id": "d1"}})
     finder = _finder(net, dht=dht)
-    clock = [1000.0]
-    monkeypatch.setattr(slice_sources.time, "monotonic", lambda: clock[0])
+    clock = _clock(monkeypatch)
 
     async def go():
         await finder.find()
@@ -186,25 +200,51 @@ def test_the_kept_set_ages_out_and_forget_drops_it(hints, monkeypatch):
     assert len(net.probed) == 3
 
 
-def test_an_empty_search_serves_local_wakes_until_a_network_pass(hints, monkeypatch):
-    # A history import woke the cycles every few seconds on local data, and
-    # with no source anywhere every wake searched the network again.
-    clock = [1000.0]
-    monkeypatch.setattr(slice_sources.time, "monotonic", lambda: clock[0])
+def test_an_empty_search_holds_five_minutes(hints, monkeypatch):
+    # A history import woke the cycles every few seconds, and with no source
+    # anywhere every wake searched the network again.
+    clock = _clock(monkeypatch)
     dht = _Dht([("203.0.113.5", 21001)])                 # a holder that is gone
     net = _Net({})
     finder = _finder(net, dht=dht)
 
     async def go():
         assert await finder.find() == ([], True)
-        assert await finder.find() == ([], False)        # new MBIDs: no search
+        clock[0] += slice_sources.NO_SOURCE_TTL - 1
+        assert await finder.find() == ([], False)
         assert len(dht.asked) == 1
-        assert await finder.find(refresh=True) == ([], True)    # a network pass
+        clock[0] += 1
+        assert await finder.find() == ([], True)
         assert len(dht.asked) == 2
-        clock[0] += slice_sources.SOURCES_TTL
-        assert (await finder.find())[1] is True          # aged out like a found set
     asyncio.run(go())
     assert net.probed == ["203.0.113.5:21001"]           # dead: dialled once, not per search
+
+
+def test_a_lan_peer_that_turns_up_ends_an_empty_search(hints):
+    lan = _Lan([])
+    net = _Net({"https://192.0.2.10:22000": {**DUMP, "node_id": "lan-dump"}})
+    finder = _finder(net, lan=lan)
+
+    async def go():
+        assert await finder.find() == ([], True)
+        assert await finder.find() == ([], False)
+        lan.beacon("192.0.2.10", 22000, "https")
+        found, probed = await finder.find()
+        assert probed and _nodes(found) == ["lan-dump"]
+    asyncio.run(go())
+
+
+def test_the_dht_attached_later_ends_an_empty_search(hints):
+    # The Docker backend starts its DHT after the cycles exist.
+    net = _Net({"203.0.113.5:21001": {**DUMP, "node_id": "d1"}})
+    finder = _finder(net)
+
+    async def go():
+        assert await finder.find() == ([], True)
+        finder.dht = _Dht([("203.0.113.5", 21001)])
+        found, probed = await finder.find()
+        assert probed and _nodes(found) == ["d1"]
+    asyncio.run(go())
 
 
 def test_one_dead_address_record_for_the_walk_and_both_families(hints):
@@ -220,22 +260,13 @@ def test_one_dead_address_record_for_the_walk_and_both_families(hints):
     assert net.dead.backing_off("203.0.113.5:21001")     # and the walk skips it too
 
 
-def test_manual_and_lan_peers_are_asked_on_every_search(hints):
+def test_manual_and_lan_peers_ignore_the_dead_address_record(hints):
     lan = _Lan([("192.0.2.10", 22000, "https")])
     net = _Net({})
-    finder = _finder(net, lan=lan, manual=["https://192.0.2.20:22000"])
-
-    async def go():
-        await finder.find()
-        await finder.find(refresh=True)
-    asyncio.run(go())
-    assert net.probed == ["https://192.0.2.20:22000", "https://192.0.2.10:22000"] * 2
-    assert not net.dead.backing_off("https://192.0.2.10:22000")
-
-
-def test_a_network_pass_is_a_walk_the_timer_or_this_nodes_dump():
-    assert all(network_pass(t) for t in ("sync", "auto", "sources", "pending+sync"))
-    assert not any(network_pass(t) for t in ("pending", "request", "enrich+scrobbles"))
+    net.dead.failed("https://192.0.2.10:22000")
+    net.dead.failed("https://192.0.2.20:22000")
+    asyncio.run(_finder(net, lan=lan, manual=["https://192.0.2.20:22000"]).find())
+    assert net.probed == ["https://192.0.2.20:22000", "https://192.0.2.10:22000"]
 
 
 def test_both_runtimes_dht_take_the_same_calls():
