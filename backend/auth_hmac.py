@@ -202,8 +202,8 @@ WHITELIST_PREFIX = (
     "/api/player/media/",
     # Last.fm sends the browser here once the user has granted access — a
     # redirect cannot sign. Admitted on the nonce in the path (lastfm_auth):
-    # minted only for a signed caller, single use, dead with the flow; the
-    # page never echoes the token or the session key.
+    # minted only for a signed caller, good for one connection, dead with
+    # the flow; the page never echoes the token or the session key.
     "/lastfm/auth/callback/",
 )
 

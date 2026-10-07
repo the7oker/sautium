@@ -8,6 +8,7 @@ per key."""
 import logging
 import sys
 from pathlib import Path
+from types import SimpleNamespace
 from urllib.parse import parse_qs, urlsplit
 
 import pylast
@@ -75,7 +76,7 @@ def flow(monkeypatch):
     FakeService.refused, FakeService.silent, FakeService.during = set(), 0, None
     FakeService.exchanged = []
     monkeypatch.setattr(lastfm, "LastFmService", FakeService)
-    monkeypatch.setattr(lastfm_auth.threading, "Timer", FakeTimer)
+    monkeypatch.setattr(lastfm_auth, "threading", SimpleNamespace(Timer=FakeTimer))
     monkeypatch.setattr(lastfm_auth, "_upsert", lambda key, value: persisted.append((key, value)))
     monkeypatch.setattr(lastfm_auth, "_notify", lambda: wakes.append(1))
     monkeypatch.setattr(lastfm_history, "start", walks.append)
@@ -194,6 +195,8 @@ def test_a_foreign_nonce_changes_nothing(flow):
     nonce = _nonce()
     with pytest.raises(lastfm_auth.FlowError, match="expired"):
         lastfm_auth.callback("not-the-nonce", "granted")
+    with pytest.raises(lastfm_auth.FlowError, match="expired"):
+        lastfm_auth.callback("é", "granted")            # the path is anyone's to type
     with pytest.raises(lastfm_auth.FlowError, match="without a token"):
         lastfm_auth.callback(nonce, "")
     assert FakeService.exchanged == [] and persisted == [] and wakes == [] and walks == []
@@ -207,11 +210,11 @@ def test_a_second_callback_during_the_exchange_is_refused(flow):
     started_meanwhile = []
 
     def meanwhile():
-        # A doubled redirect, and a start from another address, while the
+        # A doubled redirect, and a start from the same address, while the
         # first callback is still talking to Last.fm.
         with pytest.raises(lastfm_auth.FlowError, match="already finishing"):
             lastfm_auth.callback(nonce, "granted")
-        started_meanwhile.append(lastfm_auth.start(PHONE))
+        started_meanwhile.append(lastfm_auth.start(ORIGIN))
     FakeService.during = meanwhile
 
     assert lastfm_auth.callback(nonce, "granted") == "listener"
@@ -219,6 +222,28 @@ def test_a_second_callback_during_the_exchange_is_refused(flow):
     assert started_meanwhile == [url] and len(FakeTimer.armed) == 1
     assert FakeService.exchanged == ["granted"] and wakes == [1]
     assert lastfm_auth.status()["pending"] is False
+
+
+def test_another_address_mid_exchange_gets_its_own_flow(flow):
+    # The launcher's flow is exchanging slowly and a phone taps Connect:
+    # handed the launcher's page, the phone would be sent back to 127.0.0.1
+    # — itself — should that exchange get no answer and the flow stay.
+    persisted, wakes, walks = flow
+    lastfm_auth.start(ORIGIN)
+    nonce = _nonce()
+    phone = []
+    FakeService.during = lambda: phone.append(lastfm_auth.start(PHONE))
+    FakeService.refused = {"granted"}
+
+    with pytest.raises(lastfm_auth.FlowError, match="Unauthorized Token"):
+        lastfm_auth.callback(nonce, "granted")
+
+    assert parse_qs(urlsplit(phone[0]).query)["cb"] == [
+        "http://192.168.1.5:18000/lastfm/auth/callback/" + _nonce()]
+    # The launcher's refusal is not the phone's: its flow is still open.
+    status = lastfm_auth.status()
+    assert status["pending"] is True and status["auth_url"] == phone[0]
+    assert status["error"] is None
 
 
 def test_last_fm_not_answering_keeps_the_flow_for_a_reload(flow):
@@ -288,3 +313,20 @@ def test_the_deadline_does_not_undo_a_grant_mid_exchange(flow):
     status = lastfm_auth.status()
     assert status["authorized"] is True and status["error"] is None
     assert walks == ["connected"]
+    assert wakes == [1]                  # the outcome alone, no "expired" before it
+
+
+def test_last_fm_silent_past_the_deadline_ends_the_flow_as_expired(flow):
+    # "Reload this page" would land on a flow the deadline has ended.
+    persisted, wakes, walks = flow
+    lastfm_auth.start(ORIGIN)
+    nonce = _nonce()
+    FakeService.during = FakeTimer.armed[0].fire
+    FakeService.silent = 1
+
+    with pytest.raises(lastfm_auth.FlowError, match="expired"):
+        lastfm_auth.callback(nonce, "granted")
+
+    status = lastfm_auth.status()
+    assert status["pending"] is False and status["error"] == "The Last.fm page expired."
+    assert wakes == [1] and persisted == []

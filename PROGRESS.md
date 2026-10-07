@@ -1595,8 +1595,9 @@ were wrong, one hidden behind the other.
   `/lastfm/auth/stream`; the dialog and the sheet read `/status` and close
   themselves. Nobody guesses. The route is unsigned by necessity (a redirect
   cannot carry HMAC headers) and admitted on the nonce: 128 bits, minted
-  only for a signed caller, single use, gone with the flow; the page it
-  renders names the user and nothing else (`backend/lastfm_auth.py`).
+  only for a signed caller, good for one connection, gone with the flow;
+  the page it renders names the user and nothing else
+  (`backend/lastfm_auth.py`).
 - **The page carries the key and `cb`, nothing else (2026-10-07).** The
   first cut kept a desktop token as a manual fallback: it opened pylast's
   auth URL (`auth.getToken`'s token in it) and appended `cb`. On a real

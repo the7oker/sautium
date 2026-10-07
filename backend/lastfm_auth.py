@@ -58,6 +58,7 @@ CALLBACK_PREFIX = "/lastfm/auth/callback/"
 # flow and wakes the window waiting on it, which otherwise would wait on a
 # page that can no longer finish.
 FLOW_TTL_SECONDS = 30 * 60
+_EXPIRED = "The Last.fm page expired."
 
 _SESSION_KEY_KEY = "lastfm.session_key"
 _USERNAME_KEY = "lastfm.username"
@@ -74,6 +75,7 @@ class Flow:
     auth_url: str
     deadline: threading.Timer = field(init=False)
     exchanging: bool = False                    # a callback is turning the token into a session
+    expired: bool = False                       # the deadline passed while it was exchanging
 
 
 _flow: Optional[Flow] = None
@@ -173,12 +175,13 @@ def start(origin: str) -> str:
     comes back with. Another address gets a flow of its own, because the
     callback IS the address — a phone handed the page the launcher started
     would be sent back to 127.0.0.1. The newest flow wins; a page still open
-    on the other address lands on "expired". A flow mid-exchange is handed
-    back to anyone: it ends within seconds, connected or not."""
+    on the other address lands on "expired". Both hold mid-exchange too: the
+    exchange still reports its outcome, which leaves a newer flow's status
+    alone (`_end`)."""
     global _flow, _last_error
     callback_base = _callback_base(origin)
     with _lock:
-        if _flow is not None and (_flow.exchanging or _flow.callback_base == callback_base):
+        if _flow is not None and _flow.callback_base == callback_base:
             return _flow.auth_url
         if _flow is not None:
             _flow.deadline.cancel()
@@ -194,26 +197,32 @@ def start(origin: str) -> str:
 
 
 def _expire(flow: Flow) -> None:
-    """The page's deadline. A callback already exchanging still finishes and
-    reports its own outcome, which supersedes this one."""
+    """The page's deadline. A flow whose callback is exchanging is left to
+    that exchange, which reports its own outcome — and ends the flow as
+    expired should Last.fm not answer, instead of offering a reload."""
     global _flow, _last_error
     with _lock:
         if _flow is not flow:
             return
+        flow.expired = True
+        if flow.exchanging:
+            return
         _flow = None
-        _last_error = "The Last.fm page expired."
+        _last_error = _EXPIRED
     _notify()
 
 
 def _end(flow: Flow, error: Optional[str]) -> None:
     """The callback's outcome — connected (no error) or not: the flow is
-    over, status() says how it went, and every waiting client is woken."""
+    over, status() says how it went, and every waiting client is woken. A
+    flow another address started meanwhile keeps its own status."""
     global _flow, _last_error
     flow.deadline.cancel()
     with _lock:
         if _flow is flow:
             _flow = None
-        _last_error = error
+        if _flow is None:
+            _last_error = error
     _notify()
 
 
@@ -226,7 +235,7 @@ def callback(nonce: str, token: str) -> str:
     from lastfm import LastFmService, SourceUnavailable
     with _lock:
         flow = _flow
-        if flow is None or not secrets.compare_digest(flow.nonce, nonce):
+        if flow is None or not secrets.compare_digest(flow.nonce.encode(), nonce.encode()):
             raise FlowError("This authorisation link has expired. "
                             "Return to Sautium and start again.")
         if not token:
@@ -241,10 +250,16 @@ def callback(nonce: str, token: str) -> str:
         persist(session_key, username)
     except SourceUnavailable as e:
         # No answer about the token, which Last.fm keeps good for an hour:
-        # the flow stays, and reloading this page asks again.
+        # the flow stays, and reloading this page asks again — while it is
+        # still the flow and inside its deadline.
         logger.warning("Last.fm did not answer the session exchange: %s", e)
         with _lock:
             flow.exchanging = False
+            reloadable = _flow is flow and not flow.expired
+        if not reloadable:
+            _end(flow, _EXPIRED)
+            raise FlowError("This authorisation link has expired. "
+                            "Return to Sautium and start again.") from e
         raise FlowError(f"Last.fm did not answer ({e}). "
                         "Reload this page to finish connecting.") from e
     except pylast.WSError as e:

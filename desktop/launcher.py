@@ -906,7 +906,13 @@ class LauncherApp(ctk.CTk):
 
         def _reopen():
             _say("", "gray")
-            threading.Thread(target=self._open_lastfm_page, daemon=True).start()
+
+            def _open():
+                if not self._open_lastfm_page():
+                    self.ui_call(lambda: _say(
+                        "Sautium could not reopen the Last.fm page.\n"
+                        "Try again in a moment.", "#ef4444"))
+            threading.Thread(target=_open, daemon=True).start()
 
         btn_frame = ctk.CTkFrame(dialog, fg_color="transparent")
         btn_frame.pack(pady=10)
