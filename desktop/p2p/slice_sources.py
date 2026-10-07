@@ -108,7 +108,7 @@ class SourceFinder:
                 for ip, port in await self.dht.lookup_capability(self.capability, want_all=True):
                     candidates.append(fmt_addr(ip, port))
             except Exception as e:
-                logger.debug(f"{self.label}: DHT capability lookup failed: {e}")
+                logger.warning(f"{self.label}: DHT capability lookup failed: {e}")
         return candidates
 
     async def _fallback(self) -> List[str]:
