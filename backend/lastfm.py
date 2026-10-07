@@ -9,7 +9,7 @@ import threading
 import time
 import uuid
 from datetime import datetime, timezone
-from typing import Callable, Dict, List, Optional, Any
+from typing import Callable, Dict, List, Optional, Tuple, Any
 from xml.dom.minidom import Document
 
 import pylast
@@ -278,6 +278,16 @@ class LastFmService:
         doc = self._with_retry(
             lambda: pylast._Request(self.network, "user.getRecentTracks", params).execute(False))
         return _recent_tracks(doc)
+
+    def auth_session(self, token: str) -> Tuple[str, str]:
+        """auth.getSession for a token the owner granted on Last.fm's page:
+        (session key, username). Under the failure policy of every other
+        call — a source that does not answer ends in SourceUnavailable, and
+        Last.fm's verdict about the token is the WSError itself
+        (lastfm_auth decides what each means for the flow)."""
+        generator = pylast.SessionKeyGenerator(self.network)
+        return self._with_retry(
+            lambda: generator.get_web_auth_session_key_username(None, token))
 
     def get_artist_info(self, artist_name: str, fetch_similar: bool = True) -> Optional[Dict[str, Any]]:
         """

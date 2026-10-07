@@ -20,9 +20,11 @@ and put `cb` beside it, and on a real account the browser never came back
 
 The callback is unsigned by necessity (a browser redirect from last.fm
 cannot carry HMAC headers) and is admitted by the whitelist on the nonce
-alone: 128 bits, minted only for a signed caller, single use, gone with the
-flow. The page it renders never echoes the token or the session key, and
-the Host guard still applies to it.
+alone: 128 bits, minted only for a signed caller, good for one connection,
+gone with the flow — which ends on the exchange's outcome or at the page's
+deadline, and stays open only while Last.fm does not answer. The page it
+renders never echoes the token or the session key, and the Host guard still
+applies to it.
 """
 
 import asyncio
@@ -31,8 +33,7 @@ import json
 import logging
 import secrets
 import threading
-import time
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any, Dict, Optional
 from urllib.parse import urlencode, urlsplit
 
@@ -51,9 +52,11 @@ router = APIRouter(prefix="/lastfm/auth", tags=["lastfm"])
 AUTH_PAGE = "https://www.last.fm/api/auth/"
 CALLBACK_PREFIX = "/lastfm/auth/callback/"
 
-# The flow is what an unsigned callback has to match. It outlives a slow
-# login on the Last.fm side and not much more, so a Last.fm tab found later
-# in the browser's history connects nothing.
+# How long an open authorization page stays good: a slow login on the
+# Last.fm side and not much more, so a Last.fm tab found later in the
+# browser's history connects nothing. The deadline is an event — it ends the
+# flow and wakes the window waiting on it, which otherwise would wait on a
+# page that can no longer finish.
 FLOW_TTL_SECONDS = 30 * 60
 
 _SESSION_KEY_KEY = "lastfm.session_key"
@@ -67,15 +70,14 @@ class FlowError(Exception):
 @dataclass
 class Flow:
     nonce: str
+    callback_base: str                          # where Last.fm sends the browser back
     auth_url: str
-    started_at: float
-
-    def alive(self) -> bool:
-        return time.time() - self.started_at < FLOW_TTL_SECONDS
+    deadline: threading.Timer = field(init=False)
+    exchanging: bool = False                    # a callback is turning the token into a session
 
 
 _flow: Optional[Flow] = None
-_last_error: Optional[str] = None               # the callback's refusal, until the next start
+_last_error: Optional[str] = None               # how the last flow failed, until the next start
 _lock = threading.Lock()
 _sse_clients: list = []
 _sse_lock = threading.Lock()
@@ -150,11 +152,6 @@ def load_from_db() -> None:
 
 # -- The flow -----------------------------------------------------------------
 
-def _network() -> pylast.LastFMNetwork:
-    from lastfm import lastfm_network
-    return lastfm_network()
-
-
 def _callback_base(origin: str) -> str:
     """Where Last.fm sends the browser back: the origin the CLIENT reached
     this node at (127.0.0.1 for the launcher, the LAN or tunnel address for
@@ -170,53 +167,100 @@ def _callback_base(origin: str) -> str:
 
 
 def start(origin: str) -> str:
-    """The URL to open in the browser. A live flow is handed back as-is: a
-    second start would replace the nonce the open tab comes back with, and a
-    double tap on the button must produce one page, not two."""
+    """The URL to open in the browser. A live flow is handed back as-is to
+    the address that started it: a double tap on the button must produce one
+    page, not two, and a second page would replace the nonce the open tab
+    comes back with. Another address gets a flow of its own, because the
+    callback IS the address — a phone handed the page the launcher started
+    would be sent back to 127.0.0.1. The newest flow wins; a page still open
+    on the other address lands on "expired". A flow mid-exchange is handed
+    back to anyone: it ends within seconds, connected or not."""
     global _flow, _last_error
     callback_base = _callback_base(origin)
     with _lock:
-        if _flow is not None and _flow.alive():
+        if _flow is not None and (_flow.exchanging or _flow.callback_base == callback_base):
             return _flow.auth_url
+        if _flow is not None:
+            _flow.deadline.cancel()
         nonce = secrets.token_urlsafe(16)
         auth_url = AUTH_PAGE + "?" + urlencode({"api_key": settings.lastfm_api_key,
                                                 "cb": callback_base + nonce})
-        _flow = Flow(nonce, auth_url, time.time())
+        _flow = Flow(nonce, callback_base, auth_url)
+        _flow.deadline = threading.Timer(FLOW_TTL_SECONDS, _expire, (_flow,))
+        _flow.deadline.daemon = True
+        _flow.deadline.start()
         _last_error = None
         return auth_url
+
+
+def _expire(flow: Flow) -> None:
+    """The page's deadline. A callback already exchanging still finishes and
+    reports its own outcome, which supersedes this one."""
+    global _flow, _last_error
+    with _lock:
+        if _flow is not flow:
+            return
+        _flow = None
+        _last_error = "The Last.fm page expired."
+    _notify()
+
+
+def _end(flow: Flow, error: Optional[str]) -> None:
+    """The callback's outcome — connected (no error) or not: the flow is
+    over, status() says how it went, and every waiting client is woken."""
+    global _flow, _last_error
+    flow.deadline.cancel()
+    with _lock:
+        if _flow is flow:
+            _flow = None
+        _last_error = error
+    _notify()
 
 
 def callback(nonce: str, token: str) -> str:
     """The browser is back from last.fm with the token Last.fm minted at the
     grant. Returns the username; raises FlowError with the sentence for the
     page when nothing was earned. A stale or foreign nonce changes nothing
-    and wakes nobody; the matching one is spent before the exchange, so a
-    reloaded redirect cannot exchange twice."""
-    global _flow, _last_error
+    and wakes nobody, and neither does a second callback while the first is
+    still exchanging."""
+    from lastfm import LastFmService, SourceUnavailable
     with _lock:
         flow = _flow
-        if flow is None or not flow.alive() or not secrets.compare_digest(flow.nonce, nonce):
+        if flow is None or not secrets.compare_digest(flow.nonce, nonce):
             raise FlowError("This authorisation link has expired. "
                             "Return to Sautium and start again.")
         if not token:
             raise FlowError("Last.fm sent the browser back without a token. "
                             "Return to Sautium and start again.")
-        _flow = None
+        if flow.exchanging:
+            raise FlowError("Sautium is already finishing this authorisation. "
+                            "Return to Sautium.")
+        flow.exchanging = True
     try:
-        generator = pylast.SessionKeyGenerator(_network())
-        session_key, username = generator.get_web_auth_session_key_username(None, token)
-    except Exception as e:
-        # A token Last.fm itself sent and then refuses is not worth a second
-        # try: the flow is over, and the next start mints a fresh one.
+        session_key, username = LastFmService().auth_session(token)
+        persist(session_key, username)
+    except SourceUnavailable as e:
+        # No answer about the token, which Last.fm keeps good for an hour:
+        # the flow stays, and reloading this page asks again.
+        logger.warning("Last.fm did not answer the session exchange: %s", e)
         with _lock:
-            _last_error = str(e)
-        _notify()
-        raise FlowError(str(e)) from e
-    persist(session_key, username)
-    with _lock:
-        _last_error = None
+            flow.exchanging = False
+        raise FlowError(f"Last.fm did not answer ({e}). "
+                        "Reload this page to finish connecting.") from e
+    except pylast.WSError as e:
+        # Last.fm's verdict about the token it sent itself: not worth a
+        # second try — the next start mints a fresh flow.
+        logger.warning("Last.fm refused the authorisation token: %s", e)
+        _end(flow, f"Last.fm refused the authorisation: {e}")
+        raise FlowError(f"Last.fm refused the authorisation: {e}. "
+                        "Return to Sautium and start again.") from e
+    except Exception as e:
+        logger.error("Finishing the Last.fm connection failed", exc_info=True)
+        _end(flow, f"Sautium could not finish the connection: {e}")
+        raise FlowError(f"Sautium could not finish the connection: {e}. "
+                        "Return to Sautium and start again.") from e
+    _end(flow, None)
     logger.info("Last.fm authorized as %s", username)
-    _notify()
     # The connection is the import's first trigger: the owner's history is
     # what makes a new node's Home theirs (backend/lastfm_history.py).
     import lastfm_history
@@ -226,7 +270,7 @@ def callback(nonce: str, token: str) -> str:
 
 def status() -> Dict[str, Any]:
     with _lock:
-        flow = _flow if _flow is not None and _flow.alive() else None
+        flow = _flow
         error = _last_error
     return {
         "authorized": bool(settings.lastfm_session_key),

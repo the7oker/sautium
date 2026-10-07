@@ -828,9 +828,9 @@ class LauncherApp(ctk.CTk):
 
     def _open_lastfm_page(self) -> Optional[str]:
         """Ask the backend for the authorization page and open it. A live
-        flow is handed back as-is, so reopening lands on the same page and
-        the same token; a fresh one is minted only after the last attempt
-        ended."""
+        flow is handed back as-is to the address that started it, so
+        reopening lands on the same page and the same callback; a fresh one
+        is minted only after the last attempt ended."""
         result = self.api_client.lastfm_auth_start()
         url = (result or {}).get("auth_url")
         if url:
@@ -842,10 +842,11 @@ class LauncherApp(ctk.CTk):
 
         The callback landing on the backend is the completion event: it
         wakes /lastfm/auth/stream, the dialog reads the outcome over /status
-        and closes itself. No button asks the user whether the browser step
-        is over — the first version did, and a click a moment early failed
-        with "Unauthorized Token". What is left is a lost tab (Reopen page)
-        and connecting later (Skip)."""
+        and closes itself — or, for a refusal or a page past its deadline,
+        says so above the way back. No button asks the user whether the
+        browser step is over — the first version did, and a click a moment
+        early failed with "Unauthorized Token". What is left is a lost tab
+        (Reopen page) and connecting later (Skip)."""
         dialog = ctk.CTkToplevel(self)
         dialog.title("Last.fm Authorization")
         dialog.geometry("460x230")
@@ -899,12 +900,12 @@ class LauncherApp(ctk.CTk):
                     return
                 if status.get("error"):
                     self.ui_call(lambda s=status: _say(
-                        f"Last.fm refused the token: {s['error']}\nReopen the page to try again.",
-                        "#ef4444"))
+                        f"{s['error']}\nReopen the page to try again.", "#ef4444"))
 
         threading.Thread(target=_watch, daemon=True, name="lastfm-auth").start()
 
         def _reopen():
+            _say("", "gray")
             threading.Thread(target=self._open_lastfm_page, daemon=True).start()
 
         btn_frame = ctk.CTkFrame(dialog, fg_color="transparent")

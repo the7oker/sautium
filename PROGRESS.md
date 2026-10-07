@@ -1603,6 +1603,21 @@ were wrong, one hidden behind the other.
   token of the node's own there is nothing to finish by hand: "Finish
   manually", "Finish without the redirect" and `/lastfm/auth/complete` are
   gone.
+- **With the redirect as the only way in, the flow owns its failures
+  (2026-10-07, after review).** The manual button had been covering for
+  them. A live flow is handed back only to the address that started it —
+  the callback IS that address, and a phone handed the page the launcher
+  opened would have been sent back to 127.0.0.1; another address gets a
+  flow of its own, and the newest wins. The exchange runs under the
+  failure policy of every Last.fm call (`LastFmService.auth_session`): a
+  source that does not answer leaves the flow open, and reloading the page
+  asks again with the same token, which Last.fm keeps good for an hour;
+  Last.fm's verdict about the token, or a failure of our own, ends the flow
+  — logged, recorded for `/status`, and every waiting client woken. The
+  flow stays registered while it exchanges, so a doubled redirect is
+  refused and a start meanwhile gets the same page. The 30-minute deadline
+  is an event: it ends the flow with "The Last.fm page expired" instead of
+  leaving the window to wait on a page that can no longer finish.
 - **Scrobbling never saw the in-app session.** `playback/tracker.py` built
   its network from `LASTFM_SESSION_KEY` in the environment, once, at the
   first scrobble — the session the flow had been persisting to

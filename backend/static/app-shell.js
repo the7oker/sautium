@@ -11176,15 +11176,15 @@
       setTimeout(() => { close(); render(); }, 700);
     };
 
-    // The callback landing on the node is the completion event: the wake
-    // channel says that it did, /status says how it went.
+    // The callback landing on the node, or the page's deadline passing, is
+    // the event: the wake channel says that one came, /status says how it went.
     const onWake = async () => {
       const r = await fetch('/lastfm/auth/status');
       if (!r.ok) return;
       const s = await r.json();
       if (s.authorized) { connected(s.username); return; }
       if (s.error) {
-        say(`Last.fm refused the token: ${s.error} — start again.`, 'var(--color-negative)');
+        say(s.error, 'var(--color-negative)');
         waitRow.style.display = 'none';
         startRow.style.display = '';
       }
@@ -11199,7 +11199,6 @@
         });
         if (!r.ok) { say('Could not start: ' + await r.text(), 'var(--color-negative)'); return; }
         const data = await r.json();
-        if (!data.auth_url) { say('Last.fm did not return an authorisation URL.', 'var(--color-negative)'); return; }
         window.open(data.auth_url, '_blank', 'noopener');
         reopen.href = data.auth_url;
         startRow.style.display = 'none';
