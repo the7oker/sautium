@@ -309,26 +309,30 @@ def _add_one(hqp: HQPlayerClient, uri: str, *, clear: bool = False) -> bool:
     return ok
 
 
-def _hqp_safe(action, command: str) -> None:
+def _hqp_safe(action, command: str) -> bool:
     """Run one HQPlayer command (stop / play / clear / select_track)
     tolerantly inside an existing `_hqp_lock`: one reconnect-and-retry,
     never raises. Frames a resilient multi-add so a churning control port
     can't abort the whole operation at its stop()/play() bookends before
-    the add even runs. One HQPlayer did not take is logged in its words; a
-    command the retry could not send either is a step of the play intent it
-    served — it never reached HQPlayer, so its client heard nothing."""
+    the add even runs. Returns whether HQPlayer took it: one it did not is
+    logged in its words, and a mirror step it did not take leaves its
+    playlist no mirror — the caller says so. A command the retry could not
+    send either is a step of the play intent it served — it never reached
+    HQPlayer, so its client heard nothing."""
     for attempt in (1, 2):
         try:
             hqp = _get_hqp()
-            if not action(hqp):
-                logger.warning("HQPlayer did not take %s: %s", command,
-                               diag.redact_text(hqp.refusal()))
-            return
+            if action(hqp):
+                return True
+            logger.warning("HQPlayer did not take %s: %s", command,
+                           diag.redact_text(hqp.refusal()))
+            return False
         except (BrokenPipeError, ConnectionError, OSError) as e:
             if attempt == 1:
                 _reset_hqp()
             elif _listener is not None:
                 _listener._refused(command, str(e))
+    return False
 
 
 def _slot_key(item: QueueItem) -> tuple:
@@ -1223,13 +1227,16 @@ class HqpBackend(PlayerBackend):
     def _command(self, name: str, fn) -> bool:
         """One command on the command client; one HQPlayer did not take is
         logged in its words."""
+        return self._refusal_of(name, fn) is None
+
+    def _refusal_of(self, name: str, fn) -> Optional[str]:
+        """`_command`, answering why not: None when HQPlayer took it."""
         def run(h):
-            ok = fn(h)
-            return ok, (None if ok else h.refusal())
-        ok, refusal = self._hqp_cmd(run)
-        if not ok:
+            return None if fn(h) else h.refusal()
+        refusal = self._hqp_cmd(run)
+        if refusal is not None:
             logger.warning("HQPlayer did not take %s: %s", name, diag.redact_text(refusal))
-        return ok
+        return refusal
 
     def _close_reads(self, hqp: HQPlayerClient, att: diag.Attempt) -> dict:
         """What HQPlayer holds as the attempt closes — its playlist (whose
@@ -1635,9 +1642,12 @@ class HqpBackend(PlayerBackend):
                     # press re-mirrors.
                     now = _get_hqp().get_status()
                     converged = now is not None and now.track_index < first
+                    # A removal HQPlayer did not take stops it there: what is
+                    # appended after it would sit beside what it kept
                     if converged:
-                        for _ in uris:
-                            _hqp_safe(lambda h: h.playlist_remove(first), "PlaylistRemove")
+                        converged = all(_hqp_safe(lambda h: h.playlist_remove(first),
+                                                  "PlaylistRemove") for _ in uris)
+                    if converged:
                         converged = _add_uris_with_retry(uris) == len(uris)
                 self.poke()
             elif status.state == PlaybackState.PLAYING:
@@ -1710,7 +1720,10 @@ class HqpBackend(PlayerBackend):
     def queue_insert_next(self, items: list, anchor_index: Optional[int]) -> int:
         """Insert right after the playing slot via the seamless remove-after /
         re-append trick — the reading slot is never touched, so audio plays
-        through. URI-based so it works for preview streams too."""
+        through. URI-based so it works for preview streams too. A removal
+        HQPlayer does not take ends the removals there, and only what left
+        is appended again: never an entry twice, and the playlist is marked
+        no mirror (drift) until the next one."""
         uris = [self._uri_for(it) for it in items]
         with _hqp_lock:
             self._check_attached()
@@ -1725,32 +1738,50 @@ class HqpBackend(PlayerBackend):
                 # Remove the after-segment (always slot idx+1, which the rest
                 # shift down into), then re-append it behind the new tracks.
                 after = [t.get("uri") for t in raw[idx:] if t.get("uri")]
-                for _ in range(len(after)):
-                    _hqp_safe(lambda h: h.playlist_remove(idx + 1), "PlaylistRemove")
+                removed = 0
+                while removed < len(after) and _hqp_safe(
+                        lambda h: h.playlist_remove(idx + 1), "PlaylistRemove"):
+                    removed += 1
                 added = _add_uris_with_retry(uris, clear_first=False)
-                if after:
-                    _add_uris_with_retry(after, clear_first=False)
+                back = _add_uris_with_retry(after[:removed], clear_first=False) if removed else 0
+                if removed < len(after) or back < removed:
+                    self._drift = True
         self.poke()
         return added
 
     def queue_remove(self, index: int) -> bool:
-        ok = self._command("PlaylistRemove", lambda h: h.playlist_remove(index))
+        """Mirror-first while HQPlayer's playlist mirrors the queue: the slot
+        leaves the queue once it left HQPlayer, and a removal HQPlayer refuses
+        raises in its words (the slot is still there — the queue did not
+        change). A playlist that is no mirror — drift (an external edit, a
+        mirror step HQPlayer did not take) or lost with a restart — is not
+        edited by index: the removal is the queue's alone, and the next
+        mirror carries it."""
+        if self._drift or self._mirror_lost:
+            return True
+        refusal = self._refusal_of("PlaylistRemove", lambda h: h.playlist_remove(index))
         self.poke()
-        return ok
+        if refusal is not None:
+            raise RuntimeError(f"HQPlayer did not remove it: {refusal}")
+        return True
 
     def queue_clear_after_current(self) -> bool:
         # PlaylistClear keeps the reading slot intact — it erases everything
-        # queued around the current track while the seed plays on.
+        # queued around the current track while the seed plays on. One
+        # HQPlayer did not take leaves the queue as it is (mirror-first).
         with _hqp_lock:
             self._check_attached()
-            _hqp_safe(lambda h: h.playlist_clear(), "PlaylistClear")
+            cleared = _hqp_safe(lambda h: h.playlist_clear(), "PlaylistClear")
         self.poke()
-        return True
+        return cleared
 
     def queue_reorder(self, plan: ReorderPlan) -> dict:
         """Execute a validated reorder plan against HQPlayer's append/remove
         primitives (no insert/move in the protocol — see the /reorder
-        endpoint docstring for the seamless-feasibility rules)."""
+        endpoint docstring for the seamless-feasibility rules). A step
+        HQPlayer does not take ends the sequence there and raises in its
+        words: the queue keeps its order (PlaybackManager.apply_reorder), and
+        the playlist, part-way, is marked no mirror (drift)."""
         if plan.seamless:
             # Sequence (current at slot K = status_idx throughout, then
             # shifts left as we shrink the before-segment in step 3):
@@ -1772,20 +1803,26 @@ class HqpBackend(PlayerBackend):
             with _hqp_lock:
                 self._check_attached()
                 hqp = _get_hqp()
-                for _ in range(len(plan.old_after)):
-                    hqp.playlist_remove(plan.status_idx + 1)
-                for mid in plan.new_after:
-                    _add_one(hqp, uri_by_id[mid])
+                taken = (all(hqp.playlist_remove(plan.status_idx + 1) for _ in plan.old_after)
+                         and all(_add_one(hqp, uri_by_id[mid]) for mid in plan.new_after))
                 cursor = 1
                 new_before_remaining = list(plan.new_before)
                 for old_track in plan.old_before:
+                    if not taken:
+                        break
                     if (new_before_remaining
                             and new_before_remaining[0] == old_track):
                         new_before_remaining.pop(0)
                         cursor += 1
                     else:
-                        hqp.playlist_remove(cursor)
+                        taken = hqp.playlist_remove(cursor)
+                refusal = None if taken else hqp.refusal()
             self.poke()
+            if refusal is not None:
+                self._drift = True
+                logger.warning("HQPlayer did not take the new order: %s",
+                               diag.redact_text(refusal))
+                raise RuntimeError(f"HQPlayer did not take the new order: {refusal}")
             return {
                 "removed": len(plan.old_after) + (len(plan.old_before) - len(plan.new_before)),
                 "added": len(plan.new_after),

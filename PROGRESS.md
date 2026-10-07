@@ -640,11 +640,17 @@ implementation details live in the code, DB and git history.
   unauthenticated client while HQPlayer 6 has no internet access. Fifteen
   client commands counted any answer as done — the volume routes said `ok`,
   the assistant said "Volume increased.", a refused PlaylistRemove dropped
-  the slot from the canonical queue while HQPlayer kept it. One rule now
-  (`HQPlayerClient._accepted`): only `result="Error"` refuses, a bare element
-  is acceptance, and every caller tells a refusal in HQPlayer's words. The
-  HQPlayer screen's volume steps within `VolumeRange` and rests while it is
-  fixed, with the reason: HQPlayer's own refusal says only Error.
+  the slot from the canonical queue while HQPlayer kept it. One rule now,
+  the error ring's (`CommandOutcome.failed`, `HQPlayerClient._accepted`):
+  only `OK` or a bare element is acceptance, and a refusal is told in
+  HQPlayer's words. The queue stays mirror-first: a slot HQPlayer did not
+  remove stays, a new order or a radio clear it did not take is not the
+  queue's either, and a mirror step it did not take marks its playlist no
+  mirror (drift) — never an entry twice; a playlist that is no mirror is not
+  edited by index. The HQPlayer screen's volume steps within `VolumeRange`
+  (never above 0 dB without one) and rests while it is fixed; the reason —
+  HQPlayer's own refusal says only Error — stands under the row, as volume
+  gets no toast.
 - **DSP load is measured, not predicted (2026-10-02).** Whether a filter or a
   modulator keeps up depends on the HQPlayer host — CPU build, CUDA (filters
   can offload, modulators never do), memory, cooling — and no spec sheet

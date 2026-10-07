@@ -1480,7 +1480,9 @@ def seek(req: SeekRequest):
 def remove(req: RemoveRequest):
     """Remove a queue slot by 1-based index (HQPlayer's PlaylistRemove
     convention). The play_count for the removed slot is unaffected —
-    tracking records past plays, not pending queue contents."""
+    tracking records past plays, not pending queue contents. 409 is the
+    slot no longer holding `track_id`; a removal the output refused is a
+    503 in its words (_output_error), the slot still in the queue."""
     if req.index < 1:
         raise HTTPException(status_code=400, detail="index must be >= 1")
     try:

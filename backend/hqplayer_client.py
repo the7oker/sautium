@@ -23,10 +23,11 @@ from urllib.parse import unquote
 
 logger = logging.getLogger(__name__)
 
-# A volume HQPlayer holds fixed, in words: its own answer to a Volume command
-# is a bare result="Error". Direct SDM fixes it (Desktop 6.2.3, seen live).
+# A volume HQPlayer holds fixed, in words — the HQPlayer screen, the volume
+# route and the assistant all say it so: its own answer to a Volume command is
+# a bare result="Error". Direct SDM fixes it (Desktop 6.2.3, seen live).
 VOLUME_FIXED = ("HQPlayer holds its volume fixed — Direct SDM or a fixed volume "
-                "is on in its settings")
+                "is on in its settings. Turn your amplifier instead.")
 
 
 # -- Redaction -------------------------------------------------------------------
@@ -182,9 +183,10 @@ class HQPlayerClient:
     (`last_errors()`): the playback backend replaces its client on every
     reconnect, and the drop that killed one instance must outlive it.
 
-    A command is refused only by an explicit `result="Error"` (`_accepted`):
-    some answer with a bare element, which is HQPlayer accepting it. Play,
-    SelectTrack and PlaylistAdd count only an explicit OK.
+    A command is taken when its outcome did not fail (`CommandOutcome.failed`,
+    `_accepted`): `result="OK"`, or a bare element — some setters answer that
+    way, and it is HQPlayer accepting. Play, SelectTrack and PlaylistAdd
+    count only an explicit OK.
     """
 
     _error_ring: deque = deque(maxlen=50)
@@ -440,13 +442,14 @@ class HQPlayerClient:
         return None
 
     def _accepted(self, command: str, attributes: Optional[Dict[str, str]] = None) -> bool:
-        """Sent, answered, and not refused. An answer alone is no acceptance:
-        HQPlayer answers <Volume result="Error"/> while its volume is fixed,
-        and HQPlayer 6 without internet access refuses every state change
-        of an unauthenticated client ("not authenticated and no internet
-        access")."""
+        """Sent, answered, and not refused — by the one rule the error ring,
+        `last_error` and the playback trace read: the outcome did not fail.
+        An answer alone is no acceptance: HQPlayer answers <Volume
+        result="Error"/> while its volume is fixed, and HQPlayer 6 without
+        internet access refuses every state change of an unauthenticated
+        client ("not authenticated and no internet access")."""
         response = self._execute_command(command, attributes)
-        return response is not None and response.get("result") != "Error"
+        return response is not None and self.last_error is None
 
     # ========== Playback Control ==========
 
@@ -534,10 +537,14 @@ class HQPlayerClient:
         }
 
     def volume_refusal(self) -> str:
-        """Why the latest volume command was not taken: a volume HQPlayer
-        holds fixed, said so — its own answer is a bare Error — else
-        `refusal()`."""
-        why = self.refusal()
+        """Why the latest volume command was not taken. A bare Error is what
+        a fixed volume answers, so only then is VolumeRange asked, and a
+        fixed one said so; HQPlayer's own words, or a connection that went,
+        stand as they are — a range asked on a dead socket would only add a
+        made-up failure to the ring."""
+        why, e = self.refusal(), self.last_error
+        if e is None or e.result != "Error" or e.message:
+            return why
         span = self.volume_range()
         return VOLUME_FIXED if span is not None and not span["enabled"] else why
 

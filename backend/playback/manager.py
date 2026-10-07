@@ -855,10 +855,13 @@ class PlaybackManager:
 
     def clear_for_radio(self) -> int:
         """Radio start: clear everything after the playing slot (the seed
-        plays on). Returns the new generation for the radio filler."""
+        plays on). Returns the new generation for the radio filler — the
+        current one when the output did not clear: mirror-first, the queue
+        keeps the tail the player keeps, and the radio follows it."""
         with self._mutation():
             backend = self.backend()
-            backend.queue_clear_after_current()
+            if not backend.queue_clear_after_current():
+                return self.queue.generation
             gen = self.queue.clear_for_radio(self._latest_status.get("track_index"))
             self._retire_previews(gen)
             backend.queue_changed("clear")

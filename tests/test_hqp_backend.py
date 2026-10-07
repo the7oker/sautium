@@ -1138,6 +1138,9 @@ def test_an_answer_that_refuses_is_no_success(fake):
             assert c.last_error.command == command
             fake.replies[command] = f"<{command}/>"
             assert call() is True, command
+        # one rule with the error ring: an answer neither OK nor bare is no success
+        fake.replies["Stop"] = '<Stop result="Busy" />'
+        assert c.stop() is False and c.last_error.result == "Busy"
     finally:
         c.disconnect()
 
@@ -1153,8 +1156,25 @@ def test_a_fixed_volume_is_named_where_hqplayer_says_only_error(fake):
         fake.replies["VolumeRange"] = '<VolumeRange enabled="1" adaptive="0" min="-60" max="0"/>'
         assert c.set_volume(0.0) is False
         assert c.volume_refusal() == "HQPlayer refused Volume"
+        # its own words stand, whatever the range says (a missing `enabled` reads fixed)
+        fake.replies["VolumeRange"] = '<VolumeRange min="-60" max="0"/>'
+        fake.replies["Volume"] = '<Volume result="Error">not authenticated and no internet access</Volume>'
+        assert c.set_volume(0.0) is False
+        assert c.volume_refusal() == "not authenticated and no internet access"
     finally:
         c.disconnect()
+
+
+def test_a_volume_command_that_lost_the_connection_asks_nothing_more(fake):
+    # A range asked on a dead socket was a second, made-up failure in the
+    # ring support diagnostics ship
+    HQPlayerClient._error_ring.clear()
+    c = HQPlayerClient("127.0.0.1", fake.port, timeout=0.3)
+    assert c.connect()
+    fake.silence(1.0)
+    assert c.volume_up() is False and not c.is_connected()
+    assert c.volume_refusal() == "VolumeUp: no answer within 0.3 s"
+    assert [e["during"] for e in HQPlayerClient.last_errors()] == ["VolumeUp"]
 
 
 def test_a_command_hqplayer_refuses_is_logged_in_its_words(fake, caplog):
@@ -1163,7 +1183,7 @@ def test_a_command_hqplayer_refuses_is_logged_in_its_words(fake, caplog):
     fake.replies["PlaylistClear"] = '<PlaylistClear result="Error">busy</PlaylistClear>'
     b = HqpBackend(emit=lambda *_: None, queue=CanonicalQueue())
     assert b.stop() is False and b.set_volume(-10.0) is False
-    b.queue_clear_after_current()
+    assert b.queue_clear_after_current() is False
     assert "HQPlayer did not take Stop: not authenticated and no internet access" in caplog.text
     assert "HQPlayer did not take Volume: HQPlayer refused Volume" in caplog.text
     assert "HQPlayer did not take PlaylistClear: busy" in caplog.text
@@ -1175,12 +1195,100 @@ def test_a_slot_hqplayer_does_not_remove_stays_in_the_queue(fake):
     mgr.queue.replace([_item("E:/Music/A/01.flac", 1), _item("E:/Music/A/02.flac", 2)])
     b = _attach(mgr)
     try:
-        fake.replies["PlaylistRemove"] = '<PlaylistRemove result="Error" />'
-        assert mgr.remove(2) is False
+        fake.replies["PlaylistRemove"] = '<PlaylistRemove result="Error">busy</PlaylistRemove>'
+        with pytest.raises(RuntimeError, match="HQPlayer did not remove it: busy"):
+            mgr.remove(2)
         assert len(mgr.queue) == 2 and len(fake.playlist) == 2
         del fake.replies["PlaylistRemove"]
         assert mgr.remove(2) is True
         assert len(mgr.queue) == 1 and len(fake.playlist) == 1
+    finally:
+        b.shutdown()
+
+
+def test_a_refused_removal_is_not_called_a_changed_queue(fake, monkeypatch):
+    from fastapi import HTTPException
+    from routers import player as player_router
+    mgr = PlaybackManager()
+    mgr.queue.replace([_item("E:/Music/A/01.flac", 1), _item("E:/Music/A/02.flac", 2)])
+    b = _attach(mgr)
+    monkeypatch.setattr(player_router, "manager", mgr)
+    try:
+        fake.replies["PlaylistRemove"] = ('<PlaylistRemove result="Error">not authenticated '
+                                          'and no internet access</PlaylistRemove>')
+        with pytest.raises(HTTPException) as e:
+            player_router.remove(player_router.RemoveRequest(index=2, track_id="track-2"))
+        assert e.value.status_code == 503
+        assert e.value.detail == ("HQPlayer did not remove it: not authenticated "
+                                  "and no internet access")
+        # the slot holding another track is the queue having moved
+        with pytest.raises(HTTPException) as e:
+            player_router.remove(player_router.RemoveRequest(index=2, track_id="track-1"))
+        assert e.value.status_code == 409
+    finally:
+        b.shutdown()
+
+
+def test_a_playlist_that_is_no_mirror_is_not_edited_by_index(fake):
+    # An HQPlayer restarted empty, or holding an external playlist: the
+    # removal is the queue's alone — by index it would refuse, or take an
+    # entry that is not ours
+    mgr = PlaybackManager()
+    mgr.queue.replace([_item("E:/Music/A/01.flac", 1), _item("E:/Music/A/02.flac", 2)])
+    b = _attach(mgr)
+    try:
+        b._drift = True
+        assert mgr.remove(2) is True
+        assert len(mgr.queue) == 1 and len(fake.playlist) == 2
+        assert "PlaylistRemove" not in [c for c, _ in fake.commands]
+    finally:
+        b.shutdown()
+
+
+def test_an_insert_hqplayer_cannot_make_room_for_doubles_nothing(fake):
+    mgr = PlaybackManager()
+    mgr.queue.replace([_item(f"E:/Music/A/0{n}.flac", n) for n in (1, 2, 3)])
+    b = _attach(mgr)
+    try:
+        fake.replies["PlaylistRemove"] = '<PlaylistRemove result="Error" />'
+        assert b.queue_insert_next([_item("E:/Music/B/01.flac", 9)], 1) == 1
+        assert fake.playlist == ["file:///E:/Music/A/01.flac", "file:///E:/Music/A/02.flac",
+                                 "file:///E:/Music/A/03.flac", "file:///E:/Music/B/01.flac"]
+        assert b.drift
+    finally:
+        b.shutdown()
+
+
+def test_a_radio_clear_hqplayer_refuses_keeps_the_queue(fake):
+    mgr = PlaybackManager()
+    mgr.queue.replace([_item(f"E:/Music/A/0{n}.flac", n) for n in (1, 2, 3)])
+    b = _attach(mgr)
+    try:
+        fake.replies["PlaylistClear"] = '<PlaylistClear result="Error" />'
+        gen = mgr.queue.generation
+        assert mgr.clear_for_radio() == gen
+        assert len(mgr.queue) == 3 and len(fake.playlist) == 3
+    finally:
+        b.shutdown()
+
+
+def test_a_new_order_hqplayer_refuses_keeps_the_queues(fake):
+    from playback.base import ReorderPlan
+    mgr = PlaybackManager()
+    items = [_item(f"E:/Music/A/0{n}.flac", n) for n in (1, 2, 3)]
+    mgr.queue.replace(items)
+    b = _attach(mgr)
+    try:
+        fake.replies["PlaylistRemove"] = '<PlaylistRemove result="Error">busy</PlaylistRemove>'
+        plan = ReorderPlan(seamless=True, status_idx=1, new_status_idx=1, old_before=[],
+                           new_before=[], old_after=["track-2", "track-3"],
+                           new_after=["track-3", "track-2"],
+                           order=["track-1", "track-3", "track-2"],
+                           items_by_id={it.track_id: it for it in items})
+        with pytest.raises(RuntimeError, match="HQPlayer did not take the new order: busy"):
+            mgr.apply_reorder(plan)
+        assert [it.track_id for it in mgr.queue.snapshot()] == ["track-1", "track-2", "track-3"]
+        assert len(fake.playlist) == 3 and b.drift
     finally:
         b.shutdown()
 
@@ -1209,6 +1317,11 @@ def test_the_volume_step_keeps_to_hqplayers_range_and_a_fixed_one_says_why(fake)
         step(1)
     assert e.value.status_code == 503
     assert e.value.detail == "not authenticated and no internet access"
+    # no range given: a step never goes above 0 dB
+    del fake.replies["Volume"]
+    fake.replies["VolumeRange"] = '<VolumeRange result="Error" />'
+    fake.replies["State"] = '<State volume="-0.5"/>'
+    assert step(40) == {"volume": 0.0} and fake.commands[-1] == ("Volume", {"value": "0.0"})
 
 
 def test_the_assistant_says_the_volume_is_fixed_instead_of_increased(fake, monkeypatch):

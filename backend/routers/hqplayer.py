@@ -193,6 +193,9 @@ def get_state(dsp: bool = False) -> Dict[str, Any]:
     response["headroom"] = _headroom(ep, state, status, lists)
     response["benchmark"] = _benchmark_block(ep, state, lists, volume_range)
     response["volume_range"] = volume_range
+    # Said by the server, in the words the volume route and the assistant use.
+    response["volume_fixed"] = (VOLUME_FIXED if volume_range is not None
+                                and not volume_range["enabled"] else None)
     return response
 
 
@@ -363,8 +366,9 @@ def nudge_volume(req: VolumeRequest) -> Dict[str, Any]:
     too granular for a tap-tap-tap UI. Read the current volume from
     State and the range from VolumeRange, write back via Volume. A
     volume HQPlayer holds fixed is refused here with the reason — its
-    own answer to the Volume is a bare Error; with no range given, the
-    step is HQPlayer's to judge."""
+    own answer to the Volume is a bare Error. With no range given the
+    step never goes above 0 dB: a tap must not be what turns a pair of
+    headphones past full scale."""
     try:
         with _hqp_lock:
             _refuse_while_held()
@@ -379,9 +383,10 @@ def nudge_volume(req: VolumeRequest) -> Dict[str, Any]:
             span = hqp.volume_range()
             if span is not None and not span["enabled"]:
                 raise HTTPException(status_code=409, detail=VOLUME_FIXED)
-            new_vol = state["volume"] + req.delta
+            new_vol = min(span["max"] if span is not None else 0.0,
+                          state["volume"] + req.delta)
             if span is not None:
-                new_vol = max(span["min"], min(span["max"], new_vol))
+                new_vol = max(span["min"], new_vol)
             ok = hqp.set_volume(new_vol)
             refusal = None if ok else hqp.refusal()
     except (BrokenPipeError, ConnectionError, OSError) as e:

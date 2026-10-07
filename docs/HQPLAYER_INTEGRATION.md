@@ -78,9 +78,10 @@ older builds — the integration works unchanged without them.
 
 ## Features Implemented
 
-A command returns True only when HQPlayer took it: `result="Error"` is a
-refusal (`_accepted` — a bare element is acceptance; `play`, `select_track` and
-`playlist_add` ask for an explicit OK), and `refusal()` gives HQPlayer's reason.
+A command returns True only when HQPlayer took it: `result="OK"` or a bare
+element — the one rule the error ring reads (`CommandOutcome.failed`,
+`_accepted`); `play`, `select_track` and `playlist_add` ask for an explicit
+OK — and `refusal()` gives HQPlayer's reason.
 Desktop 6.2.3 answers `<Volume result="Error" />` while its volume is fixed, and
 HQPlayer 6 refuses every state change of an unauthenticated client while it has
 no internet access ("not authenticated and no internet access").
@@ -103,11 +104,13 @@ no internet access ("not authenticated and no internet access").
   fixed on the output — and when the attribute is missing, as Signalyst's own client
   reads it. `None` for a refusal or an answer without `min`/`max`: nothing may lower
   the volume by a range HQPlayer did not give. The benchmark lowers HQPlayer to `min`
-  (§ "DSP load"); the HQPlayer screen's ±1 dB steps stay within `min`…`max` and rest
-  while `enabled` is false — Direct SDM holds PCM at −3 dB (Desktop 6.2.3)
-- `volume_refusal()` - why a volume command was not taken: `VOLUME_FIXED` when
-  `VolumeRange` says the volume is fixed (HQPlayer's own answer is a bare Error),
-  else `refusal()`
+  (§ "DSP load"); the HQPlayer screen's ±1 dB steps stay within `min`…`max` (never
+  above 0 dB when there is no range) and rest while `enabled` is false — Direct SDM
+  holds PCM at −3 dB (Desktop 6.2.3)
+- `volume_refusal()` - why a volume command was not taken: after a bare Error —
+  what a fixed volume answers — `VolumeRange` is asked and a fixed one named
+  (`VOLUME_FIXED`); HQPlayer's own words, or a lost connection, stand as
+  `refusal()` gives them
 
 ### ✅ Playlist Management
 - `playlist_add(uri, clear, queued)` - Add track to playlist
