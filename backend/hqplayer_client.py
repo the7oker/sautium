@@ -142,6 +142,13 @@ class TrackStatus:
     # when HQPlayer does not report them.
     input_fill: Optional[float] = None
     output_fill: Optional[float] = None
+    # HQPlayer's "Limited" counter (<Status clips>): how often its soft-knee
+    # limiter acted because the OUTPUT would have passed 0 dB. None when
+    # HQPlayer does not report it.
+    limited: Optional[int] = None
+    # The adaptive gain HQPlayer applies to this track (<metadata gain>, dB;
+    # 0 with adaptive gain off) — ahead of its limiter, like the volume.
+    track_gain: Optional[float] = None
     tracks_total: int = 0
     # What the engine is running right now, by name — the DSP line of a
     # playback trace without three more round-trips.
@@ -647,6 +654,7 @@ class HQPlayerClient:
             # Parse status
             in_fill, out_fill = response.get("input_fill"), response.get("output_fill")
             speed = response.get("process_speed")
+            clips = response.get("clips")
             status = TrackStatus(
                 state=PlaybackState(int(response.get("state", 0))),
                 track_index=int(response.get("track", 0)),
@@ -657,6 +665,7 @@ class HQPlayerClient:
                 process_speed=float(speed) if speed is not None else None,
                 input_fill=float(in_fill) if in_fill is not None else None,
                 output_fill=float(out_fill) if out_fill is not None else None,
+                limited=int(clips) if clips is not None else None,
                 tracks_total=int(response.get("tracks_total", 0)),
                 active_mode=response.get("active_mode", ""),
                 active_filter=response.get("active_filter", ""),
@@ -672,6 +681,8 @@ class HQPlayerClient:
                 status.song = metadata.get("song", "")
                 status.genre = metadata.get("genre", "")
                 status.uri = metadata.get("uri", "")
+                gain = metadata.get("gain")
+                status.track_gain = float(gain) if gain is not None else None
                 if metadata.get("samplerate"):
                     status.src_rate = int(metadata.get("samplerate"))
                     status.src_bits = int(metadata.get("bits") or 0) or None

@@ -8483,6 +8483,21 @@
     if (el.textContent !== next) el.textContent = next;
   }
 
+  // HQPlayer's limiter count (status `limited`, its <Status clips>) under the
+  // Volume row, kept current the same way. HQPlayer starts it again at every
+  // volume step, so it always speaks of the volume set now.
+  function hqpLimitedText(n) {
+    if (!(n > 0)) return '';
+    return `HQPlayer's limiter acted ${n === 1 ? 'once' : n + ' times'} at this volume: its output went past 0 dB.`;
+  }
+  function updateHqpLimited(status) {
+    const el = document.querySelector('[data-hqp-limited]');
+    if (!el) return;
+    const text = hqpLimitedText(status && status.limited);
+    if (el.textContent !== text) el.textContent = text;
+    el.hidden = !text;
+  }
+
   // The Library row follows a running sync over the library wake channel
   // (the one Settings › Library uses): the progress lands in the hint, the
   // end restores the row — in place, never a re-render of the DSP screen.
@@ -9026,6 +9041,31 @@
     document.addEventListener('np-update', onDiagnosis);
     window.addEventListener('sautium:route', onRoute);
 
+    // Volume is tap-tap-tap by design (±1 dB per tap) — from the Volume row
+    // and from the peak meter's own buttons alike; the chain keeps the
+    // nudges in order, it does not swallow them. A step HQPlayer did not
+    // take (its volume fixed since the screen was drawn, its own refusal)
+    // leaves its reason under the row, and the reload repaints what
+    // HQPlayer holds. Resolves to that reason ('' when it was taken).
+    function stepVolume(delta) {
+      return serialized('hqp.config', async () => {
+        try {
+          const r = await fetch('/api/hqplayer/volume', {
+            method: 'POST',
+            headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify({delta}),
+          });
+          const out = r.ok ? null : await r.json().catch(() => ({}));
+          volumeRefusal = !out ? ''
+            : (typeof out.detail === 'string' ? out.detail : `HTTP ${r.status}`);
+        } catch (err) {
+          volumeRefusal = 'The node is not answering right now.';
+        }
+        await load();
+        return volumeRefusal;
+      });
+    }
+
     async function load() {
       const fresh = claimFresh('hqp.load');
       const body = screen.querySelector('#hqpBody');
@@ -9146,6 +9186,7 @@
       const volumeFixed = s.volume_fixed || '';
       const volumeNote = volumeFixed || volumeRefusal;
       const volOff = atEdge => (held || volumeFixed || atEdge) ? ' disabled' : '';
+      const limitedText = hqpLimitedText(window.currentStatus && window.currentStatus.limited);
 
       // What each knob's picker lists. The trigger's label and the picker's
       // options come from the same entries, so the two cannot disagree. No
@@ -9253,7 +9294,7 @@
               : `<span class="hqp-row-value mono">${escapeHtml(activeRateLabel)}</span>`}
           </div>
           <div class="hqp-row hqp-volume-row">
-            <span class="hqp-row-label">Volume</span>
+            <span class="hqp-row-label">Volume<button class="hqp-meter-chip" type="button" data-action="open-meter" aria-label="Open the peak meter">${SVG_METER}<span>Meter</span></button></span>
             <div class="hqp-volume-ctrl">
               <button class="hqp-vol-btn" type="button" data-vol="-1" aria-label="Volume -1 dB"${volOff(!!vr && volume <= vr.min)}>−</button>
               <span class="hqp-vol-value mono">${fmtVolume(volume)}</span>
@@ -9261,6 +9302,7 @@
             </div>
           </div>
           ${volumeNote ? `<p class="hqp-row-hint is-left">${escapeProfileHtml(volumeNote)}</p>` : ''}
+          <p class="hqp-row-hint is-left is-limit" data-hqp-limited${limitedText ? '' : ' hidden'}>${escapeHtml(limitedText)}</p>
           ${processSpeed > 0 ? `
           <div class="hqp-row" data-hqp-dsp>
             <span class="hqp-row-label">DSP</span>
@@ -9343,30 +9385,13 @@
         });
       });
 
-      // Volume is tap-tap-tap by design (±1 dB per tap); the chain keeps
-      // the nudges in order, it does not swallow them. A step HQPlayer did
-      // not take (its volume fixed since the screen was drawn, its own
-      // refusal) leaves its reason under the row, and the reload repaints
-      // what HQPlayer holds.
       body.querySelectorAll('[data-vol]').forEach(btn => {
-        btn.addEventListener('click', () => {
-          const delta = parseFloat(btn.dataset.vol);
-          serialized('hqp.config', async () => {
-            try {
-              const r = await fetch('/api/hqplayer/volume', {
-                method: 'POST',
-                headers: {'Content-Type': 'application/json'},
-                body: JSON.stringify({delta}),
-              });
-              const out = r.ok ? null : await r.json().catch(() => ({}));
-              volumeRefusal = !out ? ''
-                : (typeof out.detail === 'string' ? out.detail : `HTTP ${r.status}`);
-            } catch (err) {
-              volumeRefusal = 'The node is not answering right now.';
-            }
-            await load();
-          });
-        });
+        btn.addEventListener('click', () => stepVolume(parseFloat(btn.dataset.vol)));
+      });
+      const meterChip = body.querySelector('[data-action="open-meter"]');
+      if (meterChip) meterChip.addEventListener('click', (e) => {
+        if (e.detail > 1) return;      // the second click of a double-click
+        openPeakMeter({ getState: () => lastState, stepVolume });
       });
 
       const connEl = body.querySelector('[data-action="pick-output"]');
@@ -9568,6 +9593,323 @@
     sheet.addEventListener('click', e => { if (e.target === sheet) close(); });
     search.addEventListener('input', paint);
     paint();
+  }
+
+  /* ---- Peak meter (HQPlayer screen, the Meter chip on the Volume row) ----
+     The true peak per channel at HQPlayer's volume and adaptive gain, BEFORE
+     its limiter — rebuilt by the node from the source HQPlayer streams on its
+     meter port (playback.hqp_meter), so an over reads in dB where HQPlayer's
+     own levels stop at 0.00: a reading every 160 ms, on a classic VU face —
+     deflection proportional to amplitude, −20…+3 dBTP, a third of the arc on
+     −3…+3 where gain is set. A peak needle: it rises at
+     once and falls 20 dB in 1.5 s; the CSS transition fills the 160 ms
+     between readings, there is no animation loop. A gain tool, so its own
+     ±1 dB sits under the needles. The node opens HQPlayer's meter port only
+     while this sheet is up and the page visible (player.js meterWanted).
+     Reference: docs/design/reference/hqp-meter/. */
+  const SVG_METER = '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" aria-hidden="true"><path d="M4 17a8 8 0 0116 0"/><path d="M12 17l4-6"/></svg>';
+  // The pivot sits below the window; the hood hides the needle's root.
+  const PM = { PX: 160, PY: 188, R: 138, A0: -50, A1: 50, TOP: 3 };
+  const PM_MAJORS = [-20, -10, -7, -5, -3, -2, -1, 0, 1, 2, 3];
+  const PM_MINORS = [-15, -12, -8, -6, -4, -2.5, -1.5, -0.5, 0.5, 1.5, 2.5];
+  const PM_FALL_DB_PER_S = 20 / 1.5;
+
+  function pmAngle(db) {
+    const f = Number.isFinite(db) ? Math.min(1, Math.pow(10, (db - PM.TOP) / 20)) : 0;
+    return PM.A0 + (PM.A1 - PM.A0) * f;
+  }
+  function pmPoint(db, r) {
+    const t = pmAngle(db) * Math.PI / 180;
+    return [(PM.PX + r * Math.sin(t)).toFixed(2), (PM.PY - r * Math.cos(t)).toFixed(2)];
+  }
+  function pmArc(db0, db1, r) {
+    const [x0, y0] = pmPoint(db0, r), [x1, y1] = pmPoint(db1, r);
+    return `M${x0} ${y0} A${r} ${r} 0 0 1 ${x1} ${y1}`;
+  }
+  function pmTick(db, r0, r1, cls) {
+    const [x0, y0] = pmPoint(db, r0), [x1, y1] = pmPoint(db, r1);
+    return `<line x1="${x0}" y1="${y0}" x2="${x1}" y2="${y1}" class="${cls}"/>`;
+  }
+  function pmDb(v) {
+    if (!Number.isFinite(v)) return '—';
+    return (v > 0 ? '+' : v < 0 ? '−' : '') + Math.abs(v).toFixed(1);
+  }
+
+  function pmFace(label, sdm) {
+    let s = `<svg class="pm-face" viewBox="0 0 320 150" role="img" aria-label="${label === 'L' ? 'Left' : label === 'R' ? 'Right' : 'Mono'} channel">`
+      + '<rect x="0.5" y="0.5" width="319" height="149" rx="8" class="pm-win"/>'
+      + `<path d="${pmArc(-20, 0, PM.R)}" class="pm-base"/>`
+      + (sdm ? `<path d="${pmArc(-3, 0, PM.R + 2.5)}" class="pm-sdm"/>` : '')
+      + `<path d="${pmArc(0, 3, PM.R + 2.5)}" class="pm-red"/>`;
+    for (const db of PM_MAJORS) s += pmTick(db, PM.R, PM.R + 8, 'pm-tick' + (db > 0 ? ' is-over' : ''));
+    for (const db of PM_MINORS) s += pmTick(db, PM.R, PM.R + 4, 'pm-tick is-minor' + (db > 0 ? ' is-over' : ''));
+    for (const db of PM_MAJORS) {
+      const [x, y] = pmPoint(db, PM.R + 17);
+      const cls = 'pm-num' + (db > 0 ? ' is-over' : '') + (db === 0 ? ' is-zero' : '');
+      s += `<text x="${x}" y="${y}" class="${cls}" text-anchor="middle" dominant-baseline="central" font-size="10">${db === 0 ? '0' : pmDb(db).replace('.0', '')}</text>`;
+    }
+    return s
+      + `<text x="18" y="24" class="pm-ch" font-size="12">${label}</text>`
+      + '<text x="282" y="23.5" class="pm-over-t" text-anchor="end" font-size="8.5">OVER</text>'
+      + '<circle cx="292" cy="20.5" r="4.5" class="pm-lamp"/>'
+      + `<g class="pm-max" hidden><line x1="${PM.PX}" y1="${PM.PY - PM.R + 3}" x2="${PM.PX}" y2="${PM.PY - PM.R + 10}"/></g>`
+      + `<g class="pm-needle"><line x1="${PM.PX}" y1="${PM.PY - 56}" x2="${PM.PX}" y2="${PM.PY - PM.R - 6}"/></g>`
+      + `<circle cx="${PM.PX}" cy="${PM.PY}" r="54" class="pm-hood"/>`
+      + `<text x="${PM.PX}" y="146" class="pm-unit" text-anchor="middle" font-size="8.5">DBTP</text>`
+      + '</svg>';
+  }
+
+  function pmUnavailable(u) {
+    const port = u.port;
+    switch (u.reason) {
+      case 'refused': return `HQPlayer refused the meter connection on port ${port}.`;
+      case 'timeout': return `No answer from port ${port} on the HQPlayer computer. Allow it in that computer's firewall, next to ${port - 1}.`;
+      case 'protocol': return `Port ${port} does not answer as HQPlayer's meter.`;
+      case 'closed': return 'HQPlayer closed the meter connection.';
+      default: return `HQPlayer's meter cannot be reached: ${u.detail || 'no route'}.`;
+    }
+  }
+
+  function openPeakMeter({ getState, stepVolume }) {
+    const sheet = document.createElement('div');
+    sheet.className = 'hqp-sheet pm-sheet';
+    sheet.innerHTML = `
+      <div class="hqp-sheet-card">
+      <div class="hqp-sheet-bar">
+        <button class="icon-btn" type="button" data-action="close" aria-label="Close">
+          <svg width="22" height="22" viewBox="0 0 24 24" fill="none"
+               stroke="currentColor" stroke-width="1.8" stroke-linecap="round"
+               stroke-linejoin="round" aria-hidden="true">
+            <path d="M6 6l12 12M18 6L6 18"/>
+          </svg>
+        </button>
+        <h2 class="hqp-sheet-title">Peak meter</h2>
+        <span class="pm-state" data-pm-state>Connecting</span>
+      </div>
+      <div class="hqp-sheet-body">
+        <div class="pm-card">
+          <div class="pm-faces" data-pm-faces></div>
+          <div class="pm-banner" data-pm-banner hidden>
+            <span data-pm-banner-text></span>
+            <button class="pm-retry" type="button" data-action="retry" hidden>Retry</button>
+          </div>
+          <div class="pm-read">
+            <div class="pm-row">
+              <span class="pm-k">Max</span>
+              <span class="pm-vals" data-pm-max></span>
+              <button class="pm-reset" type="button" data-action="reset">Reset</button>
+            </div>
+            <div class="pm-row">
+              <span class="pm-k">Limited</span>
+              <span class="pm-vals"><span data-pm-limited>—</span></span>
+              <span class="pm-note">at this volume</span>
+            </div>
+          </div>
+          <p class="pm-advice" data-pm-advice hidden></p>
+        </div>
+        <div class="pm-card is-plain">
+          <div class="hqp-row">
+            <span class="hqp-row-label">Volume</span>
+            <div class="hqp-volume-ctrl">
+              <button class="hqp-vol-btn" type="button" data-vol="-1" aria-label="Volume -1 dB">−</button>
+              <span class="hqp-vol-value mono" data-pm-volume>—</span>
+              <button class="hqp-vol-btn" type="button" data-vol="+1" aria-label="Volume +1 dB">+</button>
+            </div>
+          </div>
+          <p class="hqp-row-hint is-left" data-pm-volume-note hidden></p>
+        </div>
+        <p class="pm-foot">True peak at HQPlayer's volume and adaptive gain, before its limiter. Above 0&nbsp;dBTP the limiter takes the over away at the output; Limited counts each time, from the last volume step.</p>
+      </div>
+      </div>
+    `;
+    document.body.appendChild(sheet);
+
+    const $ = sel => sheet.querySelector(sel);
+    // Per channel: where the needle stands and the highest peak since the
+    // sheet opened, the volume last changed or Reset.
+    let chans = [];
+    let faces = [];
+    let sdm = false;
+    let meter = { state: 'connecting' };
+    let status = window.currentStatus || {};
+    let volume = Number.isFinite(status.volume) ? status.volume : undefined;
+    let volumeNote = '';
+    // The gain the readings were made with (volume + the track's adaptive
+    // gain): a hold from before a change of it is history.
+    let gainSeen;
+
+    // The mode HQPlayer RUNS, off the live status — the selected one may be
+    // [source], and a mode changed in HQPlayer's own window shows here too.
+    function sdmNow() {
+      return /SDM|DSD/i.test(status.active_mode || '');
+    }
+
+    function build(n) {
+      sdm = sdmNow();
+      const labels = n === 1 ? ['M'] : ['L', 'R'];
+      $('[data-pm-faces]').innerHTML = labels.map(l => pmFace(l, sdm)).join('');
+      faces = Array.from(sheet.querySelectorAll('.pm-face'));
+      chans = Array.from({ length: n }, () => ({ at: performance.now(), display: -Infinity, max: -Infinity }));
+      paint();
+    }
+
+    function resetHold() {
+      chans.forEach(ch => { ch.max = -Infinity; });
+      paint();
+    }
+
+    function paint() {
+      const live = meter.state === 'open';
+      faces.forEach((svg, i) => {
+        const ch = chans[i];
+        svg.querySelector('.pm-needle').style.transform = `rotate(${pmAngle(ch.display)}deg)`;
+        const hold = svg.querySelector('.pm-max');
+        hold.toggleAttribute('hidden', !Number.isFinite(ch.max));
+        hold.style.transform = `rotate(${pmAngle(ch.max)}deg)`;
+        hold.classList.toggle('is-over', ch.max > 0);
+        svg.classList.toggle('is-over', ch.display > 0);
+        svg.classList.toggle('is-idle', !live);
+      });
+      const names = chans.length === 1 ? ['M'] : ['L', 'R'];
+      let max = names.map((name, i) => {
+        const v = chans[i].max;
+        return `<span${v > 0 ? ' class="is-over"' : ''}><i>${name}</i>${pmDb(v)}</span>`;
+      }).join('');
+      const worst = Math.max(-Infinity, ...chans.map(ch => ch.max));
+      if (chans.length > 2) {
+        max += `<span${worst > 0 ? ' class="is-over"' : ''}><i>all ${chans.length}</i>${pmDb(worst)}</span>`;
+      }
+      max += '<small>dBTP</small>';
+      const maxEl = $('[data-pm-max]');
+      if (maxEl.innerHTML !== max) maxEl.innerHTML = max;
+
+      const st = getState() || {};
+      let advice = '';
+      if (worst > 0) {
+        advice = st.volume_fixed
+          ? `Over by <span class="mono">${worst.toFixed(1)} dB</span>. HQPlayer holds its volume fixed; the −6 dB state of its fixed volume (HQPlayer's settings) leaves 3 dB more.`
+          : `Over by <span class="mono">${worst.toFixed(1)} dB</span>. Lower the volume by <span class="mono">${Math.ceil(worst)} dB</span>.`;
+      } else if (sdm && worst > -3) {
+        advice = 'SDM output: HQPlayer advises keeping <span class="mono is-sdm">3 dB</span> below full scale for the modulator.';
+      }
+      const adviceEl = $('[data-pm-advice]');
+      if (adviceEl.innerHTML !== advice) adviceEl.innerHTML = advice;
+      adviceEl.hidden = !advice;
+    }
+
+    function paintState() {
+      let label = 'Connecting', cls = '', text = '', retry = false;
+      if (meter.state === 'open') {
+        label = status.state === 'playing' ? 'Live' : status.state === 'paused' ? 'Paused' : 'Stopped';
+        if (status.state === 'playing') cls = 'is-live';
+        if (status.state !== 'playing' && status.state !== 'paused') {
+          text = 'HQPlayer is stopped. The needles move when it plays.';
+        }
+      } else if (meter.state === 'waiting') {
+        label = status.hold ? 'Benchmark' : 'Waiting';
+        text = status.hold ? 'A benchmark is running. The meter comes back when it ends.'
+                           : 'Waiting for HQPlayer.';
+      } else if (meter.state === 'unavailable') {
+        label = 'No meter';
+        cls = 'is-off';
+        text = pmUnavailable(meter);
+        retry = true;
+      }
+      const chip = $('[data-pm-state]');
+      chip.textContent = label;
+      chip.className = 'pm-state' + (cls ? ' ' + cls : '');
+      $('[data-pm-banner-text]').textContent = text;
+      $('[data-action="retry"]').hidden = !retry;
+      $('[data-pm-banner]').hidden = !text;
+    }
+
+    function paintVolume() {
+      const st = getState() || {};
+      const vr = st.volume_range;
+      const fixed = st.volume_fixed || '';
+      const held = !!(st.benchmark && st.benchmark.job && st.benchmark.job.running);
+      const v = Number.isFinite(volume) ? volume : Number((st.state || {}).volume);
+      $('[data-pm-volume]').textContent = Number.isFinite(v) ? fmtVolume(v) : '—';
+      const [down, up] = sheet.querySelectorAll('[data-vol]');
+      down.disabled = held || !!fixed || (!!vr && v <= vr.min);
+      up.disabled = held || !!fixed || (!!vr && v >= vr.max);
+      const note = fixed || volumeNote;
+      const noteEl = $('[data-pm-volume-note]');
+      noteEl.textContent = note;
+      noteEl.hidden = !note;
+    }
+
+    const onMeter = (e) => {
+      const d = e.detail || {};
+      if (d.state) {
+        // 'dropped' is player.js's to answer (it asks again); a state follows
+        if (d.state === 'dropped') return;
+        meter = d;
+        if (d.state !== 'open') chans.forEach(ch => { ch.display = -Infinity; });
+        paint();
+        paintState();
+        return;
+      }
+      const peaks = d.p || [];
+      if (peaks.length && peaks.length !== chans.length) build(peaks.length);
+      if (d.g !== gainSeen) {
+        if (gainSeen !== undefined) chans.forEach(ch => { ch.max = -Infinity; });
+        gainSeen = d.g;
+      }
+      const now = performance.now();
+      peaks.forEach((peak, i) => {
+        const ch = chans[i];
+        const p = peak == null ? -Infinity : peak;
+        ch.display = Math.max(p, ch.display - PM_FALL_DB_PER_S * (now - ch.at) / 1000);
+        if (ch.display < -60) ch.display = -Infinity;
+        ch.at = now;
+        if (p > ch.max) ch.max = p;
+      });
+      paint();
+    };
+
+    const onStatus = (e) => {
+      status = e.detail || {};
+      if (Number.isFinite(status.volume) && status.volume !== volume) {
+        volume = status.volume;
+        paintVolume();
+      }
+      const lim = $('[data-pm-limited]');
+      const n = status.limited;
+      const text = Number.isFinite(n) ? String(n) : '—';
+      if (lim.textContent !== text) lim.textContent = text;
+      lim.classList.toggle('is-over', n > 0);
+      if (sdmNow() !== sdm) build(chans.length);
+      paintState();
+    };
+
+    function close() {
+      window.meterWanted(false);
+      window.removeEventListener('sautium:meter', onMeter);
+      document.removeEventListener('np-update', onStatus);
+      window.removeEventListener('sautium:route', close);
+      sheet.remove();
+    }
+
+    $('[data-action="close"]').addEventListener('click', close);
+    // The sheet itself is only reachable as the tablet's scrim.
+    sheet.addEventListener('click', e => { if (e.target === sheet && e.detail <= 1) close(); });
+    $('[data-action="reset"]').addEventListener('click', resetHold);
+    $('[data-action="retry"]').addEventListener('click', () => window.meterRetry());
+    sheet.querySelectorAll('[data-vol]').forEach(btn => {
+      btn.addEventListener('click', async () => {
+        volumeNote = await stepVolume(parseFloat(btn.dataset.vol));
+        paintVolume();
+      });
+    });
+    window.addEventListener('sautium:meter', onMeter);
+    document.addEventListener('np-update', onStatus);
+    window.addEventListener('sautium:route', close);
+
+    build(2);
+    onStatus({ detail: status });
+    paintVolume();
+    window.meterWanted(true);
   }
 
   /* =====================================================================
@@ -14674,6 +15016,7 @@
       sheet.onStatus(d);
       updatePlayingHighlight();
       updateHqpDspReadout(d);
+      updateHqpLimited(d);
     });
     document.addEventListener('np-detail', e => {
       mp.setCover(e.detail);

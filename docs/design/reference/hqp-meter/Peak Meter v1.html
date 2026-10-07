@@ -1,0 +1,631 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Sautium Peak Meter</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Inter+Tight:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet">
+<style>
+  /* Layout: Sautium's reference canvas. One state per 360-px phone frame,
+     wrapping to a single column on a phone. One deliberate dark look: the
+     product has no light theme. Tokens are tokens.css values. */
+  :root {
+    color-scheme: dark;
+    --color-canvas:       #15110F;
+    --color-foundation:   #1B1714;
+    --color-surface:      #2A2420;
+    --color-surface-hi:   #342D28;
+    --color-surface-lo:   #221D1A;
+    --color-divider:      #3A322C;
+    --color-text:         #EDE2D4;
+    --color-text-muted:   #A69B8E;
+    --color-text-dim:     #6E665C;
+    --color-amber:        #E8B06F;
+    --color-blue:         #4A7FA7;
+    --color-blue-hover:   #5D91B8;
+    --color-blue-weak:    rgba(74, 127, 167, 0.14);
+    --color-negative:     #C1564E;
+    --font-sans: "Inter Tight", ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+    --font-mono: "JetBrains Mono", ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+    --dur-base: 200ms;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    background: radial-gradient(ellipse at 50% 12%, #221B17 0%, var(--color-canvas) 70%) no-repeat, var(--color-canvas);
+    color: var(--color-text);
+    font-family: var(--font-sans);
+    font-size: 15px;
+    line-height: 1.5;
+    -webkit-font-smoothing: antialiased;
+    padding-inline: 16px;
+    padding-block: 32px 48px;
+  }
+  button { font: inherit; color: inherit; }
+  button:focus-visible { outline: 2px solid var(--color-blue); outline-offset: 2px; }
+
+  .canvas { max-width: 1240px; margin: 0 auto; display: flex; flex-direction: column; gap: 32px; }
+  .canvas-head {
+    display: flex; flex-wrap: wrap; justify-content: space-between; align-items: end; gap: 8px 24px;
+    padding-bottom: 16px; border-bottom: 1px solid var(--color-divider);
+  }
+  .canvas-head h1 { margin: 0; font-size: 20px; font-weight: 600; letter-spacing: -0.01em; text-wrap: balance; }
+  .meta, .eyebrow {
+    font-family: var(--font-mono); font-size: 11px;
+    letter-spacing: 0.08em; text-transform: uppercase; color: var(--color-text-muted);
+  }
+  .spec {
+    display: grid; grid-template-columns: repeat(auto-fit, minmax(260px, 1fr)); gap: 16px 32px;
+    margin: 0; padding: 0; list-style: none;
+  }
+  .spec li { min-width: 0; font-size: 14px; color: var(--color-text-muted); max-width: 62ch; }
+  .spec b { display: block; color: var(--color-text); font-weight: 600; font-size: 13px; margin-bottom: 2px; }
+  .spec .num { font-family: var(--font-mono); color: var(--color-blue); font-size: 13px; }
+
+  .frames {
+    display: grid; grid-template-columns: repeat(auto-fit, minmax(min(360px, 100%), 1fr));
+    gap: 48px 32px; justify-items: center; align-items: start;
+  }
+  .frame-col { display: flex; flex-direction: column; align-items: center; gap: 14px; width: 100%; min-width: 0; }
+  .frame-title { text-align: center; }
+  .frame-title b {
+    display: block; font-family: var(--font-sans); font-size: 13px; font-weight: 600;
+    color: var(--color-text); letter-spacing: 0; text-transform: none; margin-bottom: 2px;
+  }
+
+  /* ---- phone frame (as in the bundle) ---- */
+  .phone {
+    width: min(360px, 100%);
+    background: var(--color-foundation);
+    border-radius: 44px; padding: 6px; position: relative;
+    box-shadow: 0 4px 2px 0 rgba(14,10,8,.30), 0 20px 48px -12px rgba(14,10,8,.7);
+    outline: 1px solid rgba(237,226,212,.04);
+  }
+  .screen {
+    background: var(--color-foundation); border-radius: 38px; overflow: hidden;
+    display: flex; flex-direction: column; min-height: 640px;
+  }
+  .safe-top { height: 40px; flex-shrink: 0; position: relative; }
+  .island { position: absolute; top: 10px; left: 50%; transform: translateX(-50%); width: 104px; height: 26px; background: #0A0807; border-radius: 18px; }
+  .safe-bottom { height: 30px; display: grid; place-items: center; flex-shrink: 0; margin-top: auto; }
+  .home-ind { width: 124px; height: 5px; background: var(--color-text); opacity: .85; border-radius: 3px; }
+
+  /* ---- HQPlayer screen (style.css .hqp-*) ---- */
+  .hqp-head {
+    height: 56px; padding: 0 4px; display: grid; grid-template-columns: 44px 1fr 44px; align-items: center;
+    border-bottom: 1px solid var(--color-divider);
+  }
+  .icon-btn { width: 44px; height: 44px; background: transparent; border: 0; display: grid; place-items: center; color: var(--color-text); cursor: pointer; }
+  .hqp-title { margin: 0; font-size: 17px; font-weight: 600; text-align: center; }
+  .hqp-body { padding: 8px 0 24px; }
+  .hqp-section { margin: 0 16px 16px; background: var(--color-surface); border-radius: 10px; overflow: hidden; }
+  .hqp-section-label {
+    padding: 16px 16px 6px; font-family: var(--font-mono); font-size: 10.5px; letter-spacing: 0.14em;
+    text-transform: uppercase; color: var(--color-text-muted);
+  }
+  .hqp-row {
+    display: grid; grid-template-columns: 1fr auto; align-items: center; gap: 12px;
+    padding: 12px 14px; border-top: 1px solid var(--color-divider);
+  }
+  .hqp-row:first-of-type { border-top: 0; }
+  .hqp-row-label { font-size: 13px; color: var(--color-text-muted); display: inline-flex; align-items: center; gap: 10px; }
+  .hqp-row-value { font-size: 14px; text-align: right; }
+  .mono { font-family: var(--font-mono); color: var(--color-blue); font-variant-numeric: tabular-nums; }
+  .hqp-row-hint {
+    margin: -8px 0 0; padding: 0 14px 12px; font-size: 11px; line-height: 1.5;
+    color: var(--color-text-dim); text-align: right;
+  }
+  .hqp-row-hint.is-limit { color: var(--color-negative); }
+  .hqp-volume-ctrl { display: inline-flex; align-items: center; gap: 8px; }
+  .hqp-vol-btn {
+    width: 34px; height: 34px; border-radius: 50%; background: var(--color-surface-lo);
+    border: 1px solid var(--color-divider); font-size: 18px; font-weight: 600; line-height: 1;
+    display: grid; place-items: center; cursor: pointer;
+  }
+  .hqp-vol-value { font-family: var(--font-mono); color: var(--color-blue); font-size: 14px; min-width: 64px; text-align: center; font-variant-numeric: tabular-nums; }
+
+  /* the entry point: a chip beside the Volume label */
+  .meter-chip {
+    display: inline-flex; align-items: center; gap: 5px; height: 26px; padding: 0 9px 0 7px;
+    border-radius: 13px; border: 1px solid var(--color-divider); background: var(--color-surface-lo);
+    font-family: var(--font-mono); font-size: 10.5px; letter-spacing: 0.08em; text-transform: uppercase;
+    color: var(--color-text-muted); cursor: pointer;
+  }
+  .meter-chip svg { color: var(--color-blue); }
+
+  /* ---- meter sheet (style.css .hqp-sheet-*) ---- */
+  .hqp-sheet-bar {
+    display: grid; grid-template-columns: 44px 1fr auto; align-items: center; gap: 8px;
+    padding: 8px 14px 8px 10px; border-bottom: 1px solid var(--color-divider);
+  }
+  .hqp-sheet-title { margin: 0; font-size: 15px; font-weight: 600; }
+  .pm-state {
+    display: inline-flex; align-items: center; gap: 6px;
+    font-family: var(--font-mono); font-size: 10.5px; letter-spacing: 0.12em; text-transform: uppercase;
+    color: var(--color-text-dim);
+  }
+  .pm-state::before { content: ""; width: 6px; height: 6px; border-radius: 50%; background: currentColor; }
+  .pm-state.is-live { color: var(--color-blue); }
+  .pm-state.is-off { color: var(--color-negative); }
+  .pm-body { padding: 12px 0 8px; display: flex; flex-direction: column; gap: 14px; }
+  .pm-card { margin: 0 14px; background: var(--color-surface); border-radius: 10px; padding: 10px; display: flex; flex-direction: column; gap: 8px; }
+  .pm-card.is-plain { padding: 0; }
+
+  /* ---- the face ---- */
+  .face { display: block; width: 100%; height: auto; }
+  .face .f-win { fill: var(--color-surface-lo); stroke: var(--color-divider); }
+  .face .f-base { fill: none; stroke: var(--color-blue); stroke-width: 1.2; }
+  .face .f-red  { fill: none; stroke: var(--color-negative); stroke-width: 5; }
+  .face .f-sdm  { fill: none; stroke: var(--color-amber); stroke-width: 5; }
+  .face .f-tick { stroke: var(--color-blue); stroke-width: 1.2; }
+  .face .f-tick.is-minor { stroke-width: 1; opacity: .7; }
+  .face .f-tick.is-over { stroke: var(--color-negative); }
+  .face .f-num { font-family: var(--font-mono); font-size: 10px; fill: var(--color-blue); }
+  .face .f-num.is-zero { fill: var(--color-text); font-weight: 600; }
+  .face .f-num.is-over { fill: var(--color-negative); }
+  .face .f-ch { font-family: var(--font-mono); font-size: 12px; font-weight: 600; fill: var(--color-text-muted); }
+  .face .f-over-t { font-family: var(--font-mono); font-size: 8.5px; letter-spacing: .12em; fill: var(--color-text-dim); }
+  .face .f-lamp { fill: var(--color-surface); stroke: var(--color-divider); stroke-width: 1.2; }
+  .face.is-over .f-lamp { fill: var(--color-negative); stroke: var(--color-negative); }
+  .face.is-over .f-over-t { fill: var(--color-negative); }
+  .face .f-needle, .face .f-max { transform-box: view-box; transform-origin: 160px 188px; }
+  .face .f-needle { transition: transform var(--dur-base) linear; }
+  .face .f-needle line { stroke: var(--color-text); stroke-width: 1.6; stroke-linecap: round; }
+  .face .f-needle.is-r line { stroke: var(--color-blue-hover); }
+  .face .f-max line { stroke: var(--color-text-muted); stroke-width: 2; stroke-linecap: round; }
+  .face .f-max.is-over line { stroke: var(--color-negative); }
+  .face .f-hood { fill: var(--color-surface); stroke: var(--color-divider); }
+  .face .f-unit { font-family: var(--font-mono); font-size: 8.5px; letter-spacing: .14em; fill: var(--color-text-dim); }
+  .face .f-key { font-family: var(--font-mono); font-size: 9px; letter-spacing: .1em; fill: var(--color-text-muted); }
+  .face .f-key.is-r { fill: var(--color-blue-hover); }
+  .face.is-idle .f-needle line { stroke: var(--color-text-dim); }
+  @media (prefers-reduced-motion: reduce) { .face .f-needle { transition: none; } }
+
+  /* ---- readouts ---- */
+  .pm-read { display: flex; flex-direction: column; gap: 2px; padding: 4px 4px 0; }
+  .pm-row { display: grid; grid-template-columns: 64px 1fr auto; align-items: baseline; gap: 10px; min-height: 30px; }
+  .pm-k { font-family: var(--font-mono); font-size: 10.5px; letter-spacing: .12em; text-transform: uppercase; color: var(--color-text-muted); }
+  .pm-vals { display: flex; gap: 14px; font-family: var(--font-mono); font-size: 15px; color: var(--color-blue); font-variant-numeric: tabular-nums; }
+  .pm-vals i { font-style: normal; font-size: 10.5px; color: var(--color-text-dim); margin-right: 4px; }
+  .pm-vals .is-over { color: var(--color-negative); }
+  .pm-vals small { font-size: 10.5px; color: var(--color-text-dim); align-self: center; }
+  .pm-reset {
+    height: 28px; padding: 0 10px; border-radius: 14px; border: 1px solid var(--color-divider);
+    background: var(--color-surface-lo); font-size: 12px; color: var(--color-text-muted); cursor: pointer;
+  }
+  .pm-note { font-size: 11px; color: var(--color-text-dim); }
+  .pm-advice { margin: 2px 4px 2px; font-size: 13px; line-height: 1.45; color: var(--color-text); }
+  .pm-advice .mono { color: var(--color-negative); }
+  .pm-foot { margin: 0 18px; font-size: 11px; line-height: 1.5; color: var(--color-text-dim); max-width: 60ch; }
+  .pm-banner {
+    margin: 0 4px; padding: 10px 12px; border-radius: 8px; background: var(--color-surface-lo);
+    font-size: 13px; line-height: 1.45; color: var(--color-text-muted);
+  }
+
+  /* ---- demo controls (outside the phone, not part of the design) ---- */
+  .demo { display: flex; flex-wrap: wrap; justify-content: center; gap: 8px; }
+  .demo button {
+    height: 32px; padding: 0 12px; border-radius: 16px; border: 1px solid var(--color-divider);
+    background: var(--color-surface); font-size: 12px; color: var(--color-text-muted); cursor: pointer;
+  }
+  .demo button[aria-pressed="true"] { border-color: var(--color-blue); color: var(--color-text); background: var(--color-blue-weak); }
+
+  .states { margin: 0; padding: 0; list-style: none; display: grid; gap: 8px; }
+  .states li { display: grid; grid-template-columns: 120px 1fr; gap: 12px; font-size: 14px; color: var(--color-text-muted); }
+  .states code { font-family: var(--font-mono); font-size: 12px; color: var(--color-blue); }
+  @media (max-width: 520px) { .states li { grid-template-columns: 1fr; gap: 0; } }
+</style>
+</head>
+<body>
+<main class="canvas">
+  <header class="canvas-head">
+    <div>
+      <div class="eyebrow">Sautium · HQPlayer screen</div>
+      <h1>Peak meter for gain staging</h1>
+    </div>
+    <div class="meta">Reference v1 · 2026-10-07</div>
+  </header>
+
+  <ul class="spec">
+    <li><b>What the needle shows</b>The true peak per channel at HQPlayer's volume and adaptive gain, before its limiter. Sautium rebuilds it from the source HQPlayer streams on its meter port, <span class="num">6.25</span> readings a second, in step with what plays.</li>
+    <li><b>Scale</b>Classic VU geometry: deflection follows amplitude, <span class="num">−20…+3 dBTP</span>. A third of the arc covers <span class="num">−3…+3</span>, where gain decisions happen. Terracotta above <span class="num">0</span>; amber <span class="num">−3…0</span> only while HQPlayer outputs SDM.</li>
+    <li><b>Ballistics</b>A peak meter. The needle rises at once and falls <span class="num">20 dB</span> in <span class="num">1.5 s</span>. The hold mark and Max keep the highest peak since the sheet opened; Reset or any volume change clears them.</li>
+    <li><b>Over and Limited</b>OVER lights while the needle is above <span class="num">0 dBTP</span>; past <span class="num">+3</span> the needle rests on its stop and Max gives the figure. Limited is HQPlayer's count of its own limiter acting at the output, from the last volume step.</li>
+    <li><b>Where it opens</b>The Meter chip on the Volume row. The connection to HQPlayer's meter port exists only while this sheet is open and the page is visible.</li>
+  </ul>
+
+  <div class="frames">
+
+    <!-- 1 · entry point -->
+    <div class="frame-col">
+      <div class="phone"><div class="screen">
+        <div class="safe-top"><div class="island"></div></div>
+        <header class="hqp-head">
+          <button class="icon-btn" type="button" aria-label="Back"><svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M15 18l-6-6 6-6"/></svg></button>
+          <h2 class="hqp-title">HQPlayer</h2>
+          <button class="icon-btn" type="button" aria-label="Refresh"><svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M21 12a9 9 0 11-3-6.7L21 8"/><path d="M21 3v5h-5"/></svg></button>
+        </header>
+        <div class="hqp-body">
+          <section class="hqp-section">
+            <div class="hqp-section-label">Connection</div>
+            <div class="hqp-row"><span class="hqp-row-label">Listening room</span><span class="hqp-row-value mono">Desktop 6.2.3</span></div>
+          </section>
+          <section class="hqp-section">
+            <div class="hqp-section-label">Output</div>
+            <div class="hqp-row"><span class="hqp-row-label">Mode</span><span class="hqp-row-value">PCM</span></div>
+            <div class="hqp-row"><span class="hqp-row-label">Rate</span><span class="hqp-row-value mono">96 kHz</span></div>
+            <div class="hqp-row">
+              <span class="hqp-row-label">Volume
+                <button class="meter-chip" type="button" aria-label="Open the peak meter"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" aria-hidden="true"><path d="M4 17a8 8 0 0116 0"/><path d="M12 17l4-6"/></svg>Meter</button>
+              </span>
+              <div class="hqp-volume-ctrl">
+                <button class="hqp-vol-btn" type="button" aria-label="Volume -1 dB">−</button>
+                <span class="hqp-vol-value">−3.0 dB</span>
+                <button class="hqp-vol-btn" type="button" aria-label="Volume +1 dB">+</button>
+              </div>
+            </div>
+            <p class="hqp-row-hint is-limit">HQPlayer's limiter acted 3 times at this volume: its output went past 0 dB.</p>
+            <div class="hqp-row"><span class="hqp-row-label">DSP</span><span class="hqp-row-value mono">10.5×</span></div>
+          </section>
+        </div>
+        <div class="safe-bottom"><div class="home-ind"></div></div>
+      </div></div>
+      <div class="frame-title eyebrow"><b>Entry point</b>Volume row · Meter chip · Limited hint</div>
+    </div>
+
+    <!-- 2 · normal -->
+    <div class="frame-col">
+      <div class="phone"><div class="screen">
+        <div class="safe-top"><div class="island"></div></div>
+        <div class="hqp-sheet-bar">
+          <button class="icon-btn" type="button" aria-label="Close"><svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" aria-hidden="true"><path d="M6 6l12 12M18 6L6 18"/></svg></button>
+          <h2 class="hqp-sheet-title">Peak meter</h2>
+          <span class="pm-state is-live">Live</span>
+        </div>
+        <div class="pm-body">
+          <div class="pm-card">
+            <svg class="face" viewBox="0 0 320 150" data-face="L" data-at="-4.2" data-max="-1.1" aria-label="Left channel, −4.2 dBTP"></svg>
+            <svg class="face" viewBox="0 0 320 150" data-face="R" data-at="-2.9" data-max="-0.4" aria-label="Right channel, −2.9 dBTP"></svg>
+            <div class="pm-read">
+              <div class="pm-row"><span class="pm-k">Max</span><span class="pm-vals"><span><i>L</i>−1.1</span><span><i>R</i>−0.4</span><small>dBTP</small></span><button class="pm-reset" type="button">Reset</button></div>
+              <div class="pm-row"><span class="pm-k">Limited</span><span class="pm-vals"><span>0</span></span><span class="pm-note">at this volume</span></div>
+            </div>
+          </div>
+          <div class="pm-card is-plain">
+            <div class="hqp-row"><span class="hqp-row-label">Volume</span>
+              <div class="hqp-volume-ctrl"><button class="hqp-vol-btn" type="button" aria-label="Volume -1 dB">−</button><span class="hqp-vol-value">−3.0 dB</span><button class="hqp-vol-btn" type="button" aria-label="Volume +1 dB">+</button></div>
+            </div>
+          </div>
+          <p class="pm-foot">True peak at HQPlayer's volume and adaptive gain, before its limiter. Above 0 dBTP the limiter takes the over away at the output; Limited counts each time, from the last volume step.</p>
+        </div>
+        <div class="safe-bottom"><div class="home-ind"></div></div>
+      </div></div>
+      <div class="frame-title eyebrow"><b>Normal</b>0.4 dB to spare on the loudest peak</div>
+    </div>
+
+    <!-- 3 · over -->
+    <div class="frame-col">
+      <div class="phone"><div class="screen">
+        <div class="safe-top"><div class="island"></div></div>
+        <div class="hqp-sheet-bar">
+          <button class="icon-btn" type="button" aria-label="Close"><svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" aria-hidden="true"><path d="M6 6l12 12M18 6L6 18"/></svg></button>
+          <h2 class="hqp-sheet-title">Peak meter</h2>
+          <span class="pm-state is-live">Live</span>
+        </div>
+        <div class="pm-body">
+          <div class="pm-card">
+            <svg class="face" viewBox="0 0 320 150" data-face="L" data-at="0.6" data-max="0.9" aria-label="Left channel, +0.6 dBTP"></svg>
+            <svg class="face" viewBox="0 0 320 150" data-face="R" data-at="1.8" data-max="1.8" aria-label="Right channel, +1.8 dBTP"></svg>
+            <div class="pm-read">
+              <div class="pm-row"><span class="pm-k">Max</span><span class="pm-vals"><span class="is-over"><i>L</i>+0.9</span><span class="is-over"><i>R</i>+1.8</span><small>dBTP</small></span><button class="pm-reset" type="button">Reset</button></div>
+              <div class="pm-row"><span class="pm-k">Limited</span><span class="pm-vals"><span class="is-over">3</span></span><span class="pm-note">at this volume</span></div>
+            </div>
+            <p class="pm-advice">Over by <span class="mono">1.8 dB</span>. Lower the volume by <span class="mono">2 dB</span>.</p>
+          </div>
+          <div class="pm-card is-plain">
+            <div class="hqp-row"><span class="hqp-row-label">Volume</span>
+              <div class="hqp-volume-ctrl"><button class="hqp-vol-btn" type="button" aria-label="Volume -1 dB">−</button><span class="hqp-vol-value">0.0 dB</span><button class="hqp-vol-btn" type="button" aria-label="Volume +1 dB">+</button></div>
+            </div>
+          </div>
+          <p class="pm-foot">True peak at HQPlayer's volume and adaptive gain, before its limiter. Above 0 dBTP the limiter takes the over away at the output; Limited counts each time, from the last volume step.</p>
+        </div>
+        <div class="safe-bottom"><div class="home-ind"></div></div>
+      </div></div>
+      <div class="frame-title eyebrow"><b>Over</b>OVER lit · Max and Limited in terracotta · advice</div>
+    </div>
+
+    <!-- 4 · live demo -->
+    <div class="frame-col">
+      <div class="phone"><div class="screen">
+        <div class="safe-top"><div class="island"></div></div>
+        <div class="hqp-sheet-bar">
+          <button class="icon-btn" type="button" aria-label="Close"><svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" aria-hidden="true"><path d="M6 6l12 12M18 6L6 18"/></svg></button>
+          <h2 class="hqp-sheet-title">Peak meter</h2>
+          <span class="pm-state is-live" id="demoState">Live</span>
+        </div>
+        <div class="pm-body">
+          <div class="pm-card">
+            <svg class="face" viewBox="0 0 320 150" data-face="L" id="demoL" aria-label="Left channel"></svg>
+            <svg class="face" viewBox="0 0 320 150" data-face="R" id="demoR" aria-label="Right channel"></svg>
+            <div class="pm-read">
+              <div class="pm-row"><span class="pm-k">Max</span><span class="pm-vals"><span id="demoMaxL"><i>L</i>—</span><span id="demoMaxR"><i>R</i>—</span><small>dBTP</small></span><button class="pm-reset" type="button" id="demoReset">Reset</button></div>
+              <div class="pm-row"><span class="pm-k">Limited</span><span class="pm-vals"><span id="demoLimited">0</span></span><span class="pm-note">simulated</span></div>
+            </div>
+            <p class="pm-advice" id="demoAdvice" hidden></p>
+          </div>
+          <div class="pm-card is-plain">
+            <div class="hqp-row"><span class="hqp-row-label">Volume</span>
+              <div class="hqp-volume-ctrl"><button class="hqp-vol-btn" type="button" id="demoVolDown" aria-label="Volume -1 dB">−</button><span class="hqp-vol-value" id="demoVol">−3.0 dB</span><button class="hqp-vol-btn" type="button" id="demoVolUp" aria-label="Volume +1 dB">+</button></div>
+            </div>
+          </div>
+          <p class="pm-foot">Simulated programme at 6.25 readings a second, through the ballistics the app will use.</p>
+        </div>
+        <div class="safe-bottom"><div class="home-ind"></div></div>
+      </div></div>
+      <div class="demo" role="group" aria-label="Demo controls">
+        <button type="button" id="demoRun" aria-pressed="true">Playing</button>
+        <button type="button" id="demoHot" aria-pressed="false">Hot master</button>
+        <button type="button" id="demoSdm" aria-pressed="false">SDM output</button>
+      </div>
+      <div class="frame-title eyebrow"><b>Live demo</b>Try the volume buttons and Hot master</div>
+    </div>
+
+    <!-- 5 · SDM -->
+    <div class="frame-col">
+      <div class="phone"><div class="screen">
+        <div class="safe-top"><div class="island"></div></div>
+        <div class="hqp-sheet-bar">
+          <button class="icon-btn" type="button" aria-label="Close"><svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" aria-hidden="true"><path d="M6 6l12 12M18 6L6 18"/></svg></button>
+          <h2 class="hqp-sheet-title">Peak meter</h2>
+          <span class="pm-state is-live">Live</span>
+        </div>
+        <div class="pm-body">
+          <div class="pm-card">
+            <svg class="face" viewBox="0 0 320 150" data-face="L" data-at="-1.6" data-max="-0.8" data-sdm="1" aria-label="Left channel, −1.6 dBTP, SDM output"></svg>
+            <svg class="face" viewBox="0 0 320 150" data-face="R" data-at="-2.3" data-max="-1.2" data-sdm="1" aria-label="Right channel, −2.3 dBTP, SDM output"></svg>
+            <div class="pm-read">
+              <div class="pm-row"><span class="pm-k">Max</span><span class="pm-vals"><span><i>L</i>−0.8</span><span><i>R</i>−1.2</span><small>dBTP</small></span><button class="pm-reset" type="button">Reset</button></div>
+              <div class="pm-row"><span class="pm-k">Limited</span><span class="pm-vals"><span>0</span></span><span class="pm-note">at this volume</span></div>
+            </div>
+            <p class="pm-advice">SDM output: HQPlayer advises keeping <span class="mono" style="color: var(--color-amber)">3 dB</span> below full scale for the modulator.</p>
+          </div>
+          <div class="pm-card is-plain">
+            <div class="hqp-row"><span class="hqp-row-label">Volume</span>
+              <div class="hqp-volume-ctrl"><button class="hqp-vol-btn" type="button" aria-label="Volume -1 dB">−</button><span class="hqp-vol-value">−2.0 dB</span><button class="hqp-vol-btn" type="button" aria-label="Volume +1 dB">+</button></div>
+            </div>
+          </div>
+        </div>
+        <div class="safe-bottom"><div class="home-ind"></div></div>
+      </div></div>
+      <div class="frame-title eyebrow"><b>SDM output</b>Amber arc from −3 to 0 dBTP</div>
+    </div>
+
+    <!-- 6 · not live -->
+    <div class="frame-col">
+      <div class="phone"><div class="screen">
+        <div class="safe-top"><div class="island"></div></div>
+        <div class="hqp-sheet-bar">
+          <button class="icon-btn" type="button" aria-label="Close"><svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" aria-hidden="true"><path d="M6 6l12 12M18 6L6 18"/></svg></button>
+          <h2 class="hqp-sheet-title">Peak meter</h2>
+          <span class="pm-state is-off">No meter</span>
+        </div>
+        <div class="pm-body">
+          <div class="pm-card">
+            <svg class="face is-idle" viewBox="0 0 320 150" data-face="L" aria-label="Left channel, no reading"></svg>
+            <svg class="face is-idle" viewBox="0 0 320 150" data-face="R" aria-label="Right channel, no reading"></svg>
+            <p class="pm-banner">No answer from port 4322 on the HQPlayer computer. Allow it in that computer's firewall, next to 4321.</p>
+          </div>
+          <div class="pm-card is-plain">
+            <div class="hqp-row"><span class="hqp-row-label">Volume</span>
+              <div class="hqp-volume-ctrl"><button class="hqp-vol-btn" type="button" aria-label="Volume -1 dB">−</button><span class="hqp-vol-value">−3.0 dB</span><button class="hqp-vol-btn" type="button" aria-label="Volume +1 dB">+</button></div>
+            </div>
+          </div>
+        </div>
+        <div class="safe-bottom"><div class="home-ind"></div></div>
+      </div></div>
+      <div class="frame-title eyebrow"><b>Not live</b>Needles at rest · the reason in place</div>
+    </div>
+
+    <!-- 7 · variant B -->
+    <div class="frame-col">
+      <div class="phone"><div class="screen">
+        <div class="safe-top"><div class="island"></div></div>
+        <div class="hqp-sheet-bar">
+          <button class="icon-btn" type="button" aria-label="Close"><svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" aria-hidden="true"><path d="M6 6l12 12M18 6L6 18"/></svg></button>
+          <h2 class="hqp-sheet-title">Peak meter</h2>
+          <span class="pm-state is-live">Live</span>
+        </div>
+        <div class="pm-body">
+          <div class="pm-card">
+            <svg class="face" viewBox="0 0 320 150" data-face="LR" data-at="-4.2" data-at-r="-2.9" data-max="-0.4" aria-label="Both channels on one face"></svg>
+            <div class="pm-read">
+              <div class="pm-row"><span class="pm-k">Max</span><span class="pm-vals"><span><i>L</i>−1.1</span><span><i>R</i>−0.4</span><small>dBTP</small></span><button class="pm-reset" type="button">Reset</button></div>
+              <div class="pm-row"><span class="pm-k">Limited</span><span class="pm-vals"><span>0</span></span><span class="pm-note">at this volume</span></div>
+            </div>
+          </div>
+          <div class="pm-card is-plain">
+            <div class="hqp-row"><span class="hqp-row-label">Volume</span>
+              <div class="hqp-volume-ctrl"><button class="hqp-vol-btn" type="button" aria-label="Volume -1 dB">−</button><span class="hqp-vol-value">−3.0 dB</span><button class="hqp-vol-btn" type="button" aria-label="Volume +1 dB">+</button></div>
+            </div>
+          </div>
+        </div>
+        <div class="safe-bottom"><div class="home-ind"></div></div>
+      </div></div>
+      <div class="frame-title eyebrow"><b>Variant B · one face</b>L in ivory, R in blue · for comparison</div>
+    </div>
+  </div>
+
+  <section>
+    <div class="eyebrow" style="margin-bottom: 10px">State line copy</div>
+    <ul class="states">
+      <li><code>open</code><span>Live. The needles follow HQPlayer.</span></li>
+      <li><code>open · stopped</code><span>HQPlayer is stopped. The needles move when it plays.</span></li>
+      <li><code>waiting</code><span>Waiting for HQPlayer.</span></li>
+      <li><code>held</code><span>A benchmark is running. The meter comes back when it ends.</span></li>
+      <li><code>unavailable</code><span>HQPlayer refused the meter connection on port 4322. · No answer from port 4322 on the HQPlayer computer. Allow it in that computer's firewall, next to 4321. · Port 4322 does not answer as HQPlayer's meter.</span></li>
+    </ul>
+  </section>
+</main>
+
+<script>
+(() => {
+  // Face geometry: pivot below the window, classic VU sweep, deflection
+  // proportional to amplitude so -3..+3 gets a third of the arc.
+  const G = { W: 320, H: 150, PX: 160, PY: 188, R: 138, A0: -50, A1: 50, TOP: 3 };
+  const MAJORS = [-20, -10, -7, -5, -3, -2, -1, 0, 1, 2, 3];
+  const MINORS = [-15, -12, -8, -6, -4, -2.5, -1.5, -0.5, 0.5, 1.5, 2.5];
+  const frac = db => (db == null || !isFinite(db)) ? 0 : Math.min(1, Math.pow(10, (db - G.TOP) / 20));
+  const ang = db => G.A0 + (G.A1 - G.A0) * frac(db);
+  const pt = (a, r) => {
+    const t = a * Math.PI / 180;
+    return [G.PX + r * Math.sin(t), G.PY - r * Math.cos(t)];
+  };
+  const f2 = v => v.toFixed(2);
+  const arc = (a0, a1, r) => {
+    const [x0, y0] = pt(a0, r), [x1, y1] = pt(a1, r);
+    return `M${f2(x0)} ${f2(y0)} A${r} ${r} 0 0 1 ${f2(x1)} ${f2(y1)}`;
+  };
+  const tick = (db, r0, r1, cls) => {
+    const a = ang(db), [x0, y0] = pt(a, r0), [x1, y1] = pt(a, r1);
+    return `<line x1="${f2(x0)}" y1="${f2(y0)}" x2="${f2(x1)}" y2="${f2(y1)}" class="${cls}"/>`;
+  };
+  const label = db => db === 0 ? '0' : (db > 0 ? '+' + db : '−' + Math.abs(db));
+
+  function faceMarkup(channel, sdm) {
+    let s = `<rect x="0.5" y="0.5" width="${G.W - 1}" height="${G.H - 1}" rx="8" class="f-win"/>`;
+    s += `<path d="${arc(ang(-20), ang(0), G.R)}" class="f-base"/>`;
+    if (sdm) s += `<path d="${arc(ang(-3), ang(0), G.R + 2.5)}" class="f-sdm"/>`;
+    s += `<path d="${arc(ang(0), ang(3), G.R + 2.5)}" class="f-red"/>`;
+    for (const db of MAJORS) s += tick(db, G.R, G.R + 8, 'f-tick' + (db > 0 ? ' is-over' : ''));
+    for (const db of MINORS) s += tick(db, G.R, G.R + 4, 'f-tick is-minor' + (db > 0 ? ' is-over' : ''));
+    for (const db of MAJORS) {
+      const [x, y] = pt(ang(db), G.R + 17);
+      const cls = 'f-num' + (db > 0 ? ' is-over' : '') + (db === 0 ? ' is-zero' : '');
+      s += `<text x="${f2(x)}" y="${f2(y)}" class="${cls}" text-anchor="middle" dominant-baseline="central">${label(db)}</text>`;
+    }
+    if (channel === 'LR') {
+      s += `<text x="18" y="22" class="f-key">L</text><text x="30" y="22" class="f-key is-r">R</text>`;
+    } else {
+      s += `<text x="18" y="24" class="f-ch">${channel}</text>`;
+    }
+    s += `<text x="282" y="23.5" class="f-over-t" text-anchor="end">OVER</text>`;
+    s += `<circle cx="292" cy="20.5" r="4.5" class="f-lamp"/>`;
+    s += `<g class="f-max"><line x1="${G.PX}" y1="${G.PY - G.R + 3}" x2="${G.PX}" y2="${G.PY - G.R + 10}"/></g>`;
+    s += `<g class="f-needle"><line x1="${G.PX}" y1="${G.PY - 56}" x2="${G.PX}" y2="${G.PY - G.R - 6}"/></g>`;
+    if (channel === 'LR') s += `<g class="f-needle is-r"><line x1="${G.PX}" y1="${G.PY - 56}" x2="${G.PX}" y2="${G.PY - G.R - 6}"/></g>`;
+    s += `<circle cx="${G.PX}" cy="${G.PY}" r="54" class="f-hood"/>`;
+    s += `<text x="${G.PX}" y="146" class="f-unit" text-anchor="middle">DBTP</text>`;
+    return s;
+  }
+
+  // One reading moves the needle; the CSS transition fills the 160 ms
+  // between readings. The hold mark sits inside the arc.
+  function paint(svg, { at, atR, max }) {
+    const needles = svg.querySelectorAll('.f-needle');
+    needles[0].style.transform = `rotate(${ang(at)}deg)`;
+    if (needles[1]) needles[1].style.transform = `rotate(${ang(atR)}deg)`;
+    const hold = svg.querySelector('.f-max');
+    hold.style.display = (max == null || !isFinite(max)) ? 'none' : '';
+    hold.style.transform = `rotate(${ang(max)}deg)`;
+    hold.classList.toggle('is-over', max > 0);
+    svg.classList.toggle('is-over', Math.max(at ?? -Infinity, atR ?? -Infinity) > 0);
+  }
+
+  const num = v => (v == null ? undefined : parseFloat(v));
+  for (const svg of document.querySelectorAll('svg[data-face]')) {
+    svg.innerHTML = faceMarkup(svg.dataset.face, svg.dataset.sdm === '1');
+    paint(svg, { at: num(svg.dataset.at), atR: num(svg.dataset.atR), max: num(svg.dataset.max) });
+  }
+
+  // ---- live demo: a simulated programme through the planned ballistics ----
+  const FALL_DB_PER_S = 20 / 1.5;
+  const demo = {
+    run: true, hot: false, sdm: false, volume: -3, limited: 0, t: 0,
+    ch: [{ el: document.getElementById('demoL'), display: -Infinity, max: -Infinity, at: performance.now() },
+         { el: document.getElementById('demoR'), display: -Infinity, max: -Infinity, at: performance.now() }],
+  };
+  const fmt = v => !isFinite(v) ? '—' : (v > 0 ? '+' : v < 0 ? '−' : '') + Math.abs(v).toFixed(1);
+  let seed = 7;
+  const rnd = () => (seed = (seed * 16807) % 2147483647) / 2147483647;
+
+  function programmePeak(t, c) {
+    const beat = (t % 0.5) < 0.17 ? 3.5 : 0;
+    const swell = 2.6 * Math.sin(t / 3.1) + 1.8 * Math.sin(t / 1.7 + c);
+    return -6.5 + swell + beat + (rnd() * 2.4 - 1.2) + (demo.hot ? 3.4 : 0);
+  }
+
+  function reading() {
+    const now = performance.now();
+    demo.t += 0.16;
+    let over = -Infinity;
+    demo.ch.forEach((ch, i) => {
+      const peak = demo.run ? programmePeak(demo.t, i) + demo.volume : -Infinity;
+      const dt = (now - ch.at) / 1000;
+      ch.at = now;
+      ch.display = Math.max(peak, ch.display - FALL_DB_PER_S * dt);
+      if (!isFinite(ch.display) || ch.display < -60) ch.display = -Infinity;
+      ch.max = Math.max(ch.max, peak);
+      if (peak > 0) over = Math.max(over, peak);
+      paint(ch.el, { at: ch.display, max: ch.max });
+    });
+    if (over > 0) demo.limited += 1;
+    document.getElementById('demoMaxL').innerHTML = `<i>L</i>${fmt(demo.ch[0].max)}`;
+    document.getElementById('demoMaxR').innerHTML = `<i>R</i>${fmt(demo.ch[1].max)}`;
+    document.getElementById('demoMaxL').classList.toggle('is-over', demo.ch[0].max > 0);
+    document.getElementById('demoMaxR').classList.toggle('is-over', demo.ch[1].max > 0);
+    const lim = document.getElementById('demoLimited');
+    lim.textContent = demo.limited;
+    lim.classList.toggle('is-over', demo.limited > 0);
+    const worst = Math.max(demo.ch[0].max, demo.ch[1].max);
+    const advice = document.getElementById('demoAdvice');
+    advice.hidden = !(worst > 0);
+    if (worst > 0) {
+      advice.innerHTML = `Over by <span class="mono">${worst.toFixed(1)} dB</span>. Lower the volume by <span class="mono">${Math.ceil(worst)} dB</span>.`;
+    }
+    const state = document.getElementById('demoState');
+    state.textContent = demo.run ? 'Live' : 'Stopped';
+    state.className = 'pm-state' + (demo.run ? ' is-live' : '');
+  }
+
+  function resetHold() {
+    demo.ch.forEach(ch => { ch.max = -Infinity; });
+    demo.limited = 0;
+  }
+
+  function setVolume(v) {
+    demo.volume = Math.max(-20, Math.min(0, v));
+    document.getElementById('demoVol').textContent = fmt(demo.volume) + ' dB';
+    resetHold();
+  }
+
+  function rebuildFaces() {
+    demo.ch.forEach(ch => {
+      ch.el.innerHTML = faceMarkup(ch.el.dataset.face, demo.sdm);
+      paint(ch.el, { at: ch.display, max: ch.max });
+    });
+  }
+
+  const toggle = (id, key, after) => {
+    const btn = document.getElementById(id);
+    btn.addEventListener('click', () => {
+      demo[key] = !demo[key];
+      btn.setAttribute('aria-pressed', String(demo[key]));
+      if (after) after();
+    });
+  };
+  toggle('demoRun', 'run');
+  toggle('demoHot', 'hot', resetHold);
+  toggle('demoSdm', 'sdm', rebuildFaces);
+  document.getElementById('demoVolDown').addEventListener('click', () => setVolume(demo.volume - 1));
+  document.getElementById('demoVolUp').addEventListener('click', () => setVolume(demo.volume + 1));
+  document.getElementById('demoReset').addEventListener('click', resetHold);
+
+  rebuildFaces();
+  reading();
+  setInterval(reading, 160);
+})();
+</script>
+</body>
+</html>

@@ -64,6 +64,10 @@ class FakeHqp:
         # names the entry being opened — Desktop 6.2.3's first tick after a
         # Play from stopped.
         self.opening = 0
+        # HQPlayer's limiter count (<Status clips>) and the adaptive gain it
+        # applies to the track (<metadata gain>); None: not reported.
+        self.clips = None
+        self.track_gain = None
         self.mute = False
         self._down = False
         # Until when it answers nothing, on any connection — busy building a
@@ -141,14 +145,17 @@ class FakeHqp:
                 uri = (f' uri="{self._uri_out(self.playlist[self.track - 1])}"'
                        if 1 <= self.track <= len(self.playlist) else "")
                 track, length = (0, 0) if opening else (self.track, 300)
+                clips = f' clips="{self.clips}"' if self.clips is not None else ""
                 return (f'<Status state="{self.state}" track="{track}" '
-                        f'position="{self.position}" length="{length}" volume="-3" '
+                        f'position="{self.position}" length="{length}" volume="-3"{clips} '
                         f'tracks_total="{len(self.playlist)}" process_speed="1.6" '
                         f'input_fill="0.9" output_fill="0.9" active_mode="PCM" '
                         f'active_filter="poly-sinc-gauss-long" active_shaper="none" '
                         f'active_rate="705600">'
                         f'<metadata artist="Fake artist" album="Fake album" '
-                        f'song="Fake song" genre=""{uri}/></Status>')
+                        f'song="Fake song" genre=""{uri}'
+                        + (f' gain="{self.track_gain}"' if self.track_gain is not None else '')
+                        + '/></Status>')
             if cmd == "GetInfo":
                 return ('<GetInfo name="fake" product="Signalyst HQPlayer Fake" '
                         'version="6" platform="Linux" engine="6.2.3"/>')
@@ -586,6 +593,46 @@ def test_a_listen_started_on_hqplayers_opening_tick_knows_the_tracks_length(fake
         assert tracker._play_session.track_length == 300
     finally:
         b.shutdown()
+
+
+def test_hqplayers_limiter_count_reaches_the_status(fake, listens):
+    mgr = PlaybackManager()
+    mgr.queue.replace([_item("E:/Music/A/01.flac", 1)])
+    b = _attach(mgr)
+    try:
+        with fake._lock:
+            fake.state, fake.track = int(PlaybackState.PLAYING), 1
+        assert _wait(lambda: mgr._latest_status.get("state") == "playing")
+        assert "limited" not in mgr._latest_status          # a build that does not report it
+        assert mgr._latest_status["active_mode"] == "PCM"   # the mode it runs, for the meter
+        with fake._lock:
+            fake.clips = 3
+        assert _wait(lambda: mgr._latest_status.get("limited") == 3)
+    finally:
+        b.shutdown()
+
+
+def test_the_meter_lives_at_the_control_port_plus_one_while_attached(fake):
+    from playback.hqp_meter import meter
+    mgr = PlaybackManager()
+    b = _attach(mgr)
+    try:
+        assert meter._target == ("127.0.0.1", fake.port + 1)
+        # what HQPlayer applies ahead of its limiter, from every status tick
+        assert _wait(lambda: meter._gain_db == -3.0)
+        with fake._lock:
+            fake.track_gain = -9.68
+        assert _wait(lambda: meter._gain_db == pytest.approx(-12.68))
+    finally:
+        b.shutdown()
+    assert meter._target is None
+    # a late shutdown of a replaced backend leaves the newer attach standing
+    newer = _attach(mgr)
+    try:
+        b.shutdown()
+        assert meter._target == ("127.0.0.1", fake.port + 1)
+    finally:
+        newer.shutdown()
 
 
 def test_the_item_a_status_names_keeps_its_slot_through_a_commit(fake, listens):

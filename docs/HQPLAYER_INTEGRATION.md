@@ -139,8 +139,19 @@ no internet access ("not authenticated and no internet access").
     opens itself has no input buffer; `tracks_total` - the playlist's
     length, `active_mode` / `active_filter` / `active_shaper` / `active_rate` -
     what the engine runs right now, by name (read since 2026-10-02 for the
-    playback trace; `<Status>` carries more still: `track_serial`,
-    `transport_serial`, `active_bits`, `clips`, `queued`, `output_delay`)
+    playback trace; `active_mode` rides the player status since 2026-10-07,
+    for the peak meter's SDM arc; `<Status>` carries more still: `track_serial`,
+    `transport_serial`, `active_bits`, `queued`, `output_delay`)
+  - `limited` - HQPlayer's "Limited" counter (`<Status clips>`): how often
+    its soft-knee limiter acted because the OUTPUT would have passed 0 dB
+    (manual 6 §2.5: the threshold depends on the filter and the oversampling
+    ratio). HQPlayer starts it again at every volume change (Desktop 6.2.3,
+    2026-10-07), so it speaks of the volume set now. Read since 2026-10-07
+    and carried on the player status as `limited`; `None` when HQPlayer does
+    not report it
+  - `track_gain` - the adaptive gain HQPlayer applies to the track
+    (`<metadata gain>`, dB): −9.68 on a loud master with adaptive gain on, 0
+    with it off; with the volume, what stands ahead of the limiter
 - `get_info()` - Get HQPlayer info
   - Product name
   - Version
@@ -208,10 +219,79 @@ Checked with netstat on the Desktop 6 host (2026-10-02):
 |---|---|
 | TCP 4321 | the control protocol |
 | UDP 4321 | discovery (`<discover/>`) |
-| TCP 4322 | the metering stream — the SDK's `clMeterInterface` connects to the control port + 1; binary frames (a header, then per channel a level block and transform data); HQPlayer logs "Meter connection … Metering started" |
+| TCP 4322 | the meter stream (below) — the control port + 1, HQPlayer's default (its `HQPLAYER_METERPORT` and `HQPLAYER_CTRLPORT` environment variables move them; Sautium follows the SDK's + 1); HQPlayer logs "Meter connection from …", "Metering started from …", "Metering ended from …" |
 | TCP 8019, UDP 1900 | the UPnP renderer and its SSDP |
 | TCP 8088 | Embedded: the web interface. Desktop 6 listens too but answers `404 Error` to `/` and `/log` |
 | TCP 4323 | nothing listens |
+
+### The meter stream (TCP 4322)
+From the SDK's `clMeterInterface`, measured on Desktop 6.2.3 against the FLAC
+being played (2026-10-07):
+
+- The client connects and sends nothing; HQPlayer streams frames. While it is
+  paused they carry silence (−386 dB); while it is stopped none come — the
+  connection stays open and quiet. Two clients can read at once.
+- A frame is a 32-byte header `<IIIiffff` (version 1, channels, xformLength =
+  1025, xformBits = the source's bits, bandwidth = the source's Nyquist,
+  xformTime = 1024 / source rate, xformGain = 2, reserved), then per channel
+  `peakMax, peak, rms, rmsMax` (float32, dB) followed by two xformLength
+  float32 blocks: the Re and Im of the block's spectrum, which the official
+  client draws its spectrogram from. Stereo: 16 464 bytes.
+- Frames are cut at the SOURCE rate (a hop of 1024 samples, 43 a second at
+  44.1 kHz) and sent in bursts every 160 ms; the levels change once per
+  burst. A reading covers ~160 ms, 6.25 a second, and arrives ~20 ms after
+  HQPlayer's reported position passes it — `output_delay` (1.05 s there) is
+  already accounted for. ~0.7 MB/s at 44.1 kHz, proportional to the source
+  rate.
+- The levels are measured after adaptive gain, volume AND the limiter, before
+  upsampling. Below 0 dB they are exact: RMS read −12.679 dB against the file
+  at an expected −12.690 (gain −9.68 + volume −3.01), and `peak` is a TRUE
+  peak — it matched a 4×-oversampled peak of the file within 0.023 dB (MAD),
+  the sample peak only within 0.18. Past 0 dB they say nothing of the over:
+  with adaptive gain off and the volume at 0 dB a master with +2.5 dBTP read
+  +0.00 while `limited` climbed 5, 6, 7, 8, 10. `rms` is 10·log10 of the mean
+  square (a sine reads −3.01 dB); `peakMax`/`rmsMax` hold since the
+  connection opened.
+- The spectra are the SOURCE itself, before gain, volume and limiter: each the
+  2048-point FFT of a periodic-Hann-windowed block, scaled 2/N, Im negated,
+  blocks a hop (1024) apart. An inverse FFT and an overlap-add (the window
+  halves sum to one) gave the FLAC back within 2·10⁻⁸ — float32's precision —
+  and its true peak to the thousandth.
+
+### The peak meter (HQPlayer screen)
+A gain-staging tool (decided 2026-10-07: "not a toy, a tool for setting
+gain"), so it lives by the volume control, not on Now Playing: the Meter chip
+on the Volume row opens a sheet with an analog true-peak needle per channel
+and its own ±1 dB, a step and its effect side by side.
+
+The needle reads what HQPlayer's own levels cannot past 0 dB: the node
+rebuilds the source from the stream's spectra, takes its true peak (4×
+oversampled) and adds the volume and the track's adaptive gain from the
+status poller — the peak before the limiter. Where nothing is limited it
+matches HQPlayer's own peak burst for burst (median −0.005 dB, MAD 0.013 dB);
+above 0 dBTP it is the over the limiter takes away. A gain stage outside
+that sum (convolution, an EQ) is not in the reading.
+
+The scale is a classic VU's geometry — deflection proportional to amplitude,
+−20…+3 dBTP, a third of the arc on −3…+3 — and the needle rises at once and
+falls 20 dB in 1.5 s. OVER lights while it is above 0 dBTP; Max holds the
+highest peak since the sheet opened (Reset, or a change of the gain each
+reading carries — a volume step, another track's adaptive gain — clears it);
+Limited is `limited`, counted from the last volume step. In SDM mode an amber arc marks −3…0 dBTP: the manual asks for 3 dB of
+room for the modulator (§2.15), and on Desktop 6.2.3 the EC modulators
+stalled HQPlayer from −0.5…0 dBFS (2026-10-07). The design reference is
+`docs/design/reference/hqp-meter/`.
+
+The socket to 4322 exists only while some page shows the sheet
+(`playback.hqp_meter`). A page states its wish with `PUT /api/hqplayer/meter
+{tab, on, seq}` for the `/api/events?tab=` stream it holds; the readings ride
+that stream as `meter` messages, and the wish dies with the stream. A
+reconnect of the same page takes the wish over, and every connection opens
+with `hello`, the page's cue to re-state it. One thread owns the socket and
+connects on edges only — an attach, a page's wish, the status poller finding
+HQPlayer again, one retry when a flowing stream drops — and reports a port
+that refuses or stays silent instead of retrying it. While the socket is open
+no DSP sample is written (`hqp_load`): metering costs HQPlayer work.
 
 ## Usage
 
@@ -928,7 +1008,8 @@ Ensure port 4321 is accessible:
 1. Open Windows Firewall settings
 2. Allow inbound TCP 4321 (control) and UDP 4321 (HQPlayer's discovery
    datagram — without it the picker's scan does not see this HQPlayer, and
-   it goes in through Add device by address)
+   it goes in through Add device by address), and TCP 4322 (the peak meter's
+   stream — without it the meter says the port gives no answer)
 3. Verify with: `nc -zv <windows-host-ip> 4321` from WSL
 
 ## Testing
@@ -947,7 +1028,6 @@ drawer.
 ### Not Implemented Yet
 - 🔒 **Authentication** - Advanced security features (ECDH + Ed25519)
 - 🔒 **Encrypted Commands** - ChaCha20Poly1305 encryption for file paths
-- 📊 **Metering** - Real-time audio metering (port 4322)
 - 💾 **Playlist Load/Save** - Saved playlists management
 - 🖼️ **Album Art** - Cover art retrieval
 - 🔊 **Output Device Selection** - Not available in API (configure in GUI)
@@ -955,7 +1035,6 @@ drawer.
 ### Workarounds
 - **Authentication**: Not required for basic playback control
 - **File paths**: Using unencrypted URIs works fine on local network
-- **Metering**: Can be added later if needed for visualizations
 
 ## Shipped since the first iteration
 
@@ -971,44 +1050,22 @@ drawer.
   (`hqp_library.sync`, 2026-09-27) — the library is not browsed as HQPlayer's
   tree, it joins the catalogue; HQPlayers found by the network scan and
   picked in the Output picker (2026-09-28).
+- ✅ The peak meter on the HQPlayer screen (2026-10-07, § "The peak meter").
 
 ## Future Enhancements
 
-### A VU meter, and where its signal comes from
+### Meters for the other outputs
 
-The idea: a level meter on Now Playing, drawn in the VU idiom the palette
-already names (`#4A7FA7`, "McIntosh VU blue"). HQPlayer's metering port
-(4322) is one source for it, not the source — a meter is a property of the
-ACTIVE output, so each backend answers the question differently:
-
-| Output | Signal source | Cost |
-|---|---|---|
-| HQPlayer | the metering port (4322) | a second socket + a new protocol to implement |
-| Local | the engine's own ring buffer — the PortAudio callback already holds `int32` frames and counts them; RMS/peak per block is an accumulator read from the other side | ~nothing, but it must not slow the RT callback |
-| Browser | `AnalyserNode` over a `MediaElementAudioSourceNode`; media is same-origin, so Web Audio is allowed and the http context is no obstacle | none — it runs entirely in the page |
-| DLNA | **none.** The renderer is across the network and GENA carries transport state, not signal | — |
-
-So DLNA shows no meter, by the same rule that hides a seek affordance on an
-output that cannot seek (POSITIONING §9): a control may not appear unless it
-reflects the audio actually playing. That is correct behaviour, not a gap.
-
-Before implementing the HQPlayer side, settle three things from the SDK
-(`hqp-control-*-src`, not vendored here): what the port emits (peak or RMS,
-per channel or summed), at what rate, and **whether it is measured before or
-after the DSP chain**. Post-DSP is the one worth the socket — it shows
-clipping introduced by upsampling and modulation, which nothing else in the
-UI can reveal; pre-DSP only restates what the file already says.
-
-Two implementation notes that apply to every source. The subscription lives
-**while the meter is on screen**, not while music plays — 20–60 updates per
-second pushed to a phone over Wi-Fi is real traffic, and Now Playing being
-collapsed is the signal to drop it. And VU ballistics are ours to apply:
-what a digital meter reports is peak or RMS in dBFS, so the ~300 ms
-integration, the separate fall time and any peak-hold are rendering, done
-once above whichever backend supplied the numbers.
-
-The cheap honest start is local + browser: the data is already in hand, no
-new protocol, and the meter works on the two most accessible outputs.
+The peak meter reads HQPlayer's own meter stream. The other outputs hold
+their signal elsewhere: the local engine in its ring buffer (the PortAudio
+callback already holds `int32` frames — a peak/RMS accumulator read from the
+other side, which must not slow the RT callback), the browser in the page
+(an `AnalyserNode` over a `MediaElementAudioSourceNode`; media is
+same-origin, so Web Audio is allowed). DLNA has no signal to meter — the
+renderer is across the network and GENA carries transport state — so it
+shows no meter, by the rule that hides seek on an output that cannot seek
+(POSITIONING §9). Ballistics stay rendering, applied once above whichever
+source supplies the numbers.
 
 ### Other
 

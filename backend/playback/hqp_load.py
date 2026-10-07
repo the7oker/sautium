@@ -88,18 +88,24 @@ class Sampler:
         self._written_at = 0.0
         self._dsp: Optional[tuple] = None
 
-    def due(self, status, *, ours: bool, engine: Optional[str], now: float) -> bool:
+    def due(self, status, *, ours: bool, engine: Optional[str], now: float,
+            metering: bool = False) -> bool:
         """HQPlayer plays a slot of ours (not another controller's playlist),
         reports its speed and the source it decodes; 15 s into the track and
         15 s past the last change of the setting or the source; then on a
-        change or once a minute. Never 5.17.0 with a DSD source."""
+        change or once a minute. Never 5.17.0 with a DSD source, and never
+        while our meter stream is open (playback.hqp_meter): metering costs
+        HQPlayer work, and the average it leaves is waited out like any
+        change of setting once the meter closes."""
         if status.state != PlaybackState.PLAYING or not ours:
             self._key = None    # a stop, a pause, a foreign playlist: the next play starts over
             return False
         key = (status.active_mode, status.active_rate, status.active_filter,
-               status.active_shaper, status.src_rate, status.src_channels)
+               status.active_shaper, status.src_rate, status.src_channels, metering)
         if key != self._key:
             self._key, self._since = key, now
+        if metering:
+            return False
         if not (status.process_speed and status.src_rate and status.src_channels
                 and status.active_mode and status.active_filter and status.active_rate):
             return False

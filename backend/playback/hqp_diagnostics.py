@@ -689,6 +689,7 @@ _NOISE = re.compile(
     r"|NAA output (?:network Audio IPv6 support disabled|discovery from |discovered 0 Network Audio Adapters)"
     r"|Initializing processing for matrix pipeline|Matrix pipeline \d+:"
     r"|invalid album gain|clNetEngine::Disco\(\)"
+    r"|Meter connection from |Metering (?:started|ended) from |Metering (?:enabled|disabled)"
     r"|^. \d{4}/\d\d/\d\d \d\d:\d\d:\d\d \t")
 
 # Causes HQPlayer's log names — every pattern was seen in the maintainer's

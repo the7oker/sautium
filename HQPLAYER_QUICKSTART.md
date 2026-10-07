@@ -139,7 +139,8 @@ docker exec sautium-backend nc -zv host.docker.internal 4321
    HQPlayer, DLNA, browser, local; one canonical queue mirrors into HQP)
 5. ✅ HQPlayer Embedded, the HQPlayer's own library as a catalogue source,
    HQPlayers found by the network scan — **DONE** (2026-09-27 / 28)
-6. ⏳ Real-time metering (port 4322) — not started
+6. ✅ Real-time metering (port 4322) — **DONE** (2026-10-07): the peak meter
+   on the HQPlayer screen, opened from the Volume row
 
 ## Full documentation
 

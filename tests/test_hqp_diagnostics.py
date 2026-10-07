@@ -374,6 +374,10 @@ NOISE = [
     "  2026/10/01 21:38:26 Matrix pipeline 83: 83 -> 83 0/1",
     "  2026/10/02 12:38:36 \tNEON64",
     '# 2026/09/01 10:00:00 clReadFLAC::ProcessTag(): invalid album gain "+4.42 dB"',
+    # every open and close of the peak meter (texts from the 6.2.3 binary)
+    "  2026/10/07 19:40:12 Meter connection from 192.168.1.88",
+    "  2026/10/07 19:40:12 Metering started from 192.168.1.88",
+    "  2026/10/07 19:41:30 Metering ended from 192.168.1.88",
 ]
 
 

@@ -267,9 +267,11 @@ architecture is **done**, and the legacy single-file prototype
   Queue sheet), the AI overlay, and most screen-scoped `fetch` calls.
 - **`player.js`** — transport/SSE primitives shared across screens:
   the `/api/events` subscription (one multiplexed stream per tab:
-  status, preview, research, chat, mb, lb, notice) plus `window.playerCmd`,
-  `window.playTrack`, `window.togglePlayPause`, `window.fetchPlaylist`,
-  `window.currentPlaylist`.
+  hello, status, preview, research, chat, mb, lb, notice, meter — `hello`
+  opens every connection, the page's cue to re-state what it asks of the
+  stream) plus `window.playerCmd`, `window.playTrack`,
+  `window.togglePlayPause`, `window.fetchPlaylist`, `window.currentPlaylist`,
+  `window.meterWanted` (the peak meter on the HQPlayer screen).
 
 Keep transport primitives in `player.js` and screen logic in
 `app-shell.js` — don't reintroduce a third catch-all module. The view

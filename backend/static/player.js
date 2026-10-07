@@ -23,6 +23,10 @@
  *     → `playlist_version` changes await `fetchPlaylist()` before any
  *       subscriber sees the np-update, so `currentPlaylist` is always
  *       consistent with the song HQPlayer reports.
+ *
+ *   * The peak meter's interest
+ *     → `window.meterWanted(bool)` from the HQPlayer screen; its readings
+ *       arrive as `sautium:meter` events on this page's stream.
  */
 
 (() => {
@@ -51,6 +55,40 @@
     window.dispatchEvent(new CustomEvent('sautium:link', { detail: { up } }));
   }
 
+  // One id per page load — never sessionStorage, which Duplicate Tab
+  // copies. The server binds what this page asks of its event stream (the
+  // peak meter) to the stream it holds; a reconnect of the page takes it
+  // over (playback.hqp_meter).
+  const PAGE_ID = (() => {
+    const bytes = new Uint8Array(12);
+    crypto.getRandomValues(bytes);
+    return Array.from(bytes, b => b.toString(16).padStart(2, '0')).join('');
+  })();
+
+  // The peak meter on the HQPlayer screen: HQPlayer's meter port stays open
+  // only while some page wants the meter AND shows it, so a hidden or
+  // leaving page says so at once, and a (re)connected stream re-states it
+  // on `hello`. Every wish carries this page's sequence number: two in
+  // flight apply in the order the page made them, whichever lands first.
+  // A wish that does not arrive (the link is down, the stream not open
+  // yet: 404) needs no retry here — the stream's next `hello` re-states it.
+  const meterInterest = {
+    wanted: false,
+    seq: 0,
+    send(on, keepalive) {
+      this.seq += 1;
+      fetch('/api/hqplayer/meter', {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ tab: PAGE_ID, on, seq: this.seq }),
+        keepalive: !!keepalive,
+      }).catch(err => console.debug('meter wish not delivered; the next hello re-states it:', err));
+    },
+    restate() {
+      if (this.wanted && document.visibilityState === 'visible') this.send(true);
+    },
+  };
+
   // Exposed for legacy reads in some code paths (the shell prefers the
   // detail on np-update; this is a fallback for synchronous callers).
   window.currentPlaylist = [];
@@ -71,11 +109,12 @@
   // origin at 6 connections for the whole browser; the previous three
   // parallel streams per tab meant two tabs starved every other fetch
   // into (pending) forever. Never open another standalone SSE here —
-  // new event kinds ride this channel.
+  // new event kinds ride this channel. Every connection opens with
+  // 'hello'; 'meter' carries the peak meter to the page that wants it.
   function connectEventsSSE() {
     if (_sseSource) _sseSource.abort();
     _sseSource = window.sseStream(
-      '/api/events',
+      '/api/events?tab=' + PAGE_ID,
       (event) => {
         let msg;
         try { msg = JSON.parse(event.data); }
@@ -107,6 +146,14 @@
           // data) — the shell diffs it into toasts and rows.
           window.dispatchEvent(new CustomEvent('sautium:notice',
             { detail: msg.d }));
+        } else if (msg.t === 'hello') {
+          // A (re)connected stream: what this page wants from it, again.
+          meterInterest.restate();
+        } else if (msg.t === 'meter') {
+          // 'dropped': this page stopped reading long enough to lose its
+          // interest (a frozen tab) — it asks anew if it still wants.
+          if (msg.d && msg.d.state === 'dropped') meterInterest.restate();
+          window.dispatchEvent(new CustomEvent('sautium:meter', { detail: msg.d }));
         }
       },
       () => {
@@ -869,6 +916,25 @@
   window.maybeClaimRenderer = maybeClaimRenderer;
   window.browserRenderer = browserRenderer;
   window.fetchPlaylist = fetchPlaylist;
+  // The HQPlayer screen opens and closes the peak meter; visibility is
+  // handled here, once.
+  window.meterWanted = (on) => {
+    on = !!on;
+    if (meterInterest.wanted === on) return;
+    meterInterest.wanted = on;
+    if (document.visibilityState === 'visible') meterInterest.send(on);
+  };
+  // Retry after the meter said its port is unavailable: the same wish,
+  // newer — the server takes it as a fresh reason to connect.
+  window.meterRetry = () => meterInterest.restate();
+  document.addEventListener('visibilitychange', () => {
+    if (!meterInterest.wanted) return;
+    // keepalive: a page being frozen still gets its 'off' out
+    meterInterest.send(document.visibilityState === 'visible', true);
+  });
+  window.addEventListener('pagehide', () => {
+    if (meterInterest.wanted) meterInterest.send(false, true);
+  });
 
   // --- Boot ------------------------------------------------------------
   function init() {

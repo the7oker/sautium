@@ -101,6 +101,19 @@ def test_sampler_waits_out_a_matrix_or_convolution_change():
     assert s.steady({**state, "matrix_profile": "Room"}, 95.0)
 
 
+def test_sampler_waits_while_the_meter_is_open_and_after_it_closes():
+    s = hqp_load.Sampler()
+    st = _status()
+    s.due(st, ours=True, engine="6.2.3", now=0.0)
+    # our meter stream is open: HQPlayer computes meters, no sample describes the setting alone
+    assert not s.due(st, ours=True, engine="6.2.3", now=20.0, metering=True)
+    assert not s.due(st, ours=True, engine="6.2.3", now=80.0, metering=True)
+    # closed: its work is still in HQPlayer's running average — waited out like a change
+    assert not s.due(st, ours=True, engine="6.2.3", now=81.0)
+    assert not s.due(st, ours=True, engine="6.2.3", now=95.0)
+    assert s.due(st, ours=True, engine="6.2.3", now=96.0)
+
+
 def test_sampler_skips_a_dsd_source_on_5_17_0():
     dsd = _status(src_rate=2822400, src_bits=1, src_sdm=True)
     s = hqp_load.Sampler()

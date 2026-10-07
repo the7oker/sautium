@@ -9,7 +9,8 @@ also how each picker entry runs on this HQPlayer (`headroom`,
 playback.hqp_load) and the benchmark's block (playback.hqp_benchmark).
 Writes go through /config (any subset of filter / mode / rate / shaper /
 matrix_profile), /favorites (add/remove a filter name from the favourites
-list), /benchmark and /cuda.
+list), /benchmark and /cuda; /meter records a page's peak-meter interest
+(its readings ride the page's /api/events stream).
 
 The screen reads state on mount only — no polling. If the user
 changes settings via HQP Desktop, a manual refresh in the UI picks
@@ -22,7 +23,7 @@ import time
 from typing import Any, Dict, List, Optional
 
 from fastapi import APIRouter, HTTPException
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 from config import settings
 
@@ -37,6 +38,7 @@ from playback.hqp_backend import (
     _reset_hqp,
     _reset_hqp_status,
 )
+from playback.hqp_meter import meter as hqp_meter
 from playback.manager import OutputHeld, manager
 
 router = APIRouter(prefix="/api/hqplayer", tags=["hqplayer"])
@@ -394,6 +396,25 @@ def nudge_volume(req: VolumeRequest) -> Dict[str, Any]:
     if not ok:
         raise HTTPException(status_code=503, detail=refusal)
     return {"volume": new_vol}
+
+
+# -- Peak meter ---------------------------------------------------------------
+
+class MeterInterest(BaseModel):
+    tab: str = Field(..., max_length=64, pattern=r"^[A-Za-z0-9_-]+$")
+    on: bool
+    seq: int = Field(..., ge=0)
+
+
+@router.put("/meter", status_code=204)
+def set_meter(req: MeterInterest) -> None:
+    """A page opens or closes the peak meter (playback.hqp_meter). The wish is
+    recorded whether HQPlayer is there or not: what the meter can do is said
+    on the page's event stream, as `meter` messages, never as an error here.
+    404 only for a page that holds no event stream — it asks again on the
+    stream's `hello`."""
+    if not hqp_meter.want(req.tab, req.on, req.seq):
+        raise HTTPException(status_code=404, detail="This page has no event stream open")
 
 
 # -- Benchmark ----------------------------------------------------------------

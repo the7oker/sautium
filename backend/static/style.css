@@ -4744,6 +4744,177 @@ a.am-kind { text-decoration: none; }
 }
 .hqp-sheet-star.is-on { color: var(--color-amber); }
 
+/* ---- Peak meter: the Meter chip on the Volume row and its sheet (the
+   filter picker's .hqp-sheet frame). Reference:
+   docs/design/reference/hqp-meter/. The faces are SVG: their geometry,
+   strokes and type live in the viewBox and scale with the card. ---- */
+.hqp-meter-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: calc(5 * var(--px));
+  height: calc(26 * var(--px));
+  margin-left: calc(10 * var(--px));
+  padding: 0 calc(9 * var(--px)) 0 calc(7 * var(--px));
+  vertical-align: middle;
+  border-radius: calc(13 * var(--px));
+  border: 1px solid var(--color-divider);
+  background: var(--color-surface-lo);
+  font-family: var(--font-mono);
+  font-size: calc(10.5 * var(--px));
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--color-text-muted);
+  cursor: pointer;
+}
+.hqp-meter-chip svg { flex: none; color: var(--color-blue); }
+.hqp-row-hint.is-limit { color: var(--color-negative); }
+
+.pm-sheet .hqp-sheet-bar {
+  grid-template-columns: calc(44 * var(--px)) 1fr auto;
+  padding-right: calc(14 * var(--px));
+}
+.pm-state {
+  display: inline-flex;
+  align-items: center;
+  gap: calc(6 * var(--px));
+  font-family: var(--font-mono);
+  font-size: calc(10.5 * var(--px));
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+  color: var(--color-text-dim);
+}
+.pm-state::before {
+  content: "";
+  width: calc(6 * var(--px));
+  height: calc(6 * var(--px));
+  border-radius: 50%;
+  background: currentColor;
+}
+.pm-state.is-live { color: var(--color-blue); }
+.pm-state.is-off { color: var(--color-negative); }
+.pm-sheet .hqp-sheet-body {
+  display: flex;
+  flex-direction: column;
+  gap: calc(14 * var(--px));
+  padding-top: calc(12 * var(--px));
+}
+.pm-card {
+  display: flex;
+  flex-direction: column;
+  gap: calc(8 * var(--px));
+  margin: 0 calc(14 * var(--px));
+  padding: calc(10 * var(--px));
+  background: var(--color-surface);
+  border-radius: calc(10 * var(--px));
+}
+.pm-card.is-plain { padding: 0; overflow: hidden; }
+.pm-faces { display: flex; flex-direction: column; gap: calc(8 * var(--px)); }
+
+.pm-face { display: block; width: 100%; height: auto; }
+.pm-face .pm-win { fill: var(--color-surface-lo); stroke: var(--color-divider); }
+.pm-face .pm-base { fill: none; stroke: var(--color-blue); stroke-width: 1.2; }
+.pm-face .pm-red { fill: none; stroke: var(--color-negative); stroke-width: 5; }
+.pm-face .pm-sdm { fill: none; stroke: var(--color-amber); stroke-width: 5; }
+.pm-face .pm-tick { stroke: var(--color-blue); stroke-width: 1.2; }
+.pm-face .pm-tick.is-minor { stroke-width: 1; opacity: 0.7; }
+.pm-face .pm-tick.is-over { stroke: var(--color-negative); }
+.pm-face .pm-num { font-family: var(--font-mono); fill: var(--color-blue); }
+.pm-face .pm-num.is-zero { fill: var(--color-text); font-weight: 600; }
+.pm-face .pm-num.is-over { fill: var(--color-negative); }
+.pm-face .pm-ch { font-family: var(--font-mono); font-weight: 600; fill: var(--color-text-muted); }
+.pm-face .pm-over-t { font-family: var(--font-mono); letter-spacing: 0.12em; fill: var(--color-text-dim); }
+.pm-face .pm-lamp { fill: var(--color-surface); stroke: var(--color-divider); stroke-width: 1.2; }
+.pm-face.is-over .pm-lamp { fill: var(--color-negative); stroke: var(--color-negative); }
+.pm-face.is-over .pm-over-t { fill: var(--color-negative); }
+/* Rotations about the pivot, in the viewBox's own units (not layout px). */
+.pm-face .pm-needle,
+.pm-face .pm-max { transform-box: view-box; transform-origin: 160px 188px; }
+.pm-face .pm-needle { transition: transform var(--dur-base) linear; }
+.pm-face .pm-needle line { stroke: var(--color-text); stroke-width: 1.6; stroke-linecap: round; }
+.pm-face .pm-max line { stroke: var(--color-text-muted); stroke-width: 2; stroke-linecap: round; }
+.pm-face .pm-max.is-over line { stroke: var(--color-negative); }
+.pm-face .pm-hood { fill: var(--color-surface); stroke: var(--color-divider); }
+.pm-face .pm-unit { font-family: var(--font-mono); letter-spacing: 0.14em; fill: var(--color-text-dim); }
+.pm-face.is-idle .pm-needle line { stroke: var(--color-text-dim); }
+@media (prefers-reduced-motion: reduce) {
+  .pm-face .pm-needle { transition: none; }
+}
+
+.pm-banner {
+  display: flex;
+  align-items: center;
+  gap: calc(10 * var(--px));
+  margin: 0 calc(4 * var(--px));
+  padding: calc(10 * var(--px)) calc(12 * var(--px));
+  border-radius: calc(8 * var(--px));
+  background: var(--color-surface-lo);
+  font-size: var(--text-label);
+  line-height: var(--lh-normal);
+  color: var(--color-text-muted);
+}
+.pm-banner > span { flex: 1; min-width: 0; }
+.pm-retry,
+.pm-reset {
+  flex: none;
+  height: calc(28 * var(--px));
+  padding: 0 calc(10 * var(--px));
+  border-radius: calc(14 * var(--px));
+  border: 1px solid var(--color-divider);
+  background: var(--color-surface-lo);
+  font-family: var(--font-sans);
+  font-size: calc(12 * var(--px));
+  color: var(--color-text-muted);
+  cursor: pointer;
+}
+.pm-retry { background: var(--color-surface); color: var(--color-text); }
+.pm-read { display: flex; flex-direction: column; gap: calc(2 * var(--px)); padding: calc(4 * var(--px)) calc(4 * var(--px)) 0; }
+.pm-row {
+  display: grid;
+  grid-template-columns: calc(64 * var(--px)) 1fr auto;
+  align-items: baseline;
+  gap: calc(10 * var(--px));
+  min-height: calc(30 * var(--px));
+}
+.pm-k {
+  font-family: var(--font-mono);
+  font-size: calc(10.5 * var(--px));
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+  color: var(--color-text-muted);
+}
+.pm-vals {
+  display: flex;
+  flex-wrap: wrap;
+  gap: calc(4 * var(--px)) calc(14 * var(--px));
+  font-family: var(--font-mono);
+  font-size: calc(15 * var(--px));
+  font-variant-numeric: tabular-nums;
+  color: var(--color-blue);
+}
+.pm-vals i {
+  margin-right: calc(4 * var(--px));
+  font-style: normal;
+  font-size: calc(10.5 * var(--px));
+  color: var(--color-text-dim);
+}
+.pm-vals small { align-self: center; font-size: calc(10.5 * var(--px)); color: var(--color-text-dim); }
+.pm-vals .is-over { color: var(--color-negative); }
+.pm-note { font-size: var(--text-caption); color: var(--color-text-dim); }
+.pm-advice {
+  margin: calc(2 * var(--px)) calc(4 * var(--px));
+  font-size: var(--text-label);
+  line-height: 1.45;
+  color: var(--color-text);
+}
+.pm-advice .mono { font-family: var(--font-mono); color: var(--color-negative); }
+.pm-advice .mono.is-sdm { color: var(--color-amber); }
+.pm-foot {
+  margin: 0 calc(18 * var(--px)) calc(8 * var(--px));
+  font-size: var(--text-caption);
+  line-height: var(--lh-normal);
+  color: var(--color-text-dim);
+}
+
 /* =====================================================================
  * Profile + Audio chain (#more/profile)
  * Mirrors docs/design/reference/claude-design-bundle/project/

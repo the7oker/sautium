@@ -48,6 +48,7 @@ from hqplayer_client import (HQPlayerClient, PlaybackState, file_path_to_uri,
 
 from playback import hqp_diagnostics as diag
 from playback import hqp_load
+from playback import hqp_meter
 from playback import queue as queue_mod
 from playback.base import Capabilities, PlaybackStatus, PlayerBackend, ReorderPlan
 from playback.queue import CanonicalQueue, QueueItem
@@ -761,6 +762,9 @@ class HqpBackend(PlayerBackend):
             # here is one it joins — never one nothing stops
             if self._detached:
                 return
+            # Where its meter stream lives: the control port + 1 (Signalyst's
+            # SDK). Opened only while a page has the meter open.
+            hqp_meter.meter.attach(settings.hqplayer_host, settings.hqplayer_port + 1)
             self._running = True
             self._thread = threading.Thread(target=self._poll_loop, daemon=True,
                                             name="hqp-status-poller")
@@ -825,6 +829,7 @@ class HqpBackend(PlayerBackend):
             self._thread.join(timeout=3)
         if _listener is self:
             _listener = None
+            hqp_meter.meter.detach()
         with self._att_lock:
             att, self._attempt = self._attempt, None
             if att is not None:
@@ -993,7 +998,8 @@ class HqpBackend(PlayerBackend):
                     playing = self._playing(status) if status is not None else None
                     if playing is not None and self._sampler.due(
                             status, ours=playing[1] is not None,
-                            engine=self._info.get("engine"), now=now):
+                            engine=self._info.get("engine"), now=now,
+                            metering=hqp_meter.meter.metering()):
                         dsp = hqp.get_state()
                         if dsp is None:
                             self._sampler.taken(now)    # lost with the read: the next waits its turn
@@ -1003,6 +1009,8 @@ class HqpBackend(PlayerBackend):
 
                 if reconnected:
                     self._note_info()
+                    if status is not None:
+                        hqp_meter.meter.hqplayer_back()
                 # Only when it answered: a trial-stopped Embedded takes the
                 # connection and closes it at once, tick after tick.
                 if status is not None and (reconnected or self._recover_due):
@@ -1020,6 +1028,7 @@ class HqpBackend(PlayerBackend):
                     self._register_failure()
                 else:
                     self._failures = 0
+                    hqp_meter.meter.set_gain(status.volume, status.track_gain)
                     if status.track_index >= 1:
                         self._last_track = status.track_index
                     if playing is not None:
@@ -1123,7 +1132,8 @@ class HqpBackend(PlayerBackend):
         that is not ours is reported as external playback (slot 0), so
         nothing is tracked against a queued track."""
         idx, item, foreign = playing
-        extra = {"genre": status.genre, "process_speed": status.process_speed}
+        extra = {"genre": status.genre, "process_speed": status.process_speed,
+                 "limited": status.limited, "active_mode": status.active_mode}
         if foreign:
             extra["source"] = "external"
         if item is None or not _http_served(item):

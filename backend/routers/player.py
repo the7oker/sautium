@@ -14,7 +14,7 @@ import time
 from concurrent.futures import ThreadPoolExecutor
 from typing import Optional
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, HTTPException, Query
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 
@@ -31,6 +31,7 @@ from playback import queue as queue_mod
 from playback import sessions
 from playback.base import ReorderPlan
 from playback.hqp_backend import _get_hqp, _hqp_lock
+from playback.hqp_meter import meter as hqp_meter
 from playback.manager import OutputHeld, active_hqp_endpoint, manager
 from playback.queue import resolved_artwork as _resolved_artwork
 from playback.queue import resolved_durations as _resolved_durations
@@ -993,7 +994,8 @@ events_router = APIRouter(prefix="/api", tags=["events"])
 
 
 @events_router.get("/events")
-async def events_stream():
+async def events_stream(tab: Optional[str] = Query(None, max_length=64,
+                                                   pattern=r"^[A-Za-z0-9_-]+$")):
     """The ONE SSE connection a web-UI tab holds.
 
     Multiplexes every push channel — player status, phantom-preview pings,
@@ -1004,7 +1006,13 @@ async def events_stream():
     event kinds ride this channel for free — never add another standalone
     SSE endpoint for the web UI. Preview/research events are payload-free
     pings by design: the open screen re-fetches its own snapshot, so
-    there is no split source to race."""
+    there is no split source to race.
+
+    `tab` names the page (one id per page load, player.js). The first message
+    of every connection is `hello`: the page re-states, on this stream, what
+    it wants from it — the peak meter's interest (PUT /api/hqplayer/meter)
+    is bound to the stream the page holds, and a reconnect of the same page
+    takes it over (playback.hqp_meter)."""
     import mb_discovery
     from routers.discovery import (lb_sse_register, lb_sse_unregister,
                                    mb_sse_register, mb_sse_unregister)
@@ -1022,6 +1030,7 @@ async def events_stream():
     lb_evt = asyncio.Event()
     chat_evt = asyncio.Event()
     notice_evt = asyncio.Event()
+    meter_evt = asyncio.Event()
 
     async def event_generator():
         last_version = -1
@@ -1032,7 +1041,9 @@ async def events_stream():
         lb_sse_register(lb_evt, loop)
         chat_sse_register(chat_evt, loop)
         notices_sse_register(notice_evt, loop)
+        meter = hqp_meter.register(tab, meter_evt, loop) if tab else None
         try:
+            yield 'data: {"t": "hello"}\n\n'
             yield ("data: "
                    + json.dumps({"t": "status", "d": manager.latest_status})
                    + "\n\n")
@@ -1055,11 +1066,19 @@ async def events_stream():
                     asyncio.create_task(notice_evt.wait()): "notice",
                     asyncio.create_task(preview_q.get()): "preview",
                 }
-                done, pending = await asyncio.wait(
-                    waiters, timeout=15.0,
-                    return_when=asyncio.FIRST_COMPLETED)
-                for task in pending:
-                    task.cancel()
+                if meter is not None:
+                    waiters[asyncio.create_task(meter_evt.wait())] = "meter"
+                try:
+                    done, pending = await asyncio.wait(
+                        waiters, timeout=15.0,
+                        return_when=asyncio.FIRST_COMPLETED)
+                finally:
+                    # Also when the page leaves during the wait (the stream is
+                    # cancelled here): a waiter left pending was destroyed
+                    # with the generator — "Task was destroyed but it is
+                    # pending!" on every page reload.
+                    for task in waiters:
+                        task.cancel()
                 if pending:
                     await asyncio.gather(*pending, return_exceptions=True)
                 if not done:
@@ -1100,6 +1119,13 @@ async def events_stream():
                     yield ("data: "
                            + json.dumps({"t": "notice", "d": _notices_state()})
                            + "\n\n")
+                if "meter" in kinds:
+                    # Every reading the page has not had yet, in order: the
+                    # meter offers them on this loop, so none slips between
+                    # the clear and the drain.
+                    meter_evt.clear()
+                    for msg in meter.drain():
+                        yield "data: " + json.dumps({"t": "meter", "d": msg}) + "\n\n"
         except asyncio.CancelledError:
             pass
         finally:
@@ -1110,6 +1136,8 @@ async def events_stream():
             chat_sse_unregister(chat_evt, loop)
             notices_sse_unregister(notice_evt, loop)
             preview_events.unsubscribe(preview_q)
+            if meter is not None:
+                hqp_meter.unregister(meter)
 
     return StreamingResponse(
         event_generator(),

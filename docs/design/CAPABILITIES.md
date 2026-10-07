@@ -146,11 +146,12 @@ Read-only:
 - [UI][AI] A refused DSP change or command quoted in HQPlayer's own words — `hqplayer_client.py: HQPlayerClient.refusal`, `last_errors`; `POST /api/hqplayer/config` (`failed`)
 - [auto] DSP samples: every listen leaves HQPlayer's processing speed for what it runs, keyed by build, setting and source, with a rollup per key — `playback/hqp_load.py: Sampler`, `write`
 - [UI] How each filter, modulator and rate runs on this HQPlayer, as a mark in its picker (ok / tight / too slow, the speed, never a guess) — `GET /api/hqplayer/state?dsp=1` (`headroom`); `playback/hqp_load.py: headroom`
+- [UI] The peak meter for setting gain: the true peak per channel at HQPlayer's volume and adaptive gain, before its limiter — rebuilt by the node from the source HQPlayer streams on its meter port — on an analog needle in a sheet opened from the Volume row of the HQPlayer screen, with its own ±1 dB, OVER, Max and HQPlayer's Limited count; HQPlayer's meter port is open only while a page shows the sheet — `playback/hqp_meter.py`; `PUT /api/hqplayer/meter`; `meter` messages on `/api/events`; `limited` on the player status
 
 Not implemented — searched over `backend desktop mcp`, only the definitions match:
 
 - `hqplayer_client.py: get_inputs`, `set_repeat`, `set_random`, `forward`, `backward`, `volume_mute` have no caller: no route, tool or control (`grep -rn 'set_repeat\|set_random\|get_inputs\|volume_mute'`)
-- No `set_input`, no output-device or NAA switching, no controller hand-off, no metering (`grep -n '4322\|set_input\|set_output' hqplayer_client.py` → 0)
+- No `set_input`, no output-device or NAA switching, no controller hand-off (`grep -n 'set_input\|set_output' hqplayer_client.py` → 0)
 
 ## 7. Assistant and MCP tools
 
@@ -262,7 +263,7 @@ Not implemented — searched over `backend desktop mcp`, only the definitions ma
 | HQPlayer input selection, output and NAA switching, controller state and hand-off | `HQPLAYER-EMBEDDED-DECISION.md` (private) |
 | A native mobile app, as a DLNA client | `MOBILE-APP-CONCEPT.md` (private) |
 | Lyrics on Now Playing — the button is in the page, hidden and unwired | `static/index.html` ("Parked until the lyrics sheet is wired up") |
-| A level meter on Now Playing | `docs/HQPLAYER_INTEGRATION.md` § Future Enhancements |
+| A level meter for the local and browser outputs | `docs/HQPLAYER_INTEGRATION.md` § Meters for the other outputs |
 | A desktop layout mode | `INFORMATION-ARCHITECTURE.md` § Layout modes (reserved, not designed) |
 | Moods and year as search filters — the engine has the tools, nothing reaches them | `DISCOVERY-SEARCH-ENGINE.md` § Phasing (open) |
 | A peer's audio chain and taste match on their profile | `INFORMATION-ARCHITECTURE.md` § Profile (Phase 2) |

@@ -1935,6 +1935,46 @@ Lesson: a queue that persists bindings to rows must hear when those rows
 go. `source` "never changes" was right for an output switch and wrong for
 the library under it.
 
+### The peak meter rebuilds the source HQPlayer streams (2026-10-07)
+
+The question was whether HQPlayer's meter port (4322) could drive a VU meter
+that shows clipping, and by how many dB. The SDK says what the port sends,
+not what it means, so passive captures on Desktop 6.2.3 were compared with
+the FLAC being played (`docs/HQPLAYER_INTEGRATION.md`, § The meter stream).
+HQPlayer's own levels are exact below 0 dB — after adaptive gain and volume,
+before upsampling, and `peak` a true peak — but they are taken after its
+limiter: at volume 0 dB a master with +2.5 dBTP read +0.00 while the limiter
+count climbed. The answer to "by how much" was in the same frames: their
+spectra are the source itself, untouched by gain, volume or limiter, and an
+inverse FFT with an overlap-add gives it back to float32 precision. So the
+node rebuilds the source, takes its true peak and adds the volume and the
+track's adaptive gain from the status poller: the peak before the limiter,
+which agrees with HQPlayer's own burst for burst wherever nothing is limited
+(MAD 0.013 dB) and reads the over in dB where HQPlayer's stops at zero.
+HQPlayer's limiter count (`<Status clips>`) starts again at every volume
+step, which makes it the gain stager's other half: step down until it stays
+still.
+
+Decisions: a classic VU would hide exactly the over — 300 ms of integration
+averages peaks away — so the needle is a peak needle on a VU face
+(deflection proportional to amplitude spends a third of the arc on
+−3…+3 dBTP). It is a gain tool, so it lives on the HQPlayer screen beside
+the volume, in a sheet with its own ±1 dB, and not on Now Playing. HQPlayer
+streams ~0.7 MB/s per 44.1 kHz of source and computes an FFT per frame for
+every connected meter, so the socket exists only while a page shows the
+sheet: the page's wish is bound to the `/api/events` stream it holds (a page
+id per load, a reconnect takes the wish over, `hello` is the cue to re-state
+it), never a lease that needs renewing. The socket's thread connects on
+edges only; a port that refuses while the control port answers is reported
+in place. A quiet socket is not a dead one (a stopped HQPlayer sends
+nothing), so liveness is TCP keepalive, not a read deadline. While the
+meter is open no DSP sample is written: a sample must describe the setting
+alone.
+
+Lesson: a meter's numbers are only as good as the point they are read at —
+measure where a stream's levels sit against something known (here, the
+file) before building on what they seem to say.
+
 ## Known Gotchas
 
 - **A Docker stop never reached the backend's shutdown.** Two things,

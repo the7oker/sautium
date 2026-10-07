@@ -622,6 +622,14 @@ class PlaybackManager:
         # `error` is a string the UI toasts as it stands.
         if s.extra.get("diagnosis"):
             new_data["diagnosis"] = s.extra["diagnosis"]
+        # How often HQPlayer's limiter acted on its output (<Status clips>):
+        # the meter's peak is read before upsampling, this is the after.
+        if s.extra.get("limited") is not None:
+            new_data["limited"] = s.extra["limited"]
+        # The output mode HQPlayer runs now, by name ("PCM", "SDM (DSD)") —
+        # the selected one may be [source]; the peak meter marks SDM's room.
+        if s.extra.get("active_mode"):
+            new_data["active_mode"] = s.extra["active_mode"]
 
         # Per-track listening history + scrobble (source-agnostic: owned and
         # streamed phantom items both carry the track UUID). Separate from the
