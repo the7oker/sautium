@@ -26,8 +26,9 @@ searched again: a DHT traversal, and a 5 s /health per dead address
 (2026-10-07). A network pass — a sync walk, the timed loop, this node's own
 dump loaded or deleted — searches again, so a source that turns up is asked at
 the next pass. A discovered address that did not answer is skipped through the
-record the walk keeps (sync_walk.DeadAddresses), and every probe here feeds
-it; manual and LAN peers are asked every time, as the walk asks them.
+record the walk keeps (sync_walk.DeadAddresses), which the walk's connect
+feeds with how every probe went — a node that refused is busy, not dead;
+manual and LAN peers are asked every time, as the walk asks them.
 """
 
 import asyncio
@@ -86,8 +87,8 @@ class SourceFinder:
         usable: /health → whether the node serves this family at all.
         connect: the walk's connect_peer — the /health probe, the TLS-pinned
             key, the own-address guard.
-        dead: the walk's record of dead discovered addresses — skipped here,
-            and told how every probe of one went.
+        dead: the walk's record of dead discovered addresses — skipped here;
+            `connect` feeds it with how each one answered.
         """
         self.label = label
         self.capability = capability
@@ -163,7 +164,7 @@ class SourceFinder:
         """The usable sources among `candidates`, in their order, one per node
         (a LAN and a public address of one node are one source). A discovered
         address the record holds as dead is not dialled."""
-        addrs: List[Candidate] = []
+        addrs: List[str] = []
         for addr, discovered in candidates:
             if addr in seen:
                 continue
@@ -173,7 +174,7 @@ class SourceFinder:
                 continue
             if discovered and self._dead.backing_off(addr):
                 continue
-            addrs.append((addr, discovered))
+            addrs.append(addr)
         sem = asyncio.Semaphore(PROBE_CONCURRENCY)
 
         async def probe(addr: str) -> Optional[BackendAPIClient]:
@@ -181,13 +182,7 @@ class SourceFinder:
                 return await self._connect(addr)
 
         found: List[Source] = []
-        apis = await asyncio.gather(*(probe(addr) for addr, _ in addrs))
-        for (addr, discovered), api in zip(addrs, apis):
-            if discovered:
-                if api is None:
-                    self._dead.failed(addr)
-                else:
-                    self._dead.answered(addr)
+        for api in await asyncio.gather(*(probe(a) for a in addrs)):
             if api is None or not api.last_health:
                 continue
             health = api.last_health

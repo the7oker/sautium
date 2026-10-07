@@ -142,6 +142,7 @@ class BackendAPIClient:
         self._server_pubkey: Optional[str] = None
         self._introduced = False
         self.last_health: Optional[dict] = None          # the last /health that passed its checks
+        self.last_http_error: Optional[int] = None       # the status the last GET was refused with
         self.last_peer_identity: Optional[str] = None   # last X-Sautium-Peer-Identity seen
         self.last_peer_lane: Optional[str] = None
         self.last_gate_result: Optional[str] = None
@@ -227,15 +228,18 @@ class BackendAPIClient:
             resp = urllib.request.urlopen(
                 req, timeout=timeout, context=self._ssl_ctx
             )
+            self.last_http_error = None
             self._note_peer_response(resp.headers)
             return _read_json_body(resp)
         except urllib.error.HTTPError as e:
+            self.last_http_error = e.code
             self._note_peer_response(e.headers)
             if e.code == 402 and self.peer is not None and not _paid and self.gate_prepay(endpoint_family(path)):
                 return self._get_json(path, timeout, _paid=True)     # priced: pay once and retry
             logger.debug(f"API request failed: {url} — {e}")
             return None
         except Exception as e:
+            self.last_http_error = None
             logger.debug(f"API request failed: {url} — {e}")
             return None
 

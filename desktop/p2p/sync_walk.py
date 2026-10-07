@@ -293,13 +293,13 @@ async def listen_notifications(db_dsn: str,
 class DeadAddresses:
     """Discovered addresses (the DHT, the Worker directory, the master hint)
     that did not answer, each backing off 30 min, doubling to a day. One
-    record per process: the walk and the slice source finders
-    (desktop/p2p/slice_sources.py) skip and feed the same one, so an address
-    one of them found dead is not dialled by the others on their own
-    cadence — a slice cycle woken every few seconds by a history import
-    spent a 5 s /health timeout on the same dead address per wake
-    (2026-10-07). Manual and LAN peers never enter it: they are asked every
-    time."""
+    record per process, fed by `SyncWalk.connect_peer` — the one place that
+    sees how a node answered — and skipped by the walk and the slice source
+    finders (desktop/p2p/slice_sources.py) alike, so an address found dead
+    is not dialled by the others on their own cadence: a slice cycle woken
+    every few seconds by a history import spent a 5 s /health timeout on the
+    same dead address per wake (2026-10-07). Manual and LAN peers never
+    enter it: they are asked every time."""
 
     def __init__(self) -> None:
         self._entries: dict[str, tuple[float, int]] = {}   # addr -> (retry_after, strikes)
@@ -718,7 +718,13 @@ class SyncWalk:
         force). LAN peers get one retry: the first connection from a fresh
         process can fail on OS-level cold start. Our own address — a DHT
         lookup lists us too — answers with our own key and is never a
-        peer."""
+        peer.
+
+        A bare address is a discovered one (the DHT, the directory, the
+        master hint), and how it answered goes into `self.dead`: a node that
+        refused — a 429, a 503, a 402 it could not be paid — is alive and
+        busy, never dead; no answer, a timeout, our own key or a channel
+        that is not the node /health names is dead."""
         loop = asyncio.get_event_loop()
         peer_identity = self._identity()
 
@@ -744,7 +750,14 @@ class SyncWalk:
             return None
 
         api = BackendAPIClient(f"https://{peer_addr}", peer=peer_identity)
-        return api if await _healthy(api) else None
+        if await _healthy(api):
+            self.dead.answered(peer_addr)
+            return api
+        if api.last_http_error is None:
+            self.dead.failed(peer_addr)
+        else:
+            self.dead.answered(peer_addr)
+        return None
 
     async def _probe_candidates(
         self, addrs: list[str],
@@ -757,10 +770,7 @@ class SyncWalk:
         async def probe(addr: str):
             async with sem:
                 api = await self.connect_peer(addr)
-            if api is None:
-                self.dead.failed(addr)
-            else:
-                self.dead.answered(addr)
+            if api is not None:
                 self._note_sighting(api)
             return addr, api
 

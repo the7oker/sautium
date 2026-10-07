@@ -24,15 +24,23 @@ class _Client:
 
 
 class _Net:
-    """What answers where: addr → /health (None = dead or our own twin)."""
+    """What answers where: addr → /health (None = dead or our own twin). Its
+    connect feeds `dead` as the walk's connect_peer does: a bare (discovered)
+    address that does not answer starts backing off."""
 
     def __init__(self, answers):
         self.answers = answers
         self.probed: list = []
+        self.dead = DeadAddresses()
 
     async def connect(self, addr):
         self.probed.append(addr)
         health = self.answers.get(addr)
+        if "://" not in addr:
+            if health:
+                self.dead.answered(addr)
+            else:
+                self.dead.failed(addr)
         url = addr if "://" in addr else f"https://{addr}"
         return _Client(url, health) if health else None
 
@@ -74,12 +82,11 @@ def hints(monkeypatch):
     return state
 
 
-def _finder(net, *, dht=None, lan=None, manual=(), bans=(set(), set()), dead=None):
+def _finder(net, *, dht=None, lan=None, manual=(), bans=(set(), set())):
     return SourceFinder(
         "MB slice", capability="mbdump", directory=("mbslices", "mbdump"),
         usable=lambda h: bool(h.get("mb_dump") or h.get("mb_slices")),
-        connect=net.connect, dead=dead if dead is not None else DeadAddresses(),
-        dht=dht, lan=lan, manual_peers=list(manual),
+        connect=net.connect, dead=net.dead, dht=dht, lan=lan, manual_peers=list(manual),
         load_bans=lambda: bans, addr_uuid=lambda addr: addr)
 
 
@@ -201,31 +208,29 @@ def test_an_empty_search_serves_local_wakes_until_a_network_pass(hints, monkeypa
 
 
 def test_one_dead_address_record_for_the_walk_and_both_families(hints):
-    dead = DeadAddresses()
     dht = _Dht([("203.0.113.5", 21001)])
     net = _Net({})
-    mb, lb = _finder(net, dht=dht, dead=dead), _finder(net, dht=dht, dead=dead)
+    mb, lb = _finder(net, dht=dht), _finder(net, dht=dht)
 
     async def go():
         await mb.find()
         await lb.find()
     asyncio.run(go())
     assert net.probed == ["203.0.113.5:21001"]           # the other family did not dial it
-    assert dead.backing_off("203.0.113.5:21001")         # and the walk skips it too
+    assert net.dead.backing_off("203.0.113.5:21001")     # and the walk skips it too
 
 
 def test_manual_and_lan_peers_are_asked_on_every_search(hints):
     lan = _Lan([("192.0.2.10", 22000, "https")])
-    dead = DeadAddresses()
     net = _Net({})
-    finder = _finder(net, lan=lan, manual=["https://192.0.2.20:22000"], dead=dead)
+    finder = _finder(net, lan=lan, manual=["https://192.0.2.20:22000"])
 
     async def go():
         await finder.find()
         await finder.find(refresh=True)
     asyncio.run(go())
     assert net.probed == ["https://192.0.2.20:22000", "https://192.0.2.10:22000"] * 2
-    assert not dead.backing_off("https://192.0.2.10:22000")
+    assert not net.dead.backing_off("https://192.0.2.10:22000")
 
 
 def test_a_network_pass_is_a_walk_the_timer_or_this_nodes_dump():
