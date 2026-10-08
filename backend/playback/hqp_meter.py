@@ -27,10 +27,12 @@ the limiter — scaled 2/N with Im negated, blocks a hop apart. An inverse FFT
 and an overlap-add give the source back (to float32 precision against the
 FLAC), so the meter rebuilds it, takes its true peak (4× oversampled) and
 adds the gain HQPlayer applies ahead of the limiter — the volume and the
-track's adaptive gain, from the status poller (`set_gain`). Where nothing is
-limited this agrees with HQPlayer's own peak within ~0.1 dB; above 0 dBTP it
-is the over HQPlayer's limiter takes away. A gain stage not in that sum
-(convolution, an EQ) is not in the reading.
+track's adaptive gain, from the status poller (`set_gain`; none while it
+names no track, and then no reading). A reading covers READING_S of the
+source rebuilt. Where nothing is limited this agrees with HQPlayer's own
+peak burst for burst (MAD 0.013 dB); above 0 dBTP it is the over HQPlayer's
+limiter takes away. A gain stage not in that sum (convolution, an EQ) is
+not in the reading.
 
 The stream costs HQPlayer an FFT per frame and the link ~0.7 MB/s per
 44.1 kHz of source rate, so the socket exists only while a page has the
@@ -47,7 +49,6 @@ refuses while the control port answers is reported and left alone.
 
 import asyncio
 import logging
-import select
 import socket
 import struct
 import threading
@@ -71,8 +72,12 @@ MAX_BINS = 16385
 SILENT_DB = -120.0
 
 CONNECT_TIMEOUT_S = 3.0
-# A page that stopped draining its event stream (a frozen tab, a socket the
-# OS has not given up on yet) gets ~5 s of readings, then loses its interest.
+# A reading per this much of the source rebuilt — HQPlayer's own burst, and
+# 6.25 readings a second whatever TCP does to the bursts on the way.
+READING_S = 0.16
+# Readings a page's stream may leave untaken — ~5 s while its generator does
+# not run (a blocked loop, a send the OS has stopped taking) — before the
+# page loses its interest; it is told, and asks again if it still wants.
 PAGE_BACKLOG = 32
 
 
@@ -80,13 +85,13 @@ class MeterProtocolError(ValueError):
     """What arrived on the meter port is not HQPlayer's meter stream."""
 
 
-def parse_frames(view: memoryview) -> Tuple[List[np.ndarray], int, int]:
-    """The complete frames at the start of `view`: each one's spectra, a
-    complex (channels, bins) array; the bytes they took; and the size of the
-    incomplete frame that follows (0 when no header has arrived yet). A
-    header is checked before its body is waited for: the version, sane
-    bounds, and a hop (xformTime at the source rate) of half the FFT — the
-    layout the rebuild relies on."""
+def parse_frames(view: memoryview) -> Tuple[List[Tuple[float, np.ndarray]], int, int]:
+    """The complete frames at the start of `view`: each one's source rate
+    and spectra (a complex (channels, bins) array); the bytes they took; and
+    the size of the incomplete frame that follows (0 when no header has
+    arrived yet). A header is checked before its body is waited for: the
+    version, sane bounds, and a hop (xformTime at the source rate) of half
+    the FFT — the layout the rebuild relies on."""
     frames = []
     pos = 0
     end = len(view)
@@ -111,7 +116,7 @@ def parse_frames(view: memoryview) -> Tuple[List[np.ndarray], int, int]:
             spectra[c].real = re
             spectra[c].imag = -im
             at += stride
-        frames.append(spectra)
+        frames.append((2.0 * bandwidth, spectra))
         pos += size
     return frames, pos, 0
 
@@ -137,6 +142,11 @@ class SourceRebuild:
         block = np.fft.irfft(spectra * (self.n / 2), n=self.n, axis=1)
         self._pending.append(self._tail + block[:, :self.hop])
         self._tail = block[:, self.hop:]
+
+    @property
+    def pending(self) -> int:
+        """Samples rebuilt and not yet in a peak."""
+        return sum(b.shape[1] for b in self._pending)
 
     def peaks(self) -> Optional[np.ndarray]:
         """The true peak (linear, 4× oversampled) per channel of the samples
@@ -262,7 +272,7 @@ class HqpMeter:
     def hqplayer_back(self) -> None:
         """The status poller found HQPlayer again after losing it."""
         with self._cond:
-            if self._sock is None and self._target is not None:
+            if self._sock is None and not self._connecting and self._target is not None:
                 self._unavailable = None
                 self._due = True
                 self._cond.notify()
@@ -271,11 +281,15 @@ class HqpMeter:
         """The socket is open — HQPlayer is computing meters for us."""
         return self._sock is not None
 
-    def set_gain(self, volume_db: float, track_gain_db: Optional[float]) -> None:
+    def set_gain(self, gain_db: Optional[float]) -> None:
         """What HQPlayer applies ahead of its limiter, from every status
-        tick: its volume and the track's adaptive gain (0 when that is off).
-        A volume step shows in the readings within a tick."""
-        self._gain_db = volume_db + (track_gain_db or 0.0)
+        tick: its volume plus the track's adaptive gain. None while it names
+        no track (stopped): no reading is made at a gain not known for what
+        plays next, and the last one, made before, is not shown again."""
+        with self._cond:
+            self._gain_db = gain_db
+            if gain_db is None:
+                self._last = None
 
     # -- pages (the /api/events generator and PUT /api/hqplayer/meter) ---------
 
@@ -318,14 +332,15 @@ class HqpMeter:
             was_on = page.on
             page.on = on
             if on:
-                if not was_on:
-                    self._snapshot_locked(page.conn)
                 if self._sock is None and not self._connecting and self._target is not None:
                     # also a Retry: a page asking while the port is
-                    # unavailable is a fresh edge
+                    # unavailable is a fresh edge — and the snapshot below
+                    # says so, not the failure before it
                     self._unavailable = None
                     self._due = True
                     self._cond.notify()
+                if not was_on:
+                    self._snapshot_locked(page.conn)
             elif not self._wanted_locked():
                 self._stop_locked()
             return True
@@ -369,8 +384,10 @@ class HqpMeter:
                 page.conn.send(msg)
 
     def _stop_locked(self) -> None:
-        # Only the owner thread closes; a shutdown wakes its blocked read.
-        # Under the lock, so the owner cannot have closed it in between.
+        # Wake the owner's blocked read: a shutdown does on Linux and macOS,
+        # Windows leaves the read blocked until the socket is closed
+        # (hqp_benchmark's Link.interrupt). Under the lock, so the owner has
+        # not let go of it in between; its own close after that is a no-op.
         sock, self._sock = self._sock, None
         if sock is not None:
             try:
@@ -379,6 +396,7 @@ class HqpMeter:
                 # ENOTCONN: the peer reset the connection first; the owner's
                 # read has ended (or is about to) on that reset already.
                 logger.debug("meter socket already down: %s", e)
+            sock.close()
 
     def _run(self) -> None:
         while True:
@@ -389,7 +407,13 @@ class HqpMeter:
                 self._connecting = True
                 target, generation = self._target, self._generation
                 self._publish_locked({"state": "connecting"})
-            self._session(target, generation)
+            try:
+                self._session(target, generation)
+            except Exception as e:
+                # The meter's one thread outlives any session: what broke
+                # this one is logged and shown, and the next wish connects.
+                logger.exception("HQPlayer meter session failed")
+                self._fail(generation, "error", target[1], f"{type(e).__name__}: {e}")
 
     def _session(self, target: Tuple[str, int], generation: int) -> None:
         host, port = target
@@ -401,32 +425,39 @@ class HqpMeter:
         except (socket.timeout, TimeoutError):
             self._fail(generation, "timeout", port, f"no answer from {host}:{port}")
             return
-        except OSError as e:
+        except (OSError, UnicodeError) as e:      # UnicodeError: a name IDNA cannot encode
             self._fail(generation, "unreachable", port, f"{host}:{port}: {e}")
             return
-        sock.settimeout(None)
-        _keepalive(sock)
-        with self._cond:
-            self._connecting = False
-            if generation != self._generation or not self._wanted_locked():
-                sock.close()
+        try:
+            try:
+                sock.settimeout(None)
+                _keepalive(sock)
+            except OSError as e:                  # reset before it was set up
+                self._fail(generation, "lost", port, f"{host}:{port}: {e}")
                 return
-            self._sock = sock
-            self._publish_locked({"state": "open"})
-        logger.info("HQPlayer meter stream open (%s:%d)", host, port)
-
-        delivered, failure = self._read(sock)
-
-        with self._cond:
-            deliberate = self._sock is not sock
-            self._sock = None
-            self._last = None
-        sock.close()
+            with self._cond:
+                self._connecting = False
+                if generation != self._generation or not self._wanted_locked():
+                    return
+                self._sock = sock
+                # a reconnect edge that came while connecting is spent here
+                self._due = False
+                self._publish_locked({"state": "open"})
+            logger.info("HQPlayer meter stream open (%s:%d)", host, port)
+            delivered, ended = self._read(sock)
+        finally:
+            with self._cond:
+                self._connecting = False
+                deliberate = self._sock is not sock
+                if not deliberate:
+                    self._sock = None
+                    self._last = None
+            sock.close()
         if deliberate:
             logger.info("HQPlayer meter stream closed")
             return
-        if failure is not None:
-            self._fail(generation, "protocol", port, failure)
+        if ended is not None and ended[0] == "protocol":
+            self._fail(generation, "protocol", port, ended[1])
         elif delivered:
             # It was flowing: one immediate attempt — a restarting meter
             # server answers it, a quitting HQPlayer refuses it.
@@ -434,14 +465,18 @@ class HqpMeter:
                 if generation == self._generation:
                     self._due = True
                     self._cond.notify()
-            logger.info("HQPlayer meter stream dropped — reconnecting once")
+            logger.info("HQPlayer meter stream ended (%s) — reconnecting once",
+                        ended[1] if ended else "closed by HQPlayer")
+        elif ended is not None:
+            self._fail(generation, "lost", port, f"{host}:{port}: {ended[1]}")
         else:
             self._fail(generation, "closed", port, f"{host}:{port} closed the meter connection")
 
-    def _read(self, sock: socket.socket) -> Tuple[bool, Optional[str]]:
-        """Read until the stream ends or is shut: (frames seen, why it was
-        not a meter stream). A reading goes out when a burst is in — nothing
-        more waiting on the socket — one per 160 ms."""
+    def _read(self, sock: socket.socket) -> Tuple[bool, Optional[Tuple[str, str]]]:
+        """Read until the stream ends or is shut: (frames seen, how it ended —
+        None for an end of stream, ("lost", the error) for a connection that
+        failed, ("protocol", why) for what is not a meter stream). A reading
+        goes out per READING_S of the source rebuilt."""
         buf = bytearray(1 << 20)
         view = memoryview(buf)
         fill = 0
@@ -450,43 +485,42 @@ class HqpMeter:
         while True:
             try:
                 n = sock.recv_into(view[fill:])
-            except OSError:
-                return delivered, None
+            except OSError as e:
+                return delivered, ("lost", str(e) or type(e).__name__)
             if n == 0:
                 return delivered, None
             fill += n
             try:
                 frames, used, need = parse_frames(view[:fill])
             except MeterProtocolError as e:
-                return delivered, str(e)
-            for spectra in frames:
+                return delivered, ("protocol", str(e))
+            for rate, spectra in frames:
                 if rebuild is None or rebuild.shape != spectra.shape:
                     rebuild = SourceRebuild(*spectra.shape)
                 rebuild.add(spectra)
                 delivered = True
+                if rebuild.pending >= READING_S * rate:
+                    self._reading(sock, rebuild.peaks())
             if used:
                 buf[:fill - used] = buf[used:fill]     # same length: allowed while viewed
                 fill -= used
             if need > len(buf):
                 buf = buf[:fill] + bytearray(need - fill)
                 view = memoryview(buf)
-            if rebuild is not None and not select.select([sock], [], [], 0)[0]:
-                self._reading(sock, rebuild.peaks())
 
     def _reading(self, sock: socket.socket, peaks: Optional[np.ndarray]) -> None:
-        gain = self._gain_db
-        if peaks is None or gain is None:
-            return
         floor = 10 ** (SILENT_DB / 20)
-        # `g` names the gain the reading was made with: a volume step shows
-        # in it, and a hold kept across it would mix two volumes
-        reading = {"p": [round(float(20 * np.log10(p)) + gain, 1) if p > floor else None
-                         for p in peaks],
-                   "g": round(gain, 2)}
         with self._cond:
-            if self._sock is sock:
-                self._last = reading
-                self._publish_locked(reading)
+            gain = self._gain_db
+            if peaks is None or gain is None or self._sock is not sock:
+                return
+            # `g` names the gain the reading was made with: a volume step
+            # shows in it, and a hold kept across it would mix two volumes
+            reading = {"p": [round(float(20 * np.log10(p)) + gain, 1) if p > floor else None
+                             for p in peaks],
+                       "g": round(gain, 2)}
+            self._last = reading
+            self._publish_locked(reading)
 
     def _fail(self, generation: int, reason: str, port: int, detail: str) -> None:
         with self._cond:
@@ -496,7 +530,10 @@ class HqpMeter:
             self._unavailable = {"state": "unavailable", "reason": reason,
                                  "port": port, "detail": detail}
             self._publish_locked(self._unavailable)
-        logger.info("HQPlayer meter unavailable: %s", detail)
+        # refused, silent or closed: HQPlayer away or not listening — what a
+        # meter meets in normal life; the rest is something going wrong
+        level = logging.INFO if reason in ("refused", "timeout", "closed", "unreachable") else logging.WARNING
+        logger.log(level, "HQPlayer meter unavailable (%s): %s", reason, detail)
 
 
 meter = HqpMeter()

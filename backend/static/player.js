@@ -67,17 +67,23 @@
 
   // The peak meter on the HQPlayer screen: HQPlayer's meter port stays open
   // only while some page wants the meter AND shows it, so a hidden or
-  // leaving page says so at once, and a (re)connected stream re-states it
-  // on `hello`. Every wish carries this page's sequence number: two in
+  // leaving page says so at once, and a (re)connected stream re-states the
+  // wish on `hello` — 'off' as much as 'on': the server may hold an 'on' it
+  // never heard withdrawn (a lost request, a reconnect that carried the old
+  // wish over). Every wish carries this page's sequence number: two in
   // flight apply in the order the page made them, whichever lands first.
   // A wish that does not arrive (the link is down, the stream not open
   // yet: 404) needs no retry here — the stream's next `hello` re-states it.
   const meterInterest = {
     wanted: false,
     seq: 0,
+    correcting: false,
+    effective() {
+      return this.wanted && document.visibilityState === 'visible';
+    },
     send(on, keepalive) {
       this.seq += 1;
-      fetch('/api/hqplayer/meter', {
+      return fetch('/api/hqplayer/meter', {
         method: 'PUT',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ tab: PAGE_ID, on, seq: this.seq }),
@@ -85,7 +91,14 @@
       }).catch(err => console.debug('meter wish not delivered; the next hello re-states it:', err));
     },
     restate() {
-      if (this.wanted && document.visibilityState === 'visible') this.send(true);
+      if (this.seq > 0) this.send(this.effective());
+    },
+    // A reading reached a page that does not want one: the server holds an
+    // 'on' this page withdrew. Say 'off' again, one request at a time.
+    unwanted() {
+      if (this.correcting || this.effective()) return;
+      this.correcting = true;
+      this.send(false).finally(() => { this.correcting = false; });
     },
   };
 
@@ -153,6 +166,7 @@
           // 'dropped': this page stopped reading long enough to lose its
           // interest (a frozen tab) — it asks anew if it still wants.
           if (msg.d && msg.d.state === 'dropped') meterInterest.restate();
+          else if (!meterInterest.effective()) meterInterest.unwanted();
           window.dispatchEvent(new CustomEvent('sautium:meter', { detail: msg.d }));
         }
       },

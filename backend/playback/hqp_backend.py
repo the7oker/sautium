@@ -1028,7 +1028,8 @@ class HqpBackend(PlayerBackend):
                     self._register_failure()
                 else:
                     self._failures = 0
-                    hqp_meter.meter.set_gain(status.volume, status.track_gain)
+                    hqp_meter.meter.set_gain(None if status.track_gain is None
+                                             else status.volume + status.track_gain)
                     if status.track_index >= 1:
                         self._last_track = status.track_index
                     if playing is not None:

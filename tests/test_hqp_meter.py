@@ -74,10 +74,11 @@ def test_a_stereo_frame_is_16464_bytes_and_its_spectra_come_back_per_channel():
     f = frames_of(x)[2]
     assert len(f) == 16464
     frames, used, need = parse_frames(memoryview(f))
-    assert used == len(f) and need == 0 and frames[0].shape == (2, BINS)
+    rate, spectra = frames[0]
+    assert used == len(f) and need == 0 and rate == 44100 and spectra.shape == (2, BINS)
     block = x[HOP:HOP + N] * WINDOW[:, None]                      # the frame's block of x
     want = np.fft.rfft(block, axis=0).T * (2 / N)
-    assert np.allclose(frames[0], want, atol=1e-6)               # Im negated back
+    assert np.allclose(spectra, want, atol=1e-6)                 # Im negated back
 
 
 def test_an_incomplete_frame_waits_for_its_body():
@@ -102,7 +103,7 @@ def test_the_rebuilt_source_is_the_source_and_its_peak_the_true_peak():
     rebuild = SourceRebuild(2, BINS)
     for f in frames_of(x):
         frames, _, _ = parse_frames(memoryview(f))
-        rebuild.add(frames[0])
+        rebuild.add(frames[0][1])
     peak_db = 20 * np.log10(rebuild.peaks())
     # +2 dBTP from samples at −1.01 dBFS: the true peak, not the sample peak
     assert np.allclose(peak_db, 2.0, atol=0.05)
@@ -113,7 +114,7 @@ def test_a_peak_waits_for_the_samples_after_it():
     rebuild = SourceRebuild(1, BINS)
     assert rebuild.peaks() is None                                # nothing yet
     frames, _, _ = parse_frames(memoryview(frames_of(np.zeros((HOP, 1)))[0]))
-    rebuild.add(frames[0])
+    rebuild.add(frames[0][1])
     assert rebuild.peaks() is not None                            # a hop, minus the context
 
 
@@ -172,6 +173,13 @@ class FakeMeterPort:
         except (BrokenPipeError, ConnectionResetError):
             return False
         return True
+
+    def reset(self):
+        """The newest connection reset (RST): an error, not an end of stream."""
+        with self._cv:
+            c = self._conns.pop()
+        c.setsockopt(socket.SOL_SOCKET, socket.SO_LINGER, struct.pack("ii", 1, 0))
+        c.close()
 
     def drop(self):
         """HQPlayer ends the newest connection (its meter server restarting)."""
@@ -273,6 +281,11 @@ def readings(msgs):
     return [m["p"] for m in msgs if "p" in m]
 
 
+def loudest(peaks):
+    """The highest reading per channel — the settled peak of a passage."""
+    return [max(p[c] for p in peaks if p[c] is not None) for c in range(len(peaks[0]))]
+
+
 def test_no_interest_no_connection(meter, loop, port):
     meter.attach("127.0.0.1", port.port)
     page = Page(meter, loop, "a")
@@ -282,16 +295,16 @@ def test_no_interest_no_connection(meter, loop, port):
 
 def test_two_pages_share_one_socket_and_only_interested_pages_hear_it(meter, loop, port):
     meter.attach("127.0.0.1", port.port)
-    meter.set_gain(0.0, None)                    # volume 0 dB, no adaptive gain
+    meter.set_gain(0.0)                          # volume 0 dB, no adaptive gain
     a, b = Page(meter, loop, "a"), Page(meter, loop, "b")
     assert a.want(True)
     a.until(state("open"))
     port.wait(lambda: port.accepts == 1)
     port.send(burst(over_sine(0.5)), chunk=1000)
-    got = readings(a.until(lambda m: "p" in m and m["p"][0] is not None and m["p"][0] > 1))
+    got = readings(a.until(lambda m: "p" in m) + a.settle())
     # the over in dB: +2 dBTP, where HQPlayer's own peak would read 0.00
-    assert got[-1] == pytest.approx([2.0, 2.0], abs=0.1)
-    last = (readings(a.settle()) or got)[-1]
+    assert loudest(got) == pytest.approx([2.0, 2.0], abs=0.1)
+    last = got[-1]
     assert b.take(0.3) == []
     assert b.want(True)
     # what a newly interested page is told at once: the state and the last reading
@@ -306,11 +319,11 @@ def test_the_reading_is_after_the_volume_and_the_tracks_gain(meter, loop, port):
     page.until(state("open"))
     port.send(burst(over_sine(0.3)))
     assert readings(page.take(0.5)) == []        # no gain known yet: no reading
-    meter.set_gain(-3.0, -1.5)                   # what the status poller says
+    meter.set_gain(-3.0 - 1.5)                   # the poller: volume + the track's adaptive gain
     port.send(burst(over_sine(0.5)))
-    got = [m for m in page.until(lambda m: "p" in m and m["p"][0] is not None) if "p" in m]
-    assert got[-1]["p"] == pytest.approx([-2.5, -2.5], abs=0.1)
-    assert got[-1]["g"] == -4.5                  # the gain it was made with: a step shows in it
+    got = [m for m in page.until(lambda m: "p" in m) + page.settle() if "p" in m]
+    assert loudest([m["p"] for m in got]) == pytest.approx([-2.5, -2.5], abs=0.1)
+    assert {m["g"] for m in got} == {-4.5}       # the gain it was made with: a step shows in it
     port.send(burst(np.zeros((22050, 2))))       # paused: silence
     got = readings(page.until(lambda m: "p" in m and m["p"][0] is None))
     assert got[-1] == [None, None]
@@ -338,11 +351,11 @@ def test_a_reconnected_page_takes_its_interest_over(meter, loop, port):
     first = Page(meter, loop, "a")
     first.want(True)
     first.until(state("open"))
-    meter.set_gain(-5.0, None)
+    meter.set_gain(-5.0)
     port.send(burst(over_sine(0.5)))
-    got = readings(first.until(lambda m: "p" in m and m["p"][0] is not None))
-    assert got[-1] == pytest.approx([-3.0, -3.0], abs=0.1)        # +2 dBTP at −5 dB
-    last = (readings(first.settle()) or got)[-1]
+    got = readings(first.until(lambda m: "p" in m) + first.settle())
+    assert loudest(got) == pytest.approx([-3.0, -3.0], abs=0.1)   # +2 dBTP at −5 dB
+    last = got[-1]
     again = Page(meter, loop, "a")               # the same page on a new stream; the old one lingers
     assert again.until(lambda m: "p" in m) == [{"state": "open"}, {"p": last, "g": -5.0}]
     first.gone()                                 # the old stream's end takes nothing with it
@@ -399,7 +412,7 @@ def test_a_stream_that_delivered_is_retried_once_when_it_drops(meter, loop, port
     page = Page(meter, loop, "a")
     page.want(True)
     page.until(state("open"))
-    meter.set_gain(0.0, None)
+    meter.set_gain(0.0)
     port.send(burst(over_sine(0.3)))
     page.until(lambda m: "p" in m)
     port.drop()
@@ -430,16 +443,98 @@ def test_a_page_that_stops_reading_loses_its_interest(meter, loop, port):
     page = Page(meter, loop, "a")
     page.want(True)
     page.until(state("open"))
-    meter.set_gain(0.0, None)
+    meter.set_gain(0.0)
     # the page reads nothing more while readings pile up past its backlog:
-    # one a burst, a burst being what the socket held when it went quiet
-    for f in frames_of(over_sine(1.0))[:hqp_meter.PAGE_BACKLOG + 5]:
-        if not port.send(f):
-            break
-        time.sleep(0.01)
+    # one per 0.16 s of music, so a few seconds of it
+    port.send(burst(over_sine((hqp_meter.PAGE_BACKLOG + 5) * hqp_meter.READING_S)))
     port.wait(lambda: port.ends == 1)            # its interest was the only one
     assert page.take()[0] == {"state": "dropped"}
     assert not meter.metering()
+
+
+def test_a_reading_per_160_ms_of_music_however_tcp_cuts_it(meter, loop, port):
+    meter.attach("127.0.0.1", port.port)
+    meter.set_gain(0.0)
+    page = Page(meter, loop, "a")
+    page.want(True)
+    page.until(state("open"))
+    port.send(burst(over_sine(1.0)), chunk=100)          # a burst in a thousand segments
+    n = len(readings(page.settle()))
+    # 1 s of music and the padding around it: about seven, never one per segment
+    assert 6 <= n <= 9
+
+
+def test_no_reading_while_hqplayer_names_no_track(meter, loop, port):
+    meter.attach("127.0.0.1", port.port)
+    meter.set_gain(0.0)
+    page = Page(meter, loop, "a")
+    page.want(True)
+    page.until(state("open"))
+    port.send(burst(over_sine(0.5)))
+    assert readings(page.settle())
+    meter.set_gain(None)                        # stopped: the next track's gain is not known
+    port.send(burst(over_sine(0.5)))
+    assert readings(page.settle()) == []
+    other = Page(meter, loop, "b")
+    other.want(True)
+    assert other.settle() == [{"state": "open"}]   # nothing from before the stop is shown
+
+
+def test_a_failed_session_leaves_the_thread_to_the_next_wish(meter, loop, port, monkeypatch):
+    def broken(sock):
+        raise ValueError("a failure nothing expected")
+    monkeypatch.setattr(hqp_meter, "_keepalive", broken)
+    meter.attach("127.0.0.1", port.port)
+    page = Page(meter, loop, "a")
+    page.want(True)
+    said = next(m for m in page.until(state("unavailable")) if m.get("state") == "unavailable")
+    assert said["reason"] == "error" and "ValueError" in said["detail"]
+    monkeypatch.undo()
+    assert not meter.metering()
+    page.want(True)                              # Retry
+    page.until(state("open"))
+    port.wait(lambda: port.accepts == 2)
+
+
+def test_a_name_that_cannot_be_a_host_is_unreachable(meter, loop):
+    meter.attach("host..docker.internal", 4322)  # IDNA refuses the empty label
+    page = Page(meter, loop, "a")
+    page.want(True)
+    said = next(m for m in page.until(state("unavailable")) if m.get("state") == "unavailable")
+    assert said["reason"] == "unreachable"
+
+
+def test_a_connection_that_fails_is_lost_with_its_error(meter, loop, port):
+    meter.attach("127.0.0.1", port.port)
+    page = Page(meter, loop, "a")
+    page.want(True)
+    page.until(state("open"))
+    port.reset()                                 # a reset, no frame ever came
+    said = next(m for m in page.until(state("unavailable")) if m.get("state") == "unavailable")
+    assert said["reason"] == "lost" and said["detail"]
+
+
+def test_after_a_failure_a_new_wish_hears_the_new_attempt_first(meter, loop):
+    closed = socket.socket()
+    closed.bind(("127.0.0.1", 0))
+    nobody = closed.getsockname()[1]
+    closed.close()
+    meter.attach("127.0.0.1", nobody)
+    page = Page(meter, loop, "a")
+    page.want(True)
+    page.until(state("unavailable"))
+    page.want(False)
+    page.want(True)
+    assert page.take()[0] == {"state": "connecting"}
+
+
+def test_hqplayer_back_while_connecting_adds_no_attempt(meter):
+    meter.attach("127.0.0.1", 9)
+    with meter._cond:
+        meter._due = False
+        meter._connecting = True
+    meter.hqplayer_back()
+    assert meter._due is False
 
 
 # -- the page's event stream --------------------------------------------------------------

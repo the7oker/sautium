@@ -147,7 +147,8 @@ class TrackStatus:
     # HQPlayer does not report it.
     limited: Optional[int] = None
     # The adaptive gain HQPlayer applies to this track (<metadata gain>, dB;
-    # 0 with adaptive gain off) — ahead of its limiter, like the volume.
+    # 0 with adaptive gain off or unreported) — ahead of its limiter, like
+    # the volume. None while it names no track (stopped).
     track_gain: Optional[float] = None
     tracks_total: int = 0
     # What the engine is running right now, by name — the DSP line of a
@@ -681,8 +682,7 @@ class HQPlayerClient:
                 status.song = metadata.get("song", "")
                 status.genre = metadata.get("genre", "")
                 status.uri = metadata.get("uri", "")
-                gain = metadata.get("gain")
-                status.track_gain = float(gain) if gain is not None else None
+                status.track_gain = float(metadata.get("gain") or 0.0)
                 if metadata.get("samplerate"):
                     status.src_rate = int(metadata.get("samplerate"))
                     status.src_bits = int(metadata.get("bits") or 0) or None

@@ -9670,7 +9670,12 @@
     }
   }
 
+  let peakMeterOpen = false;
   function openPeakMeter({ getState, stepVolume }) {
+    // One sheet: it takes the focus as it opens (below), so a key held on
+    // the chip cannot reach the chip again; this is the net under that.
+    if (peakMeterOpen) return;
+    peakMeterOpen = true;
     const sheet = document.createElement('div');
     sheet.className = 'hqp-sheet pm-sheet';
     sheet.innerHTML = `
@@ -9738,19 +9743,22 @@
     // gain): a hold from before a change of it is history.
     let gainSeen;
 
-    // The mode HQPlayer RUNS, off the live status — the selected one may be
-    // [source], and a mode changed in HQPlayer's own window shows here too.
-    function sdmNow() {
-      return /SDM|DSD/i.test(status.active_mode || '');
-    }
+    // A tick of HQPlayer's own: it names the mode HQPlayer RUNS (the
+    // selected one may be [source]). A status without it — the stub while
+    // the link is down, the queue's idle tick — says nothing of the mode or
+    // of HQPlayer's volume.
+    const hqpTick = st => !!(st && st.active_mode);
 
-    function build(n) {
-      sdm = sdmNow();
-      const labels = n === 1 ? ['M'] : ['L', 'R'];
+    function drawFaces() {
+      const labels = chans.length === 1 ? ['M'] : ['L', 'R'];
       $('[data-pm-faces]').innerHTML = labels.map(l => pmFace(l, sdm)).join('');
       faces = Array.from(sheet.querySelectorAll('.pm-face'));
-      chans = Array.from({ length: n }, () => ({ at: performance.now(), display: -Infinity, max: -Infinity }));
       paint();
+    }
+
+    function setChannels(n) {
+      chans = Array.from({ length: n }, () => ({ at: performance.now(), display: -Infinity, max: -Infinity }));
+      drawFaces();
     }
 
     function resetHold() {
@@ -9827,7 +9835,7 @@
       const st = getState() || {};
       const vr = st.volume_range;
       const fixed = st.volume_fixed || '';
-      const held = !!(st.benchmark && st.benchmark.job && st.benchmark.job.running);
+      const held = !!status.hold || !!(st.benchmark && st.benchmark.job && st.benchmark.job.running);
       const v = Number.isFinite(volume) ? volume : Number((st.state || {}).volume);
       $('[data-pm-volume]').textContent = Number.isFinite(v) ? fmtVolume(v) : '—';
       const [down, up] = sheet.querySelectorAll('[data-vol]');
@@ -9845,13 +9853,14 @@
         // 'dropped' is player.js's to answer (it asks again); a state follows
         if (d.state === 'dropped') return;
         meter = d;
+        $('[data-action="retry"]').disabled = false;
         if (d.state !== 'open') chans.forEach(ch => { ch.display = -Infinity; });
         paint();
         paintState();
         return;
       }
       const peaks = d.p || [];
-      if (peaks.length && peaks.length !== chans.length) build(peaks.length);
+      if (peaks.length && peaks.length !== chans.length) setChannels(peaks.length);
       if (d.g !== gainSeen) {
         if (gainSeen !== undefined) chans.forEach(ch => { ch.max = -Infinity; });
         gainSeen = d.g;
@@ -9869,17 +9878,29 @@
     };
 
     const onStatus = (e) => {
+      const held = !!status.hold;
       status = e.detail || {};
-      if (Number.isFinite(status.volume) && status.volume !== volume) {
-        volume = status.volume;
-        paintVolume();
+      if (held && !status.hold) volumeNote = '';      // the run's refusal ends with it
+      if (hqpTick(status)) {
+        if (Number.isFinite(status.volume)) volume = status.volume;
+        const nowSdm = /SDM|DSD/i.test(status.active_mode);
+        if (nowSdm !== sdm) {
+          sdm = nowSdm;
+          drawFaces();                                  // the arc; the holds stay
+        }
       }
+      if (status.state !== 'playing' && status.state !== 'paused') {
+        // Stopped, no frames come: the needles rest instead of holding
+        // their last reading. Max keeps the record.
+        chans.forEach(ch => { ch.display = -Infinity; });
+        paint();
+      }
+      paintVolume();
       const lim = $('[data-pm-limited]');
       const n = status.limited;
       const text = Number.isFinite(n) ? String(n) : '—';
       if (lim.textContent !== text) lim.textContent = text;
       lim.classList.toggle('is-over', n > 0);
-      if (sdmNow() !== sdm) build(chans.length);
       paintState();
     };
 
@@ -9889,13 +9910,19 @@
       document.removeEventListener('np-update', onStatus);
       window.removeEventListener('sautium:route', close);
       sheet.remove();
+      peakMeterOpen = false;
     }
 
     $('[data-action="close"]').addEventListener('click', close);
     // The sheet itself is only reachable as the tablet's scrim.
     sheet.addEventListener('click', e => { if (e.target === sheet && e.detail <= 1) close(); });
     $('[data-action="reset"]').addEventListener('click', resetHold);
-    $('[data-action="retry"]').addEventListener('click', () => window.meterRetry());
+    // A double-tap is one tap: the button rests until the meter says how
+    // the attempt went.
+    $('[data-action="retry"]').addEventListener('click', (e) => {
+      e.currentTarget.disabled = true;
+      window.meterRetry();
+    });
     sheet.querySelectorAll('[data-vol]').forEach(btn => {
       btn.addEventListener('click', async () => {
         volumeNote = await stepVolume(parseFloat(btn.dataset.vol));
@@ -9906,10 +9933,11 @@
     document.addEventListener('np-update', onStatus);
     window.addEventListener('sautium:route', close);
 
-    build(2);
+    sdm = /SDM|DSD/i.test(status.active_mode || '');
+    setChannels(2);
     onStatus({ detail: status });
-    paintVolume();
     window.meterWanted(true);
+    $('[data-action="close"]').focus();
   }
 
   /* =====================================================================

@@ -4798,6 +4798,10 @@ a.am-kind { text-decoration: none; }
   gap: calc(14 * var(--px));
   padding-top: calc(12 * var(--px));
 }
+/* The body scrolls; nothing in it gives way — a card that clips its corners
+   (overflow: hidden) would otherwise shrink to nothing on a short screen,
+   its ±1 dB with it. */
+.pm-sheet .hqp-sheet-body > * { flex-shrink: 0; }
 .pm-card {
   display: flex;
   flex-direction: column;

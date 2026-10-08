@@ -270,7 +270,11 @@ oversampled) and adds the volume and the track's adaptive gain from the
 status poller — the peak before the limiter. Where nothing is limited it
 matches HQPlayer's own peak burst for burst (median −0.005 dB, MAD 0.013 dB);
 above 0 dBTP it is the over the limiter takes away. A gain stage outside
-that sum (convolution, an EQ) is not in the reading.
+that sum (convolution, an EQ) is not in the reading. A reading covers 0.16 s
+of the source rebuilt — HQPlayer's own burst, however TCP cuts it on the
+way — and carries the gain it was made with. While HQPlayer names no track
+(stopped) no reading is made: the gain of what plays next is not known, and
+the needles rest.
 
 The scale is a classic VU's geometry — deflection proportional to amplitude,
 −20…+3 dBTP, a third of the arc on −3…+3 — and the needle rises at once and
