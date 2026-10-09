@@ -16,9 +16,8 @@ from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import Response, StreamingResponse
 
 import media_urls
-import notices
 from config import settings
-from db_pool import db_execute, db_query_one
+from db_pool import db_query_one
 from streaming import transcode
 from streaming.proxy import MIME_BY_FORMAT, UNSATISFIABLE, parse_byte_range
 
@@ -44,14 +43,15 @@ def _range_headers(start: int, end: int, total: int, mime: str) -> dict:
 
 def _serve_disk(path: str, mime: str, request: Request):
     """Range-stream a file on disk (owned original, or a cached Opus transcode)."""
+    from scanner import folder_seen, library_unreachable
     try:
         total = os.path.getsize(path)
     except OSError:
         # A missing file is the moment a dropped music mount becomes
-        # visible: let the notices channel re-derive and say so.
-        db_execute("NOTIFY sautium_notices")
+        # visible: look at the folder, which wakes the notices if it is gone.
+        library_unreachable()
         raise HTTPException(status_code=404, detail="file missing on disk")
-    notices.recheck("library.mount_missing")   # served = the folder is back
+    folder_seen(False)                         # served = the folder is there
     span = parse_byte_range(request.headers.get("range"), total)
     if span is UNSATISFIABLE:
         return _unsatisfiable(total)

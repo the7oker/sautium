@@ -29,7 +29,6 @@ if str(BACKEND) not in sys.path:
 psycopg2 = pytest.importorskip("psycopg2")
 settings_router = pytest.importorskip("routers.settings")
 
-import notices  # noqa: E402
 import scanner  # noqa: E402
 
 
@@ -57,8 +56,10 @@ def cur(scratch_dsn, monkeypatch):
     engine = database.make_engine(scratch_dsn)
     monkeypatch.setattr(database, "SessionLocal",
                         sessionmaker(autocommit=False, autoflush=False, bind=engine))
-    # The notice's onset is process state: each test starts with none armed.
-    monkeypatch.setattr(notices, "_derived_since", {})
+    # The notice's onset and the folder's last look are process state: each
+    # test starts with none armed and a folder last seen in place.
+    monkeypatch.setattr(settings_router, "_derived_since", {})
+    monkeypatch.setattr(scanner, "_folder_unreachable", False)
     conn = psycopg2.connect(scratch_dsn)
     conn.autocommit = True
     with conn.cursor() as c:
@@ -140,6 +141,7 @@ def test_an_empty_folder_is_unreachable_only_while_the_catalog_knows_files(
 
 def test_the_notice_names_the_folder_the_owner_knows(cur, library):
     _owned_file(cur)
+    scanner.library_unreachable()                 # a look: the folder is empty
 
     notice = {n["key"]: n for n in settings_router._notices_state()["items"]}
 
@@ -148,20 +150,45 @@ def test_the_notice_names_the_folder_the_owner_knows(cur, library):
         library.parent / "host" / "Music").as_posix()
 
 
-def test_opening_the_library_wakes_the_notices_on_the_onset_and_the_return(
+def test_the_notices_read_the_last_look_and_never_the_folder(cur, library, monkeypatch):
+    _owned_file(cur)                              # the folder is empty, not yet looked at
+    real = os.scandir
+
+    def scandir(path="."):
+        assert os.fspath(path) != str(library), "the notices asked the folder"
+        return real(path)
+
+    monkeypatch.setattr(os, "scandir", scandir)
+    assert "library.mount_missing" not in {n["key"] for n in settings_router._notices_state()["items"]}
+
+    monkeypatch.setattr(os, "scandir", real)
+    scanner.library_unreachable()                 # a look
+    assert "library.mount_missing" in {n["key"] for n in settings_router._notices_state()["items"]}
+
+
+def test_a_file_served_or_a_walk_says_the_folder_is_there(cur, library, heard):
+    _owned_file(cur)
+    scanner.library_unreachable()                 # looked: gone
+    assert heard() == ["sautium_notices"]
+
+    scanner.folder_seen(False)                    # a file served from it after all
+    assert heard() == ["sautium_notices"]
+    assert scanner.folder_last_seen() is False
+
+
+def test_opening_the_library_looks_and_wakes_the_notices_on_a_change(
         cur, library, main_module, heard):
     _owned_file(cur)
 
     asyncio.run(settings_router._library_state())
-    assert heard() == ["sautium_notices"]         # seen here first: the notice derives it
+    assert heard() == ["sautium_notices"]         # the folder gone: news
 
-    settings_router._notices_state()              # the snapshot that wake asked for
     asyncio.run(settings_router._library_state())
-    assert heard(timeout=0.5) == []               # shown already: no wake per read
+    assert heard(timeout=0.5) == []               # still gone: no wake per read
 
     (library / "Electronic").mkdir()              # the folder is back
     asyncio.run(settings_router._library_state())
-    assert heard() == ["sautium_notices"]         # the shown notice is taken down
+    assert heard() == ["sautium_notices"]
 
 
 def test_scan_start_refuses_an_unreachable_folder_and_wakes_the_notices(
@@ -177,7 +204,6 @@ def test_scan_start_refuses_an_unreachable_folder_and_wakes_the_notices(
     assert main_module._scan_state["running"] is False
     assert heard() == ["sautium_notices"]         # every open tab learns the onset
 
-    settings_router._notices_state()              # the notice is shown now
     with pytest.raises(HTTPException):
         asyncio.run(main_module.scan_start())
     assert heard(timeout=0.5) == []               # a second tap wakes nobody again
@@ -193,7 +219,7 @@ def test_the_cli_and_the_legacy_endpoint_refuse_as_well(cur, library, main_modul
         asyncio.run(main_module.scan_library_endpoint())
 
     assert refused.value.status_code == 409
-    assert heard() == ["sautium_notices", "sautium_notices"]
+    assert heard() == ["sautium_notices"]         # the first look's news; the second's is not
 
 
 def _empty_the_folder_during_the_walk(monkeypatch, library):

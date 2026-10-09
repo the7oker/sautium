@@ -472,8 +472,13 @@ HQPlayer output's playback trace (the same failure three plays in a row,
 `playback.hqp_diagnostics.failing_run`) — the
 rule for WHEN a condition exists lives there, the words and the clock
 (local time, mono) live in `NOTICE_COPY` here. A condition with no ledger
-keeps its `since` in `backend/notices.py`; its producers wake the channel on
-the bad AND the good transition (`notices.onset` / `notices.recheck`). The client diffs snapshots: a key
+keeps its `since` in `_derived_since`; its producers wake the channel on
+the bad AND the good transition. The music folder is the one source the
+derivation never asks — a scandir of a dead network mount can stall, and
+every stream derives the set on every wake: it reads the last look
+(`scanner.folder_last_seen`), and a look that changes the answer (a scan's
+refusal, Library opened, a file served or found missing, a walk, the
+backend's first look) wakes the channel. The client diffs snapshots: a key
 that appears or re-arms toasts once — so `since` is the condition's
 ONSET, stable while it lasts: a producer that restamps it per run
 re-raises the same toast on every run (the slice rows did, every few

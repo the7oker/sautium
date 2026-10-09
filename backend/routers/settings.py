@@ -27,7 +27,6 @@ from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 from sqlalchemy import text
 
-import notices
 from config import settings as app_settings
 from database import get_db_context
 from db_pool import db_execute, db_query, db_query_one, get_conn
@@ -141,9 +140,9 @@ def _aicanon_worker(limit: Optional[int], since=None) -> None:
 
 
 # /api/events subscribers waiting for a fresh notices snapshot. Registered
-# by the multiplexed stream in routers/player.py; woken by the notices owner
-# below once it has derived the set a sautium_notices NOTIFY asked for
-# (api_cooldown arm/clear, the launcher's slice cycle, the scanner).
+# by the multiplexed stream in routers/player.py; woken by the
+# sautium_notices NOTIFY (api_cooldown arm/clear, the launcher's slice
+# cycle, the music folder's state changing) through the sync listener above.
 _notice_sse_clients: List[Tuple[asyncio.Event, asyncio.AbstractEventLoop]] = []
 _notice_sse_lock = threading.Lock()
 
@@ -168,58 +167,6 @@ def notify_notice_subscribers() -> None:
                 loop.call_soon_threadsafe(evt.set)
             except RuntimeError:
                 continue
-
-
-# The notices snapshot has one owner. Deriving the active set asks the music
-# folder (scanner.library_unreachable), and a scandir of a dead network mount
-# can stall: once, on this thread, never once per open stream and wake. Every
-# sautium_notices NOTIFY wakes it through the sync listener; a wake that lands
-# while it derives is the next pass, so a burst costs one more derivation.
-_notices_items: Optional[List[Dict[str, Any]]] = None
-_notices_lock = threading.Lock()
-_notices_wake = threading.Event()
-# Bumped by every start and stop: an owner of another generation quits on its
-# next wake, so a restart never runs two, and a stop never waits on a thread
-# a dead mount may be holding.
-_notices_generation = 0
-
-
-def _notices_owner(generation: int) -> None:
-    global _notices_items
-    while True:
-        _notices_wake.wait()
-        if generation != _notices_generation:
-            return
-        _notices_wake.clear()
-        try:
-            items = _derive_notices()
-        except Exception as e:
-            # The streams keep the last set; the next wake derives again.
-            logger.error(f"Notices derivation failed: {e}", exc_info=True)
-            continue
-        with _notices_lock:
-            if generation != _notices_generation:
-                return
-            _notices_items = items
-        notify_notice_subscribers()
-
-
-def start_notices_owner() -> None:
-    global _notices_generation
-    with _notices_lock:
-        _notices_generation += 1
-        generation = _notices_generation
-    threading.Thread(target=_notices_owner, args=(generation,), daemon=True,
-                     name="notices-owner").start()
-    _notices_wake.set()                # the first set, before any NOTIFY
-
-
-def stop_notices_owner() -> None:
-    global _notices_generation, _notices_items
-    with _notices_lock:
-        _notices_generation += 1
-        _notices_items = None          # no owner, no snapshot: readers derive
-    _notices_wake.set()
 
 
 def notify_library_subscribers() -> None:
@@ -290,7 +237,7 @@ def _sync_db_listener() -> None:
                         while conn.notifies:
                             channels.add(conn.notifies.pop(0).channel)
                         if "sautium_notices" in channels:
-                            _notices_wake.set()
+                            notify_notice_subscribers()
                         notify_library_subscribers()
         except Exception as e:
             logger.debug(f"Sync DB listener error: {e}")
@@ -306,9 +253,7 @@ def _sync_db_listener() -> None:
 
 
 def start_sync_listener() -> None:
-    """The listener and the notices owner it wakes: one channel, two threads."""
     global _sync_listener_thread, _sync_listener_running
-    start_notices_owner()
     if _sync_listener_thread and _sync_listener_thread.is_alive():
         return
     _sync_listener_running = True
@@ -321,7 +266,6 @@ def start_sync_listener() -> None:
 def stop_sync_listener() -> None:
     global _sync_listener_running
     _sync_listener_running = False
-    stop_notices_owner()
 
 
 # ============================================================
@@ -663,12 +607,9 @@ async def _library_state() -> Dict[str, Any]:
     music_path = app_settings.music_host_path or app_settings.music_library_path
 
     # The screen reads the folder's state from the notice set; opening it is
-    # a moment to look, both ways (off the loop — a dead network mount can
-    # stall it).
-    if await asyncio.to_thread(library_unreachable):
-        notices.onset("library.mount_missing")
-    else:
-        notices.recheck("library.mount_missing")
+    # a moment to look (off the loop — a dead network mount can stall it),
+    # and a look that changes the answer wakes the notices.
+    await asyncio.to_thread(library_unreachable)
 
     return {
         "music_path":         music_path,
@@ -1155,38 +1096,41 @@ def _guidance_state() -> Dict[str, Any]:
     return {"tasks": tasks}
 
 
+# Conditions with no ledger of their own (a vanished music folder, a missing
+# binary, a silent stream provider) keep their `since` here from the moment
+# they are first observed until they are not — process memory, which is
+# enough: after a restart the condition is either gone or freshly observed.
+_derived_since: Dict[str, str] = {}
 # The binaries THIS process shells out to (analysis + provenance). `flac`
 # is launcher-side only — the Docker image never ships it, and a check
 # there would light every Docker node for nothing.
 _MEDIA_TOOLS = ("ffmpeg", "fpcalc")
 
 
+def _derived(key: str, active: bool) -> Optional[str]:
+    from datetime import datetime, timezone
+    if not active:
+        _derived_since.pop(key, None)
+        return None
+    return _derived_since.setdefault(key, datetime.now(timezone.utc).isoformat())
+
+
 def _notices_state() -> Dict[str, Any]:
-    """The active set as its owner last derived it, each item with `seen`
-    (the trail already led the user to it) read now, so a visit retires it
-    without a derivation. Where no owner runs — a test, a script — or
-    before its first pass, the reader derives the set itself."""
-    with _notices_lock:
-        items = _notices_items
-    if items is None:
-        items = _derive_notices()
-    seen = _read("notice.seen") or {}
-    return {"items": [{**item, "seen": seen.get(item["key"]) == item["since"]}
-                      for item in items]}
-
-
-def _derive_notices() -> List[Dict[str, Any]]:
     """Active conditions that change what the user sees without any action
     of theirs: an external API that cooled us down, catalog data the
     network has not served yet. Like the guidance trail, the rule for WHEN
     a condition exists lives here next to the workers that create it; the
     view layer owns the words and the clock. Derived, never stored — the
     cooldown ledger and the slice cycles' status rows are the sources, so a
-    condition ends the moment its source does.
+    condition ends the moment its source does. The one source not asked
+    here is the music folder: its state is the last look's
+    (scanner.folder_last_seen), since a scandir of a dead network mount can
+    stall, and every stream derives this set on every wake.
 
     Each item: `key` (stable — what toasts coalesce on), `kind`, `since`
     (a re-arm bumps it, which re-lights the trail), `until` (when the
-    condition clears or is retried, or null), `data` (facts for the copy)."""
+    condition clears or is retried, or null), `data` (facts for the copy),
+    `seen` (the trail already led the user to it)."""
     items: List[Dict[str, Any]] = []
     for row in db_query("""
         SELECT source, strikes, updated_at, cooldown_until, reason
@@ -1217,14 +1161,14 @@ def _derive_notices() -> List[Dict[str, Any]]:
                          ("unserved", "pending", "pending_capped", "served",
                           "reason", "sources")},
             })
-    from scanner import library_unreachable
-    since = notices.derived("library.mount_missing", library_unreachable())
+    from scanner import folder_last_seen
+    since = _derived("library.mount_missing", folder_last_seen())
     if since:
         items.append({"key": "library.mount_missing", "kind": "error",
                       "since": since, "until": None,
                       "data": {"path": app_settings.library_db_root()}})
     missing = [t for t in _MEDIA_TOOLS if not shutil.which(t)]
-    since = notices.derived("tools.missing", bool(missing))
+    since = _derived("tools.missing", bool(missing))
     if since:
         items.append({"key": "tools.missing", "kind": "warning",
                       "since": since, "until": None, "data": {"tools": missing}})
@@ -1245,7 +1189,10 @@ def _derive_notices() -> List[Dict[str, Any]]:
                       "since": run["since"], "until": None,
                       "data": {"code": run["code"], "count": run["count"],
                                "title": run["title"]}})
-    return items
+    seen = _read("notice.seen") or {}
+    for item in items:
+        item["seen"] = seen.get(item["key"]) == item["since"]
+    return {"items": items}
 
 
 @router.get("/guidance")

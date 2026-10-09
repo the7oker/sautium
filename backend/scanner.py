@@ -8,6 +8,7 @@ and physical entities (AlbumVariant, MediaFile) per file on disk.
 import logging
 import os
 import re
+import threading
 from collections import defaultdict
 from dataclasses import dataclass
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -28,8 +29,7 @@ from models import (
     AlbumVariant, MediaFile, HqpLibraryFile, Genre,
 )
 from database import get_db_context
-from db_pool import db_query, db_query_one
-import notices
+from db_pool import db_execute, db_query, db_query_one
 from uuid_utils import artist_uuid, track_uuid, album_uuid, genre_uuid, is_lossless as check_lossless
 from album_identity import assign_dir_albums
 from canon.identity import ORPHAN_TRACK_SQL, elect_analysis_source
@@ -65,15 +65,43 @@ def library_unreachable() -> bool:
     path counts as empty; no folder chosen yet is not this. The one rule
     behind the library.mount_missing notice, Library's Music path row, the
     scan's refusal and the prune's last check — a walk over such a folder
-    finds nothing and reads as a scan, or as every file deleted."""
+    finds nothing and reads as a scan, or as every file deleted. Every
+    answer is recorded for the readers that must not ask (folder_seen)."""
     root = settings.music_library_path
     if not root or not db_query_one("SELECT 1 AS x FROM media_files LIMIT 1"):
-        return False
-    try:
-        with os.scandir(root) as it:
-            return next(it, None) is None
-    except OSError:
-        return True
+        answer = False
+    else:
+        try:
+            with os.scandir(root) as it:
+                answer = next(it, None) is None
+        except OSError:
+            answer = True
+    folder_seen(answer)
+    return answer
+
+
+# The folder's state as last looked at. Readers that must not wait on the
+# folder — the notices set, which every stream derives on every wake — take
+# it from here, so a scandir of a dead network mount holds the one look that
+# asked, never a reader. Whoever looks records what it found, and a change
+# wakes the notices: a scan's refusal, the prune's check, the Library screen
+# opened, a file served or found missing, a walk, the backend's first look.
+_folder_lock = threading.Lock()
+_folder_unreachable = False
+
+
+def folder_seen(unreachable: bool) -> None:
+    global _folder_unreachable
+    with _folder_lock:
+        changed = unreachable != _folder_unreachable
+        _folder_unreachable = unreachable
+    if changed:
+        db_execute("NOTIFY sautium_notices")
+
+
+def folder_last_seen() -> bool:
+    """library_unreachable()'s last answer, without asking the folder."""
+    return _folder_unreachable
 
 
 class LibraryUnreachable(RuntimeError):
@@ -83,10 +111,9 @@ class LibraryUnreachable(RuntimeError):
 
 def refuse_if_unreachable() -> None:
     """Every scan's refusal, whoever starts it (the Library button, the
-    launcher, cli.py, a walk that came back empty). It wakes the notices
-    channel: the condition's onset, seen here, reaches every open tab."""
+    launcher, cli.py, a walk that came back empty). Its look at the folder
+    wakes the notices when the answer changed, so every open tab learns."""
     if library_unreachable():
-        notices.onset("library.mount_missing")
         raise LibraryUnreachable(UNREACHABLE)
 
 
