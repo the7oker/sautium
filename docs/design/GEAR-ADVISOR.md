@@ -5,7 +5,9 @@ pair engine (`backend/gear_pairs.py`), upgrade advisor
 (`backend/gear_advisor.py`) and the measurement-registry candidate pool
 (`backend/gear_registry.py`), all reachable through `/api/profile/gear`,
 `/gear/system` and `/gear/advisor` and through the `gear_*` assistant tools.
-Remaining: P2P sharing of researched facts and the refresh policy (§Roadmap 6–7).
+Remaining (§Roadmap 6–9): P2P sharing of researched facts, the refresh
+policy, format chains in the pair engine and the exceptions to
+transducers-first.
 This document is the source of truth for the feature's stance, layers and
 roadmap. The design was validated by a live end-to-end experiment before any
 code was written (see §Experiment).
@@ -143,9 +145,10 @@ listening axes the praised traits hit.
    delta to best-in-budget is below audibility, say "plateau — money goes
    elsewhere". (The experiment's verdict for the reference rig: DAC and amp
    are measured plateaus; all budget flows to transducers.)
-2. **Transducers-first** with deterministic exceptions (underpowered planar →
-   amp first; hiss on sensitive IEMs → source first; a format wall → DAC
-   once the pair engine has format chains, Roadmap 8).
+2. **Transducers-first** with deterministic exceptions: underpowered
+   planar → amp first and hiss on sensitive IEMs → source first are
+   designed, not built (Roadmap 9); a format wall → DAC once the pair engine
+   has format chains (Roadmap 8).
 3. **Genre-weighted frontier, not a ranking.** Budget slider → Pareto frontier
    of candidates; each card carries the three voices + "improves X% of your
    library, regresses Y%" computed from genre shares. Anti-recommendations
@@ -236,3 +239,11 @@ hosts are region-blocked, head-fi renders JS-only.
    It needs DAC facts the catalog does not hold yet — formats per input,
    NOS capability, a PCM/DSD level offset. `gear_pairs.py` gives a DAC a
    line-out role only.
+9. The exceptions to transducers-first — designed, not built:
+   - underpowered planar → amp first;
+   - hiss on sensitive IEMs → source first.
+
+   The advisor orders no spend today. An underpowered pair shows as the pair
+   engine's SPL-headroom fail and leaves its amp `open` in the plateau
+   diagnosis; no check compares a source's output noise with an IEM's
+   sensitivity.

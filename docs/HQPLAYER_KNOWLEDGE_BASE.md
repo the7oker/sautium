@@ -6,12 +6,14 @@
 > author's dated public statements, attributed. Nothing here ranks one
 > setting above another, and nothing here is Sautium's own recommendation.
 >
-> **Which HQPlayer.** The lists are what HQPlayer engine 6.2.3 (HQPlayer
-> Desktop 6.1.0) reports at runtime — `GetFilters` and `GetShapers`, in PCM
-> mode and in SDM mode. Names, descriptions and ratio classes belong to a
-> build: another HQPlayer may add, rename or drop names (see "Changes since
-> the HQPlayer 5 manual"). Sautium reads them live from the running HQPlayer,
-> and the assistant works from those live lists, not from this file.
+> **Which HQPlayer.** The lists are the names HQPlayer engine 6.2.3
+> (HQPlayer Desktop 6.1.0) reports at runtime — `GetFilters` and
+> `GetShapers`, in PCM mode and in SDM mode. Names, descriptions and ratio
+> classes belong to a build: another HQPlayer may add, rename or drop names
+> (see "Changes since the HQPlayer 5 manual"). HQPlayer's own description of
+> each name is not copied here; "Reading the list" shows its form. Sautium
+> reads the lists live from the running HQPlayer, and the assistant works
+> from those live lists, not from this file.
 
 ---
 
@@ -146,47 +148,22 @@ The manual and the post differ for Denafrips; both are given here.
 
 ### Modulators
 
-HQPlayer 6.2.3 lists 36 modulators in SDM mode (`GetShapers`), in this
-order. The generation is HQPlayer's own field (since 6.1.0).
+HQPlayer 6.2.3 lists 36 modulators in SDM mode (`GetShapers`). By family,
+in HQPlayer's order:
 
-| # | Modulator | Generation |
-|---|---|---|
-| 0 | `DSD5` | Gen1 |
-| 1 | `DSD5v2` | Gen2 |
-| 2 | `DSD5v2 256+fs` | Gen2 |
-| 3 | `DSD5EC` | Gen4 |
-| 4 | `ASDM5` | Gen3 |
-| 5 | `ASDM5EC` | Gen4 |
-| 6 | `ASDM5ECv2` | Gen5 |
-| 7 | `ASDM5ECv3` | Gen6 |
-| 8 | `ASDM5EC-ul` | Gen7 |
-| 9 | `ASDM5EC-light` | Gen7 |
-| 10 | `ASDM5EC-fast` | Gen7 |
-| 11 | `ASDM5EC-super` | Gen7 |
-| 12 | `ASDM5EC-ul 512+fs` | Gen7 |
-| 13 | `ASDM5EC-light 512+fs` | Gen7 |
-| 14 | `ASDM5EC-fast 512+fs` | Gen7 |
-| 15 | `ASDM5EC-super 512+fs` | Gen7 |
-| 16 | `DSD7` | Gen2 |
-| 17 | `DSD7 256+fs` | Gen2 |
-| 18 | `ASDM7` | Gen3 |
-| 19 | `ASDM7EC` | Gen4 |
-| 20 | `ASDM7ECv2` | Gen5 |
-| 21 | `ASDM7ECv3` | Gen6 |
-| 22 | `ASDM7EC-ul` | Gen7 |
-| 23 | `ASDM7EC-light` | Gen7 |
-| 24 | `ASDM7EC-fast` | Gen7 |
-| 25 | `ASDM7EC-super` | Gen7 |
-| 26 | `ASDM7EC-ul 512+fs` | Gen7 |
-| 27 | `ASDM7EC-light 512+fs` | Gen7 |
-| 28 | `ASDM7EC-fast 512+fs` | Gen7 |
-| 29 | `ASDM7EC-super 512+fs` | Gen7 |
-| 30 | `AMSDM7 512+fs` | Gen3 |
-| 31 | `AMSDM7EC 512+fs` | Gen4 |
-| 32 | `AHM5EC4B` | Gen8 |
-| 33 | `AHM7EC4B` | Gen8 |
-| 34 | `AHM5EC8B` | Gen8 |
-| 35 | `AHM7EC8B` | Gen8 |
+- **DSD5:** `DSD5`, `DSD5v2`, `DSD5v2 256+fs`, `DSD5EC`.
+- **ASDM5:** `ASDM5`, `ASDM5EC`, `ASDM5ECv2`, `ASDM5ECv3`, `ASDM5EC-ul`,
+  `ASDM5EC-light`, `ASDM5EC-fast`, `ASDM5EC-super`, `ASDM5EC-ul 512+fs`,
+  `ASDM5EC-light 512+fs`, `ASDM5EC-fast 512+fs`, `ASDM5EC-super 512+fs`.
+- **DSD7:** `DSD7`, `DSD7 256+fs`.
+- **ASDM7:** `ASDM7`, `ASDM7EC`, `ASDM7ECv2`, `ASDM7ECv3`, `ASDM7EC-ul`,
+  `ASDM7EC-light`, `ASDM7EC-fast`, `ASDM7EC-super`, `ASDM7EC-ul 512+fs`,
+  `ASDM7EC-light 512+fs`, `ASDM7EC-fast 512+fs`, `ASDM7EC-super 512+fs`.
+- **AMSDM7:** `AMSDM7 512+fs`, `AMSDM7EC 512+fs`.
+- **AHM:** `AHM5EC4B`, `AHM7EC4B`, `AHM5EC8B`, `AHM7EC8B`.
+
+HQPlayer's description of a modulator is its generation, `Gen1`…`Gen8`
+(since 6.1.0); "Reading the list" shows one.
 
 The names read:
 - `5` / `7` — the modulator's order;
@@ -258,109 +235,77 @@ Named in earlier references, **not listed by 6.2.3**: `DSD7 512+fs`,
 ### The list
 
 HQPlayer 6.2.3 lists 67 filters in PCM mode and 77 in SDM mode — 84 names.
-Each cell is HQPlayer's own description of the filter in that mode:
-**Signalyst's rating · the author's focus words · the ratio class**. Rows
-follow PCM mode's order; the names only SDM mode lists come after, in its
-order. "—" means the mode does not list the name.
+By family, in PCM mode's order; SDM mode's two-stage variants (`-2s`) and
+`closed-form-16M` stand in their families. A name is in both modes' lists
+unless marked.
 
-| Filter | PCM mode | SDM mode |
-|---|---|---|
-| `none` | 1/5 · 1:1 | — |
-| `IIR` | 2/5 · Int | 2/5 · Int |
-| `IIR2` | 4/5 · Int | 4/5 · Int |
-| `FIR` | 3/5 · Int | 3/5 · Int |
-| `asymFIR` | 3/5 · Int | 3/5 · Int |
-| `minphaseFIR` | 3/5 · Int | 3/5 · Int |
-| `FFT` | 4/5 · 2ˣ | 4/5 · 2ˣ |
-| `poly-sinc-lp` | 4/5 · space · Any | 4/5 · space · Any |
-| `poly-sinc-mp` | 4/5 · transients · Any | 4/5 · transients · Any |
-| `poly-sinc-short-lp` | 3/5 · space, transients · Any | 3/5 · transients, space · Any |
-| `poly-sinc-short-mp` | 3/5 · transients · Any | 3/5 · transients · Any |
-| `poly-sinc-long-lp` | 4/5 · space · Any | 4/5 · space · Any |
-| `poly-sinc-long-ip` | 4/5 · space, transients · Any | 4/5 · space, transients · Any |
-| `poly-sinc-long-mp` | 4/5 · transients · Any | 4/5 · transients · Any |
-| `poly-sinc-hb` | 4/5 · Any | 4/5 · Any |
-| `poly-sinc-hb-xs` | 2/5 · Any | — |
-| `poly-sinc-hb-s` | 3/5 · Any | — |
-| `poly-sinc-hb-m` | 3/5 · Any | — |
-| `poly-sinc-hb-l` | 4/5 · Any | — |
-| `poly-sinc-ext` | 3/5 · Int | 3/5 · Int |
-| `poly-sinc-ext2` | 5/5 · timbre · Any | 5/5 · timbre · Any |
-| `poly-sinc-ext2-short` | 4/5 · timbre · Int up | 4/5 · timbre · Int |
-| `poly-sinc-ext2-medium` | 4/5 · timbre · Any | 4/5 · timbre · Any |
-| `poly-sinc-ext2-long` | 5/5 · timbre · Any | 5/5 · timbre · Any |
-| `poly-sinc-ext2-xla` | 5/5 · timbre · Any | 5/5 · timbre · Any |
-| `poly-sinc-ext2-xl` | 5/5 · timbre · Any | 5/5 · timbre · Any |
-| `poly-sinc-ext2-hires-lp` | 5/5 · timbre · Any | 5/5 · timbre · Any |
-| `poly-sinc-ext2-hires-ip` | 5/5 · timbre · Any | 5/5 · timbre · Any |
-| `poly-sinc-ext2-hires-mp` | 5/5 · timbre · Any | 5/5 · timbre · Any |
-| `poly-sinc-mqa/mp3-lp` | 4/5 · transients · Int up | 4/5 · transients · Any |
-| `poly-sinc-mqa/mp3-mp` | 4/5 · transients · Int up | 4/5 · transients · Any |
-| `poly-sinc-xtr-lp` | 5/5 · timbre · Any | 5/5 · timbre · Any |
-| `poly-sinc-xtr-mp` | 5/5 · timbre · Any | 5/5 · timbre · Any |
-| `poly-sinc-xtr-short-lp` | 5/5 · timbre · Any | 5/5 · timbre, transients · Any |
-| `poly-sinc-xtr-short-mp` | 5/5 · timbre · Any | 5/5 · timbre, transients · Any |
-| `poly-sinc-gauss-short` | 3/5 · transients · Int up | 3/5 · transients · Int |
-| `poly-sinc-gauss-medium` | 4/5 · transients, timbre · Any | 4/5 · transients, timbre · Any |
-| `poly-sinc-gauss-long` | 5/5 · transients, timbre, space · Any | 5/5 · transients, timbre, space · Any |
-| `poly-sinc-gauss-xla` | 5/5 · transients, timbre, space · Any | 5/5 · transients, timbre, space · Any |
-| `poly-sinc-gauss-xl` | 5/5 · transients, timbre, space · Any | 5/5 · transients, timbre, space · Any |
-| `poly-sinc-gauss-hires-lp` | 5/5 · transients, timbre, space · Any | 5/5 · transients, timbre, space · Any |
-| `poly-sinc-gauss-hires-ip` | 5/5 · transients, timbre, space · Any | 5/5 · transients, timbre, space · Any |
-| `poly-sinc-gauss-hires-mp` | 5/5 · transients, timbre, space · Any | 5/5 · transients, timbre, space · Any |
-| `poly-sinc-gauss-halfband` | 4/5 · transients, timbre, space · Any | 4/5 · transients, timbre, space · Any |
-| `poly-sinc-gauss-halfband-s` | 3/5 · transients, timbre, space · Any | 3/5 · transients, timbre, space · Any |
-| `ASRC` | 2/5 · Any | — |
-| `polynomial-1` | 1/5 · Int up | 1/5 · Int |
-| `polynomial-2` | 1/5 · Int up | 1/5 · Int |
-| `minringFIR-lp` | 2/5 · transients · Int up | 2/5 · transients · Int |
-| `minringFIR-mp` | 2/5 · transients · Int up | 2/5 · transients · Int |
-| `closed-form` | 3/5 · 2ˣ up | 3/5 · 2ˣ |
-| `closed-form-fast` | 2/5 · 2ˣ up | 2/5 · 2ˣ |
-| `closed-form-M` | 3/5 · 2ˣ up | — |
-| `sinc-S` | 4/5 · space, timbre · 2ˣ up | 4/5 · space, timbre · 2ˣ |
-| `sinc-M` | 4/5 · space, timbre · 2ˣ up | 4/5 · space, timbre · 2ˣ |
-| `sinc-Mx` | 4/5 · space, timbre · 2ˣ up | 4/5 · space, timbre · 2ˣ |
-| `sinc-MG` | 4/5 · transients, timbre, space · 2ˣ up | 4/5 · transients, timbre, space · 2ˣ |
-| `sinc-MGa` | 4/5 · transients, timbre, space · 2ˣ up | 4/5 · transients, timbre, space · 2ˣ |
-| `sinc-L` | 3/5 · 2ˣ up | 3/5 · 2ˣ |
-| `sinc-Ls` | 2/5 · 2ˣ up | 2/5 · 2ˣ |
-| `sinc-Lm` | 2/5 · 2ˣ up | 2/5 · 2ˣ |
-| `sinc-Ll` | 3/5 · 2ˣ up | 3/5 · 2ˣ |
-| `sinc-Lh` | 4/5 · 2ˣ up | 4/5 · 2ˣ |
-| `sinc-short` | 2/5 · Any up | 2/5 · Any |
-| `sinc-medium` | 2/5 · Any up | 2/5 · Any |
-| `sinc-long` | 3/5 · Any up | 3/5 · Any |
-| `sinc-long-h` | 4/5 · Any | 4/5 · Any |
-| `poly-sinc-hb-xs-2s` | — | 2/5 · Any |
-| `poly-sinc-hb-s-2s` | — | 3/5 · Any |
-| `poly-sinc-hb-m-2s` | — | 3/5 · Any |
-| `poly-sinc-hb-l-2s` | — | 4/5 · Any |
-| `poly-sinc-lp-2s` | — | 4/5 · space · Any |
-| `poly-sinc-mp-2s` | — | 4/5 · transients · Any |
-| `poly-sinc-short-lp-2s` | — | 3/5 · transients, space · Any |
-| `poly-sinc-short-mp-2s` | — | 3/5 · transients · Any |
-| `poly-sinc-long-lp-2s` | — | 4/5 · space · Any |
-| `poly-sinc-long-ip-2s` | — | 4/5 · space, transients · Any |
-| `poly-sinc-long-mp-2s` | — | 4/5 · transients · Any |
-| `poly-sinc-hb-2s` | — | 4/5 · Any |
-| `poly-sinc-xtr-lp-2s` | — | 5/5 · timbre · Any |
-| `poly-sinc-xtr-mp-2s` | — | 5/5 · timbre · Any |
-| `poly-sinc-xtr-short-lp-2s` | — | 5/5 · timbre, transients · Any |
-| `poly-sinc-xtr-short-mp-2s` | — | 5/5 · timbre, transients · Any |
-| `closed-form-16M` | — | 3/5 · 2ˣ |
+- **No conversion:** `none`, PCM mode only.
+- **IIR:** `IIR`, `IIR2`.
+- **FIR:** `FIR`, `asymFIR`, `minphaseFIR`.
+- **FFT:** `FFT`.
+- **poly-sinc:** `poly-sinc-lp`, `poly-sinc-mp`, `poly-sinc-short-lp`,
+  `poly-sinc-short-mp`, `poly-sinc-long-lp`, `poly-sinc-long-ip`,
+  `poly-sinc-long-mp`. SDM mode only: `poly-sinc-lp-2s`, `poly-sinc-mp-2s`,
+  `poly-sinc-short-lp-2s`, `poly-sinc-short-mp-2s`, `poly-sinc-long-lp-2s`,
+  `poly-sinc-long-ip-2s`, `poly-sinc-long-mp-2s`.
+- **poly-sinc-hb (half-band):** `poly-sinc-hb`. PCM mode only:
+  `poly-sinc-hb-xs`, `poly-sinc-hb-s`, `poly-sinc-hb-m`, `poly-sinc-hb-l`.
+  SDM mode only: `poly-sinc-hb-xs-2s`, `poly-sinc-hb-s-2s`,
+  `poly-sinc-hb-m-2s`, `poly-sinc-hb-l-2s`, `poly-sinc-hb-2s`.
+- **poly-sinc-ext, poly-sinc-ext2:** `poly-sinc-ext`, `poly-sinc-ext2`,
+  `poly-sinc-ext2-short`, `poly-sinc-ext2-medium`, `poly-sinc-ext2-long`,
+  `poly-sinc-ext2-xla`, `poly-sinc-ext2-xl`, `poly-sinc-ext2-hires-lp`,
+  `poly-sinc-ext2-hires-ip`, `poly-sinc-ext2-hires-mp`.
+- **poly-sinc-mqa/mp3:** `poly-sinc-mqa/mp3-lp`, `poly-sinc-mqa/mp3-mp`.
+- **poly-sinc-xtr:** `poly-sinc-xtr-lp`, `poly-sinc-xtr-mp`,
+  `poly-sinc-xtr-short-lp`, `poly-sinc-xtr-short-mp`. SDM mode only:
+  `poly-sinc-xtr-lp-2s`, `poly-sinc-xtr-mp-2s`, `poly-sinc-xtr-short-lp-2s`,
+  `poly-sinc-xtr-short-mp-2s`.
+- **poly-sinc-gauss:** `poly-sinc-gauss-short`, `poly-sinc-gauss-medium`,
+  `poly-sinc-gauss-long`, `poly-sinc-gauss-xla`, `poly-sinc-gauss-xl`,
+  `poly-sinc-gauss-hires-lp`, `poly-sinc-gauss-hires-ip`,
+  `poly-sinc-gauss-hires-mp`, `poly-sinc-gauss-halfband`,
+  `poly-sinc-gauss-halfband-s`.
+- **ASRC:** `ASRC`, PCM mode only.
+- **polynomial:** `polynomial-1`, `polynomial-2`.
+- **minringFIR:** `minringFIR-lp`, `minringFIR-mp`.
+- **closed-form:** `closed-form`, `closed-form-fast`. PCM mode only:
+  `closed-form-M`. SDM mode only: `closed-form-16M`.
+- **sinc-S, sinc-M:** `sinc-S`, `sinc-M`, `sinc-Mx`, `sinc-MG`, `sinc-MGa`.
+- **sinc-L:** `sinc-L`, `sinc-Ls`, `sinc-Lm`, `sinc-Ll`, `sinc-Lh`.
+- **sinc-short … sinc-long-h:** `sinc-short`, `sinc-medium`, `sinc-long`,
+  `sinc-long-h`.
 
 ### Reading the list
+
+HQPlayer describes each filter in one line: Signalyst's rating, the
+author's focus words when there are any, an arrow, and the ratio class. The
+arrow belongs to the mode: `⥮` in PCM mode, `⥣` in SDM mode. A modulator's
+description is its generation, `Gen1`…`Gen8`. Five lines as engine 6.2.3
+reports them:
+
+| Mode | Filter or modulator | HQPlayer's description |
+|---|---|---|
+| PCM | `poly-sinc-gauss-xla` | `5/5 transients, timbre, space ⥮ Any` |
+| SDM | `poly-sinc-gauss-xla` | `5/5 transients, timbre, space ⥣ Any` |
+| PCM | `sinc-M` | `4/5 space, timbre ⥮ 2^x up` |
+| PCM | `IIR` | `2/5 ⥮ Int` |
+| SDM | `ASDM7EC-super` (modulator) | `Gen7` |
+
+The full list, a line for every name, is live: HQPlayer shows it, and
+Sautium's HQPlayer screen reads it from the running HQPlayer — the filter
+picker puts each filter's line under its name. The lines are Signalyst's
+text, and this file does not reproduce them.
 
 - **Signalyst's rating (n/5)** is Signalyst's technical rating relative to the
   other filters — **not a listening score**. It says nothing about what a
   listener will prefer on a given system.
 - **Focus words** (transients, timbre, space) are the author's, as HQPlayer
   shows them — not a recommendation for a kind of music.
-- **Ratio class**: `Int` — integer ratios; `2ˣ` — power-of-two ratios;
-  `Any` — any ratio; `1:1` — no conversion; `up` — upsampling only. The class
-  can differ between modes: `poly-sinc-mqa/mp3-lp` is `Int up` in PCM mode
-  and `Any` in SDM mode.
+- **Ratio class**: `Int` — integer ratios; `2ˣ` (HQPlayer writes `2^x`) —
+  power-of-two ratios; `Any` — any ratio; `1:1` — no conversion; `up` —
+  upsampling only. The class can differ between modes:
+  `poly-sinc-mqa/mp3-lp` is `Int up` in PCM mode and `Any` in SDM mode.
 - Names ending in **`-2s`** are two-stage variants. 6.2.3 lists them in SDM
   mode only.
 - **The manual's notes** (5.7.3): it advises against ASRC (heavy to compute)

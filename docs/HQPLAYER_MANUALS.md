@@ -11,10 +11,13 @@ redistributed in this repository. Get them from the vendor:
 What Sautium keeps in-tree is its own, independently written material:
 
 - `HQPLAYER_KNOWLEDGE_BASE.md` — a structured reference for people (filters,
-  modulators, shapers, rates): the lists as HQPlayer 6.2.3 reports them at
-  runtime, and the manual's and the author's advice, attributed — it ranks
+  modulators, shapers, rates): the names HQPlayer 6.2.3 lists at runtime, by
+  family, and the manual's and the author's advice, attributed — it ranks
   nothing. The assistant reads the live lists from HQPlayer, not this file.
   The manual is paraphrased with its version and section, never quoted.
+  HQPlayer's own line for each filter and modulator is Signalyst's text too:
+  it is read live from the running HQPlayer (Sautium shows each filter's),
+  and the file quotes a few lines only, to show how one reads.
 - `HQPLAYER_INTEGRATION.md` — the control protocol as Sautium uses it.
 - `../HQPLAYER_QUICKSTART.md`, `../DSP_CONTROLS_SUMMARY.md`.
 

@@ -1982,13 +1982,17 @@ tiers read off the n/5 in HQPlayer's descriptions, per-genre filter picks,
 per-DAC recipes, a "sweet spot" rate, and an algorithm that chose settings
 from a DAC type and a CPU class. The n/5 is Signalyst's technical rating
 relative to the other filters, not a listening score — a 4/5 filter can be
-the one a listener prefers. So the file states what HQPlayer reports at
-runtime (the lists of one build; names belong to a build, 6.2.3 here), the
-manual's advice by version and section, and the author's dated posts,
-attributed. Where neither speaks it says nothing, and it recommends nothing
-of Sautium's own. The rule for anything Sautium shows about filters and
-modulators: a label names its source, a list keeps HQPlayer's own order, and
-"which is best" is answered with what differs, never with a pick.
+the one a listener prefers. So the file names what HQPlayer lists at runtime
+(one build's names, 6.2.3 here — names belong to a build), the manual's
+advice by version and section, and the author's dated posts, attributed.
+Where neither speaks it says nothing, and it recommends nothing of Sautium's
+own. HQPlayer's own line for each filter and modulator (the n/5, the focus
+words, the ratio class, the generation) is Signalyst's text: it is read
+live from the running HQPlayer (Sautium shows each filter's), and the file
+quotes a few lines only, to show how one reads. The rule for anything
+Sautium shows about filters and modulators: a label names its source, a list
+keeps HQPlayer's own order, and "which is best" is answered with what
+differs, never with a pick.
 
 ## Known Gotchas
 

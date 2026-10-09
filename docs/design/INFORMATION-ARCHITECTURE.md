@@ -1003,9 +1003,12 @@ and 13 stayed optional.
    `gear_specs` (EAV over `gear_spec_attributes`, `source_url` per value) and the
    sentiment terms in `gear_sentiment_terms` — canonicalized via UUID v5
    `(category:brand:model)`
-9. ✅ `user_gear` table **(new)** — `(id UUID PK, user_id, gear_model_id REFERENCES
-   gear_models(id), status user_gear_status ENUM (own / want / sell / previously_owned),
-   notes TEXT, added_at, status_changed_at)`
+9. ✅ `user_gear` table **(new)** — built without the `user_id` and
+   `status_changed_at` planned here (a node has one account): `(id UUID PK,
+   gear_model_id UNIQUE REFERENCES gear_models(id) ON DELETE/UPDATE CASCADE,
+   status user_gear_status ENUM (own / want / sell / previously_owned) DEFAULT 'own',
+   notes TEXT, added_at, updated_at, removed_at)` — `removed_at` is a soft delete:
+   re-adding the model brings the row back, its notes included
 10. ✅ `(new endpoints)` for Profile (now under `/api/profile/*`):
     - `GET/PUT /api/profile` — own profile read/write
     - `GET /api/profile/by-pubkey/{pubkey_prefix}` — public profile of another user
