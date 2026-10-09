@@ -229,6 +229,15 @@ class FakeHqp:
         self._serve()
 
 
+@pytest.fixture(autouse=True)
+def _queue_stays_in_memory(monkeypatch):
+    """A manager here never persists its queue. The write is a timer that
+    outlives the test, and db_pool opens the configured database for it: run
+    in the backend container, the suite overwrote the node's player.queue and
+    the next start crash-looped on "track-1" (2026-10-09)."""
+    monkeypatch.setattr(PlaybackManager, "_schedule_persist", lambda self: None)
+
+
 @pytest.fixture
 def fake(monkeypatch):
     f = FakeHqp()

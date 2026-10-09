@@ -698,7 +698,18 @@ def signals(tmp_path_factory):
 
 
 @pytest.fixture
-def run(dsn, signals, monkeypatch):
+def library(tmp_path):
+    """The album the owner has queued when a run starts — files of the test's
+    own, not a path of any machine's library."""
+    album = tmp_path / "library" / "A"
+    album.mkdir(parents=True)
+    for name in ("01.flac", "02.flac"):
+        (album / name).touch()
+    return album
+
+
+@pytest.fixture
+def run(dsn, signals, library, monkeypatch):
     """A manager with the fake HQPlayer attached as the output, its endpoint
     registered in a scratch database, and the clock of a point shrunk."""
     import db_pool
@@ -731,7 +742,11 @@ def run(dsn, signals, monkeypatch):
     monkeypatch.setattr(substitute, "native_plays", lambda items, output_id, endpoint_id: [None] * len(items))
     monkeypatch.setattr(settings_router, "_read", lambda key: "hqplayer" if key == "output.type" else None)
     mgr = PlaybackManager()
-    mgr.queue.replace([_item("E:/Music/A/01.flac", 1), _item("E:/Music/A/02.flac", 2)])
+    # Its persist timer would outlive this scratch pool, and db_pool then opens
+    # the configured database — the node's own player.queue (2026-10-09).
+    monkeypatch.setattr(mgr, "_schedule_persist", lambda: None)
+    mgr.queue.replace([_item((library / "01.flac").as_posix(), 1),
+                       _item((library / "02.flac").as_posix(), 2)])
     monkeypatch.setattr(manager_mod, "manager", mgr)
     monkeypatch.setattr(bench, "_SIGNAL_DIR", signals)
     monkeypatch.setattr(bench, "TICK_S", 0.01)
@@ -1243,15 +1258,16 @@ def test_recover_puts_back_the_measured_modes_own_selection(run):
     assert run.q("SELECT outcome::text FROM hqp_benchmark_runs") == [("interrupted",)]
 
 
-def test_recover_leaves_an_hqplayer_the_owner_changed_since(run):
+def test_recover_leaves_an_hqplayer_the_owner_changed_since(run, library):
     fake = run.fake
     _cut_short_run(run, last_rate=1, last_filter=1, last_filter1x=1, last_shaper=1)
+    owners = (library / "01.flac").as_uri()
     with fake._lock:
         fake.volume, fake.sel[2] = -10.0, [2, 1, 1, 2]
-        fake.playlist = ["file:///E:/Music/A/01.flac"]
+        fake.playlist = [owners]
     bench.recover(run.endpoint_id)
     assert fake.settings() == (2, (2, 1, 1, 1), (2, 1, 1, 2), -10.0)
-    assert fake.playlist == ["file:///E:/Music/A/01.flac"]
+    assert fake.playlist == [owners]
     assert "left as it is" in run.q("SELECT note FROM hqp_benchmark_runs")[0][0]
 
 
