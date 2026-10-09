@@ -1994,6 +1994,52 @@ Sautium shows about filters and modulators: a label names its source, a list
 keeps HQPlayer's own order, and "which is best" is answered with what
 differs, never with a pick.
 
+### An agent's sign-in is the CLI's verdict (2026-10-09)
+
+- **A credentials file is not a sign-in.** When a token refresh fails the
+  CLI keeps `.credentials.json` with its tokens blanked, so "the file parses"
+  read as signed in. On 2026-10-09 the Docker node — recreated by the Windows
+  docker CLI, which mounts `%USERPROFILE%\.claude` instead of the WSL home —
+  showed Claude Code ready in Settings and hid Sign in, while gear research
+  (Meze ARTA) was refused in two seconds, put back as an "infra pause" every
+  15 minutes and logged as "unknown error": CLI 2.1.x exits 1 with the cause
+  in the stdout JSON, and the runner read only stderr. On macOS the store is
+  a Keychain item whose existence says nothing of its contents either.
+- **Two voices of the CLI decide, one verdict per agent holds them.**
+  `claude auth status --json` reads the CLI's own store wherever it lives
+  (file or Keychain; the same JSON on Windows 2.1.278, macOS 2.1.281 and the
+  image's 2.1.295, ~150 ms), and every call reports itself refused or
+  authenticated (the runners → `claude_code.auth`, `codex_cli.auth` — one
+  `AgentAuth` class, so the two cannot drift). Readers take the held
+  verdict; only the first read, the AI screen (an explicit look) and a
+  finished sign-in ask the CLI again. A refused call outranks a status that
+  still reads "logged in" — that status cannot tell a revived sign-in from
+  dead tokens left in place — so only a call that authenticates or a sign-in
+  that completes ends it.
+- **Codex's status reads presence, so its turns decide.** `codex login
+  status` (exit 0/1, its words on stderr) calls an auth.json of `{}` logged
+  in (codex-cli 0.162): it catches a missing or garbled file, and a refused
+  turn (`turn.failed` with a 401) catches a dead one. No auth.json with
+  OPENAI_API_KEY at hand stays signed in — the runner mints the file. `codex
+  login` deletes auth.json before it authorizes anything, so every exit of a
+  sign-in the backend drove looks at the store again: a cancelled one reads
+  as signed out at once.
+- **A flip is an event, never a retry timer.** The research drain claims
+  nothing while signed out and wakes on the sign-in; the notices channel,
+  the guidance trail (woken with it) and the AI screen's streams wake on
+  both directions. A lost sign-in is not billed to the API key instead, and
+  it is not an "infra pause": a usage limit reopens with time, a sign-in
+  only with a human. The human is told where it bites —
+  `claude_code.signed_out` / `codex.signed_out` (only while the assistant
+  runs on that agent, or research waits for Claude Code), the gear chips and
+  sheet, the Sign in panel with the CLI's own words — and led to the fix by
+  the `ai_signin` trail: More tab → AI assistant → the Sign in button (a
+  dark mark on that amber button), done when the sign-in is back. Research
+  runs on Claude Code whichever agent answers the chat, so the AI screen
+  shows Claude's sign-in too while the queue waits for it. Measured live the
+  same day: the sign-in from the Web UI woke the drain within 80 ms, and
+  Meze ARTA was researched in 59 s.
+
 ## Known Gotchas
 
 - **A Docker stop never reached the backend's shutdown.** Two things,

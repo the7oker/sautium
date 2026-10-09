@@ -8371,7 +8371,7 @@
               <span class="more-hint"></span>
               <span class="more-chev">${CHEV}</span>
             </button>
-            <button class="more-row" type="button" data-go="more/ai">
+            <button class="more-row" type="button" data-go="more/ai" data-guide="ai_signin">
               <span class="more-icon">${ICON_AI}</span>
               <span class="more-label">AI assistant</span>
               <span class="more-hint"></span>
@@ -10115,6 +10115,11 @@
       // the Retry button, the chip tells the truth.
       return '<span class="research-pending is-failed">Research failed · open to retry</span>';
     }
+    // Research runs on Claude Code: signed out, the queue waits for the
+    // sign-in, not for its turn (the notice set is the one source).
+    if (notices.get('claude_code.signed_out')) {
+      return '<span class="research-pending is-blocked">Waits for Claude sign-in</span>';
+    }
     return '<span class="research-pending">Awaiting research</span>';
   }
 
@@ -11105,6 +11110,25 @@
     title: 'Media tools missing',
     text: `${escapeHtml(((n.data && n.data.tools) || []).join(', '))} not found — audio analysis and fingerprinting are skipped until installed.`,
   });
+  // The CLI's own verdict (backend/claude_code.py), raised only while
+  // something needs it: the assistant runs on Claude Code, or gear research
+  // waits for it. The gear chips and the gear sheet say it where it bites.
+  NOTICE_COPY['claude_code.signed_out'] = n => {
+    const d = n.data || {};
+    const jobs = d.waiting
+      ? `<span class="num">${d.waiting}</span> gear research job${d.waiting === 1 ? '' : 's'}`
+      : '';
+    const who = d.assistant
+      ? (jobs ? `The assistant and ${jobs} wait` : 'The assistant waits')
+      : `${jobs} wait${d.waiting === 1 ? 's' : ''}`;
+    return { title: 'Claude Code is signed out',
+             text: `${who} for a new sign-in — More → AI assistant.` };
+  };
+  // Raised only while the assistant runs on Codex (backend/codex_cli.py).
+  NOTICE_COPY['codex.signed_out'] = () => ({
+    title: 'Codex is signed out',
+    text: 'The assistant waits for a new sign-in — More → AI assistant.',
+  });
   function noticeCopy(n) {
     const fn = NOTICE_COPY[n.key];
     if (fn) return fn(n);
@@ -11924,6 +11948,18 @@
               <button class="refresh" data-retry-research>Retry research</button>
             </div>
           </div>`;
+      } else if (notices.get('claude_code.signed_out')) {
+        researchHTML = `
+          <div class="research-card">
+            <div class="research-state-row">
+              <span class="research-state-label is-blocked">Waits for Claude sign-in</span>
+            </div>
+            <p class="research-prose empty">Research runs on Claude Code, and Claude Code on this node is signed out. Sign in again — the queue resumes on its own.</p>
+            <div class="research-meta">
+              <span></span>
+              <button class="refresh" data-open-ai>Sign in</button>
+            </div>
+          </div>`;
       } else {
         researchHTML = `
           <div class="research-card">
@@ -12128,6 +12164,8 @@
         try { await fetch('/api/gear-models/' + modelId + '/retry-research', { method: 'POST' }); } catch (_) {}
         renderGearDetail(root, modelId);
       });
+      const signinBtn = root.querySelector('[data-open-ai]');
+      if (signinBtn) signinBtn.addEventListener('click', () => navigate('more/ai'));
   }
   function openGearRenameForm(g, onSaved) {
       const overlay = document.createElement('div');
@@ -12854,6 +12892,9 @@
     }
     if (s === 'not_authed') {
       const failed = sg && sg.error;
+      // A sign-in that was lost rather than never made: the CLI's own words
+      // from the call it refused (backend/claude_code.py verdict).
+      const refused = cc.auth && cc.auth.refused && cc.auth.reason;
       const how = cc.launcher_mode
         ? 'A browser tab opens on this computer; authorize there and Sautium finishes on its own.'
         : 'Sautium gives you a sign-in link and takes the code the page shows.';
@@ -12866,9 +12907,10 @@
           <div class="row-stack-value" style="${_cliSigninProse}">
             Sign in with your Claude subscription. ${how}
           </div>
-          ${failed ? `<div class="row-stack-sub" style="color:var(--color-negative);">${escapeProfileHtml(sg.error)}</div>` : ''}
+          ${failed ? `<div class="row-stack-sub" style="color:var(--color-negative);">${escapeProfileHtml(sg.error)}</div>`
+            : refused ? `<div class="row-stack-sub" style="color:var(--color-negative);">Claude Code said: ${escapeProfileHtml(refused)}</div>` : ''}
           <div class="btn-row single" style="margin:calc(10*var(--px)) 0 0;">
-            <button class="btn btn-primary" data-action="cc-signin">${failed ? 'Try again' : 'Sign in to Claude'}</button>
+            <button class="btn btn-primary" data-action="cc-signin" data-guide="ai_signin">${failed ? 'Try again' : 'Sign in to Claude'}</button>
           </div>
         </div>`;
     }
@@ -12965,6 +13007,9 @@
     }
     if (s === 'not_authed') {
       const failed = sg && sg.error;
+      // A sign-in that was lost rather than never made: the CLI's own words
+      // from the turn it refused (backend/codex_cli.py verdict).
+      const refused = cx.auth && cx.auth.refused && cx.auth.reason;
       const how = cx.launcher_mode
         ? 'A browser tab opens on this computer; authorize there and Sautium finishes on its own.'
         : 'Sautium gives you a sign-in link and a one-time code to enter there.';
@@ -12978,9 +13023,10 @@
             Sign in with your ChatGPT account. ${how} Alternatively, set
             <code style="font-family:var(--font-mono);color:var(--color-blue);">OPENAI_API_KEY</code> in .env.
           </div>
-          ${failed ? `<div class="row-stack-sub" style="color:var(--color-negative);">${escapeProfileHtml(sg.error)}</div>` : ''}
+          ${failed ? `<div class="row-stack-sub" style="color:var(--color-negative);">${escapeProfileHtml(sg.error)}</div>`
+            : refused ? `<div class="row-stack-sub" style="color:var(--color-negative);">Codex said: ${escapeProfileHtml(refused)}</div>` : ''}
           <div class="btn-row single" style="margin:calc(10*var(--px)) 0 0;">
-            <button class="btn btn-primary" data-action="cx-signin">${failed ? 'Try again' : 'Sign in to ChatGPT'}</button>
+            <button class="btn btn-primary" data-action="cx-signin" data-guide="ai_signin">${failed ? 'Try again' : 'Sign in to ChatGPT'}</button>
           </div>
         </div>`;
     }
@@ -14739,8 +14785,12 @@
       return;
     }
 
+    // Gear research runs on Claude Code whatever answers the chat, so its
+    // sign-in is shown here whenever the queue waits for it — the notice
+    // points at this screen.
+    const researchNeedsClaude = ai.provider !== 'claude_code' && !!notices.get('claude_code.signed_out');
     let claudeState = null;
-    if (ai.provider === 'claude_code') {
+    if (ai.provider === 'claude_code' || researchNeedsClaude) {
       claudeState = await _fetchClaudeState();
     }
     let codexState = null;
@@ -14752,6 +14802,9 @@
       <section class="screen screen-settings">
         ${_settingsHeader('AI assistant')}
         <div style="margin-top:calc(14*var(--px));">${_renderAi(ai, claudeState, codexState)}</div>
+        ${researchNeedsClaude && claudeState ? `
+          <div class="profile-group-label">Claude Code · gear research</div>
+          <div class="form-group">${_renderClaudeCodeBlock(claudeState)}</div>` : ''}
         ${_renderAiCanon(ai)}
       </section>
     `;
@@ -14874,10 +14927,11 @@
       renderAI(root);   // picks up running state + stream
     });
 
-    if (ai.provider === 'claude_code') _subscribeClaudeStream();
+    if (ai.provider === 'claude_code' || researchNeedsClaude) _subscribeClaudeStream();
     if (ai.provider === 'codex') _subscribeCodexStream();
     if (ai.canonization && ai.canonization.available) _subscribeAiCanonStream();
     refreshAiAvailability();
+    guide.paint();
   }
 
   /* ============ Sync & P2P screen — #more/sync ============ */
@@ -15103,6 +15157,15 @@
       else if (h.startsWith('more/gear-system'))  refreshGearScreenLive(renderGearSystem, 'more/gear-system');
       else if (h.startsWith('more/gear-advisor')) refreshGearScreenLive(renderGearAdvisor, 'more/gear-advisor');
       else if (h.startsWith('more/gear/'))        refreshGearScreenLive(app => renderGearDetail(app, h.split('/')[2]), 'more/gear/');
+    });
+    // A lost Claude sign-in parks the research queue; the gear surfaces say
+    // so (researchChipHTML, the gear sheet), repainted when it comes or goes.
+    let researchBlocked = false;
+    window.addEventListener('sautium:notices-changed', () => {
+      const blocked = !!notices.get('claude_code.signed_out');
+      if (blocked === researchBlocked) return;
+      researchBlocked = blocked;
+      window.dispatchEvent(new CustomEvent('sautium:research-changed'));
     });
 
     // MB-scope capability changes (dump loaded, dump peers found/lost)

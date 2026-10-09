@@ -24,6 +24,14 @@ because every write below is upsert-shaped (idempotent enrichment).
 a deliberate user action (re-add the model or a future Retry button),
 never an automatic loop.
 
+Research runs on the Claude Code subscription. While its sign-in is lost
+(claude_code.auth — the CLI's own verdict) the drain claims nothing
+and a refused call puts its row back: the queue waits for the sign-in,
+which wakes the drain (claude_code.auth.on_change). No timer re-tries
+it, and nothing falls back to the pay-as-you-go key — a sign-in is the
+owner's to restore, and the notices channel tells them (settings
+`claude_code.signed_out`).
+
 CLI (inside the backend container):
     python gear_research_worker.py --list
     python gear_research_worker.py --one <gear_model_id>
@@ -39,6 +47,7 @@ from typing import Any, Dict, List, Optional
 
 import psycopg2
 
+import claude_code
 from config import settings
 from db_pool import db_execute, db_query, db_query_one
 from uuid_utils import (gear_caveat_uuid, gear_pair_uuid,
@@ -69,6 +78,14 @@ def request_drain() -> None:
     _drain_wake.set()
 
 
+def _on_signin_change(signed_in: bool) -> None:
+    if signed_in:
+        request_drain()
+
+
+claude_code.auth.on_change(_on_signin_change)
+
+
 RESEARCH_TIMEOUT_SECONDS = 600   # one model = many web fetches; chat's 150s is far too small.
                                  # 480 proved too tight for review-rich categories (Empyrean II
                                  # timed out on the first live drain) — headphones carry the
@@ -80,13 +97,15 @@ PAUSE_BETWEEN_MODELS = 3         # seconds; politeness between research calls
 
 _VALID_VALUE_TYPES = {"number", "string", "enum", "boolean"}
 
-# CLI-level failures (usage limit exhausted, OAuth expiry, transport errors)
-# are infrastructure conditions, not verdicts about the model being
-# researched: the row goes back to 'queued' and the drain pauses instead of
-# burning the whole queue into 'failed' (observed live: an exhausted
-# subscription window failed 10 models in under a minute).
+# CLI-level failures (usage limit exhausted, transport errors) are
+# infrastructure conditions, not verdicts about the model being researched:
+# the row goes back to 'queued' and the drain pauses instead of burning the
+# whole queue into 'failed' (observed live: an exhausted subscription window
+# failed 10 models in under a minute). A limit window reopens with time, so
+# that pause is a timer; a lost sign-in does not, so it is not one of these
+# (ResearchSignedOut).
 _CLI_INFRA_RE = re.compile(
-    r"^Claude Code (error|OAuth token expired)|limit reached|usage limit|rate limit",
+    r"^Claude Code error|limit reached|usage limit|rate limit",
     re.IGNORECASE,
 )
 INFRA_PAUSE_SECONDS = 15 * 60
@@ -94,6 +113,10 @@ INFRA_PAUSE_SECONDS = 15 * 60
 
 class ResearchInfraPause(Exception):
     """AI backend temporarily unavailable — requeue and pause the drain."""
+
+
+class ResearchSignedOut(Exception):
+    """Claude Code refused the call — requeue; the queue waits for the sign-in."""
 
 
 _consumer_thread: Optional[threading.Thread] = None
@@ -142,8 +165,10 @@ def _call_claude_code_research(system_prompt: str, user_msg: str) -> Optional[Di
     payload = _extract_json(answer)
     if payload is None:
         # Raised before the Anthropic fallback on purpose: when the
-        # subscription window is exhausted the pay-as-you-go key is the
-        # wrong tool to silently burn instead.
+        # subscription window is exhausted or its sign-in lost, the
+        # pay-as-you-go key is the wrong tool to silently burn instead.
+        if not claude_code.auth.signed_in():
+            raise ResearchSignedOut(claude_code.auth.verdict()["reason"] or "signed out")
         if _CLI_INFRA_RE.search(answer):
             raise ResearchInfraPause(answer[:120])
         logger.warning(f"gear research: Claude Code returned no JSON; head: {answer[:300]!r}")
@@ -415,7 +440,7 @@ def research_one(model_id: str) -> bool:
 
     try:
         payload = _run_research_call(brand, model, category)
-    except ResearchInfraPause:
+    except (ResearchInfraPause, ResearchSignedOut):
         raise
     except Exception as e:
         logger.error(f"gear research: call failed for {brand} {model}: {e}")
@@ -503,7 +528,7 @@ def research_pair(pair_id: str) -> bool:
     try:
         payload = _call_claude_code_research(system_prompt, user_msg) \
             or _call_anthropic_research(system_prompt, user_msg)
-    except ResearchInfraPause:
+    except (ResearchInfraPause, ResearchSignedOut):
         raise
     except Exception as e:
         logger.error(f"gear research: pair call failed: {e}")
@@ -591,9 +616,47 @@ def _claim_next() -> Optional[str]:
     return row["id"] if row else None
 
 
+def _requeue(model_id: Optional[str], pair_id: Optional[str]) -> None:
+    """Put a claimed job back: the call never got to research it."""
+    if model_id:
+        db_execute(
+            "UPDATE gear_models SET research_state = 'queued' WHERE id = %(m)s::uuid",
+            {"m": model_id},
+        )
+        _notify_state(model_id, "queued")
+    else:
+        db_execute(
+            "UPDATE gear_pair_notes SET research_state = 'queued' WHERE id = %(m)s::uuid",
+            {"m": pair_id},
+        )
+
+
+def _waits_for_signin() -> bool:
+    """Claude Code is installed and signed out: claim nothing. The sign-in
+    wakes the drain again (_on_signin_change). Queued work waiting on it is
+    a notice (settings `claude_code.signed_out`), so the notices channel
+    hears every time the queue parks with work in it. Without the CLI the
+    call itself fails over to the API key, as it always has."""
+    if claude_code.get_claude_executable() is None or claude_code.auth.signed_in():
+        return False
+    row = db_query_one(
+        """
+        SELECT EXISTS (SELECT 1 FROM gear_models WHERE research_state = 'queued')
+            OR EXISTS (SELECT 1 FROM gear_pair_notes WHERE research_state = 'queued')
+               AS waiting
+        """
+    )
+    if row["waiting"]:
+        logger.info("gear research: the queue waits for the Claude Code sign-in")
+        db_execute("NOTIFY sautium_notices")
+    return True
+
+
 def _drain_queue() -> None:
     # Models first (they feed specs/sentiment), then pair-synergy jobs.
     while _worker_running:
+        if _waits_for_signin():
+            return
         model_id = _claim_next()
         pair_id = None
         if not model_id:
@@ -605,17 +668,12 @@ def _drain_queue() -> None:
                 research_one(model_id)
             else:
                 research_pair(pair_id)
+        except ResearchSignedOut as e:
+            _requeue(model_id, pair_id)
+            logger.warning(f"gear research: Claude Code refused the call ({e})")
+            continue
         except ResearchInfraPause as e:
-            if model_id:
-                db_execute(
-                    "UPDATE gear_models SET research_state = 'queued' WHERE id = %(m)s::uuid",
-                    {"m": model_id},
-                )
-            else:
-                db_execute(
-                    "UPDATE gear_pair_notes SET research_state = 'queued' WHERE id = %(m)s::uuid",
-                    {"m": pair_id},
-                )
+            _requeue(model_id, pair_id)
             logger.warning(
                 f"gear research: AI backend unavailable ({e}); pausing drain "
                 f"for {INFRA_PAUSE_SECONDS // 60} min"

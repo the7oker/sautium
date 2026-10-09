@@ -92,6 +92,17 @@ AI call, in preference order:
    (pause_turn continuation loop, max 12 searches) when Claude Code is absent
    or returns no parseable JSON.
 
+A lost subscription is never a reason to bill the API key instead. While
+Claude Code is installed but signed out (`claude_code.auth`, the CLI's own
+verdict: `claude auth status` plus every refused call) the drain claims
+nothing and a refused call puts its row back; the sign-in wakes the drain
+(`claude_code.auth.on_change`), and meanwhile the rows read "Waits for
+Claude sign-in" beside the `claude_code.signed_out` notice, with the
+`ai_signin` guidance trail leading to the Sign in button (since
+2026-10-09 — before, the dead sign-in looped as a 15-minute infra pause that
+nobody saw). A usage-limit window reopens with time, so that one requeues
+and pauses the drain for 15 minutes.
+
 The prompt is `gear_research_prompt.build_prompt()` — canonical-catalog
 injection, reuse-or-propose attribute keys, citations required
 (`source_url`), "omit rather than guess". Persistence enforces the same:

@@ -69,6 +69,7 @@ from typing import Iterator, List, Optional
 if sys.platform not in ("win32", "darwin"):
     import pwd
 
+import codex_cli
 from providers.base import StreamDone, StreamEvent, TextDelta, ToolStart
 from claude_code_runner import AGENT_USER, MCP_CONFIG_PATH
 
@@ -109,12 +110,14 @@ _DISABLED_FEATURES = ("plugins", "apps", "multi_agent", "tool_suggest",
                       "goals", "image_generation")
 
 CODEX_LOGIN_MSG = (
-    "Codex sign-in expired or missing. Run `codex login` in a terminal "
-    "on the host machine — the new credentials are picked up "
-    "automatically (no restart needed)."
+    "Codex is signed out — its sign-in expired or is missing. Sign in "
+    "again under More → AI assistant (or set OPENAI_API_KEY); the "
+    "assistant picks it up from there."
 )
 
 
+# Every refusal and every completed turn is reported to codex_cli.auth,
+# which owns the verdict the rest of the backend reads.
 def _auth_error(text: Optional[str]) -> bool:
     t = (text or "").lower()
     return (
@@ -183,6 +186,9 @@ def _ensure_auth(codex_exe: str) -> Optional[str]:
         return None
     key = os.environ.get("OPENAI_API_KEY") or os.environ.get("CODEX_API_KEY")
     if not key:
+        # Nothing to sign in with — and the verdict hears it from the store
+        # (a cancelled `codex login` deletes auth.json behind any reader).
+        codex_cli.auth.signed_in(fresh=True)
         return CODEX_LOGIN_MSG
     env = os.environ.copy()
     kwargs = _spawn_kwargs(env)
@@ -528,10 +534,15 @@ def call_codex_stream(
 
             elif t == "turn.completed":
                 turn_completed = True
+                codex_cli.auth.authenticated()
 
             elif t == "turn.failed":
                 raw = (evt.get("error") or {}).get("message") or "Codex error"
-                error_msg = CODEX_LOGIN_MSG if _auth_error(raw) else raw
+                if _auth_error(raw):
+                    codex_cli.auth.refused(raw)
+                    error_msg = CODEX_LOGIN_MSG
+                else:
+                    error_msg = raw
 
             elif t == "error":
                 transient_error = evt.get("message") or transient_error
@@ -546,8 +557,11 @@ def call_codex_stream(
             stderr = "".join(stderr_chunks).strip()
             raw = transient_error or stderr or (
                 f"Codex exited with code {rc}" if rc != 0 else None)
-            if raw:
-                error_msg = CODEX_LOGIN_MSG if _auth_error(raw) else raw
+            if raw and _auth_error(raw):
+                codex_cli.auth.refused(raw)
+                error_msg = CODEX_LOGIN_MSG
+            elif raw:
+                error_msg = raw
         if rc != 0 and not error_msg and not turn_completed:
             error_msg = f"Codex exited with code {rc}"
 

@@ -523,10 +523,13 @@ docker compose down
 - **Phone can't reach the Web UI** — confirm `SAUTIUM_HOST_IPS` lists the host's
   LAN IP (the Host guard answers 421 to any address that is not the node's
   own), then `docker restart sautium-backend`.
-- **`Claude Code error` on AI queries** — the mounted `~/.claude` credentials
-  are stale or missing. Use the Compose variant that matches where you ran
-  `claude /login` (Windows vs WSL), or sign in again from More › AI
-  assistant.
+- **"Claude Code is signed out" / "Codex is signed out"** (the assistant
+  says so, gear research waits for Claude Code, a notice names it and an
+  amber trail leads to the Sign in button) — the mounted `~/.claude` or
+  `~/.codex` holds no working sign-in: its tokens expired or were revoked,
+  or the Compose variant mounts a different home than the one you signed in
+  from (Windows vs WSL). Sign in again from More › AI assistant; the node
+  picks it up without a restart.
 
 ## Documentation
 

@@ -27,6 +27,7 @@ from typing import Any, Dict, Iterator, Optional
 if sys.platform not in ("win32", "darwin"):
     import pwd
 
+import claude_code
 from providers.base import StreamDone, StreamEvent, TextDelta, ToolStart
 
 logger = logging.getLogger(__name__)
@@ -85,17 +86,36 @@ _MAX_THINKING_TOKENS = "1024"
 # refreshed" does NOT (observed on a fresh launcher install with stale
 # host credentials, 2026-08-09) — so the mapping must also match text.
 # Only consulted inside is_error paths, where an authentication mention
-# IS the failure.
+# IS the failure. Every refusal is reported to claude_code, which owns the
+# verdict the rest of the backend reads.
 OAUTH_EXPIRED_MSG = (
-    "Claude Code sign-in expired or revoked. Run `claude /login` in a "
-    "terminal on the host machine — the new token is picked up "
-    "automatically (no restart needed)."
+    "Claude Code is signed out — its sign-in expired or was revoked. Sign "
+    "in again under More → AI assistant; the assistant and gear research "
+    "pick it up from there."
 )
 
 
 def _oauth_error(text: Optional[str]) -> bool:
     t = (text or "").lower()
     return "oauth" in t or "authenticat" in t
+
+
+def _error_text(evt: dict) -> str:
+    """The words of a failed result event: `result` on API errors, the
+    `errors` list on the CLI's early exits (e.g. `--resume <unknown-id>`)."""
+    errs = evt.get("errors") or []
+    return evt.get("result") or (errs[0] if errs else "")
+
+
+def _auth_failure(evt: dict) -> Optional[str]:
+    """The CLI's own words when a result event says authentication failed,
+    else None."""
+    if not evt.get("is_error"):
+        return None
+    raw = _error_text(evt)
+    if evt.get("api_error_status") == 401 or _oauth_error(raw):
+        return raw or "authentication failed"
+    return None
 
 
 def _claude_env() -> dict:
@@ -234,45 +254,28 @@ def call_claude_code(
     logger.info(f"Claude Code call: message={message[:80]!r}, resume={resume}, session={session_id}")
 
     try:
-        env = _claude_env()
-        kwargs = {
-            "capture_output": True,
-            "text": True,
-            "encoding": "utf-8",
-            "errors": "replace",
-            "timeout": wallclock,
-            "env": env,
-        }
-
-        if sys.platform == "win32":
-            kwargs["creationflags"] = subprocess.CREATE_NO_WINDOW
-        elif sys.platform != "darwin":
-            # Linux/Docker: run as non-root user
-            pw = pwd.getpwnam(AGENT_USER)
-
-            def demote():
-                os.setgid(pw.pw_gid)
-                os.setuid(pw.pw_uid)
-
-            kwargs["preexec_fn"] = demote
-            env["HOME"] = pw.pw_dir
-
+        kwargs = spawn_kwargs(_claude_env())
+        kwargs.update(capture_output=True, text=True, encoding="utf-8",
+                      errors="replace", timeout=wallclock)
         result = subprocess.run(cmd, **kwargs)
 
-        if result.returncode != 0:
-            stderr = result.stderr.strip()
-            logger.error(f"Claude Code failed (rc={result.returncode}): {stderr}")
-            return {
-                "answer": f"Claude Code error: {stderr or 'unknown error'}",
-                "claude_session_id": None,
-                "model": use_model,
-            }
-
-        # Parse JSON output
+        # A failed call still prints its result object: since CLI 2.1.x it
+        # exits 1 with the cause in `result` and nothing on stderr, so the
+        # exit code alone read as "unknown error" (2026-10-09).
         try:
             output = json.loads(result.stdout)
-        except json.JSONDecodeError as e:
-            logger.error(f"Failed to parse Claude Code JSON: {e}\nstdout: {result.stdout[:500]}")
+        except json.JSONDecodeError:
+            output = None
+        if not isinstance(output, dict):
+            if result.returncode != 0:
+                stderr = result.stderr.strip()
+                logger.error(f"Claude Code failed (rc={result.returncode}): {stderr}")
+                return {
+                    "answer": f"Claude Code error: {stderr or 'unknown error'}",
+                    "claude_session_id": None,
+                    "model": use_model,
+                }
+            logger.error(f"Failed to parse Claude Code JSON; stdout: {result.stdout[:500]}")
             return {
                 "answer": result.stdout.strip() or "Failed to parse Claude Code response",
                 "claude_session_id": None,
@@ -282,10 +285,17 @@ def call_claude_code(
         raw_answer = output.get("result", "")
         claude_sid = output.get("session_id")
 
-        if output.get("is_error") and (
-            output.get("api_error_status") == 401 or _oauth_error(raw_answer)
-        ):
+        refused = _auth_failure(output)
+        if refused:
+            claude_code.auth.refused(refused)
+            logger.error(f"Claude Code refused the call (rc={result.returncode}): {refused}")
             raw_answer = OAUTH_EXPIRED_MSG
+        elif result.returncode != 0:
+            cause = _error_text(output) or "unknown error"
+            logger.error(f"Claude Code failed (rc={result.returncode}): {cause}")
+            raw_answer = f"Claude Code error: {cause}"
+        elif not output.get("is_error"):
+            claude_code.auth.authenticated()
 
         logger.info(
             f"Claude Code response: {len(raw_answer)} chars, session={claude_sid}"
@@ -321,8 +331,9 @@ def call_claude_code(
 
 
 def spawn_kwargs(env: dict) -> dict:
-    """Popen setup shared by every Claude Code spawn — the chat turns and
-    the sign-in (claude_code.start_signin): non-root user on Linux/Docker,
+    """Popen setup shared by every Claude Code spawn — the chat turns, the
+    one-shot calls, the sign-in (claude_code.start_signin) and its status
+    look (claude_code._cli_status): non-root user on Linux/Docker,
     whose HOME is where the CLI keeps credentials and sessions, so a
     sign-in run this way lands exactly where the next turn looks; no
     flashing console window on Windows."""
@@ -557,21 +568,18 @@ def call_claude_code_stream(
             elif t == "result":
                 if evt.get("session_id"):
                     claude_sid = evt["session_id"]
-                if evt.get("is_error"):
+                refused = _auth_failure(evt)
+                if refused:
+                    # The CLI's raw message tells the user nothing
+                    # actionable — replace with a recovery instruction.
+                    claude_code.auth.refused(refused)
+                    error_msg = OAUTH_EXPIRED_MSG
+                elif evt.get("is_error"):
                     # Surface the real error message instead of the
-                    # generic "Claude Code error". `errors` is a list
-                    # set by the CLI on early-exit failures (e.g.
-                    # `--resume <unknown-id>`); `result` carries the
-                    # human-readable text on normal API errors.
-                    errs = evt.get("errors") or []
-                    api_status = evt.get("api_error_status")
-                    raw = evt.get("result") or (errs[0] if errs else None)
-                    if api_status == 401 or _oauth_error(raw):
-                        # The CLI's raw message tells the user nothing
-                        # actionable — replace with a recovery instruction.
-                        error_msg = OAUTH_EXPIRED_MSG
-                    else:
-                        error_msg = raw or "Claude Code error"
+                    # generic "Claude Code error".
+                    error_msg = _error_text(evt) or "Claude Code error"
+                else:
+                    claude_code.auth.authenticated()
 
             # 'user' (tool_result) events are internal — ignore.
 
@@ -580,6 +588,7 @@ def call_claude_code_stream(
             stderr_thread.join(timeout=2)
             stderr = "".join(stderr_chunks).strip()
             if _oauth_error(stderr):
+                claude_code.auth.refused(stderr)
                 error_msg = OAUTH_EXPIRED_MSG
             else:
                 error_msg = stderr or f"Claude Code exited with code {rc}"

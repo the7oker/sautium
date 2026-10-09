@@ -160,7 +160,9 @@ A **bottom-up sheet** with a vertical list of entries:
   Streaming library: the dumps are neither the user's files nor a catalog
   of music — they are reference data the whole node reads, and the set of
   them grows
-- AI assistant (`#more/ai`) — which agent answers the chat and its sign-in
+- AI assistant (`#more/ai`) — which agent answers the chat and its sign-in;
+  also Claude Code's sign-in whenever gear research waits for it, since
+  research runs on Claude Code whichever agent answers the chat
 - Sync & P2P (`#more/sync`) — the network's state, the P2P settings, the
   notices
 

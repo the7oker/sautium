@@ -219,6 +219,8 @@ class AgentLogin:
             "timed_out": self._timed_out,
             "cancelled": self._cancelled,
             "exit_code": self._exit_code,
+            # The CLI exited 0 on its own: it stored a fresh credential.
+            "completed": self._exit_code == 0 and self._error is None,
             "started_at": self._started_at,
         }
 

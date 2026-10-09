@@ -27,6 +27,8 @@ from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 from sqlalchemy import text
 
+import claude_code
+import codex_cli
 from config import settings as app_settings
 from database import get_db_context
 from db_pool import db_execute, db_query, db_query_one, get_conn
@@ -201,6 +203,24 @@ def notify_codex_subscribers() -> None:
                 loop.call_soon_threadsafe(evt.set)
             except RuntimeError:
                 continue
+
+
+def _claude_signin_changed(signed_in: bool) -> None:
+    """The Claude Code verdict flipped — a refused call, a completed
+    sign-in, a look: the AI screen, the notices set and the guidance
+    trail (woken with the notices) all read it."""
+    notify_claude_subscribers()
+    db_execute("NOTIFY sautium_notices")
+
+
+def _codex_signin_changed(signed_in: bool) -> None:
+    """The Codex verdict flipped — same readers as Claude Code's."""
+    notify_codex_subscribers()
+    db_execute("NOTIFY sautium_notices")
+
+
+claude_code.auth.on_change(_claude_signin_changed)
+codex_cli.auth.on_change(_codex_signin_changed)
 
 
 # Sync DB listener: bridge between launcher's P2PManager and the
@@ -1002,6 +1022,7 @@ def _audio_output_state() -> Dict[str, Any]:
 # The client owns only the route each id maps to.
 
 _GUIDANCE_DISMISSIBLE = {"audio_output", "notices", "hqp_library"}
+_SIGNIN_NOTICES = {"claude_code.signed_out", "codex.signed_out"}
 
 
 def _analysis_pending() -> bool:
@@ -1076,8 +1097,16 @@ def _guidance_state() -> Dict[str, Any]:
     # A background condition the user has not been shown yet — the More
     # tab and the Sync & P2P row light up until the screen with the rows
     # is visited. A re-armed condition (new `since`) lights it again.
-    if any(not n["seen"] for n in _notices_state()["items"]):
+    notices = _notices_state()["items"]
+    if any(not n["seen"] for n in notices):
         tasks.append("notices")
+
+    # An agent the node needs has lost its sign-in (the notices name it):
+    # the trail leads to its Sign in button — More tab, the AI assistant
+    # row, the button. Done when the sign-in is back, a state the verdict
+    # reads, never by visiting.
+    if any(n["key"] in _SIGNIN_NOTICES for n in notices):
+        tasks.append("ai_signin")
 
     # The HQPlayer chosen as the output runs on another machine and has a
     # library of its own that was never imported: the trail leads to the
@@ -1196,6 +1225,28 @@ def _notices_state() -> Dict[str, Any]:
                       "since": run["since"], "until": None,
                       "data": {"code": run["code"], "count": run["count"],
                                "title": run["title"]}})
+    # A CLI agent signed out while something needs it: the assistant runs on
+    # it, or — Claude Code only — gear research waits for it (the drain
+    # claims nothing until the sign-in returns). Each verdict is the CLI's
+    # own (claude_code.auth, codex_cli.auth); it is read as it stands, never
+    # asked for here, and its onset dates the notice.
+    provider = _read("ai.provider")
+    agent = claude_code.auth.verdict()
+    if agent is not None and not agent["signed_in"]:
+        waiting = db_query_one("""
+            SELECT (SELECT count(*) FROM gear_models WHERE research_state = 'queued')
+                 + (SELECT count(*) FROM gear_pair_notes WHERE research_state = 'queued')
+                   AS n
+        """)["n"]
+        assistant = provider == "claude_code"
+        if waiting or assistant:
+            items.append({"key": "claude_code.signed_out", "kind": "error",
+                          "since": agent["since"], "until": None,
+                          "data": {"waiting": waiting, "assistant": assistant}})
+    agent = codex_cli.auth.verdict()
+    if agent is not None and not agent["signed_in"] and provider == "codex":
+        items.append({"key": "codex.signed_out", "kind": "error",
+                      "since": agent["since"], "until": None, "data": {}})
     seen = _read("notice.seen") or {}
     for item in items:
         item["seen"] = seen.get(item["key"]) == item["since"]
@@ -1354,6 +1405,10 @@ def _select_provider(new_provider: str) -> None:
     # Re-overlay credentials onto Pydantic settings and bust the
     # providers cache — same path PUT /ai/key uses.
     _apply_api_key_to_runtime(next_key)
+
+    # The Claude Code sign-in notice names the assistant only while it
+    # runs on Claude Code.
+    db_execute("NOTIFY sautium_notices")
 
     # Connecting the AI after a dump was already loaded is the third trigger
     # (besides dump-load + scan): catch up the residue now. Gated + no-op without
@@ -1598,12 +1653,17 @@ def get_claude_state() -> Dict[str, Any]:
 
     When the state transitions to 'ready' we invalidate the providers
     cache so /api/chat picks up the freshly-installed CLI without a
-    backend restart."""
+    backend restart.
+
+    This screen is the explicit look at the sign-in: the CLI is asked
+    again (`fresh`), so a sign-in made in a terminal shows here, and
+    `auth` carries the verdict's facts — a refused call's own words
+    among them — for the Sign in panel."""
     from claude_code import (
-        get_state, get_claude_executable, detect_node_version,
+        auth, get_state, get_claude_executable, detect_node_version,
         is_launcher_mode, signin_snapshot,
     )
-    state = get_state()
+    state = get_state(fresh=True)
     _diag_observe_agent("claude", state)
     if state == "ready":
         from providers import reset as _reset_providers
@@ -1617,6 +1677,7 @@ def get_claude_state() -> Dict[str, Any]:
         "claude_path":    str(claude) if claude else None,
         "install":        dict(_claude_install_state),
         "signin":         signin_snapshot(),
+        "auth":           auth.verdict() if claude else None,
     }
 
 
@@ -1760,10 +1821,10 @@ def get_codex_state() -> Dict[str, Any]:
     """State machine for the OpenAI Codex CLI — Web UI branches on
     `state` exactly like the Claude Code screen. Transition to 'ready'
     busts the providers cache so chat picks the CLI up without a
-    restart."""
-    import codex_cli
+    restart. The explicit look, as on the Claude Code screen: the CLI is
+    asked again and `auth` carries the verdict's facts."""
     from claude_code import detect_node_version, is_launcher_mode
-    state = codex_cli.get_state()
+    state = codex_cli.get_state(fresh=True)
     _diag_observe_agent("codex", state)
     if state == "ready":
         from providers import reset as _reset_providers
@@ -1778,6 +1839,7 @@ def get_codex_state() -> Dict[str, Any]:
         "auth_method":    codex_cli.codex_auth_method(),
         "install":        dict(_codex_install_state),
         "signin":         codex_cli.signin_snapshot(),
+        "auth":           codex_cli.auth.verdict() if codex else None,
     }
 
 

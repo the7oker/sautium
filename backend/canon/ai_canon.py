@@ -28,6 +28,7 @@ from difflib import SequenceMatcher
 
 from anyascii import anyascii
 
+import claude_code
 from database import SessionLocal
 from db_pool import db_query
 from sqlalchemy import text as _sql
@@ -269,6 +270,15 @@ def ai_canonize_stream(limit: int = None, dry_run: bool = False, since=None):
             logger.info("ai_canon yielding to algorithmic canon at %d/%d", st["processed"], total)
             yield {"event": "done", "provider": provider.name, "model": model,
                    "yielded": True, **st}
+            return
+        # A lost sign-in refuses every batch in two seconds and the answer
+        # holds no decisions — the run stops instead of "processing" the
+        # residue into nothing.
+        if provider.name == "claude_code" and not claude_code.auth.signed_in():
+            logger.info("ai_canon stopping at %d/%d — Claude Code is signed out",
+                        st["processed"], total)
+            yield {"event": "done", "provider": provider.name, "model": model,
+                   "signed_out": True, **st}
             return
         batch = enriched[s:s + _BATCH]
         by_n = {it["n"]: it for it in batch}

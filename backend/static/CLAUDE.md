@@ -467,9 +467,13 @@ The active set comes from the server as a **snapshot** on
 ledger, the slice cycles' status rows (`mb_slice.status`,
 `lb_slice.status`), the music folder (owned
 files known but the path empty), the media binaries on PATH, the
-stream providers' health (`streaming.service.provider_health`) and the
+stream providers' health (`streaming.service.provider_health`), the
 HQPlayer output's playback trace (the same failure three plays in a row,
-`playback.hqp_diagnostics.failing_run`) — the
+`playback.hqp_diagnostics.failing_run`) and the CLI agents' sign-ins
+(`claude_code.auth`, `codex_cli.auth`: while the assistant runs on one, or
+gear research waits for Claude Code — the gear chips and sheet say so in
+place, and the `ai_signin` guidance task lights the trail to the Sign in
+button until the sign-in is back) — the
 rule for WHEN a condition exists lives there, the words and the clock
 (local time, mono) live in `NOTICE_COPY` here. A condition with no ledger
 keeps its `since` in `_derived_since`; its producers wake the channel on

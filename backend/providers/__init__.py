@@ -22,41 +22,43 @@ def reset() -> None:
 
 
 def _claude_code_ready() -> bool:
-    """True when the Claude Code CLI is installed and authenticated.
-    Used instead of an env flag so adding/removing the credentials
-    file is picked up after a reset(). Docker can't shell out to the
-    host so `get_claude_executable()` returns None there."""
+    """True when the Claude Code CLI is installed and signed in — the
+    CLI's own verdict, held by claude_code.auth. Used instead of an env
+    flag so a sign-in, or one lost, is picked up after a reset()."""
     try:
-        from claude_code import get_claude_executable, claude_authenticated
-        return get_claude_executable() is not None and claude_authenticated()
+        import claude_code
+        return claude_code.get_claude_executable() is not None and claude_code.auth.signed_in()
     except Exception as e:
         logger.debug(f"claude_code readiness probe failed: {e}")
         return False
 
 
 def _codex_ready() -> bool:
-    """True when the Codex CLI is installed and can authenticate
-    (auth.json present, or an API key available to mint it). Same
-    fact-based role as `_claude_code_ready` — keep in sync with
-    codex_cli.get_state()."""
+    """True when the Codex CLI is installed and signed in — its own
+    verdict, held by codex_cli.auth. Same role as `_claude_code_ready`."""
     try:
-        from codex_cli import get_codex_executable, codex_authenticated
-        return get_codex_executable() is not None and codex_authenticated()
+        import codex_cli
+        return codex_cli.get_codex_executable() is not None and codex_cli.auth.signed_in()
     except Exception as e:
         logger.debug(f"codex readiness probe failed: {e}")
         return False
 
 
 def _maybe_reset_for_cli_agents() -> None:
-    """If either CLI agent's readiness has changed since the cache was
+    """If either CLI agent's registration would change since the cache was
     built, drop the cache so the next access re-detects. Cheap enough
-    to call on every entry — it's a few file/keychain probes."""
+    to call on every entry — a held verdict and a few file probes. The
+    test is _init_providers' own, env override included: against
+    readiness alone, a force-enabled agent that is signed out (Docker's
+    CLAUDE_CODE_ENABLED) mismatched on every access and rebuilt the
+    registry each time."""
     if not _initialized:
         return
-    if ("claude_code" in _providers) != _claude_code_ready():
+    from config import settings
+    if ("claude_code" in _providers) != (settings.claude_code_enabled or _claude_code_ready()):
         reset()
         return
-    if ("codex" in _providers) != _codex_ready():
+    if ("codex" in _providers) != (settings.codex_cli_enabled or _codex_ready()):
         reset()
 
 

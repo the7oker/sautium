@@ -5503,6 +5503,7 @@ a.am-kind { text-decoration: none; }
 }
 .research-pending.is-researching { color: var(--color-amber); }
 .research-pending.is-failed { color: var(--color-negative); }
+.research-pending.is-blocked { color: var(--color-negative); }
 .pulse {
   width: calc(6 * var(--px));
   height: calc(6 * var(--px));
@@ -5864,6 +5865,7 @@ select.add-gear-input {
 .research-state-label.is-awaiting { color: var(--color-text-dim); }
 .research-state-label.is-researching { color: var(--color-amber); }
 .research-state-label.is-failed { color: var(--color-negative); }
+.research-state-label.is-blocked { color: var(--color-negative); }
 
 /* ---- Measured findings (gear sheet) ---- */
 .measured-row {
@@ -6914,6 +6916,8 @@ html { -webkit-tap-highlight-color: transparent; }
   background: var(--color-foundation);
   border-color: var(--color-amber);
 }
+/* On amber ground the mark takes the label's colour, or it would vanish. */
+.btn-primary.is-guided::after { background: currentColor; }
 
 /* The rail is an out-of-flow strip from the top of the screen down to the
    target's centre (height measured in attachGuidePuck). Its only job is to

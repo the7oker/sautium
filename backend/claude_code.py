@@ -7,6 +7,10 @@ the host, so it only works when the backend runs as a native process
 for native mode). The sign-in does not: it is the CLI's own headless
 login driven over pipes (`desktop/agent_login.py`), so Docker, where
 the CLI is baked into the image, signs in from the Web UI too.
+
+Whether the CLI is signed in is the one verdict this module owns for the
+whole process (§ Sign-in state): the assistant, the gear research worker,
+the AI canon tier and the settings screen all read it here.
 """
 
 from __future__ import annotations
@@ -17,8 +21,10 @@ import os
 import shutil
 import subprocess
 import sys
+import threading
+from datetime import datetime, timezone
 from pathlib import Path
-from typing import Optional, Tuple
+from typing import Callable, List, Optional, Tuple
 
 logger = logging.getLogger(__name__)
 
@@ -146,68 +152,176 @@ def get_claude_executable() -> Optional[Path]:
     return None
 
 
-def claude_authenticated() -> bool:
-    """True iff Claude Code has stored OAuth credentials. Storage is
-    platform-dependent: macOS Keychain entry "Claude Code-credentials",
-    Windows/Linux JSON at ~/.claude/.credentials.json.
+# --- Sign-in state ----------------------------------------------------------
+#
+# Whether a CLI agent can authenticate is the CLI's to say. A credential store
+# is not a working sign-in: when a token refresh fails Claude Code keeps
+# .credentials.json with its tokens blanked — on 2026-10-09 the Docker node's
+# mounted ~/.claude read as "signed in" by file presence while every gear
+# research call was refused in two seconds, retried every 15 minutes and
+# shown to nobody — on macOS the store is a Keychain item whose existence says
+# nothing about its contents, and `codex login status` calls an auth.json of
+# `{}` logged in. So two voices of the CLI decide: its own status command,
+# which reads its store wherever it lives, and the calls themselves, which the
+# runners report as refused or authenticated.
+#
+# One verdict per agent per process (`auth` here, `codex_cli.auth`). Readers
+# take it as it stands (the notices stream derives on every wake); only the
+# first read, an explicit look (the AI settings screen) and a finished
+# sign-in ask the CLI again. A refused call outranks the store: a status that
+# still reads "logged in" after a refusal cannot tell a revived sign-in from
+# dead tokens left in place, so only a call that authenticates or a completed
+# sign-in ends that verdict. A flip is an event (on_change): the research
+# drain, the notices channel, the guidance trail and the settings streams
+# wake on it — none of them re-tries on a timer.
 
-    On Linux (incl. Docker) the CLI is launched as AGENT_USER by
-    `claude_code_runner._spawn_claude` (the CLI refuses to run as root
-    with --dangerously-skip-permissions), so credentials live in
-    that user's HOME — not the backend process's HOME, which under
-    Docker is /root and finds nothing while the host mount puts the
-    file at /home/agent/.claude/.credentials.json."""
-    if sys.platform == "darwin":
-        try:
-            result = subprocess.run(
-                ["security", "find-generic-password",
-                 "-s", "Claude Code-credentials"],
-                capture_output=True, timeout=5,
-            )
-            return result.returncode == 0
-        except Exception as e:
-            logger.debug(f"Keychain probe failed: {e}")
-            return False
+STATUS_TIMEOUT_SECONDS = 30
 
-    home = Path.home()
-    if sys.platform == "linux":
-        try:
-            import pwd
-            from claude_code_runner import AGENT_USER
-            home = Path(pwd.getpwnam(AGENT_USER).pw_dir)
-        except (KeyError, ImportError) as e:
-            logger.debug(f"AGENT_USER lookup failed, falling back to Path.home(): {e}")
 
-    creds = home / ".claude" / ".credentials.json"
-    if not creds.is_file():
-        return False
-    try:
-        json.loads(creds.read_text(encoding="utf-8"))
+class AgentAuth:
+    """The sign-in verdict of one CLI agent for the whole process."""
+
+    def __init__(self, name: str, status: Callable[[], Optional[bool]]):
+        self.name = name
+        self._status = status            # the CLI's status command: True/False/None
+        self._verdict: Optional[dict] = None
+        self._lock = threading.Lock()
+        self._look_lock = threading.Lock()
+        self._listeners: List[Callable[[bool], None]] = []
+
+    def on_change(self, listener: Callable[[bool], None]) -> None:
+        """`listener(signed_in)` runs on every flip of the verdict, on the
+        thread that observed it."""
+        self._listeners.append(listener)
+
+    def verdict(self) -> Optional[dict]:
+        """The standing verdict — signed_in, refused (a call said so),
+        reason (the CLI's words), since (the onset) — or None before the
+        first look. Never asks the CLI."""
+        return self._verdict
+
+    def signed_in(self, fresh: bool = False) -> bool:
+        """Can the CLI authenticate? The standing verdict; the first read
+        and a `fresh` look ask the CLI's own status first, one look at a
+        time."""
+        if self._verdict is not None and not fresh:
+            return self._verdict["signed_in"]
+        with self._look_lock:
+            if self._verdict is not None and not fresh:
+                return self._verdict["signed_in"]
+            status = self._status()
+            standing = self._verdict
+            flipped = False
+            if status is False:
+                flipped = self._record(False)
+            elif status is True:
+                if standing is None or not standing["refused"]:
+                    flipped = self._record(True)
+            elif standing is None:
+                # No answer and nothing known: no evidence against it —
+                # the first call says.
+                flipped = self._record(True)
+            now = self._verdict["signed_in"]
+        if flipped:
+            self._announce(now)
+        return now
+
+    def refused(self, reason: str) -> None:
+        """The runner: the CLI refused a call for authentication."""
+        if self._record(False, refused=True, reason=reason):
+            self._announce(False)
+
+    def authenticated(self) -> None:
+        """The runner: a call went through."""
+        if self._record(True):
+            self._announce(True)
+
+    def signin_finished(self, completed: bool) -> None:
+        """A sign-in the backend drove has exited. A completed one is a
+        signed-in verdict — the CLI stored a fresh credential; any other
+        leaves the store to say what is left (`codex login` deletes
+        auth.json before it authorizes anything)."""
+        if completed:
+            self.authenticated()
+        else:
+            self.signed_in(fresh=True)
+
+    def _record(self, signed_in: bool, refused: bool = False,
+                reason: Optional[str] = None) -> bool:
+        """Set the verdict; True when it flipped, and the caller then tells
+        the listeners (outside every lock)."""
+        with self._lock:
+            prev = self._verdict
+            if prev is not None and prev["signed_in"] == signed_in:
+                if not signed_in and (refused or reason):
+                    # The same episode: its onset stays, a refusal and the
+                    # newest words join it.
+                    self._verdict = {**prev, "refused": prev["refused"] or refused,
+                                     "reason": reason or prev["reason"]}
+                return False
+            self._verdict = {"signed_in": signed_in, "refused": refused,
+                             "reason": reason,
+                             "since": datetime.now(timezone.utc).isoformat()}
+        logger.info("%s %s%s", self.name, "signed in" if signed_in else "signed out",
+                    f" — {reason}" if reason else "")
         return True
-    except (json.JSONDecodeError, OSError) as e:
-        logger.debug(f"Claude credentials unreadable: {e}")
-        return False
+
+    def _announce(self, signed_in: bool) -> None:
+        for listener in list(self._listeners):
+            try:
+                listener(signed_in)
+            except Exception:
+                logger.exception(f"{self.name} sign-in listener failed")
+
+
+def _cli_status() -> Optional[bool]:
+    """`claude auth status --json` → loggedIn, spawned like a chat turn so
+    it reads the store those turns use (the agent user's HOME in Docker,
+    the Keychain on macOS); None when the CLI gives no answer."""
+    claude = get_claude_executable()
+    if claude is None:
+        return None
+    from claude_code_runner import spawn_kwargs
+    env = os.environ.copy()
+    # Judged on the subscription the calls bill, not a stray API key.
+    env.pop("ANTHROPIC_API_KEY", None)
+    kwargs = spawn_kwargs(env)
+    kwargs.update(capture_output=True, text=True, encoding="utf-8",
+                  errors="replace", timeout=STATUS_TIMEOUT_SECONDS)
+    try:
+        out = subprocess.run([str(claude), "auth", "status", "--json"], **kwargs)
+    except (OSError, subprocess.TimeoutExpired) as e:
+        logger.warning(f"claude auth status did not run: {e}")
+        return None
+    try:
+        return bool(json.loads(out.stdout)["loggedIn"])
+    except (ValueError, KeyError, TypeError):
+        logger.warning(f"claude auth status gave no answer (rc={out.returncode}): "
+                       f"{(out.stdout or out.stderr).strip()[:200]}")
+        return None
+
+
+auth = AgentAuth("Claude Code", _cli_status)
 
 
 # --- State machine ----------------------------------------------------------
 
-def get_state() -> str:
+def get_state(fresh: bool = False) -> str:
     """Return one of: 'host_unsupported', 'node_missing', 'claude_missing',
-    'not_authed', 'ready'.
+    'not_authed', 'ready'. `fresh` asks the CLI again (an explicit look).
 
     Fact-based detection runs first: when the `claude` binary is
-    present and credentials are readable, the CLI is ready regardless
+    present and signed in (`auth`), the CLI is ready regardless
     of whether the backend is "launcher mode" or "Docker with host
-    volume mount" — both serve identical chat requests. This mirrors
-    providers._claude_code_ready(); keep the two in sync.
+    volume mount" — both serve identical chat requests.
 
-    Without credentials the CLI's presence decides: a present CLI is
+    Signed out, the CLI's presence decides: a present CLI is
     'not_authed' on every runtime, because the sign-in runs headless
     from here (start_signin). Only the install needs the native host,
     so a container WITHOUT the CLI is 'host_unsupported' and native
     mode walks through node/install."""
     claude = get_claude_executable()
-    if claude is not None and claude_authenticated():
+    if claude is not None and auth.signed_in(fresh):
         return "ready"
     if not is_launcher_mode():
         return "not_authed" if claude is not None else "host_unsupported"
@@ -276,7 +390,9 @@ _signin = None
 def start_signin(on_change) -> dict:
     """Start `claude auth login` with the chat turns' own spawn setup, so
     the credentials land where they read them (the demoted agent user's
-    HOME in Docker). A sign-in already running is returned as is."""
+    HOME in Docker). A sign-in already running is returned as is. Its
+    exit reaches the verdict (`auth.signin_finished`) before `on_change`
+    hears it."""
     global _signin
     if _signin is not None and _signin.running:
         return _signin.snapshot()
@@ -289,8 +405,14 @@ def start_signin(on_change) -> dict:
     # The login must bind the subscription the chat turns bill, not a
     # stray API key — same drop as the runner's _claude_env().
     env.pop("ANTHROPIC_API_KEY", None)
+
+    def changed(snap: dict) -> None:
+        if not snap["running"]:
+            auth.signin_finished(snap["completed"])
+        on_change(snap)
+
     _signin = AgentLogin("claude", claude_login_command(claude),
-                         spawn_kwargs(env), on_change=on_change)
+                         spawn_kwargs(env), on_change=changed)
     return _signin.start()
 
 

@@ -12,8 +12,12 @@ Auth model (differs from Claude Code): the CLI reads ONLY
 (measured on codex-cli 0.149: requests go out with no Authorization
 header at all). Subscription sign-in (`codex login`) and
 `codex login --with-api-key` both materialize that file. The runner
-auto-creates it from OPENAI_API_KEY when missing, so "authenticated"
-here means: auth.json exists OR an API key is available to mint it.
+auto-creates it from OPENAI_API_KEY when missing, so an absent
+auth.json with a key at hand counts as signed in. Whether the file
+works is the CLI's to say — `codex login status` and every call
+(`auth`, the same verdict as claude_code.auth): the status command
+reads presence more than validity (codex-cli 0.162 calls an auth.json
+of `{}` logged in), so the refused calls are what catch a dead one.
 """
 
 from __future__ import annotations
@@ -23,11 +27,14 @@ import logging
 import os
 import platform
 import shutil
+import subprocess
 import sys
 from pathlib import Path
 from typing import Optional, Tuple
 
 from claude_code import (
+    STATUS_TIMEOUT_SECONDS,
+    AgentAuth,
     detect_node_version,
     get_npm_executable,
     is_launcher_mode,
@@ -133,14 +140,29 @@ def codex_auth_file() -> Path:
     return codex_home() / "auth.json"
 
 
-def codex_authenticated() -> bool:
-    """True iff a chat turn can authenticate: auth.json exists
-    (subscription sign-in or a previously stored API key), or an
-    OPENAI_API_KEY is available for the runner to mint auth.json from
-    on first use."""
-    if codex_auth_file().is_file():
-        return True
-    return bool(os.environ.get("OPENAI_API_KEY") or os.environ.get("CODEX_API_KEY"))
+def _cli_status() -> Optional[bool]:
+    """`codex login status` for the store the chat turns use (exit 0 =
+    logged in; the words go to stderr), spawned like a turn — the agent
+    user's CODEX_HOME in Docker. No auth.json with an API key at hand is
+    signed in: the runner mints the file from it on first use. None when
+    the CLI gives no answer."""
+    codex = get_codex_executable()
+    if codex is None:
+        return None
+    if not codex_auth_file().is_file():
+        return bool(os.environ.get("OPENAI_API_KEY") or os.environ.get("CODEX_API_KEY"))
+    from codex_runner import _codex_env, _spawn_kwargs
+    kwargs = _spawn_kwargs(_codex_env())
+    kwargs.update(capture_output=True, timeout=STATUS_TIMEOUT_SECONDS)
+    try:
+        out = subprocess.run([str(codex), "login", "status"], **kwargs)
+    except (OSError, subprocess.TimeoutExpired) as e:
+        logger.warning(f"codex login status did not run: {e}")
+        return None
+    return out.returncode == 0
+
+
+auth = AgentAuth("Codex", _cli_status)
 
 
 def codex_auth_method() -> Optional[str]:
@@ -167,15 +189,14 @@ def codex_auth_method() -> Optional[str]:
 
 # --- State machine -----------------------------------------------------------
 
-def get_state() -> str:
+def get_state(fresh: bool = False) -> str:
     """One of: 'host_unsupported', 'node_missing', 'codex_missing',
-    'not_authed', 'ready'. Same fact-based-first ordering as
-    claude_code.get_state() — a present CLI without credentials is
-    'not_authed' on every runtime, 'host_unsupported' is a container
-    without the CLI; mirrors providers._codex_ready() — keep the two
-    in sync."""
+    'not_authed', 'ready'. `fresh` asks the CLI again (an explicit look).
+    Same fact-based-first ordering as claude_code.get_state() — a present
+    CLI that is signed out is 'not_authed' on every runtime,
+    'host_unsupported' is a container without the CLI."""
     codex = get_codex_executable()
-    if codex is not None and codex_authenticated():
+    if codex is not None and auth.signed_in(fresh):
         return "ready"
     if not is_launcher_mode():
         return "not_authed" if codex is not None else "host_unsupported"
@@ -250,7 +271,9 @@ def start_signin(on_change, device: bool) -> dict:
     Unlike `claude auth login`, `codex login` deletes the existing
     auth.json the moment it starts (measured on 0.149 and 0.153, both
     flows), so a cancelled re-authorization leaves the node signed out
-    of ChatGPT — the UI says so next to Reauthorize."""
+    of ChatGPT — the UI says so next to Reauthorize. Its exit reaches the
+    verdict (`auth.signin_finished`) before `on_change` hears it, so a
+    cancelled one reads as signed out at once."""
     global _signin
     if not is_launcher_mode():
         device = True
@@ -264,9 +287,15 @@ def start_signin(on_change, device: bool) -> dict:
     codex = get_codex_executable()
     if codex is None:
         raise RuntimeError("Codex CLI not installed")
+
+    def changed(snap: dict) -> None:
+        if not snap["running"]:
+            auth.signin_finished(snap["completed"])
+        on_change(snap)
+
     _signin = AgentLogin("codex", codex_login_command(codex, device),
                          _spawn_kwargs(os.environ.copy()),
-                         on_change=on_change, flow=flow)
+                         on_change=changed, flow=flow)
     return _signin.start()
 
 
