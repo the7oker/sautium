@@ -476,13 +476,15 @@ place, and the `ai_signin` guidance task lights the trail to the Sign in
 button until the sign-in is back) — the
 rule for WHEN a condition exists lives there, the words and the clock
 (local time, mono) live in `NOTICE_COPY` here. A condition with no ledger
-keeps its `since` in `_derived_since`; its producers wake the channel on
-the bad AND the good transition (`notices_recheck`). The music folder is
-looked at one look at a time (`scanner.folder_unreachable_now`): every
-stream derives the set on every wake, so a derivation looks unless a look
-is under way and otherwise takes the last answer — a scandir of a dead
-network mount holds one reader, never all — and a look that changes the
-answer, a scan's refusal included, wakes the channel. The client diffs snapshots: a key
+keeps its `since` in `_derived_since` (`routers/settings.py`); its
+producers wake the channel on the bad AND the good transition. The music
+folder: every stream derives the set on every wake, so the readers share
+one look on a thread of its own (`scanner.folder_unreachable_now`) and wait
+for it a few seconds at most — a look that takes longer reads as a dead
+mount — and the derivation never wakes the channel itself (on a flapping
+share it would wake itself without end). Its producers do, when their
+answer changes: a scan's refusal, the prune, Library opened, a library
+file served or found missing — never a transcode-cache file. The client diffs snapshots: a key
 that appears or re-arms toasts once — so `since` is the condition's
 ONSET, stable while it lasts: a producer that restamps it per run
 re-raises the same toast on every run (the slice rows did, every few

@@ -630,9 +630,9 @@ async def _library_state() -> Dict[str, Any]:
     music_path = app_settings.music_host_path or app_settings.music_library_path
 
     # The screen reads the folder's state from the notice set; opening it is
-    # a moment to look (off the loop, one look at a time), and a look that
-    # changes the answer wakes the notices.
-    await asyncio.to_thread(folder_unreachable_now)
+    # a moment to look, as a producer: an answer that changed what the
+    # notices last read wakes them.
+    await asyncio.to_thread(folder_unreachable_now, True)
 
     return {
         "music_path":         music_path,
@@ -1147,13 +1147,6 @@ def _derived(key: str, active: bool) -> Optional[str]:
     return _derived_since.setdefault(key, datetime.now(timezone.utc).isoformat())
 
 
-def notices_recheck(key: str) -> None:
-    """A producer saw the good state again (a file served): re-derive only
-    if the condition is shown, so a healthy node never pays for this."""
-    if key in _derived_since:
-        db_execute("NOTIFY sautium_notices")
-
-
 def _notices_state() -> Dict[str, Any]:
     """Active conditions that change what the user sees without any action
     of theirs: an external API that cooled us down, catalog data the
@@ -1161,10 +1154,11 @@ def _notices_state() -> Dict[str, Any]:
     a condition exists lives here next to the workers that create it; the
     view layer owns the words and the clock. Derived, never stored — the
     cooldown ledger and the slice cycles' status rows are the sources, so a
-    condition ends the moment its source does. The music folder is looked
-    at one look at a time (scanner.folder_unreachable_now): every stream
-    derives this set on every wake, and a scandir of a dead network mount
-    can stall — the one deriving reader it holds, never the rest.
+    condition ends the moment its source does. The music folder comes from
+    the readers' shared look (scanner.folder_unreachable_now), which waits a
+    few seconds at most — a look that takes longer reads as a dead mount —
+    so no stream hangs on a dead network mount, and the derivation never
+    wakes the channel itself.
 
     Each item: `key` (stable — what toasts coalesce on), `kind`, `since`
     (a re-arm bumps it, which re-lights the trail), `until` (when the

@@ -17,6 +17,8 @@ import errno
 import os
 import select
 import sys
+import threading
+import time
 import uuid
 from pathlib import Path
 
@@ -60,6 +62,8 @@ def cur(scratch_dsn, monkeypatch):
     # test starts with none armed and a folder last seen in place.
     monkeypatch.setattr(settings_router, "_derived_since", {})
     monkeypatch.setattr(scanner, "_folder_unreachable", False)
+    monkeypatch.setattr(scanner, "_recorded", 0)
+    monkeypatch.setattr(scanner, "_looking", False)
     conn = psycopg2.connect(scratch_dsn)
     conn.autocommit = True
     with conn.cursor() as c:
@@ -149,26 +153,101 @@ def test_the_notice_names_the_folder_the_owner_knows(cur, library):
         library.parent / "host" / "Music").as_posix()
 
 
-def test_a_derivation_looks_unless_a_look_is_under_way(cur, library, monkeypatch):
+def _keys():
+    return {n["key"] for n in settings_router._notices_state()["items"]}
+
+
+def test_the_notices_look_and_never_wake_the_channel(cur, library, heard):
     _owned_file(cur)                              # the folder is empty
 
-    def keys():
-        return {n["key"] for n in settings_router._notices_state()["items"]}
+    assert "library.mount_missing" in _keys()     # the derivation looked
+    assert heard(timeout=0.5) == []               # and woke nobody: on a flapping share it
+                                                  # would wake itself without end
 
-    assert "library.mount_missing" in keys()      # it looked
 
-    (library / "Electronic").mkdir()              # back, while a look holds the folder
-    real = os.scandir
+def _hang_the_folder(monkeypatch, library):
+    """scandir of the library root blocks, as on a dead network mount, until
+    the returned event is set; `blocked` says a look is stuck in it."""
+    real, release, blocked = os.scandir, threading.Event(), threading.Event()
 
     def scandir(path="."):
-        assert os.fspath(path) != str(library), "a second reader asked the folder"
+        if os.fspath(path) == str(library):
+            blocked.set()
+            release.wait(10)
         return real(path)
 
     monkeypatch.setattr(os, "scandir", scandir)
-    with scanner._look_lock:
-        assert "library.mount_missing" in keys()  # the last answer, at once
-    monkeypatch.setattr(os, "scandir", real)
-    assert "library.mount_missing" not in keys()  # the next derivation looks again
+    return release, blocked
+
+
+def test_a_look_a_dead_mount_holds_reads_as_unreachable_and_holds_no_reader(
+        cur, library, monkeypatch):
+    _owned_file(cur)
+    (library / "Electronic").mkdir()              # the folder is there...
+    monkeypatch.setattr(scanner, "LOOK_PATIENCE_S", 0.3)
+    release, blocked = _hang_the_folder(monkeypatch, library)   # ...and stops answering
+    try:
+        t = time.monotonic()
+        assert "library.mount_missing" in _keys()  # a look stuck past patience: a dead mount
+        assert "library.mount_missing" in _keys()  # the next reader does not wait again
+        assert time.monotonic() - t < 2
+        assert blocked.is_set()
+    finally:
+        release.set()
+    assert _wait_until(lambda: not scanner._looking)
+    assert "library.mount_missing" not in _keys()  # the look came back: the folder answers
+
+
+def _wait_until(pred, timeout=5.0):
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        if pred():
+            return True
+        time.sleep(0.05)
+    return False
+
+
+def test_an_older_look_that_lands_late_records_nothing(cur, library, monkeypatch):
+    _owned_file(cur)                              # the folder is empty: a look says gone
+    release, blocked = _hang_the_folder(monkeypatch, library)
+    old = threading.Thread(target=scanner.library_unreachable, kwargs={"wake": False})
+    old.start()
+    assert blocked.wait(5)
+
+    scanner.folder_seen(False)                    # a newer word: a library file served
+    release.set()
+    old.join(5)
+
+    assert scanner._folder_unreachable is False   # the stale "gone" landed last and lost
+
+
+class _NoRange:
+    headers: dict = {}
+
+
+def test_only_the_librarys_own_files_speak_for_the_folder(cur, library, tmp_path, heard):
+    from fastapi import HTTPException
+    from routers import media
+    _owned_file(cur)                              # the folder is empty: gone
+    owned = str(library / "A" / "01.flac")
+
+    with pytest.raises(HTTPException):
+        media._serve_disk(str(tmp_path / "transcode_cache" / "x.opus"), "audio/ogg", _NoRange())
+    assert heard(timeout=0.5) == []               # a cache miss says nothing of the folder
+
+    with pytest.raises(HTTPException):
+        media._serve_disk(owned, "audio/flac", _NoRange())
+    assert heard() == ["sautium_notices"]         # the library's own file: the folder is gone
+    with pytest.raises(HTTPException):
+        media._serve_disk(owned, "audio/flac", _NoRange())
+    assert heard(timeout=0.5) == []               # a retry wakes nobody again
+
+    (library / "A").mkdir()
+    Path(owned).write_bytes(b"x" * 16)
+    media._serve_disk(owned, "audio/flac", _NoRange())
+    assert heard() == ["sautium_notices"]         # served: the folder answers again
+    media._serve_disk(owned, "audio/flac", _NoRange())
+    assert heard(timeout=0.5) == []               # never once per request
 
 
 def test_opening_the_library_looks_and_wakes_the_notices_on_a_change(

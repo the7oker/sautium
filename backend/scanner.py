@@ -9,6 +9,7 @@ import logging
 import os
 import re
 import threading
+import time
 from collections import defaultdict
 from dataclasses import dataclass
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -58,15 +59,19 @@ UNREACHABLE = ("The music folder is empty or not mounted, so nothing was scanned
                "after a restart.")
 
 
-def library_unreachable() -> bool:
+def library_unreachable(wake: bool = True) -> bool:
     """The library path is set but holds nothing while the catalog knows
     owned files: a drvfs mount that dropped under a running node, a forgotten
     drive, a Docker bind that came up on an empty directory. An unreadable
     path counts as empty; no folder chosen yet is not this. The one rule
     behind the library.mount_missing notice, Library's Music path row, the
     scan's refusal and the prune's last check — a walk over such a folder
-    finds nothing and reads as a scan, or as every file deleted. Every
-    answer is recorded (the last look, folder_unreachable_now)."""
+    finds nothing and reads as a scan, or as every file deleted.
+
+    A look: its answer is recorded unless a look that started later recorded
+    first, and `wake` — a producer looking — wakes the notices when it
+    changes the answer."""
+    ticket = _next_ticket()
     root = settings.music_library_path
     if not root or not db_query_one("SELECT 1 AS x FROM media_files LIMIT 1"):
         answer = False
@@ -76,40 +81,88 @@ def library_unreachable() -> bool:
                 answer = next(it, None) is None
         except OSError:
             answer = True
-    _folder_seen(answer)
+    _record(answer, ticket, wake)
     return answer
 
 
-# The last look's answer. A look that changes it wakes the notices, so a
-# refusal seen anywhere — the Library button, the launcher, cli.py — reaches
-# every open tab: their derivation looks again.
-_folder_lock = threading.Lock()
+# The folder's last answer and the looks that produce it. Producers — a scan's
+# refusal, the prune's check, the Library screen opened, a library file served
+# or found missing — wake the notices when they change the answer. The notices'
+# own look never does: every stream derives the set on every wake, and on a
+# share that flaps a derivation that woke the channel would wake itself without end.
+_folder = threading.Condition()
 _folder_unreachable = False
-# Held while a reader that must not wait looks (folder_unreachable_now).
-_look_lock = threading.Lock()
+_ticket = 0                 # handed to each look as it starts
+_recorded = 0               # the ticket the answer is from; an older look records nothing
+_looking = False            # the notices' look is under way...
+_look_started = 0.0         # ...since then (monotonic)
+_looks_done = 0             # bumped as it ends; the readers waiting on it wake
+# A look that has not answered by then is a dead mount, and reads as one.
+LOOK_PATIENCE_S = 3.0
 
 
-def _folder_seen(unreachable: bool) -> None:
-    global _folder_unreachable
-    with _folder_lock:
+def _next_ticket() -> int:
+    global _ticket
+    with _folder:
+        _ticket += 1
+        return _ticket
+
+
+def _record(unreachable: bool, ticket: int, wake: bool) -> None:
+    global _folder_unreachable, _recorded
+    with _folder:
+        if ticket < _recorded:
+            return
+        _recorded = ticket
         changed = unreachable != _folder_unreachable
         _folder_unreachable = unreachable
-    if changed:
+    if changed and wake:
         db_execute("NOTIFY sautium_notices")
 
 
-def folder_unreachable_now() -> bool:
-    """library_unreachable() for a reader that must not wait on the folder —
-    the notices set, which every stream derives on every wake: it looks
-    unless a look of this kind is under way, and then takes the last answer.
-    One look at a time, so a scandir of a dead network mount holds one
-    reader, never every stream."""
-    if not _look_lock.acquire(blocking=False):
-        return _folder_unreachable
+def folder_seen(unreachable: bool) -> None:
+    """A producer's observation that needs no look (a library file served:
+    the folder answers), recorded like a look that started now."""
+    _record(unreachable, _next_ticket(), wake=True)
+
+
+def _notices_look() -> None:
+    global _looking, _looks_done
     try:
-        return library_unreachable()
+        library_unreachable(wake=False)
+    except Exception as e:
+        logger.error(f"Music folder look failed: {e}", exc_info=True)
     finally:
-        _look_lock.release()
+        with _folder:
+            _looking = False
+            _looks_done += 1
+            _folder.notify_all()
+
+
+def folder_unreachable_now(wake: bool = False) -> bool:
+    """The folder's state for a reader that must not hang on it. Readers share
+    one look, on a thread of its own: a reader that finds it under way waits
+    for its answer, but no longer than LOOK_PATIENCE_S from the look's start,
+    and a look that takes longer reads as a dead mount. The notices derive
+    with this; a producer passes `wake` to wake them when its answer changed
+    what they last read."""
+    global _looking, _look_started
+    with _folder:
+        before = _folder_unreachable
+        if not _looking:
+            _looking = True
+            _look_started = time.monotonic()
+            threading.Thread(target=_notices_look, daemon=True,
+                             name="music-folder-look").start()
+        done = _looks_done
+        remaining = _look_started + LOOK_PATIENCE_S - time.monotonic()
+        if remaining > 0 and _folder.wait_for(lambda: _looks_done != done, timeout=remaining):
+            answer = _folder_unreachable
+        else:
+            answer = True
+    if wake and answer != before:
+        db_execute("NOTIFY sautium_notices")
+    return answer
 
 
 class LibraryUnreachable(RuntimeError):
