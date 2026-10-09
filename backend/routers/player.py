@@ -1052,8 +1052,8 @@ async def events_stream(tab: Optional[str] = Query(None, max_length=64,
             # events: the client diffs it, so a tab that was asleep learns
             # what is true now rather than replaying what happened. The
             # connect-time copy is flagged so it paints state, not toasts.
-            # Derived off the loop: it asks the music folder, and a scandir
-            # of a dead network mount can stall every stream with it.
+            # The set comes from its one owner (routers.settings), with the
+            # seen marks read now — a database read, so off the loop too.
             yield ("data: "
                    + json.dumps({"t": "notice",
                                  "d": {**await asyncio.to_thread(_notices_state),

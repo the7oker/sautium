@@ -141,9 +141,9 @@ def _aicanon_worker(limit: Optional[int], since=None) -> None:
 
 
 # /api/events subscribers waiting for a fresh notices snapshot. Registered
-# by the multiplexed stream in routers/player.py; woken by the
-# sautium_notices NOTIFY (api_cooldown arm/clear, the launcher's slice
-# cycle) through the sync listener above.
+# by the multiplexed stream in routers/player.py; woken by the notices owner
+# below once it has derived the set a sautium_notices NOTIFY asked for
+# (api_cooldown arm/clear, the launcher's slice cycle, the scanner).
 _notice_sse_clients: List[Tuple[asyncio.Event, asyncio.AbstractEventLoop]] = []
 _notice_sse_lock = threading.Lock()
 
@@ -168,6 +168,58 @@ def notify_notice_subscribers() -> None:
                 loop.call_soon_threadsafe(evt.set)
             except RuntimeError:
                 continue
+
+
+# The notices snapshot has one owner. Deriving the active set asks the music
+# folder (scanner.library_unreachable), and a scandir of a dead network mount
+# can stall: once, on this thread, never once per open stream and wake. Every
+# sautium_notices NOTIFY wakes it through the sync listener; a wake that lands
+# while it derives is the next pass, so a burst costs one more derivation.
+_notices_items: Optional[List[Dict[str, Any]]] = None
+_notices_lock = threading.Lock()
+_notices_wake = threading.Event()
+# Bumped by every start and stop: an owner of another generation quits on its
+# next wake, so a restart never runs two, and a stop never waits on a thread
+# a dead mount may be holding.
+_notices_generation = 0
+
+
+def _notices_owner(generation: int) -> None:
+    global _notices_items
+    while True:
+        _notices_wake.wait()
+        if generation != _notices_generation:
+            return
+        _notices_wake.clear()
+        try:
+            items = _derive_notices()
+        except Exception as e:
+            # The streams keep the last set; the next wake derives again.
+            logger.error(f"Notices derivation failed: {e}", exc_info=True)
+            continue
+        with _notices_lock:
+            if generation != _notices_generation:
+                return
+            _notices_items = items
+        notify_notice_subscribers()
+
+
+def start_notices_owner() -> None:
+    global _notices_generation
+    with _notices_lock:
+        _notices_generation += 1
+        generation = _notices_generation
+    threading.Thread(target=_notices_owner, args=(generation,), daemon=True,
+                     name="notices-owner").start()
+    _notices_wake.set()                # the first set, before any NOTIFY
+
+
+def stop_notices_owner() -> None:
+    global _notices_generation, _notices_items
+    with _notices_lock:
+        _notices_generation += 1
+        _notices_items = None          # no owner, no snapshot: readers derive
+    _notices_wake.set()
 
 
 def notify_library_subscribers() -> None:
@@ -238,7 +290,7 @@ def _sync_db_listener() -> None:
                         while conn.notifies:
                             channels.add(conn.notifies.pop(0).channel)
                         if "sautium_notices" in channels:
-                            notify_notice_subscribers()
+                            _notices_wake.set()
                         notify_library_subscribers()
         except Exception as e:
             logger.debug(f"Sync DB listener error: {e}")
@@ -254,7 +306,9 @@ def _sync_db_listener() -> None:
 
 
 def start_sync_listener() -> None:
+    """The listener and the notices owner it wakes: one channel, two threads."""
     global _sync_listener_thread, _sync_listener_running
+    start_notices_owner()
     if _sync_listener_thread and _sync_listener_thread.is_alive():
         return
     _sync_listener_running = True
@@ -267,6 +321,7 @@ def start_sync_listener() -> None:
 def stop_sync_listener() -> None:
     global _sync_listener_running
     _sync_listener_running = False
+    stop_notices_owner()
 
 
 # ============================================================
@@ -1107,6 +1162,20 @@ _MEDIA_TOOLS = ("ffmpeg", "fpcalc")
 
 
 def _notices_state() -> Dict[str, Any]:
+    """The active set as its owner last derived it, each item with `seen`
+    (the trail already led the user to it) read now, so a visit retires it
+    without a derivation. Where no owner runs — a test, a script — or
+    before its first pass, the reader derives the set itself."""
+    with _notices_lock:
+        items = _notices_items
+    if items is None:
+        items = _derive_notices()
+    seen = _read("notice.seen") or {}
+    return {"items": [{**item, "seen": seen.get(item["key"]) == item["since"]}
+                      for item in items]}
+
+
+def _derive_notices() -> List[Dict[str, Any]]:
     """Active conditions that change what the user sees without any action
     of theirs: an external API that cooled us down, catalog data the
     network has not served yet. Like the guidance trail, the rule for WHEN
@@ -1117,8 +1186,7 @@ def _notices_state() -> Dict[str, Any]:
 
     Each item: `key` (stable — what toasts coalesce on), `kind`, `since`
     (a re-arm bumps it, which re-lights the trail), `until` (when the
-    condition clears or is retried, or null), `data` (facts for the copy),
-    `seen` (the trail already led the user to it)."""
+    condition clears or is retried, or null), `data` (facts for the copy)."""
     items: List[Dict[str, Any]] = []
     for row in db_query("""
         SELECT source, strikes, updated_at, cooldown_until, reason
@@ -1177,10 +1245,7 @@ def _notices_state() -> Dict[str, Any]:
                       "since": run["since"], "until": None,
                       "data": {"code": run["code"], "count": run["count"],
                                "title": run["title"]}})
-    seen = _read("notice.seen") or {}
-    for item in items:
-        item["seen"] = seen.get(item["key"]) == item["since"]
-    return {"items": items}
+    return items
 
 
 @router.get("/guidance")
