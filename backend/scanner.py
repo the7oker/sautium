@@ -68,10 +68,13 @@ def library_unreachable(wake: bool = True) -> bool:
     scan's refusal and the prune's last check — a walk over such a folder
     finds nothing and reads as a scan, or as every file deleted.
 
-    A look: its answer is recorded unless a look that started later recorded
-    first, and `wake` — a producer looking — wakes the notices when it
-    changes the answer."""
-    ticket = _next_ticket()
+    A look, taken where it is called (a scan's refusal, the prune): its
+    answer is recorded unless a look that started later recorded first, and
+    `wake` wakes the notices when it differs from what they show."""
+    return _look(_next_ticket(), wake)
+
+
+def _look(ticket: int, wake: bool) -> bool:
     root = settings.music_library_path
     if not root or not db_query_one("SELECT 1 AS x FROM media_files LIMIT 1"):
         answer = False
@@ -85,20 +88,32 @@ def library_unreachable(wake: bool = True) -> bool:
     return answer
 
 
-# The folder's last answer and the looks that produce it. Producers — a scan's
-# refusal, the prune's check, the Library screen opened, a library file served
-# or found missing — wake the notices when they change the answer. The notices'
-# own look never does: every stream derives the set on every wake, and on a
-# share that flaps a derivation that woke the channel would wake itself without end.
+# The folder's state, two ways: the last answer recorded (looks and
+# observations, ordered by when they started) and what the notices were last
+# given. The notices derive on every wake of every stream, so they share one
+# look, run by a worker thread, and wait for it a few seconds at most — a look
+# that takes longer reads as a dead mount. Their look never wakes the channel:
+# on a share that flaps it would wake itself without end, so a change only a
+# request's derivation saw reaches the tabs already open with the next wake.
+# Producers do wake it, when their answer differs from what the notices show:
+# a scan's refusal, the prune, Library opened, a library file served or found
+# missing. And a look the readers gave up on wakes them if the folder answered
+# after all: a disk spinning up is not a dead mount.
+LOOK_PATIENCE_S = 3.0
 _folder = threading.Condition()
 _folder_unreachable = False
-_ticket = 0                 # handed to each look as it starts
-_recorded = 0               # the ticket the answer is from; an older look records nothing
-_looking = False            # the notices' look is under way...
-_look_started = 0.0         # ...since then (monotonic)
-_looks_done = 0             # bumped as it ends; the readers waiting on it wake
-# A look that has not answered by then is a dead mount, and reads as one.
-LOOK_PATIENCE_S = 3.0
+_shown = False
+_ticket = 0
+_recorded = 0                 # the ticket the recorded answer is from
+_look_wanted = False          # the worker's queue of one,
+_look_wakes_wanted = False    # asked for by a producer
+_looking = False              # the worker's look under way:
+_look_ticket = 0              #   its ticket,
+_look_started = 0.0           #   its start (monotonic),
+_look_wakes = False           #   a producer's,
+_look_given_up = False        #   a reader read "unreachable" rather than wait longer
+_looks_done = 0
+_worker: Optional[threading.Thread] = None
 
 
 def _next_ticket() -> int:
@@ -109,14 +124,16 @@ def _next_ticket() -> int:
 
 
 def _record(unreachable: bool, ticket: int, wake: bool) -> None:
-    global _folder_unreachable, _recorded
+    global _folder_unreachable, _recorded, _shown
     with _folder:
         if ticket < _recorded:
             return
         _recorded = ticket
-        changed = unreachable != _folder_unreachable
         _folder_unreachable = unreachable
-    if changed and wake:
+        wake = wake and unreachable != _shown
+        if wake:
+            _shown = unreachable
+    if wake:
         db_execute("NOTIFY sautium_notices")
 
 
@@ -126,43 +143,78 @@ def folder_seen(unreachable: bool) -> None:
     _record(unreachable, _next_ticket(), wake=True)
 
 
-def _notices_look() -> None:
-    global _looking, _looks_done
-    try:
-        library_unreachable(wake=False)
-    except Exception as e:
-        logger.error(f"Music folder look failed: {e}", exc_info=True)
-    finally:
+def check_folder() -> None:
+    """A producer's look that nobody waits for (Library opened, a library
+    file found missing): the worker looks and wakes the notices if the
+    answer differs from what they show."""
+    global _look_wanted, _look_wakes_wanted
+    _ensure_worker()
+    with _folder:
+        _look_wanted = _look_wakes_wanted = True
+        _folder.notify_all()
+
+
+def folder_unreachable_now() -> bool:
+    """The folder's state for the notices: they share the worker's look and
+    wait for it no longer than LOOK_PATIENCE_S from its start. A look that
+    takes longer reads as a dead mount, unless a word newer than it says the
+    folder answers (a library file served)."""
+    global _look_wanted, _look_given_up, _shown
+    _ensure_worker()
+    with _folder:
+        if not _looking and not _look_wanted:
+            _look_wanted = True
+            _folder.notify_all()
+        done = _looks_done
+        started = _look_started if _looking else time.monotonic()
+        remaining = started + LOOK_PATIENCE_S - time.monotonic()
+        if remaining > 0 and _folder.wait_for(lambda: _looks_done != done, timeout=remaining):
+            answer = _folder_unreachable
+        elif _recorded > _look_ticket:
+            answer = _folder_unreachable
+        else:
+            _look_given_up = True
+            answer = True
+        _shown = answer
+    return answer
+
+
+def _ensure_worker() -> None:
+    global _worker
+    with _folder:
+        if _worker is None or not _worker.is_alive():
+            _worker = threading.Thread(target=_look_worker, daemon=True,
+                                       name="music-folder-look")
+            _worker.start()
+
+
+def _look_worker() -> None:
+    global _look_wanted, _look_wakes_wanted, _looking, _look_ticket, _look_started
+    global _look_wakes, _look_given_up, _looks_done, _shown, _ticket
+    while True:
         with _folder:
+            _folder.wait_for(lambda: _look_wanted)
+            _look_wanted = False
+            _look_wakes, _look_wakes_wanted = _look_wakes_wanted, False
+            _look_given_up = False
+            _ticket += 1
+            _looking, _look_ticket, _look_started = True, _ticket, time.monotonic()
+        try:
+            answer = _look(_look_ticket, wake=False)
+        except Exception as e:
+            logger.error(f"Music folder look failed: {e}", exc_info=True)
+            answer = None
+        with _folder:
+            wake = (answer is not None and _recorded == _look_ticket
+                    and answer != _shown
+                    and (_look_wakes or (_look_given_up and not answer)))
+            if wake:
+                _shown = answer
             _looking = False
             _looks_done += 1
             _folder.notify_all()
-
-
-def folder_unreachable_now(wake: bool = False) -> bool:
-    """The folder's state for a reader that must not hang on it. Readers share
-    one look, on a thread of its own: a reader that finds it under way waits
-    for its answer, but no longer than LOOK_PATIENCE_S from the look's start,
-    and a look that takes longer reads as a dead mount. The notices derive
-    with this; a producer passes `wake` to wake them when its answer changed
-    what they last read."""
-    global _looking, _look_started
-    with _folder:
-        before = _folder_unreachable
-        if not _looking:
-            _looking = True
-            _look_started = time.monotonic()
-            threading.Thread(target=_notices_look, daemon=True,
-                             name="music-folder-look").start()
-        done = _looks_done
-        remaining = _look_started + LOOK_PATIENCE_S - time.monotonic()
-        if remaining > 0 and _folder.wait_for(lambda: _looks_done != done, timeout=remaining):
-            answer = _folder_unreachable
-        else:
-            answer = True
-    if wake and answer != before:
-        db_execute("NOTIFY sautium_notices")
-    return answer
+        if wake:
+            db_execute("NOTIFY sautium_notices")
 
 
 class LibraryUnreachable(RuntimeError):

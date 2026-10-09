@@ -58,21 +58,28 @@ def cur(scratch_dsn, monkeypatch):
     engine = database.make_engine(scratch_dsn)
     monkeypatch.setattr(database, "SessionLocal",
                         sessionmaker(autocommit=False, autoflush=False, bind=engine))
-    # The notice's onset and the folder's last look are process state: each
-    # test starts with none armed and a folder last seen in place.
+    # The notice's onset and the folder's state are process state: each test
+    # starts with none armed and the folder answering, once the look worker
+    # is idle — a look still running would land in this test.
+    assert _wait_until(_worker_idle)
     monkeypatch.setattr(settings_router, "_derived_since", {})
-    monkeypatch.setattr(scanner, "_folder_unreachable", False)
-    monkeypatch.setattr(scanner, "_recorded", 0)
-    monkeypatch.setattr(scanner, "_looking", False)
+    for name, value in (("_folder_unreachable", False), ("_shown", False), ("_recorded", 0),
+                        ("_look_given_up", False), ("_look_wakes_wanted", False)):
+        monkeypatch.setattr(scanner, name, value)
     conn = psycopg2.connect(scratch_dsn)
     conn.autocommit = True
     with conn.cursor() as c:
         for table in ("user_settings", "media_files", "album_variants", "albums", "tracks"):
             c.execute(f"DELETE FROM {table}")
         yield c
+    assert _wait_until(_worker_idle)
     conn.close()
     engine.dispose()
     pool.closeall()
+
+
+def _worker_idle():
+    return not scanner._looking and not scanner._look_wanted
 
 
 @pytest.fixture
@@ -181,7 +188,7 @@ def _hang_the_folder(monkeypatch, library):
 
 
 def test_a_look_a_dead_mount_holds_reads_as_unreachable_and_holds_no_reader(
-        cur, library, monkeypatch):
+        cur, library, monkeypatch, heard):
     _owned_file(cur)
     (library / "Electronic").mkdir()              # the folder is there...
     monkeypatch.setattr(scanner, "LOOK_PATIENCE_S", 0.3)
@@ -194,8 +201,10 @@ def test_a_look_a_dead_mount_holds_reads_as_unreachable_and_holds_no_reader(
         assert blocked.is_set()
     finally:
         release.set()
-    assert _wait_until(lambda: not scanner._looking)
-    assert "library.mount_missing" not in _keys()  # the look came back: the folder answers
+    # the look answers after all — a disk spinning up, not a dead mount: the
+    # tabs that read "unreachable" on its behalf are woken
+    assert heard() == ["sautium_notices"]
+    assert "library.mount_missing" not in _keys()
 
 
 def _wait_until(pred, timeout=5.0):
@@ -236,17 +245,17 @@ def test_only_the_librarys_own_files_speak_for_the_folder(cur, library, tmp_path
     assert heard(timeout=0.5) == []               # a cache miss says nothing of the folder
 
     with pytest.raises(HTTPException):
-        media._serve_disk(owned, "audio/flac", _NoRange())
+        media._serve_disk(owned, "audio/flac", _NoRange(), library=True)
     assert heard() == ["sautium_notices"]         # the library's own file: the folder is gone
     with pytest.raises(HTTPException):
-        media._serve_disk(owned, "audio/flac", _NoRange())
+        media._serve_disk(owned, "audio/flac", _NoRange(), library=True)
     assert heard(timeout=0.5) == []               # a retry wakes nobody again
 
     (library / "A").mkdir()
     Path(owned).write_bytes(b"x" * 16)
-    media._serve_disk(owned, "audio/flac", _NoRange())
+    media._serve_disk(owned, "audio/flac", _NoRange(), library=True)
     assert heard() == ["sautium_notices"]         # served: the folder answers again
-    media._serve_disk(owned, "audio/flac", _NoRange())
+    media._serve_disk(owned, "audio/flac", _NoRange(), library=True)
     assert heard(timeout=0.5) == []               # never once per request
 
 

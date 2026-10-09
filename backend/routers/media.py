@@ -41,27 +41,23 @@ def _range_headers(start: int, end: int, total: int, mime: str) -> dict:
     }
 
 
-def _in_library(path: str) -> bool:
-    root = settings.music_library_path
-    return bool(root) and os.path.abspath(path).startswith(
-        os.path.join(os.path.abspath(root), ""))
-
-
-def _serve_disk(path: str, mime: str, request: Request):
-    """Range-stream a file on disk (owned original, or a cached Opus transcode)."""
-    from scanner import folder_seen, folder_unreachable_now
-    # Only the library's own files speak for the music folder — a transcode
-    # cache file says nothing about it — and they speak only when the answer
-    # changes, never once per range request.
-    in_library = _in_library(path)
+def _serve_disk(path: str, mime: str, request: Request, library: bool = False):
+    """Range-stream a file on disk (owned original, or a cached Opus
+    transcode). `library`: the file is the library's own original — the only
+    kind that speaks for the music folder (a cache file says nothing about
+    it), and only when that changes what the notices show, never once per
+    range request."""
+    from scanner import check_folder, folder_seen
     try:
         total = os.path.getsize(path)
     except OSError:
-        # A missing file is the moment a dropped music mount becomes visible.
-        if in_library:
-            folder_unreachable_now(wake=True)
+        # A missing file is the moment a dropped music mount becomes
+        # visible: the folder is looked at — not waited for — and the 404
+        # goes out at once.
+        if library:
+            check_folder()
         raise HTTPException(status_code=404, detail="file missing on disk")
-    if in_library:
+    if library:
         folder_seen(False)
     span = parse_byte_range(request.headers.get("range"), total)
     if span is UNSATISFIABLE:
@@ -141,7 +137,8 @@ def media_file(media_file_id: int, request: Request,
         if opus:
             return _serve_disk(opus, transcode.MIME, request)
 
-    return _serve_disk(path, mime, request)
+    # the original itself, unless a CUE slice's cached cut stands in for it
+    return _serve_disk(path, mime, request, library=row["cue_start_seconds"] is None)
 
 
 @router.get("/preview/{token}")

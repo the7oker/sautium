@@ -479,12 +479,16 @@ rule for WHEN a condition exists lives there, the words and the clock
 keeps its `since` in `_derived_since` (`routers/settings.py`); its
 producers wake the channel on the bad AND the good transition. The music
 folder: every stream derives the set on every wake, so the readers share
-one look on a thread of its own (`scanner.folder_unreachable_now`) and wait
+one look run by a worker thread (`scanner.folder_unreachable_now`) and wait
 for it a few seconds at most — a look that takes longer reads as a dead
-mount — and the derivation never wakes the channel itself (on a flapping
-share it would wake itself without end). Its producers do, when their
-answer changes: a scan's refusal, the prune, Library opened, a library
-file served or found missing — never a transcode-cache file. The client diffs snapshots: a key
+mount, unless a newer word says the folder answers — and the derivation
+never wakes the channel itself (on a flapping share it would wake itself
+without end; a change only a request's derivation saw reaches the open
+tabs with the next wake). Its producers do, when their answer differs from
+what the notices show: a scan's refusal, the prune, Library opened, a
+library file served or found missing — never a transcode-cache file — and
+so does a look the readers gave up on if the folder answered after all (a
+disk spinning up). The client diffs snapshots: a key
 that appears or re-arms toasts once — so `since` is the condition's
 ONSET, stable while it lasts: a producer that restamps it per run
 re-raises the same toast on every run (the slice rows did, every few

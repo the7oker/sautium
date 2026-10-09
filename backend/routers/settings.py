@@ -604,7 +604,7 @@ async def _library_state() -> Dict[str, Any]:
     Albums / Genres on the Library side, Embeddings / Features /
     Last.fm / Lyrics on the Enrichment side."""
     from main import get_stats, _scan_state, _enrich_state
-    from scanner import folder_unreachable_now
+    from scanner import check_folder
 
     try:
         stats = await get_stats()
@@ -630,9 +630,10 @@ async def _library_state() -> Dict[str, Any]:
     music_path = app_settings.music_host_path or app_settings.music_library_path
 
     # The screen reads the folder's state from the notice set; opening it is
-    # a moment to look, as a producer: an answer that changed what the
-    # notices last read wakes them.
-    await asyncio.to_thread(folder_unreachable_now, True)
+    # a moment to look, as a producer — not waited for, so the screen never
+    # hangs on the folder: an answer that differs from what the notices show
+    # wakes them.
+    check_folder()
 
     return {
         "music_path":         music_path,
