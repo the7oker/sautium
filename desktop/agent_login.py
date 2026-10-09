@@ -132,6 +132,7 @@ class AgentLogin:
         self._text = ""
         self._cancelled = False
         self._timed_out = False
+        self._code_sent = False
         self._parsed = parse_output(agent, "")
         self._error: Optional[str] = None
         self._exit_code: Optional[int] = None
@@ -165,6 +166,7 @@ class AgentLogin:
             self._text = ""
             self._cancelled = False
             self._timed_out = False
+            self._code_sent = False
             self._parsed = parse_output(self.agent, "")
             self._error = None
             self._exit_code = None
@@ -193,6 +195,7 @@ class AgentLogin:
             try:
                 proc.stdin.write((code + "\n").encode("utf-8"))
                 proc.stdin.flush()
+                self._code_sent = True
             except OSError as e:
                 raise RuntimeError("The sign-in process has already exited") from e
 
@@ -221,6 +224,9 @@ class AgentLogin:
             "exit_code": self._exit_code,
             # The CLI exited 0 on its own: it stored a fresh credential.
             "completed": self._exit_code == 0 and self._error is None,
+            # A code went in from the page — else a browser callback ended
+            # it (the tab the CLI opened itself, on the launcher).
+            "code_sent": self._code_sent,
             "started_at": self._started_at,
         }
 

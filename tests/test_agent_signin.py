@@ -51,9 +51,12 @@ with open(os.environ["FAKE_CLI_LOG"], "a", encoding="utf-8") as log:
 
 if args[:2] == ["auth", "status"]:
     logged_in = os.environ["FAKE_LOGGED_IN"] == "1"
-    print(json.dumps({"loggedIn": logged_in,
-                      "authMethod": "claude.ai" if logged_in else "none",
-                      "apiProvider": "firstParty"}, indent=2))
+    status = {"loggedIn": logged_in, "authMethod": "claude.ai" if logged_in else "none",
+              "apiProvider": "firstParty"}
+    if logged_in:
+        status.update(email=os.environ.get("FAKE_EMAIL", "owner@example.com"),
+                      orgName="Owner's Organization", subscriptionType="max")
+    print(json.dumps(status, indent=2))
     sys.exit(0 if logged_in else 1)
 
 if args[:2] == ["auth", "login"]:
@@ -309,7 +312,7 @@ def test_a_look_that_a_call_overtook_does_not_apply():
     def status():
         asked.set()
         release.wait(10)
-        return False                              # what the store said before
+        return {"signed_in": False, "account": None}   # what the store said before
 
     auth = claude_code.AgentAuth("Test", status)
     auth.authenticated()
@@ -366,6 +369,22 @@ def test_a_completed_sign_in_ends_the_episode_and_listeners_hear_flips_only(cli)
     _wait_for_exit(claude_code.start_signin)
     assert flips == [False, True]
     assert claude_code.auth.signed_in()
+
+
+def test_a_look_reads_whose_sign_in_it_is_and_a_switch_shows(cli, monkeypatch):
+    """The account the CLI names is what makes "Switch account" visible: the
+    look after a completed sign-in reads it, a lost sign-in drops it."""
+    assert claude_code.auth.signed_in()
+    assert claude_code.auth.verdict()["account"] == {"email": "owner@example.com", "plan": "max"}
+
+    monkeypatch.setenv("FAKE_EMAIL", "partner@example.com")   # the other account
+    looks = cli.looks()
+    _wait_for_exit(claude_code.start_signin)
+    assert cli.looks() == looks + 1
+    assert claude_code.auth.verdict()["account"]["email"] == "partner@example.com"
+
+    claude_code.auth.refused(REFUSAL)
+    assert claude_code.auth.verdict()["account"] is None
 
 
 def test_a_signed_out_agent_stays_registered_and_the_registry_never_asks(cli, monkeypatch):

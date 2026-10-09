@@ -159,9 +159,12 @@ def test_claude_flow_accepts_a_pasted_code(fake_cli):
     assert snap["running"] and snap["url"] is None
     ready = changes.wait_for(lambda s: s["accepts_code"])
     assert ready["url"] == "https://claude.com/cai/oauth/authorize?code=true&state=x"
+    assert not ready["code_sent"]
     login.submit_code(" good#code \n")
     done = changes.wait_for(lambda s: not s["running"])
     assert done["exit_code"] == 0 and done["error"] is None and not done["cancelled"]
+    # Ended by the pasted code, not a browser callback: the screen says which.
+    assert done["completed"] and done["code_sent"]
     assert login.snapshot()["accepts_code"] is False
 
 

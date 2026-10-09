@@ -185,10 +185,14 @@ STATUS_TIMEOUT_SECONDS = 30
 class AgentAuth:
     """The sign-in verdict of one CLI agent for the whole process."""
 
-    def __init__(self, name: str, status: Callable[[], Optional[bool]]):
+    def __init__(self, name: str, status: Callable[[], Optional[dict]]):
         self.name = name
-        self._status = status            # the CLI's status command: True/False/None
+        # The CLI's status command: {"signed_in", "account"}, or None when it
+        # gave no answer. `account` (who is signed in, when the CLI says) is
+        # what makes a switch of accounts visible.
+        self._status = status
         self._verdict: Optional[dict] = None
+        self._account: Optional[dict] = None
         self._observed = 0               # calls and sign-ins seen; a look started
                                          # before the latest one is out of date
         self._lock = threading.Lock()
@@ -202,9 +206,11 @@ class AgentAuth:
 
     def verdict(self) -> Optional[dict]:
         """The standing verdict — signed_in, refused (a call said so),
-        reason (the CLI's words), since (the onset) — or None before the
-        first look. Never asks the CLI."""
-        return self._verdict
+        reason (the CLI's words), since (the onset), account (as the last
+        look read it) — or None before the first look. Never asks the CLI."""
+        if self._verdict is None:
+            return None
+        return {**self._verdict, "account": self._account}
 
     def signed_in(self, fresh: bool = False) -> bool:
         """Can the CLI authenticate? The standing verdict; the first read
@@ -225,7 +231,8 @@ class AgentAuth:
                     # no evidence against it; the first call says.
                     flipped = self._verdict is None and self._set(True)
                 else:
-                    flipped = self._set(status)
+                    flipped = self._set(status["signed_in"])
+                    self._account = status["account"] if status["signed_in"] else None
                 now = self._verdict["signed_in"]
         if flipped:
             self._announce(now)
@@ -249,13 +256,13 @@ class AgentAuth:
 
     def signin_finished(self, completed: bool) -> None:
         """A sign-in the backend drove has exited. A completed one is a
-        signed-in verdict — the CLI stored a fresh credential; any other
-        leaves the store to say what is left (`codex login` deletes
-        auth.json before it authorizes anything)."""
+        signed-in verdict — the CLI stored a fresh credential — and the
+        look after it reads whose; any other leaves the store to say what
+        is left (`codex login` deletes auth.json before it authorizes
+        anything)."""
         if completed:
             self.authenticated()
-        else:
-            self.signed_in(fresh=True)
+        self.signed_in(fresh=True)
 
     def _set(self, signed_in: bool, refused: bool = False,
              reason: Optional[str] = None) -> bool:
@@ -272,6 +279,8 @@ class AgentAuth:
         self._verdict = {"signed_in": signed_in, "refused": refused,
                          "reason": reason,
                          "since": datetime.now(timezone.utc).isoformat()}
+        if not signed_in:
+            self._account = None
         logger.info("%s %s%s", self.name, "signed in" if signed_in else "signed out",
                     f" — {reason}" if reason else "")
         return True
@@ -284,10 +293,11 @@ class AgentAuth:
                 logger.exception(f"{self.name} sign-in listener failed")
 
 
-def _cli_status() -> Optional[bool]:
-    """`claude auth status --json` → loggedIn, spawned like a chat turn so
-    it reads the store those turns use (the agent user's HOME in Docker,
-    the Keychain on macOS); None when the CLI gives no answer."""
+def _cli_status() -> Optional[dict]:
+    """`claude auth status --json` → loggedIn and the account (email, plan —
+    `subscriptionType`, 2.1.295), spawned like a chat turn so it reads the
+    store those turns use (the agent user's HOME in Docker, the Keychain on
+    macOS); None when the CLI gives no answer."""
     claude = get_claude_executable()
     if claude is None:
         return None
@@ -304,11 +314,15 @@ def _cli_status() -> Optional[bool]:
         logger.warning(f"claude auth status did not run: {e}")
         return None
     try:
-        return bool(json.loads(out.stdout)["loggedIn"])
+        status = json.loads(out.stdout)
+        signed_in = bool(status["loggedIn"])
     except (ValueError, KeyError, TypeError):
         logger.warning(f"claude auth status gave no answer (rc={out.returncode}): "
                        f"{(out.stdout or out.stderr).strip()[:200]}")
         return None
+    account = {"email": status.get("email"), "plan": status.get("subscriptionType")}
+    return {"signed_in": signed_in,
+            "account": account if signed_in and any(account.values()) else None}
 
 
 auth = AgentAuth("Claude Code", _cli_status)

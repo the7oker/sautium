@@ -12640,21 +12640,10 @@
     const auth = ai.auth_state || 'not_authenticated';
     const usage = ai.usage;
 
+    // An OAuth sign-in is a CLI agent's, and those render their own block
+    // (cliBlock below): this row is the API providers' key or its absence.
     let authRow;
-    if (auth === 'oauth_signed_in') {
-      const expires = ai.expires_in_days != null ? `<span style="color:var(--color-text-muted);font-size:calc(12*var(--px));">· expires in <span style="font-family:var(--font-mono);color:var(--color-blue);font-size:calc(11.5*var(--px));letter-spacing:0.02em;">${ai.expires_in_days} days</span></span>` : '';
-      authRow = `
-        <div class="form-row stacked">
-          <div class="row-stack">
-            <span class="row-stack-label">Authentication</span>
-            <button class="btn-link" data-action="reauthorize">Reauthorize</button>
-          </div>
-          <div class="row-stack-value" style="display:flex;align-items:center;gap:calc(8*var(--px));flex-wrap:wrap;">
-            <span style="color:var(--color-positive);font-family:var(--font-mono);font-size:calc(12*var(--px));letter-spacing:0.02em;"><span class="status-dot green"></span>Signed in</span>
-            ${expires}
-          </div>
-        </div>`;
-    } else if (auth === 'api_key_set') {
+    if (auth === 'api_key_set') {
       authRow = `
         <div class="form-row stacked">
           <div class="row-stack">
@@ -12794,7 +12783,7 @@
   // carries a `signin` snapshot — running/url/code/accepts_code/error —
   // and the server wakes the stream on every change, so the panel below
   // is re-rendered from facts, never from a timer. While a sign-in runs
-  // the panel replaces the state block whatever the state is (Reauthorize
+  // the panel replaces the state block whatever the state is (Switch account
   // starts one from 'ready').
   const _cliSigninProse = 'color:var(--color-text-muted);font-size:calc(12.5*var(--px));line-height:1.6;';
 
@@ -12832,6 +12821,23 @@
         </div>`;
   }
 
+  // Who the Claude Code CLI says is signed in (`claude auth status`), as the
+  // verdict's last look read it — escaped, '' when it did not say.
+  function _claudeAccount(cc) {
+    const a = cc && cc.auth && cc.auth.account;
+    if (!a || !a.email) return '';
+    const plan = a.plan ? ` · ${a.plan[0].toUpperCase()}${a.plan.slice(1)}` : '';
+    return escapeProfileHtml(a.email + plan);
+  }
+
+  // The words of a sign-in that ended badly, under a block that still says
+  // "signed in": Claude keeps the old credential when a switch fails.
+  function _signinFailureLine(sg) {
+    return sg && !sg.running && sg.error
+      ? `<div class="row-stack-sub" style="color:var(--color-negative);">The last sign-in failed: ${escapeProfileHtml(sg.error)}</div>`
+      : '';
+  }
+
   function _renderClaudeCodeBlock(cc) {
     const s = cc.state;
     const installing = cc.install && cc.install.running;
@@ -12839,16 +12845,20 @@
     const sg = cc.signin;
     if (sg && sg.running) return _renderClaudeSigninPanel(cc);
     if (s === 'ready') {
+      // Signing in again from here switches accounts — the one thing it is
+      // for now that a lost sign-in reads as "Sign in" (the CLI's verdict).
+      const who = _claudeAccount(cc);
       return `
         <div class="form-row stacked">
           <div class="row-stack">
             <span class="row-stack-label">Authentication</span>
-            <button class="btn-link" data-action="cc-signin">Reauthorize</button>
+            <button class="btn-link" data-action="cc-signin">Switch account</button>
           </div>
           <div class="row-stack-value" style="display:flex;align-items:center;gap:calc(8*var(--px));">
             <span style="color:var(--color-positive);font-family:var(--font-mono);font-size:calc(12*var(--px));letter-spacing:0.02em;"><span class="status-dot green"></span>Signed in via subscription</span>
           </div>
-          <div class="row-stack-sub">No API key needed. Reauthorize to switch accounts.</div>
+          <div class="row-stack-sub">${who ? `${who} — no API key needed.` : 'No API key needed.'}</div>
+          ${_signinFailureLine(sg)}
         </div>`;
     }
     if (s === 'host_unsupported') {
@@ -12944,6 +12954,12 @@
         </div>`;
   }
 
+  function _codexVia(cx) {
+    return cx.auth_method === 'chatgpt' ? 'Signed in with ChatGPT'
+         : cx.auth_method === 'api_key' ? 'API key (stored)'
+         : 'API key from .env';
+  }
+
   function _renderCodexBlock(cx) {
     const s = cx.state;
     const installing = cx.install && cx.install.running;
@@ -12951,19 +12967,20 @@
     const sg = cx.signin;
     if (sg && sg.running) return _renderCodexSigninPanel(cx);
     if (s === 'ready') {
-      const via = cx.auth_method === 'chatgpt' ? 'Signed in with ChatGPT'
-                : cx.auth_method === 'api_key' ? 'API key (stored)'
-                : 'API key from .env';
+      // On a ChatGPT sign-in, signing in again switches accounts; on a key,
+      // it moves Codex onto the subscription the key only stands in for.
+      const action = cx.auth_method === 'chatgpt' ? 'Switch account' : 'Sign in with ChatGPT';
       return `
         <div class="form-row stacked">
           <div class="row-stack">
             <span class="row-stack-label">Authentication</span>
-            <button class="btn-link" data-action="cx-signin">Reauthorize</button>
+            <button class="btn-link" data-action="cx-signin">${action}</button>
           </div>
           <div class="row-stack-value" style="display:flex;align-items:center;gap:calc(8*var(--px));">
-            <span style="color:var(--color-positive);font-family:var(--font-mono);font-size:calc(12*var(--px));letter-spacing:0.02em;"><span class="status-dot green"></span>${via}</span>
+            <span style="color:var(--color-positive);font-family:var(--font-mono);font-size:calc(12*var(--px));letter-spacing:0.02em;"><span class="status-dot green"></span>${_codexVia(cx)}</span>
           </div>
-          <div class="row-stack-sub">ChatGPT subscription preferred; an OPENAI_API_KEY works as fallback. Reauthorize signs out first, then signs in again.</div>
+          <div class="row-stack-sub">ChatGPT subscription preferred; an OPENAI_API_KEY works as fallback. Signing in again removes the stored sign-in first — a cancelled one leaves none.</div>
+          ${_signinFailureLine(sg)}
         </div>`;
     }
     if (s === 'host_unsupported') {
@@ -14774,6 +14791,28 @@
       return `HTTP ${resp.status}`;
     }
   }
+  // A sign-in this screen saw running ends in a toast that says how it
+  // ended. A sign-in from "Signed in" (a switch of accounts) otherwise
+  // changes nothing on screen, and on the launcher the tab the CLI opened
+  // can finish it before the link's page shows a code — two successful ones
+  // read as "nothing happened" (2026-10-09). Remembered for the page's life,
+  // so a sign-in that ends while the screen is closed speaks on its return.
+  const _signinsSeen = {};            // agent → started_at of the one seen running
+  function _signinOutcome(agent, label, st, successText) {
+    const sg = st && st.signin;
+    if (!sg) return;
+    if (sg.running) { _signinsSeen[agent] = sg.started_at; return; }
+    if (_signinsSeen[agent] !== sg.started_at) return;
+    delete _signinsSeen[agent];
+    if (sg.completed) {
+      notices.toast({ kind: 'success', key: `signin.${agent}`,
+                      title: `${label} signed in`, text: successText(st) });
+    } else if (sg.error) {
+      notices.toast({ kind: 'error', key: `signin.${agent}`,
+                      title: `${label} sign-in failed`, text: escapeProfileHtml(sg.error) });
+    }
+  }
+
   // `look`: the screen opened or its Refresh — the server asks the CLIs
   // again. The screen's own re-renders (a stream wake, a canon batch, the
   // sign-in notice coming or going) read the verdict it holds.
@@ -14801,6 +14840,13 @@
     if (ai.provider === 'codex') {
       codexState = await _fetchCodexState(look);
     }
+    _signinOutcome('claude', 'Claude Code', claudeState, cc => {
+      const who = _claudeAccount(cc);
+      const tab = cc.launcher_mode && !cc.signin.code_sent
+        ? ' The browser tab Sautium opened finished it — there is no code to paste.' : '';
+      return `${who ? `As ${who}.` : ''}${tab}`;
+    });
+    _signinOutcome('codex', 'Codex', codexState, cx => `${_codexVia(cx)}.`);
 
     root.innerHTML = `
       <section class="screen screen-settings">
@@ -14834,10 +14880,6 @@
     const afterKeySaved = () => { refreshAiAvailability(); render(); };
     onAction('[data-action="sign-in"]',     () => openApiKeyModal(ai.provider || 'anthropic', afterKeySaved));
     onAction('[data-action="replace-key"]', () => openApiKeyModal(ai.provider || 'anthropic', afterKeySaved));
-    onAction('[data-action="reauthorize"]', () => {
-      // OAuth handshake lives in the chat module — route there for now.
-      navigate('friends');
-    });
 
     // Claude Code state actions
     onAction('[data-action="cc-refresh"]', () => render());

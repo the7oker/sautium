@@ -140,17 +140,19 @@ def codex_auth_file() -> Path:
     return codex_home() / "auth.json"
 
 
-def _cli_status() -> Optional[bool]:
+def _cli_status() -> Optional[dict]:
     """`codex login status` for the store the chat turns use (exit 0 =
-    logged in; the words go to stderr), spawned like a turn — the agent
-    user's CODEX_HOME in Docker. No auth.json with an API key at hand is
-    signed in: the runner mints the file from it on first use. None when
+    logged in; the words go to stderr, and they name no account — how the
+    node is signed in is codex_auth_method's), spawned like a turn — the
+    agent user's CODEX_HOME in Docker. No auth.json with an API key at hand
+    is signed in: the runner mints the file from it on first use. None when
     the CLI gives no answer."""
     codex = get_codex_executable()
     if codex is None:
         return None
     if not codex_auth_file().is_file():
-        return bool(os.environ.get("OPENAI_API_KEY") or os.environ.get("CODEX_API_KEY"))
+        minted = bool(os.environ.get("OPENAI_API_KEY") or os.environ.get("CODEX_API_KEY"))
+        return {"signed_in": minted, "account": None}
     from codex_runner import _codex_env, _spawn_kwargs
     kwargs = _spawn_kwargs(_codex_env())
     kwargs.update(capture_output=True, timeout=STATUS_TIMEOUT_SECONDS)
@@ -159,7 +161,7 @@ def _cli_status() -> Optional[bool]:
     except (OSError, subprocess.TimeoutExpired) as e:
         logger.warning(f"codex login status did not run: {e}")
         return None
-    return out.returncode == 0
+    return {"signed_in": out.returncode == 0, "account": None}
 
 
 auth = AgentAuth("Codex", _cli_status)

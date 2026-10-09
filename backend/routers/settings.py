@@ -754,8 +754,8 @@ def _ai_state() -> Dict[str, Any]:
     """Provider/model/auth/usage snapshot for the AI section.
 
     Authentication state is one of:
-      - 'oauth_signed_in' — Claude Code OAuth is connected (existing
-        flow). expires_in_days populated.
+      - 'oauth_signed_in' — the CLI agent picked (Claude Code, Codex) is
+        signed in, by its own verdict (claude_code.auth, codex_cli.auth).
       - 'api_key_set'    — user has provided a raw API key.
         masked_key shows last 4 chars.
       - 'not_authenticated' — neither.
@@ -769,7 +769,6 @@ def _ai_state() -> Dict[str, Any]:
 
     auth_state = "not_authenticated"
     masked_key: Optional[str] = None
-    expires_in_days: Optional[int] = None
     # Authentication state is only meaningful once a provider has been
     # picked. Without one we leave auth_state at the default so the UI
     # hides the auth/usage rows entirely.
@@ -842,7 +841,6 @@ def _ai_state() -> Dict[str, Any]:
         "model":          model,
         "auth_state":     auth_state,
         "masked_key":     masked_key,
-        "expires_in_days": expires_in_days,
         "usage":          usage,
         "canonization": {
             "enabled":   canon_enabled,

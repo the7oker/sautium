@@ -935,7 +935,8 @@ The short version of the hard-learned lessons:
   0.153, browser and device flows alike); `claude auth login` keeps the old
   credentials until the new ones land. A cancelled codex re-authorization
   therefore leaves the node signed out of ChatGPT (falling back to
-  `OPENAI_API_KEY` when one is set), and the Reauthorize row says so.
+  `OPENAI_API_KEY` when one is set), and the row under its Switch account
+  (Sign in with ChatGPT, on a key) says so.
 - **Docker signs in from the Web UI now.** Both CLIs are baked into the
   image and `~/.claude` / `~/.codex` are host mounts, so `host_unsupported`
   shrank to "a container without the CLI"; the sign-in process runs demoted
@@ -2056,6 +2057,20 @@ differs, never with a pick.
   shows Claude's sign-in too while the queue waits for it. Measured live the
   same day: the sign-in from the Web UI woke the drain within 80 ms, and
   Meze ARTA was researched in 59 s.
+- **"Reauthorize" became "Switch account", and a sign-in says how it
+  ended.** Two successful re-authorizations (the Mac and Windows launchers)
+  read as "nothing happened": the button sat in the signed-in state, looked
+  like a request, and a sign-in from there changes nothing on screen — on the
+  launcher the tab the CLI opens itself can even finish it before the link's
+  page shows a code. With the state truthful a lost sign-in reads "Sign in",
+  so what is left for the button is switching accounts (and, on a Codex key,
+  moving onto the ChatGPT subscription — "Sign in with ChatGPT"); it is named
+  for that. The row names the account the CLI reports (`claude auth status`
+  email and plan — a switch shows), a sign-in the screen saw running ends in
+  a toast — the account, or the CLI's words when it failed, and "the browser
+  tab Sautium opened finished it — there is no code to paste" when no code
+  went in — and a failed switch shows under a row that still reads "Signed
+  in" (Claude keeps the old credential when a switch fails).
 
 ## Known Gotchas
 
