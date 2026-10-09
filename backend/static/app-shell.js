@@ -14393,8 +14393,9 @@
 
   /* ============ Library screen — #more/library ============ */
   // The library.mount_missing condition explained where it bites: a scan here
-  // would walk an empty folder, so the server refuses one. Painted from the
-  // library state on render, then kept in step with the notice set.
+  // would walk an empty folder, so the server refuses one. The notice set is
+  // the one source, on render and on every snapshot (the library read wakes
+  // the channel when it sees the folder gone first).
   function paintMusicPathRow(row, missing) {
     row.classList.toggle('notice-row', missing);
     row.classList.toggle('kind-error', missing);
@@ -14553,7 +14554,7 @@
         ${actions}
       </section>
     `;
-    paintMusicPathRow(root.querySelector('[data-music-path-row]'), !!lib.mount_missing);
+    paintMusicPathRow(root.querySelector('[data-music-path-row]'), !!notices.get('library.mount_missing'));
     _wireBack(root);
 
     const onAction = (sel, fn) => root.querySelectorAll(sel).forEach(el => el.addEventListener('click', fn));

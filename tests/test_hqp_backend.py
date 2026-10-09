@@ -395,6 +395,8 @@ def test_adopt_resolves_paths_tokens_and_foreign_uris(fake, monkeypatch):
         return {("E:/Music/A/01.flac", None): _item("E:/Music/A/01.flac", 1),
                 ("E:/Music/A/02.flac", None): _item("E:/Music/A/02.flac", 2)}
     monkeypatch.setattr(queue_mod, "items_for_file_spans", spans)
+    # ...and the foreign one is held by no HQPlayer library either.
+    monkeypatch.setattr(queue_mod, "items_for_hqp_paths", lambda paths, endpoint_id: {})
     mgr = PlaybackManager()
     b = _attach(mgr)
     try:

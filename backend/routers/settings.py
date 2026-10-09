@@ -606,9 +606,13 @@ async def _library_state() -> Dict[str, Any]:
     # launcher when starting the container.
     music_path = app_settings.music_host_path or app_settings.music_library_path
 
+    # The screen reads the folder's state from the notice set; opening it is
+    # a moment to look (off the loop — a dead network mount can stall it).
+    if await asyncio.to_thread(library_unreachable):
+        notices_onset("library.mount_missing")
+
     return {
         "music_path":         music_path,
-        "mount_missing":      library_unreachable(),
         # Library counts (matches launcher's Library block 2×2)
         "total_tracks":       stats.get("total_tracks", 0),
         "total_artists":      stats.get("total_artists", 0),
@@ -1116,6 +1120,13 @@ def notices_recheck(key: str) -> None:
     re-derive only if the condition is currently shown, so a healthy node
     never pays for this."""
     if key in _derived_since:
+        db_execute("NOTIFY sautium_notices")
+
+
+def notices_onset(key: str) -> None:
+    """A producer saw the bad state: re-derive only if the condition is not
+    shown yet, so a reader that keeps seeing it wakes the channel once."""
+    if key not in _derived_since:
         db_execute("NOTIFY sautium_notices")
 
 

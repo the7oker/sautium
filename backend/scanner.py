@@ -28,7 +28,7 @@ from models import (
     AlbumVariant, MediaFile, HqpLibraryFile, Genre,
 )
 from database import get_db_context
-from db_pool import db_query, db_query_one
+from db_pool import db_execute, db_query, db_query_one
 from uuid_utils import artist_uuid, track_uuid, album_uuid, genre_uuid, is_lossless as check_lossless
 from album_identity import assign_dir_albums
 from canon.identity import ORPHAN_TRACK_SQL, elect_analysis_source
@@ -73,6 +73,20 @@ def library_unreachable() -> bool:
             return next(it, None) is None
     except OSError:
         return True
+
+
+class LibraryUnreachable(RuntimeError):
+    """A scan refused: the folder library_unreachable() names. An expected
+    condition, not a failure of the scan."""
+
+
+def refuse_if_unreachable() -> None:
+    """Every scan's refusal, whoever starts it (the Library button, the
+    launcher, cli.py, a walk that came back empty). It wakes the notices
+    channel: the condition's onset, seen here, reaches every open tab."""
+    if library_unreachable():
+        db_execute("NOTIFY sautium_notices")
+        raise LibraryUnreachable(UNREACHABLE)
 
 
 @dataclass(frozen=True)
@@ -767,8 +781,7 @@ class LibraryScanner:
         def _cancelled() -> bool:
             return cancel_check and cancel_check()
 
-        if library_unreachable():
-            raise RuntimeError(UNREACHABLE)
+        refuse_if_unreachable()
 
         # ── Discover files ──────────────────────────────────────────
         if progress_cb:

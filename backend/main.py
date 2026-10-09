@@ -1262,7 +1262,7 @@ def _scan_worker(limit: Optional[int], skip_existing: bool, subpath: Optional[st
     from datetime import datetime, timezone
     _scan_started = datetime.now(timezone.utc)   # AI-canon `since`: only this scan's new files
     try:
-        from scanner import LibraryScanner
+        from scanner import LibraryScanner, LibraryUnreachable, refuse_if_unreachable
         from routers.settings import notify_library_subscribers
 
         def progress_cb(msg: str, stats: dict):
@@ -1289,14 +1289,9 @@ def _scan_worker(limit: Optional[int], skip_existing: bool, subpath: Optional[st
             # An empty walk scanned nothing: no post-import pass, no prune and
             # no "Last scan" stamp, which the Library screen would show as a
             # scan that happened. Over a catalog that knows files it is the
-            # folder gone mid-run — scan_and_import refuses one gone before.
-            from scanner import UNREACHABLE, library_unreachable
-            if library_unreachable():
-                from db_pool import db_execute
-                db_execute("NOTIFY sautium_notices")   # the notice's onset, seen here
-                state["progress"] = f"Scan failed: {UNREACHABLE}"
-            else:
-                state["progress"] = "No audio files found"
+            # folder gone mid-run, refused like one gone before the walk.
+            refuse_if_unreachable()
+            state["progress"] = "No audio files found"
         else:
             from canon import post_import
             from routers.settings import notices_recheck
@@ -1351,6 +1346,10 @@ def _scan_worker(limit: Optional[int], skip_existing: bool, subpath: Optional[st
                     logger.warning(f"Post-scan sync request failed: {e}")
         state["result"] = result
 
+    except LibraryUnreachable as e:
+        logger.warning(f"Scan refused: {e}")
+        state["progress"] = f"Scan failed: {e}"
+        state["result"] = {"error": str(e)}
     except Exception as e:
         logger.error(f"Scan worker failed: {e}", exc_info=True)
         state["progress"] = f"Scan failed: {str(e)[:200]}"
@@ -1373,13 +1372,14 @@ async def scan_start(
 ) -> Dict[str, Any]:
     """Start library scan as a background task. Poll /scan/status for progress."""
     from playback import hqp_benchmark
-    from scanner import UNREACHABLE, library_unreachable
+    from scanner import LibraryUnreachable, refuse_if_unreachable
     if hqp_benchmark.measures_here():
         raise HTTPException(status_code=409, detail=hqp_benchmark.HERE_BUSY)
-    if library_unreachable():
-        from db_pool import db_execute
-        db_execute("NOTIFY sautium_notices")   # the notice's onset, seen here
-        raise HTTPException(status_code=409, detail=UNREACHABLE)
+    try:
+        # off the event loop: a scandir of a dead network mount can stall
+        await asyncio.to_thread(refuse_if_unreachable)
+    except LibraryUnreachable as e:
+        raise HTTPException(status_code=409, detail=str(e))
     with _scan_lock:
         if _scan_state["running"]:
             raise HTTPException(status_code=409, detail="Scan already running")
@@ -1425,7 +1425,7 @@ async def scan_library_endpoint(
     subpath: Optional[str] = None
 ) -> Dict[str, Any]:
     """Synchronous scan (for CLI/scripts). Use /scan/start for UI."""
-    from scanner import scan_library as do_scan
+    from scanner import LibraryUnreachable, scan_library as do_scan
 
     try:
         logger.info(f"Starting library scan (limit={limit}, skip_existing={skip_existing}, subpath={subpath})")
@@ -1434,6 +1434,8 @@ async def scan_library_endpoint(
             "success": True,
             "statistics": stats
         }
+    except LibraryUnreachable as e:
+        raise HTTPException(status_code=409, detail=str(e))
     except Exception as e:
         logger.error(f"Scan failed: {e}")
         raise HTTPException(status_code=500, detail=str(e))
