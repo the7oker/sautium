@@ -66,7 +66,7 @@ def library_unreachable() -> bool:
     behind the library.mount_missing notice, Library's Music path row, the
     scan's refusal and the prune's last check — a walk over such a folder
     finds nothing and reads as a scan, or as every file deleted. Every
-    answer is recorded for the readers that must not ask (folder_seen)."""
+    answer is recorded (the last look, folder_unreachable_now)."""
     root = settings.music_library_path
     if not root or not db_query_one("SELECT 1 AS x FROM media_files LIMIT 1"):
         answer = False
@@ -76,21 +76,20 @@ def library_unreachable() -> bool:
                 answer = next(it, None) is None
         except OSError:
             answer = True
-    folder_seen(answer)
+    _folder_seen(answer)
     return answer
 
 
-# The folder's state as last looked at. Readers that must not wait on the
-# folder — the notices set, which every stream derives on every wake — take
-# it from here, so a scandir of a dead network mount holds the one look that
-# asked, never a reader. Whoever looks records what it found, and a change
-# wakes the notices: a scan's refusal, the prune's check, the Library screen
-# opened, a file served or found missing, a walk, the backend's first look.
+# The last look's answer. A look that changes it wakes the notices, so a
+# refusal seen anywhere — the Library button, the launcher, cli.py — reaches
+# every open tab: their derivation looks again.
 _folder_lock = threading.Lock()
 _folder_unreachable = False
+# Held while a reader that must not wait looks (folder_unreachable_now).
+_look_lock = threading.Lock()
 
 
-def folder_seen(unreachable: bool) -> None:
+def _folder_seen(unreachable: bool) -> None:
     global _folder_unreachable
     with _folder_lock:
         changed = unreachable != _folder_unreachable
@@ -99,9 +98,18 @@ def folder_seen(unreachable: bool) -> None:
         db_execute("NOTIFY sautium_notices")
 
 
-def folder_last_seen() -> bool:
-    """library_unreachable()'s last answer, without asking the folder."""
-    return _folder_unreachable
+def folder_unreachable_now() -> bool:
+    """library_unreachable() for a reader that must not wait on the folder —
+    the notices set, which every stream derives on every wake: it looks
+    unless a look of this kind is under way, and then takes the last answer.
+    One look at a time, so a scandir of a dead network mount holds one
+    reader, never every stream."""
+    if not _look_lock.acquire(blocking=False):
+        return _folder_unreachable
+    try:
+        return library_unreachable()
+    finally:
+        _look_lock.release()
 
 
 class LibraryUnreachable(RuntimeError):

@@ -141,7 +141,6 @@ def test_an_empty_folder_is_unreachable_only_while_the_catalog_knows_files(
 
 def test_the_notice_names_the_folder_the_owner_knows(cur, library):
     _owned_file(cur)
-    scanner.library_unreachable()                 # a look: the folder is empty
 
     notice = {n["key"]: n for n in settings_router._notices_state()["items"]}
 
@@ -150,30 +149,26 @@ def test_the_notice_names_the_folder_the_owner_knows(cur, library):
         library.parent / "host" / "Music").as_posix()
 
 
-def test_the_notices_read_the_last_look_and_never_the_folder(cur, library, monkeypatch):
-    _owned_file(cur)                              # the folder is empty, not yet looked at
+def test_a_derivation_looks_unless_a_look_is_under_way(cur, library, monkeypatch):
+    _owned_file(cur)                              # the folder is empty
+
+    def keys():
+        return {n["key"] for n in settings_router._notices_state()["items"]}
+
+    assert "library.mount_missing" in keys()      # it looked
+
+    (library / "Electronic").mkdir()              # back, while a look holds the folder
     real = os.scandir
 
     def scandir(path="."):
-        assert os.fspath(path) != str(library), "the notices asked the folder"
+        assert os.fspath(path) != str(library), "a second reader asked the folder"
         return real(path)
 
     monkeypatch.setattr(os, "scandir", scandir)
-    assert "library.mount_missing" not in {n["key"] for n in settings_router._notices_state()["items"]}
-
+    with scanner._look_lock:
+        assert "library.mount_missing" in keys()  # the last answer, at once
     monkeypatch.setattr(os, "scandir", real)
-    scanner.library_unreachable()                 # a look
-    assert "library.mount_missing" in {n["key"] for n in settings_router._notices_state()["items"]}
-
-
-def test_a_file_served_or_a_walk_says_the_folder_is_there(cur, library, heard):
-    _owned_file(cur)
-    scanner.library_unreachable()                 # looked: gone
-    assert heard() == ["sautium_notices"]
-
-    scanner.folder_seen(False)                    # a file served from it after all
-    assert heard() == ["sautium_notices"]
-    assert scanner.folder_last_seen() is False
+    assert "library.mount_missing" not in keys()  # the next derivation looks again
 
 
 def test_opening_the_library_looks_and_wakes_the_notices_on_a_change(

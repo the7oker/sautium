@@ -581,7 +581,7 @@ async def _library_state() -> Dict[str, Any]:
     Albums / Genres on the Library side, Embeddings / Features /
     Last.fm / Lyrics on the Enrichment side."""
     from main import get_stats, _scan_state, _enrich_state
-    from scanner import library_unreachable
+    from scanner import folder_unreachable_now
 
     try:
         stats = await get_stats()
@@ -607,9 +607,9 @@ async def _library_state() -> Dict[str, Any]:
     music_path = app_settings.music_host_path or app_settings.music_library_path
 
     # The screen reads the folder's state from the notice set; opening it is
-    # a moment to look (off the loop — a dead network mount can stall it),
-    # and a look that changes the answer wakes the notices.
-    await asyncio.to_thread(library_unreachable)
+    # a moment to look (off the loop, one look at a time), and a look that
+    # changes the answer wakes the notices.
+    await asyncio.to_thread(folder_unreachable_now)
 
     return {
         "music_path":         music_path,
@@ -1097,9 +1097,9 @@ def _guidance_state() -> Dict[str, Any]:
 
 
 # Conditions with no ledger of their own (a vanished music folder, a missing
-# binary, a silent stream provider) keep their `since` here from the moment
-# they are first observed until they are not — process memory, which is
-# enough: after a restart the condition is either gone or freshly observed.
+# binary) keep their `since` here from the moment they are first observed
+# until they are not — process memory, which is enough: after a restart the
+# condition is either gone or freshly observed.
 _derived_since: Dict[str, str] = {}
 # The binaries THIS process shells out to (analysis + provenance). `flac`
 # is launcher-side only — the Docker image never ships it, and a check
@@ -1115,6 +1115,13 @@ def _derived(key: str, active: bool) -> Optional[str]:
     return _derived_since.setdefault(key, datetime.now(timezone.utc).isoformat())
 
 
+def notices_recheck(key: str) -> None:
+    """A producer saw the good state again (a file served): re-derive only
+    if the condition is shown, so a healthy node never pays for this."""
+    if key in _derived_since:
+        db_execute("NOTIFY sautium_notices")
+
+
 def _notices_state() -> Dict[str, Any]:
     """Active conditions that change what the user sees without any action
     of theirs: an external API that cooled us down, catalog data the
@@ -1122,10 +1129,10 @@ def _notices_state() -> Dict[str, Any]:
     a condition exists lives here next to the workers that create it; the
     view layer owns the words and the clock. Derived, never stored — the
     cooldown ledger and the slice cycles' status rows are the sources, so a
-    condition ends the moment its source does. The one source not asked
-    here is the music folder: its state is the last look's
-    (scanner.folder_last_seen), since a scandir of a dead network mount can
-    stall, and every stream derives this set on every wake.
+    condition ends the moment its source does. The music folder is looked
+    at one look at a time (scanner.folder_unreachable_now): every stream
+    derives this set on every wake, and a scandir of a dead network mount
+    can stall — the one deriving reader it holds, never the rest.
 
     Each item: `key` (stable — what toasts coalesce on), `kind`, `since`
     (a re-arm bumps it, which re-lights the trail), `until` (when the
@@ -1161,8 +1168,8 @@ def _notices_state() -> Dict[str, Any]:
                          ("unserved", "pending", "pending_capped", "served",
                           "reason", "sources")},
             })
-    from scanner import folder_last_seen
-    since = _derived("library.mount_missing", folder_last_seen())
+    from scanner import folder_unreachable_now
+    since = _derived("library.mount_missing", folder_unreachable_now())
     if since:
         items.append({"key": "library.mount_missing", "kind": "error",
                       "since": since, "until": None,

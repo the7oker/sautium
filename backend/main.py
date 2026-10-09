@@ -305,14 +305,6 @@ async def _serve_p2p(port: int) -> None:
         logger.error(f"P2P sync server on :{port} stopped: {e}")
 
 
-def _first_folder_look() -> None:
-    from scanner import library_unreachable
-    try:
-        library_unreachable()
-    except Exception as e:
-        logger.error(f"First look at the music folder failed: {e}", exc_info=True)
-
-
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Application lifespan handler for startup and shutdown events."""
@@ -450,12 +442,6 @@ async def lifespan(app: FastAPI):
     # Start sync SSE listener (bridges launcher NOTIFY → library SSE)
     from routers.settings import start_sync_listener, stop_sync_listener
     start_sync_listener()
-
-    # The music folder's first look: the notices read its last answer, and the
-    # Docker bind that came up empty on 2026-10-09 was there from the start.
-    # On a thread of its own — a scandir of a dead network mount can stall.
-    threading.Thread(target=_first_folder_look, daemon=True,
-                     name="music-folder-look").start()
 
     # Start gear research worker (drains queued gear_models, wakes on NOTIFY)
     from gear_research_worker import start_gear_research_worker, stop_gear_research_worker
@@ -1276,8 +1262,7 @@ def _scan_worker(limit: Optional[int], skip_existing: bool, subpath: Optional[st
     from datetime import datetime, timezone
     _scan_started = datetime.now(timezone.utc)   # AI-canon `since`: only this scan's new files
     try:
-        from scanner import (LibraryScanner, LibraryUnreachable, folder_seen,
-                             refuse_if_unreachable)
+        from scanner import LibraryScanner, LibraryUnreachable, refuse_if_unreachable
         from routers.settings import notify_library_subscribers
 
         def progress_cb(msg: str, stats: dict):
@@ -1313,7 +1298,6 @@ def _scan_worker(limit: Optional[int], skip_existing: bool, subpath: Optional[st
             state["progress"] = "No audio files found" + unread_note
         else:
             from canon import post_import
-            folder_seen(False)                         # walked = the folder is there
             post_import.run(state, result, _scan_started)
 
             if prune and not state["cancel_requested"]:

@@ -1052,8 +1052,8 @@ async def events_stream(tab: Optional[str] = Query(None, max_length=64,
             # events: the client diffs it, so a tab that was asleep learns
             # what is true now rather than replaying what happened. The
             # connect-time copy is flagged so it paints state, not toasts.
-            # Derived off the loop: its database reads. The music folder is
-            # not asked here — its state is the last look's (scanner).
+            # Derived off the loop: its database reads and, one look at a
+            # time across every stream, the music folder (scanner).
             yield ("data: "
                    + json.dumps({"t": "notice",
                                  "d": {**await asyncio.to_thread(_notices_state),
