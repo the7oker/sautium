@@ -608,6 +608,7 @@ async def _library_state() -> Dict[str, Any]:
 
     return {
         "music_path":         music_path,
+        "mount_missing":      music_folder_unreachable(),
         # Library counts (matches launcher's Library block 2×2)
         "total_tracks":       stats.get("total_tracks", 0),
         "total_artists":      stats.get("total_artists", 0),
@@ -1118,10 +1119,13 @@ def notices_recheck(key: str) -> None:
         db_execute("NOTIFY sautium_notices")
 
 
-def _music_root_empty() -> bool:
+def music_folder_unreachable() -> bool:
     """The library path is there but holds nothing while the catalog knows
     owned files: a drvfs mount that dropped under a running node, a
-    forgotten drive. An unreadable path counts as empty."""
+    forgotten drive, a Docker bind that came up on an empty directory. An
+    unreadable path counts as empty. The one rule behind the notice, the
+    Library screen's Music path row and the scan start that refuses to walk
+    such a folder — a walk over it found nothing and reported a scan."""
     if not db_query_one("SELECT 1 AS x FROM media_files LIMIT 1"):
         return False
     try:
@@ -1174,11 +1178,11 @@ def _notices_state() -> Dict[str, Any]:
                          ("unserved", "pending", "pending_capped", "served",
                           "reason", "sources")},
             })
-    since = _derived("library.mount_missing", _music_root_empty())
+    since = _derived("library.mount_missing", music_folder_unreachable())
     if since:
         items.append({"key": "library.mount_missing", "kind": "error",
                       "since": since, "until": None,
-                      "data": {"path": app_settings.music_library_path}})
+                      "data": {"path": app_settings.library_db_root()}})
     missing = [t for t in _MEDIA_TOOLS if not shutil.which(t)]
     since = _derived("tools.missing", bool(missing))
     if since:

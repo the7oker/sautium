@@ -1127,8 +1127,10 @@ class LauncherApp(ctk.CTk):
                 self._scan_active = True
                 self.ui_call(self._refresh_scan)
             else:
+                # A refusal carries its reason (the music folder unreachable,
+                # a scan already running) — show it, not a bare failure.
                 self.ui_call(lambda: self._progress_text.configure(
-                    text="Failed to start scan"))
+                    text=(result or {}).get("detail") or "Failed to start scan"))
                 self.ui_call(self._scan_done)
 
         threading.Thread(target=_do_start, daemon=True).start()

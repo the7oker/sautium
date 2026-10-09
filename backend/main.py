@@ -1285,8 +1285,18 @@ def _scan_worker(limit: Optional[int], skip_existing: bool, subpath: Optional[st
 
         if state["cancel_requested"]:
             state["progress"] = "Scan cancelled"
+        elif not result["processed"]:
+            # An empty walk scanned nothing: no post-import pass, no prune and
+            # no "Last scan" stamp, which the Library screen would show as a
+            # scan that happened. Over a catalog that knows files it is the
+            # folder gone mid-run — scan_start refuses it up front.
+            from routers.settings import music_folder_unreachable
+            state["progress"] = ("Scan failed: music folder unreachable"
+                                 if music_folder_unreachable() else "No audio files found")
         else:
             from canon import post_import
+            from routers.settings import notices_recheck
+            notices_recheck("library.mount_missing")   # walked = the folder is back
             post_import.run(state, result, _scan_started)
 
             if prune and not state["cancel_requested"]:
@@ -1359,8 +1369,13 @@ async def scan_start(
 ) -> Dict[str, Any]:
     """Start library scan as a background task. Poll /scan/status for progress."""
     from playback import hqp_benchmark
+    from routers.settings import music_folder_unreachable
     if hqp_benchmark.measures_here():
         raise HTTPException(status_code=409, detail=hqp_benchmark.HERE_BUSY)
+    if music_folder_unreachable():
+        raise HTTPException(status_code=409, detail=(
+            f"{settings.library_db_root()} is empty or not mounted — nothing was "
+            "scanned. Scan again once the folder is back."))
     with _scan_lock:
         if _scan_state["running"]:
             raise HTTPException(status_code=409, detail="Scan already running")

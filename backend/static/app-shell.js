@@ -14421,6 +14421,9 @@
     const isPathSet     = !!(lib.music_path && lib.music_path !== '/music');
     const pathFull      = isPathSet ? fmtPathForDisplay(lib.music_path) : '';
     const path          = isPathSet ? fmtPathTruncatedFromStart(pathFull) : 'Not set';
+    // The library.mount_missing condition, explained where it bites: a scan
+    // here would walk an empty folder, so the server refuses one.
+    const mountMissing  = !!lib.mount_missing;
 
     const scanCancelling   = scanRunning   && !!(lib.scan   && lib.scan.cancel_requested);
     const enrichCancelling = enrichRunning && !!(lib.enrich && lib.enrich.cancel_requested);
@@ -14513,12 +14516,14 @@
         ${_settingsHeader('Library')}
 
         <div class="form-group" style="margin-top:calc(14*var(--px));">
-          <div class="form-row stacked">
+          <div class="form-row stacked${mountMissing ? ' notice-row kind-error' : ''}">
             <div class="row-stack">
               <span class="row-stack-label">Music path</span>
               <span class="${isPathSet ? 'path-value' : 'form-value muted'}"${isPathSet ? ` title="${escapeProfileHtml(pathFull)}"` : ''}>${escapeProfileHtml(path)}</span>
             </div>
-            <div class="row-stack-sub">Configured in the launcher.</div>
+            <div class="row-stack-sub">${mountMissing
+              ? 'Empty or not mounted — your own tracks cannot play or be scanned until it is back.'
+              : 'Configured in the launcher.'}</div>
           </div>
           ${isEmpty ? '' : `
             <div class="form-row">
@@ -14545,8 +14550,19 @@
     _wireBack(root);
 
     const onAction = (sel, fn) => root.querySelectorAll(sel).forEach(el => el.addEventListener('click', fn));
-    onAction('[data-action="scan"]',       async () => { await fetch('/api/settings/library/scan',          { method: 'POST' }); render(); });
-    onAction('[data-action="scan-prune"]', async () => { await fetch('/api/settings/library/scan?prune=true', { method: 'POST' }); render(); });
+    // A refused start (the folder unreachable, a scan already running, the
+    // benchmark measuring) says why — it used to re-render as if it had run.
+    const startScan = query => e => onceInFlight(e.currentTarget, async () => {
+      const r = await fetch('/api/settings/library/scan' + query, { method: 'POST' });
+      if (!r.ok) {
+        const d = await r.json().catch(() => ({}));
+        await window.notifyDialog({ title: 'Scan not started', kind: 'error',
+          message: escapeProfileHtml(d.detail || `HTTP ${r.status}`) });
+      }
+      render();
+    });
+    onAction('[data-action="scan"]',       startScan(''));
+    onAction('[data-action="scan-prune"]', startScan('?prune=true'));
     onAction('[data-action="enrich"]',     async () => { await fetch('/api/settings/library/enrich',        { method: 'POST' }); render(); });
     onAction('[data-cancel-scan]',         async () => { await fetch('/api/settings/library/scan/cancel',   { method: 'POST' }); render(); });
     onAction('[data-cancel-enrich]',       async () => { await fetch('/api/settings/library/enrich/cancel', { method: 'POST' }); render(); });

@@ -6313,9 +6313,10 @@ html { -webkit-tap-highlight-color: transparent; }
 }
 .notice-strip .num { font-family: var(--font-mono); color: var(--color-blue); }
 
-/* Rows on Sync & P2P and the in-place note on an artist card reuse the
-   settings row-stack and the Discovery notice paragraph respectively;
-   only the accents are new. */
+/* Rows on Sync & P2P (and Library's Music path row while the folder is
+   unreachable) and the in-place note on an artist card reuse the settings
+   row-stack and the Discovery notice paragraph respectively; only the
+   accents are new. */
 .notice-row.kind-error   .row-stack-label { color: var(--color-negative); }
 .notice-row.kind-success .row-stack-label { color: var(--color-positive); }
 .notice-row .row-stack-sub .num,
