@@ -201,40 +201,27 @@ def detect_claude_cli() -> bool:
 
 
 def claude_authenticated() -> bool:
-    """True iff Claude Code has stored OAuth credentials.
-
-    Storage is platform-dependent:
-      - macOS: a generic password entry in the user's login Keychain
-        named "Claude Code-credentials". (~/.claude/.credentials.json
-        on macOS is a *directory* placeholder created by the CLI, so a
-        file-based check is wrong here.)
-      - Windows / Linux: a JSON file at ~/.claude/.credentials.json.
-    """
-    if sys.platform == "darwin":
-        try:
-            kwargs = {"capture_output": True, "timeout": 5}
-            # The plain `find-generic-password` (without `-w`) only checks
-            # for existence — it doesn't try to read the password and so
-            # doesn't trigger a Keychain-unlock prompt. Exit 0 = present,
-            # 44 (errSecItemNotFound) = absent.
-            result = subprocess.run(
-                ["security", "find-generic-password",
-                 "-s", "Claude Code-credentials"],
-                **kwargs,
-            )
-            return result.returncode == 0
-        except Exception as e:
-            logger.debug(f"Keychain probe failed: {e}")
-            return False
-
-    creds = Path.home() / ".claude" / ".credentials.json"
-    if not creds.is_file():
+    """True iff Claude Code says it is signed in — `claude auth status`,
+    which reads the CLI's own store wherever it lives (the Keychain on
+    macOS, ~/.claude/.credentials.json elsewhere). The store's presence
+    says nothing: a refresh that fails leaves the file with its tokens
+    blanked, and a Keychain item exists whatever it holds. The backend's
+    verdict asks the same command (backend/claude_code.py)."""
+    claude = get_claude_executable()
+    if claude is None:
         return False
+    env = os.environ.copy()
+    # Judged on the subscription the assistant bills, not a stray API key.
+    env.pop("ANTHROPIC_API_KEY", None)
+    kwargs = {"capture_output": True, "text": True, "encoding": "utf-8",
+              "errors": "replace", "timeout": 30, "env": env}
+    if sys.platform == "win32":
+        kwargs["creationflags"] = subprocess.CREATE_NO_WINDOW
     try:
-        json.loads(creds.read_text(encoding="utf-8"))
-        return True
-    except (json.JSONDecodeError, OSError) as e:
-        logger.debug(f"Claude credentials unreadable: {e}")
+        out = subprocess.run([str(claude), "auth", "status", "--json"], **kwargs)
+        return bool(json.loads(out.stdout)["loggedIn"])
+    except (OSError, subprocess.TimeoutExpired, ValueError, KeyError, TypeError) as e:
+        logger.debug(f"claude auth status gave no answer: {e}")
         return False
 
 
@@ -414,18 +401,25 @@ def detect_codex_cli() -> bool:
 
 
 def codex_authenticated() -> bool:
-    """True iff codex has stored credentials ($CODEX_HOME/auth.json —
-    ChatGPT OAuth or a stored API key). No Keychain variant exists;
-    every platform uses the file."""
-    home = os.environ.get("CODEX_HOME")
-    auth = (Path(home) if home else Path.home() / ".codex") / "auth.json"
-    if not auth.is_file():
+    """True iff codex says it is signed in — `codex login status`, exit 0
+    (its words go to stderr) — on stored credentials ($CODEX_HOME/auth.json:
+    ChatGPT OAuth or a stored API key), not an API key in the environment.
+    The status reads presence more than validity (codex-cli 0.162 calls an
+    auth.json of `{}` logged in), so codex_auth_verified stays the
+    decisive check."""
+    codex = get_codex_executable()
+    if codex is None:
         return False
+    env = os.environ.copy()
+    env.pop("OPENAI_API_KEY", None)
+    env.pop("CODEX_API_KEY", None)
+    kwargs = {"capture_output": True, "timeout": 30, "env": env}
+    if sys.platform == "win32":
+        kwargs["creationflags"] = subprocess.CREATE_NO_WINDOW
     try:
-        json.loads(auth.read_text(encoding="utf-8"))
-        return True
-    except (json.JSONDecodeError, OSError) as e:
-        logger.debug(f"Codex credentials unreadable: {e}")
+        return subprocess.run([str(codex), "login", "status"], **kwargs).returncode == 0
+    except (OSError, subprocess.TimeoutExpired) as e:
+        logger.debug(f"codex login status gave no answer: {e}")
         return False
 
 

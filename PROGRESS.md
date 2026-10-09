@@ -2011,11 +2011,20 @@ differs, never with a pick.
   image's 2.1.295, ~150 ms), and every call reports itself refused or
   authenticated (the runners → `claude_code.auth`, `codex_cli.auth` — one
   `AgentAuth` class, so the two cannot drift). Readers take the held
-  verdict; only the first read, the AI screen (an explicit look) and a
-  finished sign-in ask the CLI again. A refused call outranks a status that
-  still reads "logged in" — that status cannot tell a revived sign-in from
-  dead tokens left in place — so only a call that authenticates or a sign-in
-  that completes ends it.
+  verdict; only the first read, an explicit look (opening the AI screen, its
+  Refresh — not its re-renders, which ran a CLI per canon batch) and a
+  finished sign-in ask the CLI again. A look takes the store's word in both
+  directions: a sign-in made in a terminal ends a refusal (the first cut let
+  only a call or a backend-driven sign-in end it, and research parked for
+  good behind a terminal re-login), dead tokens left in place read "logged
+  in" until the next call refuses again. A look that a call or a sign-in
+  overtook applies nothing — what it read is older (`_observed`).
+- **Signed out is not unavailable.** A CLI agent is registered when it is
+  installed: signed out, it answers with the sign-in instruction. The first
+  cut registered on the verdict, so one refusal dropped a provider without
+  an env flag and `chat._resolve_provider` fell through to another one — a
+  pay-as-you-go key, without a word; and the async chat handlers spawned
+  the status CLI on a first read.
 - **Codex's status reads presence, so its turns decide.** `codex login
   status` (exit 0/1, its words on stderr) calls an auth.json of `{}` logged
   in (codex-cli 0.162): it catches a missing or garbled file, and a refused
@@ -2025,11 +2034,19 @@ differs, never with a pick.
   sign-in the backend drove looks at the store again: a cancelled one reads
   as signed out at once.
 - **A flip is an event, never a retry timer.** The research drain claims
-  nothing while signed out and wakes on the sign-in; the notices channel,
-  the guidance trail (woken with it) and the AI screen's streams wake on
-  both directions. A lost sign-in is not billed to the API key instead, and
-  it is not an "infra pause": a usage limit reopens with time, a sign-in
-  only with a human. The human is told where it bites —
+  nothing while it waits for the sign-in and wakes on it; the notices
+  channel, the guidance trail (woken with it) and the AI screen's streams
+  wake on both directions. A lost sign-in is not billed to the API key
+  instead — the key is used where the owner chose it: no CLI, or the
+  Anthropic API as the node's agent (the image ships the CLI to every Docker
+  node, and such a node waited forever for a subscription it never had;
+  `waits_for_claude` is the one rule for the gate, a refused call and the
+  notice). Nor is it an "infra pause": a usage limit, an overload, a dead
+  connection reopen with time, a sign-in only with a human — and a failure
+  that belongs to the model (max turns spent, a prompt too long) is neither:
+  requeued, it came back first on every pass and held the queue, so it ends
+  `failed` with its Retry. The pause reads only the CLI's own errors
+  (`is_error`), never the model's prose. The human is told where it bites —
   `claude_code.signed_out` / `codex.signed_out` (only while the assistant
   runs on that agent, or research waits for Claude Code), the gear chips and
   sheet, the Sign in panel with the CLI's own words — and led to the fix by

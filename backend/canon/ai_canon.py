@@ -278,7 +278,7 @@ def ai_canonize_stream(limit: int = None, dry_run: bool = False, since=None):
             logger.info("ai_canon stopping at %d/%d — Claude Code is signed out",
                         st["processed"], total)
             yield {"event": "done", "provider": provider.name, "model": model,
-                   "signed_out": True, **st}
+                   "stopped": "Claude Code is signed out", **st}
             return
         batch = enriched[s:s + _BATCH]
         by_n = {it["n"]: it for it in batch}

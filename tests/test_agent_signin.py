@@ -65,11 +65,15 @@ if args[:2] == ["auth", "login"]:
 result = {
     "refused": {"is_error": True, "api_error_status": None,
                 "result": "Failed to authenticate: OAuth session expired and could not be refreshed"},
+    "not_logged_in": {"is_error": True, "api_error_status": None,
+                      "result": "Not logged in · Please run /login"},
     "limit": {"is_error": True, "api_error_status": 429,
               "result": "Claude AI usage limit reached|1760000000"},
+    "max_turns": {"is_error": True, "subtype": "error_max_turns"},
     "ok": {"is_error": False, "result": "ok"},
 }[os.environ["FAKE_CALL"]]
-result.update(type="result", subtype="success", session_id="s-1")
+result.setdefault("subtype", "success")
+result.update(type="result", session_id="s-1")
 if args[args.index("--output-format") + 1] == "stream-json":
     print(json.dumps({"type": "system", "subtype": "init", "session_id": "s-1",
                       "model": "claude-sonnet", "mcp_servers": [], "tools": []}))
@@ -119,11 +123,27 @@ def _script(path: Path, body: str) -> Path:
     return path
 
 
+class _Asked:
+    """What the stand-in Claude Code was asked, from its own log."""
+
+    def __init__(self, log: Path):
+        self.log = log
+
+    def _lines(self):
+        return self.log.read_text(encoding="utf-8").splitlines()
+
+    def looks(self) -> int:
+        return self._lines().count("auth status")
+
+    def calls(self) -> int:
+        return sum(1 for line in self._lines() if line.startswith("-p"))
+
+
 @pytest.fixture
 def cli(tmp_path, monkeypatch):
     """The stand-in Claude Code where every spawn looks for the real one, and
-    a process that has not looked at its sign-in yet. Returns how many times
-    `auth status` was asked."""
+    a process that has not looked at its sign-in yet. Returns what the CLI
+    was asked."""
     exe = _script(tmp_path / "claude", FAKE_CLAUDE_BODY)
     log = tmp_path / "calls.log"
     log.touch()
@@ -139,7 +159,7 @@ def cli(tmp_path, monkeypatch):
     monkeypatch.setattr(claude_code, "auth",
                         claude_code.AgentAuth("Claude Code", claude_code._cli_status))
     monkeypatch.setattr(claude_code, "_signin", None)
-    return lambda: log.read_text(encoding="utf-8").splitlines().count("auth status")
+    return _Asked(log)
 
 
 @pytest.fixture
@@ -250,33 +270,74 @@ def test_the_first_read_asks_the_cli_and_then_the_verdict_stands(cli, monkeypatc
     assert claude_code.auth.verdict() is None
     assert claude_code.get_state() == "not_authed"
     assert not claude_code.auth.signed_in()
-    assert cli() == 1                             # readers take the verdict
+    assert cli.looks() == 1                       # readers take the verdict
 
     monkeypatch.setenv("FAKE_LOGGED_IN", "1")     # a sign-in made in a terminal
     assert not claude_code.auth.signed_in()
     assert claude_code.get_state(fresh=True) == "ready"   # the AI screen's look
-    assert cli() == 2
+    assert cli.looks() == 2
 
 
-def test_a_refused_call_outranks_a_store_that_still_reads_logged_in(cli, monkeypatch):
+def test_a_refusal_holds_until_a_call_or_a_look_says_otherwise(cli, monkeypatch):
     assert claude_code.auth.signed_in()
 
     monkeypatch.setenv("FAKE_CALL", "refused")
-    assert runner.call_claude_code("hi", "system", mcp=False)["answer"] == runner.OAUTH_EXPIRED_MSG
+    res = runner.call_claude_code("hi", "system", mcp=False)
+    assert (res["answer"], res["is_error"]) == (runner.OAUTH_EXPIRED_MSG, True)
     v = claude_code.auth.verdict()
     assert (v["signed_in"], v["refused"], v["reason"]) == (False, True, REFUSAL)
-    assert not claude_code.auth.signed_in(fresh=True)   # dead tokens may still sit there
+    assert not claude_code.auth.signed_in()       # readers take the verdict
 
+    # A sign-in made in a terminal: the AI screen's look sees it.
+    assert claude_code.auth.signed_in(fresh=True)
+
+    # Tokens left dead in place read "logged in" only until the next call.
+    assert runner.call_claude_code("hi", "system", mcp=False)["answer"] == runner.OAUTH_EXPIRED_MSG
+    assert not claude_code.auth.signed_in()
     monkeypatch.setenv("FAKE_CALL", "ok")
-    assert runner.call_claude_code("hi", "system", mcp=False)["answer"] == "ok"
+    res = runner.call_claude_code("hi", "system", mcp=False)
+    assert (res["answer"], res["is_error"]) == ("ok", False)
     assert claude_code.auth.signed_in()
+
+
+def test_a_look_that_a_call_overtook_does_not_apply():
+    """The store a look read is older than a call that answered while the
+    CLI was being asked: a sign-in completing under an open AI screen must
+    not be undone by the screen's look."""
+    asked, release = threading.Event(), threading.Event()
+
+    def status():
+        asked.set()
+        release.wait(10)
+        return False                              # what the store said before
+
+    auth = claude_code.AgentAuth("Test", status)
+    auth.authenticated()
+    look = threading.Thread(target=auth.signed_in, kwargs={"fresh": True})
+    look.start()
+    assert asked.wait(10)
+    auth.authenticated()                          # the sign-in lands meanwhile
+    release.set()
+    look.join(10)
+    assert auth.signed_in()
+
+
+def test_not_logged_in_is_a_refusal_too(cli, monkeypatch):
+    assert claude_code.auth.signed_in()
+    monkeypatch.setenv("FAKE_CALL", "not_logged_in")
+    assert runner.call_claude_code("hi", "system", mcp=False)["answer"] == runner.OAUTH_EXPIRED_MSG
+    assert claude_code.auth.verdict()["reason"] == "Not logged in \u00b7 Please run /login"
 
 
 def test_any_other_failure_says_why_and_leaves_the_sign_in_alone(cli, monkeypatch):
     assert claude_code.auth.signed_in()
     monkeypatch.setenv("FAKE_CALL", "limit")
-    answer = runner.call_claude_code("hi", "system", mcp=False)["answer"]
-    assert answer == "Claude Code error: Claude AI usage limit reached|1760000000"
+    res = runner.call_claude_code("hi", "system", mcp=False)
+    assert res["answer"] == "Claude Code error: Claude AI usage limit reached|1760000000"
+    assert res["is_error"]
+    monkeypatch.setenv("FAKE_CALL", "max_turns")
+    res = runner.call_claude_code("hi", "system", mcp=False)
+    assert res["answer"] == "Claude Code error: error_max_turns"   # not "unknown error"
     assert claude_code.auth.signed_in()
 
 
@@ -307,20 +368,22 @@ def test_a_completed_sign_in_ends_the_episode_and_listeners_hear_flips_only(cli)
     assert claude_code.auth.signed_in()
 
 
-def test_a_force_enabled_agent_that_is_signed_out_keeps_its_registry(cli, monkeypatch):
-    """Docker sets CLAUDE_CODE_ENABLED: the provider stays registered while
-    signed out (the chat then says so), and the registry is built once — not
-    on every access because registration and readiness disagree."""
+def test_a_signed_out_agent_stays_registered_and_the_registry_never_asks(cli, monkeypatch):
+    """A CLI agent is registered when installed, env flag or not: signed out
+    it answers with the sign-in instruction, instead of the chat falling
+    through to another provider (and its bill). Building the registry — the
+    async chat handlers do — spawns nothing, and happens once."""
     import providers
     from config import settings
-    monkeypatch.setattr(settings, "claude_code_enabled", True)
+    monkeypatch.setattr(settings, "claude_code_enabled", False)
     monkeypatch.setenv("FAKE_LOGGED_IN", "0")
     providers.reset()
     try:
         first = providers.get_provider("claude_code")
-        assert first is not None and not claude_code.auth.signed_in()
+        assert first is not None
         providers.available_providers()
         assert providers.get_provider("claude_code") is first
+        assert cli.looks() == 0
     finally:
         providers.reset()
 
@@ -346,6 +409,46 @@ def test_the_research_queue_waits_for_the_sign_in_and_wakes_on_it(cli, cur, hear
 
     claude_code.auth.authenticated()                          # a chat turn went through
     assert worker._drain_wake.is_set()
+
+
+def test_a_node_whose_agent_is_the_api_researches_on_its_key(cli, cur, monkeypatch):
+    """The image ships the CLI to every Docker node; an owner without a
+    Claude subscription who chose the Anthropic API gets research on that
+    key — never a queue waiting for a sign-in that will not come."""
+    import gear_research_worker as worker
+    from config import settings
+    settings_router = pytest.importorskip("routers.settings")
+    model = _queued_model(cur)
+    _provider(cur, "anthropic")
+    monkeypatch.setattr(settings, "anthropic_api_key", "test-key")
+    monkeypatch.setenv("FAKE_LOGGED_IN", "0")
+    billed = []
+    monkeypatch.setattr(worker, "_call_anthropic_research",
+                        lambda system, user: billed.append(1) or {"research_summary": "via the API"})
+    monkeypatch.setattr(worker, "_worker_running", True)
+    monkeypatch.setattr(worker, "PAUSE_BETWEEN_MODELS", 0)
+
+    assert not claude_code.auth.signed_in()
+    assert "claude_code.signed_out" not in {n["key"] for n in settings_router._notices_state()["items"]}
+    worker._drain_queue()
+    assert _research_state(cur, model) == "cached"
+    assert (billed, cli.calls()) == ([1], 0)
+
+
+def test_a_model_that_spends_its_turns_fails_instead_of_holding_the_queue(cli, cur, monkeypatch):
+    """A failure that belongs to the model is not infrastructure: requeued
+    it would come back first on every pass and hold every model behind it."""
+    import gear_research_worker as worker
+    model = _queued_model(cur)
+    monkeypatch.setenv("FAKE_CALL", "max_turns")
+    monkeypatch.setattr(worker, "_call_anthropic_research", lambda system, user: None)
+    monkeypatch.setattr(worker, "_worker_running", True)
+    monkeypatch.setattr(worker, "PAUSE_BETWEEN_MODELS", 0)
+
+    started = time.monotonic()
+    worker._drain_queue()
+    assert time.monotonic() - started < 60                    # no 15-minute pause
+    assert _research_state(cur, model) == "failed"
 
 
 def test_the_signed_out_notice_names_what_waits_for_the_sign_in(cli, cur):
@@ -381,14 +484,26 @@ def test_codex_reads_its_own_status_and_a_refused_turn_outranks_it(codex, monkey
     assert done.error == codex_runner.CODEX_LOGIN_MSG
     v = codex_cli.auth.verdict()
     assert (v["signed_in"], v["refused"], v["reason"]) == (False, True, CODEX_REFUSAL)
-    # The status command reads presence (0.162 calls `{}` logged in), so it
-    # cannot end what a refused turn said.
-    assert codex_cli.get_state(fresh=True) == "not_authed"
+    assert codex_cli.get_state() == "not_authed"
+    # The AI screen's look takes the store's word — it reads presence (0.162
+    # calls `{}` logged in), so the next turn is what tells a dead file.
+    assert codex_cli.get_state(fresh=True) == "ready"
+    done = list(codex_runner.call_codex_stream("hi"))[-1]
+    assert codex_cli.get_state() == "not_authed"
 
     monkeypatch.setenv("FAKE_CODEX_CALL", "ok")
     done = list(codex_runner.call_codex_stream("hi"))[-1]
     assert done.error is None
     assert codex_cli.get_state() == "ready"
+
+
+def test_only_words_of_a_refused_account_count_as_a_codex_refusal():
+    for refusal in (CODEX_REFUSAL, "Not logged in", "Incorrect API key provided: sk-***"):
+        assert codex_runner._auth_error(refusal), refusal
+    for other in ("Rate limit reached for gpt-5.6: Limit 30000, Used 28600, Requested 1401.",
+                  "2026-10-09T14:01:23.401Z ERROR codex_core: stream disconnected",
+                  "stream error: unexpected status 500 Internal Server Error"):
+        assert not codex_runner._auth_error(other), other
 
 
 def test_codex_without_auth_json_is_signed_in_only_with_a_key_to_mint_from(codex, monkeypatch):
@@ -425,6 +540,31 @@ def test_a_cancelled_codex_login_reads_as_signed_out_at_once(codex, monkeypatch)
     assert codex_cli.auth.signed_in()
 
 
+def test_a_codex_sign_in_replaced_by_another_flow_leaves_the_verdict_alone(codex, monkeypatch):
+    """Switching from the browser flow to a code cancels the first sign-in,
+    whose exit says nothing about a store the second is rewriting."""
+    monkeypatch.setattr(codex_cli, "is_launcher_mode", lambda: True)
+    flips = []
+    assert codex_cli.auth.signed_in()
+    codex_cli.auth.on_change(flips.append)
+    monkeypatch.setenv("FAKE_CODEX_LOGIN", "wait")
+    first_shown, first_exited = threading.Event(), threading.Event()
+
+    def first(snap):
+        if snap["running"] and snap["url"]:
+            first_shown.set()
+        if not snap["running"]:
+            first_exited.set()
+
+    codex_cli.start_signin(first, device=False)
+    assert first_shown.wait(30)
+    monkeypatch.setenv("FAKE_CODEX_LOGIN", "ok")
+    _wait_for_exit(lambda cb: codex_cli.start_signin(cb, device=True))
+    assert first_exited.wait(30)
+    assert flips == []                            # never "signed out" halfway
+    assert codex_cli.auth.signed_in()
+
+
 def test_the_codex_notice_is_raised_only_while_the_assistant_runs_on_it(codex, cur):
     settings_router = pytest.importorskip("routers.settings")
 
@@ -437,6 +577,21 @@ def test_the_codex_notice_is_raised_only_while_the_assistant_runs_on_it(codex, c
     assert "codex.signed_out" in keys()
     codex_cli.auth.authenticated()
     assert "codex.signed_out" not in keys()
+
+
+def test_the_launcher_wizard_asks_the_same_clis(cli, codex, monkeypatch):
+    """desktop/utils — the wizard's one-shot check — reads what the backend's
+    verdict reads: the CLIs' own status, not a store that merely exists."""
+    utils = pytest.importorskip("desktop.utils")
+    monkeypatch.setattr(utils, "get_claude_executable", lambda: cli.log.parent / "claude")
+    monkeypatch.setattr(utils, "get_codex_executable", lambda: codex.parent.parent / "codex")
+    monkeypatch.setenv("FAKE_LOGGED_IN", "0")
+    assert not utils.claude_authenticated()
+    monkeypatch.setenv("FAKE_LOGGED_IN", "1")
+    assert utils.claude_authenticated()
+    assert utils.codex_authenticated()
+    monkeypatch.setenv("FAKE_CODEX_LOGGED_IN", "0")
+    assert not utils.codex_authenticated()
 
 
 # ─── the guidance trail ─────────────────────────────────────────────────────

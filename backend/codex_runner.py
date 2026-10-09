@@ -60,6 +60,7 @@ Differences from the Claude runner, all forced by the CLI surface
 import json
 import logging
 import os
+import re
 import subprocess
 import sys
 import threading
@@ -117,13 +118,18 @@ CODEX_LOGIN_MSG = (
 
 
 # Every refusal and every completed turn is reported to codex_cli.auth,
-# which owns the verdict the rest of the backend reads.
+# which owns the verdict the rest of the backend reads — so only words that
+# say the account was refused count: a bare "401" or "login" also turns up
+# in a rate limit's "Requested 1401" and a log line's "…T14:01:23.401Z".
+_AUTH_FAILURE_RE = re.compile(
+    r"status:? 401|401 unauthori[sz]ed|unauthori[sz]ed:|not (?:logged|signed) in"
+    r"|(?:sign|log) ?in again|run `?codex login|could not be refreshed"
+    r"|(?:incorrect|invalid) api key|authenticat",
+    re.IGNORECASE)
+
+
 def _auth_error(text: Optional[str]) -> bool:
-    t = (text or "").lower()
-    return (
-        "401" in t or "unauthoriz" in t or "not logged in" in t
-        or "login" in t or "authenticat" in t
-    )
+    return bool(_AUTH_FAILURE_RE.search(text or ""))
 
 
 def _codex_home() -> Path:

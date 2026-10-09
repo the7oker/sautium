@@ -12,53 +12,51 @@ _initialized = False
 
 
 def reset() -> None:
-    """Force `_init_providers` to re-run. Call after the user
-    completes Claude Code sign-in or adds an API key in Settings —
-    provider availability is otherwise cached for the process
-    lifetime."""
+    """Force `_init_providers` to re-run. Call after a CLI agent is
+    installed or an API key is added in Settings — provider
+    availability is otherwise cached for the process lifetime."""
     global _initialized
     _initialized = False
     _providers.clear()
 
 
-def _claude_code_ready() -> bool:
-    """True when the Claude Code CLI is installed and signed in — the
-    CLI's own verdict, held by claude_code.auth. Used instead of an env
-    flag so a sign-in, or one lost, is picked up after a reset()."""
+# A CLI agent is registered when it is installed, signed in or not. Signed
+# out is a condition the agent answers with ("sign in again"), never a reason
+# to drop it: an unregistered pick makes chat._resolve_provider fall through
+# to another provider — another account, or a pay-as-you-go key — without a
+# word. The sign-in itself is claude_code.auth / codex_cli.auth.
+
+def _claude_code_installed() -> bool:
     try:
         import claude_code
-        return claude_code.get_claude_executable() is not None and claude_code.auth.signed_in()
+        return claude_code.get_claude_executable() is not None
     except Exception as e:
-        logger.debug(f"claude_code readiness probe failed: {e}")
+        logger.debug(f"claude_code detection failed: {e}")
         return False
 
 
-def _codex_ready() -> bool:
-    """True when the Codex CLI is installed and signed in — its own
-    verdict, held by codex_cli.auth. Same role as `_claude_code_ready`."""
+def _codex_installed() -> bool:
     try:
         import codex_cli
-        return codex_cli.get_codex_executable() is not None and codex_cli.auth.signed_in()
+        return codex_cli.get_codex_executable() is not None
     except Exception as e:
-        logger.debug(f"codex readiness probe failed: {e}")
+        logger.debug(f"codex detection failed: {e}")
         return False
 
 
 def _maybe_reset_for_cli_agents() -> None:
     """If either CLI agent's registration would change since the cache was
     built, drop the cache so the next access re-detects. Cheap enough
-    to call on every entry — a held verdict and a few file probes. The
-    test is _init_providers' own, env override included: against
-    readiness alone, a force-enabled agent that is signed out (Docker's
-    CLAUDE_CODE_ENABLED) mismatched on every access and rebuilt the
-    registry each time."""
+    to call on every entry — a few file probes; the async chat handlers
+    call it, so nothing here may spawn a process. The test is
+    _init_providers' own, env override included."""
     if not _initialized:
         return
     from config import settings
-    if ("claude_code" in _providers) != (settings.claude_code_enabled or _claude_code_ready()):
+    if ("claude_code" in _providers) != (settings.claude_code_enabled or _claude_code_installed()):
         reset()
         return
-    if ("codex" in _providers) != (settings.codex_cli_enabled or _codex_ready()):
+    if ("codex" in _providers) != (settings.codex_cli_enabled or _codex_installed()):
         reset()
 
 
@@ -76,18 +74,18 @@ def _init_providers():
 
     from config import settings
 
-    # Claude Code (subprocess) — fact-based detection so that signing
-    # in from the Web UI flips it on without a backend restart. The
+    # Claude Code (subprocess) — fact-based detection so that installing
+    # it from the Web UI flips it on without a backend restart. The
     # legacy env flag still acts as an override for the corner case
     # where the user wants to force-enable it.
-    if settings.claude_code_enabled or _claude_code_ready():
+    if settings.claude_code_enabled or _claude_code_installed():
         from providers.claude_code import ClaudeCodeProvider
         _providers["claude_code"] = ClaudeCodeProvider()
 
     # OpenAI Codex (subprocess) — same fact-based detection; registered
     # after claude_code so the providers[0] fallback in
-    # chat._resolve_provider keeps preferring Claude when both are ready.
-    if settings.codex_cli_enabled or _codex_ready():
+    # chat._resolve_provider keeps preferring Claude when both are there.
+    if settings.codex_cli_enabled or _codex_installed():
         from providers.codex import CodexProvider
         _providers["codex"] = CodexProvider()
 

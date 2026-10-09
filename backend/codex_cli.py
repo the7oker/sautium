@@ -273,7 +273,9 @@ def start_signin(on_change, device: bool) -> dict:
     flows), so a cancelled re-authorization leaves the node signed out
     of ChatGPT — the UI says so next to Reauthorize. Its exit reaches the
     verdict (`auth.signin_finished`) before `on_change` hears it, so a
-    cancelled one reads as signed out at once."""
+    cancelled one reads as signed out at once — unless another flow has
+    replaced it: the replaced one's exit says nothing about a store the
+    new `codex login` is already rewriting."""
     global _signin
     if not is_launcher_mode():
         device = True
@@ -281,7 +283,8 @@ def start_signin(on_change, device: bool) -> dict:
     if _signin is not None and _signin.running:
         if _signin.flow == flow:
             return _signin.snapshot()
-        _signin.cancel()
+        replaced, _signin = _signin, None
+        replaced.cancel()
     from desktop.agent_login import AgentLogin, codex_login_command
     from codex_runner import _spawn_kwargs
     codex = get_codex_executable()
@@ -289,14 +292,14 @@ def start_signin(on_change, device: bool) -> dict:
         raise RuntimeError("Codex CLI not installed")
 
     def changed(snap: dict) -> None:
-        if not snap["running"]:
+        if not snap["running"] and _signin is driver:
             auth.signin_finished(snap["completed"])
         on_change(snap)
 
-    _signin = AgentLogin("codex", codex_login_command(codex, device),
-                         _spawn_kwargs(os.environ.copy()),
-                         on_change=changed, flow=flow)
-    return _signin.start()
+    driver = _signin = AgentLogin("codex", codex_login_command(codex, device),
+                                  _spawn_kwargs(os.environ.copy()),
+                                  on_change=changed, flow=flow)
+    return driver.start()
 
 
 def signin_snapshot() -> Optional[dict]:

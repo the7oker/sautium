@@ -1,16 +1,18 @@
 """Claude Code (subscription CLI) detection, install and sign-in.
 
-Backend mirror of `desktop/utils.py` for the parts that the Web UI
-needs: state detection and npm install. The install needs node/npm on
-the host, so it only works when the backend runs as a native process
-(launcher mode — the launcher exports `P2P_IDENTITY_DIR`, the marker
-for native mode). The sign-in does not: it is the CLI's own headless
-login driven over pipes (`desktop/agent_login.py`), so Docker, where
-the CLI is baked into the image, signs in from the Web UI too.
+Backend counterpart of `desktop/utils.py` for the parts that the Web UI
+needs: locating the CLI, npm install, the sign-in. The install needs
+node/npm on the host, so it only works when the backend runs as a native
+process (launcher mode — the launcher exports `P2P_IDENTITY_DIR`, the
+marker for native mode). The sign-in does not: it is the CLI's own
+headless login driven over pipes (`desktop/agent_login.py`), so Docker,
+where the CLI is baked into the image, signs in from the Web UI too.
 
 Whether the CLI is signed in is the one verdict this module owns for the
 whole process (§ Sign-in state): the assistant, the gear research worker,
-the AI canon tier and the settings screen all read it here.
+the AI canon tier and the settings screen all read it here. The launcher
+wizard asks the same CLI status one-shot (`desktop/utils.py`), without a
+process-wide verdict to keep.
 """
 
 from __future__ import annotations
@@ -166,14 +168,16 @@ def get_claude_executable() -> Optional[Path]:
 # runners report as refused or authenticated.
 #
 # One verdict per agent per process (`auth` here, `codex_cli.auth`). Readers
-# take it as it stands (the notices stream derives on every wake); only the
-# first read, an explicit look (the AI settings screen) and a finished
-# sign-in ask the CLI again. A refused call outranks the store: a status that
-# still reads "logged in" after a refusal cannot tell a revived sign-in from
-# dead tokens left in place, so only a call that authenticates or a completed
-# sign-in ends that verdict. A flip is an event (on_change): the research
-# drain, the notices channel, the guidance trail and the settings streams
-# wake on it — none of them re-tries on a timer.
+# take it as it stands (the notices stream derives on every wake, the chat's
+# async handlers read it); only the first read, an explicit look (opening the
+# AI settings screen, its Refresh) and a finished sign-in ask the CLI again.
+# The calls are evidence; a look applies what the store says, in both
+# directions — a sign-in made in a terminal ends a refusal there, and dead
+# tokens left in place read "logged in" only until the next call refuses
+# again — unless a call or a sign-in answered while the CLI was being asked:
+# that answer is newer than the store the look read. A flip is an event
+# (on_change): the research drain, the notices channel, the guidance trail and
+# the settings streams wake on it — none of them re-tries on a timer.
 
 STATUS_TIMEOUT_SECONDS = 30
 
@@ -185,6 +189,8 @@ class AgentAuth:
         self.name = name
         self._status = status            # the CLI's status command: True/False/None
         self._verdict: Optional[dict] = None
+        self._observed = 0               # calls and sign-ins seen; a look started
+                                         # before the latest one is out of date
         self._lock = threading.Lock()
         self._look_lock = threading.Lock()
         self._listeners: List[Callable[[bool], None]] = []
@@ -209,31 +215,36 @@ class AgentAuth:
         with self._look_lock:
             if self._verdict is not None and not fresh:
                 return self._verdict["signed_in"]
+            observed = self._observed
             status = self._status()
-            standing = self._verdict
-            flipped = False
-            if status is False:
-                flipped = self._record(False)
-            elif status is True:
-                if standing is None or not standing["refused"]:
-                    flipped = self._record(True)
-            elif standing is None:
-                # No answer and nothing known: no evidence against it —
-                # the first call says.
-                flipped = self._record(True)
-            now = self._verdict["signed_in"]
+            with self._lock:
+                if self._observed != observed:
+                    flipped = False      # a call or a sign-in answered meanwhile
+                elif status is None:
+                    # No answer: nothing learned. Nothing known either →
+                    # no evidence against it; the first call says.
+                    flipped = self._verdict is None and self._set(True)
+                else:
+                    flipped = self._set(status)
+                now = self._verdict["signed_in"]
         if flipped:
             self._announce(now)
         return now
 
     def refused(self, reason: str) -> None:
         """The runner: the CLI refused a call for authentication."""
-        if self._record(False, refused=True, reason=reason):
+        with self._lock:
+            self._observed += 1
+            flipped = self._set(False, refused=True, reason=reason)
+        if flipped:
             self._announce(False)
 
     def authenticated(self) -> None:
         """The runner: a call went through."""
-        if self._record(True):
+        with self._lock:
+            self._observed += 1
+            flipped = self._set(True)
+        if flipped:
             self._announce(True)
 
     def signin_finished(self, completed: bool) -> None:
@@ -246,22 +257,21 @@ class AgentAuth:
         else:
             self.signed_in(fresh=True)
 
-    def _record(self, signed_in: bool, refused: bool = False,
-                reason: Optional[str] = None) -> bool:
-        """Set the verdict; True when it flipped, and the caller then tells
-        the listeners (outside every lock)."""
-        with self._lock:
-            prev = self._verdict
-            if prev is not None and prev["signed_in"] == signed_in:
-                if not signed_in and (refused or reason):
-                    # The same episode: its onset stays, a refusal and the
-                    # newest words join it.
-                    self._verdict = {**prev, "refused": prev["refused"] or refused,
-                                     "reason": reason or prev["reason"]}
-                return False
-            self._verdict = {"signed_in": signed_in, "refused": refused,
-                             "reason": reason,
-                             "since": datetime.now(timezone.utc).isoformat()}
+    def _set(self, signed_in: bool, refused: bool = False,
+             reason: Optional[str] = None) -> bool:
+        """Set the verdict under the lock; True when it flipped, and the
+        caller then tells the listeners (outside every lock)."""
+        prev = self._verdict
+        if prev is not None and prev["signed_in"] == signed_in:
+            if not signed_in and (refused or reason):
+                # The same episode: its onset stays, a refusal and the
+                # newest words join it.
+                self._verdict = {**prev, "refused": prev["refused"] or refused,
+                                 "reason": reason or prev["reason"]}
+            return False
+        self._verdict = {"signed_in": signed_in, "refused": refused,
+                         "reason": reason,
+                         "since": datetime.now(timezone.utc).isoformat()}
         logger.info("%s %s%s", self.name, "signed in" if signed_in else "signed out",
                     f" — {reason}" if reason else "")
         return True
@@ -392,7 +402,7 @@ def start_signin(on_change) -> dict:
     the credentials land where they read them (the demoted agent user's
     HOME in Docker). A sign-in already running is returned as is. Its
     exit reaches the verdict (`auth.signin_finished`) before `on_change`
-    hears it."""
+    hears it — while it is still this process's sign-in."""
     global _signin
     if _signin is not None and _signin.running:
         return _signin.snapshot()
@@ -407,13 +417,13 @@ def start_signin(on_change) -> dict:
     env.pop("ANTHROPIC_API_KEY", None)
 
     def changed(snap: dict) -> None:
-        if not snap["running"]:
+        if not snap["running"] and _signin is driver:
             auth.signin_finished(snap["completed"])
         on_change(snap)
 
-    _signin = AgentLogin("claude", claude_login_command(claude),
-                         spawn_kwargs(env), on_change=changed)
-    return _signin.start()
+    driver = _signin = AgentLogin("claude", claude_login_command(claude),
+                                  spawn_kwargs(env), on_change=changed)
+    return driver.start()
 
 
 def signin_snapshot() -> Optional[dict]:

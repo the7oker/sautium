@@ -12784,7 +12784,8 @@
         <div class="btn-row single">
           <button class="btn ${noDump ? 'btn-secondary' : 'btn-primary'}" data-action="run-canon" ${noDump ? 'disabled' : ''}>Run now</button>
         </div>
-        ${seen ? `<div class="action-progress">${tally}</div>` : ''}`}
+        ${seen ? `<div class="action-progress">${tally}</div>` : ''}
+        ${job.stopped ? `<div class="action-progress failed">${escapeProfileHtml('Stopped: ' + job.stopped)}</div>` : ''}`}
       ${log ? `<div class="form-group canon-log">${log}</div>` : ''}
     `;
   }
@@ -12910,7 +12911,7 @@
           ${failed ? `<div class="row-stack-sub" style="color:var(--color-negative);">${escapeProfileHtml(sg.error)}</div>`
             : refused ? `<div class="row-stack-sub" style="color:var(--color-negative);">Claude Code said: ${escapeProfileHtml(refused)}</div>` : ''}
           <div class="btn-row single" style="margin:calc(10*var(--px)) 0 0;">
-            <button class="btn btn-primary" data-action="cc-signin" data-guide="ai_signin">${failed ? 'Try again' : 'Sign in to Claude'}</button>
+            <button class="btn btn-primary" data-action="cc-signin" data-guide="ai_signin" data-guide-scroll>${failed ? 'Try again' : 'Sign in to Claude'}</button>
           </div>
         </div>`;
     }
@@ -13026,7 +13027,7 @@
           ${failed ? `<div class="row-stack-sub" style="color:var(--color-negative);">${escapeProfileHtml(sg.error)}</div>`
             : refused ? `<div class="row-stack-sub" style="color:var(--color-negative);">Codex said: ${escapeProfileHtml(refused)}</div>` : ''}
           <div class="btn-row single" style="margin:calc(10*var(--px)) 0 0;">
-            <button class="btn btn-primary" data-action="cx-signin" data-guide="ai_signin">${failed ? 'Try again' : 'Sign in to ChatGPT'}</button>
+            <button class="btn btn-primary" data-action="cx-signin" data-guide="ai_signin" data-guide-scroll>${failed ? 'Try again' : 'Sign in to ChatGPT'}</button>
           </div>
         </div>`;
     }
@@ -14705,14 +14706,14 @@
         _stopClaudeStream();
         return;
       }
-      renderAI(screenRoot());
+      renderAI(screenRoot(), { look: false });
     }, (_err) => {
       // sseStream auto-reconnects with backoff; nothing to do here.
     });
   }
-  async function _fetchClaudeState() {
+  async function _fetchClaudeState(look) {
     try {
-      const r = await fetch('/api/settings/ai/claude/state');
+      const r = await fetch('/api/settings/ai/claude/state' + (look ? '?look=1' : ''));
       if (r.ok) return await r.json();
     } catch (_) {}
     return null;
@@ -14732,12 +14733,12 @@
         _stopCodexStream();
         return;
       }
-      renderAI(screenRoot());
+      renderAI(screenRoot(), { look: false });
     }, (_err) => {});
   }
-  async function _fetchCodexState() {
+  async function _fetchCodexState(look) {
     try {
-      const r = await fetch('/api/settings/ai/codex/state');
+      const r = await fetch('/api/settings/ai/codex/state' + (look ? '?look=1' : ''));
       if (r.ok) return await r.json();
     } catch (_) {}
     return null;
@@ -14755,7 +14756,7 @@
     _aiCanonStreamCtrl = window.sseStream('/api/settings/ai/canonization/stream', () => {
       if (!primed) { primed = true; return; }
       if (!parseHash().startsWith('more/ai')) { _stopAiCanonStream(); return; }
-      renderAI(screenRoot());
+      renderAI(screenRoot(), { look: false });
     }, (_err) => {});
   }
   // Pull a human-readable message out of a FastAPI error response.
@@ -14773,7 +14774,10 @@
       return `HTTP ${resp.status}`;
     }
   }
-  async function renderAI(root) {
+  // `look`: the screen opened or its Refresh — the server asks the CLIs
+  // again. The screen's own re-renders (a stream wake, a canon batch, the
+  // sign-in notice coming or going) read the verdict it holds.
+  async function renderAI(root, { look = true } = {}) {
     let ai = null;
     try {
       const r = await fetch('/api/settings/ai');
@@ -14791,11 +14795,11 @@
     const researchNeedsClaude = ai.provider !== 'claude_code' && !!notices.get('claude_code.signed_out');
     let claudeState = null;
     if (ai.provider === 'claude_code' || researchNeedsClaude) {
-      claudeState = await _fetchClaudeState();
+      claudeState = await _fetchClaudeState(look);
     }
     let codexState = null;
     if (ai.provider === 'codex') {
-      codexState = await _fetchCodexState();
+      codexState = await _fetchCodexState(look);
     }
 
     root.innerHTML = `
@@ -14917,14 +14921,14 @@
         await fetch('/api/settings/ai/canonization', {
           method: 'PUT', headers: {'Content-Type':'application/json'},
           body: JSON.stringify({ enabled: want }) });
-        renderAI(root);
+        renderAI(root, { look: false });
       });
     });
     onAction('[data-action="run-canon"]', async () => {
       try {
         await fetch('/api/settings/ai/canonization/run', { method: 'POST' });
       } catch (_) {}
-      renderAI(root);   // picks up running state + stream
+      renderAI(root, { look: false });   // picks up running state + stream
     });
 
     if (ai.provider === 'claude_code' || researchNeedsClaude) _subscribeClaudeStream();
@@ -15159,13 +15163,15 @@
       else if (h.startsWith('more/gear/'))        refreshGearScreenLive(app => renderGearDetail(app, h.split('/')[2]), 'more/gear/');
     });
     // A lost Claude sign-in parks the research queue; the gear surfaces say
-    // so (researchChipHTML, the gear sheet), repainted when it comes or goes.
+    // so (researchChipHTML, the gear sheet), and the AI screen shows or drops
+    // Claude's sign-in block (renderAI) — repainted when it comes or goes.
     let researchBlocked = false;
     window.addEventListener('sautium:notices-changed', () => {
       const blocked = !!notices.get('claude_code.signed_out');
       if (blocked === researchBlocked) return;
       researchBlocked = blocked;
       window.dispatchEvent(new CustomEvent('sautium:research-changed'));
+      if (parseHash().startsWith('more/ai')) renderAI(screenRoot(), { look: false });
     });
 
     // MB-scope capability changes (dump loaded, dump peers found/lost)

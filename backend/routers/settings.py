@@ -29,6 +29,7 @@ from sqlalchemy import text
 
 import claude_code
 import codex_cli
+import gear_research_worker
 from config import settings as app_settings
 from database import get_db_context
 from db_pool import db_execute, db_query, db_query_one, get_conn
@@ -75,6 +76,7 @@ _aicanon_sse_lock = threading.Lock()
 _aicanon: Dict[str, Any] = {
     "running": False, "total": 0, "processed": 0, "canonized": 0,
     "skipped": 0, "guard_rejected": 0, "errors": 0, "model": None, "items": [],
+    "stopped": None,     # why a run ended before its residue did, in words
 }
 _aicanon_lock = threading.Lock()
 
@@ -111,7 +113,7 @@ def start_aicanon_job(since=None, *, force: bool = False) -> bool:
         if _aicanon["running"]:
             return False
         _aicanon.update(running=True, total=0, processed=0, canonized=0,
-                        skipped=0, guard_rejected=0, errors=0, items=[])
+                        skipped=0, guard_rejected=0, errors=0, items=[], stopped=None)
     threading.Thread(target=_aicanon_worker, args=(None, since), daemon=True).start()
     _notify_aicanon()
     return True
@@ -131,7 +133,8 @@ def _aicanon_worker(limit: Optional[int], since=None) -> None:
                     # newest first, keep a bounded reasoning log for the UI
                     _aicanon["items"] = (ev["items"] + _aicanon["items"])[:80]
                 elif ev["event"] == "done":
-                    _aicanon.update(running=False, skipped_reason=ev.get("skipped"))
+                    _aicanon.update(running=False, skipped_reason=ev.get("skipped"),
+                                    stopped=ev.get("stopped"))
             _notify_aicanon()
     except Exception:
         logging.getLogger(__name__).exception("ai_canon worker crashed")
@@ -1233,11 +1236,13 @@ def _notices_state() -> Dict[str, Any]:
     provider = _read("ai.provider")
     agent = claude_code.auth.verdict()
     if agent is not None and not agent["signed_in"]:
-        waiting = db_query_one("""
-            SELECT (SELECT count(*) FROM gear_models WHERE research_state = 'queued')
-                 + (SELECT count(*) FROM gear_pair_notes WHERE research_state = 'queued')
-                   AS n
-        """)["n"]
+        waiting = 0
+        if gear_research_worker.waits_for_claude(look=False):
+            waiting = db_query_one("""
+                SELECT (SELECT count(*) FROM gear_models WHERE research_state = 'queued')
+                     + (SELECT count(*) FROM gear_pair_notes WHERE research_state = 'queued')
+                       AS n
+            """)["n"]
         assistant = provider == "claude_code"
         if waiting or assistant:
             items.append({"key": "claude_code.signed_out", "kind": "error",
@@ -1645,7 +1650,7 @@ async def claude_stream() -> StreamingResponse:
 
 
 @router.get("/ai/claude/state")
-def get_claude_state() -> Dict[str, Any]:
+def get_claude_state(look: bool = False) -> Dict[str, Any]:
     """State machine for the Claude Code subscription CLI. The Web UI
     branches on `state` to show install / sign-in / ready affordances.
     `host_unsupported` means the backend can't shell out (Docker mode)
@@ -1655,15 +1660,16 @@ def get_claude_state() -> Dict[str, Any]:
     cache so /api/chat picks up the freshly-installed CLI without a
     backend restart.
 
-    This screen is the explicit look at the sign-in: the CLI is asked
-    again (`fresh`), so a sign-in made in a terminal shows here, and
-    `auth` carries the verdict's facts — a refused call's own words
-    among them — for the Sign in panel."""
+    `look` is the explicit look at the sign-in — the screen opened, its
+    Refresh: the CLI is asked again, so a sign-in made in a terminal shows
+    here. The screen's own re-renders (a stream wake, a canon batch) read
+    the held verdict. `auth` carries the verdict's facts — a refused
+    call's own words among them — for the Sign in panel."""
     from claude_code import (
         auth, get_state, get_claude_executable, detect_node_version,
         is_launcher_mode, signin_snapshot,
     )
-    state = get_state(fresh=True)
+    state = get_state(fresh=look)
     _diag_observe_agent("claude", state)
     if state == "ready":
         from providers import reset as _reset_providers
@@ -1817,14 +1823,13 @@ async def codex_stream() -> StreamingResponse:
 
 
 @router.get("/ai/codex/state")
-def get_codex_state() -> Dict[str, Any]:
+def get_codex_state(look: bool = False) -> Dict[str, Any]:
     """State machine for the OpenAI Codex CLI — Web UI branches on
     `state` exactly like the Claude Code screen. Transition to 'ready'
     busts the providers cache so chat picks the CLI up without a
-    restart. The explicit look, as on the Claude Code screen: the CLI is
-    asked again and `auth` carries the verdict's facts."""
+    restart. `look` and `auth` as on the Claude Code screen."""
     from claude_code import detect_node_version, is_launcher_mode
-    state = codex_cli.get_state(fresh=True)
+    state = codex_cli.get_state(fresh=look)
     _diag_observe_agent("codex", state)
     if state == "ready":
         from providers import reset as _reset_providers

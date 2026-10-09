@@ -30,7 +30,9 @@ and a refused call puts its row back: the queue waits for the sign-in,
 which wakes the drain (claude_code.auth.on_change). No timer re-tries
 it, and nothing falls back to the pay-as-you-go key — a sign-in is the
 owner's to restore, and the notices channel tells them (settings
-`claude_code.signed_out`).
+`claude_code.signed_out`). The key is used where the owner chose it: a
+node without the CLI, or one whose agent is the Anthropic API
+(waits_for_claude).
 
 CLI (inside the backend container):
     python gear_research_worker.py --list
@@ -97,15 +99,21 @@ PAUSE_BETWEEN_MODELS = 3         # seconds; politeness between research calls
 
 _VALID_VALUE_TYPES = {"number", "string", "enum", "boolean"}
 
-# CLI-level failures (usage limit exhausted, transport errors) are
-# infrastructure conditions, not verdicts about the model being researched:
-# the row goes back to 'queued' and the drain pauses instead of burning the
-# whole queue into 'failed' (observed live: an exhausted subscription window
-# failed 10 models in under a minute). A limit window reopens with time, so
-# that pause is a timer; a lost sign-in does not, so it is not one of these
-# (ResearchSignedOut).
+# CLI-level failures that time cures (an exhausted usage window, a rate
+# limit, an overloaded or unreachable API, a CLI that died without a word)
+# are infrastructure conditions, not verdicts about the model being
+# researched: the row goes back to 'queued' and the drain pauses instead of
+# burning the whole queue into 'failed' (observed live: an exhausted
+# subscription window failed 10 models in under a minute). Read only off the
+# CLI's own errors (`is_error`), never off the model's prose. A failure that
+# belongs to the model (max turns spent, a prompt too long, the wallclock) is
+# not one of these: requeued it would hold the head of the queue forever, so
+# it ends 'failed' with its Retry. A lost sign-in is neither — no timer cures
+# it (ResearchSignedOut).
 _CLI_INFRA_RE = re.compile(
-    r"^Claude Code error|limit reached|usage limit|rate limit",
+    r"limit reached|usage limit|rate.?limit|overloaded|API Error: (?:429|5\d\d)"
+    r"|connection error|ECONN|ETIMEDOUT|ENOTFOUND|socket hang up|fetch failed"
+    r"|^Claude Code error: unknown error",
     re.IGNORECASE,
 )
 INFRA_PAUSE_SECONDS = 15 * 60
@@ -151,6 +159,29 @@ def _extract_json(text: str) -> Optional[Dict[str, Any]]:
     return payload if isinstance(payload, dict) else None
 
 
+def _api_chosen() -> bool:
+    """The owner made the Anthropic API the node's agent and gave it a key:
+    research may bill that key by the owner's own choice."""
+    row = db_query_one("SELECT value FROM user_settings WHERE key = 'ai.provider'")
+    return bool(row and row["value"] == "anthropic" and settings.anthropic_api_key)
+
+
+def waits_for_claude(look: bool = True) -> bool:
+    """Research waits for the Claude Code sign-in: the CLI is installed, it
+    is signed out, and the owner has not chosen the Anthropic API instead.
+    The one rule for the drain's gate, a refused call and the notice;
+    `look=False` reads the verdict as it stands and never asks the CLI
+    (the notices derive on the event loop)."""
+    if claude_code.get_claude_executable() is None:
+        return False
+    if look:
+        signed_in = claude_code.auth.signed_in()
+    else:
+        verdict = claude_code.auth.verdict()
+        signed_in = verdict is None or verdict["signed_in"]
+    return not signed_in and not _api_chosen()
+
+
 def _call_claude_code_research(system_prompt: str, user_msg: str) -> Optional[Dict[str, Any]]:
     from claude_code_runner import call_claude_code
     res = call_claude_code(
@@ -162,16 +193,16 @@ def _call_claude_code_research(system_prompt: str, user_msg: str) -> Optional[Di
         max_turns=25,
     )
     answer = res.get("answer") or ""
-    payload = _extract_json(answer)
+    payload = None if res["is_error"] else _extract_json(answer)
     if payload is None:
         # Raised before the Anthropic fallback on purpose: when the
         # subscription window is exhausted or its sign-in lost, the
         # pay-as-you-go key is the wrong tool to silently burn instead.
-        if not claude_code.auth.signed_in():
+        if waits_for_claude():
             raise ResearchSignedOut(claude_code.auth.verdict()["reason"] or "signed out")
-        if _CLI_INFRA_RE.search(answer):
+        if res["is_error"] and _CLI_INFRA_RE.search(answer):
             raise ResearchInfraPause(answer[:120])
-        logger.warning(f"gear research: Claude Code returned no JSON; head: {answer[:300]!r}")
+        logger.warning(f"gear research: Claude Code gave no JSON; head: {answer[:300]!r}")
     return payload
 
 
@@ -204,16 +235,25 @@ def _call_anthropic_research(system_prompt: str, user_msg: str) -> Optional[Dict
     return _extract_json(text)
 
 
+def _research(system_prompt: str, user_msg: str) -> Optional[Dict[str, Any]]:
+    """One research call on the route the node allows: the Claude Code
+    subscription while it is signed in, the Anthropic key when the CLI is
+    absent or the owner chose the API (and as the fallback for an answer
+    without JSON); signed out otherwise, the job waits for the sign-in."""
+    if waits_for_claude():
+        raise ResearchSignedOut(claude_code.auth.verdict()["reason"] or "signed out")
+    if claude_code.get_claude_executable() is not None and claude_code.auth.signed_in():
+        payload = _call_claude_code_research(system_prompt, user_msg)
+        if payload is not None:
+            return payload
+        logger.info("gear research: Claude Code path yielded no JSON, trying Anthropic API")
+    return _call_anthropic_research(system_prompt, user_msg)
+
+
 def _run_research_call(brand: str, model: str, category: str) -> Optional[Dict[str, Any]]:
     from gear_research_prompt import build_prompt
-    system_prompt = build_prompt(brand, model, category)
-    user_msg = _user_message(brand, model, category)
-
-    payload = _call_claude_code_research(system_prompt, user_msg)
-    if payload is not None:
-        return payload
-    logger.info("gear research: Claude Code path yielded no JSON, trying Anthropic API")
-    return _call_anthropic_research(system_prompt, user_msg)
+    return _research(build_prompt(brand, model, category),
+                     _user_message(brand, model, category))
 
 
 # ─── persistence ────────────────────────────────────────────────────────────
@@ -526,8 +566,7 @@ def research_pair(pair_id: str) -> bool:
         "Return ONLY the JSON object."
     )
     try:
-        payload = _call_claude_code_research(system_prompt, user_msg) \
-            or _call_anthropic_research(system_prompt, user_msg)
+        payload = _research(system_prompt, user_msg)
     except (ResearchInfraPause, ResearchSignedOut):
         raise
     except Exception as e:
@@ -631,14 +670,12 @@ def _requeue(model_id: Optional[str], pair_id: Optional[str]) -> None:
         )
 
 
-def _waits_for_signin() -> bool:
-    """Claude Code is installed and signed out: claim nothing. The sign-in
-    wakes the drain again (_on_signin_change). Queued work waiting on it is
-    a notice (settings `claude_code.signed_out`), so the notices channel
-    hears every time the queue parks with work in it. Without the CLI the
-    call itself fails over to the API key, as it always has."""
-    if claude_code.get_claude_executable() is None or claude_code.auth.signed_in():
-        return False
+def _park() -> None:
+    """The queue waits for the Claude Code sign-in (waits_for_claude) and
+    claims nothing more — the sign-in wakes the drain again
+    (_on_signin_change). Queued work waiting on it is a notice (settings
+    `claude_code.signed_out`), so the notices channel hears every time the
+    queue parks with work in it."""
     row = db_query_one(
         """
         SELECT EXISTS (SELECT 1 FROM gear_models WHERE research_state = 'queued')
@@ -649,13 +686,13 @@ def _waits_for_signin() -> bool:
     if row["waiting"]:
         logger.info("gear research: the queue waits for the Claude Code sign-in")
         db_execute("NOTIFY sautium_notices")
-    return True
 
 
 def _drain_queue() -> None:
     # Models first (they feed specs/sentiment), then pair-synergy jobs.
     while _worker_running:
-        if _waits_for_signin():
+        if waits_for_claude():
+            _park()
             return
         model_id = _claim_next()
         pair_id = None
@@ -671,7 +708,8 @@ def _drain_queue() -> None:
         except ResearchSignedOut as e:
             _requeue(model_id, pair_id)
             logger.warning(f"gear research: Claude Code refused the call ({e})")
-            continue
+            _park()
+            return
         except ResearchInfraPause as e:
             _requeue(model_id, pair_id)
             logger.warning(

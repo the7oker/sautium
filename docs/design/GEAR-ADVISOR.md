@@ -88,20 +88,24 @@ AI call, in preference order:
    mcp=False)`) — built-in WebSearch/WebFetch, subscription-billed, the same
    runner the AI assistant chat and ai_canon use. No MCP config: research needs the
    web, not the library.
-2. **Anthropic API fallback** with the server-side `web_search` tool
-   (pause_turn continuation loop, max 12 searches) when Claude Code is absent
-   or returns no parseable JSON.
+2. **Anthropic API** with the server-side `web_search` tool (pause_turn
+   continuation loop, max 12 searches) when Claude Code is absent, when the
+   owner made the Anthropic API the node's agent, or as the fallback for an
+   answer without parseable JSON.
 
 A lost subscription is never a reason to bill the API key instead. While
 Claude Code is installed but signed out (`claude_code.auth`, the CLI's own
-verdict: `claude auth status` plus every refused call) the drain claims
-nothing and a refused call puts its row back; the sign-in wakes the drain
+verdict: `claude auth status` plus every refused call) on a node whose agent
+is not the API (`waits_for_claude`) the drain claims nothing and a refused
+call puts its row back; the sign-in wakes the drain
 (`claude_code.auth.on_change`), and meanwhile the rows read "Waits for
 Claude sign-in" beside the `claude_code.signed_out` notice, with the
 `ai_signin` guidance trail leading to the Sign in button (since
 2026-10-09 — before, the dead sign-in looped as a 15-minute infra pause that
-nobody saw). A usage-limit window reopens with time, so that one requeues
-and pauses the drain for 15 minutes.
+nobody saw). A usage limit, an overloaded or unreachable API reopen with
+time, so those requeue and pause the drain for 15 minutes; a failure that
+belongs to the model (max turns spent, a prompt too long, the wallclock)
+ends `failed` with its Retry rather than holding the head of the queue.
 
 The prompt is `gear_research_prompt.build_prompt()` — canonical-catalog
 injection, reuse-or-propose attribute keys, citations required

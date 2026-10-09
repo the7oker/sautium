@@ -17,6 +17,7 @@ Two flavours:
 import json
 import logging
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -84,27 +85,33 @@ _MAX_THINKING_TOKENS = "1024"
 # Invalid authentication credentials" carries api_error_status=401, but
 # "Failed to authenticate: OAuth session expired and could not be
 # refreshed" does NOT (observed on a fresh launcher install with stale
-# host credentials, 2026-08-09) — so the mapping must also match text.
-# Only consulted inside is_error paths, where an authentication mention
-# IS the failure. Every refusal is reported to claude_code, which owns the
-# verdict the rest of the backend reads.
+# host credentials, 2026-08-09), and with no credentials at all 2.1.295
+# answers "Not logged in · Please run /login" (measured 2026-10-09) — so the
+# mapping must also match text. Only consulted inside is_error paths, where
+# an authentication mention IS the failure. Every refusal is reported to
+# claude_code, which owns the verdict the rest of the backend reads.
 OAUTH_EXPIRED_MSG = (
     "Claude Code is signed out — its sign-in expired or was revoked. Sign "
     "in again under More → AI assistant; the assistant and gear research "
     "pick it up from there."
 )
 
+_AUTH_FAILURE_RE = re.compile(
+    r"oauth|authenticat|not logged in|run /login|invalid api key", re.IGNORECASE)
+
 
 def _oauth_error(text: Optional[str]) -> bool:
-    t = (text or "").lower()
-    return "oauth" in t or "authenticat" in t
+    return bool(_AUTH_FAILURE_RE.search(text or ""))
 
 
 def _error_text(evt: dict) -> str:
     """The words of a failed result event: `result` on API errors, the
-    `errors` list on the CLI's early exits (e.g. `--resume <unknown-id>`)."""
+    `errors` list on the CLI's early exits (e.g. `--resume <unknown-id>`),
+    else the error subtype itself — `error_max_turns` carries no text."""
     errs = evt.get("errors") or []
-    return evt.get("result") or (errs[0] if errs else "")
+    subtype = evt.get("subtype") or ""
+    return (evt.get("result") or (errs[0] if errs else "")
+            or (subtype if subtype.startswith("error") else ""))
 
 
 def _auth_failure(evt: dict) -> Optional[str]:
@@ -214,7 +221,8 @@ def call_claude_code(
             WebSearch/WebFetch turn this off.
 
     Returns:
-        dict with keys: answer, tracks, claude_session_id, model
+        dict with keys: answer, claude_session_id, model, is_error — True
+        when the CLI failed and `answer` is its error, not the model's.
     """
     use_model = model if model in ALLOWED_MODELS else DEFAULT_MODEL
     wallclock = timeout_seconds or TIMEOUT_SECONDS
@@ -226,6 +234,7 @@ def call_claude_code(
             "answer": "Claude Code CLI is not installed. Open Settings to run AI agent setup.",
             "claude_session_id": None,
             "model": use_model,
+            "is_error": True,
         }
 
     cmd = [
@@ -274,16 +283,19 @@ def call_claude_code(
                     "answer": f"Claude Code error: {stderr or 'unknown error'}",
                     "claude_session_id": None,
                     "model": use_model,
+                    "is_error": True,
                 }
             logger.error(f"Failed to parse Claude Code JSON; stdout: {result.stdout[:500]}")
             return {
                 "answer": result.stdout.strip() or "Failed to parse Claude Code response",
                 "claude_session_id": None,
                 "model": use_model,
+                "is_error": True,
             }
 
         raw_answer = output.get("result", "")
         claude_sid = output.get("session_id")
+        failed = bool(output.get("is_error")) or result.returncode != 0
 
         refused = _auth_failure(output)
         if refused:
@@ -294,7 +306,7 @@ def call_claude_code(
             cause = _error_text(output) or "unknown error"
             logger.error(f"Claude Code failed (rc={result.returncode}): {cause}")
             raw_answer = f"Claude Code error: {cause}"
-        elif not output.get("is_error"):
+        elif not failed:
             claude_code.auth.authenticated()
 
         logger.info(
@@ -305,6 +317,7 @@ def call_claude_code(
             "answer": raw_answer,
             "claude_session_id": claude_sid,
             "model": use_model,
+            "is_error": failed,
         }
 
     except subprocess.TimeoutExpired:
@@ -313,6 +326,7 @@ def call_claude_code(
             "answer": "Request timed out. Please try a simpler query.",
             "claude_session_id": None,
             "model": use_model,
+            "is_error": True,
         }
     except FileNotFoundError:
         logger.error("Claude Code CLI not found. Is it installed?")
@@ -320,6 +334,7 @@ def call_claude_code(
             "answer": "Claude Code CLI is not installed in this environment.",
             "claude_session_id": None,
             "model": use_model,
+            "is_error": True,
         }
     except Exception as e:
         logger.error(f"Unexpected error calling Claude Code: {e}")
@@ -327,6 +342,7 @@ def call_claude_code(
             "answer": f"Error: {e}",
             "claude_session_id": None,
             "model": use_model,
+            "is_error": True,
         }
 
 
