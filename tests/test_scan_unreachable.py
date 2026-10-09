@@ -1,10 +1,11 @@
 """A scan never reports a walk over an unreachable music folder as a scan
 (scanner.library_unreachable — the rule the library.mount_missing notice and
 the prune read): every entry point refuses it and wakes the notices, a walk
-that found nothing records nothing, and a prune handed a partial tree deletes
-nothing once the folder is gone. On 2026-10-09 a Docker bind that came up on
-an empty directory turned "Scan for new" into "Scan complete" and a fresh
-"Last scan" while the new album sat on the drive nothing had mounted.
+that found nothing records nothing, and a prune deletes nothing from a
+partial tree — the folder gone, or a subfolder the walk could not read. On
+2026-10-09 a Docker bind that came up on an empty directory turned "Scan for
+new" into "Scan complete" and a fresh "Last scan" while the new album sat on
+the drive nothing had mounted.
 
 On a real PostgreSQL — the module's scratch database (conftest.scratch_dsn),
 the connection pool AND the SQLAlchemy sessions pointed at it, so not even a
@@ -12,6 +13,8 @@ regressed prune can reach a catalog. Skipped where there is no cluster.
 """
 
 import asyncio
+import errno
+import os
 import select
 import sys
 import uuid
@@ -97,9 +100,9 @@ def main_module(monkeypatch):
     main._scan_state.update(saved)
 
 
-def _owned_file(cur):
+def _owned_file(cur, album="Solar Fields/Shaped By Time"):
     from config import settings
-    album_dir = f"{settings.library_db_root()}/Solar Fields/Shaped By Time"
+    album_dir = f"{settings.library_db_root()}/{album}"
     track, album = str(uuid.uuid4()), str(uuid.uuid4())
     cur.execute("INSERT INTO tracks (id, title) VALUES (%s, 'Silent Walking')", (track,))
     cur.execute("INSERT INTO albums (id, title) VALUES (%s, 'Shaped By Time')", (album,))
@@ -187,7 +190,7 @@ def _empty_the_folder_during_the_walk(monkeypatch, library):
 
     def walk(self, **kw):
         library.joinpath("Electronic").rmdir()
-        return [], []
+        return [], [], []
 
     monkeypatch.setattr(scanner.LibraryScanner, "find_audio_files", walk)
 
@@ -228,3 +231,58 @@ def test_a_prune_handed_a_partial_tree_deletes_nothing_once_the_folder_is_gone(c
     assert stats["pruned"] == 0
     cur.execute("SELECT count(*) FROM media_files")
     assert cur.fetchone()[0] == 1
+
+
+def _two_albums_one_unreadable(cur, library, monkeypatch):
+    """A/ and B/ on disk and in the catalog; B/ is a folder the node may not
+    list. The suite runs as root, which reads through any mode bits, so the
+    refusal comes from scandir itself."""
+    for album in ("A", "B"):
+        (library / album).mkdir()
+        (library / album / "01.flac").touch()
+        _owned_file(cur, album)
+    denied, real = str(library / "B"), os.scandir
+
+    def scandir(path="."):
+        if os.fspath(path) == denied:
+            raise PermissionError(errno.EACCES, "Permission denied", denied)
+        return real(path)
+
+    monkeypatch.setattr(os, "scandir", scandir)
+    return denied
+
+
+def test_the_walk_names_the_folders_it_could_not_read(cur, library, monkeypatch):
+    denied = _two_albums_one_unreadable(cur, library, monkeypatch)
+
+    audio, _cues, unread = scanner.LibraryScanner().find_audio_files()
+
+    assert audio == [library / "A" / "01.flac"]
+    assert unread == [denied]
+
+
+def test_a_rescan_that_could_not_read_a_folder_keeps_its_rows(cur, library, main_module,
+                                                             monkeypatch):
+    from canon import post_import
+    _two_albums_one_unreadable(cur, library, monkeypatch)
+    monkeypatch.setattr(post_import, "run", lambda *a: None)
+    main_module._scan_state.update(running=True, cancel_requested=False,
+                                   progress="Starting scan...", stats=None, result=None)
+
+    main_module._scan_worker(None, True, None, True)   # Rescan: the scan, then the prune
+
+    assert main_module._scan_state["result"]["prune"]["pruned"] == 0
+    assert main_module._scan_state["progress"] == (
+        "Scan complete — 1 folder(s) could not be read")
+    cur.execute("SELECT count(*) FROM media_files")
+    assert cur.fetchone()[0] == 2                 # B/01.flac kept: unread is not deleted
+
+
+def test_a_prune_that_cannot_read_a_folder_deletes_nothing(cur, library, monkeypatch):
+    _two_albums_one_unreadable(cur, library, monkeypatch)
+
+    stats = scanner.prune_missing_files()         # its own walk
+
+    assert stats["pruned"] == 0
+    cur.execute("SELECT count(*) FROM media_files")
+    assert cur.fetchone()[0] == 2

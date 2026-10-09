@@ -1283,6 +1283,10 @@ def _scan_worker(limit: Optional[int], skip_existing: bool, subpath: Optional[st
             progress_cb=progress_cb, cancel_check=cancel_check,
         )
 
+        # Folders the walk could not read are named in the log; the outcome
+        # says how many, and the prune refuses the partial tree.
+        unread_note = (f" — {result['unread']} folder(s) could not be read"
+                       if result["unread"] else "")
         if state["cancel_requested"]:
             state["progress"] = "Scan cancelled"
         elif not result["processed"]:
@@ -1291,7 +1295,7 @@ def _scan_worker(limit: Optional[int], skip_existing: bool, subpath: Optional[st
             # scan that happened. Over a catalog that knows files it is the
             # folder gone mid-run, refused like one gone before the walk.
             refuse_if_unreachable()
-            state["progress"] = "No audio files found"
+            state["progress"] = "No audio files found" + unread_note
         else:
             from canon import post_import
             from routers.settings import notices_recheck
@@ -1307,6 +1311,7 @@ def _scan_worker(limit: Optional[int], skip_existing: bool, subpath: Optional[st
                         subpath=subpath,
                         cancel_check=lambda: state["cancel_requested"],
                         disk_paths=scanner.last_disk_paths,
+                        unread=scanner.last_unread,
                     )
                     result["prune"] = prune_stats
                     logger.info(f"Prune results: {prune_stats}")
@@ -1314,7 +1319,7 @@ def _scan_worker(limit: Optional[int], skip_existing: bool, subpath: Optional[st
                     logger.error(f"Prune failed: {e}")
                     result["prune_error"] = str(e)
 
-            state["progress"] = "Scan complete"
+            state["progress"] = "Scan complete" + unread_note
             # Persist the completion timestamp so the Library screen's
             # "Last scan" row reflects reality across backend restarts.
             try:

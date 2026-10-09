@@ -13,7 +13,7 @@ from dataclasses import dataclass
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Optional, Dict, Any, List, Set, Tuple
+from typing import Optional, Dict, Any, List, Sequence, Set, Tuple
 
 import mutagen
 from mutagen.flac import FLAC
@@ -477,9 +477,10 @@ class LibraryScanner:
             raise ValueError(f"Library path does not exist: {self.library_path}")
 
         logger.info(f"Initialized scanner for: {self.library_path}")
-        # Host paths of the last FULL discovery, for the prune that closes a
-        # scan run (see scan_and_import).
+        # Host paths of the last FULL discovery and the folders it could not
+        # read, for the prune that closes a scan run (see scan_and_import).
         self.last_disk_paths: Optional[Set[str]] = None
+        self.last_unread: List[str] = []
 
     @staticmethod
     def extract_metadata(file_path: Path) -> Optional[Dict[str, Any]]:
@@ -619,7 +620,7 @@ class LibraryScanner:
         limit: Optional[int] = None,
         subpath: Optional[str] = None,
         cancel_check: Optional[callable] = None,
-    ) -> Tuple[List[Path], List[Path]]:
+    ) -> Tuple[List[Path], List[Path], List[str]]:
         """
         Recursively find all audio files (and cue sheets) in library.
 
@@ -628,13 +629,17 @@ class LibraryScanner:
             subpath: Optional subdirectory within library to scan.
             cancel_check: Optional callable returning True if the
                           enclosing scan was cancelled. Discovery can
-                          take many seconds on a large library (rglob
-                          stats every node); checking inside the walk
-                          lets a Cancel tap take effect immediately
-                          instead of waiting until extraction phase.
+                          take minutes on a large library over drvfs;
+                          checking per folder lets a Cancel tap take
+                          effect immediately instead of waiting until
+                          extraction phase.
 
         Returns:
-            (audio file Paths, .cue file Paths) — one walk collects both.
+            (audio file Paths, .cue file Paths, folders that could not be
+            read) — one walk collects all three. A folder the walk could not
+            read (no permission, a nested mount gone, removed mid-walk) is
+            reported, never skipped in silence: its files are missing from
+            the lists, and a prune must not read them as deleted.
         """
         if subpath:
             scan_path = self.library_path / subpath
@@ -645,24 +650,33 @@ class LibraryScanner:
             scan_path = self.library_path
             logger.info(f"Searching for audio files in {scan_path}")
 
-        audio_files = []
-        cue_files = []
-        for i, file_path in enumerate(scan_path.rglob("*")):
-            if cancel_check and (i & 0xFF) == 0 and cancel_check():
+        audio_files: List[Path] = []
+        cue_files: List[Path] = []
+        unread: List[str] = []
+
+        def unreadable(err: OSError) -> None:
+            logger.warning(f"Could not read {err.filename}: {err.strerror}")
+            unread.append(err.filename)
+
+        # os.walk, not Path.rglob: rglob drops a folder it may not list without
+        # a word. The names it lists beside the subfolders are the non-folders.
+        for dirpath, _dirs, names in os.walk(scan_path, onerror=unreadable):
+            if cancel_check and cancel_check():
                 logger.info("Discovery cancelled by user")
                 break
-            if not file_path.is_file():
-                continue
-            suffix = file_path.suffix.lower()
-            if suffix in AUDIO_EXTENSIONS:
-                audio_files.append(file_path)
-                if limit and len(audio_files) >= limit:
-                    break
-            elif suffix == ".cue":
-                cue_files.append(file_path)
+            for name in names:
+                suffix = os.path.splitext(name)[1].lower()
+                if suffix in AUDIO_EXTENSIONS:
+                    audio_files.append(Path(dirpath, name))
+                elif suffix == ".cue":
+                    cue_files.append(Path(dirpath, name))
+            if limit and len(audio_files) >= limit:
+                del audio_files[limit:]
+                break
 
-        logger.info(f"Found {len(audio_files)} audio files, {len(cue_files)} cue sheets")
-        return audio_files, cue_files
+        logger.info(f"Found {len(audio_files)} audio files, {len(cue_files)} cue sheets"
+                    + (f", {len(unread)} folders unread" if unread else ""))
+        return audio_files, cue_files, unread
 
     @staticmethod
     def get_or_create_genre(db: Session, genre_name: str) -> Genre:
@@ -773,6 +787,7 @@ class LibraryScanner:
             "errors": 0,
             "unique_tracks": 0,
             "superseded": 0,
+            "unread": 0,
         }
         def _report(msg: str = None):
             if progress_cb:
@@ -786,7 +801,10 @@ class LibraryScanner:
         # ── Discover files ──────────────────────────────────────────
         if progress_cb:
             progress_cb("Discovering files...", stats)
-        audio_files, cue_files = self.find_audio_files(limit=limit, subpath=subpath, cancel_check=cancel_check)
+        audio_files, cue_files, unread = self.find_audio_files(
+            limit=limit, subpath=subpath, cancel_check=cancel_check)
+        stats["unread"] = len(unread)
+        self.last_unread = unread
         if _cancelled():
             logger.info("Scan cancelled during discovery")
             return stats
@@ -797,7 +815,8 @@ class LibraryScanner:
 
         # The prune that closes a scan run reconciles this very tree, and the
         # walk costs ~6 min on the reference library over drvfs. Hand it this
-        # one. A limited scan truncates the list, so it never becomes a prune
+        # one, with the folders it could not read — the prune refuses a partial
+        # tree. A limited scan truncates the list, so it never becomes a prune
         # input — everything outside the limit would read as deleted.
         self.last_disk_paths = None if limit else {
             settings.translate_to_host_path(str(fp.absolute())) for fp in audio_files
@@ -1038,6 +1057,7 @@ def prune_missing_files(
     subpath: Optional[str] = None,
     cancel_check: Optional[callable] = None,
     disk_paths: Optional[Set[str]] = None,
+    unread: Sequence[str] = (),
 ) -> Dict[str, int]:
     """Remove DB records for files that no longer exist on disk.
 
@@ -1050,7 +1070,9 @@ def prune_missing_files(
     tables (embeddings, stats, etc).
 
     disk_paths lets a caller that has just walked the tree hand its result in
-    (see LibraryScanner.scan_and_import) instead of paying for a second walk.
+    (see LibraryScanner.scan_and_import) instead of paying for a second walk,
+    with `unread`, the folders that walk could not read: a partial tree is
+    refused, whoever walked it.
 
     cancel_check is forwarded to find_audio_files so a Cancel tap takes
     effect during the slow disk-discovery phase.
@@ -1065,11 +1087,20 @@ def prune_missing_files(
             progress_cb("Discovering files on disk...")
 
         scanner = LibraryScanner()
-        disk_files, _cues = scanner.find_audio_files(subpath=subpath, cancel_check=cancel_check)
+        disk_files, _cues, unread = scanner.find_audio_files(subpath=subpath, cancel_check=cancel_check)
         if cancel_check and cancel_check():
             logger.info("Prune cancelled during discovery")
             return stats
         disk_paths = {settings.translate_to_host_path(str(fp.absolute())) for fp in disk_files}
+
+    # A folder the walk could not read is missing its files here, and every
+    # row under it would read as deleted.
+    if unread:
+        logger.error(f"Prune aborted: {len(unread)} folder(s) could not be read, "
+                     f"e.g. {unread[0]}")
+        if progress_cb:
+            progress_cb(f"Prune skipped: {len(unread)} folder(s) could not be read")
+        return stats
 
     # An empty tree is an unmounted library, never a library the owner emptied
     # — every DB record would read as missing. The folder is asked again right
