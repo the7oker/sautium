@@ -628,8 +628,11 @@ badge, and a research-pulled chip when cached (e.g. `R2R · $6000` plus
 - User adds an item not in DB → placeholder entry created with state
   `awaiting_research`.
 - Background research worker (AI-powered, WebSearch + WebFetch +
-  Claude synthesis) fills in `specs JSONB`, `research_summary`,
-  `community_sentiment JSONB`.
+  Claude synthesis) fills in `research_summary`, the specs (`gear_specs`:
+  one row per model × catalog attribute of `gear_spec_attributes`, each
+  value with its `source_url`) and the community sentiment
+  (`gear_models.sentiment_score` / `sentiment_sample_size`, the praise and
+  criticism terms in `gear_sentiment_terms`).
 - P2P sync of completed entries, so that one user's research benefits
   everyone, is designed and not built: the sync carries no gear category
   (the blueprint modelled it on artist bios, which left the wire on
@@ -964,7 +967,7 @@ All Genre blocks roll up into a single `(new endpoint)` GET
 |-------|------------|-----------|
 | Header (brand · model · category) | `gear_models` table | — |
 | Status pill | `user_gear.status` enum | — |
-| Research panel | `gear_models.research_state`, `.research_summary`, `.specs JSONB`, `.community_sentiment JSONB`, `.researched_at` | + iterative research (Run 1 prose → Run 2 structured → Run 3 wiki-style corrections) |
+| Research panel | `gear_models.research_state`, `.research_summary`, `.researched_at`, `.sentiment_score`, `.sentiment_sample_size`; `gear_specs` (EAV over `gear_spec_attributes`, a `source_url` per value); `gear_sentiment_terms` | + iterative research (Run 1 prose → Run 2 structured → Run 3 wiki-style corrections) |
 | Personalised take | runtime AI chat call with user's gear + listening history as context — only if agent active | + caching for repeat questions |
 | My notes | `user_gear.notes TEXT` | — |
 
@@ -993,10 +996,13 @@ and 13 stayed optional.
 7. ✅ `users` table extensions — `display_name TEXT`, `city TEXT`, `bio TEXT`,
    `avatar_cover_id UUID REFERENCES covers(id)`, `public_gear BOOLEAN DEFAULT FALSE`,
    `open_to_meet BOOLEAN DEFAULT FALSE`
-8. ✅ `gear_models` table **(new)** — `(id UUID PK, brand TEXT, model TEXT, category TEXT,
-   research_state gear_research_state ENUM, research_summary TEXT, specs JSONB,
-   community_sentiment JSONB, researched_at TIMESTAMPTZ, refresh_cooldown_days INT
-   DEFAULT 7)` — canonicalized via UUID v5 `(brand:model:category)`
+8. ✅ `gear_models` table **(new)** — built normalized, not as the JSONB columns
+   planned here: `(id UUID PK, brand_id → gear_brands, model, category,
+   research_state gear_research_state ENUM, research_summary TEXT, researched_at,
+   sentiment_score, sentiment_sample_size, sentiment_updated_at)`, the specs in
+   `gear_specs` (EAV over `gear_spec_attributes`, `source_url` per value) and the
+   sentiment terms in `gear_sentiment_terms` — canonicalized via UUID v5
+   `(category:brand:model)`
 9. ✅ `user_gear` table **(new)** — `(id UUID PK, user_id, gear_model_id REFERENCES
    gear_models(id), status user_gear_status ENUM (own / want / sell / previously_owned),
    notes TEXT, added_at, status_changed_at)`

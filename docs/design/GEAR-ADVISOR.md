@@ -120,17 +120,16 @@ user-drawn chain. The threshold table IS the product:
 - SPL headroom: required voltage/power for ~110 dB peaks from sensitivity
   (prefer measured dB/V over datasheet dB/mW), against source capability;
   crest-factor check against the library's DR percentiles (layer 3).
-- Gain staging: DAC output vs amp max input; documented level offsets
-  (Cyan 2 DSD −6 dB) surface as A/B level-match warnings.
-- Format chains: max PCM/DSD per hop, OS-dependent ceilings (native DSD512
-  Windows-only on some DACs vs Linux NAA → DoP limit), NOS-only DACs marking
-  the upsampler as an architectural dependency.
+- Gain staging: DAC output vs amp max input.
 - Electrostatic domain check: bias voltage + connector = hard incompatibility
   with conventional amps (energizer required).
 
 Verdict grammar: ✓ pass / ⚠ pass-with-caveat / ✗ conflict / ⌀ no data — each
 with the numbers shown and a provenance tier per number
 (DS datasheet / M measured / D derived / F forum).
+
+Format chains and the DSD level-match warning are designed, not built
+(Roadmap 8): the engine reads no DAC format fact today.
 
 ## Upgrade strategy (Phases 4/5 — implemented)
 
@@ -145,7 +144,8 @@ listening axes the praised traits hit.
    elsewhere". (The experiment's verdict for the reference rig: DAC and amp
    are measured plateaus; all budget flows to transducers.)
 2. **Transducers-first** with deterministic exceptions (underpowered planar →
-   amp first; hiss on sensitive IEMs → source first; format wall → DAC).
+   amp first; hiss on sensitive IEMs → source first; a format wall → DAC
+   once the pair engine has format chains, Roadmap 8).
 3. **Genre-weighted frontier, not a ranking.** Budget slider → Pareto frontier
    of candidates; each card carries the three voices + "improves X% of your
    library, regresses Y%" computed from genre shares. Anti-recommendations
@@ -225,3 +225,14 @@ hosts are region-blocked, head-fi renders JS-only.
 7. Refresh policy: re-research staleness (`researched_at` TTL per category),
    re-research on newly reachable sources. (Retry for `failed` and a manual
    refresh shipped 2026-07-13/15.)
+8. Format chains in the pair engine — designed, not built:
+   - max PCM/DSD per hop;
+   - OS-dependent ceilings (native DSD512 Windows-only on some DACs vs a
+     Linux NAA → DoP limit);
+   - NOS-only DACs marking the upsampler as an architectural dependency;
+   - documented level offsets (Cyan 2 DSD −6 dB) surfacing as A/B
+     level-match warnings.
+
+   It needs DAC facts the catalog does not hold yet — formats per input,
+   NOS capability, a PCM/DSD level offset. `gear_pairs.py` gives a DAC a
+   line-out role only.

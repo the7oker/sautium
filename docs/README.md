@@ -44,11 +44,11 @@ The repository root carries the rest: `CLAUDE.md` (spec and conventions),
   - Troubleshooting
 
 - **[HQPLAYER_KNOWLEDGE_BASE.md](HQPLAYER_KNOWLEDGE_BASE.md)** — a reference
-  for people, compiled from the HQPlayer 5 manual
-  - Distilled from the official manual
+  for people
+  - The filter and modulator lists HQPlayer 6.2.3 reports at runtime
   - Every DSP setting explained
-  - Recommendations per scenario
-  - Algorithms for choosing settings automatically
+  - The advice that has a source — the manual, the author's dated posts —
+    attributed; it ranks nothing
 
 ### 📖 Official manuals
 
@@ -84,8 +84,8 @@ mode lists it reads live through `hqplayer_get_settings`.
 
 2. **Audio-processing knowledge** (HQPLAYER_KNOWLEDGE_BASE.md)
    - What PCM/DSD are
-   - Which filter serves which purpose
-   - How to choose settings
+   - What HQPlayer says about each filter and modulator
+   - What the manual and the author advise, with the source
 
 3. **The official manual** (see HQPLAYER_MANUALS.md)
    - Detailed technical descriptions

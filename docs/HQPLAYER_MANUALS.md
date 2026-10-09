@@ -11,11 +11,10 @@ redistributed in this repository. Get them from the vendor:
 What Sautium keeps in-tree is its own, independently written material:
 
 - `HQPLAYER_KNOWLEDGE_BASE.md` — a structured reference for people (filters,
-  modulators, shapers, rates, per-scenario recommendations), compiled from
-  the HQPlayer 5 manual; the assistant reads the live lists from HQPlayer,
-  not this file.
-  Checked 2026-09-12 against both manuals: no manual prose appears verbatim;
-  the only overlap is filter names and genre labels inside the tables.
+  modulators, shapers, rates): the lists as HQPlayer 6.2.3 reports them at
+  runtime, and the manual's and the author's advice, attributed — it ranks
+  nothing. The assistant reads the live lists from HQPlayer, not this file.
+  The manual is paraphrased with its version and section, never quoted.
 - `HQPLAYER_INTEGRATION.md` — the control protocol as Sautium uses it.
 - `../HQPLAYER_QUICKSTART.md`, `../DSP_CONTROLS_SUMMARY.md`.
 

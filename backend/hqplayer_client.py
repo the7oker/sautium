@@ -803,8 +803,10 @@ class HQPlayerClient:
             List of dicts with: index, name, value, arg, description
             `description` is HQPlayer 6's own line for the filter (its rating,
             focus and ratio); empty string on HQP5.
-            Example: [{"index": 6, "name": "poly-sinc-lp", "value": 0, "arg": 2,
-                       "description": "4/5 space ⥣ Any"}, ...]
+            Example, SDM mode on engine 6.2.3: [{"index": 6, "name": "poly-sinc-lp",
+                       "value": 0, "arg": 2, "description": "4/5 space ⥣ Any"}, ...]
+            PCM mode lists the same filter as index 7, value 6, "4/5 space ⥮ Any":
+            the index, the value and the arrow belong to the mode.
         """
         response = self._execute_command("GetFilters")
         if response is None or response.tag != "GetFilters":

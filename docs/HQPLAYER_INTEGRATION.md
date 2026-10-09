@@ -281,10 +281,9 @@ The scale is a classic VU's geometry — deflection proportional to amplitude,
 falls 20 dB in 1.5 s. OVER lights while it is above 0 dBTP; Max holds the
 highest peak since the sheet opened (Reset, or a change of the gain each
 reading carries — a volume step, another track's adaptive gain — clears it);
-Limited is `limited`, counted from the last volume step. In SDM mode an amber arc marks −3…0 dBTP: the manual asks for 3 dB of
-room for the modulator (§2.15), and on Desktop 6.2.3 the EC modulators
-stalled HQPlayer from −0.5…0 dBFS (2026-10-07). The design reference is
-`docs/design/reference/hqp-meter/`.
+Limited is `limited`, counted from the last volume step. In SDM mode an amber
+arc marks −3…0 dBTP: the manual asks for 3 dB of room for the modulator
+(§2.15). The design reference is `docs/design/reference/hqp-meter/`.
 
 The socket to 4322 exists only while some page shows the sheet
 (`playback.hqp_meter`). A page states its wish with `PUT /api/hqplayer/meter
