@@ -1289,10 +1289,14 @@ def _scan_worker(limit: Optional[int], skip_existing: bool, subpath: Optional[st
             # An empty walk scanned nothing: no post-import pass, no prune and
             # no "Last scan" stamp, which the Library screen would show as a
             # scan that happened. Over a catalog that knows files it is the
-            # folder gone mid-run — scan_start refuses it up front.
-            from routers.settings import music_folder_unreachable
-            state["progress"] = ("Scan failed: music folder unreachable"
-                                 if music_folder_unreachable() else "No audio files found")
+            # folder gone mid-run — scan_and_import refuses one gone before.
+            from scanner import UNREACHABLE, library_unreachable
+            if library_unreachable():
+                from db_pool import db_execute
+                db_execute("NOTIFY sautium_notices")   # the notice's onset, seen here
+                state["progress"] = f"Scan failed: {UNREACHABLE}"
+            else:
+                state["progress"] = "No audio files found"
         else:
             from canon import post_import
             from routers.settings import notices_recheck
@@ -1369,13 +1373,13 @@ async def scan_start(
 ) -> Dict[str, Any]:
     """Start library scan as a background task. Poll /scan/status for progress."""
     from playback import hqp_benchmark
-    from routers.settings import music_folder_unreachable
+    from scanner import UNREACHABLE, library_unreachable
     if hqp_benchmark.measures_here():
         raise HTTPException(status_code=409, detail=hqp_benchmark.HERE_BUSY)
-    if music_folder_unreachable():
-        raise HTTPException(status_code=409, detail=(
-            f"{settings.library_db_root()} is empty or not mounted — nothing was "
-            "scanned. Scan again once the folder is back."))
+    if library_unreachable():
+        from db_pool import db_execute
+        db_execute("NOTIFY sautium_notices")   # the notice's onset, seen here
+        raise HTTPException(status_code=409, detail=UNREACHABLE)
     with _scan_lock:
         if _scan_state["running"]:
             raise HTTPException(status_code=409, detail="Scan already running")

@@ -11093,7 +11093,7 @@
   };
   NOTICE_COPY['library.mount_missing'] = n => ({
     title: 'Music folder unreachable',
-    text: `<span class="num">${escapeHtml((n.data && n.data.path) || '')}</span> is empty or not mounted — your own tracks cannot play until it is back.`,
+    text: `<span class="num">${escapeHtml(fmtPathForDisplay((n.data && n.data.path) || ''))}</span> is empty or not mounted — your own tracks cannot play until it is back.`,
   });
   // The same failure on three plays in a row (playback/hqp_diagnostics.py):
   // the output, not a track. The facts come from the server; the words here.
@@ -14392,6 +14392,17 @@
   }
 
   /* ============ Library screen — #more/library ============ */
+  // The library.mount_missing condition explained where it bites: a scan here
+  // would walk an empty folder, so the server refuses one. Painted from the
+  // library state on render, then kept in step with the notice set.
+  function paintMusicPathRow(row, missing) {
+    row.classList.toggle('notice-row', missing);
+    row.classList.toggle('kind-error', missing);
+    row.querySelector('.row-stack-sub').textContent = missing
+      ? 'Empty or not mounted — your own tracks cannot play or be scanned until it is back.'
+      : 'Configured in the launcher.';
+  }
+
   async function renderLibrary(root) {
     let lib = null;
     try {
@@ -14421,9 +14432,6 @@
     const isPathSet     = !!(lib.music_path && lib.music_path !== '/music');
     const pathFull      = isPathSet ? fmtPathForDisplay(lib.music_path) : '';
     const path          = isPathSet ? fmtPathTruncatedFromStart(pathFull) : 'Not set';
-    // The library.mount_missing condition, explained where it bites: a scan
-    // here would walk an empty folder, so the server refuses one.
-    const mountMissing  = !!lib.mount_missing;
 
     const scanCancelling   = scanRunning   && !!(lib.scan   && lib.scan.cancel_requested);
     const enrichCancelling = enrichRunning && !!(lib.enrich && lib.enrich.cancel_requested);
@@ -14516,14 +14524,12 @@
         ${_settingsHeader('Library')}
 
         <div class="form-group" style="margin-top:calc(14*var(--px));">
-          <div class="form-row stacked${mountMissing ? ' notice-row kind-error' : ''}">
+          <div class="form-row stacked" data-music-path-row>
             <div class="row-stack">
               <span class="row-stack-label">Music path</span>
               <span class="${isPathSet ? 'path-value' : 'form-value muted'}"${isPathSet ? ` title="${escapeProfileHtml(pathFull)}"` : ''}>${escapeProfileHtml(path)}</span>
             </div>
-            <div class="row-stack-sub">${mountMissing
-              ? 'Empty or not mounted — your own tracks cannot play or be scanned until it is back.'
-              : 'Configured in the launcher.'}</div>
+            <div class="row-stack-sub"></div>
           </div>
           ${isEmpty ? '' : `
             <div class="form-row">
@@ -14547,11 +14553,12 @@
         ${actions}
       </section>
     `;
+    paintMusicPathRow(root.querySelector('[data-music-path-row]'), !!lib.mount_missing);
     _wireBack(root);
 
     const onAction = (sel, fn) => root.querySelectorAll(sel).forEach(el => el.addEventListener('click', fn));
-    // A refused start (the folder unreachable, a scan already running, the
-    // benchmark measuring) says why — it used to re-render as if it had run.
+    // A refused start says why: the folder unreachable, a scan already
+    // running, the benchmark measuring.
     const startScan = query => e => onceInFlight(e.currentTarget, async () => {
       const r = await fetch('/api/settings/library/scan' + query, { method: 'POST' });
       if (!r.ok) {
@@ -15041,6 +15048,8 @@
       // Targeted updates only — the open screen keeps its DOM.
       const note = document.querySelector('[data-discography-pending]');
       if (note) note.innerHTML = discographyPendingText();
+      const pathRow = document.querySelector('[data-music-path-row]');
+      if (pathRow) paintMusicPathRow(pathRow, !!notices.get('library.mount_missing'));
       if (parseHash().startsWith('more/sync')) {
         const content = screenRoot() && screenRoot().querySelector('[data-sync-content]');
         if (content) {

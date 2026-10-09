@@ -28,7 +28,7 @@ from models import (
     AlbumVariant, MediaFile, HqpLibraryFile, Genre,
 )
 from database import get_db_context
-from db_pool import db_query
+from db_pool import db_query, db_query_one
 from uuid_utils import artist_uuid, track_uuid, album_uuid, genre_uuid, is_lossless as check_lossless
 from album_identity import assign_dir_albums
 from canon.identity import ORPHAN_TRACK_SQL, elect_analysis_source
@@ -49,6 +49,30 @@ _ALBUM_GENRE_UPSERT = text("""
 
 # Supported audio extensions
 AUDIO_EXTENSIONS = {'.flac', '.ape', '.wav', '.aiff', '.wv', '.tta', '.dsf', '.dff', '.mp3', '.ogg', '.m4a'}
+
+# A Docker bind is fixed when its container starts: a drive reconnected under
+# a running node stays invisible to it until the restart.
+UNREACHABLE = ("The music folder is empty or not mounted, so nothing was scanned. "
+               "Reconnect it and scan again — a Docker node sees it again only "
+               "after a restart.")
+
+
+def library_unreachable() -> bool:
+    """The library path is set but holds nothing while the catalog knows
+    owned files: a drvfs mount that dropped under a running node, a forgotten
+    drive, a Docker bind that came up on an empty directory. An unreadable
+    path counts as empty; no folder chosen yet is not this. The one rule
+    behind the library.mount_missing notice, Library's Music path row, the
+    scan's refusal and the prune's last check — a walk over such a folder
+    finds nothing and reads as a scan, or as every file deleted."""
+    root = settings.music_library_path
+    if not root or not db_query_one("SELECT 1 AS x FROM media_files LIMIT 1"):
+        return False
+    try:
+        with os.scandir(root) as it:
+            return next(it, None) is None
+    except OSError:
+        return True
 
 
 @dataclass(frozen=True)
@@ -743,6 +767,9 @@ class LibraryScanner:
         def _cancelled() -> bool:
             return cancel_check and cancel_check()
 
+        if library_unreachable():
+            raise RuntimeError(UNREACHABLE)
+
         # ── Discover files ──────────────────────────────────────────
         if progress_cb:
             progress_cb("Discovering files...", stats)
@@ -1031,11 +1058,11 @@ def prune_missing_files(
             return stats
         disk_paths = {settings.translate_to_host_path(str(fp.absolute())) for fp in disk_files}
 
-    # An empty tree is an unmounted library (E:/Music rides a drvfs mount that
-    # does not survive a host shutdown), never a library the owner emptied —
-    # and every DB record would read as missing.
-    if not disk_paths:
-        logger.error("Prune aborted: discovery found no audio files under "
+    # An empty tree is an unmounted library, never a library the owner emptied
+    # — every DB record would read as missing. The folder is asked again right
+    # before the delete: a drive that left during the walk handed in a part.
+    if not disk_paths or library_unreachable():
+        logger.error("Prune aborted: no audio files under "
                      f"{settings.music_library_path} — library not mounted?")
         if progress_cb:
             progress_cb("Prune skipped: no files found on disk")

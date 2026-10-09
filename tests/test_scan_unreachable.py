@@ -1,16 +1,19 @@
 """A scan never reports a walk over an unreachable music folder as a scan
-(routers.settings.music_folder_unreachable — the rule the library.mount_missing
-notice and the Library screen read): scan_start refuses it, and a walk that
-found nothing records nothing. On 2026-10-09 a Docker bind that came up on an
-empty directory turned "Scan for new" into "Scan complete" and a fresh "Last
-scan" while the new album sat on the drive nothing had mounted.
+(scanner.library_unreachable — the rule the library.mount_missing notice, the
+Library screen and the prune read): every entry point refuses it, a walk that
+found nothing records nothing, and a prune handed a partial tree deletes
+nothing once the folder is gone. On 2026-10-09 a Docker bind that came up on
+an empty directory turned "Scan for new" into "Scan complete" and a fresh
+"Last scan" while the new album sat on the drive nothing had mounted.
 
 On a real PostgreSQL — a throwaway database built from the migrations, the
-connection pool pointed at it. Skipped where there is no cluster.
+connection pool AND the SQLAlchemy sessions pointed at it, so not even a
+regressed prune can reach the node's own catalog. Skipped where there is no
+cluster.
 """
 
 import asyncio
-import os
+import select
 import sys
 import uuid
 from pathlib import Path
@@ -24,28 +27,15 @@ if str(BACKEND) not in sys.path:
 psycopg2 = pytest.importorskip("psycopg2")
 settings_router = pytest.importorskip("routers.settings")
 
-PG = dict(host=os.environ.get("SAUTIUM_TEST_PGHOST", "postgres"),
-          port=int(os.environ.get("SAUTIUM_TEST_PGPORT", "5432")),
-          user=os.environ.get("SAUTIUM_TEST_PGUSER", "musicai"),
-          password=os.environ.get("SAUTIUM_TEST_PGPASSWORD", "supervisor"))
+import scanner  # noqa: E402
+from test_hqp_load import PG, _make_db  # noqa: E402
+
 DBNAME = "sautium_scan_unreachable_test"
 
 
 @pytest.fixture(scope="module")
 def dsn():
-    try:
-        admin = psycopg2.connect(dbname="postgres", **PG)
-    except psycopg2.OperationalError as e:
-        pytest.skip(f"no PostgreSQL for the scan test: {e}")
-    admin.autocommit = True
-    from desktop import db_init, node_backup as nb
-    nb._drop_database(admin, DBNAME)
-    with admin.cursor() as cur:
-        cur.execute(f"CREATE DATABASE {DBNAME}")
-    conn = psycopg2.connect(dbname=DBNAME, **PG)
-    db_init.apply_migrations(conn)
-    conn.commit()
-    conn.close()
+    admin, nb = _make_db(DBNAME)
     yield f"postgresql://{PG['user']}:{PG['password']}@{PG['host']}:{PG['port']}/{DBNAME}"
     nb._drop_database(admin, DBNAME)
     admin.close()
@@ -66,27 +56,51 @@ def library(tmp_path, monkeypatch):
 
 @pytest.fixture
 def cur(dsn, monkeypatch):
+    import database
     import db_pool
     import psycopg2.pool
+    from sqlalchemy.orm import sessionmaker
     pool = psycopg2.pool.ThreadedConnectionPool(1, 2, dsn=dsn)
     monkeypatch.setattr(db_pool, "_pool", pool)
+    engine = database.make_engine(dsn)
+    monkeypatch.setattr(database, "SessionLocal",
+                        sessionmaker(autocommit=False, autoflush=False, bind=engine))
+    # The notice's onset is process state: each test starts with none armed.
+    monkeypatch.setattr(settings_router, "_derived_since", {})
     conn = psycopg2.connect(dsn)
     conn.autocommit = True
     with conn.cursor() as c:
-        c.execute("DELETE FROM user_settings")
-        c.execute("DELETE FROM media_files")
-        c.execute("DELETE FROM album_variants")
-        c.execute("DELETE FROM albums")
-        c.execute("DELETE FROM tracks")
+        for table in ("user_settings", "media_files", "album_variants", "albums", "tracks"):
+            c.execute(f"DELETE FROM {table}")
         yield c
     conn.close()
+    engine.dispose()
     pool.closeall()
+
+
+@pytest.fixture
+def heard(dsn):
+    """What the notices channel hears from the backend."""
+    conn = psycopg2.connect(dsn)
+    conn.autocommit = True
+    with conn.cursor() as c:
+        c.execute("LISTEN sautium_notices")
+
+    def wakes(timeout=2.0):
+        if select.select([conn], [], [], timeout)[0]:
+            conn.poll()
+        got = [n.channel for n in conn.notifies]
+        conn.notifies.clear()
+        return got
+
+    yield wakes
+    conn.close()
 
 
 @pytest.fixture
 def scan_state(monkeypatch):
     monkeypatch.chdir(BACKEND)   # main mounts static/ relative to the server's directory
-    main = pytest.importorskip("main")
+    import main
     saved = dict(main._scan_state)
     yield main
     main._scan_state.clear()
@@ -103,6 +117,7 @@ def _owned_file(cur):
                 "RETURNING id", (album, album_dir))
     cur.execute("INSERT INTO media_files (track_id, album_variant_id, file_path) "
                 "VALUES (%s, %s, %s)", (track, cur.fetchone()[0], f"{album_dir}/01.flac"))
+    return album_dir
 
 
 def _last_scan(cur):
@@ -110,18 +125,23 @@ def _last_scan(cur):
     return cur.fetchone()
 
 
-def test_an_empty_folder_is_unreachable_only_while_the_catalog_knows_files(cur, library):
-    assert not settings_router.music_folder_unreachable()   # a fresh node's empty folder
+def test_an_empty_folder_is_unreachable_only_while_the_catalog_knows_files(
+        cur, library, monkeypatch):
+    from config import settings
+    assert not scanner.library_unreachable()      # a fresh node's empty folder
 
     _owned_file(cur)
-    assert settings_router.music_folder_unreachable()
+    assert scanner.library_unreachable()
 
     (library / "Electronic").mkdir()
-    assert not settings_router.music_folder_unreachable()
+    assert not scanner.library_unreachable()
 
     library.joinpath("Electronic").rmdir()
-    library.rmdir()                                          # the drive itself gone
-    assert settings_router.music_folder_unreachable()
+    library.rmdir()                               # the drive itself gone
+    assert scanner.library_unreachable()
+
+    monkeypatch.setattr(settings, "music_library_path", "")
+    assert not scanner.library_unreachable()      # no folder chosen yet is not "unmounted"
 
 
 def test_the_notice_names_the_folder_the_owner_knows(cur, library):
@@ -134,7 +154,8 @@ def test_the_notice_names_the_folder_the_owner_knows(cur, library):
         library.parent / "host" / "Music").as_posix()
 
 
-def test_scan_start_refuses_an_unreachable_folder(cur, library, scan_state):
+def test_scan_start_refuses_an_unreachable_folder_and_wakes_the_notices(
+        cur, library, scan_state, heard):
     from fastapi import HTTPException
     _owned_file(cur)
 
@@ -142,18 +163,43 @@ def test_scan_start_refuses_an_unreachable_folder(cur, library, scan_state):
         asyncio.run(scan_state.scan_start())
 
     assert refused.value.status_code == 409
-    assert refused.value.detail.startswith(
-        f"{(library.parent / 'host' / 'Music').as_posix()} is empty or not mounted")
+    assert refused.value.detail == scanner.UNREACHABLE
     assert scan_state._scan_state["running"] is False
+    assert heard() == ["sautium_notices"]         # every open tab learns the onset
 
 
-@pytest.mark.parametrize("catalog, progress", [
-    (True, "Scan failed: music folder unreachable"),   # the folder gone mid-run
-    (False, "No audio files found"),                   # a fresh node, an empty folder
-])
-def test_an_empty_walk_records_no_scan(cur, library, scan_state, catalog, progress):
-    if catalog:
+def test_the_cli_and_the_legacy_endpoint_refuse_as_well(cur, library):
+    _owned_file(cur)
+
+    with pytest.raises(RuntimeError, match="empty or not mounted"):
+        scanner.scan_library()
+
+
+def _empty_the_folder_during_the_walk(monkeypatch, library):
+    (library / "Electronic").mkdir()
+
+    def walk(self, **kw):
+        library.joinpath("Electronic").rmdir()
+        return [], []
+
+    monkeypatch.setattr(scanner.LibraryScanner, "find_audio_files", walk)
+
+
+@pytest.mark.parametrize("case, progress, wakes", [
+    ("gone before the walk", f"Scan failed: {scanner.UNREACHABLE}", []),
+    ("gone during the walk", f"Scan failed: {scanner.UNREACHABLE}", ["sautium_notices"]),
+    ("a fresh node's empty folder", "No audio files found", []),
+], ids=["gone-before", "gone-during", "fresh-node"])
+def test_an_empty_walk_records_no_scan(cur, library, scan_state, heard, monkeypatch,
+                                       case, progress, wakes):
+    from canon import post_import
+    if case != "a fresh node's empty folder":
         _owned_file(cur)
+    if case == "gone during the walk":
+        _empty_the_folder_during_the_walk(monkeypatch, library)
+    ran = []
+    monkeypatch.setattr(post_import, "run", lambda *a: ran.append("post_import"))
+    monkeypatch.setattr(scanner, "prune_missing_files", lambda **kw: ran.append("prune"))
     scan_state._scan_state.update(running=True, cancel_requested=False,
                                   progress="Starting scan...", stats=None, result=None)
 
@@ -161,5 +207,17 @@ def test_an_empty_walk_records_no_scan(cur, library, scan_state, catalog, progre
 
     assert scan_state._scan_state["running"] is False
     assert scan_state._scan_state["progress"] == progress
-    assert "mb_canon" not in scan_state._scan_state["result"]   # no post-import pass
+    assert ran == []                              # no post-import pass, no prune
     assert _last_scan(cur) is None
+    assert heard(timeout=0.5) == wakes
+
+
+def test_a_prune_handed_a_partial_tree_deletes_nothing_once_the_folder_is_gone(cur, library):
+    album_dir = _owned_file(cur)
+
+    # a walk that saw one file before the drive left
+    stats = scanner.prune_missing_files(disk_paths={f"{album_dir}/02.flac"})
+
+    assert stats["pruned"] == 0
+    cur.execute("SELECT count(*) FROM media_files")
+    assert cur.fetchone()[0] == 1
