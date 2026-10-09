@@ -14,7 +14,7 @@ from config import settings, LOGGING_CONFIG
 from database import get_db_context, engine
 from api_cooldown import cooling_down
 from ensemble_instruments import present_instruments
-from scanner import scan_library
+from scanner import LibraryUnreachable, scan_library
 from track_filter import get_filtered_track_ids, describe_filters, track_filter_options
 
 # Configure logging
@@ -85,10 +85,15 @@ def scan(limit, no_skip, path, prune):
         click.echo(f"   • Added: {stats['added']} tracks")
         click.echo(f"   • Skipped: {stats['skipped']} tracks")
         click.echo(f"   • Errors: {stats['errors']} files")
+        if stats['unread']:
+            click.echo(f"   • Unread folders: {stats['unread']} (named in the log)")
 
         if stats['errors'] > 0:
             click.echo(f"\n⚠️  Check logs for error details")
 
+    except LibraryUnreachable as e:
+        click.echo(f"\n❌ {e}", err=True)
+        sys.exit(1)
     except Exception as e:
         click.echo(f"\n❌ Error: {e}", err=True)
         logger.exception("Scan failed")
@@ -102,12 +107,14 @@ def scan(limit, no_skip, path, prune):
 
             click.echo(f"   • Checked: {prune_stats['checked']} files")
             click.echo(f"   • Pruned: {prune_stats['pruned']} missing files")
+            if prune_stats['kept_unread']:
+                click.echo(f"   • Kept: {prune_stats['kept_unread']} files under folders that could not be read")
             if prune_stats['pruned'] > 0:
                 click.echo(f"   • Orphan tracks removed: {prune_stats['orphan_tracks']}")
                 click.echo(f"   • Orphan album variants removed: {prune_stats['orphan_variants']}")
                 click.echo(f"   • Orphan albums removed: {prune_stats['orphan_albums']}")
                 click.echo(f"   • Orphan artists removed: {prune_stats['orphan_artists']}")
-            else:
+            elif prune_stats['checked'] and not prune_stats['kept_unread']:
                 click.echo(f"   ✅ All files present on disk")
         except Exception as e:
             click.echo(f"\n❌ Prune error: {e}", err=True)

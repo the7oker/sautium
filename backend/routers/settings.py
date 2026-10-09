@@ -607,9 +607,12 @@ async def _library_state() -> Dict[str, Any]:
     music_path = app_settings.music_host_path or app_settings.music_library_path
 
     # The screen reads the folder's state from the notice set; opening it is
-    # a moment to look (off the loop — a dead network mount can stall it).
+    # a moment to look, both ways (off the loop — a dead network mount can
+    # stall it).
     if await asyncio.to_thread(library_unreachable):
         notices_onset("library.mount_missing")
+    else:
+        notices_recheck("library.mount_missing")
 
     return {
         "music_path":         music_path,

@@ -62,10 +62,12 @@ def _recreate(name: str, *, create: bool) -> bool:
     admin = _admin()
     if admin is None:
         return False
+    from psycopg2 import sql
+    database = sql.Identifier(name)   # quoted: the name connects exactly as spelled
     with admin.cursor() as cur:
-        cur.execute(f"DROP DATABASE IF EXISTS {name} WITH (FORCE)")
+        cur.execute(sql.SQL("DROP DATABASE IF EXISTS {} WITH (FORCE)").format(database))
         if create:
-            cur.execute(f"CREATE DATABASE {name}")
+            cur.execute(sql.SQL("CREATE DATABASE {}").format(database))
     admin.close()
     return True
 

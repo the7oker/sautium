@@ -1283,8 +1283,8 @@ def _scan_worker(limit: Optional[int], skip_existing: bool, subpath: Optional[st
             progress_cb=progress_cb, cancel_check=cancel_check,
         )
 
-        # Folders the walk could not read are named in the log; the outcome
-        # says how many, and the prune refuses the partial tree.
+        # Paths the walk could not read are named in the log; the outcome says
+        # how many, and a prune keeps what lies under them.
         unread_note = (f" — {result['unread']} folder(s) could not be read"
                        if result["unread"] else "")
         if state["cancel_requested"]:
@@ -1319,7 +1319,9 @@ def _scan_worker(limit: Optional[int], skip_existing: bool, subpath: Optional[st
                     logger.error(f"Prune failed: {e}")
                     result["prune_error"] = str(e)
 
-            state["progress"] = "Scan complete" + unread_note
+            kept = (result.get("prune") or {}).get("kept_unread")
+            state["progress"] = ("Scan complete" + unread_note
+                                 + (f"; the prune kept {kept} file(s) there" if kept else ""))
             # Persist the completion timestamp so the Library screen's
             # "Last scan" row reflects reality across backend restarts.
             try:

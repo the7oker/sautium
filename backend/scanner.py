@@ -28,7 +28,7 @@ from models import (
     AlbumVariant, MediaFile, HqpLibraryFile, Genre,
 )
 from database import get_db_context
-from db_pool import db_execute, db_query, db_query_one
+from db_pool import db_query, db_query_one
 from uuid_utils import artist_uuid, track_uuid, album_uuid, genre_uuid, is_lossless as check_lossless
 from album_identity import assign_dir_albums
 from canon.identity import ORPHAN_TRACK_SQL, elect_analysis_source
@@ -85,7 +85,8 @@ def refuse_if_unreachable() -> None:
     launcher, cli.py, a walk that came back empty). It wakes the notices
     channel: the condition's onset, seen here, reaches every open tab."""
     if library_unreachable():
-        db_execute("NOTIFY sautium_notices")
+        from routers.settings import notices_onset
+        notices_onset("library.mount_missing")
         raise LibraryUnreachable(UNREACHABLE)
 
 
@@ -635,11 +636,12 @@ class LibraryScanner:
                           extraction phase.
 
         Returns:
-            (audio file Paths, .cue file Paths, folders that could not be
-            read) — one walk collects all three. A folder the walk could not
-            read (no permission, a nested mount gone, removed mid-walk) is
-            reported, never skipped in silence: its files are missing from
-            the lists, and a prune must not read them as deleted.
+            (audio file Paths, .cue file Paths, paths that could not be
+            read) — one walk collects all three. A folder it could not list,
+            or an entry whose type it could not read (no permission, a nested
+            mount gone, removed mid-walk), is reported, never skipped in
+            silence: what it holds is missing from the lists, and a prune
+            must not read it as deleted.
         """
         if subpath:
             scan_path = self.library_path / subpath
@@ -654,22 +656,43 @@ class LibraryScanner:
         cue_files: List[Path] = []
         unread: List[str] = []
 
-        def unreadable(err: OSError) -> None:
-            logger.warning(f"Could not read {err.filename}: {err.strerror}")
-            unread.append(err.filename)
+        def unreadable(path: str, err: OSError) -> None:
+            logger.warning(f"Could not read {path}: {err.strerror}")
+            unread.append(path)
 
-        # os.walk, not Path.rglob: rglob drops a folder it may not list without
-        # a word. The names it lists beside the subfolders are the non-folders.
-        for dirpath, _dirs, names in os.walk(scan_path, onerror=unreadable):
+        # A scandir walk of its own: Path.rglob drops a folder it may not list
+        # without a word, and os.walk files a folder whose type it could not
+        # read (a stale nested mount) as a plain name. Entry types come from
+        # the directory listing, so a regular file costs no stat; a symlink is
+        # followed to its file (rglob's is_file did the same) but never into
+        # a folder.
+        folders = [str(scan_path)]
+        while folders:
             if cancel_check and cancel_check():
                 logger.info("Discovery cancelled by user")
                 break
-            for name in names:
-                suffix = os.path.splitext(name)[1].lower()
+            folder = folders.pop()
+            try:
+                with os.scandir(folder) as it:
+                    entries = list(it)
+            except OSError as err:
+                unreadable(folder, err)
+                continue
+            for entry in entries:
+                try:
+                    if entry.is_dir(follow_symlinks=False):
+                        folders.append(entry.path)
+                        continue
+                    if not entry.is_file():      # a FIFO, a socket, a dangling link
+                        continue
+                except OSError as err:
+                    unreadable(entry.path, err)
+                    continue
+                suffix = os.path.splitext(entry.name)[1].lower()
                 if suffix in AUDIO_EXTENSIONS:
-                    audio_files.append(Path(dirpath, name))
+                    audio_files.append(Path(entry.path))
                 elif suffix == ".cue":
-                    cue_files.append(Path(dirpath, name))
+                    cue_files.append(Path(entry.path))
             if limit and len(audio_files) >= limit:
                 del audio_files[limit:]
                 break
@@ -815,8 +838,8 @@ class LibraryScanner:
 
         # The prune that closes a scan run reconciles this very tree, and the
         # walk costs ~6 min on the reference library over drvfs. Hand it this
-        # one, with the folders it could not read — the prune refuses a partial
-        # tree. A limited scan truncates the list, so it never becomes a prune
+        # one, with the paths it could not read — the prune keeps what lies
+        # under them. A limited scan truncates the list, so it never becomes a prune
         # input — everything outside the limit would read as deleted.
         self.last_disk_paths = None if limit else {
             settings.translate_to_host_path(str(fp.absolute())) for fp in audio_files
@@ -1071,15 +1094,15 @@ def prune_missing_files(
 
     disk_paths lets a caller that has just walked the tree hand its result in
     (see LibraryScanner.scan_and_import) instead of paying for a second walk,
-    with `unread`, the folders that walk could not read: a partial tree is
-    refused, whoever walked it.
+    with `unread`, the paths that walk could not read: whatever lies under
+    them keeps its rows, whoever walked the tree.
 
     cancel_check is forwarded to find_audio_files so a Cancel tap takes
     effect during the slow disk-discovery phase.
     """
     from sqlalchemy import text
 
-    stats = {"checked": 0, "pruned": 0, "orphan_tracks": 0,
+    stats = {"checked": 0, "pruned": 0, "kept_unread": 0, "orphan_tracks": 0,
              "orphan_variants": 0, "orphan_albums": 0, "orphan_artists": 0}
 
     if disk_paths is None:
@@ -1093,14 +1116,14 @@ def prune_missing_files(
             return stats
         disk_paths = {settings.translate_to_host_path(str(fp.absolute())) for fp in disk_files}
 
-    # A folder the walk could not read is missing its files here, and every
-    # row under it would read as deleted.
-    if unread:
-        logger.error(f"Prune aborted: {len(unread)} folder(s) could not be read, "
-                     f"e.g. {unread[0]}")
-        if progress_cb:
-            progress_cb(f"Prune skipped: {len(unread)} folder(s) could not be read")
-        return stats
+    # What the walk could not read keeps its rows: a folder it could not list
+    # is missing its files here, and they would read as deleted. The rest of
+    # the tree is pruned as usual — a folder nobody may read (a volume's
+    # System Volume Information, lost+found) must not stop the prune for good.
+    unverified = [settings.translate_to_host_path(p) for p in unread]
+    if unverified:
+        logger.warning(f"Prune keeps what {len(unverified)} unread path(s) hold, "
+                       f"e.g. {unverified[0]}")
 
     # An empty tree is an unmounted library, never a library the owner emptied
     # — every DB record would read as missing. The folder is asked again right
@@ -1124,9 +1147,13 @@ def prune_missing_files(
 
         missing_ids = []
         for mf_id, file_path in all_files:
-            if file_path not in disk_paths:
-                missing_ids.append(mf_id)
-                logger.info(f"Missing: {file_path}")
+            if file_path in disk_paths:
+                continue
+            if any(file_path == u or file_path.startswith(u + "/") for u in unverified):
+                stats["kept_unread"] += 1
+                continue
+            missing_ids.append(mf_id)
+            logger.info(f"Missing: {file_path}")
 
         if not missing_ids:
             logger.info("Prune: no missing files found")

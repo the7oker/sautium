@@ -147,7 +147,8 @@ def test_the_notice_names_the_folder_the_owner_knows(cur, library):
         library.parent / "host" / "Music").as_posix()
 
 
-def test_opening_the_library_wakes_the_notices_once(cur, library, main_module, heard):
+def test_opening_the_library_wakes_the_notices_on_the_onset_and_the_return(
+        cur, library, main_module, heard):
     _owned_file(cur)
 
     asyncio.run(settings_router._library_state())
@@ -156,6 +157,10 @@ def test_opening_the_library_wakes_the_notices_once(cur, library, main_module, h
     settings_router._notices_state()              # the snapshot that wake asked for
     asyncio.run(settings_router._library_state())
     assert heard(timeout=0.5) == []               # shown already: no wake per read
+
+    (library / "Electronic").mkdir()              # the folder is back
+    asyncio.run(settings_router._library_state())
+    assert heard() == ["sautium_notices"]         # the shown notice is taken down
 
 
 def test_scan_start_refuses_an_unreachable_folder_and_wakes_the_notices(
@@ -170,6 +175,11 @@ def test_scan_start_refuses_an_unreachable_folder_and_wakes_the_notices(
     assert refused.value.detail == scanner.UNREACHABLE
     assert main_module._scan_state["running"] is False
     assert heard() == ["sautium_notices"]         # every open tab learns the onset
+
+    settings_router._notices_state()              # the notice is shown now
+    with pytest.raises(HTTPException):
+        asyncio.run(main_module.scan_start())
+    assert heard(timeout=0.5) == []               # a second tap wakes nobody again
 
 
 def test_the_cli_and_the_legacy_endpoint_refuse_as_well(cur, library, main_module, heard):
@@ -233,13 +243,14 @@ def test_a_prune_handed_a_partial_tree_deletes_nothing_once_the_folder_is_gone(c
     assert cur.fetchone()[0] == 1
 
 
-def _two_albums_one_unreadable(cur, library, monkeypatch):
-    """A/ and B/ on disk and in the catalog; B/ is a folder the node may not
-    list. The suite runs as root, which reads through any mode bits, so the
-    refusal comes from scandir itself."""
-    for album in ("A", "B"):
-        (library / album).mkdir()
-        (library / album / "01.flac").touch()
+def _albums_one_unreadable_one_gone(cur, library, monkeypatch):
+    """A/ readable, B/ a folder the node may not list, C/ in the catalog but
+    deleted from the disk. The suite runs as root, which reads through any
+    mode bits, so the refusal comes from scandir itself."""
+    for album in ("A", "B", "C"):
+        if album != "C":
+            (library / album).mkdir()
+            (library / album / "01.flac").touch()
         _owned_file(cur, album)
     denied, real = str(library / "B"), os.scandir
 
@@ -252,8 +263,17 @@ def _two_albums_one_unreadable(cur, library, monkeypatch):
     return denied
 
 
-def test_the_walk_names_the_folders_it_could_not_read(cur, library, monkeypatch):
-    denied = _two_albums_one_unreadable(cur, library, monkeypatch)
+def _catalog(cur):
+    """The album folders the catalog still has files in."""
+    cur.execute("SELECT file_path FROM media_files ORDER BY file_path")
+    return [Path(p).parent.name for (p,) in cur.fetchall()]
+
+
+def test_the_walk_names_what_it_could_not_read_and_takes_regular_files_only(
+        cur, library, monkeypatch):
+    denied = _albums_one_unreadable_one_gone(cur, library, monkeypatch)
+    os.mkfifo(library / "A" / "a pipe.flac")      # opening it would block a reader for good
+    os.symlink(library / "moved away.flac", library / "A" / "dangling.flac")
 
     audio, _cues, unread = scanner.LibraryScanner().find_audio_files()
 
@@ -261,28 +281,27 @@ def test_the_walk_names_the_folders_it_could_not_read(cur, library, monkeypatch)
     assert unread == [denied]
 
 
-def test_a_rescan_that_could_not_read_a_folder_keeps_its_rows(cur, library, main_module,
-                                                             monkeypatch):
+def test_a_rescan_keeps_what_it_could_not_read_and_prunes_the_rest(
+        cur, library, main_module, monkeypatch):
     from canon import post_import
-    _two_albums_one_unreadable(cur, library, monkeypatch)
+    _albums_one_unreadable_one_gone(cur, library, monkeypatch)
     monkeypatch.setattr(post_import, "run", lambda *a: None)
     main_module._scan_state.update(running=True, cancel_requested=False,
                                    progress="Starting scan...", stats=None, result=None)
 
     main_module._scan_worker(None, True, None, True)   # Rescan: the scan, then the prune
 
-    assert main_module._scan_state["result"]["prune"]["pruned"] == 0
+    prune = main_module._scan_state["result"]["prune"]
+    assert (prune["pruned"], prune["kept_unread"]) == (1, 1)
     assert main_module._scan_state["progress"] == (
-        "Scan complete — 1 folder(s) could not be read")
-    cur.execute("SELECT count(*) FROM media_files")
-    assert cur.fetchone()[0] == 2                 # B/01.flac kept: unread is not deleted
+        "Scan complete — 1 folder(s) could not be read; the prune kept 1 file(s) there")
+    assert _catalog(cur) == ["A", "B"]            # C pruned; B unread, so kept
 
 
-def test_a_prune_that_cannot_read_a_folder_deletes_nothing(cur, library, monkeypatch):
-    _two_albums_one_unreadable(cur, library, monkeypatch)
+def test_a_prune_of_its_own_keeps_what_it_could_not_read(cur, library, monkeypatch):
+    _albums_one_unreadable_one_gone(cur, library, monkeypatch)
 
     stats = scanner.prune_missing_files()         # its own walk
 
-    assert stats["pruned"] == 0
-    cur.execute("SELECT count(*) FROM media_files")
-    assert cur.fetchone()[0] == 2
+    assert (stats["pruned"], stats["kept_unread"]) == (1, 1)
+    assert _catalog(cur) == ["A", "B"]
