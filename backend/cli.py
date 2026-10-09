@@ -103,7 +103,9 @@ def scan(limit, no_skip, path, prune):
         click.echo(f"\n🧹 Pruning missing files...")
         try:
             from scanner import prune_missing_files
-            prune_stats = prune_missing_files(subpath=path)
+            # its progress says why when it skips (no files, a folder gone)
+            prune_stats = prune_missing_files(
+                subpath=path, progress_cb=lambda msg: click.echo(f"   {msg}"))
 
             click.echo(f"   • Checked: {prune_stats['checked']} files")
             click.echo(f"   • Pruned: {prune_stats['pruned']} missing files")

@@ -27,6 +27,7 @@ from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 from sqlalchemy import text
 
+import notices
 from config import settings as app_settings
 from database import get_db_context
 from db_pool import db_execute, db_query, db_query_one, get_conn
@@ -610,9 +611,9 @@ async def _library_state() -> Dict[str, Any]:
     # a moment to look, both ways (off the loop — a dead network mount can
     # stall it).
     if await asyncio.to_thread(library_unreachable):
-        notices_onset("library.mount_missing")
+        notices.onset("library.mount_missing")
     else:
-        notices_recheck("library.mount_missing")
+        notices.recheck("library.mount_missing")
 
     return {
         "music_path":         music_path,
@@ -1099,38 +1100,10 @@ def _guidance_state() -> Dict[str, Any]:
     return {"tasks": tasks}
 
 
-# Conditions with no ledger of their own (a vanished music folder, a missing
-# binary, a silent stream provider) keep their `since` here from the moment
-# they are first observed until they are not — process memory, which is
-# enough: after a restart the condition is either gone or freshly observed.
-_derived_since: Dict[str, str] = {}
 # The binaries THIS process shells out to (analysis + provenance). `flac`
 # is launcher-side only — the Docker image never ships it, and a check
 # there would light every Docker node for nothing.
 _MEDIA_TOOLS = ("ffmpeg", "fpcalc")
-
-
-def _derived(key: str, active: bool) -> Optional[str]:
-    from datetime import datetime, timezone
-    if not active:
-        _derived_since.pop(key, None)
-        return None
-    return _derived_since.setdefault(key, datetime.now(timezone.utc).isoformat())
-
-
-def notices_recheck(key: str) -> None:
-    """A producer saw the good state again (a file served, a scan ran):
-    re-derive only if the condition is currently shown, so a healthy node
-    never pays for this."""
-    if key in _derived_since:
-        db_execute("NOTIFY sautium_notices")
-
-
-def notices_onset(key: str) -> None:
-    """A producer saw the bad state: re-derive only if the condition is not
-    shown yet, so a reader that keeps seeing it wakes the channel once."""
-    if key not in _derived_since:
-        db_execute("NOTIFY sautium_notices")
 
 
 def _notices_state() -> Dict[str, Any]:
@@ -1177,13 +1150,13 @@ def _notices_state() -> Dict[str, Any]:
                           "reason", "sources")},
             })
     from scanner import library_unreachable
-    since = _derived("library.mount_missing", library_unreachable())
+    since = notices.derived("library.mount_missing", library_unreachable())
     if since:
         items.append({"key": "library.mount_missing", "kind": "error",
                       "since": since, "until": None,
                       "data": {"path": app_settings.library_db_root()}})
     missing = [t for t in _MEDIA_TOOLS if not shutil.which(t)]
-    since = _derived("tools.missing", bool(missing))
+    since = notices.derived("tools.missing", bool(missing))
     if since:
         items.append({"key": "tools.missing", "kind": "warning",
                       "since": since, "until": None, "data": {"tools": missing}})

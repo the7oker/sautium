@@ -16,6 +16,7 @@ from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import Response, StreamingResponse
 
 import media_urls
+import notices
 from config import settings
 from db_pool import db_execute, db_query_one
 from streaming import transcode
@@ -43,7 +44,6 @@ def _range_headers(start: int, end: int, total: int, mime: str) -> dict:
 
 def _serve_disk(path: str, mime: str, request: Request):
     """Range-stream a file on disk (owned original, or a cached Opus transcode)."""
-    from routers.settings import notices_recheck
     try:
         total = os.path.getsize(path)
     except OSError:
@@ -51,7 +51,7 @@ def _serve_disk(path: str, mime: str, request: Request):
         # visible: let the notices channel re-derive and say so.
         db_execute("NOTIFY sautium_notices")
         raise HTTPException(status_code=404, detail="file missing on disk")
-    notices_recheck("library.mount_missing")   # served = the folder is back
+    notices.recheck("library.mount_missing")   # served = the folder is back
     span = parse_byte_range(request.headers.get("range"), total)
     if span is UNSATISFIABLE:
         return _unsatisfiable(total)

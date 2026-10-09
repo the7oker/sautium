@@ -29,6 +29,7 @@ if str(BACKEND) not in sys.path:
 psycopg2 = pytest.importorskip("psycopg2")
 settings_router = pytest.importorskip("routers.settings")
 
+import notices  # noqa: E402
 import scanner  # noqa: E402
 
 
@@ -57,7 +58,7 @@ def cur(scratch_dsn, monkeypatch):
     monkeypatch.setattr(database, "SessionLocal",
                         sessionmaker(autocommit=False, autoflush=False, bind=engine))
     # The notice's onset is process state: each test starts with none armed.
-    monkeypatch.setattr(settings_router, "_derived_since", {})
+    monkeypatch.setattr(notices, "_derived_since", {})
     conn = psycopg2.connect(scratch_dsn)
     conn.autocommit = True
     with conn.cursor() as c:
@@ -279,6 +280,48 @@ def test_the_walk_names_what_it_could_not_read_and_takes_regular_files_only(
 
     assert audio == [library / "A" / "01.flac"]
     assert unread == [denied]
+
+
+def test_a_folder_with_an_entry_it_cannot_type_is_left_out_whole(library, monkeypatch):
+    album = library / "CUE"
+    album.mkdir()
+    (album / "image.flac").touch()
+    (album / "image.cue").touch()
+    real = os.scandir
+
+    class Untypable:
+        """The cue as a stale mount lists it: a name whose type is EIO."""
+        def __init__(self, entry):
+            self._entry = entry
+
+        def __getattr__(self, attr):
+            return getattr(self._entry, attr)
+
+        def is_dir(self, follow_symlinks=True):
+            raise OSError(errno.EIO, "Input/output error", self._entry.path)
+
+        is_file = is_dir
+
+    class Listing:
+        def __init__(self, path):
+            self._it = real(path)
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *exc):
+            self._it.close()
+
+        def __iter__(self):
+            return (Untypable(e) if e.name == "image.cue" else e for e in self._it)
+
+    monkeypatch.setattr(os, "scandir",
+                        lambda path=".": Listing(path) if os.fspath(path) == str(album) else real(path))
+
+    audio, cues, unread = scanner.LibraryScanner().find_audio_files()
+
+    # never the image without its cue: imported whole, it would supersede its slices
+    assert (audio, cues, unread) == ([], [], [str(album)])
 
 
 def test_a_rescan_keeps_what_it_could_not_read_and_prunes_the_rest(

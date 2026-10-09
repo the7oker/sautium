@@ -1297,9 +1297,9 @@ def _scan_worker(limit: Optional[int], skip_existing: bool, subpath: Optional[st
             refuse_if_unreachable()
             state["progress"] = "No audio files found" + unread_note
         else:
+            import notices
             from canon import post_import
-            from routers.settings import notices_recheck
-            notices_recheck("library.mount_missing")   # walked = the folder is back
+            notices.recheck("library.mount_missing")   # walked = the folder is back
             post_import.run(state, result, _scan_started)
 
             if prune and not state["cancel_requested"]:
