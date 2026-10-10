@@ -36,7 +36,7 @@ from playback.manager import OutputHeld, active_hqp_endpoint, manager
 from playback.queue import resolved_artwork as _resolved_artwork
 from playback.queue import resolved_durations as _resolved_durations
 from playback.sessions import _SESSION_ORIGINS
-from sql_queries import ALBUM_FILES, TRACK_FILES, best_rip_order, owned_rank
+from sql_queries import ALBUM_FILES, TRACK_FILES, best_rip_order, owned_rank, rip_quality
 
 logger = logging.getLogger(__name__)
 
@@ -1275,9 +1275,6 @@ def _preview_now_playing_detail(track_id: str, provider: Optional[str],
         # natively there — its format and resolution are the badge, as an
         # owned file's are; the analysis is the track's, keyed by uuid.
         row.update(held)
-        sr, bd = held.get("sample_rate") or 0, held.get("bit_depth") or 0
-        row["quality"] = ("hi-res" if held.get("is_lossless") and sr >= 48000 and bd >= 24
-                          else "lossless" if held.get("is_lossless") else "lossy")
     else:
         row["quality"] = _stream_quality(provider)
     row["provider_cover_url"] = _resolved_artwork.get(track_id)
@@ -1294,9 +1291,10 @@ def _held_copy(track_id: str) -> Optional[dict]:
              if it.track_id == track_id and it.source.get("kind") == "hqp"]
     if hqp_id is None and not paths:
         return None
-    return _db_query_one("""
+    return _db_query_one(f"""
         SELECT hf.file_format, hf.is_lossless, hf.sample_rate, hf.bit_depth,
-               hf.duration_seconds
+               hf.duration_seconds,
+               {rip_quality('hf.is_lossless', 'hf.sample_rate', 'hf.bit_depth')} AS quality
         FROM hqp_library_files hf
         JOIN album_variants av ON av.id = hf.album_variant_id
         WHERE hf.track_id = %(tid)s::uuid
@@ -1367,7 +1365,7 @@ def now_playing_detail(media_file_id: int = None, track_id: str = None,
         return _preview_now_playing_detail(track_id, provider, album_id)
     if not media_file_id:
         raise HTTPException(status_code=400, detail="media_file_id or track_id required")
-    row = _db_query_one("""
+    row = _db_query_one(f"""
         SELECT mf.id AS media_file_id,
                mf.track_id::text AS track_id,
                mf.cover_id::text AS cover_id,
@@ -1375,6 +1373,7 @@ def now_playing_detail(media_file_id: int = None, track_id: str = None,
                mf.is_lossless,
                mf.sample_rate,
                mf.bit_depth,
+               {rip_quality('mf.is_lossless', 'mf.sample_rate', 'mf.bit_depth')} AS quality,
                mf.duration_seconds,
                t.title,
                af.bpm,
@@ -1417,15 +1416,6 @@ def now_playing_detail(media_file_id: int = None, track_id: str = None,
         WHERE ta.track_id = %(t)s::uuid
         LIMIT 1
     """, {"t": row["track_id"]})
-
-    sr = row.get("sample_rate") or 0
-    bd = row.get("bit_depth") or 0
-    if row.get("is_lossless") and sr >= 48000 and bd >= 24:
-        row["quality"] = "hi-res"
-    elif row.get("is_lossless"):
-        row["quality"] = "lossless"
-    else:
-        row["quality"] = "lossy"
 
     return row
 

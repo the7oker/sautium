@@ -13,14 +13,9 @@ from fastapi import APIRouter, HTTPException
 
 from db_pool import db_query, db_query_one
 from release_groups import release_group_cluster, simplify_edition_name
+from sql_queries import rip_quality
 
 router = APIRouter(prefix="/api/release-groups", tags=["release-groups"])
-
-
-def _quality(row: dict) -> str:
-    if row["lossless"] and (row["sr"] or 0) >= 48000 and (row["bd"] or 0) >= 24:
-        return "hi-res"
-    return "lossless" if row["lossless"] else "lossy"
 
 
 @router.get("/{group_id}")
@@ -31,7 +26,7 @@ def get_release_group(group_id: str) -> dict:
 
     # One pass over the cluster's edition rows — quality / track-count / cover
     # subqueries mirror routers/albums.py so an edition reads like a mini album.
-    rows = db_query("""
+    rows = db_query(f"""
         SELECT al.id::text AS album_id, al.title, al.release_year AS year,
                al.cover_url, al.musicbrainz_id::text AS rg_mbid,
                -- the variants' release label names the row only when every
@@ -52,9 +47,10 @@ def get_release_group(group_id: str) -> dict:
                 FROM media_files mf JOIN album_variants av ON av.id = mf.album_variant_id
                 WHERE av.album_id = al.id
                 ORDER BY mf.disc_number, mf.track_number LIMIT 1) AS media_file_id,
-               (SELECT bool_or(av.is_lossless) FROM album_variants av WHERE av.album_id = al.id) AS lossless,
-               (SELECT max(av.sample_rate) FROM album_variants av WHERE av.album_id = al.id) AS sr,
-               (SELECT max(av.bit_depth) FROM album_variants av WHERE av.album_id = al.id) AS bd
+               (SELECT {rip_quality('bool_or(av.is_lossless)',
+                                    'max(av.sample_rate) FILTER (WHERE av.is_lossless)',
+                                    'max(av.bit_depth) FILTER (WHERE av.is_lossless)')}
+                FROM album_variants av WHERE av.album_id = al.id) AS quality
         FROM albums al
         WHERE al.id = ANY(%(ids)s::uuid[])
     """, {"ids": ids})
@@ -90,7 +86,7 @@ def get_release_group(group_id: str) -> dict:
             "edition_name": name,
             "track_count": int(r["track_count"] or 0),
             "year": r["year"],
-            "quality": _quality(r),
+            "quality": r["quality"],
             "cover_id": r["cover_id"],
             "media_file_id": r["media_file_id"],
             "cover_url": r["cover_url"],

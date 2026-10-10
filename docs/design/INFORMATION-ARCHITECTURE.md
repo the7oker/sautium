@@ -870,7 +870,7 @@ or is a thin query over existing data.
 |-------|------------|-----------|
 | Track title / artist / album | `tracks` + `track_artists` + `albums` joins | — |
 | Progress / duration | the status tick on `/api/events`, whichever output is active; a tap or drag on the bar seeks (POST `/api/player/seek`) | — |
-| Quality badge | `media_files.is_lossless` + `bit_depth` + `sample_rate` (Hi-Res = ≥ 96k/24bit lossless); a streamed track: the serving provider's tier (`/now-playing-detail`), plus `[30s]` from the status `excerpt` flag | — |
+| Quality badge | `media_files.is_lossless` + `bit_depth` + `sample_rate` (Hi-Res = lossless past CD on either axis, > 16-bit or > 48 kHz — 24/44.1 and DSD included; `sql_queries.rip_quality`, since 2026-10-10); a streamed track: the serving provider's tier (`/now-playing-detail`), plus `[30s]` from the status `excerpt` flag | — |
 | Key pill, BPM, energy | `audio_features.key`, `bpm`, `energy` | — |
 | Lyrics panel | `track_lyrics` table; the button is parked (hidden since 2026-08-24) until the sheet exists, GET `/api/player/lyrics/{media_file_id}` is there | + timed-LRC support already partly present |
 | Similar tracks | GET `/api/player/similar/{track_uuid}` — the two-tier scorer radio drifts on (`track_similarity.py`), owned and streamable rows mixed, deterministic (since 2026-07-13; the blueprint named `/search/similar`, a mean-cosine lookup) | — |

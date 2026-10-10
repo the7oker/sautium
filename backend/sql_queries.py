@@ -67,6 +67,24 @@ def owned_rank(alias: str, style: str = "psycopg") -> str:
             f"WHEN {alias}.location = 'local' THEN 1 ELSE 2 END")
 
 
+# ---------------------------------------------------------------------------
+# What a rip's quality badge says
+# ---------------------------------------------------------------------------
+# Hi-res is lossless past CD on either axis — more than 16 bits, or more than
+# 48 kHz: JEITA's definition, and the one the hi-res stores label by. A 24/44.1
+# rip is hi-res and so is DSD (1 bit at MHz rates); 16/48 (DAT) is CD-class.
+# Every badge — the album header, an edition card, Now Playing — is this one
+# expression, so no two can call the same file different things.
+
+def rip_quality(lossless: str, sample_rate: str, bit_depth: str) -> str:
+    """SQL expression naming a rip 'hi-res', 'lossless' or 'lossy' from its
+    three columns. Over several rips pass BOOL_OR of the flag and the maxima
+    of the lossless ones only (`MAX(...) FILTER (WHERE is_lossless)`): either
+    axis alone makes a rip hi-res, so the best rip decides."""
+    return (f"CASE WHEN {lossless} AND ({bit_depth} > 16 OR {sample_rate} > 48000) "
+            f"THEN 'hi-res' WHEN {lossless} THEN 'lossless' ELSE 'lossy' END")
+
+
 # One track's files (%(tid)s) from both places files live — the per-track
 # form of ALBUM_FILES below, for a play/queue by track uuid.
 TRACK_FILES = """

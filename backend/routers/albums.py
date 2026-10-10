@@ -22,7 +22,7 @@ from fastapi import APIRouter, HTTPException, Query
 from db_pool import db_query, db_query_one
 from genre_queries import album_genre_chips
 from playback.manager import active_hqp_endpoint
-from sql_queries import ALBUM_FILES, best_rip_order, owned_rank
+from sql_queries import ALBUM_FILES, best_rip_order, owned_rank, rip_quality
 
 
 router = APIRouter(prefix="/api/albums", tags=["albums"])
@@ -335,22 +335,15 @@ def get_album(
     # every picked file came from, NULL when the default mixed several.
     qrow = db_query_one(f"""
         WITH picked AS ({_PICKED_FILES})
-        SELECT BOOL_OR(is_lossless)          AS lossless,
-               MAX(sample_rate)              AS sr_max,
-               MAX(bit_depth)                AS bd_max,
+        SELECT {rip_quality('BOOL_OR(is_lossless)',
+                            'MAX(sample_rate) FILTER (WHERE is_lossless)',
+                            'MAX(bit_depth) FILTER (WHERE is_lossless)')} AS quality,
                SUM(duration_seconds)         AS total_duration,
                CASE WHEN COUNT(DISTINCT album_variant_id) = 1
                     THEN MIN(album_variant_id) END AS variant_id
         FROM picked
     """, params)
-    sr = qrow["sr_max"] or 0
-    bd = qrow["bd_max"] or 0
-    if qrow["lossless"] and sr >= 48000 and bd >= 24:
-        album["quality"] = "hi-res"
-    elif qrow["lossless"]:
-        album["quality"] = "lossless"
-    else:
-        album["quality"] = "lossy"
+    album["quality"] = qrow["quality"]
     album["total_duration"] = float(qrow["total_duration"] or 0)
 
     # Album-grain genres (deduped across filetag/mb, ranked by count), falling
