@@ -58,6 +58,8 @@ from typing import Dict, List, Optional, Tuple
 import numpy as np
 from scipy.signal import resample_poly
 
+from hqplayer_client import connect_address
+
 logger = logging.getLogger(__name__)
 
 _HEAD = struct.Struct("<IIIiffff")
@@ -418,7 +420,7 @@ class HqpMeter:
     def _session(self, target: Tuple[str, int], generation: int) -> None:
         host, port = target
         try:
-            sock = socket.create_connection(target, timeout=CONNECT_TIMEOUT_S)
+            sock = socket.create_connection((connect_address(host), port), timeout=CONNECT_TIMEOUT_S)
         except ConnectionRefusedError:
             self._fail(generation, "refused", port, f"{host}:{port} refused the connection")
             return

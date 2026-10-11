@@ -66,8 +66,8 @@ class ReorderPlan:
     new_after: list
     order: list                         # full new order of media_file_ids
     items_by_id: dict                   # media_file_id -> QueueItem (URI derivation)
-    position: int = 0                   # rebuild: resume seek position
-    resume: bool = False                # rebuild: resume playback after select
+    position: int = 0                   # rebuild: the second it resumes at
+    resume: bool = False                # rebuild: play on (it was playing), else the play press resumes
 
 
 class PlayerBackend(ABC):

@@ -49,6 +49,7 @@ from caa import fill_held_album_covers
 from canon.identity import ORPHAN_TRACK_SQL
 from database import get_db_context
 from db_pool import db_execute, db_query
+from hqplayer_client import connect_address
 from scanner import AUDIO_EXTENSIONS, FileSink, import_metadata
 from uuid_utils import is_lossless
 
@@ -71,7 +72,7 @@ Entry = Tuple[str, Dict[str, Any]]
 
 def _command(host: str, port: int, xml: str, timeout: float) -> bytes:
     """One control-port command, one newline-framed line of XML back."""
-    with socket.create_connection((host, port), timeout=_CONNECT_TIMEOUT) as s:
+    with socket.create_connection((connect_address(host), port), timeout=_CONNECT_TIMEOUT) as s:
         s.settimeout(timeout)
         s.sendall(xml.encode("utf-8"))
         buf = bytearray()
@@ -129,7 +130,7 @@ def discover(host: str, port: int = 4321, timeout: float = _DISCOVER_TIMEOUT) ->
     s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
     try:
         s.settimeout(timeout)
-        s.connect((host, port))
+        s.connect((connect_address(host), port))
         s.send(b"<discover/>\n")
         deadline = time.monotonic() + timeout
         while True:

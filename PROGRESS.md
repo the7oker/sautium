@@ -574,12 +574,20 @@ implementation details live in the code, DB and git history.
   21k files of the same library as copies before it was cancelled and
   reverted (`--forget-endpoint`); `album_genres.count` for the albums that
   import touched stayed roughly doubled (no per-file record to undo it).
-- **A SelectTrack on a stopped HQPlayer needs a beat.** One second between
-  select and play on a resume (`hqp_backend.play`) — a boundary exception:
-  HQPlayer cannot say it is ready. The first client's 2 s wait after a
-  playlist load is gone. Desktop 6.2.4 disproves the premise (2026-10-11): a
-  SelectTrack starts a stopped HQPlayer by itself — no path may send one just
-  to ready a slot (a queue rebuilt while stopped sent one, and played).
+- **A SelectTrack starts a stopped HQPlayer** (Desktop 6.2.4, 2026-10-11).
+  The one-second beat between select and play on a resume rested on the
+  opposite reading and is gone: a start is a build, and Play waits for its
+  own answer. No path sends a SelectTrack just to ready a slot — a queue
+  rebuilt while stopped sent one, and played; a paused one is now left
+  stopped at its spot, resumed by the play press.
+- **A DSP change waits out a build** (2026-10-11). HQPlayer answers nothing
+  while it builds a setting and carries out afterwards what was sent
+  meanwhile, so the 5 s command client reported a long filter build as a
+  failure, and the knobs after it as "not connected", while HQPlayer applied
+  them later anyway. The end of a build is the answer to a request held on
+  the same client — a new connection is accepted all through it, and the
+  meter's first frame comes after the answer — and the one build watch
+  (`hqp_backend.BuildWatch`) holds every other command out meanwhile.
 - **Stop-clear-add-select-play sequence** for `play_track`/`play_album`. Without
   explicit stop, HQPlayer occasionally started the wrong track from the
   existing queue.

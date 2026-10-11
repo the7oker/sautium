@@ -205,12 +205,15 @@ assistant tool, no control in the Web UI (as of 2026-09-29):
 - `get_rates()` / `set_rate(index)` - Output sample rate
   - 20 rates: 2.048 MHz to 98.304 MHz (DSD)
 - `set_convolution(enabled)` - Convolution engine on/off — reached through
-  the assistant (`hqplayer_set_convolution`); the Web UI has no control for it
-- `apply_settings(mode, rate, filter, filter1x, shaper, matrix_profile)` - any
-  subset, one Set* command each, in the order HQPlayer needs (the mode decides
-  which lists the indices after it point into); returns what was applied and
-  each refusal in HQPlayer's words — the one apply core of `POST
-  /api/hqplayer/config` and the benchmark
+  the assistant (`hqplayer_set_convolution`), as the last of `DSP_KNOBS` on
+  the DSP change path (`convolution` of `POST /api/hqplayer/config`); the Web
+  UI has no control for it
+- `apply_settings(mode, rate, filter, filter1x, shaper, matrix_profile, convolution)` - any
+  subset, one Set* command each, in the order HQPlayer needs (`DSP_KNOBS`: the
+  mode decides which lists the indices after it point into); returns what was
+  applied and each refusal in HQPlayer's words — the benchmark's. `POST
+  /api/hqplayer/config` sends the same knobs in the same order through
+  `hqp_backend.change_dsp`, which waits out each knob's build (below)
 - `get_state()` - the selection as indices into the current mode's lists, plus
   `filterNx` (the Nx slot `SetFilter value` sets — `filter` read as the 1x
   slot while a 44.1 kHz source played), `filter1x`, `adaptive`,
@@ -239,6 +242,54 @@ HQPlayer logs the same reason on its side as `clControlThread::ParseMsg():
 <reason>`. A `PlaylistAdd` of a file HQPlayer cannot open may still answer OK
 and add nothing (seen on the Pi, 2026-09-27); its log then names the file in
 `clPlaylist::AddURI("<uri>"): <reason>`.
+
+### Builds: a DSP change waits one out (since 2026-10-11)
+HQPlayer answers nothing on its control port while it builds a setting — a
+filter, a modulator, a rate, and every start — and carries out what it was
+sent meanwhile once it is done, in the order it came: a command given up on
+is not withdrawn. Desktop 6.2.4 answers a `SetFilter` sent mid-play at once
+and falls silent on the command after it; a PCM filter swaps without a
+silence, an SDM one built for ten seconds on a laptop. It accepts and
+starts new connections all through a build, and the meter's first frame
+comes after the control port answers again — so neither can end the wait.
+- **Waits by command.** The command client waits for an answer as long as
+  its command may take (`hqp_backend.COMMAND_WAITS`): 5 s for a query,
+  `STOP_ANSWER_S` (15 s) for a Stop — the output's teardown, a second in
+  PCM and up to three and a half in SDM on a Mac; a short silence, never a
+  build — and `BUILD_LIMIT_S` (10 min) for what may set off a build or meet
+  one: the Set* commands, Play, SelectTrack, Seek, Next, Previous.
+- **The build watch** (`hqp_backend.BuildWatch`, one per process). An answer
+  later than `BUILDING_AFTER_S` (1 s) is HQPlayer building: the player
+  status carries `building` (since when, after which command), every other
+  command is refused with 409 "HQPlayer is building the filter", the status
+  poller says the build instead of asking, and `GET /api/hqplayer/state`
+  answers from the watch — the HQPlayer screen keeps what it read last and
+  holds its controls, Now Playing shows "Building the filter…". The build
+  ends where the late answer comes. Past `BUILD_LIMIT_S` it is
+  `unfinished` — "HQPlayer did not finish building the filter", never
+  "disconnected" — until HQPlayer answers the poller again. A detach or an
+  address change gives a build up rather than wait it out.
+- **The DSP change** (`change_dsp`, behind `/config` and the assistant's
+  filter, shaper, matrix profile and convolution tools). Each knob's Set*, then a
+  `<Status/>` held on the same client until HQPlayer answers; the next knob
+  goes only then. Past `BUILDING_AFTER_S` the change answers at once with
+  what was taken and refused so far, the knobs still to go and the build;
+  the rest follows behind the answer, and its outcome rides the player status
+  (`dsp_change`) — a knob refused there is toasted in HQPlayer's words. Built,
+  a change made while HQPlayer played resumes the spot it played only if
+  HQPlayer came back stopped (6.2.3 on Windows did; 6.2.4 plays on).
+- **A start is a build.** Play waits for its own answer; a SelectTrack starts
+  a stopped HQPlayer by itself (its log: "GoTo 1", then "Play (1/0)"), so a
+  slot is resumed as SelectTrack, then Seek — landing in the start's opening
+  run of silent frames, before anything is heard — then Play
+  (`HqpBackend._start_at`). A paused HQPlayer whose playlist is rebuilt is
+  left stopped at its spot, never played to be paused again: the status
+  carries `resume`, Now Playing says "Stopped at m:ss — Play resumes here",
+  and the play press resumes it there.
+- **Embedded answers through its builds**, saying it plays with nothing out
+  yet (`hqp_benchmark._building`, 25–70 s on a Pi 5): the poller reports that
+  as a build too, and refuses nothing — there is no silence to queue into.
+  On Desktop the same shape is only a start's opening ticks.
 
 ### Ports
 Checked with netstat on the Desktop 6 host (2026-10-02):
@@ -931,8 +982,8 @@ cooling — so Sautium measures it instead of predicting it
   DSD file, while it is still there, only when the plan has DSD-source
   points. A point is Stop → its changed knobs → State read back (the
   selection the run set last is kept on its row) → SelectTrack, then
-  `<Status/>` until it names the slot (2 s at most: a SelectTrack on a
-  stopped HQPlayer needs a beat) → Play; another entry playing is selected
+  `<Status/>` until it names the slot (2 s at most — a stopped HQPlayer plays
+  the slot it is given; the read confirms which) → Play; another entry playing is selected
   once more. Its readings count after 5 s of moving position (counted again
   when the position stalls for two ticks before them), are accepted when the
   last five stay within ±2 % of their mean with no trend (a running average

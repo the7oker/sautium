@@ -13,8 +13,10 @@ user-initiated commands never contend for the same socket / lock:
 
   * `_hqp_client` + `_hqp_lock`
       Owned by all command endpoints (play / pause / next / play-track /
-      /api/player/playlist etc). 5 s timeout for write operations that
-      may take longer to acknowledge (e.g. play-album loads many URIs).
+      /api/player/playlist etc). Each answer is waited for as long as its
+      command may take (COMMAND_WAITS): a Stop's output teardown, and a
+      build — HQPlayer answers nothing while it builds a setting, and the
+      build watch (BuildWatch) keeps every other command out meanwhile.
 
 HQPlayer's control API accepts multiple concurrent TCP clients, so the
 two sockets co-exist cleanly on the HQP side.
@@ -31,32 +33,234 @@ the address HQPlayer can reach us at (streaming.media_host), never a fixed
 one.
 """
 
+import itertools
 import logging
 import re
 import socket
 import threading
 import time
 from contextlib import contextmanager, nullcontext
-from typing import Optional
+from dataclasses import replace
+from typing import Any, Callable, Dict, Optional
 from urllib.parse import urlsplit
 
 import psycopg2
 
 from config import settings
-from hqplayer_client import (STATUS_READINGS, HQPlayerClient, PlaybackState,
-                             file_path_to_uri, redact_uri, uri_to_file_path)
+from hqplayer_client import (DSP_KNOBS, STATUS_READINGS, HQPlayerClient, PlaybackState,
+                             connect_address, file_path_to_uri, redact_uri, uri_to_file_path)
 
 from playback import hqp_diagnostics as diag
 from playback import hqp_load
 from playback import hqp_meter
 from playback import queue as queue_mod
 from playback.base import Capabilities, PlaybackStatus, PlayerBackend, ReorderPlan
+from playback.hqp_benchmark import BUILD_LIMIT_S, _building
 from playback.queue import CanonicalQueue, QueueItem
 
 logger = logging.getLogger(__name__)
 
+# -- builds ---------------------------------------------------------------------
+
+# An answer later than this is HQPlayer building a setting. A PCM filter
+# changed mid-play swaps without a silence, and a PCM start holds its answer
+# for under half a second; an SDM start builds for a second and a half, a
+# heavy SDM filter changed mid-play for ten (Desktop 6.2.4 on a laptop,
+# 2026-10-11). A hot swap stays below it.
+BUILDING_AFTER_S = 1.0
+# A Stop is answered once the output is torn down: a second in PCM, up to
+# three and a half in SDM through CoreAudio (Desktop 6.2.4, 2026-10-11), more
+# on a slower output. A short silence, never a build.
+STOP_ANSWER_S = 15.0
+# What may set off a build, or meet the silence of one set off a moment
+# before (a Seek right after the SelectTrack that starts a stopped HQPlayer):
+# their answers are waited for up to BUILD_LIMIT_S — HQPlayer carries out a
+# command given up on all the same, after the build, out of order.
+BUILD_COMMANDS = frozenset({"SetMode", "SetRate", "SetFilter", "SetShaping", "MatrixSetProfile",
+                            "SetConvolution", "SetInvert", "Play", "SelectTrack", "Seek",
+                            "Next", "Previous"})
+COMMAND_WAITS = {"Stop": STOP_ANSWER_S, **{c: BUILD_LIMIT_S for c in BUILD_COMMANDS}}
+
+
+class Building(ConnectionError):
+    """Refused while HQPlayer builds a setting (409): it answers nothing
+    until the build is done, and a command sent into the silence would be
+    carried out after it, out of order."""
+
+    def __init__(self, state: dict):
+        super().__init__("HQPlayer is building the filter — it takes commands again "
+                         "once it is done")
+        self.state = state
+
+
+class BuildWatch:
+    """The one build watch of this process, read by the DSP change path, the
+    status poller, the play intents and the assistant. HQPlayer answers
+    nothing on its control port while it builds a setting — a filter, a
+    modulator, a rate, every start — and carries out what was sent
+    meanwhile once it is done. The command client meets a build as a late
+    answer (BUILDING_AFTER_S) to one of BUILD_COMMANDS or to the <Status/>
+    held after a Set* (change_dsp), and waits it out up to BUILD_LIMIT_S;
+    the build ends where that answer comes. A new connection says nothing —
+    HQPlayer accepts and starts them all through a build — and the meter's
+    first frame comes after the answer. While it lasts, `state` says since
+    when and after which command: commands are refused (Building), the
+    status poller reports it instead of asking, and the player status
+    carries it. Past BUILD_LIMIT_S it is `unfinished` — HQPlayer did not
+    finish building the filter — until HQPlayer answers the poller again.
+    An Embedded box answers all through its builds, saying it plays with
+    nothing out yet (hqp_benchmark._building): the poller reports that as a
+    build too, with nothing to refuse — there is no silence to queue into."""
+
+    after = BUILDING_AFTER_S
+    commands = BUILD_COMMANDS
+
+    def __init__(self) -> None:
+        self._lock = threading.Lock()
+        self.state: Optional[dict] = None
+        # The latest DSP change that went through a build — its outcome on the
+        # player status, for a refusal its caller was not there to hear.
+        self.last_change: Optional[dict] = None
+        self._given_up = 0
+        self._wake_on_build: Optional[threading.Event] = None
+        self._change_ids = itertools.count(1)
+
+    def begin(self, command: str, attributes: Dict[str, str]) -> Callable[[bool], None]:
+        """A command's answer is late: HQPlayer builds. Told by the command
+        client on the thread that waits for the answer, under _hqp_lock."""
+        with self._lock:
+            self.state = {"since": time.time(), "command": command, "silent": True}
+            given_up, wake = self._given_up, self._wake_on_build
+        logger.info("HQPlayer is building (after %s) — commands wait for it", command)
+        if wake is not None:
+            wake.set()
+        _hqp_lock.wake()
+        _poke_poller()
+        return lambda answered: self._end(given_up, answered)
+
+    def _end(self, given_up: int, answered: bool) -> None:
+        with self._lock:
+            if given_up != self._given_up or self.state is None:
+                return          # given up by a detach or an address change
+            since = self.state["since"]
+            self.state = None if answered else {**self.state, "unfinished": True}
+        if answered:
+            logger.info("HQPlayer answered again after building %.1f s", time.time() - since)
+        else:
+            logger.warning("HQPlayer did not finish building the filter")
+        _poke_poller()
+
+    def answering(self, building: bool) -> None:
+        """The poller's reading of an Embedded box: building while it says it
+        plays with nothing out yet, over as soon as it does not."""
+        with self._lock:
+            if building and self.state is None:
+                self.state = {"since": time.time(), "command": None, "silent": False}
+            elif not building and self.state is not None and not self.state["silent"]:
+                self.state = None
+
+    def answered(self) -> None:
+        """HQPlayer answered the poller: a build it did not finish is over."""
+        with self._lock:
+            if self.state is not None and self.state.get("unfinished"):
+                self.state = None
+
+    def silent(self) -> Optional[dict]:
+        """The build HQPlayer is silent in, if one is on — not one it did not
+        finish, nor an Embedded box's answering build."""
+        state = self.state
+        return state if state is not None and state["silent"] and not state.get("unfinished") else None
+
+    def refuse(self) -> None:
+        state = self.silent()
+        if state is not None:
+            raise Building(state)
+
+    def give_up(self) -> None:
+        """A detach or an address change: whatever HQPlayer builds now is not
+        this node's to wait for."""
+        with self._lock:
+            self._given_up += 1
+            self.state = None
+
+    @contextmanager
+    def waking(self, event: threading.Event):
+        """`event` is set when a build begins while the block runs — the DSP
+        change answering its caller at once."""
+        with self._lock:
+            self._wake_on_build = event
+        try:
+            yield
+        finally:
+            with self._lock:
+                self._wake_on_build = None
+
+    def report(self, applied: dict, failed: dict) -> None:
+        """A DSP change that went through a build: its outcome rides the
+        player status (`dsp_change`)."""
+        self.last_change = {"id": next(self._change_ids), "applied": applied, "failed": failed}
+        _poke_poller()
+
+
+build = BuildWatch()
+
+
+class _CommandLock:
+    """_hqp_lock: one command on the command client at a time — and none
+    while HQPlayer builds. A caller is refused at once (Building), never
+    parked for minutes behind the command that met the build; one already
+    parked is woken and refused when the build begins. A detach or an
+    address change takes it over instead (taking_over)."""
+
+    def __init__(self) -> None:
+        self._cond = threading.Condition()
+        self._held = False
+
+    def __enter__(self) -> "_CommandLock":
+        with self._cond:
+            while True:
+                build.refuse()
+                if not self._held:
+                    self._held = True
+                    return self
+                self._cond.wait()
+
+    def __exit__(self, *exc) -> bool:
+        with self._cond:
+            self._held = False
+            self._cond.notify_all()
+        return False
+
+    def wake(self) -> None:
+        with self._cond:
+            self._cond.notify_all()
+
+    @contextmanager
+    def taking_over(self):
+        """For a detach or an address change: a build in progress is given up
+        — the socket the command waits on is shut, so it lets go at once —
+        rather than waited out for minutes, or refused."""
+        silent = build.silent() is not None
+        if build.state is not None:
+            build.give_up()
+        client = _hqp_client
+        if silent and client is not None and client.socket is not None:
+            try:
+                client.socket.shutdown(socket.SHUT_RDWR)
+            except OSError:
+                pass        # closed meanwhile: nothing waits on it
+        with self._cond:
+            while self._held:
+                self._cond.wait()
+            self._held = True
+        try:
+            yield
+        finally:
+            self.__exit__()
+
+
 _hqp_client: Optional[HQPlayerClient] = None
-_hqp_lock = threading.Lock()  # cmd commands
+_hqp_lock = _CommandLock()  # cmd commands
 
 _hqp_status_client: Optional[HQPlayerClient] = None
 _hqp_status_lock = threading.Lock()  # status poller
@@ -72,16 +276,27 @@ def _route_outcome(outcome) -> None:
         b._on_outcome(outcome)
 
 
+def _poke_poller() -> None:
+    b = _listener
+    if b is not None:
+        b.poke()
+
+
 def _notify_notices() -> None:
     from db_pool import db_execute
     db_execute("NOTIFY sautium_notices")
 
 
-def _make_client(timeout: float) -> HQPlayerClient:
+def _make_client(timeout: float, *, command: bool = False) -> HQPlayerClient:
+    """The command client waits for each answer as long as its command may
+    take and tells the build watch of a late one; the status client asks
+    for Status only, within `timeout`."""
     return HQPlayerClient(
         host=settings.hqplayer_host,
         port=settings.hqplayer_port,
         timeout=timeout,
+        waits=COMMAND_WAITS if command else None,
+        late=build if command else None,
     )
 
 
@@ -98,8 +313,8 @@ _hqp_unreachable_until: float = 0.0
 HQP_CIRCUIT_COOLDOWN = 6.0
 
 
-def _ensure_connected(client: Optional[HQPlayerClient], timeout: float, label: str
-                      ) -> HQPlayerClient:
+def _ensure_connected(client: Optional[HQPlayerClient], timeout: float, label: str,
+                      *, command: bool = False) -> HQPlayerClient:
     """Return a healthy HQPlayer client; reconnect if the cached one is stale.
 
     Caller must hold the appropriate lock. `client` is the previous instance
@@ -131,7 +346,7 @@ def _ensure_connected(client: Optional[HQPlayerClient], timeout: float, label: s
                 client.disconnect()
             except Exception:
                 pass
-        client = _make_client(timeout=timeout)
+        client = _make_client(timeout=timeout, command=command)
         if not client.connect():
             _hqp_unreachable_until = time.monotonic() + HQP_CIRCUIT_COOLDOWN
             raise ConnectionError(
@@ -145,7 +360,7 @@ def _ensure_connected(client: Optional[HQPlayerClient], timeout: float, label: s
 def _get_hqp() -> HQPlayerClient:
     """Get or create HQPlayer command client. Must be called inside _hqp_lock."""
     global _hqp_client
-    _hqp_client = _ensure_connected(_hqp_client, timeout=5.0, label="cmd")
+    _hqp_client = _ensure_connected(_hqp_client, timeout=5.0, label="cmd", command=True)
     _hqp_client.on_outcome = _route_outcome
     return _hqp_client
 
@@ -186,10 +401,112 @@ def reset_all_clients() -> None:
     """Public entry point — called by /api/settings/hqplayer after the
     host or port changes so the next status/command call reconnects
     against the new address instead of holding onto the old socket."""
-    with _hqp_lock:
+    with _hqp_lock.taking_over():
         _reset_hqp()
     with _hqp_status_lock:
         _reset_hqp_status()
+
+
+def change_dsp(knobs: Dict[str, Any]) -> Dict[str, Any]:
+    """The one DSP change path — the HQPlayer screen's /config and the
+    assistant's DSP tools. Each knob's Set*, in DSP_KNOBS' order, then a
+    <Status/> held on the same client until HQPlayer answers: a build ends
+    there — HQPlayer answers a Set* before it builds and falls silent on the
+    command after it, or holds the Set*'s own answer — and the next knob
+    goes only then. A refused knob is reported in HQPlayer's words and the
+    rest still go. When HQPlayer builds past BUILDING_AFTER_S the change
+    answers at once: what was taken and refused so far, what is still to
+    go, and the build; the rest is carried out behind the answer and its
+    outcome rides the player status (BuildWatch.report). Built, a change
+    made while HQPlayer played resumes the spot it played if HQPlayer came
+    back stopped, and leaves one that plays on alone. Raises OutputHeld
+    while the output is lent, Building while another build is on."""
+    from playback.manager import manager
+    pre = manager.latest_status
+    spot = ((int(pre.get("track_index") or 1), int(pre.get("position") or 0),
+             manager.queue.generation) if pre.get("state") == "playing" else None)
+    return _DspChange({k: v for k, v in knobs.items() if v is not None}, spot).answer()
+
+
+class _DspChange:
+    """change_dsp's run: a thread of its own, so the caller can be answered
+    the moment a build begins (BuildWatch.waking)."""
+
+    def __init__(self, knobs: Dict[str, Any], spot: Optional[tuple]):
+        self.knobs = knobs
+        self.spot = spot
+        self.applied: Dict[str, Any] = {}
+        self.failed: Dict[str, str] = {}
+        self.error: Optional[Exception] = None
+        self.done = False
+        self.ready = threading.Event()
+
+    def answer(self) -> Dict[str, Any]:
+        threading.Thread(target=self._run, daemon=True, name="hqp-dsp-change").start()
+        self.ready.wait()
+        if self.done and self.error is not None:
+            raise self.error
+        if self.done:
+            return {"ok": not self.failed, "applied": dict(self.applied),
+                    "failed": dict(self.failed), "building": None, "pending": []}
+        return {"ok": None, "applied": dict(self.applied), "failed": dict(self.failed),
+                "building": build.state,
+                "pending": [k for k in DSP_KNOBS if k in self.knobs
+                            and k not in self.applied and k not in self.failed]}
+
+    def _run(self) -> None:
+        from playback.manager import OutputHeld, manager
+        status = None
+        try:
+            with _hqp_lock, build.waking(self.ready):
+                # Checked under the lock the hold detaches the backend under:
+                # a change that passed it is through before a run sends anything
+                if manager.held is not None:
+                    raise OutputHeld(manager.held)
+                hqp = _get_hqp()
+                for knob in DSP_KNOBS:
+                    if knob not in self.knobs:
+                        continue
+                    if hqp.set_knob(knob, self.knobs[knob], self.knobs.get("filter1x")):
+                        self.applied[knob] = self.knobs[knob]
+                        if knob == "filter" and "filter1x" in self.knobs:
+                            self.applied["filter1x"] = self.knobs["filter1x"]
+                    else:
+                        self.failed[knob] = hqp.refusal()
+                    status = hqp.get_status(wait=BUILD_LIMIT_S, watched=True)
+        except Exception as e:      # the caller's to answer: refused, held, or HQPlayer away
+            self.error = e
+        finally:
+            built = self.ready.is_set()
+            self.done = True
+            self.ready.set()
+        if self.error is not None:
+            if built:
+                logger.warning("HQPlayer DSP change ended after a build: %s", self.error)
+            return
+        if built:
+            build.report(dict(self.applied), dict(self.failed))
+        if self.spot is not None and status is not None and status.state == PlaybackState.STOPPED:
+            self._resume(*self.spot)
+
+    @staticmethod
+    def _resume(index: int, position: int, generation: int) -> None:
+        """HQPlayer came back stopped from a change made while it played (an
+        HQPlayer that stops the transport for a build and never restarts it):
+        back to the spot — unless the owner started another queue, or the
+        output is no longer this HQPlayer."""
+        from playback.manager import manager
+        backend = manager.active
+        if backend is None or backend.id != "hqplayer" or manager.queue.generation != generation:
+            return
+        try:
+            if backend.resume_after_rebuild(index, position):
+                logger.info("resumed playback after a DSP change (track %d at %d s)",
+                            index, position)
+        except (BrokenPipeError, ConnectionError, OSError) as e:
+            # Behind the change's answer, nobody to raise to: its attempt
+            # (the playback trace) holds what went wrong
+            logger.warning("playback not resumed after a DSP change: %s", e)
 
 
 def _uri_in_playlist(uri: str) -> bool:
@@ -690,10 +1007,15 @@ class HqpBackend(PlayerBackend):
         # The proxy address HQPlayer reaches, fixed per attach: a DNS + route
         # lookup once, not per queued item.
         self._url_host = hqp_media_host()
-        # Slot the next play press selects: after an output switch (resume_at),
-        # or once HQPlayer took the queue afresh while not playing
-        # (_converge_mirror, _rebuild).
+        # Slot the next play press selects, and the second it starts at: after
+        # an output switch (resume_at), or once HQPlayer took the queue afresh
+        # while not playing (_converge_mirror, _rebuild) — a paused HQPlayer
+        # is left stopped there, never played to be paused again.
         self._resume_index: Optional[int] = None
+        self._resume_position = 0
+        # The latest status emitted: what the poller says again, with the
+        # build, while HQPlayer is building and answers nothing.
+        self._last_tick: Optional[PlaybackStatus] = None
         # The play intent being watched (playback.hqp_diagnostics), and the
         # ones an intent superseded or the owner ended, waiting for the
         # poller to judge them.
@@ -820,10 +1142,11 @@ class HqpBackend(PlayerBackend):
 
     def shutdown(self) -> None:
         global _listener
-        with _hqp_lock:
-            # A command already on its way finished before the lock was ours;
-            # one sent later by whoever took this backend before the switch
-            # (a play intent, the DSP resume watcher) is refused.
+        with _hqp_lock.taking_over():
+            # A command already on its way finished before the lock was ours
+            # (a build it waited out is given up); one sent later by whoever
+            # took this backend before the switch (a play intent, a DSP
+            # change's resume) is refused.
             self._detached = True
         self._running = False
         self._wake.set()
@@ -851,10 +1174,12 @@ class HqpBackend(PlayerBackend):
         answer to GetInfo within 2 s. A bare TCP connect proves nothing —
         HQPlayer Embedded's trial stop keeps the port open and closes every
         connection at once (seen live), and HQPlayer Desktop listens only
-        once its audio engine is up."""
+        once its audio engine is up. A build answers nothing for minutes:
+        busy (Building), never offline."""
+        build.refuse()
         try:
             with socket.create_connection(
-                    (settings.hqplayer_host, settings.hqplayer_port),
+                    (connect_address(settings.hqplayer_host), settings.hqplayer_port),
                     timeout=2.0) as s:
                 s.settimeout(2.0)
                 s.sendall(b"<GetInfo/>")
@@ -900,7 +1225,7 @@ class HqpBackend(PlayerBackend):
         # HQPlayer owns its playlist pointer, and a select fired straight
         # after the attach mirror does not stick (verified live) — defer it
         # to the play press, where select+play is the proven jump sequence.
-        self._resume_index = index
+        self._resume_index, self._resume_position = index, 0
 
     def poke(self) -> None:
         """Wake the poller for an immediate re-poll after a command."""
@@ -937,6 +1262,17 @@ class HqpBackend(PlayerBackend):
     def _poll_loop(self) -> None:
         tick = 0
         while self._running:
+            building = build.state
+            if building is not None and building["silent"]:
+                # HQPlayer answers nothing while it builds: said from the
+                # watch, not asked — the watch wakes the poller at the end.
+                # One it did not finish is said, then asked: HQPlayer may be
+                # back, and its answer ends it.
+                self._emit_building(building)
+                if not building.get("unfinished"):
+                    self._wake.wait()
+                    self._wake.clear()
+                    continue
             status = None
             playing = None
             reads = None
@@ -1030,6 +1366,8 @@ class HqpBackend(PlayerBackend):
                     self._register_failure()
                 else:
                     self._failures = 0
+                    build.answered()
+                    build.answering(_building(status) and self._embedded())
                     hqp_meter.meter.set_gain(None if status.track_gain is None
                                              else status.volume + status.track_gain)
                     if status.track_index >= 1:
@@ -1042,7 +1380,8 @@ class HqpBackend(PlayerBackend):
                                 and (status.process_speed is None or status.process_speed >= 1.0)
                                 and diag.note_playing(playing[0], self._queue.generation)):
                             _notify_notices()
-                        self._emit(self._status_of(status, playing))
+                        self._last_tick = self._status_of(status, playing)
+                        self._emit(self._last_tick)
                     if diag.note_answered():
                         _notify_notices()
                     if sample is not None:
@@ -1146,6 +1485,14 @@ class HqpBackend(PlayerBackend):
         diagnosis = self._diagnosis(status)
         if diagnosis is not None:
             extra["diagnosis"] = diagnosis
+        if build.state is not None:
+            extra["building"] = build.state
+        if build.last_change is not None:
+            extra["dsp_change"] = build.last_change
+        if self._resume_index is not None and status.state == PlaybackState.STOPPED:
+            # Where the play press resumes: a paused HQPlayer whose playlist
+            # was taken afresh is left stopped, not played to be paused again
+            extra["resume"] = {"index": self._resume_index, "position": self._resume_position}
         return PlaybackStatus(
             state=STATE_NAMES.get(status.state, "unknown"),
             position=status.position, length=status.length,
@@ -1401,10 +1748,27 @@ class HqpBackend(PlayerBackend):
 
     def _register_failure(self) -> None:
         """Tolerate a short burst of misses; emit 'disconnected' only past
-        the threshold (the manager dedupes repeats)."""
+        the threshold (the manager dedupes repeats). A miss in a build is the
+        build's, and past a build HQPlayer did not finish its last word is
+        that, not 'disconnected'."""
+        state = build.state
+        if state is not None and state["silent"]:
+            if state.get("unfinished"):
+                self._emit_building(state)
+            return
         self._failures += 1
         if self._failures >= STATUS_FAILURE_THRESHOLD:
             self._emit(PlaybackStatus(state="disconnected"))
+
+    def _emit_building(self, state: dict) -> None:
+        """The last status again, with the build HQPlayer is in."""
+        last = self._last_tick
+        self._emit(replace(last, extra={**last.extra, "building": state}) if last is not None
+                   else PlaybackStatus(state="unknown", extra={"building": state}))
+
+    def _embedded(self) -> bool:
+        import hqp_library
+        return hqp_library.is_embedded(self._info.get("product"))
 
     def _first_divergence(self, hqp_tracks: list, snapshot: list) -> Optional[int]:
         """The first 1-based slot, over the length the two share, at which
@@ -1455,14 +1819,12 @@ class HqpBackend(PlayerBackend):
     def play(self) -> bool:
         with self._intent("play", slot=self._resume_index):
             if self._resume_index is not None:
-                idx, self._resume_index = self._resume_index, None
-                logger.info("play: honoring resume slot %d", idx)
-                if self._select_play(idx):
-                    # A SelectTrack on a STOPPED HQPlayer needs a beat to
-                    # register before Play honors it — the resume-watcher's
-                    # documented 1s boundary exception (04c46b8), same quirk.
-                    time.sleep(1.0)
-            ok = self._command("Play", lambda h: h.play())
+                idx, pos = self._resume_index, self._resume_position
+                self._resume_index, self._resume_position = None, 0
+                logger.info("play: honoring resume slot %d at %d s", idx, pos)
+                ok = self._start_at(idx, pos)
+            else:
+                ok = self._command("Play", lambda h: h.play())
         self.poke()
         return ok
 
@@ -1478,6 +1840,7 @@ class HqpBackend(PlayerBackend):
 
     def next(self) -> bool:
         self._resume_index = None    # explicit navigation overrides resume
+        self._resume_position = 0
         # Watched only when there is a next slot to land on.
         with (self._intent("next") if 1 <= self._last_track < len(self._queue)
               else nullcontext()):
@@ -1487,6 +1850,7 @@ class HqpBackend(PlayerBackend):
 
     def previous(self) -> bool:
         self._resume_index = None    # explicit navigation overrides resume
+        self._resume_position = 0
         with self._intent("previous") if self._last_track > 1 else nullcontext():
             ok = self._command("Previous", lambda h: h.previous())
         self.poke()
@@ -1500,26 +1864,40 @@ class HqpBackend(PlayerBackend):
         leaves that to the play press). The Play after it, which jump()
         used to send from the manager, finds it playing then."""
         self._resume_index = None    # explicit navigation overrides resume
+        self._resume_position = 0
         with self._intent("select", slot=index):
-            ok = self._select_play(index)
+            ok = self._start_at(index, 0)
         self.poke()
         return ok
 
-    def _select_play(self, index: int) -> bool:
-        ok = self._command("SelectTrack", lambda h: h.select_track(index))
-        if ok:
-            ok = self._command("Play", lambda h: h.play())
-        return ok
+    def _start_at(self, index: int, position: int) -> bool:
+        """The slot, from `position` on, as one command sequence: SelectTrack
+        starts a stopped HQPlayer, the Seek lands in the start's opening run
+        of silent frames before anything is heard, and the Play starts what
+        SelectTrack did not. Each waits for its own answer through the build
+        the start sets off (COMMAND_WAITS). A slot HQPlayer refuses still
+        gets the Play — it plays where it stands, as a plain Play would."""
+        def start(h: HQPlayerClient) -> Optional[str]:
+            selected = h.select_track(index)
+            refusal = None if selected else h.refusal()
+            if selected and position > 0 and not h.seek(int(position)):
+                logger.warning("HQPlayer did not seek the resumed slot: %s",
+                               diag.redact_text(h.refusal()))
+            if not h.play():
+                return h.refusal()
+            return refusal
+        refusal = self._hqp_cmd(start)
+        if refusal is not None:
+            logger.warning("HQPlayer did not take the start at slot %d: %s", index,
+                           diag.redact_text(refusal))
+        return refusal is None
 
     def resume_after_rebuild(self, index: int, position: int) -> bool:
-        """Back to the slot and second a DSP change stopped — select, seek,
-        play as ONE attempt (routers.hqplayer._resume_after_dsp_change)."""
-        self._resume_index = None
+        """Back to the slot and second a DSP change stopped, as ONE attempt
+        (change_dsp)."""
+        self._resume_index, self._resume_position = None, 0
         with self._intent("resume", slot=index):
-            ok = self._select_play(index)
-            if position > 0:
-                self._command("Seek", lambda h: h.seek(int(position)))
-            ok = self._command("Play", lambda h: h.play()) and ok
+            ok = self._start_at(index, position)
         self.poke()
         return ok
 
@@ -1623,8 +2001,8 @@ class HqpBackend(PlayerBackend):
         and appended again, as queue_insert_next does. One at or before it
         cannot be put back in place — the protocol has no insert — so a
         playing HQPlayer is rebuilt around its position (the gap a reorder
-        rebuild costs), and a paused one takes the queue afresh and resumes
-        that slot from its start on the play press."""
+        rebuild costs), and a paused one takes the queue afresh, stopped,
+        and resumes that slot where it was on the play press."""
         snapshot = self._queue.snapshot()
         try:
             with _hqp_lock:
@@ -1674,6 +2052,8 @@ class HqpBackend(PlayerBackend):
                 converged = self.queue_replace(snapshot, play=False) == len(snapshot)
                 if 1 <= current <= len(snapshot):
                     self._resume_index = current
+                    self._resume_position = (int(status.position)
+                                             if status.state == PlaybackState.PAUSED else 0)
         except (BrokenPipeError, ConnectionError, OSError) as e:
             logger.warning("re-bound slots: HQPlayer's playlist could not follow "
                            "(%s) — the queue is re-mirrored on the next play", e)
@@ -1691,8 +2071,9 @@ class HqpBackend(PlayerBackend):
         under `_hqp_lock`). hqp.stop() is mandatory — HQPlayer ignores
         PlaylistAdd(clear=True) while playing, silently appending instead,
         which would double every track and land select_track on the wrong
-        slot. Not resuming, it lands nowhere: SelectTrack would start the
-        stopped HQPlayer (select) — the play press resumes the slot.
+        slot. Not resuming — HQPlayer was paused or stopped — it lands
+        nowhere: SelectTrack would start the stopped HQPlayer (select), and
+        the play press resumes the slot at `position` (_start_at).
         Returns whether HQPlayer accepted every entry."""
         with self._intent("rebuild", slot=index, uris=uris) if resume else nullcontext():
             with _hqp_lock:
@@ -1707,7 +2088,7 @@ class HqpBackend(PlayerBackend):
                         hqp.seek(position)
                     hqp.play()
                 else:
-                    self._resume_index = index
+                    self._resume_index, self._resume_position = index, position
         self.poke()
         return all(accepted)
 

@@ -181,6 +181,11 @@ def _get_hqp() -> HQPlayerClient:
             "come back when it finishes; the user can cancel it on the HQPlayer "
             "screen."
         )
+    if prefs.get("building"):
+        raise ConnectionError(
+            "HQPlayer is building the filter — it answers nothing until the build "
+            "is done; its transport and DSP controls come back then."
+        )
     global _hqp_client
     host, port = _hqp_endpoint()
     if (_hqp_client is None or not _hqp_client.is_connected()
@@ -1205,11 +1210,14 @@ def hqplayer_set_filter(filter_name: str) -> str:
             available = ", ".join(f["name"] for f in filters)
             return f"Filter '{filter_name}' not found. Available filters: {available}"
 
-        ok = hqp.set_filter(match["index"])
-        if not ok:
-            return f"Failed to set filter to {match['name']}: {hqp.refusal()}"
+        # The backend's one DSP change path — the build it may set off is
+        # watched there — with both slots, as the HQPlayer screen sends it: a
+        # 44.1/48 kHz source plays through the 1x slot
+        outcome = _backend_post("/api/hqplayer/config",
+                                {"filter": match["index"], "filter1x": match["index"]})
         desc = match.get("description", "")
-        return f"Filter set to: {match['name']}" + (f" — {desc}" if desc else "")
+        return aq.hqp_change_text(outcome, f"the filter {match['name']}",
+                                  f"Filter set to: {match['name']}" + (f" — {desc}" if desc else ""))
     except Exception as e:
         return f"Error setting filter: {e}"
 
@@ -1250,9 +1258,9 @@ def hqplayer_set_shaper(shaper_name: str) -> str:
             available = ", ".join(s["name"] for s in shapers)
             return f"Shaper '{shaper_name}' not found. Available shapers: {available}"
 
-        ok = hqp.set_shaping(match["index"])
-        return (f"Dither/shaper set to: {match['name']}" if ok
-                else f"Failed to set shaper to {match['name']}: {hqp.refusal()}")
+        outcome = _backend_post("/api/hqplayer/config", {"shaper": match["index"]})
+        return aq.hqp_change_text(outcome, f"the dither/shaper {match['name']}",
+                                  f"Dither/shaper set to: {match['name']}")
     except Exception as e:
         return f"Error setting shaper: {e}"
 
@@ -1272,10 +1280,11 @@ def hqplayer_set_convolution(enabled: bool) -> str:
         enabled: True to enable convolution, False to disable
     """
     try:
-        hqp = _get_hqp()
-        ok = hqp.set_convolution(enabled)
+        _get_hqp()
+        outcome = _backend_post("/api/hqplayer/config", {"convolution": enabled})
         state = "enabled" if enabled else "disabled"
-        return f"Convolution {state}." if ok else f"Failed to {state} convolution: {hqp.refusal()}"
+        return aq.hqp_change_text(outcome, f"convolution {'on' if enabled else 'off'}",
+                                  f"Convolution {state}.")
     except Exception as e:
         return f"Error: {e}"
 
@@ -1348,9 +1357,9 @@ def hqplayer_set_matrix_profile(profile_name: str) -> str:
                 return f"Profile '{profile_name}' not found. Available: {available}"
             profile_name = match
 
-        ok = hqp.matrix_set_profile(profile_name)
-        return (f"Matrix profile set to: '{profile_name}'" if ok
-                else f"Failed to set matrix profile to '{profile_name}': {hqp.refusal()}")
+        outcome = _backend_post("/api/hqplayer/config", {"matrix_profile": profile_name})
+        return aq.hqp_change_text(outcome, f"the matrix profile '{profile_name}'",
+                                  f"Matrix profile set to: '{profile_name}'")
     except Exception as e:
         return f"Error: {e}"
 

@@ -50,6 +50,8 @@ def _get_hqp():
             "come back when it finishes; the user can cancel it on the HQPlayer "
             "screen."
         )
+    from playback.hqp_backend import build
+    build.refuse()
     endpoint = (settings.hqplayer_host, settings.hqplayer_port)
     if (_hqp_client is None or not _hqp_client.is_connected()
             or (_hqp_client.host, _hqp_client.port) != endpoint):
@@ -474,11 +476,13 @@ def _h_hqplayer_set_filter(filter_name: str) -> str:
         if match is None:
             available = ", ".join(f["name"] for f in filters)
             return f"Filter '{filter_name}' not found. Available filters: {available}"
-        ok = hqp.set_filter(match["index"])
-        if not ok:
-            return f"Failed to set filter to {match['name']}: {hqp.refusal()}"
+        # Both slots, as the HQPlayer screen sends it: a 44.1/48 kHz source
+        # plays through the 1x slot
+        from playback.hqp_backend import change_dsp
+        outcome = change_dsp({"filter": match["index"], "filter1x": match["index"]})
         desc = match.get("description", "")
-        return f"Filter set to: {match['name']}" + (f" — {desc}" if desc else "")
+        return aq.hqp_change_text(outcome, f"the filter {match['name']}",
+                                  f"Filter set to: {match['name']}" + (f" — {desc}" if desc else ""))
     except Exception as e:
         return f"Error setting filter: {e}"
 
@@ -504,19 +508,22 @@ def _h_hqplayer_set_shaper(shaper_name: str) -> str:
         if match is None:
             available = ", ".join(s["name"] for s in shapers)
             return f"Shaper '{shaper_name}' not found. Available shapers: {available}"
-        ok = hqp.set_shaping(match["index"])
-        return (f"Dither/shaper set to: {match['name']}" if ok
-                else f"Failed to set shaper to {match['name']}: {hqp.refusal()}")
+        from playback.hqp_backend import change_dsp
+        outcome = change_dsp({"shaper": match["index"]})
+        return aq.hqp_change_text(outcome, f"the dither/shaper {match['name']}",
+                                  f"Dither/shaper set to: {match['name']}")
     except Exception as e:
         return f"Error setting shaper: {e}"
 
 
 def _h_hqplayer_set_convolution(enabled: bool) -> str:
     try:
-        hqp = _get_hqp()
-        ok = hqp.set_convolution(enabled)
+        _get_hqp()              # the output and busy rules every HQPlayer tool keeps
+        from playback.hqp_backend import change_dsp
+        outcome = change_dsp({"convolution": enabled})
         state = "enabled" if enabled else "disabled"
-        return f"Convolution {state}." if ok else f"Failed to {state} convolution: {hqp.refusal()}"
+        return aq.hqp_change_text(outcome, f"convolution {'on' if enabled else 'off'}",
+                                  f"Convolution {state}.")
     except Exception as e:
         return f"Error: {e}"
 
@@ -568,9 +575,10 @@ def _h_hqplayer_set_matrix_profile(profile_name: str) -> str:
                 available = ", ".join(profiles)
                 return f"Profile '{profile_name}' not found. Available: {available}"
             profile_name = match
-        ok = hqp.matrix_set_profile(profile_name)
-        return (f"Matrix profile set to: '{profile_name}'" if ok
-                else f"Failed to set profile: {hqp.refusal()}")
+        from playback.hqp_backend import change_dsp
+        outcome = change_dsp({"matrix_profile": profile_name})
+        return aq.hqp_change_text(outcome, f"the matrix profile '{profile_name}'",
+                                  f"Matrix profile set to: '{profile_name}'")
     except Exception as e:
         return f"Error: {e}"
 

@@ -215,9 +215,9 @@ class Attempt:
     def intent_done(self, exc: Optional[BaseException]) -> None:
         """The intent returned: a fact that settles it now — a command that
         never reached HQPlayer, the FINAL answer to a transport command being
-        a refusal (play()'s resume sends Play twice, so a first refusal is not
-        final), or no transport command sent at all — closes it on the next
-        poller pass instead of after the window."""
+        a refusal (the last answer of each command counts), or no transport
+        command sent at all — closes it on the next poller pass instead of
+        after the window."""
         with _lock:
             if exc is not None and self.error is None:
                 self.error = str(exc) or type(exc).__name__

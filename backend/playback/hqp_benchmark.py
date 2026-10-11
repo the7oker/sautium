@@ -152,9 +152,9 @@ TICK_S = 1.0
 # Stopped this many ticks in a row, the position never having moved: HQPlayer
 # did not start it — once to start it again, twice to call it refused.
 STOP_TICKS = 3
-# A SelectTrack on a stopped HQPlayer needs a beat to register before Play
-# honours it (the resume watcher's quirk, 04c46b8): the run reads <Status/>
-# until it names the slot, this long at most.
+# After a SelectTrack the run reads <Status/> until it names the slot, this
+# long at most: a stopped HQPlayer plays the slot it is given (Desktop 6.2.4),
+# and the read confirms which entry it took.
 SELECT_WAIT_S = 2.0
 SELECT_POLL_S = 0.2
 # Seconds a point takes before this endpoint has run one: start, five stable
@@ -923,7 +923,10 @@ def start(mode: Optional[str] = None, *, fixed_volume_ok: bool = False) -> Dict[
     b = manager.active
     if b is None or b.id != "hqplayer":
         raise BenchmarkRefused("Pick this HQPlayer as the audio output first")
-    from playback.hqp_backend import _stream_mode
+    from playback.hqp_backend import _stream_mode, build
+    if build.silent() is not None:
+        raise BenchmarkRefused("HQPlayer is building the filter — start the benchmark once "
+                               "it is done")
     if not _stream_mode():
         import main
         import model_cache
@@ -1499,9 +1502,9 @@ def _play(link: _Link, slot: int, src_rate: Optional[int], entries: int, *,
                 stopped += 1
                 if not replayed and (settle.playing is not None or stopped >= STOP_TICKS):
                     # HQPlayer stops the transport once a heavy setting is
-                    # built and does not start again by itself (the DSP
-                    # resume watcher's quirk), or it stopped at once: start
-                    # it again, once.
+                    # built and does not start again by itself (Desktop 6.2.3
+                    # on Windows; 6.2.4 plays on), or it stopped at once:
+                    # start it again, once.
                     replayed, stopped = True, 0
                     _select(send, read, slot)
                     send("play")

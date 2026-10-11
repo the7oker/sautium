@@ -18,8 +18,6 @@ up the new values.
 """
 
 import logging
-import threading
-import time
 from typing import Any, Dict, List, Optional
 
 from fastapi import APIRouter, HTTPException
@@ -31,12 +29,15 @@ logger = logging.getLogger(__name__)
 from db_pool import db_execute, db_query_one
 from hqplayer_client import VOLUME_FIXED
 from playback.hqp_backend import (
+    Building,
     _hqp_lock,
     _hqp_status_lock,
     _get_hqp,
     _get_hqp_status,
     _reset_hqp,
     _reset_hqp_status,
+    build,
+    change_dsp,
 )
 from playback.hqp_meter import meter as hqp_meter
 from playback.manager import OutputHeld, manager
@@ -78,6 +79,7 @@ class ConfigRequest(BaseModel):
     mode: Optional[int] = None
     rate: Optional[int] = None
     matrix_profile: Optional[str] = None
+    convolution: Optional[bool] = None     # the assistant's switch: no control on the screen
 
 
 class FavoriteRequest(BaseModel):
@@ -145,6 +147,11 @@ def get_state(dsp: bool = False) -> Dict[str, Any]:
         # run's Cancel must still be there.
         from playback import hqp_benchmark
         response["benchmark"] = hqp_benchmark.summary(ep)
+    building = build.silent()
+    if building is not None:
+        # HQPlayer answers nothing while it builds: the screen keeps what it
+        # read last and says why its controls wait.
+        return {**response, "connected": True, "building": building}
 
     try:
         with _hqp_status_lock:
@@ -286,10 +293,11 @@ def _benchmark_block(ep: Optional[dict], state: Optional[dict], lists: dict,
 
 
 def _refuse_while_held() -> None:
-    """A lent output (the benchmark drives HQPlayer) takes no DSP or volume
-    change from here: it would land in the middle of a measurement. Called
-    under _hqp_lock — the hold detaches the backend under it, so a change
-    that passed the check is through before the run sends anything."""
+    """A lent output (the benchmark drives HQPlayer) takes no volume change
+    from here (a DSP change checks it in change_dsp): it would land in the
+    middle of a measurement. Called under _hqp_lock — the hold detaches the
+    backend under it, so a change that passed the check is through before
+    the run sends anything."""
     hold = manager.held
     if hold is not None:
         raise HTTPException(status_code=409, detail=str(OutputHeld(hold)))
@@ -297,73 +305,19 @@ def _refuse_while_held() -> None:
 
 # -- Config -------------------------------------------------------------------
 
-# Applying a heavy DSP change mid-play (e.g. a long-initialisation filter
-# like sinc-MGa) makes HQPlayer STOP the transport while it rebuilds the
-# pipeline — and it never resumes on its own (light filters hot-swap with a
-# sub-second dropout). The watcher below restores the exact pre-change spot
-# once HQPlayer answers again. The 1 s wait-loop is the same documented
-# boundary exception as the status poller: HQPlayer cannot push "I'm ready".
-_RESUME_WATCH_DEADLINE_S = 90.0
-
-
-def _resume_after_dsp_change(pre_index: int, pre_position: int, generation: int) -> None:
-    deadline = time.monotonic() + _RESUME_WATCH_DEADLINE_S
-    while time.monotonic() < deadline:
-        time.sleep(1.0)
-        if manager.queue.generation != generation:
-            return                      # user started a new queue — back off
-        state = manager.latest_status.get("state")
-        if state in ("playing", "paused"):
-            return                      # hot-swapped / user already resumed
-        if state == "stopped":
-            backend = manager.active
-            if backend is None or backend.id != "hqplayer":
-                return
-            try:
-                backend.resume_after_rebuild(pre_index, pre_position)
-                logger.info("resumed playback after DSP rebuild "
-                            "(track %d @ %ds)", pre_index, pre_position)
-            except Exception as e:
-                logger.warning("post-DSP resume failed: %s", e)
-            return
-        # "disconnected" — HQPlayer is still rebuilding; keep waiting.
-    logger.warning("post-DSP resume: HQPlayer did not come back within %.0fs",
-                   _RESUME_WATCH_DEADLINE_S)
-
-
 @router.post("/config")
 def set_config(req: ConfigRequest) -> Dict[str, Any]:
-    """Apply any subset of the DSP knobs.
-
-    Each non-None field triggers exactly one HQPlayer Set* command;
-    the request is rejected as 503 on connection trouble. Successful
-    fields are reported back so the client can reconcile partial
-    failures (e.g. wrong index for the current mode). A change applied
-    mid-play arms a resume watcher — see _resume_after_dsp_change."""
-    pre = dict(manager.latest_status)
+    """Apply any subset of the DSP knobs (hqp_backend.change_dsp): each
+    knob's outcome — taken, or refused in HQPlayer's words — and, when
+    HQPlayer builds past a moment, `building` at once with the knobs still
+    to go; the rest follows behind the answer. 409 while the output is lent
+    or HQPlayer builds, 503 when it cannot be reached."""
     try:
-        with _hqp_lock:
-            _refuse_while_held()
-            try:
-                hqp = _get_hqp()
-            except (BrokenPipeError, ConnectionError, OSError):
-                _reset_hqp()
-                hqp = _get_hqp()
-            applied, failed = hqp.apply_settings(
-                mode=req.mode, rate=req.rate, filter=req.filter, filter1x=req.filter1x,
-                shaper=req.shaper, matrix_profile=req.matrix_profile)
+        return change_dsp(req.model_dump())
+    except (OutputHeld, Building) as e:
+        raise HTTPException(status_code=409, detail=str(e))
     except (BrokenPipeError, ConnectionError, OSError) as e:
         raise HTTPException(status_code=503, detail=f"HQPlayer not reachable: {e}")
-
-    if applied and pre.get("state") == "playing":
-        threading.Thread(
-            target=_resume_after_dsp_change,
-            args=(int(pre.get("track_index") or 1),
-                  int(pre.get("position") or 0),
-                  manager.queue.generation),
-            daemon=True, name="hqp-dsp-resume").start()
-
-    return {"ok": not failed, "applied": applied, "failed": failed}
 
 
 # -- Volume -------------------------------------------------------------------
@@ -399,6 +353,8 @@ def nudge_volume(req: VolumeRequest) -> Dict[str, Any]:
                 new_vol = max(span["min"], new_vol)
             ok = hqp.set_volume(new_vol)
             refusal = None if ok else hqp.refusal()
+    except Building as e:
+        raise HTTPException(status_code=409, detail=str(e))
     except (BrokenPipeError, ConnectionError, OSError) as e:
         raise HTTPException(status_code=503, detail=f"HQPlayer not reachable: {e}")
     if not ok:
@@ -439,6 +395,9 @@ def get_benchmark() -> Dict[str, Any]:
     out.update(rows=[], context=None, current=None, thresholds=None)
     if ep is None:
         return out
+    building = build.silent()
+    if building is not None:
+        raise HTTPException(status_code=409, detail=str(Building(building)))
     try:
         with _hqp_status_lock:
             try:

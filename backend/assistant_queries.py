@@ -112,6 +112,19 @@ def hqp_list(lines: list, title: str, items, hqp, line) -> None:
         lines.extend(line(x) for x in items)
 
 
+def hqp_change_text(outcome: dict, what: str, done: str) -> str:
+    """A DSP change's outcome (playback.hqp_backend.change_dsp, the one path
+    behind /api/hqplayer/config) as the assistant tells it: refused in
+    HQPlayer's words, taken and still building — HQPlayer answers nothing
+    until a build is done — or `done`, taken at once."""
+    if outcome.get("failed"):
+        return f"HQPlayer did not take {what}: {'; '.join(outcome['failed'].values())}"
+    if outcome.get("building"):
+        return (f"HQPlayer took {what} and is building it — it answers nothing until the "
+                "build is done, then plays on with it.")
+    return done
+
+
 _PH_LATERAL = """
     LEFT JOIN LATERAL (
         SELECT atr.length_ms, al.id AS album_id, al.title AS album,

@@ -30,7 +30,7 @@ from lrclib import LrclibService
 from playback import queue as queue_mod
 from playback import sessions
 from playback.base import ReorderPlan
-from playback.hqp_backend import _get_hqp, _hqp_lock
+from playback.hqp_backend import Building, _get_hqp, _hqp_lock
 from playback.hqp_meter import meter as hqp_meter
 from playback.manager import OutputHeld, active_hqp_endpoint, manager
 from playback.queue import resolved_artwork as _resolved_artwork
@@ -1630,7 +1630,9 @@ def reorder(req: ReorderRequest):
         order=req.order,
         items_by_id=items_by_id,
         position=int(manager.latest_status.get("position") or 0),
-        resume=manager.latest_status.get("state") in ("playing", "paused"),
+        # A paused HQPlayer is left stopped at its spot, never played to be
+        # paused again: the play press resumes it there (HqpBackend._rebuild)
+        resume=manager.latest_status.get("state") == "playing",
     )
     try:
         result = manager.apply_reorder(plan)
@@ -2455,12 +2457,12 @@ class PlayPhantomAlbumRequest(BaseModel):
 
 def _output_error(e: Exception) -> HTTPException:
     """What a play intent or transport command the output did not take
-    answers: 409 while the output is lent (the HQPlayer benchmark — busy,
-    not broken: the UI must not send the owner to the Output picker), 503
-    when it cannot take it. A backend detached by the hold that an intent
-    took just before refuses with a plain ConnectionError — the hold
-    names it."""
-    if isinstance(e, OutputHeld):
+    answers: 409 while the output is lent (the HQPlayer benchmark) or
+    HQPlayer builds a setting — busy, not broken: the UI must not send the
+    owner to the Output picker — 503 when it cannot take it. A backend
+    detached by the hold that an intent took just before refuses with a
+    plain ConnectionError — the hold names it."""
+    if isinstance(e, (OutputHeld, Building)):
         return HTTPException(status_code=409, detail=str(e))
     hold = manager.held
     if hold is not None and isinstance(e, ConnectionError):
@@ -2946,8 +2948,13 @@ def queue_entities(req: QueueEntitiesRequest):
     # appends strictly in order, and _add_owned's own rolling filler would race
     # that ordering for a set that needs transcoding (m4a, CUE cuts).
     if len(segments) == 1 and segments[0][0] == "owned":
-        _add_owned(segments[0][1], clear_first=False,
-                   position="next" if req.position == "next" else "end")
+        try:
+            _add_owned(segments[0][1], clear_first=False,
+                       position="next" if req.position == "next" else "end")
+        except HTTPException:
+            raise
+        except Exception as e:
+            raise _output_error(e)
     else:
         _queue_segments_async(segments, gen, "queue-entities")
     return {"ok": True, "queued": owned, "streaming": phantom, "not_found": missing}
@@ -3137,7 +3144,12 @@ def queue_session(req: QueueSessionRequest):
         _ensure_streaming_ready()
 
     if len(segments) == 1 and segments[0][0] == "owned":
-        _add_owned(segments[0][1], clear_first=False, position=req.position)
+        try:
+            _add_owned(segments[0][1], clear_first=False, position=req.position)
+        except HTTPException:
+            raise
+        except Exception as e:
+            raise _output_error(e)
     else:
         if req.position == "next":
             raise HTTPException(status_code=400,

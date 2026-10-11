@@ -2047,6 +2047,7 @@ class OutputPrefs(BaseModel):
 
 @router.get("/output")
 def get_output_prefs() -> Dict[str, Any]:
+    from playback.hqp_backend import build
     from playback.manager import manager
     hold = manager.held
     return {
@@ -2055,9 +2056,11 @@ def get_output_prefs() -> Dict[str, Any]:
         "exclusive": bool(_read("output.local_exclusive")),
         "renderer": _read("output.dlna_renderer"),
         "stream_quality": _read("output.stream_quality") or "lossless",
-        # What the output is lent to (the HQPlayer benchmark) — the MCP
-        # assistant reads it to keep its HQPlayer tools off meanwhile.
+        # What the output is lent to (the HQPlayer benchmark), and whether
+        # HQPlayer is building a setting (playback.hqp_backend.BuildWatch) —
+        # the MCP assistant reads both to keep its HQPlayer tools off meanwhile.
         "held": hold["label"] if hold else None,
+        "building": build.silent() is not None,
     }
 
 

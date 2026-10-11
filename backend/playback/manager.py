@@ -633,6 +633,11 @@ class PlaybackManager:
         # HQPlayer 6's further readings (the Apod counter, the output's bits
         # and channels, its delay…): additive, each while HQPlayer gives it.
         new_data.update({k: s.extra[k] for k in STATUS_READINGS if s.extra.get(k) is not None})
+        # The HQPlayer output's own words (playback.hqp_backend): the build it
+        # is in, the outcome of a DSP change that went through one, and where
+        # the play press resumes a stopped HQPlayer.
+        new_data.update({k: s.extra[k] for k in ("building", "dsp_change", "resume")
+                         if s.extra.get(k) is not None})
 
         # Per-track listening history + scrobble (source-agnostic: owned and
         # streamed phantom items both carry the track UUID). Separate from the
