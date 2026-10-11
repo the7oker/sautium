@@ -28,7 +28,7 @@ import psycopg2
 import psycopg2.extensions
 
 from config import settings, ui_build
-from hqplayer_client import format_time
+from hqplayer_client import STATUS_READINGS, format_time
 
 from playback import sessions, tracker
 from playback.base import PlaybackStatus, PlayerBackend, ReorderPlan
@@ -630,6 +630,9 @@ class PlaybackManager:
         # the selected one may be [source]; the peak meter marks SDM's room.
         if s.extra.get("active_mode"):
             new_data["active_mode"] = s.extra["active_mode"]
+        # HQPlayer 6's further readings (the Apod counter, the output's bits
+        # and channels, its delay…): additive, each while HQPlayer gives it.
+        new_data.update({k: s.extra[k] for k in STATUS_READINGS if s.extra.get(k) is not None})
 
         # Per-track listening history + scrobble (source-agnostic: owned and
         # streamed phantom items both carry the track UUID). Separate from the

@@ -93,7 +93,10 @@ no internet access ("not authenticated and no internet access").
 - `next()` - Next track
 - `previous()` - Previous track
 - `seek(position)` - Seek to position in seconds
-- `select_track(index)` - Select track by playlist index
+- `select_track(index)` - Select track by playlist index. A STOPPED HQPlayer
+  starts playing it (its log: "GoTo 1", then "Play (1/0)"; Desktop 6.2.4,
+  2026-10-11), so nothing sends it just to ready a slot: a queue rebuilt
+  while stopped leaves the slot to the play press
 
 ### ✅ Volume Control
 - `set_volume(value)` - Set volume level
@@ -141,7 +144,14 @@ no internet access ("not authenticated and no internet access").
     what the engine runs right now, by name (read since 2026-10-02 for the
     playback trace; `active_mode` rides the player status since 2026-10-07,
     for the peak meter's SDM arc; `<Status>` carries more still: `track_serial`,
-    `transport_serial`, `active_bits`, `queued`, `output_delay`)
+    `transport_serial`, `queued`)
+  - HQPlayer 6's further readings (since 2026-10-11, `STATUS_READINGS`):
+    `apod` (the Apod counter of the track playing), `active_bits` and
+    `active_channels` (the OUTPUT), `output_delay` (in seconds — HQPlayer
+    reports microseconds, the SDK's `output_delay_us`), `display_position`,
+    `correction`, `filter_20k`, `filter_junk`; `None` from a build that does
+    not report them. They ride the player status while HQPlayer gives them;
+    no screen shows them
   - `limited` - HQPlayer's "Limited" counter (`<Status clips>`): how often
     its soft-knee limiter acted because the OUTPUT would have passed 0 dB
     (manual 6 §2.5: the threshold depends on the filter and the oversampling
@@ -167,15 +177,31 @@ assistant tool, no control in the Web UI (as of 2026-09-29):
 - `set_repeat(mode)` - Repeat mode (NONE/SINGLE/ALL)
 - `set_random(enabled)` - Shuffle
 - `get_inputs()` - Available input devices (there is no `set_input`)
+- `set_adaptive_volume(enabled)` - adaptive volume on/off (State `adaptive`;
+  since 2026-10-11)
 
 ### ✅ DSP Settings & Control
+- The list getters (`get_modes`, `get_filters`, `get_shapers`, `get_rates`,
+  `get_inputs`, `matrix_list_profiles`) return `None` for a list HQPlayer did
+  not give — a refusal, another element, a lost or silent connection — and
+  `[]` only for one it answered empty (since 2026-10-11). `GET
+  /api/hqplayer/state` names the missing ones in `missing` (their keys null)
+  and the HQPlayer screen keeps their pickers shut; the assistant is told; a
+  benchmark neither starts nor plans on one
 - `get_modes()` / `set_mode(index)` - Output mode (PCM/DSD)
   - Example modes: [source], PCM, SDM (DSD)
 - `get_filters()` / `set_filter(index, index_1x)` - Audio filters (PCM and SDM)
   - 77+ filters available: IIR, FIR, poly-sinc, closed-form, etc.
   - Separate 1x filter for PCM
+  - `parsed` - the description read (`parse_filter_description`): rating,
+    focus (a set, sorted), ratio class, `up`, and the mode by its arrow; one
+    filter's two descriptions agree on rating, focus and ratio. `None` for no
+    description (HQPlayer 5) or a shape not read here — the raw line stays,
+    and the shape is logged once
 - `get_shapers()` / `set_shaping(index)` - Noise shaping/dither
   - 36+ shapers: DSD5, ASDM5, ASDM7, etc.
+  - `parsed` - a modulator's generation (`Gen7` → `{"generation": 7}`);
+    `None` for a dither
 - `get_rates()` / `set_rate(index)` - Output sample rate
   - 20 rates: 2.048 MHz to 98.304 MHz (DSD)
 - `set_convolution(enabled)` - Convolution engine on/off — reached through
@@ -188,7 +214,9 @@ assistant tool, no control in the Web UI (as of 2026-09-29):
 - `get_state()` - the selection as indices into the current mode's lists, plus
   `filterNx` (the Nx slot `SetFilter value` sets — `filter` read as the 1x
   slot while a 44.1 kHz source played), `filter1x`, `adaptive`,
-  `matrix_profile`, `volume`; no mute flag. HQPlayer keeps one selection per mode (its `settings.xml`
+  `matrix_profile`, `volume`, and since 2026-10-11 `filter_20k`,
+  `filter_junk`, `random`, `repeat` (`None` from a build that does not report
+  them); no mute flag. HQPlayer keeps one selection per mode (its `settings.xml`
   `<defaults>` hold `filter`/`dither`/`samplerate` for PCM and
   `oversampling`/`modulator`/`bitrate` for SDM)
 
@@ -1002,6 +1030,9 @@ cooling — so Sautium measures it instead of predicting it
   it. The estimate of a run's length takes the pace of the last run that
   ended or was cancelled (on a trial-mode Embedded the owner cancels before
   the half hour is up and runs again: a repeat run measures only the gaps).
+  Without an estimate the block says why (`no_estimate`, since 2026-10-11):
+  the HQPlayer is not registered yet, it did not report its state, a list a
+  run is planned from is missing, or its mode follows the source.
 
 Measurements stay on this node: in the `.sbk` backup, not in the life-data
 merge (their endpoint is this node's registry), not in P2P sync.

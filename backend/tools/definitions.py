@@ -439,30 +439,16 @@ def _h_hqplayer_get_settings() -> str:
             lines.append(f"HQPlayer: {info.get('product', '')} v{info.get('version', '')}")
             lines.append(f"Engine: {info.get('engine', '')}")
             lines.append("")
-        filters = hqp.get_filters()
-        if filters:
-            lines.append(f"Available filters ({len(filters)}):")
-            for f in filters:
-                desc = f.get("description", "")
-                suffix = f" — {desc}" if desc else ""
-                lines.append(f"  [{f['index']}] {f['name']}{suffix}")
-        shapers = hqp.get_shapers()
-        if shapers:
-            lines.append(f"\nAvailable dither/shapers ({len(shapers)}):")
-            for s in shapers:
-                lines.append(f"  [{s['index']}] {s['name']}")
-        modes = hqp.get_modes()
-        if modes:
-            lines.append(f"\nOutput modes ({len(modes)}):")
-            for m in modes:
-                lines.append(f"  [{m['index']}] {m['name']}")
-        rates = hqp.get_rates()
-        if rates:
-            lines.append(f"\nSample rates ({len(rates)}):")
-            for r in rates:
-                rate_khz = r['rate'] / 1000
-                lines.append(f"  [{r['index']}] {rate_khz:.1f} kHz")
-        return "\n".join(lines) if lines else "No settings info available."
+        aq.hqp_list(lines, "Available filters", hqp.get_filters(), hqp,
+                    lambda f: f"  [{f['index']}] {f['name']}"
+                              + (f" — {f['description']}" if f.get("description") else ""))
+        aq.hqp_list(lines, "\nAvailable dither/shapers", hqp.get_shapers(), hqp,
+                    lambda s: f"  [{s['index']}] {s['name']}")
+        aq.hqp_list(lines, "\nOutput modes", hqp.get_modes(), hqp,
+                    lambda m: f"  [{m['index']}] {m['name']}")
+        aq.hqp_list(lines, "\nSample rates", hqp.get_rates(), hqp,
+                    lambda r: f"  [{r['index']}] {r['rate'] / 1000:.1f} kHz")
+        return "\n".join(lines)
     except Exception as e:
         return f"Error getting settings: {e}"
 
@@ -471,8 +457,10 @@ def _h_hqplayer_set_filter(filter_name: str) -> str:
     try:
         hqp = _get_hqp()
         filters = hqp.get_filters()
+        if filters is None:
+            return f"HQPlayer did not list its filters ({hqp.refusal()}) — nothing was changed."
         if not filters:
-            return "Could not retrieve filter list from HQPlayer."
+            return "HQPlayer lists no filters in its current mode."
         match = None
         for f in filters:
             if f["name"].lower() == filter_name.lower():
@@ -499,8 +487,10 @@ def _h_hqplayer_set_shaper(shaper_name: str) -> str:
     try:
         hqp = _get_hqp()
         shapers = hqp.get_shapers()
+        if shapers is None:
+            return f"HQPlayer did not list its dithers/shapers ({hqp.refusal()}) — nothing was changed."
         if not shapers:
-            return "Could not retrieve shaper list from HQPlayer."
+            return "HQPlayer lists no dithers/shapers in its current mode."
         match = None
         for s in shapers:
             if s["name"].lower() == shaper_name.lower():
@@ -533,7 +523,10 @@ def _h_hqplayer_set_convolution(enabled: bool) -> str:
 
 def _h_hqplayer_list_matrix_profiles() -> str:
     try:
-        profiles = _get_hqp().matrix_list_profiles()
+        hqp = _get_hqp()
+        profiles = hqp.matrix_list_profiles()
+        if profiles is None:
+            return f"HQPlayer did not list its matrix profiles ({hqp.refusal()})."
         if not profiles:
             return "No matrix profiles found."
         lines = [f"Available matrix profiles ({len(profiles)}):"]
@@ -558,6 +551,8 @@ def _h_hqplayer_set_matrix_profile(profile_name: str) -> str:
     try:
         hqp = _get_hqp()
         profiles = hqp.matrix_list_profiles()
+        if profiles is None:
+            return f"HQPlayer did not list its matrix profiles ({hqp.refusal()}) — nothing was changed."
         if profiles and profile_name not in profiles:
             match = None
             for p in profiles:
@@ -586,11 +581,14 @@ def _h_hqplayer_get_dsp_state() -> str:
         state = hqp.get_state()
         if not state:
             return "Could not get DSP state."
-        active_filter = next(
-            (f for f in hqp.get_filters() if f["index"] == state["filter"]), None
+        filters = hqp.get_filters()
+        active_filter = None if filters is None else next(
+            (f for f in filters if f["index"] == state["filter"]), None
         )
         filter_line = f"  Active filter index: {state['filter']}"
-        if active_filter:
+        if filters is None:
+            filter_line += f" (its name unknown: HQPlayer did not list its filters — {hqp.refusal()})"
+        elif active_filter:
             filter_line += f" ({active_filter['name']})"
             if active_filter.get("description"):
                 filter_line += f" — {active_filter['description']}"

@@ -43,8 +43,8 @@ from urllib.parse import urlsplit
 import psycopg2
 
 from config import settings
-from hqplayer_client import (HQPlayerClient, PlaybackState, file_path_to_uri,
-                             redact_uri, uri_to_file_path)
+from hqplayer_client import (STATUS_READINGS, HQPlayerClient, PlaybackState,
+                             file_path_to_uri, redact_uri, uri_to_file_path)
 
 from playback import hqp_diagnostics as diag
 from playback import hqp_load
@@ -690,7 +690,9 @@ class HqpBackend(PlayerBackend):
         # The proxy address HQPlayer reaches, fixed per attach: a DNS + route
         # lookup once, not per queued item.
         self._url_host = hqp_media_host()
-        # Slot to select on the first play after an output switch (resume_at).
+        # Slot the next play press selects: after an output switch (resume_at),
+        # or once HQPlayer took the queue afresh while not playing
+        # (_converge_mirror, _rebuild).
         self._resume_index: Optional[int] = None
         # The play intent being watched (playback.hqp_diagnostics), and the
         # ones an intent superseded or the owner ended, waiting for the
@@ -1134,7 +1136,8 @@ class HqpBackend(PlayerBackend):
         nothing is tracked against a queued track."""
         idx, item, foreign = playing
         extra = {"genre": status.genre, "process_speed": status.process_speed,
-                 "limited": status.limited, "active_mode": status.active_mode}
+                 "limited": status.limited, "active_mode": status.active_mode,
+                 **{k: getattr(status, k) for k in STATUS_READINGS}}
         if foreign:
             extra["source"] = "external"
         if item is None or not _http_served(item):
@@ -1490,9 +1493,12 @@ class HqpBackend(PlayerBackend):
         return ok
 
     def select(self, index: int) -> bool:
-        """Load AND play the slot (PlayerBackend contract): HQPlayer's
-        SelectTrack alone leaves a STOPPED player stopped, so the Play that
-        jump() used to send from the manager follows here, same order."""
+        """Load AND play the slot (PlayerBackend contract). SelectTrack
+        alone already starts a STOPPED HQPlayer on the slot it names (its
+        log: "GoTo 1", then "Play (1/0)"; Desktop 6.2.4, 2026-10-11) — so no
+        path sends it just to ready a slot on a stopped HQPlayer (_rebuild
+        leaves that to the play press). The Play after it, which jump()
+        used to send from the manager, finds it playing then."""
         self._resume_index = None    # explicit navigation overrides resume
         with self._intent("select", slot=index):
             ok = self._select_play(index)
@@ -1685,7 +1691,9 @@ class HqpBackend(PlayerBackend):
         under `_hqp_lock`). hqp.stop() is mandatory — HQPlayer ignores
         PlaylistAdd(clear=True) while playing, silently appending instead,
         which would double every track and land select_track on the wrong
-        slot. Returns whether HQPlayer accepted every entry."""
+        slot. Not resuming, it lands nowhere: SelectTrack would start the
+        stopped HQPlayer (select) — the play press resumes the slot.
+        Returns whether HQPlayer accepted every entry."""
         with self._intent("rebuild", slot=index, uris=uris) if resume else nullcontext():
             with _hqp_lock:
                 self._check_attached()
@@ -1693,11 +1701,13 @@ class HqpBackend(PlayerBackend):
                 hqp.stop()
                 accepted = [_add_one(hqp, uris[0], clear=True)]
                 accepted += [_add_one(hqp, uri) for uri in uris[1:]]
-                hqp.select_track(index)
-                if position > 0:
-                    hqp.seek(position)
                 if resume:
+                    hqp.select_track(index)
+                    if position > 0:
+                        hqp.seek(position)
                     hqp.play()
+                else:
+                    self._resume_index = index
         self.poke()
         return all(accepted)
 

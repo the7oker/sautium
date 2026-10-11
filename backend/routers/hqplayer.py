@@ -155,14 +155,9 @@ def get_state(dsp: bool = False) -> Dict[str, Any]:
                 hqp = _get_hqp_status()
             info = hqp.get_info()
             state = hqp.get_state()
-            modes = hqp.get_modes()
-            rates = hqp.get_rates()
-            filters = hqp.get_filters()
-            shapers = hqp.get_shapers()
-            try:
-                matrix_profiles = hqp.matrix_list_profiles()
-            except Exception:
-                matrix_profiles = []
+            lists = {"modes": hqp.get_modes(), "rates": hqp.get_rates(),
+                     "filters": hqp.get_filters(), "shapers": hqp.get_shapers(),
+                     "matrix_profiles": hqp.matrix_list_profiles()}
             status = hqp.get_status() if dsp else None
             volume_range = hqp.volume_range() if dsp else None
     except (BrokenPipeError, ConnectionError, OSError) as e:
@@ -179,19 +174,17 @@ def get_state(dsp: bool = False) -> Dict[str, Any]:
     response["connected"] = really_connected
     response["info"] = info or {}
     response["state"] = state or {}
-    response["modes"] = modes or []
-    response["rates"] = rates or []
-    response["filters"] = filters or []
-    response["shapers"] = shapers or []
-    response["matrix_profiles"] = matrix_profiles
+    # A list HQPlayer did not give (a refusal, a lost answer) is null and
+    # named in `missing` — never an empty one: an empty picker would say
+    # HQPlayer has nothing to choose from.
+    response.update(lists)
+    response["missing"] = [name for name, items in lists.items() if items is None]
     response["favorite_filters"] = _load_favorites()
     if not dsp:
         return response
     if ep is not None and info:
         hqp_library.note_info(ep["id"], info, here=not _stream_mode())
         ep = hqp_library.endpoint_by_address(settings.hqplayer_host, settings.hqplayer_port)
-    lists = {"modes": modes or [], "filters": filters or [], "shapers": shapers or [],
-             "rates": rates or []}
     response["headroom"] = _headroom(ep, state, status, lists)
     response["benchmark"] = _benchmark_block(ep, state, lists, volume_range)
     response["volume_range"] = volume_range
@@ -214,7 +207,8 @@ def _mode_of(state: dict, modes: List[dict]) -> Optional[str]:
 def _headroom(ep: Optional[dict], state: Optional[dict], status, lists: dict) -> Dict[str, Any]:
     """How each picker entry runs on this HQPlayer, for the source the owner
     hears: the playing one (what HQPlayer decodes), else the file the queue
-    plays next. Empty without a measured build or a known source."""
+    plays next. Empty without a measured build or a known source — or, for
+    the queued file, a list HQPlayer did not give."""
     from hqplayer_client import PlaybackState
     from playback import hqp_load
     from playback.hqp_benchmark import running_filter
@@ -226,6 +220,8 @@ def _headroom(ep: Optional[dict], state: Optional[dict], status, lists: dict) ->
         filt, shaper = status.active_filter, status.active_shaper
         src = (status.src_rate, status.src_channels)
     else:
+        if any(lists[k] is None for k in ("modes", "rates", "filters", "shapers")):
+            return {}
         item = manager.queue.item_at(manager.latest_status.get("track_index") or 1)
         src = hqp_load.file_source(item.opener()) if item is not None else None
         mode = _mode_of(state, lists["modes"])
@@ -246,7 +242,10 @@ def _benchmark_block(ep: Optional[dict], state: Optional[dict], lists: dict,
     """The Benchmark block: the job and the last run, CUDA offload and where
     it is known from, whether HQPlayer can lower its volume here, the
     machine it runs on (this one only), and what a run of the current mode
-    would measure now."""
+    would measure now — or, while no run is running, why that is not known
+    (`no_estimate`): the HQPlayer is not registered yet, it did not report
+    its state, a list the run is planned from is missing, or its mode
+    follows the source."""
     import hqp_library
     from playback import hqp_benchmark
     from playback.hqp_backend import _stream_mode
@@ -258,8 +257,15 @@ def _benchmark_block(ep: Optional[dict], state: Optional[dict], lists: dict,
                    volume_range, state["volume"]) is not None,
                host=({k: ep.get(f"host_{k}") for k in ("cpu", "cores", "gpu", "ram_gb")}
                      if here and ep else None),
-               estimate=None, other_modes=[])
-    if not ep or not ep.get("hqp_engine") or not state or out["job"]["running"]:
+               estimate=None, no_estimate=None, other_modes=[])
+    if out["job"]["running"]:
+        return out
+    out["no_estimate"] = ("unregistered" if not ep or not ep.get("hqp_engine")
+                          else "state" if not state
+                          else "lists" if any(lists[k] is None
+                                              for k in ("modes", "rates", "filters", "shapers"))
+                          else None)
+    if out["no_estimate"] is not None:
         return out
     # A run measures the mode chosen in HQPlayer ([source] chooses none):
     # the others are measured on request.
@@ -267,13 +273,15 @@ def _benchmark_block(ep: Optional[dict], state: Optional[dict], lists: dict,
     kind = hqp_benchmark.mode_kind(mode)
     kinds = {hqp_benchmark.mode_kind(m["name"]) for m in lists["modes"]} - {None}
     out["other_modes"] = sorted(kinds - {kind})
-    if kind is not None:
-        grid = hqp_benchmark.plan(ep, kind=kind, mode_name=mode, state=state,
-                                  filters=lists["filters"], shapers=lists["shapers"],
-                                  rates=lists["rates"])
-        asks = grid.asks()
-        out["estimate"] = {"mode": mode, "points": asks,
-                           "seconds": round(asks * hqp_benchmark.pace(ep["id"]))}
+    if kind is None:
+        out["no_estimate"] = "source"
+        return out
+    grid = hqp_benchmark.plan(ep, kind=kind, mode_name=mode, state=state,
+                              filters=lists["filters"], shapers=lists["shapers"],
+                              rates=lists["rates"])
+    asks = grid.asks()
+    out["estimate"] = {"mode": mode, "points": asks,
+                       "seconds": round(asks * hqp_benchmark.pace(ep["id"]))}
     return out
 
 
@@ -444,6 +452,12 @@ def get_benchmark() -> Dict[str, Any]:
         raise HTTPException(status_code=503, detail=f"HQPlayer not reachable: {e}")
     if state is None:
         raise HTTPException(status_code=503, detail="HQPlayer state unavailable")
+    missing = [name for name, items in (("modes", modes), ("filters", filters),
+                                        ("shapers", shapers), ("rates", rates)) if items is None]
+    if missing:
+        # The sheet's tables are cut at the current filter, shaper and rate.
+        raise HTTPException(status_code=503,
+                            detail=f"HQPlayer did not list its {', '.join(missing)}")
     mode = _mode_of(state, modes)
     run = out["last_run"]
     engine = run["hqp_engine"] if run and run["stale"] else ep.get("hqp_engine")

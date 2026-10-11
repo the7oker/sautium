@@ -168,6 +168,22 @@ class TrackStatus:
     # unauthenticated client). The slot index names an entry only through
     # the playlist; this names it outright.
     uri: str = ""
+    # HQPlayer 6's further Status fields; None from a build that does not
+    # report them (HQPlayer 5). `apod` is its Apod counter for the track
+    # playing — it starts at 0 with every track; `active_bits` and
+    # `active_channels` describe the OUTPUT, like active_rate; `output_delay`
+    # is the time from a sample's position to the output, in seconds
+    # (HQPlayer reports microseconds); `display_position` is the position it
+    # shows; `correction` and `filter_20k` are its switches, `filter_junk`
+    # the junk filter it runs (an index into its own list of them).
+    apod: Optional[int] = None
+    active_bits: Optional[int] = None
+    active_channels: Optional[int] = None
+    output_delay: Optional[float] = None
+    correction: Optional[bool] = None
+    filter_20k: Optional[bool] = None
+    filter_junk: Optional[int] = None
+    display_position: Optional[float] = None
 
     @property
     def is_playing(self) -> bool:
@@ -178,6 +194,76 @@ class TrackStatus:
         if self.length > 0:
             return (self.position / self.length) * 100
         return 0.0
+
+
+# The TrackStatus fields the playback status carries as HQPlayer gives them
+# (playback.hqp_backend._status_of → PlaybackManager), each only while it
+# reports one.
+STATUS_READINGS = ("apod", "active_bits", "active_channels", "output_delay",
+                   "correction", "filter_20k", "filter_junk", "display_position")
+
+
+def _optional(el: ET.Element, key: str, cast: Callable[[str], Any]) -> Any:
+    """An attribute a build may not report: None when it does not."""
+    value = el.get(key)
+    return None if value is None or value == "" else cast(value)
+
+
+def _flag(value: str) -> bool:
+    return bool(int(value))
+
+
+# -- Filter and modulator descriptions ---------------------------------------------
+# HQPlayer 6 describes each filter in its own words: Signalyst's rating out of
+# five, the focus words, the mode's arrow and the ratio class —
+# "4/5 transients, timbre, space ⥮ 2^x up". PCM mode writes ⥮, SDM mode ⥣;
+# only PCM adds "up" (a filter that converts upwards only). A focus list may
+# keep a trailing comma ("4/5 space, ⥮ Any") or be absent ("4/5 ⥮ Any"), and the
+# two modes may list one filter's words in another order, so the focus is a
+# set: two descriptions of one filter agree when their rating, focus and ratio
+# class do. A modulator's description is its generation ("Gen7"). A shape not
+# read here is left unparsed — never guessed — and said once per string.
+
+_FILTER_DESCRIPTION = re.compile(r"^([1-5])/5 (?:(.+?),? )?([⥮⥣]) (1:1|Int|Any|2\^x)( up)?$")
+_FOCUS_WORDS = frozenset({"space", "transients", "timbre"})
+_ARROW_MODE = {"⥮": "pcm", "⥣": "sdm"}
+_GENERATION = re.compile(r"^Gen([1-9][0-9]?)$")
+_unread_descriptions: set = set()
+_unread_lock = threading.Lock()
+
+
+def _unread(kind: str, text: str) -> None:
+    with _unread_lock:
+        if text in _unread_descriptions:
+            return
+        _unread_descriptions.add(text)
+    logger.warning("HQPlayer describes a %s as %r — a shape this client does not read", kind, text)
+
+
+def parse_filter_description(text: str) -> Optional[Dict[str, Any]]:
+    """{rating, focus (sorted), ratio, up, mode} from a filter's description;
+    None for none (HQPlayer 5) or a shape not read here."""
+    if not text:
+        return None
+    m = _FILTER_DESCRIPTION.match(text)
+    focus = frozenset(w.strip() for w in (m.group(2) or "").split(",") if w.strip()) if m else None
+    if m is None or not focus <= _FOCUS_WORDS:
+        _unread("filter", text)
+        return None
+    return {"rating": int(m.group(1)), "focus": sorted(focus), "ratio": m.group(4),
+            "up": m.group(5) is not None, "mode": _ARROW_MODE[m.group(3)]}
+
+
+def parse_shaper_description(text: str) -> Optional[Dict[str, Any]]:
+    """{generation} from a modulator's description; None for none (PCM
+    dithers, HQPlayer 5) or a shape not read here."""
+    if not text:
+        return None
+    m = _GENERATION.match(text)
+    if m is None:
+        _unread("modulator", text)
+        return None
+    return {"generation": int(m.group(1))}
 
 
 class HQPlayerClient:
@@ -200,13 +286,15 @@ class HQPlayerClient:
     _error_ring: deque = deque(maxlen=50)
     _error_lock = threading.Lock()
 
-    def __init__(self, host: str = "localhost", port: int = 4321, timeout: float = 5.0,
+    def __init__(self, host: str = "127.0.0.1", port: int = 4321, timeout: float = 5.0,
                  *, ring: bool = True):
         """
         Initialize HQPlayer client
 
         Args:
-            host: HQPlayer host (use host.docker.internal for Docker, or Windows IP)
+            host: HQPlayer host — an address, never "localhost", which Windows
+                resolves to ::1 first (a refused attempt per connect); the
+                Docker node names host.docker.internal or the HQPlayer's IP
             port: Control port (default 4321)
             timeout: Socket timeout in seconds
             ring: whether this instance's failures join the shared ring — the
@@ -565,6 +653,10 @@ class HQPlayerClient:
         """
         return self._accepted("Volume", {"value": str(value)})
 
+    def set_adaptive_volume(self, enabled: bool) -> bool:
+        """Turn HQPlayer's adaptive volume on or off — State `adaptive`."""
+        return self._accepted("SetAdaptiveVolume", {"value": "1" if enabled else "0"})
+
     # ========== Playlist Control ==========
 
     def playlist_add(self, uri: str, clear: bool = False, queued: bool = False) -> bool:
@@ -672,6 +764,14 @@ class HQPlayerClient:
                 active_filter=response.get("active_filter", ""),
                 active_shaper=response.get("active_shaper", ""),
                 active_rate=int(response.get("active_rate") or 0),
+                apod=_optional(response, "apod", int),
+                active_bits=_optional(response, "active_bits", int),
+                active_channels=_optional(response, "active_channels", int),
+                output_delay=_optional(response, "output_delay", lambda v: int(v) / 1e6),
+                correction=_optional(response, "correction", _flag),
+                filter_20k=_optional(response, "filter_20k", _flag),
+                filter_junk=_optional(response, "filter_junk", int),
+                display_position=_optional(response, "display_position", float),
             )
 
             # Parse metadata if present
@@ -700,7 +800,9 @@ class HQPlayerClient:
         Get current HQPlayer DSP state (filter, shaper, mode, convolution, matrix profile).
 
         Returns:
-            Dict with: mode, filter, shaper, rate, convolution, matrix_profile, etc.
+            Dict with: mode, filter, shaper, rate, convolution, matrix_profile, etc.;
+            filter_20k, filter_junk, random and repeat None from a build that
+            does not report them.
         """
         response = self._execute_command("State")
 
@@ -727,6 +829,10 @@ class HQPlayerClient:
                 "invert": bool(int(response.get("invert", 0))),
                 "adaptive": bool(int(response.get("adaptive", 0))),
                 "volume": float(response.get("volume", 0.0)),
+                "filter_20k": _optional(response, "filter_20k", _flag),
+                "filter_junk": _optional(response, "filter_junk", int),
+                "random": _optional(response, "random", _flag),
+                "repeat": _optional(response, "repeat", int),
             }
         except Exception as e:
             logger.error(f"Failed to parse state: {e}")
@@ -763,28 +869,36 @@ class HQPlayerClient:
 
     # ========== DSP Settings ==========
 
-    def get_modes(self) -> List[Dict[str, Any]]:
+    def _listing(self, command: str, item: str) -> Optional[List[ET.Element]]:
+        """The items of a list HQPlayer gave — [] only for a list it answered
+        empty. None when it refused, answered another element or never
+        answered: a list HQPlayer did not give is not an empty one, and a
+        picker drawn from it would say HQPlayer has nothing to choose."""
+        response = self._execute_command(command)
+        if response is None or self.last_error is not None:
+            return None
+        if response.tag != command:
+            self._outcome(command, None, "unparsed", f"answered <{response.tag}>")
+            return None
+        return response.findall(item)
+
+    def get_modes(self) -> Optional[List[Dict[str, Any]]]:
         """
         Get available output modes (PCM/DSD)
 
         Returns:
-            List of dicts with: index, name, value
+            List of dicts with: index, name, value; None when HQPlayer did
+            not give the list (`_listing`)
             Example: [{"index": 0, "name": "[source]", "value": -1}, {"index": 1, "name": "PCM", "value": 0}, ...]
         """
-        response = self._execute_command("GetModes")
-        if response is None or response.tag != "GetModes":
-            return []
-
-        modes = []
-        # Parse ModesItem children
-        for item in response.findall("ModesItem"):
-            modes.append({
-                "index": int(item.get("index", 0)),
-                "name": item.get("name", ""),
-                "value": int(item.get("value", 0)),
-            })
-
-        return modes
+        items = self._listing("GetModes", "ModesItem")
+        if items is None:
+            return None
+        return [{
+            "index": int(item.get("index", 0)),
+            "name": item.get("name", ""),
+            "value": int(item.get("value", 0)),
+        } for item in items]
 
     def set_mode(self, index: int) -> bool:
         """
@@ -795,35 +909,35 @@ class HQPlayerClient:
         """
         return self._accepted("SetMode", {"value": str(index)})
 
-    def get_filters(self) -> List[Dict[str, Any]]:
+    def get_filters(self) -> Optional[List[Dict[str, Any]]]:
         """
         Get available filters (PCM and SDM/DSD)
 
         Returns:
-            List of dicts with: index, name, value, arg, description
+            List of dicts with: index, name, value, arg, description, parsed;
+            None when HQPlayer did not give the list (`_listing`)
             `description` is HQPlayer 6's own line for the filter (its rating,
-            focus and ratio); empty string on HQP5.
+            focus and ratio); empty string on HQP5. `parsed` is that line
+            read (`parse_filter_description`), None when there is none or
+            its shape is not read here.
             Example, SDM mode on engine 6.2.3: [{"index": 6, "name": "poly-sinc-lp",
-                       "value": 0, "arg": 2, "description": "4/5 space ⥣ Any"}, ...]
+                       "value": 0, "arg": 2, "description": "4/5 space ⥣ Any",
+                       "parsed": {"rating": 4, "focus": ["space"], "ratio": "Any",
+                                  "up": False, "mode": "sdm"}}, ...]
             PCM mode lists the same filter as index 7, value 6, "4/5 space ⥮ Any":
             the index, the value and the arrow belong to the mode.
         """
-        response = self._execute_command("GetFilters")
-        if response is None or response.tag != "GetFilters":
-            return []
-
-        filters = []
-        # Parse FiltersItem children
-        for item in response.findall("FiltersItem"):
-            filters.append({
-                "index": int(item.get("index", 0)),
-                "name": item.get("name", ""),
-                "value": int(item.get("value", 0)),
-                "arg": int(item.get("arg", 0)),
-                "description": item.get("description", ""),
-            })
-
-        return filters
+        items = self._listing("GetFilters", "FiltersItem")
+        if items is None:
+            return None
+        return [{
+            "index": int(item.get("index", 0)),
+            "name": item.get("name", ""),
+            "value": int(item.get("value", 0)),
+            "arg": int(item.get("arg", 0)),
+            "description": item.get("description", ""),
+            "parsed": parse_filter_description(item.get("description", "")),
+        } for item in items]
 
     def set_filter(self, index: int, index_1x: Optional[int] = None) -> bool:
         """
@@ -839,29 +953,27 @@ class HQPlayerClient:
 
         return self._accepted("SetFilter", attrs)
 
-    def get_shapers(self) -> List[Dict[str, Any]]:
+    def get_shapers(self) -> Optional[List[Dict[str, Any]]]:
         """
         Get available dither/noise shapers
 
         Returns:
-            List of dicts with: index, name, value, description — HQPlayer 6.1+
-            names a modulator's generation there ("Gen7"); empty before.
+            List of dicts with: index, name, value, description, parsed;
+            None when HQPlayer did not give the list (`_listing`).
+            HQPlayer 6.1+ names a modulator's generation in its description
+            ("Gen7"; `parsed` {"generation": 7}); PCM dithers and earlier
+            builds leave it empty (`parsed` None).
         """
-        response = self._execute_command("GetShapers")
-        if response is None or response.tag != "GetShapers":
-            return []
-
-        shapers = []
-        # Parse ShapersItem children
-        for item in response.findall("ShapersItem"):
-            shapers.append({
-                "index": int(item.get("index", 0)),
-                "name": item.get("name", ""),
-                "value": int(item.get("value", 0)),
-                "description": item.get("description", ""),
-            })
-
-        return shapers
+        items = self._listing("GetShapers", "ShapersItem")
+        if items is None:
+            return None
+        return [{
+            "index": int(item.get("index", 0)),
+            "name": item.get("name", ""),
+            "value": int(item.get("value", 0)),
+            "description": item.get("description", ""),
+            "parsed": parse_shaper_description(item.get("description", "")),
+        } for item in items]
 
     def set_shaping(self, index: int) -> bool:
         """
@@ -872,27 +984,22 @@ class HQPlayerClient:
         """
         return self._accepted("SetShaping", {"value": str(index)})
 
-    def get_rates(self) -> List[Dict[str, Any]]:
+    def get_rates(self) -> Optional[List[Dict[str, Any]]]:
         """
         Get available output sample rates
 
         Returns:
-            List of dicts with: index, rate (Hz)
+            List of dicts with: index, rate (Hz); None when HQPlayer did not
+            give the list (`_listing`)
             Example: [{"index": 0, "rate": 44100}, {"index": 1, "rate": 88200}, ...]
         """
-        response = self._execute_command("GetRates")
-        if response is None or response.tag != "GetRates":
-            return []
-
-        rates = []
-        # Parse RatesItem children
-        for item in response.findall("RatesItem"):
-            rates.append({
-                "index": int(item.get("index", 0)),
-                "rate": int(item.get("rate", 0)),
-            })
-
-        return rates
+        items = self._listing("GetRates", "RatesItem")
+        if items is None:
+            return None
+        return [{
+            "index": int(item.get("index", 0)),
+            "rate": int(item.get("rate", 0)),
+        } for item in items]
 
     def set_rate(self, index: int) -> bool:
         """
@@ -903,23 +1010,18 @@ class HQPlayerClient:
         """
         return self._accepted("SetRate", {"value": str(index)})
 
-    def get_inputs(self) -> List[str]:
+    def get_inputs(self) -> Optional[List[str]]:
         """
         Get available input devices
 
         Returns:
-            List of input device names
+            List of input device names; None when HQPlayer did not give the
+            list (`_listing`)
         """
-        response = self._execute_command("GetInputs")
-        if response is None or response.tag != "GetInputs":
-            return []
-
-        inputs = []
-        # Parse InputsItem children
-        for item in response.findall("InputsItem"):
-            inputs.append(item.get("name", ""))
-
-        return inputs
+        items = self._listing("GetInputs", "InputsItem")
+        if items is None:
+            return None
+        return [item.get("name", "") for item in items]
 
     # ========== Convolution & Matrix ==========
 
@@ -932,23 +1034,18 @@ class HQPlayerClient:
         """
         return self._accepted("SetConvolution", {"value": "1" if enabled else "0"})
 
-    def matrix_list_profiles(self) -> List[str]:
+    def matrix_list_profiles(self) -> Optional[List[str]]:
         """
         Get list of saved matrix profiles.
 
         Returns:
-            List of profile names
+            List of profile names; None when HQPlayer did not give the list
+            (`_listing`)
         """
-        response = self._execute_command("MatrixListProfiles")
-        if response is None or response.tag != "MatrixListProfiles":
-            return []
-
-        profiles = []
-        for item in response.findall("MatrixProfile"):
-            name = item.get("name", "")
-            if name:
-                profiles.append(name)
-        return profiles
+        items = self._listing("MatrixListProfiles", "MatrixProfile")
+        if items is None:
+            return None
+        return [item.get("name") for item in items if item.get("name")]
 
     def matrix_get_profile(self) -> Optional[str]:
         """
@@ -1016,7 +1113,7 @@ class HQPlayerClient:
 class HQPlayerConnection:
     """Context manager for HQPlayer connection"""
 
-    def __init__(self, host: str = "localhost", port: int = 4321):
+    def __init__(self, host: str = "127.0.0.1", port: int = 4321):
         self.client = HQPlayerClient(host, port)
 
     def __enter__(self) -> HQPlayerClient:

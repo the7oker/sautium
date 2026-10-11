@@ -577,7 +577,9 @@ implementation details live in the code, DB and git history.
 - **A SelectTrack on a stopped HQPlayer needs a beat.** One second between
   select and play on a resume (`hqp_backend.play`) — a boundary exception:
   HQPlayer cannot say it is ready. The first client's 2 s wait after a
-  playlist load is gone.
+  playlist load is gone. Desktop 6.2.4 disproves the premise (2026-10-11): a
+  SelectTrack starts a stopped HQPlayer by itself — no path may send one just
+  to ready a slot (a queue rebuilt while stopped sent one, and played).
 - **Stop-clear-add-select-play sequence** for `play_track`/`play_album`. Without
   explicit stop, HQPlayer occasionally started the wrong track from the
   existing queue.

@@ -2143,7 +2143,7 @@ def _put_output_prefs(req: OutputPrefs) -> Dict[str, Any]:
                              exclusive=bool(_read("output.local_exclusive")))
         elif otype == "hqplayer":
             # Choosing HQPlayer IS configuring it. There is always an effective
-            # endpoint (the config default, localhost:4321), so persist it if
+            # endpoint (the config default, 127.0.0.1:4321), so persist it if
             # nothing was saved and carry on.
             #
             # This used to refuse with a 409 when no host had been saved, using

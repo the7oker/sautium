@@ -1369,3 +1369,20 @@ def test_an_hqplayer_forgotten_mid_run_ends_it(run, monkeypatch):
     st = bench.state()
     assert st["outcome"] == "failed" and "forgotten" in st["note"], st
     assert run.q("SELECT count(*) FROM hqp_benchmark_runs") == [(0,)]
+
+
+def test_a_list_hqplayer_did_not_give_refuses_a_run_or_ends_it_put_back(run):
+    # a refused GetModes read as no modes said "HQPlayer's mode is [source]"
+    fake = run.fake
+    fake.MINE = DspFake.MINE - {"GetModes"}
+    fake.replies["GetModes"] = '<GetModes result="Error"/>'
+    with pytest.raises(bench.BenchmarkRefused, match="HQPlayer did not list its modes"):
+        bench.start()
+    fake.MINE = DspFake.MINE - {"GetShapers"}
+    fake.replies["GetShapers"] = '<GetShapers result="Error"/>'
+    before = fake.settings()
+    bench.start()
+    assert _wait(lambda: not bench.running(), 20)
+    st = bench.state()
+    assert (st["outcome"], st["note"]) == ("failed", "HQPlayer did not list its shapers")
+    assert fake.settings() == before

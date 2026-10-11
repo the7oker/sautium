@@ -8755,6 +8755,15 @@
   // settings no sample covers yet), shown as the pickers' headroom marks.
   // While HQPlayer does not answer (a heavy point can hold its control port)
   // the block keeps the run's progress and its Cancel.
+  // Why the Benchmark block has no estimate, in the server's terms
+  // (routers/hqplayer.py _benchmark_block).
+  const HQP_BENCH_NO_ESTIMATE = {
+    unregistered: 'This HQPlayer is not registered yet — a run can start once it has played.',
+    state: 'HQPlayer did not report its state — Refresh asks again.',
+    lists: 'A run is planned from HQPlayer\'s lists — it can start once HQPlayer gives them.',
+    source: 'HQPlayer\'s mode follows the source here ([source]): measure PCM or SDM with a button above.',
+  };
+
   function hqpBenchmarkBlock(s) {
     const b = s.benchmark;
     if (!b) return '';
@@ -8779,7 +8788,7 @@
     } else if (est) {
       hint = `Plays test noise${b.volume_control ? " at HQPlayer's lowest volume" : ''} through the ${est.points} ${escapeHtml(est.mode)} settings not measured here yet — ${fmtAbout(est.seconds)}.`;
     } else {
-      hint = 'HQPlayer\'s mode follows the source here ([source]): measure PCM or SDM with a button above.';
+      hint = HQP_BENCH_NO_ESTIMATE[b.no_estimate];
     }
     // How the last attempt ended: a job that never opened a run (it could
     // not start) says so itself; a run says its outcome and its note.
@@ -8903,13 +8912,18 @@
 
   async function openHqpBenchResults() {
     let b;
+    let why = 'HQPlayer or the node is not answering right now.';
     try {
       const r = await fetch('/api/hqplayer/benchmark', { cache: 'no-store' });
-      if (!r.ok) throw new Error('HTTP ' + r.status);
+      if (!r.ok) {
+        const out = await r.json().catch(() => ({}));
+        if (typeof out.detail === 'string') why = out.detail + '.';
+        throw new Error('HTTP ' + r.status);
+      }
       b = await r.json();
     } catch (err) {
       notices.toast({ kind: 'error', key: 'hqp.bench', title: 'Results unavailable',
-                      text: 'HQPlayer or the node is not answering right now.' });
+                      text: escapeHtml(why) });
       return;
     }
     const ctx = b.context || {};
@@ -9139,6 +9153,15 @@
       const isPcm = modeUpper === 'PCM';
       const isSdm = modeUpper.includes('SDM') || modeUpper.includes('DSD');
       const shaperLabel = isPcm ? 'Dither' : isSdm ? 'Modulator' : 'Shaper';
+      // A list HQPlayer did not give (it refused, or its answer was lost)
+      // comes as null and is named in `missing`: its picker stays shut
+      // rather than open on nothing, and one line says what is missing.
+      const missing = new Set(s.connected ? s.missing : []);
+      const missingNames = { modes: 'modes', rates: 'rates', filters: 'filters',
+                             shapers: shaperLabel.toLowerCase() + 's', matrix_profiles: 'matrix profiles' };
+      const missingNote = missing.size
+        ? `HQPlayer did not list its ${new Intl.ListFormat('en').format([...missing].map(k => missingNames[k]))} — Refresh asks again.`
+        : '';
 
       const info = s.info || {};
       const productLine = [info.version, info.platform].filter(Boolean).map(escapeHtml).join(' · ')
@@ -9193,21 +9216,22 @@
       // "(none)" option for the matrix: HQPlayer has no call that clears the
       // active profile, so picking it would do nothing.
       const knobs = {
-        mode: { title: 'Mode', current: st.mode,
+        mode: { title: 'Mode', current: st.mode, list: 'modes',
                 options: (s.modes || []).map(m => ({ id: m.index, label: m.name })) },
-        rate: { title: 'Rate', current: st.rate,
+        rate: { title: 'Rate', current: st.rate, list: 'rates',
                 options: (s.rates || []).map(r => ({ id: r.index, label: r.rate ? fmtRateLabel(r.rate) : 'Auto',
                                                      meta: r.rate ? hqpHeadroomMark((hr.rates || {})[String(r.rate)]) : '' })) },
-        shaper: { title: shaperLabel, current: st.shaper,
+        shaper: { title: shaperLabel, current: st.shaper, list: 'shapers',
                   options: (s.shapers || []).map(sh => ({ id: sh.index, label: sh.name,
                                                           meta: hqpHeadroomMark((hr.shapers || {})[sh.name]) })) },
-        matrix_profile: { title: 'Matrix profile', current: matrixActive,
+        matrix_profile: { title: 'Matrix profile', current: matrixActive, list: 'matrix_profiles',
                           options: profiles.map(p => ({ id: p, label: p })) },
       };
       const knobTrigger = (knob, id) => {
         const k = knobs[knob];
         const cur = k.options.find(o => String(o.id) === String(k.current));
-        return `<button class="hqp-select" type="button" id="${id}" data-knob="${knob}"${held ? ' disabled' : ''}>${
+        return `<button class="hqp-select" type="button" id="${id}" data-knob="${knob}"${
+          held || missing.has(k.list) ? ' disabled' : ''}>${
           escapeHtml(cur ? cur.label : (knob === 'matrix_profile' ? '(none)' : '—'))}</button>`;
       };
 
@@ -9220,16 +9244,19 @@
       // PCM 48k). A favourite missing from the live filter list is
       // dimmed and inert — the chip stays so the user sees it's still
       // saved, just not selectable here right now.
+      // Without HQPlayer's filter list no favourite is judged unavailable:
+      // the strip only waits, like the Filter row above it.
+      const filtersMissing = missing.has('filters');
       const availableNames = new Set((s.filters || []).map(f => f.name));
-      const hasUnavailableFav = favourites.some(name => !availableNames.has(name));
+      const hasUnavailableFav = !filtersMissing && favourites.some(name => !availableNames.has(name));
       const favouritesStrip = favourites.length
         ? `<div class="hqp-fav-strip">${favourites.map(name => {
             const isCurrent = name === filterName;
-            const available = availableNames.has(name);
+            const available = filtersMissing || availableNames.has(name);
             return `<button type="button" class="hqp-fav-chip${
               isCurrent ? ' is-current' : ''}${available ? '' : ' is-unavailable'}"${
               available ? '' : ' title="Not available in the current output mode/rate"'}${
-              held ? ' disabled' : ''} data-fav="${escapeHtml(name)}">
+              held || filtersMissing ? ' disabled' : ''} data-fav="${escapeHtml(name)}">
               <span class="hqp-fav-star">★</span>
               <span class="hqp-fav-name">${escapeHtml(name)}</span>
             </button>`;
@@ -9279,6 +9306,7 @@
         <section class="hqp-section">
           <div class="hqp-section-label">Connection</div>
           ${connBlock}
+          ${missingNote ? `<p class="hqp-row-hint is-left">${escapeHtml(missingNote)}</p>` : ''}
         </section>
 
         <section class="hqp-section">
@@ -9312,7 +9340,7 @@
 
         <section class="hqp-section">
           <div class="hqp-section-label">Filter</div>
-          <button class="hqp-row hqp-row-tap" type="button" data-action="open-filter"${held ? ' disabled' : ''}>
+          <button class="hqp-row hqp-row-tap" type="button" data-action="open-filter"${held || filtersMissing ? ' disabled' : ''}>
             <span class="hqp-row-label">Active ${shortMark.filter}</span>
             <span class="hqp-row-value">${escapeHtml(filterName)}</span>
             <svg width="18" height="18" viewBox="0 0 24 24" fill="none"

@@ -953,6 +953,8 @@ def start(mode: Optional[str] = None, *, fixed_volume_ok: bool = False) -> Dict[
         link.close()
     if status is None or st is None:
         raise BenchmarkRefused("HQPlayer did not report its state")
+    if modes is None:
+        raise BenchmarkRefused("HQPlayer did not list its modes — try again")
     # HQPlayer answering is the whole precondition — a queue mirror the
     # attach could not make (HQPlayer not up yet, 2026-10-03) is none: the
     # run sets HQPlayer's playlist itself, and the attach that takes the
@@ -1067,8 +1069,10 @@ def _measure(ep: dict, kind: str) -> Tuple[str, Optional[str]]:
     try:
         pre, modes, vr = _again(lambda: (link("get_state"), link("get_modes"),
                                          link("volume_range")))
-        if pre is None or not modes:
+        if pre is None:
             return "failed", "HQPlayer did not report its state"
+        if modes is None:
+            return "failed", "HQPlayer did not list its modes"
         mode_index = _mode_index(modes, kind)
         if mode_index is None:
             return "failed", f"This HQPlayer's output offers no {kind.upper()} mode"
@@ -1130,7 +1134,17 @@ def _enter_mode(link: _Link, mode_index: int, switched: bool) -> tuple:
     st = link("get_state")
     if st is None:
         raise _Abort("HQPlayer did not report its state")
-    return st, link("get_filters"), link("get_shapers"), link("get_rates")
+    return (st, *_lists(link))
+
+
+def _lists(link: _Link) -> tuple:
+    """The measured mode's filters, shapers and rates: a run neither plans
+    on, nor checks its plan against, a list HQPlayer did not give."""
+    lists = link("get_filters"), link("get_shapers"), link("get_rates")
+    missing = [name for name, items in zip(("filters", "shapers", "rates"), lists) if items is None]
+    if missing:
+        raise _Abort(f"HQPlayer did not list its {', '.join(missing)}")
+    return lists
 
 
 def _lists_key(filters: List[dict], shapers: List[dict], rates: List[dict]) -> tuple:
@@ -1160,7 +1174,7 @@ def _prepare(link: _Link, uris: Dict[str, str], mute: Optional[float], mode: tup
                 raise _Abort("HQPlayer did not report its state")
             if st["mode"] != mode_index and not link("set_mode", mode_index):
                 raise _Abort(f"HQPlayer did not go back to the measured mode: {link.refusal()}")
-            if _lists_key(link("get_filters"), link("get_shapers"), link("get_rates")) != lists:
+            if _lists_key(*_lists(link)) != lists:
                 raise _Abort("HQPlayer came back with other lists — the run's settings would "
                              "name others")
         if mute is not None:

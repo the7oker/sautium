@@ -48,7 +48,7 @@ DEFAULT_CONFIG = {
         # manager's legacy branch hand a brand-new node to HQPlayer — an output
         # most people do not own. Existing installs keep their saved value.
         "enabled": False,
-        "host": "localhost",
+        "host": LOOPBACK,
         "port": 4321,
     },
     "ports": {
@@ -237,7 +237,7 @@ def generate_env_file(config: dict, env_path: Path) -> None:
     Key differences from Docker:
     - POSTGRES_HOST = 127.0.0.1 (not 'postgres'; LOOPBACK, never a name)
     - MUSIC_LIBRARY_PATH = native Windows path (not '/music')
-    - HQPLAYER_HOST = localhost (not 'host.docker.internal')
+    - HQPLAYER_HOST = 127.0.0.1 (not 'host.docker.internal'; LOOPBACK, never a name)
     """
     hqp = config.get("hqplayer", {})
     ports = config.get("ports", {})
@@ -262,7 +262,7 @@ def generate_env_file(config: dict, env_path: Path) -> None:
         f"MUSIC_LIBRARY_PATH={config.get('music_path', '')}",
         "",
         "# HQPlayer",
-        f"HQPLAYER_HOST={hqp.get('host', 'localhost')}",
+        f"HQPLAYER_HOST={hqp.get('host', LOOPBACK)}",
         f"HQPLAYER_PORT={hqp.get('port', 4321)}",
         f"HQPLAYER_ENABLED={'true' if hqp.get('enabled') else 'false'}",
         "",
@@ -371,7 +371,7 @@ def generate_mcp_config(config: dict, output_path: Path) -> None:
                     "DB_USER": "sautium",
                     "DB_PASSWORD": config.get("postgres_password", "changeme"),
                     "DB_NAME": "sautium",
-                    "HQPLAYER_HOST": hqp.get("host", "localhost"),
+                    "HQPLAYER_HOST": hqp.get("host", LOOPBACK),
                     "HQPLAYER_PORT": str(hqp.get("port", 4321)),
                     "BACKEND_URL": f"http://{LOOPBACK}:{ports.get('web', 8000)}",
                     # Where the server finds shared backend code — explicit,

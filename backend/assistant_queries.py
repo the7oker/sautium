@@ -97,6 +97,21 @@ def active_hqp_endpoint(q):
     rows = q("SELECT id FROM hqp_endpoints WHERE host = %(h)s AND port = %(p)s", {"h": host, "p": port})
     return rows[0]["id"] if rows else None
 
+
+def hqp_list(lines: list, title: str, items, hqp, line) -> None:
+    """One of HQPlayer's lists (`HQPlayerClient.get_filters` and its kin)
+    as the assistant reads it — and when HQPlayer did not give it (None),
+    that and why: read as "none", an absent list has the assistant tell the
+    owner HQPlayer offers nothing."""
+    if items is None:
+        lines.append(f"{title}: HQPlayer did not list them ({hqp.refusal()}).")
+    elif not items:
+        lines.append(f"{title}: none.")
+    else:
+        lines.append(f"{title} ({len(items)}):")
+        lines.extend(line(x) for x in items)
+
+
 _PH_LATERAL = """
     LEFT JOIN LATERAL (
         SELECT atr.length_ms, al.id AS album_id, al.title AS album,

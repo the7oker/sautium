@@ -68,6 +68,9 @@ class FakeHqp:
         # applies to the track (<metadata gain>); None: not reported.
         self.clips = None
         self.track_gain = None
+        # Further <Status> attributes, sent as they stand — HQPlayer 6's
+        # apod, output_delay and their kin.
+        self.status_extra: dict[str, str] = {}
         self.mute = False
         self._down = False
         # Until when it answers nothing, on any connection — busy building a
@@ -146,12 +149,13 @@ class FakeHqp:
                        if 1 <= self.track <= len(self.playlist) else "")
                 track, length = (0, 0) if opening else (self.track, 300)
                 clips = f' clips="{self.clips}"' if self.clips is not None else ""
+                extra = "".join(f' {k}="{v}"' for k, v in self.status_extra.items())
                 return (f'<Status state="{self.state}" track="{track}" '
                         f'position="{self.position}" length="{length}" volume="-3"{clips} '
                         f'tracks_total="{len(self.playlist)}" process_speed="1.6" '
                         f'input_fill="0.9" output_fill="0.9" active_mode="PCM" '
                         f'active_filter="poly-sinc-gauss-long" active_shaper="none" '
-                        f'active_rate="705600">'
+                        f'active_rate="705600"{extra}>'
                         f'<metadata artist="Fake artist" album="Fake album" '
                         f'song="Fake song" genre=""{uri}'
                         + (f' gain="{self.track_gain}"' if self.track_gain is not None else '')
@@ -195,6 +199,11 @@ class FakeHqp:
             if cmd == "SelectTrack":
                 self.track = int(attrs["index"])
                 self.position = 0.0
+                if self.state == int(PlaybackState.STOPPED) and self.playlist:
+                    # A stopped HQPlayer plays the slot it is given (its log:
+                    # "GoTo 1", then "Play (1/0)"; Desktop 6.2.4).
+                    self.state = int(PlaybackState.PLAYING)
+                    self._starting = self.start_polls
                 return '<SelectTrack result="OK"/>'
             return f'<{cmd} result="OK"/>'
 
@@ -1458,3 +1467,355 @@ def test_overlapping_intents_keep_their_own_commands(fake):
     assert nxt.end is None                       # not ended as the owner's
     b._on_outcome(out("Stop"))                   # a Stop from no intent at all is
     assert nxt.end == "owner"
+
+
+# -- HQPlayer 6's readings, its lists and their descriptions (hqplayer_client) ----------
+
+_LISTS_624 = Path(__file__).parent / "fixtures" / "hqp_lists" / "desktop_6.2.4.json"
+
+
+@pytest.fixture
+def client(fake):
+    c = HQPlayerClient("127.0.0.1", fake.port, timeout=2.0)
+    assert c.connect()
+    yield c
+    c.disconnect()
+
+
+def test_adaptive_volume_is_switched_and_a_refusal_is_said(fake, client):
+    assert client.set_adaptive_volume(True)
+    assert fake.commands[-1] == ("SetAdaptiveVolume", {"value": "1"})
+    assert client.set_adaptive_volume(False)
+    assert fake.commands[-1] == ("SetAdaptiveVolume", {"value": "0"})
+    fake.replies["SetAdaptiveVolume"] = ('<SetAdaptiveVolume result="Error">not authenticated '
+                                         'and no internet access</SetAdaptiveVolume>')
+    assert not client.set_adaptive_volume(True)
+    assert client.refusal() == "not authenticated and no internet access"
+
+
+def test_hqplayer_6s_status_readings_are_typed_and_none_where_a_build_has_none(fake, client):
+    import json
+    raw = json.loads(_LISTS_624.read_text())["raw"]
+    fake.replies["Status"] = raw["status_playing"]          # Desktop 6.2.4, PCM sinc-MGa at 16×
+    st = client.get_status()
+    assert (st.apod, st.active_bits, st.active_channels) == (0, 32, 2)
+    assert st.output_delay == pytest.approx(3.229092)       # 3229092 µs
+    assert (st.correction, st.filter_20k, st.filter_junk) == (False, False, 0)
+    assert st.display_position == pytest.approx(5.0155102040816324)
+    del fake.replies["Status"]                               # a build that reports none of them
+    st = client.get_status()
+    assert [getattr(st, k) for k in ("apod", "active_bits", "active_channels", "output_delay",
+                                     "correction", "filter_20k", "filter_junk",
+                                     "display_position")] == [None] * 8
+
+
+def test_hqplayer_6s_readings_reach_the_status_while_it_gives_them(fake, listens):
+    mgr = PlaybackManager()
+    mgr.queue.replace([_item("E:/Music/A/01.flac", 1)])
+    b = _attach(mgr)
+    try:
+        with fake._lock:
+            fake.state, fake.track = int(PlaybackState.PLAYING), 1
+        assert _wait(lambda: mgr._latest_status.get("state") == "playing")
+        assert "apod" not in mgr._latest_status and "output_delay" not in mgr._latest_status
+        with fake._lock:
+            fake.status_extra = {"apod": "4", "active_bits": "1", "active_channels": "2",
+                                 "output_delay": "1743000", "correction": "1", "filter_20k": "0",
+                                 "filter_junk": "2", "display_position": "12.5"}
+        assert _wait(lambda: mgr._latest_status.get("apod") == 4)
+        s = mgr._latest_status
+        assert (s["active_bits"], s["active_channels"], s["output_delay"]) == (1, 2, 1.743)
+        assert (s["correction"], s["filter_20k"], s["filter_junk"]) == (True, False, 2)
+        assert s["display_position"] == 12.5
+    finally:
+        b.shutdown()
+
+
+def test_hqplayer_6s_state_switches_are_read_and_none_where_a_build_has_none(fake, client):
+    import json
+    fake.replies["State"] = json.loads(_LISTS_624.read_text())["raw"]["state"]
+    st = client.get_state()
+    assert (st["filter_20k"], st["filter_junk"], st["random"], st["repeat"]) == (False, 0, False, 0)
+    assert (st["mode"], st["filter1x"], st["filterNx"], st["shaper"]) == (2, 48, 51, 24)
+    fake.replies["State"] = '<State mode="1" filter="3" shaper="1" volume="-3"/>'
+    st = client.get_state()
+    assert (st["filter_20k"], st["filter_junk"], st["random"], st["repeat"]) == (None,) * 4
+
+
+_LIST_GETTERS = [
+    ("get_modes", "GetModes", '<ModesItem index="1" name="PCM" value="0"/>',
+     [{"index": 1, "name": "PCM", "value": 0}]),
+    ("get_rates", "GetRates", '<RatesItem index="1" rate="705600"/>', [{"index": 1, "rate": 705600}]),
+    ("get_filters", "GetFilters",
+     '<FiltersItem index="57" name="sinc-MGa" value="20" arg="0" '
+     'description="4/5 transients, timbre, space ⥮ 2^x up"/>',
+     [{"index": 57, "name": "sinc-MGa", "value": 20, "arg": 0,
+       "description": "4/5 transients, timbre, space ⥮ 2^x up",
+       "parsed": {"rating": 4, "focus": ["space", "timbre", "transients"], "ratio": "2^x",
+                  "up": True, "mode": "pcm"}}]),
+    ("get_shapers", "GetShapers", '<ShapersItem index="24" name="ASDM7EC-fast" value="34" '
+     'description="Gen7"/>',
+     [{"index": 24, "name": "ASDM7EC-fast", "value": 34, "description": "Gen7",
+       "parsed": {"generation": 7}}]),
+    ("get_inputs", "GetInputs", '<InputsItem name="optical"/>', ["optical"]),
+    ("matrix_list_profiles", "MatrixListProfiles", '<MatrixProfile name="room"/>', ["room"]),
+]
+
+
+@pytest.mark.parametrize("method,command,item,listed", _LIST_GETTERS,
+                         ids=[g[0] for g in _LIST_GETTERS])
+def test_a_list_hqplayer_did_not_give_is_none_never_empty(fake, client, method, command, item,
+                                                          listed):
+    get = getattr(client, method)
+    fake.replies[command] = f"<{command}>{item}</{command}>"
+    assert get() == listed
+    fake.replies[command] = f"<{command}/>"                          # answered, and empty
+    assert get() == []
+    fake.replies[command] = f'<{command} result="Error">no output device</{command}>'
+    assert get() is None and client.refusal() == "no output device"
+    fake.replies[command] = '<Stop result="OK"/>'                    # another command's answer
+    assert get() is None
+    assert (client.last_error.result, client.last_error.message) == ("unparsed", "answered <Stop>")
+    fake.replies[command] = None                                     # the connection drops unanswered
+    assert get() is None and client.last_error.result == "lost"
+
+
+def test_a_list_hqplayer_builds_past_the_wait_for_is_none(fake):
+    c = HQPlayerClient("127.0.0.1", fake.port, timeout=0.3)
+    assert c.connect()
+    try:
+        fake.silence(0.8)
+        assert c.get_filters() is None and c.timed_out
+    finally:
+        c.disconnect()
+
+
+# Every distinct filter description HQPlayer Desktop 6.2.4 gives (77 SDM and
+# 67 PCM filters; 6.2.3 gives the same), read: (rating, focus, ratio, up, mode).
+_DESCRIPTIONS = [
+    ("1/5 ⥮ 1:1", (1, [], "1:1", False, "pcm")),
+    ("2/5 ⥣ 2^x", (2, [], "2^x", False, "sdm")),
+    ("3/5 ⥣ 2^x", (3, [], "2^x", False, "sdm")),
+    ("4/5 space, timbre ⥣ 2^x", (4, ["space", "timbre"], "2^x", False, "sdm")),
+    ("4/5 transients, timbre, space ⥣ 2^x", (4, ["space", "timbre", "transients"], "2^x", False, "sdm")),
+    ("4/5 ⥣ 2^x", (4, [], "2^x", False, "sdm")),
+    ("4/5 ⥮ 2^x", (4, [], "2^x", False, "pcm")),
+    ("2/5 ⥣ Any", (2, [], "Any", False, "sdm")),
+    ("2/5 ⥮ Any", (2, [], "Any", False, "pcm")),
+    ("3/5 space, transients ⥮ Any", (3, ["space", "transients"], "Any", False, "pcm")),
+    ("3/5 transients ⥣ Any", (3, ["transients"], "Any", False, "sdm")),
+    ("3/5 transients ⥮ Any", (3, ["transients"], "Any", False, "pcm")),
+    ("3/5 transients, space ⥣ Any", (3, ["space", "transients"], "Any", False, "sdm")),
+    ("3/5 transients, timbre, space ⥣ Any", (3, ["space", "timbre", "transients"], "Any", False, "sdm")),
+    ("3/5 transients, timbre, space ⥮ Any", (3, ["space", "timbre", "transients"], "Any", False, "pcm")),
+    ("3/5 ⥣ Any", (3, [], "Any", False, "sdm")),
+    ("3/5 ⥮ Any", (3, [], "Any", False, "pcm")),
+    ("4/5 space ⥣ Any", (4, ["space"], "Any", False, "sdm")),
+    ("4/5 space ⥮ Any", (4, ["space"], "Any", False, "pcm")),
+    ("4/5 space, transients ⥣ Any", (4, ["space", "transients"], "Any", False, "sdm")),
+    ("4/5 space, transients ⥮ Any", (4, ["space", "transients"], "Any", False, "pcm")),
+    ("4/5 space, ⥮ Any", (4, ["space"], "Any", False, "pcm")),
+    ("4/5 timbre ⥣ Any", (4, ["timbre"], "Any", False, "sdm")),
+    ("4/5 timbre ⥮ Any", (4, ["timbre"], "Any", False, "pcm")),
+    ("4/5 transients ⥣ Any", (4, ["transients"], "Any", False, "sdm")),
+    ("4/5 transients ⥮ Any", (4, ["transients"], "Any", False, "pcm")),
+    ("4/5 transients, timbre ⥣ Any", (4, ["timbre", "transients"], "Any", False, "sdm")),
+    ("4/5 transients, timbre ⥮ Any", (4, ["timbre", "transients"], "Any", False, "pcm")),
+    ("4/5 transients, timbre, space ⥣ Any", (4, ["space", "timbre", "transients"], "Any", False, "sdm")),
+    ("4/5 transients, timbre, space ⥮ Any", (4, ["space", "timbre", "transients"], "Any", False, "pcm")),
+    ("4/5 transients, ⥮ Any", (4, ["transients"], "Any", False, "pcm")),
+    ("4/5 ⥣ Any", (4, [], "Any", False, "sdm")),
+    ("4/5 ⥮ Any", (4, [], "Any", False, "pcm")),
+    ("5/5 timbre ⥣ Any", (5, ["timbre"], "Any", False, "sdm")),
+    ("5/5 timbre ⥮ Any", (5, ["timbre"], "Any", False, "pcm")),
+    ("5/5 timbre, transients ⥣ Any", (5, ["timbre", "transients"], "Any", False, "sdm")),
+    ("5/5 transients, timbre, space ⥣ Any", (5, ["space", "timbre", "transients"], "Any", False, "sdm")),
+    ("5/5 transients, timbre, space ⥮ Any", (5, ["space", "timbre", "transients"], "Any", False, "pcm")),
+    ("1/5 ⥣ Int", (1, [], "Int", False, "sdm")),
+    ("2/5 transients ⥣ Int", (2, ["transients"], "Int", False, "sdm")),
+    ("2/5 ⥣ Int", (2, [], "Int", False, "sdm")),
+    ("2/5 ⥮ Int", (2, [], "Int", False, "pcm")),
+    ("3/5 transients ⥣ Int", (3, ["transients"], "Int", False, "sdm")),
+    ("3/5 ⥣ Int", (3, [], "Int", False, "sdm")),
+    ("3/5 ⥮ Int", (3, [], "Int", False, "pcm")),
+    ("4/5 timbre ⥣ Int", (4, ["timbre"], "Int", False, "sdm")),
+    ("4/5 ⥣ Int", (4, [], "Int", False, "sdm")),
+    ("4/5 ⥮ Int", (4, [], "Int", False, "pcm")),
+    ("1/5 ⥮ Int up", (1, [], "Int", True, "pcm")),
+    ("2/5 transients ⥮ Int up", (2, ["transients"], "Int", True, "pcm")),
+    ("2/5 ⥮ 2^x up", (2, [], "2^x", True, "pcm")),
+    ("2/5 ⥮ Any up", (2, [], "Any", True, "pcm")),
+    ("3/5 transients, ⥮ Int up", (3, ["transients"], "Int", True, "pcm")),
+    ("3/5 ⥮ 2^x up", (3, [], "2^x", True, "pcm")),
+    ("3/5 ⥮ Any up", (3, [], "Any", True, "pcm")),
+    ("4/5 space, timbre ⥮ 2^x up", (4, ["space", "timbre"], "2^x", True, "pcm")),
+    ("4/5 timbre ⥮ Int up", (4, ["timbre"], "Int", True, "pcm")),
+    ("4/5 transients ⥮ Int up", (4, ["transients"], "Int", True, "pcm")),
+    ("4/5 transients, timbre, space ⥮ 2^x up", (4, ["space", "timbre", "transients"], "2^x", True, "pcm")),
+    ("4/5 ⥮ 2^x up", (4, [], "2^x", True, "pcm")),
+]
+
+
+def test_every_filter_description_hqplayer_6_gives_is_read():
+    import json
+    from hqplayer_client import parse_filter_description
+    lists = json.loads(_LISTS_624.read_text())
+    given = {f["description"] for f in lists["filters"] + lists["pcm"]["filters"]}
+    assert given == {d for d, _ in _DESCRIPTIONS}                 # the table is the whole set
+    for text, (rating, focus, ratio, up, mode) in _DESCRIPTIONS:
+        assert parse_filter_description(text) == {"rating": rating, "focus": focus, "ratio": ratio,
+                                                   "up": up, "mode": mode}, text
+
+
+def test_one_filter_described_in_both_modes_compares_on_rating_focus_and_ratio():
+    from hqplayer_client import parse_filter_description as read
+    # poly-sinc-short-lp: SDM and PCM order its focus words differently;
+    # poly-sinc-long-lp: PCM keeps a trailing comma; sinc-L: only PCM says `up`.
+    for sdm, pcm in (("3/5 transients, space ⥣ Any", "3/5 space, transients ⥮ Any"),
+                     ("4/5 space ⥣ Any", "4/5 space, ⥮ Any"),
+                     ("3/5 ⥣ 2^x", "3/5 ⥮ 2^x up")):
+        a, b = read(sdm), read(pcm)
+        assert (a["mode"], b["mode"]) == ("sdm", "pcm")
+        assert [a[k] for k in ("rating", "focus", "ratio")] == [b[k] for k in ("rating", "focus", "ratio")]
+
+
+def test_modulator_generations_are_read_and_a_dither_has_none():
+    import json
+    from hqplayer_client import parse_shaper_description
+    lists = json.loads(_LISTS_624.read_text())
+    assert ({s["description"] for s in lists["shapers"]}
+            == {f"Gen{n}" for n in range(1, 9)})                  # SDM: the modulators
+    for n in range(1, 9):
+        assert parse_shaper_description(f"Gen{n}") == {"generation": n}
+    assert {s["description"] for s in lists["pcm"]["shapers"]} == {""}   # PCM: the dithers
+    assert parse_shaper_description("") is None
+
+
+def test_a_description_in_a_shape_not_read_here_is_kept_raw_and_said_once(caplog):
+    from hqplayer_client import parse_filter_description, parse_shaper_description
+    assert parse_filter_description("") is None                      # HQPlayer 5: no description
+    for _ in range(3):
+        assert parse_filter_description("5/5 warmth ⥮ Any") is None    # a focus word not known here
+        assert parse_filter_description("five stars") is None
+        assert parse_shaper_description("Gen 9") is None
+    said = [r.getMessage() for r in caplog.records if "does not read" in r.getMessage()]
+    assert len(said) == 3
+    assert any("'5/5 warmth ⥮ Any'" in m for m in said)
+
+
+def test_a_filter_hqplayer_describes_unreadably_keeps_its_description(fake, client):
+    fake.replies["GetFilters"] = ('<GetFilters><FiltersItem index="1" name="new-filter" value="9" '
+                                  'arg="0" description="6/5 ⥮ Any"/></GetFilters>')
+    assert client.get_filters() == [{"index": 1, "name": "new-filter", "value": 9, "arg": 0,
+                                     "description": "6/5 ⥮ Any", "parsed": None}]
+
+
+def test_the_hqplayer_screen_is_told_which_lists_hqplayer_did_not_give(fake, monkeypatch):
+    import hqp_library
+    from routers import hqplayer as hqp_router
+    from routers import settings as settings_router
+    monkeypatch.setattr(hqp_library, "endpoint_by_address", lambda host, port: None)
+    monkeypatch.setattr(settings_router, "_hqp_library_state", lambda: {})
+    monkeypatch.setattr(hqp_router, "_load_favorites", lambda: [])
+    fake.replies["GetModes"] = ('<GetModes><ModesItem index="0" name="[source]" value="-1"/>'
+                                '</GetModes>')
+    fake.replies["GetShapers"] = '<GetShapers result="Error"/>'
+    fake.replies["MatrixListProfiles"] = None
+    s = hqp_router.get_state()
+    assert s["connected"]
+    assert s["modes"] == [{"index": 0, "name": "[source]", "value": -1}]
+    assert s["filters"] == [] and s["rates"] == []                  # answered, and empty
+    assert s["shapers"] is None and s["matrix_profiles"] is None
+    assert s["missing"] == ["shapers", "matrix_profiles"]
+    # the marks of a queued file are not made from a list it did not give
+    lists = {"modes": s["modes"], "rates": [], "filters": [], "shapers": None}
+    assert hqp_router._headroom({"id": 7, "hqp_engine": "6.2.4"}, {"mode": 0}, None, lists) == {}
+
+
+def test_the_benchmark_block_says_why_it_has_no_estimate(monkeypatch):
+    # an absent estimate read as "[source]" whatever kept it away
+    import hqp_library
+    from playback import hqp_benchmark
+    from routers import hqplayer as hqp_router
+    monkeypatch.setattr(hqp_benchmark, "summary", lambda ep: {"job": {"running": False}, "last_run": None})
+    monkeypatch.setattr(hqp_library, "local_cuda", lambda: (False, None))
+    ep, state = {"id": 7, "hqp_engine": "6.2.4"}, {"mode": 2, "volume": -3.0}
+    lists = {"modes": [{"index": 0, "name": "[source]", "value": -1},
+                       {"index": 1, "name": "PCM", "value": 0},
+                       {"index": 2, "name": "SDM (DSD)", "value": 1}],
+             "rates": [], "filters": None, "shapers": []}
+
+    def why(ep, state, lists):
+        block = hqp_router._benchmark_block(ep, state, lists, None)
+        assert block["estimate"] is None
+        return block["no_estimate"], block["other_modes"]
+    assert why(None, state, lists) == ("unregistered", [])
+    assert why({"id": 7, "hqp_engine": None}, state, lists) == ("unregistered", [])
+    assert why(ep, None, lists) == ("state", [])
+    assert why(ep, state, lists) == ("lists", [])
+    assert why(ep, {"mode": 0, "volume": -3.0}, {**lists, "filters": []}) == ("source", ["pcm", "sdm"])
+
+
+def test_the_assistant_is_told_a_list_hqplayer_did_not_give(fake, monkeypatch):
+    import assistant_queries as aq
+    from routers import settings as settings_router
+    from tools import definitions
+    monkeypatch.setattr(settings_router, "_read", lambda key: "hqplayer" if key == "output.type" else None)
+    monkeypatch.setattr(definitions, "_hqp_client", None)
+    fake.replies["GetFilters"] = '<GetFilters result="Error">no output device</GetFilters>'
+    assert definitions._h_hqplayer_set_filter("sinc-MGa") == (
+        "HQPlayer did not list its filters (no output device) — nothing was changed.")
+    assert "SetFilter" not in [c for c, _ in fake.commands]
+    text = definitions._h_hqplayer_get_settings()
+    assert "Available filters: HQPlayer did not list them (no output device)." in text
+    assert "Output modes: none." in text                            # answered, and empty
+    lines: list = []
+    aq.hqp_list(lines, "Sample rates", [{"index": 1, "rate": 705600}], None,
+                lambda r: f"  [{r['index']}] {r['rate'] / 1000:.1f} kHz")
+    assert lines == ["Sample rates (1):", "  [1] 705.6 kHz"]
+    definitions._hqp_client.disconnect()
+
+
+def test_a_run_does_not_plan_on_a_list_hqplayer_did_not_give(fake):
+    from playback import hqp_benchmark as bench
+    fake.replies["GetShapers"] = '<GetShapers result="Error"/>'
+    link = bench._Link(lambda s: True)
+    assert link.connect()
+    try:
+        with pytest.raises(bench._Abort, match="^HQPlayer did not list its shapers$"):
+            bench._enter_mode(link, 1, switched=False)
+    finally:
+        link.close()
+
+
+def test_hqplayer_is_reached_by_address_by_default():
+    from config import Settings
+    from hqplayer_client import HQPlayerConnection
+    assert HQPlayerClient().host == "127.0.0.1"
+    assert HQPlayerConnection().client.host == "127.0.0.1"
+    assert Settings.model_fields["hqplayer_host"].default == "127.0.0.1"
+
+
+# -- SelectTrack starts a stopped HQPlayer ------------------------------------------------
+
+def test_a_new_order_taken_while_stopped_plays_only_on_the_play_press(fake):
+    from playback.base import ReorderPlan
+    mgr = _album(3)
+    b = _mirrored(mgr)
+    fake.track = 2                      # stopped on slot 2: a build that keeps the index
+    fake.commands.clear()
+    items = mgr.queue.snapshot()
+    plan = ReorderPlan(seamless=False, status_idx=2, new_status_idx=1, old_before=["track-1"],
+                       new_before=[], old_after=["track-3"], new_after=["track-1", "track-3"],
+                       order=["track-2", "track-1", "track-3"],
+                       items_by_id={it.track_id: it for it in items}, position=0, resume=False)
+    assert b.queue_reorder(plan)["interrupted"]
+    assert fake.playlist == ["file:///E:/Music/A/02.flac", "file:///E:/Music/A/01.flac",
+                             "file:///E:/Music/A/03.flac"]
+    assert "SelectTrack" not in [c for c, _ in fake.commands]
+    assert fake.state == int(PlaybackState.STOPPED) and b._resume_index == 1
+    fake.commands.clear()
+    assert b.play()
+    assert [(c, a) for c, a in fake.commands if c in ("SelectTrack", "Play")][:2] == [
+        ("SelectTrack", {"index": "1"}), ("Play", {})]
+    assert (fake.state, fake.track) == (int(PlaybackState.PLAYING), 1)
