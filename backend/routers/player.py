@@ -30,7 +30,8 @@ from lrclib import LrclibService
 from playback import queue as queue_mod
 from playback import sessions
 from playback.base import ReorderPlan
-from playback.hqp_backend import Building, BuildGaveUp, _get_hqp, _hqp_lock, through_builds
+from playback import hqp_link
+from playback.hqp_link import Building, Dropped, GaveUp, NotAnswering, through
 from playback.hqp_meter import meter as hqp_meter
 from playback.manager import OutputHeld, active_hqp_endpoint, manager
 from playback.queue import resolved_artwork as _resolved_artwork
@@ -1166,11 +1167,10 @@ def get_status():
 # read direct from HQPlayer.
 @router.get("/status/fresh")
 def get_status_fresh():
-    """Force a fresh HQPlayer status read. Slower (may hang up to socket
-    timeout if HQPlayer is unresponsive)."""
+    """Force a fresh HQPlayer status read, on its link. Slower (may hang up
+    to the question's wait if HQPlayer is unresponsive)."""
     try:
-        with _hqp_lock:
-            hqp = _get_hqp()
+        with hqp_link.selected().asking() as hqp:
             status = hqp.get_status()
         if status is None:
             return {"state": "unknown"}
@@ -1652,10 +1652,12 @@ def _filler_append(item, gen: int, *, position: str = "end",
     announce window can drop a single add while the audio stream itself rides
     on, and silently losing an already-fetched track leaves a "buffering"
     ghost in the album UI. A build HQPlayer is in — it answers nothing — is
-    waited out (hqp_backend.through_builds), off the queue lock; one it does
-    not finish, or an HQPlayer gone during it, stops the filler, said in the
-    log. None = generation superseded or the filler stopped (caller must
-    stop); False = dropped after retries."""
+    waited out (hqp_link.through), off the queue lock; one it does not
+    finish, or an HQPlayer gone during it, stops the filler, said in the
+    log. An add the HQPlayer's link no longer sends (another HQPlayer was
+    chosen) is tried again through the manager, on the output it has then.
+    None = generation superseded or the filler stopped (caller must stop);
+    False = dropped after retries."""
     def moved_on() -> Optional[str]:
         return "the queue moved on" if manager.queue.generation != gen else None
 
@@ -1667,14 +1669,18 @@ def _filler_append(item, gen: int, *, position: str = "end",
         if attempt:
             time.sleep(5)
         try:
-            added = through_builds(
+            added = through(
                 lambda: manager.append([item], position, generation=gen, after=after),
                 needed=moved_on, until=elsewhere)
-        except BuildGaveUp as e:
+        except GaveUp as e:
             if e.failed:
                 logger.warning("filler: stopped — %s; %s — %s and what follows were not "
                                "queued", e, item.artist, item.title)
             return None
+        except Dropped as e:
+            logger.info("filler: %s — %s not added (%s), tried again", item.artist,
+                        item.title, e)
+            continue
         if added is None:
             return None
         if added:
@@ -2464,16 +2470,20 @@ class PlayPhantomAlbumRequest(BaseModel):
 
 def _output_error(e: Exception) -> HTTPException:
     """What a play intent or transport command the output did not take
-    answers: 409 while the output is lent (the HQPlayer benchmark) or
-    HQPlayer builds a setting — busy, not broken: the UI must not send the
+    answers: 409 while the output is lent (the HQPlayer benchmark), while
+    HQPlayer builds a setting or takes the connection and says nothing, and
+    for a command its link no longer sends (a newer intent came first, the
+    output was switched away) — busy, not broken: the UI must not send the
     owner to the Output picker — 503 when it cannot take it. A backend
     detached by the hold that an intent took just before refuses with a
     plain ConnectionError — the hold names it."""
-    if isinstance(e, (OutputHeld, Building)):
+    if isinstance(e, OutputHeld):
         return HTTPException(status_code=409, detail=str(e))
     hold = manager.held
     if hold is not None and isinstance(e, ConnectionError):
         return HTTPException(status_code=409, detail=str(OutputHeld(hold)))
+    if isinstance(e, (Building, NotAnswering, Dropped)):
+        return HTTPException(status_code=409, detail=str(e))
     return HTTPException(status_code=503, detail=str(e))
 
 

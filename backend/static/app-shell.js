@@ -1296,11 +1296,13 @@
       this.whyBtn.hidden = !why;
       this.whyBtn.dataset.attempt = why ? diag.id : '';
       // What the HQPlayer output says beside the track: the build it is in —
-      // its transport waits meanwhile — or, for a stopped HQPlayer, the spot
-      // the play press resumes (a paused one whose playlist was taken afresh
-      // is left stopped: never "paused").
+      // its transport waits meanwhile — a silence no build of ours explains,
+      // or, for a stopped HQPlayer, the spot the play press resumes (a
+      // paused one whose playlist was taken afresh is left stopped: never
+      // "paused").
       const b = data.building, r = data.resume;
-      const tag = b ? (b.unfinished ? 'Filter build unfinished' : 'Building the filter…')
+      const tag = b ? (b.unfinished ? 'Filter build unfinished — restart HQPlayer' : 'Building the filter…')
+        : data.not_answering ? 'HQPlayer is not answering'
         : r && r.position > 0 && data.state === 'stopped'
           ? `Stopped at ${fmtDuration(r.position)} — Play resumes here` : '';
       this.hqpTag.hidden = !tag;
@@ -6304,9 +6306,10 @@
                       action: { label: 'HQPlayer', run: () => navigate('more/hqplayer') } });
       return false;
     }
-    // 409 while HQPlayer builds a setting: it answers nothing until it is
-    // done, and the command waits with it — busy, not broken.
-    if (resp && resp.status === 409 && window.currentStatus && window.currentStatus.building) {
+    // 409 while HQPlayer builds a setting, or takes the connection and says
+    // nothing: it answers nothing until it is done — busy, not broken.
+    if (resp && resp.status === 409 && window.currentStatus
+        && (window.currentStatus.building || window.currentStatus.not_answering)) {
       notices.toast({ kind: 'info', key: 'player.building', title: 'HQPlayer is busy',
                       text: escapeProfileHtml(detail) });
       return false;
@@ -8807,7 +8810,7 @@
   // its controls; an Embedded box's answering build is only said.
   function hqpBuildNote(b) {
     if (!b) return '';
-    if (b.unfinished) return 'HQPlayer did not finish building the filter.';
+    if (b.unfinished) return 'HQPlayer did not finish building the filter — restart HQPlayer.';
     return 'HQPlayer is building the filter…' + (b.silent ? ' Its controls wait until it is done.' : '');
   }
 
@@ -9179,9 +9182,10 @@
       }
       s.diagnostics = await diagnostics;
       if (!fresh()) return;          // a later load owns the panel
-      // A building HQPlayer answers nothing: what it said last stands, the
-      // build beside it.
+      // A building HQPlayer answers nothing, and one lent to the benchmark is
+      // asked nothing: what it said last stands, the build beside it.
       if (s.building && lastState) s = { ...lastState, building: s.building };
+      else if (s.held && lastState) s = { ...lastState, benchmark: s.benchmark || lastState.benchmark };
       lastState = s;
       renderBody(body, s);
     }

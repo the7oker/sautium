@@ -56,7 +56,6 @@ from uuid_utils import is_lossless
 logger = logging.getLogger(__name__)
 
 
-_CONNECT_TIMEOUT = 2.0
 _HASH_TIMEOUT = 10.0
 # The whole library in one answer. 39k files took 1.2 s from Desktop; an
 # Embedded box scanning a share may answer slower.
@@ -71,18 +70,11 @@ Entry = Tuple[str, Dict[str, Any]]
 
 
 def _command(host: str, port: int, xml: str, timeout: float) -> bytes:
-    """One control-port command, one newline-framed line of XML back."""
-    with socket.create_connection((connect_address(host), port), timeout=_CONNECT_TIMEOUT) as s:
-        s.settimeout(timeout)
-        s.sendall(xml.encode("utf-8"))
-        buf = bytearray()
-        while not buf.endswith(b"\n"):
-            chunk = s.recv(1 << 20)
-            if not chunk:
-                raise ConnectionError(
-                    f"HQPlayer at {host}:{port} closed the connection mid-answer")
-            buf += chunk
-    return bytes(buf)
+    """One control-port request, one newline-framed line of XML back — on the
+    HQPlayer's link (playback.hqp_link), where every request of this node to
+    it goes: never into a build's silence, never beside another request."""
+    from playback import hqp_link
+    return hqp_link.link_for(host, port).ask_raw(xml, timeout)
 
 
 def get_info(host: str, port: int) -> Dict[str, str]:

@@ -32,6 +32,7 @@ psycopg2 = pytest.importorskip("psycopg2")
 from config import settings  # noqa: E402
 from hqplayer_client import HQPlayerClient, PlaybackState, TrackStatus  # noqa: E402
 from playback import hqp_backend as hb  # noqa: E402
+from playback import hqp_link as hl  # noqa: E402
 from playback import hqp_benchmark as bench  # noqa: E402
 from playback import hqp_load  # noqa: E402
 from playback.hqp_backend import HqpBackend  # noqa: E402
@@ -39,7 +40,7 @@ from playback.manager import OutputHeld, PlaybackManager  # noqa: E402
 from streaming import service as streaming_service  # noqa: E402
 from streaming.proxy import MediaProxy  # noqa: E402
 
-from test_hqp_backend import FakeHqp, _item, _wait  # noqa: E402
+from test_hqp_backend import FakeHqp, _fresh_links, _item, _wait  # noqa: E402
 from test_hqp_load import PG, _make_db  # noqa: E402
 
 LISTS = Path(__file__).resolve().parent / "fixtures" / "hqp_lists"
@@ -729,9 +730,8 @@ def run(dsn, signals, library, monkeypatch):
     monkeypatch.setattr(settings, "media_proxy_advertised_host", "127.0.0.1")
     monkeypatch.setattr(streaming_service, "_proxy",
                         MediaProxy(port=0, advertised_host="127.0.0.1", file_token_key=b"k"))
-    hb.reset_all_clients()
-    hb._hqp_unreachable_until = 0.0
-    monkeypatch.setattr(hb, "HQP_CIRCUIT_COOLDOWN", 0.2)
+    _fresh_links()
+    monkeypatch.setattr(hl, "CIRCUIT_COOLDOWN_S", 0.2)
     monkeypatch.setattr(hb, "_notify_notices", lambda: None)
     monkeypatch.setattr(hb, "_stream_mode", lambda: True)
     import hqp_library
@@ -764,7 +764,7 @@ def run(dsn, signals, library, monkeypatch):
         _wait(lambda: not bench.running(), 20)
     if mgr.active is not None:
         mgr.active.shutdown()
-    hb.reset_all_clients()
+    _fresh_links()
     fake.close()
     conn.close()
     pool.closeall()
@@ -1251,7 +1251,7 @@ def test_recover_puts_back_the_measured_modes_own_selection(run):
     with fake._lock:
         fake.mode, fake.sel[1], fake.volume = 1, [1, 0, 0, 0], -60.0
         fake.playlist = [proxy.file_url(proxy.file_token(str(signal)), host="127.0.0.1")]
-    bench.recover(run.endpoint_id)
+    bench.recover(run.endpoint_id, hl.selected())
     # PCM's own selection back, then SDM and its selection, the volume, no signal
     assert fake.settings() == (2, (2, 1, 1, 1), (2, 0, 0, 0), -3.0)
     assert fake.playlist == []
@@ -1265,7 +1265,7 @@ def test_recover_leaves_an_hqplayer_the_owner_changed_since(run, library):
     with fake._lock:
         fake.volume, fake.sel[2] = -10.0, [2, 1, 1, 2]
         fake.playlist = [owners]
-    bench.recover(run.endpoint_id)
+    bench.recover(run.endpoint_id, hl.selected())
     assert fake.settings() == (2, (2, 1, 1, 1), (2, 1, 1, 2), -10.0)
     assert fake.playlist == [owners]
     assert "left as it is" in run.q("SELECT note FROM hqp_benchmark_runs")[0][0]

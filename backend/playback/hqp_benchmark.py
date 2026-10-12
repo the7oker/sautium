@@ -923,10 +923,13 @@ def start(mode: Optional[str] = None, *, fixed_volume_ok: bool = False) -> Dict[
     b = manager.active
     if b is None or b.id != "hqplayer":
         raise BenchmarkRefused("Pick this HQPlayer as the audio output first")
-    from playback.hqp_backend import _stream_mode, build
-    if build.silent() is not None:
-        raise BenchmarkRefused("HQPlayer is building the filter — start the benchmark once "
-                               "it is done")
+    from playback import hqp_link
+    from playback.hqp_backend import _stream_mode
+    building = BenchmarkRefused("HQPlayer is building the filter — start the benchmark once "
+                                "it is done")
+    link = hqp_link.selected()
+    if link.build.silent() is not None:
+        raise building
     if not _stream_mode():
         import main
         import model_cache
@@ -944,16 +947,14 @@ def start(mode: Optional[str] = None, *, fixed_volume_ok: bool = False) -> Dict[
     if ep is None or not ep.get("hqp_engine"):
         raise BenchmarkRefused("This HQPlayer is not registered yet — try again once it "
                                "has played")
-    link = _Link(lambda s: True)
-    if not link.connect():
-        raise BenchmarkRefused("HQPlayer is not answering")
     try:
-        status, st = link("get_status"), link("get_state")
-        modes, vr = link("get_modes"), link("volume_range")
-    except (_Reopened, _Lost):
-        raise BenchmarkRefused("HQPlayer dropped the connection — try again")
-    finally:
-        link.close()
+        with link.asking() as c:
+            status, st = c.get_status(), c.get_state()
+            modes, vr = c.get_modes(), c.volume_range()
+    except hqp_link.Building:
+        raise building
+    except (BrokenPipeError, ConnectionError, OSError):
+        raise BenchmarkRefused("HQPlayer is not answering")
     if status is None or st is None:
         raise BenchmarkRefused("HQPlayer did not report its state")
     if modes is None:
@@ -1695,15 +1696,37 @@ def _close_run(run_id: int, outcome: str, note: Optional[str], stats: dict, *,
           "first": own[0] if own else None, "last": own[-1] if len(own) > 1 else None})
 
 
-def recover(endpoint_id: int) -> None:
+class _OnLink:
+    """The playback link (playback.hqp_link) in _Link's shape, for putting a
+    run back outside a hold: its requests go where every other request of
+    this node to HQPlayer goes. A connection replaced under it is a
+    _Reopened (_Silent after a silence), as on the run's own."""
+
+    def __init__(self, link):
+        self.c = link.client
+
+    def refusal(self) -> str:
+        return self.c.refusal()
+
+    def __call__(self, method: str, *args, **kwargs):
+        result = getattr(self.c, method)(*args, **kwargs)
+        if not self.c.is_connected():
+            raise (_Silent if self.c.timed_out else _Reopened)(self.c.refusal())
+        return result
+
+
+def recover(endpoint_id: int, link) -> None:
     """A run cut short — the process died in the middle of it, or HQPlayer
     went away and did not answer the restore — left HQPlayer stopped on its
     test settings, maybe lowered and holding the signals. The next time
     HQPlayer answers (the attach, or the poller seeing it come back), before
-    anything reads its playlist: put the owner's settings back — only while
-    HQPlayer still shows a mark of the run (its signals in the playlist, the
-    volume it lowered to, the selection it set last); a HQPlayer changed
-    since is the owner's again. A HQPlayer that drops the connection
+    anything reads its playlist: put the owner's settings back on its link —
+    only while HQPlayer still shows a mark of the run (its signals in the
+    playlist, the volume it lowered to, the selection it set last); a
+    HQPlayer changed since is the owner's again. One command sequence: a
+    setting HQPlayer builds holds the link as any other, and the caller —
+    the attach, the poller — goes on once the build begins, the rest put
+    back behind it (BuildWatch.waking). A HQPlayer that drops the connection
     meanwhile is tried at its next return."""
     if running():
         return
@@ -1714,16 +1737,27 @@ def recover(endpoint_id: int) -> None:
     """, {"e": endpoint_id})
     if run is None:
         return
-    link = _Link(lambda s: True)       # never holds up the attach: tried again at the next one
-    if not link.connect():
-        return
+    ready = threading.Event()
+
+    def put_back() -> None:
+        try:
+            with link.build.waking(ready):
+                _put_run_back(link, run)
+        except Exception:       # the thread's boundary: recorded, never lost
+            logger.exception("HQPlayer benchmark run %s: putting it back failed", run["id"])
+        finally:
+            ready.set()
+    threading.Thread(target=put_back, daemon=True, name="hqp-benchmark-recover").start()
+    ready.wait()
+
+
+def _put_run_back(link, run: dict) -> None:
     try:
-        note = _recover(link, run)
-    except (_Reopened, _Lost) as e:
+        with link.command():
+            note = _recover(_OnLink(link), run)
+    except (_Reopened, _Lost, BrokenPipeError, ConnectionError, OSError) as e:
         logger.info("HQPlayer benchmark run %s not put back yet: %s", run["id"], e)
         return
-    finally:
-        link.close()
     if note is None:
         return
     db_execute("""UPDATE hqp_benchmark_runs SET finished_at = now(), outcome = 'interrupted',

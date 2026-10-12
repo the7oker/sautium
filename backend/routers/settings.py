@@ -1976,16 +1976,15 @@ def get_hqplayer_prefs() -> Dict[str, Any]:
 
 def _apply_hqplayer_address(host: Optional[str], port: Optional[int]) -> None:
     """The one place the active HQPlayer's address is set: persisted to
-    user_settings, overlaid onto the runtime settings, and — for another
-    HQPlayer (hqp_library.address_key) — the cached control sockets
-    dropped so the next status/command call reconnects against the new
-    address. The same HQPlayer picked again keeps them, and the build it
+    user_settings, overlaid onto the runtime settings, and its link chosen
+    (hqp_link.choose) — another HQPlayer's link takes over and the old one
+    retires: what it still owes goes, everything else it held gives up. The
+    same HQPlayer picked again (any alias) keeps its link, and the build it
     may be in stays watched. Its endpoint row comes from the output's first
     contact (hqp_library.request_sync) or the next scan — never from here:
     a save must return at once, not after two control round-trips."""
     from config import settings as app_settings
-    from hqp_library import address_key
-    before = address_key(app_settings.hqplayer_host, app_settings.hqplayer_port)
+    from playback import hqp_link
     if host is not None:
         host = host.strip() or None
         _write("hqplayer.host", host)
@@ -1996,9 +1995,7 @@ def _apply_hqplayer_address(host: Optional[str], port: Optional[int]) -> None:
         app_settings.hqplayer_port = port
     logger.info("HQPlayer settings updated: host=%s, port=%s",
                 app_settings.hqplayer_host, app_settings.hqplayer_port)
-    if address_key(app_settings.hqplayer_host, app_settings.hqplayer_port) != before:
-        from playback.hqp_backend import reset_all_clients
-        reset_all_clients()
+    hqp_link.choose(app_settings.hqplayer_host, app_settings.hqplayer_port)
 
 
 @router.put("/hqplayer")
@@ -2052,7 +2049,7 @@ class OutputPrefs(BaseModel):
 
 @router.get("/output")
 def get_output_prefs() -> Dict[str, Any]:
-    from playback.hqp_backend import build
+    from playback import hqp_link
     from playback.manager import manager
     hold = manager.held
     return {
@@ -2062,10 +2059,10 @@ def get_output_prefs() -> Dict[str, Any]:
         "renderer": _read("output.dlna_renderer"),
         "stream_quality": _read("output.stream_quality") or "lossless",
         # What the output is lent to (the HQPlayer benchmark), and whether
-        # HQPlayer is building a setting (playback.hqp_backend.BuildWatch) —
+        # HQPlayer is building a setting (playback.hqp_link.BuildWatch) —
         # the MCP assistant reads both to keep its HQPlayer tools off meanwhile.
         "held": hold["label"] if hold else None,
-        "building": build.silent() is not None,
+        "building": hqp_link.selected().build.silent() is not None,
     }
 
 
@@ -2166,7 +2163,17 @@ def _put_output_prefs(req: OutputPrefs) -> Dict[str, Any]:
                 logger.info("HQPlayer selected with no saved host — recorded "
                             "the default %s:%s", app_settings.hqplayer_host,
                             app_settings.hqplayer_port)
-            manager.activate(None)
+            # Registered before anything is released: a Stop an earlier
+            # switch away still owes this HQPlayer (it builds) is
+            # superseded, even if its build ends while the output it
+            # switched to is let go
+            from playback import hqp_link
+            link = hqp_link.selected()
+            link.accept("attach")
+            # The HQPlayer already driven, picked again, stays the output:
+            # nothing is stopped
+            again = getattr(manager.active, "link", None) is link
+            manager.activate(None, stop_old=not again)
             manager.activate("hqplayer")
     except HTTPException:
         raise

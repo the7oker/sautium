@@ -110,10 +110,13 @@ class PlaybackManager:
         as an output switch detaches it — stopped, its poller ended, so no
         tick reaches the tracker and no mirror fights the job — and while the
         hold lasts every play intent, transport command and output switch is
-        refused (OutputHeld). The canonical queue stays the owner's: an edit
-        lands in it as it does with no output attached. The release attaches
-        HQPlayer again — still held, so no switch lands in between — and the
-        attach mirrors the queue back into it and keeps its slot.
+        refused (OutputHeld). Its link is lent the while (HqpLink.lend):
+        nothing of this node's but the job's own connection reaches HQPlayer
+        — no question, no probe, no Stop an earlier switch owed. The
+        canonical queue stays the owner's: an edit lands in it as it does
+        with no output attached. The release attaches HQPlayer again — still
+        held, so no switch lands in between — and the attach mirrors the
+        queue back into it and keeps its slot.
 
         The hold begins only once nothing else is driving HQPlayer: it takes
         the mutation lock (a queue replace still adding its tracks finishes
@@ -138,10 +141,14 @@ class PlaybackManager:
             except BaseException:
                 self._hold = None
                 raise
+            from playback import hqp_link
+            link = hqp_link.selected()
+            link.lend()
         try:
             yield
         finally:
             with self._mutate_lock, self._ensure_lock:
+                link.reclaim()
                 try:
                     self.activate("hqplayer", by_hold=True)
                 except Exception as e:      # activate rolled back and said "disconnected"
@@ -636,9 +643,11 @@ class PlaybackManager:
         # and channels, its delay…): additive, each while HQPlayer gives it.
         new_data.update({k: s.extra[k] for k in STATUS_READINGS if s.extra.get(k) is not None})
         # The HQPlayer output's own words (playback.hqp_backend): the build it
-        # is in, the outcome of a DSP change that went through one, and where
-        # the play press resumes a stopped HQPlayer.
-        new_data.update({k: s.extra[k] for k in ("building", "dsp_change", "resume")
+        # is in, a silence no build of ours explains, the outcome of a DSP
+        # change that went through a build, and where the play press resumes
+        # a stopped HQPlayer.
+        new_data.update({k: s.extra[k] for k in ("building", "not_answering", "dsp_change",
+                                                 "resume")
                          if s.extra.get(k) is not None})
 
         # Per-track listening history + scrobble (source-agnostic: owned and

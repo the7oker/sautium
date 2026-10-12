@@ -29,17 +29,9 @@ from config import settings
 logger = logging.getLogger(__name__)
 from db_pool import db_execute, db_query_one
 from hqplayer_client import VOLUME_FIXED
-from playback.hqp_backend import (
-    Building,
-    _hqp_lock,
-    _hqp_status_lock,
-    _get_hqp,
-    _get_hqp_status,
-    _reset_hqp,
-    _reset_hqp_status,
-    build,
-    change_dsp,
-)
+from playback import hqp_link
+from playback.hqp_backend import change_dsp
+from playback.hqp_link import Building, Dropped
 from playback.hqp_meter import meter as hqp_meter
 from playback.manager import OutputHeld, manager
 
@@ -148,19 +140,20 @@ def get_state(dsp: bool = False) -> Dict[str, Any]:
         # run's Cancel must still be there.
         from playback import hqp_benchmark
         response["benchmark"] = hqp_benchmark.summary(ep)
-    building = build.silent()
+    link = hqp_link.selected()
+    held = manager.held
+    if link.lent and held is not None:
+        # The benchmark drives HQPlayer on its own connection: nothing else
+        # asks it meanwhile — the screen keeps what it read last.
+        return {**response, "connected": True, "held": held["label"]}
+    building = link.build.silent()
     if building is not None:
         # HQPlayer answers nothing while it builds: the screen keeps what it
         # read last and says why its controls wait.
         return {**response, "connected": True, "building": building}
 
     try:
-        with _hqp_status_lock:
-            try:
-                hqp = _get_hqp_status()
-            except (BrokenPipeError, ConnectionError, OSError):
-                _reset_hqp_status()
-                hqp = _get_hqp_status()
+        with link.asking() as hqp:
             info = hqp.get_info()
             state = hqp.get_state()
             lists = {"modes": hqp.get_modes(), "rates": hqp.get_rates(),
@@ -168,6 +161,8 @@ def get_state(dsp: bool = False) -> Dict[str, Any]:
                      "matrix_profiles": hqp.matrix_list_profiles()}
             status = hqp.get_status() if dsp else None
             volume_range = hqp.volume_range() if dsp else None
+    except Building as e:
+        return {**response, "connected": True, "building": e.state}
     except (BrokenPipeError, ConnectionError, OSError) as e:
         return {**response, "error": str(e)}
 
@@ -296,9 +291,9 @@ def _benchmark_block(ep: Optional[dict], state: Optional[dict], lists: dict,
 def _refuse_while_held() -> None:
     """A lent output (the benchmark drives HQPlayer) takes no volume change
     from here (a DSP change checks it in change_dsp): it would land in the
-    middle of a measurement. Called under _hqp_lock — the hold detaches the
-    backend under it, so a change that passed the check is through before
-    the run sends anything."""
+    middle of a measurement. Called under the link's command lock — the
+    hold detaches the backend under it, so a change that passed the check
+    is through before the run sends anything."""
     hold = manager.held
     if hold is not None:
         raise HTTPException(status_code=409, detail=str(OutputHeld(hold)))
@@ -334,14 +329,11 @@ def nudge_volume(req: VolumeRequest) -> Dict[str, Any]:
     own answer to the Volume is a bare Error. With no range given the
     step never goes above 0 dB: a tap must not be what turns a pair of
     headphones past full scale."""
+    link = hqp_link.selected()
     try:
-        with _hqp_lock:
+        with link.command():
             _refuse_while_held()
-            try:
-                hqp = _get_hqp()
-            except (BrokenPipeError, ConnectionError, OSError):
-                _reset_hqp()
-                hqp = _get_hqp()
+            hqp = link.client
             state = hqp.get_state()
             if state is None:
                 raise HTTPException(status_code=503, detail="HQPlayer state unavailable")
@@ -354,8 +346,10 @@ def nudge_volume(req: VolumeRequest) -> Dict[str, Any]:
                 new_vol = max(span["min"], new_vol)
             ok = hqp.set_volume(new_vol)
             refusal = None if ok else hqp.refusal()
-    except Building as e:
-        raise HTTPException(status_code=409, detail=str(e))
+    except (Building, Dropped) as e:
+        hold = manager.held
+        raise HTTPException(status_code=409,
+                            detail=str(OutputHeld(hold)) if hold is not None else str(e))
     except (BrokenPipeError, ConnectionError, OSError) as e:
         raise HTTPException(status_code=503, detail=f"HQPlayer not reachable: {e}")
     if not ok:
@@ -396,18 +390,16 @@ def get_benchmark() -> Dict[str, Any]:
     out.update(rows=[], context=None, current=None, thresholds=None)
     if ep is None:
         return out
-    building = build.silent()
-    if building is not None:
-        raise HTTPException(status_code=409, detail=str(Building(building)))
+    link = hqp_link.selected()
     try:
-        with _hqp_status_lock:
-            try:
-                hqp = _get_hqp_status()
-            except (BrokenPipeError, ConnectionError, OSError):
-                _reset_hqp_status()
-                hqp = _get_hqp_status()
+        link.build.refuse()
+        with link.asking() as hqp:
             state, modes = hqp.get_state(), hqp.get_modes()
             filters, shapers, rates = hqp.get_filters(), hqp.get_shapers(), hqp.get_rates()
+    except (Building, Dropped) as e:
+        hold = manager.held
+        raise HTTPException(status_code=409,
+                            detail=str(OutputHeld(hold)) if hold is not None else str(e))
     except (BrokenPipeError, ConnectionError, OSError) as e:
         raise HTTPException(status_code=503, detail=f"HQPlayer not reachable: {e}")
     if state is None:
