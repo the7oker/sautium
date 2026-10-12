@@ -505,7 +505,8 @@ implementation details live in the code, DB and git history.
   failed polls across a power cycle — the case a same-tick socket comparison
   missed live on 2026-09-27) triggers an immediate playlist read: a
   restarted HQPlayer (trial-mode Embedded stops every 30 min) that lost the
-  mirror is re-mirrored by the next play through the play-intent gate. The
+  mirror gets the queue back at its first answer (since 2026-10-12; the next
+  play re-mirrored it through the play-intent gate before). The
   gate's liveness probe asks `GetInfo` — the trial stop keeps the port open
   and closes every connection.
   **The HQPlayer library as a source** (2026-09-27, evening): `hqp_library`

@@ -252,7 +252,7 @@ Not implemented — searched over `backend desktop mcp`, only the definitions ma
 | A sync button | the sync runs itself — `P2P_NETWORK.md` § Layered sync flow | `grep -rniE 'sync now\|trigger_sync'` → 0 |
 | A hardware-tier picker | detection must be good enough on its own — `HARDWARE-TIERS.md` § 4 | `GET /api/settings/hardware` is read-only |
 | HQPlayer connection form, mount mode, path mapping | the address says how files reach it — `docs/HQPLAYER_INTEGRATION.md` | `desktop/migrations/031_hqp_no_mount_mode.sql` |
-| Auto-resume after an HQPlayer restart | "deliberately not done" — `docs/HQPLAYER_INTEGRATION.md` | the play-intent gate re-mirrors on the next play |
+| Auto-resume after an HQPlayer restart | "deliberately not done" — `docs/HQPLAYER_INTEGRATION.md` | HQPlayer, back and stopped, gets the queue at its first answer; the play press starts it |
 | Social feed, gamification | anti-patterns — `POSITIONING.md` | — |
 | Voice interface, selective sharing, browsing or searching a friend's library, shared queues, friend recommendations, provider search, creator profiles | "dropped as no longer intended", commit `a2ef382` (2026-09-21), confirmed 2026-09-29; reason: not documented | the invite-token right `can_search` stays in the protocol and is offered nowhere |
 | Repeat | the Radio toggle took its place on Now Playing (2026-05-26); reason: not documented | `grep -n -i -w 'repeat' static/*.js static/index.html` → no control |

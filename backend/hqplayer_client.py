@@ -387,9 +387,12 @@ class HQPlayerClient:
         self.gate = gate
         self.socket: Optional[socket.socket] = None
         self.buffer = bytearray()
-        # Connections made so far: a status poller sharing the client tells
-        # an HQPlayer that came back by it
+        # Connections made so far, and the ones HQPlayer ended — closed,
+        # reset, refused: a status poller sharing the client tells an
+        # HQPlayer that came back by the latter, never by a reconnect of
+        # this node's own after a silence
         self.connections = 0
+        self.losses = 0
         self._outcomes = threading.local()
         # Called with every outcome, failures and successes alike — the
         # playback backend's trace listens on its command client.
@@ -485,6 +488,7 @@ class HQPlayerClient:
             return sock
         except Exception as e:
             logger.error(f"Failed to connect to HQPlayer: {e}")
+            self.losses += 1
             if sock is not None:
                 sock.close()
             self._outcome("<connection>", None, "refused",
@@ -529,6 +533,7 @@ class HQPlayerClient:
         except Exception as e:
             logger.error(f"Failed to send command: {e}")
             self._io_error = f"send failed: {e}"
+            self.losses += 1
             self.disconnect()
             return False
 
@@ -571,6 +576,7 @@ class HQPlayerClient:
                     # the socket doesn't linger in CLOSE_WAIT until the next
                     # request's peek happens to notice it.
                     self._io_error = "closed by HQPlayer"
+                    self.losses += 1
                     self.disconnect()
                     return None
                 self.buffer += chunk
@@ -583,6 +589,7 @@ class HQPlayerClient:
             if e.errno is not None:
                 logger.error(f"Failed to read response: {e}")
                 self._io_error = f"no answer: {e}"
+                self.losses += 1
                 self.disconnect()
                 return None
             # The connection goes all the same: the late answer would be
@@ -596,6 +603,7 @@ class HQPlayerClient:
         except Exception as e:
             logger.error(f"Failed to read response: {e}")
             self._io_error = f"no answer: {e}"
+            self.losses += 1
             self.disconnect()
             return None
         finally:

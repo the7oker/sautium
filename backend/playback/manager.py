@@ -171,8 +171,10 @@ class PlaybackManager:
         """An output change from the picker or an address change — never
         while the output is lent: checked under the lock the hold takes, so
         a change that passed the check lands before a hold can begin, and
-        none of its settings is written while one lasts."""
-        with self._ensure_lock:
+        none of its settings is written while one lasts. It takes the queue
+        lock first, in the order the hold takes both: the attach mirrors the
+        queue with no mutation in flight."""
+        with self._mutate_lock, self._ensure_lock:
             self._refuse_if_held()
             yield
 
@@ -182,8 +184,10 @@ class PlaybackManager:
         preference, not a live connection. Called at the start of every
         playback session — a dead or never-attached output is (re)attached
         from the persisted settings right here; pause/stop/volume keep
-        using backend() and never wake a device."""
-        with self._ensure_lock:
+        using backend() and never wake a device. The queue lock first, in
+        the order the hold takes both: an attach mirrors the queue with no
+        mutation in flight, and a play press waits for one to commit."""
+        with self._mutate_lock, self._ensure_lock:
             self._refuse_if_held()
             b = self._active
             # Fast offline-fail: a powered-off DLNA renderer must 503 within
@@ -229,11 +233,13 @@ class PlaybackManager:
         return self._active
 
     def activate(self, output_type: Optional[str], *, stop_old: bool = True,
-                 by_hold: bool = False, **cfg) -> None:
+                 by_hold: bool = False, **cfg) -> Optional[str]:
         """Switch the active output. The old backend is stopped (while it
         still believes its device reachable) and shut down; the canonical
         queue survives the switch; playback does NOT auto-resume — the user
-        presses play on the new output.
+        presses play on the new output. Returns what the person is told when
+        the old output's stop is left for later (HQPlayer building, or not
+        answering), else None.
 
         `stop_old=False` detaches without touching playback — app shutdown
         and clearing the HQPlayer host must leave an externally-running
@@ -247,16 +253,17 @@ class PlaybackManager:
                 self._refuse_if_held()
             if (output_type is not None and self._active is not None
                     and self._active.id == output_type):
-                return
+                return None
             # The slot that was active on the OLD output — seeded into the
             # new backend after attach so play continues from the same track.
             prev_idx = self._last_slot
             old = self._active
+            told = None
             if old is not None:
                 self._active = None
                 if stop_old and old.healthy():
                     try:
-                        old.release()
+                        told = old.release()
                     except Exception as e:
                         logger.debug("stop on deactivate failed: %s", e)
                 elif stop_old:
@@ -272,7 +279,7 @@ class PlaybackManager:
             if output_type is None:
                 # No output ⇒ no status source at all (§2.6).
                 self._push_status({"state": "disconnected"})
-                return
+                return told
             if output_type == "hqplayer":
                 from playback.hqp_backend import HqpBackend
                 backend = HqpBackend(emit=self._on_backend_status, queue=self.queue)
@@ -324,6 +331,7 @@ class PlaybackManager:
             # the slot it resumes at — the play press finds them buffering.
             self._subs.maintain(prev_idx if prev_idx >= 1 else 1)
             logger.info("playback backend activated: %s", backend.id)
+            return told
 
     def _reresolve(self, backend: PlayerBackend) -> None:
         """Recompute `QueueItem.play` for every slot against this output
@@ -644,10 +652,10 @@ class PlaybackManager:
         new_data.update({k: s.extra[k] for k in STATUS_READINGS if s.extra.get(k) is not None})
         # The HQPlayer output's own words (playback.hqp_backend): the build it
         # is in, a silence no build of ours explains, the outcome of a DSP
-        # change that went through a build, and where the play press resumes
-        # a stopped HQPlayer.
+        # change that went through a build, where the play press resumes a
+        # stopped HQPlayer, and a play press taking the queue to it again.
         new_data.update({k: s.extra[k] for k in ("building", "not_answering", "dsp_change",
-                                                 "resume")
+                                                 "resume", "rebuilding")
                          if s.extra.get(k) is not None})
 
         # Per-track listening history + scrobble (source-agnostic: owned and
@@ -710,8 +718,9 @@ class PlaybackManager:
         appends with."""
         with self._mutation():
             backend = self.ensure_active() if play else self.backend()
-            added = backend.queue_replace(items, play=play,
-                                          probe_first=probe_first)
+            accepted = backend.queue_replace(items, play=play,
+                                             probe_first=probe_first)
+            added = len(accepted)
             if added and archive is not None:
                 try:
                     archive()
@@ -719,7 +728,7 @@ class PlaybackManager:
                     backend.queue_abandon()
                     raise
             if added:
-                gen = self.queue.replace(items[:added])
+                gen = self.queue.replace(accepted)
                 self._retire_previews(gen)
                 self._last_slot = 0   # fresh queue — no resume slot in it
                 backend.queue_changed("replace", play=play)
@@ -761,19 +770,20 @@ class PlaybackManager:
             else:
                 anchor = None
             if position == "next" and anchor is not None:
-                added = backend.queue_insert_next(items, anchor) if backend else len(items)
-                if added:
-                    self.queue.insert_after(anchor, items[:added])
+                accepted = backend.queue_insert_next(items, anchor) if backend else list(items)
+                if accepted:
+                    self.queue.insert_after(anchor, accepted)
                     if backend:
                         backend.queue_changed("insert_next")
                     self._schedule_persist()
             else:
-                added = backend.queue_append(items) if backend else len(items)
-                if added:
-                    self.queue.append(items[:added])
+                accepted = backend.queue_append(items) if backend else list(items)
+                if accepted:
+                    self.queue.append(accepted)
                     if backend:
                         backend.queue_changed("append")
                     self._schedule_persist()
+            added = len(accepted)
             if added and self._latest_status.get("state") not in (
                     "playing", "paused", "loading"):
                 # Nothing is playing (fresh/stopped queue, or no backend) —
@@ -891,6 +901,18 @@ class PlaybackManager:
                 self._push_status({**status, **update})
         if backend is not None:
             backend.queue_start()
+
+    def forget(self, items: list[QueueItem]) -> None:
+        """Items the output refused while it took the queue it holds already
+        — files it cannot open: they leave the canonical queue (mirror-first),
+        each unmirrored, the output never having held it. Called by the
+        output under the queue lock."""
+        with self._mutation():
+            for item in items:
+                index = self.queue.index_of(item)
+                if index is not None:
+                    self.queue.remove(index)
+            self._schedule_persist()
 
     def mirror_step(self, backend: PlayerBackend, step: Callable[[], None]) -> None:
         """An output's own mirror step outside a mutation — HQPlayer

@@ -124,11 +124,13 @@ class PlayerBackend(ABC):
     @abstractmethod
     def stop(self) -> bool: ...
 
-    def release(self) -> None:
-        """The output is switched away from: stop what it plays. HQPlayer,
-        building a setting and answering nothing, stops once it is done —
-        the switch does not wait for it."""
+    def release(self) -> Optional[str]:
+        """The output is switched away from: stop what it plays. Returns what
+        the person is told when the stop is left for later — HQPlayer,
+        building a setting or answering nothing, stops once it answers; the
+        switch does not wait for it."""
         self.stop()
+        return None
 
     def refusal(self) -> str:
         """Why the last command this thread sent was not taken, in the
@@ -191,14 +193,22 @@ class PlayerBackend(ABC):
         a stream substitute landed on it (playback.substitute). Default:
         nothing; an output that parked a play there starts it."""
 
-    def queue_replace(self, items: list, *, play: bool, probe_first: bool = False) -> int:
-        return len(items)
+    # The three take what the output took of `items` into the queue — all of
+    # them here; HQPlayer's leaves out what it refused (mirror-first).
 
-    def queue_append(self, items: list) -> int:
-        return len(items)
+    def queue_replace(self, items: list, *, play: bool, probe_first: bool = False) -> list:
+        return list(items)
 
-    def queue_insert_next(self, items: list, anchor_index: Optional[int]) -> int:
-        return len(items)
+    def queue_append(self, items: list) -> list:
+        return list(items)
+
+    def queue_insert_next(self, items: list, anchor_index: Optional[int]) -> list:
+        return list(items)
+
+    def lose_mirror(self, why: str) -> None:
+        """Background work could not hand the output what the queue took (a
+        filler whose wait gave up). Default: nothing — only HQPlayer keeps a
+        mirror of the queue."""
 
     def queue_remove(self, index: int) -> bool:
         return True

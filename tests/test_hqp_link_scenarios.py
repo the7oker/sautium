@@ -32,7 +32,14 @@ statuses the output pushed. The node stop ends every run.
  12. A replace rotates listening history only once the output took it:
      once when it did, never when it was refused.
  13. At rest HQPlayer's playlist is the queue, or the mirror is marked lost
-     (or drifted: an edit made elsewhere); no item twice in the queue.
+     (or drifted: an edit made elsewhere) — and a play press then makes it
+     the queue; no item twice in the queue.
+ 14. A tail mirror plays the queue's tracks from the entry it reads to the
+     end.
+
+The Stop a switch away owes (6) is also looked for: it went, or a newer
+attach superseded it, or HQPlayer stayed silent past the limit, went away,
+or the node stopped.
 
 A failure names its seed and prints the whole event log.
 
@@ -71,7 +78,7 @@ _QUESTIONS = {"Status", "State", "GetInfo", "PlaylistGet", "VolumeRange", "GetMo
               "GetFilters", "GetShapers", "GetRates", "MatrixListProfiles", "MatrixGetProfile",
               "raw"}
 _WORKERS = ("hqp-dsp-change", "hqp-late-stop", "hqp-start", "hqp-rebind",
-            "hqp-benchmark-recover", "hqp-reconverge")
+            "hqp-benchmark-recover", "hqp-reconverge", "hqp-press", "hqp-held-status")
 # The queue edits a spot stays through, its item kept
 _KEEP_SPOT = ("fill", "play next", "remove", "reorder", "rebind")
 
@@ -122,8 +129,11 @@ class _Elsewhere:
 
     def start(self) -> None: ...
     def shutdown(self) -> None: ...
-    def release(self) -> None: ...
     def resume_at(self, index: int) -> None: ...
+    def lose_mirror(self, why: str) -> None: ...
+
+    def release(self) -> None:
+        return None
     def queue_changed(self, kind: str, *, play: bool = False) -> None: ...
     def queue_start(self) -> None: ...
     def slot_ready(self, index: int) -> None: ...
@@ -137,14 +147,14 @@ class _Elsewhere:
     def refusal(self) -> str:
         return ""
 
-    def queue_replace(self, items, *, play, probe_first=False) -> int:
-        return len(items)
+    def queue_replace(self, items, *, play, probe_first=False) -> list:
+        return list(items)
 
-    def queue_append(self, items) -> int:
-        return len(items)
+    def queue_append(self, items) -> list:
+        return list(items)
 
-    def queue_insert_next(self, items, anchor_index) -> int:
-        return len(items)
+    def queue_insert_next(self, items, anchor_index) -> list:
+        return list(items)
 
     def queue_remove(self, index) -> bool:
         return True
@@ -212,6 +222,7 @@ class World:
         self.removed: set = set()       # id() of the items people removed
         self.mgr: Optional[PlaybackManager] = None
         self.settings_router = None
+        self.owed_checked = 0
 
     # -- the log ------------------------------------------------------------
 
@@ -327,6 +338,25 @@ class World:
                 w.rec("waited", link=lid(link), entered=entered)
             return out
         mp.setattr(hl.BuildWatch, "wait_out", waited)
+
+        # A switch away from HQPlayer, as the manager makes it — whatever the
+        # backend then does about the Stop it owes
+        activate = PlaybackManager.activate
+
+        def activated(mgr, output_type, *, stop_old=True, by_hold=False, **cfg):
+            old = mgr._active
+            if output_type is None and stop_old and not by_hold and isinstance(old, HqpBackend):
+                link = old._link
+                f = w.a if link.port == w.a.port else w.b
+                with f._lock:
+                    entry = f.playlist[f.track - 1] if 1 <= f.track <= len(f.playlist) else None
+                    state = f.state
+                built = link.build.silent()
+                w.rec("released", link=lid(link), fake=f.name, state=state, entry=entry,
+                      given=[old._uri_for(it) for it in mgr.queue.snapshot()],
+                      unfinished=bool(built and built.get("unfinished")))
+            return activate(mgr, output_type, stop_old=stop_old, by_hold=by_hold, **cfg)
+        mp.setattr(PlaybackManager, "activate", activated)
 
         for name in ("retire", "close"):
             orig = getattr(hl.HqpLink, name)
@@ -454,7 +484,7 @@ class World:
             (2, "play next", lambda: mgr.append(self.items(1), "next")),
             (2, "remove", self.remove),
             (2, "reorder", self.reorder),
-            (2, "radio", lambda: mgr.clear_for_radio(lambda: None)),
+            (2, "radio", lambda: mgr.clear_for_radio(lambda: self.rec("archive"))),
             (3, "dsp", self.dsp),
             (4, "dsp builds", lambda: (self.build(r.choice(["SetFilter", "SetShaping"])),
                                        self.dsp())),
@@ -468,7 +498,7 @@ class World:
             (3, "fill through a build", self.fill_through_build),
             (3, "jump, then a switch", self.jump_then_switch),
             (2, "silence", lambda: self.hqp().silence(r.uniform(0.2, 1.3))),
-            (1, "restart", lambda: self.hqp().restart()),
+            (1, "restart", self.restart),
             (1, "vanish", self.vanish),
             (2, "theirs", self.theirs),
             (2, "switch away", lambda: self.settings_router.put_output_prefs(
@@ -479,17 +509,32 @@ class World:
         ]
 
     def replace(self) -> None:
-        """A play route's replace, its session rotation handed in."""
+        """A play route's replace, its session rotation handed in — now and
+        then of files HQPlayer refuses whole: nothing commits, nothing
+        rotates."""
         rotated = []
+        items = self.items(self.rng.randint(1, 4))
+        refused = self.rng.random() < 0.2
+        if refused:
+            for f in (self.a, self.b):
+                f.refuse.update(it.source["path"] for it in items)
+        before = self.mgr.queue.snapshot()
         try:
-            added, _ = self.mgr.replace_queue(self.items(self.rng.randint(1, 4)), play=True,
+            added, _ = self.mgr.replace_queue(items, play=True,
                                               archive=lambda: rotated.append(True))
         except BaseException:
             if rotated:
                 self.violate("I12: history rotated for a replace the output refused")
             raise
+        finally:
+            if refused:
+                for f in (self.a, self.b):
+                    f.refuse.difference_update(it.source["path"] for it in items)
         if len(rotated) != (1 if added else 0):
             self.violate(f"I12: {len(rotated)} rotation(s) for a replace that took {added}")
+        if refused and isinstance(self.mgr.active, HqpBackend) and (
+                added or self.mgr.queue.snapshot() != before):
+            self.violate("I12: a replace HQPlayer refused whole changed the queue")
 
     def fill_through_build(self) -> None:
         """A filler adding while HQPlayer builds — a build that may run out
@@ -552,10 +597,16 @@ class World:
         answer = "last" if command == "Play" else r.choice(["first", "last"])
         self.hqp().build(command, r.uniform(0.1, 1.5), answer=answer, stops=r.random() < 0.3)
 
+    def restart(self) -> None:
+        f = self.hqp()
+        self.rec("gone", fake=f.name)
+        f.restart()
+
     def vanish(self) -> None:
         f = self.hqp()
         if f._down:
             return
+        self.rec("gone", fake=f.name)
         f.close()
         back = threading.Timer(self.rng.uniform(0.3, 1.2), f.come_back)
         back.name = "scenario-return"
@@ -637,9 +688,11 @@ class World:
             self.run_step(name, fn)
 
     def at_rest(self) -> None:
-        """Invariants 11 and 13, at a full settle: what is left of HQPlayer's
-        own background work done, then the queue and the mirror compared —
-        given a bounded while to converge (the poller sees a return)."""
+        """Invariants 11, 13 and 14, and the Stops a switch away owed, at a
+        full settle: what is left of HQPlayer's own background work done,
+        then the queue and the mirror compared — given a bounded while to
+        converge (the poller sees a return). A mirror marked lost or drifted
+        is given a play press: HQPlayer holds the queue after it."""
         deadline = time.monotonic() + 8.0
         while (any(t.name in _WORKERS for t in threading.enumerate())
                and time.monotonic() < deadline):
@@ -654,25 +707,79 @@ class World:
                     if self.mgr.queue.index_of(it) is None and id(it) not in self.removed]
             if lost:
                 self.violate(f"I11: a filler's tracks are not in the queue: {lost}")
+        self._owed_stops()
         b = self.mgr.active
         if not isinstance(b, HqpBackend):
             return
         hqp = self.b if b._link.port == self.b.port else self.a
+        pressed = False
         while True:
-            if hqp._down or b._mirror_lost or b._drift:
+            if hqp._down:
                 return
             with hqp._lock:
-                playlist = list(hqp.playlist)
-            if any("/Elsewhere/" in u for u in playlist):
-                return                  # another controller's edit: drift, the canary's
-            want = [b._uri_for(it) for it in self.mgr.queue.snapshot()]
+                playlist, track, state = list(hqp.playlist), hqp.track, hqp.state
+            snapshot = self.mgr.queue.snapshot()
+            want = [b._uri_for(it) for it in snapshot]
             if playlist == want:
                 return
+            if b._mirror == "tail" and _tail_holds(playlist, want, track, state):
+                return
+            if b._mirror in ("lost", "drift") and not pressed and snapshot:
+                pressed = True
+                if not self._press():
+                    return              # refused (a build, a silence): no verdict now
+                deadline = time.monotonic() + 8.0
+                continue
             if time.monotonic() > deadline:
                 self.violate(f"I13: at rest HQPlayer holds {playlist}, the queue {want}, "
-                             "and the mirror is not marked lost")
+                             f"the mirror {b._mirror}" + (" after a play press" if pressed else ""))
                 return
             time.sleep(0.1)
+
+    def _press(self) -> bool:
+        """A play press — a tap on the first slot — on a playlist that is no
+        mirror: whether it was taken."""
+        self.rec("step", name="press (at rest)")
+        try:
+            self.player.jump(self.player.JumpRequest(index=1))
+        except (HTTPException, ConnectionError, OSError) as e:
+            self.rec("step-refused", why=str(e))
+            return False
+        deadline = time.monotonic() + 8.0
+        while (any(t.name in _WORKERS for t in threading.enumerate())
+               and time.monotonic() < deadline):
+            time.sleep(0.05)
+        return True
+
+    def _owed_stops(self) -> None:
+        """I6, the other half: the Stop a switch away owed went — unless a
+        newer attach superseded it, HQPlayer stopped or played another
+        entry meanwhile, stayed silent past the limit or went away, or the
+        node stopped; past a build it did not finish none is owed."""
+        with self._lock:
+            log = list(self.log)
+        for i, e in enumerate(log):
+            d = e.data
+            if (e.kind != "released" or e.seq < self.owed_checked
+                    or d["entry"] not in d["given"] or d["unfinished"]
+                    or d["state"] not in (int(PlaybackState.PLAYING), int(PlaybackState.PAUSED))):
+                continue
+            fake = d["fake"]
+
+            def settled(x) -> bool:
+                k, y = x.kind, x.data
+                return ((k == "wire" and y["fake"] == fake
+                         and ((y["what"] == "in" and y["command"] == "Stop")
+                              or y["state"] not in (int(PlaybackState.PLAYING),
+                                                    int(PlaybackState.PAUSED))
+                              or (y["entry"] or "").find("/Elsewhere/") >= 0))
+                        or (k == "accept" and y["intent"] == "attach" and y["link"][0] == fake)
+                        or (k == "build-end" and y["link"][0] == fake and y["how"] != "answered")
+                        or (k == "gone" and y["fake"] == fake)
+                        or (k == "close" and y["link"][0] == fake))
+            if not any(settled(x) for x in log[i + 1:]):
+                self.violate(f"I6: the Stop the switch away (event {e.seq}) owed {fake} never went")
+        self.owed_checked = len(log)
 
     def settle(self, *, full: bool) -> None:
         """Between steps a random breath only: what one set going — a build,
@@ -733,6 +840,7 @@ class World:
         self._ends_heard(log)
         self._switch_stop(log)
         self._statuses(log)
+        self._radio_order(log)
         self.checked = len(log)
 
     def _one_at_a_time(self, log: list) -> None:
@@ -878,9 +986,32 @@ class World:
                 if d["not_answering"] and d["building"]:
                     self._once(e, "I9: not answering said together with a build")
 
+    def _radio_order(self, log: list) -> None:
+        """I12, the radio's half: history rotates before HQPlayer's playlist
+        is cleared — no PlaylistClear the rotation did not come before."""
+        archived = False
+        for e in log:
+            if e.kind == "archive":
+                archived = True
+            elif e.kind == "send" and e.data["command"] == "PlaylistClear":
+                if not archived:
+                    self._once(e, "I12: a radio's PlaylistClear went before history rotated")
+                archived = False
+
     def _once(self, e: _Event, what: str) -> None:
         if e.seq >= self.checked:
             self.violate(f"{what} (event {e.seq})")
+
+
+def _tail_holds(playlist: list, want: list, track: int, state: int) -> bool:
+    """Invariant 14 as the fake shows it: from the entry HQPlayer reads to
+    its end, its playlist is the queue's from that entry's slot."""
+    if state not in (int(PlaybackState.PLAYING), int(PlaybackState.PAUSED)):
+        return True
+    if not 1 <= track <= len(playlist) or playlist[track - 1] not in want:
+        return False
+    q = want.index(playlist[track - 1]) + 1
+    return playlist[track - 1:] == want[q - 1:]
 
 
 @pytest.mark.parametrize("seed", _seeds())

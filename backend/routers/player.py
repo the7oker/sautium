@@ -1686,11 +1686,10 @@ def _filler_append(item, gen: int, *, position: str = "end",
         except GaveUp as e:
             if moved_on() is not None:
                 return None
-            if e.failed:
-                lose = getattr(manager.active, "lose_mirror", None)
-                if lose is not None:
-                    lose(f"filler: {e}; {item.artist} — {item.title} and what follows go "
-                         "into the queue alone")
+            active = manager.active
+            if e.failed and active is not None:
+                active.lose_mirror(f"filler: {e}; {item.artist} — {item.title} and what "
+                                   "follows go into the queue alone")
             pause = False           # the queue, or the output it has now, takes it at once
             continue
         except Dropped as e:

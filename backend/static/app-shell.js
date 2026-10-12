@@ -1303,6 +1303,7 @@
       const b = data.building, r = data.resume;
       const tag = b ? (b.unfinished ? 'Filter build unfinished — restart HQPlayer' : 'Building the filter…')
         : data.not_answering ? 'HQPlayer is not answering'
+        : data.rebuilding ? 'HQPlayer is taking the queue again'
         : r && r.position > 0 && data.state === 'stopped'
           ? `Stopped at ${fmtDuration(r.position)} — Play resumes here` : '';
       this.hqpTag.hidden = !tag;
@@ -8810,6 +8811,7 @@
   // its controls; an Embedded box's answering build is only said.
   function hqpBuildNote(b) {
     if (!b) return '';
+    if (b.not_answering) return 'HQPlayer is not answering. Its controls wait for its answer.';
     if (b.unfinished) return 'HQPlayer did not finish building the filter — restart HQPlayer.';
     return 'HQPlayer is building the filter…' + (b.silent ? ' Its controls wait until it is done.' : '');
   }
@@ -11216,6 +11218,18 @@
     title: 'HQPlayer is not playing',
     text: `${escapeHtml((n.data && n.data.title) || 'Plays fail')} — <span class="num">${(n.data && n.data.count) || 3}</span> plays in a row. More → HQPlayer → Diagnostics has the cause and what to do.`,
   });
+  // HQPlayer refused files of a batch it was handed: one notice per batch,
+  // naming both causes it may have — never asserting one.
+  NOTICE_COPY['hqplayer.refused'] = n => {
+    const d = n.data || {};
+    const reach = d.stream
+      ? 'HQPlayer may not reach this node\'s media proxy (a firewall, or the proxy\'s address)'
+      : 'the music disk may be unreachable';
+    return {
+      title: 'HQPlayer could not open some files',
+      text: `${escapeHtml(d.what || 'Tracks')} — <span class="num">${d.count || 1}</span> of <span class="num">${d.total || 1}</span> not taken: ${reach}, or the files themselves cannot be opened (format, permissions).`,
+    };
+  };
   NOTICE_COPY['tools.missing'] = n => ({
     title: 'Media tools missing',
     text: `${escapeHtml(((n.data && n.data.tools) || []).join(', '))} not found — audio analysis and fingerprinting are skipped until installed.`,
@@ -13791,6 +13805,14 @@
           const err = await r.json().catch(() => ({}));
           notices.toast({ kind: 'error', key: 'output.switch', title: 'Audio output',
                           text: escapeProfileHtml(err.detail || 'Failed to switch output') });
+        } else {
+          // The HQPlayer switched away from did not answer at once: its Stop
+          // is owed, and the person is told what happens to it
+          const out = await r.json().catch(() => ({}));
+          if (out.hqplayer_stop) {
+            notices.toast({ kind: 'info', key: 'output.hqp-stop', title: 'HQPlayer',
+                            text: escapeProfileHtml(out.hqplayer_stop) });
+          }
         }
       } catch (_) {}
       await renderOutputSettings(root);

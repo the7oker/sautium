@@ -1289,12 +1289,12 @@ def test_a_hold_that_cannot_begin_leaves_nothing_held(run, monkeypatch):
 
 
 def test_an_hqplayer_back_from_a_restart_is_lent_before_the_next_play(run):
-    # HQPlayer restarted: the backend knows its mirror is gone until the
-    # next play re-mirrors it — the run needs none of it (2026-10-03: "not
-    # the attached output" right after an Embedded restart)
+    # HQPlayer restarted: the backend knows its mirror is gone until HQPlayer
+    # gets the queue back — the run needs none of it (2026-10-03: "not the
+    # attached output" right after an Embedded restart)
     b = run.mgr.active
-    b._mirror_lost = True
-    assert not b.healthy()
+    b.lose_mirror("HQPlayer came back with a different playlist (restarted?)")
+    assert b._mirror == "lost"
     bench.start()
     assert _wait(lambda: not bench.running(), 30)
     assert bench.state()["outcome"] == "done", bench.state()

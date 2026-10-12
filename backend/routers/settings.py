@@ -1221,6 +1221,13 @@ def _notices_state() -> Dict[str, Any]:
                       "since": run["since"], "until": None,
                       "data": {"code": run["code"], "count": run["count"],
                                "title": run["title"]}})
+    # Files HQPlayer refused of the last batch it was handed — one notice per
+    # batch, its causes worded where it is shown
+    refused = hqp_diagnostics.refused()
+    if refused and _read("output.type") == "hqplayer":
+        items.append({"key": "hqplayer.refused", "kind": "warning",
+                      "since": refused["since"], "until": None,
+                      "data": {k: refused[k] for k in ("what", "count", "total", "stream")}})
     # A CLI agent signed out while something needs it: the assistant runs on
     # it, or — Claude Code only — gear research waits for it (the drain
     # claims nothing until the sign-in returns). Each verdict is the CLI's
@@ -2002,10 +2009,12 @@ def _apply_hqplayer_address(host: Optional[str], port: Optional[int]) -> None:
 def put_hqplayer_prefs(req: HqplayerPrefs) -> Dict[str, Any]:
     """Update the HQPlayer endpoint by address (the Output picker's own
     path is PUT /output with `hqplayer`). When HQPlayer is the selected
-    output the backend is detached and re-attached, so a new address takes
-    effect at once — and with it the way files reach it, read off that
-    address: the attach mirrors the canonical queue in the URI form the
-    address dictates. (activate() is a no-op for an already-active type,
+    output and the address names another HQPlayer, the backend is detached
+    and re-attached, so a new address takes effect at once — and with it
+    the way files reach it, read off that address: the attach mirrors the
+    canonical queue in the URI form the address dictates. Another alias of
+    the HQPlayer driven changes nothing in playback (its link dials it).
+    (activate() is a no-op for an already-active type,
     so a plain re-activate would leave HQPlayer holding URIs of the old
     form.)"""
     from playback.manager import OutputHeld, manager
@@ -2013,14 +2022,19 @@ def put_hqplayer_prefs(req: HqplayerPrefs) -> Dict[str, Any]:
     # address, and nothing of the change is written meanwhile.
     try:
         with manager.output_change():
+            from playback import hqp_link
+            before = hqp_link.selected()
             _apply_hqplayer_address(req.host, req.port)
             # Only when HQPlayer IS the selection. Unset no longer means
             # "HQPlayer may have it" — an unset output resolves to this
             # device, so saving an address here must not quietly move
             # playback. Nothing is sent to the previous endpoint
             # (stop_old=False): an HQPlayer the owner just pointed away from
-            # is left as it was.
-            if _read("output.type") == "hqplayer":
+            # is left as it was. Another alias of the HQPlayer driven is the
+            # same HQPlayer: it stays attached as it is.
+            if (_read("output.type") == "hqplayer"
+                    and not (hqp_link.selected() is before
+                             and getattr(manager.active, "link", None) is before)):
                 from routers.player import _hqp_configured, stop_status_poller
                 if _hqp_configured():
                     manager.activate(None, stop_old=False)
@@ -2132,17 +2146,18 @@ def _put_output_prefs(req: OutputPrefs) -> Dict[str, Any]:
         return get_output_prefs()
 
     otype = _read("output.type")
+    told = None         # what the person is told of a Stop the old output still owes
     try:
         if otype == "browser":
-            manager.activate(None)
+            told = manager.activate(None)
             manager.activate("browser")
         elif otype == "dlna":
-            manager.activate(None)
+            told = manager.activate(None)
             manager.activate("dlna", renderer=_read("output.dlna_renderer"))
         elif otype == "local":
             # Deactivate first — re-selecting "local" with a different device
             # must reconstruct the engine, and activate() is idempotent per type.
-            manager.activate(None)
+            told = manager.activate(None)
             manager.activate("local",
                              device_id=_read("output.local_device"),
                              exclusive=bool(_read("output.local_exclusive")))
@@ -2163,24 +2178,28 @@ def _put_output_prefs(req: OutputPrefs) -> Dict[str, Any]:
                 logger.info("HQPlayer selected with no saved host — recorded "
                             "the default %s:%s", app_settings.hqplayer_host,
                             app_settings.hqplayer_port)
-            # Registered before anything is released: a Stop an earlier
-            # switch away still owes this HQPlayer (it builds) is
-            # superseded, even if its build ends while the output it
-            # switched to is let go
             from playback import hqp_link
             link = hqp_link.selected()
-            link.accept("attach")
-            # The HQPlayer already driven, picked again, stays the output:
-            # nothing is stopped
-            again = getattr(manager.active, "link", None) is link
-            manager.activate(None, stop_old=not again)
-            manager.activate("hqplayer")
+            # The HQPlayer already driven, picked again, stays the output as
+            # it is — no detach, no attach: its DSP change, a resume, its
+            # spot go on (the link took the alias picked, choose)
+            if getattr(manager.active, "link", None) is not link:
+                # Registered before anything is released: a Stop an earlier
+                # switch away still owes this HQPlayer (it builds) is
+                # superseded, even if its build ends while the output it
+                # switched to is let go
+                link.accept("attach")
+                told = manager.activate(None)
+                manager.activate("hqplayer")
     except HTTPException:
         raise
     except Exception as e:
         raise HTTPException(status_code=503, detail=str(e))
     notify_library_subscribers()   # the guidance trail reads output.type
-    return get_output_prefs()
+    out = get_output_prefs()
+    if told:
+        out["hqplayer_stop"] = told
+    return out
 
 
 def load_hqplayer_from_db() -> None:

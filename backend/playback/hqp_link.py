@@ -94,6 +94,11 @@ BUILDING = "HQPlayer is building the filter — it takes commands again once it 
 LOST = "HQPlayer went away during the build"
 NOT_ANSWERING = "HQPlayer is not answering"
 _ENDS = {"timeout": UNFINISHED, "lost": LOST}
+# What a switch away tells the person when its Stop stays owed
+STOP_OWED_BUILDING = ("HQPlayer is building the filter; if it still plays our track once the "
+                      "build is done, Sautium stops it then")
+STOP_OWED_SILENT = ("HQPlayer is not answering; if it still plays our track, Sautium stops it "
+                    "as soon as it answers")
 
 
 def _command_waits() -> Dict[str, float]:
@@ -112,7 +117,8 @@ class Building(ConnectionError):
     `unfinished`, and the person is told to restart HQPlayer."""
 
     def __init__(self, link: "HqpLink", state: dict):
-        super().__init__(UNFINISHED if state.get("unfinished") else BUILDING)
+        super().__init__(NOT_ANSWERING if state.get("not_answering")
+                         else UNFINISHED if state.get("unfinished") else BUILDING)
         self.link = link
         self.state = state
 
@@ -206,20 +212,29 @@ class BuildWatch:
         # to end ended: (its number, how)
         self._builds = 0
         self._began = 0.0
-        self._ended: tuple = (0, None)
+        self._ended: tuple = (0, None, False)
         # What waits to hear a build begin (waking)
         self._wake_on_build: set = set()
 
     def begin(self, command: str, attributes: Dict[str, str]) -> Callable[[str], None]:
         """A command's answer is late: HQPlayer builds. Told by the client on
         the thread that waits for the answer, holding the connection."""
+        # The Status a switch away holds (the late Stop): a silence no build
+        # of ours explains — HQPlayer not answering, never "building"
+        quiet = getattr(self._link._local, "late", False)
         with self._lock:
             self._builds += 1
             n, self._began = self._builds, time.monotonic()
             self.state = {"since": time.time(), "command": command, "silent": True}
+            if quiet:
+                self.state["not_answering"] = True
             wake = list(self._wake_on_build)
             self._changed.notify_all()
-        logger.info("HQPlayer is building (after %s) — commands wait for it", command)
+        if quiet:
+            logger.info("HQPlayer is not answering the Status a switch away holds — commands "
+                        "wait for its answer")
+        else:
+            logger.info("HQPlayer is building (after %s) — commands wait for it", command)
         for event in wake:
             event.set()
         self._link._build_began()
@@ -230,9 +245,16 @@ class BuildWatch:
             if self.state is None or self._link.state == "closed":
                 return
             since = self.state["since"]
-            self.state = {**self.state, "unfinished": True} if how == "timeout" else None
-            self._ended = (n, how)
+            quiet = bool(self.state.get("not_answering"))
+            self.state = ({**self.state, "unfinished": True}
+                          if how == "timeout" and not quiet else None)
+            self._ended = (n, how, quiet)
             self._changed.notify_all()
+        if quiet:
+            if how == "timeout":
+                self._link._not_answering("the Status a switch away held")
+            self._link._build_ended(how)
+            return
         if how == "answered":
             logger.info("HQPlayer answered again after building %.1f s", time.time() - since)
         elif how == "timeout":
@@ -306,7 +328,8 @@ class BuildWatch:
                 return GaveUp(self._link.why or "HQPlayer was let go", failed=False)
             if self._ended[0] < n:
                 return None
-            why = _ENDS.get(self._ended[1])
+            _, how, quiet = self._ended
+            why = NOT_ANSWERING if quiet and how == "timeout" else _ENDS.get(how)
             return GaveUp(why, failed=True) if why else None
 
     @contextmanager
@@ -331,8 +354,9 @@ class BuildWatch:
 
 
 class _CommandLock:
-    """A link's command lock: one command sequence at a time — and none
-    while HQPlayer builds, or answers nothing past a short silence. A caller
+    """A link's command lock: one command sequence at a time, in the order
+    they came — and none while HQPlayer builds, or answers nothing past a
+    short silence. A caller
     is refused at once (Building, NotAnswering), never parked for minutes
     behind the command that met it; one already parked is woken and refused
     when it begins. A command behind a short silence (a Stop's teardown)
@@ -344,18 +368,27 @@ class _CommandLock:
         self._cond = threading.Condition()
         self._held = False
         self.owner: Optional[int] = None
+        # Who waits for it, in the order they came: a Pause pressed while a
+        # play press rebuilds goes before the start that rebuild leads to
+        self._waiting: deque = deque()
 
     def __enter__(self) -> "_CommandLock":
+        me = threading.get_ident()
         with self._cond:
-            while True:
-                self._link._check_state()
-                self._link.build.refuse()
-                self._link._refuse_if_silent()
-                if not self._held:
-                    self._held = True
-                    self.owner = threading.get_ident()
-                    return self
-                self._cond.wait()
+            self._waiting.append(me)
+            try:
+                while True:
+                    self._link._check_state()
+                    self._link.build.refuse()
+                    self._link._refuse_if_silent()
+                    if not self._held and self._waiting[0] == me:
+                        self._held = True
+                        self.owner = me
+                        return self
+                    self._cond.wait()
+            finally:
+                self._waiting.remove(me)
+                self._cond.notify_all()         # the next in line looks again
 
     def __exit__(self, *exc) -> bool:
         with self._cond:
@@ -392,21 +425,28 @@ class _CommandLock:
 
 
 class _LateStop:
-    """The Stop an output switch owes HQPlayer while it builds and answers
-    nothing: the switch goes on at once, and HQPlayer — undriven beside the
-    new output — stops once the build is done, if it plays or pauses an
-    entry of ours then. It outlives the backend that owed it and a retiring
-    link; a newer attach of the link supersedes it, and a closed link drops
-    it — a stopping node leaves HQPlayer as it is."""
+    """The Stop an output switch owes HQPlayer — the one a switch away
+    sends, on its own thread; the switch waits for its first outcome (the
+    Stop sent, or not needed) at most BUILDING_AFTER_S, never more. HQPlayer
+    — undriven beside the new output — stops if it plays or pauses an entry
+    of what it was given before the switch (`ours`), once it answers: at
+    once, after a build it is in, or after a silence no build explains — its
+    Status held up to the build limit, as a build's answer is, and nothing
+    else of this node sent meanwhile. No answer by then: no Stop. It
+    outlives the backend that owed it and a retiring link; a newer attach
+    of the link supersedes it, a closed link drops it — a stopping node
+    leaves HQPlayer as it is — and a connection that broke drops it, with no
+    reconnect for it."""
 
     def __init__(self, link: "HqpLink", item: Item, ours: Callable[[Any], bool]):
         self.link = link
         self.item = item
         self.ours = ours
+        self.decided = threading.Event()
 
     def _send(self) -> bool:
         with self.link.command(item=self.item):
-            return self.link._stop_if_ours(self.ours)
+            return self.link._stop_if_ours(self.ours, self.decided)
 
     def run(self) -> None:
         link = self.link
@@ -414,8 +454,7 @@ class _LateStop:
         try:
             if through(self._send, needed=lambda: link.superseded(self.item),
                        until=lambda: link.superseded(self.item) is not None):
-                logger.info("HQPlayer stopped once its build was done — the output had been "
-                            "switched away")
+                logger.info("HQPlayer stopped — the output had been switched away")
         except GaveUp as e:
             (logger.warning if e.failed else logger.info)(
                 "HQPlayer not stopped after the output switch: %s", e)
@@ -424,6 +463,7 @@ class _LateStop:
         except (BrokenPipeError, ConnectionError, OSError) as e:
             logger.warning("HQPlayer not stopped after the output switch: %s", e)
         finally:
+            self.decided.set()
             link._local.late = False
             with link._state_lock:
                 if link._late_stop is self:
@@ -572,8 +612,10 @@ class HqpLink:
 
     def _refuse_if_silent(self) -> None:
         """A command is refused while HQPlayer answers nothing past a short
-        silence's wait (silent_since): never parked behind it."""
-        if self.silent_since is not None:
+        silence's wait (silent_since): never parked behind it. The Stop a
+        switch away owes goes all the same — its Status waits for HQPlayer
+        (_LateStop)."""
+        if self.silent_since is not None and not getattr(self._local, "late", False):
             raise NotAnswering()
 
     def _take(self) -> None:
@@ -764,6 +806,9 @@ class HqpLink:
                 if why is not None:
                     raise Dropped(why)
             yield
+        sent = getattr(self._local, "sent", None)
+        if sent is not None:
+            sent.set()          # the switch away goes on once its Stop went
 
     def _connect(self) -> None:
         """A live socket for the holder: one the peer closed while idle is
@@ -775,6 +820,7 @@ class HqpLink:
         if sock is not None and _closed(sock):
             logger.info("HQPlayer at %s:%d closed the connection — reconnecting",
                         self.host, self.port)
+            c.losses += 1
             c.disconnect()
         if c.socket is not None:
             return
@@ -790,16 +836,6 @@ class HqpLink:
                 sock.close()
                 raise Dropped(self.why or "HQPlayer was let go")
             c.use(sock)
-
-    def reset(self) -> None:
-        """A fresh socket for the next request (a retry after a broken one);
-        a connection a hand-over kept for this thread stays its."""
-        kept = self._reserved == threading.get_ident()
-        self._take()
-        try:
-            self.client.disconnect()
-        finally:
-            self._give(self._after if kept else None)
 
     @contextmanager
     def command(self, intent: Optional[str] = None, *, item: Any = None):
@@ -874,35 +910,54 @@ class HqpLink:
             self.accept("switch")
         self._close_if_retired()
 
-    def release(self, ours: Callable[[Any], bool]) -> None:
+    def release(self, ours: Callable[[Any], bool]) -> Optional[str]:
         """The output is switched away from this HQPlayer: it stops if it
-        plays or pauses an entry of ours — at once, or, while it builds, once
-        the build is done (the late Stop): the switch does not wait for it.
-        Past the build limit it is left as it is."""
+        plays or pauses an entry of what it was given (`ours`) — the one
+        late Stop (_LateStop), on its own thread. The switch waits for its
+        first outcome — the Stop sent, or not needed — at most
+        BUILDING_AFTER_S, and returns at once while HQPlayer is known to
+        build: the Stop then stays owed, and what the person is told comes
+        back. Past the build limit HQPlayer is left as it is."""
         stop = self.item("late_stop", self.accept("switch"))
-        try:
-            with self.command(item=stop):
-                self._stop_if_ours(ours)
-        except Building as e:
-            if e.state.get("unfinished"):
-                logger.warning("HQPlayer not stopped at the output switch: %s", e)
-                return
-            with self._state_lock:
-                # One owed by an earlier switch was superseded by the attach since
-                late = self._late_stop = _LateStop(self, stop, ours)
-            threading.Thread(target=late.run, daemon=True, name="hqp-late-stop").start()
+        state = self.build.silent()
+        if state is not None and state.get("unfinished"):
+            logger.warning("HQPlayer not stopped at the output switch: %s", UNFINISHED)
+            return None
+        late = _LateStop(self, stop, ours)
+        with self._state_lock:
+            # One owed by an earlier switch was superseded by the attach since
+            self._late_stop = late
+        threading.Thread(target=late.run, daemon=True, name="hqp-late-stop").start()
+        if state is None and late.decided.wait(BUILDING_AFTER_S):
+            return None
+        state = self.build.silent() if state is None else state
+        return (STOP_OWED_BUILDING if state is not None and not state.get("not_answering")
+                else STOP_OWED_SILENT)
 
-    def _stop_if_ours(self, ours: Callable[[Any], bool]) -> bool:
-        """Stop, if HQPlayer plays or pauses an entry of ours; on a held
-        connection."""
+    def _stop_if_ours(self, ours: Callable[[Any], bool], decided: threading.Event) -> bool:
+        """Stop, if HQPlayer plays or pauses an entry of ours — judged on its
+        Status, held up to the build limit (a silence it is in is waited
+        out; nothing else goes meanwhile). `decided` is set the moment the
+        Stop's bytes go, or once it is not needed."""
         c = self.client
-        status = c.get_status(wait=QUESTION_WAIT_S)
-        if status is None or status.state not in (PlaybackState.PLAYING, PlaybackState.PAUSED):
+        status = c.get_status(wait=BUILD_LIMIT_S, watched=True)
+        if status is None:
+            logger.warning("HQPlayer did not answer the Status a switch away held%s — not "
+                           "stopped", " within the build limit" if c.timed_out else "")
+            return False
+        if status.state not in (PlaybackState.PLAYING, PlaybackState.PAUSED):
+            decided.set()
             return False
         if not ours(status):
             logger.info("HQPlayer plays something that is not ours — left playing")
+            decided.set()
             return False
-        if c.stop():
+        self._local.sent = decided
+        try:
+            stopped = c.stop()
+        finally:
+            self._local.sent = None
+        if stopped:
             return True
         logger.warning("HQPlayer did not take the Stop: %s", redact_uri(c.refusal()))
         return False

@@ -337,6 +337,40 @@ def note_playing(slot: int, generation: int) -> bool:
     return _run_changed()
 
 
+# -- What HQPlayer refused of a batch ------------------------------------------------
+# One notice per batch it refused files of — never one per track: what (the
+# album, or the first track) and how many; the notices channel words the
+# causes it may have. A batch it takes whole ends it.
+
+_refused: Optional[dict] = None
+
+
+def note_refused(items: list, total: int, *, stream: bool) -> bool:
+    """HQPlayer refused `items` of a batch of `total` tracks it was handed.
+    Returns whether the notices changed: a batch is a notice of its own."""
+    global _refused
+    albums = {it.album for it in items}
+    what = items[0].album if len(albums) == 1 and items[0].album else items[0].title
+    with _lock:
+        _refused = {"since": _iso(time.time()), "what": what, "count": len(items),
+                    "total": total, "stream": stream}
+    return True
+
+
+def note_taken() -> bool:
+    """HQPlayer took a batch whole: the last refusal's notice is over.
+    Returns whether the notices changed."""
+    global _refused
+    with _lock:
+        changed, _refused = _refused is not None, None
+    return changed
+
+
+def refused() -> Optional[dict]:
+    with _lock:
+        return dict(_refused) if _refused else None
+
+
 def failing_run() -> Optional[dict]:
     """Three or more closed attempts in a row ending in the same failure — a
     dead output, as opposed to one track that would not play."""
