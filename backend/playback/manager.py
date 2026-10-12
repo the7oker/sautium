@@ -698,14 +698,26 @@ class PlaybackManager:
             yield
 
     def replace_queue(self, items: list[QueueItem], *, play: bool,
-                      probe_first: bool = False) -> tuple[int, int]:
+                      probe_first: bool = False,
+                      archive: Optional[Callable[[], None]] = None) -> tuple[int, int]:
         """Replace the queue (and start playback, once the queue lock is let
-        go). Returns (added, generation); generation is what background
-        fillers must guard their appends with."""
+        go). `archive` — the session rotation a play route starts with — runs
+        once the output has taken the queue, under the queue lock, before the
+        commit: an output that refused it (busy, gone) leaves history as it
+        was; a rotation that fails commits nothing, and the output abandons
+        what it was given (PlayerBackend.queue_abandon). Returns (added,
+        generation); generation is what background fillers must guard their
+        appends with."""
         with self._mutation():
             backend = self.ensure_active() if play else self.backend()
             added = backend.queue_replace(items, play=play,
                                           probe_first=probe_first)
+            if added and archive is not None:
+                try:
+                    archive()
+                except Exception:
+                    backend.queue_abandon()
+                    raise
             if added:
                 gen = self.queue.replace(items[:added])
                 self._retire_previews(gen)
@@ -900,15 +912,15 @@ class PlaybackManager:
     def clear_for_radio(self, archive: Callable[[], None]) -> int:
         """Radio start: clear everything after the playing slot (the seed
         plays on). `archive` — the session rotation radio starts with — runs
-        once the output answered, before the queue commits the clear: an
-        output that could not be asked (busy, gone) raises first, history
-        untouched. Returns the new generation for the radio filler — the
-        current one when the output did not clear: mirror-first, the queue
-        keeps the tail the player keeps, and the radio follows it."""
+        in the output's own clear, before it (queue_clear_after_current): an
+        output that cannot be asked (busy, lent, gone) refuses before either,
+        and a rotation that fails clears nothing. Returns the new generation
+        for the radio filler — the current one when the output did not
+        clear: mirror-first, the queue keeps the tail the player keeps, and
+        the radio follows it, history rotated."""
         with self._mutation():
             backend = self.backend()
-            cleared = backend.queue_clear_after_current()
-            archive()
+            cleared = backend.queue_clear_after_current(archive)
             if not cleared:
                 return self.queue.generation
             gen = self.queue.clear_for_radio(self._latest_status.get("track_index"))

@@ -1395,7 +1395,7 @@ def test_a_command_hqplayer_refuses_is_logged_in_its_words(fake, caplog):
     fake.replies["PlaylistClear"] = '<PlaylistClear result="Error">busy</PlaylistClear>'
     b = HqpBackend(emit=lambda *_: None, queue=CanonicalQueue())
     assert b.stop() is False and b.set_volume(-10.0) is False
-    assert b.queue_clear_after_current() is False
+    assert b.queue_clear_after_current(lambda: None) is False
     assert "HQPlayer did not take Stop: not authenticated and no internet access" in caplog.text
     assert "HQPlayer did not take Volume: HQPlayer refused Volume" in caplog.text
     assert "HQPlayer did not take PlaylistClear: busy" in caplog.text
@@ -2570,9 +2570,6 @@ def test_the_mcp_assistants_transport_goes_through_the_backend(fake, monkeypatch
     spec.loader.exec_module(server)
     posted = []
     monkeypatch.setattr(server, "_output_prefs", lambda: {"type": "hqplayer"})
-    # Whatever the server would dial by itself is the fake, never an HQPlayer
-    # that runs on this machine
-    monkeypatch.setattr(server, "_hqp_endpoint", lambda: ("127.0.0.1", fake.port))
     monkeypatch.setattr(server, "_backend_post",
                         lambda path, body, timeout=30.0: posted.append((path, body)) or
                         ({"ok": True} if path != "/api/player/volume/up"
@@ -3299,3 +3296,203 @@ def test_a_filler_waiting_on_one_hqplayer_when_another_is_picked_lands_on_the_ne
 def _silence_began(fake) -> float:
     """When the fake's latest silence began — the build the filler waited on."""
     return fake.silences[-1][0] if fake.silences else 0.0
+
+
+# -- the routes: history rotates once the output took the queue; the assistants ---------------
+
+@pytest.fixture
+def play_route(fake, output, monkeypatch):
+    """POST /api/player/play-track for owned file 9, its row in memory, and
+    every session rotation recorded with the queue it found."""
+    mgr, b = output
+    player_router = _routes_on(monkeypatch, mgr)
+    monkeypatch.setattr(player_router, "_db_query_one",
+                        lambda sql, params=None: {"id": 9, "file_path": "E:/Music/B/09.flac",
+                                                  "file_format": "FLAC", "title": "Song 9",
+                                                  "artist": "Artist", "album": "Album"})
+    monkeypatch.setattr(queue_mod, "items_for_owned_rows",
+                        lambda rows: [_item(r["file_path"], r["id"]) for r in rows])
+    rotations = []
+    monkeypatch.setattr(player_router.sessions, "rotate_session",
+                        lambda queue, origin, **k: rotations.append(
+                            [it.track_id for it in queue.snapshot()]))
+
+    def play():
+        return player_router.play_track(player_router.PlayTrackRequest(track_id=9))
+    return mgr, b, play, rotations
+
+
+def test_a_play_rotates_history_once_the_output_took_the_queue(fake, play_route):
+    """I12: the rotation runs after the mirror, on the queue it replaces."""
+    mgr, b, play, rotations = play_route
+    assert play()["ok"]
+    assert rotations == [["track-1", "track-2", "track-3"]]
+    assert [it.track_id for it in mgr.queue.snapshot()] == ["track-9"]
+
+
+@pytest.mark.parametrize("refusal", ["the gate", "the mirror", "HQPlayer's adds"])
+def test_a_play_the_output_refuses_leaves_history_as_it_was(fake, play_route, monkeypatch,
+                                                           refusal):
+    """I12: refused at the gate (a build on), at the mirror (a build begun
+    after the gate passed), or by HQPlayer itself (no entry taken): the
+    sessions are as they were, the queue too."""
+    from fastapi import HTTPException
+    mgr, b, play, rotations = play_route
+    if refusal == "the gate":
+        fake.build("SetFilter", 2.0)
+        hb.change_dsp({"filter": 57, "filter1x": 57})
+    elif refusal == "the mirror":
+        reachable = b.reachable
+
+        def then_a_build():
+            ok = reachable()
+            fake.build("SetFilter", 2.0)
+            hb.change_dsp({"filter": 57, "filter1x": 57})
+            return ok
+        monkeypatch.setattr(b, "reachable", then_a_build)
+    else:
+        fake.replies["PlaylistAdd"] = '<PlaylistAdd result="Error">cannot open it</PlaylistAdd>'
+    with pytest.raises(HTTPException) as e:
+        play()
+    assert e.value.status_code == (503 if refusal == "HQPlayer's adds" else 409)
+    assert rotations == []
+    assert [it.track_id for it in mgr.queue.snapshot()] == ["track-1", "track-2", "track-3"]
+
+
+def test_a_rotation_that_fails_commits_nothing_and_starts_nothing(fake, play_route, monkeypatch):
+    """I12: the rotation itself fails (the database): nothing is committed,
+    the start the mirror left is not sent, HQPlayer's playlist is no mirror —
+    and it gets the queue back."""
+    mgr, b, play, rotations = play_route
+    from routers import player as player_router
+
+    def fails(queue, origin, **k):
+        raise RuntimeError("the database is gone")
+    monkeypatch.setattr(player_router.sessions, "rotate_session", fails)
+    fake.commands.clear()
+    with pytest.raises(Exception):
+        play()
+    assert [it.track_id for it in mgr.queue.snapshot()] == ["track-1", "track-2", "track-3"]
+    assert "Play" not in [c for c, _ in fake.commands]
+    assert _wait(lambda: (b.poke(), fake.playlist == [
+        "file:///E:/Music/A/01.flac", "file:///E:/Music/A/02.flac",
+        "file:///E:/Music/A/03.flac"])[1], timeout=10)
+
+
+@pytest.mark.parametrize("case", ["database", "clear refused", "taken"])
+def test_the_radio_rotates_history_under_the_command_hold_before_the_clear(fake, output,
+                                                                         monkeypatch, case):
+    """The radio start: the rotation runs under HQPlayer's command hold,
+    before PlaylistClear — a rotation that fails clears nothing; a clear
+    HQPlayer does not take leaves the queue as it is, history rotated."""
+    mgr, b = output
+    player_router = _routes_on(monkeypatch, mgr)
+    monkeypatch.setattr(player_router, "_db_query_one", lambda sql, params: {"artist": "Artist"})
+    monkeypatch.setattr(player_router, "_radio_fill", lambda seed, gen: None)
+    order = []
+
+    def rotate(queue, origin, **k):
+        order.append("PlaylistClear" in [c for c, _ in fake.commands])   # cleared before it?
+        if case == "database":
+            raise RuntimeError("the database is gone")
+    monkeypatch.setattr(player_router.sessions, "rotate_session", rotate)
+    if case == "clear refused":
+        fake.replies["PlaylistClear"] = '<PlaylistClear result="Error">busy</PlaylistClear>'
+    fake.commands.clear()
+    req = player_router.RadioStartRequest(track_uuid="0b8f1a2e-1d2c-5e3f-9a4b-5c6d7e8f9a0b")
+    if case == "database":
+        with pytest.raises(RuntimeError):
+            player_router.radio_start(req)
+        assert "PlaylistClear" not in [c for c, _ in fake.commands]
+        assert len(mgr.queue) == 3
+    else:
+        player_router.radio_start(req)
+        assert "PlaylistClear" in [c for c, _ in fake.commands]
+        assert len(mgr.queue) == (3 if case == "clear refused" else 1)
+    assert order == [False]                         # rotated once, before the clear
+
+
+def test_the_mcp_assistant_reads_hqplayer_through_the_backend_and_keeps_no_connection(
+        fake, monkeypatch):
+    """The MCP server (a process of its own) asks HQPlayer nothing: its
+    reads go through the backend's routes, which ask on the link."""
+    import importlib.util
+    spec = importlib.util.spec_from_file_location(
+        "assistant_server_reads", BACKEND.parent / "mcp" / "assistant_server.py")
+    server = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(server)
+    assert not hasattr(server, "HQPlayerClient") and not hasattr(server, "_hqp_endpoint")
+    state = {"connected": True, "info": {"product": "Signalyst HQPlayer Fake", "version": "6",
+                                         "engine": "6.2.4"},
+             "state": {"filter": 57, "shaper": 2, "mode": 1, "rate": 3, "convolution": False,
+                       "matrix_profile": "", "invert": False},
+             "filters": [{"index": 57, "name": "sinc-MGa", "description": ""}],
+             "shapers": [{"index": 2, "name": "NS9"}], "modes": [{"index": 1, "name": "PCM"}],
+             "rates": None, "matrix_profiles": ["Room"],
+             "refused": {"rates": "no output device"}}
+    status = {"state": "playing", "artist": "Artist", "song": "Song 1", "album": "Album",
+              "position_formatted": "0:42", "length_formatted": "5:00", "volume": -3,
+              "track_index": 1}
+    asked, posted = [], []
+    monkeypatch.setattr(server, "_output_prefs", lambda: {"type": "hqplayer"})
+    monkeypatch.setattr(server, "_backend_get", lambda path, params: asked.append(path) or (
+        state if path == "/api/hqplayer/state" else status))
+    monkeypatch.setattr(server, "_backend_post", lambda path, body, timeout=30.0: posted.append(
+        (path, body)) or {"ok": True, "applied": body, "failed": {}, "building": None})
+    settings_text = server.hqplayer_get_settings()
+    assert "sinc-MGa" in settings_text and "Sample rates: HQPlayer did not list them (no output device)." in settings_text
+    assert server.hqplayer_set_filter("sinc-MGa").startswith("Filter set to: sinc-MGa")
+    assert "Track: Artist - Song 1" in server.hqplayer_get_status()
+    assert "Active filter index: 57 (sinc-MGa)" in server.hqplayer_get_dsp_state()
+    assert "Room" in server.hqplayer_list_matrix_profiles()
+    assert set(asked) == {"/api/hqplayer/state", "/api/player/status"}
+    assert posted == [("/api/hqplayer/config", {"filter": 57, "filter1x": 57})]
+    assert fake.arrivals == []
+
+
+def test_a_name_is_picked_exactly_as_written_before_any_case_or_part_of_it():
+    import assistant_queries as aq
+    filters = [{"name": "poly-sinc-xtr"}, {"name": "poly-sinc-XTR"}, {"name": "poly-sinc-xtr-mp"}]
+    pick = lambda name: aq.hqp_pick("filter", filters, name, "", key=lambda f: f["name"])[0]
+    assert pick("poly-sinc-XTR") is filters[1]
+    assert pick("poly-sinc-xtr") is filters[0]
+    assert pick("POLY-SINC-XTR-MP") is filters[2]
+    assert pick("xtr-mp") is filters[2]
+
+
+def test_hqplayer_picked_again_during_a_build_says_what_it_is_with_its_first_answer(
+        fake, output, monkeypatch):
+    """An attach during a build asks HQPlayer nothing; what it says of
+    itself (GetInfo) comes with the poller's first answer after it."""
+    mgr, b = output
+    fake.build("SetFilter", 1.0)
+    hb.change_dsp({"filter": 57, "filter1x": 57})
+    b.shutdown()
+    again = _attach(mgr)
+    try:
+        assert again._info == {}
+        assert _wait(lambda: again._info.get("engine") == "6.2.3", timeout=10)
+    finally:
+        again.shutdown()
+
+
+def test_a_start_left_to_a_backend_detached_before_it_goes_is_dropped_quietly(fake, play_route,
+                                                                            monkeypatch, caplog):
+    """The output switched away between a replace's commit and its start:
+    the play route answers what it committed, and the start is dropped —
+    logged, never a 503 for a queue that did change."""
+    import logging
+    mgr, b, play, rotations = play_route
+    changed = b.queue_changed
+
+    def detach_after(kind, *, play=False):
+        changed(kind, play=play)
+        if kind == "replace":
+            b.shutdown()
+    monkeypatch.setattr(b, "queue_changed", detach_after)
+    caplog.set_level(logging.INFO)
+    fake.commands.clear()
+    assert play()["ok"]
+    assert [it.track_id for it in mgr.queue.snapshot()] == ["track-9"]
+    assert "Play" not in [c for c, _ in fake.commands]
+    assert "HQPlayer's start not sent: HQPlayer was detached from playback" in caplog.text

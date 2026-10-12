@@ -415,15 +415,16 @@ def _h_hqplayer_get_settings() -> str:
                 lines.append(f"HQPlayer: {info.get('product', '')} v{info.get('version', '')}")
                 lines.append(f"Engine: {info.get('engine', '')}")
                 lines.append("")
-            aq.hqp_list(lines, "Available filters", hqp.get_filters(), hqp,
-                        lambda f: f"  [{f['index']}] {f['name']}"
-                                  + (f" — {f['description']}" if f.get("description") else ""))
-            aq.hqp_list(lines, "\nAvailable dither/shapers", hqp.get_shapers(), hqp,
-                        lambda s: f"  [{s['index']}] {s['name']}")
-            aq.hqp_list(lines, "\nOutput modes", hqp.get_modes(), hqp,
-                        lambda m: f"  [{m['index']}] {m['name']}")
-            aq.hqp_list(lines, "\nSample rates", hqp.get_rates(), hqp,
-                        lambda r: f"  [{r['index']}] {r['rate'] / 1000:.1f} kHz")
+            for title, read, line in (
+                    ("Available filters", hqp.get_filters,
+                     lambda f: f"  [{f['index']}] {f['name']}"
+                               + (f" — {f['description']}" if f.get("description") else "")),
+                    ("\nAvailable dither/shapers", hqp.get_shapers,
+                     lambda s: f"  [{s['index']}] {s['name']}"),
+                    ("\nOutput modes", hqp.get_modes, lambda m: f"  [{m['index']}] {m['name']}"),
+                    ("\nSample rates", hqp.get_rates,
+                     lambda r: f"  [{r['index']}] {r['rate'] / 1000:.1f} kHz")):
+                aq.hqp_list(lines, title, read(), hqp.refusal(), line)
         return "\n".join(lines)
     except Exception as e:
         return f"Error getting settings: {e}"
@@ -432,7 +433,8 @@ def _h_hqplayer_get_settings() -> str:
 def _h_hqplayer_set_filter(filter_name: str) -> str:
     try:
         with _hqp_asking() as hqp:
-            match, said = aq.hqp_pick("filter", hqp.get_filters(), filter_name, hqp,
+            filters = hqp.get_filters()
+            match, said = aq.hqp_pick("filter", filters, filter_name, hqp.refusal(),
                                       key=lambda f: f["name"])
         if match is None:
             return said
@@ -450,7 +452,8 @@ def _h_hqplayer_set_filter(filter_name: str) -> str:
 def _h_hqplayer_set_shaper(shaper_name: str) -> str:
     try:
         with _hqp_asking() as hqp:
-            match, said = aq.hqp_pick("shaper", hqp.get_shapers(), shaper_name, hqp,
+            shapers = hqp.get_shapers()
+            match, said = aq.hqp_pick("shaper", shapers, shaper_name, hqp.refusal(),
                                       key=lambda s: s["name"])
         if match is None:
             return said
@@ -505,7 +508,8 @@ def _h_hqplayer_get_matrix_profile() -> str:
 def _h_hqplayer_set_matrix_profile(profile_name: str) -> str:
     try:
         with _hqp_asking() as hqp:
-            match, said = aq.hqp_pick("profile", hqp.matrix_list_profiles(), profile_name, hqp)
+            profiles = hqp.matrix_list_profiles()
+            match, said = aq.hqp_pick("profile", profiles, profile_name, hqp.refusal())
         if match is None:
             return said
         profile_name = match

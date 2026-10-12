@@ -98,13 +98,13 @@ def active_hqp_endpoint(q):
     return rows[0]["id"] if rows else None
 
 
-def hqp_list(lines: list, title: str, items, hqp, line) -> None:
+def hqp_list(lines: list, title: str, items, why: str, line) -> None:
     """One of HQPlayer's lists (`HQPlayerClient.get_filters` and its kin)
     as the assistant reads it — and when HQPlayer did not give it (None),
-    that and why: read as "none", an absent list has the assistant tell the
-    owner HQPlayer offers nothing."""
+    that and `why`, its refusal: read as "none", an absent list has the
+    assistant tell the owner HQPlayer offers nothing."""
     if items is None:
-        lines.append(f"{title}: HQPlayer did not list them ({hqp.refusal()}).")
+        lines.append(f"{title}: HQPlayer did not list them ({why}).")
     elif not items:
         lines.append(f"{title}: none.")
     else:
@@ -117,21 +117,23 @@ _HQP_LISTS = {"filter": ("filters", "Filter", "Available filters"),
               "profile": ("matrix profiles", "Profile", "Available")}
 
 
-def hqp_pick(kind: str, items, name: str, hqp, key=lambda x: x) -> tuple:
+def hqp_pick(kind: str, items, name: str, why: str, key=lambda x: x) -> tuple:
     """A filter, a shaper or a matrix profile picked by name off HQPlayer's
-    list, as both assistant surfaces pick it: the name in any case, else the
-    first that contains it. (match, None), or (None, what the assistant
-    says: HQPlayer did not list them, lists none, or none by that name). An
-    empty profile list lets the name through — HQPlayer's own answer to it
-    decides (match: the name itself)."""
+    list, as both assistant surfaces pick it: the name exactly as written —
+    two can differ in case alone — else in any case, else the first that
+    contains it. (match, None), or (None, what the assistant says: HQPlayer
+    did not list them — `why`, its refusal — lists none, or none by that
+    name). An empty profile list lets the name through — HQPlayer's own
+    answer to it decides (match: the name itself)."""
     plural, label, available = _HQP_LISTS[kind]
     if items is None:
-        return None, f"HQPlayer did not list its {plural} ({hqp.refusal()}) — nothing was changed."
+        return None, f"HQPlayer did not list its {plural} ({why}) — nothing was changed."
     if not items:
         return ((name, None) if kind == "profile"
                 else (None, f"HQPlayer lists no {plural} in its current mode."))
     wanted = name.lower()
-    match = (next((x for x in items if key(x).lower() == wanted), None)
+    match = (next((x for x in items if key(x) == name), None)
+             or next((x for x in items if key(x).lower() == wanted), None)
              or next((x for x in items if wanted in key(x).lower()), None))
     if match is None:
         return None, f"{label} '{name}' not found. {available}: {', '.join(key(x) for x in items)}"

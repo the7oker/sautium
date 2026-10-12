@@ -180,6 +180,12 @@ class PlayerBackend(ABC):
         left on this thread — a replace that plays, a rebuild that plays on.
         Default: nothing (a renderer starts in queue_changed)."""
 
+    def queue_abandon(self) -> None:
+        """A replace this output mirrored was not committed (the session
+        rotation before the commit failed): what its mirror left on this
+        thread is not carried out. Default: nothing (a renderer had not
+        started anything)."""
+
     def slot_ready(self, index: int) -> None:
         """A slot this output could not open when it was reached now can —
         a stream substitute landed on it (playback.substitute). Default:
@@ -200,5 +206,9 @@ class PlayerBackend(ABC):
     def queue_reorder(self, plan: ReorderPlan) -> dict:
         return {"removed": 0, "added": 0, "interrupted": False}
 
-    def queue_clear_after_current(self) -> bool:
+    def queue_clear_after_current(self, archive: Callable[[], None]) -> bool:
+        """Radio start: everything around the playing slot goes. `archive`
+        (the session rotation) runs first — a rotation that fails clears
+        nothing."""
+        archive()
         return True

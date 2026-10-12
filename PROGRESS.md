@@ -609,6 +609,30 @@ implementation details live in the code, DB and git history.
   under the command lock, where a command's silence turning into a build is
   busy, not "offline". The assistants' transport goes through the backend's
   routes: their own connections set off builds the watch never heard of.
+- **One link per HQPlayer** (2026-10-12). The fixes above kept landing on
+  two questions — whose command is this, and when may it go: work outlived
+  the HQPlayer it was made for, a start left for later overrode a later
+  intent, and neither the node stop nor an address change cancelled
+  anything. Everything this node says to an HQPlayer now goes through that
+  HQPlayer's link (`playback/hqp_link.py`): one connection held by one owner
+  at a time — two connections only sent requests into each other's
+  silences, and HQPlayer's one control thread answers in order anyway — an
+  intent clock that drops what was left for later once a newer intent
+  supersedes it, checked right before the bytes go, and a life cycle:
+  another HQPlayer retires the old link, the node stop closes every link
+  first, sockets shut down and closed so a blocked read ends on Windows
+  too. A dedicated executor thread per HQPlayer was weighed and not taken:
+  the caller's thread already sends one request at a time, and a thread of
+  its own added no coverage. The link's invariants are checked under random
+  interleavings by a seeded scenario runner
+  (`tests/test_hqp_link_scenarios.py`); taking one guarantee out of the
+  link — the check right before the send, a question waiting for the
+  connection's owner, the wake at a build's end — fails it within a dozen
+  seeds, and the run found a filler that a pick of another HQPlayer stopped
+  for good. Around the link: a queue edit HQPlayer could not take lands in
+  the queue all the same, the mirror lost, and HQPlayer gets the queue back
+  once it answers; the resume spot names a queue item; listening history
+  rotates only once the output took the queue.
 - **Stop-clear-add-select-play sequence** for `play_track`/`play_album`. Without
   explicit stop, HQPlayer occasionally started the wrong track from the
   existing queue.

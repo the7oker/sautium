@@ -174,7 +174,7 @@ Not implemented — searched over `backend desktop mcp`, only the definitions ma
 - [auto] A second, read-only PostgreSQL MCP server gives the agent the database — `desktop/config_manager.py: generate_mcp_config`
 - [auto] The API providers get 34 tools of their own, `execute_query` among them — `tools/definitions.py`
 - [auto] Play tools take track UUIDs, so a phantom plays through them; `build_playlist` assembles a queue without starting it — `mcp/assistant_server.py: play_all`, `build_playlist`
-- [auto] The `hqplayer_*` tools refuse while another output is selected — `mcp/assistant_server.py: _get_hqp`
+- [auto] The `hqplayer_*` tools refuse while another output is selected, while the benchmark holds HQPlayer and while it builds; they read HQPlayer and command it through the backend's routes, so the MCP server keeps no connection of its own — `mcp/assistant_server.py: _hqp_gate`, `_hqp_state`, `_hqp_transport`
 - [UI] Chat: sessions, a streamed reply that survives a dropped connection, tiles and track rows in replies that open and play — `POST /api/chat/sessions/{id}/messages`, `GET …/stream`; `static/app-shell.js` (blocks `artist`, `album`, `tracks`)
 - [auto] The assistant is told what is playing; it is not told which screen is open — `routers/chat.py: _get_player_context`
 - [auto] A turn is capped at 150 s; the agent's file, shell and web tools are off — `claude_code_runner.py: DISALLOWED_TOOLS_MCP`; `codex_runner.py: _DISABLED_FEATURES`

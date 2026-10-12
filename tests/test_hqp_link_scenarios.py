@@ -29,6 +29,8 @@ statuses the output pushed. The node stop ends every run.
      edits that keep its item.
  11. Nothing a filler took is lost: at rest it is in the queue, unless a
      newer queue replaced it or a person removed it.
+ 12. A replace rotates listening history only once the output took it:
+     once when it did, never when it was refused.
  13. At rest HQPlayer's playlist is the queue, or the mirror is marked lost
      (or drifted: an edit made elsewhere); no item twice in the queue.
 
@@ -147,8 +149,11 @@ class _Elsewhere:
     def queue_remove(self, index) -> bool:
         return True
 
-    def queue_clear_after_current(self) -> bool:
+    def queue_clear_after_current(self, archive) -> bool:
+        archive()
         return True
+
+    def queue_abandon(self) -> None: ...
 
     def queue_reorder(self, plan) -> dict:
         return {"removed": 0, "added": 0, "interrupted": False}
@@ -444,7 +449,7 @@ class World:
             (3, "jump", lambda: p.jump(p.JumpRequest(index=r.randint(1, max(len(mgr.queue), 1))))),
             (2, "seek", lambda: p._transport(False, "seek", r.randint(0, 200))),
             (2, "volume", lambda: p._transport(False, "set_volume", float(-r.randint(3, 40)))),
-            (4, "replace", lambda: mgr.replace_queue(self.items(r.randint(1, 4)), play=True)),
+            (4, "replace", self.replace),
             (3, "fill", self.fill),
             (2, "play next", lambda: mgr.append(self.items(1), "next")),
             (2, "remove", self.remove),
@@ -472,6 +477,19 @@ class World:
             (2, "to B", lambda: self.pick(self.b)),
             (2, "rebind", self.rebind),
         ]
+
+    def replace(self) -> None:
+        """A play route's replace, its session rotation handed in."""
+        rotated = []
+        try:
+            added, _ = self.mgr.replace_queue(self.items(self.rng.randint(1, 4)), play=True,
+                                              archive=lambda: rotated.append(True))
+        except BaseException:
+            if rotated:
+                self.violate("I12: history rotated for a replace the output refused")
+            raise
+        if len(rotated) != (1 if added else 0):
+            self.violate(f"I12: {len(rotated)} rotation(s) for a replace that took {added}")
 
     def fill_through_build(self) -> None:
         """A filler adding while HQPlayer builds — a build that may run out

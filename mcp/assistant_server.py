@@ -8,9 +8,12 @@ MusicBrainz-catalog tools, and — while HQPlayer is the selected output —
 that device's own transport/DSP controls (the hqplayer_* tools).
 
 Architecture:
-  - HQPlayer Client: TCP XML → Windows host (device tools only, lazy)
+  - FastAPI Backend: httpx → localhost:8000 (ML-heavy semantic search, and
+    everything HQPlayer: its transport, its DSP changes and every read —
+    the backend's link to HQPlayer is the one connection this node keeps
+    to it, so this process keeps none: one of its own would send into a
+    build's silence, beside the node's own requests)
   - PostgreSQL: psycopg2 direct → localhost (Docker port-forwarded)
-  - FastAPI Backend: httpx → localhost:8000 (ML-heavy semantic search)
 
 All logging goes to stderr (stdout is reserved for STDIO MCP transport).
 """
@@ -29,11 +32,10 @@ import psycopg2
 import psycopg2.extras
 from mcp.server.fastmcp import FastMCP
 
-# -- HQPlayer client import (stdlib only, safe to import from backend) --------
+# -- Shared assistant queries (stdlib only, safe to import from backend) ------
 backend_path = os.environ.get("BACKEND_PATH", os.path.join(os.path.dirname(__file__), "..", "backend"))
 sys.path.insert(0, backend_path)
 import assistant_queries as aq
-from hqplayer_client import HQPlayerClient, PlaybackState, format_time
 
 # -- Logging to stderr (NEVER stdout — would corrupt STDIO transport) ---------
 logging.basicConfig(
@@ -49,9 +51,11 @@ DB_PORT = os.getenv("DB_PORT", "5432")
 DB_USER = os.getenv("DB_USER", "musicai")
 DB_PASSWORD = os.getenv("DB_PASSWORD", "supervisor")
 DB_NAME = os.getenv("DB_NAME", "music_ai")
-HQPLAYER_HOST = os.getenv("HQPLAYER_HOST", "127.0.0.1")
-HQPLAYER_PORT = int(os.getenv("HQPLAYER_PORT", "4321"))
 BACKEND_URL = os.getenv("BACKEND_URL", "http://localhost:8000")
+# A route that starts HQPlayer waits out the start's build — up to the build
+# limit, ten minutes (playback.hqp_benchmark.BUILD_LIMIT_S): its answer is
+# waited for as long as that.
+_START_WAIT_S = 660.0
 
 
 # -- Signed backend HTTP -------------------------------------------------------
@@ -126,26 +130,7 @@ mcp = FastMCP(
 )
 
 # -- Lazy singletons ----------------------------------------------------------
-_hqp_client: HQPlayerClient | None = None
 _db_conn: psycopg2.extensions.connection | None = None
-
-
-def _hqp_endpoint() -> tuple[str, int]:
-    """The endpoint the node is configured for — the host and port saved
-    in the Web UI (GET /api/settings/hqplayer), not this process's
-    environment: the launcher's config and the Docker MCP config carry a
-    boot-time default that the owner may have replaced from the phone since
-    (an HQPlayer Embedded box on the LAN, say). The environment is the
-    fallback when the backend cannot be asked."""
-    try:
-        prefs = _backend_get("/api/settings/hqplayer", {}) or {}
-        host, port = prefs.get("host"), prefs.get("port")
-        if host and port:
-            return str(host), int(port)
-    except Exception as e:
-        logger.warning("HQPlayer endpoint unavailable from the backend (%s) — "
-                       "using the environment's", e)
-    return HQPLAYER_HOST, HQPLAYER_PORT
 
 
 def _output_prefs() -> dict:
@@ -187,28 +172,25 @@ def _hqp_gate() -> None:
         )
 
 
-def _get_hqp() -> HQPlayerClient:
-    """The HQPlayer client the reading tools ask through (lazy,
-    auto-reconnect; _hqp_gate first). A command goes through the backend
-    instead (_hqp_transport, /api/hqplayer/config): its client is the one
-    the backend's build watch hears — one of this process would send into
-    a build's silence, and not be heard."""
+def _hqp_state() -> dict:
+    """What HQPlayer says of itself and its lists, read by the backend on its
+    link (GET /api/hqplayer/state; _hqp_gate first) — this process asks
+    HQPlayer nothing itself."""
     _hqp_gate()
-    global _hqp_client
-    host, port = _hqp_endpoint()
-    if (_hqp_client is None or not _hqp_client.is_connected()
-            or (_hqp_client.host, _hqp_client.port) != (host, port)):
-        if _hqp_client is not None:
-            _hqp_client.disconnect()
-        _hqp_client = HQPlayerClient(host=host, port=port, timeout=10.0)
-        if not _hqp_client.connect():
-            _hqp_client = None
-            raise ConnectionError(
-                f"Cannot connect to HQPlayer at {host}:{port}. Make sure HQPlayer "
-                "is running (an HQPlayer Embedded in trial mode stops every 30 "
-                "minutes and must be restarted)."
-            )
-    return _hqp_client
+    state = _backend_get("/api/hqplayer/state", {}) or {}
+    if state.get("building"):
+        raise ConnectionError(
+            "HQPlayer is building the filter — it answers nothing until the build "
+            "is done; its transport and DSP controls come back then.")
+    if state.get("held"):
+        raise ConnectionError(
+            f"HQPlayer is busy: {state['held']}. Its controls come back when it finishes.")
+    if not state.get("connected"):
+        raise ConnectionError(
+            f"HQPlayer is not answering ({state.get('error') or 'no answer to GetInfo'}). "
+            "Make sure HQPlayer is running (an HQPlayer Embedded in trial mode stops "
+            "every 30 minutes and must be restarted).")
+    return state
 
 
 def _get_db() -> psycopg2.extensions.connection:
@@ -265,13 +247,15 @@ def _format_track_list(rows: list[dict], header: str = "") -> str:
 
 def _hqp_transport(command: str, body: dict | None = None, **values) -> str:
     """A transport command the way the Web UI sends it (/api/player): the
-    backend's own command client — the one its build watch hears —, the
-    play press's resume spot, the playback trace; refused in HQPlayer's
-    words when it did not take it."""
+    backend's link to HQPlayer — the one its build watch hears —, the play
+    press's resume spot, the playback trace; refused in HQPlayer's words
+    when it did not take it. One that may start HQPlayer is waited for as
+    long as its start may build."""
     try:
         _hqp_gate()
-        return aq.hqp_transport_text(command, _backend_post(f"/api/player/{command}", body or {}),
-                                     **values)
+        wait = _START_WAIT_S if command in ("play", "next", "previous") else 30.0
+        return aq.hqp_transport_text(
+            command, _backend_post(f"/api/player/{command}", body or {}, timeout=wait), **values)
     except Exception as e:
         return f"Error: {e}"
 
@@ -310,40 +294,32 @@ def hqplayer_previous() -> str:
 def hqplayer_get_status() -> str:
     """Get current HQPlayer status: track info, position, state, volume."""
     try:
-        hqp = _get_hqp()
-        status = hqp.get_status()
-        if status is None:
-            return "Could not get HQPlayer status."
-
-        state_names = {
-            PlaybackState.STOPPED: "Stopped",
-            PlaybackState.PAUSED: "Paused",
-            PlaybackState.PLAYING: "Playing",
-            PlaybackState.STOPREQ: "Stopping",
-        }
-
-        lines = [f"State: {state_names.get(status.state, 'Unknown')}"]
-        # The node's own status names the track from the canonical queue
-        # — HQPlayer's tags are authoritative only for a file it opened
-        # itself; a track it streams over http (a preview, an owned file
-        # reached through the media proxy) is 'HTTP stream' to it.
-        try:
-            now = _backend_get("/api/player/status", {}) or {}
-        except Exception:
-            now = {}
-        artist = now.get("artist") or status.artist
-        song = now.get("song") or status.song
-        album = now.get("album") or status.album
-        if artist or song:
-            lines.append(f"Track: {artist} - {song}")
-        if album:
-            lines.append(f"Album: {album}")
-        if status.genre:
-            lines.append(f"Genre: {status.genre}")
-        lines.append(f"Position: {format_time(status.position)} / {format_time(status.length)}")
-        lines.append(f"Volume: {status.volume}")
-        lines.append(f"Track index: {status.track_index}")
-
+        _hqp_gate()
+        # The node's own status, the one Now Playing shows: the track named
+        # from the canonical queue — HQPlayer's tags are authoritative only
+        # for a file it opened itself; a track it streams over http is 'HTTP
+        # stream' to it — and what HQPlayer is doing meanwhile.
+        now = _backend_get("/api/player/status", {}) or {}
+        state = now.get("state") or "unknown"
+        lines = [f"State: {state.capitalize()}"]
+        building = now.get("building")
+        if building:
+            lines.append("HQPlayer is building the filter — it answers nothing until it is done"
+                         if not building.get("unfinished")
+                         else "HQPlayer did not finish building the filter — restart HQPlayer")
+        elif now.get("not_answering"):
+            lines.append("HQPlayer is not answering")
+        if now.get("artist") or now.get("song"):
+            lines.append(f"Track: {now.get('artist', '')} - {now.get('song', '')}")
+        if now.get("album"):
+            lines.append(f"Album: {now['album']}")
+        if now.get("genre"):
+            lines.append(f"Genre: {now['genre']}")
+        if state != "disconnected":
+            lines.append(f"Position: {now.get('position_formatted', '0:00')} / "
+                         f"{now.get('length_formatted', '0:00')}")
+            lines.append(f"Volume: {now.get('volume')}")
+            lines.append(f"Track index: {now.get('track_index')}")
         return "\n".join(lines)
     except Exception as e:
         return f"Error: {e}"
@@ -1129,26 +1105,23 @@ def add_to_queue(ids: list[str]) -> str:
 def hqplayer_get_settings() -> str:
     """Get current HQPlayer DSP settings: filters, dither/shapers, output mode, sample rate."""
     try:
-        hqp = _get_hqp()
-
+        state = _hqp_state()
+        refused = state.get("refused") or {}
         lines = []
-
-        # Get info
-        info = hqp.get_info()
+        info = state.get("info") or {}
         if info:
             lines.append(f"HQPlayer: {info.get('product', '')} v{info.get('version', '')}")
             lines.append(f"Engine: {info.get('engine', '')}")
             lines.append("")
 
-        aq.hqp_list(lines, "Available filters", hqp.get_filters(), hqp,
-                    lambda f: f"  [{f['index']}] {f['name']}"
-                              + (f" — {f['description']}" if f.get("description") else ""))
-        aq.hqp_list(lines, "\nAvailable dither/shapers", hqp.get_shapers(), hqp,
-                    lambda s: f"  [{s['index']}] {s['name']}")
-        aq.hqp_list(lines, "\nOutput modes", hqp.get_modes(), hqp,
-                    lambda m: f"  [{m['index']}] {m['name']}")
-        aq.hqp_list(lines, "\nSample rates", hqp.get_rates(), hqp,
-                    lambda r: f"  [{r['index']}] {r['rate'] / 1000:.1f} kHz")
+        for title, name, line in (
+                ("Available filters", "filters",
+                 lambda f: f"  [{f['index']}] {f['name']}"
+                           + (f" — {f['description']}" if f.get("description") else "")),
+                ("\nAvailable dither/shapers", "shapers", lambda s: f"  [{s['index']}] {s['name']}"),
+                ("\nOutput modes", "modes", lambda m: f"  [{m['index']}] {m['name']}"),
+                ("\nSample rates", "rates", lambda r: f"  [{r['index']}] {r['rate'] / 1000:.1f} kHz")):
+            aq.hqp_list(lines, title, state.get(name), refused.get(name, ""), line)
 
         return "\n".join(lines)
     except Exception as e:
@@ -1165,8 +1138,9 @@ def hqplayer_set_filter(filter_name: str) -> str:
         filter_name: Name of the filter to set (e.g. 'poly-sinc-gauss-xla')
     """
     try:
-        hqp = _get_hqp()
-        match, said = aq.hqp_pick("filter", hqp.get_filters(), filter_name, hqp,
+        state = _hqp_state()
+        match, said = aq.hqp_pick("filter", state.get("filters"), filter_name,
+                                  (state.get("refused") or {}).get("filters", ""),
                                   key=lambda f: f["name"])
         if match is None:
             return said
@@ -1192,8 +1166,9 @@ def hqplayer_set_shaper(shaper_name: str) -> str:
         shaper_name: Name of the dither/shaper to set (e.g. 'NS9')
     """
     try:
-        hqp = _get_hqp()
-        match, said = aq.hqp_pick("shaper", hqp.get_shapers(), shaper_name, hqp,
+        state = _hqp_state()
+        match, said = aq.hqp_pick("shaper", state.get("shapers"), shaper_name,
+                                  (state.get("refused") or {}).get("shapers", ""),
                                   key=lambda s: s["name"])
         if match is None:
             return said
@@ -1235,10 +1210,11 @@ def hqplayer_list_matrix_profiles() -> str:
     Matrix profiles contain EQ, convolution, and channel routing settings.
     """
     try:
-        hqp = _get_hqp()
-        profiles = hqp.matrix_list_profiles()
+        state = _hqp_state()
+        profiles = state.get("matrix_profiles")
         if profiles is None:
-            return f"HQPlayer did not list its matrix profiles ({hqp.refusal()})."
+            return ("HQPlayer did not list its matrix profiles "
+                    f"({(state.get('refused') or {}).get('matrix_profiles', '')}).")
         if not profiles:
             return "No matrix profiles found. Create profiles in HQPlayer GUI (Settings → Matrix → save profile name)."
         lines = [f"Available matrix profiles ({len(profiles)}):"]
@@ -1253,8 +1229,7 @@ def hqplayer_list_matrix_profiles() -> str:
 def hqplayer_get_matrix_profile() -> str:
     """Get the currently active HQPlayer Matrix Processor profile name."""
     try:
-        hqp = _get_hqp()
-        profile = hqp.matrix_get_profile()
+        profile = (_hqp_state().get("state") or {}).get("matrix_profile")
         if profile is None:
             return "Could not get current matrix profile."
         return f"Current matrix profile: '{profile}'" if profile else "No matrix profile active (using default)."
@@ -1273,8 +1248,9 @@ def hqplayer_set_matrix_profile(profile_name: str) -> str:
         profile_name: Name of the matrix profile to activate
     """
     try:
-        hqp = _get_hqp()
-        match, said = aq.hqp_pick("profile", hqp.matrix_list_profiles(), profile_name, hqp)
+        state = _hqp_state()
+        match, said = aq.hqp_pick("profile", state.get("matrix_profiles"), profile_name,
+                                  (state.get("refused") or {}).get("matrix_profiles", ""))
         if match is None:
             return said
         profile_name = match
@@ -1294,18 +1270,19 @@ def hqplayer_get_dsp_state() -> str:
     available options.
     """
     try:
-        hqp = _get_hqp()
-        state = hqp.get_state()
+        read = _hqp_state()
+        state = read.get("state")
         if not state:
             return "Could not get DSP state from HQPlayer."
 
-        filters = hqp.get_filters()
+        filters = read.get("filters")
         active_filter = None if filters is None else next(
             (f for f in filters if f["index"] == state["filter"]), None
         )
         filter_line = f"  Active filter index: {state['filter']}"
         if filters is None:
-            filter_line += f" (its name unknown: HQPlayer did not list its filters — {hqp.refusal()})"
+            filter_line += (" (its name unknown: HQPlayer did not list its filters — "
+                            f"{(read.get('refused') or {}).get('filters', '')})")
         elif active_filter:
             filter_line += f" ({active_filter['name']})"
             if active_filter.get("description"):

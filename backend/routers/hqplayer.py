@@ -156,9 +156,13 @@ def get_state(dsp: bool = False) -> Dict[str, Any]:
         with link.asking() as hqp:
             info = hqp.get_info()
             state = hqp.get_state()
-            lists = {"modes": hqp.get_modes(), "rates": hqp.get_rates(),
-                     "filters": hqp.get_filters(), "shapers": hqp.get_shapers(),
-                     "matrix_profiles": hqp.matrix_list_profiles()}
+            lists, refused = {}, {}
+            for name, read in (("modes", hqp.get_modes), ("rates", hqp.get_rates),
+                               ("filters", hqp.get_filters), ("shapers", hqp.get_shapers),
+                               ("matrix_profiles", hqp.matrix_list_profiles)):
+                lists[name] = read()
+                if lists[name] is None:
+                    refused[name] = hqp.refusal()
             status = hqp.get_status() if dsp else None
             volume_range = hqp.volume_range() if dsp else None
     except Building as e:
@@ -178,10 +182,11 @@ def get_state(dsp: bool = False) -> Dict[str, Any]:
     response["info"] = info or {}
     response["state"] = state or {}
     # A list HQPlayer did not give (a refusal, a lost answer) is null and
-    # named in `missing` — never an empty one: an empty picker would say
-    # HQPlayer has nothing to choose from.
+    # named in `missing`, its refusal in `refused` — never an empty one: an
+    # empty picker would say HQPlayer has nothing to choose from.
     response.update(lists)
     response["missing"] = [name for name, items in lists.items() if items is None]
+    response["refused"] = refused
     response["favorite_filters"] = _load_favorites()
     if not dsp:
         return response

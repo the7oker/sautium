@@ -12,7 +12,7 @@ import os
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
-from typing import Optional
+from typing import Callable, Optional
 
 from fastapi import APIRouter, HTTPException, Query
 from fastapi.responses import StreamingResponse
@@ -1715,7 +1715,8 @@ def _owned_filler(items: list, gen: int, *, position: str = "end",
             cursor = item
 
 
-def _add_owned(rows: list, *, clear_first: bool, position: str = "end") -> int:
+def _add_owned(rows: list, *, clear_first: bool, position: str = "end",
+               archive: Optional[Callable[[], None]] = None) -> int:
     """THE single path for queueing owned tracks. Rows (id, ...) become
     full-metadata QueueItems; the active backend mirrors them as needed
     (HQPlayer: a file:// URI or a media-proxy URL by file-access mode, m4a via
@@ -1724,9 +1725,10 @@ def _add_owned(rows: list, *, clear_first: bool, position: str = "end") -> int:
     added (and, for a replace, played) now, the rest fill in behind via a
     background filler — so a slow transcode never blocks the add. A native-
     only set takes the fast add-everything-at-once path. ``clear_first``
-    replaces the queue (and starts playback); otherwise tracks append
-    (``position`` next|end). Returns the count queued (rolling appends
-    finish async)."""
+    replaces the queue (and starts playback) — ``archive``, the session
+    rotation, once the output has taken it (PlaybackManager.replace_queue);
+    otherwise tracks append (``position`` next|end). Returns the count
+    queued (rolling appends finish async)."""
     from streaming.local import TRANSCODE_FORMATS
     items = queue_mod.items_for_owned_rows(rows)
     # CUE slices roll like m4a: each needs its FLAC cut encoded at
@@ -1737,7 +1739,8 @@ def _add_owned(rows: list, *, clear_first: bool, position: str = "end") -> int:
 
     if not needs_roll:
         if clear_first:
-            added, _gen = manager.replace_queue(items, play=True, probe_first=True)
+            added, _gen = manager.replace_queue(items, play=True, probe_first=True,
+                                                archive=archive)
         else:
             added = manager.append(items, position) or 0
         return added
@@ -1745,7 +1748,7 @@ def _add_owned(rows: list, *, clear_first: bool, position: str = "end") -> int:
     # Rolling: add/play the first now, background-fill the rest in order.
     first, rest = items[0], items[1:]
     if clear_first:
-        added, gen = manager.replace_queue([first], play=True)
+        added, gen = manager.replace_queue([first], play=True, archive=archive)
     else:
         added = manager.append([first], position) or 0
         gen = manager.queue.generation
@@ -1774,11 +1777,9 @@ def play_track(req: PlayTrackRequest):
     if not row:
         raise HTTPException(status_code=404, detail="Track not found")
 
-    sessions.rotate_session(manager.queue, 'track',
-                            seed_media_file_id=req.track_id)
-
     try:
-        added = _add_owned([row], clear_first=True)
+        added = _add_owned([row], clear_first=True, archive=lambda: sessions.rotate_session(
+            manager.queue, 'track', seed_media_file_id=req.track_id))
         _exit_radio_mode()
         if not added:
             raise HTTPException(
@@ -1860,16 +1861,11 @@ def _play_album_rows(best_album: dict):
     if not rows:
         return play_phantom_album(PlayPhantomAlbumRequest(album_id=str(best_album["id"])))
 
-    sessions.rotate_session(
-        manager.queue,
-        'album',
-        origin_album_id=str(best_album["id"]),
-        seed_media_file_id=next((r["id"] for r in rows if r["location"] == "local"), None),
-    )
-
     try:
         items = queue_mod.items_for_owned_rows(rows)
-        added, _gen = manager.replace_queue(items, play=True)
+        added, _gen = manager.replace_queue(items, play=True, archive=lambda: sessions.rotate_session(
+            manager.queue, 'album', origin_album_id=str(best_album["id"]),
+            seed_media_file_id=next((r["id"] for r in rows if r["location"] == "local"), None)))
         _exit_radio_mode()
 
         if added < len(rows):
@@ -2598,17 +2594,16 @@ def play_phantom_album(req: PlayPhantomAlbumRequest):
     if not prefix:
         raise HTTPException(status_code=502, detail="No tracks could be fetched from the provider")
 
-    # Snapshot the prior queue into a session, then open a phantom-album one —
-    # streamed albums land in the Home shelf like owned albums (origin_album_id
-    # is the phantom album's UUID; the seed is its first available track).
-    sessions.rotate_session(manager.queue, 'album',
-                            origin_album_id=str(req.album_id),
-                            seed_track_id=avail_q[0].track_id)
-
     prefix_items = [it for it in (queue_mod.item_for_proxy_token(t) for t in prefix)
                     if it is not None]
     try:
-        added, gen = manager.replace_queue(prefix_items, play=True)
+        # The prior queue snapshotted into a session once the output took the
+        # new one, then a phantom-album one opened — streamed albums land in
+        # the Home shelf like owned albums (origin_album_id is the phantom
+        # album's UUID; the seed is its first available track).
+        added, gen = manager.replace_queue(prefix_items, play=True, archive=lambda: sessions.rotate_session(
+            manager.queue, 'album', origin_album_id=str(req.album_id),
+            seed_track_id=avail_q[0].track_id))
         # The session belongs to this queue now — moving to another one cancels
         # whatever of it is still downloading.
         proxy.bind(tokens, gen)
@@ -2677,16 +2672,15 @@ def play_phantom_track(req: PlayPhantomTrackRequest):
     if e is None or e.audio is None:
         raise HTTPException(status_code=502, detail="This track isn't available to stream right now.")
 
-    # A single streamed track is a 'track'-origin session seeded by its UUID;
-    # the album the row was clicked on is the session's origin album, so the
-    # card wears that edition's cover.
-    sessions.rotate_session(manager.queue, 'track',
-                            seed_track_id=req.track_id,
-                            origin_album_id=req.album_id)
-
     try:
         item = queue_mod.item_for_proxy_token(tokens[0])
-        added, gen = manager.replace_queue([item] if item else [], play=True)
+        # A single streamed track is a 'track'-origin session seeded by its
+        # UUID; the album the row was clicked on is the session's origin
+        # album, so the card wears that edition's cover.
+        added, gen = manager.replace_queue([item] if item else [], play=True,
+                                           archive=lambda: sessions.rotate_session(
+                                               manager.queue, 'track', seed_track_id=req.track_id,
+                                               origin_album_id=req.album_id))
         proxy.bind(tokens, gen)
         _exit_radio_mode()
         if not added:
@@ -2889,11 +2883,13 @@ def _queue_segments_worker(segments: list, gen: int) -> None:
         _phantom_filler(proxy, tokens, 0, gen)
 
 
-def _play_segments(segments: list, worker_name: str, *, play: bool = True) -> None:
+def _play_segments(segments: list, worker_name: str, *, archive: Callable[[], None],
+                   play: bool = True) -> None:
     """Replace the queue with these segments. The FIRST item goes in alone — a
     transcode or a provider fetch must never hold up the answer — and everything
-    behind it rolls in through the ordered worker. The caller rotates the session
-    BEFORE this (the old queue is archived intact).
+    behind it rolls in through the ordered worker. `archive`, the caller's
+    session rotation, runs once the output has taken the first item, before
+    the commit (the old queue is archived intact; a refusal leaves it be).
 
     `play=False` assembles the queue without starting it: "put together a
     playlist" is a curation act, not a play command, and the canonical queue is
@@ -2901,11 +2897,11 @@ def _play_segments(segments: list, worker_name: str, *, play: bool = True) -> No
     head_kind, head_items = segments[0]
     if head_kind == "owned":
         if play:
-            added = _add_owned([head_items[0]], clear_first=True)
+            added = _add_owned([head_items[0]], clear_first=True, archive=archive)
             gen = manager.queue.generation
         else:
             added, gen = manager.replace_queue(
-                queue_mod.items_for_owned_rows([head_items[0]]), play=False)
+                queue_mod.items_for_owned_rows([head_items[0]]), play=False, archive=archive)
         head_rest = head_items[1:]
     else:
         from streaming import service as streaming_service
@@ -2926,7 +2922,7 @@ def _play_segments(segments: list, worker_name: str, *, play: bool = True) -> No
             raise HTTPException(status_code=502,
                                 detail="The opening track isn\u2019t available to stream right now.")
         item = queue_mod.item_for_proxy_token(tokens[0])
-        added, gen = manager.replace_queue([item] if item else [], play=play)
+        added, gen = manager.replace_queue([item] if item else [], play=play, archive=archive)
         proxy.bind(tokens, gen)
         head_rest = [q for q, _ch in pairs[1:]]
     if not added:
@@ -3016,15 +3012,18 @@ def play_entities(req: QueueEntitiesRequest):
     album_ids = [i.id for i in req.items if i.kind == "album"]
     single_album = album_ids[0] if len(req.items) == 1 and album_ids else None
     head_kind, head_items = segments[0]
-    sessions.rotate_session(
-        manager.queue, "album" if single_album else "mix",
-        origin_album_id=single_album,
-        seed_media_file_id=(head_items[0]["id"] if head_kind == "owned"
-                            and (head_items[0].get("location") or "local") == "local" else None),
-        seed_track_id=(None if head_kind == "owned" else head_items[0].track_id))
+
+    def archive() -> None:
+        sessions.rotate_session(
+            manager.queue, "album" if single_album else "mix",
+            origin_album_id=single_album,
+            seed_media_file_id=(head_items[0]["id"] if head_kind == "owned"
+                                and (head_items[0].get("location") or "local") == "local"
+                                else None),
+            seed_track_id=(None if head_kind == "owned" else head_items[0].track_id))
 
     try:
-        _play_segments(segments, "play-entities", play=req.autoplay)
+        _play_segments(segments, "play-entities", archive=archive, play=req.autoplay)
     except HTTPException:
         raise
     except Exception as e:
@@ -3134,19 +3133,22 @@ def play_session(req: PlaySessionRequest):
 
     head_kind, head_items = segments[0]
     origin = "mix" if header["origin"] == "radio" else header["origin"]
-    sessions.rotate_session(
-        manager.queue, origin,
-        origin_album_id=header["origin_album_id"],
-        seed_media_file_id=(head_items[0]["id"] if head_kind == "owned"
-                            and (head_items[0].get("location") or "local") == "local" else None),
-        seed_track_id=(None if head_kind == "owned" else head_items[0].track_id),
-        # A mix keeps the name it was archived under (a radio, replaying as a
-        # static mix, keeps its seed's); album and track cards are recomputed
-        # from their origin and need nothing carried.
-        title=(header["title"] if origin == "mix" else None))
+
+    def archive() -> None:
+        sessions.rotate_session(
+            manager.queue, origin,
+            origin_album_id=header["origin_album_id"],
+            seed_media_file_id=(head_items[0]["id"] if head_kind == "owned"
+                                and (head_items[0].get("location") or "local") == "local"
+                                else None),
+            seed_track_id=(None if head_kind == "owned" else head_items[0].track_id),
+            # A mix keeps the name it was archived under (a radio, replaying
+            # as a static mix, keeps its seed's); album and track cards are
+            # recomputed from their origin and need nothing carried.
+            title=(header["title"] if origin == "mix" else None))
 
     try:
-        _play_segments(segments, "play-session")
+        _play_segments(segments, "play-session", archive=archive)
     except HTTPException:
         raise
     except Exception as e:
@@ -3217,11 +3219,10 @@ def play_similar(req: PlaySimilarRequest):
         SELECT mf.id FROM media_files mf WHERE mf.track_id = %(tid)s::uuid
         ORDER BY {best_rip_order('mf')} LIMIT 1
     """, {"tid": req.track_id})
-    sessions.rotate_session(manager.queue, 'radio', seed_track_id=req.track_id,
-                            seed_media_file_id=(seed_mf or {}).get("id"))
-
     try:
-        _play_segments(segments, "play-similar")
+        _play_segments(segments, "play-similar", archive=lambda: sessions.rotate_session(
+            manager.queue, 'radio', seed_track_id=req.track_id,
+            seed_media_file_id=(seed_mf or {}).get("id")))
     except HTTPException:
         raise
     except Exception as e:
@@ -3268,15 +3269,10 @@ def play_tracks(req: PlayTracksRequest):
     if not rows:
         raise HTTPException(status_code=404, detail="No tracks found")
 
-    sessions.rotate_session(
-        manager.queue,
-        req.origin or 'mix',
-        origin_album_id=req.origin_album_id,
-        seed_media_file_id=rows[0]["id"],
-    )
-
     try:
-        added = _add_owned(rows, clear_first=True)
+        added = _add_owned(rows, clear_first=True, archive=lambda: sessions.rotate_session(
+            manager.queue, req.origin or 'mix', origin_album_id=req.origin_album_id,
+            seed_media_file_id=rows[0]["id"]))
         _exit_radio_mode()
         if added < len(rows):
             raise HTTPException(
@@ -3614,9 +3610,9 @@ def _radio_start(req: RadioStartRequest):
 
     # Clear everything around the reading slot — the seed plays on while the
     # batch flows in behind. New generation supersedes any prior filler. The
-    # session rotates once the output answered: one that could not be asked
-    # (HQPlayer building, the output lent or gone) refuses with history
-    # intact. seed_uuid is resolved for BOTH an owned (req.track_id) and a
+    # session rotates in the output's own clear, before it: one that cannot
+    # be asked (HQPlayer building, the output lent or gone) refuses with
+    # history intact. seed_uuid is resolved for BOTH an owned (req.track_id) and a
     # phantom (req.track_uuid) seed — the logical seed, so a radio started
     # from a streamed track gets a proper session card.
     try:

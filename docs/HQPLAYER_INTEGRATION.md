@@ -388,10 +388,24 @@ comes after the control port answers again — so neither can end the wait.
 - **The assistants' transport** (both surfaces: `tools/definitions.py` and
   the MCP server) goes through the backend's own routes (`/api/player/*`,
   whose answer carries HQPlayer's refusal for the assistant to quote): the
-  link the watch hears, the play press's spot, the playback trace. The
-  in-process assistant's questions (status, lists, settings) go through the
-  link too; the MCP server, a process of its own, still asks them on a
-  connection of its own.
+  link the watch hears, the play press's spot, the playback trace — and a
+  play command waits as long as its start may build. Their questions go
+  through the link too: the in-process assistant's on it directly, the MCP
+  server's (a process of its own) through the backend's routes
+  (`/api/hqplayer/state`, `/api/player/status`), so it keeps no connection
+  to HQPlayer at all. A list HQPlayer did not give comes with its refusal
+  (`refused`), and a name is picked exactly as written before any case of
+  it or any part.
+- **History rotates once the output took the queue.** A play route's
+  session rotation runs inside the replace (`PlaybackManager.replace_queue`,
+  `archive`): once HQPlayer has taken the mirror, under the queue lock,
+  before the commit — a play refused at the gate, at the mirror or by
+  HQPlayer itself leaves the listening history as it was; a rotation that
+  fails commits nothing, and HQPlayer, its start never sent, gets the queue
+  it lost back. The radio start rotates under HQPlayer's command hold,
+  before its PlaylistClear: busy or lent, refused before either; a rotation
+  that fails clears nothing; a clear HQPlayer does not take leaves the queue
+  as it is and the radio follows it, history rotated.
 - **Embedded answers through its builds**, saying it plays with nothing out
   yet (`hqp_benchmark._building`, 25–70 s on a Pi 5): the poller reports that
   as a build too, and refuses nothing — there is no silence to queue into.

@@ -764,6 +764,9 @@ class HqpBackend(PlayerBackend):
         # A cut-short benchmark run is put back once HQPlayer answers: at the
         # attach if GetInfo did, else at the first status that does
         self._recover_due = False
+        # What HQPlayer says of itself is asked with the poller's first
+        # answer when the attach could not ask it (a build)
+        self._info_due = False
 
     # -- lifecycle -------------------------------------------------------------
 
@@ -793,6 +796,7 @@ class HqpBackend(PlayerBackend):
             self._recover()
         else:
             self._recover_due = True
+            self._info_due = building
         if building:
             self._verify_mirror = True
         else:
@@ -1149,7 +1153,7 @@ class HqpBackend(PlayerBackend):
             reads = None
             sample = None
             miss = None         # (what was said, whether HQPlayer kept the connection silent)
-            came_back = False
+            came_back = learned = False
             att = self._attempt
             try:
                 hqp_playlist = None
@@ -1180,7 +1184,13 @@ class HqpBackend(PlayerBackend):
                         if came_back:
                             self._verify_mirror = True
                             self._library_check()
-                            self._info = hqp.get_info(wait=QUESTION_WAIT_S) or self._info
+                        if came_back or self._info_due:
+                            # Back — or picked while it built, its attach
+                            # asking nothing: what it says of itself
+                            self._info_due = False
+                            info = hqp.get_info(wait=QUESTION_WAIT_S)
+                            learned = bool(info)
+                            self._info = info or self._info
                     if status is not None and (self._verify_mirror
                                                or tick % DRIFT_CHECK_EVERY == 0):
                         _, version, pending = self._queue.view()
@@ -1215,8 +1225,9 @@ class HqpBackend(PlayerBackend):
                             self._sampler.taken(now)
                             sample = (status, dsp)
 
-                if came_back:
+                if came_back or learned:
                     self._note_info()
+                if came_back:
                     hqp_meter.meter.hqplayer_back()
                 # Only when it answered: a trial-stopped Embedded takes the
                 # connection and closes it at once, tick after tick.
@@ -1501,6 +1512,17 @@ class HqpBackend(PlayerBackend):
             threading.Thread(target=self._start_after_build, args=(owed,), daemon=True,
                              name="hqp-start").start()
 
+    def queue_abandon(self) -> None:
+        """The replace this thread just mirrored was not committed: its start
+        is not sent, its attempt ends, and HQPlayer's playlist — the queue
+        that did not commit — is no mirror (_reconverge gives it the queue
+        back)."""
+        owed = getattr(self._local, "start", None)
+        self._local.start = None
+        if owed is not None and owed[0] is not None:
+            owed[0].intent_done(RuntimeError("the queue was not committed"))
+        self._lose_mirror("HQPlayer took a queue that was not committed")
+
     def _start_after_build(self, owed: tuple) -> None:
         """A start that met a build, sent once the build is done (through) —
         unless a newer intent superseded it meanwhile, the queue it was made
@@ -1551,9 +1573,10 @@ class HqpBackend(PlayerBackend):
 
     def _check_attached(self) -> None:
         """Every command sequence of this instance calls it under the
-        command lock."""
+        command lock: a detached backend sends nothing more — dropped, as an
+        item a newer intent superseded is."""
         if self._detached:
-            raise ConnectionError("HQPlayer was detached from playback")
+            raise Dropped("HQPlayer was detached from playback")
 
     def _cmd(self, func, intent: Optional[str] = None, *, item: Any = None):
         """One command sequence of this backend: `func(client)` under the
@@ -2285,13 +2308,19 @@ class HqpBackend(PlayerBackend):
             raise RuntimeError(f"HQPlayer did not remove it: {refusal}")
         return True
 
-    def queue_clear_after_current(self) -> bool:
-        # PlaylistClear keeps the reading slot intact — it erases everything
-        # queued around the current track while the seed plays on. A new
-        # queue (radio): what was left to start is superseded. One HQPlayer
-        # did not take leaves the queue as it is (mirror-first).
-        cleared = self._cmd(lambda h: _hqp_safe(self._link, lambda c: c.playlist_clear(),
-                                                "PlaylistClear"), "queue")
+    def queue_clear_after_current(self, archive: Callable[[], None]) -> bool:
+        """Radio start. PlaylistClear keeps the reading slot intact — it
+        erases everything queued around the current track while the seed
+        plays on. A new queue: what was left to start is superseded. The
+        session rotation (`archive`) runs under the same command hold, before
+        the clear: busy or lent, the sequence is refused before either; a
+        rotation that fails clears nothing; a clear HQPlayer does not take
+        leaves the queue as it is (mirror-first), and the radio follows it,
+        history rotated."""
+        def clear(h: HQPlayerClient) -> bool:
+            archive()
+            return _hqp_safe(self._link, lambda c: c.playlist_clear(), "PlaylistClear")
+        cleared = self._cmd(clear, "queue")
         self.poke()
         return cleared
 
