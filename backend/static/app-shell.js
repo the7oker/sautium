@@ -6251,17 +6251,17 @@
   // done (hqp_backend.change_dsp): a knob HQPlayer refused behind that answer
   // is told here, once, in HQPlayer's words. The status a tab connects with
   // paints nothing, and a status without the change (another output, an
-  // outage, a benchmark's hold) forgets nothing: the same change coming back
-  // with HQPlayer is no news.
-  let lastDspChangeSeen;
+  // outage, a benchmark's hold) forgets nothing: a change this tab has seen
+  // since its first status — its id no restart repeats — is no news.
+  let dspChangesSeen;
   document.addEventListener('np-update', (e) => {
     const c = e.detail && e.detail.dsp_change;
-    if (lastDspChangeSeen === undefined) {
-      lastDspChangeSeen = c ? c.id : null;
+    if (dspChangesSeen === undefined) {
+      dspChangesSeen = new Set(c ? [c.id] : []);
       return;
     }
-    if (!c || c.id === lastDspChangeSeen) return;
-    lastDspChangeSeen = c.id;
+    if (!c || dspChangesSeen.has(c.id)) return;
+    dspChangesSeen.add(c.id);
     const reasons = Object.values(c.failed || {});
     if (!reasons.length) return;
     notices.toast({ kind: 'error', key: 'hqp.config', title: 'HQPlayer did not take the change',

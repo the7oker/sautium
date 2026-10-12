@@ -25,6 +25,12 @@ statuses the output pushed. The node stop ends every run.
   9. Statuses: "unfinished" only after a build ran out — never after a
      broken held answer — "disconnected" only after a miss that was no
      silence, "not answering" never together with a build.
+ 10. The resume spot names a queue item and stays with it through the queue
+     edits that keep its item.
+ 11. Nothing a filler took is lost: at rest it is in the queue, unless a
+     newer queue replaced it or a person removed it.
+ 13. At rest HQPlayer's playlist is the queue, or the mirror is marked lost
+     (or drifted: an edit made elsewhere); no item twice in the queue.
 
 A failure names its seed and prints the whole event log.
 
@@ -63,7 +69,9 @@ _QUESTIONS = {"Status", "State", "GetInfo", "PlaylistGet", "VolumeRange", "GetMo
               "GetFilters", "GetShapers", "GetRates", "MatrixListProfiles", "MatrixGetProfile",
               "raw"}
 _WORKERS = ("hqp-dsp-change", "hqp-late-stop", "hqp-start", "hqp-rebind",
-            "hqp-benchmark-recover")
+            "hqp-benchmark-recover", "hqp-reconverge")
+# The queue edits a spot stays through, its item kept
+_KEEP_SPOT = ("fill", "play next", "remove", "reorder", "rebind")
 
 
 def _seeds() -> list:
@@ -195,6 +203,8 @@ class World:
         self.foreign = 0
         self.next_id = 100
         self._links = 0
+        self.fills: list = []           # (queue generation, the items a filler took)
+        self.removed: set = set()       # id() of the items people removed
         self.mgr: Optional[PlaybackManager] = None
         self.settings_router = None
 
@@ -435,9 +445,9 @@ class World:
             (2, "seek", lambda: p._transport(False, "seek", r.randint(0, 200))),
             (2, "volume", lambda: p._transport(False, "set_volume", float(-r.randint(3, 40)))),
             (4, "replace", lambda: mgr.replace_queue(self.items(r.randint(1, 4)), play=True)),
-            (3, "fill", lambda: p._owned_filler(self.items(r.randint(1, 3)), mgr.queue.generation)),
+            (3, "fill", self.fill),
             (2, "play next", lambda: mgr.append(self.items(1), "next")),
-            (2, "remove", lambda: mgr.remove(r.randint(1, max(len(mgr.queue), 1)))),
+            (2, "remove", self.remove),
             (2, "reorder", self.reorder),
             (2, "radio", lambda: mgr.clear_for_radio(lambda: None)),
             (3, "dsp", self.dsp),
@@ -450,6 +460,7 @@ class World:
                                             1, max(len(mgr.queue), 1)))))),
             (2, "build next", self.arm_build),
             (3, "dsp, then a switch", self.dsp_then_switch),
+            (3, "fill through a build", self.fill_through_build),
             (3, "jump, then a switch", self.jump_then_switch),
             (2, "silence", lambda: self.hqp().silence(r.uniform(0.2, 1.3))),
             (1, "restart", lambda: self.hqp().restart()),
@@ -461,6 +472,28 @@ class World:
             (2, "to B", lambda: self.pick(self.b)),
             (2, "rebind", self.rebind),
         ]
+
+    def fill_through_build(self) -> None:
+        """A filler adding while HQPlayer builds — a build that may run out
+        or end in a vanish: what it took is never lost."""
+        r = self.rng
+        self.driven().build("SetFilter", r.uniform(0.6, 1.6), answer=r.choice(["first", "last"]))
+        self.dsp()
+        if r.random() < 0.3:
+            self.vanish()
+        self.fill()
+
+    def fill(self) -> None:
+        items, gen = self.items(self.rng.randint(1, 3)), self.mgr.queue.generation
+        self.fills.append((gen, items))
+        self.player._owned_filler(items, gen)
+
+    def remove(self) -> None:
+        mgr = self.mgr
+        k = self.rng.randint(1, max(len(mgr.queue), 1))
+        item = mgr.queue.item_at(k)
+        if item is not None and mgr.remove(k, item.track_id):
+            self.removed.add(id(item))
 
     def dsp(self) -> None:
         hb.change_dsp(self.rng.choice([{"filter": 57, "filter1x": 57}, {"shaper": 2},
@@ -550,9 +583,18 @@ class World:
 
     def run_step(self, name: str, fn: Callable[[], Any]) -> None:
         n = self.rec("step", name=name)
+        b = self.mgr.active
+        alone = not any(t.is_alive() for t in self.threads
+                        if t is not threading.current_thread())
+        before = getattr(b, "_spot", None) if name in _KEEP_SPOT and alone else None
         try:
             fn()
             self.rec("step-done", step=n)
+            after = getattr(self.mgr.active, "_spot", None)
+            if (before is not None and self.mgr.active is b
+                    and self.mgr.queue.index_of(before[0]) is not None
+                    and (after is None or after[0] is not before[0])):
+                self.violate(f"I10: {name} took the spot off its item")
         except HTTPException as e:
             self.rec("step-refused", step=n, status=e.status_code, why=e.detail)
         except (ConnectionError, OSError) as e:
@@ -575,6 +617,44 @@ class World:
             t.start()
         else:
             self.run_step(name, fn)
+
+    def at_rest(self) -> None:
+        """Invariants 11 and 13, at a full settle: what is left of HQPlayer's
+        own background work done, then the queue and the mirror compared —
+        given a bounded while to converge (the poller sees a return)."""
+        deadline = time.monotonic() + 8.0
+        while (any(t.name in _WORKERS for t in threading.enumerate())
+               and time.monotonic() < deadline):
+            time.sleep(0.05)
+        queue = self.mgr.queue.snapshot()
+        if len({id(it) for it in queue}) != len(queue):
+            self.violate("I13: an item twice in the queue")
+        for gen, items in self.fills:
+            if gen != self.mgr.queue.generation:
+                continue
+            lost = [it.title for it in items
+                    if self.mgr.queue.index_of(it) is None and id(it) not in self.removed]
+            if lost:
+                self.violate(f"I11: a filler's tracks are not in the queue: {lost}")
+        b = self.mgr.active
+        if not isinstance(b, HqpBackend):
+            return
+        hqp = self.b if b._link.port == self.b.port else self.a
+        while True:
+            if hqp._down or b._mirror_lost or b._drift:
+                return
+            with hqp._lock:
+                playlist = list(hqp.playlist)
+            if any("/Elsewhere/" in u for u in playlist):
+                return                  # another controller's edit: drift, the canary's
+            want = [b._uri_for(it) for it in self.mgr.queue.snapshot()]
+            if playlist == want:
+                return
+            if time.monotonic() > deadline:
+                self.violate(f"I13: at rest HQPlayer holds {playlist}, the queue {want}, "
+                             "and the mirror is not marked lost")
+                return
+            time.sleep(0.1)
 
     def settle(self, *, full: bool) -> None:
         """Between steps a random breath only: what one set going — a build,
@@ -796,6 +876,8 @@ def test_the_links_keep_their_invariants_whatever_the_order(seed, fake, fake_b, 
         for i in range(int(os.environ.get("SAUTIUM_SCENARIO_STEPS", "25"))):
             world.step()
             world.settle(full=i % 6 == 5)
+            if i % 6 == 5:
+                world.at_rest()
             world.check()
             if world.violations or world.unexpected:
                 break

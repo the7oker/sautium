@@ -39,6 +39,7 @@ import select
 import socket
 import threading
 import time
+import uuid
 from contextlib import contextmanager
 from dataclasses import dataclass
 from typing import Any, Callable, Dict, Optional
@@ -182,7 +183,8 @@ class BuildWatch:
         self._changed = threading.Condition(self._lock)
         self.state: Optional[dict] = None
         # The latest DSP change that went through a build — its outcome on the
-        # player status, for a refusal its caller was not there to hear.
+        # player status, for a refusal its caller was not there to hear: an
+        # id no restart repeats, and the attachment it was made in
         self.last_change: Optional[dict] = None
         # The builds begun so far, when the latest began, and how the latest
         # to end ended: (its number, how)
@@ -191,7 +193,6 @@ class BuildWatch:
         self._ended: tuple = (0, None)
         # What waits to hear a build begin (waking)
         self._wake_on_build: set = set()
-        self._change_id = 0
 
     def begin(self, command: str, attributes: Dict[str, str]) -> Callable[[str], None]:
         """A command's answer is late: HQPlayer builds. Told by the client on
@@ -297,12 +298,12 @@ class BuildWatch:
             with self._lock:
                 self._wake_on_build.discard(event)
 
-    def report(self, applied: dict, failed: dict) -> None:
+    def report(self, applied: dict, failed: dict, attachment: Optional[int]) -> None:
         """A DSP change that went through a build: its outcome rides the
-        player status (`dsp_change`)."""
+        player status (`dsp_change`) of the attachment it was made in."""
         with self._lock:
-            self._change_id += 1
-            self.last_change = {"id": self._change_id, "applied": applied, "failed": failed}
+            self.last_change = {"id": uuid.uuid4().hex, "attachment": attachment,
+                                "applied": applied, "failed": failed}
         self._link._poke()
 
 
@@ -422,8 +423,10 @@ class HqpLink:
         self.why: Optional[str] = None
         self.lent = False
         # The backend driving this HQPlayer, while one is attached: hears the
-        # answers (its playback trace), the build's changes (its poller)
+        # answers (its playback trace), the build's changes (its poller) —
+        # and the number its attach took
         self.attached = None
+        self.attachment: Optional[int] = None
         self._state_lock = threading.Lock()
         self._late_stop: Optional[_LateStop] = None
         # The connection's owner (a thread id) and how deep it holds it
@@ -651,18 +654,20 @@ class HqpLink:
 
     def attach(self, backend) -> int:
         """`backend` drives this HQPlayer now: an attach intent, which
-        supersedes the Stop a switch away owed it."""
+        supersedes the Stop a switch away owed it. Returns its number — the
+        attachment."""
         self.attached = backend
-        return self.accept("attach")
+        self.attachment = self.accept("attach")
+        return self.attachment
 
     def detach(self, backend) -> None:
         """`backend` drives this HQPlayer no more: a switch away, which
         supersedes what was made for its attachment — a start or a resume
         left for later, the rest of a DSP change."""
         if self.attached is backend:
-            self.attached = None
+            self.attached = self.attachment = None
             self.build.last_change = None    # the outcome of a change was that attachment's
-        self.accept("switch")
+            self.accept("switch")
         self._close_if_retired()
 
     def release(self, ours: Callable[[Any], bool]) -> None:

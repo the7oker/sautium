@@ -1652,12 +1652,14 @@ def _filler_append(item, gen: int, *, position: str = "end",
     announce window can drop a single add while the audio stream itself rides
     on, and silently losing an already-fetched track leaves a "buffering"
     ghost in the album UI. A build HQPlayer is in — it answers nothing — is
-    waited out (hqp_link.through), off the queue lock; one it does not
-    finish, or an HQPlayer gone during it, stops the filler, said in the
-    log. An add the HQPlayer's link no longer sends (another HQPlayer was
+    waited out (hqp_link.through), off the queue lock. One it does not
+    finish, or an HQPlayer gone during it, loses nothing: the output's
+    mirror is marked lost and the item goes into the queue alone, as what
+    follows does — HQPlayer gets the queue back when it answers again. An
+    add — or a wait — the HQPlayer's link let go of (another HQPlayer was
     chosen) is tried again through the manager, on the output it has then.
-    None = generation superseded or the filler stopped (caller must stop);
-    False = dropped after retries."""
+    None = generation superseded (caller must stop); False = dropped after
+    retries."""
     def moved_on() -> Optional[str]:
         return "the queue moved on" if manager.queue.generation != gen else None
 
@@ -1665,18 +1667,25 @@ def _filler_append(item, gen: int, *, position: str = "end",
         b = manager.active
         return moved_on() is not None or b is None or b.id != "hqplayer"
 
+    pause = False
     for attempt in range(4):
-        if attempt:
+        if pause:
             time.sleep(5)
+        pause = True
         try:
             added = through(
                 lambda: manager.append([item], position, generation=gen, after=after),
                 needed=moved_on, until=elsewhere)
         except GaveUp as e:
+            if moved_on() is not None:
+                return None
             if e.failed:
-                logger.warning("filler: stopped — %s; %s — %s and what follows were not "
-                               "queued", e, item.artist, item.title)
-            return None
+                lose = getattr(manager.active, "lose_mirror", None)
+                if lose is not None:
+                    lose(f"filler: {e}; {item.artist} — {item.title} and what follows go "
+                         "into the queue alone")
+            pause = False           # the queue, or the output it has now, takes it at once
+            continue
         except Dropped as e:
             logger.info("filler: %s — %s not added (%s), tried again", item.artist,
                         item.title, e)

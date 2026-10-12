@@ -89,6 +89,8 @@ class _DspChange:
 
     def __init__(self, link: HqpLink, knobs: Dict[str, Any], spot: Optional[tuple]):
         self.link = link
+        # The attachment the change is made in: its outcome is shown there only
+        self.attachment = link.attachment
         self.knobs = knobs
         self.spot = spot
         self.n: Optional[int] = None
@@ -159,7 +161,7 @@ class _DspChange:
                 logger.warning("HQPlayer DSP change ended after a build: %s", self.error)
             return
         if built:
-            link.build.report(dict(self.applied), dict(self.failed))
+            link.build.report(dict(self.applied), dict(self.failed), self.attachment)
         if self.spot is not None and status is not None and status.state == PlaybackState.STOPPED:
             self._resume(*self.spot)
 
@@ -216,7 +218,8 @@ def _poll_interval(failures: int) -> float:
     return 1.0 if failures <= 0 else min(2.0 ** min(failures, 4), 15.0)
 
 
-def _add_uris_with_retry(link: HqpLink, uris: list[str], *, clear_first: bool = False) -> int:
+def _add_uris_with_retry(link: HqpLink, uris: list[str], *,
+                         clear_first: bool = False) -> tuple[int, bool]:
     """Append URIs to the HQPlayer playlist, surviving a mid-batch
     connection drop. MUST be called inside a command sequence on `link`
     (HqpLink.command); its refusals — a build, an item superseded, a link
@@ -228,8 +231,9 @@ def _add_uris_with_retry(link: HqpLink, uris: list[str], *, clear_first: bool = 
     action add only the one track that landed before HQPlayer stalled.
     Here every add is verified: on a falsey result or a dropped socket we
     reset the connection and retry that one URI once. Returns the count
-    actually added so the caller can surface a short count instead of a
-    fake 'ok'.
+    actually added — so the caller can surface a short count instead of a
+    fake 'ok' — and whether the batch stopped because HQPlayer did not
+    answer or could not be reached (a refusal is no such stop).
 
     `clear_first=True` issues clear=True on the first URI (replace-queue
     semantics); the rest append. The clear only ever fires on i == 0, so a
@@ -289,8 +293,7 @@ def _add_uris_with_retry(link: HqpLink, uris: list[str], *, clear_first: bool = 
     # Each reason the batch is short is told: the silence that stopped it,
     # and what HQPlayer refused before it
     if gave_up:
-        logger.warning("HQPlayer is not answering — %d of %d tracks were not handed over; "
-                       "the queue is mirrored again on the next play",
+        logger.warning("HQPlayer is not answering — %d of %d tracks were not handed over",
                        len(uris) - added, len(uris))
     if refused and _stream_mode():
         logger.warning(
@@ -302,7 +305,7 @@ def _add_uris_with_retry(link: HqpLink, uris: list[str], *, clear_first: bool = 
         # HQPlayer refuses a file it cannot open — a dropped music mount
         # looks exactly like this; the notices channel re-derives.
         _notify_notices()
-    return added
+    return added, gave_up
 
 
 def _refusal(hqp: HQPlayerClient) -> tuple:
@@ -686,6 +689,9 @@ class HqpBackend(PlayerBackend):
         self._thread: Optional[threading.Thread] = None
         self._running = False
         self._failures = 0
+        # Silences past a build HQPlayer did not finish: no failures, but the
+        # poller backs off on them all the same
+        self._silent_misses = 0
         # The link's connections when the poller last had an answer: a new
         # one since is HQPlayer back (a restart drops the connection)
         self._connections = 0
@@ -711,13 +717,27 @@ class HqpBackend(PlayerBackend):
         # The proxy address HQPlayer reaches, fixed per attach: a DNS + route
         # lookup once, not per queued item.
         self._url_host = hqp_media_host()
-        # (slot, second) the next play press starts at: after an output switch
-        # (resume_at), or once HQPlayer took the queue afresh while not
-        # playing (_converge_mirror, _rebuild) — a paused HQPlayer is left
-        # stopped there, never played to be paused again. Any other queue
-        # action erases it; a reorder moves it with its slot.
+        # (queue item, second) the next play press starts at: after an output
+        # switch that found HQPlayer stopped (resume_at), or once HQPlayer
+        # took the queue afresh while not playing (_converge_mirror,
+        # _rebuild) — a paused HQPlayer is left stopped there, never played
+        # to be paused again. It names the item, not a slot (_spot_at): an
+        # insert or a removal before it moves its index, an append after it
+        # nothing, and it goes with its item — the queue keeps item objects
+        # through a reorder, a re-bind and a radio clear. A start taken
+        # erases it; a command refused, as busy or by HQPlayer, leaves it.
         self._spot: Optional[tuple] = None
         self._spot_lock = threading.Lock()
+        # HQPlayer was found stopped at the attach (its queue mirrored), so
+        # the slot an output switch keeps is a spot (resume_at)
+        self._stopped_at_attach = False
+        # Each time the mirror was lost, and the last time HQPlayer was given
+        # the queue back for it (_reconverge): once per loss, never per tick
+        self._lost = 0
+        self._reconverged = 0
+        # Which attachment of the link this backend is (HqpLink.attach): a DSP
+        # change's outcome is shown only to the attachment it was made in
+        self._attachment: Optional[int] = None
         # The latest status emitted: what the poller says again, with the
         # build, while HQPlayer is building and answers nothing.
         self._last_tick: Optional[PlaybackStatus] = None
@@ -750,7 +770,7 @@ class HqpBackend(PlayerBackend):
     def start(self) -> None:
         link = self._link
         # Attached: the Stop a switch away owed HQPlayer is superseded
-        link.attach(self)
+        self._attachment = link.attach(self)
         if link.state == "closed":
             return              # the node is stopping (hqp_link.close_all): nothing to start
         # HQPlayer builds and answers nothing: no question is put to it now —
@@ -776,7 +796,7 @@ class HqpBackend(PlayerBackend):
         if building:
             self._verify_mirror = True
         else:
-            self._mirror_on_attach()
+            self._stopped_at_attach = self._mirror_on_attach()
         self._library_check()
         with self._life:
             # shutdown() detaches under this lock: past it, a poller started
@@ -793,7 +813,7 @@ class HqpBackend(PlayerBackend):
             self._thread.start()
         logger.info("HQPlayer status poller started")
 
-    def _mirror_on_attach(self) -> None:
+    def _mirror_on_attach(self) -> bool:
         """Output switch with a live queue (§2.6): HQPlayer becomes the
         mirror of the canonical queue — replace, no autoplay, the user
         presses play. Without this the switch left HQPlayer's playlist empty
@@ -801,9 +821,13 @@ class HqpBackend(PlayerBackend):
         PLAYING/PAUSED (a backend restart mid-listening — clearing would cut
         live audio); a stopped HQPlayer gets the replace even if it holds a
         stale playlist. A build that began meanwhile leaves it to the
-        poller's mirror check, as at an attach during one."""
+        poller's mirror check, as at an attach during one. A queue edit that
+        lands while HQPlayer takes it (the attach runs off the queue lock)
+        leaves the mirror lost: HQPlayer gets the queue back once it answers
+        again (_reconverge). Returns whether HQPlayer was found stopped and
+        took the queue."""
         if self._adopt_hqp_playlist() or not len(self._queue):
-            return
+            return False
         try:
             with self._link.asking() as hqp:
                 st = hqp.get_status(wait=QUESTION_WAIT_S)
@@ -811,19 +835,24 @@ class HqpBackend(PlayerBackend):
                 PlaybackState.PLAYING, PlaybackState.PAUSED)
         except Building:
             self._verify_mirror = True
-            return
+            return False
         except (BrokenPipeError, ConnectionError, OSError):
             hqp_busy = False
         if hqp_busy:
             self._register_serving()
-            return
+            return False
         try:
-            added = self.queue_replace(self._queue.snapshot(), play=False)
+            items, version, pending = self._queue.view()
+            added = self.queue_replace(items, play=False)
             logger.info("mirrored %d canonical tracks into HQPlayer on attach", added)
+            if pending or self._queue.view()[1:] != (version, False):
+                self._lose_mirror("the queue changed while HQPlayer took it")
+            return added > 0
         except Building:
             self._verify_mirror = True
         except Exception as e:
             logger.warning("canonical mirror on attach failed: %s", e)
+        return False
 
     def _note_info(self) -> None:
         """What HQPlayer said of itself goes on its endpoint row: the build
@@ -955,24 +984,107 @@ class HqpBackend(PlayerBackend):
         # HQPlayer owns its playlist pointer, and a select fired straight
         # after the attach mirror does not stick (verified live) — defer it
         # to the play press, where select+play is the proven jump sequence.
-        self._set_spot((index, 0))
+        # Only for an HQPlayer the attach found stopped: one that plays or
+        # builds keeps its own place.
+        item = self._queue.item_at(index)
+        if self._stopped_at_attach and item is not None:
+            self._set_spot(item, 0)
 
-    def _set_spot(self, spot: Optional[tuple]) -> None:
+    def _set_spot(self, item: QueueItem, position: int) -> None:
         with self._spot_lock:
-            self._spot = spot
+            self._spot = (item, position)
 
-    def _take_spot(self, spot: Optional[tuple] = None) -> Optional[tuple]:
-        """Erase the spot — only if it is still `spot`, when given: one a
+    def _spot_at(self) -> Optional[tuple]:
+        """The spot as (its slot now, its second); None when there is none
+        — or its item left the queue, which takes the spot with it."""
+        held = self._spot
+        if held is None:
+            return None
+        idx = self._queue.index_of(held[0])
+        if idx is None:
+            self._take_spot(held)
+            return None
+        return idx, held[1]
+
+    def _take_spot(self, held: Optional[tuple] = None) -> Optional[tuple]:
+        """Erase the spot — only if it is still `held`, when given: one a
         later action set stays — and return what it was."""
         with self._spot_lock:
-            held = self._spot
-            if spot is None or held == spot:
+            spot = self._spot
+            if held is None or spot is held:
                 self._spot = None
-            return held
+            return spot
 
     def poke(self) -> None:
         """Wake the poller for an immediate re-poll after a command."""
         self._wake.set()
+
+    def _lose_mirror(self, why: str) -> None:
+        """HQPlayer's playlist is no mirror of the queue any more: queue edits
+        are the queue's alone from now on, and HQPlayer gets the queue back
+        when it answers again (_reconverge) — or at the next play press."""
+        self._mirror_lost = True
+        self._lost += 1
+        logger.warning("%s — HQPlayer gets the queue back once it answers again", why)
+        self.poke()
+
+    def lose_mirror(self, why: str) -> None:
+        """Background work could not hand HQPlayer what the queue took (a
+        filler that met a build HQPlayer did not finish, or went away
+        during): see _lose_mirror."""
+        self._lose_mirror(why)
+
+    def _reconverge(self) -> None:
+        """HQPlayer answers again while its playlist is no mirror: it gets the
+        queue back, under the queue lock, as background work (a build met is
+        waited out). Playing or paused on a prefix of the queue, the tail it
+        lacks is appended behind what it reads; stopped, it takes the queue
+        afresh and the play press resumes its slot; anything else is drift,
+        and the play press re-mirrors."""
+        from playback.manager import manager
+        try:
+            through(lambda: manager.mirror_step(self, self._follow_queue),
+                    needed=lambda: "HQPlayer was detached" if self._detached else None,
+                    until=lambda: self._detached)
+        except GaveUp as e:
+            (logger.warning if e.failed else logger.info)(
+                "HQPlayer did not get the queue back: %s", e)
+        except Dropped as e:
+            logger.info("HQPlayer did not get the queue back: %s", e)
+        except (BrokenPipeError, ConnectionError, OSError) as e:
+            logger.warning("HQPlayer did not get the queue back: %s", e)
+        finally:
+            self.poke()
+
+    def _follow_queue(self) -> None:
+        """_reconverge's step, under the queue lock."""
+        snapshot = self._queue.snapshot()
+
+        def read(h: HQPlayerClient) -> tuple:
+            status = h.get_status()
+            playlist = h.get_playlist()
+            return status, (playlist if h.last_error is None else None)
+        status, playlist = self._cmd(read)
+        if status is None or playlist is None or not status.state.known:
+            return
+        current = status.track_index
+        busy = status.state in (PlaybackState.PLAYING, PlaybackState.PAUSED)
+        prefix = (len(playlist) <= len(snapshot)
+                  and self._first_divergence(playlist, snapshot) is None)
+        if prefix and len(playlist) == len(snapshot):
+            self._drift = self._mirror_lost = False     # it holds the queue as it is
+        elif busy and prefix and 1 <= current <= len(playlist):
+            tail = snapshot[len(playlist):]
+            uris = [self._uri_for(it) for it in tail]
+            added = self._cmd(lambda h: _add_uris_with_retry(self._link, uris)[0]) if uris else 0
+            if added == len(uris):
+                self._drift = self._mirror_lost = False
+                logger.info("HQPlayer got the %d track(s) of the queue it lacked", added)
+        elif status.state == PlaybackState.STOPPED:
+            added, _ = self._mirror([self._uri_for(it) for it in snapshot], "rebuild")
+            if added == len(snapshot) and self._spot_at() is None and 1 <= current <= len(snapshot):
+                self._set_spot(snapshot[current - 1], 0)
+            logger.info("HQPlayer took the queue afresh (%d of %d tracks)", added, len(snapshot))
 
     def _lost_sight(self) -> None:
         """A build's held answer broke — HQPlayer went away or restarted
@@ -1081,10 +1193,8 @@ class HqpBackend(PlayerBackend):
                         if (hqp.last_error is None and not pending
                                 and self._queue.view()[1:] == (version, False)):
                             if self._check_drift(hqp_playlist) and self._verify_mirror:
-                                self._mirror_lost = True
-                                logger.warning("HQPlayer came back with a different "
-                                               "playlist (restarted?) — the queue is "
-                                               "re-mirrored on the next play")
+                                self._lose_mirror("HQPlayer came back with a different "
+                                                  "playlist (restarted?)")
                             self._verify_mirror = False
                     if att is not None and status is not None:
                         att.tick(status, STATE_NAMES.get(status.state, "unknown"))
@@ -1120,8 +1230,13 @@ class HqpBackend(PlayerBackend):
                     # last good status stands, no listen closes, no miss.
                     self._failures = 0
                 elif status is not None:
-                    self._failures = 0
+                    self._failures = self._silent_misses = 0
                     link.build.answered()
+                    if self._mirror_lost and self._reconverged < self._lost:
+                        # Once per loss: HQPlayer answers again, and gets the queue back
+                        self._reconverged = self._lost
+                        threading.Thread(target=self._reconverge, daemon=True,
+                                         name="hqp-reconverge").start()
                     link.build.answering(_building(status) and self._embedded())
                     hqp_meter.meter.set_gain(None if status.track_gain is None
                                              else status.volume + status.track_gain)
@@ -1168,7 +1283,7 @@ class HqpBackend(PlayerBackend):
             # it recover; a successful poll resets to 1s. Capped at 15 s —
             # the WSL2→Windows hop flaps for seconds at a time, and a 30 s
             # cap kept the UI on "disconnected" long after HQP was back.
-            self._wake.wait(timeout=_poll_interval(self._failures))
+            self._wake.wait(timeout=_poll_interval(max(self._failures, self._silent_misses)))
             self._wake.clear()
             tick += 1
 
@@ -1197,8 +1312,8 @@ class HqpBackend(PlayerBackend):
         anchors on, whatever entry HQPlayer's own pointer rests on."""
         idx = status.track_index
         items, version, pending = self._queue.view()
-        spot = self._spot
-        if spot is not None and status.state == PlaybackState.STOPPED:
+        spot = self._spot_at() if status.state == PlaybackState.STOPPED else None
+        if spot is not None:
             idx = spot[0]
         item = items[idx - 1] if 1 <= idx <= len(items) else None
         if status.state not in (PlaybackState.PLAYING, PlaybackState.PAUSED):
@@ -1260,10 +1375,11 @@ class HqpBackend(PlayerBackend):
         watch = self._link.build
         if watch.state is not None:
             extra["building"] = watch.state
-        if watch.last_change is not None:
-            extra["dsp_change"] = watch.last_change
-        spot = self._spot
-        if spot is not None and status.state == PlaybackState.STOPPED:
+        change = watch.last_change
+        if change is not None and change["attachment"] == self._attachment:
+            extra["dsp_change"] = change
+        spot = self._spot_at() if status.state == PlaybackState.STOPPED else None
+        if spot is not None:
             # Where the play press resumes: a paused HQPlayer whose playlist
             # was taken afresh is left stopped, not played to be paused again
             extra["resume"] = {"index": spot[0], "position": spot[1]}
@@ -1342,9 +1458,10 @@ class HqpBackend(PlayerBackend):
         replace, the resume of a rebuild — to queue_start, once the lock is
         let go: HQPlayer may build the start for minutes, and no queue edit
         may wait behind it. `item` is the start (HqpLink.item): a newer intent
-        that supersedes it drops it. `spot`: where the play press resumes if
-        the start does not go; `patient`: the start is background work (a
-        re-bind), so one that fails is logged, never raised."""
+        that supersedes it drops it. `spot`: (queue item, second), where the
+        play press resumes if the start does not go; `patient`: the start is
+        background work (a re-bind), so one that fails is logged, never
+        raised."""
         self._local.start = (att, item, start, spot, patient)
 
     def queue_start(self) -> None:
@@ -1372,7 +1489,7 @@ class HqpBackend(PlayerBackend):
             logger.info("HQPlayer's start not sent: %s", e)
         except (BrokenPipeError, ConnectionError, OSError) as e:
             if spot is not None:
-                self._set_spot(spot)
+                self._set_spot(*spot)
             if not patient:
                 raise
             logger.warning("HQPlayer did not start again after its playlist followed the "
@@ -1397,12 +1514,12 @@ class HqpBackend(PlayerBackend):
                         until=lambda: link.superseded(item) is not None)
         except (GaveUp, Dropped) as e:
             if spot is not None:
-                self._set_spot(spot)
+                self._set_spot(*spot)
             (logger.warning if getattr(e, "failed", False) else logger.info)(
                 "HQPlayer's start not sent after the build: %s", e)
         except (BrokenPipeError, ConnectionError, OSError) as e:
             if spot is not None:
-                self._set_spot(spot)
+                self._set_spot(*spot)
             logger.warning("HQPlayer's start after the build failed: %s", e)
         finally:
             self.poke()
@@ -1631,7 +1748,13 @@ class HqpBackend(PlayerBackend):
             if not state.get("unfinished"):
                 return
             if silent:
-                self._emit_building(state)
+                # Asked again with the same back-off as an HQPlayer away: no
+                # new connection every few seconds into a silence
+                self._silent_misses += 1
+                try:
+                    self._emit_building(state)
+                except Exception:
+                    logger.exception("HQPlayer's build was not said on the status")
                 return
         self._failures += 1
         if self._failures < STATUS_FAILURE_THRESHOLD:
@@ -1702,12 +1825,13 @@ class HqpBackend(PlayerBackend):
     # -- transport -----------------------------------------------------------------
 
     def play(self) -> bool:
-        spot = self._spot
+        held, spot = self._spot, self._spot_at()
         with self._intent("play", slot=spot[0] if spot else None):
             if spot is not None:
                 logger.info("play: honoring resume slot %d at %d s", *spot)
                 ok = self._start_at(*spot, fallback=True, intent="transport", item="start")
-                self._take_spot(spot)
+                if ok:
+                    self._take_spot(held)
             else:
                 ok = self._command("Play", lambda h: h.play())
         self.poke()
@@ -1725,17 +1849,31 @@ class HqpBackend(PlayerBackend):
 
     def next(self) -> bool:
         # Watched only when there is a next slot to land on.
-        with (self._intent("next") if 1 <= self._last_track < len(self._queue)
-              else nullcontext()):
-            ok = self._command("Next", lambda h: h.next())
-        self._take_spot()           # explicit navigation overrides resume
-        self.poke()
-        return ok
+        return self._step(1, "Next", lambda h: h.next(),
+                          1 <= self._last_track < len(self._queue))
 
     def previous(self) -> bool:
-        with self._intent("previous") if self._last_track > 1 else nullcontext():
-            ok = self._command("Previous", lambda h: h.previous())
-        self._take_spot()
+        return self._step(-1, "Previous", lambda h: h.previous(), self._last_track > 1)
+
+    def _step(self, by: int, name: str, send, watched: bool) -> bool:
+        """Next and Previous. Stopped at the spot, they only move it — to the
+        slot after or before, at its start: no command, no sound (at either
+        end of the queue it stays). Otherwise HQPlayer's own Next or
+        Previous, a start taken that erases a spot."""
+        held, spot = self._spot, self._spot_at()
+        last = self._last_tick
+        if spot is not None and last is not None and last.state == "stopped":
+            target = self._queue.item_at(spot[0] + by)
+            if target is not None:
+                with self._spot_lock:
+                    if self._spot is held:
+                        self._spot = (target, 0)
+            self.poke()
+            return True
+        with self._intent(name.lower()) if watched else nullcontext():
+            ok = self._command(name, send)
+        if ok:
+            self._take_spot(held)
         self.poke()
         return ok
 
@@ -1747,9 +1885,11 @@ class HqpBackend(PlayerBackend):
         leaves that to the play press). The Play after it, which jump()
         used to send from the manager, finds it playing then; a slot
         HQPlayer refuses gets no Play."""
+        held = self._spot
         with self._intent("select", slot=index):
             ok = self._start_at(index, 0, fallback=False, intent="transport", item="start")
-        self._take_spot()           # explicit navigation overrides resume
+        if ok:
+            self._take_spot(held)   # a start taken elsewhere: the play press resumes nothing
         self.poke()
         return ok
 
@@ -1921,9 +2061,7 @@ class HqpBackend(PlayerBackend):
                     until=lambda: self._detached)
         except GaveUp as e:
             if e.failed:
-                logger.warning("re-bound slots: HQPlayer's playlist could not follow (%s) — "
-                               "the queue is re-mirrored on the next play", e)
-                self._mirror_lost = True
+                self._lose_mirror(f"re-bound slots: HQPlayer's playlist could not follow ({e})")
         except Dropped as e:
             logger.info("re-bound slots: HQPlayer's playlist not converged: %s", e)
 
@@ -1950,9 +2088,7 @@ class HqpBackend(PlayerBackend):
         except Building:
             raise
         except (BrokenPipeError, ConnectionError, OSError) as e:
-            logger.info("re-bound slots: HQPlayer unreachable (%s) — the queue "
-                        "is re-mirrored on the next play", e)
-            self._mirror_lost = True
+            self._lose_mirror(f"re-bound slots: HQPlayer unreachable ({e})")
             return
         # A state the SDK does not name is HQPlayer starting a play: a replace
         # now would stop it — the next rebind, or the play press, converges
@@ -1980,19 +2116,19 @@ class HqpBackend(PlayerBackend):
                     return (now is not None and now.track_index < first
                             and all(_hqp_safe(self._link, lambda c: c.playlist_remove(first),
                                               "PlaylistRemove") for _ in uris)
-                            and _add_uris_with_retry(self._link, uris) == len(uris))
+                            and _add_uris_with_retry(self._link, uris)[0] == len(uris))
                 converged = self._cmd(follow)
                 self.poke()
             elif status.state == PlaybackState.PLAYING:
                 converged = self._rebuild([self._uri_for(it) for it in snapshot],
-                                          current, int(status.position), resume=True,
-                                          patient=True)
+                                          snapshot[current - 1], current, int(status.position),
+                                          resume=True, patient=True)
             else:
                 converged = self._mirror([self._uri_for(it) for it in snapshot],
                                          "rebuild")[0] == len(snapshot)
-                if self._spot is None and 1 <= current <= len(snapshot):
-                    self._set_spot((current, int(status.position)
-                                    if status.state == PlaybackState.PAUSED else 0))
+                if self._spot_at() is None and 1 <= current <= len(snapshot):
+                    self._set_spot(snapshot[current - 1], int(status.position)
+                                   if status.state == PlaybackState.PAUSED else 0)
                 self.poke()
         except Building:
             raise
@@ -2004,9 +2140,9 @@ class HqpBackend(PlayerBackend):
             self._drift = False
             logger.info("HQPlayer's playlist follows the re-bound slots from %d", first)
         else:
-            self._mirror_lost = True
+            self._lose_mirror("HQPlayer's playlist did not follow the re-bound slots")
 
-    def _rebuild(self, uris: list, index: int, position: int, *, resume: bool,
+    def _rebuild(self, uris: list, item: QueueItem, index: int, position: int, *, resume: bool,
                  patient: bool = False) -> bool:
         """Clear and reload HQPlayer's playlist for slot `index` at `position`
         — the ~300 ms gap of every change that needs an insert the protocol
@@ -2021,8 +2157,8 @@ class HqpBackend(PlayerBackend):
         logged; a start that does not go leaves the slot to the play press.
         Not resuming — HQPlayer was paused or stopped — it lands nowhere:
         SelectTrack would start the stopped HQPlayer (select), and the play
-        press resumes the slot at `position`. Returns whether HQPlayer
-        accepted every entry."""
+        press resumes the slot at `position` — `item`'s, wherever it is by
+        then. Returns whether HQPlayer accepted every entry."""
         att = self._watch("rebuild", slot=index, uris=uris) if resume else None
         with self._steps(att):
             def reload(h: HQPlayerClient) -> list:
@@ -2033,12 +2169,12 @@ class HqpBackend(PlayerBackend):
                 self._check_attached()
                 accepted = reload(self._link.client)
             if resume:
-                item = self._link.item("start", n)
-                self._owe_start(att, item,
-                                lambda: self._start_at(index, position, fallback=True, item=item),
-                                spot=(index, position), patient=patient)
+                start = self._link.item("start", n)
+                self._owe_start(att, start,
+                                lambda: self._start_at(index, position, fallback=True, item=start),
+                                spot=(item, position), patient=patient)
             else:
-                self._set_spot((index, position))
+                self._set_spot(item, position)
         self.poke()
         return all(accepted)
 
@@ -2066,7 +2202,7 @@ class HqpBackend(PlayerBackend):
         with self._link.command(intent) as n:
             self._check_attached()
             _hqp_safe(self._link, lambda h: h.stop(), "Stop")
-            added = _add_uris_with_retry(self._link, uris, clear_first=True)
+            added, _ = _add_uris_with_retry(self._link, uris, clear_first=True)
             if added == len(uris):
                 self._drift = self._mirror_lost = False   # mirrored afresh
         return added, n
@@ -2079,10 +2215,19 @@ class HqpBackend(PlayerBackend):
         self._cmd(start, item=item)
 
     def queue_append(self, items: list) -> int:
+        """Appended behind the last entry — the spot stays with its item. With
+        the mirror lost the append is the queue's alone: HQPlayer gets the
+        queue back when it answers again (_reconverge). So is one HQPlayer
+        does not answer, or cannot be reached: the mirror is lost then — what
+        it refuses stays out, mirror-first."""
+        if self._mirror_lost:
+            return len(items)
         uris = [self._uri_for(it) for it in items]
-        added = self._cmd(lambda h: _add_uris_with_retry(self._link, uris, clear_first=False))
-        self._take_spot()
+        added, unanswered = self._cmd(lambda h: _add_uris_with_retry(self._link, uris))
         self.poke()
+        if unanswered:
+            self._lose_mirror(f"HQPlayer took {added} of {len(items)} appended tracks")
+            return len(items)
         return added
 
     def queue_insert_next(self, items: list, anchor_index: Optional[int]) -> int:
@@ -2091,10 +2236,14 @@ class HqpBackend(PlayerBackend):
         through. URI-based so it works for preview streams too. A removal
         HQPlayer does not take ends the removals there, and only what left
         is appended again: never an entry twice, and the playlist is marked
-        no mirror (drift) until the next one."""
+        no mirror (drift) until the next one. With the mirror lost, or
+        HQPlayer not answering, the insert is the queue's alone, as an
+        append is."""
+        if self._mirror_lost:
+            return len(items)
         uris = [self._uri_for(it) for it in items]
 
-        def insert(h: HQPlayerClient) -> int:
+        def insert(h: HQPlayerClient) -> tuple:
             raw = h.get_playlist() or []
             idx = anchor_index or 0
             if idx < 1 or idx > len(raw):
@@ -2106,15 +2255,17 @@ class HqpBackend(PlayerBackend):
             while removed < len(after) and _hqp_safe(
                     self._link, lambda c: c.playlist_remove(idx + 1), "PlaylistRemove"):
                 removed += 1
-            added = _add_uris_with_retry(self._link, uris, clear_first=False)
-            back = (_add_uris_with_retry(self._link, after[:removed], clear_first=False)
-                    if removed else 0)
+            added, unanswered = _add_uris_with_retry(self._link, uris, clear_first=False)
+            back, lost = (_add_uris_with_retry(self._link, after[:removed], clear_first=False)
+                          if removed else (0, False))
             if removed < len(after) or back < removed:
                 self._drift = True
-            return added
-        added = self._cmd(insert)
-        self._take_spot()
+            return added, unanswered or lost
+        added, unanswered = self._cmd(insert)
         self.poke()
+        if unanswered:
+            self._lose_mirror(f"HQPlayer took {added} of {len(items)} tracks to play next")
+            return len(items)
         return added
 
     def queue_remove(self, index: int) -> bool:
@@ -2126,14 +2277,12 @@ class HqpBackend(PlayerBackend):
         edited by index: the removal is the queue's alone, and the next
         mirror carries it."""
         if self._drift or self._mirror_lost:
-            self._take_spot()
             return True
         refusal = self._refusal_of("PlaylistRemove", lambda h: h.playlist_remove(index),
                                    intent=None)
         self.poke()
         if refusal is not None:
             raise RuntimeError(f"HQPlayer did not remove it: {refusal}")
-        self._take_spot()
         return True
 
     def queue_clear_after_current(self) -> bool:
@@ -2143,8 +2292,6 @@ class HqpBackend(PlayerBackend):
         # did not take leaves the queue as it is (mirror-first).
         cleared = self._cmd(lambda h: _hqp_safe(self._link, lambda c: c.playlist_clear(),
                                                 "PlaylistClear"), "queue")
-        if cleared:
-            self._take_spot()
         self.poke()
         return cleared
 
@@ -2156,10 +2303,9 @@ class HqpBackend(PlayerBackend):
         words: the queue keeps its order (PlaybackManager.apply_reorder), and
         the playlist, part-way, is marked no mirror (drift). Stopped where
         the play press resumes (a spot — a reorder made while paused), the
-        spot follows its slot at the second it held; a rebuild that stops a
-        paused HQPlayer leaves one. Playing, it erases one, as any other
-        queue action does."""
-        held = self._take_spot() if plan.resume else self._spot
+        spot stays with its item at the second it held; a rebuild that stops
+        a paused HQPlayer leaves one."""
+        held = self._spot
         if plan.seamless:
             # Sequence (current at slot K = status_idx throughout, then
             # shifts left as we shrink the before-segment in step 3):
@@ -2202,8 +2348,6 @@ class HqpBackend(PlayerBackend):
                 logger.warning("HQPlayer did not take the new order: %s",
                                diag.redact_text(refusal))
                 raise RuntimeError(f"HQPlayer did not take the new order: {refusal}")
-            if held is not None and not plan.resume:
-                self._set_spot((plan.new_status_idx, held[1]))
             return {
                 "removed": len(plan.old_after) + (len(plan.old_before) - len(plan.new_before)),
                 "added": len(plan.new_after),
@@ -2214,7 +2358,8 @@ class HqpBackend(PlayerBackend):
         # (swap inside before, after→before crossing, current right-shift).
         uri_by_id = {mid: self._uri_for(plan.items_by_id[mid])
                      for mid in plan.order}
-        self._rebuild([uri_by_id[mid] for mid in plan.order], plan.new_status_idx,
+        self._rebuild([uri_by_id[mid] for mid in plan.order],
+                      plan.items_by_id[plan.order[plan.new_status_idx - 1]], plan.new_status_idx,
                       held[1] if held is not None and not plan.resume else plan.position,
                       resume=plan.resume)
         return {

@@ -294,9 +294,10 @@ comes after the control port answers again — so neither can end the wait.
   ends where the late answer comes. Past `BUILD_LIMIT_S` it is
   `unfinished` — "HQPlayer did not finish building the filter — restart
   HQPlayer" — until HQPlayer answers the poller again: only questions go
-  then, and while it takes the poller's connection and says nothing that
-  stays the build's, never "disconnected"; an HQPlayer that refuses or drops
-  the connection counts as away. A silence no build of this node's came
+  then, with the back-off of an HQPlayer away, and while it takes the
+  poller's connection and says nothing that stays the build's, never
+  "disconnected"; an HQPlayer that refuses or drops the connection counts
+  as away. A silence no build of this node's came
   before — HQPlayer taking the connection and answering nothing on its own —
   is neither: the status says "HQPlayer is not answering" (`not_answering`). A held
   answer whose connection breaks — HQPlayer closed it, restarted, or its
@@ -304,7 +305,7 @@ comes after the control port answers again — so neither can end the wait.
   the same 35 s bound for a command not yet acknowledged) — ends no build
   and is no `unfinished`: HQPlayer went away, the poller asks again, and its
   return is read as any other (its playlist checked; one that restarted has
-  lost the mirror, which the play press re-mirrors).
+  lost the mirror, and gets the queue back — below).
 - **People are refused, background work waits.** A command someone is
   waiting for — a play intent, a transport button, a queue edit, the radio
   start, a DSP change, the volume — is refused with 409 "HQPlayer is
@@ -319,8 +320,12 @@ comes after the control port answers again — so neither can end the wait.
   mechanism (`hqp_link.through`: the watch's event, never a poll, bounded by
   the build's limit, called off when the work goes elsewhere or a newer
   intent supersedes it), checks again whether it is still wanted (the
-  queue's generation, the output) and goes on; a build HQPlayer does not
-  finish, or goes away during, gives it up with why in the log.
+  queue's generation, the output) and goes on. A build HQPlayer does not
+  finish, or goes away during, gives it up with why in the log — and a
+  filler loses nothing to it: what it took goes into the queue alone, the
+  mirror marked lost. A wait whose link was let go (another HQPlayer
+  picked) does not stop a filler either: it goes on through the manager, on
+  the output there is then.
 - **Output switch, address change.** A switch away stops HQPlayer if it
   plays or pauses an entry of ours (another controller's is left playing) —
   at once, or, while it builds, once the build is done (the link's late
@@ -337,8 +342,9 @@ comes after the control port answers again — so neither can end the wait.
   goes only then. Past `BUILDING_AFTER_S` the change answers at once with
   what was taken and refused so far, the knobs still to go and the build;
   the rest follows behind the answer, and its outcome rides the player status
-  (`dsp_change`) — a knob refused there is toasted in HQPlayer's words, once
-  per change, and an output switched away forgets it. A held Status
+  (`dsp_change`) of the attachment it was made in, under an id no restart
+  repeats — a knob refused there is toasted in HQPlayer's words, once per
+  change and tab, and an output switched away forgets it. A held Status
   HQPlayer did not answer — a build it did not finish, a connection that
   broke — an output lent meanwhile, or a newer intent that supersedes the
   rest (another DSP change, a switch away) ends the change there: the knobs
@@ -362,8 +368,23 @@ comes after the control port answers again — so neither can end the wait.
   played to be paused again: the status names the spot's slot and carries
   `resume`, Now Playing says "Stopped at m:ss — Play resumes here", the next
   reorder and a "play next" anchor on that slot, and the play press resumes
-  it there. A reorder moves the spot with its slot; any other queue action
-  erases it, and a play press refused as busy keeps it.
+  it there. The spot names a queue item, not a slot: an insert or a removal
+  before it moves its index, an append after it changes nothing, and it goes
+  with its item. Stopped there, Next and Previous only move it a slot, to
+  its start — no command, no sound; a tap on a track plays that track. A
+  start taken spends it; a command refused, as busy or by HQPlayer, leaves
+  it. Back on HQPlayer after another output, the slot the queue was on is a
+  spot when the attach found HQPlayer stopped; one that plays keeps its
+  own place.
+- **A lost mirror.** HQPlayer's playlist is no mirror of the queue any more
+  when a build ran out or HQPlayer went away under a queue edit, when an
+  append or a "play next" found it not answering, when it came back
+  restarted, or when the queue moved while HQPlayer took it at an attach.
+  From then on appends and inserts are the queue's alone, as a removal is,
+  and once HQPlayer answers again it gets the queue back, once per loss
+  (`HqpBackend._reconverge`): playing or paused on a prefix of the queue,
+  the tail it lacks is appended behind what it reads; stopped, it takes the
+  queue afresh; anything else is drift, and the play press re-mirrors.
 - **The assistants' transport** (both surfaces: `tools/definitions.py` and
   the MCP server) goes through the backend's own routes (`/api/player/*`,
   whose answer carries HQPlayer's refusal for the assistant to quote): the
@@ -600,14 +621,15 @@ slot HQPlayer drops (one it cannot open) went untracked while the canary said
 drift. A build whose status names no entry, or a stream token of an earlier
 session, leaves the index standing, external while the playlist differs.
 
-**A restarted HQPlayer re-mirrors on the next play.** The status poller
+**A restarted HQPlayer gets the queue back.** The status poller
 notices HQPlayer coming back — an answer on a connection made since its last
 answer (a restart drops the connection, and whoever asks first makes the
 new one), or the first answer after failed polls (a power cycle, a restart
 that takes longer than one poll; that second shape was missed until a live
 Pi reboot on 2026-09-27) — reads the playlist at once and, when it differs from
-the queue, marks the mirror lost; the play-intent gate then re-attaches the
-backend, which mirrors the queue afresh. An HQPlayer Embedded in trial mode
+the queue, marks the mirror lost; HQPlayer, back and stopped, takes the
+queue afresh at once (a lost mirror, above) — and should that not go, the
+play-intent gate re-attaches the backend, which mirrors the queue afresh. An HQPlayer Embedded in trial mode
 stops every 30 minutes and must be restarted — its control port stays open
 but closes every connection, which is why the play-intent probe asks
 `GetInfo` instead of trusting a TCP connect. Auto-resume after such a
