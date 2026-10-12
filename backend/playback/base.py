@@ -124,6 +124,17 @@ class PlayerBackend(ABC):
     @abstractmethod
     def stop(self) -> bool: ...
 
+    def release(self) -> None:
+        """The output is switched away from: stop what it plays. HQPlayer,
+        building a setting and answering nothing, stops once it is done —
+        the switch does not wait for it."""
+        self.stop()
+
+    def refusal(self) -> str:
+        """Why the last command this thread sent was not taken, in the
+        device's own words when it gave any — what the assistant quotes."""
+        return ""
+
     @abstractmethod
     def next(self) -> bool: ...
 
@@ -156,11 +167,18 @@ class PlayerBackend(ABC):
     # the manager commits only that prefix). `queue_changed` runs AFTER the
     # canonical commit — backends that render the canonical queue directly
     # (local engine) act here, when the queue is already in its new shape.
+    # Both run under the queue lock; `queue_start` runs once it is let go:
+    # a start the mirror left (HQPlayer may build it for minutes).
 
     def queue_changed(self, kind: str, *, play: bool = False) -> None:
         """Post-commit notification: kind ∈ replace|append|insert_next|
         remove|reorder|clear. Default: nothing to do (HQPlayer acted in the
         mirror hooks)."""
+
+    def queue_start(self) -> None:
+        """After a mutation, outside the queue lock: the start its mirror
+        left on this thread — a replace that plays, a rebuild that plays on.
+        Default: nothing (a renderer starts in queue_changed)."""
 
     def slot_ready(self, index: int) -> None:
         """A slot this output could not open when it was reached now can —

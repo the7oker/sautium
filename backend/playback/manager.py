@@ -13,7 +13,9 @@ Queue mutations go through the manager: mirror into the active backend
 first (it can short-apply on a dropped control socket), then commit the
 actually-applied prefix to the canonical queue — so the canonical queue
 never claims tracks the player doesn't have. `_mutate_lock` serialises
-mutations so canonical and mirrored order can't interleave.
+mutations so canonical and mirrored order can't interleave; a start a
+mirror leaves (a replace that plays) goes once it is let go
+(`PlayerBackend.queue_start`) — HQPlayer may build a start for minutes.
 """
 
 import logging
@@ -247,7 +249,7 @@ class PlaybackManager:
                 self._active = None
                 if stop_old and old.healthy():
                     try:
-                        old.stop()
+                        old.release()
                     except Exception as e:
                         logger.debug("stop on deactivate failed: %s", e)
                 elif stop_old:
@@ -688,8 +690,9 @@ class PlaybackManager:
 
     def replace_queue(self, items: list[QueueItem], *, play: bool,
                       probe_first: bool = False) -> tuple[int, int]:
-        """Replace the queue (and start playback). Returns (added, generation);
-        generation is what background fillers must guard their appends with."""
+        """Replace the queue (and start playback, once the queue lock is let
+        go). Returns (added, generation); generation is what background
+        fillers must guard their appends with."""
         with self._mutation():
             backend = self.ensure_active() if play else self.backend()
             added = backend.queue_replace(items, play=play,
@@ -702,7 +705,8 @@ class PlaybackManager:
                 self._schedule_persist()
             else:
                 gen = self.queue.generation
-            return added, gen
+        backend.queue_start()
+        return added, gen
 
     def append(self, items: list[QueueItem], position: str = "end",
                generation: Optional[int] = None,
@@ -824,7 +828,9 @@ class PlaybackManager:
             if backend:
                 backend.queue_changed("reorder")
             self._schedule_persist()
-            return result
+        if backend:
+            backend.queue_start()
+        return result
 
     def rebind_files(self) -> None:
         """Re-bind every slot whose file left the library: it takes a live
@@ -862,6 +868,19 @@ class PlaybackManager:
                     update.update(media_file_id=item.media_file_id,
                                   track_id=item.track_id)
                 self._push_status({**status, **update})
+        if backend is not None:
+            backend.queue_start()
+
+    def mirror_step(self, backend: PlayerBackend, step: Callable[[], None]) -> None:
+        """An output's own mirror step outside a mutation — HQPlayer
+        following a re-bind once the build that held it off is done: under
+        the queue lock, while `backend` is still the active output, and the
+        start it leaves after."""
+        with self._mutation():
+            if self._active is not backend:
+                return
+            step()
+        backend.queue_start()
 
     def jump(self, index: int) -> bool:
         # select() loads AND plays the slot (PlayerBackend contract). The
@@ -869,14 +888,19 @@ class PlaybackManager:
         # OLD track for the seconds the new one took to buffer.
         return self.ensure_active().select(index)
 
-    def clear_for_radio(self) -> int:
+    def clear_for_radio(self, archive: Callable[[], None]) -> int:
         """Radio start: clear everything after the playing slot (the seed
-        plays on). Returns the new generation for the radio filler — the
+        plays on). `archive` — the session rotation radio starts with — runs
+        once the output answered, before the queue commits the clear: an
+        output that could not be asked (busy, gone) raises first, history
+        untouched. Returns the new generation for the radio filler — the
         current one when the output did not clear: mirror-first, the queue
         keeps the tail the player keeps, and the radio follows it."""
         with self._mutation():
             backend = self.backend()
-            if not backend.queue_clear_after_current():
+            cleared = backend.queue_clear_after_current()
+            archive()
+            if not cleared:
                 return self.queue.generation
             gen = self.queue.clear_for_radio(self._latest_status.get("track_index"))
             self._retire_previews(gen)

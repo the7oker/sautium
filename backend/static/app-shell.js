@@ -6248,16 +6248,20 @@
   // A DSP change that went through a build answered its caller before it was
   // done (hqp_backend.change_dsp): a knob HQPlayer refused behind that answer
   // is told here, once, in HQPlayer's words. The status a tab connects with
-  // carries the last change and paints nothing.
+  // paints nothing, and a status without the change (another output, an
+  // outage, a benchmark's hold) forgets nothing: the same change coming back
+  // with HQPlayer is no news.
   let lastDspChangeSeen;
   document.addEventListener('np-update', (e) => {
     const c = e.detail && e.detail.dsp_change;
-    const id = c ? c.id : null;
-    const first = lastDspChangeSeen === undefined;
-    if (id === lastDspChangeSeen) return;
-    lastDspChangeSeen = id;
-    const reasons = c ? Object.values(c.failed || {}) : [];
-    if (first || !reasons.length) return;
+    if (lastDspChangeSeen === undefined) {
+      lastDspChangeSeen = c ? c.id : null;
+      return;
+    }
+    if (!c || c.id === lastDspChangeSeen) return;
+    lastDspChangeSeen = c.id;
+    const reasons = Object.values(c.failed || {});
+    if (!reasons.length) return;
     notices.toast({ kind: 'error', key: 'hqp.config', title: 'HQPlayer did not take the change',
                     text: escapeProfileHtml(reasons.join(' · ')) });
   });
@@ -8799,6 +8803,14 @@
     source: 'HQPlayer\'s mode follows the source here ([source]): measure PCM or SDM with a button above.',
   };
 
+  // The HQPlayer screen's line on a build: one HQPlayer is silent in holds
+  // its controls; an Embedded box's answering build is only said.
+  function hqpBuildNote(b) {
+    if (!b) return '';
+    if (b.unfinished) return 'HQPlayer did not finish building the filter.';
+    return 'HQPlayer is building the filter…' + (b.silent ? ' Its controls wait until it is done.' : '');
+  }
+
   function hqpBenchmarkBlock(s) {
     const b = s.benchmark;
     if (!b) return '';
@@ -9074,9 +9086,12 @@
     // status (`hold`) into the Benchmark hint, and the screen reloads when
     // the output comes back.
     let shownHold = !!(window.currentStatus && window.currentStatus.hold);
-    // A build HQPlayer begins or ends reloads the screen: its controls wait
-    // for it, and what it took is read once it answers again.
-    let shownBuilding = !!(window.currentStatus && window.currentStatus.building);
+    // A build HQPlayer is silent in begins or ends — or is not finished —
+    // and the screen reloads: its controls wait for it, and what it took is
+    // read once it answers again. An Embedded box's answering build (at
+    // every start) waits for nothing: its line changes in place.
+    const buildKey = (b) => (!b ? '' : b.unfinished ? 'unfinished' : b.silent ? 'silent' : '');
+    let shownBuilding = buildKey(window.currentStatus && window.currentStatus.building);
     const detachDiag = () => {
       document.removeEventListener('np-update', onDiagnosis);
       window.removeEventListener('sautium:route', onRoute);
@@ -9092,7 +9107,16 @@
       }
       if (!!hold !== shownHold) { shownHold = !!hold; load(); }
       const building = e.detail && e.detail.building;
-      if (!!building !== shownBuilding) { shownBuilding = !!building; load(); }
+      if (buildKey(building) !== shownBuilding) {
+        shownBuilding = buildKey(building);
+        load();
+      } else {
+        const note = screen.querySelector('[data-hqp-build-note]');
+        if (note) {
+          note.textContent = hqpBuildNote(building);
+          note.hidden = !note.textContent;
+        }
+      }
     };
     const onRoute = () => { if (!document.contains(screen)) detachDiag(); };
     document.addEventListener('np-update', onDiagnosis);
@@ -9181,9 +9205,7 @@
       const building = s.building || (window.currentStatus && window.currentStatus.building) || null;
       const buildWaits = !!(building && building.silent && !building.unfinished);
       const waits = held || buildWaits;
-      const buildNote = !building ? ''
-        : building.unfinished ? 'HQPlayer did not finish building the filter.'
-        : 'HQPlayer is building the filter…' + (buildWaits ? ' Its controls wait until it is done.' : '');
+      const buildNote = hqpBuildNote(building);
       const currentRateHz = ((s.rates || []).find(r => r.index === st.rate) || {}).rate || st.active_rate;
       const shortMark = {
         shaper: hqpHeadroomMark((hr.shapers || {})[shaperName], { onlyShort: true }),
@@ -9361,7 +9383,7 @@
         <section class="hqp-section">
           <div class="hqp-section-label">Connection</div>
           ${connBlock}
-          ${buildNote ? `<p class="hqp-row-hint is-left">${escapeHtml(buildNote)}</p>` : ''}
+          <p class="hqp-row-hint is-left" data-hqp-build-note${buildNote ? '' : ' hidden'}>${escapeHtml(buildNote)}</p>
           ${missingNote ? `<p class="hqp-row-hint is-left">${escapeHtml(missingNote)}</p>` : ''}
         </section>
 

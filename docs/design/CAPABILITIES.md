@@ -124,14 +124,14 @@ code disagree, the code is what this file records and § 14 names the doc.
 
 Controlled:
 
-- [UI][AI] Transport, through the mirrored queue — `playback/hqp_backend.py: HqpBackend`; `hqplayer_client.py: play`, `pause`, `stop`, `next`, `previous`, `seek`, `select_track`
+- [UI][AI] Transport, through the mirrored queue — the assistants' too, through the backend's routes — `playback/hqp_backend.py: HqpBackend`; `hqplayer_client.py: play`, `pause`, `stop`, `next`, `previous`, `seek`, `select_track`; `routers/player.py: _transport`
 - [UI] Mode (PCM / SDM), rate, filter with its 1x filter, dither / modulator, matrix profile — `POST /api/hqplayer/config` (`ConfigRequest`)
 - [AI] Filter (both slots), shaper, matrix profile by name, by the screen's own path — `mcp/assistant_server.py: hqplayer_set_filter`, `hqplayer_set_shaper`, `hqplayer_set_matrix_profile` → `POST /api/hqplayer/config`
 - [UI][AI] Volume: ±1 dB steps in the Web UI within HQPlayer's `VolumeRange`, steps and an exact level for the assistant; a volume HQPlayer holds fixed (Direct SDM) rests the buttons with the reason, and a step it refuses is told under the row in its words — `POST /api/hqplayer/volume`; `hqplayer_set_volume`
 - [UI] Favourite filters: starred in the filter picker, one tap to switch — `POST /api/hqplayer/favorites/filter`
 - [AI] Convolution on and off — the assistant only, no control in the Web UI — `hqplayer_set_convolution` → `POST /api/hqplayer/config`
 - [AI] Parametric-EQ preset written as a Room EQ Wizard file the owner loads into the Matrix Processor — `generate_eq_preset`; `eq_generator.py: save_eq_preset`; `GET /api/eq/presets`, `/download/{filename}`
-- [auto] A DSP change waits out the build HQPlayer answers nothing in, holding every other command meanwhile (409), and resumes the spot it played only if HQPlayer came back stopped — `playback/hqp_backend.py: change_dsp`, `BuildWatch`
+- [auto] A DSP change waits out the build HQPlayer answers nothing in, refusing what someone sends meanwhile (409) while background work (a filler, a re-bind, an output switch's Stop) waits for its end, and resumes the spot it played only if HQPlayer came back stopped — `playback/hqp_backend.py: change_dsp`, `BuildWatch`, `through_builds`
 - [UI] Found on the network by its own discovery datagram; every HQPlayer the owner picked is kept, aliases of this machine are one — `hqp_library.py: discover`, `register`, `address_key`
 - [auto] On this machine it is handed paths, anywhere else streams; nothing to configure — `playback/hqp_backend.py: _stream_mode`
 - [UI][CLI] Library import: an HQPlayer on another machine lists its library (`<LibraryGet/>`), which joins the catalogue as album variants; first import previewed, then sync, rescan, forget, cancel; re-synced when its hash moved — `hqp_library.py: sync`, `forget_missing`, `request_sync`; `POST /api/settings/library/hqp-sync`, `/hqp-rescan`, `/hqp-forget`, `/hqp-sync/cancel`

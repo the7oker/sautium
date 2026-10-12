@@ -253,39 +253,85 @@ silence, an SDM one built for ten seconds on a laptop. It accepts and
 starts new connections all through a build, and the meter's first frame
 comes after the control port answers again — so neither can end the wait.
 - **Waits by command.** The command client waits for an answer as long as
-  its command may take (`hqp_backend.COMMAND_WAITS`): 5 s for a query,
+  its command may take (`hqp_backend._command_waits`, read when a client is
+  made): 5 s for a query,
   `STOP_ANSWER_S` (15 s) for a Stop — the output's teardown, a second in
   PCM and up to three and a half in SDM on a Mac; a short silence, never a
   build — and `BUILD_LIMIT_S` (10 min) for what may set off a build or meet
   one: the Set* commands, Play, SelectTrack, Seek, Next, Previous.
 - **The build watch** (`hqp_backend.BuildWatch`, one per process). An answer
   later than `BUILDING_AFTER_S` (1 s) is HQPlayer building: the player
-  status carries `building` (since when, after which command), every other
-  command is refused with 409 "HQPlayer is building the filter", the status
+  status carries `building` (since when, after which command), the status
   poller says the build instead of asking, and `GET /api/hqplayer/state`
   answers from the watch — the HQPlayer screen keeps what it read last and
   holds its controls, Now Playing shows "Building the filter…". The build
   ends where the late answer comes. Past `BUILD_LIMIT_S` it is
-  `unfinished` — "HQPlayer did not finish building the filter", never
-  "disconnected" — until HQPlayer answers the poller again. A detach or an
-  address change gives a build up rather than wait it out.
+  `unfinished` — "HQPlayer did not finish building the filter" — until
+  HQPlayer answers the poller again; while it takes the poller's connection
+  and says nothing that stays the build's, never "disconnected", and an
+  HQPlayer that refuses or drops the connection counts as away. A held
+  answer whose connection breaks — HQPlayer closed it, restarted, or its
+  machine stopped answering (keepalive; on Linux `TCP_USER_TIMEOUT` keeps
+  the same 35 s bound for a command not yet acknowledged) — ends no build
+  and is no `unfinished`: HQPlayer went away, the poller asks again, and its
+  return is read as any other (its playlist checked; one that restarted has
+  lost the mirror, which the play press re-mirrors).
+- **People are refused, background work waits.** A command someone is
+  waiting for — a play intent, a transport button, a queue edit, the radio
+  start, a DSP change, the volume — is refused with 409 "HQPlayer is
+  building the filter" (`Building`). The play gate's liveness probe
+  (`reachable()`) goes under the command lock: a command on its way is
+  answered first, and its silence turning out a build is busy, never
+  "offline". Work no one waits for — a filler adding an album's tracks as
+  they arrive, HQPlayer following a re-bind of the queue's files, the Stop
+  an output switch owes, the resume after a DSP change — waits for the
+  build's end through one mechanism (`hqp_backend.through_builds`: the
+  watch's event, never a poll, bounded by the build's limit, called off
+  when the work goes elsewhere), checks again whether it is still wanted
+  (the queue's generation, the output) and goes on; a build HQPlayer does
+  not finish, or goes away during, gives it up with why in the log.
+- **Output switch, address change.** A switch away goes on at once: HQPlayer
+  stops once its build is done (`_LateStop`, which outlives the backend
+  that owed it) — called off if HQPlayer is picked again before then, and
+  never sent while the benchmark drives it. Picking the same HQPlayer again
+  keeps its sockets and its build watched. Another HQPlayer's address gives
+  the build up — the socket its command waits on is shut, also for a build
+  that begins while the change waits.
 - **The DSP change** (`change_dsp`, behind `/config` and the assistant's
   filter, shaper, matrix profile and convolution tools). Each knob's Set*, then a
   `<Status/>` held on the same client until HQPlayer answers; the next knob
   goes only then. Past `BUILDING_AFTER_S` the change answers at once with
   what was taken and refused so far, the knobs still to go and the build;
   the rest follows behind the answer, and its outcome rides the player status
-  (`dsp_change`) — a knob refused there is toasted in HQPlayer's words. Built,
-  a change made while HQPlayer played resumes the spot it played only if
-  HQPlayer came back stopped (6.2.3 on Windows did; 6.2.4 plays on).
+  (`dsp_change`) — a knob refused there is toasted in HQPlayer's words, once
+  per change, and an output switched away forgets it. A held Status
+  HQPlayer did not answer — a build it did not finish, a connection that
+  broke — or an output lent meanwhile ends the change there: the knobs after
+  it are reported as not sent. Built, a change made while HQPlayer played
+  resumes the spot it played only if HQPlayer came back stopped (6.2.3 on
+  Windows did; 6.2.4 plays on) — read again right before the resume, on
+  the same hold of the command client, after any build begun meanwhile.
 - **A start is a build.** Play waits for its own answer; a SelectTrack starts
   a stopped HQPlayer by itself (its log: "GoTo 1", then "Play (1/0)"), so a
   slot is resumed as SelectTrack, then Seek — landing in the start's opening
   run of silent frames, before anything is heard — then Play
-  (`HqpBackend._start_at`). A paused HQPlayer whose playlist is rebuilt is
-  left stopped at its spot, never played to be paused again: the status
-  carries `resume`, Now Playing says "Stopped at m:ss — Play resumes here",
-  and the play press resumes it there.
+  (`HqpBackend._start_at`); a jump to a slot HQPlayer refuses sends no Play.
+  A start waits without the queue lock: a replace that plays, and a rebuild
+  that plays on, mirror the playlist under it and start once it is let go
+  (`PlayerBackend.queue_start`), so a queue edit meanwhile is refused (409)
+  or waits as background work, never parked behind the build. A paused
+  HQPlayer whose playlist is rebuilt is left stopped at its spot, never
+  played to be paused again: the status names the spot's slot and carries
+  `resume`, Now Playing says "Stopped at m:ss — Play resumes here", the next
+  reorder and a "play next" anchor on that slot, and the play press resumes
+  it there. A reorder moves the spot with its slot; any other queue action
+  erases it, and a play press refused as busy keeps it.
+- **The assistants' transport** (both surfaces: `tools/definitions.py` and
+  the MCP server) goes through the backend's own routes (`/api/player/*`,
+  whose answer carries HQPlayer's refusal for the assistant to quote): the
+  command client the watch hears, the play press's spot, the playback
+  trace. Only their questions (status, lists, settings) ask HQPlayer on a
+  connection of their own.
 - **Embedded answers through its builds**, saying it plays with nothing out
   yet (`hqp_benchmark._building`, 25–70 s on a Pi 5): the poller reports that
   as a build too, and refuses nothing — there is no silence to queue into.
@@ -774,13 +820,14 @@ seconds, those plays read `unknown`) — what the media
 proxy saw for that file's token (each request's status, range and bytes —
 `MediaProxy.hits`), and, read as it closes, HQPlayer's playlist: whether the
 expected entry is in it and whose entry it plays. A stop, a pause, a DSP change
-or a replaced playlist sent through any of the backend's own HQPlayer
-connections (the HQPlayer screen, the in-process assistant tools) ends an
-attempt as the owner's, and so does a DSP change made anywhere — it shows in
-the status, and HQPlayer stops to rebuild. A Stop sent by the assistant's MCP
-server (a connection of its own, in another process) cannot be told from
-HQPlayer stopping by itself. Two intents may overlap (a Next pressed while a
-replace still adds): each one's commands stay its own steps. The
+or a replaced playlist sent through the backend's own command client (the
+Web UI, the HQPlayer screen, both assistants) ends an attempt as the owner's,
+and so does a DSP change made anywhere — it shows in the status, and a stop
+HQPlayer makes for its build (6.2.3 on Windows did; 6.2.4 plays on) is that
+change, not a failure. A Stop from HQPlayer's own window or another
+controller cannot be told from HQPlayer stopping by itself. Two intents may
+overlap (a Next pressed while a replace still adds): each one's commands
+stay its own steps. The
 last 20 are kept in memory (never in the database), and each gets a verdict,
 checked in this order — positive evidence before any absence of it:
 

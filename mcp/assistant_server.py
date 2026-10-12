@@ -157,15 +157,14 @@ def _output_prefs() -> dict:
         return {}          # backend unreachable: don't block on a guess
 
 
-def _get_hqp() -> HQPlayerClient:
-    """Get or create HQPlayer client (lazy, auto-reconnect).
-
-    Refuses when HQPlayer is not the chosen output. Every tool that commands
-    HQPlayer comes through here, so this is the one place the rule has to
-    exist. It exists because the tools are named for what they do and an agent
-    will reach for one: asking to change a filter, or to skip a track, while
-    the sound is going to a phone over DLNA would reconfigure — or start —
-    a device in another room, with the canonical queue none the wiser."""
+def _hqp_gate() -> None:
+    """Refuses when HQPlayer is not the chosen output, while it is lent to
+    the benchmark, and while it builds a setting. Every HQPlayer tool comes
+    through here, so this is the one place the rule has to exist. It exists
+    because the tools are named for what they do and an agent will reach
+    for one: asking to change a filter, or to skip a track, while the sound
+    is going to a phone over DLNA would reconfigure — or start — a device
+    in another room, with the canonical queue none the wiser."""
     prefs = _output_prefs()
     active = prefs.get("type") or ""
     if active and active != "hqplayer":
@@ -186,6 +185,15 @@ def _get_hqp() -> HQPlayerClient:
             "HQPlayer is building the filter — it answers nothing until the build "
             "is done; its transport and DSP controls come back then."
         )
+
+
+def _get_hqp() -> HQPlayerClient:
+    """The HQPlayer client the reading tools ask through (lazy,
+    auto-reconnect; _hqp_gate first). A command goes through the backend
+    instead (_hqp_transport, /api/hqplayer/config): its client is the one
+    the backend's build watch hears — one of this process would send into
+    a build's silence, and not be heard."""
+    _hqp_gate()
     global _hqp_client
     host, port = _hqp_endpoint()
     if (_hqp_client is None or not _hqp_client.is_connected()
@@ -255,59 +263,47 @@ def _format_track_list(rows: list[dict], header: str = "") -> str:
 # PLAYBACK CONTROL (6 tools)
 # =============================================================================
 
+def _hqp_transport(command: str, body: dict | None = None, **values) -> str:
+    """A transport command the way the Web UI sends it (/api/player): the
+    backend's own command client — the one its build watch hears —, the
+    play press's resume spot, the playback trace; refused in HQPlayer's
+    words when it did not take it."""
+    try:
+        _hqp_gate()
+        return aq.hqp_transport_text(command, _backend_post(f"/api/player/{command}", body or {}),
+                                     **values)
+    except Exception as e:
+        return f"Error: {e}"
+
+
 @mcp.tool()
 def hqplayer_play() -> str:
     """Start or resume HQPlayer playback."""
-    try:
-        hqp = _get_hqp()
-        ok = hqp.play()
-        return "Playback started." if ok else f"Failed to start playback: {hqp.refusal()}"
-    except Exception as e:
-        return f"Error: {e}"
+    return _hqp_transport("play")
 
 
 @mcp.tool()
 def hqplayer_pause() -> str:
     """Pause HQPlayer playback."""
-    try:
-        hqp = _get_hqp()
-        ok = hqp.pause()
-        return "Playback paused." if ok else f"Failed to pause: {hqp.refusal()}"
-    except Exception as e:
-        return f"Error: {e}"
+    return _hqp_transport("pause")
 
 
 @mcp.tool()
 def hqplayer_stop() -> str:
     """Stop HQPlayer playback."""
-    try:
-        hqp = _get_hqp()
-        ok = hqp.stop()
-        return "Playback stopped." if ok else f"Failed to stop: {hqp.refusal()}"
-    except Exception as e:
-        return f"Error: {e}"
+    return _hqp_transport("stop")
 
 
 @mcp.tool()
 def hqplayer_next() -> str:
     """Skip to the next track in HQPlayer."""
-    try:
-        hqp = _get_hqp()
-        ok = hqp.next()
-        return "Skipped to next track." if ok else f"Failed to skip: {hqp.refusal()}"
-    except Exception as e:
-        return f"Error: {e}"
+    return _hqp_transport("next")
 
 
 @mcp.tool()
 def hqplayer_previous() -> str:
     """Go back to the previous track in HQPlayer."""
-    try:
-        hqp = _get_hqp()
-        ok = hqp.previous()
-        return "Went to previous track." if ok else f"Failed to go back: {hqp.refusal()}"
-    except Exception as e:
-        return f"Error: {e}"
+    return _hqp_transport("previous")
 
 
 @mcp.tool()
@@ -360,23 +356,13 @@ def hqplayer_get_status() -> str:
 @mcp.tool()
 def hqplayer_volume_up() -> str:
     """Increase HQPlayer volume by one step."""
-    try:
-        hqp = _get_hqp()
-        ok = hqp.volume_up()
-        return "Volume increased." if ok else f"Failed to change volume: {hqp.volume_refusal()}"
-    except Exception as e:
-        return f"Error: {e}"
+    return _hqp_transport("volume/up")
 
 
 @mcp.tool()
 def hqplayer_volume_down() -> str:
     """Decrease HQPlayer volume by one step."""
-    try:
-        hqp = _get_hqp()
-        ok = hqp.volume_down()
-        return "Volume decreased." if ok else f"Failed to change volume: {hqp.volume_refusal()}"
-    except Exception as e:
-        return f"Error: {e}"
+    return _hqp_transport("volume/down")
 
 
 @mcp.tool()
@@ -386,12 +372,7 @@ def hqplayer_set_volume(level: float) -> str:
     Args:
         level: Volume level in dB (e.g. -10.0)
     """
-    try:
-        hqp = _get_hqp()
-        ok = hqp.set_volume(level)
-        return f"Volume set to {level}." if ok else f"Failed to set volume: {hqp.volume_refusal()}"
-    except Exception as e:
-        return f"Error: {e}"
+    return _hqp_transport("volume", {"level": level}, level=level)
 
 
 # =============================================================================
@@ -1185,31 +1166,10 @@ def hqplayer_set_filter(filter_name: str) -> str:
     """
     try:
         hqp = _get_hqp()
-        filters = hqp.get_filters()
-
-        if filters is None:
-            return f"HQPlayer did not list its filters ({hqp.refusal()}) — nothing was changed."
-        if not filters:
-            return "HQPlayer lists no filters in its current mode."
-
-        # Find filter by name (case-insensitive, partial match)
-        match = None
-        for f in filters:
-            if f["name"].lower() == filter_name.lower():
-                match = f
-                break
-
+        match, said = aq.hqp_pick("filter", hqp.get_filters(), filter_name, hqp,
+                                  key=lambda f: f["name"])
         if match is None:
-            # Try partial match
-            for f in filters:
-                if filter_name.lower() in f["name"].lower():
-                    match = f
-                    break
-
-        if match is None:
-            available = ", ".join(f["name"] for f in filters)
-            return f"Filter '{filter_name}' not found. Available filters: {available}"
-
+            return said
         # The backend's one DSP change path — the build it may set off is
         # watched there — with both slots, as the HQPlayer screen sends it: a
         # 44.1/48 kHz source plays through the 1x slot
@@ -1233,31 +1193,10 @@ def hqplayer_set_shaper(shaper_name: str) -> str:
     """
     try:
         hqp = _get_hqp()
-        shapers = hqp.get_shapers()
-
-        if shapers is None:
-            return f"HQPlayer did not list its dithers/shapers ({hqp.refusal()}) — nothing was changed."
-        if not shapers:
-            return "HQPlayer lists no dithers/shapers in its current mode."
-
-        # Find shaper by name (case-insensitive, exact match first)
-        match = None
-        for s in shapers:
-            if s["name"].lower() == shaper_name.lower():
-                match = s
-                break
-
+        match, said = aq.hqp_pick("shaper", hqp.get_shapers(), shaper_name, hqp,
+                                  key=lambda s: s["name"])
         if match is None:
-            # Try partial match
-            for s in shapers:
-                if shaper_name.lower() in s["name"].lower():
-                    match = s
-                    break
-
-        if match is None:
-            available = ", ".join(s["name"] for s in shapers)
-            return f"Shaper '{shaper_name}' not found. Available shapers: {available}"
-
+            return said
         outcome = _backend_post("/api/hqplayer/config", {"shaper": match["index"]})
         return aq.hqp_change_text(outcome, f"the dither/shaper {match['name']}",
                                   f"Dither/shaper set to: {match['name']}")
@@ -1280,7 +1219,7 @@ def hqplayer_set_convolution(enabled: bool) -> str:
         enabled: True to enable convolution, False to disable
     """
     try:
-        _get_hqp()
+        _hqp_gate()
         outcome = _backend_post("/api/hqplayer/config", {"convolution": enabled})
         state = "enabled" if enabled else "disabled"
         return aq.hqp_change_text(outcome, f"convolution {'on' if enabled else 'off'}",
@@ -1335,28 +1274,10 @@ def hqplayer_set_matrix_profile(profile_name: str) -> str:
     """
     try:
         hqp = _get_hqp()
-
-        # Verify profile exists
-        profiles = hqp.matrix_list_profiles()
-        if profiles is None:
-            return f"HQPlayer did not list its matrix profiles ({hqp.refusal()}) — nothing was changed."
-        if profiles and profile_name not in profiles:
-            # Try case-insensitive match
-            match = None
-            for p in profiles:
-                if p.lower() == profile_name.lower():
-                    match = p
-                    break
-            if match is None:
-                for p in profiles:
-                    if profile_name.lower() in p.lower():
-                        match = p
-                        break
-            if match is None:
-                available = ", ".join(profiles)
-                return f"Profile '{profile_name}' not found. Available: {available}"
-            profile_name = match
-
+        match, said = aq.hqp_pick("profile", hqp.matrix_list_profiles(), profile_name, hqp)
+        if match is None:
+            return said
+        profile_name = match
         outcome = _backend_post("/api/hqplayer/config", {"matrix_profile": profile_name})
         return aq.hqp_change_text(outcome, f"the matrix profile '{profile_name}'",
                                   f"Matrix profile set to: '{profile_name}'")

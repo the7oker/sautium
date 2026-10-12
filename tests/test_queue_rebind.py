@@ -122,7 +122,7 @@ class Library:
 
 class StubOutput:
     """The active output as rebind_files sees it: an id, maybe an endpoint,
-    and the hook it is told through."""
+    the hook it is told through, and the start it may owe after the lock."""
 
     def __init__(self, output_id, endpoint_id=None):
         self.id, self.endpoint_id = output_id, endpoint_id
@@ -130,6 +130,9 @@ class StubOutput:
 
     def queue_changed(self, kind, *, play=False):
         self.changed.append(kind)
+
+    def queue_start(self):
+        pass
 
 
 def _notified(listener, timeout) -> bool:

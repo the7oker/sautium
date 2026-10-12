@@ -588,6 +588,27 @@ implementation details live in the code, DB and git history.
   the same client — a new connection is accepted all through it, and the
   meter's first frame comes after the answer — and the one build watch
   (`hqp_backend.BuildWatch`) holds every other command out meanwhile.
+- **People are refused, background work waits a build out** (2026-10-12).
+  Refusing every command at once (409) during a build was right for a tap
+  and wrong for the work behind it: a filler adding an album died on the
+  refusal, the radio start answered 500 with the session already rotated,
+  a re-bind of the queue's files dropped, and an output switch swallowed
+  its Stop, leaving HQPlayer playing undriven beside the new output.
+  Background work now waits for the build's end through one mechanism
+  (`through_builds`: the watch's event, bounded by the build limit, called
+  off when the work goes elsewhere), checks again whether it is still
+  wanted and goes on, or gives up with why when HQPlayer does not finish or
+  goes away; the switch goes on at once and the Stop follows the build,
+  called off if HQPlayer is picked again first. A held answer whose
+  connection breaks is HQPlayer gone or restarted — no build, no
+  `unfinished` — and the poller reads its return as any other: counting
+  every miss only while the build was on had hidden a restart (the mirror
+  never marked lost) and kept a vanished HQPlayer "building" forever. A
+  start waits without the queue lock — a Play holding it through a start
+  build parked every queue edit behind it — and the play gate's probe goes
+  under the command lock, where a command's silence turning into a build is
+  busy, not "offline". The assistants' transport goes through the backend's
+  routes: their own connections set off builds the watch never heard of.
 - **Stop-clear-add-select-play sequence** for `play_track`/`play_album`. Without
   explicit stop, HQPlayer occasionally started the wrong track from the
   existing queue.

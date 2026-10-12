@@ -16,7 +16,7 @@ import threading
 import time
 import xml.etree.ElementTree as ET
 from collections import deque
-from typing import Callable, Optional, Dict, Any, List, Protocol
+from typing import Any, Callable, Dict, Iterator, List, Optional, Protocol, Tuple
 from dataclasses import asdict, dataclass
 from enum import IntEnum
 from urllib.parse import unquote
@@ -284,11 +284,14 @@ class LateAnswers(Protocol):
     nothing on its control port while it builds a setting, so an answer to
     one of `commands` that has not come after `after` seconds is that.
     `begin` is told on the thread that waits for it, and returns what that
-    thread calls once the wait ends — with whether the answer came."""
+    thread calls once the wait ends, with how it ended: "answered", "timeout"
+    (the wait ran out, the connection open) or "lost" (the connection broke
+    — HQPlayer closed it, restarted, or its machine stopped answering the
+    keepalive probes)."""
     after: float
     commands: frozenset
 
-    def begin(self, command: str, attributes: Dict[str, str]) -> Callable[[bool], None]: ...
+    def begin(self, command: str, attributes: Dict[str, str]) -> Callable[[str], None]: ...
 
 
 class HQPlayerClient:
@@ -411,9 +414,14 @@ class HQPlayerClient:
             # in ~35 s instead. Timer constants are per-platform (Linux:
             # KEEPIDLE/KEEPINTVL/KEEPCNT; macOS: TCP_KEEPALIVE; availability
             # probed with hasattr — plain SO_KEEPALIVE everywhere else).
+            # Keepalive probes only an idle connection: TCP_USER_TIMEOUT
+            # (Linux, ms) keeps the same bound while a command sent to a
+            # vanished HQPlayer is still unacknowledged — a build's held
+            # answer waits minutes, and a dead peer must not pass for one.
             self.socket.setsockopt(socket.SOL_SOCKET, socket.SO_KEEPALIVE, 1)
             for opt, val in (("TCP_KEEPIDLE", 20), ("TCP_KEEPINTVL", 5),
-                             ("TCP_KEEPCNT", 3), ("TCP_KEEPALIVE", 20)):
+                             ("TCP_KEEPCNT", 3), ("TCP_KEEPALIVE", 20),
+                             ("TCP_USER_TIMEOUT", 35_000)):
                 if hasattr(socket, opt):
                     try:
                         self.socket.setsockopt(socket.IPPROTO_TCP,
@@ -469,13 +477,13 @@ class HQPlayerClient:
             return False
 
     def _read_response(self, wait: Optional[float] = None,
-                       on_late: Optional[Callable[[], Callable[[bool], None]]] = None
+                       on_late: Optional[Callable[[], Callable[[str], None]]] = None
                        ) -> Optional[ET.Element]:
         """
         Read XML response from HQPlayer, waiting `wait` seconds for it (the
         client's timeout by default). With `on_late`, an answer that has not
         come after `late.after` seconds is told to it, and what it returns
-        hears whether the answer came.
+        hears how the wait ended (LateAnswers).
 
         Returns:
             Parsed XML element or None
@@ -486,16 +494,17 @@ class HQPlayerClient:
 
         wait = self.timeout if wait is None else wait
         deadline = time.monotonic() + wait
-        ended: Optional[Callable[[bool], None]] = None
-        answered = False
+        ended: Optional[Callable[[str], None]] = None
+        how = "lost"
         try:
             self.socket.settimeout(min(wait, self.late.after) if on_late else wait)
             # Read until we get a complete XML document (ends with newline)
             while b'\n' not in self.buffer:
                 try:
                     chunk = self.socket.recv(4096)
-                except TimeoutError:
-                    if on_late is None or ended is not None:
+                except TimeoutError as e:
+                    # errno set: the peer is gone (keepalive), not our wait run out
+                    if on_late is None or ended is not None or e.errno is not None:
                         raise
                     ended = on_late()
                     self.socket.settimeout(max(deadline - time.monotonic(), 0.001))
@@ -510,7 +519,7 @@ class HQPlayerClient:
                     self.disconnect()
                     return None
                 self.buffer += chunk
-            answered = True
+            how = "answered"
 
             # Extract first complete line
             line, self.buffer = self.buffer.split(b'\n', 1)
@@ -525,12 +534,18 @@ class HQPlayerClient:
             self._io_error = f"unreadable answer: {e}"
             self.disconnect()
             return None
-        except TimeoutError:
+        except TimeoutError as e:
+            if e.errno is not None:
+                logger.error(f"Failed to read response: {e}")
+                self._io_error = f"no answer: {e}"
+                self.disconnect()
+                return None
             # The connection goes all the same: the late answer would be
             # read as the next command's.
             logger.warning(f"HQPlayer did not answer within {wait:g} s")
             self._io_error = f"no answer within {wait:g} s"
             self.timed_out = True
+            how = "timeout"
             self.disconnect()
             return None
         except Exception as e:
@@ -542,7 +557,7 @@ class HQPlayerClient:
             if self.socket is not None:
                 self.socket.settimeout(self.timeout)
             if ended is not None:
-                ended(answered)
+                ended(how)
 
     def _execute_command(self, command: str, attributes: Optional[Dict[str, str]] = None,
                         expect_response: bool = True, *, wait: Optional[float] = None,
@@ -1152,26 +1167,38 @@ class HQPlayerClient:
             return self.matrix_set_profile(value)
         return self.set_convolution(bool(value))
 
+    def set_knobs(self, knobs: Dict[str, Any]) -> Iterator[Tuple[str, Optional[Dict[str, Any]], str]]:
+        """Each DSP knob `knobs` names, one Set* command each in DSP_KNOBS'
+        order (`filter1x` rides with the filter): (knob, what HQPlayer took —
+        the filter with its 1x slot —, "") or (knob, None, its refusal). A
+        caller acts between them, or stops."""
+        filter1x = knobs.get("filter1x")
+        for knob in DSP_KNOBS:
+            if knobs.get(knob) is None:
+                continue
+            if self.set_knob(knob, knobs[knob], filter1x):
+                yield knob, ({knob: knobs[knob], "filter1x": filter1x}
+                             if knob == "filter" and filter1x is not None
+                             else {knob: knobs[knob]}), ""
+            else:
+                yield knob, None, self.refusal()
+
     def apply_settings(self, *, mode: Optional[int] = None, rate: Optional[int] = None,
                        filter: Optional[int] = None, filter1x: Optional[int] = None,
                        shaper: Optional[int] = None, matrix_profile: Optional[str] = None,
                        convolution: Optional[bool] = None) -> tuple:
-        """Apply any subset of the DSP knobs, one Set* command each, in
-        DSP_KNOBS' order. Returns (applied, failed) — a refused knob carries
-        HQPlayer's reason and the rest still go."""
-        knobs = {"mode": mode, "rate": rate, "filter": filter, "shaper": shaper,
-                 "matrix_profile": matrix_profile, "convolution": convolution}
+        """Apply any subset of the DSP knobs (set_knobs). Returns (applied,
+        failed) — a refused knob carries HQPlayer's reason and the rest still
+        go."""
         applied: Dict[str, Any] = {}
         failed: Dict[str, str] = {}
-        for knob in DSP_KNOBS:
-            if knobs[knob] is None:
-                continue
-            if self.set_knob(knob, knobs[knob], filter1x):
-                applied[knob] = knobs[knob]
-                if knob == "filter" and filter1x is not None:
-                    applied["filter1x"] = filter1x
+        for knob, taken, refusal in self.set_knobs({
+                "mode": mode, "rate": rate, "filter": filter, "filter1x": filter1x,
+                "shaper": shaper, "matrix_profile": matrix_profile, "convolution": convolution}):
+            if taken is None:
+                failed[knob] = refusal
             else:
-                failed[knob] = self.refusal()
+                applied.update(taken)
         return applied, failed
 
 

@@ -30,7 +30,7 @@ from lrclib import LrclibService
 from playback import queue as queue_mod
 from playback import sessions
 from playback.base import ReorderPlan
-from playback.hqp_backend import Building, _get_hqp, _hqp_lock
+from playback.hqp_backend import Building, BuildGaveUp, _get_hqp, _hqp_lock, through_builds
 from playback.hqp_meter import meter as hqp_meter
 from playback.manager import OutputHeld, active_hqp_endpoint, manager
 from playback.queue import resolved_artwork as _resolved_artwork
@@ -1430,68 +1430,57 @@ def now_playing_detail(media_file_id: int = None, track_id: str = None,
     return row
 
 
-@router.post("/play")
-def play():
+def _transport(intent: bool, command: str, *args) -> dict:
+    """One transport command on the active output — a play intent through
+    the gate that (re)attaches it — and whether it was taken; one that was
+    not carries the output's own words (`refusal`), which the assistant
+    quotes."""
     try:
-        return {"ok": manager.ensure_active().play()}
+        b = manager.ensure_active() if intent else manager.backend()
+        ok = getattr(b, command)(*args)
     except Exception as e:
         raise _output_error(e)
+    return {"ok": True} if ok else {"ok": False, "refusal": b.refusal()}
+
+
+@router.post("/play")
+def play():
+    return _transport(True, "play")
 
 
 @router.post("/pause")
 def pause():
-    try:
-        return {"ok": manager.backend().pause()}
-    except Exception as e:
-        raise _output_error(e)
+    return _transport(False, "pause")
 
 
 @router.post("/stop")
 def stop():
-    try:
-        return {"ok": manager.backend().stop()}
-    except Exception as e:
-        raise _output_error(e)
+    return _transport(False, "stop")
 
 
 @router.post("/next")
 def next_track():
-    try:
-        return {"ok": manager.ensure_active().next()}
-    except Exception as e:
-        raise _output_error(e)
+    return _transport(True, "next")
 
 
 @router.post("/previous")
 def previous_track():
-    try:
-        return {"ok": manager.ensure_active().previous()}
-    except Exception as e:
-        raise _output_error(e)
+    return _transport(True, "previous")
 
 
 @router.post("/volume/up")
 def volume_up():
-    try:
-        return {"ok": manager.backend().volume_up()}
-    except Exception as e:
-        raise _output_error(e)
+    return _transport(False, "volume_up")
 
 
 @router.post("/volume/down")
 def volume_down():
-    try:
-        return {"ok": manager.backend().volume_down()}
-    except Exception as e:
-        raise _output_error(e)
+    return _transport(False, "volume_down")
 
 
 @router.post("/volume")
 def set_volume(req: VolumeRequest):
-    try:
-        return {"ok": manager.backend().set_volume(req.level)}
-    except Exception as e:
-        raise _output_error(e)
+    return _transport(False, "set_volume", req.level)
 
 
 @router.post("/seek")
@@ -1662,12 +1651,30 @@ def _filler_append(item, gen: int, *, position: str = "end",
     """Append one filler item, retrying through control-link blips — a DHT
     announce window can drop a single add while the audio stream itself rides
     on, and silently losing an already-fetched track leaves a "buffering"
-    ghost in the album UI. None = generation superseded (caller must stop);
-    False = dropped after retries."""
+    ghost in the album UI. A build HQPlayer is in — it answers nothing — is
+    waited out (hqp_backend.through_builds), off the queue lock; one it does
+    not finish, or an HQPlayer gone during it, stops the filler, said in the
+    log. None = generation superseded or the filler stopped (caller must
+    stop); False = dropped after retries."""
+    def moved_on() -> Optional[str]:
+        return "the queue moved on" if manager.queue.generation != gen else None
+
+    def elsewhere() -> bool:
+        b = manager.active
+        return moved_on() is not None or b is None or b.id != "hqplayer"
+
     for attempt in range(4):
         if attempt:
             time.sleep(5)
-        added = manager.append([item], position, generation=gen, after=after)
+        try:
+            added = through_builds(
+                lambda: manager.append([item], position, generation=gen, after=after),
+                needed=moved_on, until=elsewhere)
+        except BuildGaveUp as e:
+            if e.failed:
+                logger.warning("filler: stopped — %s; %s — %s and what follows were not "
+                               "queued", e, item.artist, item.title)
+            return None
         if added is None:
             return None
         if added:
@@ -3586,15 +3593,19 @@ def _radio_start(req: RadioStartRequest):
             status_code=409,
             detail="This track isn't analysed yet — play it a moment, then start radio.")
 
-    # seed_uuid is resolved for BOTH an owned (req.track_id) and a phantom
-    # (req.track_uuid) seed — pass it as the logical seed so a radio started
-    # from a streamed track gets a proper session card (previously this passed
-    # the owned-only req.track_id, which was None for a phantom seed).
-    sessions.rotate_session(manager.queue, 'radio', seed_track_id=seed_uuid,
-                            seed_media_file_id=req.track_id)
     # Clear everything around the reading slot — the seed plays on while the
-    # batch flows in behind. New generation supersedes any prior filler.
-    gen = manager.clear_for_radio()
+    # batch flows in behind. New generation supersedes any prior filler. The
+    # session rotates once the output answered: one that could not be asked
+    # (HQPlayer building, the output lent or gone) refuses with history
+    # intact. seed_uuid is resolved for BOTH an owned (req.track_id) and a
+    # phantom (req.track_uuid) seed — the logical seed, so a radio started
+    # from a streamed track gets a proper session card.
+    try:
+        gen = manager.clear_for_radio(
+            lambda: sessions.rotate_session(manager.queue, 'radio', seed_track_id=seed_uuid,
+                                            seed_media_file_id=req.track_id))
+    except (BrokenPipeError, ConnectionError, OSError) as e:
+        raise _output_error(e)
 
     _radio_played = {seed_uuid}
     _radio_last_artist = seed_row["artist"]

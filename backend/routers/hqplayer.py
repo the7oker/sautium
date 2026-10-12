@@ -8,7 +8,8 @@ from the user_settings key/value store; with `dsp=1` (the screen itself)
 also how each picker entry runs on this HQPlayer (`headroom`,
 playback.hqp_load) and the benchmark's block (playback.hqp_benchmark).
 Writes go through /config (any subset of filter / mode / rate / shaper /
-matrix_profile), /favorites (add/remove a filter name from the favourites
+matrix_profile / convolution — the last the assistant's switch, no control
+on the screen), /favorites (add/remove a filter name from the favourites
 list), /benchmark and /cuda; /meter records a page's peak-meter interest
 (its readings ride the page's /api/events stream).
 
