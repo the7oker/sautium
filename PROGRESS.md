@@ -634,6 +634,27 @@ implementation details live in the code, DB and git history.
   the queue all the same, the mirror lost, and HQPlayer gets the queue back
   once it answers; the resume spot names a queue item; listening history
   rotates only once the output took the queue.
+- **The link reviewed again** (2026-10-12). A review of the three link
+  commits found fifteen faults, three high, nearly all regressions of those
+  commits: one file HQPlayer refused
+  kept a re-mirror going round, a lost mirror read as an unhealthy output
+  (so a switch away sent no Stop), and a command sequence held the
+  connection for an album's adds while the poller waited. The fixes: each
+  request takes the connection for itself, and after a command a build or a
+  Stop's teardown may follow it passes on, to the sequence's next request or
+  to a Status the link holds itself; the mirror has one state — in step, a
+  tail mirror, lost, drifted — and HQPlayer is back only when it ended a
+  connection, never on a reconnect of our own; what HQPlayer refuses leaves
+  the queue only when it took the rest of the batch, and a person's replace
+  or append refused whole commits nothing; a play press on a playlist that
+  is no mirror rebuilds it in the background; the switch-away Stop is judged
+  on what HQPlayer was given and the switch waits a second at most for it;
+  one line for an HQPlayer that refuses people, a filler that never sleeps,
+  a benchmark put-back the owner's newer change supersedes. Lesson: a test
+  that guards a fix must fail on the code without it — four of this round's
+  passed on the old code for the wrong reason (a Stop the fixture's own
+  attach had sent, adds the fixture had made), caught only by running each
+  against the parent commit and against a mutation of the new code.
 - **Stop-clear-add-select-play sequence** for `play_track`/`play_album`. Without
   explicit stop, HQPlayer occasionally started the wrong track from the
   existing queue.

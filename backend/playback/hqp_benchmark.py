@@ -187,6 +187,10 @@ _halt = threading.Event()
 _thread: Optional[threading.Thread] = None
 # The run's own connection, for a cancel to wake a read it is waiting on.
 _live: Optional["_Link"] = None
+# The put-back each run cut short still owes HQPlayer, by run id: a DSP item of
+# the HQPlayer's link (link, item) as of the run's end — a person's newer DSP
+# change, or a switch away, supersedes it, and HQPlayer is theirs then.
+_owed: Dict[int, tuple] = {}
 _state: Dict[str, Any] = {"running": False, "cancel_requested": False, "endpoint_id": None,
                           "mode": None, "point": 0, "total": 0, "point_label": "",
                           "eta_s": None, "started_at": None, "outcome": None, "note": None}
@@ -925,11 +929,10 @@ def start(mode: Optional[str] = None, *, fixed_volume_ok: bool = False) -> Dict[
         raise BenchmarkRefused("Pick this HQPlayer as the audio output first")
     from playback import hqp_link
     from playback.hqp_backend import _stream_mode
-    building = BenchmarkRefused("HQPlayer is building the filter — start the benchmark once "
-                                "it is done")
     link = hqp_link.selected()
-    if link.build.silent() is not None:
-        raise building
+    busy = link.busy()
+    if busy is not None:
+        raise BenchmarkRefused(f"{busy}. Start the benchmark once it answers again.")
     if not _stream_mode():
         import main
         import model_cache
@@ -951,10 +954,10 @@ def start(mode: Optional[str] = None, *, fixed_volume_ok: bool = False) -> Dict[
         with link.asking() as c:
             status, st = c.get_status(), c.get_state()
             modes, vr = c.get_modes(), c.volume_range()
-    except hqp_link.Building:
-        raise building
+    except (hqp_link.Building, hqp_link.NotAnswering) as e:
+        raise BenchmarkRefused(f"{e}. Start the benchmark once it answers again.")
     except (BrokenPipeError, ConnectionError, OSError):
-        raise BenchmarkRefused("HQPlayer is not answering")
+        raise BenchmarkRefused(hqp_link.NOT_ANSWERING)
     if status is None or st is None:
         raise BenchmarkRefused("HQPlayer did not report its state")
     if modes is None:
@@ -1122,7 +1125,10 @@ def _measure(ep: dict, kind: str) -> Tuple[str, Optional[str]]:
             reached, restore_note = _restore(link, pre, own, mute)
             note = "; ".join(x for x in (note, restore_note) if x) or None
             # An HQPlayer that did not answer the restore keeps the run
-            # open: the next attach, or its return, puts it back (recover).
+            # open: the next attach, or its next answer, puts it back
+            # (recover) — unless the owner changes it first.
+            if not reached:
+                _owe(run_id)
             _close_run(run_id, outcome, note, stats, finished=reached)
         return outcome, note
     finally:
@@ -1715,19 +1721,34 @@ class _OnLink:
         return result
 
 
-def recover(endpoint_id: int, link) -> None:
+def _owe(run_id: int, link=None) -> tuple:
+    """The put-back of a run cut short, owed from now: a DSP item of the
+    HQPlayer's link (dsp_knob) — what the owner changes after it supersedes
+    it. Made once per run and link; a link made afresh owes it anew."""
+    from playback import hqp_link
+    link = link if link is not None else hqp_link.selected()
+    with _lock:
+        owed = _owed.get(run_id)
+        if owed is None or owed[0] is not link:
+            owed = _owed[run_id] = (link, link.item("dsp_knob", link.accept("dsp")))
+        return owed
+
+
+def recover(endpoint_id: int, link, *, again: Callable[[], None] = lambda: None) -> None:
     """A run cut short — the process died in the middle of it, or HQPlayer
-    went away and did not answer the restore — left HQPlayer stopped on its
-    test settings, maybe lowered and holding the signals. The next time
-    HQPlayer answers (the attach, or the poller seeing it come back), before
+    went away or stayed silent through the restore — left HQPlayer stopped
+    on its test settings, maybe lowered and holding the signals. The next
+    time HQPlayer answers (the attach, or the poller's next answer), before
     anything reads its playlist: put the owner's settings back on its link —
     only while HQPlayer still shows a mark of the run (its signals in the
-    playlist, the volume it lowered to, the selection it set last); a
-    HQPlayer changed since is the owner's again. One command sequence: a
-    setting HQPlayer builds holds the link as any other, and the caller —
-    the attach, the poller — goes on once the build begins, the rest put
-    back behind it (BuildWatch.waking). A HQPlayer that drops the connection
-    meanwhile is tried at its next return."""
+    playlist, the volume it lowered to, the selection it set last), and
+    never past a change the owner made since: the put-back is a DSP item
+    (_owe), a newer DSP change or a switch away supersedes it, and the run is
+    closed as left to the owner. One command sequence: a setting HQPlayer
+    builds holds the link as any other, and the caller — the attach, the
+    poller — goes on once the build begins, the rest put back behind it
+    (BuildWatch.waking). Not put back — HQPlayer building, silent, gone —
+    `again` asks for it at HQPlayer's next answer."""
     if running():
         return
     run = db_query_one("""
@@ -1737,12 +1758,13 @@ def recover(endpoint_id: int, link) -> None:
     """, {"e": endpoint_id})
     if run is None:
         return
+    _, item = _owe(run["id"], link)
     ready = threading.Event()
 
     def put_back() -> None:
         try:
             with link.build.waking(ready):
-                _put_run_back(link, run)
+                _put_run_back(link, run, item, again)
         except Exception:       # the thread's boundary: recorded, never lost
             logger.exception("HQPlayer benchmark run %s: putting it back failed", run["id"])
         finally:
@@ -1751,18 +1773,29 @@ def recover(endpoint_id: int, link) -> None:
     ready.wait()
 
 
-def _put_run_back(link, run: dict) -> None:
+def _put_run_back(link, run: dict, item, again: Callable[[], None]) -> None:
+    from playback.hqp_link import Dropped
     try:
-        with link.command():
+        with link.command(item=item):
             note = _recover(_OnLink(link), run)
+    except Dropped as e:
+        if link.superseded(item) is None:
+            # Lent, let go or closed: the next attach tries again
+            logger.info("HQPlayer benchmark run %s not put back yet: %s", run["id"], e)
+            return
+        note = f"cut short; not put back — {e}: HQPlayer was left as it was set since"
     except (_Reopened, _Lost, BrokenPipeError, ConnectionError, OSError) as e:
         logger.info("HQPlayer benchmark run %s not put back yet: %s", run["id"], e)
+        again()
         return
     if note is None:
+        again()
         return
     db_execute("""UPDATE hqp_benchmark_runs SET finished_at = now(), outcome = 'interrupted',
                          note = concat_ws('; ', note, %(n)s::text)
                    WHERE id = %(id)s""", {"n": note, "id": run["id"]})
+    with _lock:
+        _owed.pop(run["id"], None)
     logger.info("HQPlayer benchmark run %s recovered: %s", run["id"], note)
 
 

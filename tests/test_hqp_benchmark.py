@@ -18,6 +18,7 @@ output is an audible action, not a test.
 import json
 import random
 import sys
+import threading
 import time
 from pathlib import Path
 
@@ -762,6 +763,12 @@ def run(dsn, signals, library, monkeypatch):
     if bench.running():
         bench.cancel()
         _wait(lambda: not bench.running(), 20)
+    # The job's thread gives the output back after running() turned False:
+    # left alive it attaches HQPlayer again on the next test's fake
+    job = bench._thread
+    if job is not None:
+        job.join(20)
+        assert not job.is_alive(), "the benchmark's thread outlived its test"
     if mgr.active is not None:
         mgr.active.shutdown()
     _fresh_links()
@@ -1227,6 +1234,38 @@ def test_a_run_hqplayer_left_is_put_back_when_it_returns(run, monkeypatch):
     assert "put back when it answered again" in note and "volume" not in note.split("; ")[-1]
 
 
+def test_a_put_back_owed_gives_way_to_the_owners_newer_change(run, monkeypatch):
+    """A run HQPlayer left in the middle — nobody could put it back — owes
+    its put-back as a DSP item as of the run's end: the owner's filter
+    change, made once HQPlayer answers again and before the put-back goes,
+    supersedes it — HQPlayer keeps the owner's filter, and the run is closed
+    as left to the owner."""
+    fake, mgr = run.fake, run.mgr
+    fake.jitter = 0.2
+    monkeypatch.setattr(bench, "SETTLE_CAP_S", 1.0)
+    # The poller's recovery, once HQPlayer answers again, waits for the
+    # owner's change to go first
+    asked, go = threading.Event(), threading.Event()
+    recover = hb.HqpBackend._recover
+    monkeypatch.setattr(hb.HqpBackend, "_recover",
+                        lambda self: (asked.set(), go.wait(15), recover(self))[2])
+    bench.start()
+    assert _wait(lambda: run.point() >= 3, 20)
+    fake.close()                        # powered off in the middle of a point
+    assert _wait(lambda: not bench.running(), 30)
+    assert run.q("SELECT finished_at IS NULL FROM hqp_benchmark_runs") == [(True,)]
+    fake.come_back()                    # the run's last selection, its lowered volume
+    assert _wait(lambda: (mgr.active.poke(), asked.is_set())[1], 20)
+    out = hb.change_dsp({"filter": 0, "filter1x": 0, "shaper": 1})    # the owner's
+    assert out["ok"], out
+    owners = fake.settings()
+    go.set()                                         # the put-back may go now
+    assert _wait(lambda: (mgr.active.poke(), run.q(
+        "SELECT finished_at IS NOT NULL FROM hqp_benchmark_runs") == [(True,)])[1], 20)
+    assert fake.settings() == owners
+    assert "left as it was set since" in run.q("SELECT note FROM hqp_benchmark_runs")[0][0]
+
+
 def _cut_short_run(r: Run, **kw):
     """A run row as a run cut short leaves it."""
     row = dict(hqp_endpoint_id=r.endpoint_id, hqp_engine="6.2.3", mode="SDM (DSD)", points_planned=8,
@@ -1291,9 +1330,15 @@ def test_a_hold_that_cannot_begin_leaves_nothing_held(run, monkeypatch):
 def test_an_hqplayer_back_from_a_restart_is_lent_before_the_next_play(run):
     # HQPlayer restarted: the backend knows its mirror is gone until HQPlayer
     # gets the queue back — the run needs none of it (2026-10-03: "not the
-    # attached output" right after an Embedded restart)
+    # attached output" right after an Embedded restart). Its playlist empty
+    # and the loss a refusal's, the mirror stays lost until a play press: a
+    # loss through a silence is given back at the poller's next answer, and a
+    # playlist that is the queue reads as in step — either maybe before the
+    # next line.
     b = run.mgr.active
-    b.lose_mirror("HQPlayer came back with a different playlist (restarted?)")
+    with run.fake._lock:
+        run.fake.playlist = []
+    b.lose_mirror("HQPlayer came back with a different playlist (restarted?)", by="refusal")
     assert b._mirror == "lost"
     bench.start()
     assert _wait(lambda: not bench.running(), 30)

@@ -25,7 +25,6 @@ from db_pool import (
     db_query_one as _db_query_one,
 )
 from ensemble_instruments import present_instruments
-from hqplayer_client import PlaybackState, format_time
 from lrclib import LrclibService
 from playback import queue as queue_mod
 from playback import sessions
@@ -1169,45 +1168,6 @@ def get_status():
     return manager.latest_status
 
 
-# Legacy synchronous status (rarely needed; UI uses cached /status above
-# and SSE for live updates). Kept for tools that explicitly want a fresh
-# read direct from HQPlayer.
-@router.get("/status/fresh")
-def get_status_fresh():
-    """Force a fresh HQPlayer status read, on its link. Slower (may hang up
-    to the question's wait if HQPlayer is unresponsive)."""
-    try:
-        with hqp_link.selected().asking() as hqp:
-            status = hqp.get_status()
-        if status is None:
-            return {"state": "unknown"}
-
-        state_names = {
-            PlaybackState.STOPPED: "stopped",
-            PlaybackState.PAUSED: "paused",
-            PlaybackState.PLAYING: "playing",
-            PlaybackState.STOPREQ: "stopping",
-        }
-
-        return {
-            "state": state_names.get(status.state, "unknown"),
-            "artist": status.artist,
-            "album": status.album,
-            "song": status.song,
-            "genre": status.genre,
-            "position": status.position,
-            "length": status.length,
-            "volume": status.volume,
-            "process_speed": status.process_speed,
-            "track_index": status.track_index,
-            "progress_percent": round(status.progress_percent, 1),
-            "position_formatted": format_time(status.position),
-            "length_formatted": format_time(status.length),
-        }
-    except Exception:
-        return {"state": "disconnected"}
-
-
 def _stream_quality(provider_id: Optional[str]) -> str:
     """'lossless' / 'lossy' for the serving provider — the preview analog of the
     owned file-quality badge (a stream has no file bit-depth)."""
@@ -1655,18 +1615,18 @@ def jump(req: JumpRequest):
 
 def _filler_append(item, gen: int, *, position: str = "end",
                    after=None) -> Optional[bool]:
-    """Append one filler item, retrying through control-link blips — a DHT
-    announce window can drop a single add while the audio stream itself rides
-    on, and silently losing an already-fetched track leaves a "buffering"
-    ghost in the album UI. A build HQPlayer is in — it answers nothing — is
-    waited out (hqp_link.through), off the queue lock. One it does not
-    finish, or an HQPlayer gone during it, loses nothing: the output's
-    mirror is marked lost and the item goes into the queue alone, as what
-    follows does — HQPlayer gets the queue back when it answers again. An
-    add — or a wait — the HQPlayer's link let go of (another HQPlayer was
-    chosen) is tried again through the manager, on the output it has then.
-    None = generation superseded (caller must stop); False = dropped after
-    retries."""
+    """Append one filler item through the manager, on the output there is.
+    A build HQPlayer is in — it answers nothing — is waited out
+    (hqp_link.through), off the queue lock. One it does not finish, or an
+    HQPlayer gone during it, loses nothing: the output's mirror is marked
+    lost and the item goes into the queue alone, as what follows does —
+    HQPlayer gets the queue back when it answers again. An add — or a wait —
+    the link did not send because the output changed meanwhile (another
+    HQPlayer chosen, the output lent) goes again once that change is over
+    (PlaybackManager.wait_for_output_change), on the output it left; the
+    node stopping ends the filler. A file the output refused is not offered
+    again. None = the queue moved on, or the node stops (the caller stops);
+    False = not added."""
     def moved_on() -> Optional[str]:
         return "the queue moved on" if manager.queue.generation != gen else None
 
@@ -1674,34 +1634,32 @@ def _filler_append(item, gen: int, *, position: str = "end",
         b = manager.active
         return moved_on() is not None or b is None or b.id != "hqplayer"
 
-    pause = False
-    for attempt in range(4):
-        if pause:
-            time.sleep(5)
-        pause = True
+    for _ in range(4):
+        seen = manager.output_changes()
         try:
             added = through(
                 lambda: manager.append([item], position, generation=gen, after=after),
                 needed=moved_on, until=elsewhere)
         except GaveUp as e:
-            if moved_on() is not None:
+            if moved_on() is not None or hqp_link.stopping() is not None:
                 return None
             active = manager.active
             if e.failed and active is not None:
                 active.lose_mirror(f"filler: {e}; {item.artist} — {item.title} and what "
                                    "follows go into the queue alone")
-            pause = False           # the queue, or the output it has now, takes it at once
-            continue
+            continue                # the queue, or the output it has now, takes it at once
         except Dropped as e:
-            logger.info("filler: %s — %s not added (%s), tried again", item.artist,
-                        item.title, e)
+            if hqp_link.stopping() is not None:
+                return None
+            logger.info("filler: %s — %s not added (%s); again once the output change is over",
+                        item.artist, item.title, e)
+            if not manager.wait_for_output_change(seen, hqp_link.BUILD_LIMIT_S):
+                break
             continue
         if added is None:
             return None
-        if added:
-            return True
-    logger.warning("filler: dropped %s — %s after add retries",
-                   item.artist, item.title)
+        return bool(added)          # 0: the output refused the file (one notice says so)
+    logger.warning("filler: dropped %s — %s, the output did not settle", item.artist, item.title)
     return False
 
 

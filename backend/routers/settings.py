@@ -2072,11 +2072,12 @@ def get_output_prefs() -> Dict[str, Any]:
         "exclusive": bool(_read("output.local_exclusive")),
         "renderer": _read("output.dlna_renderer"),
         "stream_quality": _read("output.stream_quality") or "lossless",
-        # What the output is lent to (the HQPlayer benchmark), and whether
-        # HQPlayer is building a setting (playback.hqp_link.BuildWatch) —
-        # the MCP assistant reads both to keep its HQPlayer tools off meanwhile.
+        # What the output is lent to (the HQPlayer benchmark), and what
+        # HQPlayer's link refuses a person's command with now, in its words
+        # (HqpLink.busy) — the MCP assistant quotes both to keep its HQPlayer
+        # tools off meanwhile.
         "held": hold["label"] if hold else None,
-        "building": hqp_link.selected().build.silent() is not None,
+        "busy": hqp_link.selected().busy(),
     }
 
 
@@ -2098,6 +2099,9 @@ def put_output_prefs(req: OutputPrefs) -> Dict[str, Any]:
 
 def _put_output_prefs(req: OutputPrefs) -> Dict[str, Any]:
     from playback.manager import manager
+    # Every field is checked before anything is written or chosen: a 400
+    # after the HQPlayer address was applied left the output on a link the
+    # choice had retired.
     if req.type is not None and req.type not in ("hqplayer", "local", "dlna", "browser"):
         raise HTTPException(status_code=400, detail=f"unknown output type: {req.type}")
     if req.type == "local":
@@ -2109,6 +2113,10 @@ def _put_output_prefs(req: OutputPrefs) -> Dict[str, Any]:
                        "(launcher mode) for WASAPI/ASIO/CoreAudio output")
     if req.type == "dlna" and not (req.renderer or _read("output.dlna_renderer")):
         raise HTTPException(status_code=409, detail="No DLNA renderer selected")
+    if req.stream_quality is not None and req.stream_quality not in ("lossless", "opus_192",
+                                                                     "opus_96"):
+        raise HTTPException(status_code=400, detail=f"unknown stream quality: {req.stream_quality}")
+    address = None
     if req.hqplayer is not None:
         # The picker lists every HQPlayer found or added; the tapped one
         # becomes THE HQPlayer this node drives — its address is the
@@ -2116,16 +2124,18 @@ def _put_output_prefs(req: OutputPrefs) -> Dict[str, Any]:
         host = str(req.hqplayer.get("host") or "").strip()
         if not host:
             raise HTTPException(status_code=400, detail="hqplayer.host is required")
-        port = req.hqplayer.get("port") or 4321
+        raw = req.hqplayer.get("port") or 4321
         try:
-            port = int(port)
+            port = int(raw)
         except (TypeError, ValueError):
-            raise HTTPException(status_code=400, detail=f"hqplayer.port is not a port: {port!r}")
-        _apply_hqplayer_address(host, port)
+            port = None
+        if port is None or not 1 <= port <= 65535:
+            raise HTTPException(status_code=400, detail=f"hqplayer.port is not a port: {raw!r}")
+        address = (host, port)
+
+    if address is not None:
+        _apply_hqplayer_address(*address)
     if req.stream_quality is not None:
-        if req.stream_quality not in ("lossless", "opus_192", "opus_96"):
-            raise HTTPException(status_code=400,
-                                detail=f"unknown stream quality: {req.stream_quality}")
         _write("output.stream_quality", req.stream_quality)
     if req.type is not None:
         _write("output.type", req.type)

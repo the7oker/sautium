@@ -144,12 +144,14 @@ def _output_prefs() -> dict:
 
 def _hqp_gate() -> None:
     """Refuses when HQPlayer is not the chosen output, while it is lent to
-    the benchmark, and while it builds a setting. Every HQPlayer tool comes
-    through here, so this is the one place the rule has to exist. It exists
-    because the tools are named for what they do and an agent will reach
-    for one: asking to change a filter, or to skip a track, while the sound
-    is going to a phone over DLNA would reconfigure — or start — a device
-    in another room, with the canonical queue none the wiser."""
+    the benchmark, and while its link refuses people — a build, one it did
+    not finish, a silence — in the backend's own words (`busy`). Every
+    HQPlayer tool comes through here, so this is the one place the rule has
+    to exist. It exists because the tools are named for what they do and an
+    agent will reach for one: asking to change a filter, or to skip a track,
+    while the sound is going to a phone over DLNA would reconfigure — or
+    start — a device in another room, with the canonical queue none the
+    wiser."""
     prefs = _output_prefs()
     active = prefs.get("type") or ""
     if active and active != "hqplayer":
@@ -165,11 +167,9 @@ def _hqp_gate() -> None:
             "come back when it finishes; the user can cancel it on the HQPlayer "
             "screen."
         )
-    if prefs.get("building"):
-        raise ConnectionError(
-            "HQPlayer is building the filter — it answers nothing until the build "
-            "is done; its transport and DSP controls come back then."
-        )
+    if prefs.get("busy"):
+        raise ConnectionError(f"{prefs['busy']}. Its transport and DSP controls are refused "
+                              "meanwhile.")
 
 
 def _hqp_state() -> dict:
@@ -178,10 +178,9 @@ def _hqp_state() -> dict:
     HQPlayer nothing itself."""
     _hqp_gate()
     state = _backend_get("/api/hqplayer/state", {}) or {}
-    if state.get("building"):
-        raise ConnectionError(
-            "HQPlayer is building the filter — it answers nothing until the build "
-            "is done; its transport and DSP controls come back then.")
+    if state.get("busy"):
+        raise ConnectionError(f"{state['busy']}. Its transport and DSP controls are refused "
+                              "meanwhile.")
     if state.get("held"):
         raise ConnectionError(
             f"HQPlayer is busy: {state['held']}. Its controls come back when it finishes.")

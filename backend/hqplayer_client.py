@@ -395,7 +395,7 @@ class HQPlayerClient:
         self.losses = 0
         self._outcomes = threading.local()
         # Called with every outcome, failures and successes alike — the
-        # playback backend's trace listens on its command client.
+        # playback backend's trace listens on its link's client.
         self.on_outcome: Optional[Callable[[CommandOutcome], None]] = None
 
     @classmethod

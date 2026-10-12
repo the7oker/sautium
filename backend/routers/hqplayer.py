@@ -150,7 +150,7 @@ def get_state(dsp: bool = False) -> Dict[str, Any]:
     if building is not None:
         # HQPlayer answers nothing while it builds: the screen keeps what it
         # read last and says why its controls wait.
-        return {**response, "connected": True, "building": building}
+        return {**response, "connected": True, "building": building, "busy": link.busy()}
 
     try:
         with link.asking() as hqp:
@@ -166,7 +166,7 @@ def get_state(dsp: bool = False) -> Dict[str, Any]:
             status = hqp.get_status() if dsp else None
             volume_range = hqp.volume_range() if dsp else None
     except Building as e:
-        return {**response, "connected": True, "building": e.state}
+        return {**response, "connected": True, "building": e.state, "busy": str(e)}
     except (BrokenPipeError, ConnectionError, OSError) as e:
         return {**response, "error": str(e)}
 
@@ -293,6 +293,16 @@ def _benchmark_block(ep: Optional[dict], state: Optional[dict], lists: dict,
     return out
 
 
+def _busy(e: Exception) -> HTTPException:
+    """409 for a request HQPlayer's link does not send now: lent to the
+    benchmark (named by its job — the link only knows it is lent), building
+    a setting, answering nothing, or superseded by a newer intent. Busy, not
+    broken."""
+    hold = manager.held
+    return HTTPException(status_code=409,
+                         detail=str(OutputHeld(hold)) if hold is not None else str(e))
+
+
 def _refuse_while_held() -> None:
     """A lent output (the benchmark drives HQPlayer) takes no volume change
     from here (a DSP change checks it in change_dsp): it would land in the
@@ -312,12 +322,12 @@ def set_config(req: ConfigRequest) -> Dict[str, Any]:
     knob's outcome — taken, or refused in HQPlayer's words — and, when
     HQPlayer builds past a moment, `building` at once with the knobs still
     to go; the rest follows behind the answer. 409 while the output is lent,
-    HQPlayer builds or answers nothing past a short silence, 503 when it
-    cannot be reached."""
+    HQPlayer builds or answers nothing past a short silence, or a newer
+    intent took over; 503 when it cannot be reached."""
     try:
         return change_dsp(req.model_dump())
-    except (OutputHeld, Building, NotAnswering) as e:
-        raise HTTPException(status_code=409, detail=str(e))
+    except (OutputHeld, Building, Dropped, NotAnswering) as e:
+        raise _busy(e)
     except (BrokenPipeError, ConnectionError, OSError) as e:
         raise HTTPException(status_code=503, detail=f"HQPlayer not reachable: {e}")
 
@@ -353,9 +363,7 @@ def nudge_volume(req: VolumeRequest) -> Dict[str, Any]:
             ok = hqp.set_volume(new_vol)
             refusal = None if ok else hqp.refusal()
     except (Building, Dropped, NotAnswering) as e:
-        hold = manager.held
-        raise HTTPException(status_code=409,
-                            detail=str(OutputHeld(hold)) if hold is not None else str(e))
+        raise _busy(e)
     except (BrokenPipeError, ConnectionError, OSError) as e:
         raise HTTPException(status_code=503, detail=f"HQPlayer not reachable: {e}")
     if not ok:
@@ -398,14 +406,12 @@ def get_benchmark() -> Dict[str, Any]:
         return out
     link = hqp_link.selected()
     try:
-        link.build.refuse()
+        link.refuse()
         with link.asking() as hqp:
             state, modes = hqp.get_state(), hqp.get_modes()
             filters, shapers, rates = hqp.get_filters(), hqp.get_shapers(), hqp.get_rates()
-    except (Building, Dropped) as e:
-        hold = manager.held
-        raise HTTPException(status_code=409,
-                            detail=str(OutputHeld(hold)) if hold is not None else str(e))
+    except (Building, Dropped, NotAnswering) as e:
+        raise _busy(e)
     except (BrokenPipeError, ConnectionError, OSError) as e:
         raise HTTPException(status_code=503, detail=f"HQPlayer not reachable: {e}")
     if state is None:

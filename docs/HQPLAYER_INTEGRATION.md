@@ -273,7 +273,8 @@ still goes (only while it plays or pauses an entry of ours), everything
 else gives up, then it closes; picking the same HQPlayer again keeps its
 link and its build watched, and the link dials the alias picked last (on a
 Docker node the host's address, not a loopback that reaches nothing). While the benchmark holds the output the link is
-lent: nothing of it goes out. The node stop closes every link first
+lent: nothing of it goes out, and a person's command meanwhile (the
+HQPlayer screen's DSP change, the volume) is refused with 409 naming the job. The node stop closes every link first
 (`hqp_link.close_all`): its waiters and owed items give up at once and each
 socket is shut down and closed — a read blocked on it ends on Linux, macOS
 and Windows — the meter's included.
@@ -319,8 +320,11 @@ comes after the control port answers again — so neither can end the wait.
   lost the mirror, and gets the queue back — below).
 - **People are refused, background work waits.** A command someone is
   waiting for — a play intent, a transport button, a queue edit, the radio
-  start, a DSP change, the volume — is refused with 409 "HQPlayer is
-  building the filter" (`Building`). The play gate's liveness probe
+  start, a DSP change, the volume — is refused with 409 in the link's own
+  words (`HqpLink.refuse`): building the filter (`Building`), a build it did
+  not finish (restart HQPlayer), or not answering (`NotAnswering`). The
+  output settings carry that line (`busy`), and both assistants' gates quote
+  it, beside the benchmark's hold. The play gate's liveness probe
   (`HqpLink.probe`) is a question on the link: a command on its way is
   answered first, and its silence turning out a build is busy, never
   "offline"; so is a probe HQPlayer takes and leaves unanswered
@@ -336,7 +340,10 @@ comes after the control port answers again — so neither can end the wait.
   filler loses nothing to it: what it took goes into the queue alone, the
   mirror marked lost. A wait whose link was let go (another HQPlayer
   picked) does not stop a filler either: it goes on through the manager, on
-  the output there is then.
+  the output there is then; an add the link did not send waits for the
+  output change to be over (`PlaybackManager.wait_for_output_change`, an
+  event), never a sleep. The node stopping ends a filler; a file the output
+  refused is not offered again.
 - **Output switch, address change.** A switch away stops HQPlayer if it
   plays or pauses an entry of what it was given — the queue as it stood at
   the switch, never as it is once the Stop goes; another controller's entry
@@ -368,10 +375,12 @@ comes after the control port answers again — so neither can end the wait.
   broke — an output lent meanwhile, or a newer intent that supersedes the
   rest (another DSP change, a switch away) ends the change there: the knobs
   after it are reported as not sent. Built, a change made while HQPlayer played
-  resumes the spot it played only if HQPlayer came back stopped (6.2.3 on
-  Windows did; 6.2.4 plays on) — read again right before the resume, on
-  the same hold of the connection, after any build begun meanwhile; a newer
-  intent or another queue drops the resume.
+  an entry of ours resumes that queue track at its second only if HQPlayer
+  came back stopped (6.2.3 on Windows did; 6.2.4 plays on) — read again right
+  before the resume, on the same hold of the connection, after any build
+  begun meanwhile; a newer intent or another queue drops the resume, another
+  controller's entry gets none, and on a playlist that is no mirror the
+  resume is a play press (the queue taken afresh, that track started).
 - **A start is a build.** Play waits for its own answer; a SelectTrack starts
   a stopped HQPlayer by itself (its log: "GoTo 1", then "Play (1/0)"), so a
   slot is resumed as SelectTrack, then Seek — landing in the start's opening
@@ -382,7 +391,9 @@ comes after the control port answers again — so neither can end the wait.
   (`PlayerBackend.queue_start`), so a queue edit meanwhile is refused (409)
   or waits as background work, never parked behind the build. A start that
   meets someone else's build there is not refused — the queue was
-  committed: it waits for the build's end on the link, behind the answer. A paused
+  committed: it waits for the build's end on the link, behind the answer; one
+  a newer intent drops (a Pause first) leaves its slot and second as the
+  spot, for the play press. A paused
   HQPlayer whose playlist is rebuilt is left stopped at its spot, never
   played to be paused again: the status names the spot's slot and carries
   `resume`, Now Playing says "Stopped at m:ss — Play resumes here", the next
@@ -636,7 +647,7 @@ handed the local address on its network. Owned-file tokens are an HMAC of the
 path under the node secret, so they are the same after a backend restart and
 the playlist a remote HQPlayer still holds keeps resolving.
 
-The playlist canary (`_check_drift`) and adopt-on-attach read HQPlayer's
+The playlist canary (`_judge_mirror`) and adopt-on-attach read HQPlayer's
 playlist back through the same rules — a `file://` URI with HQPlayer's
 percent-escapes undone (the stored path, or the path of a copy in its own
 library), a `/file/{token}` URL through the proxy's registry — so both
@@ -668,8 +679,9 @@ own mutations mirror into HQPlayer before the queue commits them, and every
 queue mutation of the manager runs inside `CanonicalQueue.mutation()`: a
 replace plays its first track before its commit, and a removal shifts
 HQPlayer's index first. While a mutation is in flight the canary judges
-nothing either, and its verdict comes before the slot is read, since the
-fallback rests on it. A verdict is kept per (entry, index, queue version): a
+nothing either, nor a read the mirror's state changed under (a loss its
+stale "in step" would undo), and its verdict comes before the slot is read,
+since the fallback rests on it. A verdict is kept per (entry, index, queue version): a
 foreign entry played for an hour is looked for once.
 Until 2026-10-04 the slot came from the index alone and only the canary (every
 30 polls) caught an external edit, so for up to half a minute such a file was
@@ -928,7 +940,7 @@ change — is watched as one ATTEMPT (`backend/playback/hqp_diagnostics.py`, fed
 by `hqp_backend`): what the slot was handed as (a path HQPlayer opens, a
 stream from the media proxy, a CUE cut, a transcode, a preview, a copy in
 HQPlayer's own library) with the PlaylistAdd's final answer, every command of
-the intent with HQPlayer's answer (the command client reports them through
+the intent with HQPlayer's answer (the link's client reports them through
 `on_outcome`), the status for ten seconds after the first transport command
 (state, track, position, speed, buffer fills, the DSP by name) — longer, up to
 a minute, while HQPlayer is still making the start: it says it plays, or its
@@ -939,14 +951,16 @@ seconds, those plays read `unknown`) — what the media
 proxy saw for that file's token (each request's status, range and bytes —
 `MediaProxy.hits`), and, read as it closes, HQPlayer's playlist: whether the
 expected entry is in it and whose entry it plays. A stop, a pause, a DSP change
-or a replaced playlist sent through the backend's own command client (the
+or a replaced playlist sent through the HQPlayer's link (the
 Web UI, the HQPlayer screen, both assistants) ends an attempt as the owner's,
 and so does a DSP change made anywhere — it shows in the status, and a stop
 HQPlayer makes for its build (6.2.3 on Windows did; 6.2.4 plays on) is that
 change, not a failure. A Stop from HQPlayer's own window or another
 controller cannot be told from HQPlayer stopping by itself. Two intents may
 overlap (a Next pressed while a replace still adds): each one's commands
-stay its own steps. The
+stay its own steps. A step the link did not send — a newer intent came
+first, the output was switched away or lent — ends its attempt as
+superseded: interrupted, never "HQPlayer did not answer". The
 last 20 are kept in memory (never in the database), and each gets a verdict,
 checked in this order — positive evidence before any absence of it:
 
@@ -1237,12 +1251,15 @@ cooling — so Sautium measures it instead of predicting it
   lowered and read back and the signals loaded again before the point plays
   again. Everything is put back at the end, on cancel,
   on failure and when the app stops (it waits up to six seconds); a run cut
-  short before that — the process died, HQPlayer stayed away — is put back
-  the next time HQPlayer answers, at the attach or when the poller sees it
-  return, while HQPlayer still shows a mark of the run: its signals, the
+  short before that — the process died, HQPlayer stayed away or silent — is
+  put back the next time HQPlayer answers, at the attach or at the poller's
+  next answer, while HQPlayer still shows a mark of the run: its signals, the
   lowered volume, or the selection it set last (an HQPlayer that restarted
   keeps that, maybe nothing else) — only once HQPlayer answers, never on a
-  trial-stopped box that takes a connection and drops it. Forgetting the
+  trial-stopped box that takes a connection and drops it. The put-back is a
+  DSP item of the HQPlayer's link as of the run's end: a DSP change the
+  owner makes first, or a switch away, supersedes it, and the run is closed
+  as left to the owner. Forgetting the
   HQPlayer takes its measurements with it; it is refused while a run measures
   it. The estimate of a run's length takes the pace of the last run that
   ended or was cancelled (on a trial-mode Embedded the owner cancels before

@@ -70,6 +70,11 @@ class PlaybackManager:
         # What the output is lent to (hold), with the job's progress; every
         # status payload carries it while it lasts.
         self._hold: Optional[dict] = None
+        # Output changes so far, told as each is over: work one cut short — a
+        # filler's add the link did not send — goes on through the output
+        # there is then (wait_for_output_change)
+        self._outputs = 0
+        self._outputs_changed = threading.Condition()
 
         self._latest_status: dict = {"state": "disconnected"}
         self._status_version = 0
@@ -248,7 +253,7 @@ class PlaybackManager:
 
         While the output is lent (hold) only the hold itself switches it
         (`by_hold`); anyone else gets OutputHeld."""
-        with self._active_lock:
+        with self._active_lock, self._changing_output():
             if not by_hold:
                 self._refuse_if_held()
             if (output_type is not None and self._active is not None
@@ -332,6 +337,29 @@ class PlaybackManager:
             self._subs.maintain(prev_idx if prev_idx >= 1 else 1)
             logger.info("playback backend activated: %s", backend.id)
             return told
+
+    @contextmanager
+    def _changing_output(self) -> Iterator[None]:
+        """An output change (activate), told once it is over, however it
+        ends."""
+        try:
+            yield
+        finally:
+            with self._outputs_changed:
+                self._outputs += 1
+                self._outputs_changed.notify_all()
+
+    def output_changes(self) -> int:
+        """How many output changes are over: what wait_for_output_change
+        waits past."""
+        with self._outputs_changed:
+            return self._outputs
+
+    def wait_for_output_change(self, seen: int, timeout: float) -> bool:
+        """Until an output change after `seen` (output_changes) is over, at
+        most `timeout` seconds. Returns whether one is."""
+        with self._outputs_changed:
+            return self._outputs_changed.wait_for(lambda: self._outputs != seen, timeout)
 
     def _reresolve(self, backend: PlayerBackend) -> None:
         """Recompute `QueueItem.play` for every slot against this output

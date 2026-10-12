@@ -26,7 +26,8 @@ def _hqp_gate() -> None:
     refuse when HQPlayer is not the chosen output (a filter change or a
     skip would reconfigure a device in another room while the sound goes
     elsewhere, with the canonical queue none the wiser), while it is lent
-    to the benchmark, and while it builds a setting."""
+    to the benchmark, and while its link refuses people (HqpLink.refuse: a
+    build, one it did not finish, a silence)."""
     from routers.settings import _read
     from playback.manager import manager
     active = _read("output.type")
@@ -45,7 +46,7 @@ def _hqp_gate() -> None:
             "screen."
         )
     from playback import hqp_link
-    hqp_link.selected().build.refuse()
+    hqp_link.selected().refuse()
 
 
 @contextmanager

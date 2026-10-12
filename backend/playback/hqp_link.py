@@ -379,8 +379,7 @@ class _CommandLock:
             try:
                 while True:
                     self._link._check_state()
-                    self._link.build.refuse()
-                    self._link._refuse_if_silent()
+                    self._link.refuse()
                     if not self._held and self._waiting[0] == me:
                         self._held = True
                         self.owner = me
@@ -452,16 +451,10 @@ class _LateStop:
         link = self.link
         link._local.late = True
         try:
-            if through(self._send, needed=lambda: link.superseded(self.item),
-                       until=lambda: link.superseded(self.item) is not None):
+            if background("HQPlayer not stopped after the output switch", self._send,
+                          needed=lambda: link.superseded(self.item),
+                          until=lambda: link.superseded(self.item) is not None):
                 logger.info("HQPlayer stopped — the output had been switched away")
-        except GaveUp as e:
-            (logger.warning if e.failed else logger.info)(
-                "HQPlayer not stopped after the output switch: %s", e)
-        except Dropped as e:
-            logger.info("HQPlayer not stopped after the output switch: %s", e)
-        except (BrokenPipeError, ConnectionError, OSError) as e:
-            logger.warning("HQPlayer not stopped after the output switch: %s", e)
         finally:
             self.decided.set()
             link._local.late = False
@@ -609,6 +602,24 @@ class HqpLink:
             item = getattr(self._local, "item", None)
             if item is None or item.kind != "late_stop":
                 raise Dropped(self.why or "another HQPlayer was chosen")
+
+    def refuse(self) -> None:
+        """A person's command to this HQPlayer is refused now — while it
+        builds a setting or did not finish one (Building: restart HQPlayer),
+        or answers nothing past a short silence (NotAnswering) — never parked
+        behind it. The one rule every gate keeps: the command lock, the
+        assistants' tools, the routes. Lent to the benchmark is the
+        manager's to name (OutputHeld names the job)."""
+        self.build.refuse()
+        self._refuse_if_silent()
+
+    def busy(self) -> Optional[str]:
+        """What refuse() would say, in the person's words, or None."""
+        try:
+            self.refuse()
+        except (Building, NotAnswering) as e:
+            return str(e)
+        return None
 
     def _refuse_if_silent(self) -> None:
         """A command is refused while HQPlayer answers nothing past a short
@@ -766,8 +777,7 @@ class HqpLink:
         if self.lock.owner == me:
             # A sequence whose own build HQPlayer did not finish sends
             # nothing more into its silence
-            self.build.refuse()
-            self._refuse_if_silent()
+            self.refuse()
         self._take()
         builds = self.build.count
         hand_over = None
@@ -1097,6 +1107,25 @@ def through(action: Callable[[], Any], *, needed: Callable[[], Optional[str]] = 
                 raise gave_up
 
 
+def background(what: str, action: Callable[[], Any], *,
+               needed: Callable[[], Optional[str]] = lambda: None,
+               until: Callable[[], bool] = lambda: False) -> Any:
+    """`action` through a build (through), as background work no caller
+    waits for: what ends it short is logged as `what` — a build HQPlayer did
+    not finish or a connection that broke as a warning, work no longer
+    wanted or a link that did not send it as news. Returns what `action`
+    returned, or None when it did not go."""
+    try:
+        return through(action, needed=needed, until=until)
+    except GaveUp as e:
+        (logger.warning if e.failed else logger.info)("%s: %s", what, e)
+    except Dropped as e:
+        logger.info("%s: %s", what, e)
+    except (BrokenPipeError, ConnectionError, OSError) as e:
+        logger.warning("%s: %s", what, e)
+    return None
+
+
 # -- the registry --------------------------------------------------------------------
 
 _links: Dict[tuple, HqpLink] = {}
@@ -1154,6 +1183,12 @@ def choose(host: str, port: int) -> HqpLink:
     if old is not None:
         old.retire("another HQPlayer was chosen")
     return link
+
+
+def stopping() -> Optional[str]:
+    """Why the node let every link go (close_all), once it is stopping."""
+    with _registry_lock:
+        return _closed_why
 
 
 def close_all(why: str) -> None:
