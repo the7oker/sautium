@@ -31,7 +31,7 @@ from db_pool import db_execute, db_query_one
 from hqplayer_client import VOLUME_FIXED
 from playback import hqp_link
 from playback.hqp_backend import change_dsp
-from playback.hqp_link import Building, Dropped
+from playback.hqp_link import Building, Dropped, NotAnswering
 from playback.hqp_meter import meter as hqp_meter
 from playback.manager import OutputHeld, manager
 
@@ -311,11 +311,12 @@ def set_config(req: ConfigRequest) -> Dict[str, Any]:
     """Apply any subset of the DSP knobs (hqp_backend.change_dsp): each
     knob's outcome — taken, or refused in HQPlayer's words — and, when
     HQPlayer builds past a moment, `building` at once with the knobs still
-    to go; the rest follows behind the answer. 409 while the output is lent
-    or HQPlayer builds, 503 when it cannot be reached."""
+    to go; the rest follows behind the answer. 409 while the output is lent,
+    HQPlayer builds or answers nothing past a short silence, 503 when it
+    cannot be reached."""
     try:
         return change_dsp(req.model_dump())
-    except (OutputHeld, Building) as e:
+    except (OutputHeld, Building, NotAnswering) as e:
         raise HTTPException(status_code=409, detail=str(e))
     except (BrokenPipeError, ConnectionError, OSError) as e:
         raise HTTPException(status_code=503, detail=f"HQPlayer not reachable: {e}")
@@ -351,7 +352,7 @@ def nudge_volume(req: VolumeRequest) -> Dict[str, Any]:
                 new_vol = max(span["min"], new_vol)
             ok = hqp.set_volume(new_vol)
             refusal = None if ok else hqp.refusal()
-    except (Building, Dropped) as e:
+    except (Building, Dropped, NotAnswering) as e:
         hold = manager.held
         raise HTTPException(status_code=409,
                             detail=str(OutputHeld(hold)) if hold is not None else str(e))

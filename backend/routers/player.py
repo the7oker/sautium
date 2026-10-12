@@ -696,7 +696,14 @@ async def _scan_run():
         facts = found_hqp[host]
         entry = {"name": facts["name"], "product": facts["product"], "endpoint_id": None,
                  "control": True}
-        if err is not None:
+        if isinstance(err, (Building, Dropped, NotAnswering)):
+            # Busy, not gone: the link of the HQPlayer driven refused the
+            # question — it builds, is lent to the benchmark or holds a
+            # silence. Its row is read by address; nothing is asked.
+            ep = await asyncio.to_thread(hqp_library.endpoint_by_address, host, 4321)
+            if ep is not None:
+                entry["endpoint_id"] = ep["id"]
+        elif err is not None:
             # Answers discovery, refuses control: an Embedded past its trial
             # half-hour looks exactly like this (the daemon still answers the
             # datagram while the control port closes at once) — listed as

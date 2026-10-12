@@ -5,14 +5,19 @@ machine's aliases are one link.
 
 A link owns:
   * one connection to its own address (an HQPlayerClient whose requests all
-    pass `request`, its gate), held by one owner at a time: a command
-    sequence from its first request to its end, a question for its own. So
-    at most one request from this node is outstanding at an HQPlayer — a
-    command, the status poller, the HQPlayer screen, the play gate, the
-    library, the assistants — and nothing reaches it while it builds but the
-    request whose answer is held. HQPlayer's one control thread answers in
-    order anyway: two connections only sent requests into each other's
-    silences;
+    pass `request`, its gate), taken by each request for itself, from its
+    send to its answer, in the order they came: a question goes between the
+    requests of a command sequence. So at most one request from this node is
+    outstanding at an HQPlayer — a command, the status poller, the HQPlayer
+    screen, the play gate, the library, the assistants — and nothing reaches
+    it while it builds but the request whose answer is held. HQPlayer's one
+    control thread answers in order anyway: two connections only sent
+    requests into each other's silences. After a command whose silence may
+    follow it (HANDOVER_COMMANDS: what sets off a build, a Stop's teardown)
+    the connection passes to the sequence's next request, or to a Status the
+    link holds itself: that silence never falls on a question with a short
+    wait. A request left unanswered ends its sequence or question block: the
+    rest of it is refused (NotAnswering), never sent into the same silence;
   * the command lock: one command sequence at a time, none while HQPlayer
     builds — a person's command is refused at once (Building, 409), never
     parked behind the build; background work waits the build out (through);
@@ -22,8 +27,8 @@ A link owns:
   * the intent clock: what a person or this node asked of it, in order. An
     item — a start left for later, a resume, the rest of a DSP change, a
     Stop an output switch owed — is never sent once a newer intent of a kind
-    that supersedes it was accepted (SUPERSEDED_BY), checked under the
-    command lock, holding the connection, right before the bytes go;
+    that supersedes it was accepted (SUPERSEDED_BY), checked right before
+    the bytes go, under the lock an intent is accepted under;
   * the Stop an output switch owes it while it builds (the late Stop).
 
 Life cycle: link_for creates a link on first use; the same HQPlayer keeps its
@@ -35,11 +40,11 @@ on Linux and macOS, close() on Windows — and every waiter released.
 """
 
 import logging
-import select
 import socket
 import threading
 import time
 import uuid
+from collections import deque
 from contextlib import contextmanager
 from dataclasses import dataclass
 from typing import Any, Callable, Dict, Optional
@@ -58,18 +63,28 @@ logger = logging.getLogger(__name__)
 BUILDING_AFTER_S = 1.0
 # A Stop is answered once the output is torn down: a second in PCM, up to
 # three and a half in SDM through CoreAudio (Desktop 6.2.4, 2026-10-11), more
-# on a slower output. A short silence, never a build.
+# on a slower output. A short silence, never a build: more than four times
+# the longest one measured, with room for outputs not measured (a Pi's ALSA,
+# Windows). Past it, HQPlayer is not answering.
 STOP_ANSWER_S = 15.0
 # A command's answer otherwise, and a question's.
 COMMAND_WAIT_S = 5.0
 QUESTION_WAIT_S = 4.0
 # The play gate's GetInfo: a live HQPlayer answers it at once.
 PROBE_WAIT_S = 2.0
+# What a silence may follow: the connection passes from one of them to the
+# sequence's next request, or to a Status the link holds itself — never to
+# a question with a short wait.
+HANDOVER_COMMANDS = frozenset({"SetMode", "SetRate", "SetFilter", "SetShaping", "MatrixSetProfile",
+                               "SetConvolution", "Play", "SelectTrack", "Next", "Previous",
+                               "Stop", "PlaylistClear"})
+# Of them, the silences that are no build: the output torn down, the playlist
+# dropped around the entry read — waited out up to STOP_ANSWER_S.
+SHORT_SILENCE_COMMANDS = frozenset({"Stop", "PlaylistClear"})
 # What may set off a build, or meet the silence of one set off a moment
-# before (a Seek right after the SelectTrack that starts a stopped HQPlayer).
-BUILD_COMMANDS = frozenset({"SetMode", "SetRate", "SetFilter", "SetShaping", "MatrixSetProfile",
-                            "SetConvolution", "SetInvert", "Play", "SelectTrack", "Seek",
-                            "Next", "Previous"})
+# before (a Seek right after the SelectTrack that starts a stopped HQPlayer):
+# a late answer to one of them is a build.
+BUILD_COMMANDS = (HANDOVER_COMMANDS - SHORT_SILENCE_COMMANDS) | {"Seek"}
 # A failed connect fails the next ones fast for this long: a stalled control
 # port would otherwise make every reconnect wait out the connect timeout.
 CIRCUIT_COOLDOWN_S = 6.0
@@ -83,10 +98,11 @@ _ENDS = {"timeout": UNFINISHED, "lost": LOST}
 
 def _command_waits() -> Dict[str, float]:
     """How long a link's client waits for each answer, read when the link is
-    made: a Stop's output teardown, and the build limit for what may set off
-    a build — HQPlayer carries out a command given up on all the same, after
+    made: a short silence's, and the build limit for what may set off a
+    build — HQPlayer carries out a command given up on all the same, after
     the build, out of order."""
-    return {"Stop": STOP_ANSWER_S, **{c: BUILD_LIMIT_S for c in BUILD_COMMANDS}}
+    return {**{c: STOP_ANSWER_S for c in SHORT_SILENCE_COMMANDS},
+            **{c: BUILD_LIMIT_S for c in BUILD_COMMANDS}}
 
 
 class Building(ConnectionError):
@@ -165,7 +181,7 @@ class BuildWatch:
     While it lasts, `state` says since when and after which command: the
     link refuses commands and questions (Building), background work waits for
     its end (through), and the player status carries it. Past BUILD_LIMIT_S
-    it is `unfinished` until HQPlayer answers the poller again. A held answer
+    it is `unfinished` until HQPlayer answers a request again. A held answer
     whose connection breaks (EOF, a reset, keepalive or TCP_USER_TIMEOUT)
     ends no build: HQPlayer went away or restarted, and the poller asks
     again and reads its return as any other. An Embedded box answers all
@@ -236,10 +252,17 @@ class BuildWatch:
                 self.state = None
 
     def answered(self) -> None:
-        """HQPlayer answered the poller: a build it did not finish is over."""
+        """HQPlayer answered a request on the link — anyone's: a build it did
+        not finish is over."""
         with self._lock:
             if self.state is not None and self.state.get("unfinished"):
                 self.state = None
+
+    @property
+    def count(self) -> int:
+        """The builds begun so far: one begun during a request means its
+        silence was a build's, watched — never a silence of its own."""
+        return self._builds
 
     def silent(self) -> Optional[dict]:
         """The build HQPlayer is silent in — one it did not finish included
@@ -309,10 +332,12 @@ class BuildWatch:
 
 class _CommandLock:
     """A link's command lock: one command sequence at a time — and none
-    while HQPlayer builds. A caller is refused at once (Building), never
-    parked for minutes behind the command that met the build; one already
-    parked is woken and refused when the build begins. A detach goes on
-    without it while a build holds it (detaching)."""
+    while HQPlayer builds, or answers nothing past a short silence. A caller
+    is refused at once (Building, NotAnswering), never parked for minutes
+    behind the command that met it; one already parked is woken and refused
+    when it begins. A command behind a short silence (a Stop's teardown)
+    waits for it. A detach goes on without the lock while a build holds it
+    (detaching)."""
 
     def __init__(self, link: "HqpLink") -> None:
         self._link = link
@@ -325,6 +350,7 @@ class _CommandLock:
             while True:
                 self._link._check_state()
                 self._link.build.refuse()
+                self._link._refuse_if_silent()
                 if not self._held:
                     self._held = True
                     self.owner = threading.get_ident()
@@ -405,9 +431,44 @@ class _LateStop:
             link._close_if_retired()
 
 
+def _closed(sock: socket.socket) -> bool:
+    """Has this idle connection ended — the peer closed it, or it was shut
+    under us? A peek that waits for nothing, with no select: no descriptor
+    is too large to look at, and a closed socket is an answer, never a
+    ValueError."""
+    try:
+        timeout = sock.gettimeout()
+        sock.setblocking(False)
+        try:
+            return sock.recv(1, socket.MSG_PEEK) == b""
+        finally:
+            sock.settimeout(timeout)
+    except BlockingIOError:
+        return False            # nothing to read: alive
+    except OSError:
+        return True
+
+
+class _Scope:
+    """A command sequence's or a question block's hold on the link
+    (HqpLink.command, HqpLink.asking): once a request of it went unanswered
+    with no build of ours behind the silence, the rest of it is refused."""
+
+    __slots__ = ("silent",)
+
+    def __init__(self) -> None:
+        self.silent = False
+
+
+# The slot passed on to the Status a link holds itself, before its thread
+# takes it (HqpLink._end_scope)
+_HELD = object()
+
+
 class HqpLink:
     """Everything this node says to one HQPlayer (see the module docstring).
-    Its address is fixed: another address is another link."""
+    Its identity is fixed (`key`, this machine's aliases one); the address
+    it dials is the alias chosen last (readdress)."""
 
     def __init__(self, key: tuple, host: str, port: int):
         self.key = key
@@ -429,10 +490,18 @@ class HqpLink:
         self.attachment: Optional[int] = None
         self._state_lock = threading.Lock()
         self._late_stop: Optional[_LateStop] = None
-        # The connection's owner (a thread id) and how deep it holds it
+        # The connection: the thread whose request holds it, the threads
+        # waiting for it in the order they came, and the one a hand-over
+        # left it to (a thread id, or _HELD) with the command that did
         self._conn = threading.Condition()
         self._owner: Optional[int] = None
-        self._depth = 0
+        self._waiting: deque = deque()
+        self._reserved: Any = None
+        self._after: Optional[str] = None
+        # Since when HQPlayer has answered nothing past a short silence's
+        # wait: people's commands are refused, questions go on, and its next
+        # answer ends it
+        self.silent_since: Optional[float] = None
         self._local = threading.local()
         self._clock = 0
         self._latest: Dict[str, int] = {}
@@ -469,9 +538,13 @@ class HqpLink:
     def superseded(self, item: Item) -> Optional[str]:
         """Why `item` must not be sent any more, or None."""
         with self._state_lock:
-            for kind in SUPERSEDED_BY[item.kind]:
-                if self._latest.get(kind, 0) > item.n:
-                    return _WHY[kind]
+            return self._superseded(item)
+
+    def _superseded(self, item: Item) -> Optional[str]:
+        """superseded, under the state lock."""
+        for kind in SUPERSEDED_BY[item.kind]:
+            if self._latest.get(kind, 0) > item.n:
+                return _WHY[kind]
         if item.generation is not None and item.queue.generation != item.generation:
             return _WHY["queue"]
         return None
@@ -497,126 +570,257 @@ class HqpLink:
             if item is None or item.kind != "late_stop":
                 raise Dropped(self.why or "another HQPlayer was chosen")
 
-    def _check_item(self) -> None:
+    def _refuse_if_silent(self) -> None:
+        """A command is refused while HQPlayer answers nothing past a short
+        silence's wait (silent_since): never parked behind it."""
+        if self.silent_since is not None:
+            raise NotAnswering()
+
+    def _take(self) -> None:
+        """Hold the connection for one request: the caller is its only user
+        until _give. In turn behind the requests that came before it — first,
+        when a hand-over left it to this thread. Refused once the wait turns
+        into a build (past the build limit questions go again: HQPlayer may
+        be back)."""
+        me = threading.get_ident()
+        with self._conn:
+            self._waiting.append(me)
+            try:
+                while True:
+                    self._check_state()
+                    state = self.build.building()
+                    if state is not None:
+                        raise Building(self, state)
+                    if self._owner is None and (self._reserved == me or (
+                            self._reserved is None and self._waiting[0] == me)):
+                        self._owner, self._reserved = me, None
+                        return
+                    self._conn.wait()
+            except BaseException:
+                if self._reserved == me:
+                    # What the hand-over kept it for does not go: the others may
+                    self._reserved = None
+                    self._conn.notify_all()
+                raise
+            finally:
+                self._waiting.remove(me)
+
+    def _give(self, hand_over: Optional[str] = None) -> None:
+        """Let the connection go — or, after `hand_over`, a command whose
+        silence may follow it, keep it for this thread's next request."""
+        with self._conn:
+            self._owner = None
+            if hand_over is not None:
+                self._reserved, self._after = threading.get_ident(), hand_over
+            self._conn.notify_all()
+
+    @contextmanager
+    def _scope(self):
+        """This thread's command sequence or question block: its requests
+        share one fate (_Scope), and when it ends a connection a hand-over
+        kept for it goes to a Status the link holds itself (_end_scope)."""
+        if getattr(self._local, "scope", None) is not None:
+            yield
+            return
+        self._local.scope = _Scope()
+        try:
+            yield
+        finally:
+            self._local.scope = None
+            self._end_scope()
+
+    def _end_scope(self) -> None:
+        """The sequence sent its last request. A connection a hand-over kept
+        for it — a silence may follow its last command — goes to a Status the
+        link holds itself, in the background (_hold): the silence falls on
+        that, never on a question with a short wait. A link nothing drives
+        keeps no socket (a probe's, a library's)."""
+        me = threading.get_ident()
+        after = None
+        with self._conn:
+            if self._reserved == me:
+                self._reserved, after = _HELD, self._after
+            elif (self._owner is None and self._reserved is None and self.attached is None
+                  and self._late_stop is None and not self._selected()):
+                self.client.disconnect()
+        if after is not None:
+            threading.Thread(target=self._hold, args=(after,), daemon=True,
+                             name="hqp-held-status").start()
+
+    def _hold(self, after: str) -> None:
+        """The Status the link holds after `after` when its sequence sent
+        nothing more. After a build command it is watched up to the build
+        limit: the watch says building, and its answer ends the build. After
+        a short silence (a Stop's teardown, a PlaylistClear) it waits up to
+        STOP_ANSWER_S, past which HQPlayer is not answering."""
+        me = threading.get_ident()
+        with self._conn:
+            if self._reserved is not _HELD:
+                return              # a close or a lend let the connection go meanwhile
+            self._reserved = me
+        short = after in SHORT_SILENCE_COMMANDS
+        c = self.client
+        try:
+            with self._scope():
+                c.get_status(wait=STOP_ANSWER_S if short else BUILD_LIMIT_S, watched=not short)
+        except (BrokenPipeError, ConnectionError, OSError) as e:
+            # Let go, lent, or another request's silence already: nothing held
+            logger.debug("HQPlayer's Status after %s not held: %s", after, e)
+            return
+        if short and c.timed_out:
+            self._not_answering(after)
+
+    def _answered(self) -> None:
+        """HQPlayer answered a request: a build it did not finish is over,
+        and so is a silence past a short silence's wait."""
+        self.build.answered()
+        if self.silent_since is not None:
+            self.silent_since = None
+            logger.info("HQPlayer at %s:%d answers again", self.host, self.port)
+            self._poke()
+
+    def _not_answering(self, command: str) -> None:
+        """HQPlayer answered nothing within a short silence's wait after
+        `command`: not answering — never a build. People's commands are
+        refused with that line, the ones waiting for it woken; questions go
+        on, and the next answer ends it."""
+        if self.silent_since is None:
+            self.silent_since = time.time()
+            logger.warning("HQPlayer did not answer within %g s of %s — it is not answering",
+                           STOP_ANSWER_S, command)
+        self.lock.wake()
+        with self._conn:
+            self._conn.notify_all()
+        self._poke()
+
+    @contextmanager
+    def asking(self):
+        """A block of this thread's questions — the poller's tick, the
+        HQPlayer screen's reads, a probe: each takes the connection for
+        itself, and one HQPlayer leaves unanswered ends the block."""
+        with self._scope():
+            yield self.client
+
+    @contextmanager
+    def request(self, command: str):
+        """The client's gate, around every request it sends. Refused when an
+        earlier request of its sequence or block went unanswered, and — in a
+        command sequence — while HQPlayer is in a build it did not finish or
+        answers nothing past a short silence. The connection is taken for
+        the request alone (_take), a dropped socket reconnected; its bytes
+        pass `sending`. After it: an answer ends what HQPlayer was silent in;
+        a silence no build of ours explains ends the sequence, and past a
+        short silence's wait HQPlayer is not answering; after a command a
+        silence may follow, the connection passes on (_give, _end_scope)."""
+        me = threading.get_ident()
+        scope = getattr(self._local, "scope", None)
+        if scope is not None and scope.silent:
+            raise NotAnswering()
         item = getattr(self._local, "item", None)
         if item is not None:
             why = self.superseded(item)
             if why is not None:
-                raise Dropped(why)
-
-    def _take(self) -> None:
-        """Hold the connection: the caller is its only user until _give.
-        Waits while another holds it, refused once that turns into a build
-        (past the build limit questions go again: HQPlayer may be back)."""
-        me = threading.get_ident()
-        with self._conn:
-            while True:
-                self._check_state()
-                if self._owner == me:
-                    self._depth += 1
-                    return
-                state = self.build.building()
-                if state is not None:
-                    raise Building(self, state)
-                if self._owner is None:
-                    self._owner, self._depth = me, 1
-                    return
-                self._conn.wait()
-
-    def _give(self) -> None:
-        with self._conn:
-            self._depth -= 1
-            if self._depth:
-                return
-            if self.attached is None and self._late_stop is None and not self._selected():
-                self.client.disconnect()         # a probe's link keeps no socket
-            self._owner = None
-            self._conn.notify_all()
-
-    @contextmanager
-    def asking(self):
-        """The connection for this thread's questions — the poller's tick,
-        the HQPlayer screen's reads, a probe: nothing else goes on it
-        meanwhile, so what the client says of a failure is this caller's."""
+                raise Dropped(why)      # not even dialled for; `sending` has the last word
+        if self.lock.owner == me:
+            # A sequence whose own build HQPlayer did not finish sends
+            # nothing more into its silence
+            self.build.refuse()
+            self._refuse_if_silent()
         self._take()
+        builds = self.build.count
+        hand_over = None
         try:
-            yield self.client
-        finally:
-            self._give()
-
-    @contextmanager
-    def request(self, command: str):
-        """The client's gate, around every request it sends: the connection
-        (already held by this thread's command sequence or question, else
-        held for this one request), the link's state and the item this thread
-        serves checked right before the bytes go, a dropped socket
-        reconnected."""
-        self._take()
-        try:
-            self._check_state()
-            if self.lock.owner == threading.get_ident():
-                # A sequence whose own build HQPlayer did not finish sends
-                # nothing more into its silence
-                self.build.refuse()
-            self._check_item()
+            if self.lock.owner == me:
+                self._refuse_if_silent()        # it began while this one waited its turn
             self._connect()
+            c = self.client
+            c.timed_out = False
             yield
+            if c.answered:
+                self._answered()
+                if command in HANDOVER_COMMANDS:
+                    hand_over = command
+            elif c.timed_out and self.build.count == builds:
+                if scope is not None:
+                    scope.silent = True
+                if command in SHORT_SILENCE_COMMANDS:
+                    self._not_answering(command)
         finally:
-            self._give()
+            self._give(hand_over)
+        if hand_over is not None and scope is None:
+            self._end_scope()
+
+    @contextmanager
+    def sending(self):
+        """Around a request's bytes: the link's state and the item this
+        thread serves checked under the lock an intent is accepted and a
+        close is made under — an intent accepted after the check is newer
+        than the bytes that went, and nothing goes once the link closed."""
+        with self._state_lock:
+            self._check_state()
+            item = getattr(self._local, "item", None)
+            if item is not None:
+                why = self._superseded(item)
+                if why is not None:
+                    raise Dropped(why)
+            yield
 
     def _connect(self) -> None:
         """A live socket for the holder: one the peer closed while idle is
-        found before the send (a peek), a dropped one reconnected; a failed
-        connect opens the breaker for CIRCUIT_COOLDOWN_S."""
+        found before the send (_closed), a dropped one reconnected — never
+        once the link closed; a failed connect opens the breaker for
+        CIRCUIT_COOLDOWN_S."""
         c = self.client
         sock = c.socket
-        if sock is not None:
-            try:
-                if select.select([sock], [], [], 0)[0] and not sock.recv(1, socket.MSG_PEEK):
-                    logger.info("HQPlayer at %s:%d closed the connection — reconnecting",
-                                self.host, self.port)
-                    c.disconnect()
-            except OSError:
-                c.disconnect()
+        if sock is not None and _closed(sock):
+            logger.info("HQPlayer at %s:%d closed the connection — reconnecting",
+                        self.host, self.port)
+            c.disconnect()
         if c.socket is not None:
             return
         if time.monotonic() < self._unreachable_until:
             raise ConnectionError(f"HQPlayer at {self.host}:{self.port} unreachable (circuit open)")
-        if not c.connect():
+        sock = c.dial()
+        if sock is None:
             self._unreachable_until = time.monotonic() + CIRCUIT_COOLDOWN_S
             raise ConnectionError(f"Cannot connect to HQPlayer at {self.host}:{self.port}")
         self._unreachable_until = 0.0
+        with self._state_lock:
+            if self.state == "closed":
+                sock.close()
+                raise Dropped(self.why or "HQPlayer was let go")
+            c.use(sock)
 
     def reset(self) -> None:
-        """A fresh socket for the next request (a retry after a broken one)."""
+        """A fresh socket for the next request (a retry after a broken one);
+        a connection a hand-over kept for this thread stays its."""
+        kept = self._reserved == threading.get_ident()
         self._take()
         try:
             self.client.disconnect()
         finally:
-            self._give()
+            self._give(self._after if kept else None)
 
     @contextmanager
     def command(self, intent: Optional[str] = None, *, item: Any = None):
         """A command sequence: the command lock (refused while HQPlayer
-        builds — Building), then the connection held to its end. `intent`, a
-        person's or this node's, is accepted once the lock is ours and takes
-        the clock's next number (yielded). `item` is what the sequence
-        serves — an Item made earlier (a start left for later, a resume, an
-        owed Stop), or a kind, made here for `intent`: each of its requests
-        is dropped once a newer intent supersedes it (Dropped)."""
+        builds — Building — or answers nothing past a short silence —
+        NotAnswering), each of its requests taking the connection for
+        itself. `intent`, a person's or this node's, is accepted once the
+        lock is ours and takes the clock's next number (yielded). `item` is
+        what the sequence serves — an Item made earlier (a start left for
+        later, a resume, an owed Stop), or a kind, made here for `intent`:
+        each of its requests is dropped once a newer intent supersedes it
+        (Dropped)."""
         outer = getattr(self._local, "item", None)
         if isinstance(item, Item):
             self._local.item = item
         try:
-            with self.lock:
-                self._take()
-                try:
-                    n = self.accept(intent) if intent is not None else getattr(item, "n", None)
-                    if isinstance(item, str):
-                        self._local.item = self.item(item, n)
-                    yield n
-                finally:
-                    self._give()
+            with self.lock, self._scope():
+                n = self.accept(intent) if intent is not None else getattr(item, "n", None)
+                if isinstance(item, str):
+                    self._local.item = self.item(item, n)
+                yield n
         finally:
             self._local.item = outer
 
@@ -705,14 +909,22 @@ class HqpLink:
 
     def lend(self) -> None:
         """Lent to the benchmark, which drives HQPlayer on its own connection:
-        nothing of this link goes out meanwhile."""
-        self.lent = True
+        nothing of this link goes out meanwhile. A request already sent is
+        answered first — the run's connection is then the address's only
+        sender; a connection kept for a next request or a held Status is let
+        go."""
+        with self._state_lock:
+            self.lent = True
         with self._conn:
+            self._reserved = None
             self._conn.notify_all()
+            while self._owner is not None:
+                self._conn.wait()
         self.build.wake_waiters()
 
     def reclaim(self) -> None:
-        self.lent = False
+        with self._state_lock:
+            self.lent = False
 
     def retire(self, why: str) -> None:
         """Another HQPlayer was chosen: the backend still attached here sends
@@ -741,17 +953,19 @@ class HqpLink:
     def close(self, why: str) -> None:
         """Cancel everything: waiters and owed items give up with `why`, and
         the socket is shut down and closed — a read blocked on it ends on
-        every platform."""
+        every platform. Read under the lock a connect takes to use a socket:
+        none is used after this, and none goes unshut."""
         with self._state_lock:
             if self.state == "closed":
                 return
             self.state, self.why = "closed", why
             self._late_stop = None
+            sock = self.client.socket
         with self._conn:
+            self._reserved = None
             self._conn.notify_all()
         self.lock.wake()
         self.build.wake_waiters()
-        sock = self.client.socket
         if sock is not None:
             try:
                 sock.shutdown(socket.SHUT_RDWR)
@@ -761,6 +975,17 @@ class HqpLink:
 
     def _selected(self) -> bool:
         return self.key == _key(settings.hqplayer_host, settings.hqplayer_port)
+
+    def readdress(self, host: str, port: int) -> None:
+        """Dial the alias chosen last (the same HQPlayer, `key`): on a Docker
+        node the host's address replaces a container loopback that reaches
+        nothing. A live connection stays until it ends."""
+        if (host, port) == (self.host, self.port):
+            return
+        self.host, self.port = host, port
+        self.client.host, self.client.port = host, port
+        self._unreachable_until = 0.0
+        logger.info("HQPlayer's link dials %s:%d from now on", host, port)
 
     # -- the play gate ----------------------------------------------------------------
 
@@ -825,6 +1050,9 @@ _registry_lock = threading.Lock()
 # closed from the start — a hold's release re-attaching the output while the
 # node stops sends nothing.
 _closed_why: Optional[str] = None
+# The key of the HQPlayer this node drives: the link that retires when the
+# owner chooses another (choose)
+_chosen: Optional[tuple] = None
 
 
 def _key(host: str, port: int) -> tuple:
@@ -847,19 +1075,29 @@ def link_for(host: str, port: int) -> HqpLink:
 
 def selected() -> HqpLink:
     """The link of the HQPlayer the owner chose (settings' address)."""
-    return link_for(settings.hqplayer_host, settings.hqplayer_port)
+    global _chosen
+    link = link_for(settings.hqplayer_host, settings.hqplayer_port)
+    with _registry_lock:
+        if _chosen is None:
+            _chosen = link.key
+    return link
 
 
 def choose(host: str, port: int) -> HqpLink:
     """The owner chose the HQPlayer at this address: its link — the same one,
-    if it was chosen before and has not closed yet — and every other open
-    link retires."""
+    if it was chosen before and has not closed yet, dialling the alias
+    chosen now — and the link of the HQPlayer chosen before retires. Every
+    other link goes on: a library sync of another box, the picker's
+    probes."""
+    global _chosen
     link = link_for(host, port)
+    link.readdress(host, port)
     link.unretire()
     with _registry_lock:
-        others = [ln for ln in _links.values() if ln is not link and ln.state == "open"]
-    for other in others:
-        other.retire("another HQPlayer was chosen")
+        before, _chosen = _chosen, link.key
+        old = _links.get(before) if before is not None and before != link.key else None
+    if old is not None:
+        old.retire("another HQPlayer was chosen")
     return link
 
 

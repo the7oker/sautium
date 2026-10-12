@@ -249,21 +249,30 @@ Everything this node says to an HQPlayer goes through that HQPlayer's link
 machine's aliases are one link: the status poller, the commands, the
 HQPlayer screen's reads, the play gate's probe, the library's hash and
 listing, the in-process assistant's questions, and putting back a benchmark
-run cut short. A link owns one connection, held by one owner at a time — a
-command sequence from its start to its end, a question for its own — so at
-most one request of this node is outstanding at HQPlayer (its one control
-thread answers in order anyway; two connections only sent requests into
-each other's silences). It also owns the command lock (one command sequence
+run cut short. A link owns one connection, taken by each request for itself
+in the order they came — a question goes between the requests of a command
+sequence — so at most one request of this node is outstanding at HQPlayer
+(its one control thread answers in order anyway; two connections only sent
+requests into each other's silences). After a command a silence may follow
+— one that may set off a build, a Stop, a PlaylistClear — the connection
+passes to the sequence's next request or to a Status the link holds itself,
+so that silence never falls on a question with a short wait; a request
+HQPlayer leaves unanswered, with no build of ours behind the silence, ends
+its sequence or question block — the rest is refused, never sent into the
+same silence. What a request came to (its refusal, its silence) is the
+thread's that sent it, read in the same call. It also owns the command lock (one command sequence
 at a time, none while HQPlayer builds), the build watch (below), the intent
 clock — every intent it accepts takes the next number, and an item left for
 later (a start that met a build, the resume after a DSP change, the knobs
 after a build, the Stop a switch away owes) is dropped at its send once a
 newer intent of a kind that supersedes it was accepted (`SUPERSEDED_BY`) or
 its queue was replaced — and the Stop a switch away owes while HQPlayer
-builds. Picking another HQPlayer retires the old link: the Stop it owes
+builds. Picking another HQPlayer retires the link of the one picked
+before — no other: a library read of a third box goes on — the Stop it owes
 still goes (only while it plays or pauses an entry of ours), everything
 else gives up, then it closes; picking the same HQPlayer again keeps its
-link and its build watched. While the benchmark holds the output the link is
+link and its build watched, and the link dials the alias picked last (on a
+Docker node the host's address, not a loopback that reaches nothing). While the benchmark holds the output the link is
 lent: nothing of it goes out. The node stop closes every link first
 (`hqp_link.close_all`): its waiters and owed items give up at once and each
 socket is shut down and closed — a read blocked on it ends on Linux, macOS
@@ -281,9 +290,11 @@ comes after the control port answers again — so neither can end the wait.
 - **Waits by command.** A link's client waits for an answer as long as
   its command may take (`hqp_link._command_waits`, read when a link is
   made): 5 s for a query (4 s for the poller's),
-  `STOP_ANSWER_S` (15 s) for a Stop — the output's teardown, a second in
-  PCM and up to three and a half in SDM on a Mac; a short silence, never a
-  build — and `BUILD_LIMIT_S` (10 min) for what may set off a build or meet
+  `STOP_ANSWER_S` (15 s) for a Stop and a PlaylistClear — the output's
+  teardown, a second in PCM and up to three and a half in SDM on a Mac; a
+  short silence, never a build: a command behind it waits, and past it
+  HQPlayer is "not answering" (people's commands refused with that line,
+  questions go on until it answers) — and `BUILD_LIMIT_S` (10 min) for what may set off a build or meet
   one: the Set* commands, Play, SelectTrack, Seek, Next, Previous.
 - **The build watch** (`hqp_link.BuildWatch`, one per link). An answer
   later than `BUILDING_AFTER_S` (1 s) is HQPlayer building: the player
@@ -293,7 +304,7 @@ comes after the control port answers again — so neither can end the wait.
   holds its controls, Now Playing shows "Building the filter…". The build
   ends where the late answer comes. Past `BUILD_LIMIT_S` it is
   `unfinished` — "HQPlayer did not finish building the filter — restart
-  HQPlayer" — until HQPlayer answers the poller again: only questions go
+  HQPlayer" — until HQPlayer answers a request again: only questions go
   then, with the back-off of an HQPlayer away, and while it takes the
   poller's connection and says nothing that stays the build's, never
   "disconnected"; an HQPlayer that refuses or drops the connection counts

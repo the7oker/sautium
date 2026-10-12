@@ -1127,8 +1127,15 @@ class HqpBackend(PlayerBackend):
     def _poll_loop(self) -> None:
         link = self._link
         tick = 0
-        said_unfinished = None
+        said_unfinished = said_silent = None
         while self._running:
+            silent = link.silent_since
+            if silent is not None and silent != said_silent:
+                # HQPlayer answered nothing past a short silence's wait (a
+                # Stop's teardown): said at once, then asked with the
+                # back-off of any silence — its answer ends it
+                said_silent = silent
+                self._emit_silence({"not_answering": NOT_ANSWERING})
             building = link.build.state
             if building is not None and building["silent"]:
                 # HQPlayer answers nothing while it builds: said from the
@@ -1242,7 +1249,6 @@ class HqpBackend(PlayerBackend):
                     self._failures = 0
                 elif status is not None:
                     self._failures = self._silent_misses = 0
-                    link.build.answered()
                     if self._mirror_lost and self._reconverged < self._lost:
                         # Once per loss: HQPlayer answers again, and gets the queue back
                         self._reconverged = self._lost
@@ -1580,7 +1586,8 @@ class HqpBackend(PlayerBackend):
 
     def _cmd(self, func, intent: Optional[str] = None, *, item: Any = None):
         """One command sequence of this backend: `func(client)` under the
-        link's command lock, holding its connection (HqpLink.command) —
+        link's command lock, each request taking the connection for itself
+        (HqpLink.command) —
         `intent` the person's or this node's, `item` what it serves."""
         with self._link.command(intent, item=item):
             self._check_attached()
@@ -2246,7 +2253,10 @@ class HqpBackend(PlayerBackend):
         if self._mirror_lost:
             return len(items)
         uris = [self._uri_for(it) for it in items]
-        added, unanswered = self._cmd(lambda h: _add_uris_with_retry(self._link, uris))
+        try:
+            added, unanswered = self._cmd(lambda h: _add_uris_with_retry(self._link, uris))
+        except NotAnswering:
+            added, unanswered = 0, True
         self.poke()
         if unanswered:
             self._lose_mirror(f"HQPlayer took {added} of {len(items)} appended tracks")
@@ -2284,7 +2294,10 @@ class HqpBackend(PlayerBackend):
             if removed < len(after) or back < removed:
                 self._drift = True
             return added, unanswered or lost
-        added, unanswered = self._cmd(insert)
+        try:
+            added, unanswered = self._cmd(insert)
+        except NotAnswering:
+            added, unanswered = 0, True
         self.poke()
         if unanswered:
             self._lose_mirror(f"HQPlayer took {added} of {len(items)} tracks to play next")

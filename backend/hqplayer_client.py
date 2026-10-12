@@ -294,6 +294,28 @@ class LateAnswers(Protocol):
     def begin(self, command: str, attributes: Dict[str, str]) -> Callable[[str], None]: ...
 
 
+class _PerThread:
+    """What the latest request a thread sent came to — its failure, whether
+    HQPlayer kept the connection silent, whether it answered — is that
+    thread's: a link's one client is shared, and its requests interleave
+    (playback.hqp_link), so a caller reads its own outcome in the same call
+    as its request, never another thread's."""
+
+    def __init__(self, default: Any) -> None:
+        self.default = default
+
+    def __set_name__(self, owner: type, name: str) -> None:
+        self.name = name
+
+    def __get__(self, obj: Any, owner: Optional[type] = None) -> Any:
+        if obj is None:
+            return self
+        return getattr(obj._outcomes, self.name, self.default)
+
+    def __set__(self, obj: Any, value: Any) -> None:
+        setattr(obj._outcomes, self.name, value)
+
+
 class HQPlayerClient:
     """
     HQPlayer Desktop 5/6 Control API Client
@@ -313,6 +335,21 @@ class HQPlayerClient:
 
     _error_ring: deque = deque(maxlen=50)
     _error_lock = threading.Lock()
+
+    # The failure of the thread's latest command (None when HQPlayer accepted
+    # it) — what a caller quotes when a setter returns False.
+    last_error = _PerThread(None)
+    # A command since the last connect found HQPlayer there and got no answer
+    # within the timeout — as opposed to a connection that closed or refused.
+    # Building a heavy setting blocks HQPlayer's control port for many
+    # seconds (playback.hqp_benchmark waits it out). Kept until the next
+    # connect: without a gate the commands after the silent one in a step
+    # (apply_settings) fail as "not connected", and still mean it; a link's
+    # gate clears it before each request it lets through.
+    timed_out = _PerThread(False)
+    # The latest read got its line: HQPlayer answered, whatever it said.
+    answered = _PerThread(False)
+    _io_error = _PerThread(None)
 
     def __init__(self, host: str = "127.0.0.1", port: int = 4321, timeout: float = 5.0,
                  *, ring: bool = True, waits: Optional[Dict[str, float]] = None,
@@ -336,9 +373,10 @@ class HQPlayerClient:
             late: told when the answer to one of its commands is late — the
                 playback backend's build watch
             gate: what every request passes, around its send and its answer
-                (`gate.request(command)`, a context) — the HQPlayer link
-                (playback.hqp_link): one request on its connection at a
-                time, and none it may no longer send
+                (`gate.request(command)`, a context), and around its bytes
+                (`gate.sending()`) — the HQPlayer link (playback.hqp_link):
+                one request on its connection at a time, and none it may no
+                longer send
         """
         self.host = host
         self.port = port
@@ -352,22 +390,10 @@ class HQPlayerClient:
         # Connections made so far: a status poller sharing the client tells
         # an HQPlayer that came back by it
         self.connections = 0
-        # The failure of this instance's latest command (None when HQPlayer
-        # accepted it) — what a caller quotes when a setter returns False.
-        self.last_error: Optional[CommandOutcome] = None
+        self._outcomes = threading.local()
         # Called with every outcome, failures and successes alike — the
         # playback backend's trace listens on its command client.
         self.on_outcome: Optional[Callable[[CommandOutcome], None]] = None
-        self._io_error: Optional[str] = None
-        # A command since the last connect found HQPlayer there and got no
-        # answer within the timeout — as opposed to a connection that closed
-        # or refused. Building a heavy setting blocks HQPlayer's control port
-        # for many seconds (playback.hqp_benchmark waits it out). Kept until
-        # the next connect: without a gate the commands after the silent one
-        # in a step (apply_settings) fail as "not connected", and still mean
-        # it; a link's gate connects afresh for the next request, or refuses
-        # it while the build that silence was is unfinished.
-        self.timed_out = False
 
     @classmethod
     def last_errors(cls, since: Optional[float] = None) -> List[Dict[str, Any]]:
@@ -377,8 +403,9 @@ class HQPlayerClient:
         return [e.public() for e in reversed(entries) if since is None or e.ts >= since]
 
     def refusal(self) -> str:
-        """Why the latest command was not accepted, in HQPlayer's words when
-        it gave any — what a caller reports when a command returns False."""
+        """Why this thread's latest command was not accepted, in HQPlayer's
+        words when it gave any — what a caller reports when a command returns
+        False."""
         e = self.last_error
         if e is None:
             return "HQPlayer did not confirm it"
@@ -407,16 +434,34 @@ class HQPlayerClient:
         Returns:
             True if connected successfully
         """
+        sock = self.dial()
+        if sock is None:
+            self.socket = None
+            return False
+        self.use(sock)
+        return True
+
+    def use(self, sock: socket.socket) -> None:
+        """Talk to HQPlayer on `sock`, a connection `dial` made."""
+        self.socket = sock
+        self.buffer = bytearray()
+        self.connections += 1
+        logger.info(f"Connected to HQPlayer at {self.host}:{self.port}")
+
+    def dial(self) -> Optional[socket.socket]:
+        """A new connection to HQPlayer, set up for this client's reads — not
+        yet the one it talks on (use) — or None, the outcome saying why."""
         self.timed_out = False      # a failed connect is HQPlayer away, never its silence
+        sock = None
         try:
-            self.socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
             # Connect must be quick on LAN/localhost. A stalled HQPlayer that
             # accepts SYN slowly would otherwise burn the full read timeout on
             # every reconnect attempt. Cap connect at 2s, then restore the
             # full timeout for reads (commands can legitimately take seconds).
-            self.socket.settimeout(min(self.timeout, 2.0))
-            self.socket.connect((connect_address(self.host), self.port))
-            self.socket.settimeout(self.timeout)
+            sock.settimeout(min(self.timeout, 2.0))
+            sock.connect((connect_address(self.host), self.port))
+            sock.settimeout(self.timeout)
             # Tight TCP keepalive: the WSL2→Windows NAT silently drops idle
             # TCP mappings (no RST) — an idle command socket then surfaces
             # only as the NEXT command's full read-timeout + reconnect cycle.
@@ -428,26 +473,23 @@ class HQPlayerClient:
             # (Linux, ms) keeps the same bound while a command sent to a
             # vanished HQPlayer is still unacknowledged — a build's held
             # answer waits minutes, and a dead peer must not pass for one.
-            self.socket.setsockopt(socket.SOL_SOCKET, socket.SO_KEEPALIVE, 1)
+            sock.setsockopt(socket.SOL_SOCKET, socket.SO_KEEPALIVE, 1)
             for opt, val in (("TCP_KEEPIDLE", 20), ("TCP_KEEPINTVL", 5),
                              ("TCP_KEEPCNT", 3), ("TCP_KEEPALIVE", 20),
                              ("TCP_USER_TIMEOUT", 35_000)):
                 if hasattr(socket, opt):
                     try:
-                        self.socket.setsockopt(socket.IPPROTO_TCP,
-                                               getattr(socket, opt), val)
+                        sock.setsockopt(socket.IPPROTO_TCP, getattr(socket, opt), val)
                     except OSError:
                         pass  # platform exposes the constant but rejects it
-            self.buffer = bytearray()
-            self.connections += 1
-            logger.info(f"Connected to HQPlayer at {self.host}:{self.port}")
-            return True
+            return sock
         except Exception as e:
             logger.error(f"Failed to connect to HQPlayer: {e}")
-            self.socket = None
+            if sock is not None:
+                sock.close()
             self._outcome("<connection>", None, "refused",
                           f"connect to {self.host}:{self.port}: {e}")
-            return False
+            return None
 
     def disconnect(self):
         """Disconnect from HQPlayer"""
@@ -480,6 +522,8 @@ class HQPlayerClient:
             return False
 
         try:
+            # A read leaves the socket at whatever its wait had left
+            self.socket.settimeout(self.timeout)
             self.socket.sendall(xml_command.encode('utf-8'))
             return True
         except Exception as e:
@@ -497,8 +541,9 @@ class HQPlayerClient:
         has not come after `late.after` seconds is told to it, and what it
         returns hears how the wait ended (LateAnswers). None when there is
         none: `_io_error` says why, `timed_out` whether HQPlayer kept the
-        connection and said nothing.
+        connection and said nothing; `answered` whether a line came.
         """
+        self.answered = False
         if not self.socket:
             self._io_error = "not connected"
             return None
@@ -530,6 +575,7 @@ class HQPlayerClient:
                     return None
                 self.buffer += chunk
             how = "answered"
+            self.answered = True
             line = bytes(self.buffer[:nl])
             del self.buffer[:nl + 1]
             return line
@@ -553,8 +599,6 @@ class HQPlayerClient:
             self.disconnect()
             return None
         finally:
-            if self.socket is not None:
-                self.socket.settimeout(self.timeout)
             if ended is not None:
                 ended(how)
 
@@ -623,7 +667,7 @@ class HQPlayerClient:
         xml_str = ET.tostring(root, encoding='unicode')
 
         # Send command
-        if not self._send_command(xml_str):
+        if not self._send(xml_str):
             self._outcome("<connection>", attributes, "lost",
                           f"{command}: {self._io_error}", during=command)
             return None
@@ -657,9 +701,17 @@ class HQPlayerClient:
         with self.gate.request("raw"):
             return self._raw(xml, wait)
 
+    def _send(self, xml_command: str) -> bool:
+        """_send_command, the gate's last word on it first (`gate.sending()`,
+        a context): it may still refuse, and then nothing was sent."""
+        if self.gate is None:
+            return self._send_command(xml_command)
+        with self.gate.sending():
+            return self._send_command(xml_command)
+
     def _raw(self, xml: str, wait: float) -> bytes:
         self._io_error = None
-        if not self._send_command(xml):
+        if not self._send(xml):
             raise ConnectionError(f"HQPlayer at {self.host}:{self.port}: {self._io_error}")
         line = self._read_line(wait)
         if line is None:

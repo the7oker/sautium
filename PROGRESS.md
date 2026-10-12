@@ -614,8 +614,8 @@ implementation details live in the code, DB and git history.
   the HQPlayer it was made for, a start left for later overrode a later
   intent, and neither the node stop nor an address change cancelled
   anything. Everything this node says to an HQPlayer now goes through that
-  HQPlayer's link (`playback/hqp_link.py`): one connection held by one owner
-  at a time — two connections only sent requests into each other's
+  HQPlayer's link (`playback/hqp_link.py`): one connection, one request of
+  this node's on it at a time — two connections only sent requests into each other's
   silences, and HQPlayer's one control thread answers in order anyway — an
   intent clock that drops what was left for later once a newer intent
   supersedes it, checked right before the bytes go, and a life cycle:
