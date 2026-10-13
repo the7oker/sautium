@@ -3,6 +3,7 @@ URI form each file-access mode dictates, a running playlist adopted back into
 queue items, drift read through HQPlayer's escapes, and the re-mirror after
 HQPlayer restarts (a trial-mode Embedded stops every 30 minutes)."""
 
+import errno
 import itertools
 import os
 import re
@@ -5359,6 +5360,85 @@ def test_a_close_ends_a_connect_to_an_address_that_never_answers(monkeypatch):
         assert isinstance(out.get("error"), hl.Dropped), out
         assert link.client.losses == 0
     finally:
+        _fresh_links()
+
+
+def test_a_close_while_a_request_holds_the_connection_outside_a_wait_closes_its_socket(
+        fake, monkeypatch):
+    """The link closes while a request holds the connection between its
+    answer and its end — no wait for the close to wake: the request's own
+    thread closes the socket as it lets the connection go, and nothing is
+    left open."""
+    link = _link()
+    c = link.client
+    read = c._read_response
+    answered, release = threading.Event(), threading.Event()
+
+    def holding(wait, on_late=None):
+        out = read(wait, on_late)
+        answered.set()
+        release.wait(5)
+        return out
+    monkeypatch.setattr(c, "_read_response", holding)
+
+    def ask():
+        with link.asking() as hqp:
+            hqp.get_status()
+    t = threading.Thread(target=ask, daemon=True)
+    t.start()
+    try:
+        assert answered.wait(5)
+        link.close("the node is stopping")
+    finally:
+        release.set()
+    t.join(5)
+    assert c.socket is None
+
+
+def test_a_close_ends_a_connect_whose_name_the_resolver_holds(monkeypatch):
+    """A name the resolver takes seconds over — a .local HQPlayer switched
+    off — holds no node stop: the lookup is a wait the close ends, and the
+    request is let go at once, no failure of HQPlayer's."""
+    resolving, release = threading.Event(), threading.Event()
+    lookup, connect_ex = socket.getaddrinfo, socket.socket.connect_ex
+
+    def held_lookup(host, *args, **kwargs):
+        if host == "hqplayer.local":
+            resolving.set()
+            release.wait(10)
+            raise socket.gaierror(socket.EAI_NONAME, "nodename nor servname provided")
+        return lookup(host, *args, **kwargs)
+
+    def held_connect(sock, address):
+        if address[0] == "hqplayer.local":           # a name looked up inside the connect
+            resolving.set()
+            release.wait(10)
+            return errno.EHOSTUNREACH
+        return connect_ex(sock, address)
+    monkeypatch.setattr(socket, "getaddrinfo", held_lookup)
+    monkeypatch.setattr(socket.socket, "connect_ex", held_connect)
+    _fresh_links()
+    link = hl.link_for("hqplayer.local", 4321)
+    out = {}
+
+    def ask():
+        try:
+            with link.asking() as c:
+                c.get_status()
+        except Exception as e:
+            out["error"] = e
+    t = threading.Thread(target=ask, daemon=True)
+    t.start()
+    try:
+        assert resolving.wait(2)
+        t0 = time.monotonic()
+        link.close("the node is stopping")
+        t.join(1.5)
+        assert not t.is_alive() and time.monotonic() - t0 < 0.5
+        assert isinstance(out.get("error"), hl.Dropped), out
+        assert link.client.losses == 0
+    finally:
+        release.set()
         _fresh_links()
 
 

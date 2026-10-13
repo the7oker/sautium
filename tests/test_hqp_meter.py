@@ -589,3 +589,51 @@ def test_a_stop_closes_no_socket_the_session_reads(meter, loop, port, monkeypatc
     port.wait(lambda: port.ends == 1)
     page.until(state("waiting"))
     assert [who for who, sock in made if sock is held] == ["hqp-meter"]
+
+
+def test_a_page_that_turns_the_meter_off_and_on_while_it_connects_gets_the_meter(
+        meter, loop, port, monkeypatch):
+    """The meter connects; the page turns it off and on again before the
+    connection is made: the stop's wake-up ends that connect, and the newest
+    wish — the meter on — connects again. It opens, and stays open."""
+    go = threading.Event()
+    real = hqp_meter.open_connection
+
+    def slow(address, timeout, wait):
+        go.wait(5)
+        return real(address, timeout, wait)
+    monkeypatch.setattr(hqp_meter, "open_connection", slow)
+    meter.attach("127.0.0.1", port.port)
+    page = Page(meter, loop, "a")
+    page.want(True)
+    page.until(state("connecting"))
+    page.want(False)
+    page.want(True)
+    go.set()
+    page.until(state("open"))
+    assert all(m.get("state") in (None, "open", "connecting") for m in page.settle())
+    assert meter.metering()
+
+
+def test_a_stop_and_a_start_while_the_connection_is_made_leave_it_open(meter, loop, port,
+                                                                        monkeypatch):
+    """The connection is made; before the session takes it, the page turns
+    the meter off and on again: the stop's wake-up is spent as the session
+    opens — the meter stays open, never told that HQPlayer closed it."""
+    go = threading.Event()
+    real = hqp_meter._keepalive
+
+    def held(sock):
+        go.wait(5)
+        real(sock)
+    monkeypatch.setattr(hqp_meter, "_keepalive", held)
+    meter.attach("127.0.0.1", port.port)
+    page = Page(meter, loop, "a")
+    page.want(True)
+    port.wait(lambda: port.accepts == 1)
+    page.want(False)
+    page.want(True)
+    go.set()
+    page.until(state("open"))
+    assert all(m.get("state") in (None, "open", "connecting") for m in page.settle(0.5))
+    assert meter.metering() and port.ends == 0

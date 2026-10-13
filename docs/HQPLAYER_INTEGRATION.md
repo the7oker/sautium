@@ -296,7 +296,14 @@ another socket's — and a close does not wake a poll on macOS. Each wait
 watches its socket and a socketpair together (`hqplayer_client.Waker`,
 `wait_on`, through the selectors module's default, never `select.select`,
 which refuses a descriptor past 1023); a wake-up given before the wait began
-is not lost. A benchmark cancel wakes the run's read the same way.
+is not lost. A benchmark cancel wakes the run's read the same way. A request
+that holds the connection outside any wait when its link closes — between
+its answer and its end — closes the socket itself as it lets the connection
+go. A connect to a name looks the name up on a helper thread the same wait
+watches (getaddrinfo can be neither woken nor bounded: a `.local` HQPlayer
+switched off took the resolver seconds, and held the node stop with it), so
+a close or the connect's own bound ends the lookup too; an address is
+dialled as it is.
 
 ### Builds: a DSP change waits one out (since 2026-10-11)
 HQPlayer answers nothing on its control port while it builds a setting — a
@@ -674,7 +681,11 @@ reconnect of the same page takes the wish over, and every connection opens
 with `hello`, the page's cue to re-state it. One thread owns the socket and
 connects on edges only — an attach, a page's wish, the status poller finding
 HQPlayer again, one retry when a flowing stream drops — and reports a port
-that refuses or stays silent instead of retrying it. While the socket is open
+that refuses or stays silent instead of retrying it. A page that turns the
+meter off and on again while it connects gets it: the stop ends that
+connect and the newest wish connects again, and a stop's wake-up the newest
+wish undid is spent as the session opens, never read as the stream's end
+(since 2026-10-13). While the socket is open
 no DSP sample is written (`hqp_load`): metering costs HQPlayer work.
 
 ## Usage

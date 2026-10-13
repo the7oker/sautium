@@ -10,6 +10,7 @@ Default port: 4321
 """
 
 import errno
+import ipaddress
 import logging
 import os
 import re
@@ -116,20 +117,68 @@ _CONNECTING = {errno.EINPROGRESS, errno.EWOULDBLOCK, errno.EALREADY,
                getattr(errno, "WSAEWOULDBLOCK", errno.EWOULDBLOCK)}
 
 
+def _lookup(host: str, port: int, timeout: float,
+            wait: Callable[[socket.socket, int, Optional[float]], str]) -> str:
+    """`host`'s IPv4 address. getaddrinfo can be neither woken nor bounded —
+    a .local name of a box switched off takes the resolver seconds — so it
+    runs on a helper thread, and `wait` watches the helper's end of a
+    socketpair: Interrupted when it is woken, TimeoutError past `timeout`.
+    The helper finishes on its own, and closes its end itself."""
+    mine, theirs = socket.socketpair()
+    found: dict = {}
+
+    def look() -> None:
+        try:
+            found["address"] = socket.getaddrinfo(host, port, socket.AF_INET,
+                                                  socket.SOCK_STREAM)[0][4][0]
+        except (OSError, UnicodeError) as e:     # UnicodeError: a name IDNA cannot encode
+            found["error"] = e
+        finally:
+            try:
+                theirs.send(b"!")
+            except OSError:
+                pass                             # the wait let it go
+            theirs.close()
+    threading.Thread(target=look, daemon=True, name="hqp-name-lookup").start()
+    try:
+        got = wait(mine, selectors.EVENT_READ, timeout)
+        if got == "woken":
+            raise Interrupted("the name lookup was let go")
+        if got == "timeout":
+            raise TimeoutError(f"no address for {host} within {timeout:g} s")
+        if "error" in found:
+            raise found["error"]
+        return found["address"]
+    finally:
+        mine.close()
+
+
+def _literal(host: str) -> bool:
+    try:
+        ipaddress.ip_address(host)
+    except ValueError:
+        return False
+    return True
+
+
 def open_connection(address: Tuple[str, int], timeout: float,
                     wait: Callable[[socket.socket, int, Optional[float]], str]) -> socket.socket:
-    """A TCP connection to `address`, the connect waited out through `wait`
-    (wait_on with the caller's Waker): Interrupted when that wakes it,
-    TimeoutError past `timeout`, OSError when it is refused or unreachable.
-    Blocking once made."""
+    """A TCP connection to `address`, its name looked up (_lookup) and the
+    connect waited out through `wait` (wait_on with the caller's Waker):
+    Interrupted when that wakes either, TimeoutError past `timeout`, OSError
+    when it is refused or unreachable. Blocking once made."""
+    host, port = address
+    deadline = time.monotonic() + timeout
+    if not _literal(host):
+        host = _lookup(host, port, timeout, wait)
     sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     try:
         sock.setblocking(False)
-        err = sock.connect_ex(address)
+        err = sock.connect_ex((host, port))
         if err not in (0, *_CONNECTING):
             raise OSError(err, os.strerror(err))
         if err:
-            got = wait(sock, selectors.EVENT_WRITE, timeout)
+            got = wait(sock, selectors.EVENT_WRITE, max(deadline - time.monotonic(), 0.0))
             if got == "woken":
                 raise Interrupted("the connect was let go")
             if got == "timeout":

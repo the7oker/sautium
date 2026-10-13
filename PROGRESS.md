@@ -817,6 +817,18 @@ implementation details live in the code, DB and git history.
   the database failing a read or a write of it costs the notice, never the
   poll. Lesson: a decision a person made is state — kept only in memory, it
   is undone by the next restart.
+- **A wait the node can end is every wait** (2026-10-13). Three waits still
+  escaped the wake channel: the meter's connect, which a page's stop ended
+  for good even when the page turned the meter on again before it was made
+  (and a stop's wake-up that outlived it closed the stream it then opened);
+  a request that held the connection outside a wait when its link closed,
+  whose socket stayed open; and the connect's name lookup, which nothing
+  could wake or bound — a `.local` HQPlayer switched off held the node stop
+  for seconds. The lookup now runs on a helper the same wait watches, a
+  closed link's holder closes its socket as it lets go, and the meter's
+  newest wish decides whether a connect that was stopped connects again.
+  Lesson: a wake-up is about a moment — spend it when the moment has passed,
+  or it ends the next one.
 - **Stop-clear-add-select-play sequence** for `play_track`/`play_album`. Without
   explicit stop, HQPlayer occasionally started the wrong track from the
   existing queue.

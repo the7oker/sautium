@@ -704,12 +704,16 @@ class HqpLink:
 
     def _give(self, hand_over: Optional[str] = None) -> None:
         """Let the connection go — or, after `hand_over`, a command whose
-        silence may follow it, keep it for this thread's next request."""
+        silence may follow it, keep it for this thread's next request. A link
+        closed while this request held it outside a wait — nothing to wake —
+        has its socket closed here, by the thread that held it."""
         with self._conn:
             self._owner = None
             if hand_over is not None:
                 self._reserved, self._after = threading.get_ident(), hand_over
             self._conn.notify_all()
+        if self.state == "closed":
+            self.client.disconnect()
 
     @contextmanager
     def _scope(self):

@@ -404,20 +404,19 @@ class HqpMeter:
                     self._cond.wait()
                 self._due = False
                 self._connecting = True
+                # Published with the connect: a stop at any moment of it wakes it
+                self._waker = waker = Waker()
                 target, generation = self._target, self._generation
                 self._publish_locked({"state": "connecting"})
             try:
-                self._session(target, generation)
+                self._session(target, generation, waker)
             except Exception as e:
                 # The meter's one thread outlives any session: what broke
                 # this one is logged and shown, and the next wish connects.
                 logger.exception("HQPlayer meter session failed")
                 self._fail(generation, "error", target[1], f"{type(e).__name__}: {e}")
 
-    def _session(self, target: Tuple[str, int], generation: int) -> None:
-        waker = Waker()
-        with self._cond:
-            self._waker = waker
+    def _session(self, target: Tuple[str, int], generation: int, waker: Waker) -> None:
         try:
             self._connected(target, generation, waker)
         finally:
@@ -434,9 +433,15 @@ class HqpMeter:
         try:
             sock = open_connection((connect_address(host), port), CONNECT_TIMEOUT_S, wait)
         except Interrupted:
+            # Stopped while it connected: the newest wish may want the meter
+            # again — a page turned it off and on — and asks for a connection
             with self._cond:
                 self._connecting = False
-            return                                # stopped while it connected
+                if (generation == self._generation and self._target is not None
+                        and self._wanted_locked()):
+                    self._due = True
+                    self._cond.notify()
+            return
         except ConnectionRefusedError:
             self._fail(generation, "refused", port, f"{host}:{port} refused the connection")
             return
@@ -457,6 +462,10 @@ class HqpMeter:
                 self._connecting = False
                 if generation != self._generation or not self._wanted_locked():
                     return
+                # Wanted now: a stop's wake-up given while it connected was
+                # undone by a newer wish, and is spent here — never read as
+                # the stream's end
+                waker.take()
                 self._sock = sock
                 # a reconnect edge that came while connecting is spent here
                 self._due = False
