@@ -433,12 +433,26 @@ comes after the control port answers again — so neither can end the wait.
     "HQPlayer is taking the queue again"; a second press joins the first, a
     Pause meanwhile drops its start; the second applies only to the same
     track. Next and Previous at a stopped spot only move it.
-- **What HQPlayer refuses** of a batch (a file it cannot open) leaves the
-  queue when it took the rest — exactly those, in order; HQPlayer refusing
-  everything (the disk or the proxy out of its reach, or the files
-  themselves) commits nothing of a person's replace or append and keeps a
-  mirror's queue whole. One notice per batch names what was refused and
-  both causes it may have.
+- **Gaps** (since 2026-10-13). HQPlayer's playlist is the queue without its
+  gaps, in the same order: a gap is a slot this HQPlayer does not hold —
+  nothing it can open (a file held only in another HQPlayer's library, one
+  that left the library: the slot's way in, `QueueItem.play`, read again at
+  every mirroring, so a copy that came back is handed over), or a file it
+  refused while it took the rest of the batch (until the next full mirror
+  hands it over again, or the slot is re-bound to another copy). A gap stays
+  in the queue, named in `/api/player/playlist` (`gap`), and is never handed
+  to HQPlayer: a tap on it is refused in its words, a start at a spot on it
+  goes from the next slot HQPlayer holds at 0 s, and Next or Previous at a
+  stopped spot skip it. A queue slot and HQPlayer's entry are told apart by
+  type (`hqp_backend.Entry`), the layout (`_Layout`) is the one translation
+  between them, and SelectTrack and PlaylistRemove take only an entry. The
+  clear of a full mirror rides on the first add HQPlayer takes.
+- **What HQPlayer refuses whole** — every file it was handed (the disk or
+  the proxy out of its reach, or the files themselves) — commits nothing of
+  a person's replace or append and keeps a mirror's queue whole; a replace
+  none of whose files this HQPlayer could open is refused before anything
+  is sent. One notice per batch names what was refused and both causes it
+  may have; a batch it takes whole ends the last one.
 - **The assistants' transport** (both surfaces: `tools/definitions.py` and
   the MCP server) goes through the backend's own routes (`/api/player/*`,
   whose answer carries HQPlayer's refusal for the assistant to quote): the
@@ -674,21 +688,26 @@ DSP sample, the benchmark holds back, and the listen that was open ends there.
 Two ticks give no verdict and are not emitted. One is the tick on which
 HQPlayer opens an entry: PLAYING at track 0 and length 0, with the URI already
 named; a listen opened there froze a length of 0. The other is an entry the
-queue does not hold at HQPlayer's index while a mutation is in flight. Sautium's
+queue does not hold at the slot HQPlayer's entry names (through the layout:
+the queue without its gaps) while a mutation is in flight — unless the
+asker is the backend's own mirror step, whose mutation it is. Sautium's
 own mutations mirror into HQPlayer before the queue commits them, and every
 queue mutation of the manager runs inside `CanonicalQueue.mutation()`: a
 replace plays its first track before its commit, and a removal shifts
 HQPlayer's index first. While a mutation is in flight the canary judges
 nothing either, nor a read the mirror's state changed under (a loss its
 stale "in step" would undo), and its verdict comes before the slot is read,
-since the fallback rests on it. A verdict is kept per (entry, index, queue version): a
-foreign entry played for an hour is looked for once.
+since the fallback rests on it. A verdict is kept per (entry, its place, the slot the
+layout names, queue version, playing or not): a foreign entry played for an
+hour is looked for once. A stopped HQPlayer's slot is named the same way, by
+what its entry is — never by its place in a playlist that is no mirror.
 Until 2026-10-04 the slot came from the index alone and only the canary (every
 30 polls) caught an external edit, so for up to half a minute such a file was
 tracked and scrobbled as the queued track at that index; and a queue holding a
 slot HQPlayer drops (one it cannot open) went untracked while the canary said
 drift. A build whose status names no entry, or a stream token of an earlier
-session, leaves the index standing, external while the playlist differs.
+session, leaves the layout's slot standing while the playlist is the mirror —
+external (playing) or no slot (stopped) while it is not.
 
 **A restarted HQPlayer gets the queue back.** The status poller
 notices HQPlayer coming back — HQPlayer ended a connection since its last

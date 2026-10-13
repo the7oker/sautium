@@ -144,7 +144,7 @@ class QueueSessionRequest(BaseModel):
     position: str = "end"   # 'next' | 'end' — next only for an all-owned snapshot
 
 class JumpRequest(BaseModel):
-    index: int  # 1-based, matches HQPlayer's select_track convention
+    index: int  # the queue's 1-based slot, as the status's track_index names it
 
 class RemoveRequest(BaseModel):
     index: int  # 1-based — HQPlayer's PlaylistRemove convention
@@ -943,9 +943,10 @@ def browser_event(req: BrowserEventRequest):
 
 @router.get("/playlist")
 def get_playlist():
-    """The canonical queue, serialized. Always instant — the queue lives
-    here; no player round-trip, no cache."""
-    return manager.queue.payload()
+    """The canonical queue, serialized — each slot the active output does
+    not hold named with why (a gap). Always instant — the queue lives here;
+    no player round-trip, no cache."""
+    return manager.playlist()
 
 
 @router.get("/status/stream")
@@ -1599,11 +1600,12 @@ def reorder(req: ReorderRequest):
 
 @router.post("/jump")
 def jump(req: JumpRequest):
-    """Jump to a specific position in the current HQPlayer playlist.
+    """Jump to a slot of the queue.
 
-    `index` is 1-based to match HQPlayer's own `select_track` API and
-    the SSE `track_index` field. Used by the Queue sheet to play a
-    specific track without rebuilding the playlist."""
+    `index` is the queue's 1-based slot, as the SSE `track_index` field
+    names it — HQPlayer's entry for it is the output's to find (a slot it
+    does not hold has none). Used by the Queue sheet to play a specific
+    track without rebuilding the playlist."""
     if req.index < 1:
         raise HTTPException(status_code=400, detail="index must be >= 1")
     try:

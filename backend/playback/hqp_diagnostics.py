@@ -148,7 +148,9 @@ def _new_id() -> int:
 @dataclass
 class Attempt:
     intent: str
-    slot: Optional[int] = None           # the slot it should play; None = read off HQPlayer
+    # HQPlayer's entry it should play — never the queue's slot, which the
+    # gaps move away from it (playback.hqp_backend.Entry); None = read off HQPlayer
+    slot: Optional[int] = None
     uris: Optional[list] = None          # what this intent handed, in playlist order
     items: Optional[list] = None         # their queue items (a replace: the queue still holds the old ones)
     id: int = field(default_factory=_new_id)

@@ -10,9 +10,10 @@ tracker, archives natural end-of-queue sessions, and notifies observers
 (radio refill).
 
 Queue mutations go through the manager: mirror into the active backend
-first (it can short-apply on a dropped control socket), then commit the
-actually-applied prefix to the canonical queue — so the canonical queue
-never claims tracks the player doesn't have. `_mutate_lock` serialises
+first, then commit what it took to the canonical queue — nothing of a batch
+HQPlayer refused whole; a slot it cannot open, or refused among others it
+took, stays in the queue as a gap of that output (PlayerBackend.gap), named
+in the playlist and never handed to it. `_mutate_lock` serialises
 mutations so canonical and mirrored order can't interleave; a start a
 mirror leaves (a replace that plays) goes once it is let go
 (`PlayerBackend.queue_start`) — HQPlayer may build a start for minutes.
@@ -722,9 +723,10 @@ class PlaybackManager:
 
     # -- queue mutations -----------------------------------------------------------
     #
-    # Mirror-first: the backend reports how much it actually applied and only
-    # that prefix lands in the canonical queue. A failed mirror leaves the
-    # canonical queue untouched (matching the player's unchanged state).
+    # Mirror-first: the backend reports what it took and only that lands in
+    # the canonical queue — on HQPlayer every slot of a batch it took any of,
+    # a gap for what it did not open. A failed mirror leaves the canonical
+    # queue untouched (matching the player's unchanged state).
 
     @contextmanager
     def _mutation(self) -> Iterator[None]:
@@ -930,17 +932,11 @@ class PlaybackManager:
         if backend is not None:
             backend.queue_start()
 
-    def forget(self, items: list[QueueItem]) -> None:
-        """Items the output refused while it took the queue it holds already
-        — files it cannot open: they leave the canonical queue (mirror-first),
-        each unmirrored, the output never having held it. Called by the
-        output under the queue lock."""
-        with self._mutation():
-            for item in items:
-                index = self.queue.index_of(item)
-                if index is not None:
-                    self.queue.remove(index)
-            self._schedule_persist()
+    def playlist(self) -> dict:
+        """The queue as /api/player/playlist serves it: each slot the active
+        output does not hold named with why (PlayerBackend.gap)."""
+        b = self._active
+        return self.queue.payload(gap=b.gap if b is not None else None)
 
     def mirror_step(self, backend: PlayerBackend, step: Callable[[], None]) -> None:
         """An output's own mirror step outside a mutation — HQPlayer

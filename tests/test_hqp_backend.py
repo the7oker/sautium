@@ -4278,9 +4278,9 @@ def _stopped(mgr, fake):
 
 def test_one_refused_file_with_the_mirror_lost_costs_one_handover_not_a_loop(fake, output,
                                                                              monkeypatch):
-    """F1: HQPlayer back and stopped with one file of the queue it cannot
-    open: it gets the queue once — the refused file leaves the queue — never
-    an endless round of Stop, clear and re-adds."""
+    """HQPlayer back and stopped with one file of the queue it cannot open:
+    it gets the queue once — the refused file a gap of it, in the queue
+    still and named — never an endless round of Stop, clear and re-adds."""
     mgr, b = output
     monkeypatch.setattr(hl, "CIRCUIT_COOLDOWN_S", 0.0)
     _stopped(mgr, fake)
@@ -4290,8 +4290,9 @@ def test_one_refused_file_with_the_mirror_lost_costs_one_handover_not_a_loop(fak
     time.sleep(4.0)                                  # what a loop would send meanwhile
     adds = [c for c, _ in fake.commands[n:] if c == "PlaylistAdd"]
     assert len(adds) == 3, len(adds)                 # one hand-over, the refused file once
-    assert [it.track_id for it in mgr.queue.snapshot()] == ["track-1", "track-3"]
+    assert [it.track_id for it in mgr.queue.snapshot()] == ["track-1", "track-2", "track-3"]
     assert fake.playlist == ["file:///E:/Music/A/01.flac", "file:///E:/Music/A/03.flac"]
+    assert [t.get("gap") for t in mgr.playlist()["tracks"]] == [None, hb.REFUSED_HERE, None]
 
 
 def test_a_question_that_times_out_is_no_return_of_hqplayer(fake, output):
@@ -4481,16 +4482,20 @@ def test_all_files_refused_at_an_attach_keep_the_queue_and_the_next_play_hands_i
         b.shutdown()
 
 
-def test_two_files_refused_of_eighty_at_a_replace_leave_exactly_78_in_order(fake, output):
-    """Decision 2: what HQPlayer refuses of a batch it took the rest of
-    leaves it — exactly those, in order, one notice for the batch."""
+def test_two_files_refused_of_eighty_at_a_replace_are_gaps_and_hqplayer_holds_78(fake, output):
+    """What HQPlayer refuses of a batch it took the rest of stays in the
+    queue, a gap of this HQPlayer named in the playlist: the queue all 80,
+    HQPlayer the other 78 in order, one notice for the batch."""
     mgr, b = output
     items = [_item(f"E:/Music/R/{i:03d}.flac", 100 + i) for i in range(80)]
     fake.refuse.update({"R/017.flac", "R/049.flac"})
     added, _ = mgr.replace_queue(items, play=False)
-    kept = [it for i, it in enumerate(items) if i not in (17, 49)]
-    assert added == 78 and mgr.queue.snapshot() == kept
-    assert len(fake.playlist) == 78
+    assert added == 80 and mgr.queue.snapshot() == items
+    assert fake.playlist == [f"file:///E:/Music/R/{i:03d}.flac" for i in range(80)
+                             if i not in (17, 49)]
+    assert [i for i, t in enumerate(mgr.playlist()["tracks"])
+            if t.get("gap") == hb.REFUSED_HERE] == [17, 49]
+    assert b._mirror == "step"
     notice = diag.refused()
     assert notice["count"] == 2 and notice["total"] == 80
 
@@ -4692,3 +4697,467 @@ def test_a_pause_or_a_stop_supersedes_a_start_left_for_later(fake, output, press
     with pytest.raises(hl.Dropped, match="a newer request came first"):
         with link.command(item=start):
             link.client.play()
+
+
+# -- Gaps (2026-10-13) ----------------------------------------------------------------
+# A slot this HQPlayer does not hold — nothing here it can open, or a file it
+# refused while it took the rest of the batch — stays in the queue, named,
+# and is never handed to it: HQPlayer's playlist is the queue without its
+# gaps, in the same order.
+
+def _ways_in_by_library(items, output_id, endpoint_id):
+    """playback.substitute.native_plays as the database answers it here: a
+    file held in an HQPlayer's own library opens on that HQPlayer alone, and
+    no other copy of it is anywhere."""
+    return [None if it.source["kind"] != "hqp" or it.source["endpoint"] == endpoint_id
+            else {"kind": "unplayable", "reason": "held in another HQPlayer's library"}
+            for it in items]
+
+
+def _held_by(path, n, endpoint_id):
+    return QueueItem(track_id=f"track-{n}", media_file_id=None,
+                     source={"kind": "hqp", "path": path, "format": "FLAC",
+                             "endpoint": endpoint_id},
+                     title=f"Song {n}", artist="Artist", album="Album")
+
+
+@pytest.fixture
+def two_libraries(fake, fake_b, monkeypatch):
+    """Two HQPlayers, each with a library of its own: `fake` is endpoint 5
+    (it holds the L/ files), `fake_b` endpoint 7, which refuses a path it
+    does not hold. A manager drives `fake`, stopped, its queue L1, a, L2, b."""
+    import hqp_library
+    from playback import manager as manager_mod
+    from playback import substitute
+    monkeypatch.setattr(hqp_library, "endpoint_by_address",
+                        lambda host, port: {"id": 5 if port == fake.port else 7, "name": "fake"})
+    monkeypatch.setattr(substitute, "native_plays", _ways_in_by_library)
+    fake_b.refuse.add("Library/L/")
+    mgr = PlaybackManager()
+    monkeypatch.setattr(manager_mod, "manager", mgr)
+    queue = [_held_by("D:/Library/L/01.flac", 1, 5), _item("E:/Music/A/02.flac", 2),
+             _held_by("D:/Library/L/03.flac", 3, 5), _item("E:/Music/A/04.flac", 4)]
+    mgr.queue.replace(queue)
+    settings_router = _picker(monkeypatch, fake)
+    mgr.activate("hqplayer")
+    yield mgr, settings_router, queue
+    if mgr.active is not None:
+        mgr.active.shutdown()
+
+
+def test_the_slots_of_another_hqplayers_library_are_gaps_and_the_queue_survives_the_round_trip(
+        fake, fake_b, two_libraries):
+    """From one HQPlayer to another and back: on the one that does not hold
+    the files of the other's library the queue is the same, those slots left
+    out of its playlist and named; back on the first, it holds them all
+    again."""
+    mgr, settings_router, queue = two_libraries
+    assert fake.playlist == ["file:///D:/Library/L/01.flac", "file:///E:/Music/A/02.flac",
+                             "file:///D:/Library/L/03.flac", "file:///E:/Music/A/04.flac"]
+    _pick(settings_router, type="hqplayer", hqplayer={"host": "127.0.0.1", "port": fake_b.port})
+    assert mgr.queue.snapshot() == queue
+    assert fake_b.playlist == ["file:///E:/Music/A/02.flac", "file:///E:/Music/A/04.flac"]
+    assert not any(c == "PlaylistAdd" and "Library/L/" in a["uri"] for c, a in fake_b.commands)
+    assert [t.get("gap") for t in mgr.playlist()["tracks"]] == [
+        "held in another HQPlayer's library", None, "held in another HQPlayer's library", None]
+    _pick(settings_router, type="hqplayer", hqplayer={"host": "127.0.0.1", "port": fake.port})
+    assert mgr.queue.snapshot() == queue
+    assert fake.playlist == ["file:///D:/Library/L/01.flac", "file:///E:/Music/A/02.flac",
+                             "file:///D:/Library/L/03.flac", "file:///E:/Music/A/04.flac"]
+    assert not any(t.get("gap") for t in mgr.playlist()["tracks"])
+
+
+def test_a_tap_on_a_slot_after_two_gaps_plays_that_track(fake, fake_b, two_libraries):
+    """The queue's slot is translated to HQPlayer's entry: a tap on the slot
+    after two gaps starts that very track, and a tap on a gap is refused in
+    its words, nothing sent."""
+    mgr, settings_router, queue = two_libraries
+    mgr.queue.replace([_held_by("D:/Library/L/05.flac", 5, 5), _item("E:/Music/A/06.flac", 6),
+                       _held_by("D:/Library/L/07.flac", 7, 5),
+                       _held_by("D:/Library/L/08.flac", 8, 5), _item("E:/Music/A/09.flac", 9)])
+    _pick(settings_router, type="hqplayer", hqplayer={"host": "127.0.0.1", "port": fake_b.port})
+    assert fake_b.playlist == ["file:///E:/Music/A/06.flac", "file:///E:/Music/A/09.flac"]
+    b = mgr.active
+    fake_b.commands.clear()
+    assert not b.select(3)
+    assert "held in another HQPlayer's library" in b.refusal()
+    assert not [c for c, _ in fake_b.commands if c in ("SelectTrack", "Play")]
+    assert b.select(5)
+    assert ("SelectTrack", {"index": "2"}) in fake_b.commands
+    assert fake_b.playlist[fake_b.track - 1] == "file:///E:/Music/A/09.flac"
+    assert _wait(lambda: mgr._latest_status.get("track_index") == 5)
+
+
+def test_a_remove_and_a_reorder_around_a_gap_keep_hqplayer_on_its_entries(
+        fake, fake_b, two_libraries, monkeypatch):
+    """A slot HQPlayer holds is removed at its own entry, a gap from the
+    queue alone; a new order behind the playing slot moves HQPlayer's
+    entries, the gap left out — the playing entry never touched."""
+    mgr, settings_router, queue = two_libraries
+    from routers import player as player_router
+    monkeypatch.setattr(player_router, "manager", mgr)
+    mgr.queue.replace([_item("E:/Music/A/02.flac", 2), _held_by("D:/Library/L/01.flac", 1, 5),
+                       _item("E:/Music/A/04.flac", 4), _item("E:/Music/A/05.flac", 5),
+                       _item("E:/Music/A/06.flac", 6)])
+    _pick(settings_router, type="hqplayer", hqplayer={"host": "127.0.0.1", "port": fake_b.port})
+    assert fake_b.playlist == [f"file:///E:/Music/A/0{i}.flac" for i in (2, 4, 5, 6)]
+    with fake_b._lock:
+        fake_b.state, fake_b.track = int(PlaybackState.PLAYING), 1
+    assert _wait(lambda: mgr._latest_status.get("track_index") == 1)
+    fake_b.commands.clear()
+    assert mgr.remove(4, "track-5")                     # behind the gap
+    assert [a["index"] for c, a in fake_b.commands if c == "PlaylistRemove"] == ["3"]
+    assert mgr.remove(2, "track-1")                     # the gap itself
+    assert [a["index"] for c, a in fake_b.commands if c == "PlaylistRemove"] == ["3"]
+    assert fake_b.playlist == [f"file:///E:/Music/A/0{i}.flac" for i in (2, 4, 6)]
+    assert mgr.append([_held_by("D:/Library/L/03.flac", 3, 5)], "next") == 1   # a gap again
+    assert fake_b.playlist == [f"file:///E:/Music/A/0{i}.flac" for i in (2, 4, 6)]
+    fake_b.commands.clear()
+    player_router.reorder(player_router.ReorderRequest(
+        order=["track-2", "track-6", "track-3", "track-4"]))
+    assert fake_b.playlist == [f"file:///E:/Music/A/0{i}.flac" for i in (2, 6, 4)]
+    assert "Stop" not in [c for c, _ in fake_b.commands]
+    assert (fake_b.state, fake_b.track) == (int(PlaybackState.PLAYING), 1)
+    assert [it.track_id for it in mgr.queue.snapshot()] == ["track-2", "track-6", "track-3",
+                                                            "track-4"]
+
+
+def test_a_file_gone_is_a_gap_and_the_next_mirror_takes_it_back(fake, output, monkeypatch):
+    """A slot whose file left the library with no copy HQPlayer opens is a
+    gap: its entry leaves HQPlayer's playlist, the slot stays in the queue,
+    named. Back in the library, the next full mirror hands it over again."""
+    from playback import substitute
+    mgr, b = output
+    back = {}
+
+    def ways_in(items, output_id, endpoint_id):
+        return [None if it.source["kind"] != "track"
+                else {**back[it.track_id], "kind": "file"} if it.track_id in back
+                else {"kind": "unplayable", "reason": "its file left the library"}
+                for it in items]
+    monkeypatch.setattr(substitute, "native_plays", ways_in)
+    b.stop()
+    _stopped(mgr, fake)
+    with mgr._mutation():
+        moved = mgr.queue.rebind(
+            lambda items: [{"media_file_id": None, "source": {"kind": "track"}}
+                           if i == 2 else None for i, _ in enumerate(items, start=1)],
+            lambda items: ways_in(items, "hqplayer", 7))
+        assert len(moved) == 1
+        b.queue_changed("rebind")
+    assert fake.playlist == ["file:///E:/Music/A/01.flac", "file:///E:/Music/A/03.flac"]
+    assert [it.track_id for it in mgr.queue.snapshot()] == ["track-1", "track-2", "track-3"]
+    assert [t.get("gap") for t in mgr.playlist()["tracks"]] == [
+        None, "its file left the library", None]
+    back["track-2"] = {"path": "E:/Music/B/02.flac", "format": "FLAC", "media_file_id": 22}
+    fake.restart()                                   # the next mirror: HQPlayer back, stopped
+    assert _wait(lambda: fake.playlist == ["file:///E:/Music/A/01.flac",
+                                           "file:///E:/Music/B/02.flac",
+                                           "file:///E:/Music/A/03.flac"], timeout=10)
+    assert not any(t.get("gap") for t in mgr.playlist()["tracks"])
+
+
+def test_only_hqplayers_own_entries_reach_its_index_commands():
+    """HQPlayer's playlist index is a type of its own (Entry): the client's
+    SelectTrack and PlaylistRemove are reached through _select and _remove
+    alone, and a queue slot handed to either is refused."""
+    import ast
+    tree = ast.parse(Path(hb.__file__).read_text())
+    callers = {}
+    for fn in ast.walk(tree):
+        if isinstance(fn, (ast.FunctionDef, ast.Lambda)):
+            for node in ast.walk(fn):
+                if (isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)
+                        and node.func.attr in ("select_track", "playlist_remove")):
+                    callers.setdefault(node.func.attr, set()).add(
+                        getattr(fn, "name", "<lambda>"))
+    assert callers == {"select_track": {"_select"}, "playlist_remove": {"_remove"}}
+    with pytest.raises(TypeError):
+        hb._select(None, 2)
+    with pytest.raises(TypeError):
+        hb._remove(None, 2)
+
+
+def test_a_file_refused_before_the_kept_slot_leaves_the_spot_on_its_track(fake, monkeypatch):
+    """Switched to HQPlayer stopped, the slot the old output was on is the
+    spot. A file before it HQPlayer refuses is a gap — the queue whole — and
+    Play starts the very track the person was on, at HQPlayer's own entry."""
+    from playback import manager as manager_mod
+    mgr = PlaybackManager()
+    monkeypatch.setattr(manager_mod, "manager", mgr)
+    _picker(monkeypatch, fake)
+    mgr.queue.replace([_item(f"E:/Music/A/0{i}.flac", i) for i in range(1, 6)])
+    mgr._last_slot = 4                                   # the old output was on track-4
+    fake.refuse.add("A/02.flac")
+    mgr.activate("hqplayer")
+    b = mgr.active
+    try:
+        assert [it.track_id for it in mgr.queue.snapshot()] == [f"track-{i}" for i in range(1, 6)]
+        assert b._spot_at() == (4, 0)
+        assert b.play()
+        assert ("SelectTrack", {"index": "3"}) in fake.commands
+        assert fake.playlist[fake.track - 1] == "file:///E:/Music/A/04.flac"
+    finally:
+        b.shutdown()
+
+
+def test_a_file_refused_in_a_reorders_rebuild_is_a_gap(fake, output, monkeypatch):
+    """A reorder's rebuild is a full mirror: what HQPlayer refuses of it is a
+    gap — the queue in its new order, the refused track in it and named — and
+    the playlist the rest, in step, one notice."""
+    mgr, b = output
+    player_router = _routes_on(monkeypatch, mgr)
+    fake.refuse.add("A/03.flac")
+    out = player_router.reorder(player_router.ReorderRequest(
+        order=["track-2", "track-1", "track-3"]))
+    assert out["interrupted"]                            # a rebuild: the current track moves right
+    assert fake.playlist == ["file:///E:/Music/A/02.flac", "file:///E:/Music/A/01.flac"]
+    assert [it.track_id for it in mgr.queue.snapshot()] == ["track-2", "track-1", "track-3"]
+    assert b._mirror == "step" and diag.refused()["count"] == 1
+    assert [t.get("gap") for t in mgr.playlist()["tracks"]] == [None, None, hb.REFUSED_HERE]
+
+
+def test_a_replace_cut_short_by_a_silence_keeps_every_track_and_loses_the_mirror(fake, output):
+    """An add HQPlayer leaves unanswered is carried out once it answers
+    again: a replace cut short there is no mirror in step. The queue takes
+    every track — the person asked for all of them — and HQPlayer gets the
+    rest at its next answer, in step after it."""
+    mgr, b = output
+    _link().client.timeout = 0.5                       # an add's wait, shortened
+    dispatch = fake._dispatch
+    adds = itertools.count(1)
+
+    def slow_second_add(cmd, attrs):
+        if cmd == "PlaylistAdd" and next(adds) == 2:
+            time.sleep(1.0)                            # busy: answered late, carried out all the same
+        return dispatch(cmd, attrs)
+    fake._dispatch = slow_second_add
+    items = [_item(f"E:/Music/B/0{i}.flac", 10 + i) for i in (1, 2, 3)]
+    added, _ = mgr.replace_queue(items, play=False)
+    assert added == 3 and mgr.queue.snapshot() == items
+    assert b._mirror == "lost"
+    assert _wait(lambda: fake.playlist == [f"file:///E:/Music/B/0{i}.flac" for i in (1, 2, 3)]
+                 and b._mirror == "step", timeout=10), (fake.playlist, b._mirror)
+
+
+def test_stopped_in_a_tail_mirror_the_slot_and_play_stay_with_the_track(fake, output):
+    """The slot a stopped HQPlayer stands on is named by what its entry is,
+    never by its place: stopped in a tail mirror on the queue's slot 2
+    (HQPlayer's entry 3), the status names slot 2's track, and Play starts
+    there — as a Play after a Stop does on a mirror — not at slot 1."""
+    mgr, b = output
+    _tail(mgr, b, fake)          # HQPlayer [01, X09, 02, 03, 04] reads entry 3 = queue slot 2
+    assert _wait(lambda: mgr._latest_status.get("track_id") == "track-2", timeout=5)
+    assert b.stop()
+    assert _wait(lambda: mgr._latest_status.get("state") == "stopped", timeout=5)
+    named = mgr._latest_status.get("track_id")
+    assert b.play()
+    assert _wait(lambda: fake.state == int(PlaybackState.PLAYING) and not b._pressing, timeout=10)
+    assert _wait(lambda: mgr._latest_status.get("track_id") == "track-2", timeout=5)
+    assert (named, fake.playlist[fake.track - 1]) == ("track-2", "file:///E:/Music/A/02.flac")
+
+
+# The backend's own mirror steps judge the queue they act on: the guard that
+# keeps the poller from naming an entry while a mutation is in flight is not
+# theirs — in a tail mirror HQPlayer's entry and the queue's slot differ always.
+
+def _named(mgr, track_id):
+    """The poller has named the slot HQPlayer reads, for the queue as it stands."""
+    return _wait(lambda: mgr._latest_status.get("track_id") == track_id
+                 and mgr._latest_status.get("playlist_version") == mgr.queue.version, timeout=5)
+
+
+def test_two_quick_removes_behind_the_entry_read_both_reach_a_tail_mirror(fake, output):
+    """A remove behind the slot HQPlayer reads goes to it at the entry it
+    holds there — two in a row, as two taps within a second."""
+    mgr, b = output
+    _tail(mgr, b, fake)          # HQPlayer [01, X09, 02, 03, 04] reads entry 3 = queue slot 2
+    assert _named(mgr, "track-2")
+    assert mgr.remove(4)         # track-4
+    assert mgr.remove(3)         # track-3, right after
+    assert [it.track_id for it in mgr.queue.snapshot()] == ["track-1", "track-2"]
+    assert b._mirror == "tail"
+    assert fake.playlist == ["file:///E:/Music/A/01.flac", "file:///E:/Music/X/09.flac",
+                             "file:///E:/Music/A/02.flac"], fake.playlist
+
+
+def test_a_remove_right_after_hqplayers_own_advance_reaches_a_tail_mirror(fake, output):
+    """HQPlayer advanced on its own to entry 4 (the queue's slot 3), and the
+    person removes slot 4 before the next status tick."""
+    mgr, b = output
+    _tail(mgr, b, fake)
+    assert _named(mgr, "track-2")
+    b._running = False                   # no tick between the advance and the remove
+    b._wake.set()
+    b._thread.join(timeout=3)
+    with fake._lock:
+        fake.track, fake.position = 4, 0.0
+    assert mgr.remove(4)                 # track-4, behind the slot HQPlayer reads now
+    assert [it.track_id for it in mgr.queue.snapshot()] == ["track-1", "track-2", "track-3"]
+    assert fake.playlist == ["file:///E:/Music/A/01.flac", "file:///E:/Music/X/09.flac",
+                             "file:///E:/Music/A/02.flac", "file:///E:/Music/A/03.flac"], fake.playlist
+
+
+def test_a_play_next_after_a_remove_lands_behind_the_entry_a_tail_mirror_reads(fake, output):
+    """A play-next on a tail mirror goes to HQPlayer right behind the entry
+    it reads, where the queue takes it."""
+    mgr, b = output
+    _tail(mgr, b, fake)
+    assert _named(mgr, "track-2")
+    assert mgr.remove(4)                                      # track-4
+    assert mgr.append([_item("E:/Music/A/07.flac", 7)], position="next") == 1
+    assert [it.track_id for it in mgr.queue.snapshot()] == ["track-1", "track-2", "track-7",
+                                                            "track-3"]
+    assert fake.playlist[2:] == ["file:///E:/Music/A/02.flac", "file:///E:/Music/A/07.flac",
+                                 "file:///E:/Music/A/03.flac"], fake.playlist
+
+
+def test_a_reorder_behind_the_entry_read_after_a_remove_reaches_a_tail_mirror(fake, output,
+                                                                               monkeypatch):
+    """A new order behind the slot HQPlayer reads goes to it behind the
+    entry it reads — also right after another edit moved the queue on."""
+    mgr, b = output
+    player_router = _routes_on(monkeypatch, mgr)
+    _tail(mgr, b, fake)          # HQPlayer [01, X09, 02, 03, 04] reads entry 3 = queue slot 2
+    assert _named(mgr, "track-2")
+    assert mgr.append([_item("E:/Music/A/05.flac", 5)]) == 1     # reaches HQPlayer behind the tail
+    assert fake.playlist[-1] == "file:///E:/Music/A/05.flac"
+    assert mgr.remove(5)         # track-5, right after
+    player_router.reorder(player_router.ReorderRequest(
+        order=["track-1", "track-2", "track-4", "track-3"]))
+    assert (b._mirror, fake.playlist[2:]) == ("tail", [
+        "file:///E:/Music/A/02.flac", "file:///E:/Music/A/04.flac", "file:///E:/Music/A/03.flac"])
+
+
+def test_a_commit_between_hqplayers_answer_and_its_reconverge_leaves_no_mirror_lost(fake, output):
+    """Lost through a silence, HQPlayer playing an entry of ours gets what
+    lies behind it at its next answer, once per loss: a queue edit that
+    commits between that answer and the reconverge (a filler's append) does
+    not spend the once for nothing."""
+    mgr, b = output
+    with fake._lock:
+        fake.track, fake.position = 3, 0.0                       # HQPlayer reads entry 3 = track-3
+    assert _wait(lambda: mgr._latest_status.get("track_id") == "track-3")
+    with mgr._mutate_lock:
+        b.lose_mirror("HQPlayer took 0 of 1 appended tracks")   # through a silence
+        assert mgr.remove(1)                                     # the queue's alone: [2, 3]
+        # the poller answers and starts the reconverge, which waits for the queue lock
+        assert _wait(lambda: any(t.name == "hqp-reconverge" for t in threading.enumerate()),
+                     timeout=5)
+        assert mgr.append([_item("E:/Music/A/04.flac", 4)]) == 1  # the queue's alone
+    assert _wait(lambda: fake.playlist == [f"file:///E:/Music/A/0{i}.flac" for i in (1, 2, 3, 4)]
+                 and b._mirror == "tail", timeout=5), (fake.playlist, b._mirror)
+
+
+def test_the_refusal_notice_ends_once_a_play_press_hands_the_whole_queue_over(fake, monkeypatch):
+    """A batch HQPlayer takes whole ends the refusal notice of the last one:
+    all refused at an attach (the disk away) raises it; the disk back, the
+    play press hands HQPlayer the whole queue and the notice goes."""
+    from playback import manager as manager_mod
+    mgr = PlaybackManager()
+    monkeypatch.setattr(manager_mod, "manager", mgr)
+    mgr.queue.replace([_item(f"E:/Music/R/{i:03d}.flac", 100 + i) for i in range(5)])
+    fake.refuse.add("E:/Music/R/")
+    b = _attach(mgr)
+    try:
+        assert diag.refused() is not None and diag.refused()["count"] == 5
+        fake.refuse.clear()                          # the disk is back
+        assert b.play()
+        assert _wait(lambda: len(fake.playlist) == 5
+                     and fake.state == int(PlaybackState.PLAYING), timeout=10)
+        assert _wait(lambda: not b._pressing, timeout=5)
+        assert b._mirror == "step"
+        assert diag.refused() is None, diag.refused()
+    finally:
+        b.shutdown()
+
+
+def test_a_stopped_hqplayer_given_the_queue_back_keeps_its_track_as_the_spot(fake, output):
+    """Lost through a silence, a stopped HQPlayer is given the queue afresh
+    and the play press resumes the slot of the track it stood on — named by
+    what its entry is, not by its place in a playlist that was no mirror."""
+    mgr, b = output
+    mgr.append([_item("E:/Music/A/04.flac", 4)])
+    assert fake.playlist[-1] == "file:///E:/Music/A/04.flac"
+    with fake._lock:
+        fake.track, fake.position = 3, 0.0
+    assert _wait(lambda: mgr._latest_status.get("track_id") == "track-3")
+    b.stop()
+    _stopped(mgr, fake)                                   # stopped on track-3 (entry 3)
+    with mgr._mutate_lock:
+        b.lose_mirror("HQPlayer took 0 of 1 appended tracks")
+        assert mgr.remove(1)                               # the queue's alone: [2, 3, 4]
+    assert _wait(lambda: b._mirror == "step", timeout=5), b._mirror
+    spot = b._spot_at()
+    assert spot is not None and mgr.queue.item_at(spot[0]).track_id == "track-3", (
+        spot, spot and mgr.queue.item_at(spot[0]).track_id)
+
+
+def test_a_full_mirror_whose_first_file_is_refused_still_clears_the_playlist(fake, output):
+    """The clear of a full mirror rides on the first add HQPlayer takes: a
+    first file it refuses clears nothing, and what follows must not land
+    behind the playlist it held."""
+    mgr, b = output
+    fake.refuse.add("B/01.flac")
+    items = [_item(f"E:/Music/B/0{i}.flac", 20 + i) for i in (1, 2, 3)]
+    added, _ = mgr.replace_queue(items, play=False)
+    assert fake.playlist == ["file:///E:/Music/B/02.flac", "file:///E:/Music/B/03.flac"]
+    assert added == 3 and b._mirror == "step"
+
+
+def test_a_refused_file_re_bound_to_another_copy_is_handed_over(fake, output):
+    """A refusal is of a file: a slot whose refused file is re-bound to
+    another copy of its track is no gap any more, and HQPlayer's playlist
+    follows the re-bind with the new copy in it."""
+    mgr, b = output
+    b.stop()
+    _stopped(mgr, fake)
+    fake.refuse.add("A/02.flac")
+    fake.restart()                                   # back stopped: the queue afresh
+    assert _wait(lambda: fake.playlist == ["file:///E:/Music/A/01.flac",
+                                           "file:///E:/Music/A/03.flac"]
+                 and b._mirror == "step", timeout=10)
+    assert [it.track_id for it in mgr.queue.snapshot()] == ["track-1", "track-2", "track-3"]
+    assert b.gap(mgr.queue.item_at(2)) == hb.REFUSED_HERE
+    with mgr._mutation():
+        _move(mgr, 2, "E:/Music/B/02.flac", 20)
+        b.queue_changed("rebind")
+    assert b.gap(mgr.queue.item_at(2)) is None
+    assert fake.playlist == ["file:///E:/Music/A/01.flac", "file:///E:/Music/B/02.flac",
+                             "file:///E:/Music/A/03.flac"]
+
+
+def test_a_track_added_while_the_mirror_is_lost_is_read_for_this_hqplayer(fake, fake_b,
+                                                                          two_libraries):
+    """An append the queue takes alone, the mirror lost, reads its way in
+    for the HQPlayer driven all the same: a file of the other's library is a
+    gap named at once, and HQPlayer is never handed it when it gets the queue
+    back."""
+    mgr, settings_router, queue = two_libraries
+    _pick(settings_router, type="hqplayer", hqplayer={"host": "127.0.0.1", "port": fake_b.port})
+    assert mgr.queue.snapshot() == queue
+    b = mgr.active
+    with fake_b._lock:
+        fake_b.state, fake_b.track = int(PlaybackState.PLAYING), 1
+    with mgr._mutate_lock:
+        b.lose_mirror("HQPlayer took 0 of 1 appended tracks")
+        assert mgr.append([_held_by("D:/Library/L/09.flac", 9, 5)]) == 1
+        assert mgr.playlist()["tracks"][-1].get("gap") == "held in another HQPlayer's library"
+    assert _wait(lambda: b._mirror in ("step", "tail"), timeout=5), b._mirror
+    assert not any(c == "PlaylistAdd" and "Library/L/" in a["uri"] for c, a in fake_b.commands)
+
+
+def test_a_spot_on_a_gap_starts_the_next_slot_hqplayer_holds_from_its_start(fake, fake_b,
+                                                                            two_libraries):
+    """Play from a spot on a slot this HQPlayer does not hold starts the
+    next one it holds, from 0 s: the second belonged to the track the spot
+    was taken on."""
+    mgr, settings_router, queue = two_libraries
+    _pick(settings_router, type="hqplayer", hqplayer={"host": "127.0.0.1", "port": fake_b.port})
+    b = mgr.active
+    b._set_spot(queue[2], 90)                           # a file of the other library
+    fake_b.commands.clear()
+    assert b.play()
+    assert [(c, a) for c, a in fake_b.commands if c in ("SelectTrack", "Seek")] == [
+        ("SelectTrack", {"index": "2"})]
+    assert fake_b.playlist[fake_b.track - 1] == "file:///E:/Music/A/04.flac"

@@ -193,8 +193,15 @@ class PlayerBackend(ABC):
         a stream substitute landed on it (playback.substitute). Default:
         nothing; an output that parked a play there starts it."""
 
+    def gap(self, item) -> Optional[str]:
+        """Why this output does not hold the queue's slot `item` — it stays
+        in the queue, named with this — or None. Default: every slot is
+        held; HQPlayer's playlist leaves out what it cannot open."""
+        return None
+
     # The three take what the output took of `items` into the queue — all of
-    # them here; HQPlayer's leaves out what it refused (mirror-first).
+    # them here and on HQPlayer, which has a gap for what it did not open;
+    # nothing when HQPlayer refused them whole (mirror-first).
 
     def queue_replace(self, items: list, *, play: bool, probe_first: bool = False) -> list:
         return list(items)

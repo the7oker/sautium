@@ -18,11 +18,14 @@ told (`PlayerBackend.slot_ready`). Nothing is fetched for a queue nobody
 listens on past the window, and a queue that moves on retires its tokens
 through the proxy's generation binding.
 
-The HQPlayer output mirrors its playlist one entry per slot and HQPlayer
-fetches an http entry at ADD time, so a stream it has not buffered cannot
-sit in that playlist: on that output only native copies are resolved, and a
-slot only a stream could serve (a file held at another HQPlayer with no rip
-here) stays unplayable there, named as such.
+The HQPlayer output mirrors its playlist one entry per slot it holds, and
+HQPlayer fetches an http entry at ADD time, so a stream it has not buffered
+cannot sit in that playlist: on that output only native copies are
+resolved, and a slot only a stream could serve (a file held at another
+HQPlayer with no rip here) is `unplayable` there — a gap of that output: it
+stays in the queue, named in the playlist with the reason given here, and
+is never handed to HQPlayer (playback.hqp_backend). That output reads every
+slot's way in again at each mirroring, so a copy that came back is taken.
 
 A slot whose file left the library with no other copy here (`source` kind
 `track`, playback.queue.rebind_origins) has no copy of its own: every output

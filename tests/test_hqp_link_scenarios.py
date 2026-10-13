@@ -31,9 +31,11 @@ statuses the output pushed. The node stop ends every run.
      newer queue replaced it or a person removed it.
  12. A replace rotates listening history only once the output took it:
      once when it did, never when it was refused.
- 13. At rest HQPlayer's playlist is the queue, or the mirror is marked lost
-     (or drifted: an edit made elsewhere) — and a play press then makes it
-     the queue; no item twice in the queue.
+ 13. At rest HQPlayer's playlist is the queue without its gaps, in the same
+     order, or the mirror is marked lost (or drifted: an edit made
+     elsewhere) — and a play press then makes it so; no item twice in the
+     queue. A gap is a slot that HQPlayer cannot open (a file of the other
+     HQPlayer's library) or one whose file it refused, and nothing else.
  14. A tail mirror plays the queue's tracks from the entry it reads to the
      end.
 
@@ -64,8 +66,9 @@ import pytest
 from fastapi import HTTPException
 
 # The harness and its fixtures — importing it puts backend/ on the path
-from test_hqp_backend import (FakeHqp, _item, _picker, _queue_stays_in_memory,  # noqa: F401
-                              fake, fake_b, listens)
+from test_hqp_backend import (FakeHqp, _held_by, _item, _picker,  # noqa: F401
+                              _queue_stays_in_memory, _ways_in_by_library, fake, fake_b,
+                              listens)
 
 from hqplayer_client import PlaybackState  # noqa: E402
 from playback import hqp_backend as hb  # noqa: E402
@@ -220,6 +223,7 @@ class World:
         self._links = 0
         self.fills: list = []           # (queue generation, the items a filler took)
         self.removed: set = set()       # id() of the items people removed
+        self.refused: set = set()       # the paths an HQPlayer was made to refuse for good
         self.mgr: Optional[PlaybackManager] = None
         self.settings_router = None
         self.owed_checked = 0
@@ -353,7 +357,7 @@ class World:
                     state = f.state
                 built = link.build.silent()
                 w.rec("released", link=lid(link), fake=f.name, state=state, entry=entry,
-                      given=[old._uri_for(it) for it in mgr.queue.snapshot()],
+                      given=[old._uri_for(it) for it in old._layout().handed],
                       unfinished=bool(built and built.get("unfinished")))
             return activate(mgr, output_type, stop_old=stop_old, by_hold=by_hold, **cfg)
         mp.setattr(PlaybackManager, "activate", activated)
@@ -432,6 +436,14 @@ class World:
         from playback import queue as queue_mod
         self.mp.setattr(queue_mod, "items_for_file_spans", lambda spans: {})
         self.mp.setattr(queue_mod, "items_for_hqp_paths", lambda paths, endpoint_id: {})
+        # Each HQPlayer has a library of its own: A holds the H/ files, which
+        # B cannot open — a slot of A's library is a gap on B
+        import hqp_library
+        from playback import substitute
+        self.mp.setattr(hqp_library, "endpoint_by_address",
+                        lambda host, port: {"id": 7 if port == self.a.port else 8, "name": "fake"})
+        self.mp.setattr(substitute, "native_plays", _ways_in_by_library)
+        self.b.refuse.add("Library/H/")
         self.player = player_router
         self.pick(self.a)
 
@@ -442,10 +454,19 @@ class World:
     # -- the steps ----------------------------------------------------------------------
 
     def items(self, n: int) -> list:
+        """New tracks — some held in A's library (a gap on B), now and then
+        one whose file the HQPlayer driven refuses from now on."""
         made = []
         for _ in range(n):
             self.next_id += 1
-            made.append(_item(f"E:/Music/S/{self.next_id}.flac", self.next_id))
+            if self.rng.random() < 0.2:
+                made.append(_held_by(f"D:/Library/H/{self.next_id}.flac", self.next_id, 7))
+                continue
+            path = f"E:/Music/S/{self.next_id}.flac"
+            if self.rng.random() < 0.1:
+                self.refused.add(path)
+                self.driven().refuse.add(path)
+            made.append(_item(path, self.next_id))
         return made
 
     def hqp(self) -> FakeHqp:
@@ -669,7 +690,7 @@ class World:
         except (ConnectionError, OSError) as e:
             self.rec("step-refused", step=n, why=f"{type(e).__name__}: {e}")
         except RuntimeError as e:
-            if not str(e).startswith("HQPlayer did not"):
+            if not str(e).startswith(("HQPlayer did not", "none of these tracks is on")):
                 self.unexpected.append(f"{name}: {traceback.format_exc()}")
             self.rec("step-refused", step=n, why=str(e))
         except Exception:
@@ -703,8 +724,10 @@ class World:
         for gen, items in self.fills:
             if gen != self.mgr.queue.generation:
                 continue
+            # what HQPlayer refused whole the filler never took
             lost = [it.title for it in items
-                    if self.mgr.queue.index_of(it) is None and id(it) not in self.removed]
+                    if self.mgr.queue.index_of(it) is None and id(it) not in self.removed
+                    and it.source.get("path") not in self.refused]
             if lost:
                 self.violate(f"I11: a filler's tracks are not in the queue: {lost}")
         self._owed_stops()
@@ -719,7 +742,8 @@ class World:
             with hqp._lock:
                 playlist, track, state = list(hqp.playlist), hqp.track, hqp.state
             snapshot = self.mgr.queue.snapshot()
-            want = [b._uri_for(it) for it in snapshot]
+            self._gaps(b, snapshot)
+            want = [b._uri_for(it) for it in b._layout(snapshot).handed]
             if playlist == want:
                 return
             if b._mirror == "tail" and _tail_holds(playlist, want, track, state):
@@ -736,12 +760,28 @@ class World:
                 return
             time.sleep(0.1)
 
+    def _gaps(self, b: HqpBackend, snapshot: list) -> None:
+        """I13's gaps: a slot is one exactly when HQPlayer cannot open it — a
+        file of the other HQPlayer's library — or its file was refused there."""
+        endpoint = b.endpoint_id
+        for it in snapshot:
+            why = b.gap(it)
+            elsewhere = it.source["kind"] == "hqp" and it.source["endpoint"] != endpoint
+            if elsewhere != (why is not None and why != hb.REFUSED_HERE):
+                self.violate(f"I13: {it.title} is {'a gap: ' + why if why else 'no gap'} "
+                             f"on endpoint {endpoint}")
+            if why == hb.REFUSED_HERE and it.source.get("path") not in self.refused:
+                self.violate(f"I13: {it.title} is a gap HQPlayer never refused")
+
     def _press(self) -> bool:
-        """A play press — a tap on the first slot — on a playlist that is no
-        mirror: whether it was taken."""
+        """A play press — a tap on the first slot HQPlayer holds — on a
+        playlist that is no mirror: whether it was taken."""
         self.rec("step", name="press (at rest)")
+        held = self.mgr.active._layout().slots
+        if not held:
+            return False                # nothing of the queue on this HQPlayer
         try:
-            self.player.jump(self.player.JumpRequest(index=1))
+            self.player.jump(self.player.JumpRequest(index=held[0]))
         except (HTTPException, ConnectionError, OSError) as e:
             self.rec("step-refused", why=str(e))
             return False

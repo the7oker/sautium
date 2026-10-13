@@ -655,6 +655,24 @@ implementation details live in the code, DB and git history.
   passed on the old code for the wrong reason (a Stop the fixture's own
   attach had sent, adds the fixture had made), caught only by running each
   against the parent commit and against a mutation of the new code.
+- **Gaps, not removal** (2026-10-13). The next review found that removal
+  broke what an output switch promises: a slot held only in another
+  HQPlayer's library, or one whose file left the library, was handed over,
+  refused and deleted from the queue at the first mirror, so the switch back
+  found it gone. A slot an HQPlayer does not hold is now a gap of that
+  output: it stays in the queue, named in the playlist, and is never handed
+  over — HQPlayer's playlist is the queue without its gaps, in order, and
+  each slot's way in is read again at every mirroring, so a copy that came
+  back is taken; a file HQPlayer refused is tried again at the next full
+  mirror. A queue slot and HQPlayer's entry are different types (`Entry`),
+  translated by one layout, and the client's SelectTrack and PlaylistRemove
+  take only an entry. On the way: the clear of a full mirror rode on the
+  first add alone, so a refused first file left the new queue behind the old
+  playlist (pre-existing); the mirror steps asked for HQPlayer's slot
+  through the poller's guard against a read made before a commit — a guard
+  for one caller that, inside their own mutation, refused every tail-mirror
+  edit. Lesson: a rule about one batch (what HQPlayer refused) must not
+  decide what the queue — which every output shares — holds.
 - **Stop-clear-add-select-play sequence** for `play_track`/`play_album`. Without
   explicit stop, HQPlayer occasionally started the wrong track from the
   existing queue.

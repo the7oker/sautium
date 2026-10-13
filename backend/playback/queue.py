@@ -284,11 +284,17 @@ class CanonicalQueue:
 
     # -- payload -------------------------------------------------------------
 
-    def payload(self) -> dict:
+    def payload(self, gap=None) -> dict:
         """The exact `/api/player/playlist` JSON shape the UI has always
-        consumed (owned / preview / foreign row variants)."""
+        consumed (owned / preview / foreign row variants). `gap` — the
+        active output's (PlayerBackend.gap) — names each slot that output
+        does not hold."""
         with self._lock:
             tracks = [self._row(it, idx) for idx, it in enumerate(self._items)]
+            gaps = [gap(it) for it in self._items] if gap is not None else []
+        for row, why in zip(tracks, gaps):
+            if why is not None:
+                row["gap"] = why
         return {"tracks": tracks, "count": len(tracks)}
 
     @staticmethod
