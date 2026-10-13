@@ -181,17 +181,6 @@ class _Elsewhere:
         raise AttributeError(name)
 
 
-class _QuickSleep:
-    """routers.player's `time`, its sleeps cut to a fifth of a second."""
-
-    def __getattr__(self, name):
-        return getattr(time, name)
-
-    @staticmethod
-    def sleep(seconds: float) -> None:
-        time.sleep(min(seconds, 0.2))
-
-
 @dataclass
 class _Event:
     seq: int
@@ -360,7 +349,7 @@ class World:
                     state = f.state
                 built = link.build.silent()
                 w.rec("released", link=lid(link), fake=f.name, state=state, entry=entry,
-                      given=[old._uri_for(it) for it in old._layout().handed],
+                      given=[old._uri_of(it)[0] for it in old._layout().handed],
                       unfinished=bool(built and built.get("unfinished")))
             return activate(mgr, output_type, stop_old=stop_old, by_hold=by_hold, **cfg)
         mp.setattr(PlaybackManager, "activate", activated)
@@ -398,6 +387,13 @@ class World:
             heard(manager, backend, status)
         mp.setattr(PlaybackManager, "_on_backend_status", emitted)
 
+        drifted = HqpBackend._drifted
+
+        def marked(backend, why, **kw):
+            w.rec("drift", link=lid(backend._link), why=why)
+            return drifted(backend, why, **kw)
+        mp.setattr(HqpBackend, "_drifted", marked)
+
         miss = HqpBackend._register_failure
 
         def missed(backend, *, silent):
@@ -429,8 +425,6 @@ class World:
         mgr.queue.replace([_item(f"E:/Music/A/0{i}.flac", i) for i in range(1, 5)])
         self.mp.setattr(manager_mod, "manager", mgr)
         self.mp.setattr(player_router, "manager", mgr)
-        # A filler's add that failed is tried again after 5 s: a tenth here
-        self.mp.setattr(player_router, "time", _QuickSleep())
         # The output a switch goes to: no browser, no media URLs
         from playback import browser_backend
         self.mp.setattr(browser_backend, "BrowserBackend", _Elsewhere)
@@ -525,6 +519,7 @@ class World:
             (1, "restart", self.restart),
             (1, "vanish", self.vanish),
             (2, "theirs", self.theirs),
+            (2, "an entry before", self.entry_before),
             (2, "switch away", lambda: self.settings_router.put_output_prefs(
                 self.settings_router.OutputPrefs(type="browser"))),
             (2, "back to A", lambda: self.pick(self.a)),
@@ -647,8 +642,26 @@ class World:
             f.track = len(f.playlist)
             f.state = int(PlaybackState.PLAYING)
 
+    def entry_before(self) -> None:
+        """An entry of HQPlayer's own put before the one it plays, its
+        mirror then lost through a silence: answering again it gets what
+        lies behind that entry — a tail mirror (I14)."""
+        b = self.mgr.active
+        if not isinstance(b, HqpBackend):
+            return
+        f = self.driven()
+        with f._lock:
+            if f.state != int(PlaybackState.PLAYING) or not 1 <= f.track <= len(f.playlist):
+                return
+            self.foreign += 1
+            f.playlist.insert(f.track - 1, f"file:///Elsewhere/before-{self.foreign}.flac")
+            f.track += 1
+        b.lose_mirror("an entry of HQPlayer's own before the one it plays")
+
     def reorder(self) -> None:
         order = [it.track_id for it in self.mgr.queue.snapshot()]
+        if not order:
+            return                      # nothing to order: the route says 400
         self.rng.shuffle(order)
         self.player.reorder(self.player.ReorderRequest(order=order))
 
@@ -674,6 +687,19 @@ class World:
         if backend is not None:
             backend.queue_start()
 
+    def _refused(self, name: str, n: Optional[int], e: HTTPException) -> None:
+        """A route's refusal — 409 busy, a 503 whose cause is the output
+        out of reach or HQPlayer's own refusal in its words — never a crash
+        a route wrapped into a 503."""
+        cause = e.__context__
+        if e.status_code != 409 and not (
+                isinstance(cause, (ConnectionError, OSError))
+                or (isinstance(cause, RuntimeError)
+                    and str(cause).startswith(("HQPlayer did not", "none of these tracks is on")))):
+            self.unexpected.append(f"{name}: {e.status_code} {e.detail} — "
+                                   + "".join(traceback.format_exception(cause)))
+        self.rec("step-refused", step=n, status=e.status_code, why=e.detail)
+
     def run_step(self, name: str, fn: Callable[[], Any]) -> None:
         n = self.rec("step", name=name)
         b = self.mgr.active
@@ -689,7 +715,7 @@ class World:
                     and (after is None or after[0] is not before[0])):
                 self.violate(f"I10: {name} took the spot off its item")
         except HTTPException as e:
-            self.rec("step-refused", step=n, status=e.status_code, why=e.detail)
+            self._refused(name, n, e)
         except (ConnectionError, OSError) as e:
             self.rec("step-refused", step=n, why=f"{type(e).__name__}: {e}")
         except RuntimeError as e:
@@ -734,22 +760,30 @@ class World:
             if lost:
                 self.violate(f"I11: a filler's tracks are not in the queue: {lost}")
         self._owed_stops()
-        b = self.mgr.active
-        if not isinstance(b, HqpBackend):
-            return
-        hqp = self.b if b._link.port == self.b.port else self.a
         pressed = False
         while True:
+            # Read afresh each time round: the press attaches the output
+            # again when the play gate found it gone
+            b = self.mgr.active
+            if not isinstance(b, HqpBackend):
+                return
+            hqp = self.b if b._link.port == self.b.port else self.a
             if hqp._down:
                 return
             with hqp._lock:
                 playlist, track, state = list(hqp.playlist), hqp.track, hqp.state
             snapshot = self.mgr.queue.snapshot()
             self._gaps(b, snapshot)
-            want = [b._uri_for(it) for it in b._layout(snapshot).handed]
+            want = [b._uri_of(it)[0] for it in b._layout(snapshot).handed]
             if playlist == want:
                 return
             if b._mirror == "tail" and _tail_holds(playlist, want, track, state):
+                return
+            if not snapshot and any("/Elsewhere/" in u for u in playlist):
+                return      # another controller's playlist and no queue: nothing to give it
+            if (b._mirror == "drift" and not pressed and self._drift_unexplained(b, playlist)):
+                self.violate(f"I13: HQPlayer holds {playlist}, the queue {want}: a divergence "
+                             "of the node's own, taken for an edit made elsewhere")
                 return
             if b._mirror in ("lost", "drift") and not pressed and snapshot:
                 pressed = True
@@ -762,6 +796,15 @@ class World:
                              f"the mirror {b._mirror}" + (" after a play press" if pressed else ""))
                 return
             time.sleep(0.1)
+
+    def _drift_unexplained(self, b: HqpBackend, playlist: list) -> bool:
+        """Did the canary mark the drift — "an external edit?" — with no
+        entry of anyone else's in HQPlayer's playlist? Every other drift
+        names its own reason (a removal, a new order HQPlayer did not take)."""
+        with self._lock:
+            marks = [e for e in self.log if e.kind == "drift" and e.data["link"] == self.lid(b._link)]
+        return (bool(marks) and marks[-1].data["why"].startswith("HQPlayer's playlist drifted")
+                and not any("/Elsewhere/" in u for u in playlist))
 
     def _gaps(self, b: HqpBackend, snapshot: list) -> None:
         """I13's gaps: a slot is one exactly when HQPlayer cannot open it — a
@@ -785,7 +828,10 @@ class World:
             return False                # nothing of the queue on this HQPlayer
         try:
             self.player.jump(self.player.JumpRequest(index=held[0]))
-        except (HTTPException, ConnectionError, OSError) as e:
+        except HTTPException as e:
+            self._refused("press (at rest)", None, e)
+            return False
+        except (ConnectionError, OSError) as e:
             self.rec("step-refused", why=str(e))
             return False
         deadline = time.monotonic() + 8.0
@@ -818,8 +864,7 @@ class World:
                               or (y["entry"] or "").find("/Elsewhere/") >= 0))
                         or (k == "accept" and y["intent"] == "attach" and y["link"][0] == fake)
                         or (k == "build-end" and y["link"][0] == fake and y["how"] != "answered")
-                        or (k == "gone" and y["fake"] == fake)
-                        or (k == "close" and y["link"][0] == fake))
+                        or (k == "gone" and y["fake"] == fake))
             if not any(settled(x) for x in log[i + 1:]):
                 self.violate(f"I6: the Stop the switch away (event {e.seq}) owed {fake} never went")
         self.owed_checked = len(log)
@@ -1032,14 +1077,15 @@ class World:
     def _radio_order(self, log: list) -> None:
         """I12, the radio's half: history rotates before HQPlayer's playlist
         is cleared — no PlaylistClear the rotation did not come before."""
-        archived = False
+        archived: set = set()
         for e in log:
             if e.kind == "archive":
-                archived = True
+                archived.add(e.thread)
             elif e.kind == "send" and e.data["command"] == "PlaylistClear":
-                if not archived:
+                # The rotation and the clear are one step's, on its thread
+                if e.thread not in archived:
                     self._once(e, "I12: a radio's PlaylistClear went before history rotated")
-                archived = False
+                archived.discard(e.thread)
 
     def _once(self, e: _Event, what: str) -> None:
         if e.seq >= self.checked:

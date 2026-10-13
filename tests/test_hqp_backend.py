@@ -397,11 +397,13 @@ def fake(monkeypatch):
     # these tests have none.
     import hqp_library
     monkeypatch.setattr(hqp_library, "request_sync", lambda host, port: None)
-    # ...and what GetInfo said goes on the endpoint row, and a benchmark the
-    # process died in is put back — both in the database.
+    # ...and what GetInfo said goes on the endpoint row, a benchmark the
+    # process died in is put back, and one left to the owner is said — all
+    # in the database.
     from playback import hqp_benchmark
     monkeypatch.setattr(hqp_library, "note_info", lambda *a, **k: None)
     monkeypatch.setattr(hqp_benchmark, "recover", lambda endpoint_id, link, **kw: None)
+    monkeypatch.setattr(hqp_benchmark, "left_pending", lambda endpoint_id: False)
     # ...and its endpoint row: this HQPlayer's library is endpoint 7 here.
     monkeypatch.setattr(hqp_library, "endpoint_by_address", lambda host, port: {"id": 7, "name": "fake"})
     # The output switch re-reads every slot's copies from the database
@@ -552,18 +554,42 @@ def test_busy_attach_registers_tokens_without_touching_the_playlist(fake, monkey
         b.shutdown()
 
 
+def test_a_tap_after_an_attach_that_found_another_controller_playing_takes_the_queue(
+        fake, monkeypatch):
+    """HQPlayer plays another controller's playlist when it is attached: the
+    attach leaves it playing and judges it at once — a tap before the
+    poller's first answer hands HQPlayer the queue and plays the tapped
+    track, never selects into the other controller's playlist."""
+    from playback import manager as manager_mod
+    monkeypatch.setattr(HqpBackend, "_poll_loop", lambda self: None)    # no first answer
+    fake.playlist = ["file:///Elsewhere/theirs-1.flac", "file:///Elsewhere/theirs-2.flac"]
+    fake.state, fake.track = int(PlaybackState.PLAYING), 1
+    mgr = _album(3)
+    monkeypatch.setattr(manager_mod, "manager", mgr)
+    b = _attach(mgr)
+    try:
+        assert fake.playlist[0] == "file:///Elsewhere/theirs-1.flac"     # left playing
+        assert b.select(2)
+        assert _wait(lambda: fake.playlist == [f"file:///E:/Music/A/0{i}.flac" for i in (1, 2, 3)]
+                     and fake.state == int(PlaybackState.PLAYING) and fake.track == 2, timeout=10)
+    finally:
+        b.shutdown()
+
+
 def test_drift_is_read_through_hqplayers_escapes(fake):
     mgr = PlaybackManager()
     mgr.queue.replace([_item("E:/Music/A [TR24]/01.flac", 1)])
     b = HqpBackend(emit=mgr._on_backend_status, queue=mgr.queue)
     stopped = TrackStatus(state=PlaybackState.STOPPED, track_index=0, track_id="", position=0.0,
                           length=0.0, volume=-3.0)
-    b._judge_mirror([{"uri": "file:///E:/Music/A%20%5BTR24%5D/01.flac"}], stopped)
+    b._judge_mirror([{"uri": "file:///E:/Music/A%20%5BTR24%5D/01.flac"}], stopped,
+                    expect=b._mirror_moves)
     assert not b.drift
-    b._judge_mirror([{"uri": "file:///E:/Music/A%20%5BTR24%5D/02.flac"}], stopped)
+    b._judge_mirror([{"uri": "file:///E:/Music/A%20%5BTR24%5D/02.flac"}], stopped,
+                    expect=b._mirror_moves)
     assert b.drift
     b._in_step()
-    b._judge_mirror([], stopped)
+    b._judge_mirror([], stopped, expect=b._mirror_moves)
     assert b.drift
 
 
@@ -1145,7 +1171,7 @@ def test_a_rebind_hqplayer_cannot_follow_loses_the_mirror_until_it_answers(fake)
     b.queue_changed("rebind")
     # HQPlayer gets the queue back once it answers again (_reconverge); the
     # output is no less healthy for it — a switch away still owes its Stop
-    assert b._mirror == "lost" and b.healthy()
+    assert b._mirror == "lost" and b._reconverge_due and b.healthy()
 
 
 # -- the playback trace (playback.hqp_diagnostics) ------------------------------------
@@ -2000,7 +2026,7 @@ def test_a_new_order_taken_while_stopped_plays_only_on_the_play_press(fake):
     assert (fake.state, fake.track) == (int(PlaybackState.PLAYING), 1)
 
 
-# -- a DSP change waits out a build (hqp_backend.BuildWatch, change_dsp) -----------------
+# -- a DSP change waits out a build (hqp_link.BuildWatch, change_dsp) --------------------
 #
 # Desktop answers nothing on its control port while it builds a setting. The
 # watch's moment (BUILDING_AFTER_S) is shortened here: a build of a couple of
@@ -2257,7 +2283,7 @@ def test_a_reorder_while_paused_leaves_hqplayer_stopped_at_its_spot(fake, listen
 
 
 def test_a_start_a_pause_dropped_leaves_its_spot_for_the_play_press(fake, output):
-    """F15: the start a rebuild left, dropped by a Pause before it went,
+    """The start a rebuild left, dropped by a Pause before it went,
     leaves the slot and second it was for as the spot — the next Play
     resumes them, never HQPlayer's first entry from 0 s."""
     from playback.base import ReorderPlan
@@ -2415,7 +2441,7 @@ def test_the_convolver_goes_by_the_dsp_path_and_never_into_a_builds_silence(
     assert "SetConvolution" not in [c for ts, c in fake.arrivals if ts >= began]
 
 
-# -- background work meets a build (through_builds); the spot; the takeover ---------------
+# -- background work meets a build (hqp_link.through); the spot; the takeover -------------
 #
 # People are refused while HQPlayer builds (409); work behind them — a filler,
 # a re-bind HQPlayer follows, the Stop an output switch owes — waits for the
@@ -3113,7 +3139,7 @@ class _QuietLink:
     state, why = "open", None
     _local = threading.local()
 
-    def _not_answering(self, command):
+    def _not_answering(self, command, waited):
         pass
 
     def _waitable(self):
@@ -3458,7 +3484,7 @@ def _silence_began(fake) -> float:
 
 
 def test_the_node_stop_ends_a_filler_at_once(fake, output, monkeypatch):
-    """F14: a filler waiting out a build when the node stops ends there —
+    """A filler waiting out a build when the node stops ends there —
     no add tried again, no seconds slept per track."""
     mgr, b = output
     player_router = _routes_on(monkeypatch, mgr)
@@ -3482,7 +3508,7 @@ def test_the_node_stop_ends_a_filler_at_once(fake, output, monkeypatch):
 
 
 def test_a_file_the_output_refused_is_offered_once(fake, output, monkeypatch):
-    """F14: a filler's file HQPlayer refuses is not tried again — one add,
+    """A filler's file HQPlayer refuses is not tried again — one add,
     no seconds slept, the track left out."""
     mgr, b = output
     player_router = _routes_on(monkeypatch, mgr)
@@ -3497,7 +3523,7 @@ def test_a_file_the_output_refused_is_offered_once(fake, output, monkeypatch):
 
 
 def test_an_add_the_link_let_go_lands_once_the_output_change_is_over(fake, output, monkeypatch):
-    """F14: an add the link did not send because the output changed under it
+    """An add the link did not send because the output changed under it
     goes again once the change is over — on the output there is then, and
     with no sleep in between."""
     mgr, b = output
@@ -3688,7 +3714,7 @@ def test_the_mcp_assistant_reads_hqplayer_through_the_backend_and_keeps_no_conne
 
 @pytest.mark.parametrize("how", ["unfinished", "not answering"])
 def test_the_assistants_gates_quote_the_links_own_line(fake, output, monkeypatch, how):
-    """F9: one line for an HQPlayer that refuses people — the link's — on the
+    """One line for an HQPlayer that refuses people — the link's — on the
     output settings, in the MCP gate and in the in-process one: a build it
     did not finish says restart HQPlayer, a silence past a Stop's wait says
     it is not answering."""
@@ -3849,16 +3875,20 @@ def test_each_thread_reads_the_refusal_of_its_own_request(fake):
         with link.command("transport"):
             seen["ok"] = link.client.pause()
             sent.set()
-            asked.wait(2)
+            seen["between"] = asked.wait(2)          # the question went meanwhile
             seen["why"] = link.client.refusal()
+    def question():
+        with link.asking() as c:
+            seen["answered"] = c.get_status() is not None
+        asked.set()
     t = threading.Thread(target=command, daemon=True)
     t.start()
     assert sent.wait(5)
-    with link.asking() as c:
-        assert c.get_status() is not None
-    asked.set()
+    q = threading.Thread(target=question, daemon=True)  # its turn may never come
+    q.start()
     t.join(5)
-    assert seen == {"ok": False, "why": "Nothing to pause"}
+    q.join(5)
+    assert seen == {"ok": False, "between": True, "why": "Nothing to pause", "answered": True}
 
 
 def test_a_silence_ends_the_sequence_that_met_it(fake, monkeypatch):
@@ -3929,7 +3959,8 @@ def test_a_set_whose_next_item_is_superseded_leaves_its_silence_to_the_links_sta
         fake, output, monkeypatch):
     """I1, I3: the change's own held Status is dropped — a newer DSP
     change came first — so the connection goes to the link's held Status,
-    and the build's silence falls on it, watched, never on the poller."""
+    and the build's silence falls on it, watched, never on the poller; the
+    knob still to go is not sent."""
     mgr, b = output
     _quick_polls(monkeypatch)
     link = _link()
@@ -3940,11 +3971,13 @@ def test_a_set_whose_next_item_is_superseded_leaves_its_silence_to_the_links_sta
         if what == "out" and command == "SetFilter":
             link.accept("dsp")                           # the rest of this change goes
     fake.on_wire = superseding
-    hb.change_dsp({"filter": 57, "filter1x": 57})
+    out = hb.change_dsp({"filter": 57, "filter1x": 57, "shaper": 2})
+    assert out["failed"]["shaper"] == "not sent: a newer DSP change came first", out
     assert _wait(lambda: link.build.state is not None, timeout=3)
     after = [c for _, c in fake.arrivals]
     assert after[after.index("SetFilter") + 1] == "Status"
     assert _wait(lambda: link.build.state is None, timeout=10)
+    assert "SetShaping" not in [c for _, c in fake.arrivals]
     assert not any(quiet)
 
 
@@ -3961,8 +3994,7 @@ def test_a_stops_silence_meets_no_question_and_never_says_building(fake, output,
     fake.build("Stop", 3.5, answer=answer)
     stopping = threading.Thread(target=b.stop, daemon=True)
     stopping.start()
-    assert _wait(lambda: any(c == "Stop" for _, c in fake.arrivals), timeout=3)
-    time.sleep(0.5)                                      # inside the teardown
+    assert _wait(lambda: fake.silences, timeout=3)       # inside the teardown
     assert b.play()                                      # waited for it, never refused
     stopping.join(10)
     assert not any(buildings) and not any(quiet)
@@ -4164,7 +4196,7 @@ def test_a_request_waiting_its_turn_is_dropped_once_the_link_is_lent(fake):
     not only before: the benchmark's hold lands while it waits, and it never
     goes."""
     link = _link()
-    fake.service["GetInfo"] = 1.0
+    fake.service["GetInfo"] = 2.0
     results = {}
 
     def ask(name, question):
@@ -4178,10 +4210,14 @@ def test_a_request_waiting_its_turn_is_dropped_once_the_link_is_lent(fake):
     assert _wait(lambda: any(c == "GetInfo" for _, c in fake.arrivals), timeout=3)
     second = threading.Thread(target=ask, args=("second", lambda c: c.get_status()), daemon=True)
     second.start()
-    time.sleep(0.3)                                      # it waits its turn behind the GetInfo
-    link.lend()
+    assert _wait(lambda: len(link._waiting) == 1, timeout=3)   # its turn behind the GetInfo
+    lending = threading.Thread(target=link.lend, daemon=True)
+    lending.start()
+    # dropped while it waits — before the GetInfo it waits behind is answered
+    assert _wait(lambda: "second" in results, timeout=1.5) and "first" not in results
     first.join(5)
     second.join(5)
+    lending.join(5)
     assert results["first"] is not None and not isinstance(results["first"], Exception)
     assert isinstance(results["second"], hl.Dropped)
     assert [c for _, c in fake.arrivals] == ["GetInfo"]
@@ -4201,12 +4237,19 @@ def test_close_releases_work_waiting_a_build_out_at_once(fake, monkeypatch):
     threading.Thread(target=changing, daemon=True).start()
     assert _wait(lambda: link.build.state is not None, timeout=3)
     gave_up = {}
+    waits = threading.Event()
+    wait = link.build._changed.wait
+
+    def watched(timeout=None):
+        waits.set()
+        return wait(timeout)
+    monkeypatch.setattr(link.build._changed, "wait", watched)
 
     def waiting():
         gave_up["why"] = link.build.wait_out()
     t = threading.Thread(target=waiting, daemon=True)
     t.start()
-    time.sleep(0.2)
+    assert waits.wait(3)                                 # inside wait_out's wait
     t0 = time.monotonic()
     hl.close_all("the node is stopping")
     t.join(5)
@@ -4302,7 +4345,7 @@ def test_one_refused_file_with_the_mirror_lost_costs_one_handover_not_a_loop(fak
 
 
 def test_a_question_that_times_out_is_no_return_of_hqplayer(fake, output):
-    """F1: a reconnect of our own after a question went unanswered is no
+    """A reconnect of our own after a question went unanswered is no
     return of HQPlayer — an edit made in its own window stays as it was,
     never overwritten by a re-mirror."""
     mgr, b = output
@@ -4319,7 +4362,7 @@ def test_a_question_that_times_out_is_no_return_of_hqplayer(fake, output):
 
 
 def test_a_lost_mirror_still_owes_the_switch_away_stop(fake, output, monkeypatch):
-    """F2: a mirror lost while HQPlayer plays on — an add it did not answer
+    """A mirror lost while HQPlayer plays on — an add it did not answer
     — is no health matter: the switch away still stops it."""
     mgr, b = output
     _away(monkeypatch, fake)
@@ -4332,7 +4375,7 @@ def test_a_lost_mirror_still_owes_the_switch_away_stop(fake, output, monkeypatch
 
 
 def test_a_tap_on_a_lost_mirror_rebuilds_and_plays_the_queues_track(fake, output, monkeypatch):
-    """F3: the mirror lost while HQPlayer plays, a slot removed from the
+    """The mirror lost while HQPlayer plays, a slot removed from the
     queue alone: a tap on the queue's slot 2 rebuilds HQPlayer's playlist and
     plays that slot's track — never the one the person removed."""
     mgr, b = output
@@ -4348,7 +4391,7 @@ def test_a_tap_on_a_lost_mirror_rebuilds_and_plays_the_queues_track(fake, output
 
 
 def test_the_switch_away_stop_judges_what_hqplayer_was_given(fake, output, monkeypatch):
-    """F4: HQPlayer builds when the output is switched away, and another
+    """HQPlayer builds when the output is switched away, and another
     album plays elsewhere before the build ends: the Stop still goes — the
     entry it plays was ours when it was switched away from."""
     mgr, b = output
@@ -4366,7 +4409,7 @@ def test_the_switch_away_stop_judges_what_hqplayer_was_given(fake, output, monke
 
 @pytest.mark.parametrize("case", ["ours", "theirs", "back", "limit"])
 def test_a_switch_away_from_a_silent_hqplayer_owes_its_stop(fake, output, monkeypatch, case):
-    """Decision 3, F4: HQPlayer silent with no build of ours when the output
+    """HQPlayer silent with no build of ours when the output
     is switched away. The switch returns within a moment, saying so; once
     HQPlayer answers it stops if it plays ours — exactly once — and is left
     be when it plays another's, when the output came back to it first, or
@@ -4393,14 +4436,14 @@ def test_a_switch_away_from_a_silent_hqplayer_owes_its_stop(fake, output, monkey
     time.sleep(7.5 if case == "limit" else 3.0)
     stops = [c for _, c in fake.arrivals[n:] if c == "Stop"]
     assert len(stops) == (1 if case == "ours" else 0), stops
+    assert isinstance(mgr.active, HqpBackend if case == "back" else _Away)
     if case == "back":
         mgr.active.shutdown()
-    assert isinstance(mgr.active, (PlayerBackend, _Away))
 
 
 def test_a_switch_away_from_an_answering_hqplayer_stops_it_before_the_new_output(fake, output,
                                                                                monkeypatch):
-    """Decision 3: HQPlayer answering — the switch says nothing more, and
+    """HQPlayer answering — the switch says nothing more, and
     its Stop went before the new output started."""
     mgr, b = output
     _away(monkeypatch, fake)
@@ -4422,7 +4465,7 @@ def test_a_switch_away_from_an_answering_hqplayer_stops_it_before_the_new_output
 
 
 def test_a_reorder_on_a_lost_mirror_is_the_queues_alone(fake, output, monkeypatch):
-    """F5: a playlist that is no mirror is not edited by the queue's
+    """A playlist that is no mirror is not edited by the queue's
     indices: the new order is the queue's alone, and the entry HQPlayer
     plays is never removed from under it."""
     mgr, b = output
@@ -4435,8 +4478,8 @@ def test_a_reorder_on_a_lost_mirror_is_the_queues_alone(fake, output, monkeypatc
     assert (fake.state, fake.track) == (int(PlaybackState.PLAYING), 1)
 
 
-def test_an_attach_inside_a_replace_loses_no_mirror(fake, output, monkeypatch, caplog):
-    """F8: the play gate re-attaching a stopped HQPlayer inside a replace
+def test_an_attach_inside_a_replace_loses_no_mirror(fake, output, monkeypatch):
+    """The play gate re-attaching a stopped HQPlayer inside a replace
     takes the queue lock first: the attach mirrors the queue with no
     mutation in flight — no race to guard, no mirror lost for nothing."""
     mgr, b = output
@@ -4448,7 +4491,6 @@ def test_an_attach_inside_a_replace_loses_no_mirror(fake, output, monkeypatch, c
     try:
         assert added == 2 and mgr.active is not b
         assert mgr.active.mirror_losses == 0
-        assert "the queue changed while HQPlayer took it" not in caplog.text
         assert _wait(lambda: fake.playlist == ["file:///E:/Music/B/01.flac",
                                                "file:///E:/Music/B/02.flac"])
     finally:
@@ -4456,7 +4498,7 @@ def test_an_attach_inside_a_replace_loses_no_mirror(fake, output, monkeypatch, c
 
 
 def test_re_picking_the_hqplayer_driven_lets_its_dsp_change_finish(fake, output, monkeypatch):
-    """F11: the HQPlayer already driven picked again stays the output as it
+    """The HQPlayer already driven picked again stays the output as it
     is — the knob its build held back still goes."""
     mgr, b = output
     settings_router = _picker(monkeypatch, fake)
@@ -4469,7 +4511,7 @@ def test_re_picking_the_hqplayer_driven_lets_its_dsp_change_finish(fake, output,
 
 def test_all_files_refused_at_an_attach_keep_the_queue_and_the_next_play_hands_it_over(
         fake, monkeypatch):
-    """Decision 2: HQPlayer refusing every file it is handed at an attach —
+    """HQPlayer refusing every file it is handed at an attach —
     the disk unreachable — is no reason to empty the queue: it stays whole,
     the mirror lost, and the next Play hands it over again."""
     from playback import manager as manager_mod
@@ -4507,7 +4549,7 @@ def test_two_files_refused_of_eighty_at_a_replace_are_gaps_and_hqplayer_holds_78
 
 
 def test_a_replace_refused_whole_changes_nothing_and_play_gives_the_queue_back(fake, output):
-    """Decision 2: a replace HQPlayer refused whole commits nothing — the
+    """A replace HQPlayer refused whole commits nothing — the
     queue, the resume spot and history as they were — and since its Stop and
     clear went the mirror is lost: the next Play gives HQPlayer the queue as
     it was, starting at the spot."""
@@ -4531,7 +4573,7 @@ def test_a_replace_refused_whole_changes_nothing_and_play_gives_the_queue_back(f
 
 
 def test_an_append_of_two_refused_whole_leaves_the_queue_and_the_mirror(fake, output):
-    """Decision 2: a person's append HQPlayer refused whole — it took
+    """A person's append HQPlayer refused whole — it took
     nothing — leaves the queue as it was, and the mirror whole."""
     mgr, b = output
     fake.refuse.add("E:/Music/B/")
@@ -4572,7 +4614,7 @@ def _lost_and_stopped(mgr, b, fake):
 
 
 def test_a_double_play_during_a_rebuild_is_one_rebuild_and_one_start(fake, output):
-    """Decision 4: a play press on a playlist that is no mirror rebuilds it
+    """A play press on a playlist that is no mirror rebuilds it
     in the background, answered at once; a second press while it does joins
     it — one rebuild, one start."""
     mgr, b = output
@@ -4591,7 +4633,7 @@ def test_a_double_play_during_a_rebuild_is_one_rebuild_and_one_start(fake, outpu
 
 @pytest.mark.parametrize("when", ["before it begins", "during its adds"])
 def test_a_pause_during_a_rebuild_drops_its_start(fake, output, when):
-    """Decision 4: a Pause while the play press rebuilds — before the
+    """A Pause while the play press rebuilds — before the
     rebuild begins (it waits for a queue edit to commit), or while HQPlayer
     takes the queue — supersedes its start: HQPlayer takes the queue, and
     stays stopped."""
@@ -4614,7 +4656,7 @@ def test_a_pause_during_a_rebuild_drops_its_start(fake, output, when):
 
 
 def test_play_on_a_pause_with_the_mirror_lost_only_resumes(fake, output):
-    """Decision 4a: Play on a pause of our track with the mirror lost
+    """Play on a pause of our track with the mirror lost
     resumes it — the sound never stops for a rebuild."""
     mgr, b = output
     with fake._lock:
@@ -6203,3 +6245,83 @@ def test_a_press_behind_a_reconverge_hands_the_queue_over_once(fake, output):
     assert _wait(lambda: fake.state == int(PlaybackState.PLAYING), timeout=10)
     _settled()
     assert _rebuilds(fake) == 1
+
+
+# -- The rest of the fourth round (2026-10-13) ---------------------------------------------
+
+def test_a_loss_after_the_canarys_check_is_not_undone(fake, output, monkeypatch):
+    """The canary's read and its verdict are one compare-and-set: a loss
+    landing while it compares (a replace HQPlayer refused whole, its Stop and
+    clear gone) is not undone by its stale "in step" — the next Play hands
+    HQPlayer the queue."""
+    mgr, b = output
+    armed = threading.Event()
+    first = HqpBackend._first_divergence
+
+    def judging(self, playlist, snapshot):
+        if armed.is_set() and threading.current_thread().name == "hqp-status-poller":
+            armed.clear()
+            monkeypatch.setattr(hb, "DRIFT_CHECK_EVERY", 10 ** 6)   # no second look
+            with fake._lock:
+                fake.playlist = []
+            self.lose_mirror("HQPlayer refused all 3 tracks of a new queue", by="refusal")
+        return first(self, playlist, snapshot)
+    monkeypatch.setattr(HqpBackend, "_first_divergence", judging)
+    judged = threading.Event()
+    judge = HqpBackend._judge_mirror
+
+    def judging_done(self, *a, **k):
+        try:
+            return judge(self, *a, **k)
+        finally:
+            if not armed.is_set():
+                judged.set()
+    monkeypatch.setattr(HqpBackend, "_judge_mirror", judging_done)
+    monkeypatch.setattr(hb, "DRIFT_CHECK_EVERY", 1)
+    armed.set()
+    assert _wait(lambda: (b.poke(), judged.is_set())[1], timeout=5)
+    assert b._mirror == "lost"
+    _stopped(mgr, fake)
+    fake.commands.clear()
+    assert b.play()
+    assert _wait(lambda: any(c == "PlaylistAdd" for c, _ in fake.commands), timeout=5)
+
+
+def test_reading_tools_go_on_while_hqplayer_refuses_commands_and_say_its_line(fake, output,
+                                                                              monkeypatch):
+    """HQPlayer answers nothing past a Stop's wait: its commands are refused,
+    its questions go on — a reading tool asks and answers, in-process and
+    over MCP, and the status tool says the link's own line."""
+    import importlib.util
+    from tools import definitions
+    mgr, b = output
+    settings_router = _picker(monkeypatch, fake)
+    spec = importlib.util.spec_from_file_location(
+        "assistant_server_reads", BACKEND.parent / "mcp" / "assistant_server.py")
+    server = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(server)
+    monkeypatch.setattr(server, "_output_prefs", settings_router.get_output_prefs)
+    monkeypatch.setattr(server, "_backend_get",
+                        lambda path, params=None: dict(mgr.latest_status)
+                        if path == "/api/player/status" else {})
+    monkeypatch.setattr(hl, "STOP_ANSWER_S", 0.6)
+    _link().client.waits.update(hl._command_waits())
+    fake.build("Stop", 3.0, answer="last")
+    assert not b.stop()
+    assert _wait(lambda: _link().silent_since is not None, timeout=3)
+    said = server.hqplayer_get_status()
+    assert not said.startswith("Error") and hl.NOT_ANSWERING in said, said
+    read = definitions._h_hqplayer_get_status()
+    assert not read.startswith("Error"), read
+
+
+def test_a_radio_begun_while_hqplayer_is_stopped_gives_it_the_seed_back(fake, output):
+    """Stopped, HQPlayer reads no entry a radio's clear would keep: what the
+    clear leaves is no mirror of the seed the queue keeps, and HQPlayer gets
+    the queue back at its next answer."""
+    mgr, b = output
+    _stopped(mgr, fake)
+    mgr.clear_for_radio(lambda: None)
+    assert [it.track_id for it in mgr.queue.snapshot()] == ["track-1"]   # the seed
+    assert _wait(lambda: (b.poke(), fake.playlist == ["file:///E:/Music/A/01.flac"])[1],
+                 timeout=5), fake.playlist

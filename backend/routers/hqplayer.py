@@ -258,6 +258,9 @@ def _benchmark_block(ep: Optional[dict], state: Optional[dict], lists: dict,
     from playback import hqp_benchmark
     from playback.hqp_backend import _stream_mode
     out = hqp_benchmark.summary(ep)
+    # What a run left to the owner still holds of its test settings, named
+    # from the lists this screen read
+    out["left"] = hqp_benchmark.left_on((ep or {}).get("id"), state, lists)
     here = not _stream_mode()
     out.update(cuda=(ep or {}).get("cuda"),
                cuda_read=here and hqp_library.local_cuda()[0],

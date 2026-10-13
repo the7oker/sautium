@@ -588,7 +588,7 @@ implementation details live in the code, DB and git history.
   them later anyway. The end of a build is the answer to a request held on
   the same client — a new connection is accepted all through it, and the
   meter's first frame comes after the answer — and the one build watch
-  (`hqp_backend.BuildWatch`) holds every other command out meanwhile.
+  (`hqp_link.BuildWatch`) holds every other command out meanwhile.
 - **People are refused, background work waits a build out** (2026-10-12).
   Refusing every command at once (409) during a build was right for a tap
   and wrong for the work behind it: a filler adding an album died on the
@@ -596,7 +596,7 @@ implementation details live in the code, DB and git history.
   a re-bind of the queue's files dropped, and an output switch swallowed
   its Stop, leaving HQPlayer playing undriven beside the new output.
   Background work now waits for the build's end through one mechanism
-  (`through_builds`: the watch's event, bounded by the build limit, called
+  (`hqp_link.through`: the watch's event, bounded by the build limit, called
   off when the work goes elsewhere), checks again whether it is still
   wanted and goes on, or gives up with why when HQPlayer does not finish or
   goes away; the switch goes on at once and the Stop follows the build,
@@ -635,9 +635,9 @@ implementation details live in the code, DB and git history.
   once it answers; the resume spot names a queue item; listening history
   rotates only once the output took the queue.
 - **The link reviewed again** (2026-10-12). A review of the three link
-  commits found fifteen faults, three high, nearly all regressions of those
-  commits: one file HQPlayer refused
-  kept a re-mirror going round, a lost mirror read as an unhealthy output
+  commits found faults, nearly all regressions of those commits: one file
+  HQPlayer refused kept a re-mirror going round, a lost mirror read as an
+  unhealthy output
   (so a switch away sent no Stop), and a command sequence held the
   connection for an album's adds while the poller waited. The fixes: each
   request takes the connection for itself, and after a command a build or a
@@ -710,6 +710,31 @@ implementation details live in the code, DB and git history.
   not for the old poller.
   Lesson: an intent that joins pending work without a number of its own is
   not the newest word — it is no word at all.
+- **A switch away is a person's word** (2026-10-13). A switch supersedes
+  what was made for the output it leaves — a benchmark run's owed put-back,
+  the rest of a DSP change, a start left for later — and every detach said
+  "switch", two that are none among them: the play gate re-attaching the
+  HQPlayer it drives after an unanswered probe, and a benchmark run's own
+  hold. The first closed an owed put-back as left to the owner, HQPlayer on
+  the run's test settings with its volume at the bottom of the range. Only a
+  person's release of the output says it now, and a new run takes a
+  put-back still owed before it reads what it found. A put-back a person's
+  change did supersede stays superseded — their change wins, and the volume
+  is never raised after it — and is no longer a line in the run's record
+  alone: one notice, in the notices channel and on the HQPlayer screen,
+  names each setting still at the run's test value (now → before the run)
+  and the volume left to raise; it ends once each of them changed, or a new
+  run starts (`hqp_benchmark_runs.left_at`). On the way: the drift canary's
+  verdict is a compare-and-set on the mirror's moves (a loss between its
+  read and its "in step" was undone); the reading tools go on while
+  HQPlayer refuses commands, and the status tool says its line; a radio
+  begun on a stopped HQPlayer loses the mirror — the clear keeps the
+  reading entry only while one plays, so the seed was gone from a playlist
+  marked in step; an attach that finds HQPlayer playing judges its playlist
+  at once — a tap ahead of the poller's first answer selected into another
+  controller's playlist and played its entry. Lesson: an intent clock is
+  ticked by the decision, never by the mechanism that serves it — a detach
+  serves a switch, a re-attach and a hold alike.
 - **Stop-clear-add-select-play sequence** for `play_track`/`play_album`. Without
   explicit stop, HQPlayer occasionally started the wrong track from the
   existing queue.

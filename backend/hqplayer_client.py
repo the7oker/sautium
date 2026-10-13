@@ -480,7 +480,7 @@ class HQPlayerClient:
                 what a Stop's output teardown or a build may take; a command
                 given up on is carried out by HQPlayer all the same
             late: told when the answer to one of its commands is late — the
-                playback backend's build watch
+                HQPlayer link's build watch (playback.hqp_link.BuildWatch)
             gate: what every request passes, around its send and its answer
                 (`gate.request(command)`, a context), and around its bytes
                 (`gate.sending()`) — the HQPlayer link (playback.hqp_link):

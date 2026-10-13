@@ -112,11 +112,11 @@ class PlaybackManager:
     @contextmanager
     def hold(self, by: str, label: str) -> Iterator[None]:
         """Lend the HQPlayer output to `by` (the benchmark), which drives
-        HQPlayer on a connection of its own. The backend is detached exactly
-        as an output switch detaches it — stopped, its poller ended, so no
-        tick reaches the tracker and no mirror fights the job — and while the
-        hold lasts every play intent, transport command and output switch is
-        refused (OutputHeld). Its link is lent the while (HqpLink.lend):
+        HQPlayer on a connection of its own. The backend is detached — its
+        poller ended, so no tick reaches the tracker and no mirror fights the
+        job; the job stops HQPlayer itself — and while the hold lasts every
+        play intent, transport command and output switch is refused
+        (OutputHeld). Its link is lent the while (HqpLink.lend):
         nothing of this node's but the job's own connection reaches HQPlayer
         — no question, no probe, no Stop an earlier switch owed. The
         canonical queue stays the owner's: an edit lands in it as it does
@@ -134,15 +134,18 @@ class PlaybackManager:
             with self._active_lock:
                 self._refuse_if_held()
                 b = self._active
-                # Not its health: an HQPlayer back from a restart has lost
-                # the mirror until the next play, and the hold detaches the
-                # backend anyway — the release attaches it afresh, mirror and
-                # all. Whether HQPlayer answers is the job's own check.
+                # Not its health: an output believed gone is detached by the
+                # hold all the same, and the release attaches it afresh,
+                # mirror and all. Whether HQPlayer answers is the job's own
+                # check.
                 if b is None or b.id != "hqplayer":
                     raise ConnectionError("HQPlayer is not the attached output")
                 self._hold = {"by": by, "label": label, "progress": None}
             try:
-                self.activate(None, by_hold=True)
+                # No switch away: the job stops HQPlayer itself, and what was
+                # made for the attachment it leaves — a run's owed put-back —
+                # is the job's to take first
+                self.activate(None, by_hold=True, stop_old=False)
                 self._push_status({"state": "stopped"})
             except BaseException:
                 self._hold = None
@@ -224,7 +227,9 @@ class PlaybackManager:
             logger.info("play intent on %s '%s' output — (re)attaching",
                         "unhealthy" if b is not None else "inactive", otype)
             if b is not None:
-                self.activate(None)      # clean detach of the dead instance
+                # A clean detach of the dead instance — no Stop, and no switch
+                # away: the same output is attached again
+                self.activate(None, stop_old=False)
             self.activate(otype,
                           device_id=_read("output.local_device"),
                           exclusive=bool(_read("output.local_exclusive")),
@@ -262,7 +267,11 @@ class PlaybackManager:
         `stop_old=False` detaches without touching playback — app shutdown
         and clearing the HQPlayer host must leave an externally-running
         player alone (a backend restart mid-listening adopts the still-
-        playing queue on the next start).
+        playing queue on the next start); the play gate attaching the same
+        output again and a benchmark's hold use it too. Only a release is a
+        switch away (PlayerBackend.release): what was made for the old
+        attachment — a benchmark's owed put-back among it — is superseded by
+        nothing else.
 
         While the output is lent (hold) only the hold itself switches it
         (`by_hold`); anyone else gets OutputHeld."""
@@ -279,19 +288,11 @@ class PlaybackManager:
             told = None
             if old is not None:
                 self._active = None
-                if stop_old and old.healthy():
+                if stop_old:
                     try:
                         told = old.release()
                     except Exception as e:
                         logger.debug("stop on deactivate failed: %s", e)
-                elif stop_old:
-                    # The backend already believes its device off the
-                    # network: a Stop would fail exactly as the last command
-                    # did and burn the command timeout on a ghost (the
-                    # switch away from a vanished phone renderer waited out
-                    # its whole Stop + unsubscribe budget).
-                    logger.info("%s believed off the network — detached "
-                                "without a stop", old.id)
                 old.shutdown()
                 logger.info("playback backend deactivated: %s", old.id)
             if output_type is None:

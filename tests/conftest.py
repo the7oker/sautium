@@ -39,6 +39,10 @@ PG = dict(host=os.environ.get("SAUTIUM_TEST_PGHOST", "postgres"),
 # checkout). A module that builds a database of its own names it itself:
 # two runs keep apart only while they run different ones of those.
 SESSION_DATABASE = os.environ.get("SAUTIUM_TEST_PGDATABASE", "sautium_pytest_session")
+# The run drops it and makes it afresh: never a database of the node's own
+if not SESSION_DATABASE.startswith("sautium_pytest"):
+    raise pytest.UsageError(f"SAUTIUM_TEST_PGDATABASE names {SESSION_DATABASE!r}: the run drops "
+                            "its session database, so only a sautium_pytest* name is taken")
 
 # Before any backend module builds config.settings.
 os.environ.update(POSTGRES_HOST=PG["host"], POSTGRES_PORT=str(PG["port"]),

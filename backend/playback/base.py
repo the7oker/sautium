@@ -15,12 +15,15 @@ from the canonical queue (local engine, browser) keep the no-op
 defaults.
 """
 
+import logging
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Callable, Optional
 
 if TYPE_CHECKING:
     from playback.queue import QueueItem
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass
@@ -125,10 +128,17 @@ class PlayerBackend(ABC):
     def stop(self) -> bool: ...
 
     def release(self) -> Optional[str]:
-        """The output is switched away from: stop what it plays. Returns what
-        the person is told when the stop is left for later — HQPlayer,
-        building a setting or answering nothing, stops once it answers; the
-        switch does not wait for it."""
+        """The output is switched away from — a person's switch to another
+        output: stop what it plays. Returns what the person is told when the
+        stop is left for later — HQPlayer, building a setting or answering
+        nothing, stops once it answers; the switch does not wait for it. A
+        backend that believes its device off the network sends no stop: it
+        would fail exactly as the last command did and burn the command
+        timeout on a ghost (the switch away from a vanished phone renderer
+        waited out its whole Stop + unsubscribe budget)."""
+        if not self.healthy():
+            logger.info("%s believed off the network — switched away without a stop", self.id)
+            return None
         self.stop()
         return None
 

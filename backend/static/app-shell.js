@@ -8474,6 +8474,24 @@
     return sign + db.toFixed(1) + ' dB';
   }
 
+  // What a cut-short benchmark run still holds of its test settings on
+  // HQPlayer (hqp_benchmark: left_notice, left_on), in one line: each
+  // setting as now → before the run, then the volume left at the bottom of
+  // the range — the owner's to raise. Empty when nothing is left.
+  const HQP_LEFT_NAMES = { mode: 'mode', rate: 'rate', filter: 'filter', filter1x: '1x filter',
+                           shaper: 'modulator or dither' };
+  function hqpLeftLine(items) {
+    const shown = (it, v) => v == null ? '—'
+      : it.what === 'rate' ? `<span class="num">${escapeHtml(fmtRateLabel(v))}</span>`
+      : escapeHtml(String(v));
+    const kept = (items || []).filter(it => it.what !== 'volume').map(it =>
+      `${HQP_LEFT_NAMES[it.what] || escapeHtml(it.what)} ${shown(it, it.now)} → ${shown(it, it.before)}`);
+    const low = (items || []).some(it => it.what === 'volume');
+    return [kept.length ? `HQPlayer is still on its test settings (now → before the run): ${kept.join(', ')}.` : '',
+            low ? 'Its volume is at the bottom of the range — raise it yourself.' : '']
+      .filter(Boolean).join(' ');
+  }
+
   function modeNameFromState(s, modes) {
     if (!s || !modes) return '—';
     const m = modes.find(x => x.index === s.mode);
@@ -8851,8 +8869,11 @@
     // not start) says so itself; a run says its outcome and its note.
     const jobOnly = !job.running && job.outcome
       && (!run || Date.parse(run.started_at) / 1000 < job.started_at - 1);
+    const left = job.running ? '' : hqpLeftLine(b.left);
     if (jobOnly) {
       hint = `The benchmark did not run${job.note ? ': ' + escapeHtml(job.note) : ''}. ` + hint;
+    } else if (left) {
+      hint = `The last run was cut short. ${left} ` + hint;
     } else if (!job.running && run && !run.outcome) {
       hint = 'The last run was cut short — HQPlayer\'s settings are put back when it answers again. ' + hint;
     } else if (!job.running && run && HQP_BENCH_OUTCOME[run.outcome] && (run.outcome !== 'done' || run.note)) {
@@ -11219,6 +11240,14 @@
   NOTICE_COPY['hqplayer.failing'] = n => ({
     title: 'HQPlayer is not playing',
     text: `${escapeHtml((n.data && n.data.title) || 'Plays fail')} — <span class="num">${(n.data && n.data.count) || 3}</span> plays in a row. More → HQPlayer → Diagnostics has the cause and what to do.`,
+  });
+  // A benchmark run cut short whose put-back the owner's own change
+  // superseded (playback/hqp_benchmark.py): what HQPlayer still holds of its
+  // test settings, each as now → before the run, and a volume left at the
+  // bottom of the range, which nothing raises for them.
+  NOTICE_COPY['hqplayer.run_left'] = n => ({
+    title: 'The benchmark was cut short',
+    text: hqpLeftLine(n.data && n.data.items),
   });
   // HQPlayer refused files of a batch it was handed: one notice per batch,
   // naming both causes it may have — never asserting one.
@@ -13810,13 +13839,19 @@
         } else {
           // The HQPlayer switched away from did not answer at once: its Stop
           // is owed, and the person is told what happens to it
-          const out = await r.json().catch(() => ({}));
+          const out = await r.json();
           if (out.hqplayer_stop) {
             notices.toast({ kind: 'info', key: 'output.hqp-stop', title: 'HQPlayer',
                             text: escapeProfileHtml(out.hqplayer_stop) });
           }
         }
-      } catch (_) {}
+      } catch (e) {
+        // The node did not answer, or answered what cannot be read: said —
+        // the list below shows the output the node uses
+        console.error('output switch', e);
+        notices.toast({ kind: 'error', key: 'output.switch', title: 'Audio output',
+                        text: 'The switch was not confirmed — the list shows the output in use.' });
+      }
       await renderOutputSettings(root);
     });
     root.querySelectorAll('[data-action="select-hqp"]').forEach(el =>

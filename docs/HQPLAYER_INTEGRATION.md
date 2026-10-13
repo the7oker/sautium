@@ -264,22 +264,26 @@ the connection goes to anyone else); a request
 HQPlayer leaves unanswered, with no build of ours behind the silence, ends
 its sequence or question block — the rest is refused, never sent into the
 same silence. What a request came to (its refusal, its silence) is the
-thread's that sent it, read in the same call. It also owns the command lock (one command sequence
-at a time, none while HQPlayer builds), the build watch (below), the intent
-clock — every intent it accepts takes the next number, and an item left for
-later (a start that met a build, the resume after a DSP change, the knobs
-after a build, the Stop a switch away owes) is dropped at its send once a
-newer intent of a kind that supersedes it was accepted (`SUPERSEDED_BY`) or
-its queue was replaced — and the Stop a switch away owes while HQPlayer
-builds. Picking another HQPlayer retires the link of the one picked
+thread's that sent it, read in the same call. It also owns the command
+lock (one command sequence at a time, in the order they came; a person's
+command is refused while HQPlayer builds or answers nothing past a short
+silence's wait), the build watch (below), the intent clock — every intent it
+accepts takes the next number, and an item left for later (a start that met
+a build, a play press's starts and its hand-over, the resume after a DSP
+change, the knobs after a build, a benchmark run's owed put-back, the Stop a
+switch away owes) is dropped at its send once a newer intent of a kind that
+supersedes it was accepted (`SUPERSEDED_BY`) or its queue was replaced — and
+the Stop every switch away owes (the late Stop, below). Picking another HQPlayer retires the link of the one picked
 before — no other: a library read of a third box goes on — the Stop it owes
 still goes (only while it plays or pauses an entry of ours), everything
 else gives up, then it closes; picking the same HQPlayer again keeps its
 link and its build watched, and the link dials the alias picked last (on a
 Docker node the host's address, not a loopback that reaches nothing — the
 meter follows it). While the benchmark holds the output the link is
-lent: nothing of it goes out, and a person's command meanwhile (the
-HQPlayer screen's DSP change, the volume) is refused with 409 naming the job. The node stop closes every link first
+lent: a request already sent is answered first (the lend waits for it, a
+connection kept for a sequence's next request let go), then nothing of it
+goes out, and a person's command meanwhile (the HQPlayer screen's DSP
+change, the volume) is refused with 409 naming the job. The node stop closes every link first
 (`hqp_link.close_all`): its waiters and owed items give up at once, and
 every wait on HQPlayer — a read, a connect, the meter's session included —
 is woken through its wake channel and closes its own socket (since
@@ -395,13 +399,13 @@ comes after the control port answers again — so neither can end the wait.
   after it are reported as not sent. Built, a change made while HQPlayer played
   an entry of ours resumes that queue track at its second only if HQPlayer
   came back stopped (6.2.3 on Windows did; 6.2.4 plays on) — the entry read
-  on the change's own hold, before its first knob, against the queue as it
-  is then (an old queue's entry while a replace still adds is none of the
-  queue's), HQPlayer's state read again right before the resume, on the
-  same hold of the connection, after any build begun meanwhile; a newer
-  intent or another queue drops the resume, another controller's entry gets
-  none, and on a playlist that is no mirror the resume is a start of a play
-  press (below), which a newer DSP change still drops.
+  in the change's own command sequence, before its first knob, against the
+  queue as it is then (an old queue's entry while a replace still adds is
+  none of the queue's), HQPlayer's state read again right before the
+  resume, in the same command sequence, after any build begun meanwhile; a
+  newer intent or another queue drops the resume, another controller's entry
+  gets none, and on a playlist that is no mirror the resume is a start of a
+  play press (below), which a newer DSP change still drops.
 - **A start is a build.** Play waits for its own answer; a SelectTrack starts
   a stopped HQPlayer by itself (its log: "GoTo 1", then "Play (1/0)"), so a
   slot is resumed as SelectTrack, then Seek — landing in the start's opening
@@ -454,7 +458,10 @@ comes after the control port answers again — so neither can end the wait.
   - **Drifted** by an edit made outside this node or a mirror step HQPlayer
     did not take: never reconciled on its own, and never edited by the
     queue's places — a remove, a reorder, a "play next" are the queue's
-    alone until the play press re-mirrors.
+    alone until the play press re-mirrors. An attach that finds HQPlayer
+    playing or paused leaves its playlist alone and judges it at once, as
+    the canary does (since 2026-10-13): another controller's, or one that is
+    no longer the queue, is drifted before a tap can select into it.
   - **The play press** on a playlist that is no mirror: Play on a pause
     only resumes (the tail behind the entry read is repaired as above);
     Play from a stop, a tap, Next or Previous while it plays hand HQPlayer
@@ -829,7 +836,10 @@ never follows the selection). The dot's word is discovery AND control: an
 Embedded past its trial half-hour still answers the datagram while its
 control port closes at once, and reads "Not answering" whether or not it
 is the selected output (the scan's `control` verdict, the selected row's
-live check).
+live check). A box whose link refuses the scan's question — it builds or
+did not finish a build, answers nothing past a short silence, is lent to
+the benchmark, or its link was let go — is busy, not gone: listed by its
+registered row as answering, nothing asked of it.
 HQPlayer OS is a UPnP renderer as well (manufacturer Signalyst), and so is a
 Desktop: a box that answered as an HQPlayer is offered once, as the HQPlayer
 — its renderer would be the same DSP with no queue and no filter control.
@@ -1321,9 +1331,19 @@ cooling — so Sautium measures it instead of predicting it
   lowered volume, or the selection it set last (an HQPlayer that restarted
   keeps that, maybe nothing else) — only once HQPlayer answers, never on a
   trial-stopped box that takes a connection and drops it. The put-back is a
-  DSP item of the HQPlayer's link as of the run's end: a DSP change the
-  owner makes first, or a switch away, supersedes it, and the run is closed
-  as left to the owner. Forgetting the
+  DSP item of the HQPlayer's link as of the run's end (one made afresh
+  owes it anew, as it does after the process restarted — an item kept in
+  memory — unless a person superseded it on the link it was owed on): a
+  DSP change the owner makes first, or their switch to another
+  output, supersedes it — never the node's own re-attach of the same
+  HQPlayer, nor a new run's hold — and the run is closed as left to the
+  owner (since 2026-10-13): nothing more is put back, the volume is never
+  raised for them, and one notice — through the notices channel and on the
+  HQPlayer screen — names what still holds the run's test values, each as
+  now → before the run, and a volume left at the bottom of the range for
+  them to raise, until they changed it all or a new run began (the poller
+  reads HQPlayer's State for it while it stands). A new run takes a
+  put-back still owed first, and reads what HQPlayer holds after it. Forgetting the
   HQPlayer takes its measurements with it; it is refused while a run measures
   it. The estimate of a run's length takes the pace of the last run that
   ended or was cancelled (on a trial-mode Embedded the owner cancels before

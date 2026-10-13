@@ -403,6 +403,11 @@ CREATE TABLE IF NOT EXISTS hqp_benchmark_runs (
     last_filter INTEGER,
     last_filter1x INTEGER,
     last_shaper INTEGER,
+    -- When a person's DSP change or switch away superseded the put-back of a
+    -- run cut short: HQPlayer was left on what the run set, and what of it
+    -- still holds the run's test values is said until the person changed
+    -- it all, or a new run began (NULL again)
+    left_at TIMESTAMPTZ,
     CONSTRAINT chk_hqp_benchmark_runs_finished CHECK ((finished_at IS NULL) = (outcome IS NULL))
 );
 CREATE INDEX IF NOT EXISTS idx_hqp_benchmark_runs_endpoint

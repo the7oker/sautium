@@ -21,13 +21,14 @@ from tools.registry import REGISTRY, ToolDef, ToolParam
 
 logger = logging.getLogger(__name__)
 
-def _hqp_gate() -> None:
+def _hqp_gate(*, commands: bool = True) -> None:
     """The rules every HQPlayer tool here keeps, the MCP server's too:
     refuse when HQPlayer is not the chosen output (a filter change or a
     skip would reconfigure a device in another room while the sound goes
-    elsewhere, with the canonical queue none the wiser), while it is lent
-    to the benchmark, and while its link refuses people (HqpLink.refuse: a
-    build, one it did not finish, a silence)."""
+    elsewhere, with the canonical queue none the wiser) and while it is
+    lent to the benchmark; a transport or DSP tool (`commands`) also while
+    its link refuses people (HqpLink.refuse: a build, one it did not
+    finish, a silence). A reading tool goes on: its questions do."""
     from routers.settings import _read
     from playback.manager import manager
     active = _read("output.type")
@@ -45,17 +46,20 @@ def _hqp_gate() -> None:
             "come back when it finishes; the user can cancel it on the HQPlayer "
             "screen."
         )
-    from playback import hqp_link
-    hqp_link.selected().refuse()
+    if commands:
+        from playback import hqp_link
+        hqp_link.selected().refuse()
 
 
 @contextmanager
 def _hqp_asking():
     """The selected HQPlayer's link for the reading tools here (_hqp_gate
-    first): their questions go where every request of this node to it goes,
-    one at a time. A command goes the backend's way instead (_hqp_transport,
-    change_dsp) — after the block: a change holds the link itself."""
-    _hqp_gate()
+    first, as a reading): their questions go where every request of this
+    node to it goes, one at a time — refused by the link itself only while
+    HQPlayer builds. A command goes the backend's way instead
+    (_hqp_transport, change_dsp) — after the block: a change holds the link
+    itself."""
+    _hqp_gate(commands=False)
     from playback import hqp_link
     with hqp_link.selected().asking() as hqp:
         yield hqp

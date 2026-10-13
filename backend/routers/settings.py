@@ -1228,6 +1228,16 @@ def _notices_state() -> Dict[str, Any]:
         items.append({"key": "hqplayer.refused", "kind": "warning",
                       "since": refused["since"], "until": None,
                       "data": {k: refused[k] for k in ("what", "count", "total", "stream")}})
+    # A benchmark run cut short whose put-back the owner's own change
+    # superseded: what HQPlayer still holds of its test settings — the volume
+    # among them, never raised for them — until they changed it all
+    from playback import hqp_benchmark
+    from playback.manager import active_hqp_endpoint
+    left = hqp_benchmark.left_notice(active_hqp_endpoint())
+    if left is not None:
+        items.append({"key": "hqplayer.run_left", "kind": "warning",
+                      "since": left["since"].isoformat(), "until": None,
+                      "data": {"items": left["items"]}})
     # A CLI agent signed out while something needs it: the assistant runs on
     # it, or — Claude Code only — gear research waits for it (the drain
     # claims nothing until the sign-in returns). Each verdict is the CLI's
@@ -2088,8 +2098,11 @@ def get_output_prefs() -> Dict[str, Any]:
 @router.put("/output")
 def put_output_prefs(req: OutputPrefs) -> Dict[str, Any]:
     """Select the playback output (Output picker). Persisted, then applied
-    live: the old backend stops, the canonical queue survives, playback does
-    not auto-resume — the user presses play on the new output."""
+    live: the old backend stops what it plays (an HQPlayer building or not
+    answering is stopped once it answers, and `hqplayer_stop` tells the
+    person so), the canonical queue survives, playback does not auto-resume
+    — the user presses play on the new output. The HQPlayer already driven,
+    picked again, stays the output as it is."""
     from playback.manager import OutputHeld, manager
 
     # Not while the benchmark has the output: checked under the lock a hold
@@ -2199,9 +2212,9 @@ def _put_output_prefs(req: OutputPrefs) -> Dict[str, Any]:
             # spot go on (the link took the alias picked, choose)
             if getattr(manager.active, "link", None) is not link:
                 # Registered before anything is released: a Stop an earlier
-                # switch away still owes this HQPlayer (it builds) is
-                # superseded, even if its build ends while the output it
-                # switched to is let go
+                # switch away still owes this HQPlayer (its answer awaited
+                # through a build or a silence) is superseded, even if it
+                # answers while the output it switched to is let go
                 link.accept("attach")
                 told = manager.activate(None)
                 manager.activate("hqplayer")

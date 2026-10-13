@@ -142,16 +142,17 @@ def _output_prefs() -> dict:
         return {}          # backend unreachable: don't block on a guess
 
 
-def _hqp_gate() -> None:
-    """Refuses when HQPlayer is not the chosen output, while it is lent to
-    the benchmark, and while its link refuses people — a build, one it did
-    not finish, a silence — in the backend's own words (`busy`). Every
-    HQPlayer tool comes through here, so this is the one place the rule has
-    to exist. It exists because the tools are named for what they do and an
+def _hqp_gate(*, commands: bool = True) -> dict:
+    """Refuses when HQPlayer is not the chosen output and while it is lent
+    to the benchmark; a transport or DSP tool (`commands`) also while its
+    link refuses people — a build, one it did not finish, a silence — in the
+    backend's own words (`busy`); a reading tool goes on. Every HQPlayer
+    tool comes through here, so this is the one place the rule has to
+    exist. It exists because the tools are named for what they do and an
     agent will reach for one: asking to change a filter, or to skip a track,
     while the sound is going to a phone over DLNA would reconfigure — or
     start — a device in another room, with the canonical queue none the
-    wiser."""
+    wiser. Returns the output as the backend said it."""
     prefs = _output_prefs()
     active = prefs.get("type") or ""
     if active and active != "hqplayer":
@@ -167,16 +168,18 @@ def _hqp_gate() -> None:
             "come back when it finishes; the user can cancel it on the HQPlayer "
             "screen."
         )
-    if prefs.get("busy"):
+    if commands and prefs.get("busy"):
         raise ConnectionError(f"{prefs['busy']}. Its transport and DSP controls are refused "
                               "meanwhile.")
+    return prefs
 
 
 def _hqp_state() -> dict:
     """What HQPlayer says of itself and its lists, read by the backend on its
-    link (GET /api/hqplayer/state; _hqp_gate first) — this process asks
-    HQPlayer nothing itself."""
-    _hqp_gate()
+    link (GET /api/hqplayer/state; _hqp_gate first, as a reading) — this
+    process asks HQPlayer nothing itself. Nothing to read while HQPlayer
+    builds: the backend says so (`busy`)."""
+    _hqp_gate(commands=False)
     state = _backend_get("/api/hqplayer/state", {}) or {}
     if state.get("busy"):
         raise ConnectionError(f"{state['busy']}. Its transport and DSP controls are refused "
@@ -293,21 +296,20 @@ def hqplayer_previous() -> str:
 def hqplayer_get_status() -> str:
     """Get current HQPlayer status: track info, position, state, volume."""
     try:
-        _hqp_gate()
+        prefs = _hqp_gate(commands=False)
         # The node's own status, the one Now Playing shows: the track named
         # from the canonical queue — HQPlayer's tags are authoritative only
         # for a file it opened itself; a track it streams over http is 'HTTP
-        # stream' to it — and what HQPlayer is doing meanwhile.
+        # stream' to it — and what HQPlayer is doing meanwhile, in its link's
+        # own words while it refuses commands (a build, one it did not
+        # finish, a silence).
         now = _backend_get("/api/player/status", {}) or {}
         state = now.get("state") or "unknown"
         lines = [f"State: {state.capitalize()}"]
-        building = now.get("building")
-        if building:
-            lines.append("HQPlayer is building the filter — it answers nothing until it is done"
-                         if not building.get("unfinished")
-                         else "HQPlayer did not finish building the filter — restart HQPlayer")
-        elif now.get("not_answering"):
-            lines.append("HQPlayer is not answering")
+        if prefs.get("busy"):
+            lines.append(prefs["busy"])
+        elif now.get("building"):
+            lines.append("HQPlayer is building the filter (it answers meanwhile)")
         if now.get("artist") or now.get("song"):
             lines.append(f"Track: {now.get('artist', '')} - {now.get('song', '')}")
         if now.get("album"):

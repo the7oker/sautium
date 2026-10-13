@@ -18,9 +18,11 @@ A link owns:
     link holds itself: that silence never falls on a question with a short
     wait. A request left unanswered ends its sequence or question block: the
     rest of it is refused (NotAnswering), never sent into the same silence;
-  * the command lock: one command sequence at a time, none while HQPlayer
-    builds — a person's command is refused at once (Building, 409), never
-    parked behind the build; background work waits the build out (through);
+  * the command lock: one command sequence at a time, in the order they
+    came; a person's command is refused at once while HQPlayer builds
+    (Building, 409) or answers nothing past a short silence's wait
+    (NotAnswering), never parked behind it; background work waits a build
+    out (through);
   * its build watch (BuildWatch): HQPlayer answers nothing while it builds a
     setting, and the late answer of the command that set the build off is
     the build's end;
@@ -29,7 +31,8 @@ A link owns:
     Stop an output switch owed — is never sent once a newer intent of a kind
     that supersedes it was accepted (SUPERSEDED_BY), checked right before
     the bytes go, under the lock an intent is accepted under;
-  * the Stop an output switch owes it while it builds (the late Stop).
+  * the Stop a person's switch away owes it (the late Stop): sent at once,
+    or once HQPlayer answers through a build or a silence.
 
 Life cycle: link_for creates a link on first use; the same HQPlayer keeps its
 link; choosing another HQPlayer (choose) retires the old one — what its
@@ -116,7 +119,9 @@ class Building(ConnectionError):
     """Refused while HQPlayer builds a setting (409): it answers nothing
     until the build is done, and a command sent into the silence would be
     carried out after it, out of order. Past the build limit the build is
-    `unfinished`, and the person is told to restart HQPlayer."""
+    `unfinished`, and the person is told to restart HQPlayer. While the
+    Status a switch away holds goes unanswered (the late Stop's quiet watch)
+    it is no build of ours: the words are NOT_ANSWERING."""
 
     def __init__(self, link: "HqpLink", state: dict):
         super().__init__(NOT_ANSWERING if state.get("not_answering")
@@ -196,7 +201,10 @@ class BuildWatch:
     it is `unfinished` until HQPlayer answers a request again. A held answer
     whose connection breaks (EOF, a reset, keepalive or TCP_USER_TIMEOUT)
     ends no build: HQPlayer went away or restarted, and the poller asks
-    again and reads its return as any other. An Embedded box answers all
+    again and reads its return as any other. It watches the Status the late
+    Stop holds the same way, quietly: a silence there is no build of ours —
+    said as not answering, never building — and past the build limit
+    HQPlayer is not answering. An Embedded box answers all
     through its builds, saying it plays with nothing out yet
     (hqp_benchmark._building): the poller reports that as a build too, with
     nothing to refuse."""
@@ -258,7 +266,7 @@ class BuildWatch:
             self._changed.notify_all()
         if quiet:
             if how == "timeout":
-                self._link._not_answering("the Status a switch away held")
+                self._link._not_answering("the Status a switch away held", BUILD_LIMIT_S)
             self._link._build_ended(how)
             return
         if how == "answered":
@@ -758,15 +766,16 @@ class HqpLink:
             logger.info("HQPlayer at %s:%d answers again", self.host, self.port)
             self._poke()
 
-    def _not_answering(self, command: str) -> None:
-        """HQPlayer answered nothing within a short silence's wait after
-        `command`: not answering — never a build. People's commands are
-        refused with that line, the ones waiting for it woken; questions go
-        on, and the next answer ends it."""
+    def _not_answering(self, command: str, waited: float) -> None:
+        """HQPlayer answered nothing to `command` within the `waited` seconds
+        it was given (a short silence's wait, or the build limit of the
+        Status a switch away held): not answering — never a build. People's
+        commands are refused with that line, the ones waiting for it woken;
+        questions go on, and the next answer ends it."""
         if self.silent_since is None:
             self.silent_since = time.time()
             logger.warning("HQPlayer did not answer within %g s of %s — it is not answering",
-                           STOP_ANSWER_S, command)
+                           waited, command)
         self.lock.wake()
         with self._conn:
             self._conn.notify_all()
@@ -848,7 +857,7 @@ class HqpLink:
                 if scope is not None:
                     scope.silent = True
                 if short is not None:
-                    self._not_answering(short)
+                    self._not_answering(short, STOP_ANSWER_S)
         finally:
             self.teardown = None
             self._give(hand_over)
@@ -968,24 +977,31 @@ class HqpLink:
         return self.attachment
 
     def detach(self, backend) -> None:
-        """`backend` drives this HQPlayer no more: a switch away, which
-        supersedes what was made for its attachment — a start or a resume
-        left for later, the rest of a DSP change."""
+        """`backend` drives this HQPlayer no more — an output switch, the
+        play gate attaching it again, a benchmark's hold, the node stopping.
+        Only a person's switch away supersedes what was made for its
+        attachment, and it says so in release: a re-attach and a hold
+        supersede nothing (a run's owed put-back stays owed)."""
         if self.attached is backend:
             self.attached = self.attachment = None
             self.build.last_change = None    # the outcome of a change was that attachment's
-            self.accept("switch")
         self._close_if_retired()
 
-    def release(self, ours: Callable[[Any], bool]) -> Optional[str]:
-        """The output is switched away from this HQPlayer: it stops if it
-        plays or pauses an entry of what it was given (`ours`) — the one
-        late Stop (_LateStop), on its own thread. The switch waits for its
-        first outcome — the Stop sent, or not needed — at most
-        BUILDING_AFTER_S, and returns at once while HQPlayer is known to
-        build: the Stop then stays owed, and what the person is told comes
-        back. Past the build limit HQPlayer is left as it is."""
-        stop = self.item("late_stop", self.accept("switch"))
+    def release(self, ours: Optional[Callable[[Any], bool]]) -> Optional[str]:
+        """A person switched the output away from this HQPlayer (switch): what
+        was made for its attachment is superseded — a start or a resume left
+        for later, the rest of a DSP change, a run's owed put-back — and it
+        stops if it plays or pauses an entry of what it was given (`ours`;
+        None: believed off the network, no Stop) — the one late Stop
+        (_LateStop), on its own thread. The switch waits for its first
+        outcome — the Stop sent, or not needed — at most BUILDING_AFTER_S,
+        and returns at once while HQPlayer is known to build: the Stop then
+        stays owed, and what the person is told comes back. Past the build
+        limit HQPlayer is left as it is."""
+        n = self.accept("switch")
+        if ours is None:
+            return None
+        stop = self.item("late_stop", n)
         state = self.build.silent()
         if state is not None and state.get("unfinished"):
             logger.warning("HQPlayer not stopped at the output switch: %s", UNFINISHED)
