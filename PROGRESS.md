@@ -776,14 +776,12 @@ implementation details live in the code, DB and git history.
   HQPlayer's playlist to it; a new queue is the newest word as it is
   asked (numbered before it waits for the command lock), so the hand-over's
   next add is dropped instead of waited out for seconds, and a Play made
-  while the new queue is handed over plays that queue (the manager says
-  when one is on its way, `new_queue`). A Seek during a press moves the
-  newest word's second instead of waiting the hand-over out and dropping
-  the start. A plain Play spends the spot, and the start a rebuild owes puts
-  one back only if no start was taken since the rebuild began: a Play
-  during a reorder's rebuild left the old spot under what played (which
-  track that Play starts is still read off the queue before the reorder
-  commits — open). Around it: the judge of a start given up on waits for a
+  while the new queue is handed over plays that queue. A Seek during a
+  press moves the newest word's second instead of waiting the hand-over out
+  and dropping the start. A plain Play spends the spot: a Play during a
+  reorder's rebuild left the old spot under what played (and started the
+  wrong track — the lesson below). Around it: the judge of a start given
+  up on waits for a
   tick that names a slot; "ours" at a switch is what this attachment handed
   HQPlayer, never the process's ledger of every file ever handed; the
   benchmark's hold lends the link before it detaches the backend; the play
@@ -791,6 +789,20 @@ implementation details live in the code, DB and git history.
   Stop still waiting its turn on the connection. Lesson: a pending word
   belongs to the work that will carry it out — once that work is overtaken,
   joining it is dropping the word.
+- **A word names a track while the queue is in flight** (2026-10-13). A
+  replace, a new order, a re-bind and the radio's clear hand HQPlayer a
+  playlist before the queue commits it, and the words a person made
+  meanwhile were translated by slot against the queue as it stood: a tap on
+  the old sheet's third row during a new album's hand-over played the new
+  album's third track, and a Play during a reorder's rebuild started
+  HQPlayer's entry 1 of the new order from 0:00, dropping the rebuild's own
+  resume of the track that played. The mutation now holds the words as a
+  play press does (`PlayerBackend.mutation`): each names a track — the tap
+  carries the one the sheet showed (`/jump`'s `track_id`) — translated
+  against what HQPlayer is handed, the newest goes once the queue stands,
+  and a Play joins the start the mutation owes. Lesson: a slot is a name
+  for a track only while the queue under it holds still; carry the identity
+  and translate it against what the output is handed.
 - **Stop-clear-add-select-play sequence** for `play_track`/`play_album`. Without
   explicit stop, HQPlayer occasionally started the wrong track from the
   existing queue.

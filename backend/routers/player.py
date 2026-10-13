@@ -145,6 +145,10 @@ class QueueSessionRequest(BaseModel):
 
 class JumpRequest(BaseModel):
     index: int  # the queue's 1-based slot, as the status's track_index names it
+    # The track the client saw in that slot: the tap names it, never the slot
+    # alone — a queue mutation in flight (a new queue handed over, a new
+    # order) moves slots under the sheet before the queue commits
+    track_id: Optional[str] = None
 
 class RemoveRequest(BaseModel):
     index: int  # 1-based — HQPlayer's PlaylistRemove convention
@@ -1633,7 +1637,9 @@ def jump(req: JumpRequest):
     the tap is a play press, answered at once with the track it will start
     (`starts`). A slot the output does not take — a gap of this HQPlayer —
     is answered with the output's own words (`refusal`), as every transport
-    command is."""
+    command is. While HQPlayer takes a queue mutation (a new queue, a new
+    order) the tap names `track_id`, which it plays wherever the mutation
+    puts it — one the mutation takes away is refused."""
     if req.index < 1:
         raise HTTPException(status_code=400, detail="index must be >= 1")
     try:
@@ -1641,7 +1647,7 @@ def jump(req: JumpRequest):
         # play() after it raced the DLNA load and resumed the OLD track for
         # the seconds the new one took to buffer
         b = manager.ensure_active()
-        ok = b.select(req.index)
+        ok = b.select(req.index, req.track_id)
     except Exception as e:
         raise _output_error(e)
     answer = {"ok": True, "index": req.index} if ok else {

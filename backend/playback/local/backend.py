@@ -85,7 +85,7 @@ class LocalBackend(PlayerBackend):
         self._engine.post("select", index=max(1, self._engine_index() - 1))
         return True
 
-    def select(self, index: int) -> bool:
+    def select(self, index: int, track_id: Optional[str] = None) -> bool:
         if self._queue.item_at(index) is None:
             return False
         self._engine.post("select", index=index)

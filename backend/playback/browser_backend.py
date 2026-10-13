@@ -471,7 +471,7 @@ class BrowserBackend(PlayerBackend):
     def previous(self) -> bool:
         return self._start_at(max(1, self._index - 1), play=True)
 
-    def select(self, index: int) -> bool:
+    def select(self, index: int, track_id: Optional[str] = None) -> bool:
         if self._queue.item_at(index) is None:
             return False
         return self._start_at(index, play=True)

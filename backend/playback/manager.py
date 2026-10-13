@@ -770,7 +770,7 @@ class PlaybackManager:
         appends with."""
         with self._mutation():
             backend = self.ensure_active() if play else self.backend()
-            with backend.new_queue():
+            with backend.mutation():
                 accepted = backend.queue_replace(items, play=play,
                                                  probe_first=probe_first)
                 added = len(accepted)
@@ -911,14 +911,16 @@ class PlaybackManager:
             if plan.version is not None and plan.version != self.queue.version:
                 raise QueueChanged("the queue changed while its new order was made")
             backend = self._active   # queue reorder is output-independent
-            result = (backend.queue_reorder(plan) if backend
-                      else {"removed": 0, "added": 0, "interrupted": False})
-            self.queue.reorder_by_track_ids(plan.order)
-            if backend:
+            if backend is None:
+                self.queue.reorder_by_track_ids(plan.order)
+                self._schedule_persist()
+                return {"removed": 0, "added": 0, "interrupted": False}
+            with backend.mutation():
+                result = backend.queue_reorder(plan)
+                self.queue.reorder_by_track_ids(plan.order)
                 backend.queue_changed("reorder")
             self._schedule_persist()
-        if backend:
-            backend.queue_start()
+        backend.queue_start()
         return result
 
     def rebind_files(self) -> None:
@@ -947,7 +949,8 @@ class PlaybackManager:
             logger.info("%d queued slot(s) re-bound: their file left the library",
                         len(moved))
             if backend is not None:
-                backend.queue_changed("rebind")
+                with backend.mutation():
+                    backend.queue_changed("rebind")
             self._schedule_persist()
             status = self._latest_status
             if status.get("state") not in (None, "disconnected"):
@@ -974,7 +977,8 @@ class PlaybackManager:
         with self._mutation():
             if self._active is not backend:
                 return
-            step()
+            with backend.mutation():
+                step()
         backend.queue_start()
 
     def mirror_locked(self, backend: PlayerBackend, step: Callable[[], Any]) -> Any:
@@ -996,18 +1000,22 @@ class PlaybackManager:
         and a rotation that fails clears nothing. Returns the new generation
         for the radio filler — the current one when the output did not
         clear: mirror-first, the queue keeps the tail the player keeps, and
-        the radio follows it, history rotated."""
+        the radio follows it, history rotated. A play intent made while the
+        output clears is the output's to carry out once the queue stands
+        (PlayerBackend.mutation, queue_start)."""
         with self._mutation():
             backend = self.backend()
-            with backend.new_queue():
+            with backend.mutation():
                 cleared = backend.queue_clear_after_current(archive)
-                if not cleared:
-                    return self.queue.generation
-                gen = self.queue.clear_for_radio(self._latest_status.get("track_index"))
-                self._retire_previews(gen)
-                backend.queue_changed("clear")
-            self._schedule_persist()
-            return gen
+                gen = self.queue.generation
+                if cleared:
+                    gen = self.queue.clear_for_radio(self._latest_status.get("track_index"))
+                    self._retire_previews(gen)
+                    backend.queue_changed("clear")
+            if cleared:
+                self._schedule_persist()
+        backend.queue_start()
+        return gen
 
     # -- queue persistence -------------------------------------------------------
     #

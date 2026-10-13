@@ -36,7 +36,7 @@ class _Stub(PlayerBackend):
     def stop(self): return True
     def next(self): return True
     def previous(self): return True
-    def select(self, index): return True
+    def select(self, index, track_id=None): return True
 
 
 def test_manager_hears_the_active_backend_only():

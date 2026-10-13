@@ -163,11 +163,14 @@ class PlayerBackend(ABC):
     def previous(self) -> bool: ...
 
     @abstractmethod
-    def select(self, index: int) -> bool:
+    def select(self, index: int, track_id: Optional[str] = None) -> bool:
         """Play queue slot `index` (1-based): load it and start it in ONE
         step. Every backend owns that atomically — a caller-side play()
         after select() raced the DLNA load and resumed the previous track
-        while the new one buffered."""
+        while the new one buffered. `track_id`: the track the person saw in
+        that slot — an output that holds play intents while a queue mutation
+        is in flight (mutation) plays that track wherever the mutation puts
+        it."""
 
     def seek(self, seconds: int) -> bool:
         return False
@@ -202,10 +205,12 @@ class PlayerBackend(ABC):
         Default: nothing (a renderer starts in queue_changed)."""
 
     @contextmanager
-    def new_queue(self):
-        """A new queue is handed to this output (a replace, a radio start)
-        until the queue commits it or gives it up: a play intent meanwhile
-        acts on that queue. Default: nothing to know."""
+    def mutation(self):
+        """A queue mutation this output follows — a replace, a reorder, a
+        re-bind, a radio start — on this thread, until the queue commits it
+        or gives it up: a play intent made while the output takes it is the
+        output's to hold and carry out once the queue stands (queue_start).
+        Default: nothing to hold."""
         yield
 
     def queue_abandon(self) -> None:

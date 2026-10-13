@@ -2049,10 +2049,13 @@
 
     async jumpTo(index) {
       window.maybeClaimRenderer();
+      // The tap names the track this row shows, not the row: a queue being
+      // handed to the output (a new album, a new order) moves rows under it
+      const shown = this.tracks[index - 1];
       const resp = await fetch('/api/player/jump', {
         method: 'POST',
         headers: {'Content-Type': 'application/json'},
-        body: JSON.stringify({index}),
+        body: JSON.stringify({index, track_id: (shown && shown.track_id) || null}),
       }).catch(() => null);
       if (!resp || !resp.ok) {
         await reportPlaybackResult(resp);

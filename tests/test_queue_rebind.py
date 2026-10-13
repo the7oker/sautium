@@ -13,6 +13,7 @@ import select
 import sys
 import time
 import uuid
+from contextlib import contextmanager
 from dataclasses import asdict
 from datetime import datetime, timezone
 from pathlib import Path
@@ -130,6 +131,10 @@ class StubOutput:
 
     def queue_changed(self, kind, *, play=False):
         self.changed.append(kind)
+
+    @contextmanager
+    def mutation(self):
+        yield
 
     def queue_start(self):
         pass

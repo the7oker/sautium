@@ -433,9 +433,7 @@ comes after the control port answers again — so neither can end the wait.
   with its item. Stopped there, Next and Previous only move it a slot, to
   its start — no command, no sound; a tap on a track plays that track. A
   start taken spends it — a plain Play too — spent under the command lock
-  the start held, so a start dropped meanwhile puts none back; the start a
-  rebuild owes (a new order, a re-bind) puts its spot back only if no start
-  was taken since the rebuild began — a Play during its adds included. One
+  the start held, so a start dropped meanwhile puts none back. One
   HQPlayer answered past the build limit, given up on, is judged at
   HQPlayer's first answer since that names a slot (an opening tick names
   none): playing or paused on its track, it was taken after all. A command refused,
@@ -503,8 +501,7 @@ comes after the control port answers again — so neither can end the wait.
     radio) is the newest word as it is asked: what the hand-over still had
     to send is dropped, a press it overtook takes no more words — a Play, a
     tap or a DSP change's resume made then is one of its own — and hands
-    HQPlayer nothing the reconverge should wait for; a Play made while the
-    new queue is handed over plays that queue. While the
+    HQPlayer nothing the reconverge should wait for. While the
     press drives HQPlayer the play gate asks it nothing (a question would
     wait behind its Stop and adds). A queue edit meanwhile is the queue's: an
     append follows behind what HQPlayer took (in step); anything else leaves
@@ -512,6 +509,30 @@ comes after the control port answers again — so neither can end the wait.
     target — a target removed starts the next track still queued. Next and
     Previous at a stopped spot only move it; at either end of the queue they
     send nothing.
+- **Words during a queue mutation** (since 2026-10-13). A replace, a new
+  order, a re-bind's or the reconverge's rebuild and the radio's clear hand
+  HQPlayer a playlist under the queue lock, and commit the queue only after
+  it: the person's play intents made meanwhile are held as a play press
+  holds them (`PlayerBackend.mutation`, `HqpBackend._hold_words`), answered
+  at once (`starts`, the play gate asking nothing), and the newest one no
+  newer intent superseded is carried out once the queue stands
+  (`queue_start`). A word names a track, never a slot, translated against
+  what HQPlayer is handed — the queue sheet still shows the old queue while
+  a new one loads, so a tap carries the track it showed (`/jump`'s
+  `track_id`) and plays it wherever the new queue holds it, from its start;
+  a track the mutation takes away is refused in words, and the words before
+  stand. A Play asks again for the start the mutation owes — the replace's
+  first track, the rebuild's track at its second — and that start goes,
+  numbered as the Play: a Play during a new order's rebuild resumes the
+  track that played, at its second, never HQPlayer's entry 1. Next and
+  Previous count from the newest start (the one owed before any); a Seek
+  changes the newest word's second; a Pause or a Stop drops the starts
+  before it — on a mutation that stopped HQPlayer nothing is sent and the
+  spot is left at the newest start's track, on one that left it playing (a
+  seamless reorder, the radio's clear) the Pause or the Stop is sent. With
+  no track to count from — HQPlayer plays on, or the reconverge knows no
+  slot it stood on — a Play or a Seek acts once the queue stands, as it
+  would then. A mutation that does not commit takes its words with it.
 - **Gaps** (since 2026-10-13). HQPlayer's playlist is the queue without its
   gaps, in the same order: a gap is a slot this HQPlayer does not hold —
   nothing it can open (a file held only in another HQPlayer's library, one

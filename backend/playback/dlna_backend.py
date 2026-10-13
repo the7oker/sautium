@@ -1404,7 +1404,7 @@ class DlnaBackend(PlayerBackend):
     def previous(self) -> bool:
         return self._call_async(self._load_and_play(max(1, self._index - 1)))
 
-    def select(self, index: int) -> bool:
+    def select(self, index: int, track_id: Optional[str] = None) -> bool:
         if self._queue.item_at(index) is None:
             return False
         return self._call_async(self._load_and_play(index))

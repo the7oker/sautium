@@ -142,7 +142,7 @@ class _Elsewhere:
     def slot_ready(self, index: int) -> None: ...
 
     @contextmanager
-    def new_queue(self):
+    def mutation(self):
         yield
 
     def healthy(self) -> bool:
