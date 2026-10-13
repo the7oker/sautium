@@ -4599,7 +4599,7 @@ def test_a_loss_while_the_canary_reads_is_not_undone_by_its_stale_verdict(fake, 
                                                                           monkeypatch):
     """The canary judges HQPlayer's playlist with the mirror's state it read
     it with: a loss landing while it reads — a replace HQPlayer refused
-    whole, its Stop and clear gone — is not undone by a stale "in step"."""
+    whole, its Stop gone — is not undone by a stale "in step"."""
     mgr, b = output
     armed = threading.Event()
     get_playlist = HQPlayerClient.get_playlist
@@ -5336,7 +5336,7 @@ def test_a_close_ends_a_connect_to_an_address_that_never_answers(monkeypatch):
 
     def watched(sock, address):
         err = connect_ex(sock, address)
-        if err:
+        if err in hqplayer_client._CONNECTING:
             connecting.set()                         # under way: nothing answered yet
         return err
     monkeypatch.setattr(socket.socket, "connect_ex", watched)

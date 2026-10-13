@@ -48,9 +48,10 @@ handed over as the media proxy's /file/ URLs: a Docker node's container
 path is nothing HQPlayer can open, and the input path changes no DSP cost.
 
 One owner of HQPlayer at a time: the run borrows the output
-(PlaybackManager.hold) — the backend is detached as an output switch
-detaches it, every other Sautium path is refused until the output comes
-back, and the canonical queue mirrors back into HQPlayer when it does. The
+(PlaybackManager.hold) — the backend is detached without a switch away, no
+Stop (the run stops HQPlayer itself), every other Sautium path is refused
+until the output comes back, and the canonical queue mirrors back into
+HQPlayer when it does. The
 run drives HQPlayer on a connection of its own (_Link), which waits out
 HQPlayer's silence while it builds a setting — its control port answers
 nothing until the build is done, and a command given up on would still be
@@ -63,7 +64,10 @@ end, on cancel, on failure and when the app stops (shutdown); a run cut
 short before that is put back the next time HQPlayer answers — at the
 attach or when the poller sees it come back (recover) — while HQPlayer still
 shows a mark of the run: its lowered volume, its signals, or the selection
-it set last.
+it set last; a new run takes it first. A person's switch away, DSP change or
+knob set in HQPlayer's own window since leaves HQPlayer to them instead: the
+run is closed as left, nothing more is put back, and one notice names what
+still holds the run's test values.
 
 Each point waits for HQPlayer's average to settle (Settle) and writes one
 sample: the p10 of the accepted readings, whether they settled, how long
@@ -954,8 +958,8 @@ def start(mode: Optional[str] = None, *, fixed_volume_ok: bool = False) -> Dict[
                                "has played")
     # A run cut short before still owes HQPlayer its put-back: it goes first,
     # and this run reads what HQPlayer holds after it — never the old run's
-    # test mode or lowered volume. One that sets off a build makes this run
-    # wait for it, as any build does.
+    # test mode or lowered volume. One that sets off a build refuses this
+    # start (busy below): the owner starts again once HQPlayer answers.
     recover(ep["id"], link)
     busy = link.busy()
     if busy is not None:

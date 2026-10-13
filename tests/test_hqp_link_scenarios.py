@@ -215,6 +215,8 @@ class World:
         self.unexpected: list[str] = []
         self.checked = 0
         self.foreign = 0
+        # A step whose outcome the next settle judges at rest (the tail mirror)
+        self.rest_due = False
         self.next_id = 100
         self._links = 0
         self.fills: list = []           # (queue generation, the items a filler took)
@@ -406,11 +408,28 @@ class World:
 
         def marked(backend, why, **kw):
             read = getattr(judging, "playlist", None)
-            w.rec("drift", link=lid(backend._link), why=why,
-                  foreign=None if read is None else any("/Elsewhere/" in (t.get("uri") or "")
-                                                        for t in read))
-            return drifted(backend, why, **kw)
+            judging.why = why
+            judging.foreign = (None if read is None else
+                               any("/Elsewhere/" in (t.get("uri") or "") for t in read))
+            try:
+                return drifted(backend, why, **kw)
+            finally:
+                judging.why = judging.foreign = None
         mp.setattr(HqpBackend, "_drifted", marked)
+
+        # Every move of the mirror, with what made it: a drift the canary
+        # marks names its reason and the playlist it read; any other move —
+        # a press's own drift among them — is the node's own
+        move = HqpBackend._move_mirror
+
+        def moved(backend, state, **kw):
+            done = move(backend, state, **kw)
+            if done:
+                w.rec("mirror", link=lid(backend._link), state=state, by=kw.get("by"),
+                      why=getattr(judging, "why", None),
+                      foreign=getattr(judging, "foreign", None))
+            return done
+        mp.setattr(HqpBackend, "_move_mirror", moved)
 
         miss = HqpBackend._register_failure
 
@@ -663,18 +682,37 @@ class World:
     def entry_before(self) -> None:
         """An entry of HQPlayer's own put before the one it plays, its
         mirror then lost through a silence: answering again it gets what
-        lies behind that entry — a tail mirror (I14)."""
+        lies behind that entry — a tail mirror (I14). HQPlayer not playing,
+        the step makes it play first — a tap on the first slot it holds — so
+        there is an entry to put one before."""
         b = self.mgr.active
         if not isinstance(b, HqpBackend):
             return
         f = self.driven()
+
+        def playing() -> bool:
+            return f.state == int(PlaybackState.PLAYING) and 1 <= f.track <= len(f.playlist)
         with f._lock:
-            if f.state != int(PlaybackState.PLAYING) or not 1 <= f.track <= len(f.playlist):
+            ready = playing()
+        if not ready:
+            held = b._layout().slots
+            if not held:
                 return
+            self.player.jump(self.player.JumpRequest(index=held[0]))
+            deadline = time.monotonic() + 5.0
+            while time.monotonic() < deadline:
+                with f._lock:
+                    if playing():
+                        break
+                time.sleep(0.05)
+        with f._lock:
+            if not playing():
+                return                  # the start did not take (a build, a silence)
             self.foreign += 1
             f.playlist.insert(f.track - 1, f"file:///Elsewhere/before-{self.foreign}.flac")
             f.track += 1
         b.lose_mirror("an entry of HQPlayer's own before the one it plays")
+        self.rest_due = True            # judged at rest before another step moves it
 
     def reorder(self) -> None:
         order = [it.track_id for it in self.mgr.queue.snapshot()]
@@ -797,7 +835,8 @@ class World:
                 return
             if b._mirror == "tail" and _tail_holds(playlist, want, track, state):
                 return
-            if not snapshot and any("/Elsewhere/" in u for u in playlist):
+            if (not snapshot and b._mirror in ("lost", "drift")
+                    and any("/Elsewhere/" in u for u in playlist)):
                 return      # another controller's playlist and no queue: nothing to give it
             if (b._mirror == "drift" and not pressed and self._drift_unexplained(b, playlist)):
                 self.violate(f"I13: HQPlayer holds {playlist}, the queue {want}: a divergence "
@@ -816,15 +855,19 @@ class World:
             time.sleep(0.1)
 
     def _drift_unexplained(self, b: HqpBackend, playlist: list) -> bool:
-        """Did the canary mark the drift — "an external edit?" — over a
-        playlist with no entry of anyone else's, as it read it then? Every
-        other drift names its own reason (a removal, a new order HQPlayer did
-        not take)."""
+        """Did the canary make the drift that stands — "an external edit?" —
+        over a playlist with no entry of anyone else's, as it read it then?
+        Judged by the move that made the state: every other drift is the
+        node's own (a removal, a new order HQPlayer did not take, a press's
+        edits followed)."""
         with self._lock:
-            marks = [e for e in self.log if e.kind == "drift" and e.data["link"] == self.lid(b._link)]
-        if not marks or not marks[-1].data["why"].startswith("HQPlayer's playlist drifted"):
+            moves = [e for e in self.log
+                     if e.kind == "mirror" and e.data["link"] == self.lid(b._link)]
+        last = moves[-1].data if moves else None
+        if (last is None or last["state"] != "drift"
+                or not (last["why"] or "").startswith("HQPlayer's playlist drifted")):
             return False
-        foreign = marks[-1].data.get("foreign")
+        foreign = last["foreign"]
         return not (foreign if foreign is not None else any("/Elsewhere/" in u for u in playlist))
 
     def _gaps(self, b: HqpBackend, snapshot: list) -> None:
@@ -842,23 +885,37 @@ class World:
 
     def _press(self) -> bool:
         """A play press — a tap on the first slot HQPlayer holds — on a
-        playlist that is no mirror: whether it was taken."""
+        playlist that is no mirror, at rest: taken, and the slot pressed
+        plays. A refusal then is HQPlayer's to explain — away, silent or
+        building — never the node's own."""
         self.rec("step", name="press (at rest)")
-        held = self.mgr.active._layout().slots
-        if not held:
+        b = self.mgr.active
+        layout = b._layout()
+        if not layout.slots:
             return False                # nothing of the queue on this HQPlayer
+        slot = layout.slots[0]
+        uri = b._uri_of(layout.items[slot - 1])[0]
+        hqp = self.b if b._link.port == self.b.port else self.a
         try:
-            self.player.jump(self.player.JumpRequest(index=held[0]))
-        except HTTPException as e:
-            self._refused("press (at rest)", None, e)
-            return False
-        except (ConnectionError, OSError) as e:
-            self.rec("step-refused", why=str(e))
+            self.player.jump(self.player.JumpRequest(index=slot))
+        except (HTTPException, ConnectionError, OSError) as e:
+            why = f"{e.status_code} {e.detail}" if isinstance(e, HTTPException) else str(e)
+            self.rec("step-refused", why=why)
+            if not (hqp._down or hqp.mute or hqp._silent_until > time.monotonic()
+                    or any(ln.build.building() for ln in list(hl._links.values()))):
+                self.violate(f"I13: at rest a play press was refused — {why} — with "
+                             f"HQPlayer up, answering and building nothing")
             return False
         deadline = time.monotonic() + 8.0
-        while (any(t.name in _WORKERS for t in threading.enumerate())
-               and time.monotonic() < deadline):
+        while time.monotonic() < deadline:
+            with hqp._lock:
+                plays = (hqp.state == int(PlaybackState.PLAYING)
+                         and 1 <= hqp.track <= len(hqp.playlist)
+                         and hqp.playlist[hqp.track - 1] == uri)
+            if plays and not any(t.name in _WORKERS for t in threading.enumerate()):
+                return True
             time.sleep(0.05)
+        self.violate(f"I13: at rest the slot pressed ({slot}) never played")
         return True
 
     def _owed_stops(self) -> None:
@@ -894,16 +951,22 @@ class World:
         """Between steps a random breath only: what one set going — a build,
         a silence, a step on its thread — runs on beside the next, which is
         where the orders that matter happen. A full settle is a bounded wait
-        for quiet: no fake in a silence, no build in progress, the steps on
-        threads done (one still running past it hung)."""
+        for quiet: no fake in a silence, no build in progress, no link's
+        breaker open after a connect that failed (an HQPlayer just back is
+        dialled once its cooldown is over), the steps on threads done (one
+        still running past it hung)."""
         if not full:
             time.sleep(self.rng.uniform(0.0, 0.3))
             return
         deadline = time.monotonic() + 15.0
         while time.monotonic() < deadline:
-            silent = any(f._silent_until > time.monotonic() for f in (self.a, self.b))
-            building = any(ln.build.building() for ln in list(hl._links.values()))
-            if not silent and not building and not any(t.is_alive() for t in self.threads):
+            now = time.monotonic()
+            silent = any(f._silent_until > now for f in (self.a, self.b))
+            links = list(hl._links.values())
+            building = any(ln.build.building() for ln in links)
+            breaker = any(ln._unreachable_until > now for ln in links)
+            if (not silent and not building and not breaker
+                    and not any(t.is_alive() for t in self.threads)):
                 break
             time.sleep(0.05)
         else:
@@ -1100,7 +1163,9 @@ class World:
         is cleared — no PlaylistClear the rotation did not come before."""
         archived: set = set()
         for e in log:
-            if e.kind == "archive":
+            if e.kind == "step":
+                archived.discard(e.thread)      # a radio's mark is its own step's
+            elif e.kind == "archive":
                 archived.add(e.thread)
             elif e.kind == "send" and e.data["command"] == "PlaylistClear":
                 # The rotation and the clear are one step's, on its thread
@@ -1134,8 +1199,10 @@ def test_the_links_keep_their_invariants_whatever_the_order(seed, fake, fake_b, 
         world.start()
         for i in range(int(os.environ.get("SAUTIUM_SCENARIO_STEPS", "25"))):
             world.step()
-            world.settle(full=i % 6 == 5)
-            if i % 6 == 5:
+            full = i % 6 == 5 or world.rest_due
+            world.settle(full=full)
+            if full:
+                world.rest_due = False
                 world.at_rest()
             world.check()
             if world.violations or world.unexpected:

@@ -385,8 +385,9 @@ class _CommandLock:
         # Held by the Stop a switch away owes (_LateStop): the link's own
         # work, which outlives the backend — a detach never waits for it
         self._late = False
-        # Who waits for it, in the order they came: a Pause pressed while a
-        # play press rebuilds goes before the start that rebuild leads to
+        # Who waits for it, in the order they came: a volume change pressed
+        # while a new queue is handed over goes once the hand-over is done,
+        # before anything asked after it
         self._waiting: deque = deque()
 
     def __enter__(self) -> "_CommandLock":
@@ -1008,8 +1009,9 @@ class HqpLink:
         """`backend` drives this HQPlayer no more — an output switch, the
         play gate attaching it again, a benchmark's hold, the node stopping.
         Only a person's switch away supersedes what was made for its
-        attachment, and it says so in release: a re-attach and a hold
-        supersede nothing (a run's owed put-back stays owed)."""
+        attachment, and it says so in release — or in retire, another
+        HQPlayer picked by address: a re-attach and a hold supersede nothing
+        (a run's owed put-back stays owed)."""
         if self.attached is backend:
             self.attached = self.attachment = None
             self.build.last_change = None    # the outcome of a change was that attachment's

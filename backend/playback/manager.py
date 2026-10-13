@@ -277,10 +277,11 @@ class PlaybackManager:
         and clearing the HQPlayer host must leave an externally-running
         player alone (a backend restart mid-listening adopts the still-
         playing queue on the next start); the play gate attaching the same
-        output again and a benchmark's hold use it too. Only a release is a
-        switch away (PlayerBackend.release): what was made for the old
-        attachment — a benchmark's owed put-back among it — is superseded by
-        nothing else.
+        output again and a benchmark's hold use it too. Only a person's
+        switch away supersedes what was made for the old attachment — a
+        benchmark's owed put-back among it: a release (PlayerBackend.release),
+        or another HQPlayer picked by address (HqpLink.retire); nothing else
+        does.
 
         While the output is lent (hold) only the hold itself switches it
         (`by_hold`); anyone else gets OutputHeld."""

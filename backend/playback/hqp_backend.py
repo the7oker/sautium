@@ -490,8 +490,8 @@ def _same_entry(a: str, b: str) -> bool:
 
 def _skip_to_first_playable(hqp: HQPlayerClient, added: int) -> None:
     """If the first queued track didn't start (e.g. a [Vinyl] placeholder path that
-    isn't real audio), skip ahead until one plays. Best-effort, on a held
-    connection; the link's own refusals end it."""
+    isn't real audio), skip ahead until one plays. Best-effort, in the replace
+    start's command sequence; the link's own refusals end it."""
     try:
         time.sleep(0.5)
         status = hqp.get_status()
@@ -958,9 +958,10 @@ class HqpBackend(PlayerBackend):
         # (_InFlight): set as its hand-over begins, let go as the mutation
         # ends (mutation); under _press_lock
         self._inflight: Optional[_InFlight] = None
-        # The last verdict of _playing, by (entry, HQPlayer's index, queue
-        # version): a foreign entry played for an hour is looked for in the
-        # queue once, not every second.
+        # The last verdict of _playing, by (the URI HQPlayer names, its
+        # entry, the slot the layout gives it, the queue's version, playing or
+        # not): a foreign entry played for an hour is looked for in the queue
+        # once, not every second.
         self._verdict: Optional[tuple] = None
         # Lost sight of HQPlayer (a dropped socket, failed polls): its
         # playlist is read on the first answer, and the flag stays raised
@@ -1198,9 +1199,11 @@ class HqpBackend(PlayerBackend):
             # A command already on its way is answered before the lock is
             # ours — but never waited out through a build, nor the Stop a
             # switch away owes: that goes on watched and ends on its own, and
-            # what its sequence still had to send is superseded by the detach
-            # (HqpLink.detach). One sent later by whoever took this backend
-            # before the switch (a play intent) is refused.
+            # what its sequence still had to send is dropped by what made the
+            # detach — a person's switch away (release), the hold's lend, or
+            # this backend detached (_detached, the play gate's re-attach).
+            # One sent later by whoever took this backend before the switch
+            # (a play intent) is refused.
             self._detached = True
         # The poller stops: a question of its still waiting for the
         # connection is not asked, and one HQPlayer has yet to answer is not
@@ -1499,7 +1502,8 @@ class HqpBackend(PlayerBackend):
 
     def _follow_queue(self, press: bool = False) -> None:
         """_reconverge's step, under the queue lock. A read HQPlayer does not
-        answer leaves the mirror lost, due again at its next answer; a play
+        answer leaves the mirror lost — through a silence, due again at its
+        next answer; a play
         press under way takes the queue to HQPlayer itself — one a new queue
         overtook takes none."""
         if self._live(self._pressed) is not None:
@@ -1768,7 +1772,7 @@ class HqpBackend(PlayerBackend):
                         # again, nor one HQPlayer did not answer (an empty
                         # list), and its verdict never applied over a change
                         # of the mirror made since (a loss: a replace
-                        # HQPlayer refused whole, its Stop and clear gone) —
+                        # HQPlayer refused whole, its Stop gone) —
                         # and before the slot below, which falls back on it.
                         if (hqp.last_error is None and not pending and self._pressed is None
                                 and self._queue.view()[1:] == (version, False)
@@ -3576,8 +3580,9 @@ class HqpBackend(PlayerBackend):
         (intent queue), each slot's way in read for it — and the queue all of
         them (mirror-first): a slot it cannot open, or refuses while it takes
         others, is a gap (_took); refused whole, or silent before it took
-        any, nothing commits, and since its Stop and clear went the mirror is
-        lost — the next Play gives it the queue as it was. Nothing of `items`
+        any, nothing commits, and since its Stop went (a file it refuses
+        clears nothing) the mirror is lost — the next Play gives it the queue
+        as it was. Nothing of `items`
         it could open: refused before anything is sent, in the gap's words.
         Cut short by a silence, the queue takes them all and HQPlayer gets
         the rest once it answers again. With `play` it starts once the

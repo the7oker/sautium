@@ -1023,7 +1023,7 @@ class HQPlayerClient:
         Select track by index in playlist
 
         Args:
-            index: Track index (0-based)
+            index: HQPlayer's entry (1-based)
         """
         response = self._execute_command("SelectTrack", {"index": str(index)})
         return response is not None and response.get("result") == "OK"

@@ -453,7 +453,9 @@ comes after the control port answers again — so neither can end the wait.
     when an append or a "play next" found it not answering, when it left a
     removal or the radio's clear unanswered within its wait (it carries
     them out once its silence is over: the slot leaves the queue, the radio
-    goes on), or when it came
+    goes on), when a replace was cut short by a silence (the queue takes
+    every track of it), when a radio began while HQPlayer was stopped (its
+    clear keeps no entry of the seed the queue keeps), or when it came
     back restarted — through a silence: from then on appends, inserts,
     removals and new orders are the queue's alone, and once HQPlayer answers
     again it gets the queue back, once per loss (`HqpBackend._reconverge`):
@@ -1297,9 +1299,10 @@ cooling — so Sautium measures it instead of predicting it
   queue, read off the status the start itself asks for
   (`HqpBackend.reads_foreign` — another controller). The run borrows the output
   (`PlaybackManager.hold`): it begins once a queue replace still adding
-  tracks and a play intent still attaching are through, the backend detaches
-  as on an output switch — a command of that backend still on its way is
-  refused from then on — every other Sautium path to HQPlayer answers 409
+  tracks and a play intent still attaching are through, the link is lent and
+  the backend detaches without a switch away — no Stop, the run stops
+  HQPlayer itself; a command of that backend still on its way is refused
+  from then on — every other Sautium path to HQPlayer answers 409
   (busy, not broken: the UI points at the run's Cancel, not at the Output
   picker), an output or address change included, and the queue mirrors back
   when it ends. HQPlayer goes to the bottom of its `VolumeRange` first, read

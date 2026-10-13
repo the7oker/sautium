@@ -704,7 +704,7 @@ implementation details live in the code, DB and git history.
   only if nothing moved it since (a dropped press start re-armed a spot under
   a playing track); a start given up on past the build limit and then taken
   by HQPlayer is judged at its next answer; a DSP change reads the entry it
-  would resume on its own hold (it read the old queue's while a replace
+  would resume in its own command sequence (it read the old queue's while a replace
   still added, and its resume cancelled the new album's Play); the detach
   waits for no teardown (the owed Stop's, a person's Stop just before) and
   not for the old poller.
@@ -829,6 +829,19 @@ implementation details live in the code, DB and git history.
   newest wish decides whether a connect that was stopped connects again.
   Lesson: a wake-up is about a moment — spend it when the moment has passed,
   or it ends the next one.
+- **A property runner must ask that something happens** (2026-10-13). The
+  scenario runner checked that nothing went wrong and never that the music
+  played: a press that never handed the queue over, or every start dropped,
+  passed a dozen seeds; a refusal at rest passed as "busy"; the tail mirror
+  it claimed to check was never reached at rest; and two of its checks read
+  the wrong evidence (the last drift logged instead of the move that made
+  the state, a radio's mark kept past its own step). At rest a press must
+  now be taken unless HQPlayer is away, silent, building or its breaker
+  open, and the slot pressed must play; every move of the mirror is logged
+  with its reason; the step that makes a tail mirror makes its own
+  precondition and is judged at rest at once. Lesson: invariants of the
+  form "never" need a twin of the form "eventually", or a system that does
+  nothing passes them all.
 - **Stop-clear-add-select-play sequence** for `play_track`/`play_album`. Without
   explicit stop, HQPlayer occasionally started the wrong track from the
   existing queue.

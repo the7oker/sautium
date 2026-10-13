@@ -151,7 +151,7 @@ class JumpRequest(BaseModel):
     track_id: Optional[str] = None
 
 class RemoveRequest(BaseModel):
-    index: int  # 1-based — HQPlayer's PlaylistRemove convention
+    index: int  # the queue's 1-based slot (HQPlayer's entry differs past a gap)
     # The identity the client saw in that slot. A queue that moved under
     # the tap (radio refill, another device, the client's own optimistic
     # re-render) makes the removal refuse instead of taking whatever now
@@ -1411,8 +1411,9 @@ def _transport(intent: bool, command: str, *args) -> dict:
     the gate that (re)attaches it — and whether it was taken; one that was
     not carries the output's own words (`refusal`), which the assistant
     quotes. While a play intent goes on behind the answer (HQPlayer taking
-    the queue again) `starts` names the track it will start — null when a
-    Pause or a Stop dropped it."""
+    the queue again, or a queue mutation in flight) `starts` names the track
+    it will start — null when a Pause, a Stop or any newer intent that
+    supersedes it dropped it."""
     try:
         b = manager.ensure_active() if intent else manager.backend()
         ok = getattr(b, command)(*args)
@@ -1486,8 +1487,9 @@ def seek(req: SeekRequest):
 
 @router.post("/remove")
 def remove(req: RemoveRequest):
-    """Remove a queue slot by 1-based index (HQPlayer's PlaylistRemove
-    convention). The play_count for the removed slot is unaffected —
+    """Remove the queue's slot at the 1-based `index` — the output finds its
+    own entry for it (a gap of HQPlayer's has none). The play_count for the
+    removed slot is unaffected —
     tracking records past plays, not pending queue contents. 409 is the
     slot no longer holding `track_id`; a removal the output refused is a
     503 in its words (_output_error), the slot still in the queue."""
