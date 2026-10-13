@@ -1237,21 +1237,34 @@ class HqpBackend(PlayerBackend):
             self._in_step()                             # it holds the queue as it is
             return
         playing = self._playing(status, mutating=True)
+        # The same file at more than one slot: which one HQPlayer reads is no
+        # verdict to repair on, nor a spot to resume at
+        twice = len(self._named(status, layout.items)) > 1
         if status.state in (PlaybackState.PLAYING, PlaybackState.PAUSED):
             reads = Entry.read(status)
-            if playing is None or playing[2] or reads is None or reads.n > len(playlist):
-                return              # an entry not ours: the play press re-mirrors
+            if (playing is None or playing[2] or twice or reads is None
+                    or reads.n > len(playlist)):
+                return              # not one entry of ours: the play press re-mirrors
             self._repair_tail(reads, playing[0], playlist, layout)
         elif status.state == PlaybackState.STOPPED:
-            self._remirror(at=playing[1] if playing is not None and not playing[2] else None)
+            self._remirror(at=playing[1] if playing is not None and not playing[2]
+                           and not twice else None)
+
+    def _named(self, status, items: list) -> list:
+        """Every slot of `items` the entry HQPlayer's status names is — one
+        file queued twice is two."""
+        readings = self._readings(status.uri)
+        return [s for s, it in enumerate(items, 1) if any(_reads_item(r, it) for r in readings)]
 
     def _repair_tail(self, reads: Entry, q: int, playlist: list, layout: _Layout) -> None:
         """HQPlayer reads our slot `q` at its entry `reads`: what lies behind
         that entry is made what HQPlayer holds of the queue behind the slot —
         removed from the first entry that differs and added again, as
         play-next does: the entry read is never touched, the sound never
-        stops. In step when the part before it was the queue's too, else a
-        tail mirror (§ _mirror). Under the queue lock."""
+        stops — read again in the repair's own sequence, so an HQPlayer that
+        moved on meanwhile is repaired at its next answer instead. In step
+        when the part before it was the queue's too, else a tail mirror
+        (§ _mirror). Under the queue lock."""
         after, want = playlist[reads.n:], layout.behind(q)
         first = self._first_divergence(after, want)
         keep = min(len(after), len(want)) if first is None else first - 1
@@ -1259,6 +1272,11 @@ class HqpBackend(PlayerBackend):
         uris = [self._uri_for(it) for it in items]
 
         def repair(hq: HQPlayerClient):
+            # The URIs took their time: HQPlayer may have moved on meanwhile,
+            # and the entry it moved on to is never removed from under it
+            now = hq.get_status()
+            if now is None or Entry.read(now) != reads:
+                return "moved"
             for _ in range(len(after) - keep):
                 if not _hqp_safe(self._link, lambda c: _remove(c, reads + (keep + 1)),
                                  "PlaylistRemove"):
@@ -1266,7 +1284,10 @@ class HqpBackend(PlayerBackend):
             return _add_uris_with_retry(self._link, uris)
         out = self._cmd(repair)
         self.poke()
-        if out is None:
+        if out == "moved":
+            # judged again at HQPlayer's next answer
+            self._reconverge_due = self._lost_by == "silence"
+        elif out is None:
             self._drifted("HQPlayer did not take a removal behind the entry it reads")
         elif self._took(items, *out, "behind the entry it reads"):
             before = layout.before(q)
@@ -2187,7 +2208,10 @@ class HqpBackend(PlayerBackend):
         slot after or before that this HQPlayer holds, at its start: no
         command, no sound (at either end of the queue it stays). Otherwise
         HQPlayer's own Next or Previous — onto the entry beside, the slot it
-        holds beside — a start taken that erases a spot."""
+        holds beside — a start taken that erases a spot. On a playlist that is
+        no mirror the slot beside is started by a play press, and at either
+        end of the queue nothing is sent: HQPlayer's own Next would move it in
+        a playlist that is not the queue's."""
         held, spot = self._spot, self._spot_at()
         last = self._last_tick
         layout = self._layout()
@@ -2200,12 +2224,13 @@ class HqpBackend(PlayerBackend):
             self.poke()
             return True
         reading = last.item if last is not None and self._mirror != "step" else None
-        if reading is not None:
-            index = self._queue.index_of(reading)
-            target = (self._queue.item_at(layout.held(index + by, by))
-                      if index is not None else None)
-            if target is not None:
-                return self._press(target, 0)
+        index = self._queue.index_of(reading) if reading is not None else None
+        if index is not None:
+            target = self._queue.item_at(layout.held(index + by, by))
+            if target is None:
+                self.poke()
+                return True                     # the queue's end: nowhere to go
+            return self._press(target, 0)
         with self._intent(name.lower()) if watched else nullcontext():
             ok = self._command(name, send)
         if ok:
@@ -2758,11 +2783,12 @@ class HqpBackend(PlayerBackend):
         HQPlayer does not take ends the removals there, and only what left
         is appended again: never an entry twice, and the playlist is marked
         no mirror (drift) until the next one. A slot this HQPlayer cannot
-        open is never handed over (_queue_takes). With the mirror lost, or
-        HQPlayer not answering, the insert is the queue's alone, as an
-        append is."""
+        open is never handed over (_queue_takes). With the mirror lost or
+        drifted — a playlist that is no mirror is not edited by the queue's
+        places — or HQPlayer not answering, the insert is the queue's alone,
+        as an append on a lost mirror is."""
         self._ways_in(items)
-        if self._mirror == "lost":
+        if self._mirror in ("lost", "drift"):
             return list(items)
         handed = _Layout(items, self.gap).handed
         uris = [self._uri_for(it) for it in handed]

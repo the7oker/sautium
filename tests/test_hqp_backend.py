@@ -5553,3 +5553,107 @@ def test_a_waiter_that_leaves_the_head_of_the_line_wakes_the_next(fake, monkeypa
     link.retire("another HQPlayer was chosen")
     tl.join(2)
     assert not tl.is_alive(), "the late Stop's Status never got the free connection"
+
+
+# -- The mirror's last rows (2026-10-13) -----------------------------------------------
+
+def _followed(b, monkeypatch) -> threading.Event:
+    """Set once the reconverge's step (_follow_queue) has run."""
+    done = threading.Event()
+    follow = b._follow_queue
+
+    def followed(*a, **k):
+        try:
+            return follow(*a, **k)
+        finally:
+            done.set()
+    monkeypatch.setattr(b, "_follow_queue", followed)
+    return done
+
+
+def test_the_same_file_queued_twice_names_no_slot_for_a_repair(fake, output, monkeypatch):
+    """The same file queued twice (an album added again): lost through a
+    silence after removals before the playing slot, HQPlayer's entry names
+    two slots of the queue — no verdict for a repair, nothing removed from
+    under what it is about to play: the mirror stays lost, the play press
+    rebuilds."""
+    mgr, b = output
+    a = "E:/Music/A/01.flac"
+    items = ([_item(f"E:/Music/P/0{i}.flac", 50 + i) for i in (1, 2, 3)]
+             + [_item(a, 1), _item("E:/Music/A/02.flac", 2), _item("E:/Music/A/03.flac", 3),
+                _item(a, 1)])
+    added, _ = mgr.replace_queue(items, play=False)
+    assert added == 7
+    with fake._lock:
+        fake.state, fake.track, fake.position = int(PlaybackState.PLAYING), 4, 5.0   # the first A
+    assert _wait(lambda: mgr._latest_status.get("track_index") == 4)
+    before = list(fake.playlist)
+    followed = _followed(b, monkeypatch)
+    with mgr._mutate_lock:
+        b.lose_mirror("HQPlayer took 0 of 1 appended tracks")      # through a silence
+        for _ in range(3):
+            assert mgr.remove(1)                                     # the queue's alone: [A, B, C, A]
+    assert followed.wait(5)
+    assert b._mirror == "lost" and fake.playlist == before
+    assert (fake.state, fake.track) == (int(PlaybackState.PLAYING), 4)
+
+
+def test_a_play_next_on_a_drifted_tail_never_removes_the_entry_read(fake, output, monkeypatch):
+    """A playlist that is no mirror is not edited by the queue's places: a
+    tail mirror that drifted (an entry added in HQPlayer's own window) takes
+    a play-next in the queue alone, and the sound never stops."""
+    mgr, b = output
+    monkeypatch.setattr(hb, "DRIFT_CHECK_EVERY", 1)
+    _tail(mgr, b, fake)          # HQPlayer [01, X09, 02, 03, 04] reads entry 3 = queue slot 2
+    with fake._lock:
+        fake.playlist.append("file:///Elsewhere/theirs.flac")    # an edit in HQPlayer's window
+    assert _wait(lambda: b._mirror == "drift", timeout=5), b._mirror
+    fake.commands.clear()
+    assert mgr.append([_item("E:/Music/A/07.flac", 7)], position="next") == 1
+    assert [c for c, _ in fake.commands if c in ("PlaylistRemove", "PlaylistAdd")] == []
+    assert (fake.state, fake.playlist[fake.track - 1]) == (
+        int(PlaybackState.PLAYING), "file:///E:/Music/A/02.flac")
+    assert [it.track_id for it in mgr.queue.snapshot()][:3] == ["track-1", "track-2", "track-7"]
+
+
+def test_the_tail_repair_never_removes_the_entry_hqplayer_moved_on_to(fake, output, monkeypatch):
+    """The tail is repaired without stopping the sound: HQPlayer may move on
+    while the URIs are made (they may transcode or cut), and the repair reads
+    its entry again in its own sequence — the entry it moved on to is never
+    removed from under it; the repair is due again at its next answer."""
+    mgr, b = output                                   # HQPlayer plays entry 1 of [01, 02, 03]
+    uri_for = b._uri_for
+
+    def advancing(it):
+        with fake._lock:
+            if fake.track == 1:
+                fake.track, fake.position = 2, 0.0     # 01 ended meanwhile: HQPlayer plays 02
+        return uri_for(it)
+    followed = _followed(b, monkeypatch)
+    with mgr._mutate_lock:
+        b.lose_mirror("HQPlayer took 0 of 1 appended tracks")
+        assert mgr.remove(2)                           # the queue's alone: [01, 03]
+        b._uri_for = advancing
+    assert followed.wait(5)
+    assert fake.state == int(PlaybackState.PLAYING), (fake.state, fake.track, fake.playlist)
+    assert fake.playlist[fake.track - 1] == "file:///E:/Music/A/02.flac"
+
+
+@pytest.mark.parametrize("press", ["next", "previous"])
+def test_next_or_previous_at_the_queues_end_sends_nothing_to_a_playlist_that_is_no_mirror(
+        fake, output, press):
+    """Next at the queue's last slot, Previous at its first, on a playlist
+    that is no mirror: nowhere to go in the queue, and HQPlayer's own Next or
+    Previous would move it in a playlist that is not the queue's — nothing is
+    sent."""
+    mgr, b = output
+    with fake._lock:
+        fake.track = 1 if press == "previous" else 3
+        fake.playlist.insert(0, "file:///Elsewhere/theirs.flac")    # entries of another's
+        fake.track += 1
+    b.lose_mirror("HQPlayer took 0 of 1 appended tracks", by="refusal")
+    want = "track-1" if press == "previous" else "track-3"
+    assert _wait(lambda: mgr._latest_status.get("track_id") == want, timeout=5)
+    fake.commands.clear()
+    assert getattr(b, press)()
+    assert [c for c, _ in fake.commands if c in ("Next", "Previous", "Stop", "PlaylistAdd")] == []

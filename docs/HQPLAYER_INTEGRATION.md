@@ -428,7 +428,10 @@ comes after the control port answers again — so neither can end the wait.
     again it gets the queue back, once per loss (`HqpBackend._reconverge`):
     playing or paused on an entry of ours, what lies behind that entry is
     replaced by remove-after / re-append, the sound never stopped; stopped,
-    it takes the queue afresh; on an entry not ours it stays lost. Lost too
+    it takes the queue afresh; on an entry not ours, or on a file queued
+    at more than one slot (no verdict which one it reads), it stays lost —
+    the repair reads HQPlayer's entry again in its own sequence, and one that
+    moved on meanwhile is repaired at its next answer. Lost too
     when HQPlayer refused every file of a mirror, or of a person's replace
     after its Stop and clear: the next Play hands the queue over again.
   - **A tail mirror** when that repair leaves a difference before the entry
@@ -437,7 +440,9 @@ comes after the control port answers again — so neither can end the wait.
     reads naming the slot; what touches the part before it is the queue's
     alone.
   - **Drifted** by an edit made outside this node or a mirror step HQPlayer
-    did not take: never reconciled on its own.
+    did not take: never reconciled on its own, and never edited by the
+    queue's places — a remove, a reorder, a "play next" are the queue's
+    alone until the play press re-mirrors.
   - **The play press** on a playlist that is no mirror: Play on a pause
     only resumes (the tail behind the entry read is repaired as above);
     Play from a stop, a tap, Next or Previous while it plays rebuild
@@ -445,7 +450,8 @@ comes after the control port answers again — so neither can end the wait.
     background, the route answered at once and the status saying
     "HQPlayer is taking the queue again"; a second press joins the first, a
     Pause meanwhile drops its start; the second applies only to the same
-    track. Next and Previous at a stopped spot only move it.
+    track. Next and Previous at a stopped spot only move it; at either end
+    of the queue they send nothing.
 - **Gaps** (since 2026-10-13). HQPlayer's playlist is the queue without its
   gaps, in the same order: a gap is a slot this HQPlayer does not hold —
   nothing it can open (a file held only in another HQPlayer's library, one
