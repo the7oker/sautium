@@ -573,7 +573,11 @@ comes after the control port answers again — so neither can end the wait.
   (`/api/hqplayer/state`, `/api/player/status`), so it keeps no connection
   to HQPlayer at all. A list HQPlayer did not give comes with its refusal
   (`refused`), and a name is picked exactly as written before any case of
-  it or any part.
+  it or any part. A filter, modulator or matrix profile set by name is a
+  command from its first step: the list it names from is read behind the
+  command gate, refused at once in the link's words while HQPlayer refuses
+  people (since 2026-10-13 — read as a question, it waited into the
+  silence and answered with another line).
 - **History rotates once the output took the queue.** A play route's
   session rotation runs inside the replace (`PlaybackManager.replace_queue`,
   `archive`): once HQPlayer has taken the mirror, under the queue lock,
@@ -1392,16 +1396,28 @@ cooling — so Sautium measures it instead of predicting it
   DSP item of the HQPlayer's link as of the run's end (one made afresh
   owes it anew, as it does after the process restarted — an item kept in
   memory — unless a person superseded it on the link it was owed on): a
-  DSP change the owner makes first, or their switch to another
-  output, supersedes it — never the node's own re-attach of the same
-  HQPlayer, nor a new run's hold — and the run is closed as left to the
-  owner (since 2026-10-13): nothing more is put back, the volume is never
-  raised for them, and one notice — through the notices channel and on the
-  HQPlayer screen — names what still holds the run's test values, each as
-  now → before the run, and a volume left at the bottom of the range for
-  them to raise, until they changed it all or a new run began (the poller
-  reads HQPlayer's State for it while it stands). A new run takes a
-  put-back still owed first, and reads what HQPlayer holds after it. Forgetting the
+  DSP change the owner makes first, their switch to another output or to
+  another HQPlayer supersedes it — written in the run's row where it
+  happens, so no later answer and no restart puts it back
+  (`hqp_benchmark.left_by_person`) — and so does any knob the owner set in
+  HQPlayer's own window since: judged knob by knob (mode, rate, filter,
+  modulator, volume) on what HQPlayer answers once it is not building, one
+  that is neither the run's last point nor what was there before the run
+  is theirs, whatever the others still hold. Never the node's own
+  re-attach of the same HQPlayer, nor a new run's hold. The run is then
+  closed as left to the owner (since 2026-10-13): nothing more is put
+  back, the volume is never raised for them, and one notice — through the
+  notices channel and on the HQPlayer screen — names what still holds the
+  run's test values, each as now → before the run (named from HQPlayer's
+  lists of the mode the run measured, read in that mode), and a volume
+  left at the bottom of the range for them to raise, until they changed it
+  all or a new run opened its row (the poller reads HQPlayer's State for it
+  while it stands; a write or a read the database fails costs the notice,
+  never the poll). The notice stands on the run's row, whatever the output
+  is now: a restart or another output never ends it to raise it again;
+  until the poller has read HQPlayer it says the test settings may still be
+  there. A new run takes a put-back still owed first, and reads what
+  HQPlayer holds after it. Forgetting the
   HQPlayer takes its measurements with it; it is refused while a run measures
   it. The estimate of a run's length takes the pace of the last run that
   ended or was cancelled (on a trial-mode Embedded the owner cancels before

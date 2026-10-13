@@ -8515,7 +8515,7 @@
                            shaper: 'modulator or dither' };
   function hqpLeftLine(items) {
     const shown = (it, v) => v == null ? '—'
-      : it.what === 'rate' ? `<span class="num">${escapeHtml(fmtRateLabel(v))}</span>`
+      : it.what === 'rate' ? (v ? `<span class="num">${escapeHtml(fmtRateLabel(v))}</span>` : 'Auto')
       : escapeHtml(String(v));
     const kept = (items || []).filter(it => it.what !== 'volume').map(it =>
       `${HQP_LEFT_NAMES[it.what] || escapeHtml(it.what)} ${shown(it, it.now)} → ${shown(it, it.before)}`);
@@ -11277,10 +11277,13 @@
   // A benchmark run cut short whose put-back the owner's own change
   // superseded (playback/hqp_benchmark.py): what HQPlayer still holds of its
   // test settings, each as now → before the run, and a volume left at the
-  // bottom of the range, which nothing raises for them.
+  // bottom of the range, which nothing raises for them — null until the
+  // poller's next answer of that HQPlayer (the notice stands on the run's row).
   NOTICE_COPY['hqplayer.run_left'] = n => ({
     title: 'The benchmark was cut short',
-    text: hqpLeftLine(n.data && n.data.items),
+    text: (n.data && n.data.items) == null
+      ? 'HQPlayer may still hold the run\'s test settings — check them, and its volume, before you play.'
+      : hqpLeftLine(n.data.items),
   });
   // HQPlayer refused files of a batch it was handed: one notice per batch,
   // naming both causes it may have — never asserting one.

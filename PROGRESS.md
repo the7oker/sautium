@@ -803,6 +803,20 @@ implementation details live in the code, DB and git history.
   and a Play joins the start the mutation owes. Lesson: a slot is a name
   for a track only while the queue under it holds still; carry the identity
   and translate it against what the output is handed.
+- **A run left to the owner is written where it happens** (2026-10-13). A
+  person's switch away or DSP change superseded a benchmark run's owed
+  put-back only in what the process held: after a restart, HQPlayer picked
+  and answering again had the run put back over their change and its volume
+  raised. The supersession is now the run's row (`left_by_person`), and a
+  knob the owner set in HQPlayer's own window counts too — judged knob by
+  knob on what HQPlayer answers once it is not building: one that is
+  neither the run's last point nor what was there before it is theirs. The
+  notice of such a run stands on its row (a restart or another output no
+  longer ended and raised it again), names what is left from the lists of
+  the mode the run measured, and ends only once a new run opened its row;
+  the database failing a read or a write of it costs the notice, never the
+  poll. Lesson: a decision a person made is state — kept only in memory, it
+  is undone by the next restart.
 - **Stop-clear-add-select-play sequence** for `play_track`/`play_album`. Without
   explicit stop, HQPlayer occasionally started the wrong track from the
   existing queue.

@@ -52,14 +52,15 @@ def _hqp_gate(*, commands: bool = True) -> None:
 
 
 @contextmanager
-def _hqp_asking():
+def _hqp_asking(*, commands: bool = False):
     """The selected HQPlayer's link for the reading tools here (_hqp_gate
-    first, as a reading): their questions go where every request of this
-    node to it goes, one at a time — refused by the link itself only while
-    HQPlayer builds. A command goes the backend's way instead
-    (_hqp_transport, change_dsp) — after the block: a change holds the link
-    itself."""
-    _hqp_gate(commands=False)
+    first, as a reading; a DSP setter's reading of the lists it names from,
+    `commands`, through the command gate — refused at once while the link
+    refuses people): their questions go where every request of this node to
+    it goes, one at a time — refused by the link itself only while HQPlayer
+    builds. A command goes the backend's way instead (_hqp_transport,
+    change_dsp) — after the block: a change holds the link itself."""
+    _hqp_gate(commands=commands)
     from playback import hqp_link
     with hqp_link.selected().asking() as hqp:
         yield hqp
@@ -437,7 +438,7 @@ def _h_hqplayer_get_settings() -> str:
 
 def _h_hqplayer_set_filter(filter_name: str) -> str:
     try:
-        with _hqp_asking() as hqp:
+        with _hqp_asking(commands=True) as hqp:
             filters = hqp.get_filters()
             match, said = aq.hqp_pick("filter", filters, filter_name, hqp.refusal(),
                                       key=lambda f: f["name"])
@@ -456,7 +457,7 @@ def _h_hqplayer_set_filter(filter_name: str) -> str:
 
 def _h_hqplayer_set_shaper(shaper_name: str) -> str:
     try:
-        with _hqp_asking() as hqp:
+        with _hqp_asking(commands=True) as hqp:
             shapers = hqp.get_shapers()
             match, said = aq.hqp_pick("shaper", shapers, shaper_name, hqp.refusal(),
                                       key=lambda s: s["name"])
@@ -512,7 +513,7 @@ def _h_hqplayer_get_matrix_profile() -> str:
 
 def _h_hqplayer_set_matrix_profile(profile_name: str) -> str:
     try:
-        with _hqp_asking() as hqp:
+        with _hqp_asking(commands=True) as hqp:
             profiles = hqp.matrix_list_profiles()
             match, said = aq.hqp_pick("profile", profiles, profile_name, hqp.refusal())
         if match is None:

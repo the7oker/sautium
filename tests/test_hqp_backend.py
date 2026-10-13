@@ -6311,6 +6311,39 @@ def test_reading_tools_go_on_while_hqplayer_refuses_commands_and_say_its_line(fa
     assert not read.startswith("Error"), read
 
 
+def test_the_dsp_setters_are_refused_at_once_while_hqplayer_refuses_commands(
+        fake, output, monkeypatch):
+    """HQPlayer answers nothing past a Stop's wait: a filter, a shaper or a
+    matrix profile the assistant sets — in-process and over MCP — is a
+    command, refused at once in the link's own line, never a list read
+    waited out into the silence and answered with another line."""
+    import importlib.util
+    from routers import hqplayer as hqp_router
+    from tools import definitions
+    mgr, b = output
+    settings_router = _picker(monkeypatch, fake)
+    spec = importlib.util.spec_from_file_location(
+        "assistant_server_setters", BACKEND.parent / "mcp" / "assistant_server.py")
+    server = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(server)
+    monkeypatch.setattr(server, "_output_prefs", settings_router.get_output_prefs)
+    monkeypatch.setattr(server, "_backend_get", lambda path, params=None: (
+        hqp_router.get_state() if path == "/api/hqplayer/state" else {}))
+    monkeypatch.setattr(hl, "STOP_ANSWER_S", 0.6)
+    _link().client.waits.update(hl._command_waits())
+    fake.build("Stop", 20.0, answer="last")
+    assert not b.stop()
+    assert _wait(lambda: _link().silent_since is not None, timeout=3)
+    t0 = time.monotonic()
+    for said in (server.hqplayer_set_filter("sinc-L"), server.hqplayer_set_shaper("NS9"),
+                 server.hqplayer_set_matrix_profile("Room"),
+                 definitions._h_hqplayer_set_filter("sinc-L"),
+                 definitions._h_hqplayer_set_shaper("NS9"),
+                 definitions._h_hqplayer_set_matrix_profile("Room")):
+        assert hl.NOT_ANSWERING in said, said
+    assert time.monotonic() - t0 < 2
+
+
 def test_a_radio_begun_while_hqplayer_is_stopped_gives_it_the_seed_back(fake, output):
     """Stopped, HQPlayer reads no entry a radio's clear would keep: what the
     clear leaves is no mirror of the seed the queue keeps, and HQPlayer gets

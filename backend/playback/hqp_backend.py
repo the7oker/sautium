@@ -144,6 +144,9 @@ class _DspChange:
                 # the change's own, asked again after each knob
                 if manager.held is not None:
                     raise OutputHeld(manager.held)
+                # The person's change: a run cut short here owes its put-back
+                # no more — written where it happens, not only on the link
+                hqp_benchmark.left_by_person(link.host, link.port, "a DSP change came first")
                 hqp = link.client
                 self.spot = self._spot_of(hqp.get_status())
                 try:
@@ -1224,8 +1227,13 @@ class HqpBackend(PlayerBackend):
         the same. Returns what the person is told when the Stop stays
         owed."""
         given = self._layout()
-        return self._link.release(None if self._gone else
+        told = self._link.release(None if self._gone else
                                   lambda status: self._reads_any(status, given))
+        # A run cut short here owes its put-back no more: written where the
+        # person switched, so no later answer or restart puts it back
+        hqp_benchmark.left_by_person(self._link.host, self._link.port,
+                                     "the output was switched away")
+        return told
 
     def _reads_any(self, status, given: _Layout) -> bool:
         """Does HQPlayer read an entry this node gave it — one the hand-over
@@ -1771,7 +1779,8 @@ class HqpBackend(PlayerBackend):
                         # A benchmark run left to the owner: what HQPlayer
                         # still holds of its test settings, for its notice
                         left_state = hqp.get_state()
-                        if left_state is not None and hqp_benchmark.wants_lists(self.endpoint_id):
+                        if left_state is not None and hqp_benchmark.wants_lists(
+                                self.endpoint_id, left_state["mode"]):
                             left_lists = {"modes": hqp.get_modes(), "rates": hqp.get_rates(),
                                           "filters": hqp.get_filters(),
                                           "shapers": hqp.get_shapers()}

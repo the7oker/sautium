@@ -1230,10 +1230,10 @@ def _notices_state() -> Dict[str, Any]:
                       "data": {k: refused[k] for k in ("what", "count", "total", "stream")}})
     # A benchmark run cut short whose put-back the owner's own change
     # superseded: what HQPlayer still holds of its test settings — the volume
-    # among them, never raised for them — until they changed it all
+    # among them, never raised for them — until they changed it all. Its run
+    # row is the source, whatever the output is now
     from playback import hqp_benchmark
-    from playback.manager import active_hqp_endpoint
-    left = hqp_benchmark.left_notice(active_hqp_endpoint())
+    left = hqp_benchmark.left_notice()
     if left is not None:
         items.append({"key": "hqplayer.run_left", "kind": "warning",
                       "since": left["since"].isoformat(), "until": None,
@@ -2001,7 +2001,8 @@ def _apply_hqplayer_address(host: Optional[str], port: Optional[int]) -> None:
     contact (hqp_library.request_sync) or the next scan — never from here:
     a save must return at once, not after two control round-trips."""
     from config import settings as app_settings
-    from playback import hqp_link
+    from playback import hqp_benchmark, hqp_link
+    before = hqp_link.selected()
     if host is not None:
         host = host.strip() or None
         _write("hqplayer.host", host)
@@ -2012,7 +2013,10 @@ def _apply_hqplayer_address(host: Optional[str], port: Optional[int]) -> None:
         app_settings.hqplayer_port = port
     logger.info("HQPlayer settings updated: host=%s, port=%s",
                 app_settings.hqplayer_host, app_settings.hqplayer_port)
-    hqp_link.choose(app_settings.hqplayer_host, app_settings.hqplayer_port)
+    if hqp_link.choose(app_settings.hqplayer_host, app_settings.hqplayer_port) is not before:
+        # Another HQPlayer chosen: a run cut short on the one before owes
+        # its put-back no more
+        hqp_benchmark.left_by_person(before.host, before.port, "another HQPlayer was chosen")
 
 
 @router.put("/hqplayer")

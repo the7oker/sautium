@@ -1303,6 +1303,33 @@ def test_recover_puts_back_the_measured_modes_own_selection(run):
     assert run.q("SELECT outcome::text FROM hqp_benchmark_runs") == [("interrupted",)]
 
 
+def _run_left():
+    """The notice of a run left to the owner, as the notices channel derives
+    it for the view layer."""
+    from routers import settings as settings_router
+    return next((n for n in settings_router._notices_state()["items"]
+                 if n["key"] == "hqplayer.run_left"), None)
+
+
+def _run_left_items():
+    left = _run_left()
+    return {it["what"]: it for it in ((left or {}).get("data") or {}).get("items") or []}
+
+
+def _closed_as_left(r: Run, run_id: int) -> bool:
+    return r.q("SELECT finished_at IS NOT NULL, left_at IS NOT NULL FROM hqp_benchmark_runs "
+               "WHERE id = %s", run_id) == [(True, True)]
+
+
+# What a PCM run from SDM, left to the owner on its last point, still holds of its
+# test settings while HQPlayer is in PCM: each as now → before the run
+_LEFT_IN_PCM = {
+    "volume": {"what": "volume", "now": -60.0, "before": -3.0},
+    "mode": {"what": "mode", "now": "PCM", "before": "SDM (DSD)"},
+    "rate": {"what": "rate", "now": 352800, "before": 705600},
+    "shaper": {"what": "shaper", "now": "none", "before": "LNS15"}}
+
+
 def _owed_pcm_run(r: Run) -> int:
     """A "Measure PCM" run from SDM cut short, its put-back owed on the
     selected link: HQPlayer in PCM on the run's last point, lowered."""
@@ -1331,14 +1358,9 @@ def test_a_put_back_a_person_superseded_leaves_one_notice_of_what_the_run_left(r
 
     def notice():
         mgr.active.poke()           # the poller reads what is left at its next answer
-        return bench.left_notice(run.endpoint_id)
-    assert _wait(notice, 10)
-    left = {
-        "volume": {"what": "volume", "now": -60.0, "before": -3.0},
-        "mode": {"what": "mode", "now": "PCM", "before": "SDM (DSD)"},
-        "rate": {"what": "rate", "now": 352800, "before": 705600},
-        "shaper": {"what": "shaper", "now": "none", "before": "LNS15"}}
-    assert {it["what"]: it for it in notice()["items"]} == left
+        return _run_left_items()
+    assert _wait(lambda: notice() == _LEFT_IN_PCM, 10)
+    left = _LEFT_IN_PCM
     from routers import hqplayer as hqp_router
     screen = hqp_router.get_state(dsp=True)["benchmark"]["left"]     # the HQPlayer screen too
     assert {it["what"]: it for it in screen} == left
@@ -1347,7 +1369,7 @@ def test_a_put_back_a_person_superseded_leaves_one_notice_of_what_the_run_left(r
     assert mgr.active.set_volume(-12.0)                         # ...and raise the volume
     assert _wait(lambda: (mgr.active.poke(), run.q(
         "SELECT left_at IS NULL FROM hqp_benchmark_runs WHERE id = %s", run_id) == [(True,)])[1])
-    assert bench.left_notice(run.endpoint_id) is None
+    assert _run_left() is None
     assert not bench.left_pending(run.endpoint_id)              # the poller asks no more for it
     assert hb.change_dsp({"mode": 1})["ok"]                     # the run's mode and volume again,
     assert mgr.active.set_volume(-60.0)                         # by their own hand...
@@ -1421,18 +1443,21 @@ def test_a_new_run_ends_the_notice_of_one_left_to_the_owner(run):
     run_id = _owed_pcm_run(run)
     assert hb.change_dsp({"filter": 1, "filter1x": 1})["ok"]       # the owner's, first
     bench.recover(run.endpoint_id, hl.selected())
-    assert _wait(lambda: (mgr.active.poke(), bench.left_notice(run.endpoint_id))[1], 10)
+    assert _wait(lambda: (mgr.active.poke(), _run_left())[1] is not None, 10)
     bench.start(fixed_volume_ok=True)                   # their volume is the range's bottom now
     assert _wait(lambda: not bench.running(), 60)
     st = bench.state()
     assert st["outcome"] == "done", st["note"]
-    assert bench.left_notice(run.endpoint_id) is None
+    assert _run_left() is None
     assert run.q("SELECT left_at FROM hqp_benchmark_runs WHERE id = %s", run_id) == [(None,)]
 
 
 def test_recover_leaves_an_hqplayer_the_owner_changed_since(run, library):
+    """The owner's own album queued, their volume, a modulator of theirs: what
+    they set in HQPlayer's window since the run is theirs — nothing is put
+    back, and the run is left to them."""
     fake = run.fake
-    _cut_short_run(run, last_rate=1, last_filter=1, last_filter1x=1, last_shaper=1)
+    run_id = _cut_short_run(run, last_rate=1, last_filter=1, last_filter1x=1, last_shaper=1)
     owners = (library / "01.flac").as_uri()
     with fake._lock:
         fake.volume, fake.sel[2] = -10.0, [2, 1, 1, 2]
@@ -1440,7 +1465,9 @@ def test_recover_leaves_an_hqplayer_the_owner_changed_since(run, library):
     bench.recover(run.endpoint_id, hl.selected())
     assert fake.settings() == (2, (2, 1, 1, 1), (2, 1, 1, 2), -10.0)
     assert fake.playlist == [owners]
-    assert "left as it is" in run.q("SELECT note FROM hqp_benchmark_runs")[0][0]
+    assert _closed_as_left(run, run_id)
+    assert "shaper, volume changed in HQPlayer since" in run.q(
+        "SELECT note FROM hqp_benchmark_runs")[0][0]
 
 
 def test_a_hold_that_cannot_begin_leaves_nothing_held(run, monkeypatch):
@@ -1623,3 +1650,209 @@ def test_a_put_back_a_switch_superseded_stays_superseded_on_a_new_link(run):
     assert _wait(lambda: run.q("SELECT finished_at IS NOT NULL, left_at IS NOT NULL "
                                "FROM hqp_benchmark_runs WHERE id = %s", run_id) == [(True, True)])
     assert run.fake.settings() == (1, (1, 0, 0, 0), (2, 0, 0, 0), -60.0)
+
+
+# -- A run left to the owner: written where it happens, judged knob by knob, named
+# from the measured mode's lists, its notice the run row's (2026-10-13) ----------
+
+def test_a_switch_away_leaves_an_owed_put_back_to_the_owner_for_good(run, monkeypatch):
+    """A person switches the output away while a run cut short owes its
+    put-back: the run is closed as left to them where the switch happens —
+    a restart, which forgets what the process held, and HQPlayer picked and
+    answering again put nothing back and raise no volume."""
+    fake, mgr = run.fake, run.mgr
+    run_id = _owed_pcm_run(run)
+    mgr.active.release()                                    # the person's switch away
+    assert _closed_as_left(run, run_id)
+    monkeypatch.setattr(bench, "_owed", {})                 # a restart
+    _fresh_links()
+    bench.recover(run.endpoint_id, hl.selected())           # picked, and answering again
+    assert fake.settings() == (1, (1, 0, 0, 0), (2, 0, 0, 0), -60.0)
+
+
+def test_a_dsp_change_leaves_an_owed_put_back_to_the_owner_for_good(run, monkeypatch):
+    """The owner's DSP change while a run cut short owes its put-back closes
+    the run as left to them at once, in its row: after a restart, HQPlayer
+    answering puts nothing back over their change."""
+    fake = run.fake
+    run_id = _owed_pcm_run(run)
+    assert hb.change_dsp({"filter": 1, "filter1x": 1})["ok"]     # the owner's
+    assert _closed_as_left(run, run_id)
+    monkeypatch.setattr(bench, "_owed", {})                 # a restart
+    _fresh_links()
+    bench.recover(run.endpoint_id, hl.selected())
+    assert fake.settings() == (1, (1, 1, 1, 0), (2, 0, 0, 0), -60.0)
+
+
+def test_a_dsp_change_the_database_cannot_record_goes_all_the_same(run, monkeypatch):
+    """The owner's DSP change while a run cut short owes its put-back, and
+    the database refuses to record the run as left to them: the change goes
+    all the same, and in this process the put-back stays superseded — no
+    answer of HQPlayer puts it back over their change."""
+    import psycopg2
+    fake = run.fake
+    run_id = _owed_pcm_run(run)
+    read = bench.db_query
+
+    def refusing(sql, params=None):
+        raise psycopg2.OperationalError("the database is away")
+    monkeypatch.setattr(bench, "db_query", refusing)
+    assert hb.change_dsp({"filter": 1, "filter1x": 1})["ok"]
+    monkeypatch.setattr(bench, "db_query", read)
+    bench.recover(run.endpoint_id, hl.selected())
+    assert _wait(lambda: _closed_as_left(run, run_id))
+    assert fake.settings() == (1, (1, 1, 1, 0), (2, 0, 0, 0), -60.0)
+
+
+def test_another_hqplayer_chosen_leaves_an_owed_put_back_to_the_owner(run, monkeypatch):
+    """The owner picks another HQPlayer while a run cut short on this one
+    owes its put-back: the run is closed as left to them — picked again
+    later, this HQPlayer keeps what it holds."""
+    from routers import settings as settings_router
+    run_id = _owed_pcm_run(run)
+    monkeypatch.setattr(settings_router, "_write", lambda key, value: None)
+    settings_router._apply_hqplayer_address("127.0.0.1", 1)    # another HQPlayer's address
+    assert _closed_as_left(run, run_id)
+
+
+def test_a_setting_changed_in_hqplayers_own_window_leaves_the_run_to_the_owner(run):
+    """A run cut short owes its put-back; the owner changes only the filter,
+    in HQPlayer's own window. HQPlayer answers: that knob is neither the
+    run's last point nor what was there before the run — the owner's — so
+    the put-back is theirs to forgo: nothing is sent, the volume stays at
+    the bottom, and the notice names what still holds the run's test
+    values."""
+    fake, mgr = run.fake, run.mgr
+    run_id = _cut_short_run(run, mode="PCM", own_mode=1, own_rate=2, own_filter=1,
+                            own_filter1x=1, own_shaper=1, last_rate=1, last_filter=1,
+                            last_filter1x=1, last_shaper=0)
+    with fake._lock:                    # on the run's last point but the filter: the owner's
+        fake.mode, fake.sel[1], fake.volume = 1, [1, 0, 1, 0], -60.0
+    bench._owe(run_id, hl.selected())
+    bench.recover(run.endpoint_id, hl.selected())           # HQPlayer answers
+    assert _wait(lambda: _closed_as_left(run, run_id))
+    assert fake.settings() == (1, (1, 0, 1, 0), (2, 0, 0, 0), -60.0)
+    assert _wait(lambda: (mgr.active.poke(), _run_left_items())[1] == _LEFT_IN_PCM, 10)
+
+
+def test_a_setting_of_the_owners_in_the_mode_the_run_found_leaves_it_to_them(run):
+    """A PCM run from SDM cut short; the owner puts HQPlayer back in SDM and
+    changes its filter there, in HQPlayer's own window. The run set nothing
+    in SDM: that filter is theirs — nothing is put back, the volume stays at
+    the bottom."""
+    fake = run.fake
+    run_id = _owed_pcm_run(run)
+    with fake._lock:
+        fake.mode, fake.sel[2] = 2, [2, 1, 1, 0]
+    bench.recover(run.endpoint_id, hl.selected())
+    assert _wait(lambda: _closed_as_left(run, run_id))
+    assert fake.settings() == (2, (1, 0, 0, 0), (2, 1, 1, 0), -60.0)
+
+
+def test_the_notice_names_what_is_left_from_the_measured_modes_lists(run):
+    """A PCM run left to the owner while they put HQPlayer in SDM: the
+    poller's first read of it is in SDM. Back in PCM by HQPlayer's own
+    window, the notice names the rate and the shaper still on the run's
+    test values from PCM's lists — never SDM's."""
+    fake, mgr = run.fake, run.mgr
+    run_id = _owed_pcm_run(run)
+    assert hb.change_dsp({"mode": 2})["ok"]                 # the owner's: SDM
+    bench.recover(run.endpoint_id, hl.selected())
+    assert _wait(lambda: _closed_as_left(run, run_id))
+    assert _wait(lambda: (mgr.active.poke(), _run_left_items())[1] == {
+        "volume": {"what": "volume", "now": -60.0, "before": -3.0}}, 10)
+    with fake._lock:
+        fake.mode = 1                                       # PCM again, in HQPlayer's window
+    filters = {"now": "poly-sinc-gauss-long", "before": "sinc-L"}     # the run's last point's
+    assert _wait(lambda: (mgr.active.poke(), _run_left_items())[1] == {
+        **_LEFT_IN_PCM, "filter": {"what": "filter", **filters},
+        "filter1x": {"what": "filter1x", **filters}}, 10)
+
+
+def test_a_notice_write_the_database_refuses_costs_the_notice_never_the_poll(run, monkeypatch):
+    """Every setting a run left was changed back, and the database refuses
+    the write that ends its notice: the poll goes on as if nothing happened
+    — no miss, no back-off — and the notice ends at a later answer, once the
+    database takes it."""
+    import psycopg2
+    fake, mgr = run.fake, run.mgr
+    run_id = _owed_pcm_run(run)
+    assert hb.change_dsp({"filter": 1, "filter1x": 1})["ok"]
+    bench.recover(run.endpoint_id, hl.selected())
+    assert _wait(lambda: (mgr.active.poke(), _run_left())[1] is not None, 10)
+    write = bench.db_execute
+    refused = threading.Event()
+
+    def refusing(sql, params=None):
+        if "left_at = NULL" in sql and not refused.is_set():
+            refused.set()
+            raise psycopg2.OperationalError("the database is away")
+        return write(sql, params)
+    monkeypatch.setattr(bench, "db_execute", refusing)
+    with fake._lock:
+        fake.mode, fake.volume = 2, -12.0                   # the owner's: SDM, their volume
+    assert _wait(lambda: (mgr.active.poke(), refused.is_set())[1], 10)
+    assert mgr.active._failures == 0
+    assert _wait(lambda: (mgr.active.poke(), run.q(
+        "SELECT left_at IS NULL FROM hqp_benchmark_runs WHERE id = %s", run_id) == [(True,)])[1],
+        10)
+    assert _run_left() is None
+
+
+def test_a_left_run_the_database_did_not_give_is_asked_again(run, monkeypatch):
+    """The poller asks whether a run was left to the owner on this HQPlayer,
+    and the database fails that read: it is asked again at the next answer,
+    never taken for "none" for the life of the process."""
+    import psycopg2
+    run_id = _owed_pcm_run(run)
+    assert hb.change_dsp({"filter": 1, "filter1x": 1})["ok"]
+    bench.recover(run.endpoint_id, hl.selected())
+    assert _wait(lambda: _closed_as_left(run, run_id))
+    monkeypatch.setattr(bench, "_left", {})                 # not read yet
+    read = bench.db_query_one
+
+    def failing(sql, params=None):
+        raise psycopg2.OperationalError("the database is away")
+    monkeypatch.setattr(bench, "db_query_one", failing)
+    assert not bench.left_pending(run.endpoint_id)
+    monkeypatch.setattr(bench, "db_query_one", read)
+    assert bench.left_pending(run.endpoint_id)
+
+
+def test_a_run_that_never_opened_its_row_leaves_the_notice_standing(run, monkeypatch):
+    """A run left to the owner is named until a new run reads what HQPlayer
+    holds as theirs — one that never got as far as its own row read nothing,
+    and the notice stands."""
+    mgr = run.mgr
+    run_id = _owed_pcm_run(run)
+    assert hb.change_dsp({"filter": 1, "filter1x": 1})["ok"]
+    bench.recover(run.endpoint_id, hl.selected())
+    assert _wait(lambda: (mgr.active.poke(), _run_left())[1] is not None, 10)
+
+    def no_row(*args):
+        raise bench._Abort("This HQPlayer is no longer registered")
+    monkeypatch.setattr(bench, "_open_run", no_row)
+    bench.start(fixed_volume_ok=True)
+    assert _wait(lambda: not bench.running(), 60)
+    assert bench.state()["outcome"] == "failed"
+    assert run.q("SELECT left_at IS NOT NULL FROM hqp_benchmark_runs WHERE id = %s",
+                 run_id) == [(True,)]
+    assert _wait(lambda: _run_left() is not None, 10)
+
+
+def test_the_notice_of_a_run_left_stands_on_its_row(run, monkeypatch):
+    """The notice of a run left to the owner is its row's: a restart — what
+    the process held, gone, nothing read of HQPlayer yet — and another
+    output picked keep it in the channel, its onset the same: never gone and
+    back, to be toasted again."""
+    fake, mgr = run.fake, run.mgr
+    run_id = _owed_pcm_run(run)
+    assert hb.change_dsp({"filter": 1, "filter1x": 1})["ok"]
+    bench.recover(run.endpoint_id, hl.selected())
+    assert _wait(lambda: (mgr.active.poke(), _run_left_items())[1] == _LEFT_IN_PCM, 10)
+    since = _run_left()["since"]
+    monkeypatch.setattr(bench, "_left", {})                 # a restart
+    assert (_run_left() or {}).get("since") == since
+    mgr.active.shutdown()
+    mgr._active = None                                      # another output
+    assert (_run_left() or {}).get("since") == since

@@ -174,12 +174,13 @@ def _hqp_gate(*, commands: bool = True) -> dict:
     return prefs
 
 
-def _hqp_state() -> dict:
+def _hqp_state(*, commands: bool = False) -> dict:
     """What HQPlayer says of itself and its lists, read by the backend on its
-    link (GET /api/hqplayer/state; _hqp_gate first, as a reading) — this
-    process asks HQPlayer nothing itself. Nothing to read while HQPlayer
-    builds: the backend says so (`busy`)."""
-    _hqp_gate(commands=False)
+    link (GET /api/hqplayer/state; _hqp_gate first, as a reading — a DSP
+    setter's, `commands`, through the command gate: refused at once while
+    the link refuses people) — this process asks HQPlayer nothing itself.
+    Nothing to read while HQPlayer builds: the backend says so (`busy`)."""
+    _hqp_gate(commands=commands)
     state = _backend_get("/api/hqplayer/state", {}) or {}
     if state.get("busy"):
         raise ConnectionError(f"{state['busy']}. Its transport and DSP controls are refused "
@@ -1139,7 +1140,7 @@ def hqplayer_set_filter(filter_name: str) -> str:
         filter_name: Name of the filter to set (e.g. 'poly-sinc-gauss-xla')
     """
     try:
-        state = _hqp_state()
+        state = _hqp_state(commands=True)
         match, said = aq.hqp_pick("filter", state.get("filters"), filter_name,
                                   (state.get("refused") or {}).get("filters", ""),
                                   key=lambda f: f["name"])
@@ -1167,7 +1168,7 @@ def hqplayer_set_shaper(shaper_name: str) -> str:
         shaper_name: Name of the dither/shaper to set (e.g. 'NS9')
     """
     try:
-        state = _hqp_state()
+        state = _hqp_state(commands=True)
         match, said = aq.hqp_pick("shaper", state.get("shapers"), shaper_name,
                                   (state.get("refused") or {}).get("shapers", ""),
                                   key=lambda s: s["name"])
@@ -1249,7 +1250,7 @@ def hqplayer_set_matrix_profile(profile_name: str) -> str:
         profile_name: Name of the matrix profile to activate
     """
     try:
-        state = _hqp_state()
+        state = _hqp_state(commands=True)
         match, said = aq.hqp_pick("profile", state.get("matrix_profiles"), profile_name,
                                   (state.get("refused") or {}).get("matrix_profiles", ""))
         if match is None:
