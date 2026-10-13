@@ -1406,13 +1406,22 @@ def _transport(intent: bool, command: str, *args) -> dict:
     """One transport command on the active output — a play intent through
     the gate that (re)attaches it — and whether it was taken; one that was
     not carries the output's own words (`refusal`), which the assistant
-    quotes."""
+    quotes. While a play intent goes on behind the answer (HQPlayer taking
+    the queue again) `starts` names the track it will start — null when a
+    Pause or a Stop dropped it."""
     try:
         b = manager.ensure_active() if intent else manager.backend()
         ok = getattr(b, command)(*args)
     except Exception as e:
         raise _output_error(e)
-    return {"ok": True} if ok else {"ok": False, "refusal": b.refusal()}
+    return _starting(b, {"ok": True} if ok else {"ok": False, "refusal": b.refusal()})
+
+
+def _starting(b, answer: dict) -> dict:
+    """`answer`, with the track a play press will start (PlayerBackend.pressing)
+    while one runs."""
+    press = b.pressing()
+    return answer if press is None else {**answer, "starts": press or None}
 
 
 @router.post("/play")
@@ -1462,9 +1471,11 @@ def seek(req: SeekRequest):
     if req.position < 0:
         raise HTTPException(status_code=400, detail="position must be >= 0")
     try:
-        return {"ok": manager.backend().seek(int(req.position))}
+        b = manager.backend()
+        ok = b.seek(int(req.position))
     except Exception as e:
         raise _output_error(e)
+    return _starting(b, {"ok": ok})
 
 
 # -- Smart play ----------------------------------------------------------------
@@ -1609,14 +1620,20 @@ def jump(req: JumpRequest):
     `index` is the queue's 1-based slot, as the SSE `track_index` field
     names it — HQPlayer's entry for it is the output's to find (a slot it
     does not hold has none). Used by the Queue sheet to play a specific
-    track without rebuilding the playlist."""
+    track without rebuilding the playlist; on a playlist that is no mirror
+    the tap is a play press, answered at once with the track it will start
+    (`starts`)."""
     if req.index < 1:
         raise HTTPException(status_code=400, detail="index must be >= 1")
     try:
-        ok = manager.jump(req.index)
-        return {"ok": ok, "index": req.index}
+        # select() loads AND plays the slot (PlayerBackend contract): a
+        # play() after it raced the DLNA load and resumed the OLD track for
+        # the seconds the new one took to buffer
+        b = manager.ensure_active()
+        ok = b.select(req.index)
     except Exception as e:
         raise _output_error(e)
+    return _starting(b, {"ok": ok, "index": req.index})
 
 
 def _filler_append(item, gen: int, *, position: str = "end",

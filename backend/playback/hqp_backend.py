@@ -83,29 +83,28 @@ def change_dsp(knobs: Dict[str, Any]) -> Dict[str, Any]:
     build; the rest is carried out behind the answer and its outcome rides
     the player status (BuildWatch.report). Built, a change made while
     HQPlayer played resumes the spot it played if HQPlayer came back
-    stopped, and leaves one that plays on alone; another controller's entry
-    — slot 0 on the status — is not ours to resume. Raises OutputHeld while
-    the output is lent, Building while HQPlayer builds."""
-    from playback.manager import manager
-    pre = manager.latest_status
-    entry = (manager.queue.item_at(int(pre.get("track_index") or 0))
-             if pre.get("state") == "playing" else None)
-    spot = ((entry, int(pre.get("position") or 0), manager.queue.generation)
-            if entry is not None else None)
-    return _DspChange(hqp_link.selected(), {k: v for k, v in knobs.items() if v is not None},
-                      spot).answer()
+    stopped, and leaves one that plays on alone. The spot is read on the
+    change's own hold of the connection, before its first knob, against
+    the queue as it is then (_spot_of): an entry the queue does not hold —
+    another controller's, or the old queue's while a replace still adds —
+    is not ours to resume. Raises OutputHeld while the output is lent,
+    Building while HQPlayer builds."""
+    return _DspChange(hqp_link.selected(),
+                      {k: v for k, v in knobs.items() if v is not None}).answer()
 
 
 class _DspChange:
     """change_dsp's run: a thread of its own, so the caller can be answered
     the moment a build begins (BuildWatch.waking)."""
 
-    def __init__(self, link: HqpLink, knobs: Dict[str, Any], spot: Optional[tuple]):
+    def __init__(self, link: HqpLink, knobs: Dict[str, Any]):
         self.link = link
         # The attachment the change is made in: its outcome is shown there only
         self.attachment = link.attachment
         self.knobs = knobs
-        self.spot = spot
+        # (queue item, second, queue generation) HQPlayer played when the
+        # change began: where it resumes if the change leaves it stopped
+        self.spot: Optional[tuple] = None
         self.n: Optional[int] = None
         self.applied: Dict[str, Any] = {}
         self.failed: Dict[str, str] = {}
@@ -144,6 +143,7 @@ class _DspChange:
                 if manager.held is not None:
                     raise OutputHeld(manager.held)
                 hqp = link.client
+                self.spot = self._spot_of(hqp.get_status())
                 try:
                     for knob, taken, refusal in hqp.set_knobs(self.knobs):
                         if taken is None:
@@ -177,6 +177,21 @@ class _DspChange:
             link.build.report(dict(self.applied), dict(self.failed), self.attachment)
         if self.spot is not None and status is not None and status.state == PlaybackState.STOPPED:
             self._resume(*self.spot)
+
+    def _spot_of(self, status) -> Optional[tuple]:
+        """What HQPlayer plays as the change begins, on its hold — a slot of
+        the queue as it is now, named by what its entry is (_playing) — with
+        its second and the queue's generation; None while it plays nothing
+        of the queue, or the output driving it is another."""
+        from playback.manager import manager
+        backend = self.link.attached
+        if (status is None or status.state != PlaybackState.PLAYING
+                or backend is None or manager.active is not backend):
+            return None
+        playing = backend._playing(status)
+        if playing is None or playing[1] is None or playing[2]:
+            return None
+        return playing[1], int(status.position), manager.queue.generation
 
     def _resume(self, entry: QueueItem, position: int, generation: int) -> None:
         """HQPlayer came back stopped from a change made while it played (an
@@ -748,6 +763,60 @@ STATUS_FAILURE_THRESHOLD = 5
 DRIFT_CHECK_EVERY = 30
 
 
+@dataclass
+class _Start:
+    """A start a play press owes: a Play, a tap, Next or Previous made while
+    it runs, or a DSP change's resume. `item` is its intent — superseded as
+    any start is (SUPERSEDED_BY) — `target` its track by identity, never by
+    slot, `position` the second it starts at, `following` the queue from
+    the target on as it stood (the target removed meanwhile, the next one
+    still queued starts), and `held` the spot it spends once HQPlayer takes
+    it."""
+    item: Item
+    target: QueueItem
+    position: int
+    following: list
+    held: Optional[tuple]
+
+
+class _Press:
+    """A play press under way on a playlist that is no mirror: HQPlayer
+    takes the queue afresh once (`item`, its rebuild — superseded only by a
+    new queue or a switch away), and at its end the newest start made
+    meanwhile goes, unless a newer intent superseded it."""
+
+    def __init__(self, item: Item, generation: int, spot_gen: int):
+        self.item = item
+        self.generation = generation
+        # The spot's generation when it began: a spot it leaves is put only
+        # where no start was taken nor a spot set since
+        self.spot_gen = spot_gen
+        self.starts: list = []
+        # The numbers of the Pauses and Stops made meanwhile
+        self.halts: list = []
+        # Its rebuild's Stop went: HQPlayer is stopped whatever follows
+        self.stopped = False
+
+    def newest(self) -> _Start:
+        """The start of the newest intent — by its number, not by when it
+        joined: a DSP change's resume joins with the change's own."""
+        return max(self.starts, key=lambda s: s.item.n)
+
+    def live(self, link: HqpLink) -> Optional[_Start]:
+        """The newest start, unless a newer intent superseded it — every
+        older one a newer start superseded already."""
+        start = self.newest()
+        return start if link.superseded(start.item) is None else None
+
+    def halted(self) -> bool:
+        """Was a Pause or a Stop the newest word?"""
+        return bool(self.halts) and max(self.halts) > self.newest().item.n
+
+
+# _Press's first step found HQPlayer's playlist the queue's again: no rebuild
+_IN_STEP = object()
+
+
 class HqpBackend(PlayerBackend):
     """HQPlayer output: the selected HQPlayer, driven through its link
     (playback.hqp_link), taken once at construction. Status acquisition = 1 s
@@ -826,11 +895,20 @@ class HqpBackend(PlayerBackend):
         # erases it; a command refused, as busy or by HQPlayer, leaves it.
         self._spot: Optional[tuple] = None
         self._spot_lock = threading.Lock()
+        # Moves on with every spot set and every start taken: a start that
+        # did not go puts its spot back only if nothing moved it since it was
+        # owed (_put_back)
+        self._spot_gen = 0
+        # A start HQPlayer answered nothing to past the build limit, given up
+        # on: (its track, the spot's generation then), judged at HQPlayer's
+        # next answer (_judge_start)
+        self._unjudged: Optional[tuple] = None
         # HQPlayer was found stopped at the attach (its queue mirrored), so
         # the slot an output switch keeps is a spot (resume_at)
         self._stopped_at_attach = False
-        # A play press is taking the queue afresh (_press): one more joins it
-        self._pressing = False
+        # The play press under way (_press): every play intent made meanwhile
+        # is one of its starts, the newest one going at its end
+        self._pressed: Optional[_Press] = None
         self._press_lock = threading.Lock()
         # Which attachment of the link this backend is (HqpLink.attach): a DSP
         # change's outcome is shown only to the attachment it was made in
@@ -901,7 +979,7 @@ class HqpBackend(PlayerBackend):
         self._library_check()
         with self._life:
             # shutdown() detaches under this lock: past it, a poller started
-            # here is one it joins — never one nothing stops
+            # here is one it stops — never one nothing stops
             if self._detached:
                 return
             # Where its meter stream lives: the control port + 1 (Signalyst's
@@ -1011,16 +1089,18 @@ class HqpBackend(PlayerBackend):
         link = self._link
         with link.lock.detaching(), self._life:
             # A command already on its way is answered before the lock is
-            # ours — but never waited out through a build: that goes on
-            # watched and ends on its own, and what its sequence still had to
-            # send is superseded by the detach (HqpLink.detach). One sent
-            # later by whoever took this backend before the switch (a play
-            # intent) is refused.
+            # ours — but never waited out through a build, nor the Stop a
+            # switch away owes: that goes on watched and ends on its own, and
+            # what its sequence still had to send is superseded by the detach
+            # (HqpLink.detach). One sent later by whoever took this backend
+            # before the switch (a play intent) is refused.
             self._detached = True
+        # The poller stops: a question of its still waiting for the
+        # connection is not asked, and one HQPlayer has yet to answer is not
+        # waited for — whatever it hears acts on nothing (_poll_loop)
         self._running = False
         self._wake.set()
-        if self._thread:
-            self._thread.join(timeout=3)
+        link.wake_askers()
         if link.attached is self:
             hqp_meter.meter.detach()
         link.detach(self)
@@ -1034,17 +1114,21 @@ class HqpBackend(PlayerBackend):
 
     def release(self) -> Optional[str]:
         """Switched away from: HQPlayer stops if it plays or pauses an entry
-        of what it was given — the queue as it stands at the switch, never
-        as it is once the Stop goes — at once, or once it answers
-        (HqpLink.release): the switch waits a moment at most. Returns what
-        the person is told when the Stop stays owed."""
+        this node gave it, at once, or once it answers (HqpLink.release):
+        the switch waits a moment at most. Returns what the person is told
+        when the Stop stays owed."""
         given = self._layout()
         return self._link.release(lambda status: self._reads_any(status, given))
 
     def _reads_any(self, status, given: _Layout) -> bool:
-        """Does HQPlayer read an entry of what it was given? With nothing
-        that names the entry (no URI from this build) its place stands while
-        the playlist was our mirror."""
+        """Does HQPlayer read an entry this node gave it — one the hand-over
+        ledger names (_handed: a slot removed since from a playlist that is
+        no mirror is still ours), or a slot of the queue as it stands at the
+        switch, never as it is once the Stop goes? With nothing that names
+        the entry (no URI from this build) its place stands while the
+        playlist was our mirror."""
+        if status.uri and _handed(status.uri) is not None:
+            return True
         readings = self._readings(status.uri)
         if not readings:
             reads = Entry.read(status)
@@ -1147,6 +1231,46 @@ class HqpBackend(PlayerBackend):
     def _set_spot(self, item: QueueItem, position: int) -> None:
         with self._spot_lock:
             self._spot = (item, position)
+            self._spot_gen += 1
+
+    def _put_back(self, spot: tuple, gen: int) -> None:
+        """Where a start that did not go would have started (`spot`): the
+        play press resumes there — unless a start was taken or a spot set
+        since it was owed (`gen`, the spot's generation then)."""
+        with self._spot_lock:
+            if self._spot_gen == gen:
+                self._spot = spot
+
+    def _spent(self, held: Optional[tuple]) -> None:
+        """A start HQPlayer took spends the spot it would have resumed — the
+        one it read (`held`), any when it read none — and a start dropped
+        before it puts none back. Called under the command lock the start
+        held: a dropped start's put-back comes after it."""
+        with self._spot_lock:
+            self._spot_gen += 1
+            if held is None or self._spot is held:
+                self._spot = None
+
+    def _given_up(self, target: Optional[QueueItem]) -> None:
+        """HQPlayer answered nothing to a start past the build limit: whether
+        it took it is judged at its next answer (_judge_start)."""
+        if target is not None:
+            with self._spot_lock:
+                self._unjudged = (target, self._spot_gen)
+
+    def _judge_start(self, status, playing: Optional[tuple]) -> None:
+        """HQPlayer's first answer since a start it was given up on: playing
+        or paused on that start's track, it took it — the spot it would have
+        spent, or the one put back for it, is spent, unless a start was taken
+        or a spot set since; anything else, it did not, and the spot stays."""
+        with self._spot_lock:
+            unjudged, self._unjudged = self._unjudged, None
+            if (unjudged is None or playing is None or playing[1] is not unjudged[0]
+                    or status.state not in (PlaybackState.PLAYING, PlaybackState.PAUSED)):
+                return
+            if self._spot_gen == unjudged[1]:
+                self._spot = None
+            self._spot_gen += 1
 
     def _spot_at(self) -> Optional[tuple]:
         """The spot as (its slot now, its second); None when there is none
@@ -1156,18 +1280,11 @@ class HqpBackend(PlayerBackend):
             return None
         idx = self._queue.index_of(held[0])
         if idx is None:
-            self._take_spot(held)
+            with self._spot_lock:
+                if self._spot is held:          # one set since stays
+                    self._spot = None
             return None
         return idx, held[1]
-
-    def _take_spot(self, held: Optional[tuple] = None) -> Optional[tuple]:
-        """Erase the spot — only if it is still `held`, when given: one a
-        later action set stays — and return what it was."""
-        with self._spot_lock:
-            spot = self._spot
-            if held is None or spot is held:
-                self._spot = None
-            return spot
 
     def poke(self) -> None:
         """Wake the poller for an immediate re-poll after a command."""
@@ -1219,7 +1336,10 @@ class HqpBackend(PlayerBackend):
 
     def _follow_queue(self, press: bool = False) -> None:
         """_reconverge's step, under the queue lock. A read HQPlayer does not
-        answer leaves the mirror lost, due again at its next answer."""
+        answer leaves the mirror lost, due again at its next answer; a play
+        press under way takes the queue to HQPlayer itself."""
+        if self._pressed is not None:
+            return
         if self._mirror != "lost" and not (press and self._mirror == "drift"):
             return              # in step again meanwhile (a replace, the canary)
         layout = self._layout()
@@ -1427,7 +1547,7 @@ class HqpBackend(PlayerBackend):
             att = self._attempt
             try:
                 hqp_playlist = None
-                with link.asking() as hqp:
+                with link.asking(until=lambda: not self._running) as hqp:
                     status = hqp.get_status(wait=QUESTION_WAIT_S)
                     if status is None and not hqp.timed_out:
                         # The connection broke under the read: once more, on
@@ -1467,13 +1587,14 @@ class HqpBackend(PlayerBackend):
                         hqp_playlist = hqp.get_playlist()
                         # Judged against the queue and the mirror's state it
                         # was read with — never a read made while a mutation
-                        # was in flight, nor one a commit or a loss of the
-                        # mirror overtook (its stale "in step" would undo the
-                        # loss: a replace HQPlayer refused whole, its Stop and
+                        # was in flight or a play press takes the queue
+                        # again, nor one a commit or a loss of the mirror
+                        # overtook (its stale "in step" would undo the loss:
+                        # a replace HQPlayer refused whole, its Stop and
                         # clear gone), nor one HQPlayer did not answer (an
                         # empty list) — and before the slot below, which
                         # falls back on the verdict.
-                        if (hqp.last_error is None and not pending
+                        if (hqp.last_error is None and not pending and self._pressed is None
                                 and self._queue.view()[1:] == (version, False)
                                 and (self._mirror, self.mirror_losses) == mirror):
                             self._judge_mirror(hqp_playlist, status)
@@ -1497,6 +1618,8 @@ class HqpBackend(PlayerBackend):
                             self._sampler.taken(now)
                             sample = (status, dsp)
 
+                if not self._running:
+                    break               # detached meanwhile: what it heard acts on nothing
                 if came_back or learned:
                     self._note_info()
                 if came_back:
@@ -1514,6 +1637,7 @@ class HqpBackend(PlayerBackend):
                     self._failures = 0
                 elif status is not None:
                     self._failures = self._silent_misses = 0
+                    self._judge_start(status, playing)
                     if self._reconverge_due:
                         # Once per loss: HQPlayer answers again, and gets the queue back
                         self._reconverge_due = False
@@ -1549,6 +1673,8 @@ class HqpBackend(PlayerBackend):
             except Exception as e:
                 logger.exception("HQPlayer status tick failed")
                 miss = (str(e), False)
+            if not self._running:
+                break
             if miss is not None:
                 self._register_failure(silent=miss[1])
                 if att is not None:
@@ -1674,7 +1800,7 @@ class HqpBackend(PlayerBackend):
             # Where the play press resumes: a paused HQPlayer whose playlist
             # was taken afresh is left stopped, not played to be paused again
             extra["resume"] = {"index": spot[0], "position": spot[1]}
-        if self._pressing:
+        if self._pressed is not None:
             extra["rebuilding"] = True      # a play press: HQPlayer takes the queue again
         return PlaybackStatus(
             state=STATE_NAMES.get(status.state, "unknown"),
@@ -1726,7 +1852,9 @@ class HqpBackend(PlayerBackend):
         judges whether a final refusal or a command that never left already
         settles it — unless the block left the intent a start still to send
         (_owe_start, or one waiting out a build): its sender ends it then. A
-        step the link did not send (Dropped) ends it as superseded."""
+        step the link did not send (Dropped), or a wait for a build given up
+        because the step was no longer wanted (GaveUp, not failed), ends it
+        as superseded."""
         if att is None:
             yield None
             return
@@ -1742,7 +1870,7 @@ class HqpBackend(PlayerBackend):
             owed = getattr(self._local, "start", None)
             if exc is not None and owed is not None and owed[0] is att:
                 self._local.start = None
-            if isinstance(exc, Dropped):
+            if isinstance(exc, Dropped) or (isinstance(exc, GaveUp) and not exc.failed):
                 # The link did not send it — a newer intent came first, the
                 # output was switched away or lent, the link let go: nothing
                 # of HQPlayer's to judge, never "HQPlayer did not answer"
@@ -1760,10 +1888,11 @@ class HqpBackend(PlayerBackend):
         let go: HQPlayer may build the start for minutes, and no queue edit
         may wait behind it. `item` is the start (HqpLink.item): a newer intent
         that supersedes it drops it. `spot`: (queue item, second), where the
-        play press resumes if the start does not go; `patient`: the start is
-        background work (a re-bind), so one that fails is logged, never
-        raised."""
-        self._local.start = (att, item, start, spot, patient)
+        play press resumes if the start does not go — unless a start was
+        taken or a spot set since it was owed (_put_back); `patient`: the
+        start is background work (a re-bind), so one that fails is logged,
+        never raised."""
+        self._local.start = (att, item, start, spot, patient, self._spot_gen)
 
     def queue_start(self) -> None:
         """The start a mirror step left (_owe_start), sent now. One that
@@ -1776,7 +1905,7 @@ class HqpBackend(PlayerBackend):
         if owed is None:
             return
         self._local.start = None
-        att, item, start, spot, patient = owed
+        att, item, start, spot, patient, gen = owed
         item.queue, item.generation = self._queue, self._queue.generation
         later = False
         try:
@@ -1789,11 +1918,11 @@ class HqpBackend(PlayerBackend):
         except Dropped as e:
             # Where it does not go, the play press resumes — as after a build
             if spot is not None:
-                self._set_spot(*spot)
+                self._put_back(spot, gen)
             logger.info("HQPlayer's start not sent: %s", e)
         except (BrokenPipeError, ConnectionError, OSError) as e:
             if spot is not None:
-                self._set_spot(*spot)
+                self._put_back(spot, gen)
             if not patient:
                 raise
             logger.warning("HQPlayer did not start again after its playlist followed the "
@@ -1821,7 +1950,7 @@ class HqpBackend(PlayerBackend):
         unless a newer intent superseded it meanwhile, the queue it was made
         for was replaced, or the link was let go; a build HQPlayer did not
         finish gives it up. Where it does not go, the play press resumes."""
-        att, item, start, spot, _ = owed
+        att, item, start, spot, _, gen = owed
         link = self._link
         try:
             with self._steps(att):
@@ -1829,12 +1958,12 @@ class HqpBackend(PlayerBackend):
                         until=lambda: link.superseded(item) is not None)
         except (GaveUp, Dropped) as e:
             if spot is not None:
-                self._set_spot(*spot)
+                self._put_back(spot, gen)
             (logger.warning if getattr(e, "failed", False) else logger.info)(
                 "HQPlayer's start not sent after the build: %s", e)
         except (BrokenPipeError, ConnectionError, OSError) as e:
             if spot is not None:
-                self._set_spot(*spot)
+                self._put_back(spot, gen)
             logger.warning("HQPlayer's start after the build failed: %s", e)
         finally:
             self.poke()
@@ -2167,30 +2296,48 @@ class HqpBackend(PlayerBackend):
     # -- transport -----------------------------------------------------------------
 
     def play(self) -> bool:
-        if self._mirror != "step":
+        if self._mirror != "step" or self._pressed is not None:
             return self._press_play()
         held, spot = self._spot, self._spot_at()
         start = self._start_point(*spot) if spot is not None else None
         with self._intent("play", slot=start[0].n if start is not None else None):
             if spot is not None:
                 logger.info("play: honoring resume slot %d at %d s", *spot)
-                ok = self._start_at(*spot, fallback=True, intent="transport", item="start")
-                if ok:
-                    self._take_spot(held)
+                ok = self._start_at(*spot, fallback=True, intent="transport", item="start",
+                                    spends=held)
             else:
                 ok = self._command("Play", lambda h: h.play())
         self.poke()
         return ok
 
     def pause(self) -> bool:
+        if self._halt():
+            return True
         ok = self._command("Pause", lambda h: h.pause())
         self.poke()
         return ok
 
     def stop(self) -> bool:
+        if self._halt():
+            return True
         ok = self._command("Stop", lambda h: h.stop())
         self.poke()
         return ok
+
+    def _halt(self) -> bool:
+        """A Pause or a Stop while a play press runs: numbered as it comes, it
+        drops the start the press leads to — and every start made before it
+        — while the rebuild goes on, so HQPlayer ends stopped where the press
+        was asked to start, and the next Play starts there without one.
+        Nothing is sent now: a press that rebuilds nothing stops HQPlayer at
+        its end. False when no press runs."""
+        with self._press_lock:
+            press = self._pressed
+            if press is None:
+                return False
+            press.halts.append(self._link.accept("transport"))
+        self.poke()
+        return True
 
     def next(self) -> bool:
         # Watched only when there is a next entry to land on.
@@ -2204,23 +2351,37 @@ class HqpBackend(PlayerBackend):
                           last is not None and last > Entry(1))
 
     def _step(self, by: int, name: str, send, watched: bool) -> bool:
-        """Next and Previous. Stopped at the spot, they only move it — to the
-        slot after or before that this HQPlayer holds, at its start: no
-        command, no sound (at either end of the queue it stays). Otherwise
-        HQPlayer's own Next or Previous — onto the entry beside, the slot it
-        holds beside — a start taken that erases a spot. On a playlist that is
-        no mirror the slot beside is started by a play press, and at either
-        end of the queue nothing is sent: HQPlayer's own Next would move it in
-        a playlist that is not the queue's."""
+        """Next and Previous. While a play press runs they move its target,
+        counted from the newest one — the slot after or before that this
+        HQPlayer holds, at its start: a start of their own (_press); at
+        either end of the queue it stays. Stopped at the spot, they only
+        move it, as far: no command, no sound (at either end of the queue it
+        stays). Otherwise HQPlayer's own Next or Previous — onto the entry
+        beside, the slot it holds beside — a start taken that spends a spot.
+        On a playlist that is no mirror the slot beside is started by a play
+        press, and at either end of the queue nothing is sent: HQPlayer's own
+        Next would move it in a playlist that is not the queue's."""
+        layout = self._layout()
+        with self._press_lock:
+            press = self._pressed
+            newest = press.newest() if press is not None else None
+        if newest is not None:
+            now = self._resolved(newest)
+            index = self._queue.index_of(now[0]) if now is not None else None
+            target = self._queue.item_at(layout.held(index + by, by)) if index else None
+            if target is None:
+                self.poke()
+                return True                     # the queue's end: the target stays
+            return self._press(target, 0)
         held, spot = self._spot, self._spot_at()
         last = self._last_tick
-        layout = self._layout()
         if spot is not None and last is not None and last.state == "stopped":
             target = self._queue.item_at(layout.held(spot[0] + by, by))
             if target is not None:
                 with self._spot_lock:
                     if self._spot is held:
                         self._spot = (target, 0)
+                        self._spot_gen += 1
             self.poke()
             return True
         reading = last.item if last is not None and self._mirror != "step" else None
@@ -2231,10 +2392,14 @@ class HqpBackend(PlayerBackend):
                 self.poke()
                 return True                     # the queue's end: nowhere to go
             return self._press(target, 0)
+
+        def step(h: HQPlayerClient) -> bool:
+            if not send(h):
+                return False
+            self._spent(held)
+            return True
         with self._intent(name.lower()) if watched else nullcontext():
-            ok = self._command(name, send)
-        if ok:
-            self._take_spot(held)
+            ok = self._command(name, step)
         self.poke()
         return ok
 
@@ -2245,33 +2410,41 @@ class HqpBackend(PlayerBackend):
         path sends it just to ready a slot on a stopped HQPlayer (_rebuild
         leaves that to the play press). The Play after it, which jump()
         used to send from the manager, finds it playing then; a slot
-        HQPlayer refuses gets no Play. On a playlist that is no mirror the
-        tap is a play press (_press). A slot this HQPlayer does not hold (a
-        gap) is refused in the gap's words, nothing sent."""
+        HQPlayer refuses gets no Play. On a playlist that is no mirror, or
+        while a play press runs, the tap is a play press (_press) of its own
+        track, from its start. A slot this HQPlayer does not hold (a gap) is
+        refused in the gap's words, nothing sent."""
         item = self._queue.item_at(index)
         why = self.gap(item) if item is not None else None
         if why is not None:
             self._local.refusal = f"it is not on this HQPlayer — {why}"
             return False
-        if self._mirror != "step" and item is not None:
+        if item is not None and (self._mirror != "step" or self._pressed is not None):
             return self._press(item, 0)
         held = self._spot
         entry = self._layout().entry(index)
         with self._intent("select", slot=entry.n if entry is not None else None):
-            ok = self._start_at(index, 0, fallback=False, intent="transport", item="start")
-        if ok:
-            self._take_spot(held)   # a start taken elsewhere: the play press resumes nothing
+            ok = self._start_at(index, 0, fallback=False, intent="transport", item="start",
+                                spends=held)
         self.poke()
         return ok
 
     def _press_play(self) -> bool:
-        """Play on a playlist that is no mirror (lost, drifted, a tail). On a
-        pause it only resumes — the sound never stops for a rebuild — and
-        what lies behind the entry HQPlayer reads is repaired as the
-        reconverge does. From a stop HQPlayer takes the queue afresh and
-        starts at the spot, else at the slot it stopped on — named by what
-        its entry is, as a Play after a Stop replays the entry it stopped on
-        — else at the first (_press)."""
+        """Play while a play press runs: its newest target again, at the
+        second it was asked for — a start of its own (_press). Otherwise Play
+        on a playlist that is no mirror (lost, drifted, a tail): on a pause
+        it only resumes — the sound never stops for a rebuild — and what lies
+        behind the entry HQPlayer reads is repaired as the reconverge does.
+        From a stop HQPlayer takes the queue afresh and starts at the spot,
+        else at the slot it stopped on — named by what its entry is, as a
+        Play after a Stop replays the entry it stopped on — else at the
+        first (_press)."""
+        with self._press_lock:
+            press = self._pressed
+            newest = press.newest() if press is not None else None
+        if newest is not None:
+            target, position = self._resolved(newest) or (newest.target, newest.position)
+            return self._press(target, position)
         last = self._last_tick
         if last is not None and last.state in ("paused", "playing"):
             ok = self._command("Play", lambda h: h.play())
@@ -2289,73 +2462,287 @@ class HqpBackend(PlayerBackend):
             return self._command("Play", lambda h: h.play())
         return self._press(target, spot[1] if spot is not None else 0)
 
-    def _press(self, target: QueueItem, position: int) -> bool:
+    def _press(self, target: QueueItem, position: int, *, item: Optional[Item] = None) -> bool:
         """A play press on a playlist that is no mirror (lost, drifted, a
-        tail mirror): HQPlayer takes the queue afresh and starts at
+        tail mirror): HQPlayer takes the queue afresh — once — and starts at
         `target` — at `position` while it took that very track, else at the
         next it took, from 0 s — as background work through the link: the
         caller is answered at once, the status saying the queue is being
-        taken again. One attempt per press, no retry; a press while one is
-        under way joins it."""
+        taken again (pressing names the track). Every play intent made while
+        it runs — a Play, a tap, Next, Previous, a DSP change's resume
+        (`item`) — is one more start of the same press, numbered as it comes
+        on the intent clock: at its end the newest one no newer intent
+        superseded goes. No retry; no route waits for it."""
+        items = self._queue.snapshot()
+        at = next((i for i, it in enumerate(items) if it is target), None)
+        following = items[at:] if at is not None else [target]
         with self._press_lock:
-            if self._pressing:
-                return True
-            self._pressing = True
-        # The press is the person's transport intent as of now: a Pause the
-        # moment after it supersedes the start it leads to
-        n = self._link.accept("transport")
-        threading.Thread(target=self._press_run, args=(target, position, n), daemon=True,
-                         name="hqp-press").start()
+            if item is None:
+                item = self._link.item("start", self._link.accept("transport"),
+                                       queue=self._queue, generation=self._queue.generation)
+            press, begun = self._pressed, self._pressed is None
+            if begun:
+                press = self._pressed = _Press(
+                    self._link.item("press", item.n, queue=self._queue,
+                                    generation=self._queue.generation),
+                    self._queue.generation, self._spot_gen)
+            press.starts.append(_Start(item, target, position, following, self._spot))
+        if begun:
+            threading.Thread(target=self._press_run, args=(press,), daemon=True,
+                             name="hqp-press").start()
         self.poke()
         return True
 
-    def _press_run(self, target: QueueItem, position: int, n: int) -> None:
-        from playback.manager import manager
+    def pressing(self) -> Optional[dict]:
+        with self._press_lock:
+            press = self._pressed
+            start = press.live(self._link) if press is not None else None
+        if press is None:
+            return None
+        at = self._resolved(start) if start is not None else None
+        if at is None:
+            return {}
+        return {"index": self._queue.index_of(at[0]), "track_id": at[0].track_id,
+                "position": at[1]}
+
+    def _press_run(self, press: _Press) -> None:
         try:
             background("HQPlayer did not take the queue for the play press",
-                       lambda: manager.mirror_step(self,
-                                                   lambda: self._press_step(target, position, n)),
+                       lambda: self._press_once(press),
                        needed=lambda: "HQPlayer was detached" if self._detached else None,
                        until=lambda: self._detached)
         finally:
-            with self._press_lock:
-                self._pressing = False
+            self._press_ended(press)
             self.poke()
 
-    def _press_step(self, target: QueueItem, position: int, n: int) -> None:
-        """_press's rebuild, under the queue lock: its start, made for the
-        press (`n`), goes once the lock is let go (PlaybackManager.mirror_step)
-        unless a newer intent — a Pause meanwhile — supersedes it."""
-        snapshot = self._queue.snapshot()
-        if self._queue.index_of(target) is None:
-            return          # its track left the queue meanwhile
-        self._rebuild(snapshot, target, position, resume=True, pressed=n,
-                      what="of the queue for the play press")
+    def _press_once(self, press: _Press) -> None:
+        """The press's work — from its first step again after a build it
+        waited out (through). The queue is read under the queue lock, its
+        URIs made and handed over off it: a queue edit meanwhile is the
+        queue's alone and never waits for the rebuild. Then the end, under
+        the lock again, and the start it owes once the lock is let go."""
+        from playback.manager import manager
+        taking = manager.mirror_locked(self, lambda: self._press_begin(press))
+        if taking is None:
+            return
+        if taking is _IN_STEP:
+            manager.mirror_locked(self, lambda: self._press_end(press, None, taking, None))
+        else:
+            layout, _ = taking
+            uris = [self._uri_for(it) for it in layout.handed]
+            att = self._watch("rebuild", uris=uris)
+            with self._steps(att):
+                with self._link.command(item=press.item):
+                    self._check_attached()
+                    if _hqp_safe(self._link, lambda h: h.stop(), "Stop"):
+                        press.stopped = True
+                    taken, unsent = _add_uris_with_retry(self._link, uris, clear_first=True)
+                self.poke()
+                manager.mirror_locked(self, lambda: self._press_end(press, att, taking,
+                                                                    (taken, unsent)))
+        self.queue_start()
+
+    def _press_begin(self, press: _Press):
+        """The press's first step, under the queue lock. A new queue since
+        (a replace, the radio) took HQPlayer itself: nothing (None). In step
+        again meanwhile — a reconverge, the canary — nothing is rebuilt
+        (_IN_STEP). Otherwise each slot's way in is read again and HQPlayer
+        is handed the queue as it stands; the queue's edits are its own until
+        the press ends (the mirror lost to it). Returns the layout handed
+        over and each slot's way in as it was (_slot_key)."""
+        if self._queue.generation != press.generation:
+            return None
+        if self._mirror == "step":
+            return _IN_STEP
+        self._ways_in()
+        self._refusals = []
+        layout = self._layout()
+        self._mirror, self._lost_by, self._reconverge_due = "lost", "press", False
+        return layout, [_slot_key(it) for it in layout.handed]
+
+    def _press_end(self, press: _Press, att: Optional[diag.Attempt], taking, out) -> None:
+        """The press's last step, under the queue lock. A new queue since
+        took HQPlayer itself. Otherwise what HQPlayer took is judged (_took)
+        and the queue's edits made meanwhile followed (_follow_edits), and
+        the press ends: the newest start no newer intent superseded is owed
+        (_owe_start) — at its target, the target gone at the next track still
+        queued; on a playlist the edits left no mirror, at HQPlayer's own
+        entry for it — HQPlayer, stopped by the hand-over, resting at the
+        start's spot until it goes. None goes — a Pause, a Stop or a newer
+        intent came last: HQPlayer stays stopped where the press was asked to
+        start, and a Pause or a Stop stops it there when the press rebuilt
+        nothing."""
+        void = self._queue.generation != press.generation
+        took, holds = not void, None
+        if not void and taking is not _IN_STEP:
+            layout, keys = taking
+            taken, unsent = out
+            took = self._took(layout.handed, taken, unsent, "of the queue for the play press")
+            if took:
+                holds = self._follow_edits(press, layout.handed, keys, taken)
+        with self._press_lock:
+            self._pressed = None
+            start = press.live(self._link) if took else None
+            halted = press.halted()
+        if start is not None:
+            go = self._press_start(start, holds)
+            if go is not None:
+                spot, send = go
+                held = start.held
+                if taking is not _IN_STEP:
+                    # Taken afresh while stopped, HQPlayer rests at the start's
+                    # spot until the start goes (as _rebuild leaves one): a
+                    # Play landing first starts there, and spends it
+                    with self._spot_lock:
+                        self._spot = held = spot
+                        self._spot_gen += 1
+                self._owe_start(att or self._watch("play"), start.item, lambda: send(held),
+                                spot=spot)
+                return
+        if att is not None and (took or void):
+            att.request_end("superseded")
+        if void:
+            return
+        if taking is _IN_STEP and halted:
+            self._cmd(lambda h: _hqp_safe(self._link, lambda c: c.stop(), "Stop"),
+                      item=press.item)
+        if press.stopped or (taking is _IN_STEP and halted):
+            at = self._resolved(press.newest())
+            if at is not None:
+                self._put_back(at, press.spot_gen)
+
+    def _press_start(self, start: _Start, holds: Optional[list]) -> Optional[tuple]:
+        """Where the press's start goes and how: (its spot, the send — given
+        the spot it spends). On the mirror, at its track's slot as it stands
+        when it is sent; on a playlist the queue's edits left no mirror, at
+        the entry HQPlayer holds it at — the first track from the target on
+        that is still queued and HQPlayer took. None when nothing is left to
+        start."""
+        if self._mirror == "step":
+            at = self._resolved(start)
+            if at is None:
+                return None
+            return at, lambda held: self._start_item(at[0], at[1], start.item, held)
+        for it in start.following:
+            n = next((i for i, h in enumerate(holds or [], 1) if h is it), None)
+            if n is None or self._queue.index_of(it) is None:
+                continue
+            second = start.position if it is start.target else 0
+            return (it, second), lambda held: self._start_entry(
+                Entry(n), second, it, fallback=True, item=start.item, spends=held)
+        return None
+
+    def _follow_edits(self, press: _Press, handed: list, keys: list, taken: list) -> list:
+        """The queue's edits made while HQPlayer took it for the press: none,
+        or tracks appended behind what it took — those follow it, and it is
+        in step. Any other — a removal, a new order, a play-next, a slot
+        re-bound — leaves its playlist no mirror (drift): the press starts at
+        HQPlayer's own entry, and the next play press hands the queue over
+        again. Returns what HQPlayer holds, in order."""
+        holds = [it for it, t in zip(handed, taken) if t]
+        ways = [k for k, t in zip(keys, taken) if t]
+        now = self._layout().handed
+        if len(now) < len(holds) or any(a is not it or _slot_key(a) != k
+                                         for a, it, k in zip(now, holds, ways)):
+            self._mirror, self._lost_by, self._reconverge_due = "drift", None, False
+            logger.warning("the queue changed while HQPlayer took it for the play press — "
+                           "the next play press hands it over again")
+            return holds
+        rest = now[len(holds):]
+        if rest:
+            uris = [self._uri_for(it) for it in rest]
+            added, unsent = self._cmd(lambda h: _add_uris_with_retry(self._link, uris),
+                                      item=press.item)
+            self.poke()
+            if not self._took(rest, added, unsent, "queued while HQPlayer took the queue"):
+                return holds
+            holds += [it for it, t in zip(rest, added) if t]
+        self._in_step()
+        return holds
+
+    def _press_ended(self, press: _Press) -> None:
+        """A press whose end never came — HQPlayer silent or gone, a build it
+        did not finish, a new queue, the output changed — is over all the
+        same. A playlist it left half taken is no mirror: HQPlayer gets the
+        queue back at its next answer (_reconverge); once its Stop went,
+        HQPlayer stays stopped where the press was asked to start."""
+        with self._press_lock:
+            if self._pressed is not press:
+                return
+            self._pressed = None
+        if self._mirror == "lost" and self._lost_by == "press":
+            self.lose_mirror("HQPlayer did not take the queue for the play press")
+        if press.stopped:
+            at = self._resolved(press.newest())
+            if at is not None:
+                self._put_back(at, press.spot_gen)
+
+    def _resolved(self, start: _Start) -> Optional[tuple]:
+        """(the track, its second) a press's start goes at now: its target
+        while the queue holds it, else the next track of `following` still
+        queued, from its start; None when none is left."""
+        if self._queue.index_of(start.target) is not None:
+            return start.target, start.position
+        nxt = next((it for it in start.following[1:] if self._queue.index_of(it) is not None),
+                   None)
+        return (nxt, 0) if nxt is not None else None
 
     def _start_point(self, slot: int, position: int) -> Optional[tuple]:
         """Where a start at the queue's `slot` lands on this HQPlayer: the
-        entry the layout names, at `position` — for a slot it does not hold
-        (a gap), the next one it holds, from its start. None when none
-        follows."""
+        entry the layout names, at `position`, and the slot's item there —
+        for a slot it does not hold (a gap), the next one it holds, from its
+        start. None when none follows."""
         layout = self._layout()
         held = layout.held(slot)
         if held is None:
             return None
-        return layout.entry(held), (position if held == slot else 0)
+        return layout.entry(held), (position if held == slot else 0), layout.items[held - 1]
 
     def _start_at(self, slot: int, position: int, *, fallback: bool,
-                  intent: Optional[str] = None, item: Any = None) -> bool:
+                  intent: Optional[str] = None, item: Any = None,
+                  spends: Optional[tuple] = None) -> bool:
         """The queue's slot, from `position` on — where it lands on this
-        HQPlayer (_start_point) — as one command sequence (_start_on) serving
-        `item`: a person's jump or play press (intent transport, whose Seek
-        and Play after the SelectTrack are its start), or a start made
-        earlier. Returns whether HQPlayer took the start."""
+        HQPlayer (_start_point) — as one command sequence serving `item`: a
+        person's jump or play press (intent transport, whose Seek and Play
+        after the SelectTrack are its start), or a start made earlier.
+        `spends`: the spot it resumes (_start_held). Returns whether HQPlayer
+        took the start."""
         start = self._start_point(slot, position)
         if start is None:
             return self._started(None, f"nothing from slot {slot} on is on this HQPlayer")
-        entry, at = start
+        return self._start_entry(*start, fallback=fallback, intent=intent, item=item,
+                                 spends=spends)
+
+    def _start_entry(self, entry: Entry, position: int, target: QueueItem, *, fallback: bool,
+                     intent: Optional[str] = None, item: Any = None,
+                     spends: Optional[tuple] = None) -> bool:
+        """The start at HQPlayer's `entry` — the queue's `target` — as one
+        command sequence (_start_held) serving `item`."""
         return self._started(entry, self._cmd(
-            lambda h: self._start_on(h, entry, at, fallback=fallback), intent, item=item))
+            lambda h: self._start_held(h, entry, position, target, fallback=fallback,
+                                       spends=spends),
+            intent, item=item))
+
+    def _start_held(self, h: HQPlayerClient, entry: Entry, position: int,
+                    target: QueueItem, *, fallback: bool,
+                    spends: Optional[tuple]) -> Optional[str]:
+        """_start_on, judged on its own hold of the connection: taken, the
+        spot it resumes is spent (_spent) — the one it read (`spends`), any
+        when it read none — before a start dropped meanwhile could put one
+        back; given up on — HQPlayer answered nothing past the build limit —
+        whether it took it is judged at HQPlayer's next answer
+        (_judge_start). Returns HQPlayer's refusal, or None."""
+        try:
+            refusal = self._start_on(h, entry, position, fallback=fallback)
+        except Building:
+            if h.timed_out:
+                self._given_up(target)
+            raise
+        if refusal is None:
+            self._spent(spends)
+        elif h.timed_out:
+            self._given_up(target)
+        return refusal
 
     @staticmethod
     def _start_on(h: HQPlayerClient, entry: Entry, position: int, *,
@@ -2393,16 +2780,18 @@ class HqpBackend(PlayerBackend):
         resume — its state read first, on the same hold of the connection: an
         HQPlayer that plays on is left alone (False, and no attempt). On a
         playlist that is no mirror the queue's slot names no entry of
-        HQPlayer's: the resume is a play press there (_press). Returns
+        HQPlayer's: the resume is a start of a play press there (_press),
+        carrying `item` — a newer DSP change supersedes it as it would here —
+        and the press starts it (False: nothing resumed yet). Returns
         whether it resumed."""
         index = self._queue.index_of(entry)
         if index is None:
             return False            # its track left the queue meanwhile
-        mirrored = self._mirror == "step"
+        mirrored = self._mirror == "step" and self._pressed is None
         start = self._start_point(index, position)
         if start is None:
             return False            # nothing from it on is on this HQPlayer
-        at, second = start
+        at, second, target = start
 
         def resume(h: HQPlayerClient) -> Optional[bool]:
             now = h.get_status()
@@ -2411,17 +2800,23 @@ class HqpBackend(PlayerBackend):
             if not mirrored:
                 return None         # the press, off this hold of the connection
             with self._intent("resume", slot=at.n):
-                return self._started(at, self._start_on(h, at, second, fallback=True))
+                return self._started(at, self._start_held(h, at, second, target, fallback=True,
+                                                          spends=None))
         ok = self._cmd(resume, item=item)
         if ok is None:
-            return self._press(entry, position)
-        if ok:
-            self._take_spot()
+            self._press(entry, position, item=item)
+            return False
         self.poke()
         return ok
 
     def seek(self, seconds: int) -> bool:
-        ok = self._command("Seek", lambda h: h.seek(int(seconds)))
+        # While a play press runs a seek is numbered as it comes — a newer
+        # start made after it stays the newer word (a seek supersedes the
+        # starts made before it)
+        with self._press_lock:
+            early = self._pressed is not None and self._link.accept("transport")
+        ok = self._command("Seek", lambda h: h.seek(int(seconds)),
+                           intent=None if early else "transport")
         self.poke()
         return ok
 
@@ -2620,7 +3015,7 @@ class HqpBackend(PlayerBackend):
             self.lose_mirror("HQPlayer's playlist did not follow the re-bound slots")
 
     def _rebuild(self, items: list, target: QueueItem, position: int, *, resume: bool,
-                 what: str, patient: bool = False, pressed: Optional[int] = None) -> bool:
+                 what: str, patient: bool = False) -> bool:
         """Clear and reload HQPlayer's playlist with `items` — the queue, or
         a new order of it — for `target` at `position`: the ~300 ms gap of
         every change that needs an insert the protocol lacks, as a rebuild
@@ -2631,17 +3026,15 @@ class HqpBackend(PlayerBackend):
         playing, silently appending instead, which would double every track
         and land select_track on the wrong slot. The URIs are made before
         the sequence (_uri_for may transcode). With `resume` it starts at
-        `target` once the queue lock is let go (_owe_start: the play press's
-        own start, _start_at), wherever the target is by then — `patient` for
-        background work, whose failure is only logged; a start that does not
-        go leaves its spot to the play press. Not resuming it lands nowhere:
-        SelectTrack would start a stopped HQPlayer (select), and the play
-        press resumes `target` at `position`. The second holds only for the
-        track it was taken on: a target HQPlayer does not hold, or refused,
-        gives way to the next track it took, at 0 s. A play press's rebuild
-        (`pressed`, the press's intent) takes no intent of its own: its start
-        is the press's. Under the queue lock. Returns whether HQPlayer holds
-        the queue now — then it is in step."""
+        `target` once the queue lock is let go (_owe_start, _start_at),
+        wherever the target is by then — `patient` for background work,
+        whose failure is only logged; a start that does not go leaves its
+        spot to the play press. Not resuming it lands nowhere: SelectTrack
+        would start a stopped HQPlayer (select), and the play press resumes
+        `target` at `position`. The second holds only for the track it was
+        taken on: a target HQPlayer does not hold, or refused, gives way to
+        the next track it took, at 0 s. Under the queue lock. Returns
+        whether HQPlayer holds the queue now — then it is in step."""
         self._ways_in()
         self._refusals = []
         layout = self._layout(items)
@@ -2651,11 +3044,7 @@ class HqpBackend(PlayerBackend):
         first = next((i for i, it in enumerate(layout.handed, 1) if id(it) in onward), 1)
         att = self._watch("rebuild", slot=first, uris=uris) if resume else None
         with self._steps(att):
-            with self._link.command(None if pressed is not None else "rebuild") as n:
-                self._check_attached()
-                _hqp_safe(self._link, lambda c: c.stop(), "Stop")
-                taken, unsent = _add_uris_with_retry(self._link, uris, clear_first=True)
-            n = pressed if pressed is not None else n
+            taken, unsent, n = self._afresh(uris, "rebuild")
             took = {id(it) for it, t in zip(layout.handed, taken) if t}
             begin = next((it for it in from_target if id(it) in took), None)
             at = position if begin is target else 0
@@ -2673,12 +3062,15 @@ class HqpBackend(PlayerBackend):
         self._in_step()
         return True
 
-    def _start_item(self, item: QueueItem, position: int, start: Item) -> bool:
-        """The start of a rebuild, at `item`'s slot as it stands now."""
+    def _start_item(self, item: QueueItem, position: int, start: Item,
+                    held: Optional[tuple] = None) -> bool:
+        """A start owed for later — a rebuild's, a play press's — at `item`'s
+        slot as it stands now, spending the spot it read (`held`; any when
+        none)."""
         index = self._queue.index_of(item)
         if index is None:
             raise Dropped("its track left the queue")
-        return self._start_at(index, position, fallback=True, item=start)
+        return self._start_at(index, position, fallback=True, item=start, spends=held)
 
     def queue_replace(self, items: list, *, play: bool, probe_first: bool = False) -> list:
         """HQPlayer's playlist becomes what it holds of `items` — a new queue

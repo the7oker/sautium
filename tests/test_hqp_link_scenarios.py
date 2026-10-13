@@ -150,6 +150,9 @@ class _Elsewhere:
     def refusal(self) -> str:
         return ""
 
+    def pressing(self) -> None:
+        return None
+
     def queue_replace(self, items, *, play, probe_first=False) -> list:
         return list(items)
 

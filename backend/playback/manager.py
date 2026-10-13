@@ -25,7 +25,7 @@ import threading
 import time
 from contextlib import contextmanager
 from dataclasses import asdict
-from typing import Callable, Iterator, Optional
+from typing import Any, Callable, Iterator, Optional
 
 import psycopg2
 import psycopg2.extensions
@@ -190,24 +190,21 @@ class PlaybackManager:
         preference, not a live connection. Called at the start of every
         playback session — a dead or never-attached output is (re)attached
         from the persisted settings right here; pause/stop/volume keep
-        using backend() and never wake a device. The queue lock first, in
-        the order the hold takes both: an attach mirrors the queue with no
-        mutation in flight, and a play press waits for one to commit."""
+        using backend() and never wake a device. An output believed healthy
+        is only probed: no lock, so a play intent never waits for a queue
+        edit or a play press's rebuild. An attach takes the queue lock
+        first, in the order the hold takes both: it mirrors the queue with
+        no mutation in flight."""
+        self._refuse_if_held()
+        b = self._active
+        if b is not None and b.healthy():
+            self._probe(b)
+            return b
         with self._mutate_lock, self._ensure_lock:
             self._refuse_if_held()
             b = self._active
-            # Fast offline-fail: a powered-off DLNA renderer must 503 within
-            # the probe window with a clear message, not after stacked SOAP +
-            # re-attach timeouts (34s, live) — and the first attempt must not
-            # silently accept (fire-and-forget commands return 200 while the
-            # failure is async). A dozing-but-networked renderer passes the
-            # probe: its window is sized for a sleeping radio.
-            if b is not None and not b.reachable():
-                b._gone = True
-                hint = getattr(b, "offline_hint",
-                               "turn it on, or pick another output in "
-                               "Settings → Audio output")
-                raise ConnectionError(f"'{b.label}' is offline — {hint}")
+            if b is not None:
+                self._probe(b)
             if b is not None and b.healthy():
                 return b
             from routers.settings import _read
@@ -233,6 +230,21 @@ class PlaybackManager:
                           exclusive=bool(_read("output.local_exclusive")),
                           renderer=_read("output.dlna_renderer"))
             return self.backend()
+
+    @staticmethod
+    def _probe(b: PlayerBackend) -> None:
+        """Fast offline-fail: a powered-off DLNA renderer must 503 within
+        the probe window with a clear message, not after stacked SOAP +
+        re-attach timeouts (34s, live) — and the first attempt must not
+        silently accept (fire-and-forget commands return 200 while the
+        failure is async). A dozing-but-networked renderer passes the
+        probe: its window is sized for a sleeping radio."""
+        if not b.reachable():
+            b._gone = True
+            hint = getattr(b, "offline_hint",
+                           "turn it on, or pick another output in "
+                           "Settings → Audio output")
+            raise ConnectionError(f"'{b.label}' is offline — {hint}")
 
     @property
     def active(self) -> Optional[PlayerBackend]:
@@ -949,11 +961,16 @@ class PlaybackManager:
             step()
         backend.queue_start()
 
-    def jump(self, index: int) -> bool:
-        # select() loads AND plays the slot (PlayerBackend contract). The
-        # play() that used to follow raced the DLNA load: it resumed the
-        # OLD track for the seconds the new one took to buffer.
-        return self.ensure_active().select(index)
+    def mirror_locked(self, backend: PlayerBackend, step: Callable[[], Any]) -> Any:
+        """A part of an output's own work that reads or writes the queue as
+        it stands — a play press's first and last steps: under the queue
+        lock, while `backend` is still the active output. Returns what the
+        step returned, None when it is not; any start it leaves is the
+        caller's to send (PlayerBackend.queue_start)."""
+        with self._mutation():
+            if self._active is not backend:
+                return None
+            return step()
 
     def clear_for_radio(self, archive: Callable[[], None]) -> int:
         """Radio start: clear everything after the playing slot (the seed

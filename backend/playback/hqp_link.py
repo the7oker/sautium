@@ -154,10 +154,14 @@ class NotAnswering(ConnectionError):
 # — a new queue (replace, radio clear); rebuild — HQPlayer's playlist taken
 # afresh (a reorder, a re-bind); start — a start-like item made (a start or a
 # resume); dsp — a DSP change; switch — the output switched away from this
-# link; attach — this link attached again.
+# link; attach — this link attached again. A play press's own rebuild
+# ("press") goes whatever the person says meanwhile — their words decide
+# only which start follows it — and only a new queue or a switch away drops
+# it.
 SUPERSEDED_BY = {
     "start": frozenset({"transport", "queue", "rebuild", "start", "switch"}),
     "resume": frozenset({"transport", "queue", "rebuild", "start", "dsp", "switch"}),
+    "press": frozenset({"queue", "switch"}),
     "late_stop": frozenset({"attach"}),
     "dsp_knob": frozenset({"dsp", "switch"}),
 }
@@ -362,14 +366,17 @@ class _CommandLock:
     is refused at once (Building, NotAnswering), never parked for minutes
     behind the command that met it; one already parked is woken and refused
     when it begins. A command behind a short silence (a Stop's teardown)
-    waits for it. A detach goes on without the lock while a build holds it
-    (detaching)."""
+    waits for it. A detach goes on without the lock while a build, a
+    teardown or the Stop a switch away owes holds it (detaching)."""
 
     def __init__(self, link: "HqpLink") -> None:
         self._link = link
         self._cond = threading.Condition()
         self._held = False
         self.owner: Optional[int] = None
+        # Held by the Stop a switch away owes (_LateStop): the link's own
+        # work, which outlives the backend — a detach never waits for it
+        self._late = False
         # Who waits for it, in the order they came: a Pause pressed while a
         # play press rebuilds goes before the start that rebuild leads to
         self._waiting: deque = deque()
@@ -385,6 +392,7 @@ class _CommandLock:
                     if not self._held and self._waiting[0] == me:
                         self._held = True
                         self.owner = me
+                        self._late = getattr(self._link._local, "late", False)
                         return self
                     self._cond.wait()
             finally:
@@ -395,6 +403,7 @@ class _CommandLock:
         with self._cond:
             self._held = False
             self.owner = None
+            self._late = False
             self._cond.notify_all()
         return False
 
@@ -406,12 +415,17 @@ class _CommandLock:
     def detaching(self):
         """For a backend's detach — an output switch, the benchmark's hold,
         the app stopping: the lock once the command on its way is answered,
-        never a build's wait. With a build on, or one that begins while this
-        waits, the detach goes on without the lock: the build stays watched,
-        and the items the sequence waiting it out serves are superseded by
-        the switch (SUPERSEDED_BY)."""
+        never a build's wait, nor a teardown's (a Stop or a PlaylistClear of
+        ours HQPlayer answers once its output is down), nor the Stop a switch
+        away owes. With a build on, or one that begins while this waits, a
+        request in a teardown's silence, or that Stop holding the lock — its
+        Status and its answer — the detach goes on without the lock: the
+        build stays watched, the Stop is the link's own work, and the items
+        the sequence waiting it out serves are superseded by the switch
+        (SUPERSEDED_BY)."""
         with self._cond:
-            while (self._held and self._link.build.silent() is None
+            while (self._held and not self._late and self._link.teardown is None
+                   and self._link.build.silent() is None
                    and self._link.state != "closed"):
                 self._cond.wait()
             took = not self._held
@@ -537,6 +551,10 @@ class HqpLink:
         # wait: people's commands are refused, questions go on, and its next
         # answer ends it
         self.silent_since: Optional[float] = None
+        # The command whose short silence the request on the connection may
+        # be in (a Stop's teardown — SHORT_SILENCE_COMMANDS): no detach waits
+        # for it
+        self.teardown: Optional[str] = None
         self._local = threading.local()
         self._clock = 0
         self._latest: Dict[str, int] = {}
@@ -637,13 +655,17 @@ class HqpLink:
         when a hand-over left it to this thread: then the command that handed
         it over is returned, whose silence may fall on this request. Refused
         once the wait turns into a build (past the build limit questions go
-        again: HQPlayer may be back)."""
+        again: HQPlayer may be back), or its question block is no longer
+        wanted (asking's `until`)."""
         me = threading.get_ident()
         with self._conn:
             self._waiting.append(me)
             try:
                 while True:
                     self._check_state()
+                    until = getattr(self._local, "until", None)
+                    if until is not None and until():
+                        raise Dropped("its question is no longer asked")
                     state = self.build.building()
                     if state is not None:
                         raise Building(self, state)
@@ -751,12 +773,26 @@ class HqpLink:
         self._poke()
 
     @contextmanager
-    def asking(self):
+    def asking(self, until: Optional[Callable[[], bool]] = None):
         """A block of this thread's questions — the poller's tick, the
         HQPlayer screen's reads, a probe: each takes the connection for
-        itself, and one HQPlayer leaves unanswered ends the block."""
-        with self._scope():
-            yield self.client
+        itself, and one HQPlayer leaves unanswered ends the block. `until`:
+        a question still waiting for the connection once it says so is not
+        asked (Dropped) — a detached backend's poller, woken by wake_askers,
+        never waits behind the Stop a switch away owes."""
+        outer = getattr(self._local, "until", None)
+        self._local.until = until
+        try:
+            with self._scope():
+                yield self.client
+        finally:
+            self._local.until = outer
+
+    def wake_askers(self) -> None:
+        """Every request waiting for the connection looks again whether it
+        is still wanted (asking's `until`)."""
+        with self._conn:
+            self._conn.notify_all()
 
     @contextmanager
     def request(self, command: str):
@@ -797,6 +833,9 @@ class HqpLink:
             c.timed_out = False
             short = command if command in SHORT_SILENCE_COMMANDS else (
                 after if after in SHORT_SILENCE_COMMANDS else None)
+            if short is not None:
+                self.teardown = short
+                self.lock.wake()            # a detach waiting for the lock goes on
             if after is not None:
                 c.inherit(STOP_ANSWER_S if after in SHORT_SILENCE_COMMANDS else BUILD_LIMIT_S,
                           watched=after not in SHORT_SILENCE_COMMANDS)
@@ -811,6 +850,7 @@ class HqpLink:
                 if short is not None:
                     self._not_answering(short)
         finally:
+            self.teardown = None
             self._give(hand_over)
         if hand_over is not None and scope is None:
             self._end_scope()

@@ -358,17 +358,22 @@ comes after the control port answers again — so neither can end the wait.
   event), never a sleep. The node stopping ends a filler; a file the output
   refused is not offered again.
 - **Output switch, address change.** A switch away stops HQPlayer if it
-  plays or pauses an entry of what it was given — the queue as it stood at
-  the switch, never as it is once the Stop goes; another controller's entry
-  is left playing. The Stop is the link's late Stop, on its own thread, which
-  outlives the backend that owed it: its Status is held until HQPlayer
-  answers — through a build it is in, or a silence no build of ours
-  explains, up to the build limit, nothing else sent meanwhile — and the
-  switch waits for its first outcome (the Stop sent, or not needed) a second
-  at most: past it the answer says HQPlayer builds or is not answering and
-  will be stopped once it answers, and the new output starts. A lost mirror
-  owes the Stop too: it is no health matter. Picking HQPlayer again
-  supersedes it — the pick registers its attach before anything is released
+  plays or pauses an entry this node gave it — one the hand-over ledger
+  names (a slot removed since from a playlist that is no mirror is still
+  ours), or a slot of the queue as it stood at the switch, never as it is
+  once the Stop goes; another controller's entry is left playing. The Stop
+  is the link's late Stop, on its own thread, which outlives the backend
+  that owed it: its Status is held until HQPlayer answers — through a build
+  it is in, or a silence no build of ours explains, up to the build limit,
+  nothing else sent meanwhile — and the switch waits for its first outcome
+  (the Stop sent, or not needed) a second at most: past it the answer says
+  HQPlayer builds or is not answering and will be stopped once it answers,
+  and the new output starts. The detach waits for no teardown — that Stop's
+  answer, or a person's Stop still tearing HQPlayer's output down — and not
+  for the old poller: a question of its still waiting for the connection is
+  not asked, and one HQPlayer has yet to answer is not waited for. A lost mirror owes the Stop too: it
+  is no health matter. Picking HQPlayer again supersedes it — the picker
+  and an address set back register the attach before anything is released
   — and it is never sent while the benchmark drives HQPlayer, nor by a
   stopping node, nor after a connection that broke. Picking the HQPlayer
   already driven again (any alias) changes nothing in playback — no detach,
@@ -389,11 +394,14 @@ comes after the control port answers again — so neither can end the wait.
   rest (another DSP change, a switch away) ends the change there: the knobs
   after it are reported as not sent. Built, a change made while HQPlayer played
   an entry of ours resumes that queue track at its second only if HQPlayer
-  came back stopped (6.2.3 on Windows did; 6.2.4 plays on) — read again right
-  before the resume, on the same hold of the connection, after any build
-  begun meanwhile; a newer intent or another queue drops the resume, another
-  controller's entry gets none, and on a playlist that is no mirror the
-  resume is a play press (the queue taken afresh, that track started).
+  came back stopped (6.2.3 on Windows did; 6.2.4 plays on) — the entry read
+  on the change's own hold, before its first knob, against the queue as it
+  is then (an old queue's entry while a replace still adds is none of the
+  queue's), HQPlayer's state read again right before the resume, on the
+  same hold of the connection, after any build begun meanwhile; a newer
+  intent or another queue drops the resume, another controller's entry gets
+  none, and on a playlist that is no mirror the resume is a start of a play
+  press (below), which a newer DSP change still drops.
 - **A start is a build.** Play waits for its own answer; a SelectTrack starts
   a stopped HQPlayer by itself (its log: "GoTo 1", then "Play (1/0)"), so a
   slot is resumed as SelectTrack, then Seek — landing in the start's opening
@@ -406,7 +414,8 @@ comes after the control port answers again — so neither can end the wait.
   meets someone else's build there is not refused — the queue was
   committed: it waits for the build's end on the link, behind the answer; one
   a newer intent drops (a Pause first) leaves its slot and second as the
-  spot, for the play press. A paused
+  spot, for the play press — unless a start was taken or a spot set since it
+  was owed (the spot's generation). A paused
   HQPlayer whose playlist is rebuilt is left stopped at its spot, never
   played to be paused again: the status names the spot's slot and carries
   `resume`, Now Playing says "Stopped at m:ss — Play resumes here", the next
@@ -415,10 +424,13 @@ comes after the control port answers again — so neither can end the wait.
   before it moves its index, an append after it changes nothing, and it goes
   with its item. Stopped there, Next and Previous only move it a slot, to
   its start — no command, no sound; a tap on a track plays that track. A
-  start taken spends it; a command refused, as busy or by HQPlayer, leaves
-  it. Back on HQPlayer after another output, the slot the queue was on is a
-  spot when the attach found HQPlayer stopped; one that plays keeps its
-  own place.
+  start taken spends it — spent under the command lock the start held, so a
+  start dropped meanwhile puts none back; one HQPlayer answered past the
+  build limit, given up on, is judged at HQPlayer's first answer since:
+  playing or paused on its track, it was taken after all. A command refused,
+  as busy or by HQPlayer, leaves it. Back on HQPlayer after another output,
+  the slot the queue was on is a spot when the attach found HQPlayer
+  stopped; one that plays keeps its own place.
 - **The mirror's state** (`HqpBackend._mirror`): in step; a tail mirror;
   lost; drifted.
   - **Lost** when a build ran out or HQPlayer went away under a queue edit,
@@ -445,13 +457,27 @@ comes after the control port answers again — so neither can end the wait.
     alone until the play press re-mirrors.
   - **The play press** on a playlist that is no mirror: Play on a pause
     only resumes (the tail behind the entry read is repaired as above);
-    Play from a stop, a tap, Next or Previous while it plays rebuild
-    HQPlayer's playlist from the queue and start at the slot — in the
-    background, the route answered at once and the status saying
-    "HQPlayer is taking the queue again"; a second press joins the first, a
-    Pause meanwhile drops its start; the second applies only to the same
-    track. Next and Previous at a stopped spot only move it; at either end
-    of the queue they send nothing.
+    Play from a stop, a tap, Next or Previous while it plays hand HQPlayer
+    the queue afresh — once — and start a track, in the background: the
+    route answers at once, naming the track it will start (`starts`), and
+    the status says "HQPlayer is taking the queue again". The queue lock is
+    held only to read the queue and to judge what HQPlayer took, never
+    through the hand-over: no route waits for it. Every play intent while it
+    runs is a start of its own, numbered as it comes, and at its end the
+    newest one no newer intent superseded goes: a Play starts the newest
+    target again, a tap its track, Next and Previous count from the newest
+    target; the second applies only to the press's own spot, every other
+    target starts at 0 s. A Pause or a Stop drops the start and the
+    hand-over still completes — HQPlayer stopped at the target, the next
+    Play starting there without one; a press that found the playlist the
+    queue's again (a reconverge got there first) hands nothing over and
+    stops HQPlayer for a Pause or a Stop made meanwhile. A new queue
+    supersedes the press whole. A queue edit meanwhile is the queue's: an
+    append follows behind what HQPlayer took (in step); anything else leaves
+    the playlist drifted, the start going at HQPlayer's own entry for the
+    target — a target removed starts the next track still queued. Next and
+    Previous at a stopped spot only move it; at either end of the queue they
+    send nothing.
 - **Gaps** (since 2026-10-13). HQPlayer's playlist is the queue without its
   gaps, in the same order: a gap is a slot this HQPlayer does not hold —
   nothing it can open (a file held only in another HQPlayer's library, one

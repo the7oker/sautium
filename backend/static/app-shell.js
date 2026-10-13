@@ -8837,7 +8837,9 @@
     } else if (!s.connected) {
       hint = 'HQPlayer is not answering — a run can start once it does.';
     } else if (buildWaits) {
-      hint = 'HQPlayer is building the filter — a run can start once it is done.';
+      hint = s.building.not_answering
+        ? 'HQPlayer is not answering — a run can start once it does.'
+        : 'HQPlayer is building the filter — a run can start once it is done.';
     } else if (est && est.points <= 2) {
       hint = `Every ${escapeHtml(est.mode)} setting is measured on this HQPlayer — a run only checks your own setting again.`;
     } else if (est) {

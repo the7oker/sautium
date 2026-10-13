@@ -689,6 +689,27 @@ implementation details live in the code, DB and git history.
   the build limit, or `STOP_ANSWER_S`), and past `STOP_ANSWER_S` HQPlayer is
   not answering before the connection goes on. Lesson: a test of who closes
   what is red every time where a loop of the symptom is red now and then.
+- **The play press: the newest word wins** (2026-10-13). A play press held
+  the queue lock through its whole hand-over, and every play route took that
+  lock first: a second Play, a tap or Next waited out the adds, a Play that
+  came while one was pending joined it without a word of its own (Play,
+  Pause, Play ended stopped; a tap played the first press's track), and a
+  queue edit waited too. The press now reads the queue under the lock, hands
+  it over off it, and judges what HQPlayer took under it again; a route
+  takes the queue lock only to attach an output. Every play intent made
+  while it runs is a start of its own, numbered as it comes, and the newest
+  one no newer intent superseded goes at its end; a Pause or a Stop drops
+  the start while the hand-over completes. On the way: a start spends the
+  spot under the command lock, and a start dropped later puts its spot back
+  only if nothing moved it since (a dropped press start re-armed a spot under
+  a playing track); a start given up on past the build limit and then taken
+  by HQPlayer is judged at its next answer; a DSP change reads the entry it
+  would resume on its own hold (it read the old queue's while a replace
+  still added, and its resume cancelled the new album's Play); the detach
+  waits for no teardown (the owed Stop's, a person's Stop just before) and
+  not for the old poller.
+  Lesson: an intent that joins pending work without a number of its own is
+  not the newest word — it is no word at all.
 - **Stop-clear-add-select-play sequence** for `play_track`/`play_album`. Without
   explicit stop, HQPlayer occasionally started the wrong track from the
   existing queue.

@@ -2037,6 +2037,10 @@ def put_hqplayer_prefs(req: HqplayerPrefs) -> Dict[str, Any]:
                              and getattr(manager.active, "link", None) is before)):
                 from routers.player import _hqp_configured, stop_status_poller
                 if _hqp_configured():
+                    # Registered before anything is released, as the picker
+                    # does: a Stop an earlier switch away still owes the
+                    # HQPlayer at this address is superseded
+                    hqp_link.selected().accept("attach")
                     manager.activate(None, stop_old=False)
                     try:
                         manager.activate("hqplayer")
