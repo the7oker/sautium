@@ -13,6 +13,7 @@ import threading
 import time
 import traceback
 import types
+from contextlib import contextmanager
 from pathlib import Path
 from xml.sax.saxutils import escape
 
@@ -4310,6 +4311,10 @@ class _Away:
     def queue_abandon(self):
         pass
 
+    @contextmanager
+    def new_queue(self):
+        yield
+
     def lose_mirror(self, why):
         pass
 
@@ -5895,22 +5900,6 @@ def test_queue_edits_during_a_rebuild_never_wait_for_it_and_an_append_follows(fa
     assert fake.state == int(PlaybackState.PLAYING) and fake.track == 1
 
 
-def test_a_seek_during_a_rebuild_is_numbered_as_it_comes(fake, output):
-    """A Seek while the press rebuilds supersedes the start made before it
-    — and nothing made after it: Play, Seek, Play plays."""
-    mgr, b = output
-    _pressing_slowly(mgr, b, fake)
-    assert b.play()
-    _adding(fake)
-    seek = threading.Thread(target=b.seek, args=(20,), daemon=True)
-    seek.start()
-    assert _wait(lambda: _link().lock._waiting, timeout=5)   # behind the rebuild's adds
-    assert b.play()
-    seek.join(10)
-    _settled()
-    assert fake.state == int(PlaybackState.PLAYING) and fake.track == 1
-
-
 def test_a_pause_while_a_press_finds_the_mirror_again_stops_hqplayer_there(fake, output):
     """A press that finds HQPlayer's playlist the queue's again (a
     reconverge got there first) rebuilds nothing; a Pause made meanwhile is
@@ -6741,3 +6730,505 @@ def test_an_entry_not_ours_is_judged_at_once_only_once(fake, output, monkeypatch
     n = len(fake.commands)
     assert _wait(lambda: sum(1 for c, _ in fake.commands[n:] if c == "Status") >= 6, timeout=10)
     assert judged == ["file:///Elsewhere/theirs.flac"]
+
+
+# -- The play press, again (2026-10-13) --------------------------------------------------
+# Only a live press takes the words made meanwhile; a new queue cuts its hand-over
+# short; a Seek moves the newest word's second; the rebuild's spot, the judge of a
+# start given up on, what is ours at a switch, the gate and the detach around it.
+
+def _b_album():
+    return [_item(f"E:/Music/B/0{i}.flac", 10 + i) for i in range(1, 4)]
+
+
+def _start_sent(fake, n=0) -> list:
+    return [(c, a) for c, a in fake.commands[n:] if c in ("SelectTrack", "Seek", "Play")]
+
+
+def test_a_play_while_a_new_queue_loads_over_a_press_plays_that_queue(fake, output, monkeypatch):
+    """Play presses a press (HQPlayer takes the queue again); the person picks
+    an album and, while it loads, presses Play again: the newest word is Play
+    on the new queue — HQPlayer plays the album."""
+    mgr, b = output
+    player_router = _routes_on(monkeypatch, mgr)
+    _pressing_slowly(mgr, b, fake, add=0.4)
+    assert _quick(player_router.play)["ok"]
+    _adding(fake)
+    loading = threading.Thread(target=lambda: mgr.replace_queue(_b_album(), play=True),
+                               daemon=True)
+    loading.start()
+    assert _wait(lambda: any(c == "PlaylistAdd" and "B/01" in a.get("uri", "")
+                             for c, a in fake.commands), timeout=10)
+    said = player_router.play()
+    assert "starts" not in said
+    loading.join(15)
+    _settled()
+    assert fake.playlist == [f"file:///E:/Music/B/0{i}.flac" for i in range(1, 4)]
+    assert fake.state == int(PlaybackState.PLAYING) and fake.track == 1
+
+
+def test_a_pause_after_a_radio_overtook_a_pending_press_pauses(fake, output):
+    """A tap is a press still waiting to begin when a radio starts (a new
+    queue, the seed playing on): the press leads nowhere now, and the
+    person's Pause is no word to it — it pauses HQPlayer."""
+    mgr, b = output
+    b.lose_mirror("HQPlayer refused all 3 tracks of a new queue", by="refusal")
+    with mgr._mutate_lock:                            # the radio start holds the queue lock
+        assert b.select(3)                            # the tap: a press, waiting to begin
+        mgr.clear_for_radio(lambda: None)             # the radio: a new queue
+        assert b.pause()
+    _settled()
+    assert fake.state == int(PlaybackState.PAUSED)
+    assert "Pause" in [c for c, _ in fake.commands]
+
+
+def test_a_play_during_a_reorders_rebuild_leaves_no_spot_behind_what_plays(
+        fake, output, monkeypatch):
+    """Track 1 plays at 0:42; a new order needs a rebuild (track 1 moves);
+    the person presses Play while HQPlayer takes the new order: a start
+    taken, it spends the spot — the rebuild's own start, dropped by it, puts
+    none back under what plays, and a later Pause and Play only pause and
+    resume."""
+    mgr, b = output
+    player_router = _routes_on(monkeypatch, mgr)
+    fake.service["PlaylistAdd"] = 0.4
+    fake.commands.clear()
+    reorder = threading.Thread(target=lambda: player_router.reorder(
+        player_router.ReorderRequest(order=["track-2", "track-1", "track-3"])), daemon=True)
+    reorder.start()
+    assert _wait(lambda: any(c == "PlaylistAdd" and a.get("clear") == "1"
+                             for c, a in fake.commands), timeout=5)
+    assert b.play()
+    reorder.join(10)
+    _settled()
+    assert fake.state == int(PlaybackState.PLAYING)
+    assert b._spot is None
+    assert _wait(lambda: mgr._latest_status.get("state") == "playing")
+    assert b.pause()
+    assert _wait(lambda: mgr._latest_status.get("state") == "paused")
+    n = len(fake.commands)
+    assert b.play()
+    assert _start_sent(fake, n) == [("Play", {})]
+
+
+def test_a_play_taken_before_the_rebuild_owes_its_start_leaves_no_spot_behind_it(
+        fake, output, monkeypatch):
+    """The same Play, taken in the moment between the rebuild's last add and
+    the start it owes (the command lock is let go first): the spot that
+    start carries is not put back under what plays either — a start taken
+    since the rebuild began counts, not only one since its start was owed."""
+    mgr, b = output
+    player_router = _routes_on(monkeypatch, mgr)
+    fake.service["PlaylistAdd"] = 0.4
+    fake.commands.clear()
+    began, owe, waited = b._spot_gen, b._owe_start, []
+
+    def owed_after_the_play(*args, **kwargs):
+        waited.append(_wait(lambda: b._spot_gen != began, timeout=5))
+        owe(*args, **kwargs)
+    monkeypatch.setattr(b, "_owe_start", owed_after_the_play)
+    reorder = threading.Thread(target=lambda: player_router.reorder(
+        player_router.ReorderRequest(order=["track-2", "track-1", "track-3"])), daemon=True)
+    reorder.start()
+    assert _wait(lambda: any(c == "PlaylistAdd" and a.get("clear") == "1"
+                             for c, a in fake.commands), timeout=5)
+    assert b.play()
+    reorder.join(10)
+    _settled()
+    assert waited == [True]                          # the Play was taken first
+    assert fake.state == int(PlaybackState.PLAYING)
+    assert b._spot is None
+
+
+def test_a_new_queue_cuts_a_press_hand_over_short(fake, output):
+    """A replace while a press hands HQPlayer eight tracks: the new queue
+    is the newest word as it is asked — the old queue's remaining adds do not
+    go, and the album route waits for its own."""
+    mgr, b = output
+    _pressing_slowly(mgr, b, fake, n=8, add=0.4)
+    assert b.play()
+    _adding(fake)
+    n = len(fake.commands)
+    t0 = time.monotonic()
+    mgr.replace_queue(_b_album(), play=True)
+    took = time.monotonic() - t0
+    _settled()
+    old = [a.get("uri") for c, a in fake.commands[n:] if c == "PlaylistAdd" and "/A/" in a.get("uri", "")]
+    assert len(old) <= 1, old
+    assert took < 0.4 * 3 + 1.0, took
+    assert fake.state == int(PlaybackState.PLAYING)
+    assert fake.playlist == [f"file:///E:/Music/B/0{i}.flac" for i in range(1, 4)]
+
+
+def test_a_replace_that_does_not_commit_leaves_no_mirror_in_step(fake, output):
+    """A replace whose session rotation fails (nothing commits) hands
+    HQPlayer its album over a press's hand-over: the press's end does not
+    call that playlist the queue's — nothing starts on it, and a tap then
+    plays the queue's track, never one of the album the queue does not
+    hold."""
+    mgr, b = output
+    _pressing_slowly(mgr, b, fake, add=0.8)
+    adds = sum(1 for _, c in fake.arrivals if c == "PlaylistAdd")
+    assert b.play()
+    # Its last add with HQPlayer, not answered yet: the replace numbered now
+    # drops nothing of the hand-over, and the press ends after the replace
+    assert _wait(lambda: sum(1 for _, c in fake.arrivals if c == "PlaylistAdd") == adds + 3,
+                 timeout=5)
+
+    def gone():
+        raise RuntimeError("the database is away")
+    failed = []
+
+    def replace():
+        try:
+            mgr.replace_queue(_b_album(), play=True, archive=gone)
+        except RuntimeError as e:
+            failed.append(e)
+    replacing = threading.Thread(target=replace, daemon=True)
+    replacing.start()
+    replacing.join(15)
+    assert failed
+    _settled()
+    assert [it.track_id for it in mgr.queue.snapshot()] == ["track-1", "track-2", "track-3"]
+    assert _start_sent(fake) == []
+    assert b.select(2)
+    assert _wait(lambda: fake.state == int(PlaybackState.PLAYING)
+                 and fake.playlist == [f"file:///E:/Music/A/0{i}.flac" for i in range(1, 4)]
+                 and fake.track == 2, timeout=10)
+
+
+def _presses_held(monkeypatch, b, begin: threading.Event) -> None:
+    """Every play press of `b` begun from here on waits for `begin` before
+    its first step: registered, its hand-over not begun, while the test goes
+    on."""
+    once = b._press_once
+
+    def held(press):
+        begin.wait(20)
+        once(press)
+    monkeypatch.setattr(b, "_press_once", held)
+
+
+def test_an_overtaken_press_ends_leaving_the_next_one_to_run(fake, output, monkeypatch):
+    """A replace that does not commit overtakes a press near the end of its
+    hand-over, and the person taps a track while the replace runs: the tap
+    is a press of its own. The overtaken press's end, once the replace is
+    over, leaves the tap's press running — it says what it starts, and
+    HQPlayer plays the tapped track of the queue."""
+    mgr, b = output
+    _pressing_slowly(mgr, b, fake, add=0.8)
+    adds = sum(1 for _, c in fake.arrivals if c == "PlaylistAdd")
+    assert b.play()
+    first = next(t for t in threading.enumerate() if t.name == "hqp-press")
+    begin = threading.Event()
+    _presses_held(monkeypatch, b, begin)             # the tap's press waits to begin
+    assert _wait(lambda: sum(1 for _, c in fake.arrivals if c == "PlaylistAdd") == adds + 3,
+                 timeout=5)
+    overtaken = b._pressed
+
+    def gone():
+        raise RuntimeError("the database is away")
+    failed = []
+
+    def replace():
+        try:
+            mgr.replace_queue(_b_album(), play=True, archive=gone)
+        except RuntimeError as e:
+            failed.append(e)
+    replacing = threading.Thread(target=replace, daemon=True)
+    try:
+        replacing.start()
+        assert _wait(lambda: b._live(overtaken) is None, timeout=5)
+        assert b.select(2)                          # the tap, while the replace runs
+        replacing.join(15)
+        assert failed
+        first.join(10)
+        assert not first.is_alive()
+        assert b.pressing() == {"index": 2, "track_id": "track-2", "position": 0}
+    finally:
+        begin.set()
+    _settled()
+    assert fake.state == int(PlaybackState.PLAYING)
+    assert fake.playlist == [f"file:///E:/Music/A/0{i}.flac" for i in range(1, 4)]
+    assert fake.track == 2
+
+
+def test_a_start_given_up_and_taken_is_judged_on_a_tick_that_names_its_slot(
+        fake, listens, monkeypatch):
+    """A tap HQPlayer takes only after the node gave it up on, its first
+    answer after it the opening tick (playing, no track named yet): that
+    tick gives no verdict, the next one does — the old spot is spent, and a
+    Pause then a Play only resume."""
+    mgr = _album(3)
+    b = _attach(mgr)
+    try:
+        _stopped_at_spot(fake, mgr, monkeypatch)    # queue [3, 2, 1], the spot track-2 at 150 s
+        assert b._spot is not None and b._spot[0].track_id == "track-2"
+        _limit(monkeypatch, 1.0)
+        fake.build("SelectTrack", 2.0, answer="last")
+        fake.opening = 1                            # the first playing tick names no track
+        assert not b.select(1)                      # given up on: past the build limit
+        assert _wait(lambda: fake.state == int(PlaybackState.PLAYING) and fake.track == 1
+                     and _link().build.state is None)
+        assert _wait(lambda: b._spot is None, timeout=5)
+        assert _wait(lambda: mgr._latest_status.get("state") == "playing")
+        assert b.pause()
+        assert _wait(lambda: mgr._latest_status.get("state") == "paused")
+        fake.commands.clear()
+        assert b.play()
+        assert _wait(lambda: fake.state == int(PlaybackState.PLAYING))
+        assert _start_sent(fake) == [("Play", {})]
+    finally:
+        b.shutdown()
+
+
+def test_a_file_once_handed_and_played_by_another_controller_is_not_stopped_at_a_switch(
+        fake, output, monkeypatch):
+    """The queue was album A, then album B; another controller plays A/02 —
+    a file this node handed HQPlayer before the new queue, not an entry of
+    what it holds now: a switch away stops nothing of another controller's."""
+    mgr, b = output
+    _away(monkeypatch, fake)
+    mgr.replace_queue([_item(f"E:/Music/B/0{i}.flac", 10 + i) for i in range(1, 3)], play=False)
+    with fake._lock:
+        fake.playlist = ["file:///E:/Music/A/02.flac"]
+        fake.track, fake.state, fake.position = 1, int(PlaybackState.PLAYING), 5.0
+    assert _wait(lambda: mgr._latest_status.get("state") == "playing"
+                 and mgr._latest_status.get("track_index") == 0, timeout=5)
+    n = len(fake.arrivals)
+    mgr.activate(None)
+    mgr.activate("browser")
+    assert _wait(lambda: not any(t.name == "hqp-late-stop" for t in threading.enumerate()))
+    assert "Stop" not in [c for _, c in fake.arrivals[n:]]
+
+
+def test_a_hold_begun_during_a_press_hand_over_waits_for_none_of_it(fake, output, monkeypatch):
+    """A benchmark run begins while a press hands HQPlayer eight tracks: the
+    link is lent first, so the hand-over's next add is refused — the hold
+    waits for the request on its way, never the whole hand-over."""
+    mgr, b = output
+    _picker(monkeypatch, fake)
+    _pressing_slowly(mgr, b, fake, n=8, add=0.4)
+    assert b.play()
+    _adding(fake)
+    n = len(fake.commands)
+    t0 = time.monotonic()
+    try:
+        with mgr.hold("benchmark", "The HQPlayer benchmark is running"):
+            took = time.monotonic() - t0
+            adds = [a.get("uri") for c, a in fake.commands[n:] if c == "PlaylistAdd"]
+    finally:
+        if mgr.active is not None and mgr.active is not b:
+            mgr.active.shutdown()
+    _settled()
+    assert took < 1.2 and len(adds) <= 1, (took, adds)
+
+
+def test_a_second_intent_during_a_press_teardown_answers_at_once(fake, output, monkeypatch):
+    """A tap on a lost mirror is a press whose hand-over opens with a Stop
+    HQPlayer answers once its output is down (2.5 s here): a Next made
+    meanwhile is answered at once — the play gate asks no question that
+    would wait behind that teardown."""
+    mgr, b = output
+    player_router = _routes_on(monkeypatch, mgr)
+    b.lose_mirror("HQPlayer refused all 3 tracks of a new queue", by="refusal")
+    fake.service["Stop"] = 2.5
+    n = len(fake.arrivals)
+    assert _quick(lambda: player_router.jump(player_router.JumpRequest(index=2)))["ok"]
+    assert _wait(lambda: "Stop" in [c for _, c in fake.arrivals[n:]], timeout=5)
+    assert _quick(player_router.next_track)["ok"]
+    _settled()
+    assert fake.state == int(PlaybackState.PLAYING) and fake.track == 3
+
+
+def test_a_switch_waits_for_no_stop_waiting_its_turn_on_the_connection(
+        fake, output, monkeypatch):
+    """HQPlayer silent, the poller's question on the connection; the person
+    presses Stop — waiting its turn — and switches the output: the switch
+    goes on at once, the Stop's turn a teardown to come."""
+    mgr, b = output
+    _away(monkeypatch, fake)
+    n = len(fake.arrivals)
+    fake.silence(8.0)
+    assert _wait(lambda: "Status" in [c for _, c in fake.arrivals[n:]], timeout=3)
+    stopper = threading.Thread(target=b.stop, daemon=True)
+    stopper.start()
+    assert _wait(lambda: _link().lock.owner is not None and _link()._waiting, timeout=3)
+    t0 = time.monotonic()
+    mgr.activate(None)
+    took = time.monotonic() - t0
+    mgr.activate("browser")
+    assert took < hl.BUILDING_AFTER_S + 0.4, took
+
+
+def test_a_seek_during_a_rebuild_moves_the_newest_starts_second(fake, output, monkeypatch):
+    """Play, then a Seek to 60 s while the press hands the queue over: the
+    Seek decides nothing about playing — it moves the newest start's second,
+    answered at once; HQPlayer plays from 60 s."""
+    mgr, b = output
+    player_router = _routes_on(monkeypatch, mgr)
+    _pressing_slowly(mgr, b, fake, add=0.4)
+    assert _quick(player_router.play)["ok"]
+    _adding(fake)
+    assert _quick(lambda: player_router.seek(player_router.SeekRequest(position=60)))["ok"]
+    _settled()
+    assert _rebuilds(fake) == 1
+    assert fake.state == int(PlaybackState.PLAYING) and fake.track == 1
+    assert ("Seek", {"position": "60"}) in _start_sent(fake)
+
+
+def test_a_seek_after_a_pause_during_a_rebuild_moves_the_spot_alone(fake, output):
+    """Play, Pause, then a Seek to 60 s while the press hands the queue over:
+    silence — the Pause stays the newest word — the spot the press leaves at
+    60 s, and the next Play starts there."""
+    mgr, b = output
+    _pressing_slowly(mgr, b, fake, add=0.4)
+    assert b.play()
+    _adding(fake)
+    assert b.pause()
+    assert b.seek(60)
+    _settled()
+    assert fake.state != int(PlaybackState.PLAYING)
+    assert b._spot is not None and (b._spot[0].track_id, b._spot[1]) == ("track-1", 60)
+    n = len(fake.commands)
+    assert b.play()
+    assert _wait(lambda: fake.state == int(PlaybackState.PLAYING))
+    assert ("Seek", {"position": "60"}) in _start_sent(fake, n)
+
+
+def test_a_seek_after_a_tap_during_a_rebuild_starts_the_tapped_track_at_its_second(
+        fake, output, monkeypatch):
+    """Play, a tap on the 7th track, then a Seek to 30 s while the press
+    hands the queue over: the 7th track from 30 s."""
+    mgr, b = output
+    player_router = _routes_on(monkeypatch, mgr)
+    _pressing_slowly(mgr, b, fake, n=8, add=0.2)
+    assert _quick(player_router.play)["ok"]
+    _adding(fake)
+    assert _quick(lambda: player_router.jump(player_router.JumpRequest(index=7)))["ok"]
+    assert _quick(lambda: player_router.seek(player_router.SeekRequest(position=30)))["ok"]
+    _settled()
+    assert _rebuilds(fake) == 1
+    assert fake.state == int(PlaybackState.PLAYING) and fake.track == 7
+    assert _start_sent(fake)[-3:-1] == [("SelectTrack", {"index": "7"}), ("Seek", {"position": "30"})]
+
+
+def _radio_over_a_pending_press(mgr, b, fake):
+    """Stopped, its playlist no mirror: a tap is a press still waiting to
+    begin (the radio start holds the queue lock — the caller's, held on
+    return) when a radio starts — a new queue, the seed kept, a track of it
+    queued. The clear leaves HQPlayer no entry: the press leads nowhere, and
+    the radio's queue is no one's on HQPlayer."""
+    _stopped(mgr, fake)
+    b.lose_mirror("HQPlayer refused all 3 tracks of a new queue", by="refusal")
+    assert b.select(3)
+    mgr.clear_for_radio(lambda: None)
+    assert mgr.append([_item("E:/Music/R/01.flac", 51)]) == 1
+
+
+def test_a_play_after_a_radio_overtook_a_pending_press_is_a_press_of_its_own(
+        fake, output, monkeypatch):
+    """A Play made once a radio overtook a pending press is a press of its
+    own: HQPlayer takes the radio's queue and plays the seed, where it
+    stopped."""
+    mgr, b = output
+    player_router = _routes_on(monkeypatch, mgr)
+    with mgr._mutate_lock:
+        _radio_over_a_pending_press(mgr, b, fake)
+        assert player_router.play()["starts"]["track_id"] == "track-1"
+    _settled()
+    assert fake.playlist == ["file:///E:/Music/A/01.flac", "file:///E:/Music/R/01.flac"]
+    assert fake.state == int(PlaybackState.PLAYING) and fake.track == 1
+
+
+def test_a_word_after_a_radio_overtook_a_pending_press_is_no_word_to_it(
+        fake, output, monkeypatch):
+    """Once a radio overtook a pending press, a Pause names no track the
+    press would start, and a tap is a press of its own — HQPlayer takes the
+    radio's queue and plays the tapped track."""
+    mgr, b = output
+    player_router = _routes_on(monkeypatch, mgr)
+    with mgr._mutate_lock:
+        _radio_over_a_pending_press(mgr, b, fake)
+        assert "starts" not in player_router.pause()
+        tapped = player_router.jump(player_router.JumpRequest(index=2))
+        assert tapped["starts"]["track_id"] == "track-51"
+    _settled()
+    assert fake.state == int(PlaybackState.PLAYING)
+    assert fake.playlist[fake.track - 1] == "file:///E:/Music/R/01.flac"
+
+
+def test_a_play_after_a_new_queue_overtook_a_pending_press_plays_it_as_handed_over(
+        fake, output, monkeypatch):
+    """A tap is a press not yet begun when the person loads an album without
+    playing it: HQPlayer takes the album, in step. A Play made then is a
+    Play of its own and plays the album at once, as it was handed over —
+    never a press, which would name a track to start and wait behind the one
+    the album overtook."""
+    mgr, b = output
+    player_router = _routes_on(monkeypatch, mgr)
+    _stopped(mgr, fake)
+    b.lose_mirror("HQPlayer refused all 3 tracks of a new queue", by="refusal")
+    begin = threading.Event()
+    _presses_held(monkeypatch, b, begin)
+    try:
+        assert b.select(3)
+        mgr.replace_queue(_b_album(), play=False)
+        n = len(fake.commands)
+        assert "starts" not in player_router.play()
+        assert _wait(lambda: fake.state == int(PlaybackState.PLAYING))
+        assert fake.playlist == [f"file:///E:/Music/B/0{i}.flac" for i in range(1, 4)]
+        assert fake.track == 1
+        assert "PlaylistAdd" not in [c for c, _ in fake.commands[n:]]
+    finally:
+        begin.set()
+    _settled()
+
+
+def test_a_resume_after_a_new_queue_overtook_a_pending_press_goes_in_place(
+        fake, output, monkeypatch):
+    """A tap is a press not yet begun when the person plays an album:
+    HQPlayer takes it, in step, and plays. A DSP change that stops HQPlayer
+    for good resumes the album in place, at once — never as a press, which
+    would wait behind the one the album overtook."""
+    mgr, b = output
+    _stopped(mgr, fake)
+    b.lose_mirror("HQPlayer refused all 3 tracks of a new queue", by="refusal")
+    begin = threading.Event()
+    _presses_held(monkeypatch, b, begin)
+    try:
+        assert b.select(3)
+        mgr.replace_queue(_b_album(), play=True)
+        assert _wait(lambda: mgr._latest_status.get("track_id") == "track-11"
+                     and mgr._latest_status.get("state") == "playing")
+        fake.build("SetFilter", 1.0, answer="last", stops=True)
+        n = len(fake.commands)
+        hb.change_dsp({"filter": 57, "filter1x": 57})
+        assert _wait(lambda: any(c == "SelectTrack" for c, _ in fake.commands[n:]), timeout=10)
+        assert _wait(lambda: fake.state == int(PlaybackState.PLAYING))
+        assert fake.playlist[fake.track - 1] == "file:///E:/Music/B/01.flac"
+        assert "PlaylistAdd" not in [c for c, _ in fake.commands[n:]]
+    finally:
+        begin.set()
+    _settled()
+
+
+def test_hqplayer_gets_a_radios_queue_back_past_the_press_it_overtook(fake, output,
+                                                                       monkeypatch):
+    """A tap is a press not yet begun when a radio starts on a stopped
+    HQPlayer: the clear leaves it no entry, and it gets the radio's queue
+    back at its next answer — the press the radio overtook hands it none,
+    and is not waited for."""
+    mgr, b = output
+    _stopped(mgr, fake)
+    b.lose_mirror("HQPlayer refused all 3 tracks of a new queue", by="refusal")
+    begin = threading.Event()
+    _presses_held(monkeypatch, b, begin)
+    try:
+        assert b.select(3)
+        mgr.clear_for_radio(lambda: None)
+        assert _wait(lambda: fake.playlist == ["file:///E:/Music/A/01.flac"]
+                     and b._mirror == "step", timeout=10)
+    finally:
+        begin.set()
+    _settled()

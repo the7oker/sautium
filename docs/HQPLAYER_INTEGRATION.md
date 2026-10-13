@@ -280,10 +280,12 @@ else gives up, then it closes; picking the same HQPlayer again keeps its
 link and its build watched, and the link dials the alias picked last (on a
 Docker node the host's address, not a loopback that reaches nothing — the
 meter follows it). While the benchmark holds the output the link is
-lent: a request already sent is answered first (the lend waits for it, a
-connection kept for a sequence's next request let go), then nothing of it
-goes out, and a person's command meanwhile (the HQPlayer screen's DSP
-change, the volume) is refused with 409 naming the job. The node stop closes every link first
+lent — before the backend is detached, so what it still sends (a play
+press's hand-over) is refused at its next request: a request already sent
+is answered first (the lend waits for it, a connection kept for a
+sequence's next request let go), then nothing of it goes out, and a
+person's command meanwhile (the HQPlayer screen's DSP change, the volume)
+is refused with 409 naming the job. The node stop closes every link first
 (`hqp_link.close_all`): its waiters and owed items give up at once, and
 every wait on HQPlayer — a read, a connect, the meter's session included —
 is woken through its wake channel and closes its own socket (since
@@ -362,10 +364,11 @@ comes after the control port answers again — so neither can end the wait.
   event), never a sleep. The node stopping ends a filler; a file the output
   refused is not offered again.
 - **Output switch, address change.** A switch away stops HQPlayer if it
-  plays or pauses an entry this node gave it — one the hand-over ledger
-  names (a slot removed since from a playlist that is no mirror is still
+  plays or pauses an entry this node gave it — one this attachment handed
+  it (a slot removed since from a playlist that is no mirror is still
   ours), or a slot of the queue as it stood at the switch, never as it is
-  once the Stop goes; another controller's entry is left playing. The Stop
+  once the Stop goes; another controller's entry is left playing, a file
+  this node handed some HQPlayer once among them. The Stop
   is the link's late Stop, on its own thread, which outlives the backend
   that owed it: its Status is held until HQPlayer answers — through a build
   it is in, or a silence no build of ours explains, up to the build limit,
@@ -373,7 +376,8 @@ comes after the control port answers again — so neither can end the wait.
   (the Stop sent, or not needed) a second at most: past it the answer says
   HQPlayer builds or is not answering and will be stopped once it answers,
   and the new output starts. The detach waits for no teardown — that Stop's
-  answer, or a person's Stop still tearing HQPlayer's output down — and not
+  answer, or a person's Stop tearing HQPlayer's output down or still waiting
+  its turn on the connection — and not
   for the old poller: a question of its still waiting for the connection is
   not asked, and one HQPlayer has yet to answer is not waited for. A lost mirror owes the Stop too: it
   is no health matter. Picking HQPlayer again supersedes it — the picker
@@ -428,10 +432,13 @@ comes after the control port answers again — so neither can end the wait.
   before it moves its index, an append after it changes nothing, and it goes
   with its item. Stopped there, Next and Previous only move it a slot, to
   its start — no command, no sound; a tap on a track plays that track. A
-  start taken spends it — spent under the command lock the start held, so a
-  start dropped meanwhile puts none back; one HQPlayer answered past the
-  build limit, given up on, is judged at HQPlayer's first answer since:
-  playing or paused on its track, it was taken after all. A command refused,
+  start taken spends it — a plain Play too — spent under the command lock
+  the start held, so a start dropped meanwhile puts none back; the start a
+  rebuild owes (a new order, a re-bind) puts its spot back only if no start
+  was taken since the rebuild began — a Play during its adds included. One
+  HQPlayer answered past the build limit, given up on, is judged at
+  HQPlayer's first answer since that names a slot (an opening tick names
+  none): playing or paused on its track, it was taken after all. A command refused,
   as busy or by HQPlayer, leaves it. Back on HQPlayer after another output,
   the slot the queue was on is a spot when the attach found HQPlayer
   stopped; one that plays keeps its own place.
@@ -489,8 +496,17 @@ comes after the control port answers again — so neither can end the wait.
     hand-over still completes — HQPlayer stopped at the target, the next
     Play starting there without one; a press that found the playlist the
     queue's again (a reconverge got there first) hands nothing over and
-    stops HQPlayer for a Pause or a Stop made meanwhile. A new queue
-    supersedes the press whole. A queue edit meanwhile is the queue's: an
+    stops HQPlayer for a Pause or a Stop made meanwhile. A Seek decides
+    nothing about playing: it changes the second of the newest word — the
+    newest start's (a start of its own, the same target), or after a Pause
+    or a Stop only the spot the press leaves. A new queue (a replace, the
+    radio) is the newest word as it is asked: what the hand-over still had
+    to send is dropped, a press it overtook takes no more words — a Play, a
+    tap or a DSP change's resume made then is one of its own — and hands
+    HQPlayer nothing the reconverge should wait for; a Play made while the
+    new queue is handed over plays that queue. While the
+    press drives HQPlayer the play gate asks it nothing (a question would
+    wait behind its Stop and adds). A queue edit meanwhile is the queue's: an
     append follows behind what HQPlayer took (in step); anything else leaves
     the playlist drifted, the start going at HQPlayer's own entry for the
     target — a target removed starts the next track still queued. Next and

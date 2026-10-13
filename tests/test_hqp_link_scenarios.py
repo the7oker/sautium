@@ -141,6 +141,10 @@ class _Elsewhere:
     def queue_start(self) -> None: ...
     def slot_ready(self, index: int) -> None: ...
 
+    @contextmanager
+    def new_queue(self):
+        yield
+
     def healthy(self) -> bool:
         return True
 

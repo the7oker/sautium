@@ -767,6 +767,30 @@ implementation details live in the code, DB and git history.
   canary's next turn half a minute later, during which a tap selected into
   the other controller's playlist. Lesson: an edit planned off the lock is
   a compare-and-set or a guess.
+- **Only a live press takes words** (2026-10-13). The press joined every
+  Play, tap, Next, Pause and Stop without asking whether a new queue had
+  overtaken it: a Play while a picked album loaded cancelled the album's
+  start and joined a press that led nowhere — nothing played — and a Pause
+  after a radio start sent nothing. A press takes words only while its
+  queue and its hand-over stand — and only then does the reconverge leave
+  HQPlayer's playlist to it; a new queue is the newest word as it is
+  asked (numbered before it waits for the command lock), so the hand-over's
+  next add is dropped instead of waited out for seconds, and a Play made
+  while the new queue is handed over plays that queue (the manager says
+  when one is on its way, `new_queue`). A Seek during a press moves the
+  newest word's second instead of waiting the hand-over out and dropping
+  the start. A plain Play spends the spot, and the start a rebuild owes puts
+  one back only if no start was taken since the rebuild began: a Play
+  during a reorder's rebuild left the old spot under what played (which
+  track that Play starts is still read off the queue before the reorder
+  commits — open). Around it: the judge of a start given up on waits for a
+  tick that names a slot; "ours" at a switch is what this attachment handed
+  HQPlayer, never the process's ledger of every file ever handed; the
+  benchmark's hold lends the link before it detaches the backend; the play
+  gate asks nothing while the press drives HQPlayer; a switch waits for no
+  Stop still waiting its turn on the connection. Lesson: a pending word
+  belongs to the work that will carry it out — once that work is overtaken,
+  joining it is dropping the word.
 - **Stop-clear-add-select-play sequence** for `play_track`/`play_album`. Without
   explicit stop, HQPlayer occasionally started the wrong track from the
   existing queue.

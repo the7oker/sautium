@@ -424,15 +424,17 @@ class _CommandLock:
         """For a backend's detach — an output switch, the benchmark's hold,
         the app stopping: the lock once the command on its way is answered,
         never a build's wait, nor a teardown's (a Stop or a PlaylistClear of
-        ours HQPlayer answers once its output is down), nor the Stop a switch
-        away owes. With a build on, or one that begins while this waits, a
-        request in a teardown's silence, or that Stop holding the lock — its
-        Status and its answer — the detach goes on without the lock: the
-        build stays watched, the Stop is the link's own work, and the items
-        the sequence waiting it out serves are superseded by the switch
-        (SUPERSEDED_BY)."""
+        ours HQPlayer answers once its output is down — sent, or waiting its
+        turn on the connection), nor the Stop a switch away owes. With a
+        build on, or one that begins while this waits, such a teardown, or
+        that Stop holding the lock — its Status and its answer — the detach
+        goes on without the lock: the build stays watched, the Stop is the
+        link's own work, and what the sequence waiting it out serves is
+        superseded by a person's switch, or refused once the link is lent or
+        closed."""
         with self._cond:
             while (self._held and not self._late and self._link.teardown is None
+                   and self._link.teardown_due is None
                    and self._link.build.silent() is None
                    and self._link.state != "closed"):
                 self._cond.wait()
@@ -566,8 +568,10 @@ class HqpLink:
         self.silent_since: Optional[float] = None
         # The command whose short silence the request on the connection may
         # be in (a Stop's teardown — SHORT_SILENCE_COMMANDS): no detach waits
-        # for it
+        # for it — nor for one waiting its turn on the connection (teardown_due,
+        # set and cleared by that request alone)
         self.teardown: Optional[str] = None
+        self.teardown_due: Optional[str] = None
         self._local = threading.local()
         self._clock = 0
         self._latest: Dict[str, int] = {}
@@ -836,7 +840,17 @@ class HqpLink:
             # A sequence whose own build HQPlayer did not finish sends
             # nothing more into its silence
             self.refuse()
-        after = self._take()
+        due = command if command in SHORT_SILENCE_COMMANDS and self.lock.owner == me else None
+        if due is not None:
+            # A Stop or a clear of a sequence, waiting its turn on the
+            # connection (behind a question in a silence): a teardown to come
+            self.teardown_due = due
+            self.lock.wake()
+        try:
+            after = self._take()
+        finally:
+            if due is not None:
+                self.teardown_due = None
         builds = self.build.count
         hand_over = None
         try:
@@ -919,22 +933,27 @@ class HqpLink:
             c.use(sock)
 
     @contextmanager
-    def command(self, intent: Optional[str] = None, *, item: Any = None):
+    def command(self, intent: Optional[str] = None, *, item: Any = None,
+                early: bool = False):
         """A command sequence: the command lock (refused while HQPlayer
         builds — Building — or answers nothing past a short silence —
         NotAnswering), each of its requests taking the connection for
         itself. `intent`, a person's or this node's, is accepted once the
-        lock is ours and takes the clock's next number (yielded). `item` is
-        what the sequence serves — an Item made earlier (a start left for
-        later, a resume, an owed Stop), or a kind, made here for `intent`:
-        each of its requests is dropped once a newer intent supersedes it
-        (Dropped)."""
+        lock is ours and takes the clock's next number (yielded) — `early`,
+        as it is asked, before it waits for the lock: a new queue is the
+        newest word at once, and what a play press still hands over is
+        dropped at its next send instead of being waited out. `item` is what
+        the sequence serves — an Item made earlier (a start left for later, a
+        resume, an owed Stop), or a kind, made here for `intent`: each of its
+        requests is dropped once a newer intent supersedes it (Dropped)."""
         outer = getattr(self._local, "item", None)
         if isinstance(item, Item):
             self._local.item = item
+        n = self.accept(intent) if early and intent is not None else None
         try:
             with self.lock, self._scope():
-                n = self.accept(intent) if intent is not None else getattr(item, "n", None)
+                if n is None:
+                    n = self.accept(intent) if intent is not None else getattr(item, "n", None)
                 if isinstance(item, str):
                     self._local.item = self.item(item, n)
                 yield n

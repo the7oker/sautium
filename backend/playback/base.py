@@ -17,6 +17,7 @@ defaults.
 
 import logging
 from abc import ABC, abstractmethod
+from contextlib import contextmanager
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Callable, Optional
 
@@ -199,6 +200,13 @@ class PlayerBackend(ABC):
         """After a mutation, outside the queue lock: the start its mirror
         left on this thread — a replace that plays, a rebuild that plays on.
         Default: nothing (a renderer starts in queue_changed)."""
+
+    @contextmanager
+    def new_queue(self):
+        """A new queue is handed to this output (a replace, a radio start)
+        until the queue commits it or gives it up: a play intent meanwhile
+        acts on that queue. Default: nothing to know."""
+        yield
 
     def queue_abandon(self) -> None:
         """A replace this output mirrored was not committed (the session

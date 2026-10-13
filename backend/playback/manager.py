@@ -146,6 +146,12 @@ class PlaybackManager:
                 if b is None or b.id != "hqplayer":
                     raise ConnectionError("HQPlayer is not the attached output")
                 self._hold = {"by": by, "label": label, "progress": None}
+            from playback import hqp_link
+            link = hqp_link.selected()
+            # Lent first: what the backend still sends — a play press's hand-
+            # over among it — is refused at its next request, so the detach
+            # waits for no more than the request in flight
+            link.lend()
             try:
                 # No switch away: the job stops HQPlayer itself, and what was
                 # made for the attachment it leaves — a run's owed put-back —
@@ -153,11 +159,9 @@ class PlaybackManager:
                 self.activate(None, by_hold=True, stop_old=False)
                 self._push_status({"state": "stopped"})
             except BaseException:
+                link.reclaim()
                 self._hold = None
                 raise
-            from playback import hqp_link
-            link = hqp_link.selected()
-            link.lend()
         try:
             yield
         finally:
@@ -766,23 +770,24 @@ class PlaybackManager:
         appends with."""
         with self._mutation():
             backend = self.ensure_active() if play else self.backend()
-            accepted = backend.queue_replace(items, play=play,
-                                             probe_first=probe_first)
-            added = len(accepted)
-            if added and archive is not None:
-                try:
-                    archive()
-                except Exception:
-                    backend.queue_abandon()
-                    raise
-            if added:
-                gen = self.queue.replace(accepted)
-                self._retire_previews(gen)
-                self._last_slot = 0   # fresh queue — no resume slot in it
-                backend.queue_changed("replace", play=play)
-                self._schedule_persist()
-            else:
-                gen = self.queue.generation
+            with backend.new_queue():
+                accepted = backend.queue_replace(items, play=play,
+                                                 probe_first=probe_first)
+                added = len(accepted)
+                if added and archive is not None:
+                    try:
+                        archive()
+                    except Exception:
+                        backend.queue_abandon()
+                        raise
+                if added:
+                    gen = self.queue.replace(accepted)
+                    self._retire_previews(gen)
+                    self._last_slot = 0   # fresh queue — no resume slot in it
+                    backend.queue_changed("replace", play=play)
+                    self._schedule_persist()
+                else:
+                    gen = self.queue.generation
         backend.queue_start()
         return added, gen
 
@@ -994,12 +999,13 @@ class PlaybackManager:
         the radio follows it, history rotated."""
         with self._mutation():
             backend = self.backend()
-            cleared = backend.queue_clear_after_current(archive)
-            if not cleared:
-                return self.queue.generation
-            gen = self.queue.clear_for_radio(self._latest_status.get("track_index"))
-            self._retire_previews(gen)
-            backend.queue_changed("clear")
+            with backend.new_queue():
+                cleared = backend.queue_clear_after_current(archive)
+                if not cleared:
+                    return self.queue.generation
+                gen = self.queue.clear_for_radio(self._latest_status.get("track_index"))
+                self._retire_previews(gen)
+                backend.queue_changed("clear")
             self._schedule_persist()
             return gen
 
