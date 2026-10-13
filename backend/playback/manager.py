@@ -53,6 +53,11 @@ class OutputHeld(ConnectionError):
                          "finishes, or cancel it on the HQPlayer screen")
 
 
+class QueueChanged(RuntimeError):
+    """An edit planned on one version of the queue met another: refused
+    whole, the queue as it is (409) — the planner reads it again."""
+
+
 class PlaybackManager:
     def __init__(self):
         self.queue = CanonicalQueue()
@@ -893,8 +898,13 @@ class PlaybackManager:
         """Execute a validated reorder. The mirror runs first (it can raise
         mid-way — then the canonical queue is left untouched and the drift
         canary flags the divergence; a retry reconverges); on success the
-        canonical queue adopts the new order."""
+        canonical queue adopts the new order. A plan made on another version
+        of the queue than the one it meets (a filler's append landed first)
+        is refused whole (QueueChanged): it would hand HQPlayer an order of a
+        queue that is gone."""
         with self._mutation():
+            if plan.version is not None and plan.version != self.queue.version:
+                raise QueueChanged("the queue changed while its new order was made")
             backend = self._active   # queue reorder is output-independent
             result = (backend.queue_reorder(plan) if backend
                       else {"removed": 0, "added": 0, "interrupted": False})

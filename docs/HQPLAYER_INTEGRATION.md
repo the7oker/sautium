@@ -438,7 +438,10 @@ comes after the control port answers again — so neither can end the wait.
 - **The mirror's state** (`HqpBackend._mirror`): in step; a tail mirror;
   lost; drifted.
   - **Lost** when a build ran out or HQPlayer went away under a queue edit,
-    when an append or a "play next" found it not answering, or when it came
+    when an append or a "play next" found it not answering, when it left a
+    removal or the radio's clear unanswered within its wait (it carries
+    them out once its silence is over: the slot leaves the queue, the radio
+    goes on), or when it came
     back restarted — through a silence: from then on appends, inserts,
     removals and new orders are the queue's alone, and once HQPlayer answers
     again it gets the queue back, once per loss (`HqpBackend._reconverge`):
@@ -467,7 +470,9 @@ comes after the control port answers again — so neither can end the wait.
     alone until the play press re-mirrors. An attach that finds HQPlayer
     playing or paused leaves its playlist alone and judges it at once, as
     the canary does (since 2026-10-13): another controller's, or one that is
-    no longer the queue, is drifted before a tap can select into it.
+    no longer the queue, is drifted before a tap can select into it — and so
+    does the poller's first answer that reads an entry not ours while the
+    mirror is in step (once per entry and queue version).
   - **The play press** on a playlist that is no mirror: Play on a pause
     only resumes (the tail behind the entry read is repaired as above);
     Play from a stop, a tap, Next or Previous while it plays hand HQPlayer

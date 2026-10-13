@@ -883,6 +883,9 @@ class HqpBackend(PlayerBackend):
         self._mirror_lock = threading.Lock()
         self._mirror_moves = 0
         self._drift_logged = False
+        # The entry not ours (its URI, the queue's version) the canary was
+        # last asked to judge at once (_reads_foreign_in_step)
+        self._foreign_judged: Optional[tuple] = None
         # The last verdict of _playing, by (entry, HQPlayer's index, queue
         # version): a foreign entry played for an hour is looked for in the
         # queue once, not every second.
@@ -1644,7 +1647,8 @@ class HqpBackend(PlayerBackend):
                             learned = bool(info)
                             self._info = info or self._info
                     if status is not None and (self._verify_mirror
-                                               or tick % DRIFT_CHECK_EVERY == 0):
+                                               or tick % DRIFT_CHECK_EVERY == 0
+                                               or self._reads_foreign_in_step(status)):
                         _, version, pending = self._queue.view()
                         mirror = self._mirror_moves
                         hqp_playlist = hqp.get_playlist()
@@ -1835,6 +1839,21 @@ class HqpBackend(PlayerBackend):
         proxy = streaming_service.get_proxy()
         ours = f"{self._url_host}:{proxy.port}" if proxy is not None else ""
         return [r for r in (_handed(uri), _reading(uri, proxy, ours)) if r is not None]
+
+    def _reads_foreign_in_step(self, status) -> bool:
+        """Does HQPlayer read an entry of no queue slot while its playlist is
+        said to be the queue's? Then the canary judges it at this answer, not
+        DRIFT_CHECK_EVERY ticks later: a tap meanwhile selected into a
+        playlist that was not the queue's (another controller's entry
+        played). Once per entry and queue version: one the canary judged the
+        queue's after all waits for its turn."""
+        if self._mirror != "step" or not self.reads_foreign(status):
+            return False
+        key = (status.uri, self._queue.version)
+        if key == self._foreign_judged:
+            return False
+        self._foreign_judged = key
+        return True
 
     def reads_foreign(self, status) -> bool:
         """Does HQPlayer, as this status finds it, read an entry that is not
@@ -3392,9 +3411,21 @@ class HqpBackend(PlayerBackend):
                 return True
         else:
             target = layout.entry(index)
-        refusal = self._refusal_of("PlaylistRemove", lambda h: _remove(h, target),
+        unanswered = False
+
+        def why(h: HQPlayerClient) -> str:
+            nonlocal unanswered
+            unanswered = h.timed_out and not h.answered
+            return h.refusal()
+        refusal = self._refusal_of("PlaylistRemove", lambda h: _remove(h, target), why,
                                    intent=None)
         self.poke()
+        if refusal is not None and unanswered:
+            # HQPlayer carries out after its silence what was sent into it: the
+            # slot leaves the queue, and HQPlayer gets the queue back once it
+            # answers again
+            self.lose_mirror(f"HQPlayer did not answer a removal ({refusal})")
+            return True
         if refusal is not None:
             raise RuntimeError(f"HQPlayer did not remove it: {refusal}")
         return True
@@ -3417,9 +3448,22 @@ class HqpBackend(PlayerBackend):
             archive()
             now = h.get_status()
             playing = self._playing(now, mutating=True) if now is not None else None
-            return (_hqp_safe(self._link, lambda c: c.playlist_clear(), "PlaylistClear"),
-                    now, playing)
-        cleared, now, playing = self._cmd(clear, "queue")
+            unanswered = False
+
+            def clear_it(c: HQPlayerClient) -> bool:
+                nonlocal unanswered
+                took = c.playlist_clear()
+                unanswered = not took and c.timed_out and not c.answered
+                return took
+            took = _hqp_safe(self._link, clear_it, "PlaylistClear")
+            return took, unanswered, now, playing
+        cleared, unanswered, now, playing = self._cmd(clear, "queue")
+        if unanswered:
+            # HQPlayer clears once its silence is over: the radio goes on, and
+            # HQPlayer gets the queue back once it answers again
+            self.lose_mirror("HQPlayer did not answer the radio's clear")
+            self.poke()
+            return True
         busy = now is not None and now.state in (PlaybackState.PLAYING, PlaybackState.PAUSED)
         # The queue keeps the slot its last status named (clear_for_radio)
         kept = self._last_tick.queue_index if self._last_tick is not None else None

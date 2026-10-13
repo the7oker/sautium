@@ -752,7 +752,9 @@ def test_an_entry_started_in_hqplayers_own_window_is_external_from_its_first_tic
             fake.position = 0.0
         assert _wait(lambda: seen[-1].extra.get("source") == "external", timeout=3.0)
         assert seen[-1].queue_index == 0 and seen[-1].item is None
-        assert not b.drift          # the canary has not looked again: the entry said it
+        # The entry said it; the canary, asked at that same answer (an entry
+        # not ours read while in step), finds the playlist drifted too
+        assert _wait(lambda: b.drift)
     finally:
         b.shutdown()
 
@@ -6634,3 +6636,108 @@ def test_a_file_hqplayer_refuses_of_an_added_batch_is_a_gap(fake, output, positi
     assert "file:///E:/Music/B/02.flac" in fake.playlist
     assert "file:///E:/Music/B/01.flac" not in fake.playlist
     assert b._mirror == "step"
+
+
+# -- The mirror's races (2026-10-13) ----------------------------------------------------
+# A request HQPlayer answers nothing to is carried out after its silence; a plan is
+# applied only to the queue it was made on; an entry not ours is judged at once.
+
+def test_a_removal_hqplayer_answers_late_leaves_the_queue_and_loses_the_mirror(fake, output):
+    """A removal HQPlayer leaves unanswered within its wait is carried out
+    once its silence is over, as an add is: the slot leaves the queue, the
+    mirror is lost — never kept in step over a playlist about to change — and
+    HQPlayer, answering again, is the queue's mirror once more."""
+    mgr, b = output
+    assert mgr.append([_item("E:/Music/A/04.flac", 4)]) == 1
+    losses = b.mirror_losses
+    _link().client.timeout = 0.5                       # a command's wait, shortened
+    fake.service["PlaylistRemove"] = 1.0               # busy: carried out late, all the same
+    try:
+        assert mgr.remove(2, "track-2")
+    finally:
+        del fake.service["PlaylistRemove"]
+        _link().client.timeout = hl.COMMAND_WAIT_S
+    assert [it.track_id for it in mgr.queue.snapshot()] == ["track-1", "track-3", "track-4"]
+    assert b.mirror_losses == losses + 1
+    assert _wait(lambda: fake.playlist == [f"file:///E:/Music/A/0{i}.flac" for i in (1, 3, 4)]
+                 and b._mirror == "step", timeout=8)
+
+
+def test_a_radios_clear_hqplayer_answers_late_starts_the_radio_and_loses_the_mirror(
+        fake, output, monkeypatch):
+    """The radio's PlaylistClear left unanswered within its wait is carried
+    out once HQPlayer's silence is over: the radio goes on — the queue keeps
+    the seed alone — the mirror lost, and HQPlayer answering again holds the
+    queue."""
+    mgr, b = output
+    losses = b.mirror_losses
+    monkeypatch.setattr(hl, "STOP_ANSWER_S", 0.6)      # a short silence's wait, shortened
+    _link().client.waits.update(hl._command_waits())
+    fake.service["PlaylistClear"] = 1.0
+    try:
+        gen = mgr.clear_for_radio(lambda: None)
+    finally:
+        del fake.service["PlaylistClear"]
+    assert gen == mgr.queue.generation
+    assert [it.track_id for it in mgr.queue.snapshot()] == ["track-1"]
+    assert b.mirror_losses == losses + 1
+    assert _wait(lambda: fake.playlist == ["file:///E:/Music/A/01.flac"]
+                 and b._mirror == "step", timeout=8)
+
+
+def test_a_new_order_planned_before_a_fillers_append_landed_is_refused_whole(
+        fake, output, monkeypatch):
+    """The reorder route plans on the queue it reads; a filler's append that
+    lands before the plan is applied makes it a plan of a queue that is gone:
+    refused whole (409), the queue and HQPlayer in the order they hold, the
+    mirror in step."""
+    from fastapi import HTTPException
+    mgr, b = output
+    player_router = _routes_on(monkeypatch, mgr)
+    apply = mgr.apply_reorder
+
+    def a_filler_first(plan):
+        assert mgr.append([_item("E:/Music/A/04.flac", 4)]) == 1     # lands meanwhile
+        return apply(plan)
+    monkeypatch.setattr(mgr, "apply_reorder", a_filler_first)
+    with pytest.raises(HTTPException) as refused:
+        player_router.reorder(player_router.ReorderRequest(order=["track-1", "track-3", "track-2"]))
+    assert refused.value.status_code == 409
+    assert [it.track_id for it in mgr.queue.snapshot()] == [
+        "track-1", "track-2", "track-3", "track-4"]
+    assert fake.playlist == [f"file:///E:/Music/A/0{i}.flac" for i in (1, 2, 3, 4)]
+    assert b._mirror == "step"
+
+
+def test_an_entry_of_another_controllers_read_while_in_step_is_judged_at_its_answer(
+        fake, output, monkeypatch):
+    """Another controller adds an entry of its own and plays it while the
+    mirror is in step: the tick that reads it has the canary judge the
+    playlist then and there — drifted — so a tap right after hands HQPlayer
+    the queue and plays its track, never selects into the other playlist."""
+    mgr, b = output
+    monkeypatch.setattr(hb, "DRIFT_CHECK_EVERY", 10 ** 6)        # no canary of its cadence
+    with fake._lock:
+        fake.playlist.append("file:///Elsewhere/theirs.flac")
+        fake.track = len(fake.playlist)
+    assert _wait(lambda: b._mirror == "drift", timeout=5)
+    assert b.select(2)
+    assert _wait(lambda: fake.playlist == [f"file:///E:/Music/A/0{i}.flac" for i in (1, 2, 3)]
+                 and fake.state == int(PlaybackState.PLAYING) and fake.track == 2, timeout=10)
+
+
+def test_an_entry_not_ours_is_judged_at_once_only_once(fake, output, monkeypatch):
+    """The canary reads the playlist the queue's although HQPlayer reads an
+    entry no slot names: it is not asked again at every answer — once per
+    entry and queue version, then at its own cadence."""
+    mgr, b = output
+    monkeypatch.setattr(hb, "DRIFT_CHECK_EVERY", 10 ** 6)
+    judged = []
+    monkeypatch.setattr(hb.HqpBackend, "_judge_mirror",
+                        lambda self, playlist, status, **kw: judged.append(status.uri) or True)
+    with fake._lock:
+        fake.playlist.append("file:///Elsewhere/theirs.flac")
+        fake.track = len(fake.playlist)
+    n = len(fake.commands)
+    assert _wait(lambda: sum(1 for c, _ in fake.commands[n:] if c == "Status") >= 6, timeout=10)
+    assert judged == ["file:///Elsewhere/theirs.flac"]

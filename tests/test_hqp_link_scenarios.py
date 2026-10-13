@@ -387,10 +387,24 @@ class World:
             heard(manager, backend, status)
         mp.setattr(PlaybackManager, "_on_backend_status", emitted)
 
+        # A drift the canary marks is judged by the playlist it read then —
+        # HQPlayer may have dropped it since (a vanish, a restart)
+        judge, judging = HqpBackend._judge_mirror, threading.local()
+
+        def judged(backend, playlist, status, **kw):
+            judging.playlist = playlist
+            try:
+                return judge(backend, playlist, status, **kw)
+            finally:
+                judging.playlist = None
+        mp.setattr(HqpBackend, "_judge_mirror", judged)
         drifted = HqpBackend._drifted
 
         def marked(backend, why, **kw):
-            w.rec("drift", link=lid(backend._link), why=why)
+            read = getattr(judging, "playlist", None)
+            w.rec("drift", link=lid(backend._link), why=why,
+                  foreign=None if read is None else any("/Elsewhere/" in (t.get("uri") or "")
+                                                        for t in read))
             return drifted(backend, why, **kw)
         mp.setattr(HqpBackend, "_drifted", marked)
 
@@ -798,13 +812,16 @@ class World:
             time.sleep(0.1)
 
     def _drift_unexplained(self, b: HqpBackend, playlist: list) -> bool:
-        """Did the canary mark the drift — "an external edit?" — with no
-        entry of anyone else's in HQPlayer's playlist? Every other drift
-        names its own reason (a removal, a new order HQPlayer did not take)."""
+        """Did the canary mark the drift — "an external edit?" — over a
+        playlist with no entry of anyone else's, as it read it then? Every
+        other drift names its own reason (a removal, a new order HQPlayer did
+        not take)."""
         with self._lock:
             marks = [e for e in self.log if e.kind == "drift" and e.data["link"] == self.lid(b._link)]
-        return (bool(marks) and marks[-1].data["why"].startswith("HQPlayer's playlist drifted")
-                and not any("/Elsewhere/" in u for u in playlist))
+        if not marks or not marks[-1].data["why"].startswith("HQPlayer's playlist drifted"):
+            return False
+        foreign = marks[-1].data.get("foreign")
+        return not (foreign if foreign is not None else any("/Elsewhere/" in u for u in playlist))
 
     def _gaps(self, b: HqpBackend, snapshot: list) -> None:
         """I13's gaps: a slot is one exactly when HQPlayer cannot open it — a

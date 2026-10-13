@@ -32,7 +32,7 @@ from playback.base import ReorderPlan
 from playback import hqp_link
 from playback.hqp_link import Building, Dropped, GaveUp, NotAnswering, through
 from playback.hqp_meter import meter as hqp_meter
-from playback.manager import OutputHeld, active_hqp_endpoint, manager
+from playback.manager import OutputHeld, QueueChanged, active_hqp_endpoint, manager
 from playback.queue import resolved_artwork as _resolved_artwork
 from playback.queue import resolved_durations as _resolved_durations
 from playback.sessions import _SESSION_ORIGINS
@@ -1528,11 +1528,17 @@ def reorder(req: ReorderRequest):
     pulling a track from after into before, shifting current right)
     is impossible without an insert primitive, so we fall back to
     a full clear+rebuild + select_track + seek (~300 ms gap).
+
+    The plan is made on the queue as the route reads it and applied under
+    the queue lock only to that version of it: one a filler's append
+    overtook meanwhile is refused whole (409), the queue as it is.
     """
     if not req.order:
         raise HTTPException(status_code=400, detail="order is empty")
 
-    current_items = manager.queue.snapshot()
+    # The plan names the queue's version it was made on: applied under the
+    # queue lock only to that version (a filler's append may land first)
+    current_items, version, _ = manager.queue.view()
     current_ids = [it.track_id for it in current_items]
 
     status_idx = manager.latest_status.get("track_index") or 0
@@ -1605,10 +1611,13 @@ def reorder(req: ReorderRequest):
         # A paused HQPlayer is left stopped at its spot, never played to be
         # paused again: the play press resumes it there (HqpBackend._rebuild)
         resume=manager.latest_status.get("state") == "playing",
+        version=version,
     )
     try:
         result = manager.apply_reorder(plan)
         return {"ok": True, "anchor_index": new_status_idx, **result}
+    except QueueChanged as e:
+        raise HTTPException(status_code=409, detail=f"{e} — the queue shows it as it is now")
     except Exception as e:
         logger.error(f"reorder failed: {e}", exc_info=True)
         raise _output_error(e)

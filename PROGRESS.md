@@ -753,6 +753,20 @@ implementation details live in the code, DB and git history.
   why on a line of its own; a tap answers the output's words. Lesson: a
   rule about what HQPlayer holds must count what it holds — an empty
   playlist and a queue of gaps compared equal.
+- **What HQPlayer answers late, it still does** (2026-10-13). A removal or
+  the radio's clear HQPlayer left unanswered within its wait was taken as
+  refused — the queue kept the slot, the mirror stayed in step — and
+  HQPlayer carried it out after its silence, so the next removal by index
+  took the wrong entry. Unanswered is now a silence, as it was for adds:
+  the queue takes the edit, the mirror is lost, and HQPlayer answering
+  again gets the queue back. A new order is applied only to the version of
+  the queue it was planned on (a filler's append landing between the
+  route's read and the apply left HQPlayer in another order than the queue,
+  "in step"), refused whole otherwise. An entry not ours that HQPlayer
+  reads while the mirror is in step is judged at that answer, not at the
+  canary's next turn half a minute later, during which a tap selected into
+  the other controller's playlist. Lesson: an edit planned off the lock is
+  a compare-and-set or a guess.
 - **Stop-clear-add-select-play sequence** for `play_track`/`play_album`. Without
   explicit stop, HQPlayer occasionally started the wrong track from the
   existing queue.
