@@ -995,6 +995,11 @@ class HqpBackend(PlayerBackend):
         except psycopg2.Error as e:
             logger.warning("DSP sample not written: %s", e)
 
+    def readdressed(self) -> None:
+        """The link dials another alias of this HQPlayer (HqpLink.readdress):
+        the meter stream, at the control port + 1, goes there too."""
+        hqp_meter.meter.attach(self._link.host, self._link.port + 1)
+
     def _library_check(self) -> None:
         """An HQPlayer we just attached to or that just came back may have
         rescanned its library: hqp_library re-checks its hash off this

@@ -9,8 +9,11 @@ Protocol: XML over TCP
 Default port: 4321
 """
 
+import errno
 import logging
+import os
 import re
+import selectors
 import socket
 import threading
 import time
@@ -36,6 +39,109 @@ def connect_address(host: str) -> str:
     HQPlayer listens on IPv4 only — a refused attempt on every connect. A
     saved "localhost" stays as it is (hqp_library reads it as this machine)."""
     return "127.0.0.1" if host.strip().lower() == "localhost" else host
+
+
+# -- Waits another thread can end -----------------------------------------------
+# A socket closed by a thread that does not read it races the one that does:
+# CPython reads the descriptor, lets the GIL go and only then polls it, so a
+# shutdown and close landing in between leave the reader polling a number
+# that is free, or already another socket's — and on macOS a close does not
+# wake a poll at all. So nothing here closes a socket another thread reads:
+# the reader waits on its socket and on a Waker together, and closes its own
+# socket once woken.
+
+class Interrupted(ConnectionError):
+    """A wait a Waker ended: this node let the connection go — no answer of
+    HQPlayer's, and no loss of its making."""
+
+
+class Waker:
+    """Wakes, from any thread, a wait on a socket (wait_on): one byte on a
+    socketpair the wait watches beside it. A wake-up given before the wait
+    began is not lost — the flag and its byte stay until the owner acts on
+    it (take), never drained at the start of a wait. After close a wake-up
+    does nothing: what it was for has ended."""
+
+    def __init__(self) -> None:
+        self._r, self._w = socket.socketpair()
+        self._lock = threading.Lock()
+        self._woken = False
+        self._closed = False
+
+    def fileno(self) -> int:
+        return self._r.fileno()
+
+    def wake(self) -> None:
+        with self._lock:
+            if self._woken or self._closed:
+                return
+            self._w.send(b"!")
+            self._woken = True
+
+    def take(self) -> bool:
+        """The wake-up given, spent now — False when there was none, or the
+        Waker is closed. Its byte was sent before the flag was raised, so the
+        read finds it."""
+        with self._lock:
+            if not self._woken or self._closed:
+                return False
+            self._woken = False
+            self._r.recv(1)
+            return True
+
+    def close(self) -> None:
+        with self._lock:
+            self._closed = True
+            self._r.close()
+            self._w.close()
+
+
+def wait_on(sock: socket.socket, event: int, timeout: Optional[float], waker: Waker) -> str:
+    """Until `sock` is ready for `event` (selectors.EVENT_READ or
+    EVENT_WRITE), `waker` is woken, or `timeout` seconds pass (None: no
+    limit): "ready", "woken" or "timeout". Through selectors' default —
+    epoll or kqueue, select() only on Windows — never select.select, which
+    refuses a descriptor past 1023."""
+    with selectors.DefaultSelector() as sel:
+        sel.register(sock, event)
+        sel.register(waker, selectors.EVENT_READ)
+        events = sel.select(None if timeout is None else max(timeout, 0.0))
+    if any(key.fileobj is waker for key, _ in events):
+        return "woken"
+    return "ready" if events else "timeout"
+
+
+# What a connect that is on its way says: on Windows WSAEWOULDBLOCK
+_CONNECTING = {errno.EINPROGRESS, errno.EWOULDBLOCK, errno.EALREADY,
+               getattr(errno, "WSAEWOULDBLOCK", errno.EWOULDBLOCK)}
+
+
+def open_connection(address: Tuple[str, int], timeout: float,
+                    wait: Callable[[socket.socket, int, Optional[float]], str]) -> socket.socket:
+    """A TCP connection to `address`, the connect waited out through `wait`
+    (wait_on with the caller's Waker): Interrupted when that wakes it,
+    TimeoutError past `timeout`, OSError when it is refused or unreachable.
+    Blocking once made."""
+    sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    try:
+        sock.setblocking(False)
+        err = sock.connect_ex(address)
+        if err not in (0, *_CONNECTING):
+            raise OSError(err, os.strerror(err))
+        if err:
+            got = wait(sock, selectors.EVENT_WRITE, timeout)
+            if got == "woken":
+                raise Interrupted("the connect was let go")
+            if got == "timeout":
+                raise TimeoutError("timed out")
+            err = sock.getsockopt(socket.SOL_SOCKET, socket.SO_ERROR)
+            if err:
+                raise OSError(err, os.strerror(err))
+        sock.setblocking(True)
+        return sock
+    except BaseException:
+        sock.close()
+        raise
 
 
 # -- Redaction -------------------------------------------------------------------
@@ -350,6 +456,9 @@ class HQPlayerClient:
     # The latest read got its line: HQPlayer answered, whatever it said.
     answered = _PerThread(False)
     _io_error = _PerThread(None)
+    # (seconds, watched) the next answer this thread waits for takes on
+    # (inherit) — the wait of the command before it in its sequence
+    _inherited = _PerThread(None)
 
     def __init__(self, host: str = "127.0.0.1", port: int = 4321, timeout: float = 5.0,
                  *, ring: bool = True, waits: Optional[Dict[str, float]] = None,
@@ -397,6 +506,65 @@ class HQPlayerClient:
         # Called with every outcome, failures and successes alike — the
         # playback backend's trace listens on its link's client.
         self.on_outcome: Optional[Callable[[CommandOutcome], None]] = None
+        # What ends a wait of this client's from another thread (interrupt,
+        # close), and the waits on it: the last one out of a closed client
+        # closes the Waker
+        self._waker = Waker()
+        self._life = threading.Lock()
+        self._waits = 0
+        self._closed = False
+
+    def interrupt(self) -> None:
+        """End, from any thread, the wait this client is in — or the next
+        one, when none is: it ends as a connection this node let go
+        (`interrupted`), and the waiting thread closes the socket itself.
+        The owner spends a wake-up it acted on otherwise (interrupted)."""
+        self._waker.wake()
+
+    def interrupted(self) -> bool:
+        """Whether a wake-up was given that no wait has met — spent now: the
+        owner acted on what it was for."""
+        return self._waker.take()
+
+    def close(self) -> None:
+        """For good: a wait in progress is woken and closes its socket; the
+        Waker goes with the last wait out. The connection of an idle client
+        is its owner's to let go (disconnect)."""
+        with self._life:
+            if self._closed:
+                return
+            self._closed = True
+            idle = not self._waits
+        if idle:
+            self._waker.close()
+        else:
+            self._waker.wake()
+
+    def _wait(self, sock: socket.socket, event: int, timeout: Optional[float]) -> str:
+        """wait_on with this client's Waker; a closed client waits no more.
+        The wait a wake-up ends spends it: its owner acts on it."""
+        with self._life:
+            if self._closed:
+                return "woken"
+            self._waits += 1
+        try:
+            got = wait_on(sock, event, timeout, self._waker)
+            if got == "woken":
+                self._waker.take()
+            return got
+        finally:
+            with self._life:
+                self._waits -= 1
+                last = self._closed and not self._waits
+            if last:
+                self._waker.close()
+
+    def inherit(self, wait: float, watched: bool) -> None:
+        """The next answer this thread waits for is waited `wait` seconds at
+        least, `watched` by `late` — the command before it in its sequence
+        may set off a silence that falls on it (playback.hqp_link's
+        hand-over)."""
+        self._inherited = (wait, watched)
 
     @classmethod
     def last_errors(cls, since: Optional[float] = None) -> List[Dict[str, Any]]:
@@ -453,17 +621,18 @@ class HQPlayerClient:
 
     def dial(self) -> Optional[socket.socket]:
         """A new connection to HQPlayer, set up for this client's reads — not
-        yet the one it talks on (use) — or None, the outcome saying why."""
+        yet the one it talks on (use) — or None, the outcome saying why. Its
+        connect is a wait like a read's: another thread ends it
+        (interrupt, close)."""
         self.timed_out = False      # a failed connect is HQPlayer away, never its silence
         sock = None
         try:
-            sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
             # Connect must be quick on LAN/localhost. A stalled HQPlayer that
             # accepts SYN slowly would otherwise burn the full read timeout on
             # every reconnect attempt. Cap connect at 2s, then restore the
             # full timeout for reads (commands can legitimately take seconds).
-            sock.settimeout(min(self.timeout, 2.0))
-            sock.connect((connect_address(self.host), self.port))
+            sock = open_connection((connect_address(self.host), self.port),
+                                   min(self.timeout, 2.0), self._wait)
             sock.settimeout(self.timeout)
             # Tight TCP keepalive: the WSL2→Windows NAT silently drops idle
             # TCP mappings (no RST) — an idle command socket then surfaces
@@ -486,6 +655,11 @@ class HQPlayerClient:
                     except OSError:
                         pass  # platform exposes the constant but rejects it
             return sock
+        except Interrupted as e:
+            # Let go by this node (a close, a cancel): no loss of HQPlayer's
+            self._outcome("<connection>", None, "interrupted",
+                          f"connect to {self.host}:{self.port}: {e}")
+            return None
         except Exception as e:
             logger.error(f"Failed to connect to HQPlayer: {e}")
             self.losses += 1
@@ -546,7 +720,10 @@ class HQPlayerClient:
         has not come after `late.after` seconds is told to it, and what it
         returns hears how the wait ended (LateAnswers). None when there is
         none: `_io_error` says why, `timed_out` whether HQPlayer kept the
-        connection and said nothing; `answered` whether a line came.
+        connection and said nothing; `answered` whether a line came. The wait
+        is one another thread may end (interrupt, close): then this thread
+        closes its own socket, `_io_error` "interrupted" — no loss of
+        HQPlayer's.
         """
         self.answered = False
         if not self.socket:
@@ -554,23 +731,30 @@ class HQPlayerClient:
             return None
 
         wait = self.timeout if wait is None else wait
-        deadline = time.monotonic() + wait
+        now = time.monotonic()
+        deadline = now + wait
+        late_at = now + self.late.after if on_late is not None else deadline
         ended: Optional[Callable[[str], None]] = None
         how = "lost"
         try:
-            self.socket.settimeout(min(wait, self.late.after) if on_late else wait)
             scanned = 0
             while (nl := self.buffer.find(b"\n", scanned)) < 0:
                 scanned = len(self.buffer)
-                try:
-                    chunk = self.socket.recv(1 << 16)
-                except TimeoutError as e:
-                    # errno set: the peer is gone (keepalive), not our wait run out
-                    if on_late is None or ended is not None or e.errno is not None:
-                        raise
+                # Watched, it is late at `after` — or at the end of a wait
+                # shorter than that — and then waited out to the end
+                late = on_late is not None and ended is None
+                got = self._wait(self.socket, selectors.EVENT_READ,
+                                 (min(late_at, deadline) if late else deadline) - time.monotonic())
+                if got == "woken":
+                    self._io_error = "interrupted"
+                    self.disconnect()
+                    return None
+                if got == "timeout":
+                    if not late:
+                        raise TimeoutError("timed out")
                     ended = on_late()
-                    self.socket.settimeout(max(deadline - time.monotonic(), 0.001))
                     continue
+                chunk = self.socket.recv(1 << 16)
                 if not chunk:
                     # EOF: HQPlayer closed its side. Close ours immediately so
                     # the socket doesn't linger in CLOSE_WAIT until the next
@@ -666,6 +850,8 @@ class HQPlayerClient:
                   watched: Optional[bool]) -> Optional[ET.Element]:
         self.last_error = None
         self._io_error = None
+        self.answered = False
+        inherited, self._inherited = self._inherited, None
         # Build XML command
         root = ET.Element(command)
         if attributes:
@@ -682,14 +868,18 @@ class HQPlayerClient:
 
         # Read response if expected
         if expect_response:
+            if wait is None:
+                wait = self.waits.get(command, self.timeout)
             if watched is None:
                 watched = self.late is not None and command in self.late.commands
+            if inherited is not None and inherited[0] > wait:
+                wait, watched = inherited[0], watched or inherited[1]
             on_late = ((lambda: self.late.begin(command, dict(attributes or {})))
-                       if watched else None)
-            response = self._read_response(self.waits.get(command, self.timeout)
-                                           if wait is None else wait, on_late)
+                       if watched and self.late is not None else None)
+            response = self._read_response(wait, on_late)
             if response is None:
-                self._outcome("<connection>", attributes, "lost",
+                self._outcome("<connection>", attributes,
+                              "interrupted" if self._io_error == "interrupted" else "lost",
                               f"{command}: {self._io_error}", during=command)
                 return None
             result = response.get("result")
@@ -719,6 +909,8 @@ class HQPlayerClient:
 
     def _raw(self, xml: str, wait: float) -> bytes:
         self._io_error = None
+        self.answered = False
+        self._inherited = None
         if not self._send(xml):
             raise ConnectionError(f"HQPlayer at {self.host}:{self.port}: {self._io_error}")
         line = self._read_line(wait)
@@ -1328,6 +1520,7 @@ class HQPlayerConnection:
 
     def __exit__(self, exc_type, exc_val, exc_tb):
         self.client.disconnect()
+        self.client.close()
         return False
 
 

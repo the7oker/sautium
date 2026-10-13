@@ -4,6 +4,7 @@ queue items, drift read through HQPlayer's escapes, and the re-mirror after
 HQPlayer restarts (a trial-mode Embedded stops every 30 minutes)."""
 
 import itertools
+import os
 import re
 import socket
 import socketserver
@@ -5161,3 +5162,394 @@ def test_a_spot_on_a_gap_starts_the_next_slot_hqplayer_holds_from_its_start(fake
     assert [(c, a) for c, a in fake_b.commands if c in ("SelectTrack", "Seek")] == [
         ("SelectTrack", {"index": "2"})]
     assert fake_b.playlist[fake_b.track - 1] == "file:///E:/Music/A/04.flac"
+
+
+# -- The connection's waits, ended from another thread (2026-10-13) ------------------
+# A socket closed by a thread that does not read it races the one that does:
+# every wait — a read, a connect — watches a wake channel beside its socket,
+# and the thread that waits closes its own socket once woken.
+
+def _closes(monkeypatch) -> list:
+    """Every socket.close from here on: (the thread that made it, the socket)."""
+    made = []
+    close = socket.socket.close
+
+    def recorded(sock):
+        made.append((threading.current_thread().name, sock))
+        close(sock)
+    monkeypatch.setattr(socket.socket, "close", recorded)
+    return made
+
+
+def test_the_node_stop_closes_no_socket_a_request_reads(fake, monkeypatch):
+    """The node stop wakes a request waiting on HQPlayer — a DSP change's
+    answer held through a build — and the request's own thread closes the
+    socket: the stopping thread closes none another thread reads."""
+    _limit(monkeypatch, 30.0)
+    link = _link()
+    fake.build("SetFilter", 30.0, answer="last")
+    assert hb.change_dsp({"filter": 57, "filter1x": 57})["building"] is not None
+    change = next(t for t in threading.enumerate() if t.name == "hqp-dsp-change")
+    held = link.client.socket
+    made = _closes(monkeypatch)
+    t0 = time.monotonic()
+    hl.close_all("the node is stopping")
+    change.join(2)
+    assert not change.is_alive() and time.monotonic() - t0 < 2
+    assert [who for who, sock in made if sock is held] == ["hqp-dsp-change"]
+
+
+@pytest.mark.parametrize("run", range(int(os.environ.get("SAUTIUM_LOOP_RUNS", "3"))))
+def test_the_node_stop_lets_go_of_everything_within_two_seconds_again_and_again(
+        fake, output, monkeypatch, run):
+    """The node stop of the test above, run again and again: a socket a
+    close raced lost a read its whole wait now and then
+    (SAUTIUM_LOOP_RUNS=40 for a long run)."""
+    test_the_node_stop_lets_go_of_everything_within_two_seconds(fake, output, monkeypatch)
+
+
+@pytest.mark.skipif(sys.platform == "win32",
+                    reason="Windows' select() limits descriptors by count, not by number")
+def test_a_request_and_its_wake_up_work_on_descriptors_past_1023(fake):
+    """The waits go through the selectors module's default (epoll, kqueue),
+    never select.select, which refuses a descriptor past 1023: a link made
+    with a thousand files open answers, and a wake-up ends its wait."""
+    import resource
+    soft, hard = resource.getrlimit(resource.RLIMIT_NOFILE)
+    if soft < 2048:
+        if hard != resource.RLIM_INFINITY and hard < 2048:
+            pytest.skip("this process may not open 2048 descriptors")
+        resource.setrlimit(resource.RLIMIT_NOFILE, (2048, hard))
+    held = []
+    try:
+        while not held or held[-1] < 1100:
+            held.extend(os.pipe())
+        link = _link()                                   # made now: its descriptors are high
+        with link.asking() as c:
+            assert c.get_status() is not None
+        assert link.client.socket.fileno() > 1023 and link.client._waker.fileno() > 1023
+        fake.silence(10)
+        threading.Timer(0.3, link.client.interrupt).start()
+        t0 = time.monotonic()
+        with link.asking() as c:
+            assert c.get_status(wait=10) is None
+        assert time.monotonic() - t0 < 2
+    finally:
+        for fd in held:
+            os.close(fd)
+        resource.setrlimit(resource.RLIMIT_NOFILE, (soft, hard))
+
+
+def test_an_interrupt_between_the_send_and_the_wait_ends_the_wait_at_once(fake, monkeypatch):
+    """A wake-up given after the request went and before its wait began is
+    not lost: the wait ends at once. Its flag and byte stay until the owner
+    acts on them — the wait that met it — never drained at a wait's start."""
+    link = _link()
+    with link.asking() as c:
+        assert c.get_status() is not None
+    fake.silence(5)
+    send = HQPlayerClient._send_command
+
+    def sent_then_woken(client, xml):
+        ok = send(client, xml)
+        client.interrupt()
+        return ok
+    monkeypatch.setattr(HQPlayerClient, "_send_command", sent_then_woken)
+    t0 = time.monotonic()
+    with link.asking() as c:
+        assert c.get_status(wait=5) is None
+        assert c.last_error.result == "interrupted"
+    assert time.monotonic() - t0 < 1
+    assert not link.client.interrupted()             # spent by the wait that met it
+
+
+def test_a_close_ends_a_connect_to_an_address_that_never_answers(monkeypatch):
+    """A connect is a wait like a read's: a close ends one waiting on an
+    address that drops every packet — never after the connect's own two
+    seconds — and the request is let go, no failure of HQPlayer's."""
+    import hqplayer_client
+    monkeypatch.setattr(hqplayer_client, "connect_address", lambda host: "192.0.2.1")
+    _fresh_links()
+    link = hl.link_for("unreachable.example", 4321)
+    connecting = threading.Event()
+    connect_ex = socket.socket.connect_ex
+
+    def watched(sock, address):
+        err = connect_ex(sock, address)
+        if err:
+            connecting.set()                         # under way: nothing answered yet
+        return err
+    monkeypatch.setattr(socket.socket, "connect_ex", watched)
+    out = {}
+
+    def ask():
+        try:
+            with link.asking() as c:
+                c.get_status()
+        except Exception as e:
+            out["error"] = e
+    t = threading.Thread(target=ask, daemon=True)
+    t.start()
+    try:
+        if not connecting.wait(1.0):
+            pytest.skip("this host does not route TEST-NET-1: the connect fails at once")
+        t0 = time.monotonic()
+        link.close("the node is stopping")
+        t.join(1.5)
+        assert not t.is_alive() and time.monotonic() - t0 < 0.5
+        assert isinstance(out.get("error"), hl.Dropped), out
+        assert link.client.losses == 0
+    finally:
+        _fresh_links()
+
+
+@pytest.mark.skipif(not os.path.isdir("/dev/fd"), reason="counts the descriptors in /dev/fd")
+def test_a_thousand_links_opened_and_closed_leave_no_descriptor_behind(fake):
+    """A client's wake channel closes with it: a thousand links that each
+    asked HQPlayer once and closed leave the descriptors as they were (the
+    fake's own sockets close as the links' do)."""
+    def count() -> int:
+        return len(os.listdir("/dev/fd"))
+    _fresh_links()
+    base = count()
+    for _ in range(1000):
+        link = hl.link_for("127.0.0.1", fake.port)
+        with link.asking() as c:
+            assert c.get_status() is not None
+        link.close("the test opens another")
+    assert _wait(lambda: count() <= base, timeout=10), (count(), base)
+
+
+def test_a_probed_play_that_builds_after_its_answer_is_watched(fake, output, monkeypatch):
+    """A Play HQPlayer answers before its build, on the path every owned play
+    takes (a replace that probes its first track): the request after it in
+    the sequence waits as the Play may make it — watched, up to the build
+    limit — so the silence is said as a build, no question meets it, and no
+    connection is dropped."""
+    mgr, b = output
+    _quick_polls(monkeypatch)
+    link = _link()
+    link.client.timeout = 1.0                           # the plain wait, scaled below the build
+    buildings = _seen(mgr, "building")
+    fake.build("Play", 3.0)                             # answered, then silent
+    connections = link.client.connections
+    t0 = time.time()
+    mgr.replace_queue([_item(f"E:/Music/C/0{i}.flac", 200 + i) for i in range(1, 4)],
+                      play=True, probe_first=True)
+    assert _wait(lambda: time.time() > t0 + 4.5, timeout=8)
+    assert any(buildings), "the build was never said"
+    assert link.client.connections == connections, "a request timed out in the build"
+
+
+def test_a_short_start_build_after_a_play_answered_first_is_said(fake, output, monkeypatch):
+    """The same at the shipped waits: a start of 2.5 s after a Play answered
+    first (an SDM start) is a build on the status, not a question's wait."""
+    mgr, b = output
+    _quick_polls(monkeypatch)
+    buildings = _seen(mgr, "building")
+    fake.build("Play", 2.5)
+    t0 = time.time()
+    mgr.replace_queue([_item(f"E:/Music/C/0{i}.flac", 200 + i) for i in range(1, 4)],
+                      play=True, probe_first=True)
+    assert _wait(lambda: time.time() > t0 + 4.0, timeout=8)
+    assert any(buildings), "the build was never said"
+
+
+def test_a_stop_answered_first_lets_the_replaces_add_wait_its_silence(fake, output):
+    """A command behind a Stop waits the Stop's short silence out, up to
+    STOP_ANSWER_S: a replace's own add after its Stop — answered at once and
+    silent 2 s, longer than the plain wait — goes through."""
+    mgr, b = output
+    link = _link()
+    link.client.timeout = 1.0
+    fake.build("Stop", 2.0, answer="first")
+    added, _ = mgr.replace_queue([_item(f"E:/Music/D/0{i}.flac", 300 + i) for i in range(1, 4)],
+                                 play=False)
+    assert added == 3 and b._mirror == "step"
+
+
+def test_a_command_waiting_behind_a_held_status_past_its_wait_is_refused(fake, monkeypatch):
+    """Past STOP_ANSWER_S HQPlayer is not answering, said before the held
+    Status gives the connection on: a command waiting for it is refused with
+    that line, never sent into the silence. Forced: the held Status's thread
+    is held up 0.2 s right after its request."""
+    monkeypatch.setattr(hl, "STOP_ANSWER_S", 0.6)
+    monkeypatch.setattr(hl.BuildWatch, "after", 0.3)
+    link = _link()
+    link.client.waits.update(hl._command_waits())
+    real = hl.HqpLink._end_scope
+
+    def held_up(self):
+        if threading.current_thread().name == "hqp-held-status":
+            time.sleep(0.2)
+        return real(self)
+    monkeypatch.setattr(hl.HqpLink, "_end_scope", held_up)
+    fake.build("Stop", 3.0, answer="first")       # answered at once, then silent
+    with link.command("transport"):
+        assert link.client.stop()
+    assert _wait(lambda: [c for _, c in fake.arrivals] == ["Stop", "Status"], timeout=3)
+    out = {}
+
+    def press():
+        try:
+            with link.command("transport"):
+                out["ok"] = link.client.play()
+        except Exception as e:
+            out["error"] = e
+    p = threading.Thread(target=press, daemon=True)
+    p.start()
+    p.join(4)
+    assert isinstance(out.get("error"), hl.NotAnswering), out
+    assert "Play" not in [c for _, c in fake.arrivals]
+
+
+def test_the_scan_reads_an_unfinished_build_as_busy(fake, monkeypatch):
+    """The picker's scan reads the HQPlayer driven by its link: past a build
+    it did not finish it is busy — listed with control and its row — never
+    asked into the silence and read as answering discovery only."""
+    import asyncio
+
+    import async_upnp_client.search as search
+    import hqp_library
+    import tls_gen
+    from routers import player
+    _limit(monkeypatch, 0.5)
+    link = _link()
+    fake.build("SetFilter", 30, answer="last")
+    with link.command("dsp"):
+        assert not link.client.set_filter(1)
+    assert link.busy() == hl.UNFINISHED
+
+    async def no_search(*a, **k):
+        return None
+
+    async def sweep(found, found_hqp):
+        found_hqp["127.0.0.1"] = {"name": "fake", "product": "Signalyst HQPlayer Fake"}
+    real = hqp_library.resolve_endpoint
+    monkeypatch.setattr(hqp_library, "_HASH_TIMEOUT", 0.5)
+    monkeypatch.setattr(hqp_library, "resolve_endpoint", lambda host, port: real(host, fake.port))
+    monkeypatch.setattr(hl, "link_for", lambda host, port, _real=hl.link_for: _real(host, fake.port))
+    monkeypatch.setattr(search, "async_search", no_search)
+    monkeypatch.setattr(player, "_unicast_sweep", sweep)
+    monkeypatch.setattr(tls_gen, "detect_private_host_ips", lambda: [])
+    monkeypatch.setattr(hqp_library, "endpoint_by_address", lambda host, port: {"id": 9})
+    monkeypatch.setattr(player, "_configured_hqp", lambda: None)
+    monkeypatch.setattr(player, "_dlna_pins", lambda: {})
+    monkeypatch.setattr(player, "_hqplayer_entries", lambda: [])
+    monkeypatch.setattr(player, "_hqp_discovered", {})
+    n = len(fake.arrivals)
+    asyncio.run(player._scan_run())
+    entry = player._hqp_discovered[("127.0.0.1", 4321)]
+    assert entry["control"] is True and entry["endpoint_id"] == 9, entry
+    assert fake.arrivals[n:] == []
+
+
+def test_a_repick_under_another_alias_moves_the_meter_too(fake, listens, monkeypatch):
+    """The link dials the alias chosen last, and the meter of the HQPlayer
+    driven follows it: a re-pick under another alias changes nothing in
+    playback, and the meter stream is opened at the new one."""
+    import auth_hmac
+    import hqplayer_client
+    from playback import hqp_meter
+    from playback import manager as manager_mod
+    monkeypatch.setattr(auth_hmac, "is_own_address",
+                        lambda h: (h or "").lower() in ("nowhere.alias", "127.0.0.1", "localhost"))
+    real = hqplayer_client.connect_address
+    monkeypatch.setattr(hqplayer_client, "connect_address",
+                        lambda h: "::1" if h == "nowhere.alias" else real(h))
+    monkeypatch.setattr(settings, "hqplayer_host", "nowhere.alias")
+    mgr = PlaybackManager()
+    monkeypatch.setattr(manager_mod, "manager", mgr)
+    b = _attach(mgr)
+    try:
+        assert hqp_meter.meter._target == ("nowhere.alias", fake.port + 1)
+        router = _picker(monkeypatch, fake)
+        _pick(router, hqplayer={"host": "127.0.0.1", "port": fake.port})
+        assert mgr.active is b and _link().host == "127.0.0.1"
+        assert hqp_meter.meter._target == ("127.0.0.1", fake.port + 1)
+    finally:
+        mgr.active.shutdown()
+
+
+def test_a_send_that_failed_ends_no_unfinished_build(fake, monkeypatch):
+    """An unfinished build ends with HQPlayer's next answer — never with the
+    answer an earlier request of the same thread had: a send that fails
+    reads no answer at all."""
+    _limit(monkeypatch, 0.5)
+    link = _link()
+    with link.asking() as c:
+        assert c.get_status() is not None            # this thread's last read was answered
+    fake.build("SetFilter", 30, answer="last")
+
+    def change():
+        with link.command("dsp"):
+            link.client.set_filter(1)
+    t = threading.Thread(target=change, daemon=True)
+    t.start()
+    t.join(5)
+    assert link.build.state is not None and link.build.state.get("unfinished")
+
+    def failing(client, xml):
+        client._io_error = "send failed: [Errno 54] Connection reset by peer"
+        client.losses += 1
+        client.disconnect()
+        return False
+    monkeypatch.setattr(HQPlayerClient, "_send_command", failing)
+    with link.asking() as c:
+        assert c.get_info() is None
+    assert link.build.state is not None and link.build.state.get("unfinished")
+
+
+def test_a_waiter_that_leaves_the_head_of_the_line_wakes_the_next(fake, monkeypatch):
+    """The head of the line for the connection refused — a retire — wakes
+    the one behind it: the Stop a retiring link owes gets the free
+    connection. Forced: the head is held up 0.2 s between being woken and
+    looking again."""
+    link = _link()
+    fake.service["GetInfo"] = 0.5
+    late_item = link.item("late_stop", link.accept("switch"))
+    link._late_stop = object()          # the link stays retiring: a late Stop is owed
+
+    class Slow(threading.Condition):
+        def wait(self, timeout=None):
+            r = super().wait(timeout)
+            if threading.current_thread().name == "x-question":
+                self.release()
+                time.sleep(0.2)
+                self.acquire()
+            return r
+    link._conn = Slow()
+    out = {}
+
+    def owner():
+        with link.asking() as c:
+            out["o"] = c.get_info()
+
+    def x():
+        try:
+            with link.asking() as c:
+                out["x"] = c.get_status()
+        except Exception as e:
+            out["x"] = e
+
+    def late():
+        link._local.item = late_item
+        link._local.late = True
+        try:
+            with link.asking() as c:
+                out["l"] = c.get_status()
+        except Exception as e:
+            out["l"] = e
+    o = threading.Thread(target=owner, daemon=True)
+    o.start()
+    assert _wait(lambda: any(c == "GetInfo" for _, c in fake.arrivals), timeout=3)
+    tx = threading.Thread(target=x, daemon=True, name="x-question")
+    tx.start()
+    assert _wait(lambda: len(link._waiting) == 1, timeout=3)
+    tl = threading.Thread(target=late, daemon=True, name="hqp-late-stop")
+    tl.start()
+    assert _wait(lambda: len(link._waiting) == 2, timeout=3)
+    assert _wait(lambda: any(w[2] == "out" and w[3] == "GetInfo" for w in fake.wire), timeout=3)
+    link.retire("another HQPlayer was chosen")
+    tl.join(2)
+    assert not tl.is_alive(), "the late Stop's Status never got the free connection"

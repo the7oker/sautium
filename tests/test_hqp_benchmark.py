@@ -16,7 +16,9 @@ output is an audible action, not a test.
 """
 
 import json
+import os
 import random
+import socket
 import sys
 import threading
 import time
@@ -1431,3 +1433,35 @@ def test_a_list_hqplayer_did_not_give_refuses_a_run_or_ends_it_put_back(run):
     st = bench.state()
     assert (st["outcome"], st["note"]) == ("failed", "HQPlayer did not list its shapers")
     assert fake.settings() == before
+
+
+def test_a_cancel_never_closes_the_socket_the_run_reads(run, monkeypatch):
+    """A cancel wakes the run's read of an answer HQPlayer holds through a
+    build, and the run's own thread closes its socket: one closed by the
+    cancelling thread raced the read, which then waited its whole wait now
+    and then."""
+    fake = run.fake
+    monkeypatch.setattr(bench, "ANSWER_WAIT_S", 30.0)
+    monkeypatch.setattr(bench, "RESTORE_ANSWER_S", 0.3)
+    fake.builds[("sinc-L", 11289600)] = 6.0
+    bench.start()
+    assert _wait(lambda: fake._silent_until > time.monotonic(), 30)
+    held = bench._live.c.socket
+    made = []
+    close = socket.socket.close
+
+    def recorded(sock):
+        made.append((threading.current_thread().name, sock))
+        close(sock)
+    monkeypatch.setattr(socket.socket, "close", recorded)
+    bench.cancel()
+    assert _wait(lambda: not bench.running(), 10)
+    assert [who for who, sock in made if sock is held] == ["hqp-benchmark"]
+
+
+@pytest.mark.parametrize("again", range(int(os.environ.get("SAUTIUM_LOOP_RUNS", "3"))))
+def test_a_cancel_in_a_silent_build_ends_at_once_again_and_again(run, monkeypatch, again):
+    """The cancel of the test above, run again and again: a socket the
+    cancel closed under the read cost the run its whole wait now and then
+    (SAUTIUM_LOOP_RUNS=40 for a long run)."""
+    test_a_cancel_in_a_silent_build_does_not_wait_out_the_answer(run, monkeypatch)

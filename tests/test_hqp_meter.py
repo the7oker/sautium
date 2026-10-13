@@ -567,3 +567,25 @@ def test_the_event_stream_says_hello_first_and_carries_the_meter_to_its_page(mon
         assert not hqp_meter.meter.want("page-1", True, 2)          # the page went with its stream
 
     asyncio.run(run())
+
+
+def test_a_stop_closes_no_socket_the_session_reads(meter, loop, port, monkeypatch):
+    """A detach wakes the session reading the meter stream, and the session
+    closes its own socket: a socket closed by a thread that does not read it
+    races the one that does."""
+    made = []
+    close = socket.socket.close
+
+    def recorded(sock):
+        made.append((threading.current_thread().name, sock))
+        close(sock)
+    meter.attach("127.0.0.1", port.port)
+    page = Page(meter, loop, "a")
+    page.want(True)
+    page.until(state("open"))
+    held = meter._sock
+    monkeypatch.setattr(socket.socket, "close", recorded)
+    meter.detach()
+    port.wait(lambda: port.ends == 1)
+    page.until(state("waiting"))
+    assert [who for who, sock in made if sock is held] == ["hqp-meter"]

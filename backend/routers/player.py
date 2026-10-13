@@ -686,6 +686,9 @@ async def _scan_run():
     # not hold the scan for the others.
     async def _resolve(host: str) -> tuple:
         try:
+            # Its link says first whether HQPlayer takes anything now — a
+            # build, one it did not finish, a silence: busy, never asked into
+            hqp_link.link_for(host, 4321).refuse()
             return host, await asyncio.to_thread(hqp_library.resolve_endpoint, host, 4321), None
         except OSError as e:
             return host, None, e
@@ -697,8 +700,9 @@ async def _scan_run():
                  "control": True}
         if isinstance(err, (Building, Dropped, NotAnswering)):
             # Busy, not gone: the link of the HQPlayer driven refused the
-            # question — it builds, is lent to the benchmark or holds a
-            # silence. Its row is read by address; nothing is asked.
+            # question — it builds or did not finish a build, is lent to the
+            # benchmark, or answers nothing. Its row is read by address;
+            # nothing is asked.
             ep = await asyncio.to_thread(hqp_library.endpoint_by_address, host, 4321)
             if ep is not None:
                 entry["endpoint_id"] = ep["id"]

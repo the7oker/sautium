@@ -256,7 +256,11 @@ sequence — so at most one request of this node is outstanding at HQPlayer
 requests into each other's silences). After a command a silence may follow
 — one that may set off a build, a Stop, a PlaylistClear — the connection
 passes to the sequence's next request or to a Status the link holds itself,
-so that silence never falls on a question with a short wait; a request
+so that silence never falls on a question with a short wait — the request
+it passes to waits as that command may make it: watched up to the build
+limit after one that may set off a build, up to `STOP_ANSWER_S` after a
+Stop or a PlaylistClear, past which HQPlayer is not answering (said before
+the connection goes to anyone else); a request
 HQPlayer leaves unanswered, with no build of ours behind the silence, ends
 its sequence or question block — the rest is refused, never sent into the
 same silence. What a request came to (its refusal, its silence) is the
@@ -272,12 +276,21 @@ before — no other: a library read of a third box goes on — the Stop it owes
 still goes (only while it plays or pauses an entry of ours), everything
 else gives up, then it closes; picking the same HQPlayer again keeps its
 link and its build watched, and the link dials the alias picked last (on a
-Docker node the host's address, not a loopback that reaches nothing). While the benchmark holds the output the link is
+Docker node the host's address, not a loopback that reaches nothing — the
+meter follows it). While the benchmark holds the output the link is
 lent: nothing of it goes out, and a person's command meanwhile (the
 HQPlayer screen's DSP change, the volume) is refused with 409 naming the job. The node stop closes every link first
-(`hqp_link.close_all`): its waiters and owed items give up at once and each
-socket is shut down and closed — a read blocked on it ends on Linux, macOS
-and Windows — the meter's included.
+(`hqp_link.close_all`): its waiters and owed items give up at once, and
+every wait on HQPlayer — a read, a connect, the meter's session included —
+is woken through its wake channel and closes its own socket (since
+2026-10-13). A socket closed by a thread that does not read it raced the one
+that does: CPython reads the descriptor, lets the GIL go, then polls it, so a
+close in between left the reader polling a number that was free or already
+another socket's — and a close does not wake a poll on macOS. Each wait
+watches its socket and a socketpair together (`hqplayer_client.Waker`,
+`wait_on`, through the selectors module's default, never `select.select`,
+which refuses a descriptor past 1023); a wake-up given before the wait began
+is not lost. A benchmark cancel wakes the run's read the same way.
 
 ### Builds: a DSP change waits one out (since 2026-10-11)
 HQPlayer answers nothing on its control port while it builds a setting — a

@@ -74,7 +74,6 @@ thresholds).
 
 import logging
 import random
-import socket
 import threading
 import time
 from dataclasses import dataclass, replace
@@ -790,19 +789,15 @@ class _Link:
         return self.c.connect()
 
     def close(self) -> None:
+        """The run is over: its connection and its client's wake channel go."""
         self.c.disconnect()
+        self.c.close()
 
     def interrupt(self) -> None:
-        """Wake a read waiting on HQPlayer's answer — a cancel from another
-        thread: it ends as a dropped connection. A shutdown wakes it on
-        Linux; Windows leaves the read blocked until the socket is closed."""
-        sock = self.c.socket
-        if sock is not None:
-            for wake in (lambda: sock.shutdown(socket.SHUT_RDWR), sock.close):
-                try:
-                    wake()
-                except OSError:
-                    pass    # closed meanwhile: nothing waits on it
+        """Wake a read — or a connect — waiting on HQPlayer, from another
+        thread (a cancel): it ends as a connection let go, and the run's own
+        thread closes its socket (HQPlayerClient.interrupt)."""
+        self.c.interrupt()
 
     def refusal(self) -> str:
         return self.c.refusal()
@@ -1582,12 +1577,12 @@ def _restore(link: _Link, pre: dict, own: Optional[dict],
     a cancel in the middle of a build — is left to recover (RESTORE_ANSWER_S)."""
     link.wait = _halt.wait
     link.c.timeout = RESTORE_ANSWER_S
+    # A cancel's wake-up no wait of the run met is spent here: the run acted
+    # on the cancel, and the put-back is no part of it
+    link.c.interrupted()
     sock = link.c.socket
     if sock is not None:
-        if sock.fileno() < 0:
-            link.close()        # closed under it by a cancel's interrupt: connects anew
-        else:
-            sock.settimeout(RESTORE_ANSWER_S)
+        sock.settimeout(RESTORE_ANSWER_S)
     try:
         problems = _again(lambda: _put_back(link, pre=pre, own=own, mute=mute, clear=True),
                           silent_ends=True)

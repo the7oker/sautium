@@ -673,6 +673,22 @@ implementation details live in the code, DB and git history.
   for one caller that, inside their own mutation, refused every tail-mirror
   edit. Lesson: a rule about one batch (what HQPlayer refused) must not
   decide what the queue — which every output shares — holds.
+- **A wait another thread ends closes its own socket** (2026-10-13). A
+  benchmark cancel waited its whole 45 s answer now and then — once in 6 to
+  40 cancels — because the cancelling thread shut down and closed the socket
+  the run was reading: CPython reads the descriptor, lets the GIL go, then
+  polls it, so a close in between left the read polling a number that was
+  free or already another socket's, and macOS does not wake a poll on a
+  close. Every wait on HQPlayer now watches its socket and a socketpair
+  together (`hqplayer_client.Waker`, through the selectors module's
+  default — `select.select` refuses a descriptor past 1023); another thread
+  wakes it, and the waiting thread closes its own socket — the links' reads
+  and connects, the benchmark's, the meter's. A wake-up that comes before the
+  wait is kept until a wait meets it. The same commit: the request a
+  command's silence passes to waits as that command may make it (watched to
+  the build limit, or `STOP_ANSWER_S`), and past `STOP_ANSWER_S` HQPlayer is
+  not answering before the connection goes on. Lesson: a test of who closes
+  what is red every time where a loop of the symptom is red now and then.
 - **Stop-clear-add-select-play sequence** for `play_track`/`play_album`. Without
   explicit stop, HQPlayer occasionally started the wrong track from the
   existing queue.
