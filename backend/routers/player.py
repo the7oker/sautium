@@ -1622,7 +1622,9 @@ def jump(req: JumpRequest):
     does not hold has none). Used by the Queue sheet to play a specific
     track without rebuilding the playlist; on a playlist that is no mirror
     the tap is a play press, answered at once with the track it will start
-    (`starts`)."""
+    (`starts`). A slot the output does not take — a gap of this HQPlayer —
+    is answered with the output's own words (`refusal`), as every transport
+    command is."""
     if req.index < 1:
         raise HTTPException(status_code=400, detail="index must be >= 1")
     try:
@@ -1633,7 +1635,9 @@ def jump(req: JumpRequest):
         ok = b.select(req.index)
     except Exception as e:
         raise _output_error(e)
-    return _starting(b, {"ok": ok, "index": req.index})
+    answer = {"ok": True, "index": req.index} if ok else {
+        "ok": False, "index": req.index, "refusal": b.refusal()}
+    return _starting(b, answer)
 
 
 def _filler_append(item, gen: int, *, position: str = "end",

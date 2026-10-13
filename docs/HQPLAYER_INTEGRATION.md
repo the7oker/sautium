@@ -444,17 +444,23 @@ comes after the control port answers again — so neither can end the wait.
     again it gets the queue back, once per loss (`HqpBackend._reconverge`):
     playing or paused on an entry of ours, what lies behind that entry is
     replaced by remove-after / re-append, the sound never stopped; stopped,
-    it takes the queue afresh; on an entry not ours, or on a file queued
-    at more than one slot (no verdict which one it reads), it stays lost —
-    the repair reads HQPlayer's entry again in its own sequence, and one that
-    moved on meanwhile is repaired at its next answer. Lost too
+    it takes the queue afresh; playing or paused on an entry not ours, or on
+    a file queued at more than one slot it holds (no verdict which one it
+    reads), it stays lost — stopped there it takes the queue afresh, at no
+    spot; the repair reads HQPlayer's entry again in its own sequence, and
+    one that moved on meanwhile is repaired at its next answer. Lost too
     when HQPlayer refused every file of a mirror, or of a person's replace
-    after its Stop and clear: the next Play hands the queue over again.
+    after its Stop: no slot becomes a gap (every slot a gap would read as an
+    empty queue held), and the next Play hands the queue over again.
   - **A tail mirror** when that repair leaves a difference before the entry
     HQPlayer reads: what touches only the tail (an append, a "play next",
     HQPlayer's own advance) goes to HQPlayer as on a mirror, the entry it
-    reads naming the slot; what touches the part before it is the queue's
-    alone.
+    reads naming the slot — a "play next" run piece by piece behind the
+    piece before it; what touches the part before it is the queue's alone.
+    An edit behind it while HQPlayer reads no slot of the queue's, or a file
+    queued at more than one slot it holds, lands on no entry by a guess: it
+    is the queue's, the mirror lost. A radio begun on it leaves it in step —
+    the clear keeps the entry HQPlayer reads, the queue the slot it reads.
   - **Drifted** by an edit made outside this node or a mirror step HQPlayer
     did not take: never reconciled on its own, and never edited by the
     queue's places — a remove, a reorder, a "play next" are the queue's
@@ -491,17 +497,27 @@ comes after the control port answers again — so neither can end the wait.
   that left the library: the slot's way in, `QueueItem.play`, read again at
   every mirroring, so a copy that came back is handed over), or a file it
   refused while it took the rest of the batch (until the next full mirror
-  hands it over again, or the slot is re-bound to another copy). A gap stays
-  in the queue, named in `/api/player/playlist` (`gap`), and is never handed
-  to HQPlayer: a tap on it is refused in its words, a start at a spot on it
-  goes from the next slot HQPlayer holds at 0 s, and Next or Previous at a
-  stopped spot skip it. A queue slot and HQPlayer's entry are told apart by
-  type (`hqp_backend.Entry`), the layout (`_Layout`) is the one translation
+  hands it over again, or the slot is re-bound to another copy — kept by
+  the HQPlayer's link, so a backend attached to it again sees the same
+  gaps). A gap stays in the queue, named in `/api/player/playlist` (`gap`),
+  and is never handed to HQPlayer: the queue sheet fades the row and names
+  why on a line of its own; a tap on it is refused, the jump route
+  answering the output's words (`refusal`), which the sheet shows; a start
+  at a spot on it goes from the next slot HQPlayer holds at 0 s, Next or
+  Previous at a stopped spot skip it, and a "play next" anchored on it goes
+  after the last entry HQPlayer holds before it (a new order made while
+  stopped there is a rebuild). A gap is never the entry HQPlayer reads,
+  though the same track may be queued at a slot it holds. A "play next"
+  whose place HQPlayer's playlist cannot give (shorter than the queue it
+  holds) is the queue's alone, the playlist marked drifted — never added at
+  its end. A queue slot and HQPlayer's entry are told apart by type
+  (`hqp_backend.Entry`), the layout (`_Layout`) is the one translation
   between them, and SelectTrack and PlaylistRemove take only an entry. The
   clear of a full mirror rides on the first add HQPlayer takes.
 - **What HQPlayer refuses whole** — every file it was handed (the disk or
   the proxy out of its reach, or the files themselves) — commits nothing of
-  a person's replace or append and keeps a mirror's queue whole; a replace
+  a person's replace or append and keeps a mirror's queue whole, none of it
+  a gap: the mirror is lost and the next Play hands it over again; a replace
   none of whose files this HQPlayer could open is refused before anything
   is sent. One notice per batch names what was refused and both causes it
   may have; a batch it takes whole ends the last one.

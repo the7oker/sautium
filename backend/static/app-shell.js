@@ -59,6 +59,23 @@
     };
   }
 
+  // Why a queue slot is a gap of the output (the playlist row's `gap`:
+  // playback.substitute, playback.hqp_backend), in words short enough for
+  // one line of the queue sheet at 360 px; a tap brings the output's full
+  // words. A reason not named here reads as the output not holding it.
+  const QUEUE_GAP_LINES = {
+    "held in another HQPlayer's library": "Only in another HQPlayer's library",
+    'its file left the library': 'Its file left the library',
+    'this HQPlayer did not open it': 'This HQPlayer could not open it',
+    'streaming is off on this node': 'Streaming is off on this node',
+    'nothing to stream it from': 'Nothing to stream it from',
+    'no provider has it': 'No provider has it',
+    'the stream could not be fetched': 'The stream could not be fetched',
+  };
+  function queueGapLine(why) {
+    return QUEUE_GAP_LINES[why] || 'Not on this output';
+  }
+
   /* ---------- HTML escape ---------- */
 
   // A fetch that failed to reach the node and a 404 read the same in a
@@ -1849,8 +1866,11 @@
         </svg>`;
 
       this.list.innerHTML = tracks.map((t, idx) => {
-        const oneIdx = idx + 1;          // HQPlayer is 1-based
+        const oneIdx = idx + 1;          // the queue's slot, 1-based
         const isCurrent = oneIdx === currentIdx;
+        // A slot the output does not hold (`gap`: why) — faded, its reason
+        // on a line of its own; it moves and leaves like any other slot
+        const gap = t.gap ? queueGapLine(t.gap) : '';
         // Every track is draggable, including the current one —
         // moving the current row is equivalent to "shift before-
         // tracks across to after-current". Backend rebuilds and
@@ -1886,7 +1906,7 @@
             ${removeSvg}
           </button>`;
         return `
-          <div class="q-row${isCurrent ? ' is-current' : ''}"
+          <div class="q-row${isCurrent ? ' is-current' : ''}${gap ? ' is-gap' : ''}"
                data-index="${oneIdx}" data-mfid="${t.id || ''}">
             <span class="q-drag" ${isLocked ? '' : 'data-drag="1"'}>
               ${dragHandleSvg}
@@ -1895,6 +1915,7 @@
             <div class="q-info">
               <div class="q-title">${escapeHtml(t.title || '')}</div>
               <div class="q-artist">${escapeHtml(t.artist || '')}</div>
+              ${gap ? `<div class="q-gap">${escapeHtml(gap)}</div>` : ''}
             </div>
             ${right}
             ${removeBtn}
@@ -2033,7 +2054,16 @@
         headers: {'Content-Type': 'application/json'},
         body: JSON.stringify({index}),
       }).catch(() => null);
-      if (!resp || !resp.ok) await reportPlaybackResult(resp);
+      if (!resp || !resp.ok) {
+        await reportPlaybackResult(resp);
+        return;
+      }
+      // A slot the output does not take (a gap) is refused in its words
+      const out = await resp.json();
+      if (out.ok === false && out.refusal) {
+        notices.toast({ kind: 'info', key: 'queue.refused', title: 'Not played',
+                        text: escapeHtml(out.refusal.charAt(0).toUpperCase() + out.refusal.slice(1)) });
+      }
       // The queue sheet stays open — user typically wants to keep
       // browsing. Status SSE will repaint the active row.
     },

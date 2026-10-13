@@ -545,6 +545,11 @@ class HqpLink:
         # and the number its attach took
         self.attached = None
         self.attachment: Optional[int] = None
+        # The files this HQPlayer refused while it took the rest of their
+        # batch, as (queue slot, the way in it refused): gaps of this output
+        # until its next full mirror — kept by the link, which every backend
+        # attached to this HQPlayer shares, never by one of them
+        self.refusals: list = []
         self._state_lock = threading.Lock()
         self._late_stop: Optional[_LateStop] = None
         # The connection: the thread whose request holds it, the threads

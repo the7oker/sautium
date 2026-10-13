@@ -735,6 +735,24 @@ implementation details live in the code, DB and git history.
   controller's playlist and played its entry. Lesson: an intent clock is
   ticked by the decision, never by the mechanism that serves it — a detach
   serves a switch, a re-attach and a hold alike.
+- **A refusal of everything is no gap** (2026-10-13). The review of the
+  series found the gaps commit's own regression: a mirror batch HQPlayer
+  refused whole made every slot a gap, and over its empty playlist the
+  canary then read "the queue without its gaps" — in step — so Play sent a
+  bare Play to nothing and every tap was refused, until a new queue. A gap
+  is now only a file refused while HQPlayer took others of its batch, and
+  the refusals are the HQPlayer's (its link's), not one attachment's: a
+  backend attached again read a refused gap as drift and rebuilt on the
+  next Next. A "play next" goes after the last entry HQPlayer holds at or
+  before its anchor — a spot on a gap, a run's piece HQPlayer does not hold,
+  a tail mirror counted from the entry read; it fell back to HQPlayer's end
+  unmarked. A gap is never the entry HQPlayer reads (the same track queued
+  as a gap elsewhere stopped the reconverge); a tail edit behind a file
+  queued twice lands on no copy by a guess; a radio that keeps the entry
+  read leaves the mirror in step. The queue sheet now fades a gap and says
+  why on a line of its own; a tap answers the output's words. Lesson: a
+  rule about what HQPlayer holds must count what it holds — an empty
+  playlist and a queue of gaps compared equal.
 - **Stop-clear-add-select-play sequence** for `play_track`/`play_album`. Without
   explicit stop, HQPlayer occasionally started the wrong track from the
   existing queue.
