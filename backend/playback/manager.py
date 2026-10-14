@@ -856,7 +856,8 @@ class PlaybackManager:
             else:
                 anchor = None
             if position == "next" and anchor is not None:
-                accepted = backend.queue_insert_next(items, anchor) if backend else list(items)
+                accepted, anchor = (backend.queue_insert_next(items, anchor) if backend
+                                    else (list(items), anchor))
                 if accepted:
                     self.queue.insert_after(anchor, accepted)
                     if backend:

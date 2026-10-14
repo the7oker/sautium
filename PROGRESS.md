@@ -1018,6 +1018,20 @@ implementation details live in the code, DB and git history.
   nor restarted, the reconverge repairs behind it — and a "play next" goes
   behind what HQPlayer reads. Lesson: the state an edit acts on is read in
   the edit, not remembered from before it.
+- **What the edit read, both sides take** (2026-10-14). The in-step read
+  put a "play next" behind the slot HQPlayer had moved on to, while the
+  queue still took it behind the slot of the last status: the two apart,
+  the mirror said in step — a removal of the new track by its row then
+  removed the playing one, and a tap on it restarted what played. The
+  output now names the slot it went behind, and the queue puts the tracks
+  there. The same reads took a status that gives no verdict — a state the
+  SDK does not name, an entry HQPlayer is opening — as leave to act, and
+  removed or restarted what HQPlayer was starting: such a status is now no
+  reading, the edit the queue's and the mirror lost. A rebuild that sent
+  nothing for it left a failed attempt for Now Playing to explain; a Play's
+  repair of a drifted playlist that met a silence armed nothing, and
+  HQPlayer's late removal left it short with nothing to mend it. Lesson:
+  a reading taken in one place must be the one every party acts on.
 - **A tap is decided where its start goes** (2026-10-14). A tap on
   HQPlayer checked whether a queue mutation held words and whether the
   playlist was a mirror, then computed its entry and waited for the command

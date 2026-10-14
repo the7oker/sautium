@@ -253,7 +253,10 @@ class PlayerBackend(ABC):
 
     # The three take what the output took of `items` into the queue — all of
     # them here and on HQPlayer, which has a gap for what it did not open;
-    # nothing when HQPlayer refused them whole (mirror-first).
+    # nothing when HQPlayer refused them whole (mirror-first). A play next
+    # also names the slot it went behind — HQPlayer's, read as the insert
+    # goes, when it moved on past the anchor — and the queue puts the tracks
+    # there too.
 
     def queue_replace(self, items: list, *, play: bool, probe_first: bool = False) -> list:
         return list(items)
@@ -261,8 +264,8 @@ class PlayerBackend(ABC):
     def queue_append(self, items: list) -> list:
         return list(items)
 
-    def queue_insert_next(self, items: list, anchor_index: Optional[int]) -> list:
-        return list(items)
+    def queue_insert_next(self, items: list, anchor_index: Optional[int]) -> tuple:
+        return list(items), anchor_index
 
     def lose_mirror(self, why: str) -> None:
         """Background work could not hand the output what the queue took (a

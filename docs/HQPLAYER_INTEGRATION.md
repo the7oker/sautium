@@ -458,19 +458,24 @@ comes after the control port answers again — so neither can end the wait.
   - **Lost** when a build ran out or HQPlayer went away under a queue edit,
     when an append or a "play next" found it not answering (a "play next"
     whose playlist read HQPlayer did not give included — no reading is no
-    shorter playlist), when it left a
+    shorter playlist — and one read while HQPlayer opens an entry it names
+    no slot of yet), when it left a
     removal or the radio's clear unanswered within its wait (it carries
     them out once its silence is over: the slot leaves the queue, the radio
     goes on), when a replace was cut short by a silence (the queue takes
     every track of it), when a radio began while HQPlayer was stopped (its
     clear keeps no entry of the seed the queue keeps) or had moved on from
     the slot the queue keeps since its last status, when a step of a new
-    order or of this repair went unanswered within its wait (HQPlayer
-    carries it out once its silence is over; the repair is then due again),
+    order or of this repair went unanswered within its wait — a Play's
+    repair of a drifted playlist included (HQPlayer carries it out once its
+    silence is over; the repair is then due again),
     when a re-bind's read of HQPlayer's playlist went unanswered or was
-    refused, when HQPlayer moved on from the slot a new order was planned on
-    — read in the edit's own sequence, in step too (since 2026-10-14): the
-    entry it plays is never removed, nor restarted by a rebuild — or when it came
+    refused, when HQPlayer moved on from the slot a new order was planned on,
+    or reads none such an edit may go by — a state the SDK does not name, a
+    stop under way — read in the edit's own sequence, in step too (since
+    2026-10-14): the entry it plays is never removed, nor restarted by a
+    rebuild, and a "play next" that finds it moved on goes behind the entry
+    it reads, in the queue as in HQPlayer — or when it came
     back restarted — through a silence: from then on appends, inserts,
     removals and new orders are the queue's alone, and once HQPlayer answers
     again it gets the queue back, once per loss (`HqpBackend._reconverge`):

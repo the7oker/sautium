@@ -177,8 +177,8 @@ class _Elsewhere:
     def queue_append(self, items) -> list:
         return list(items)
 
-    def queue_insert_next(self, items, anchor_index) -> list:
-        return list(items)
+    def queue_insert_next(self, items, anchor_index) -> tuple:
+        return list(items), anchor_index
 
     def queue_remove(self, index) -> bool:
         return True
