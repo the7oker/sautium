@@ -1008,10 +1008,10 @@ implementation details live in the code, DB and git history.
   HQPlayer and the queue apart, the mirror "in step". Checked by identity
   against the queue's items, a plan made on one HQPlayer was also taken on
   another chosen before the apply, which started B from A's position. The
-  plan is now the queue's items in their new order, and the output it was
-  made on refuses no other; a step HQPlayer refuses is its answer
-  (OutputRefused), logged once in its words, never as a fault. Lesson: an
-  id is a name, a slot is a thing — order things.
+  plan is now the queue's items in their new order, and it is refused on
+  any output but the one it was made on; a step HQPlayer refuses is its
+  answer (OutputRefused), logged once in its words, never as a fault.
+  Lesson: an id is a name, a slot is a thing — order things.
 - **In step is a reading, not a memory** (2026-10-14). "No answer is no
   reading" had reached the "play next" and the removal, not two more edits:
   a seamless new order whose removal HQPlayer left unanswered answered 503,
@@ -1079,9 +1079,23 @@ implementation details live in the code, DB and git history.
   a slot that moved, a play press on a playlist that is no mirror), its
   attempt watched only from the start it sends, and only an output that
   holds words is handed the raw index. A Play that resumes a spot still
-  finds its entry before the command lock — the same window, left open for
-  C1b. Lesson: a check and the act it guards belong to one critical
-  section.
+  finds its entry before the command lock — the same window, left open
+  (2026-10-14). Lesson: a check and the act it guards belong to one
+  critical section.
+- **Open after the series' review** (2026-10-14), found in code the series
+  did not change, left for the next slice: a removal of the very slot
+  HQPlayer reads on a tail mirror is the queue's alone, and the canary then
+  calls the node's own removal an external edit — the scenario runner's
+  narrowed drift explanation reports it, and whether the product should send
+  the removal or the oracle excuse it is open; with two HQPlayers, a seen
+  restored-run report comes back once the other HQPlayer's newer report is
+  cleared (the seen map keeps one onset per key); a command refused at its
+  first request after it took a free command lock — a build or a short
+  silence met behind the link's held Status — keeps its number, where the
+  link's own words say a busy refusal supersedes nothing (which of the two
+  is meant is open); and a held Play that meets a build is recorded as an
+  unreachable attempt with nothing sent (its attempt opens before the lock
+  refuses it).
 - **Stop-clear-add-select-play sequence** for `play_track`/`play_album`. Without
   explicit stop, HQPlayer occasionally started the wrong track from the
   existing queue.

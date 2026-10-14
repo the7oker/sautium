@@ -32,12 +32,13 @@ A link owns:
     sequence holds the command lock: one refused as busy takes none and
     supersedes nothing. A new queue and a rebuild supersede from their ask
     (a play press's hand-over is cut short at its next add) and withdraw
-    that if the lock refuses them. A sequence that decides under the lock
-    whether it goes at all (a tap) holds only once it says so (hold_as):
-    one it refuses supersedes nothing. An item — a start left for later, a
-    resume, the rest of a DSP change, a Stop an output switch owed — is
-    never sent once a newer intent of a kind that supersedes it holds
-    (SUPERSEDED_BY), checked right before the bytes go;
+    that if their sequence never holds the lock — refused by it, or the
+    hand-over that owns the number ended first. A sequence that decides
+    under the lock whether it goes at all (a tap) holds only once it says
+    so (hold_as): one it refuses supersedes nothing. An item — a start left
+    for later, a resume, the rest of a DSP change, a Stop an output switch
+    owed — is never sent once a newer intent of a kind that supersedes it
+    holds (SUPERSEDED_BY), checked right before the bytes go;
   * the Stop a person's switch away owes it (the late Stop): sent at once,
     or once HQPlayer answers through a build or a silence.
 
@@ -621,8 +622,9 @@ class HqpLink:
         """A new queue's or a rebuild's number, as it is asked — before it
         waits for the command lock: it supersedes from now (a play press's
         hand-over is dropped at its next add instead of being waited out),
-        published once its sequence holds the lock, withdrawn if the lock
-        refuses it (command)."""
+        published once its sequence holds the lock, withdrawn if it never
+        does — the lock refuses it (command), or the hand-over that owns it
+        ends first (HqpBackend._handing)."""
         with self._state_lock:
             self._clock += 1
             n = self._clock
@@ -640,8 +642,9 @@ class HqpLink:
         self._local.item = self.item(item, n)
 
     def withdraw(self, n: int) -> None:
-        """An early number whose sequence the command lock refused: it
-        supersedes nothing from now."""
+        """An early number whose sequence never held the command lock — the
+        lock refused it, or its hand-over ended first: it supersedes nothing
+        from now (a no-op once it was published)."""
         with self._state_lock:
             self._pending.pop(n, None)
 
@@ -1012,7 +1015,8 @@ class HqpLink:
         the lock is ours (yielded): its place is the order of the asks, and
         a sequence the lock refuses supersedes nothing. `number`: one taken
         earlier for it — a new queue's or a rebuild's (ask_early), which
-        supersedes from its ask and is withdrawn when the lock refuses it.
+        supersedes from its ask and is withdrawn when the lock refuses it
+        (and by the hand-over that owns it, on any exit before it held).
         `item` is what the sequence serves — an Item made earlier (a start
         left for later, a resume, an owed Stop), or a kind, made here for
         `intent`: each of its requests is dropped once a newer intent

@@ -232,8 +232,11 @@ class World:
         self.unexpected: list[str] = []
         self.checked = 0
         self.foreign = 0
-        # A step whose outcome the next settle judges at rest (the tail mirror)
-        self.rest_due = False
+        # The tail step whose outcome the next settle judges at rest — its
+        # step's number, when no other step ran beside it — and the newest
+        # step begun: judged as right after it only while none began since
+        self.rest_due: Optional[int] = None
+        self.last_step = -1
         # How long a full settle waits for quiet
         self.settle_limit = 15.0
         self.next_id = 100
@@ -780,6 +783,9 @@ class World:
         b = self.mgr.active
         if not isinstance(b, HqpBackend):
             return
+        alone = not any(t.is_alive() for t in self.threads
+                        if t is not threading.current_thread())
+        began = self.last_step
         f = self.driven()
         ours = {b._uri_of(it)[0] for it in b._layout().handed}
 
@@ -806,7 +812,13 @@ class World:
             f.playlist.insert(f.track - 1, f"file:///Elsewhere/before-{self.foreign}.flac")
             f.track += 1
         b.lose_mirror("an entry of HQPlayer's own before the one it plays")
-        self.rest_due = True            # judged at rest before another step moves it
+        if alone and self.last_step == began:
+            self.rest_due = began       # judged at rest before another step moves it
+
+    def right_after(self, due: Optional[int]) -> bool:
+        """Is the rest that follows the tail step `due` right after it — no
+        step began since, none ran beside it?"""
+        return due is not None and self.last_step == due
 
     def reorder(self) -> None:
         order = [it.track_id for it in self.mgr.queue.snapshot()]
@@ -850,6 +862,8 @@ class World:
 
     def run_step(self, name: str, fn: Callable[[], Any]) -> None:
         n = self.rec("step", name=name)
+        with self._lock:
+            self.last_step = max(self.last_step, n)
         b = self.mgr.active
         alone = not any(t.is_alive() for t in self.threads
                         if t is not threading.current_thread())
@@ -1356,14 +1370,15 @@ def test_the_links_keep_their_invariants_whatever_the_order(seed, fake, fake_b, 
         world.start()
         for i in range(int(os.environ.get("SAUTIUM_SCENARIO_STEPS", "25"))):
             world.step()
-            full = i % 6 == 5 or world.rest_due
+            full = i % 6 == 5 or world.rest_due is not None
             world.settle(full=full)
             if full:
                 # A tail mirror is judged before anyone presses; any other
                 # rest, now and then the person presses before the
                 # reconverge HQPlayer's return made due
-                due, world.rest_due = world.rest_due, False
-                world.at_rest(press_first=not due and world.rng.random() < 0.5, tail=due)
+                due, world.rest_due = world.rest_due, None
+                world.at_rest(press_first=due is None and world.rng.random() < 0.5,
+                              tail=world.right_after(due))
             world.check()
             if world.violations or world.unexpected:
                 break
@@ -1535,7 +1550,7 @@ def test_the_tail_step_is_judged_at_rest(fake, fake_b, listens, monkeypatch):
         world.player.jump(world.player.JumpRequest(index=2))
         assert _wait(lambda: fake.state == int(PlaybackState.PLAYING) and fake.track == 2)
         world.run_step("an entry before", world.entry_before)
-        assert world.rest_due
+        assert world.right_after(world.rest_due)
         fake.service["Status"] = 0.3
         world.settle(full=True)
         n = len(world.log)
@@ -1560,6 +1575,59 @@ def _a_tail_that_does_not_hold(world, fake) -> None:
     with fake._lock:
         i = fake.track
         fake.playlist[i], fake.playlist[i + 1] = fake.playlist[i + 1], fake.playlist[i]
+
+
+def test_a_tail_step_another_step_ran_after_is_no_rest_right_after_it(fake, fake_b, listens,
+                                                                         monkeypatch):
+    """The tail step drawn onto a thread, the reconverge's tail taken; then
+    another step — another controller playing its own entry on the driven
+    HQPlayer — before the rest: that rest is not right after the tail step,
+    and judges the tail as any rest does (the canary's drift, explained by
+    the entry at the one read, then the press) — never an I14 broken by the
+    node."""
+    with _a_world(fake, fake_b, monkeypatch) as world:
+        world.player.jump(world.player.JumpRequest(index=2))
+        assert _wait(lambda: fake.state == int(PlaybackState.PLAYING) and fake.track == 2)
+        t = threading.Thread(target=world.run_step, args=("an entry before",
+                                                           world.entry_before),
+                             daemon=True, name="scenario-an entry before")
+        world.threads.append(t)
+        t.start()
+        t.join(10)
+        due = world.rest_due
+        assert world.right_after(due)
+        assert _wait(lambda: world.mgr.active._mirror == "tail")
+        world.hqp = lambda: fake
+        world.run_step("theirs", world.theirs)
+        assert not world.right_after(due)
+        world.settle(full=True)
+        world.at_rest(tail=world.right_after(due))
+        assert not world.violations, world.violations
+
+
+def test_a_tail_step_run_beside_another_step_leaves_no_rest_right_after_it(fake, fake_b, listens,
+                                                                           monkeypatch):
+    """The tail step run while another step still runs — one that may move
+    HQPlayer once it ends: the rest after them is no rest right after the
+    tail step."""
+    with _a_world(fake, fake_b, monkeypatch) as world:
+        world.player.jump(world.player.JumpRequest(index=2))
+        assert _wait(lambda: fake.state == int(PlaybackState.PLAYING) and fake.track == 2)
+        running, release = threading.Event(), threading.Event()
+
+        def beside() -> None:
+            running.set()
+            release.wait(10)
+        t = threading.Thread(target=world.run_step, args=("beside", beside), daemon=True,
+                             name="scenario-beside")
+        world.threads.append(t)
+        t.start()
+        assert running.wait(5)
+        world.run_step("an entry before", world.entry_before)
+        release.set()
+        t.join(10)
+        assert any("/before-" in uri for uri in fake.playlist), fake.playlist
+        assert world.rest_due is None
 
 
 def test_a_tail_that_does_not_hold_at_rest_breaks_invariant_14(fake, fake_b, listens,
