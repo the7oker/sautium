@@ -1104,8 +1104,10 @@ implementation details live in the code, DB and git history.
   did not change, left for the next slice: a removal of the very slot
   HQPlayer reads on a tail mirror is the queue's alone, and the canary then
   calls the node's own removal an external edit — the scenario runner's
-  narrowed drift explanation reports it, and whether the product should send
-  the removal or the oracle excuse it is open; with two HQPlayers, a seen
+  narrowed drift explanation reports it (decided: the removal stays the
+  queue's alone, the track playing out, and the node remembers it until
+  HQPlayer passes that entry, so the canary never calls it an external
+  edit — the oracle excuses nothing); with two HQPlayers, a seen
   restored-run report comes back once the other HQPlayer's newer report is
   cleared (the seen map keeps one onset per key); a command refused at its
   first request after it took a free command lock — a build or a short
@@ -1114,6 +1116,18 @@ implementation details live in the code, DB and git history.
   is meant is open); and a held Play that meets a build is recorded as an
   unreachable attempt with nothing sent (its attempt opens before the lock
   refuses it).
+- **Open after the fixes' review** (2026-10-14), in code the fixes did not
+  change: a "play next" on a tail mirror whose anchor HQPlayer moved past
+  goes to the queue alone, before the entry HQPlayer reads, and never
+  plays (whether the entry it reads should place it, as in step, is open);
+  a held Next or Previous that finds no slot among what HQPlayer is handed
+  moves nothing, even where the queue left has one (a removal of the last
+  track HQPlayer refused); and the scenario runner's rest misreads one
+  answer late past its scaled waits — a poller tick that misses re-loses
+  the mirror and the reconverge hands HQPlayer the queue stopped before the
+  rest presses (`test_a_build_left_armed_never_meets_the_rest_press` then
+  fails on its last line), or the play gate's GetInfo late at the rest's
+  press is reported as an I13 refusal with HQPlayer up.
 - **Stop-clear-add-select-play sequence** for `play_track`/`play_album`. Without
   explicit stop, HQPlayer occasionally started the wrong track from the
   existing queue.

@@ -237,6 +237,8 @@ class World:
         # step begun: judged as right after it only while none began since
         self.rest_due: Optional[int] = None
         self.last_step = -1
+        # The number of the step this thread runs
+        self._running = threading.local()
         # How long a full settle waits for quiet
         self.settle_limit = 15.0
         self.next_id = 100
@@ -785,7 +787,7 @@ class World:
             return
         alone = not any(t.is_alive() for t in self.threads
                         if t is not threading.current_thread())
-        began = self.last_step
+        began = self._running.n
         f = self.driven()
         ours = {b._uri_of(it)[0] for it in b._layout().handed}
 
@@ -814,6 +816,19 @@ class World:
         b.lose_mirror("an entry of HQPlayer's own before the one it plays")
         if alone and self.last_step == began:
             self.rest_due = began       # judged at rest before another step moves it
+
+    def rest(self, i: int) -> None:
+        """The breath after the `i`-th step: a full settle every sixth step
+        and after the tail step, then the rest. A tail mirror is judged
+        before anyone presses — as the tail step left it only when no step
+        began since (right_after); any other rest, now and then the person
+        presses before the reconverge HQPlayer's return made due."""
+        full = i % 6 == 5 or self.rest_due is not None
+        self.settle(full=full)
+        if full:
+            due, self.rest_due = self.rest_due, None
+            self.at_rest(press_first=due is None and self.rng.random() < 0.5,
+                         tail=self.right_after(due))
 
     def right_after(self, due: Optional[int]) -> bool:
         """Is the rest that follows the tail step `due` right after it — no
@@ -864,6 +879,7 @@ class World:
         n = self.rec("step", name=name)
         with self._lock:
             self.last_step = max(self.last_step, n)
+        self._running.n = n
         b = self.mgr.active
         alone = not any(t.is_alive() for t in self.threads
                         if t is not threading.current_thread())
@@ -1370,15 +1386,7 @@ def test_the_links_keep_their_invariants_whatever_the_order(seed, fake, fake_b, 
         world.start()
         for i in range(int(os.environ.get("SAUTIUM_SCENARIO_STEPS", "25"))):
             world.step()
-            full = i % 6 == 5 or world.rest_due is not None
-            world.settle(full=full)
-            if full:
-                # A tail mirror is judged before anyone presses; any other
-                # rest, now and then the person presses before the
-                # reconverge HQPlayer's return made due
-                due, world.rest_due = world.rest_due, None
-                world.at_rest(press_first=due is None and world.rng.random() < 0.5,
-                              tail=world.right_after(due))
+            world.rest(i)
             world.check()
             if world.violations or world.unexpected:
                 break
@@ -1552,9 +1560,8 @@ def test_the_tail_step_is_judged_at_rest(fake, fake_b, listens, monkeypatch):
         world.run_step("an entry before", world.entry_before)
         assert world.right_after(world.rest_due)
         fake.service["Status"] = 0.3
-        world.settle(full=True)
         n = len(world.log)
-        world.at_rest()
+        world.rest(0)
         fake.service.pop("Status", None)
         assert not world.violations, world.violations
         rest = [e for e in world.log[n:] if e.kind in ("rest", "step")]
@@ -1600,8 +1607,7 @@ def test_a_tail_step_another_step_ran_after_is_no_rest_right_after_it(fake, fake
         world.hqp = lambda: fake
         world.run_step("theirs", world.theirs)
         assert not world.right_after(due)
-        world.settle(full=True)
-        world.at_rest(tail=world.right_after(due))
+        world.rest(0)
         assert not world.violations, world.violations
 
 
