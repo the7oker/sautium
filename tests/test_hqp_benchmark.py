@@ -2573,6 +2573,7 @@ def test_another_hqplayer_chosen_in_a_put_backs_stop_leaves_the_run(run, monkeyp
     assert _wait(_recover_threads_done, 10)
     assert _closed_as_left(run, run_id)
 
+
 def test_another_hqplayer_chosen_while_a_put_back_reads_no_state_leaves_the_run(run, monkeypatch):
     """The owed put-back's reads come back with no state of HQPlayer's (an
     answer it could not read) after the owner picked another HQPlayer: that
@@ -2736,3 +2737,48 @@ def test_a_streamed_hqplayer_back_on_the_queue_after_the_node_restarted_goes_bac
     _fresh_trace()
     _node_starts(run)
     assert fake.settings() == before
+
+
+@pytest.mark.parametrize("unserved", ["accepted", "queued"])
+def test_a_restart_drops_the_put_backs_connection_it_has_not_served(run, monkeypatch, unserved):
+    """The cancel woke the run's read, the run connected again at once, and
+    HQPlayer restarted before it served that connection — accepted, its
+    handler not run yet, or still in the kernel's queue: a restart resets
+    every connection the box had, so the put-back meets the loss and the
+    run is marked lost, never judged by the silence after."""
+    fake = run.fake
+    fake.jitter = 0.2
+    monkeypatch.setattr(bench, "SETTLE_CAP_S", 2.0)
+    monkeypatch.setattr(bench, "RESTORE_ANSWER_S", 0.3)
+    hold, held = threading.Event(), threading.Event()
+
+    def later(step):
+        def waits(*a):
+            if hold.is_set():
+                hold.clear()
+                held.wait(5)
+            return step(*a)
+        return waits
+    if unserved == "accepted":
+        monkeypatch.setattr(fake._handler, "handle", later(fake._handler.handle))
+    else:
+        monkeypatch.setattr(fake._srv, "get_request", later(fake._srv.get_request))
+    put_back, began = bench._put_back, threading.Event()
+
+    def new_connection_then_restart(link, **kw):
+        if not began.is_set():
+            began.set()
+            hold.set()
+            link.c.disconnect()
+            assert link.c.connect()         # as the cancel's reconnect leaves it
+            fake.restart()
+            fake.silence(2.0)
+            held.set()
+        return put_back(link, **kw)
+    monkeypatch.setattr(bench, "_put_back", new_connection_then_restart)
+    monkeypatch.setattr(hb.HqpBackend, "_recover", lambda self: None)
+    bench.start()
+    assert _wait(lambda: run.point() >= 2, 20)
+    bench.cancel()
+    assert _wait(lambda: not bench.running(), 30)
+    assert run.q("SELECT lost_at IS NOT NULL FROM hqp_benchmark_runs") == [(True,)]

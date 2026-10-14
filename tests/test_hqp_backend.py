@@ -107,6 +107,8 @@ class FakeHqp:
         self._order = threading.Condition()
         self._lock = threading.Lock()
         self._conns: list[socket.socket] = []
+        # The epoch each connection was accepted in, until its handler runs
+        self._accepted: dict = {}
         # Bumped by every restart: what a dropped connection had queued into
         # the silence is gone with it, never carried out after the restart
         self._epoch = 0
@@ -121,11 +123,11 @@ class FakeHqp:
 
         class Handler(socketserver.BaseRequestHandler):
             def handle(self):
+                with fake._lock:
+                    epoch = fake._accepted.pop(self.request)
                 if fake.mute or fake._down:
                     return              # a trial-stopped Embedded, or a box going down: dropped at once
                 with fake._lock:
-                    fake._conns.append(self.request)
-                    epoch = fake._epoch
                     conn = next(fake._conn_ids)
                 try:
                     self._serve(conn, epoch)
@@ -185,7 +187,25 @@ class FakeHqp:
                         last = m.end()
                     buf = buf[last:]
 
-        self._handler = Handler
+        class Server(_ReusableServer):
+            # A connection is taken under the fake's lock as it is accepted,
+            # so a restart finds every one the box had — served, waiting for
+            # its handler, or still in the kernel's queue — and resets them
+            # all, as a real restart does
+
+            def server_activate(self):
+                super().server_activate()
+                self.socket.setblocking(False)  # a restart may empty the queue first
+
+            def get_request(self):
+                with fake._lock:
+                    request, address = self.socket.accept()
+                    request.setblocking(True)
+                    fake._conns.append(request)
+                    fake._accepted[request] = fake._epoch
+                return request, address
+
+        self._handler, self._server = Handler, Server
         self.port = 0
         self._serve()
 
@@ -236,7 +256,7 @@ class FakeHqp:
             self._builds[command] = (seconds, answer, stops)
 
     def _serve(self) -> None:
-        self._srv = _ReusableServer(("127.0.0.1", self.port), self._handler)
+        self._srv = self._server(("127.0.0.1", self.port), self._handler)
         self.port = self._srv.server_address[1]
         threading.Thread(target=self._srv.serve_forever, daemon=True).start()
 
@@ -348,6 +368,12 @@ class FakeHqp:
             self.track = 0
             self._builds.clear()
             self._epoch += 1
+            while True:
+                try:
+                    c, _ = self._srv.socket.accept()
+                except OSError:
+                    break           # none queued, or the port is closed
+                conns.append(c)
         for c in conns:
             try:
                 c.shutdown(socket.SHUT_RDWR)
