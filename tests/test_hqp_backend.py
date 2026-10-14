@@ -9739,3 +9739,47 @@ def test_next_then_a_seek_held_by_a_play_next_hqplayer_refused_whole_starts_at_t
         fake.state, fake.track, fake.playlist)
     sent = _start_sent(fake, n)
     assert ("Seek", {"position": "30"}) in sent, sent
+
+
+def test_a_play_next_read_on_an_entry_not_the_queues_never_removes_it(fake, output,
+                                                                       monkeypatch):
+    """In step, track 1 plays; before a "play next" goes, another controller
+    adds an entry and HQPlayer plays it — no tick has read it yet. The
+    insert's own read names no slot of the queue's: the insert is the
+    queue's, the mirror lost, and the entry HQPlayer plays is never removed
+    from under it."""
+    mgr, b = output
+    insert = b.queue_insert_next
+
+    def theirs_first(items, anchor_index):
+        with fake._lock:
+            fake.playlist.append("file:///Elsewhere/theirs.flac")
+            fake.track, fake.position = 4, 0.0
+        return insert(items, anchor_index)
+    monkeypatch.setattr(b, "queue_insert_next", theirs_first)
+    n = len(fake.commands)
+    assert mgr.append([_item("E:/Music/N/01.flac", 31)], "next") == 1
+    removed = [a.get("index") for c, a in fake.commands[n:] if c == "PlaylistRemove"]
+    assert removed == [] and b._mirror == "lost", (removed, b._mirror, fake.playlist)
+    assert fake.state == int(PlaybackState.PLAYING)
+    assert fake.playlist[fake.track - 1] == "file:///Elsewhere/theirs.flac", fake.playlist
+
+
+def test_a_play_next_read_in_a_state_hqplayer_does_not_name_edits_nothing(fake, output,
+                                                                          monkeypatch):
+    """In step, track 1 plays; before a "play next" goes, HQPlayer's Status
+    says a state the SDK does not name on entry 1 (Embedded said 5 while it
+    started a play): no reading — nothing is removed, the insert is the
+    queue's and the mirror lost."""
+    mgr, b = output
+    insert = b.queue_insert_next
+
+    def unnamed_first(items, anchor_index):
+        with fake._lock:
+            fake.state = 5
+        return insert(items, anchor_index)
+    monkeypatch.setattr(b, "queue_insert_next", unnamed_first)
+    n = len(fake.commands)
+    assert mgr.append([_item("E:/Music/N/01.flac", 31)], "next") == 1
+    removed = [a.get("index") for c, a in fake.commands[n:] if c == "PlaylistRemove"]
+    assert removed == [] and b._mirror == "lost", (removed, b._mirror, fake.playlist)

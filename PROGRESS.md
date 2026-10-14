@@ -1042,6 +1042,13 @@ implementation details live in the code, DB and git history.
   repair of a drifted playlist that met a silence armed nothing, and
   HQPlayer's late removal left it short with nothing to mend it. Lesson:
   a reading taken in one place must be the one every party acts on.
+- **One rule, every reader** (2026-10-14). The read a "play next" makes
+  in its own sequence was the one in-step read that still took another
+  controller's entry, or a state the SDK does not name, as HQPlayer
+  reading its anchor: it removed the entries behind the anchor — the one
+  another controller played among them — and HQPlayer stopped. It now
+  reads as a new order's reads do. Lesson: a rule stated for "the reads"
+  is checked at every read, not at the first two.
 - **Decided late, numbered as asked** (2026-10-14). The tap decided again
   under the command lock took a fresh number when a mutation held it or
   it became a play press: a Pause the person made while the tap waited

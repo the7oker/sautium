@@ -4028,7 +4028,7 @@ class HqpBackend(PlayerBackend):
         self.poke()
         return self._queue_takes(items, handed, taken, unsent, "appended tracks")
 
-    def queue_insert_next(self, items: list, anchor_index: Optional[int]) -> list:
+    def queue_insert_next(self, items: list, anchor_index: Optional[int]) -> tuple:
         """Insert right after the playing slot via the seamless remove-after /
         re-append trick — the reading slot is never touched, so audio plays
         through. URI-based so it works for preview streams too. The new
@@ -4117,9 +4117,11 @@ class HqpBackend(PlayerBackend):
         reads the playing slot. No anchor: behind them all. Returns ((that
         number, the queue slot they go behind), None), or (None, what marks
         the playlist) when HQPlayer's playlist cannot place it: shorter than
-        the queue it holds, reading no slot of the queue's — an entry it is
-        opening gives no verdict which — or reading a file queued at more
-        than one slot it holds (no verdict which)."""
+        the queue it holds, reading no slot of the queue's — another
+        controller's entry; an entry it is opening, a stop under way or a
+        state the SDK does not name gives no verdict which (_still_reads) —
+        or reading a file queued at more than one slot it holds (no verdict
+        which)."""
         if item is None:
             return (len(raw), None), None
         layout = self._layout()
@@ -4131,11 +4133,16 @@ class HqpBackend(PlayerBackend):
             if now is None:
                 return None, lambda: self.lose_mirror(
                     "HQPlayer did not say what it reads for a play next")
-            playing = self._playing(now, mutating=True)
+            named = now.state in (PlaybackState.STOPPED, PlaybackState.PAUSED,
+                                  PlaybackState.PLAYING)
+            playing = self._playing(now, mutating=True) if named else None
             if playing is None:
                 return None, lambda: self.lose_mirror(
                     "HQPlayer gave no verdict on what it reads for a play next")
-            if not playing[2] and playing[0] > slot:
+            if playing[2]:
+                return None, lambda: self.lose_mirror(
+                    "HQPlayer reads an entry that is not the queue's for a play next")
+            if playing[0] > slot:
                 slot = playing[0]
             place = layout.upto(slot)
             if place > len(raw):
