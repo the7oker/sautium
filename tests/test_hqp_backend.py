@@ -8824,3 +8824,32 @@ def test_held_words_a_newer_word_overtook_do_not_go(fake, output):
     _settled()
     assert b._pressed is None
     assert not [c for c, _ in fake.commands[n:] if c not in _QUESTIONS], fake.commands[n:]
+
+
+# The URIs failing ends the reconverge's thread with that error: the scenario's premise
+@pytest.mark.filterwarnings("ignore::pytest.PytestUnhandledThreadExceptionWarning")
+def test_a_rebuild_whose_uris_fail_leaves_no_number_pending(fake, output, monkeypatch):
+    """HQPlayer back stopped with an empty playlist: the reconverge numbers its
+    rebuild as it begins holding words, then makes each slot's URI — and that
+    fails (a media port another process holds, in stream mode). Nothing was
+    taken afresh, so no number of it stays pending: a start made before it,
+    still owed, is not superseded by a rebuild that never was."""
+    mgr, b = output
+    _stopped(mgr, fake)
+    with fake._lock:
+        fake.playlist, fake.track = [], 0
+    link = _link()
+    uri_for, tried = b._uri_for, threading.Event()
+
+    def media_port_taken(item):
+        if threading.current_thread().name == "hqp-reconverge":
+            tried.set()
+            raise RuntimeError("media port 8830 is already in use by another process")
+        return uri_for(item)
+    monkeypatch.setattr(b, "_uri_for", media_port_taken)
+    older = link.item("start", link.accept("transport"))    # a start owed from before
+    b.lose_mirror("HQPlayer came back with a different playlist (restarted?)")
+    assert tried.wait(10), "the reconverge never made its URIs"
+    assert _wait(lambda: not any(t.name == "hqp-reconverge" for t in threading.enumerate()))
+    assert link.superseded(older) is None, (link.superseded(older), link._pending)
+    assert link._pending == {}, link._pending

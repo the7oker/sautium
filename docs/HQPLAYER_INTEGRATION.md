@@ -272,7 +272,9 @@ intents is the order of the asks (since 2026-10-14): each takes the next
 number as it is asked and holds once its command sequence has the command
 lock, so one refused as busy supersedes nothing; a new queue and a rebuild
 hold from their ask — a play press's hand-over is cut short at its next add —
-and are withdrawn if the lock then refuses them. An item left for later (a
+and are withdrawn if the lock then refuses them, or the hand-over fails
+before it holds (making its URIs): the hand-over owns its number
+(`HqpBackend._handing`). An item left for later (a
 start that met a build, a play press's starts and its hand-over, the resume
 after a DSP change, the knobs after a build, a benchmark run's owed put-back,
 the Stop a switch away owes) is dropped at its send once a newer intent of a

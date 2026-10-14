@@ -1613,13 +1613,13 @@ class HqpBackend(PlayerBackend):
         self._ways_in()
         self._link.refusals = []
         layout = self._layout()
-        n = self._hold_words(layout.items, stops=True,
-                             base=(at, position) if at is not None else None, owes=False,
-                             intent="rebuild", yields=True)
-        if n is None:
-            return False            # a play press asked meanwhile takes the queue to it
-        taken, unsent, _ = self._afresh([self._uri_for(it) for it in layout.handed], "rebuild",
-                                        number=n)
+        with self._handing(layout.items, stops=True,
+                           base=(at, position) if at is not None else None, owes=False,
+                           intent="rebuild", yields=True) as n:
+            if n is None:
+                return False        # a play press asked meanwhile takes the queue to it
+            taken, unsent, _ = self._afresh([self._uri_for(it) for it in layout.handed],
+                                            "rebuild", number=n)
         if not self._took(layout.handed, taken, unsent, "of the queue"):
             return False
         self._in_step()
@@ -2199,7 +2199,8 @@ class HqpBackend(PlayerBackend):
         (_InFlight). Outside a mutation — an attach taking the queue — they
         act as they come. `intent` — a new queue, a rebuild — is numbered in
         the same step (HqpLink.ask_early): every word held is newer than the
-        mutation. Returns its number, for the sequence that hands over.
+        mutation. Returns its number, for the sequence that hands over —
+        _handing owns it, withdrawn on any exit before that sequence holds.
         `yields`: the reconverge's rebuild, which a play press asked before
         it overtakes — it hands HQPlayer the queue itself — so none begins:
         None, nothing numbered or held. In the same step as a press that
@@ -2212,6 +2213,22 @@ class HqpBackend(PlayerBackend):
             if mutating:
                 self._inflight = _InFlight(items, stops=stops, base=base, owes=owes)
         return n
+
+    @contextmanager
+    def _handing(self, items: list, *, stops: bool, base: Optional[tuple], owes: bool,
+                 intent: str, yields: bool = False):
+        """A hand-over numbered as it begins holding words (_hold_words): its
+        early number — None when it yields to a play press — is published
+        once its sequence holds the command lock (HqpLink.command) and
+        withdrawn on any exit before that, a failure making its URIs
+        included: no early number outlives the hand-over that asked it."""
+        n = self._hold_words(items, stops=stops, base=base, owes=owes, intent=intent,
+                             yields=yields)
+        try:
+            yield n
+        finally:
+            if n is not None:
+                self._link.withdraw(n)
 
     def _hold_around(self, items: list) -> None:
         """A seamless edit's hand-over — a "play next", a removal — HQPlayer
@@ -3749,9 +3766,8 @@ class HqpBackend(PlayerBackend):
         onward = {id(it) for it in from_target}
         first = next((i for i, it in enumerate(layout.handed, 1) if id(it) in onward), 1)
         att = self._watch("rebuild", slot=first, uris=uris) if resume else None
-        n = self._hold_words(items, stops=True, base=(target, position), owes=resume,
-                             intent="rebuild")
-        with self._steps(att):
+        with self._handing(items, stops=True, base=(target, position), owes=resume,
+                           intent="rebuild") as n, self._steps(att):
             taken, unsent, n = self._afresh(uris, "rebuild", number=n)
             took = {id(it) for it, t in zip(layout.handed, taken) if t}
             begin = next((it for it in from_target if id(it) in took), None)
@@ -3803,10 +3819,9 @@ class HqpBackend(PlayerBackend):
         uris = [self._uri_for(it) for it in layout.handed]
         att = (self._watch("replace", slot=1, uris=uris, items=list(layout.handed))
                if play and uris else None)
-        n = self._hold_words(layout.items, stops=True,
-                             base=(layout.handed[0], 0) if layout.handed else None, owes=play,
-                             intent="queue")
-        with self._steps(att):
+        with self._handing(layout.items, stops=True,
+                           base=(layout.handed[0], 0) if layout.handed else None, owes=play,
+                           intent="queue") as n, self._steps(att):
             taken, unsent, n = self._afresh(uris, "queue", number=n)
             if uris and not any(taken):
                 if unsent < len(uris):
@@ -4093,10 +4108,10 @@ class HqpBackend(PlayerBackend):
             return took, unanswered, now, playing
         last = self._last_tick
         seed = self._queue.item_at(last.queue_index) if last is not None else None
-        n = self._hold_words([seed] if seed is not None else [], stops=False,
-                             base=(seed, int(last.position)) if seed is not None else None,
-                             owes=False, intent="queue")
-        cleared, unanswered, now, playing = self._cmd(clear, "queue", number=n)
+        with self._handing([seed] if seed is not None else [], stops=False,
+                           base=(seed, int(last.position)) if seed is not None else None,
+                           owes=False, intent="queue") as n:
+            cleared, unanswered, now, playing = self._cmd(clear, "queue", number=n)
         if unanswered:
             # HQPlayer clears once its silence is over: the radio goes on, and
             # HQPlayer gets the queue back once it answers again

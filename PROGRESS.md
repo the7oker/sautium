@@ -949,6 +949,16 @@ implementation details live in the code, DB and git history.
   meanwhile could not do; a Next held over a "play next" HQPlayer refused
   was lost; Seek, Pause, Play lost the Seek. Lesson: a held word is the
   same word later, not a new one.
+- **An early number has one owner** (2026-10-14). A new queue's or a
+  rebuild's number holds from its ask, and was withdrawn only when the
+  command lock refused its sequence. The reconverge asks its number and
+  then makes each slot's URI: when that failed (a media port another
+  process held), the number stayed pending for the life of the link, and
+  every start or resume older than it was dropped as "the queue was taken
+  afresh". The hand-over now owns its number from the ask to the end:
+  published once its sequence holds the lock, withdrawn on any exit before
+  that. Lesson: a resource asked in one place and released in another leaks
+  on every path between them.
 - **Stop-clear-add-select-play sequence** for `play_track`/`play_album`. Without
   explicit stop, HQPlayer occasionally started the wrong track from the
   existing queue.
