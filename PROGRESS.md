@@ -971,6 +971,22 @@ implementation details live in the code, DB and git history.
   made on refuses no other; a step HQPlayer refuses is its answer
   (OutputRefused), logged once in its words, never as a fault. Lesson: an
   id is a name, a slot is a thing — order things.
+- **In step is a reading, not a memory** (2026-10-14). "No answer is no
+  reading" had reached the "play next" and the removal, not two more edits:
+  a seamless new order whose removal HQPlayer left unanswered answered 503,
+  kept the old order and marked the playlist drifted — nothing mends a
+  drift — while HQPlayer removed the track late; and the reconverge's
+  repair, met by the same silence, left the mirror lost for good, never due
+  again. A re-bind took a playlist HQPlayer did not give for an empty one.
+  And in step, a seamless new order and a "play next" took the playing slot
+  from the last status: HQPlayer moving on by itself in that second made
+  the edit remove the entry it now played — the sound stopped — or a
+  rebuild start the finished track again. The edits now read HQPlayer's
+  entry in their own sequence, as the tail mirror's did: moved on, a new
+  order is the queue's and the mirror lost — what plays is never stopped
+  nor restarted, the reconverge repairs behind it — and a "play next" goes
+  behind what HQPlayer reads. Lesson: the state an edit acts on is read in
+  the edit, not remembered from before it.
 - **Stop-clear-add-select-play sequence** for `play_track`/`play_album`. Without
   explicit stop, HQPlayer occasionally started the wrong track from the
   existing queue.

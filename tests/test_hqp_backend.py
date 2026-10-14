@@ -8969,3 +8969,157 @@ def test_a_new_order_hqplayer_refuses_is_said_once_in_its_words(fake, output, mo
     assert len(said) == 1 and said[0].levelno == logging.WARNING, [
         (r.name, r.levelname, r.getMessage()) for r in said]
     assert not [r for r in caplog.records if r.levelno >= logging.ERROR], caplog.text
+
+
+# -- What HQPlayer did not answer, or moved on from, in step -----------------------------
+
+
+def test_a_seamless_new_order_whose_removal_hqplayer_left_unanswered_is_the_queues(
+        fake, output, monkeypatch):
+    """In step, track 1 plays; the person swaps tracks 2 and 3. HQPlayer
+    leaves the first removal unanswered within its wait, and carries it out
+    once its silence is over: the new order is the queue's, the mirror lost,
+    and HQPlayer gets the queue back at its next answer — never a refusal
+    that leaves the queue in its old order and HQPlayer short of a track."""
+    mgr, b = output
+    player_router = _routes_on(monkeypatch, mgr)
+    _link().client.timeout = 0.5                      # a command's wait, shortened
+    fake.service["PlaylistRemove"] = 1.0              # busy: the removal goes unanswered
+    try:
+        said = player_router.reorder(player_router.ReorderRequest(
+            order=["track-1", "track-3", "track-2"]))
+    finally:
+        del fake.service["PlaylistRemove"]
+        _link().client.timeout = hl.COMMAND_WAIT_S
+    assert said["ok"], said
+    assert [it.track_id for it in mgr.queue.snapshot()] == ["track-1", "track-3", "track-2"]
+    want = ["file:///E:/Music/A/01.flac", "file:///E:/Music/A/03.flac",
+            "file:///E:/Music/A/02.flac"]
+    assert _wait(lambda: fake.playlist == want and b._mirror == "step", timeout=10), (
+        fake.playlist, b._mirror)
+    assert fake.state == int(PlaybackState.PLAYING) and fake.track == 1
+
+
+def test_a_reconverge_whose_removal_hqplayer_left_unanswered_is_due_again(fake, output,
+                                                                        monkeypatch):
+    """The mirror lost through a silence, HQPlayer playing an entry of ours:
+    its next answer gives it the queue back behind that entry. HQPlayer
+    leaves that removal unanswered too, and carries it out once its silence
+    is over: the reconverge is due again, and HQPlayer ends with the queue
+    behind what it plays."""
+    mgr, b = output                                  # playing slot 1 of 3
+    mgr.queue.append([_item("E:/Music/A/04.flac", 4)])
+    with fake._lock:
+        fake.playlist = ["file:///E:/Music/A/01.flac", "file:///E:/Music/A/02.flac",
+                         "file:///E:/Music/X/10.flac", "file:///E:/Music/A/03.flac"]
+        fake.track, fake.state, fake.position = 2, int(PlaybackState.PLAYING), 10.0
+    assert _wait(lambda: mgr._latest_status.get("track_index") == 2)
+    _link().client.timeout = 0.5                      # a command's wait, shortened
+    fake.service["PlaylistRemove"] = 1.0              # busy: the removal goes unanswered
+    n = len(fake.commands)
+    b.lose_mirror("HQPlayer took 0 of 1 appended tracks")
+    try:
+        assert _wait(lambda: any(c == "PlaylistRemove" for c, _ in fake.commands[n:]), timeout=8)
+    finally:
+        del fake.service["PlaylistRemove"]
+        _link().client.timeout = hl.COMMAND_WAIT_S
+    want = ["file:///E:/Music/A/01.flac", "file:///E:/Music/A/02.flac",
+            "file:///E:/Music/A/03.flac", "file:///E:/Music/A/04.flac"]
+    assert _wait(lambda: (b.poke(), fake.playlist == want)[1], timeout=15), (
+        fake.playlist, b._mirror, b._reconverge_due)
+    assert fake.state == int(PlaybackState.PLAYING) and fake.track == 2
+
+
+def test_a_seamless_new_order_after_hqplayer_moved_on_never_stops_it(fake, output, monkeypatch):
+    """In step: the new order is planned while HQPlayer reads slot 1, and
+    HQPlayer moves on to track 2 by itself before the order goes. The entry it
+    plays is never removed: the new order is the queue's, the mirror lost,
+    and HQPlayer, playing on, gets what lies behind it at its next answer."""
+    mgr, b = output
+    player_router = _routes_on(monkeypatch, mgr)
+    apply = mgr.apply_reorder
+
+    def moved_on_first(plan):
+        with fake._lock:                            # HQPlayer's own advance, not read yet
+            fake.track, fake.position = 2, 0.0
+        return apply(plan)
+    monkeypatch.setattr(mgr, "apply_reorder", moved_on_first)
+    said = player_router.reorder(player_router.ReorderRequest(
+        order=["track-1", "track-3", "track-2"]))
+    assert said["ok"] and said["interrupted"] is False, said
+    assert [it.track_id for it in mgr.queue.snapshot()] == ["track-1", "track-3", "track-2"]
+    assert fake.state == int(PlaybackState.PLAYING)
+    assert fake.playlist[fake.track - 1] == "file:///E:/Music/A/02.flac"
+    assert not [a for c, a in fake.commands if c == "PlaylistRemove"
+                and a.get("index") == str(fake.track)], fake.commands
+
+
+def test_a_rebuilt_new_order_after_hqplayer_moved_on_never_restarts_what_played(fake, output,
+                                                                              monkeypatch):
+    """In step, a new order that needs a rebuild is planned while slot 1 plays
+    at 0:42; HQPlayer moves on to track 2 by itself before it goes. Nothing
+    is rebuilt over the track it plays, nor the finished one started again:
+    the new order is the queue's, the mirror lost, HQPlayer playing on."""
+    mgr, b = output
+    player_router = _routes_on(monkeypatch, mgr)
+    apply = mgr.apply_reorder
+
+    def moved_on_first(plan):
+        with fake._lock:                            # HQPlayer's own advance, not read yet
+            fake.track, fake.position = 2, 0.0
+        return apply(plan)
+    monkeypatch.setattr(mgr, "apply_reorder", moved_on_first)
+    n = len(fake.commands)
+    said = player_router.reorder(player_router.ReorderRequest(
+        order=["track-2", "track-1", "track-3"]))
+    assert said["ok"], said
+    _settled()
+    assert [it.track_id for it in mgr.queue.snapshot()] == ["track-2", "track-1", "track-3"]
+    assert not [c for c, _ in fake.commands[n:] if c in ("Stop", "SelectTrack", "Seek")], [
+        c for c, _ in fake.commands[n:] if c not in _QUESTIONS]
+    assert fake.state == int(PlaybackState.PLAYING)
+    assert fake.playlist[fake.track - 1] == "file:///E:/Music/A/02.flac"
+
+
+def test_a_play_next_after_hqplayer_moved_on_goes_behind_what_it_plays(fake, output,
+                                                                       monkeypatch):
+    """In step, track 1 plays; a "play next" is anchored on the slot the last
+    status named, and HQPlayer moves on to track 2 by itself before the
+    insert goes: the track goes behind what HQPlayer reads, the sound never
+    stops."""
+    mgr, b = output
+    insert = b.queue_insert_next
+
+    def moved_on_first(items, anchor_index):
+        with fake._lock:                            # HQPlayer's own advance, not read yet
+            fake.track, fake.position = 2, 0.0
+        return insert(items, anchor_index)
+    monkeypatch.setattr(b, "queue_insert_next", moved_on_first)
+    assert mgr.append([_item("E:/Music/N/01.flac", 31)], "next") == 1
+    assert fake.state == int(PlaybackState.PLAYING)
+    assert fake.playlist[fake.track - 1] == "file:///E:/Music/A/02.flac"
+    assert fake.playlist[fake.track] == "file:///E:/Music/N/01.flac", fake.playlist
+
+
+@pytest.mark.parametrize("how", ["refused", "unanswered"])
+def test_a_rebind_whose_playlist_hqplayer_did_not_give_loses_the_mirror(fake, how):
+    """A playing HQPlayer; slot 3 re-bound to another copy. HQPlayer answers
+    the convergence's Status but not its PlaylistGet: no reading is no empty
+    playlist — the mirror is lost through a silence (HQPlayer gets the queue
+    back at its next answer), never left "in step" over a file that left."""
+    mgr = _album(4)
+    b = _mirrored(mgr)
+    fake.state, fake.track = int(PlaybackState.PLAYING), 1
+    if how == "refused":
+        fake.replies["PlaylistGet"] = '<PlaylistGet result="Error">busy</PlaylistGet>'
+    else:
+        _link().client.timeout = 0.5
+        fake.service["PlaylistGet"] = 1.0
+    try:
+        _move(mgr, 3, "E:/Music/B/03.flac", 30)
+        b.queue_changed("rebind")
+    finally:
+        fake.replies.pop("PlaylistGet", None)
+        fake.service.pop("PlaylistGet", None)
+        _link().client.timeout = hl.COMMAND_WAIT_S
+    assert (b._mirror, b._lost_by) == ("lost", "silence"), (b._mirror, fake.playlist)
