@@ -7144,7 +7144,14 @@ def test_a_switch_waits_for_no_stop_waiting_its_turn_on_the_connection(
     n = len(fake.arrivals)
     fake.silence(8.0)
     assert _wait(lambda: "Status" in [c for _, c in fake.arrivals[n:]], timeout=3)
-    stopper = threading.Thread(target=b.stop, daemon=True)
+    stopped = {}
+
+    def stop():
+        try:
+            stopped["ok"] = b.stop()
+        except hl.Dropped as e:
+            stopped["dropped"] = e
+    stopper = threading.Thread(target=stop, daemon=True)
     stopper.start()
     assert _wait(lambda: _link().lock.owner is not None and _link()._waiting, timeout=3)
     t0 = time.monotonic()
@@ -7152,6 +7159,9 @@ def test_a_switch_waits_for_no_stop_waiting_its_turn_on_the_connection(
     took = time.monotonic() - t0
     mgr.activate("browser")
     assert took < hl.BUILDING_AFTER_S + 0.4, took
+    _link().close("the test is over")
+    stopper.join(5)
+    assert "dropped" in stopped, stopped        # its turn never came: the link let go
 
 
 def test_a_seek_during_a_rebuild_moves_the_newest_starts_second(fake, output, monkeypatch):
@@ -7514,10 +7524,10 @@ def test_a_tap_while_a_new_order_waits_its_turn_plays_the_tapped_track(fake, out
     mgr, b = output
     player_router = _routes_on(monkeypatch, mgr)
     fake.service["Volume"] = 1.5
-    n = len(fake.commands)
+    n, came = len(fake.commands), len(fake.arrivals)
     volume = threading.Thread(target=lambda: b.set_volume(-10), daemon=True)
     volume.start()
-    assert _wait(lambda: "Volume" in [c for _, c in fake.arrivals[-3:]], timeout=5)
+    assert _wait(lambda: "Volume" in [c for _, c in fake.arrivals[came:]], timeout=5)
     reorder = threading.Thread(target=lambda: player_router.reorder(
         player_router.ReorderRequest(order=["track-2", "track-1", "track-3"])), daemon=True)
     reorder.start()
@@ -7592,10 +7602,10 @@ def test_a_pause_during_the_radios_clear_pauses_the_seed(fake, output):
     the radio's queue stands."""
     mgr, b = output
     fake.service["PlaylistClear"] = 0.5
-    n = len(fake.commands)
+    n, came = len(fake.commands), len(fake.arrivals)
     radio = threading.Thread(target=lambda: mgr.clear_for_radio(lambda: None), daemon=True)
     radio.start()
-    assert _wait(lambda: "PlaylistClear" in [c for _, c in fake.arrivals[-3:]], timeout=5)
+    assert _wait(lambda: "PlaylistClear" in [c for _, c in fake.arrivals[came:]], timeout=5)
     assert _quick(b.pause)
     radio.join(10)
     _settled()

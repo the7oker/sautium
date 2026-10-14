@@ -837,11 +837,22 @@ implementation details live in the code, DB and git history.
   the wrong evidence (the last drift logged instead of the move that made
   the state, a radio's mark kept past its own step). At rest a press must
   now be taken unless HQPlayer is away, silent, building or its breaker
-  open, and the slot pressed must play; every move of the mirror is logged
-  with its reason; the step that makes a tail mirror makes its own
-  precondition and is judged at rest at once. Lesson: invariants of the
-  form "never" need a twin of the form "eventually", or a system that does
+  open, and the track it starts must play; every move of the mirror is
+  logged with its reason; the step that makes a tail mirror makes its own
+  precondition and is judged at rest. Lesson: invariants of the form
+  "never" need a twin of the form "eventually", or a system that does
   nothing passes them all.
+- **An oracle's false alarm is a way the design gets there** (2026-10-14).
+  The "eventually" checks above called the design a fault: a link that
+  refuses until it hears HQPlayer after a build, a build of HQPlayer's own
+  left armed for the rest's press, a pressed file HQPlayer refused (the next
+  track plays) — and the tail mirror was still never judged, the rest's
+  press always beating the reconverge it waited for. The rest now waits for
+  every way the design converges — the link hearing HQPlayer, the reconverge
+  a silence made due — and judges the track the press starts; it is quiet
+  (nothing armed), says what never got quiet, and the runner's own judgments
+  have tests. Lesson: before an "eventually" may fail, every path to it the
+  design has must have had its turn.
 - **Stop-clear-add-select-play sequence** for `play_track`/`play_album`. Without
   explicit stop, HQPlayer occasionally started the wrong track from the
   existing queue.
