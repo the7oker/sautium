@@ -8716,6 +8716,24 @@ def test_a_next_during_a_paused_reorders_rebuild_only_moves_the_spot(fake, liste
         b.shutdown()
 
 
+def test_a_previous_while_a_restarted_hqplayer_gets_the_queue_back_moves_nothing(fake, output,
+                                                                                monkeypatch):
+    """HQPlayer restarted under the playing track — stopped, its playlist
+    empty, no spot of ours — and the reconverge hands it the queue afresh;
+    the person presses Previous meanwhile. Nothing to count from: the word
+    moves nothing and starts nothing, and HQPlayer gets the queue back whole
+    — never a fault answered 503."""
+    mgr, b = output
+    player_router = _routes_on(monkeypatch, mgr)
+    n = _slow_adds(fake)
+    fake.restart()
+    assert _wait(lambda: (b.poke(), b._inflight is not None)[1], timeout=10)
+    assert _quick(player_router.previous_track)["ok"]
+    _settled()
+    assert _wait(lambda: fake.playlist == [f"file:///E:/Music/A/0{i}.flac" for i in (1, 2, 3)])
+    assert _start_sent(fake, n) == [] and fake.state == int(PlaybackState.STOPPED)
+
+
 def test_a_tap_held_by_a_new_queue_hqplayer_refused_whole_is_said_with_its_refusal(
         fake, output, monkeypatch):
     """HQPlayer refuses every file of a new queue — nothing commits — and a

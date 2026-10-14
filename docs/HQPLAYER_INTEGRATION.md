@@ -567,9 +567,11 @@ comes after the control port answers again — so neither can end the wait.
   Previous count from the newest start (the one owed before any) — with no
   start made and HQPlayer at a spot (a rebuild that does not resume leaves
   it at one, or it stands at one) they only move the spot, as with nothing
-  in flight; one whose track the queue does not hold once it stands (a
-  "play next" HQPlayer refused whole) counts again from where it began, on
-  the queue as it stands. A Seek changes the newest word's second — after
+  in flight; with nothing to count from — no start, no spot, the queue
+  handed afresh to an HQPlayer back from a restart — they move nothing
+  (since 2026-10-14); one whose track the queue does not hold once it
+  stands (a "play next" HQPlayer refused whole) counts again from where it
+  began, on the queue as it stands. A Seek changes the newest word's second — after
   a Pause or a Stop, the second the next Play starts at, with no word of
   its own; a Pause or a Stop drops the starts before it and always goes —
   sent, unless the mutation's own Stop stopped HQPlayer: then nothing

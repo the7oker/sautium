@@ -2954,16 +2954,18 @@ class HqpBackend(PlayerBackend):
         numbered as it comes; at either end the newest word stays. With no
         start made, on a mutation that leaves HQPlayer at a spot (a rebuild
         that does not resume) or while it stands at one, it only moves that
-        spot, as _step does there: nothing is sent. Under the press lock,
-        with the words read: none goes to a mutation that ended meanwhile."""
+        spot, as _step does there: nothing is sent. With nothing to count
+        from — no start, no base, no spot (HQPlayer back from a restart, its
+        queue handed afresh) — it moves nothing. Under the press lock, with
+        the words read: none goes to a mutation that ended meanwhile."""
         newest = words.newest()
         last = self._last_tick
+        spot = self._spot
         at_spot = newest is None and not words.owes and (
-            words.stops or (self._spot is not None and last is not None
-                            and last.state == "stopped"))
+            words.stops or (spot is not None and last is not None and last.state == "stopped"))
         if at_spot:
-            ref = words.base[0] if words.base is not None and (
-                words.stops or words.base_moved) else self._spot[0]
+            ref = (words.base[0] if words.base is not None and (words.stops or words.base_moved)
+                   else spot[0] if spot is not None else None)
         else:
             ref = newest.target if newest is not None else (
                 words.base[0] if words.base else None)
