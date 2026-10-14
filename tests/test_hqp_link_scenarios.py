@@ -44,7 +44,8 @@ statuses the output pushed. The node stop ends every run.
      end.
  15. The order of intents is the order of the asks: an intent is numbered
      as its sequence is asked — never once it holds the command lock — checked
-     as each number is published (I3 reads intents so). That it holds from
+     as each number a sequence publishes while it holds it is published (I3
+     reads intents so). That it holds from
      the moment it has the lock, and that a new queue's or a rebuild's
      number, pending from its ask, is withdrawn when the lock refuses it, the
      clock's own tests pin. A sequence's ask and its taking the lock are
@@ -299,9 +300,10 @@ class World:
 
         def published(link, kind, n):
             publish(link, kind, n)
-            # I15: a sequence's number was taken as it was asked — before it
-            # asked for the command lock — never once it holds it
-            before = asked.pop(threading.get_ident(), None)
+            # I15: every number a sequence publishes while it holds the
+            # command lock was taken as it was asked — before it asked for
+            # the lock — never once it holds it
+            before = asked.get(threading.get_ident())
             if before is not None and n > before:
                 w.violate(f"I15: {kind} #{n} numbered once it held the command lock, "
                           f"not as it was asked (the clock stood at {before})")
@@ -1426,6 +1428,18 @@ def test_the_rest_waits_until_hqplayer_answered_a_build_it_did_not_finish(
         b = world.mgr.active
         want = [b._uri_of(it)[0] for it in b._layout().handed]
         assert _wait(lambda: fake.state == int(PlaybackState.PLAYING) and fake.playlist == want)
+
+
+def test_a_number_taken_while_the_lock_is_held_breaks_invariant_15(fake, fake_b, listens,
+                                                                   monkeypatch):
+    """Every number a sequence publishes while it holds the command lock is
+    held against the clock as it asked — a second one too, taken once the
+    lock was the sequence's."""
+    with _a_world(fake, fake_b, monkeypatch) as world:
+        link = world.mgr.active._link
+        with link.command("transport"):
+            link.accept("transport")
+        assert [v for v in world.violations if v.startswith("I15:")], world.violations
 
 
 def test_a_build_left_armed_never_meets_the_rest_press(fake, fake_b, listens, monkeypatch):

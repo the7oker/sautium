@@ -1032,6 +1032,19 @@ implementation details live in the code, DB and git history.
   repair of a drifted playlist that met a silence armed nothing, and
   HQPlayer's late removal left it short with nothing to mend it. Lesson:
   a reading taken in one place must be the one every party acts on.
+- **Decided late, numbered as asked** (2026-10-14). The tap decided again
+  under the command lock took a fresh number when a mutation held it or
+  it became a play press: a Pause the person made while the tap waited
+  its turn was then older than it, and the tapped track played over the
+  Pause. Its sequence also held its number from the moment it had the
+  lock, before it decided: a tap refused there still dropped a new queue's
+  own start, and nothing played. And it looked its slot up by the queue
+  item, so a replace that committed meanwhile with the same track refused
+  it. The tap now reserves its number as it asks, holds it only once it
+  goes (HqpLink.hold_as) — held, pressed or started under that very
+  number — and finds its slot by its track. The scenario runner checks
+  every number a sequence publishes under the lock, not only the first.
+  Lesson: deciding later must not mean asking later.
 - **A tap is decided where its start goes** (2026-10-14). A tap on
   HQPlayer checked whether a queue mutation held words and whether the
   playlist was a mirror, then computed its entry and waited for the command

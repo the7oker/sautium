@@ -9463,3 +9463,143 @@ def test_a_tap_on_a_renderer_while_a_removal_resyncs_names_its_track(monkeypatch
     done.set()
     t.join(5)
     assert played == ["track-3"], (said, played)
+
+
+def _a_tap_waiting_behind_a_slow_volume(b, link, fake):
+    """A slow volume change holds the command lock, and a tap on the third
+    row (track 3) — finding nothing in flight — waits its turn behind it:
+    (the tap's thread, what it said, the volume's thread)."""
+    fake.service["Volume"] = 1.5
+    vol = threading.Thread(target=lambda: b.set_volume(-10), daemon=True)
+    vol.start()
+    assert _wait(lambda: link.lock.owner is not None, timeout=3)
+    said = {}
+
+    def tap():
+        # HqpBackend.select as the jump route calls it (its play gate would
+        # ask HQPlayer a question behind the volume first)
+        try:
+            said["ok"] = b.select(3, "track-3")
+        except Exception as e:                  # a 409, as the route answers it
+            said["error"] = e
+    tapper = threading.Thread(target=tap, daemon=True)
+    return tapper, said, vol
+
+
+def test_a_tap_held_after_its_turn_never_overtakes_a_pause_made_after_it(fake, output):
+    """Track 1 plays. A tap on the third row waits its turn behind a slow
+    volume change; meanwhile a track is queued to play next — its hand-over
+    holds the person's words — and the person presses Pause. Asked after the
+    tap, the Pause is the newer word: the tap, held once it has the lock, is
+    numbered as it was asked, and HQPlayer ends paused."""
+    mgr, b = output
+    link = _link()
+    tapper, said, vol = _a_tap_waiting_behind_a_slow_volume(b, link, fake)
+    tapper.start()
+    assert _wait(lambda: len(link.lock._waiting) == 1, timeout=3)
+    inserting = threading.Thread(target=lambda: mgr.append(
+        [_item("E:/Music/N/01.flac", 31)], "next"), daemon=True)
+    inserting.start()
+    assert _wait(lambda: b._inflight is not None and len(link.lock._waiting) == 2, timeout=3)
+    assert _quick(b.pause)
+    tapper.join(10)
+    inserting.join(10)
+    vol.join(10)
+    _settled()
+    assert fake.state != int(PlaybackState.PLAYING), (said, fake.state, fake.track)
+
+
+def test_a_tap_pressed_after_its_turn_never_overtakes_a_pause_made_after_it(fake, output,
+                                                                             monkeypatch):
+    """The same tap waits its turn; an entry is added in HQPlayer's own
+    window (the canary finds the playlist drifted) and the person presses
+    Pause, which waits behind the tap. Under the lock the tap finds no
+    mirror and becomes a play press — numbered as it was asked, so the
+    Pause stays the newer word: HQPlayer ends paused, never playing the
+    tapped track."""
+    mgr, b = output
+    monkeypatch.setattr(hb, "DRIFT_CHECK_EVERY", 1)              # the canary on every tick
+    link = _link()
+    tapper, said, vol = _a_tap_waiting_behind_a_slow_volume(b, link, fake)
+    attached = b._check_attached
+
+    def once_drifted():                         # the tap's sequence, the lock its own
+        if threading.current_thread() is tapper:
+            assert _wait(lambda: b._mirror == "drift", timeout=10)
+        return attached()
+    monkeypatch.setattr(b, "_check_attached", once_drifted)
+    tapper.start()
+    assert _wait(lambda: len(link.lock._waiting) == 1, timeout=3)
+    paused = {}
+    pauser = threading.Thread(target=lambda: paused.update(ok=b.pause()), daemon=True)
+    pauser.start()
+    assert _wait(lambda: len(link.lock._waiting) == 2, timeout=3)
+    with fake._lock:
+        fake.playlist.insert(1, "file:///Elsewhere/theirs.flac")
+    tapper.join(10)
+    pauser.join(10)
+    vol.join(10)
+    _settled()
+    assert fake.state != int(PlaybackState.PLAYING), (said, paused, fake.state, fake.track)
+
+
+def test_a_tap_refused_under_the_lock_leaves_the_new_queues_start(fake, output, monkeypatch):
+    """The person taps the third row (track 3) just as album B — which does
+    not hold it — begins to load: the tap found no mutation holding words
+    and is switched out after its check; album B's hand-over then holds
+    words, and the tap, decided again under the lock, is refused. A tap
+    refused there supersedes nothing — the words before stand: album B
+    plays from its first track."""
+    mgr, b = output
+    player_router = _routes_on(monkeypatch, mgr)
+    n = _slow_adds(fake)
+    t, said, go = _tap_switched_out_after_its_check(monkeypatch, b, player_router, 3, "track-3")
+    replace = mgr.queue.replace
+
+    def once_the_tap_was_answered(items):
+        t.join(10)                              # the queue commits after the tap's answer
+        return replace(items)
+    monkeypatch.setattr(mgr.queue, "replace", once_the_tap_was_answered)
+    loading = _loading(mgr, _b_album(), play=True)
+    _handing_over(fake, n)
+    assert b._inflight is not None
+    go.set()
+    loading.join(15)
+    t.join(10)
+    _settled()
+    assert said.get("ok") is False and "being loaded" in (said.get("refusal") or ""), said
+    assert [it.track_id for it in mgr.queue.snapshot()] == ["track-11", "track-12", "track-13"]
+    assert _wait(lambda: fake.state == int(PlaybackState.PLAYING)
+                 and fake.playlist[fake.track - 1].endswith("B/01.flac"), timeout=5), (
+        fake.state, fake.track, _start_sent(fake, n))
+
+
+def test_a_tap_across_a_new_queue_that_committed_plays_its_track(fake, output, monkeypatch):
+    """The person taps the third row (track 3) as the same album is started
+    again — new slots, the same tracks: the tap is decided under the lock
+    once the new queue committed, and finds its track there by the track,
+    as its first check does: track 3 plays."""
+    mgr, b = output
+    player_router = _routes_on(monkeypatch, mgr)
+    n = _slow_adds(fake)
+    t, said, go = _tap_switched_out_after_its_check(monkeypatch, b, player_router, 3, "track-3")
+    gen0 = mgr.queue.generation
+    cmd = b._cmd
+
+    def after_the_commit(func, *args, **kw):
+        if threading.current_thread() is t:
+            assert _wait(lambda: b._inflight is None and mgr.queue.generation != gen0,
+                         timeout=10)
+        return cmd(func, *args, **kw)
+    monkeypatch.setattr(b, "_cmd", after_the_commit)
+    loading = _loading(mgr, [_item(f"E:/Music/A/0{i}.flac", i) for i in (1, 2, 3)], play=True)
+    _handing_over(fake, n)
+    assert b._inflight is not None
+    go.set()
+    loading.join(15)
+    t.join(10)
+    _settled()
+    assert said.get("ok") and _wait(
+        lambda: fake.state == int(PlaybackState.PLAYING)
+        and fake.playlist[fake.track - 1].endswith("A/03.flac"), timeout=5), (
+        said, fake.state, fake.track, _start_sent(fake, n))

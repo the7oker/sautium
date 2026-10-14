@@ -32,7 +32,9 @@ A link owns:
     sequence holds the command lock: one refused as busy takes none and
     supersedes nothing. A new queue and a rebuild supersede from their ask
     (a play press's hand-over is cut short at its next add) and withdraw
-    that if the lock refuses them. An item — a start left for later, a
+    that if the lock refuses them. A sequence that decides under the lock
+    whether it goes at all (a tap) holds only once it says so (hold_as):
+    one it refuses supersedes nothing. An item — a start left for later, a
     resume, the rest of a DSP change, a Stop an output switch owed — is
     never sent once a newer intent of a kind that supersedes it holds
     (SUPERSEDED_BY), checked right before the bytes go;
@@ -627,6 +629,15 @@ class HqpLink:
             self._pending[n] = kind
         self.build.wake_waiters()
         return n
+
+    def hold_as(self, intent: str, n: int, item: str) -> None:
+        """A command sequence asked with no intent of its own that decided,
+        holding the command lock, to go (a tap): its number, taken as it was
+        asked (reserve), holds from now, and each of its requests serves
+        `item` — dropped once a newer intent supersedes it. One that decides
+        not to go supersedes nothing."""
+        self.publish(intent, n)
+        self._local.item = self.item(item, n)
 
     def withdraw(self, n: int) -> None:
         """An early number whose sequence the command lock refused: it

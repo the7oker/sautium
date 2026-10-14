@@ -3024,9 +3024,14 @@ class HqpBackend(PlayerBackend):
         longer holds is refused in words. What the checks before the command
         lock let through is decided again as the start goes, in its command
         sequence: a mutation that began meanwhile holds the tap, one that
-        committed meanwhile moved its slot, and a playlist that is no mirror
-        by then makes it a play press. The attempt is watched from the start
-        the tap itself sends (a held one is the mutation's to judge)."""
+        committed meanwhile moved its track's slot (found by its track, as
+        the first check finds it), and a playlist that is no mirror by then
+        makes it a play press. Whatever it becomes is numbered as the tap
+        was asked — its number, taken as it asks for the command lock, holds
+        only once it goes, so a tap refused there supersedes nothing and a
+        word made after it stays newer. The attempt is watched from the
+        start the tap itself sends (a held one is the mutation's to
+        judge)."""
         with self._press_lock:
             if self._inflight is not None:
                 return self._held_tap(self._inflight, index, track_id)
@@ -3041,40 +3046,50 @@ class HqpBackend(PlayerBackend):
             return False
         if self._mirror != "step" or self._live(self._pressed) is not None:
             return self._press(item, 0)     # never behind the command lock
-        held = self._spot
+        held, tid = self._spot, item.track_id
+        n = self._link.reserve()
 
         def tap(h: HQPlayerClient) -> Optional[bool]:
             with self._press_lock:
                 words = self._inflight
                 if words is not None:
-                    return self._held_tap(words, self._queue.index_of(item) or index,
-                                          item.track_id)
+                    return self._held_tap(words, index, tid, number=n)
             if self._mirror != "step" or self._live(self._pressed) is not None:
                 return None         # the press, off this command sequence
-            slot = self._queue.index_of(item)
+            slot = self._queue.slot_of(index, tid)
             if slot is None:
                 self._local.refusal = "it is no longer in the queue"
                 return False
             start = self._start_point(slot, 0)
             if start is None:
                 return self._started(None, f"nothing from slot {slot} on is on this HQPlayer")
+            self._link.hold_as("transport", n, "start")
             with self._intent("select", slot=start[0].n):
                 return self._started(start[0], self._start_held(h, *start, fallback=False,
                                                                 spends=held))
-        ok = self._cmd(tap, "transport", item="start")
+        ok = self._cmd(tap)
         if ok is None:
-            return self._press(item, 0)
+            slot = self._queue.slot_of(index, tid)
+            target = self._queue.item_at(slot) if slot is not None else None
+            if target is None:
+                self._local.refusal = "it is no longer in the queue"
+                return False
+            self._link.publish("transport", n)
+            return self._press(target, 0, item=self._link.item(
+                "start", n, queue=self._queue, generation=self._queue.generation))
         self.poke()
         return ok
 
-    def _held_tap(self, words: _InFlight, index: int, track_id: Optional[str]) -> bool:
+    def _held_tap(self, words: _InFlight, index: int, track_id: Optional[str], *,
+                  number: Optional[int] = None) -> bool:
         """A tap while a queue mutation hands HQPlayer its playlist: the track
         the person saw in the slot — `track_id`, else the slot's track as the
         queue stands, the sheet's — wherever the mutation puts it among what
-        HQPlayer is handed, from its start, numbered as it comes. A track it
-        is not handed is refused in words; the words before stand. Under the
-        press lock, with the words read: none goes to a mutation that ended
-        meanwhile."""
+        HQPlayer is handed, from its start, numbered as it comes — or, held
+        in its own command sequence, as it was asked (`number`). A track it
+        is not handed is refused in words, numbered nothing; the words before
+        stand. Under the press lock, with the words read: none goes to a
+        mutation that ended meanwhile."""
         shown = self._queue.item_at(index)
         tid = track_id if track_id is not None else getattr(shown, "track_id", None)
         target = (shown if shown is not None and shown.track_id == tid
@@ -3088,8 +3103,12 @@ class HqpBackend(PlayerBackend):
         if why is not None:
             self._local.refusal = f"it is not on this HQPlayer — {why}"
             return False
-        words.starts.append(_Start(self._link.item("start", self._link.accept("transport")),
-                                   target, 0, words.items[words.index(target) - 1:], None))
+        if number is None:
+            number = self._link.accept("transport")
+        else:
+            self._link.publish("transport", number)
+        words.starts.append(_Start(self._link.item("start", number), target, 0,
+                                   words.items[words.index(target) - 1:], None))
         self.poke()
         return True
 
