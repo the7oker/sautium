@@ -1284,11 +1284,7 @@
         preview(frac);
         const pos = Math.round(frac * this._trackLength);
         this._seekHoldUntil = Date.now() + 1500;
-        fetch('/api/player/seek', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ position: pos }),
-        }).catch(() => {});
+        window.playerSeek(pos);
       };
       track.addEventListener('pointerup', finish);
       track.addEventListener('pointercancel', () => {

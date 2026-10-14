@@ -1083,6 +1083,15 @@ implementation details live in the code, DB and git history.
   when a tap made after the Seek led it; it now moves only a start no
   newer than itself. Lesson: when a reading moves the anchor, move all
   that counts from it.
+- **A refused word keeps its place, and is said** (2026-10-14). A command
+  refused at its first request once it held the command lock — HQPlayer
+  found building, or silent behind the link's held Status — kept its
+  number, where the link's own words said a busy refusal supersedes
+  nothing. Decided: it keeps its number, or an older word would beat the
+  person's newer one; the words now say so. Its route answers that it did
+  not go, and the UI now says it for a Pause, a Stop and a Seek too — it
+  had kept them to the console, and the music went on. Lesson: a word
+  that did not go is the person's to know.
 - **The older word yields** (2026-10-14). A tap numbered as it was asked
   but decided once it had the command lock — held by a mutation that began
   while it waited, or a play press once the mirror left step — was older
@@ -1120,11 +1129,8 @@ implementation details live in the code, DB and git history.
   HQPlayer passes that entry, so the canary never calls it an external
   edit — the oracle excuses nothing); with two HQPlayers, a seen
   restored-run report comes back once the other HQPlayer's newer report is
-  cleared (the seen map keeps one onset per key); a command refused at its
-  first request after it took a free command lock — a build or a short
-  silence met behind the link's held Status — keeps its number, where the
-  link's own words say a busy refusal supersedes nothing (which of the two
-  is meant is open); and a held Play that meets a build is recorded as an
+  cleared (the seen map keeps one onset per key); and a held Play that
+  meets a build is recorded as an
   unreachable attempt with nothing sent (its attempt opens before the lock
   refuses it).
 - **Open after the fixes' review** (2026-10-14), in code the fixes did not

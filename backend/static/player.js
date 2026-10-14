@@ -334,16 +334,26 @@
     try {
       const resp = await fetch('/api/player/' + cmd, { method: 'POST' }).catch(() => null);
       if (resp && resp.ok) return;
-      // A play intent that produced no music gets its explanation from the
-      // shell's one reporter (a dozing output, streaming, the node not
-      // answering) instead of dying in the console. Volume/pause/stop stay
-      // quiet: nagging on every tick helps nobody.
-      if (cmd === 'play' || cmd === 'next' || cmd === 'previous') {
+      // A word the output did not take gets its explanation from the
+      // shell's one reporter (a dozing output, streaming, HQPlayer building
+      // or not answering) instead of dying in the console: after a Pause or
+      // a Stop the music goes on, and the person must know.
+      if (['play', 'next', 'previous', 'pause', 'stop'].includes(cmd)) {
         await window.reportPlaybackResult(resp);
       } else {
         console.warn('Player command failed:', cmd, resp ? 'HTTP ' + resp.status : 'no response');
       }
     } finally { _cmdInFlight.delete(cmd); }
+  }
+
+  // A Seek the output did not take is said, as a Pause is (playerCmd).
+  async function playerSeek(position) {
+    const resp = await fetch('/api/player/seek', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ position }),
+    }).catch(() => null);
+    if (!resp || !resp.ok) await window.reportPlaybackResult(resp);
   }
 
   function togglePlayPause() {
@@ -922,6 +932,7 @@
 
   // --- Public API ------------------------------------------------------
   window.playerCmd = playerCmd;
+  window.playerSeek = playerSeek;
   window.playTrack = playTrack;
   window.togglePlayPause = togglePlayPause;
   // Every play-intent gesture in the UI must claim the orphaned browser

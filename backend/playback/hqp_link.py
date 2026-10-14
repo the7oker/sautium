@@ -29,8 +29,11 @@ A link owns:
   * the intent clock: what a person or this node asked of it, in order. The
     order of intents is the order of the asks — each is numbered as it is
     asked — and an intent supersedes only from the moment its command
-    sequence holds the command lock: one refused as busy takes none and
-    supersedes nothing. A new queue and a rebuild supersede from their ask
+    sequence holds the command lock: one the lock refuses as busy takes
+    none and supersedes nothing, while one refused at its first request,
+    the lock its own (a build or a silence the link's held Status met),
+    keeps its number — an older word never beats the person's newer one.
+    A new queue and a rebuild supersede from their ask
     (a play press's hand-over is cut short at its next add) and withdraw
     that if their sequence never holds the lock — refused by it, or the
     hand-over that owns the number ended first. A sequence that decides

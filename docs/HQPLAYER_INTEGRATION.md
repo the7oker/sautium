@@ -270,7 +270,10 @@ command is refused while HQPlayer builds or answers nothing past a short
 silence's wait), the build watch (below), the intent clock — the order of
 intents is the order of the asks (since 2026-10-14): each takes the next
 number as it is asked and holds once its command sequence has the command
-lock, so one refused as busy supersedes nothing; a new queue and a rebuild
+lock, so one the lock refuses as busy supersedes nothing (one refused at its
+first request, the lock its own, keeps its number: an older word never beats
+the person's newer one, and the route says the word did not go); a new queue
+and a rebuild
 hold from their ask — a play press's hand-over is cut short at its next add —
 and are withdrawn if the lock then refuses them, or the hand-over fails
 before it holds (making its URIs): the hand-over owns its number

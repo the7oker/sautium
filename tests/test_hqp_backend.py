@@ -10026,3 +10026,53 @@ def test_a_pause_during_a_play_press_still_hands_hqplayer_the_queue(fake, output
     assert "PlaylistAdd" in [c for c, _ in fake.commands], fake.commands
     assert fake.state == int(PlaybackState.STOPPED)
     assert _wait(lambda: mgr._latest_status.get("resume") == {"index": 3, "position": 0})
+
+
+def _a_stop_answered_then_silent(monkeypatch, fake, link) -> None:
+    """A Stop HQPlayer answers at once and then falls silent past its wait:
+    the connection passes to the link's held Status, the command lock free."""
+    monkeypatch.setattr(hl, "STOP_ANSWER_S", 0.6)
+    monkeypatch.setattr(hl.BuildWatch, "after", 0.3)
+    link.client.waits.update(hl._command_waits())
+    real = hl.HqpLink._end_scope
+
+    def held_up(self):
+        if threading.current_thread().name == "hqp-held-status":
+            time.sleep(0.2)
+        return real(self)
+    monkeypatch.setattr(hl.HqpLink, "_end_scope", held_up)
+    fake.build("Stop", 3.0, answer="first")                    # answered at once, then silent
+    with link.command():
+        assert link.client.stop()
+    assert _wait(lambda: [c for _, c in fake.arrivals][-2:] == ["Stop", "Status"], timeout=3)
+
+
+def test_a_command_refused_at_its_first_request_keeps_its_number(fake, monkeypatch):
+    """A Play takes the free command lock and is refused at its first
+    request — HQPlayer is not answering — with nothing sent. It held the
+    lock: its number stands, and a start owed from before is superseded by
+    it, never sent over the person's newer word."""
+    link = _link()
+    older = link.item("start", link.accept("transport"))       # a start owed from before
+    _a_stop_answered_then_silent(monkeypatch, fake, link)
+    with pytest.raises(hl.NotAnswering):
+        with link.command("transport"):
+            link.client.play()
+    assert "Play" not in [c for _, c in fake.arrivals]
+    assert link.superseded(older) is not None
+
+
+def test_a_pause_refused_at_its_first_request_says_it_did_not_go(fake, output, monkeypatch):
+    """The same silence behind the link's held Status, and the person
+    presses Pause: the route answers that it did not go, in HQPlayer's
+    state's words — never an ok over a Pause that was not sent."""
+    from fastapi import HTTPException
+    mgr, b = output
+    player_router = _routes_on(monkeypatch, mgr)
+    link = b._link
+    _a_stop_answered_then_silent(monkeypatch, fake, link)
+    with pytest.raises(HTTPException) as e:
+        player_router.pause()
+    assert e.value.status_code == 409, e.value.detail
+    assert e.value.detail == hl.NOT_ANSWERING, e.value.detail
+    assert "Pause" not in [c for _, c in fake.arrivals]
