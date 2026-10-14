@@ -211,15 +211,15 @@ _left_gen = 0
 # another HQPlayer chosen, is left to that put-back's own end — it went, or
 # the switch drops its next request (left_by_person)
 _putting: set = set()
+_state: Dict[str, Any] = {"running": False, "cancel_requested": False, "endpoint_id": None,
+                          "mode": None, "point": 0, "total": 0, "point_label": "",
+                          "eta_s": None, "started_at": None, "outcome": None, "note": None}
 
 
 def _bump() -> None:
     """Under _lock: what a run left to the owner says changed."""
     global _left_gen
     _left_gen += 1
-_state: Dict[str, Any] = {"running": False, "cancel_requested": False, "endpoint_id": None,
-                          "mode": None, "point": 0, "total": 0, "point_label": "",
-                          "eta_s": None, "started_at": None, "outcome": None, "note": None}
 
 
 class BenchmarkRefused(RuntimeError):

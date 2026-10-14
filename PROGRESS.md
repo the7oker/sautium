@@ -858,6 +858,16 @@ implementation details live in the code, DB and git history.
   (nothing armed), says what never got quiet, and the runner's own judgments
   have tests. Lesson: before an "eventually" may fail, every path to it the
   design has must have had its turn.
+- **An oracle may not be excused by its own setup** (2026-10-14). The tail
+  mirror judged at rest still could not fail: a tail that did not hold was
+  waited on until the canary drifted it, and the drift was excused as an
+  edit made elsewhere by the very entry the tail step had put before the
+  playing one. Right after that step a tail that does not hold is now a
+  broken invariant at once, and a tail's drift is explained only by an
+  entry at or behind the one HQPlayer reads. The self-test of the rest's
+  wait after an unfinished build asked only that nothing broke; it now asks
+  that the press was taken. Lesson: an explanation an oracle accepts must
+  not be one its own setup supplies.
 - **The order of intents is the order of the asks** (2026-10-14). The
   intent clock numbered a new queue and a rebuild as they were asked and
   everything else once it held the command lock. A queue edit refused with

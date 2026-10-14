@@ -43,11 +43,12 @@ statuses the output pushed. The node stop ends every run.
  14. A tail mirror plays the queue's tracks from the entry it reads to the
      end.
  15. The order of intents is the order of the asks: an intent is numbered
-     as its sequence is asked — never once it holds the command lock — and
-     holds from the moment it has the lock; a new queue and a rebuild hold
-     from their ask, withdrawn if the lock refuses them (I3 reads intents
-     so). A sequence's ask and its taking the lock are spread apart at
-     random.
+     as its sequence is asked — never once it holds the command lock — checked
+     as each number is published (I3 reads intents so). That it holds from
+     the moment it has the lock, and that a new queue's or a rebuild's
+     number, pending from its ask, is withdrawn when the lock refuses it, the
+     clock's own tests pin. A sequence's ask and its taking the lock are
+     spread apart at random.
 
 The Stop a switch away owes (6) is also looked for: it went, or a newer
 attach superseded it, or HQPlayer stayed silent past the limit, went away,
@@ -459,17 +460,22 @@ class World:
         judge, judging = HqpBackend._judge_mirror, threading.local()
 
         def judged(backend, playlist, status, **kw):
-            judging.playlist = playlist
+            judging.playlist, judging.status = playlist, status
             try:
                 return judge(backend, playlist, status, **kw)
             finally:
-                judging.playlist = None
+                judging.playlist = judging.status = None
         mp.setattr(HqpBackend, "_judge_mirror", judged)
         drifted = HqpBackend._drifted
 
         def marked(backend, why, **kw):
             read = getattr(judging, "playlist", None)
             judging.why = why
+            if read is not None and backend._mirror == "tail":
+                # A tail mirror holds entries of anyone's before the one
+                # HQPlayer reads: only one at or behind it is an edit made
+                # elsewhere since
+                read = read[max(judging.status.track_index, 1) - 1:]
             judging.foreign = (None if read is None else
                                any("/Elsewhere/" in (t.get("uri") or "") for t in read))
             try:
@@ -875,14 +881,16 @@ class World:
         else:
             self.run_step(name, fn)
 
-    def at_rest(self, *, press_first: bool = False) -> None:
+    def at_rest(self, *, press_first: bool = False, tail: bool = False) -> None:
         """Invariants 11, 13 and 14, and the Stops a switch away owed, at a
         full settle: what is left of HQPlayer's own background work done —
         the reconverge a silence made due among it, unless the person
         presses first (`press_first`: the press and the reconverge meet) —
         then the queue and the mirror compared, given a bounded while to
         converge (the poller sees a return). A mirror marked lost or drifted
-        is given a play press: HQPlayer holds the queue after it."""
+        is given a play press: HQPlayer holds the queue after it. Right
+        after the tail step (`tail`), no step since to explain it, a tail
+        mirror that does not hold breaks invariant 14 at once."""
         deadline = time.monotonic() + 8.0
         quiet = 0
         while quiet < 2 and time.monotonic() < deadline:
@@ -931,7 +939,12 @@ class World:
             want = [b._uri_of(it)[0] for it in b._layout(snapshot).handed]
             if playlist == want:
                 return
-            if b._mirror == "tail" and not pressed and _tail_holds(playlist, want, track, state):
+            holds = _tail_holds(playlist, want, track, state)
+            if b._mirror == "tail" and not pressed and tail and not holds:
+                self.violate(f"I14: at rest after the tail step HQPlayer holds {playlist} and "
+                             f"reads entry {track}, the queue {want}")
+                return
+            if b._mirror == "tail" and not pressed and holds:
                 # I14 judged at rest — on an entry read, or nothing to judge —
                 # then the play press a person's tap there is: HQPlayer takes
                 # the whole queue
@@ -1348,7 +1361,7 @@ def test_the_links_keep_their_invariants_whatever_the_order(seed, fake, fake_b, 
                 # rest, now and then the person presses before the
                 # reconverge HQPlayer's return made due
                 due, world.rest_due = world.rest_due, False
-                world.at_rest(press_first=not due and world.rng.random() < 0.5)
+                world.at_rest(press_first=not due and world.rng.random() < 0.5, tail=due)
             world.check()
             if world.violations or world.unexpected:
                 break
@@ -1405,9 +1418,14 @@ def test_the_rest_waits_until_hqplayer_answered_a_build_it_did_not_finish(
         assert _wait(lambda: (link.build.state or {}).get("unfinished"), timeout=5)
         fake.service["Status"] = 0.15           # heard a little after the silence
         world.settle(full=True)
+        n = len(world.log)
         world.at_rest()
         fake.service.pop("Status", None)
         assert not world.violations, world.violations
+        assert not [e for e in world.log[n:] if e.kind == "step-refused"], world.log[n:]
+        b = world.mgr.active
+        want = [b._uri_of(it)[0] for it in b._layout().handed]
+        assert _wait(lambda: fake.state == int(PlaybackState.PLAYING) and fake.playlist == want)
 
 
 def test_a_build_left_armed_never_meets_the_rest_press(fake, fake_b, listens, monkeypatch):
@@ -1514,6 +1532,45 @@ def test_the_tail_step_is_judged_at_rest(fake, fake_b, listens, monkeypatch):
         assert [(e.kind, e.data) for e in rest] == [
             ("rest", {"tail": True}), ("step", {"name": "press (at rest)"})], rest
         assert fake.playlist == [f"file:///E:/Music/A/0{i}.flac" for i in range(1, 5)]
+
+
+def _a_tail_that_does_not_hold(world, fake) -> None:
+    """The tail step on slot 2, the reconverge's tail taken; then two
+    entries behind the one HQPlayer reads change places — a repair that
+    re-added them out of order."""
+    world.player.jump(world.player.JumpRequest(index=2))
+    assert _wait(lambda: fake.state == int(PlaybackState.PLAYING) and fake.track == 2)
+    world.run_step("an entry before", world.entry_before)
+    world.settle(full=True)
+    assert _wait(lambda: world.mgr.active._mirror == "tail")
+    with fake._lock:
+        i = fake.track
+        fake.playlist[i], fake.playlist[i + 1] = fake.playlist[i + 1], fake.playlist[i]
+
+
+def test_a_tail_that_does_not_hold_at_rest_breaks_invariant_14(fake, fake_b, listens,
+                                                                monkeypatch):
+    """Right after the tail step, no step since to explain it, a tail mirror
+    whose tail is not the queue's is invariant 14 broken — never waited on
+    until the canary calls it drift."""
+    with _a_world(fake, fake_b, monkeypatch) as world:
+        _a_tail_that_does_not_hold(world, fake)
+        world.at_rest(tail=True)
+        assert [v for v in world.violations if v.startswith("I14:")], world.violations
+
+
+def test_a_tails_drift_is_not_explained_by_the_entry_before_it(fake, fake_b, listens,
+                                                               monkeypatch):
+    """A tail that does not hold, drifted by the canary: the entry of
+    HQPlayer's own before the one it reads is the tail's, no edit made
+    elsewhere — the drift is the node's own, a violation."""
+    monkeypatch.setattr(hb, "DRIFT_CHECK_EVERY", 1)
+    with _a_world(fake, fake_b, monkeypatch) as world:
+        _a_tail_that_does_not_hold(world, fake)
+        assert _wait(lambda: (world.mgr.active.poke(), world.mgr.active._mirror)[1] == "drift")
+        world.at_rest()
+        assert [v for v in world.violations if "taken for an edit made elsewhere" in v], (
+            world.violations)
 
 
 def test_a_rest_that_never_comes_names_what_stayed(fake, fake_b, listens, monkeypatch):

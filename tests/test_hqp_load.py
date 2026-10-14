@@ -1,5 +1,5 @@
 """What a DSP setting costs on an HQPlayer's host (backend/playback/hqp_load.py)
-and the schema behind it (migrations 033 to 036).
+and the schema behind it (migrations 033 to 037).
 
 The sampler's gate is pure. The rollup, the coverage the benchmark skips by,
 the headroom classes and the retention run on a real PostgreSQL — a
