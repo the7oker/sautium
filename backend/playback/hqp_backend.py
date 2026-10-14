@@ -1780,6 +1780,7 @@ class HqpBackend(PlayerBackend):
             reads = None
             sample = None
             left_state = left_lists = None
+            check_due = False
             miss = None         # (what was said, whether HQPlayer kept the connection silent)
             came_back = learned = False
             att = self._attempt
@@ -1839,6 +1840,11 @@ class HqpBackend(PlayerBackend):
                             self._foreign_judged = foreign or self._foreign_judged
                             if self._judge_mirror(hqp_playlist, status, expect=mirror):
                                 self._verify_mirror = False
+                    # Stopped while a benchmark run's measured mode is
+                    # unchecked: judged at this rest (hqp_benchmark.check_measured)
+                    check_due = (status is not None and status.state == PlaybackState.STOPPED
+                                 and self.endpoint_id is not None
+                                 and hqp_benchmark.unchecked_run(self.endpoint_id) is not None)
                     if (status is not None and self.endpoint_id is not None
                             and hqp_benchmark.left_pending(self.endpoint_id)):
                         # A benchmark run left to the owner: what HQPlayer
@@ -1872,6 +1878,9 @@ class HqpBackend(PlayerBackend):
                     break               # detached meanwhile: what it heard acts on nothing
                 if left_state is not None:
                     hqp_benchmark.note_left(self.endpoint_id, left_state, left_lists)
+                if check_due:
+                    hqp_benchmark.check_measured(self.endpoint_id, self._link, status,
+                                                 gave=self.gave)
                 if came_back or learned:
                     self._note_info()
                 if came_back:

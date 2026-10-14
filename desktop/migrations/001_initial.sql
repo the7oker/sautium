@@ -425,6 +425,13 @@ CREATE TABLE IF NOT EXISTS hqp_benchmark_runs (
     -- owner's newest DSD listen then; NULL = no DSD source, or a row from
     -- before it was kept (the newest listen is asked, as before)
     dsd_uri TEXT,
+    -- When the put-back left the measured mode's own selection unchecked:
+    -- State shows only the mode HQPlayer is in, and the mode is entered to
+    -- read it only on an HQPlayer at rest (stopped, reading no other
+    -- controller's entry) — SetMode restarts its output. It is checked at
+    -- HQPlayer's nearest such rest or a new run's start, before that run
+    -- reads the owner's selection; NULL once checked
+    measured_unchecked_at TIMESTAMPTZ,
     CONSTRAINT chk_hqp_benchmark_runs_finished CHECK ((finished_at IS NULL) = (outcome IS NULL))
 );
 CREATE INDEX IF NOT EXISTS idx_hqp_benchmark_runs_endpoint

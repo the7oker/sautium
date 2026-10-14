@@ -1083,6 +1083,18 @@ implementation details live in the code, DB and git history.
   when a tap made after the Seek led it; it now moves only a start no
   newer than itself. Lesson: when a reading moves the anchor, move all
   that counts from it.
+- **A mode HQPlayer does not show is read before it is judged**
+  (2026-10-14). The put-back of a run cut short by the node's own stop had
+  stopped entering the mode the run measured, since it reset a selection it
+  never read; but when the owner had only gone back to their own mode, that
+  mode kept the run's test point under a note saying the settings went
+  back, and the next run of that mode took it for the owner's own. The
+  mode is now entered and read, and judged knob by knob as the rest — only
+  on an HQPlayer at rest, since switching its mode restarts its output;
+  busy, the run is marked, a notice says so, and the mode is judged at
+  HQPlayer's nearest rest or at a new run's start, before that run reads
+  the owner's selection. Lesson: what you cannot see is neither yours nor
+  theirs until you look.
 - **What the run handed, it knows by** (2026-10-14). A lost run's
   put-back knew the run's DSD source by the owner's newest DSD listen at
   the time of the put-back: a listen, a Last.fm import or a merge since,

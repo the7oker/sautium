@@ -2059,7 +2059,6 @@ def test_a_close_while_the_left_run_is_first_read_is_read_again(run, monkeypatch
     "no run left" — the next answer reads it again, and the notice is named."""
     fake, mgr = run.fake, run.mgr
     run_id = _owed_pcm_run(run)
-    monkeypatch.setattr(bench, "_left", {})             # not read yet
     read = bench._left_run
     reading, closed = threading.Event(), threading.Event()
 
@@ -2068,7 +2067,12 @@ def test_a_close_while_the_left_run_is_first_read_is_read_again(run, monkeypatch
         reading.set()
         closed.wait(10)
         return row
+    # The slow read first; the cache emptied as a change does it — a read
+    # the poller had on its way is not kept (left_pending's generation)
     monkeypatch.setattr(bench, "_left_run", slow)
+    with bench._lock:
+        monkeypatch.setattr(bench, "_left", {})         # not read yet
+        bench._bump()
     mgr.active.poke()
     assert reading.wait(10)                             # the poller's read is on its way
     bench.left_by_person("127.0.0.1", fake.port, "a DSP change came first")
@@ -2591,7 +2595,7 @@ def test_another_hqplayer_chosen_while_a_put_back_reads_no_state_leaves_the_run(
     owed_on, item = bench._owed[run_id]
     entered = threading.Event()
 
-    def reads_nothing(on, r, gave=None):
+    def reads_nothing(on, r, gave=None, at_start=False):
         entered.set()
         assert _wait(lambda: owed_on.superseded(item) is not None, 10)
         return None
@@ -2608,9 +2612,10 @@ def test_another_hqplayer_chosen_while_a_put_back_reads_no_state_leaves_the_run(
 def test_a_put_back_of_a_run_cut_short_never_resets_a_mode_it_did_not_read(run):
     """A "Measure PCM" run from SDM cut short by the node's own stop. In
     HQPlayer's window the owner set PCM's rate to their own and went back to
-    SDM, the volume still at the run's level. HQPlayer answers in SDM: the
-    put-back judges what it shows and puts back the volume and SDM — PCM,
-    which it did not read, keeps the owner's rate."""
+    SDM, the volume still at the run's level. HQPlayer answers in SDM, at
+    rest: the put-back reads PCM before it judges it, finds the owner's rate
+    there and leaves the run to them — PCM keeps their rate, and the volume,
+    at the run's level, goes back."""
     fake = run.fake
     run_id = _cut_short_run(run, mode="PCM", own_mode=1, own_rate=2, own_filter=1,
                             own_filter1x=1, own_shaper=1, last_rate=1, last_filter=0,
@@ -2622,6 +2627,7 @@ def test_a_put_back_of_a_run_cut_short_never_resets_a_mode_it_did_not_read(run):
     assert _wait(lambda: run.q("SELECT finished_at IS NOT NULL FROM hqp_benchmark_runs "
                                "WHERE id = %s", run_id) == [(True,)])
     assert fake.sel[1][0] == 0 and fake.volume == -3.0, fake.settings()
+    assert _closed_as_left(run, run_id)
 
 
 def test_a_new_runs_first_step_puts_a_lost_run_back_whole_on_the_nodes_entry(run, monkeypatch):
@@ -2888,3 +2894,145 @@ def test_a_run_measuring_the_owners_dsd_file_keeps_the_uri_it_hands(run, tmp_pat
                                "LIMIT 1") == [(bench._dsd_uri(f),)], 20)
     bench.cancel()
     assert _wait(lambda: not bench.running(), 30)
+
+
+def _pcm_run_found_in_sdm(r: Run, pcm: list, **kw) -> int:
+    """A "Measure PCM" run from SDM that the node's own stop cut short:
+    HQPlayer back in SDM, the mode the run found, on the owner's selection
+    there, lowered — while PCM, which State does not show in SDM, holds
+    `pcm`. The run's last point in PCM is (1, 0, 0, 0), the owner's own
+    there (2, 1, 1, 1)."""
+    run_id = _cut_short_run(r, mode="PCM", own_mode=1, own_rate=2, own_filter=1, own_filter1x=1,
+                            own_shaper=1, last_rate=1, last_filter=0, last_filter1x=0,
+                            last_shaper=0, **kw)
+    with r.fake._lock:
+        r.fake.mode, r.fake.sel[1], r.fake.sel[2] = 2, list(pcm), [2, 0, 0, 0]
+        r.fake.volume = -60.0
+    return run_id
+
+
+def _unchecked(r: Run, run_id: int) -> bool:
+    return r.q("SELECT measured_unchecked_at IS NOT NULL FROM hqp_benchmark_runs WHERE id = %s",
+               run_id) == [(True,)]
+
+
+def test_a_put_back_on_a_resting_hqplayer_puts_the_measured_modes_test_point_back(run):
+    """HQPlayer stopped, reading nothing of anyone's: the put-back enters
+    PCM, finds the run's last point there and puts the owner's selection
+    back, then returns to SDM, whose selection the round trip left as it
+    was — and the rest goes back as before."""
+    fake = run.fake
+    run_id = _pcm_run_found_in_sdm(run, [1, 0, 0, 0])
+    bench._owe(run_id, hl.selected())
+    bench.recover(run.endpoint_id, hl.selected())
+    assert _wait(lambda: run.q("SELECT finished_at IS NOT NULL FROM hqp_benchmark_runs "
+                               "WHERE id = %s", run_id) == [(True,)])
+    assert fake.settings() == (2, (2, 1, 1, 1), (2, 0, 0, 0), -3.0), fake.settings()
+    assert not _closed_as_left(run, run_id) and not _unchecked(run, run_id)
+
+
+def test_a_put_back_on_a_resting_hqplayer_leaves_a_measured_mode_the_owner_changed(run):
+    """The same, PCM's rate the owner's since: the run is left to them —
+    PCM as it is, HQPlayer back in SDM — and the notice names what PCM still
+    holds of the run's test point, as read there; the volume, still at the
+    run's level, goes back."""
+    fake = run.fake
+    run_id = _pcm_run_found_in_sdm(run, [0, 0, 0, 0])
+    bench._owe(run_id, hl.selected())
+    bench.recover(run.endpoint_id, hl.selected())
+    assert _wait(lambda: _closed_as_left(run, run_id))
+    assert fake.settings() == (2, (0, 0, 0, 0), (2, 0, 0, 0), -3.0), fake.settings()
+
+    def notice():
+        run.mgr.active.poke()
+        return _run_left_items()
+    elsewhere = {"what": "elsewhere", "mode": "PCM", "knobs": ["filter", "filter1x", "shaper"]}
+    assert _wait(lambda: notice() == {"elsewhere": elsewhere}, 10), notice()
+
+
+def test_a_put_back_on_a_busy_hqplayer_leaves_the_measured_mode_unchecked_until_it_rests(
+        run, monkeypatch):
+    """HQPlayer plays another controller's entry: the put-back sends no
+    SetMode — it would restart HQPlayer's output — marks the run, and the
+    notice says the mode is not checked yet. Stopped on that entry it is
+    still another's; once HQPlayer rests on nothing of anyone's, the mode is
+    judged: the run's last point goes back to the owner's, and the notice
+    ends."""
+    fake, mgr = run.fake, run.mgr
+    run_id = _pcm_run_found_in_sdm(run, [1, 0, 0, 0])
+    with fake._lock:
+        fake.playlist, fake.track = ["file:///Elsewhere/theirs.flac"], 1
+        fake.state = int(PlaybackState.PLAYING)
+    n = len(fake.commands)
+    bench._owe(run_id, hl.selected())
+    bench.recover(run.endpoint_id, hl.selected())
+    assert _wait(lambda: _unchecked(run, run_id))
+    assert "SetMode" not in [c for c, _ in fake.commands[n:]], fake.commands[n:]
+    assert fake.settings() == (2, (1, 0, 0, 0), (2, 0, 0, 0), -3.0), fake.settings()
+    assert bench.unchecked_notice() is not None
+    assert _wait(lambda: run.fake.state == int(PlaybackState.STOPPED))
+    assert _wait(lambda: run.endpoint_id in bench._busy_at, 10)   # stopped on another's entry
+    judged = []
+    booted = bench._booted
+    monkeypatch.setattr(bench, "_booted", lambda *a: (judged.append(a), booted(*a))[1])
+    k = len(fake.arrivals)
+    for _ in range(3):
+        mgr.active.poke()
+        assert _wait(lambda: [c for _, c in fake.arrivals[k:]].count("Status") >= 1)
+        k = len(fake.arrivals)
+    assert not _wait(lambda: judged, timeout=1.0), judged   # the same rest, not judged again
+    assert _unchecked(run, run_id)
+    with fake._lock:
+        fake.playlist, fake.track = [], 0       # the other controller's entry gone
+    assert _wait(lambda: (mgr.active.poke(), not _unchecked(run, run_id))[1], 10)
+    assert fake.settings() == (2, (2, 1, 1, 1), (2, 0, 0, 0), -3.0), fake.settings()
+    assert bench.unchecked_notice() is None
+
+
+def test_a_new_run_judges_an_unchecked_measured_mode_before_it_reads_the_owners(run):
+    """A run marked unchecked — PCM still on its last point — and the owner
+    measures PCM again: before the new run reads PCM's selection as theirs,
+    the mode is judged and the owner's selection put back; the test point is
+    never what the new run puts back at its end."""
+    import datetime
+    now = datetime.datetime.now(datetime.timezone.utc)
+    run_id = _pcm_run_found_in_sdm(run, [1, 0, 0, 0], finished_at=now, outcome="interrupted",
+                                   measured_unchecked_at=now)
+    with run.fake._lock:
+        run.fake.volume = -3.0
+    bench.start("pcm")
+    assert _wait(lambda: run.q("SELECT own_rate, own_filter, own_filter1x, own_shaper "
+                               "FROM hqp_benchmark_runs WHERE id > %s", run_id)
+                 == [(2, 1, 1, 1)], 20), run.q("SELECT id, own_rate, own_filter FROM "
+                                              "hqp_benchmark_runs")
+    assert not _unchecked(run, run_id)
+    bench.cancel()
+    assert _wait(lambda: not bench.running(), 30)
+
+
+def test_a_round_trip_through_the_measured_mode_leaves_the_found_modes_selection_as_found(
+        run, monkeypatch):
+    """PCM, which State does not show, is the run's only mark left (the
+    owner raised the volume): the put-back enters it, puts the owner's
+    selection back and returns — HQPlayer showing SDM on another selection
+    than it was found on (a mode switch that reset it). Read again, SDM is
+    put back as found: nothing else would put it back."""
+    fake = run.fake
+    run_id = _pcm_run_found_in_sdm(run, [1, 0, 0, 0])
+    with fake._lock:
+        fake.volume = -3.0
+    dispatch, moved = fake._dispatch, []
+
+    def resets_sdm(cmd, attrs):
+        out = dispatch(cmd, attrs)
+        if cmd == "SetMode" and attrs.get("value") == "2" and not moved:
+            moved.append(True)
+            with fake._lock:
+                fake.sel[2] = [1, 1, 1, 1]          # not what the owner had there
+        return out
+    monkeypatch.setattr(fake, "_dispatch", resets_sdm)
+    bench._owe(run_id, hl.selected())
+    bench.recover(run.endpoint_id, hl.selected())
+    assert _wait(lambda: run.q("SELECT finished_at IS NOT NULL FROM hqp_benchmark_runs "
+                               "WHERE id = %s", run_id) == [(True,)])
+    assert moved and fake.settings() == (2, (2, 1, 1, 1), (2, 0, 0, 0), -3.0), fake.settings()

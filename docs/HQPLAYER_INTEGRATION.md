@@ -1517,7 +1517,17 @@ cooling — so Sautium measures it instead of predicting it
   nothing while it builds, an Embedded box names the selection it builds),
   one that is neither the run's last point nor what was there before the
   run is theirs, whatever the others still hold — for a run HQPlayer went
-  away under, only once it shows more than what it booted with. Neither
+  away under, only once it shows more than what it booted with. The mode
+  the run switched into, which State does not show while HQPlayer is in
+  another, is judged the same way: entered and read, its selection put back
+  from the run's last point or left as the owner's, then HQPlayer back in
+  the mode it was found in, that mode's selection read again — but only on
+  an HQPlayer at rest (stopped, reading no other controller's entry), since
+  switching its mode restarts its output. Busy, the run is marked
+  (`measured_unchecked_at`, migration 039) and a notice says the mode is not
+  checked yet; it is judged at HQPlayer's nearest rest, or at a new run's
+  start before that run reads the owner's selection — a test point is never
+  taken for theirs (since 2026-10-14). Neither
   the put-back nor a person's change waiting for the command lock behind
   it closes the run the other way: the row is closed while the put-back
   still holds the lock, and a switch away or another HQPlayer chosen
