@@ -1536,15 +1536,16 @@ def reorder(req: ReorderRequest):
     a full clear+rebuild + select_track + seek (~300 ms gap).
 
     The plan is made on the queue as the route reads it and applied under
-    the queue lock only to that version of it: one a filler's append
-    overtook meanwhile is refused whole (409), the queue as it is.
+    the queue lock only to that order of it: one a filler's append (or any
+    edit that moved a slot) overtook meanwhile is refused whole (409), the
+    queue as it is.
     """
     if not req.order:
         raise HTTPException(status_code=400, detail="order is empty")
 
-    # The plan names the queue's version it was made on: applied under the
-    # queue lock only to that version (a filler's append may land first)
-    current_items, version, _ = manager.queue.view()
+    # The plan names the queue's order it was made on: applied under the
+    # queue lock only to that order (a filler's append may land first)
+    current_items = manager.queue.snapshot()
     current_ids = [it.track_id for it in current_items]
 
     status_idx = manager.latest_status.get("track_index") or 0
@@ -1617,7 +1618,7 @@ def reorder(req: ReorderRequest):
         # A paused HQPlayer is left stopped at its spot, never played to be
         # paused again: the play press resumes it there (HqpBackend._rebuild)
         resume=manager.latest_status.get("state") == "playing",
-        version=version,
+        items=current_items,
     )
     try:
         result = manager.apply_reorder(plan)
@@ -1625,8 +1626,14 @@ def reorder(req: ReorderRequest):
     except QueueChanged as e:
         raise HTTPException(status_code=409, detail=f"{e} — the queue shows it as it is now")
     except Exception as e:
-        logger.error(f"reorder failed: {e}", exc_info=True)
-        raise _output_error(e)
+        # The output busy — held, building, silent, a newer intent first —
+        # is news; anything else is a fault, with its traceback
+        refused = _output_error(e)
+        if refused.status_code == 409:
+            logger.warning("reorder not applied: %s", refused.detail)
+        else:
+            logger.error(f"reorder failed: {e}", exc_info=True)
+        raise refused
 
 @router.post("/jump")
 def jump(req: JumpRequest):

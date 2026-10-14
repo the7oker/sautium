@@ -759,7 +759,7 @@ implementation details live in the code, DB and git history.
   HQPlayer carried it out after its silence, so the next removal by index
   took the wrong entry. Unanswered is now a silence, as it was for adds:
   the queue takes the edit, the mirror is lost, and HQPlayer answering
-  again gets the queue back. A new order is applied only to the version of
+  again gets the queue back. A new order is applied only to the order of
   the queue it was planned on (a filler's append landing between the
   route's read and the apply left HQPlayer in another order than the queue,
   "in step"), refused whole otherwise. An entry not ours that HQPlayer
@@ -895,6 +895,20 @@ implementation details live in the code, DB and git history.
   refuses one the queue no longer holds, and a "play next" and a removal
   hold a person's words as the other mutations do. Lesson: an index is a
   name only for the list the reader saw.
+- **No answer is no reading** (2026-10-14). A "play next" whose PlaylistGet
+  HQPlayer left unanswered took the empty list for a playlist shorter than
+  the queue and marked it drifted — an edit made elsewhere, which nothing
+  mends — so HQPlayer played the old next track; it is a silence now, the
+  mirror lost and the queue given back at the next answer. The same
+  confusion of "not read" with "read as": the at-once judge of an entry not
+  ours was spent when asked, not when it judged, so a tick whose read
+  failed left the entry to the canary's half-minute cadence; a new order was
+  refused as made on another queue when only a slot's way in had been read
+  again — it is checked against the order of the queue now; a new order
+  behind a tail entry that names no one slot of the queue's was answered as
+  a refusal of HQPlayer's instead of being the queue's; and a new order at a
+  spot on a gap moved the spot to the next track. Lesson: an absence of an
+  answer is not an answer of absence.
 - **Stop-clear-add-select-play sequence** for `play_track`/`play_album`. Without
   explicit stop, HQPlayer occasionally started the wrong track from the
   existing queue.

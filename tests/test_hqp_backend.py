@@ -5,6 +5,7 @@ HQPlayer restarts (a trial-mode Embedded stops every 30 minutes)."""
 
 import errno
 import itertools
+import logging
 import os
 import re
 import socket
@@ -8302,3 +8303,153 @@ def test_a_tap_on_a_track_queued_twice_means_the_slot_nearest_the_row():
     assert q.slot_of(2, "track-1") == 1
     assert q.slot_of(2, "track-9") is None
     assert q.slot_of(9, None) is None
+
+
+# -- The mirror's readings: a reading HQPlayer gave, a judge that ran ------------
+
+
+def test_a_play_next_hqplayer_reads_nothing_for_loses_the_mirror(fake, output, monkeypatch):
+    """HQPlayer answers nothing to the PlaylistGet a "play next" begins with
+    (busy): no reading is no shorter playlist — the insert is the queue's,
+    the mirror lost, and HQPlayer gets the queue back at its next answer;
+    never drift, which nothing mends."""
+    mgr, b = output
+    losses = b.mirror_losses
+    _link().client.timeout = 0.5                      # a command's wait, shortened
+    fake.service["PlaylistGet"] = 1.0                 # busy: the read goes unanswered
+    try:
+        assert mgr.append([_item("E:/Music/N/01.flac", 31)], "next") == 1
+    finally:
+        del fake.service["PlaylistGet"]
+        _link().client.timeout = hl.COMMAND_WAIT_S
+    assert [it.track_id for it in mgr.queue.snapshot()] == [
+        "track-1", "track-31", "track-2", "track-3"]
+    assert b._mirror == "lost" and b.mirror_losses == losses + 1, b._mirror
+    assert _wait(lambda: fake.playlist == [
+        "file:///E:/Music/A/01.flac", "file:///E:/Music/N/01.flac",
+        "file:///E:/Music/A/02.flac", "file:///E:/Music/A/03.flac"], timeout=8), fake.playlist
+
+
+@pytest.mark.parametrize("moved", ["a slot's way in read again", "a stream landed"])
+def test_a_new_order_is_taken_over_a_queue_whose_slots_did_not_move(fake, output,
+                                                                    monkeypatch, moved):
+    """Between the route's read and the apply the queue changed in a way that
+    moves no slot — each slot's way in read again (a press's first step, a
+    reconverge), or a stream landed for one: the new order is still the
+    queue's to take, never refused as made on another queue."""
+    mgr, b = output
+    player_router = _routes_on(monkeypatch, mgr)
+    apply = mgr.apply_reorder
+
+    def changed_first(plan):
+        if moved == "a slot's way in read again":
+            with mgr._mutate_lock:
+                b._ways_in()
+        else:
+            assert mgr.queue.set_play(mgr.queue.item_at(3), None) == 3
+        return apply(plan)
+    monkeypatch.setattr(mgr, "apply_reorder", changed_first)
+    said = player_router.reorder(player_router.ReorderRequest(
+        order=["track-1", "track-3", "track-2"]))
+    assert said["ok"]
+    assert [it.track_id for it in mgr.queue.snapshot()] == ["track-1", "track-3", "track-2"]
+
+
+def test_an_entry_not_ours_is_judged_again_when_its_first_judge_read_nothing(
+        fake, output, monkeypatch):
+    """Another controller's entry is read while in step; the at-once judge's
+    playlist read fails that tick (HQPlayer answers PlaylistGet with an
+    error): the canary never judged, so the next answer asks again — the
+    playlist is drifted before a tap selects into it."""
+    mgr, b = output
+    monkeypatch.setattr(hb, "DRIFT_CHECK_EVERY", 10 ** 6)        # no canary of its cadence
+    fake.replies["PlaylistGet"] = '<PlaylistGet result="Error">busy</PlaylistGet>'
+    n = len(fake.commands)
+    with fake._lock:
+        fake.playlist.append("file:///Elsewhere/theirs.flac")
+        fake.track = len(fake.playlist)
+    assert _wait(lambda: any(c == "PlaylistGet" for c, _ in fake.commands[n:]), timeout=5)
+    del fake.replies["PlaylistGet"]
+    assert _wait(lambda: b._mirror == "drift", timeout=5), b._mirror
+
+
+def test_a_new_order_at_a_spot_on_a_gap_leaves_the_spot_on_its_item(
+        fake, fake_b, two_libraries, monkeypatch):
+    """Stopped at a spot on a gap — the slot the queue stood on, held only by
+    the other HQPlayer — the person makes a new order: the spot stays on its
+    item, the status the same track, Next counting from it."""
+    mgr, settings_router, queue = two_libraries
+    player_router = _routes_on(monkeypatch, mgr)
+    mgr.queue.replace(queue + [_item("E:/Music/A/05.flac", 5)])
+    mgr._last_slot = 3
+    _pick(settings_router, type="hqplayer", hqplayer={"host": "127.0.0.1", "port": fake_b.port})
+    b = mgr.active
+    assert _wait(lambda: mgr._latest_status.get("track_index") == 3)
+    gap = mgr.queue.item_at(3)
+    assert b._spot is not None and b._spot[0] is gap
+    order = ["track-1", "track-3", "track-2", "track-5", "track-4"]
+    player_router.reorder(player_router.ReorderRequest(order=order))
+    assert [it.track_id for it in mgr.queue.snapshot()] == order
+    assert b._spot is not None and b._spot[0] is gap, (b._spot and b._spot[0].track_id)
+
+
+def test_a_new_order_behind_a_tail_entry_queued_twice_is_the_queues(fake, output,
+                                                                    monkeypatch):
+    """A tail mirror whose entry read is a file queued at two slots: which
+    one HQPlayer reads is no verdict, so a new order behind it lands on no
+    copy by a guess — like a removal there, it is the queue's, the mirror
+    lost — never refused as an order HQPlayer did not take."""
+    mgr, b = output
+    player_router = _routes_on(monkeypatch, mgr)
+    _tail(mgr, b, fake)
+    assert mgr.append([_item("E:/Music/A/02.flac", 2)]) == 1          # track-2 queued again
+    assert _wait(lambda: mgr._latest_status.get("track_index") == 2)
+    held = list(fake.playlist)
+    order = ["track-1", "track-2", "track-4", "track-3", "track-2"]
+    said = player_router.reorder(player_router.ReorderRequest(order=order))
+    assert said["ok"]
+    assert [it.track_id for it in mgr.queue.snapshot()] == order
+    assert fake.playlist == held and b._mirror == "lost"
+
+
+def test_a_new_order_behind_a_tail_entry_hqplayer_moved_on_from_is_the_queues(fake, output,
+                                                                              monkeypatch):
+    """A tail mirror: a new order is planned behind the slot playing, and
+    HQPlayer moves on to its next entry by itself before the edit reads it.
+    The entry it reads is not the plan's, so the order lands nowhere by a
+    guess: it is the queue's, the mirror lost — never refused as an order
+    HQPlayer did not take."""
+    mgr, b = output
+    player_router = _routes_on(monkeypatch, mgr)
+    _tail(mgr, b, fake)
+    assert _wait(lambda: mgr._latest_status.get("track_index") == 2)
+    held = list(fake.playlist)
+    apply = mgr.apply_reorder
+
+    def moved_on_first(plan):
+        with fake._lock:                        # HQPlayer's own advance, not read yet
+            fake.track, fake.position = 4, 0.0
+        return apply(plan)
+    monkeypatch.setattr(mgr, "apply_reorder", moved_on_first)
+    order = ["track-1", "track-2", "track-4", "track-3"]
+    said = player_router.reorder(player_router.ReorderRequest(order=order))
+    assert said["ok"]
+    assert [it.track_id for it in mgr.queue.snapshot()] == order
+    assert fake.playlist == held and b._mirror == "lost"
+
+
+def test_a_new_order_hqplayer_is_too_busy_for_is_news_not_a_fault(fake, output, monkeypatch,
+                                                                   caplog):
+    """A new order refused while HQPlayer builds answers 409 — the output's
+    own refusal, logged as news, never as a fault with its traceback."""
+    from fastapi import HTTPException
+    mgr, b = output
+    player_router = _routes_on(monkeypatch, mgr)
+    fake.build("SetFilter", 2.0, answer="last")
+    assert hb.change_dsp({"filter": 57, "filter1x": 57})["building"] is not None
+    with pytest.raises(HTTPException) as refused:
+        player_router.reorder(player_router.ReorderRequest(
+            order=["track-2", "track-1", "track-3"]))
+    assert refused.value.status_code == 409
+    assert not [r for r in caplog.records if r.name == "routers.player"
+                and r.levelno >= logging.ERROR], caplog.text

@@ -948,8 +948,8 @@ class HqpBackend(PlayerBackend):
         self._mirror_lock = threading.Lock()
         self._mirror_moves = 0
         self._drift_logged = False
-        # The entry not ours (its URI, the queue's version) the canary was
-        # last asked to judge at once (_reads_foreign_in_step)
+        # The entry not ours (its URI, the queue's version) the canary last
+        # judged at once (_foreign_in_step)
         self._foreign_judged: Optional[tuple] = None
         # Every URI this attachment handed HQPlayer since its last full mirror
         # (a clear: what it held before is gone): an entry it reads that is
@@ -1766,9 +1766,10 @@ class HqpBackend(PlayerBackend):
                             info = hqp.get_info(wait=QUESTION_WAIT_S)
                             learned = bool(info)
                             self._info = info or self._info
+                    foreign = self._foreign_in_step(status) if status is not None else None
                     if status is not None and (self._verify_mirror
                                                or tick % DRIFT_CHECK_EVERY == 0
-                                               or self._reads_foreign_in_step(status)):
+                                               or foreign is not None):
                         _, version, pending = self._queue.view()
                         mirror = self._mirror_moves
                         hqp_playlist = hqp.get_playlist()
@@ -1780,10 +1781,12 @@ class HqpBackend(PlayerBackend):
                         # of the mirror made since (a loss: a replace
                         # HQPlayer refused whole, its Stop gone) —
                         # and before the slot below, which falls back on it.
+                        # An entry not ours is spent only once judged.
                         if (hqp.last_error is None and not pending and self._pressed is None
-                                and self._queue.view()[1:] == (version, False)
-                                and self._judge_mirror(hqp_playlist, status, expect=mirror)):
-                            self._verify_mirror = False
+                                and self._queue.view()[1:] == (version, False)):
+                            self._foreign_judged = foreign or self._foreign_judged
+                            if self._judge_mirror(hqp_playlist, status, expect=mirror):
+                                self._verify_mirror = False
                     if (status is not None and self.endpoint_id is not None
                             and hqp_benchmark.left_pending(self.endpoint_id)):
                         # A benchmark run left to the owner: what HQPlayer
@@ -1961,20 +1964,19 @@ class HqpBackend(PlayerBackend):
         ours = f"{self._url_host}:{proxy.port}" if proxy is not None else ""
         return [r for r in (_handed(uri), _reading(uri, proxy, ours)) if r is not None]
 
-    def _reads_foreign_in_step(self, status) -> bool:
+    def _foreign_in_step(self, status) -> Optional[tuple]:
         """Does HQPlayer read an entry of no queue slot while its playlist is
         said to be the queue's? Then the canary judges it at this answer, not
         DRIFT_CHECK_EVERY ticks later: a tap meanwhile selected into a
         playlist that was not the queue's (another controller's entry
-        played). Once per entry and queue version: one the canary judged the
-        queue's after all waits for its turn."""
+        played). Its key — (entry, queue version) — or None: once judged
+        (the poller spends it when the canary ran), one the canary found the
+        queue's after all waits for its turn; a tick whose canary did not
+        run asks again."""
         if self._mirror != "step" or not self.reads_foreign(status):
-            return False
+            return None
         key = (status.uri, self._queue.version)
-        if key == self._foreign_judged:
-            return False
-        self._foreign_judged = key
-        return True
+        return None if key == self._foreign_judged else key
 
     def reads_foreign(self, status) -> bool:
         """Does HQPlayer, as this status finds it, read an entry that is not
@@ -3639,11 +3641,12 @@ class HqpBackend(PlayerBackend):
         `target` once the queue lock is let go (_owe_start, _start_at),
         wherever the target is by then — `patient` for background work,
         whose failure is only logged; a start that does not go leaves its
-        spot to the play press. Not resuming it lands nowhere: SelectTrack
-        would start a stopped HQPlayer (select), and the play press resumes
-        `target` at `position`. The second holds only for the track it was
+        spot to the play press. The second holds only for the track it was
         taken on: a target HQPlayer does not hold, or refused, gives way to
-        the next track it took, at 0 s. Numbered as it is asked: the play
+        the next track it took, at 0 s. Not resuming it lands nowhere —
+        SelectTrack would start a stopped HQPlayer (select) — and the spot
+        stays with `target` at `position` (a gap too: the start resolves it
+        when it goes), where the play press resumes. Numbered as it is asked: the play
         intents made while it hands HQPlayer the queue are held, the start it
         owes their base (_hold_words). Under the queue lock. Returns whether
         HQPlayer holds the queue now — then it is in step."""
@@ -3669,7 +3672,7 @@ class HqpBackend(PlayerBackend):
                                 lambda it: self._start_item(begin, at, it),
                                 spot=(begin, at), patient=patient)
             else:
-                self._set_spot(begin, at)
+                self._set_spot(target, position)
         self.poke()
         if not self._took(layout.handed, taken, unsent, what):
             return False
@@ -3822,7 +3825,14 @@ class HqpBackend(PlayerBackend):
 
         def insert(h: HQPlayerClient) -> tuple:
             nonlocal unplaced
-            raw = h.get_playlist() or []
+            raw = h.get_playlist()
+            if h.last_error is not None:
+                # No reading — a silence, a refusal — is no shorter playlist:
+                # the insert is the queue's, HQPlayer given the queue back
+                # once it answers (never drift, which nothing mends)
+                why = f"HQPlayer's playlist was not read for a play next ({h.refusal()})"
+                unplaced = lambda: self.lose_mirror(why)
+                return [], 0, True
             place, unplaced = self._place_after(h, raw, anchor)
             if place is None:
                 return [], 0, True
@@ -4022,8 +4032,11 @@ class HqpBackend(PlayerBackend):
         a paused HQPlayer leaves one. A playlist that is no mirror (lost,
         drifted) is not edited by index: the new order is the queue's alone.
         A tail mirror takes a new order behind the playing slot at HQPlayer's
-        offset; any other new order is the queue's alone, and the mirror is
-        lost — HQPlayer gets what lies behind its entry at its next answer.
+        offset, read in the sequence; any other new order — or one behind an
+        entry that gives no verdict (no slot of the queue's, a file queued
+        twice, another slot than the plan's) — is the queue's alone, and the
+        mirror is lost: HQPlayer gets what lies behind its entry at its next
+        answer.
         The rebuild is a full mirror: what HQPlayer refuses of it is a gap
         (_took)."""
         spot = self._spot
@@ -4063,14 +4076,18 @@ class HqpBackend(PlayerBackend):
             uri_by_id = {mid: self._uri_for(plan.items_by_id[mid]) for mid in new_after}
             current = self._layout().entry(plan.status_idx)
 
+            unplaced = None
+
             def reorder(hqp: HQPlayerClient) -> Optional[str]:
+                nonlocal unplaced
                 k = current
                 if tail:
-                    read, why = self._tail_read(hqp, self._layout())
+                    read, unplaced = self._tail_read(hqp, self._layout())
                     if read is None:
-                        return why
+                        return None
                     if read[0] != plan.status_idx:
-                        return "HQPlayer reads another entry than the playing slot"
+                        unplaced = "HQPlayer reads another entry than the playing slot"
+                        return None
                     k = read[1]
                 if k is None:
                     return "HQPlayer holds no entry for the playing slot"
@@ -4097,6 +4114,12 @@ class HqpBackend(PlayerBackend):
                              owes=False)
             refusal = self._cmd(reorder)
             self.poke()
+            if unplaced is not None:
+                # No entry of HQPlayer's to edit by — never one guessed: the
+                # new order is the queue's, and HQPlayer gets what lies behind
+                # the entry it reads once it answers again
+                self.lose_mirror(unplaced)
+                return unchanged
             if refusal is not None:
                 self._drifted("HQPlayer did not take the new order")
                 logger.warning("HQPlayer did not take the new order: %s",

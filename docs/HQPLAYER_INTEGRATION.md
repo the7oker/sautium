@@ -454,7 +454,9 @@ comes after the control port answers again — so neither can end the wait.
 - **The mirror's state** (`HqpBackend._mirror`): in step; a tail mirror;
   lost; drifted.
   - **Lost** when a build ran out or HQPlayer went away under a queue edit,
-    when an append or a "play next" found it not answering, when it left a
+    when an append or a "play next" found it not answering (a "play next"
+    whose playlist read HQPlayer did not give included — no reading is no
+    shorter playlist), when it left a
     removal or the radio's clear unanswered within its wait (it carries
     them out once its silence is over: the slot leaves the queue, the radio
     goes on), when a replace was cut short by a silence (the queue takes

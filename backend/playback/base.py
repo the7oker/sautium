@@ -72,7 +72,9 @@ class ReorderPlan:
     items_by_id: dict                   # media_file_id -> QueueItem (URI derivation)
     position: int = 0                   # rebuild: the second it resumes at
     resume: bool = False                # rebuild: play on (it was playing), else the play press resumes
-    version: Optional[int] = None       # the queue's version it was planned on: applied to no other
+    # The queue's items, in order, it was planned on: applied to no other
+    # order — a re-read of a slot's way in moves no slot
+    items: Optional[list] = None
 
 
 class PlayerBackend(ABC):
