@@ -1172,7 +1172,8 @@ class HqpBackend(PlayerBackend):
         if self.endpoint_id is None:
             return
         try:
-            hqp_benchmark.recover(self.endpoint_id, self._link, again=self._recover_later)
+            hqp_benchmark.recover(self.endpoint_id, self._link, gave=self.gave,
+                                  again=self._recover_later)
         except (OSError, RuntimeError, psycopg2.Error) as e:
             logger.warning("benchmark recovery failed: %s", e)
 
@@ -1265,6 +1266,14 @@ class HqpBackend(PlayerBackend):
             reads = Entry.read(status)
             return self._mirror == "step" and given.slot(reads) is not None
         return any(_reads_item(r, it) for r in readings for it in given.handed)
+
+    def gave(self, uri: str) -> bool:
+        """Is `uri` an entry this node gave HQPlayer — one this attachment
+        handed it, or one that names a slot of the queue as it stands?"""
+        if self._handed_here(uri):
+            return True
+        handed = self._layout().handed
+        return any(_reads_item(r, it) for r in self._readings(uri) for it in handed)
 
     def _handed_here(self, uri: Optional[str]) -> bool:
         """Did this attachment hand this HQPlayer `uri` since its last full

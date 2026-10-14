@@ -1463,15 +1463,23 @@ cooling — so Sautium measures it instead of predicting it
   lowered volume, or the selection it set last (an HQPlayer that restarted
   keeps that, maybe nothing else) — only once HQPlayer answers, never on a
   trial-stopped box that takes a connection and drops it. A run HQPlayer
-  went away under — its put-back at the end could not reach it, the app not
-  stopping (`lost_at`) — is put back whole whatever HQPlayer shows then
-  (since 2026-10-14): what it shows is what it booted with, no one's change.
-  Its volume is lowered to the owner's level when HQPlayer came back louder,
-  raised only from the level the run set itself, and otherwise left as it
-  is; one notice (`hqplayer.run_restored`) says HQPlayer restarted during
-  the run and its settings were put back — with the level the volume was
-  left at, beside the owner's — until the owner saw it or a new run opened
-  its row. The put-back is a
+  went away under — it closed, reset or refused the connection as the
+  put-back at the end tried it, the app not stopping (`lost_at`; a silence
+  is no loss — a busy HQPlayer's run is one cut short like any other) — is
+  put back whole while HQPlayer shows what a box that just booted shows:
+  stopped, reading no entry of another controller's — none, a signal of
+  the run, or one this node gave it (since 2026-10-14). What it booted
+  with is no one's change; playing, pausing or reading another
+  controller's entry, it shows more, and the run is judged as any run cut
+  short — nothing stopped, nothing reset over another controller's
+  playback. Its volume is lowered to the owner's level when HQPlayer came
+  back louder, raised only from the level the run set itself, and
+  otherwise left as it is; one notice (`hqplayer.run_restored`) says
+  Sautium lost the connection to HQPlayer during the run of that date —
+  the date keeps a put-back days later from reading as a change made on
+  its own — and that the settings from before it were put back, with the
+  level the volume was left at beside the owner's, until the owner saw it
+  or a new run opened its row. The put-back is a
   DSP item of the HQPlayer's link as of the run's end (one made afresh
   owes it anew, as it does after the process restarted — an item kept in
   memory — unless a person superseded it on the link it was owed on): a
@@ -1483,10 +1491,14 @@ cooling — so Sautium measures it instead of predicting it
   modulator, volume) on HQPlayer's State as it answers it (a Desktop says
   nothing while it builds, an Embedded box names the selection it builds),
   one that is neither the run's last point nor what was there before the
-  run is theirs, whatever the others still hold — never for a run HQPlayer
-  went away under. Neither the put-back nor a person's change waiting for
-  the command lock behind it closes the run the other way: the row is
-  closed while the put-back still holds the lock. Never the node's own
+  run is theirs, whatever the others still hold — for a run HQPlayer went
+  away under, only once it shows more than what it booted with. Neither
+  the put-back nor a person's change waiting for the command lock behind
+  it closes the run the other way: the row is closed while the put-back
+  still holds the lock, and a switch away or another HQPlayer chosen
+  meanwhile — accepted at once, without the lock — leaves the run to the
+  put-back's own end: it went, or the switch drops its next request and
+  the run is left to the owner. Never the node's own
   re-attach of the same HQPlayer, nor a new run's hold. The run is then
   closed as left to the owner (since 2026-10-13): nothing more is put
   back, the volume is never raised for them, and one notice — through the
@@ -1504,9 +1516,10 @@ cooling — so Sautium measures it instead of predicting it
   and a read a close or a new run overtook is read again. The notice stands on the run's row, whatever the output
   is now: a restart or another output never ends it to raise it again;
   until the poller has read HQPlayer it says the test settings may still be
-  there. A new run takes a put-back still owed first, and reads what
-  HQPlayer holds after it; one a knob the owner set supersedes is closed
-  then with no notice — the new run reads HQPlayer as theirs. Forgetting the
+  there. A new run takes a put-back still owed first — at its start, and
+  again as its first step — and reads what HQPlayer holds after it; the
+  run it took is closed then with no notice, however it was put back or
+  left — the new run reads HQPlayer as theirs. Forgetting the
   HQPlayer takes its measurements with it; it is refused while a run measures
   it. The estimate of a run's length takes the pace of the last run that
   ended or was cancelled (on a trial-mode Embedded the owner cancels before

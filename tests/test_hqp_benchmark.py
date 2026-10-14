@@ -1916,7 +1916,7 @@ def test_a_run_hqplayer_restarted_under_is_put_back_whole_its_volume_with_it(run
     raised from the run's own level, and a notice says why."""
     before, note = _gone_mid_run(run, monkeypatch, boot_mode=1)
     assert run.fake.settings() == before, (note, run.fake.settings())
-    assert "HQPlayer restarted under the run" in note
+    assert "HQPlayer went away under the run" in note
     assert run.q("SELECT left_at IS NULL FROM hqp_benchmark_runs") == [(True,)]
     restored = _run_restored()
     assert restored is not None and restored["data"]["volume_left"] is None, restored
@@ -1930,8 +1930,10 @@ def test_a_run_hqplayer_restarted_under_at_its_own_level_leaves_that_level(run, 
     before, note = _gone_mid_run(run, monkeypatch, boot_volume=-20.0)
     after = run.fake.settings()
     assert after[:3] == before[:3] and after[3] == -20.0, (note, after)
+    started = run.q("SELECT started_at FROM hqp_benchmark_runs")[0][0]
     restored = _run_restored()
-    assert restored["data"] == {"volume_left": -20.0, "volume_before": -3.0}, restored
+    assert restored["data"] == {"run_at": started.isoformat(), "volume_left": -20.0,
+                                "volume_before": -3.0}, restored
 
 
 def test_a_run_hqplayer_restarted_under_louder_is_lowered_to_the_owners_level(run, monkeypatch):
@@ -2131,3 +2133,385 @@ def test_a_run_the_owner_changed_is_closed_with_no_notice_as_a_new_run_starts(ru
     row = run.q("SELECT note, left_at IS NULL FROM hqp_benchmark_runs WHERE id = %s", run_id)
     assert "changed in HQPlayer since" in row[0][0] and row[0][1], row
     assert woken == [], "the notices channel was woken for a run the new one took"
+
+
+# -- A run lost or cut short: who may put it back, and how it is said ----------------
+
+
+# What a put-back changes on HQPlayer
+_CHANGES = ("Stop", "SetMode", "SetRate", "SetFilter", "SetShaping", "Volume", "PlaylistClear",
+            "PlaylistAdd")
+
+
+def _changes(fake, mark):
+    return [c for c, _ in fake.commands[mark:] if c in _CHANGES]
+
+
+def _another_controller_plays(fake):
+    """Another controller plays through HQPlayer, in PCM on a modulator and a
+    volume of the owner's: (the settings it plays on, the command log's mark)."""
+    with fake._lock:
+        fake.playlist = ["http://other-controller.invalid/track.flac"]
+        fake.track, fake.state, fake.position = 1, int(PlaybackState.PLAYING), 30.0
+        fake.mode, fake.sel[1], fake.volume = 1, [0, 0, 0, 1], -10.0
+        return fake.settings(), len(fake.commands)
+
+
+def _lost_run_node_stopped(run, monkeypatch):
+    """A run HQPlayer went away under (powered off in the middle of a point),
+    the node then stopped — its backend detached, no switch away — before
+    HQPlayer is back: the run stays owed, lost_at kept. Returns the settings
+    before the run."""
+    fake, mgr = run.fake, run.mgr
+    fake.jitter = 0.2
+    monkeypatch.setattr(bench, "SETTLE_CAP_S", 1.0)
+    before = fake.settings()
+    bench.start()
+    assert _wait(lambda: run.point() >= 3, 20)
+    fake.close()
+    assert _wait(lambda: not bench.running(), 30)
+    assert _wait(lambda: mgr.held is None, 20)
+    assert run.q("SELECT finished_at IS NULL, lost_at IS NOT NULL FROM hqp_benchmark_runs") == \
+        [(True, True)]
+    mgr.active.shutdown()
+    mgr._active = None
+    fake.come_back()
+    return before
+
+
+def _node_starts(run):
+    """The node starts again: its attach puts back what is owed first."""
+    b = HqpBackend(emit=run.mgr._on_backend_status, queue=run.mgr.queue)
+    run.mgr._active = b
+    b.start()
+    assert _wait(lambda: run.q(
+        "SELECT finished_at IS NOT NULL FROM hqp_benchmark_runs") == [(True,)], 20)
+    return b
+
+
+def test_a_lost_run_met_at_the_next_attach_leaves_another_controller_playing(run, monkeypatch):
+    """A run HQPlayer went away under; while the node is stopped HQPlayer
+    boots and another controller plays through it on settings of the
+    owner's. The node's attach finds more than a box that just booted shows
+    — HQPlayer plays an entry not its own — so the run is judged as any run
+    cut short: nothing stopped, nothing reset, the run left to the owner."""
+    fake = run.fake
+    _lost_run_node_stopped(run, monkeypatch)
+    owners, mark = _another_controller_plays(fake)
+    _node_starts(run)
+    assert _changes(fake, mark) == []
+    assert fake.settings() == owners and fake.state == int(PlaybackState.PLAYING)
+    assert run.q("SELECT left_at IS NOT NULL, restored_at IS NULL FROM hqp_benchmark_runs") == \
+        [(True, True)]
+
+
+def test_a_lost_run_met_by_the_poller_leaves_another_controller_playing(run, monkeypatch,
+                                                                        request):
+    """The node stays up: HQPlayer goes away mid-run, comes back, and another
+    controller plays through it before the poller's put-back — the same
+    judgement: nothing stopped, nothing reset."""
+    fake, mgr = run.fake, run.mgr
+    fake.jitter = 0.2
+    monkeypatch.setattr(bench, "SETTLE_CAP_S", 1.0)
+    asked, go = threading.Event(), threading.Event()
+    request.addfinalizer(go.set)
+    recover = hb.HqpBackend._recover
+    monkeypatch.setattr(hb.HqpBackend, "_recover",
+                        lambda self: (asked.set(), go.wait(15), recover(self))[2])
+    bench.start()
+    assert _wait(lambda: run.point() >= 3, 20)
+    fake.close()
+    assert _wait(lambda: not bench.running(), 30)
+    asked.clear()
+    fake.come_back()
+    owners, mark = _another_controller_plays(fake)
+    assert _wait(lambda: (mgr.active.poke(), asked.is_set())[1], 20)   # the poller's first answer
+    go.set()
+    assert _wait(lambda: (mgr.active.poke(), run.q(
+        "SELECT finished_at IS NOT NULL FROM hqp_benchmark_runs") == [(True,)])[1], 20)
+    assert _changes(fake, mark) == []
+    assert fake.settings() == owners and fake.state == int(PlaybackState.PLAYING)
+
+
+def test_a_lost_run_back_playing_the_nodes_own_queue_is_judged_as_any(run):
+    """HQPlayer back and already playing an entry this node gave it — the
+    owner pressed Play before the put-back went: more than a box that just
+    booted shows, so the run is judged as any run cut short — the rate and
+    the volume it plays at are the owner's, and the music plays on."""
+    import datetime
+    fake = run.fake
+    assert _wait(lambda: len(fake.playlist) == 2, 10)
+    run_id = _cut_short_run(run, last_rate=1, last_filter=1, last_filter1x=1, last_shaper=1,
+                            lost_at=datetime.datetime.now(datetime.timezone.utc))
+    with fake._lock:
+        fake.track, fake.state, fake.position = 1, int(PlaybackState.PLAYING), 30.0
+        fake.sel[2], fake.volume = [0, 1, 1, 1], -20.0
+        owners, mark = fake.settings(), len(fake.commands)
+    bench._owe(run_id, hl.selected())
+    bench.recover(run.endpoint_id, hl.selected(), gave=run.mgr.active.gave)
+    assert _closed_as_left(run, run_id)
+    assert _changes(fake, mark) == [] and fake.state == int(PlaybackState.PLAYING)
+    assert fake.settings() == owners
+
+
+def test_a_lost_run_back_stopped_on_another_controllers_entry_is_judged_as_any(run):
+    """HQPlayer back stopped, reading an entry another controller loaded:
+    more than a box that just booted shows. The run is judged as any run cut
+    short — the modulator the owner chose stands, nothing is sent."""
+    import datetime
+    fake = run.fake
+    run_id = _cut_short_run(run, last_rate=1, last_filter=1, last_filter1x=1, last_shaper=1,
+                            lost_at=datetime.datetime.now(datetime.timezone.utc))
+    with fake._lock:
+        fake.playlist = ["http://other-controller.invalid/track.flac"]
+        fake.track, fake.state = 1, int(PlaybackState.STOPPED)
+        fake.sel[2], fake.volume = [1, 1, 1, 2], -60.0
+        owners, mark = fake.settings(), len(fake.commands)
+    bench._owe(run_id, hl.selected())
+    bench.recover(run.endpoint_id, hl.selected(), gave=run.mgr.active.gave)
+    assert _closed_as_left(run, run_id)
+    assert fake.settings() == owners and _changes(fake, mark) == []
+
+
+def test_a_lost_run_back_stopped_on_an_entry_it_does_not_list_is_judged_as_any(run, monkeypatch):
+    """HQPlayer back stopped, its Status naming an entry, its playlist read
+    refused: an entry the read does not show is no sign of a boot — the run
+    is judged as any run cut short, and the owner's modulator stands."""
+    import datetime
+    fake = run.fake
+    run_id = _cut_short_run(run, last_rate=1, last_filter=1, last_filter1x=1, last_shaper=1,
+                            lost_at=datetime.datetime.now(datetime.timezone.utc))
+    dispatch = fake._dispatch
+    monkeypatch.setattr(fake, "_dispatch", lambda cmd, attrs: (
+        '<PlaylistGet result="Error">busy</PlaylistGet>' if cmd == "PlaylistGet"
+        else dispatch(cmd, attrs)))
+    with fake._lock:
+        fake.track, fake.state = 1, int(PlaybackState.STOPPED)
+        fake.sel[2], fake.volume = [1, 1, 1, 2], -60.0
+        owners, mark = fake.settings(), len(fake.commands)
+    bench._owe(run_id, hl.selected())
+    bench.recover(run.endpoint_id, hl.selected(), gave=run.mgr.active.gave)
+    assert _closed_as_left(run, run_id)
+    assert fake.settings() == owners and _changes(fake, mark) == []
+
+
+def test_a_lost_run_back_stopped_on_the_nodes_own_entry_is_put_back_whole(run):
+    """HQPlayer back stopped on an entry this node gave it (the queue was
+    handed to it again before the put-back went): no other controller is
+    there — the run is put back whole, over what HQPlayer booted with."""
+    import datetime
+    fake = run.fake
+    assert _wait(lambda: len(fake.playlist) == 2, 10)              # the queue as the attach handed it
+    run_id = _cut_short_run(run, last_rate=1, last_filter=1, last_filter1x=1, last_shaper=1,
+                            lost_at=datetime.datetime.now(datetime.timezone.utc))
+    with fake._lock:
+        fake.track, fake.state = 1, int(PlaybackState.STOPPED)
+        fake.sel[2], fake.volume = [0, 1, 1, 1], -60.0             # booted with a rate of no one's
+    bench._owe(run_id, hl.selected())
+    bench.recover(run.endpoint_id, hl.selected(), gave=run.mgr.active.gave)
+    assert run.q("SELECT restored_at IS NOT NULL FROM hqp_benchmark_runs WHERE id = %s",
+                 run_id) == [(True,)]
+    assert fake.settings() == (2, (2, 1, 1, 1), (2, 0, 0, 0), -3.0)
+
+
+def test_a_lost_run_back_on_the_queue_it_saved_is_put_back_whole_by_the_poller(run, monkeypatch):
+    """HQPlayer went away mid-run and boots stopped on a playlist it saved —
+    the queue this node gave it — with a rate of its own: no other
+    controller's entry, so the poller's put-back goes whole."""
+    fake, mgr = run.fake, run.mgr
+    assert _wait(lambda: len(fake.playlist) == 2, 10)
+    handed = list(fake.playlist)
+    fake.jitter = 0.2
+    monkeypatch.setattr(bench, "SETTLE_CAP_S", 1.0)
+    before = fake.settings()
+    bench.start()
+    assert _wait(lambda: run.point() >= 3, 20)
+    fake.close()
+    assert _wait(lambda: not bench.running(), 30)
+    with fake._lock:                    # what it boots with
+        fake.playlist, fake.track = handed, 1
+        fake.sel[2][0] = 0
+    fake.come_back()
+    assert _wait(lambda: (mgr.active.poke(), run.q(
+        "SELECT finished_at IS NOT NULL FROM hqp_benchmark_runs") == [(True,)])[1], 30)
+    assert fake.settings() == before
+
+
+def test_a_lost_run_back_stopped_after_the_node_restarted_is_put_back_whole_and_dated(
+        run, monkeypatch):
+    """The node stops while HQPlayer is away; HQPlayer boots in the mode it
+    saved and is back stopped, its playlist empty, when the node starts
+    again: what a box that just booted shows — the run is put back whole, and
+    the notice says so with the run's date: a put-back days later must not
+    read as a change made on its own."""
+    fake = run.fake
+    fake.boot_mode = 1
+    before = _lost_run_node_stopped(run, monkeypatch)
+    _node_starts(run)
+    assert fake.settings() == before
+    started = run.q("SELECT started_at FROM hqp_benchmark_runs")[0][0]
+    restored = _run_restored()
+    assert restored["data"] == {"run_at": started.isoformat(), "volume_left": None,
+                                "volume_before": -3.0}, restored
+
+
+def test_a_run_cancelled_in_a_silent_build_is_no_run_lost(run, monkeypatch, request):
+    """A cancel lands in a build HQPlayer is silent through: its put-back
+    goes unanswered — HQPlayer busy, not gone (it closed, reset or refused
+    nothing) — so the run is no run lost. The owner then sets a filter in
+    HQPlayer's own window: their change stands, and no notice speaks of a
+    lost connection."""
+    fake, mgr = run.fake, run.mgr
+    monkeypatch.setattr(bench, "ANSWER_WAIT_S", 30.0)
+    monkeypatch.setattr(bench, "RESTORE_ANSWER_S", 0.3)
+    asked, go = threading.Event(), threading.Event()
+    request.addfinalizer(go.set)
+    recover = hb.HqpBackend._recover
+    monkeypatch.setattr(hb.HqpBackend, "_recover",
+                        lambda self: (asked.set(), go.wait(15), recover(self))[2])
+    monkeypatch.setattr(DspFake, "FILTERS", DspFake.FILTERS + ["poly-sinc-ext2"])
+    fake.builds[("sinc-L", 11289600)] = 3.0
+    bench.start()
+    assert _wait(lambda: fake._silent_until > time.monotonic(), 30)
+    bench.cancel()
+    assert _wait(lambda: not bench.running(), 10)
+    assert run.q("SELECT finished_at IS NULL, lost_at IS NULL FROM hqp_benchmark_runs") == \
+        [(True, True)]
+    assert _wait(lambda: fake._silent_until <= time.monotonic(), 10)
+    with fake._lock:                                # the owner's filter, in HQPlayer's window
+        fake.sel[2][1] = fake.sel[2][2] = 2
+        owners = fake.settings()
+    assert _wait(lambda: asked.is_set(), 20)
+    go.set()
+    assert _wait(lambda: (mgr.active.poke(), run.q(
+        "SELECT finished_at IS NOT NULL FROM hqp_benchmark_runs") == [(True,)])[1], 20)
+    assert fake.settings()[:3] == owners[:3]
+    assert run.q("SELECT left_at IS NOT NULL FROM hqp_benchmark_runs") == [(True,)]
+    assert _run_restored() is None
+
+
+def test_a_lost_run_that_switched_modes_back_in_the_mode_it_found_is_put_back_whole(run):
+    """A "Measure PCM" run from SDM lost, its PCM selection on the run's last
+    point; HQPlayer boots in the mode the run found (SDM). HQPlayer keeps one
+    selection per mode: the whole put-back goes into PCM for its own
+    selection, then back to SDM and its own — as the run's own end does."""
+    import datetime
+    fake = run.fake
+    _cut_short_run(run, mode="PCM", own_mode=1, own_rate=2, own_filter=1, own_filter1x=1,
+                   own_shaper=1, last_rate=1, last_filter=0, last_filter1x=0, last_shaper=0,
+                   lost_at=datetime.datetime.now(datetime.timezone.utc))
+    with fake._lock:
+        fake.mode, fake.sel[1], fake.volume = 2, [1, 0, 0, 0], -60.0
+        fake.state, fake.track = int(PlaybackState.STOPPED), 0
+    bench.recover(run.endpoint_id, hl.selected(), gave=run.mgr.active.gave)
+    assert fake.settings() == (2, (2, 1, 1, 1), (2, 0, 0, 0), -3.0)
+
+
+def test_a_restored_notice_once_seen_stays_gone_at_a_later_visit(run, monkeypatch):
+    """The restored notice is seen and dropped; later another notice arrives
+    and the owner visits the rows again: the report stays seen — the seen
+    map is written from what the notices derive, not from what is served."""
+    from routers import settings as settings_router
+    _gone_mid_run(run, monkeypatch, boot_mode=1)
+    store = {"output.type": "hqplayer"}
+    monkeypatch.setattr(settings_router, "_read", store.get)
+    monkeypatch.setattr(settings_router, "_write", store.__setitem__)
+    monkeypatch.setattr(settings_router, "_guidance_state", lambda: {})
+    monkeypatch.setattr(settings_router, "notify_library_subscribers", lambda: None)
+    settings_router.post_guidance_seen("notices")
+    assert _run_restored() is None
+    run.q("""INSERT INTO external_api_cooldown (source, strikes, updated_at, cooldown_until, reason)
+             VALUES ('lastfm', 1, now(), now() + interval '1 hour', 'test') RETURNING source""")
+    settings_router.post_guidance_seen("notices")
+    assert _run_restored() is None
+
+
+def test_a_run_put_back_at_a_new_runs_start_is_closed_with_no_notice(run, monkeypatch):
+    """A run cut short whose put-back a knob the owner set in HQPlayer's
+    window supersedes, met by a new run's start (the poller's put-back not
+    there yet): closed as theirs with no notice — the new run reads what
+    HQPlayer holds as the owner's from now."""
+    fake = run.fake
+    run_id = _cut_short_run(run, last_rate=1, last_filter=1, last_filter1x=1, last_shaper=1)
+    with fake._lock:
+        fake.sel[2] = [0, 1, 1, 1]
+    monkeypatch.setattr(hb.HqpBackend, "_recover", lambda self: None)
+    woken, notify = [], bench._notify
+    monkeypatch.setattr(bench, "_notify", lambda: (woken.append(True), notify())[1])
+    bench.start()
+    assert _wait(lambda: not bench.running(), 60)
+    assert bench.state()["outcome"] == "done", bench.state()["note"]
+    row = run.q("SELECT note, left_at IS NULL FROM hqp_benchmark_runs WHERE id = %s", run_id)
+    assert "changed in HQPlayer since" in row[0][0] and row[0][1], row
+    assert woken == [], "the notices channel was woken for a run the new one took"
+
+
+def test_a_lost_run_put_back_at_a_new_runs_start_is_closed_with_no_notice(run, monkeypatch):
+    """... and a lost run put back whole there: no notice raised for the new
+    run to end a moment later."""
+    import datetime
+    fake = run.fake
+    _cut_short_run(run, last_rate=1, last_filter=1, last_filter1x=1, last_shaper=1,
+                   lost_at=datetime.datetime.now(datetime.timezone.utc))
+    with fake._lock:
+        fake.sel[2], fake.volume = [1, 1, 1, 1], -20.0
+    monkeypatch.setattr(hb.HqpBackend, "_recover", lambda self: None)
+    woken, notify = [], bench._notify
+    monkeypatch.setattr(bench, "_notify", lambda: (woken.append(True), notify())[1])
+    bench.start()
+    assert _wait(lambda: not bench.running(), 60)
+    assert bench.state()["outcome"] == "done", bench.state()["note"]
+    assert woken == [], "the notices channel was woken for a run the new one took"
+
+
+def test_a_switch_after_a_put_back_that_went_never_records_it_as_left(run, monkeypatch):
+    """A switch away is accepted at once, without the command lock: one that
+    comes after a put-back went, its row not closed yet, leaves the run to
+    that put-back's own end — put back, never left."""
+    fake, mgr = run.fake, run.mgr
+    run_id = _owed_pcm_run(run)
+    close = bench._close_owed
+    holding, go = threading.Event(), threading.Event()
+
+    def held(row, note, *args, **kw):
+        if threading.current_thread().name == "hqp-benchmark-recover":
+            holding.set()
+            go.wait(10)
+        return close(row, note, *args, **kw)
+    monkeypatch.setattr(bench, "_close_owed", held)
+    t = threading.Thread(target=lambda: bench.recover(run.endpoint_id, hl.selected()))
+    t.start()
+    assert holding.wait(10)
+    assert fake.settings() == (2, (2, 1, 1, 1), (2, 0, 0, 0), -3.0)
+    mgr.active.release()
+    go.set()
+    t.join(10)
+    assert run.q("SELECT left_at IS NULL FROM hqp_benchmark_runs WHERE id = %s", run_id) == [(True,)]
+    assert _run_left() is None
+
+
+def test_another_hqplayer_chosen_while_a_put_back_goes_leaves_the_run_to_the_owner(
+        run, monkeypatch):
+    """The owner picks another HQPlayer while the put-back holds the command
+    lock, between two of its requests: the put-back's own end decides — its
+    next request is dropped, and the run is left to the owner."""
+    fake = run.fake
+    run_id = _owed_pcm_run(run)
+    call = bench._OnLink.__call__
+    holding, go = threading.Event(), threading.Event()
+
+    def held(self, method, *args, **kwargs):
+        if method == "apply_settings" and not holding.is_set():
+            holding.set()
+            go.wait(10)
+        return call(self, method, *args, **kwargs)
+    monkeypatch.setattr(bench._OnLink, "__call__", held)
+    t = threading.Thread(target=lambda: bench.recover(run.endpoint_id, hl.selected()))
+    t.start()
+    assert holding.wait(10)
+    link = hl.selected()
+    link.retire("another HQPlayer was chosen")             # as _apply_hqplayer_address does
+    bench.left_by_person("127.0.0.1", fake.port, "another HQPlayer was chosen")
+    go.set()
+    t.join(10)
+    assert _closed_as_left(run, run_id)

@@ -410,12 +410,13 @@ CREATE TABLE IF NOT EXISTS hqp_benchmark_runs (
     -- until the person changed it all, or a new run opened its row (NULL
     -- again)
     left_at TIMESTAMPTZ,
-    -- When HQPlayer went away under the run (its restore could not reach
-    -- it): the put-back owed goes whole once it answers again — what it
-    -- shows then is what it booted with — dated by `restored_at`, which the
-    -- notice that says so stands on; `volume_left`: the level HQPlayer was
-    -- left at when the put-back did not raise it (it raises only from the
-    -- run's own level, and lowers always)
+    -- When HQPlayer went away under the run (it closed, reset or refused
+    -- the connection as the restore tried it): the put-back owed goes whole
+    -- once it answers again showing what it booted with — stopped, reading
+    -- no other controller's entry — dated by `restored_at`, which the
+    -- notice that says so stands on; `volume_left`: the level it came back
+    -- at and was left at — the put-back raises only from the run's own
+    -- level and lowers one louder than the owner's
     lost_at TIMESTAMPTZ,
     restored_at TIMESTAMPTZ,
     volume_left REAL,

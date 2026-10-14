@@ -11290,18 +11290,22 @@
       ? 'HQPlayer may still hold the run\'s test settings — check them, and its volume, before you play.'
       : hqpLeftLine(n.data.items),
   });
-  // A benchmark run HQPlayer went away under, put back whole when it
-  // answered again (playback/hqp_benchmark.py): a report, gone once seen.
-  // Its volume is raised only from the run's own level — from any other it
-  // is left, and said.
+  // A benchmark run HQPlayer went away under — it closed, reset or refused
+  // the connection — put back whole when it answered again
+  // (playback/hqp_benchmark.py): a report, gone once seen. The run's date
+  // keeps a put-back days later from reading as a change made on its own.
+  // Its volume is lowered when it came back louder than the owner's, raised
+  // only from the run's own level — from any other it is left, and said.
   NOTICE_COPY['hqplayer.run_restored'] = n => {
     const d = n.data || {};
     const db = v => `<span class="num">${escapeHtml(String(Math.round(v * 10) / 10))}</span> dB`;
+    const at = new Date(d.run_at);
+    const run = `${escapeHtml(at.toLocaleDateString([], { month: 'short', day: 'numeric' }))} at <span class="num">${escapeHtml(at.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }))}</span>`;
+    const volume = d.volume_left == null ? ''
+      : ` Its volume was left as it is — ${db(d.volume_left)}; yours was ${db(d.volume_before)}.`;
     return {
-      title: 'HQPlayer restarted during the benchmark run',
-      text: d.volume_left == null
-        ? 'Its settings were put back.'
-        : `Its settings were put back; its volume was left as it is — ${db(d.volume_left)}, yours was ${db(d.volume_before)}.`,
+      title: 'HQPlayer went away during a benchmark',
+      text: `Sautium lost the connection to HQPlayer during the benchmark run of ${run}. The settings from before it were put back as soon as HQPlayer answered again.${volume}`,
     };
   };
   // HQPlayer refused files of a batch it was handed: one notice per batch,

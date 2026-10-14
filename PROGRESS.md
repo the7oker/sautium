@@ -933,6 +933,27 @@ implementation details live in the code, DB and git history.
   record a put-back that went as left to them; and a new run's first step
   closed a run the owner had changed with a notice the new run then ended.
   Lesson: a state you did not see set is evidence of nothing but itself.
+- **A licence to put back is bounded by what licenses it** (2026-10-14).
+  The whole put-back of a run HQPlayer went away under had no bound: at
+  the node's next meeting with HQPlayer — the poller's first answer after
+  its back-off, or the attach after the node was stopped or asleep — it
+  stopped HQPlayer and reset its mode and selection whatever HQPlayer did,
+  another controller's playback included, and the mirror then replaced
+  that controller's playlist. It now goes whole only while HQPlayer shows
+  what a box that just booted shows — stopped, reading no other
+  controller's entry — and otherwise the run is judged as any run cut
+  short. A run cancelled during a silent build was marked lost too — a
+  busy HQPlayer is no lost one: the mark is now for a connection HQPlayer
+  closed, reset or refused, the causes the poller's "came back" reads. The
+  notice names the run's date and says the connection was lost, never
+  that HQPlayer restarted. With them: the whole put-back left the measured
+  mode's own selection when HQPlayer came back in the mode the run found
+  (HQPlayer keeps one per mode); the restored notice, once seen, came back
+  unseen at the next visit (the seen map was written from the filtered
+  list); a new run's start closed the run it took with a notice the run
+  ended a moment later; and a switch away accepted at once could record a
+  put-back that went as left. Lesson: a licence granted by a moment ends
+  with that moment.
 - **A held word goes under the number it was held with** (2026-10-14). The
   words a person made while a queue mutation handed HQPlayer its playlist
   were carried out as fresh intents, numbered as they went: a Play pressed

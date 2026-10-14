@@ -1147,6 +1147,13 @@ def _derived(key: str, active: bool) -> Optional[str]:
 
 
 def _notices_state() -> Dict[str, Any]:
+    """What the notices channel serves: every derived notice (_notice_items)
+    but a report the owner has seen (the restored run's), which is dropped."""
+    return {"items": [it for it in _notice_items()
+                      if not (it["key"] == "hqplayer.run_restored" and it["seen"])]}
+
+
+def _notice_items() -> List[Dict[str, Any]]:
     """Active conditions that change what the user sees without any action
     of theirs: an external API that cooled us down, catalog data the
     network has not served yet. Like the guidance trail, the rule for WHEN
@@ -1238,13 +1245,14 @@ def _notices_state() -> Dict[str, Any]:
         items.append({"key": "hqplayer.run_left", "kind": "warning",
                       "since": left["since"].isoformat(), "until": None,
                       "data": {"items": left["items"]}})
-    # One put back after HQPlayer restarted under it: a report, dropped once
-    # seen (below)
+    # One put back after HQPlayer went away under it: a report, dropped once
+    # seen (_notices_state)
     restored = hqp_benchmark.restored_notice()
     if restored is not None:
         items.append({"key": "hqplayer.run_restored", "kind": "info",
                       "since": restored["since"].isoformat(), "until": None,
-                      "data": {"volume_left": restored["volume_left"],
+                      "data": {"run_at": restored["run_at"].isoformat(),
+                               "volume_left": restored["volume_left"],
                                "volume_before": restored["volume_before"]}})
     # A CLI agent signed out while something needs it: the assistant runs on
     # it, or — Claude Code only — gear research waits for it (the drain
@@ -1273,8 +1281,7 @@ def _notices_state() -> Dict[str, Any]:
     seen = _read("notice.seen") or {}
     for item in items:
         item["seen"] = seen.get(item["key"]) == item["since"]
-    return {"items": [it for it in items
-                      if not (it["key"] == "hqplayer.run_restored" and it["seen"])]}
+    return items
 
 
 @router.get("/guidance")
@@ -1296,9 +1303,9 @@ def post_guidance_seen(task: str) -> Dict[str, Any]:
     if task == "notices":
         # Seen is per condition AND per arming: the map keeps the `since`
         # that was shown, so the same key re-armed later lights the trail
-        # again while a lingering row stays retired.
-        _write("notice.seen", {n["key"]: n["since"]
-                               for n in _notices_state()["items"]})
+        # again while a lingering row stays retired — every derived row,
+        # a seen report the channel no longer serves among them.
+        _write("notice.seen", {n["key"]: n["since"] for n in _notice_items()})
     elif task == "hqp_library":
         # per HQPlayer: another one chosen later lights the trail again
         host, port = _hqp_endpoint()
