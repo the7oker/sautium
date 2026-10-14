@@ -1346,7 +1346,8 @@ def test_a_put_back_a_person_superseded_leaves_one_notice_of_what_the_run_left(r
     filter stays, the volume stays at the bottom of the range — nothing
     raises it for them — and one notice names what still holds the run's
     test values, each as now → before the run, the mode and the rate among
-    them; it ends for good once they changed it all."""
+    them; it ends for good once they changed it all, the selection PCM
+    keeps while HQPlayer is in SDM included."""
     fake, mgr = run.fake, run.mgr
     run_id = _owed_pcm_run(run)
     out = hb.change_dsp({"filter": 1, "filter1x": 1})          # the owner's, first
@@ -1366,7 +1367,13 @@ def test_a_put_back_a_person_superseded_leaves_one_notice_of_what_the_run_left(r
     assert {it["what"]: it for it in screen} == left
     assert fake.volume == -60.0                                 # never raised for them
     assert hb.change_dsp({"mode": 2})["ok"]                     # they go back to SDM...
-    assert mgr.active.set_volume(-12.0)                         # ...and raise the volume
+    assert mgr.active.set_volume(-12.0)                         # ...and raise the volume:
+    # PCM keeps the run's rate and shaper — HQPlayer keeps one selection per mode
+    elsewhere = {"what": "elsewhere", "mode": "PCM", "knobs": ["rate", "shaper"]}
+    assert _wait(lambda: notice() == {"elsewhere": elsewhere}, 10), notice()
+    assert hb.change_dsp({"mode": 1, "rate": 2, "shaper": 1})["ok"]     # theirs in PCM again...
+    assert _wait(lambda: set(notice()) == {"mode"}, 10), notice()
+    assert hb.change_dsp({"mode": 2})["ok"]                     # ...and SDM
     assert _wait(lambda: (mgr.active.poke(), run.q(
         "SELECT left_at IS NULL FROM hqp_benchmark_runs WHERE id = %s", run_id) == [(True,)])[1])
     assert _run_left() is None
@@ -1751,16 +1758,19 @@ def test_a_setting_of_the_owners_in_the_mode_the_run_found_leaves_it_to_them(run
 
 def test_the_notice_names_what_is_left_from_the_measured_modes_lists(run):
     """A PCM run left to the owner while they put HQPlayer in SDM: the
-    poller's first read of it is in SDM. Back in PCM by HQPlayer's own
-    window, the notice names the rate and the shaper still on the run's
-    test values from PCM's lists — never SDM's."""
+    poller's first read of it is in SDM, which names the knobs PCM keeps as
+    the run left them. Back in PCM by HQPlayer's own window, the notice
+    names the rate and the shaper still on the run's test values from PCM's
+    lists — never SDM's."""
     fake, mgr = run.fake, run.mgr
     run_id = _owed_pcm_run(run)
     assert hb.change_dsp({"mode": 2})["ok"]                 # the owner's: SDM
     bench.recover(run.endpoint_id, hl.selected())
     assert _wait(lambda: _closed_as_left(run, run_id))
     assert _wait(lambda: (mgr.active.poke(), _run_left_items())[1] == {
-        "volume": {"what": "volume", "now": -60.0, "before": -3.0}}, 10)
+        "volume": {"what": "volume", "now": -60.0, "before": -3.0},
+        "elsewhere": {"what": "elsewhere", "mode": "PCM",
+                      "knobs": ["rate", "filter", "filter1x", "shaper"]}}, 10)
     with fake._lock:
         fake.mode = 1                                       # PCM again, in HQPlayer's window
     filters = {"now": "poly-sinc-gauss-long", "before": "sinc-L"}     # the run's last point's
@@ -1789,8 +1799,15 @@ def test_a_notice_write_the_database_refuses_costs_the_notice_never_the_poll(run
             raise psycopg2.OperationalError("the database is away")
         return write(sql, params)
     monkeypatch.setattr(bench, "db_execute", refusing)
+    with fake._lock:                                        # the owner's: SDM, their volume...
+        fake.mode, fake.volume = 2, -12.0
+    # ... while PCM keeps the run's test values: the notice stands
+    assert _wait(lambda: (mgr.active.poke(), set(_run_left_items()))[1] == {"elsewhere"}, 10)
+    with fake._lock:                                        # PCM's own selection theirs again...
+        fake.mode, fake.sel[1] = 1, [2, 1, 1, 1]
+    assert _wait(lambda: (mgr.active.poke(), set(_run_left_items()))[1] == {"mode"}, 10)
     with fake._lock:
-        fake.mode, fake.volume = 2, -12.0                   # the owner's: SDM, their volume
+        fake.mode = 2                                       # ... and SDM: nothing left
     assert _wait(lambda: (mgr.active.poke(), refused.is_set())[1], 10)
     assert mgr.active._failures == 0
     assert _wait(lambda: (mgr.active.poke(), run.q(
@@ -1856,3 +1873,261 @@ def test_the_notice_of_a_run_left_stands_on_its_row(run, monkeypatch):
     mgr.active.shutdown()
     mgr._active = None                                      # another output
     assert (_run_left() or {}).get("since") == since
+
+
+# -- A run HQPlayer went away under; the notice's own bookkeeping --------------------
+
+
+def _gone_mid_run(run, monkeypatch, **boot) -> tuple:
+    """A run HQPlayer went away under — powered off in the middle of a point
+    — and HQPlayer back, booted with `boot` (its saved mode, its saved
+    volume): (the settings before the run, the closed run's note)."""
+    fake, mgr = run.fake, run.mgr
+    fake.jitter = 0.2
+    monkeypatch.setattr(bench, "SETTLE_CAP_S", 1.0)
+    before = fake.settings()
+    for name, value in boot.items():
+        setattr(fake, name, value)
+    bench.start()
+    assert _wait(lambda: run.point() >= 3, 20)
+    fake.close()
+    assert _wait(lambda: not bench.running(), 30)
+    assert run.q("SELECT finished_at IS NULL, lost_at IS NOT NULL FROM hqp_benchmark_runs") == \
+        [(True, True)]
+    fake.come_back()
+
+    def closed():
+        mgr.active.poke()
+        return run.q("SELECT finished_at IS NOT NULL FROM hqp_benchmark_runs") == [(True,)]
+    assert _wait(closed, 30)
+    return before, run.q("SELECT note FROM hqp_benchmark_runs")[0][0]
+
+
+def _run_restored():
+    from routers import settings as settings_router
+    return next((n for n in settings_router._notices_state()["items"]
+                 if n["key"] == "hqplayer.run_restored"), None)
+
+
+def test_a_run_hqplayer_restarted_under_is_put_back_whole_its_volume_with_it(run, monkeypatch):
+    """HQPlayer went away mid-run and boots back in the mode it saved (PCM),
+    its volume where the run lowered it: no one changed a knob — what it
+    shows is what it booted with — so the run is put back whole, the volume
+    raised from the run's own level, and a notice says why."""
+    before, note = _gone_mid_run(run, monkeypatch, boot_mode=1)
+    assert run.fake.settings() == before, (note, run.fake.settings())
+    assert "HQPlayer restarted under the run" in note
+    assert run.q("SELECT left_at IS NULL FROM hqp_benchmark_runs") == [(True,)]
+    restored = _run_restored()
+    assert restored is not None and restored["data"]["volume_left"] is None, restored
+
+
+def test_a_run_hqplayer_restarted_under_at_its_own_level_leaves_that_level(run, monkeypatch):
+    """HQPlayer went away mid-run and boots back at a level it saved (-20 dB,
+    neither the run's -60 nor the owner's -3): the rest is put back, the
+    volume is not raised — from any level but the run's own it is the
+    owner's to raise — and the notice says it was left as it is."""
+    before, note = _gone_mid_run(run, monkeypatch, boot_volume=-20.0)
+    after = run.fake.settings()
+    assert after[:3] == before[:3] and after[3] == -20.0, (note, after)
+    restored = _run_restored()
+    assert restored["data"] == {"volume_left": -20.0, "volume_before": -3.0}, restored
+
+
+def test_a_run_hqplayer_restarted_under_louder_is_lowered_to_the_owners_level(run, monkeypatch):
+    """HQPlayer boots back louder than the owner's level: lowering is always
+    allowed — the put-back takes it down to it."""
+    before, note = _gone_mid_run(run, monkeypatch, boot_volume=0.0)
+    assert run.fake.settings() == before, (note, run.fake.settings())
+
+
+def test_the_restored_notice_is_gone_once_seen(run, monkeypatch):
+    """The notice of a run put back after a restart is a report: once the
+    owner saw it — the rows of notices visited — it is gone."""
+    from routers import settings as settings_router
+    _gone_mid_run(run, monkeypatch, boot_mode=1)
+    store = {"output.type": "hqplayer"}
+    monkeypatch.setattr(settings_router, "_read", store.get)
+    monkeypatch.setattr(settings_router, "_write", store.__setitem__)
+    monkeypatch.setattr(settings_router, "_guidance_state", lambda: {})
+    monkeypatch.setattr(settings_router, "notify_library_subscribers", lambda: None)
+    assert _run_restored() is not None
+    settings_router.post_guidance_seen("notices")
+    assert _run_restored() is None
+
+
+def test_a_new_run_ends_the_restored_notice(run, monkeypatch):
+    """... and so does the next run, once it opened its row: it reads what
+    HQPlayer holds as the owner's."""
+    _gone_mid_run(run, monkeypatch, boot_mode=1)
+    assert _run_restored() is not None
+    bench.start()
+    assert _wait(lambda: not bench.running(), 60)
+    assert bench.state()["outcome"] == "done", bench.state()["note"]
+    assert _run_restored() is None
+
+
+def test_a_notify_the_database_refuses_costs_the_notice_never_the_poll(run, monkeypatch):
+    """The NOTIFY that wakes the channel when what a run left changed is a
+    write too: the database refusing it costs the notice — sent again at a
+    later answer — never the poller's tick."""
+    import psycopg2
+    fake, mgr = run.fake, run.mgr
+    write = bench.db_execute
+    refused = threading.Event()
+
+    def refusing(sql, params=None):
+        if (sql.startswith("NOTIFY") and threading.current_thread().name == "hqp-status-poller"
+                and not refused.is_set()):
+            refused.set()
+            raise psycopg2.OperationalError("the database is away")
+        return write(sql, params)
+    monkeypatch.setattr(bench, "db_execute", refusing)
+    missed = threading.Event()
+    register = mgr.active._register_failure
+
+    def counting(*, silent):
+        missed.set()
+        return register(silent=silent)
+    monkeypatch.setattr(mgr.active, "_register_failure", counting)
+    run_id = _owed_pcm_run(run)
+    assert hb.change_dsp({"filter": 1, "filter1x": 1})["ok"]
+    bench.recover(run.endpoint_id, hl.selected())
+    assert _wait(lambda: _closed_as_left(run, run_id))
+    assert _wait(lambda: (mgr.active.poke(), refused.is_set())[1], 10)
+    assert _wait(lambda: (mgr.active.poke(), _run_left_items())[1] != {}, 10)
+    assert not missed.is_set(), "a NOTIFY the database refused cost the poll a miss"
+
+
+def test_a_list_hqplayer_did_not_give_is_read_again(run, monkeypatch):
+    """The notice's lists of the measured mode: one HQPlayer did not give at
+    the first read is asked again at the next answer, until it gives it."""
+    fake, mgr = run.fake, run.mgr
+    dispatch = fake._dispatch
+    failing = threading.Event()
+    failing.set()
+
+    def rates_refused(cmd, attrs):
+        if cmd == "GetRates" and failing.is_set():
+            return "<Nope/>"
+        return dispatch(cmd, attrs)
+    monkeypatch.setattr(fake, "_dispatch", rates_refused)
+    run_id = _owed_pcm_run(run)
+    assert hb.change_dsp({"filter": 1, "filter1x": 1})["ok"]
+    bench.recover(run.endpoint_id, hl.selected())
+    assert _wait(lambda: _closed_as_left(run, run_id))
+    assert _wait(lambda: (mgr.active.poke(), _run_left_items().get("rate"))[1]
+                 == {"what": "rate", "now": None, "before": None}, 10)
+    failing.clear()                     # HQPlayer gives its rates from now on
+    assert _wait(lambda: (mgr.active.poke(), _run_left_items().get("rate"))[1]
+                 == _LEFT_IN_PCM["rate"], 6)
+
+
+def test_a_run_left_in_another_mode_names_what_the_measured_mode_holds(run):
+    """A run measuring SDM cut short, the owner puts HQPlayer in PCM in its
+    own window — the run is left to them. HQPlayer keeps one selection per
+    mode and State shows PCM's: the notice names what SDM still holds from
+    the run's row, and it stands — once they raise the volume too — until
+    HQPlayer is read back in SDM."""
+    fake, mgr = run.fake, run.mgr
+    run_id = _cut_short_run(run, last_rate=1, last_filter=1, last_filter1x=1, last_shaper=1)
+    with fake._lock:                    # SDM on the run's last point; PCM chosen in its window
+        fake.mode, fake.sel[2], fake.volume = 1, [1, 1, 1, 1], -60.0
+    bench._owe(run_id, hl.selected())
+    bench.recover(run.endpoint_id, hl.selected())
+    assert _wait(lambda: _closed_as_left(run, run_id))
+    elsewhere = {"what": "elsewhere", "mode": "SDM (DSD)",
+                 "knobs": ["rate", "filter", "filter1x", "shaper"]}
+    assert _wait(lambda: (mgr.active.poke(), _run_left_items())[1] == {
+        "volume": {"what": "volume", "now": -60.0, "before": -3.0},
+        "elsewhere": elsewhere}, 10), _run_left_items()
+    with fake._lock:
+        fake.volume = -12.0             # the owner raises the volume
+    assert _wait(lambda: (mgr.active.poke(), _run_left_items())[1] == {
+        "elsewhere": elsewhere}, 10), _run_left_items()
+    assert run.q("SELECT left_at IS NOT NULL FROM hqp_benchmark_runs WHERE id = %s",
+                 run_id) == [(True,)]
+
+
+def test_a_close_while_the_left_run_is_first_read_is_read_again(run, monkeypatch):
+    """The poller's first read of a run left to the owner is on its way when
+    a person's change closes the run as left: what it read is not kept as
+    "no run left" — the next answer reads it again, and the notice is named."""
+    fake, mgr = run.fake, run.mgr
+    run_id = _owed_pcm_run(run)
+    monkeypatch.setattr(bench, "_left", {})             # not read yet
+    read = bench._left_run
+    reading, closed = threading.Event(), threading.Event()
+
+    def slow(endpoint_id):
+        row = read(endpoint_id)
+        reading.set()
+        closed.wait(10)
+        return row
+    monkeypatch.setattr(bench, "_left_run", slow)
+    mgr.active.poke()
+    assert reading.wait(10)                             # the poller's read is on its way
+    bench.left_by_person("127.0.0.1", fake.port, "a DSP change came first")
+    closed.set()
+    assert _closed_as_left(run, run_id)
+    monkeypatch.setattr(bench, "_left_run", read)
+    assert _wait(lambda: (mgr.active.poke(), _run_left_items())[1] != {}, 5), _run_left()
+
+
+def test_a_put_back_that_went_is_never_recorded_as_left(run, monkeypatch):
+    """The put-back goes and its row is closed while the command lock is
+    still the put-back's: a person's DSP change asked for meanwhile finds the
+    run closed — put back, no notice — never closes it as left to them."""
+    fake = run.fake
+    run_id = _owed_pcm_run(run)
+    close, by_person = bench._close_owed, bench.left_by_person
+    holding, go, asked = threading.Event(), threading.Event(), threading.Event()
+
+    def held(row, note, *args, **kw):
+        if threading.current_thread().name == "hqp-benchmark-recover":
+            holding.set()
+            go.wait(10)
+        return close(row, note, *args, **kw)
+
+    def person(*args):
+        asked.set()
+        return by_person(*args)
+    monkeypatch.setattr(bench, "_close_owed", held)
+    monkeypatch.setattr(bench, "left_by_person", person)
+    t = threading.Thread(target=lambda: bench.recover(run.endpoint_id, hl.selected()))
+    t.start()
+    assert holding.wait(10)                             # put back; its row not closed yet
+    assert fake.settings() == (2, (2, 1, 1, 1), (2, 0, 0, 0), -3.0)
+    out = {}
+    changing = threading.Thread(target=lambda: out.update(hb.change_dsp(
+        {"filter": 1, "filter1x": 1})))                 # the owner's, after it
+    changing.start()
+    lock = hl.selected().lock
+    assert _wait(lambda: len(lock._waiting) > 0 or asked.is_set(), 5)
+    go.set()
+    t.join(10)
+    changing.join(10)
+    assert out.get("ok"), out
+    row = run.q("SELECT note, left_at IS NULL FROM hqp_benchmark_runs WHERE id = %s", run_id)
+    assert row[0][1], row
+
+
+def test_a_run_the_owner_changed_is_closed_with_no_notice_as_a_new_run_starts(run, monkeypatch):
+    """A run cut short whose put-back a knob the owner set in HQPlayer's
+    window supersedes, taken by a new run's first step (its try at the start
+    met HQPlayer away): closed as theirs with no notice — the channel never
+    woken for it — as the new run reads what HQPlayer holds as the owner's
+    now."""
+    fake = run.fake
+    run_id = _cut_short_run(run, last_rate=1, last_filter=1, last_filter1x=1, last_shaper=1)
+    with fake._lock:                    # SDM on the run's last point, the rate the owner's own
+        fake.sel[2] = [0, 1, 1, 1]
+    monkeypatch.setattr(bench, "recover", lambda endpoint_id, link, **kw: None)
+    woken, notify = [], bench._notify
+    monkeypatch.setattr(bench, "_notify", lambda: (woken.append(True), notify())[1])
+    bench.start()
+    assert _wait(lambda: not bench.running(), 60)
+    assert bench.state()["outcome"] == "done", bench.state()["note"]
+    row = run.q("SELECT note, left_at IS NULL FROM hqp_benchmark_runs WHERE id = %s", run_id)
+    assert "changed in HQPlayer since" in row[0][0] and row[0][1], row
+    assert woken == [], "the notices channel was woken for a run the new one took"

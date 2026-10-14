@@ -8517,10 +8517,15 @@
     const shown = (it, v) => v == null ? '—'
       : it.what === 'rate' ? (v ? `<span class="num">${escapeHtml(fmtRateLabel(v))}</span>` : 'Auto')
       : escapeHtml(String(v));
-    const kept = (items || []).filter(it => it.what !== 'volume').map(it =>
+    const kept = (items || []).filter(it => it.what !== 'volume' && it.what !== 'elsewhere').map(it =>
       `${HQP_LEFT_NAMES[it.what] || escapeHtml(it.what)} ${shown(it, it.now)} → ${shown(it, it.before)}`);
+    // HQPlayer is in another mode: the one the run measured keeps the
+    // knobs it set, which State does not show from here
+    const away = (items || []).find(it => it.what === 'elsewhere');
     const low = (items || []).some(it => it.what === 'volume');
     return [kept.length ? `HQPlayer is still on its test settings (now → before the run): ${kept.join(', ')}.` : '',
+            away ? `Its ${escapeHtml(away.mode)} mode keeps the run's test ${
+              away.knobs.map(k => HQP_LEFT_NAMES[k] || escapeHtml(k)).join(', ')} — check them there.` : '',
             low ? 'Its volume is at the bottom of the range — raise it yourself.' : '']
       .filter(Boolean).join(' ');
   }
@@ -11285,6 +11290,20 @@
       ? 'HQPlayer may still hold the run\'s test settings — check them, and its volume, before you play.'
       : hqpLeftLine(n.data.items),
   });
+  // A benchmark run HQPlayer went away under, put back whole when it
+  // answered again (playback/hqp_benchmark.py): a report, gone once seen.
+  // Its volume is raised only from the run's own level — from any other it
+  // is left, and said.
+  NOTICE_COPY['hqplayer.run_restored'] = n => {
+    const d = n.data || {};
+    const db = v => `<span class="num">${escapeHtml(String(Math.round(v * 10) / 10))}</span> dB`;
+    return {
+      title: 'HQPlayer restarted during the benchmark run',
+      text: d.volume_left == null
+        ? 'Its settings were put back.'
+        : `Its settings were put back; its volume was left as it is — ${db(d.volume_left)}, yours was ${db(d.volume_before)}.`,
+    };
+  };
   // HQPlayer refused files of a batch it was handed: one notice per batch,
   // naming both causes it may have — never asserting one.
   NOTICE_COPY['hqplayer.refused'] = n => {

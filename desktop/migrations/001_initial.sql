@@ -403,11 +403,22 @@ CREATE TABLE IF NOT EXISTS hqp_benchmark_runs (
     last_filter INTEGER,
     last_filter1x INTEGER,
     last_shaper INTEGER,
-    -- When a person's DSP change or switch away superseded the put-back of a
-    -- run cut short: HQPlayer was left on what the run set, and what of it
-    -- still holds the run's test values is said until the person changed
-    -- it all, or a new run began (NULL again)
+    -- When the put-back of a run cut short was left to the owner — a
+    -- person's DSP change, their switch away or another HQPlayer chosen, or
+    -- a knob they set in HQPlayer's own window: HQPlayer was left on what
+    -- the run set, and what of it still holds the run's test values is said
+    -- until the person changed it all, or a new run opened its row (NULL
+    -- again)
     left_at TIMESTAMPTZ,
+    -- When HQPlayer went away under the run (its restore could not reach
+    -- it): the put-back owed goes whole once it answers again — what it
+    -- shows then is what it booted with — dated by `restored_at`, which the
+    -- notice that says so stands on; `volume_left`: the level HQPlayer was
+    -- left at when the put-back did not raise it (it raises only from the
+    -- run's own level, and lowers always)
+    lost_at TIMESTAMPTZ,
+    restored_at TIMESTAMPTZ,
+    volume_left REAL,
     CONSTRAINT chk_hqp_benchmark_runs_finished CHECK ((finished_at IS NULL) = (outcome IS NULL))
 );
 CREATE INDEX IF NOT EXISTS idx_hqp_benchmark_runs_endpoint

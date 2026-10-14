@@ -909,6 +909,25 @@ implementation details live in the code, DB and git history.
   a refusal of HQPlayer's instead of being the queue's; and a new order at a
   spot on a gap moved the spot to the next track. Lesson: an absence of an
   answer is not an answer of absence.
+- **What HQPlayer boots with is no one's change** (2026-10-14). A benchmark
+  run HQPlayer went away under (powered off, restarted) owed its put-back
+  to the next answer, and that put-back judged HQPlayer as it found it:
+  the mode or the volume HQPlayer booted with read as the owner's change,
+  so the run was left to the owner — the test settings kept, a level the
+  box had saved taken for theirs. Such a run is marked as it ends
+  (`lost_at`) and put back whole once HQPlayer answers. Its volume is
+  lowered when HQPlayer came back louder, raised only from the level the
+  run set itself, and otherwise left — and one notice says HQPlayer
+  restarted during the run and its settings were put back. The bookkeeping
+  of the notice of a run left to the owner had the same blind spots: a
+  NOTIFY the database refused cost the poll a miss; a list HQPlayer did not
+  give was never asked again; in another mode the notice ended though the
+  measured mode still kept the run's test values (HQPlayer keeps one
+  selection per mode); a close overtaking the poller's first read was
+  kept as "no run left"; a person's DSP change waiting for the lock could
+  record a put-back that went as left to them; and a new run's first step
+  closed a run the owner had changed with a notice the new run then ended.
+  Lesson: a state you did not see set is evidence of nothing but itself.
 - **Stop-clear-add-select-play sequence** for `play_track`/`play_album`. Without
   explicit stop, HQPlayer occasionally started the wrong track from the
   existing queue.

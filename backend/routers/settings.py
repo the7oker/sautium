@@ -1238,6 +1238,14 @@ def _notices_state() -> Dict[str, Any]:
         items.append({"key": "hqplayer.run_left", "kind": "warning",
                       "since": left["since"].isoformat(), "until": None,
                       "data": {"items": left["items"]}})
+    # One put back after HQPlayer restarted under it: a report, dropped once
+    # seen (below)
+    restored = hqp_benchmark.restored_notice()
+    if restored is not None:
+        items.append({"key": "hqplayer.run_restored", "kind": "info",
+                      "since": restored["since"].isoformat(), "until": None,
+                      "data": {"volume_left": restored["volume_left"],
+                               "volume_before": restored["volume_before"]}})
     # A CLI agent signed out while something needs it: the assistant runs on
     # it, or — Claude Code only — gear research waits for it (the drain
     # claims nothing until the sign-in returns). Each verdict is the CLI's
@@ -1265,7 +1273,8 @@ def _notices_state() -> Dict[str, Any]:
     seen = _read("notice.seen") or {}
     for item in items:
         item["seen"] = seen.get(item["key"]) == item["since"]
-    return {"items": items}
+    return {"items": [it for it in items
+                      if not (it["key"] == "hqplayer.run_restored" and it["seen"])]}
 
 
 @router.get("/guidance")

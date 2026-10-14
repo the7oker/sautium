@@ -1430,7 +1430,16 @@ cooling — so Sautium measures it instead of predicting it
   next answer, while HQPlayer still shows a mark of the run: its signals, the
   lowered volume, or the selection it set last (an HQPlayer that restarted
   keeps that, maybe nothing else) — only once HQPlayer answers, never on a
-  trial-stopped box that takes a connection and drops it. The put-back is a
+  trial-stopped box that takes a connection and drops it. A run HQPlayer
+  went away under — its put-back at the end could not reach it, the app not
+  stopping (`lost_at`) — is put back whole whatever HQPlayer shows then
+  (since 2026-10-14): what it shows is what it booted with, no one's change.
+  Its volume is lowered to the owner's level when HQPlayer came back louder,
+  raised only from the level the run set itself, and otherwise left as it
+  is; one notice (`hqplayer.run_restored`) says HQPlayer restarted during
+  the run and its settings were put back — with the level the volume was
+  left at, beside the owner's — until the owner saw it or a new run opened
+  its row. The put-back is a
   DSP item of the HQPlayer's link as of the run's end (one made afresh
   owes it anew, as it does after the process restarted — an item kept in
   memory — unless a person superseded it on the link it was owed on): a
@@ -1439,23 +1448,33 @@ cooling — so Sautium measures it instead of predicting it
   happens, so no later answer and no restart puts it back
   (`hqp_benchmark.left_by_person`) — and so does any knob the owner set in
   HQPlayer's own window since: judged knob by knob (mode, rate, filter,
-  modulator, volume) on what HQPlayer answers once it is not building, one
-  that is neither the run's last point nor what was there before the run
-  is theirs, whatever the others still hold. Never the node's own
+  modulator, volume) on HQPlayer's State as it answers it (a Desktop says
+  nothing while it builds, an Embedded box names the selection it builds),
+  one that is neither the run's last point nor what was there before the
+  run is theirs, whatever the others still hold — never for a run HQPlayer
+  went away under. Neither the put-back nor a person's change waiting for
+  the command lock behind it closes the run the other way: the row is
+  closed while the put-back still holds the lock. Never the node's own
   re-attach of the same HQPlayer, nor a new run's hold. The run is then
   closed as left to the owner (since 2026-10-13): nothing more is put
   back, the volume is never raised for them, and one notice — through the
   notices channel and on the HQPlayer screen — names what still holds the
   run's test values, each as now → before the run (named from HQPlayer's
-  lists of the mode the run measured, read in that mode), and a volume
+  lists of the mode the run measured, read in that mode — a list HQPlayer
+  did not give is asked again at its next answer there), and a volume
   left at the bottom of the range for them to raise, until they changed it
-  all or a new run opened its row (the poller reads HQPlayer's State for it
-  while it stands; a write or a read the database fails costs the notice,
-  never the poll). The notice stands on the run's row, whatever the output
+  all or a new run opened its row. In another mode State shows that mode's
+  selection, and HQPlayer keeps one per mode: the notice names the knobs
+  the measured mode still keeps by that mode's name, as they were last read
+  there, until HQPlayer is read in it again. The poller reads HQPlayer's
+  State for it while it stands; a write, a read or a wake the database
+  fails costs the notice — done again at a later answer — never the poll,
+  and a read a close or a new run overtook is read again. The notice stands on the run's row, whatever the output
   is now: a restart or another output never ends it to raise it again;
   until the poller has read HQPlayer it says the test settings may still be
   there. A new run takes a put-back still owed first, and reads what
-  HQPlayer holds after it. Forgetting the
+  HQPlayer holds after it; one a knob the owner set supersedes is closed
+  then with no notice — the new run reads HQPlayer as theirs. Forgetting the
   HQPlayer takes its measurements with it; it is refused while a run measures
   it. The estimate of a run's length takes the pace of the last run that
   ended or was cancelled (on a trial-mode Embedded the owner cancels before

@@ -472,7 +472,9 @@ HQPlayer output's playback trace (the same failure three plays in a row,
 `playback.hqp_diagnostics.failing_run`; the files HQPlayer refused of the
 last batch it was handed, `refused`), a benchmark run cut short whose
 put-back the owner's own change superseded (what HQPlayer still holds of
-its test settings, `playback.hqp_benchmark.left_notice`) and the CLI
+its test settings, `playback.hqp_benchmark.left_notice`), a run HQPlayer
+went away under, put back whole once it answered again (a report, gone once
+seen, `restored_notice`) and the CLI
 agents' sign-ins
 (`claude_code.auth`, `codex_cli.auth`: while the assistant runs on one, or
 gear research waits for Claude Code — the gear chips and sheet say so in
