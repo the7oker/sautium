@@ -1726,9 +1726,9 @@ def test_a_setting_changed_in_hqplayers_own_window_leaves_the_run_to_the_owner(r
     """A run cut short owes its put-back; the owner changes only the filter,
     in HQPlayer's own window. HQPlayer answers: that knob is neither the
     run's last point nor what was there before the run — the owner's — so
-    the put-back is theirs to forgo: nothing is sent, the volume stays at
-    the bottom, and the notice names what still holds the run's test
-    values."""
+    the put-back is theirs to forgo: nothing more is sent — the volume, still
+    at the run's level, goes back to theirs — and the notice names what
+    still holds the run's test values."""
     fake, mgr = run.fake, run.mgr
     run_id = _cut_short_run(run, mode="PCM", own_mode=1, own_rate=2, own_filter=1,
                             own_filter1x=1, own_shaper=1, last_rate=1, last_filter=1,
@@ -1738,22 +1738,23 @@ def test_a_setting_changed_in_hqplayers_own_window_leaves_the_run_to_the_owner(r
     bench._owe(run_id, hl.selected())
     bench.recover(run.endpoint_id, hl.selected())           # HQPlayer answers
     assert _wait(lambda: _closed_as_left(run, run_id))
-    assert fake.settings() == (1, (1, 0, 1, 0), (2, 0, 0, 0), -60.0)
-    assert _wait(lambda: (mgr.active.poke(), _run_left_items())[1] == _LEFT_IN_PCM, 10)
+    assert fake.settings() == (1, (1, 0, 1, 0), (2, 0, 0, 0), -3.0)
+    left = {k: v for k, v in _LEFT_IN_PCM.items() if k != "volume"}
+    assert _wait(lambda: (mgr.active.poke(), _run_left_items())[1] == left, 10)
 
 
 def test_a_setting_of_the_owners_in_the_mode_the_run_found_leaves_it_to_them(run):
     """A PCM run from SDM cut short; the owner puts HQPlayer back in SDM and
     changes its filter there, in HQPlayer's own window. The run set nothing
-    in SDM: that filter is theirs — nothing is put back, the volume stays at
-    the bottom."""
+    in SDM: that filter is theirs — nothing is put back but the volume, still
+    at the run's level."""
     fake = run.fake
     run_id = _owed_pcm_run(run)
     with fake._lock:
         fake.mode, fake.sel[2] = 2, [2, 1, 1, 0]
     bench.recover(run.endpoint_id, hl.selected())
     assert _wait(lambda: _closed_as_left(run, run_id))
-    assert fake.settings() == (2, (1, 0, 0, 0), (2, 1, 1, 0), -60.0)
+    assert fake.settings() == (2, (1, 0, 0, 0), (2, 1, 1, 0), -3.0)
 
 
 def test_the_notice_names_what_is_left_from_the_measured_modes_lists(run):
@@ -2029,8 +2030,9 @@ def test_a_run_left_in_another_mode_names_what_the_measured_mode_holds(run):
     """A run measuring SDM cut short, the owner puts HQPlayer in PCM in its
     own window — the run is left to them. HQPlayer keeps one selection per
     mode and State shows PCM's: the notice names what SDM still holds from
-    the run's row, and it stands — once they raise the volume too — until
-    HQPlayer is read back in SDM."""
+    the run's row — the volume, at the run's level, went back to theirs —
+    and it stands whatever the volume does next, until HQPlayer is read back
+    in SDM."""
     fake, mgr = run.fake, run.mgr
     run_id = _cut_short_run(run, last_rate=1, last_filter=1, last_filter1x=1, last_shaper=1)
     with fake._lock:                    # SDM on the run's last point; PCM chosen in its window
@@ -2041,10 +2043,10 @@ def test_a_run_left_in_another_mode_names_what_the_measured_mode_holds(run):
     elsewhere = {"what": "elsewhere", "mode": "SDM (DSD)",
                  "knobs": ["rate", "filter", "filter1x", "shaper"]}
     assert _wait(lambda: (mgr.active.poke(), _run_left_items())[1] == {
-        "volume": {"what": "volume", "now": -60.0, "before": -3.0},
         "elsewhere": elsewhere}, 10), _run_left_items()
+    assert fake.volume == -3.0
     with fake._lock:
-        fake.volume = -12.0             # the owner raises the volume
+        fake.volume = -12.0             # the owner sets the volume
     assert _wait(lambda: (mgr.active.poke(), _run_left_items())[1] == {
         "elsewhere": elsewhere}, 10), _run_left_items()
     assert run.q("SELECT left_at IS NOT NULL FROM hqp_benchmark_runs WHERE id = %s",
@@ -2257,7 +2259,8 @@ def test_a_lost_run_back_playing_the_nodes_own_queue_is_judged_as_any(run):
 def test_a_lost_run_back_stopped_on_another_controllers_entry_is_judged_as_any(run):
     """HQPlayer back stopped, reading an entry another controller loaded:
     more than a box that just booted shows. The run is judged as any run cut
-    short — the modulator the owner chose stands, nothing is sent."""
+    short — the modulator the owner chose stands, nothing is sent but the
+    volume, still at the run's level."""
     import datetime
     fake = run.fake
     run_id = _cut_short_run(run, last_rate=1, last_filter=1, last_filter1x=1, last_shaper=1,
@@ -2270,13 +2273,14 @@ def test_a_lost_run_back_stopped_on_another_controllers_entry_is_judged_as_any(r
     bench._owe(run_id, hl.selected())
     bench.recover(run.endpoint_id, hl.selected(), gave=run.mgr.active.gave)
     assert _closed_as_left(run, run_id)
-    assert fake.settings() == owners and _changes(fake, mark) == []
+    assert fake.settings() == owners[:3] + (-3.0,) and _changes(fake, mark) == ["Volume"]
 
 
 def test_a_lost_run_back_stopped_on_an_entry_it_does_not_list_is_judged_as_any(run, monkeypatch):
     """HQPlayer back stopped, its Status naming an entry, its playlist read
     refused: an entry the read does not show is no sign of a boot — the run
-    is judged as any run cut short, and the owner's modulator stands."""
+    is judged as any run cut short: the owner's modulator stands, and only
+    the volume, still at the run's level, goes back."""
     import datetime
     fake = run.fake
     run_id = _cut_short_run(run, last_rate=1, last_filter=1, last_filter1x=1, last_shaper=1,
@@ -2292,7 +2296,7 @@ def test_a_lost_run_back_stopped_on_an_entry_it_does_not_list_is_judged_as_any(r
     bench._owe(run_id, hl.selected())
     bench.recover(run.endpoint_id, hl.selected(), gave=run.mgr.active.gave)
     assert _closed_as_left(run, run_id)
-    assert fake.settings() == owners and _changes(fake, mark) == []
+    assert fake.settings() == owners[:3] + (-3.0,) and _changes(fake, mark) == ["Volume"]
 
 
 def test_a_lost_run_back_stopped_on_the_nodes_own_entry_is_put_back_whole(run):
@@ -2360,7 +2364,8 @@ def test_a_run_cancelled_in_a_silent_build_is_no_run_lost(run, monkeypatch, requ
     goes unanswered — HQPlayer busy, not gone (it closed, reset or refused
     nothing) — so the run is no run lost. The owner then sets a filter in
     HQPlayer's own window: their change stands, and no notice speaks of a
-    lost connection."""
+    lost connection; the volume, still at the run's level, goes back, and
+    with it the last of the run the notice would name."""
     fake, mgr = run.fake, run.mgr
     monkeypatch.setattr(bench, "ANSWER_WAIT_S", 30.0)
     monkeypatch.setattr(bench, "RESTORE_ANSWER_S", 0.3)
@@ -2385,8 +2390,11 @@ def test_a_run_cancelled_in_a_silent_build_is_no_run_lost(run, monkeypatch, requ
     go.set()
     assert _wait(lambda: (mgr.active.poke(), run.q(
         "SELECT finished_at IS NOT NULL FROM hqp_benchmark_runs") == [(True,)])[1], 20)
-    assert fake.settings()[:3] == owners[:3]
-    assert run.q("SELECT left_at IS NOT NULL FROM hqp_benchmark_runs") == [(True,)]
+    assert fake.settings()[:3] == owners[:3] and fake.volume == -3.0
+    assert run.q("SELECT note LIKE '%%changed in HQPlayer since%%' FROM hqp_benchmark_runs") \
+        == [(True,)]
+    assert _wait(lambda: (mgr.active.poke(), run.q(
+        "SELECT left_at IS NULL FROM hqp_benchmark_runs") == [(True,)])[1], 10)
     assert _run_restored() is None
 
 
@@ -2782,3 +2790,101 @@ def test_a_restart_drops_the_put_backs_connection_it_has_not_served(run, monkeyp
     bench.cancel()
     assert _wait(lambda: not bench.running(), 30)
     assert run.q("SELECT lost_at IS NOT NULL FROM hqp_benchmark_runs") == [(True,)]
+
+
+def _a_dsd_listen(run, path, *, source: str, at) -> list:
+    """A DSD file of the owner's library and a listen of it — one the node
+    made ('sautium'), or one a Last.fm import placed ('lastfm'). Returns
+    what to delete again: the module's database outlives the test."""
+    import uuid
+    album, track = str(uuid.uuid4()), str(uuid.uuid4())
+    run.q("INSERT INTO albums (id, title) VALUES (%s, 'D') RETURNING id", album)
+    variant = run.q("INSERT INTO album_variants (album_id, directory_path) VALUES (%s, %s) "
+                    "RETURNING id", album, path.parent.as_posix())[0][0]
+    run.q("INSERT INTO tracks (id, title) VALUES (%s, 'd') RETURNING id", track)
+    mf = run.q("""INSERT INTO media_files (track_id, album_variant_id, file_path, file_format,
+                                          sample_rate, channels)
+                  VALUES (%s, %s, %s, 'DSF', 2822400, 2) RETURNING id""",
+               track, variant, path.as_posix())[0][0]
+    run.q("INSERT INTO listening_history (track_id, media_file_id, started_at, source) "
+          "VALUES (%s, %s, %s, %s) RETURNING id", track, mf, at, source)
+    return [album, track]
+
+
+def _forget(run, made: list) -> None:
+    for album, track in made:
+        run.q("DELETE FROM tracks WHERE id = %s RETURNING id", track)
+        run.q("DELETE FROM albums WHERE id = %s RETURNING id", album)
+
+
+@pytest.mark.parametrize("source", ["sautium", "lastfm"])
+def test_a_lost_run_back_on_its_dsd_source_after_a_newer_dsd_listen_goes_back_whole(
+        run, tmp_path, monkeypatch, source):
+    """An HQPlayer on this machine (it opens files by path). A run that
+    measured the owner's DSD file is lost; before HQPlayer answers again the
+    owner's newest DSD listen is another file — a listen of the node's, or
+    one a Last.fm import placed. HQPlayer boots stopped on the playlist the
+    run gave it, on the run's DSD entry: that entry is the run's own, known
+    by the URI the run handed — the run goes back whole."""
+    import datetime
+    fake = run.fake
+    measured, later = tmp_path / "measured.dsf", tmp_path / "later.dsf"
+    measured.touch()
+    later.touch()
+    monkeypatch.setattr(hb, "_stream_mode", lambda: False)      # HQPlayer on this machine
+    now = datetime.datetime.now(datetime.timezone.utc)
+    made = [_a_dsd_listen(run, measured, source="sautium", at=now - datetime.timedelta(hours=2))]
+    try:
+        f = bench._dsd_file()
+        assert f is not None and f["file_path"] == measured.as_posix(), f
+        signal = bench._signal_uri(bench.ensure_signal(44100))
+        handed = bench._dsd_uri(f)                     # what the run handed HQPlayer: a path
+        run_id = _cut_short_run(run, last_rate=1, last_filter=1, last_filter1x=1, last_shaper=1,
+                                lost_at=now - datetime.timedelta(hours=1), dsd_uri=handed)
+        made.append(_a_dsd_listen(run, later, source=source, at=now))     # newest now
+        assert bench._dsd_file()["file_path"] == later.as_posix()
+        with fake._lock:
+            fake.playlist, fake.track, fake.state = [signal, handed], 2, int(PlaybackState.STOPPED)
+            fake.sel[2], fake.volume = [0, 1, 1, 1], -60.0
+        bench._owe(run_id, hl.selected())
+        bench.recover(run.endpoint_id, hl.selected(), gave=run.mgr.active.gave)
+        row = run.q("SELECT restored_at IS NOT NULL, left_at IS NOT NULL, note "
+                    "FROM hqp_benchmark_runs WHERE id = %s", run_id)
+        assert row[0][:2] == (True, False), row
+        assert fake.settings() == (2, (2, 1, 1, 1), (2, 0, 0, 0), -3.0), fake.settings()
+    finally:
+        _forget(run, made)
+
+
+def test_a_run_a_knob_of_the_owners_leaves_to_them_gives_back_a_volume_at_its_own_level(run):
+    """A run the node's own stop cut short (not lost): HQPlayer shows a rate
+    the owner set in its own window since, so the run is left to them — but
+    its volume still stands at the level the run lowered it to. That level is
+    the run's: it goes back to the owner's; their rate is left."""
+    fake = run.fake
+    run_id = _cut_short_run(run, mode="PCM", own_mode=1, own_rate=2, own_filter=1, own_filter1x=1,
+                            own_shaper=1, last_rate=1, last_filter=0, last_filter1x=0,
+                            last_shaper=0)
+    with fake._lock:
+        fake.mode, fake.sel[1], fake.volume = 1, [0, 0, 0, 0], -60.0   # the owner's rate
+    bench._owe(run_id, hl.selected())
+    bench.recover(run.endpoint_id, hl.selected())
+    assert _wait(lambda: run.q("SELECT left_at IS NOT NULL FROM hqp_benchmark_runs "
+                               "WHERE id = %s", run_id) == [(True,)])
+    mode, pcm, sdm, volume = fake.settings()
+    assert (mode, pcm, volume) == (1, (0, 0, 0, 0), -3.0), fake.settings()
+
+
+def test_a_run_measuring_the_owners_dsd_file_keeps_the_uri_it_hands(run, tmp_path, monkeypatch):
+    """A run that measures the owner's DSD file keeps, on its row, the URI it
+    hands HQPlayer for it: what a later put-back knows the run's own entry
+    by."""
+    owner = tmp_path / "owner.dsf"
+    owner.touch()
+    f = {"file_path": owner.as_posix(), "format": "DSF", "sample_rate": 2822400, "channels": 2}
+    monkeypatch.setattr(bench, "_dsd_file", lambda: f)
+    bench.start("pcm")
+    assert _wait(lambda: run.q("SELECT dsd_uri FROM hqp_benchmark_runs ORDER BY id DESC "
+                               "LIMIT 1") == [(bench._dsd_uri(f),)], 20)
+    bench.cancel()
+    assert _wait(lambda: not bench.running(), 30)

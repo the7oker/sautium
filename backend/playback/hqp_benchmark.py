@@ -1144,8 +1144,8 @@ def _measure(ep: dict, kind: str, gave: Callable[[str], bool]) -> Tuple[str, Opt
             uris = {name: (_dsd_uri(s["file"]) if name == "dsd"
                            else _signal_uri(ensure_signal(s["rate"])))
                     for name, s in srcs.items() if name in used}
-            db_execute("UPDATE hqp_benchmark_runs SET points_planned = %(n)s WHERE id = %(id)s",
-                       {"n": grid.asks(), "id": run_id})
+            db_execute("UPDATE hqp_benchmark_runs SET points_planned = %(n)s, dsd_uri = %(d)s "
+                       "WHERE id = %(id)s", {"n": grid.asks(), "d": uris.get("dsd"), "id": run_id})
             mode = (mode_index, _lists_key(filters, shapers, rates))
             slots = _prepare(link, uris, mute, mode)
             outcome, note = _points(link, grid, slots, uris, srcs, mute, mode, ep, run_id, st,
@@ -1899,7 +1899,8 @@ def _close_owed(run: dict, note: str, left: bool = False, restored: bool = False
     """A run cut short is over: put back, or — `left` — its put-back
     superseded by a person's DSP change or switch away, or by a knob they
     changed in HQPlayer's own window. HQPlayer is theirs then: nothing more
-    is put back, its volume is never raised for them, and what still holds
+    is put back — its volume raised for them only from the run's own level,
+    when a knob of theirs left the run (_recover) — and what still holds
     the run's test values is said in one notice until they changed it all
     (note_left), or a new run read HQPlayer. `restored`: put back after
     HQPlayer went away under the run — one notice says so, and the level its
@@ -2223,13 +2224,13 @@ def _notify() -> None:
     db_execute("NOTIFY sautium_notices")
 
 
-def _booted(status: TrackStatus, listed: list,
-            gave: Optional[Callable[[str], bool]]) -> bool:
+def _booted(status: TrackStatus, listed: list, gave: Optional[Callable[[str], bool]],
+            run: dict) -> bool:
     """Does HQPlayer show what a box that just booted shows — stopped,
-    reading no entry of another controller's: none, a source of the run
+    reading no entry of another controller's: none, a source of `run`
     (_run_source), or one this node gave it (`gave`; None: no entry but the
-    run's own is the node's)? An entry the playlist as read does not show — not given, or
-    moved since — is no one's it can tell: not."""
+    run's own is the node's)? An entry the playlist as read does not show —
+    not given, or moved since — is no one's it can tell: not."""
     if status.state != PlaybackState.STOPPED:
         return False
     i = status.track_index
@@ -2238,19 +2239,20 @@ def _booted(status: TrackStatus, listed: list,
     if i > len(listed):
         return False
     uri = listed[i - 1].get("uri", "")
-    return _run_source(uri) or (gave is not None and gave(uri))
+    return _run_source(uri, run) or (gave is not None and gave(uri))
 
 
-def _run_source(uri: str) -> bool:
-    """Is `uri` a source a run hands HQPlayer — a signal, or the owner's DSD
-    file it measures?"""
+def _run_source(uri: str, run: dict) -> bool:
+    """Is `uri` a source `run` handed HQPlayer — a signal, or the owner's DSD
+    file it measured, known by the URI its row keeps (`dsd_uri`)? A row
+    from before it was kept asks the owner's newest DSD listen, as it did."""
     if any(t in uri for t in _signal_tokens()):
         return True
-    f = _dsd_file()
-    if f is None:
-        return False
     from playback.hqp_backend import _same_entry
-    return _same_entry(uri, _dsd_uri(f))
+    if run["dsd_uri"] is not None:
+        return _same_entry(uri, run["dsd_uri"])
+    f = _dsd_file()
+    return f is not None and _same_entry(uri, _dsd_uri(f))
 
 
 def _recover(link: _Link, run: dict,
@@ -2264,18 +2266,25 @@ def _recover(link: _Link, run: dict,
     raised only from the level the run itself set, else left as it is, and
     said. Otherwise — and for a lost run HQPlayer plays, pauses or reads
     another controller's entry for — a knob the owner set in HQPlayer's own
-    window since (_owners) leaves it all to them — nothing is sent, the
-    volume never raised for them, the notice naming what still holds the
-    run's test values — and only what still bears a mark of the run is put
-    back."""
+    window since (_owners) leaves it all to them — nothing more is sent, the
+    volume raised for them only while it still stands at the run's own
+    level, the notice naming what still holds the run's test values — and
+    only what still bears a mark of the run is put back."""
     st, listed, status = link("get_state"), link("get_playlist"), link("get_status")
     if st is None or status is None:
         return None
-    whole = run["lost_at"] is not None and _booted(status, listed, gave)
+    whole = run["lost_at"] is not None and _booted(status, listed, gave, run)
     owners = [] if whole else _owners(run, st)
     if owners:
+        # A volume still at the level the run lowered HQPlayer to is the
+        # run's, not theirs: it goes back
+        back = ""
+        if (run["mute_volume"] is not None
+                and abs(st["volume"] - run["mute_volume"]) < _DB_EPS):
+            link("set_volume", run["pre_volume"])
+            back = "; its volume, still at the run's level, went back"
         return {"note": f"cut short; not put back — {', '.join(owners)} changed in HQPlayer "
-                        "since: HQPlayer was left as it was set", "left": True}
+                        f"since: HQPlayer was left as it was set{back}", "left": True}
     tokens = _signal_tokens()
     ours = any(t in e.get("uri", "") for e in listed for t in tokens)
     lowered = (run["mute_volume"] is not None

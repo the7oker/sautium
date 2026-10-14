@@ -1083,6 +1083,15 @@ implementation details live in the code, DB and git history.
   when a tap made after the Seek led it; it now moves only a start no
   newer than itself. Lesson: when a reading moves the anchor, move all
   that counts from it.
+- **What the run handed, it knows by** (2026-10-14). A lost run's
+  put-back knew the run's DSD source by the owner's newest DSD listen at
+  the time of the put-back: a listen, a Last.fm import or a merge since,
+  and the run's own entry read as another controller's — the run was left
+  to the owner at the bottom of the volume range. The run's row now keeps
+  the URI it handed HQPlayer (migration 038). And a run left to the owner
+  because of a knob of theirs kept a volume still at the run's own level:
+  that level is the run's, and goes back to theirs. Lesson: know your own
+  by what you did, not by what is newest now.
 - **A refused word keeps its place, and is said** (2026-10-14). A command
   refused at its first request once it held the command lock — HQPlayer
   found building, or silent behind the link's held Status — kept its

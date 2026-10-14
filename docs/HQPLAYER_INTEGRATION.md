@@ -1490,7 +1490,8 @@ cooling — so Sautium measures it instead of predicting it
   — a busy HQPlayer's run is one cut short like any other) — is put back
   whole while HQPlayer shows what a box that just booted shows: stopped,
   reading no entry of another controller's — none, a source of the run (a
-  signal, the owner's DSD file it measures), or one this node gave it, a
+  signal, the owner's DSD file it measured, known by the URI the run handed
+  — `dsd_uri`, migration 038), or one this node gave it, a
   stream at its own media proxy of an earlier session included (since
   2026-10-14). What it booted
   with is no one's change; playing, pausing or reading another
@@ -1526,7 +1527,10 @@ cooling — so Sautium measures it instead of predicting it
   the owner. Never the node's own
   re-attach of the same HQPlayer, nor a new run's hold. The run is then
   closed as left to the owner (since 2026-10-13): nothing more is put
-  back, the volume is never raised for them, and one notice — through the
+  back, and the volume is never raised for them — save one HQPlayer still
+  holds at the level the run lowered it to when a knob of theirs leaves
+  the run to them: that level is the run's, and goes back to theirs (since
+  2026-10-14) — and one notice — through the
   notices channel and on the HQPlayer screen — names what still holds the
   run's test values, each as now → before the run (named from HQPlayer's
   lists of the mode the run measured, read in that mode — a list HQPlayer

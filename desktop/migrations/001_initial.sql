@@ -420,6 +420,11 @@ CREATE TABLE IF NOT EXISTS hqp_benchmark_runs (
     lost_at TIMESTAMPTZ,
     restored_at TIMESTAMPTZ,
     volume_left REAL,
+    -- The URI the run handed HQPlayer for the owner's DSD file it measured:
+    -- a lost run's put-back knows the run's own entry by it, never by the
+    -- owner's newest DSD listen then; NULL = no DSD source, or a row from
+    -- before it was kept (the newest listen is asked, as before)
+    dsd_uri TEXT,
     CONSTRAINT chk_hqp_benchmark_runs_finished CHECK ((finished_at IS NULL) = (outcome IS NULL))
 );
 CREATE INDEX IF NOT EXISTS idx_hqp_benchmark_runs_endpoint
