@@ -2120,8 +2120,11 @@ def test_a_change_silent_itself_resumes_the_spot_when_hqplayer_comes_back_stoppe
     out = hb.change_dsp({"filter": 57, "filter1x": 57})
     assert out["building"] is not None
     assert out["applied"] == {} and out["pending"] == ["filter"]
-    assert _wait(lambda: any(c == "SelectTrack" for c, _ in fake.commands))
-    start = [(c, a) for c, a in fake.commands if c in ("SelectTrack", "Seek", "Play")]
+
+    def started():
+        return [(c, a) for c, a in fake.commands if c in ("SelectTrack", "Seek", "Play")]
+    assert _wait(lambda: len(started()) >= 3)       # read once the resume sent its Play
+    start = started()
     assert start[0] == ("SelectTrack", {"index": "1"})
     assert start[1][0] == "Seek" and int(start[1][1]["position"]) >= 42
     assert start[2] == ("Play", {})
