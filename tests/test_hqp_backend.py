@@ -9532,7 +9532,7 @@ def test_a_tap_held_after_its_turn_never_overtakes_a_pause_made_after_it(fake, o
     inserting.join(10)
     vol.join(10)
     _settled()
-    assert fake.state != int(PlaybackState.PLAYING), (said, fake.state, fake.track)
+    assert fake.state == int(PlaybackState.PAUSED), (said, fake.state, fake.track)
 
 
 def test_a_tap_pressed_after_its_turn_never_overtakes_a_pause_made_after_it(fake, output,
@@ -9566,7 +9566,7 @@ def test_a_tap_pressed_after_its_turn_never_overtakes_a_pause_made_after_it(fake
     pauser.join(10)
     vol.join(10)
     _settled()
-    assert fake.state != int(PlaybackState.PLAYING), (said, paused, fake.state, fake.track)
+    assert fake.state == int(PlaybackState.PAUSED), (said, paused, fake.state, fake.track)
 
 
 def test_a_tap_refused_under_the_lock_leaves_the_new_queues_start(fake, output, monkeypatch):
@@ -9891,3 +9891,138 @@ def test_a_held_seek_never_moves_a_start_made_after_it(fake, output, monkeypatch
     assert selects, sent
     assert ("Seek", {"position": "60"}) not in sent[selects[-1]:], (sent, fake.track,
                                                                     fake.position)
+
+
+def _a_play_next_holding_words_behind(mgr, b, link):
+    """A track queued to play next while the tap waits its turn: its
+    hand-over holds the person's words, its sequence behind the tap's."""
+    inserting = threading.Thread(target=lambda: mgr.append(
+        [_item("E:/Music/N/01.flac", 31)], "next"), daemon=True)
+    inserting.start()
+    assert _wait(lambda: b._inflight is not None and len(link.lock._waiting) == 2, timeout=3)
+    return inserting
+
+
+def _shows_what_plays(mgr, b, fake) -> None:
+    """The tap that yielded leaves no trace: the status — the queue sheet's
+    active row, Now Playing — names the track HQPlayer plays, never the
+    tapped one, and no play press is said to be under way."""
+    def shown():
+        s = mgr._latest_status
+        item = mgr.queue.item_at(s.get("track_index") or 0)
+        with fake._lock:
+            reads = (fake.playlist[fake.track - 1]
+                     if 1 <= fake.track <= len(fake.playlist) else None)
+        return (s.get("state") == "playing" and item is not None
+                and item.track_id != "track-3" and b._uri_of(item)[0] == reads
+                and not s.get("rebuilding"))
+    assert _wait(shown, timeout=5), (mgr._latest_status, fake.track, fake.playlist)
+
+
+def test_a_play_made_while_a_tap_waited_its_turn_plays(fake, output):
+    """HQPlayer is paused on track 1. A tap on the third row waits its turn
+    behind a slow volume change; a track is queued to play next, and the
+    person presses Play — made on what played, without the tap. The tap,
+    the older word, yields: the Play goes, HQPlayer plays, and the screen
+    shows what it plays — never the tapped track."""
+    mgr, b = output
+    assert b.pause()
+    assert _wait(lambda: mgr._latest_status.get("state") == "paused", timeout=5)
+    link = _link()
+    tapper, said, vol = _a_tap_waiting_behind_a_slow_volume(b, link, fake)
+    tapper.start()
+    assert _wait(lambda: len(link.lock._waiting) == 1, timeout=3)
+    inserting = _a_play_next_holding_words_behind(mgr, b, link)
+    n = len(fake.commands)
+    assert _quick(b.play)
+    tapper.join(10)
+    inserting.join(10)
+    vol.join(10)
+    _settled()
+    sent = [(c, a) for c, a in fake.commands[n:] if c not in _QUESTIONS]
+    assert fake.state == int(PlaybackState.PLAYING), (said, fake.state, fake.track, sent)
+    _shows_what_plays(mgr, b, fake)
+
+
+def test_a_seek_made_while_a_tap_waited_its_turn_goes(fake, output):
+    """Track 1 plays. The same tap waits its turn; a track is queued to play
+    next and the person drags the position to 60 s — on what plays. The tap
+    yields: the Seek goes, never dropped with the tap, and the screen shows
+    what plays."""
+    mgr, b = output
+    link = _link()
+    tapper, said, vol = _a_tap_waiting_behind_a_slow_volume(b, link, fake)
+    tapper.start()
+    assert _wait(lambda: len(link.lock._waiting) == 1, timeout=3)
+    inserting = _a_play_next_holding_words_behind(mgr, b, link)
+    n = len(fake.commands)
+    assert _quick(lambda: b.seek(60))
+    tapper.join(10)
+    inserting.join(10)
+    vol.join(10)
+    _settled()
+    sent = [(c, a) for c, a in fake.commands[n:] if c not in _QUESTIONS]
+    assert ("Seek", {"position": "60"}) in sent, (said, fake.state, fake.track, sent)
+    _shows_what_plays(mgr, b, fake)
+
+
+@pytest.mark.parametrize("word", ["seek", "play"])
+def test_a_word_made_while_a_tap_waited_never_leaves_its_press_stopped(fake, output, monkeypatch,
+                                                                       word):
+    """The same tap waits its turn; an entry is added in HQPlayer's own
+    window (the canary finds the playlist drifted) and the person seeks, or
+    — HQPlayer paused — presses Play, a word that waits behind the tap.
+    Under the lock the tap finds no mirror and becomes a play press; the
+    word goes first, on what played. The press, its start dead before it
+    began, rebuilds nothing: the music plays, and the screen shows it."""
+    mgr, b = output
+    if word == "play":
+        assert b.pause()
+        assert _wait(lambda: mgr._latest_status.get("state") == "paused", timeout=5)
+    monkeypatch.setattr(hb, "DRIFT_CHECK_EVERY", 1)
+    link = _link()
+    tapper, said, vol = _a_tap_waiting_behind_a_slow_volume(b, link, fake)
+    attached = b._check_attached
+
+    def once_drifted():
+        if threading.current_thread() is tapper:
+            assert _wait(lambda: b._mirror == "drift", timeout=10)
+        return attached()
+    monkeypatch.setattr(b, "_check_attached", once_drifted)
+    tapper.start()
+    assert _wait(lambda: len(link.lock._waiting) == 1, timeout=3)
+    done = {}
+    act = (lambda: b.seek(60)) if word == "seek" else b.play
+    actor = threading.Thread(target=lambda: done.update(ok=act()), daemon=True)
+    actor.start()
+    assert _wait(lambda: len(link.lock._waiting) == 2, timeout=3)
+    with fake._lock:
+        fake.playlist.insert(1, "file:///Elsewhere/theirs.flac")
+    n = len(fake.commands)
+    tapper.join(10)
+    actor.join(10)
+    vol.join(10)
+    _settled()
+    sent = [(c, a.get("index") or a.get("uri") or a.get("position")) for c, a in fake.commands[n:]
+            if c not in _QUESTIONS]
+    assert fake.state == int(PlaybackState.PLAYING), (said, done, fake.state, fake.track,
+                                                      b._spot, sent)
+    assert "Stop" not in [c for c, _ in sent], sent
+    _shows_what_plays(mgr, b, fake)
+
+
+def test_a_pause_during_a_play_press_still_hands_hqplayer_the_queue(fake, output):
+    """A Pause made while a play press waits to begin halts it: the press
+    rebuilds all the same — HQPlayer takes the queue — and nothing starts,
+    HQPlayer stopped at the track the press was to start. Only a press none
+    of whose starts is live, holding no Pause or Stop, rebuilds nothing."""
+    mgr, b = output
+    b.lose_mirror("HQPlayer took 0 of 1 appended tracks", by="refusal")
+    fake.commands.clear()
+    with mgr._mutate_lock:                           # a queue edit still committing
+        assert b.select(3)                           # a tap: the press, waiting to begin
+        assert b.pause()
+    _settled()
+    assert "PlaylistAdd" in [c for c, _ in fake.commands], fake.commands
+    assert fake.state == int(PlaybackState.STOPPED)
+    assert _wait(lambda: mgr._latest_status.get("resume") == {"index": 3, "position": 0})

@@ -573,10 +573,13 @@ comes after the control port answers again — so neither can end the wait.
   finds it), and a playlist that is no mirror by then makes it a play
   press — whatever it becomes numbered as the tap was asked: its number
   holds only once it goes, so a tap refused there supersedes nothing and a
-  word made after it stays newer. An output that holds no words (a
-  renderer, the browser) is handed that slot even while a mutation is in
-  flight
-  (`PlayerBackend.holds_words`). A Play asks again for the start the
+  word made after it stays newer. A word made while it waited its turn was
+  taken on what played, without it, and stands: the tap yields to it — a
+  held tap is not carried out, and a play press it became rebuilds nothing,
+  never leaving HQPlayer stopped (since 2026-10-14). An output that holds
+  no words (a renderer, the browser) is handed that slot even while a
+  mutation is in flight (`PlayerBackend.holds_words`). A Play asks again
+  for the start the
   mutation owes — the replace's first track, the rebuild's track at its
   second — and that start goes, numbered as the Play: a Play during a new
   order's rebuild resumes the track that played, at its second, never

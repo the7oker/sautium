@@ -170,7 +170,8 @@ class NotAnswering(ConnectionError):
 # link; attach — this link attached again. A play press's own rebuild
 # ("press") goes whatever the person says meanwhile — their words decide
 # only which start follows it — and only a new queue or a switch away drops
-# it.
+# it (a press no start of which is live by then rebuilds nothing:
+# HqpBackend._press_once).
 SUPERSEDED_BY = {
     "start": frozenset({"transport", "queue", "rebuild", "start", "switch"}),
     "resume": frozenset({"transport", "queue", "rebuild", "start", "dsp", "switch"}),

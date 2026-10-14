@@ -45,11 +45,11 @@ statuses the output pushed. The node stop ends every run.
  15. The order of intents is the order of the asks: an intent is numbered
      as its sequence is asked — never once it holds the command lock — checked
      as each number a sequence publishes while it holds it is published (I3
-     reads intents so). That it holds from
-     the moment it has the lock, and that a new queue's or a rebuild's
-     number, pending from its ask, is withdrawn when the lock refuses it, the
-     clock's own tests pin. A sequence's ask and its taking the lock are
-     spread apart at random.
+     reads intents so). That it holds once its sequence goes — from the
+     moment it has the lock, a tap's once it decides to go — and that a new
+     queue's or a rebuild's number, pending from its ask, is withdrawn when
+     its sequence never holds the lock, the clock's own tests pin. A
+     sequence's ask and its taking the lock are spread apart at random.
 
 The Stop a switch away owes (6) is also looked for: it went, or a newer
 attach superseded it, or HQPlayer stayed silent past the limit, went away,

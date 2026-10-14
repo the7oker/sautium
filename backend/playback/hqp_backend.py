@@ -2313,11 +2313,15 @@ class HqpBackend(PlayerBackend):
         the spot it leaves takes a Seek's second. A start Next or Previous
         made counts again from the base on the queue as it stands — a "play
         next" or a removal HQPlayer refused left it as it was — and so does a
-        Play or a Seek made after it. Returns what could not go, in words: a
-        start whose track the queue does not hold (a new queue that did not
-        commit)."""
+        Play or a Seek made after it. Starts older than a word that names no
+        track — a tap that waited its turn while that word was made on what
+        played (_held_tap) — yield to it: the words go as if they never
+        came. Returns what could not go, in words: a start whose track the
+        queue does not hold (a new queue that did not commit)."""
         owed = getattr(self._local, "start", None)
         newest = words.newest()
+        if newest is not None and any(n > newest.item.n for n, _, _ in words.plain):
+            newest = None
         last = max(words.halts, default=0)
         # A Seek of what plays, made before the halt with no start to move,
         # still holds
@@ -3264,7 +3268,12 @@ class HqpBackend(PlayerBackend):
         waited out (through). The queue is read under the queue lock, its
         URIs made and handed over off it: a queue edit meanwhile is the
         queue's alone and never waits for the rebuild. Then the end, under
-        the lock again, and the start it owes once the lock is let go."""
+        the lock again, and the start it owes once the lock is let go. A
+        press none of whose starts is live as its rebuild would go, holding
+        no Pause or Stop — a word made before it began, without it, came
+        first (a tap that waited its turn) — rebuilds nothing: the playlist
+        stays no mirror, and HQPlayer gets the queue back at its next answer
+        without a stop."""
         from playback.manager import manager
         taking = manager.mirror_locked(self, lambda: self._press_begin(press))
         if taking is None:
@@ -3278,10 +3287,18 @@ class HqpBackend(PlayerBackend):
             with self._steps(att):
                 with self._link.command(item=press.item):
                     self._check_attached()
-                    self._given = set(uris)
-                    if _hqp_safe(self._link, lambda h: h.stop(), "Stop"):
-                        press.stopped = True
-                    taken, unsent = _add_uris_with_retry(self._link, uris, clear_first=True)
+                    with self._press_lock:
+                        dead = press.live(self._link) is None and not press.halted()
+                    if not dead:
+                        self._given = set(uris)
+                        if _hqp_safe(self._link, lambda h: h.stop(), "Stop"):
+                            press.stopped = True
+                        taken, unsent = _add_uris_with_retry(self._link, uris,
+                                                             clear_first=True)
+                if dead:
+                    att.request_end("superseded")
+                    self.lose_mirror("a word made before the play press began came first")
+                    return
                 self.poke()
                 manager.mirror_locked(self, lambda: self._press_end(press, att, taking,
                                                                     (taken, unsent)))

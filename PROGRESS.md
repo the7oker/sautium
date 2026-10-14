@@ -1083,6 +1083,17 @@ implementation details live in the code, DB and git history.
   when a tap made after the Seek led it; it now moves only a start no
   newer than itself. Lesson: when a reading moves the anchor, move all
   that counts from it.
+- **The older word yields** (2026-10-14). A tap numbered as it was asked
+  but decided once it had the command lock — held by a mutation that began
+  while it waited, or a play press once the mirror left step — was older
+  than a Play or a Seek the person made meanwhile, taken on what played
+  without it: that word superseded the tap's start, and the carry-out then
+  sent nothing, or the press rebuilt for a start already dead and left
+  HQPlayer stopped. The older tap now yields: the words made after it go
+  as if it never came, and a press none of whose starts is live rebuilds
+  nothing. Holding words from the ask, so a tap and the words after it
+  combine, is left for the next slice. Lesson: a number taken early must
+  not let a later decision overrule what was decided meanwhile.
 - **A tap is decided where its start goes** (2026-10-14). A tap on
   HQPlayer checked whether a queue mutation held words and whether the
   playlist was a mirror, then computed its entry and waited for the command
