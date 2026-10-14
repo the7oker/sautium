@@ -1280,8 +1280,16 @@ class HqpBackend(PlayerBackend):
 
     def gave(self, uri: str) -> bool:
         """Is `uri` an entry this node gave HQPlayer — one this attachment
-        handed it, or one that names a slot of the queue as it stands?"""
+        handed it, a stream at this node's own media proxy (one of an
+        earlier session too, its token no longer registered: no one else
+        hands that address), or one that names a slot of the queue as it
+        stands?"""
         if self._handed_here(uri):
+            return True
+        from streaming import service as streaming_service
+        proxy = streaming_service.get_proxy()
+        if (proxy is not None and _token_of(uri) is not None
+                and urlsplit(uri).netloc == f"{self._url_host}:{proxy.port}"):
             return True
         handed = self._layout().handed
         return any(_reads_item(r, it) for r in self._readings(uri) for it in handed)

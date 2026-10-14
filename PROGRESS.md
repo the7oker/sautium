@@ -964,6 +964,16 @@ implementation details live in the code, DB and git history.
   ended a moment later; and a switch away accepted at once could record a
   put-back that went as left. Lesson: a licence granted by a moment ends
   with that moment.
+- **A put-back's end is what it met** (2026-10-14). A switch away that
+  woke the put-back's request on its way read as a failure to retry, and
+  the run was recorded nowhere: after a restart the person's choice was
+  overwritten. The put-back of a run cut short by the node's own stop
+  entered a mode it never read. The node's own entries — at a new run's
+  first step, the run's DSD source, streams of an earlier session — read
+  as another controller's. And a lost run was judged by the class of the
+  last failure, not by whether HQPlayer had closed, reset or refused the
+  connection. Each now ends as what happened. Lesson: judge by the events
+  you counted, not by the last error you happened to hold.
 - **A held word goes under the number it was held with** (2026-10-14). The
   words a person made while a queue mutation handed HQPlayer its playlist
   were carried out as fresh intents, numbered as they went: a Play pressed

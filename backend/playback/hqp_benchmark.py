@@ -777,11 +777,6 @@ class _Lost(Exception):
     """HQPlayer stopped answering the run and did not come back in time."""
 
 
-class _Busy(_Lost):
-    """HQPlayer kept the connection and answered nothing — busy (a build),
-    not gone: it closed, reset or refused nothing."""
-
-
 class _Reopened(Exception):
     """The connection was replaced in the middle of something. HQPlayer may
     have restarted under the run — its volume, its playlist and its
@@ -865,7 +860,7 @@ def _again(step: Callable[[], Any], *, silent_ends: bool = False,
             return step()
         except _Silent as e:
             if silent_ends:
-                raise _Busy("HQPlayer is busy and did not answer") from e
+                raise _Lost("HQPlayer is busy and did not answer") from e
             last = e
         except _Reopened as e:
             last = e
@@ -1026,7 +1021,7 @@ def start(mode: Optional[str] = None, *, fixed_volume_ok: bool = False) -> Dict[
         _state.update(running=True, cancel_requested=False, endpoint_id=ep["id"], mode=kind,
                       point=0, total=0, point_label="Preparing…", eta_s=None,
                       started_at=time.time(), outcome=None, note=None)
-        _thread = threading.Thread(target=_run, args=(ep, kind), daemon=True,
+        _thread = threading.Thread(target=_run, args=(ep, kind, b.gave), daemon=True,
                                    name="hqp-benchmark")
         _thread.start()
     return state()
@@ -1073,7 +1068,7 @@ def _why(e: Exception) -> str:
     return str(e) or type(e).__name__
 
 
-def _run(ep: dict, kind: str) -> None:
+def _run(ep: dict, kind: str, gave: Callable[[str], bool]) -> None:
     """The job's thread. Whatever ends it is recorded where the owner reads
     it (state(), and the run row once there is one); the job is closed
     before the output goes back — the attach that takes it back then finds
@@ -1083,7 +1078,7 @@ def _run(ep: dict, kind: str) -> None:
     try:
         with manager.hold("benchmark", LABEL):
             try:
-                outcome, note = _measure(ep, kind)
+                outcome, note = _measure(ep, kind, gave)
             except (_Abort, _Lost) as e:
                 outcome, note = "failed", str(e)
             except Exception as e:      # the job's boundary: recorded, never lost
@@ -1102,17 +1097,18 @@ def _finish(outcome: str, note: Optional[str]) -> None:
     logger.info("HQPlayer benchmark %s%s", outcome, f": {note}" if note else "")
 
 
-def _measure(ep: dict, kind: str) -> Tuple[str, Optional[str]]:
+def _measure(ep: dict, kind: str, gave: Callable[[str], bool]) -> Tuple[str, Optional[str]]:
     """The run proper, inside the hold: put back what a run cut short before
-    it still owes, read what is to be put back, open the run row, measure,
-    and put everything back whatever happens."""
+    it still owes (`gave` tells an entry the node gave HQPlayer), read what
+    is to be put back, open the run row, measure, and put everything back
+    whatever happens."""
     global _live
     link = _Link(_cancel.wait, answer_s=ANSWER_WAIT_S)
     if not link.connect():
         return "failed", "HQPlayer is not answering"
     _live = link
     try:
-        _take_owed(link, ep["id"])
+        _take_owed(link, ep["id"], gave)
         pre, modes, vr = _again(lambda: (link("get_state"), link("get_modes"),
                                          link("volume_range")))
         if pre is None:
@@ -1626,11 +1622,14 @@ def _outlast(link: _Link, settle: Settle) -> TrackStatus:
 def _restore(link: _Link, pre: dict, own: Optional[dict],
              mute: Optional[float]) -> Tuple[bool, Optional[str], bool]:
     """Put back what the run changed, whatever ended it. Returns (HQPlayer
-    answered, what could not be put back, whether HQPlayer went away — it
-    closed, reset or refused the connection — rather than stayed silent).
-    Only the app stopping cuts the wait for an HQPlayer that is away short;
-    one that is there but silent — a cancel in the middle of a build — is
-    left to recover (RESTORE_ANSWER_S)."""
+    answered, what could not be put back, whether HQPlayer went away under
+    the put-back — it closed, reset or refused the connection, counted as
+    it happened (the client's losses, the poller's own rule), whatever
+    failure came last — rather than only stayed silent). Only the app
+    stopping cuts the wait for an HQPlayer that is away short; one that is
+    there but silent — a cancel in the middle of a build — is left to
+    recover (RESTORE_ANSWER_S)."""
+    losses = link.c.losses
     link.wait = _halt.wait
     link.c.timeout = RESTORE_ANSWER_S
     # A cancel's wake-up no wait of the run met is spent here: the run acted
@@ -1641,12 +1640,12 @@ def _restore(link: _Link, pre: dict, own: Optional[dict],
         sock.settimeout(RESTORE_ANSWER_S)
     try:
         problems = _again(lambda: _put_back(link, pre=pre, own=own, volume=mute is not None,
-                                            clear=True),
+                                            clear=True, enter=True),
                           silent_ends=True)
         after = _again(lambda: link("get_state"), silent_ends=True)
-    except _Lost as e:
+    except _Lost:
         return (False, "HQPlayer did not answer to be put back — it is when it answers again",
-                not isinstance(e, _Busy))
+                link.c.losses > losses)
     if after is None:
         return True, "HQPlayer did not report its state after the run", False
     diff = [k for k in ("mode", "rate", "filterNx", "filter1x", "shaper")
@@ -1660,13 +1659,15 @@ def _restore(link: _Link, pre: dict, own: Optional[dict],
 
 
 def _put_back(link: _Link, *, pre: dict, own: Optional[dict], volume: bool,
-              clear: bool) -> List[str]:
+              clear: bool, enter: bool) -> List[str]:
     """Stop; the run's sources out of the playlist (`clear`); the measured
-    mode's own selection when the run switched into it — in that mode,
-    whichever one HQPlayer is in now: it keeps one selection per mode — then
-    the mode it found and that mode's selection; the owner's volume
-    (`volume`: the run lowered it, or HQPlayer came back louder). What
-    HQPlayer refused, as "knob: its words"."""
+    mode's own selection when the run switched into it — HQPlayer keeps one
+    selection per mode: in that mode, entered for it when `enter` (the
+    run's own end, a whole put-back: what the run left there is known),
+    else only while HQPlayer is in it (one it does not show is no one's to
+    judge) — then the mode it found and that mode's selection; the owner's
+    volume (`volume`: the run lowered it, or HQPlayer came back louder).
+    What HQPlayer refused, as "knob: its words"."""
     link("stop")
     if clear:
         link("playlist_clear")
@@ -1674,7 +1675,7 @@ def _put_back(link: _Link, *, pre: dict, own: Optional[dict], volume: bool,
     now = link("get_state")
     mode = now["mode"] if now is not None else None
     if own is not None:
-        if mode != own["mode"]:
+        if mode != own["mode"] and enter:
             _, failed = link("apply_settings", mode=own["mode"])
             problems += [f"{k}: {v}" for k, v in failed.items()]
             mode = None if failed else own["mode"]
@@ -1849,7 +1850,7 @@ def _put_run_back(link, run: dict, owed: tuple, again: Callable[[], None],
                   gave: Optional[Callable[[str], bool]], quiet: bool) -> None:
     from playback.hqp_link import Dropped
     owed_on, item = owed
-    why = owed_on.superseded(item)
+    why, done = owed_on.superseded(item), None
     if why is None:
         try:
             with link.command(item=item):
@@ -1875,15 +1876,22 @@ def _put_run_back(link, run: dict, owed: tuple, again: Callable[[], None],
                 logger.info("HQPlayer benchmark run %s not put back yet: %s", run["id"], e)
                 return
         except (_Reopened, _Lost, BrokenPipeError, ConnectionError, OSError) as e:
-            logger.info("HQPlayer benchmark run %s not put back yet: %s", run["id"], e)
-            again()
-            return
+            # A switch away, or another HQPlayer chosen, that woke the request
+            # on its way left the run to its end (left_by_person): this one
+            why = link.superseded(item)
+            if why is None:
+                logger.info("HQPlayer benchmark run %s not put back yet: %s", run["id"], e)
+                again()
+                return
+        else:
+            if done is None:
+                why = link.superseded(item)
+                if why is None:
+                    again()
+                    return
     if why is not None:
         _close_owed(run, f"cut short; not put back — {why}: HQPlayer was left as it was set "
                          "since", left=not quiet)
-        return
-    if done is None:
-        again()
 
 
 def _close_owed(run: dict, note: str, left: bool = False, restored: bool = False,
@@ -1944,7 +1952,7 @@ def left_by_person(host: str, port: int, why: str) -> None:
                        "(%s): %s", why, e)
 
 
-def _take_owed(link: _Link, endpoint_id: int) -> None:
+def _take_owed(link: _Link, endpoint_id: int, gave: Callable[[str], bool]) -> None:
     """A new run's first step: a run cut short before it still owes HQPlayer
     its put-back — it goes first, on this run's connection, so the new run
     reads what HQPlayer holds after it, never the old run's test settings;
@@ -1966,7 +1974,7 @@ def _take_owed(link: _Link, endpoint_id: int) -> None:
         _close_owed(run, f"cut short; not put back — {why}: HQPlayer was left as it was set "
                          "since")
         return
-    done = _again(lambda: _recover(link, run))
+    done = _again(lambda: _recover(link, run, gave))
     if done is None:
         raise _Abort("HQPlayer did not report its state")
     # No notice: the new run reads what HQPlayer holds as the owner's now
@@ -2218,9 +2226,9 @@ def _notify() -> None:
 def _booted(status: TrackStatus, listed: list,
             gave: Optional[Callable[[str], bool]]) -> bool:
     """Does HQPlayer show what a box that just booted shows — stopped,
-    reading no entry of another controller's: none, a signal of the run, or
-    one this node gave it (`gave`; None: no entry but a signal is the
-    node's)? An entry the playlist as read does not show — not given, or
+    reading no entry of another controller's: none, a source of the run
+    (_run_source), or one this node gave it (`gave`; None: no entry but the
+    run's own is the node's)? An entry the playlist as read does not show — not given, or
     moved since — is no one's it can tell: not."""
     if status.state != PlaybackState.STOPPED:
         return False
@@ -2230,7 +2238,19 @@ def _booted(status: TrackStatus, listed: list,
     if i > len(listed):
         return False
     uri = listed[i - 1].get("uri", "")
-    return any(t in uri for t in _signal_tokens()) or (gave is not None and gave(uri))
+    return _run_source(uri) or (gave is not None and gave(uri))
+
+
+def _run_source(uri: str) -> bool:
+    """Is `uri` a source a run hands HQPlayer — a signal, or the owner's DSD
+    file it measures?"""
+    if any(t in uri for t in _signal_tokens()):
+        return True
+    f = _dsd_file()
+    if f is None:
+        return False
+    from playback.hqp_backend import _same_entry
+    return _same_entry(uri, _dsd_uri(f))
 
 
 def _recover(link: _Link, run: dict,
@@ -2275,7 +2295,7 @@ def _recover(link: _Link, run: dict,
     own = None if run["own_mode"] is None else {
         "mode": run["own_mode"], "rate": run["own_rate"], "filterNx": run["own_filter"],
         "filter1x": run["own_filter1x"], "shaper": run["own_shaper"]}
-    problems = _put_back(link, pre=pre, own=own, volume=volume, clear=ours)
+    problems = _put_back(link, pre=pre, own=own, volume=volume, clear=ours, enter=whole)
     if whole:
         note = ("cut short; HQPlayer went away under the run — its settings were put back when "
                 "it answered again")

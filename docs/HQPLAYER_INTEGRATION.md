@@ -1475,11 +1475,14 @@ cooling — so Sautium measures it instead of predicting it
   keeps that, maybe nothing else) — only once HQPlayer answers, never on a
   trial-stopped box that takes a connection and drops it. A run HQPlayer
   went away under — it closed, reset or refused the connection as the
-  put-back at the end tried it, the app not stopping (`lost_at`; a silence
-  is no loss — a busy HQPlayer's run is one cut short like any other) — is
-  put back whole while HQPlayer shows what a box that just booted shows:
-  stopped, reading no entry of another controller's — none, a signal of
-  the run, or one this node gave it (since 2026-10-14). What it booted
+  put-back at the end tried it, the app not stopping (`lost_at`, counted
+  as it happens, a silence after it included; a silence alone is no loss
+  — a busy HQPlayer's run is one cut short like any other) — is put back
+  whole while HQPlayer shows what a box that just booted shows: stopped,
+  reading no entry of another controller's — none, a source of the run (a
+  signal, the owner's DSD file it measures), or one this node gave it, a
+  stream at its own media proxy of an earlier session included (since
+  2026-10-14). What it booted
   with is no one's change; playing, pausing or reading another
   controller's entry, it shows more, and the run is judged as any run cut
   short — nothing stopped, nothing reset over another controller's
@@ -1508,8 +1511,9 @@ cooling — so Sautium measures it instead of predicting it
   it closes the run the other way: the row is closed while the put-back
   still holds the lock, and a switch away or another HQPlayer chosen
   meanwhile — accepted at once, without the lock — leaves the run to the
-  put-back's own end: it went, or the switch drops its next request and
-  the run is left to the owner. Never the node's own
+  put-back's own end: it went; or the switch drops its next request, wakes
+  the one on its way or leaves it reading no state, and the run is left to
+  the owner. Never the node's own
   re-attach of the same HQPlayer, nor a new run's hold. The run is then
   closed as left to the owner (since 2026-10-13): nothing more is put
   back, the volume is never raised for them, and one notice — through the
