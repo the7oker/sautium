@@ -146,8 +146,8 @@ class QueueSessionRequest(BaseModel):
 class JumpRequest(BaseModel):
     index: int  # the queue's 1-based slot, as the status's track_index names it
     # The track the client saw in that slot: the tap names it, never the slot
-    # alone — a queue mutation in flight (a new queue handed over, a new
-    # order) moves slots under the sheet before the queue commits
+    # alone — a queue played from elsewhere, or a mutation in flight (a new
+    # queue handed over, a new order), moves slots under the sheet
     track_id: Optional[str] = None
 
 class RemoveRequest(BaseModel):
@@ -1639,21 +1639,31 @@ def jump(req: JumpRequest):
     the tap is a play press, answered at once with the track it will start
     (`starts`). A slot the output does not take — a gap of this HQPlayer —
     is answered with the output's own words (`refusal`), as every transport
-    command is. While HQPlayer takes a queue mutation (a new queue, a new
-    order) the tap names `track_id`, which it plays wherever the mutation
-    puts it — one the mutation takes away is refused."""
+    command is. The tap names the track the sheet showed (`track_id`): a
+    sheet not refreshed yet — a replace or a radio from another device —
+    plays that track wherever the queue holds it now, and one the queue no
+    longer holds is refused in words. While HQPlayer takes a queue mutation
+    (a new queue, a new order, a "play next", a removal) it plays the
+    track wherever the mutation puts it — one the mutation takes away is
+    refused."""
     if req.index < 1:
         raise HTTPException(status_code=400, detail="index must be >= 1")
+    # A queue mutation in flight: the output finds the track among what it
+    # is handed (the queue commits only after it)
+    slot = (req.index if manager.queue.view()[2]
+            else manager.queue.slot_of(req.index, req.track_id))
+    if slot is None:
+        return {"ok": False, "index": req.index, "refusal": "it is no longer in the queue"}
     try:
         # select() loads AND plays the slot (PlayerBackend contract): a
         # play() after it raced the DLNA load and resumed the OLD track for
         # the seconds the new one took to buffer
         b = manager.ensure_active()
-        ok = b.select(req.index, req.track_id)
+        ok = b.select(slot, req.track_id)
     except Exception as e:
         raise _output_error(e)
-    answer = {"ok": True, "index": req.index} if ok else {
-        "ok": False, "index": req.index, "refusal": b.refusal()}
+    answer = {"ok": True, "index": slot} if ok else {
+        "ok": False, "index": slot, "refusal": b.refusal()}
     return _starting(b, answer)
 
 

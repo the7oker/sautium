@@ -8156,3 +8156,149 @@ def test_a_press_asked_as_a_new_queue_begins_holding_words_is_one_of_them(fake, 
     assert fake.state == int(PlaybackState.PLAYING)
     assert fake.playlist[fake.track - 1] == "file:///E:/Music/A/03.flac", (
         fake.playlist, fake.track, _start_sent(fake, n))
+
+
+# -- A tap names its track (every output) -----------------------------------------
+#
+# The queue sheet sends the track a row showed with its slot: the jump route
+# plays that track wherever the queue holds it now, and refuses one it no
+# longer holds; HQPlayer holds a tap made while a "play next" or a removal
+# moves its entries.
+
+
+def test_a_tap_from_a_sheet_a_new_queue_overtook_plays_the_track_it_showed(fake, output,
+                                                                          monkeypatch):
+    """The sheet showed [1, 2, 3]; a new queue [2, 3, 4'] is played from
+    another device, and the person taps the third row before the sheet
+    refreshed: the tap names track 3, which the new queue holds second — it
+    plays there, not the new queue's third track."""
+    mgr, b = output
+    player_router = _routes_on(monkeypatch, mgr)
+    mgr.replace_queue(_new_with_3_at_2(), play=True)
+    assert _wait(lambda: fake.state == int(PlaybackState.PLAYING) and fake.track == 1)
+    said = player_router.jump(player_router.JumpRequest(index=3, track_id="track-3"))
+    assert said["ok"] and said["index"] == 2, said
+    _settled()
+    assert fake.playlist[fake.track - 1] == "file:///E:/Music/A/03.flac", (said, fake.track)
+
+
+def test_a_tap_on_a_track_the_queue_no_longer_holds_is_refused_in_words(fake, output,
+                                                                       monkeypatch):
+    """The sheet showed track 1 at its first row; a new queue without it was
+    played meanwhile: the tap is refused in words, nothing started."""
+    mgr, b = output
+    player_router = _routes_on(monkeypatch, mgr)
+    mgr.replace_queue(_new_with_3_at_2(), play=True)
+    assert _wait(lambda: fake.state == int(PlaybackState.PLAYING) and fake.track == 1)
+    n = len(fake.commands)
+    said = player_router.jump(player_router.JumpRequest(index=1, track_id="track-1"))
+    assert said == {"ok": False, "index": 1, "refusal": "it is no longer in the queue"}, said
+    assert _start_sent(fake, n) == []
+
+
+def test_a_tap_names_its_track_on_any_output(monkeypatch):
+    """Whatever the output, the slot the jump route hands it is the one that
+    holds the track the sheet showed — the queue moved under the sheet."""
+    from routers import player as player_router
+    mgr = PlaybackManager()
+    mgr.queue.replace([_item(f"E:/Music/A/0{i}.flac", i) for i in (2, 3, 1)])
+    picked = []
+
+    class Output:
+        def select(self, index, track_id=None):
+            picked.append(index)
+            return True
+
+        def pressing(self):
+            return None
+    monkeypatch.setattr(player_router, "manager", mgr)
+    monkeypatch.setattr(mgr, "ensure_active", lambda: Output())
+    assert player_router.jump(player_router.JumpRequest(index=1, track_id="track-1"))["ok"]
+    assert picked == [3]
+
+
+def test_a_tap_during_a_play_next_plays_the_tapped_track(fake, output, monkeypatch):
+    """Track 1 plays; a track is queued to play next — HQPlayer takes it
+    behind the playing entry, the entries after it moving down — and the
+    person taps the third row meanwhile: track 3 plays, at its slot once the
+    insert stands, never HQPlayer's entry 3."""
+    mgr, b = output
+    player_router = _routes_on(monkeypatch, mgr)
+    fake.service["PlaylistRemove"] = 0.4
+    n = len(fake.commands)
+    inserting = threading.Thread(target=lambda: mgr.append(
+        [_item("E:/Music/N/01.flac", 31)], "next"), daemon=True)
+    inserting.start()
+    assert _wait(lambda: any(c == "PlaylistRemove" for c, _ in fake.commands[n:]), timeout=5)
+    said = _quick(lambda: player_router.jump(
+        player_router.JumpRequest(index=3, track_id="track-3")))
+    assert said["ok"], said
+    inserting.join(10)
+    _settled()
+    assert [it.track_id for it in mgr.queue.snapshot()] == [
+        "track-1", "track-31", "track-2", "track-3"]
+    assert fake.playlist[fake.track - 1] == "file:///E:/Music/A/03.flac", (
+        fake.playlist, fake.track, _start_sent(fake, n))
+
+
+def test_a_tap_during_a_removal_plays_the_tapped_track(fake, output, monkeypatch):
+    """Track 1 plays; the person removes track 2 — HQPlayer takes the
+    removal, the entries after it moving up — and taps the third row
+    meanwhile: track 3 plays, at its slot once the removal stands."""
+    mgr, b = output
+    player_router = _routes_on(monkeypatch, mgr)
+    fake.service["PlaylistRemove"] = 0.6
+    n, came = len(fake.commands), len(fake.arrivals)
+    removing = threading.Thread(target=lambda: mgr.remove(2, "track-2"), daemon=True)
+    removing.start()
+    assert _wait(lambda: "PlaylistRemove" in [c for _, c in fake.arrivals[came:]], timeout=5)
+    said = _quick(lambda: player_router.jump(
+        player_router.JumpRequest(index=3, track_id="track-3")))
+    assert said["ok"], said
+    removing.join(10)
+    _settled()
+    assert [it.track_id for it in mgr.queue.snapshot()] == ["track-1", "track-3"]
+    assert fake.playlist[fake.track - 1] == "file:///E:/Music/A/03.flac", (
+        fake.playlist, fake.track, _start_sent(fake, n))
+
+
+def test_a_tap_handed_on_while_a_removal_runs_finds_its_track_once_it_stands(fake, output,
+                                                                            monkeypatch):
+    """The route hands a tap on as the sheet sent it while a removal is in
+    flight — the output finds the track among what it is handed — and the
+    removal stands before HQPlayer reads the tap: HQPlayer finds track 3
+    where the queue holds it now, never refuses the third row as gone."""
+    mgr, b = output
+    player_router = _routes_on(monkeypatch, mgr)
+    fake.service["PlaylistRemove"] = 0.6
+    n, came = len(fake.commands), len(fake.arrivals)
+    select, handed = b.select, []
+
+    def once_the_removal_stands(index, track_id=None):
+        handed.append(index)
+        removing.join(10)
+        return select(index, track_id)
+    monkeypatch.setattr(b, "select", once_the_removal_stands)
+    removing = threading.Thread(target=lambda: mgr.remove(2, "track-2"), daemon=True)
+    removing.start()
+    assert _wait(lambda: "PlaylistRemove" in [c for _, c in fake.arrivals[came:]], timeout=5)
+    said = player_router.jump(player_router.JumpRequest(index=3, track_id="track-3"))
+    assert said["ok"], said
+    assert handed == [3]                        # the route left the track to the output
+    _settled()
+    assert [it.track_id for it in mgr.queue.snapshot()] == ["track-1", "track-3"]
+    assert fake.playlist[fake.track - 1] == "file:///E:/Music/A/03.flac", (
+        fake.playlist, fake.track, _start_sent(fake, n))
+
+
+def test_a_tap_on_a_track_queued_twice_means_the_slot_nearest_the_row():
+    """A track queued twice: the row tapped holds it — that slot; moved
+    under the sheet, the slot nearest the row that holds it."""
+    q = CanonicalQueue()
+    q.replace([_item(f"E:/Music/A/0{i}.flac", i) for i in (1, 2, 3)]
+              + [_item("E:/Music/A/01.flac", 1)])
+    assert q.slot_of(4, "track-1") == 4
+    assert q.slot_of(3, "track-1") == 4
+    assert q.slot_of(2, "track-1") == 1
+    assert q.slot_of(2, "track-9") is None
+    assert q.slot_of(9, None) is None

@@ -167,9 +167,10 @@ class PlayerBackend(ABC):
         """Play queue slot `index` (1-based): load it and start it in ONE
         step. Every backend owns that atomically — a caller-side play()
         after select() raced the DLNA load and resumed the previous track
-        while the new one buffered. `track_id`: the track the person saw in
-        that slot — an output that holds play intents while a queue mutation
-        is in flight (mutation) plays that track wherever the mutation puts
+        while the new one buffered. `index` holds the track the person saw
+        (the jump route finds it, CanonicalQueue.slot_of); `track_id` is
+        that track — an output that holds play intents while a queue
+        mutation is in flight (mutation) plays it wherever the mutation puts
         it."""
 
     def seek(self, seconds: int) -> bool:

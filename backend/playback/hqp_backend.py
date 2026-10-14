@@ -2201,6 +2201,18 @@ class HqpBackend(PlayerBackend):
                 self._inflight = _InFlight(items, stops=stops, base=base, owes=owes)
         return n
 
+    def _hold_around(self, items: list) -> None:
+        """A seamless edit's hand-over — a "play next", a removal — HQPlayer
+        playing on through it: the person's play intents are held, counted
+        from the track it plays (_hold_words), translated against `items`,
+        the queue as the edit leaves it — HQPlayer's entries move under a
+        slot meanwhile."""
+        last = self._last_tick
+        playing = self._queue.item_at(last.queue_index) if last is not None else None
+        self._hold_words(items, stops=False,
+                         base=(playing, int(last.position)) if playing is not None else None,
+                         owes=False)
+
     def _carry_out(self, words: _InFlight, *, committed: bool) -> Optional[str]:
         """The words held while this thread's mutation handed HQPlayer its
         playlist, now that the queue stands — the mutation's, or, given up,
@@ -2863,19 +2875,24 @@ class HqpBackend(PlayerBackend):
         HQPlayer refuses gets no Play. On a playlist that is no mirror, or
         while a play press runs, the tap is a play press (_press) of its own
         track, from its start. A slot this HQPlayer does not hold (a gap) is
-        refused in the gap's words, nothing sent. While a queue mutation
-        hands HQPlayer its playlist the tap names the track the person saw
-        in the slot (`track_id`), held as a start of its own (_held_tap)."""
+        refused in the gap's words, nothing sent. The tap names the track
+        the person saw in the slot (`track_id`): while a queue mutation hands
+        HQPlayer its playlist it is held as a start of its own (_held_tap);
+        otherwise it plays where the queue holds that track now — one it no
+        longer holds is refused in words."""
         with self._press_lock:
             if self._inflight is not None:
                 return self._held_tap(self._inflight, index, track_id)
-        item = self._queue.item_at(index)
-        why = self.gap(item) if item is not None else None
+        index = self._queue.slot_of(index, track_id)
+        item = self._queue.item_at(index) if index is not None else None
+        if item is None:
+            self._local.refusal = "it is no longer in the queue"
+            return False
+        why = self.gap(item)
         if why is not None:
             self._local.refusal = f"it is not on this HQPlayer — {why}"
             return False
-        if item is not None and (self._mirror != "step"
-                                 or self._live(self._pressed) is not None):
+        if self._mirror != "step" or self._live(self._pressed) is not None:
             return self._press(item, 0)
         held = self._spot
         entry = self._layout().entry(index)
@@ -3790,13 +3807,17 @@ class HqpBackend(PlayerBackend):
         HQPlayer cannot open is never handed over (_queue_takes). With the
         mirror lost or drifted — a playlist that is no mirror is not edited by
         the queue's places — or HQPlayer not answering, the insert is the
-        queue's alone, as an append on a lost mirror is."""
+        queue's alone, as an append on a lost mirror is. A person's play
+        intents made while HQPlayer takes it are held (_hold_around)."""
         self._ways_in(items)
         if self._mirror in ("lost", "drift"):
             return list(items)
         handed = _Layout(items, self.gap).handed
         uris = [self._uri_for(it) for it in handed]
         anchor = self._queue.item_at(anchor_index) if anchor_index else None
+        queue = self._queue.snapshot()
+        at = anchor_index or len(queue)
+        self._hold_around(queue[:at] + list(items) + queue[at:])
         unplaced = None
 
         def insert(h: HQPlayerClient) -> tuple:
@@ -3890,12 +3911,16 @@ class HqpBackend(PlayerBackend):
         entry it has behind the entry read, one before it from the queue
         alone. A playlist that is no mirror — drift (an external edit, a
         mirror step HQPlayer did not take) or lost — is not edited by index:
-        the removal is the queue's alone, and the next mirror carries it."""
+        the removal is the queue's alone, and the next mirror carries it. A
+        person's play intents made while HQPlayer takes it are held
+        (_hold_around)."""
         if self._mirror in ("lost", "drift"):
             return True
         layout = self._layout()
         if layout.entry(index) is None:
             return True                                 # a gap: never handed over
+        queue = self._queue.snapshot()
+        self._hold_around(queue[:index - 1] + queue[index:])
         if self._mirror == "tail":
             unread = None
 

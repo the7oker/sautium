@@ -525,9 +525,11 @@ comes after the control port answers again — so neither can end the wait.
     Previous at a stopped spot only move it; at either end of the queue they
     send nothing.
 - **Words during a queue mutation** (since 2026-10-13). A replace, a new
-  order, a re-bind's or the reconverge's rebuild and the radio's clear hand
-  HQPlayer a playlist under the queue lock, and commit the queue only after
-  it: the person's play intents made meanwhile are held as a play press
+  order, a re-bind's or the reconverge's rebuild, the radio's clear — and,
+  since 2026-10-14, a "play next" and a removal, which move HQPlayer's
+  entries under a slot — hand HQPlayer a playlist under the queue lock,
+  and commit the queue only after it: the person's play intents made
+  meanwhile are held as a play press
   holds them (`PlayerBackend.mutation`, `HqpBackend._hold_words`, which
   numbers the mutation in the same step: every word held is newer than it),
   answered at once (`starts`, the play gate asking nothing), and the newest one no
@@ -541,7 +543,10 @@ comes after the control port answers again — so neither can end the wait.
   a new one loads, so a tap carries the track it showed (`/jump`'s
   `track_id`) and plays it wherever the new queue holds it, from its start;
   a track the mutation takes away is refused in words, and the words before
-  stand. A Play asks again for the start the mutation owes — the replace's
+  stand. The same holds with nothing in flight, on every output: a sheet
+  not refreshed yet after a queue played from elsewhere taps the track it
+  showed, wherever the queue holds it now (`CanonicalQueue.slot_of`), and
+  one the queue no longer holds is refused in words. A Play asks again for the start the mutation owes — the replace's
   first track, the rebuild's track at its second — and that start goes,
   numbered as the Play: a Play during a new order's rebuild resumes the
   track that played, at its second, never HQPlayer's entry 1. Next and

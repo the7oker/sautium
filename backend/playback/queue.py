@@ -150,6 +150,18 @@ class CanonicalQueue:
                     return i + 1
             return None
 
+    def slot_of(self, index: int, track_id: Optional[str]) -> Optional[int]:
+        """The slot a tap on a queue sheet means: `index` while it holds the
+        track the sheet showed there (`track_id`), else the slot nearest it
+        that holds that track — the queue moved under a sheet not refreshed
+        yet (a replace, the radio, another device) — or None once the queue
+        no longer holds it. An entry with no track (None) names the slot."""
+        with self._lock:
+            if track_id is None:
+                return index if 1 <= index <= len(self._items) else None
+            slots = [s for s, it in enumerate(self._items, 1) if it.track_id == track_id]
+            return min(slots, key=lambda s: (abs(s - index), s)) if slots else None
+
     def refresh_proxy_items(self, token: str, *, provider: Optional[str],
                             excerpt: bool, duration_seconds: Optional[float]) -> bool:
         """Bring every slot streaming `token` up to date with what the proxy

@@ -884,6 +884,17 @@ implementation details live in the code, DB and git history.
   start whose track the queue does not hold is said with the refusal of the
   queue that did not commit. Lesson: what a mutation holds for a person is
   the person's, its outcome included.
+- **A tap names its track, whenever it is made** (2026-10-14). The sheet
+  sent the track a row showed only so that a mutation in flight could find
+  it; with none in flight the slot alone was played — a sheet not yet
+  refreshed after a queue was played from another device started that
+  queue's track at the tapped row — and a "play next" or a removal, which
+  move HQPlayer's entries under a slot, held no words: a tap during one
+  started the entry its slot had before the move. The jump route now plays
+  the track the row showed wherever the queue holds it, for every output,
+  refuses one the queue no longer holds, and a "play next" and a removal
+  hold a person's words as the other mutations do. Lesson: an index is a
+  name only for the list the reader saw.
 - **Stop-clear-add-select-play sequence** for `play_track`/`play_album`. Without
   explicit stop, HQPlayer occasionally started the wrong track from the
   existing queue.

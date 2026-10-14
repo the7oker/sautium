@@ -831,10 +831,9 @@ class PlaybackManager:
         needs no live device. A None/absent backend just skips the mirror —
         the user can queue tracks before any output is reachable and press
         play once it is (that press attaches/probes the output)."""
-        with self._mutation():
+        with self._output_mutation(lambda: self._active) as backend:
             if generation is not None and self.queue.generation != generation:
                 return None
-            backend = self._active
             if position == "next":
                 anchor = self._latest_status.get("track_index")
                 anchor = anchor if (isinstance(anchor, int)
@@ -870,11 +869,10 @@ class PlaybackManager:
     def remove(self, index: int, track_id: Optional[str] = None) -> bool:
         """`track_id`, when given, is a precondition: the slot must still
         hold that track, else nothing is removed and False comes back."""
-        with self._mutation():
+        with self._output_mutation(lambda: self._active) as backend:
             item = self.queue.item_at(index)
             if item is None or (track_id and item.track_id != track_id):
                 return False
-            backend = self._active
             ok = backend.queue_remove(index) if backend else True
             if ok:
                 self.queue.remove(index)
