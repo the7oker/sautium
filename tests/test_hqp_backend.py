@@ -7642,3 +7642,162 @@ def test_the_words_of_a_replace_that_does_not_commit_go_nowhere(fake, output, mo
     _settled()
     assert _start_sent(fake, n) == []
     assert [it.track_id for it in mgr.queue.snapshot()] == ["track-1", "track-2", "track-3"]
+
+
+# -- The intent clock: the order of the asks -------------------------------------
+#
+# An intent is numbered as it is asked and holds once its sequence has the
+# command lock; a new queue and a rebuild supersede from their ask and
+# withdraw that when the lock refuses them.
+
+
+def test_a_number_that_holds_late_lowers_no_newer_one():
+    """Two Plays asked in a row, the first's thread switched out between its
+    ask and the lock: the second holds first. The first, holding after it,
+    does not make the newer one unasked — a start made between the two stays
+    superseded."""
+    link = hl.HqpLink(("clock", 0), "127.0.0.1", 9)
+    first = link.reserve()
+    start = link.item("start", link.reserve())
+    second = link.reserve()
+    link.publish("transport", second)
+    link.publish("transport", first)
+    assert link.superseded(start) == "a newer request came first"
+
+
+def test_a_new_queue_the_lock_refuses_is_withdrawn():
+    """A new queue supersedes from its ask; withdrawn — the lock refused it —
+    it supersedes nothing: a start older than it goes again."""
+    link = hl.HqpLink(("clock", 0), "127.0.0.1", 9)
+    start = link.item("start", link.accept("transport"))
+    n = link.ask_early("queue")
+    assert link.superseded(start) == "another queue plays"
+    link.withdraw(n)
+    assert link.superseded(start) is None
+
+
+@pytest.mark.parametrize("edit", ["radio", "new order", "queue put together"])
+def test_a_queue_edit_refused_while_hqplayer_builds_supersedes_nothing(fake, output,
+                                                                      monkeypatch, edit):
+    """A DSP change stops HQPlayer for a build and owes a resume of the track
+    that played. The person starts a radio, drags the playing track (a new
+    order HQPlayer takes afresh) or puts a queue together while it builds:
+    refused at once, the queue as it was — and the change's resume goes all
+    the same once the build is done."""
+    from fastapi import HTTPException
+    mgr, b = output
+    player_router = _routes_on(monkeypatch, mgr)
+    fake.build("SetFilter", 2.0, answer="last", stops=True)
+    assert hb.change_dsp({"filter": 57, "filter1x": 57})["building"] is not None
+    asked = {"radio": lambda: mgr.clear_for_radio(lambda: None),
+             "new order": lambda: player_router.reorder(
+                 player_router.ReorderRequest(order=["track-2", "track-1", "track-3"])),
+             "queue put together": lambda: mgr.replace_queue(
+                 [_item(f"E:/Music/B/0{i}.flac", 10 + i) for i in range(1, 4)], play=False)}
+    n = len(fake.commands)
+    with pytest.raises((hl.Building, HTTPException)) as refused:
+        asked[edit]()
+    if isinstance(refused.value, HTTPException):
+        assert refused.value.status_code == 409
+    assert [it.track_id for it in mgr.queue.snapshot()] == ["track-1", "track-2", "track-3"]
+    # HQPlayer plays on while it builds, and stops once it is done
+    assert _wait(lambda: ("SelectTrack", {"index": "1"}) in _start_sent(fake, n), timeout=8), \
+        "the change's resume never went"
+    assert _wait(lambda: fake.state == int(PlaybackState.PLAYING) and fake.track == 1)
+
+
+def test_a_play_asked_before_a_new_order_leaves_the_order_its_resume(fake, output,
+                                                                     monkeypatch):
+    """HQPlayer answers a Pause slowly — the command lock held. The person
+    presses Play (it waits its turn), then drags the playing track down: a
+    new order HQPlayer takes afresh, asked after the Play and waiting behind
+    it. The Play is the older word: the new order's resume of the track
+    that played still goes, and HQPlayer plays on."""
+    mgr, b = output
+    player_router = _routes_on(monkeypatch, mgr)
+    fake.service["Pause"] = 1.5
+    pausing = threading.Thread(target=b.pause, daemon=True)
+    pausing.start()
+    assert _wait(lambda: any(c == "Pause" for _, c in fake.arrivals), timeout=3)
+    playing = threading.Thread(target=b.play, daemon=True)
+    playing.start()
+    assert _wait(lambda: len(_link().lock._waiting) == 1, timeout=3)      # its turn
+    reordering = threading.Thread(target=lambda: player_router.reorder(
+        player_router.ReorderRequest(order=["track-2", "track-1", "track-3"])), daemon=True)
+    reordering.start()
+    assert _wait(lambda: len(_link().lock._waiting) == 2, timeout=3)      # behind the Play
+    pausing.join(5)
+    playing.join(5)
+    reordering.join(15)
+    _settled()
+    assert fake.playlist == [f"file:///E:/Music/A/0{i}.flac" for i in (2, 1, 3)]
+    assert fake.state == int(PlaybackState.PLAYING) and fake.track == 2, (
+        fake.state, fake.track, _start_sent(fake))
+
+
+def test_a_tap_while_the_reconverge_makes_its_uris_plays_the_tapped_track(fake, output,
+                                                                        monkeypatch):
+    """HQPlayer back stopped with an empty playlist: the reconverge gives it
+    the queue afresh, making each slot's URI first (a cut, a transcode:
+    seconds). A tap made then is held and answered with what it starts — and
+    that track plays: the rebuild was numbered before it."""
+    mgr, b = output
+    player_router = _routes_on(monkeypatch, mgr)
+    _stopped(mgr, fake)
+    with fake._lock:
+        fake.playlist, fake.track = [], 0                 # restarted: nothing held
+    entered, go = threading.Event(), threading.Event()
+    uri_for = b._uri_for
+
+    def slow(item):
+        if threading.current_thread().name == "hqp-reconverge" and not entered.is_set():
+            entered.set()
+            go.wait(10)
+        return uri_for(item)
+    monkeypatch.setattr(b, "_uri_for", slow)
+    b.lose_mirror("HQPlayer came back with a different playlist (restarted?)")
+    assert entered.wait(10), "the reconverge never made its URIs"
+    tapped = _quick(lambda: player_router.jump(
+        player_router.JumpRequest(index=3, track_id="track-3")))
+    go.set()
+    assert _wait(lambda: not any(t.name == "hqp-reconverge" for t in threading.enumerate()))
+    _settled()
+    assert fake.playlist == [f"file:///E:/Music/A/0{i}.flac" for i in (1, 2, 3)]
+    assert fake.state == int(PlaybackState.PLAYING) and fake.track == 3, (
+        tapped, fake.state, fake.track, _start_sent(fake))
+
+
+@pytest.mark.parametrize("word", ["tap", "pause"])
+def test_a_word_as_the_replace_hands_over_is_newer_than_it(fake, output, monkeypatch, word):
+    """A replace that plays has begun holding words and is about to hand
+    HQPlayer the new queue (its thread switched out right there): a word
+    made then is newer than the replace — a tap plays the tapped track, a
+    Pause leaves HQPlayer stopped instead of the album starting."""
+    mgr, b = output
+    player_router = _routes_on(monkeypatch, mgr)
+    entered, go = threading.Event(), threading.Event()
+    afresh = b._afresh
+
+    def switched_out(uris, intent, **kw):
+        if intent == "queue" and not entered.is_set():
+            entered.set()
+            go.wait(10)
+        return afresh(uris, intent, **kw)
+    monkeypatch.setattr(b, "_afresh", switched_out)
+    n = len(fake.commands)
+    loading = _loading(mgr, _new_with_3_at_2(), play=True)
+    assert entered.wait(10) and b._inflight is not None
+    if word == "tap":
+        said = _quick(lambda: player_router.jump(
+            player_router.JumpRequest(index=3, track_id="track-3")))
+        assert said["starts"] == {"index": 2, "track_id": "track-3", "position": 0}, said
+    else:
+        assert _quick(b.pause)
+    go.set()
+    loading.join(10)
+    _settled()
+    if word == "tap":
+        assert fake.state == int(PlaybackState.PLAYING) and fake.track == 2, (
+            fake.state, fake.track, _start_sent(fake, n))
+    else:
+        assert fake.state == int(PlaybackState.STOPPED), _start_sent(fake, n)

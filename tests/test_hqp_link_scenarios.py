@@ -42,6 +42,12 @@ statuses the output pushed. The node stop ends every run.
      HQPlayer's library) or one whose file it refused, and nothing else.
  14. A tail mirror plays the queue's tracks from the entry it reads to the
      end.
+ 15. The order of intents is the order of the asks: an intent is numbered
+     as its sequence is asked — never once it holds the command lock — and
+     holds from the moment it has the lock; a new queue and a rebuild hold
+     from their ask, withdrawn if the lock refuses them (I3 reads intents
+     so). A sequence's ask and its taking the lock are spread apart at
+     random.
 
 The Stop a switch away owes (6) is also looked for: it went, or a newer
 attach superseded it, or HQPlayer stayed silent past the limit, went away,
@@ -279,13 +285,54 @@ class World:
         for f in (self.a, self.b):
             f.on_wire = on_wire
 
-        accept = hl.HqpLink.accept
+        # The intent clock: when a number holds (published), pends (a new
+        # queue's or a rebuild's, from its ask) or is withdrawn — a withdrawal
+        # logged before it takes effect, every other change after, so I3
+        # never reads a supersession the link did not apply
+        publish, ask_early, withdraw = (hl.HqpLink.publish, hl.HqpLink.ask_early,
+                                        hl.HqpLink.withdraw)
+        asked: dict = {}
 
-        def accepted(link, kind):
-            n = accept(link, kind)
+        def published(link, kind, n):
+            publish(link, kind, n)
+            # I15: a sequence's number was taken as it was asked — before it
+            # asked for the command lock — never once it holds it
+            before = asked.pop(threading.get_ident(), None)
+            if before is not None and n > before:
+                w.violate(f"I15: {kind} #{n} numbered once it held the command lock, "
+                          f"not as it was asked (the clock stood at {before})")
             w.rec("accept", link=lid(link), intent=kind, n=n)
+        mp.setattr(hl.HqpLink, "publish", published)
+
+        def pended(link, kind):
+            n = ask_early(link, kind)
+            w.rec("pend", link=lid(link), intent=kind, n=n)
             return n
-        mp.setattr(hl.HqpLink, "accept", accepted)
+        mp.setattr(hl.HqpLink, "ask_early", pended)
+
+        def withdrawn(link, n):
+            w.rec("withdraw", link=lid(link), n=n)
+            withdraw(link, n)
+        mp.setattr(hl.HqpLink, "withdraw", withdrawn)
+
+        # A sequence's ask and its taking the command lock, spread apart at
+        # random: the clock is read as it asks for the lock
+        enter, leave = hl._CommandLock.__enter__, hl._CommandLock.__exit__
+        spread = random.Random(self.seed)
+
+        def entering(lock):
+            if spread.random() < 0.25:
+                time.sleep(spread.uniform(0.0, 0.08))
+            before = lock._link._clock
+            out = enter(lock)
+            asked[threading.get_ident()] = before
+            return out
+
+        def leaving(lock, *exc):
+            asked.pop(threading.get_ident(), None)
+            return leave(lock, *exc)
+        mp.setattr(hl._CommandLock, "__enter__", entering)
+        mp.setattr(hl._CommandLock, "__exit__", leaving)
 
         make = hl.HqpLink.item
 
@@ -1151,19 +1198,29 @@ class World:
 
     def _superseded(self, log: list) -> None:
         """I3 and I8: no request serves an item a newer intent of a kind that
-        supersedes it was accepted before it began, nor one made for a queue
-        that was replaced since."""
+        supersedes it held before it began — published, or a new queue's or
+        a rebuild's pending from its ask and not withdrawn — nor one made for
+        a queue that was replaced since."""
         latest: dict = {}
+        pending: dict = {}
         newer_by: dict = {}
         for e in log:
             d = e.data
             if e.kind == "accept":
                 key = (d["link"], d["intent"])
                 latest[key] = max(latest.get(key, 0), d["n"])
+                pending.pop((d["link"], d["n"]), None)
+            elif e.kind == "pend":
+                pending[(d["link"], d["n"])] = d["intent"]
+            elif e.kind == "withdraw":
+                pending.pop((d["link"], d["n"]), None)
             elif e.kind == "request" and d["item"]:
                 kind, n = d["item"].split("#")
-                newer_by[e.seq] = [k for k in hl.SUPERSEDED_BY[kind]
-                                   if latest.get((d["link"], k), 0) > int(n)]
+                by = hl.SUPERSEDED_BY[kind]
+                newer_by[e.seq] = (
+                    [k for k in by if latest.get((d["link"], k), 0) > int(n)]
+                    + [k for (link, m), k in pending.items()
+                       if link == d["link"] and m > int(n) and k in by])
             elif e.kind == "send" and d["begun"] in newer_by:
                 begun = log[d["begun"]].data
                 if newer_by[d["begun"]]:

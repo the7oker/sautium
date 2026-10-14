@@ -26,11 +26,16 @@ A link owns:
   * its build watch (BuildWatch): HQPlayer answers nothing while it builds a
     setting, and the late answer of the command that set the build off is
     the build's end;
-  * the intent clock: what a person or this node asked of it, in order. An
-    item — a start left for later, a resume, the rest of a DSP change, a
-    Stop an output switch owed — is never sent once a newer intent of a kind
-    that supersedes it was accepted (SUPERSEDED_BY), checked right before
-    the bytes go, under the lock an intent is accepted under;
+  * the intent clock: what a person or this node asked of it, in order. The
+    order of intents is the order of the asks — each is numbered as it is
+    asked — and an intent supersedes only from the moment its command
+    sequence holds the command lock: one refused as busy takes none and
+    supersedes nothing. A new queue and a rebuild supersede from their ask
+    (a play press's hand-over is cut short at its next add) and withdraw
+    that if the lock refuses them. An item — a start left for later, a
+    resume, the rest of a DSP change, a Stop an output switch owed — is
+    never sent once a newer intent of a kind that supersedes it holds
+    (SUPERSEDED_BY), checked right before the bytes go;
   * the Stop a person's switch away owes it (the late Stop): sent at once,
     or once HQPlayer answers through a build or a silence.
 
@@ -575,7 +580,10 @@ class HqpLink:
         self.teardown_due: Optional[str] = None
         self._local = threading.local()
         self._clock = 0
+        # The newest number of each kind that holds, and the early ones still
+        # asking for the command lock: number → kind
         self._latest: Dict[str, int] = {}
+        self._pending: Dict[int, str] = {}
         self._unreachable_until = 0.0
 
     def __repr__(self) -> str:
@@ -584,14 +592,47 @@ class HqpLink:
     # -- the intent clock -------------------------------------------------------
 
     def accept(self, kind: str) -> int:
-        """An intent this link accepts takes the next number of its clock;
-        background work waiting a build out looks again whether it is
-        still wanted."""
+        """An intent this link takes at once — a word a play press or a
+        queue mutation holds, the press itself, a switch, an attach — takes
+        the next number of its clock and holds from now (publish)."""
+        n = self.reserve()
+        self.publish(kind, n)
+        return n
+
+    def reserve(self) -> int:
+        """The clock's next number, taken as a command sequence is asked —
+        its place in the order of the asks. It supersedes nothing until it
+        holds (publish)."""
         with self._state_lock:
             self._clock += 1
-            self._latest[kind] = n = self._clock
+            return self._clock
+
+    def publish(self, kind: str, n: int) -> None:
+        """The intent numbered `n` holds from now; background work waiting
+        a build out looks again whether it is still wanted."""
+        with self._state_lock:
+            self._pending.pop(n, None)
+            self._latest[kind] = max(self._latest.get(kind, 0), n)
+        self.build.wake_waiters()
+
+    def ask_early(self, kind: str) -> int:
+        """A new queue's or a rebuild's number, as it is asked — before it
+        waits for the command lock: it supersedes from now (a play press's
+        hand-over is dropped at its next add instead of being waited out),
+        published once its sequence holds the lock, withdrawn if the lock
+        refuses it (command)."""
+        with self._state_lock:
+            self._clock += 1
+            n = self._clock
+            self._pending[n] = kind
         self.build.wake_waiters()
         return n
+
+    def withdraw(self, n: int) -> None:
+        """An early number whose sequence the command lock refused: it
+        supersedes nothing from now."""
+        with self._state_lock:
+            self._pending.pop(n, None)
 
     def item(self, kind: str, n: int, *, queue: Any = None,
              generation: Optional[int] = None) -> Item:
@@ -613,8 +654,12 @@ class HqpLink:
 
     def _superseded(self, item: Item) -> Optional[str]:
         """superseded, under the state lock."""
-        for kind in SUPERSEDED_BY[item.kind]:
+        by = SUPERSEDED_BY[item.kind]
+        for kind in by:
             if self._latest.get(kind, 0) > item.n:
+                return _WHY[kind]
+        for n, kind in self._pending.items():
+            if n > item.n and kind in by:
                 return _WHY[kind]
         if item.generation is not None and item.queue.generation != item.generation:
             return _WHY["queue"]
@@ -939,31 +984,39 @@ class HqpLink:
 
     @contextmanager
     def command(self, intent: Optional[str] = None, *, item: Any = None,
-                early: bool = False):
+                number: Optional[int] = None):
         """A command sequence: the command lock (refused while HQPlayer
         builds — Building — or answers nothing past a short silence —
         NotAnswering), each of its requests taking the connection for
-        itself. `intent`, a person's or this node's, is accepted once the
-        lock is ours and takes the clock's next number (yielded) — `early`,
-        as it is asked, before it waits for the lock: a new queue is the
-        newest word at once, and what a play press still hands over is
-        dropped at its next send instead of being waited out. `item` is what
-        the sequence serves — an Item made earlier (a start left for later, a
-        resume, an owed Stop), or a kind, made here for `intent`: each of its
-        requests is dropped once a newer intent supersedes it (Dropped)."""
+        itself. `intent`, a person's or this node's, takes the clock's next
+        number as it is asked, before it waits for the lock, and holds once
+        the lock is ours (yielded): its place is the order of the asks, and
+        a sequence the lock refuses supersedes nothing. `number`: one taken
+        earlier for it — a new queue's or a rebuild's (ask_early), which
+        supersedes from its ask and is withdrawn when the lock refuses it.
+        `item` is what the sequence serves — an Item made earlier (a start
+        left for later, a resume, an owed Stop), or a kind, made here for
+        `intent`: each of its requests is dropped once a newer intent
+        supersedes it (Dropped)."""
         outer = getattr(self._local, "item", None)
         if isinstance(item, Item):
             self._local.item = item
-        n = self.accept(intent) if early and intent is not None else None
+        n = number if number is not None else self.reserve() if intent is not None else None
+        held = False
         try:
             with self.lock, self._scope():
-                if n is None:
-                    n = self.accept(intent) if intent is not None else getattr(item, "n", None)
+                held = True
+                if intent is not None:
+                    self.publish(intent, n)
+                else:
+                    n = getattr(item, "n", None)
                 if isinstance(item, str):
                     self._local.item = self.item(item, n)
                 yield n
         finally:
             self._local.item = outer
+            if not held and number is not None:
+                self.withdraw(number)
 
     def ask_raw(self, xml: str, wait: float) -> bytes:
         """One raw request — the library's LibraryGet, its hash, GetInfo for a

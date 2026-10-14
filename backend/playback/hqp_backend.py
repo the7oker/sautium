@@ -1596,14 +1596,17 @@ class HqpBackend(PlayerBackend):
         refuses is a gap until the next full mirror (_took). The spot, when
         none was kept, is `at` — the slot it stood on — at `position`. Under
         the queue lock. Returns whether HQPlayer holds the queue again. The
-        play intents made meanwhile are held, counted from `at` (_hold_words)."""
+        play intents made from its first step on — the URIs it makes (a cut,
+        a transcode) included — are held, counted from `at`, and newer than
+        it (_hold_words)."""
         self._ways_in()
         self._link.refusals = []
         layout = self._layout()
-        self._hold_words(layout.items, stops=True,
-                         base=(at, position) if at is not None else None, owes=False)
+        n = self._hold_words(layout.items, stops=True,
+                             base=(at, position) if at is not None else None, owes=False,
+                             intent="rebuild")
         taken, unsent, _ = self._afresh([self._uri_for(it) for it in layout.handed], "rebuild",
-                                        early=True)
+                                        number=n)
         if not self._took(layout.handed, taken, unsent, "of the queue"):
             return False
         self._in_step()
@@ -2175,14 +2178,19 @@ class HqpBackend(PlayerBackend):
                             "committed go with it")
 
     def _hold_words(self, items: list, *, stops: bool, base: Optional[tuple],
-                    owes: bool) -> None:
+                    owes: bool, intent: Optional[str] = None) -> Optional[int]:
         """A hand-over of a queue mutation (mutation) begins: from now until
         the mutation ends, a person's play intents are held, not sent
         (_InFlight). Outside a mutation — an attach taking the queue — they
-        act as they come."""
-        if getattr(self._local, "mutating", False):
-            with self._press_lock:
+        act as they come. `intent` — a new queue, a rebuild — is numbered in
+        the same step (HqpLink.ask_early): every word held is newer than the
+        mutation. Returns its number, for the sequence that hands over."""
+        mutating = getattr(self._local, "mutating", False)
+        with self._press_lock:
+            n = self._link.ask_early(intent) if intent is not None else None
+            if mutating:
                 self._inflight = _InFlight(items, stops=stops, base=base, owes=owes)
+        return n
 
     def _carry_out(self, words: _InFlight) -> None:
         """The words held while this thread's mutation handed HQPlayer its
@@ -2310,13 +2318,13 @@ class HqpBackend(PlayerBackend):
             raise Dropped("HQPlayer was detached from playback")
 
     def _cmd(self, func, intent: Optional[str] = None, *, item: Any = None,
-             early: bool = False):
+             number: Optional[int] = None):
         """One command sequence of this backend: `func(client)` under the
         link's command lock, each request taking the connection for itself
         (HqpLink.command) —
-        `intent` the person's or this node's (`early`: numbered as it is
-        asked), `item` what it serves."""
-        with self._link.command(intent, item=item, early=early):
+        `intent` the person's or this node's (`number`: the early one a
+        mutation took as it began holding words), `item` what it serves."""
+        with self._link.command(intent, item=item, number=number):
             self._check_attached()
             return func(self._link.client)
 
@@ -3545,9 +3553,10 @@ class HqpBackend(PlayerBackend):
         onward = {id(it) for it in from_target}
         first = next((i for i, it in enumerate(layout.handed, 1) if id(it) in onward), 1)
         att = self._watch("rebuild", slot=first, uris=uris) if resume else None
-        self._hold_words(items, stops=True, base=(target, position), owes=resume)
+        n = self._hold_words(items, stops=True, base=(target, position), owes=resume,
+                             intent="rebuild")
         with self._steps(att):
-            taken, unsent, n = self._afresh(uris, "rebuild", early=True)
+            taken, unsent, n = self._afresh(uris, "rebuild", number=n)
             took = {id(it) for it, t in zip(layout.handed, taken) if t}
             begin = next((it for it in from_target if id(it) in took), None)
             at = position if begin is target else 0
@@ -3598,10 +3607,11 @@ class HqpBackend(PlayerBackend):
         uris = [self._uri_for(it) for it in layout.handed]
         att = (self._watch("replace", slot=1, uris=uris, items=list(layout.handed))
                if play and uris else None)
-        self._hold_words(layout.items, stops=True,
-                         base=(layout.handed[0], 0) if layout.handed else None, owes=play)
+        n = self._hold_words(layout.items, stops=True,
+                             base=(layout.handed[0], 0) if layout.handed else None, owes=play,
+                             intent="queue")
         with self._steps(att):
-            taken, unsent, n = self._afresh(uris, "queue", early=True)
+            taken, unsent, n = self._afresh(uris, "queue", number=n)
             if uris and not any(taken):
                 if unsent < len(uris):
                     self.lose_mirror("HQPlayer took nothing of a new queue before it fell silent")
@@ -3621,12 +3631,13 @@ class HqpBackend(PlayerBackend):
         self.poke()
         return accepted
 
-    def _afresh(self, uris: list, intent: str, *, early: bool = False) -> tuple:
+    def _afresh(self, uris: list, intent: str, *, number: Optional[int] = None) -> tuple:
         """HQPlayer's playlist taken afresh, as `intent` (a new queue, a
-        rebuild): stopped, cleared, `uris` added — `early`: numbered as it is
-        asked, before it waits for the command lock (HqpLink.command). Returns
-        (taken, unsent) as _add_uris_with_retry does, and the intent's number."""
-        with self._link.command(intent, early=early) as n:
+        rebuild): stopped, cleared, `uris` added — `number`: the one the
+        mutation took as it began holding words (_hold_words), superseding
+        from then. Returns (taken, unsent) as _add_uris_with_retry does, and
+        the intent's number."""
+        with self._link.command(intent, number=number) as n:
             self._check_attached()
             self._given = set(uris)
             _hqp_safe(self._link, lambda h: h.stop(), "Stop")
@@ -3862,10 +3873,10 @@ class HqpBackend(PlayerBackend):
             return took, unanswered, now, playing
         last = self._last_tick
         seed = self._queue.item_at(last.queue_index) if last is not None else None
-        self._hold_words([seed] if seed is not None else [], stops=False,
-                         base=(seed, int(last.position)) if seed is not None else None,
-                         owes=False)
-        cleared, unanswered, now, playing = self._cmd(clear, "queue", early=True)
+        n = self._hold_words([seed] if seed is not None else [], stops=False,
+                             base=(seed, int(last.position)) if seed is not None else None,
+                             owes=False, intent="queue")
+        cleared, unanswered, now, playing = self._cmd(clear, "queue", number=n)
         if unanswered:
             # HQPlayer clears once its silence is over: the radio goes on, and
             # HQPlayer gets the queue back once it answers again

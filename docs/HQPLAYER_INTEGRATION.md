@@ -267,12 +267,16 @@ same silence. What a request came to (its refusal, its silence) is the
 thread's that sent it, read in the same call. It also owns the command
 lock (one command sequence at a time, in the order they came; a person's
 command is refused while HQPlayer builds or answers nothing past a short
-silence's wait), the build watch (below), the intent clock — every intent it
-accepts takes the next number, and an item left for later (a start that met
-a build, a play press's starts and its hand-over, the resume after a DSP
-change, the knobs after a build, a benchmark run's owed put-back, the Stop a
-switch away owes) is dropped at its send once a newer intent of a kind that
-supersedes it was accepted (`SUPERSEDED_BY`) or its queue was replaced — and
+silence's wait), the build watch (below), the intent clock — the order of
+intents is the order of the asks (since 2026-10-14): each takes the next
+number as it is asked and holds once its command sequence has the command
+lock, so one refused as busy supersedes nothing; a new queue and a rebuild
+hold from their ask — a play press's hand-over is cut short at its next add —
+and are withdrawn if the lock then refuses them. An item left for later (a
+start that met a build, a play press's starts and its hand-over, the resume
+after a DSP change, the knobs after a build, a benchmark run's owed put-back,
+the Stop a switch away owes) is dropped at its send once a newer intent of a
+kind that supersedes it holds (`SUPERSEDED_BY`) or its queue was replaced — and
 the Stop every switch away owes (the late Stop, below). Picking another HQPlayer retires the link of the one picked
 before — no other: a library read of a third box goes on — the Stop it owes
 still goes (only while it plays or pauses an entry of ours), everything
@@ -510,7 +514,9 @@ comes after the control port answers again — so neither can end the wait.
     radio) is the newest word as it is asked: what the hand-over still had
     to send is dropped, a press it overtook takes no more words — a Play, a
     tap or a DSP change's resume made then is one of its own — and hands
-    HQPlayer nothing the reconverge should wait for. While the
+    HQPlayer nothing the reconverge should wait for. One the command lock
+    refuses (HQPlayer building, not answering) withdraws its number: it
+    supersedes nothing, and a DSP change's resume still goes. While the
     press drives HQPlayer the play gate asks it nothing (a question would
     wait behind its Stop and adds). A queue edit meanwhile is the queue's: an
     append follows behind what HQPlayer took (in step); anything else leaves
@@ -522,8 +528,9 @@ comes after the control port answers again — so neither can end the wait.
   order, a re-bind's or the reconverge's rebuild and the radio's clear hand
   HQPlayer a playlist under the queue lock, and commit the queue only after
   it: the person's play intents made meanwhile are held as a play press
-  holds them (`PlayerBackend.mutation`, `HqpBackend._hold_words`), answered
-  at once (`starts`, the play gate asking nothing), and the newest one no
+  holds them (`PlayerBackend.mutation`, `HqpBackend._hold_words`, which
+  numbers the mutation in the same step: every word held is newer than it),
+  answered at once (`starts`, the play gate asking nothing), and the newest one no
   newer intent superseded is carried out once the queue stands
   (`queue_start`). A word names a track, never a slot, translated against
   what HQPlayer is handed — the queue sheet still shows the old queue while

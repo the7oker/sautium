@@ -853,6 +853,22 @@ implementation details live in the code, DB and git history.
   (nothing armed), says what never got quiet, and the runner's own judgments
   have tests. Lesson: before an "eventually" may fail, every path to it the
   design has must have had its turn.
+- **The order of intents is the order of the asks** (2026-10-14). The
+  intent clock numbered a new queue and a rebuild as they were asked and
+  everything else once it held the command lock. A queue edit refused with
+  409 while HQPlayer built had still superseded — it cancelled a DSP
+  change's resume and HQPlayer stayed stopped; a Play asked before a new
+  order but waiting its turn behind a slow command was numbered after it and
+  cancelled the order's resume; and a replace or a rebuild was numbered
+  after it began holding words, so a word between — the reconverge cutting
+  a CUE slice for its URIs — was older than the mutation and dropped though
+  the route had named what it starts. Every intent is now numbered as it is
+  asked and holds once its sequence has the lock; a new queue and a rebuild
+  hold from their ask and are withdrawn if the lock refuses them; a mutation
+  takes its number in the step that begins holding words. The scenario
+  runner spreads a sequence's ask and its taking the lock apart at random
+  and checks that no number is taken at the lock. Lesson: one clock read at
+  two moments is two clocks.
 - **Stop-clear-add-select-play sequence** for `play_track`/`play_album`. Without
   explicit stop, HQPlayer occasionally started the wrong track from the
   existing queue.
