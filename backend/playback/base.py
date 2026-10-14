@@ -153,9 +153,10 @@ class PlayerBackend(ABC):
 
     def pressing(self) -> Optional[dict]:
         """While a play intent goes on behind its answer — HQPlayer taking
-        the queue again — the track it will start ({"index", "track_id",
-        "position"}), or {} when it will start none; None otherwise. Default:
-        none — every other output starts before it answers."""
+        the queue again, or a queue mutation it is held for — the track it
+        will start ({"index", "track_id", "position"}), or {} when it will
+        start none; None otherwise. Default: none — every other output starts
+        before it answers."""
         return None
 
     @abstractmethod

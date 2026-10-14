@@ -4564,9 +4564,9 @@ def test_two_files_refused_of_eighty_at_a_replace_are_gaps_and_hqplayer_holds_78
 
 def test_a_replace_refused_whole_changes_nothing_and_play_gives_the_queue_back(fake, output):
     """A replace HQPlayer refused whole commits nothing — the
-    queue, the resume spot and history as they were — and since its Stop and
-    clear went the mirror is lost: the next Play gives HQPlayer the queue as
-    it was, starting at the spot."""
+    queue, the resume spot and history as they were — and since its Stop
+    went (a file HQPlayer refuses clears nothing) the mirror is lost: the
+    next Play gives HQPlayer the queue as it was, starting at the spot."""
     mgr, b = output
     b.stop()
     _stopped(mgr, fake)
@@ -6328,8 +6328,8 @@ def test_a_press_behind_a_reconverge_hands_the_queue_over_once(fake, output):
 
 def test_a_loss_after_the_canarys_check_is_not_undone(fake, output, monkeypatch):
     """The canary's read and its verdict are one compare-and-set: a loss
-    landing while it compares (a replace HQPlayer refused whole, its Stop and
-    clear gone) is not undone by its stale "in step" — the next Play hands
+    landing while it compares (a replace HQPlayer refused whole, its Stop
+    gone) is not undone by its stale "in step" — the next Play hands
     HQPlayer the queue."""
     mgr, b = output
     armed = threading.Event()
@@ -6899,10 +6899,10 @@ def test_a_pause_after_a_radio_overtook_a_pending_press_pauses(fake, output):
 def test_a_play_during_a_reorders_rebuild_leaves_no_spot_behind_what_plays(
         fake, output, monkeypatch):
     """Track 1 plays at 0:42; a new order needs a rebuild (track 1 moves);
-    the person presses Play while HQPlayer takes the new order: a start
-    taken, it spends the spot — the rebuild's own start, dropped by it, puts
-    none back under what plays, and a later Pause and Play only pause and
-    resume."""
+    the person presses Play while HQPlayer takes the new order: held, it
+    asks for the rebuild's own start, sent as the Play's — a start taken
+    spends the spot, none is put back under what plays, and a later Pause
+    and Play only pause and resume."""
     mgr, b = output
     player_router = _routes_on(monkeypatch, mgr)
     fake.service["PlaylistAdd"] = 0.4

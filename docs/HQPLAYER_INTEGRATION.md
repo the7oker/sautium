@@ -461,7 +461,8 @@ comes after the control port answers again — so neither can end the wait.
     them out once its silence is over: the slot leaves the queue, the radio
     goes on), when a replace was cut short by a silence (the queue takes
     every track of it), when a radio began while HQPlayer was stopped (its
-    clear keeps no entry of the seed the queue keeps), or when it came
+    clear keeps no entry of the seed the queue keeps) or had moved on from
+    the slot the queue keeps since its last status, or when it came
     back restarted — through a silence: from then on appends, inserts,
     removals and new orders are the queue's alone, and once HQPlayer answers
     again it gets the queue back, once per loss (`HqpBackend._reconverge`):
@@ -482,8 +483,10 @@ comes after the control port answers again — so neither can end the wait.
     piece before it; what touches the part before it is the queue's alone.
     An edit behind it while HQPlayer reads no slot of the queue's, or a file
     queued at more than one slot it holds, lands on no entry by a guess: it
-    is the queue's, the mirror lost. A radio begun on it leaves it in step —
-    the clear keeps the entry HQPlayer reads, the queue the slot it reads.
+    is the queue's, the mirror lost. A radio begun on it while HQPlayer
+    reads the slot the queue keeps leaves it in step — the clear keeps the
+    entry HQPlayer reads, the queue the slot it reads; begun once HQPlayer
+    moved on from that slot, it loses it.
   - **Drifted** by an edit made outside this node or a mirror step HQPlayer
     did not take: never reconciled on its own, and never edited by the
     queue's places — a remove, a reorder, a "play next" are the queue's
@@ -503,11 +506,12 @@ comes after the control port answers again — so neither can end the wait.
     through the hand-over: no route waits for it. Every play intent while it
     runs is a start of its own, numbered as it comes, and at its end the
     newest one no newer intent superseded goes: a Play starts the newest
-    target again, a tap its track, Next and Previous count from the newest
-    target; the second applies only to the press's own spot, every other
-    target starts at 0 s. A Pause or a Stop drops the start and the
-    hand-over still completes — HQPlayer stopped at the target, the next
-    Play starting there without one; a press that found the playlist the
+    target again at the newest start's second (the press's own spot's, or a
+    Seek's made meanwhile), a tap its track, Next and Previous count from
+    the newest target — those three from 0 s. A Pause or a Stop drops the
+    start and the hand-over still completes — HQPlayer stopped at the
+    target, the next Play starting there without one; a press that found
+    the playlist the
     queue's again (a reconverge got there first) hands nothing over and
     stops HQPlayer for a Pause or a Stop made meanwhile. A Seek decides
     nothing about playing: it changes the second of the newest word — the
@@ -619,8 +623,9 @@ comes after the control port answers again — so neither can end the wait.
   fails commits nothing, and HQPlayer, its start never sent, gets the queue
   it lost back. The radio start rotates under HQPlayer's command hold,
   before its PlaylistClear: busy or lent, refused before either; a rotation
-  that fails clears nothing; a clear HQPlayer does not take leaves the queue
-  as it is and the radio follows it, history rotated.
+  that fails clears nothing; a clear HQPlayer refuses leaves the queue as it
+  is and the radio follows it, history rotated (one it leaves unanswered is
+  the queue's: the radio goes on, the mirror lost).
 - **Embedded answers through its builds**, saying it plays with nothing out
   yet (`hqp_benchmark._building`, 25–70 s on a Pi 5): the poller reports that
   as a build too, and refuses nothing — there is no silence to queue into.

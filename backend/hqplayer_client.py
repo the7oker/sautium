@@ -121,9 +121,9 @@ def _lookup(host: str, port: int, timeout: float,
             wait: Callable[[socket.socket, int, Optional[float]], str]) -> str:
     """`host`'s IPv4 address. getaddrinfo can be neither woken nor bounded —
     a .local name of a box switched off takes the resolver seconds — so it
-    runs on a helper thread, and `wait` watches the helper's end of a
-    socketpair: Interrupted when it is woken, TimeoutError past `timeout`.
-    The helper finishes on its own, and closes its end itself."""
+    runs on a helper thread, and `wait` watches this end of a socketpair
+    the helper writes to: Interrupted when it is woken, TimeoutError past
+    `timeout`. The helper finishes on its own, and closes its end itself."""
     mine, theirs = socket.socketpair()
     found: dict = {}
 

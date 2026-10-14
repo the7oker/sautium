@@ -1424,7 +1424,7 @@ def _transport(intent: bool, command: str, *args) -> dict:
 
 def _starting(b, answer: dict) -> dict:
     """`answer`, with the track a play press will start (PlayerBackend.pressing)
-    while one runs."""
+    while one runs — or a queue mutation will, once it stands."""
     press = b.pressing()
     return answer if press is None else {**answer, "starts": press or None}
 

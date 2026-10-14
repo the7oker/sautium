@@ -133,8 +133,9 @@ class PlaybackManager:
         the mutation lock (a queue replace still adding its tracks finishes
         first) and the ensure lock (a play intent attaching finishes first),
         and claims the output under the active lock, where activate() checks
-        it — the detach itself makes the backend refuse what is already in
-        flight (HqpBackend.shutdown)."""
+        it. The link is lent before the detach: what the backend still sends
+        is refused at its next request (HqpLink.lend), and the detach makes it
+        refuse a sequence begun later (HqpBackend.shutdown)."""
         with self._mutate_lock, self._ensure_lock:
             with self._active_lock:
                 self._refuse_if_held()

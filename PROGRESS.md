@@ -717,10 +717,11 @@ implementation details live in the code, DB and git history.
   HQPlayer it drives after an unanswered probe, and a benchmark run's own
   hold. The first closed an owed put-back as left to the owner, HQPlayer on
   the run's test settings with its volume at the bottom of the range. Only a
-  person's release of the output says it now, and a new run takes a
-  put-back still owed before it reads what it found. A put-back a person's
-  change did supersede stays superseded — their change wins, and the volume
-  is never raised after it — and is no longer a line in the run's record
+  person's word says it now — their release of the output, or another
+  HQPlayer picked — and a new run takes a put-back still owed before it
+  reads what it found. A put-back a person's change did supersede stays
+  superseded — their change wins, and the volume is never raised after it
+  — and is no longer a line in the run's record
   alone: one notice, in the notices channel and on the HQPlayer screen,
   names each setting still at the run's test value (now → before the run)
   and the volume left to raise; it ends once each of them changed, or a new
@@ -739,9 +740,10 @@ implementation details live in the code, DB and git history.
   series found the gaps commit's own regression: a mirror batch HQPlayer
   refused whole made every slot a gap, and over its empty playlist the
   canary then read "the queue without its gaps" — in step — so Play sent a
-  bare Play to nothing and every tap was refused, until a new queue. A gap
-  is now only a file refused while HQPlayer took others of its batch, and
-  the refusals are the HQPlayer's (its link's), not one attachment's: a
+  bare Play to nothing and every tap was refused, until a new queue. A
+  refused file is now a gap only while HQPlayer took others of its batch
+  (beside a slot it cannot open at all), and the refusals are the
+  HQPlayer's (its link's), not one attachment's: a
   backend attached again read a refused gap as drift and rebuilt on the
   next Next. A "play next" goes after the last entry HQPlayer holds at or
   before its anchor — a spot on a gap, a run's piece HQPlayer does not hold,
@@ -817,18 +819,21 @@ implementation details live in the code, DB and git history.
   the database failing a read or a write of it costs the notice, never the
   poll. Lesson: a decision a person made is state — kept only in memory, it
   is undone by the next restart.
-- **A wait the node can end is every wait** (2026-10-13). Three waits still
-  escaped the wake channel: the meter's connect, which a page's stop ended
-  for good even when the page turned the meter on again before it was made
-  (and a stop's wake-up that outlived it closed the stream it then opened);
-  a request that held the connection outside a wait when its link closed,
-  whose socket stayed open; and the connect's name lookup, which nothing
-  could wake or bound — a `.local` HQPlayer switched off held the node stop
-  for seconds. The lookup now runs on a helper the same wait watches, a
-  closed link's holder closes its socket as it lets go, and the meter's
-  newest wish decides whether a connect that was stopped connects again.
-  Lesson: a wake-up is about a moment — spend it when the moment has passed,
-  or it ends the next one.
+- **Every wait of a connect is one the node can end** (2026-10-13). Three
+  waits still escaped the wake channel: the meter's connect, which a page's
+  stop ended for good even when the page turned the meter on again before
+  it was made (and a stop's wake-up that outlived it closed the stream it
+  then opened); a request that held the connection outside a wait when its
+  link closed, whose socket stayed open; and the connect's name lookup,
+  which nothing could wake or bound — a `.local` HQPlayer switched off held
+  the node stop for seconds. The lookup now runs on a helper the same wait
+  watches, a closed link's holder closes its socket as it lets go, and the
+  meter's newest wish decides whether a connect that was stopped connects
+  again. The media host's own lookup of the same name, at each attach and
+  each read of HQPlayer's state, is still neither woken nor bounded: such
+  an HQPlayer can still hold an attach, and the node stop behind it, for
+  seconds (open, 2026-10-14). Lesson: a wake-up is about a moment — spend
+  it when the moment has passed, or it ends the next one.
 - **A property runner must ask that something happens** (2026-10-13). The
   scenario runner checked that nothing went wrong and never that the music
   played: a press that never handed the queue over, or every start dropped,

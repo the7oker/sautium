@@ -961,8 +961,8 @@ class HqpBackend(PlayerBackend):
         self._inflight: Optional[_InFlight] = None
         # The last verdict of _playing, by (the URI HQPlayer names, its
         # entry, the slot the layout gives it, the queue's version, playing or
-        # not): a foreign entry played for an hour is looked for in the queue
-        # once, not every second.
+        # paused or neither): a foreign entry played for an hour is looked
+        # for in the queue once, not every second.
         self._verdict: Optional[tuple] = None
         # Lost sight of HQPlayer (a dropped socket, failed polls): its
         # playlist is read on the first answer, and the flag stays raised
@@ -1201,10 +1201,11 @@ class HqpBackend(PlayerBackend):
             # ours — but never waited out through a build, nor the Stop a
             # switch away owes: that goes on watched and ends on its own, and
             # what its sequence still had to send is dropped by what made the
-            # detach — a person's switch away (release), the hold's lend, or
-            # this backend detached (_detached, the play gate's re-attach).
-            # One sent later by whoever took this backend before the switch
-            # (a play intent) is refused.
+            # detach — a person's switch away (release) or the hold's lend; on
+            # the play gate's re-attach it sends its rest (the gate re-attaches
+            # only after a probe HQPlayer left unanswered). A sequence begun
+            # later by whoever took this backend before the switch (a play
+            # intent) is refused (_detached).
             self._detached = True
         # The poller stops: a question of its still waiting for the
         # connection is not asked, and one HQPlayer has yet to answer is not
@@ -1240,12 +1241,12 @@ class HqpBackend(PlayerBackend):
         return told
 
     def _reads_any(self, status, given: _Layout) -> bool:
-        """Does HQPlayer read an entry this node gave it — one the hand-over
-        ledger names (_handed: a slot removed since from a playlist that is
-        no mirror is still ours), or a slot of the queue as it stands at the
-        switch, never as it is once the Stop goes? With nothing that names
-        the entry (no URI from this build) its place stands while the
-        playlist was our mirror."""
+        """Does HQPlayer read an entry this node gave it — one this
+        attachment handed it since its last full mirror (_handed_here: a slot
+        removed since from a playlist that is no mirror is still ours), or a
+        slot of the queue as it stands at the switch, never as it is once the
+        Stop goes? With nothing that names the entry (no URI from this
+        build) its place stands while the playlist was our mirror."""
         if self._handed_here(status.uri):
             return True
         readings = self._readings(status.uri)
@@ -2733,11 +2734,11 @@ class HqpBackend(PlayerBackend):
         """A Pause or a Stop while a play press runs, or a queue mutation
         hands HQPlayer its playlist: numbered as it comes, it drops the start
         the work leads to — and every start made before it — while the work
-        goes on, so HQPlayer ends stopped where it was asked to start, and
-        the next Play starts there without one. Nothing is sent now: a press
-        that rebuilds nothing stops HQPlayer at its end, and a mutation that
-        leaves HQPlayer playing sends it once the queue stands (_carry_out).
-        False when neither runs."""
+        goes on: the work starts nothing, and the next Play starts where it
+        was asked to start. Nothing is sent now: a press that rebuilds
+        nothing stops HQPlayer at its end, and a mutation that leaves
+        HQPlayer playing sends it once the queue stands (_carry_out). False
+        when neither runs."""
         with self._press_lock:
             words = self._inflight
             if words is not None:
@@ -3914,7 +3915,9 @@ class HqpBackend(PlayerBackend):
 
     def queue_remove(self, index: int) -> bool:
         """Mirror-first while HQPlayer's playlist mirrors the queue: the slot
-        leaves the queue once it left HQPlayer, and a removal HQPlayer refuses
+        leaves the queue once it left HQPlayer — or once HQPlayer left the
+        removal unanswered within its wait: the mirror lost, it removes the
+        entry once its silence is over — and a removal HQPlayer refuses
         raises in its words (the slot is still there — the queue did not
         change). A slot HQPlayer does not hold (a gap) leaves the queue alone.
         In a tail mirror a slot behind the playing one is removed at the
@@ -3973,14 +3976,16 @@ class HqpBackend(PlayerBackend):
         plays on. A new queue: what was left to start is superseded. The
         session rotation (`archive`) runs in the same command sequence,
         before the clear: busy or lent, the sequence is refused before
-        either; a rotation that fails clears nothing; a clear HQPlayer does
-        not take leaves the queue as it is (mirror-first), and the radio
-        follows it, history rotated. Playing or paused on the slot the queue
-        keeps, HQPlayer holds the queue after it — in step, a tail mirror
-        too; moved on from that slot meanwhile, the mirror is lost. Stopped,
-        HQPlayer reads no entry its clear would keep: what it left is no
-        mirror of the queue's seed, and it gets the queue back at its next
-        answer (_reconverge)."""
+        either; a rotation that fails clears nothing; a clear HQPlayer
+        refuses leaves the queue as it is (mirror-first), and the radio
+        follows it, history rotated; one it leaves unanswered within its wait
+        is the queue's — the radio goes on, the mirror lost, and HQPlayer
+        clears once its silence is over. Playing or paused on the slot the
+        queue keeps, HQPlayer holds the queue after it — in step, a tail
+        mirror too; moved on from that slot meanwhile, the mirror is lost.
+        Stopped, HQPlayer reads no entry its clear would keep: what it left
+        is no mirror of the queue's seed, and it gets the queue back at its
+        next answer (_reconverge)."""
         def clear(h: HQPlayerClient) -> tuple:
             archive()
             now = h.get_status()
