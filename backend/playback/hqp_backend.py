@@ -2284,6 +2284,16 @@ class HqpBackend(PlayerBackend):
                          base=(playing, int(last.position)) if playing is not None else None,
                          owes=False)
 
+    def _held_from(self, items: list, playing: QueueItem) -> None:
+        """A seamless edit's own read found HQPlayer moved on (a "play next"
+        placed behind the track it reads): the words held meanwhile count
+        from that track, translated against `items`, the queue as the edit
+        leaves it."""
+        with self._press_lock:
+            words = self._inflight
+            if words is not None:
+                words.items, words.base = items, (playing, 0)
+
     def _carry_out(self, words: _InFlight, *, committed: bool) -> Optional[str]:
         """The words held while this thread's mutation handed HQPlayer its
         playlist, now that the queue stands — the mutation's, or, given up,
@@ -2301,10 +2311,11 @@ class HqpBackend(PlayerBackend):
         after a Seek that moved the halt's second, else after the last Seek
         of what plays made before the halt; on a mutation that owes no start
         the spot it leaves takes a Seek's second. A start Next or Previous
-        made whose track the queue does not hold (a "play next" HQPlayer
-        refused whole) counts again from the base on the queue as it stands.
-        Returns what could not go, in words: a start whose track the queue
-        does not hold (a new queue that did not commit)."""
+        made counts again from the base on the queue as it stands — a "play
+        next" or a removal HQPlayer refused left it as it was — and so does a
+        Play or a Seek made after it. Returns what could not go, in words: a
+        start whose track the queue does not hold (a new queue that did not
+        commit)."""
         owed = getattr(self._local, "start", None)
         newest = words.newest()
         last = max(words.halts, default=0)
@@ -3614,7 +3625,9 @@ class HqpBackend(PlayerBackend):
         target HQPlayer refused gives way to the next track it took, at 0 s,
         as before. `word`: a held Seek carried out (_send_words) after the
         held Play its batch made a press of — no intent of its own: that
-        start takes the second. False when no press runs."""
+        start takes the second, unless a start made after the Seek leads the
+        press by then (the Seek is dropped, as a request a newer intent
+        superseded is). False when no press runs."""
         with self._press_lock:
             press = self._live(self._pressed)
             if press is None:
@@ -3624,7 +3637,8 @@ class HqpBackend(PlayerBackend):
                 return True
             newest = press.newest()
             if word is not None:
-                press.starts[press.starts.index(newest)] = replace(newest, position=seconds)
+                if newest.item.n <= word.n:
+                    press.starts[press.starts.index(newest)] = replace(newest, position=seconds)
                 return True
             item = self._link.item("start", self._link.accept("transport"),
                                    queue=self._queue, generation=self._queue.generation)
@@ -4077,6 +4091,9 @@ class HqpBackend(PlayerBackend):
             if placed is None:
                 return [], 0, True
             place, behind = placed
+            if behind is not None and behind != anchor_index:
+                self._held_from(queue[:behind] + list(items) + queue[behind:],
+                                queue[behind - 1])
             # Remove the after-segment (always the entry after `place`, which
             # the rest shift down into), then re-append it behind the new
             # tracks.

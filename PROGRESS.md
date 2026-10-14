@@ -1068,10 +1068,21 @@ implementation details live in the code, DB and git history.
   press's start. A held Next or Previous was counted again on the queue as
   it stands only when its target was gone, so over a "play next" or a
   removal HQPlayer refused it landed where the refused layout put it, and
-  a Play or a Seek after it dropped the count; a held step now always
-  counts on the queue as it stands from where it began, and keeps its
-  count through the words after it. Lesson: carry a word out as the
-  person meant it then, on the queue as it is now.
+  a Play or a Seek after it dropped the count; a held step that finds a
+  slot among what HQPlayer is handed now always counts on the queue as it
+  stands from where it began, and keeps its count through the words after
+  it. Lesson: carry a word out as the person meant it then, on the queue
+  as it is now.
+- **What the edit read, the words count from** (2026-10-14). A "play next"
+  that found HQPlayer moved on went behind the track it read, but the
+  words held meanwhile still counted from the track of the status before,
+  on the old anchor's layout: a Next made during the insert restarted the
+  track HQPlayer played, where the route had said the new track starts.
+  They now count from the track the insert read. And a held Seek met by
+  the press its batch's Play became moved that press's newest start even
+  when a tap made after the Seek led it; it now moves only a start no
+  newer than itself. Lesson: when a reading moves the anchor, move all
+  that counts from it.
 - **A tap is decided where its start goes** (2026-10-14). A tap on
   HQPlayer checked whether a queue mutation held words and whether the
   playlist was a mirror, then computed its entry and waited for the command

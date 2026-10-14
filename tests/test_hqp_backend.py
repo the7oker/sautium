@@ -9783,3 +9783,85 @@ def test_a_play_next_read_in_a_state_hqplayer_does_not_name_edits_nothing(fake, 
     assert mgr.append([_item("E:/Music/N/01.flac", 31)], "next") == 1
     removed = [a.get("index") for c, a in fake.commands[n:] if c == "PlaylistRemove"]
     assert removed == [] and b._mirror == "lost", (removed, b._mirror, fake.playlist)
+
+
+def test_a_next_held_by_a_play_next_hqplayer_took_after_moving_on_plays_the_new_track(
+        fake, output, monkeypatch):
+    """In step, track 1 of [1, 2, 3] plays. A "play next" is anchored on the
+    slot the last status named, and HQPlayer moves on to track 2 by itself
+    before the insert goes: the new track goes behind track 2, in HQPlayer
+    and in the queue alike. The person presses Next while HQPlayer takes
+    the insert — the route answers that the new track starts. Next from
+    what plays is the new track; never track 2, the one HQPlayer plays,
+    started over."""
+    mgr, b = output
+    player_router = _routes_on(monkeypatch, mgr)
+    fake.service["PlaylistRemove"] = 0.4
+    insert = b.queue_insert_next
+
+    def moved_on_first(items, anchor_index):
+        with fake._lock:                    # HQPlayer's own advance, not read yet
+            fake.track, fake.position = 2, 30.0
+        return insert(items, anchor_index)
+    monkeypatch.setattr(b, "queue_insert_next", moved_on_first)
+    came, out = len(fake.arrivals), {}
+    inserting = threading.Thread(target=lambda: out.update(added=mgr.append(
+        [_item("E:/Music/N/01.flac", 31)], "next")), daemon=True)
+    inserting.start()
+    assert _wait(lambda: "PlaylistRemove" in [c for _, c in fake.arrivals[came:]], timeout=5)
+    assert b._inflight is not None
+    n = len(fake.commands)
+    said = _quick(player_router.next_track)
+    inserting.join(10)
+    _settled()
+    assert out.get("added") == 1, out
+    assert [it.track_id for it in mgr.queue.snapshot()] == [
+        "track-1", "track-2", "track-31", "track-3"]
+    assert said.get("starts") == {"index": 3, "position": 0, "track_id": "track-31"}, said
+    sent = _start_sent(fake, n)
+    assert ("SelectTrack", {"index": "2"}) not in sent, (said, sent, fake.track, fake.position)
+    assert _wait(lambda: fake.state == int(PlaybackState.PLAYING)
+                 and fake.playlist[fake.track - 1] == "file:///E:/Music/N/01.flac"), (
+        said, sent, fake.track, fake.playlist)
+
+
+def test_a_held_seek_never_moves_a_start_made_after_it(fake, output, monkeypatch):
+    """HQPlayer stopped on track 1; a radio's clear loses the mirror; Play,
+    then Seek 60, held meanwhile. Once the queue stands the Play becomes a
+    play press and the Seek moves its start — but in the moment between the
+    carry-out's check of the Seek and its move the person taps the seed's
+    row (track 1, from its start: a start of their own on the press, newer
+    than the Seek). The Seek, older, never gives the tap its second: the
+    tapped track starts from 0 s."""
+    mgr, b = output
+    b.stop()
+    _stopped(mgr, fake)
+    fake.service["PlaylistClear"] = 0.6
+    fake.service["PlaylistAdd"] = 0.3       # the press's hand-over takes a while
+    came = len(fake.arrivals)
+    seek_pressed = b._seek_pressed
+    tapped = {}
+
+    def tap_lands_first(seconds, *, word=None):
+        if word is not None and not tapped:
+            t = threading.Thread(target=lambda: tapped.update(ok=b.select(1, "track-1")),
+                                 daemon=True)
+            t.start()
+            t.join(5)
+        return seek_pressed(seconds, word=word)
+    monkeypatch.setattr(b, "_seek_pressed", tap_lands_first)
+    radio = threading.Thread(target=lambda: mgr.clear_for_radio(lambda: None), daemon=True)
+    radio.start()
+    assert _wait(lambda: b._inflight is not None
+                 and "PlaylistClear" in [c for _, c in fake.arrivals[came:]], timeout=5)
+    n = len(fake.commands)
+    assert _quick(b.play)
+    assert _quick(lambda: b.seek(60))
+    radio.join(10)
+    _settled()
+    sent = _start_sent(fake, n)
+    assert tapped.get("ok"), tapped
+    selects = [i for i, (c, _) in enumerate(sent) if c == "SelectTrack"]
+    assert selects, sent
+    assert ("Seek", {"position": "60"}) not in sent[selects[-1]:], (sent, fake.track,
+                                                                    fake.position)
