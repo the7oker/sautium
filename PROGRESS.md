@@ -987,6 +987,23 @@ implementation details live in the code, DB and git history.
   nor restarted, the reconverge repairs behind it — and a "play next" goes
   behind what HQPlayer reads. Lesson: the state an edit acts on is read in
   the edit, not remembered from before it.
+- **A tap is decided where its start goes** (2026-10-14). A tap on
+  HQPlayer checked whether a queue mutation held words and whether the
+  playlist was a mirror, then computed its entry and waited for the command
+  lock: a "play next" that began in between moved HQPlayer's entries under
+  it, a removal that committed in between moved the slot, and a playlist
+  that drifted in between named another track at the entry — the tap
+  started the wrong track, and the route said ok. And while any mutation
+  was in flight the jump route handed every output the row's index as the
+  sheet sent it, for HQPlayer to find the track among what it was handed —
+  but a renderer plays the slot it is given. The tap is now decided inside
+  its own command sequence (held by a mutation begun meanwhile, moved with
+  a slot that moved, a play press on a playlist that is no mirror), its
+  attempt watched only from the start it sends, and only an output that
+  holds words is handed the raw index. A Play that resumes a spot still
+  finds its entry before the command lock — the same window, left open for
+  C1b. Lesson: a check and the act it guards belong to one critical
+  section.
 - **Stop-clear-add-select-play sequence** for `play_track`/`play_album`. Without
   explicit stop, HQPlayer occasionally started the wrong track from the
   existing queue.

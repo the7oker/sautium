@@ -9141,3 +9141,172 @@ def test_a_rebind_whose_playlist_hqplayer_did_not_give_loses_the_mirror(fake, ho
         fake.service.pop("PlaylistGet", None)
         _link().client.timeout = hl.COMMAND_WAIT_S
     assert (b._mirror, b._lost_by) == ("lost", "silence"), (b._mirror, fake.playlist)
+
+
+# -- A tap is resolved as its start goes --------------------------------------------------
+
+
+def _tap_switched_out_after_its_check(monkeypatch, b, player_router, index, track_id,
+                                      at=None):
+    """A tap whose thread is switched out right after HqpBackend.select read
+    that no mutation holds words (its first gap() call) — or at its first
+    call of `at`, (an object, a method's name): returns (thread, the route's
+    answer, release)."""
+    entered, go = threading.Event(), threading.Event()
+    owner, name = at or (b, "gap")
+    method = getattr(owner, name)
+    tapper, said = {}, {}
+
+    def held(*args, **kwargs):
+        if threading.current_thread() is tapper.get("t") and not entered.is_set():
+            entered.set()
+            go.wait(10)
+        return method(*args, **kwargs)
+    monkeypatch.setattr(owner, name, held)
+    t = threading.Thread(target=lambda: said.update(player_router.jump(
+        player_router.JumpRequest(index=index, track_id=track_id))), daemon=True)
+    tapper["t"] = t
+    t.start()
+    assert entered.wait(10)
+    return t, said, go
+
+
+def _intents_watched(b):
+    """The intent of every attempt the trace holds: closed, closing, watched."""
+    with b._att_lock:
+        pending = list(b._closing) + ([b._attempt] if b._attempt is not None else [])
+    return [a.intent for a in diag.attempts() + pending]
+
+
+def test_a_tap_as_a_play_next_begins_plays_the_tapped_track(fake, output, monkeypatch):
+    """The person taps the third row (track 3) just as a "play next" begins:
+    the tap found no mutation holding words, and is switched out before its
+    start goes; the play next then holds words and moves HQPlayer's entries
+    under the slot, and the tap's start comes before the queue commits the
+    insert. Track 3 plays, never HQPlayer's entry 3 of the moved playlist —
+    and the start carried out is the attempt watched: the held tap opens
+    none of its own, which would be judged with nothing sent."""
+    mgr, b = output
+    player_router = _routes_on(monkeypatch, mgr)
+    fake.service["PlaylistRemove"] = 0.4
+    t, said, go = _tap_switched_out_after_its_check(monkeypatch, b, player_router, 3, "track-3")
+    insert_after = mgr.queue.insert_after
+
+    def once_the_tap_went(*args):
+        t.join(10)                              # the queue commits after the tap's start
+        return insert_after(*args)
+    monkeypatch.setattr(mgr.queue, "insert_after", once_the_tap_went)
+    n, came = len(fake.commands), len(fake.arrivals)
+    inserting = threading.Thread(target=lambda: mgr.append(
+        [_item("E:/Music/N/01.flac", 31)], "next"), daemon=True)
+    inserting.start()
+    assert _wait(lambda: b._inflight is not None
+                 and "PlaylistRemove" in [c for _, c in fake.arrivals[came:]], timeout=5)
+    go.set()
+    t.join(10)
+    inserting.join(10)
+    _settled()
+    assert said.get("ok"), said
+    assert [it.track_id for it in mgr.queue.snapshot()] == [
+        "track-1", "track-31", "track-2", "track-3"]
+    assert fake.playlist[fake.track - 1] == "file:///E:/Music/A/03.flac", (
+        said, fake.playlist, fake.track, _start_sent(fake, n))
+    watched = _intents_watched(b)
+    assert "select" not in watched and b._attempt.intent == "play", watched
+
+
+def test_a_tap_across_a_removal_that_committed_plays_the_tapped_track(fake, output,
+                                                                      monkeypatch):
+    """The queue [1, 2, 3, 4], track 1 playing; the person taps track 3 and,
+    while the tap is switched out after its check, track 2 is removed and the
+    removal commits. Track 3 plays — never the third slot of the queue as it
+    now stands."""
+    mgr, b = output
+    player_router = _routes_on(monkeypatch, mgr)
+    assert mgr.append([_item("E:/Music/A/04.flac", 4)], "end") == 1
+    assert fake.playlist[-1] == "file:///E:/Music/A/04.flac"
+    t, said, go = _tap_switched_out_after_its_check(monkeypatch, b, player_router, 3, "track-3")
+    n = len(fake.commands)
+    assert mgr.remove(2, "track-2")
+    go.set()
+    t.join(10)
+    _settled()
+    assert said.get("ok"), said
+    assert [it.track_id for it in mgr.queue.snapshot()] == ["track-1", "track-3", "track-4"]
+    assert fake.playlist[fake.track - 1] == "file:///E:/Music/A/03.flac", (
+        said, fake.playlist, fake.track, _start_sent(fake, n))
+
+
+def test_a_tap_as_the_playlist_stops_being_a_mirror_is_a_play_press(fake, output, monkeypatch):
+    """The queue [1, 2, 3], track 1 playing, in step; the person taps track 3
+    and, while the tap waits to ask for the command lock, an entry is added
+    in HQPlayer's own window ahead of it: the canary finds the playlist
+    drifted. The tap goes as a play press of track 3 — never HQPlayer's
+    entry 3, which names no slot of the queue any more."""
+    mgr, b = output
+    player_router = _routes_on(monkeypatch, mgr)
+    monkeypatch.setattr(hb, "DRIFT_CHECK_EVERY", 1)              # the canary on every tick
+    t, said, go = _tap_switched_out_after_its_check(monkeypatch, b, player_router, 3, "track-3",
+                                                    at=(b._link, "command"))
+    n = len(fake.commands)
+    with fake._lock:
+        fake.playlist.insert(1, "file:///Elsewhere/theirs.flac")
+    assert _wait(lambda: b._mirror == "drift", timeout=5), b._mirror
+    go.set()
+    t.join(10)
+    _settled()
+    assert said.get("ok"), said
+    assert fake.playlist[fake.track - 1] == "file:///E:/Music/A/03.flac", (
+        said, fake.playlist, fake.track, _start_sent(fake, n))
+
+
+def test_a_tap_on_a_renderer_while_a_removal_resyncs_names_its_track(monkeypatch):
+    """A renderer (DLNA, the browser) plays the slot it is given and holds no
+    words. Another device removes track 2 of [1, 2, 3, 4]; the removal has
+    committed and the renderer re-syncs, the queue lock held. The person taps
+    the third row of a sheet showing [1, 2, 3, 4] — track 3 — and track 3
+    plays: the route hands such an output the slot that holds the track."""
+    from routers import player as player_router
+    mgr = PlaybackManager()
+    mgr.queue.replace([_item(f"E:/Music/A/0{i}.flac", i) for i in (1, 2, 3, 4)])
+    played = []
+    resyncing, done = threading.Event(), threading.Event()
+
+    class Renderer:
+        id = "dlna"
+        holds_words = False
+
+        def select(self, index, track_id=None):           # as DlnaBackend.select
+            item = mgr.queue.item_at(index)
+            if item is None:
+                return False
+            played.append(item.track_id)
+            return True
+
+        def pressing(self):
+            return None
+
+        def queue_remove(self, index):
+            return True
+
+        def queue_changed(self, kind, *, play=False):     # its re-sync, on its loop
+            resyncing.set()
+            done.wait(5)
+
+        @contextmanager
+        def mutation(self):
+            yield
+
+        def queue_start(self):
+            return None
+    r = Renderer()
+    mgr._active = r
+    monkeypatch.setattr(player_router, "manager", mgr)
+    monkeypatch.setattr(mgr, "ensure_active", lambda: r)
+    t = threading.Thread(target=lambda: mgr.remove(2, "track-2"), daemon=True)
+    t.start()
+    assert resyncing.wait(5)
+    said = player_router.jump(player_router.JumpRequest(index=3, track_id="track-3"))
+    done.set()
+    t.join(5)
+    assert played == ["track-3"], (said, played)

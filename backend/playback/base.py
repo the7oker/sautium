@@ -89,6 +89,10 @@ class ReorderPlan:
 class PlayerBackend(ABC):
     id: str = ""
     label: str = ""
+    # Holds a person's play intents while a queue mutation hands it its
+    # playlist, and finds a tap's track among what it is handed (HQPlayer):
+    # the jump route hands it the row's index as the sheet sent it then
+    holds_words: bool = False
 
     def __init__(self, emit: Callable[["PlayerBackend", PlaybackStatus], None]):
         # Every tick names the backend it came from: the manager listens to

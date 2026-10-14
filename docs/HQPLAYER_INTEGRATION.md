@@ -560,10 +560,17 @@ comes after the control port answers again — so neither can end the wait.
   stand. The same holds with nothing in flight, on every output: a sheet
   not refreshed yet after a queue played from elsewhere taps the track it
   showed, wherever the queue holds it now (`CanonicalQueue.slot_of`), and
-  one the queue no longer holds is refused in words. A Play asks again for the start the mutation owes — the replace's
-  first track, the rebuild's track at its second — and that start goes,
-  numbered as the Play: a Play during a new order's rebuild resumes the
-  track that played, at its second, never HQPlayer's entry 1. Next and
+  one the queue no longer holds is refused in words. HQPlayer decides the
+  tap as its start goes, under the command lock (since 2026-10-14): a
+  mutation begun between the tap and its start holds it, one committed
+  meanwhile moved its slot, and a playlist that is no mirror by then makes
+  it a play press. An output that holds no words (a renderer, the browser)
+  is handed that slot even while a mutation is in flight
+  (`PlayerBackend.holds_words`). A Play asks again for the start the
+  mutation owes — the replace's first track, the rebuild's track at its
+  second — and that start goes, numbered as the Play: a Play during a new
+  order's rebuild resumes the track that played, at its second, never
+  HQPlayer's entry 1. Next and
   Previous count from the newest start (the one owed before any) — with no
   start made and HQPlayer at a spot (a rebuild that does not resume leaves
   it at one, or it stands at one) they only move the spot, as with nothing

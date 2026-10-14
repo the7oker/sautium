@@ -909,6 +909,7 @@ class HqpBackend(PlayerBackend):
     one-way INTO HQPlayer's native playlist via the queue_* hooks."""
 
     id = "hqplayer"
+    holds_words = True
     # What the play-intent gate tells the user when reachable() says no.
     offline_hint = ("start HQPlayer, or pick another output in Settings → "
                     "Audio output (an HQPlayer Embedded in trial mode stops "
@@ -2996,7 +2997,12 @@ class HqpBackend(PlayerBackend):
         the person saw in the slot (`track_id`): while a queue mutation hands
         HQPlayer its playlist it is held as a start of its own (_held_tap);
         otherwise it plays where the queue holds that track now — one it no
-        longer holds is refused in words."""
+        longer holds is refused in words. What the checks before the command
+        lock let through is decided again as the start goes, in its command
+        sequence: a mutation that began meanwhile holds the tap, one that
+        committed meanwhile moved its slot, and a playlist that is no mirror
+        by then makes it a play press. The attempt is watched from the start
+        the tap itself sends (a held one is the mutation's to judge)."""
         with self._press_lock:
             if self._inflight is not None:
                 return self._held_tap(self._inflight, index, track_id)
@@ -3010,12 +3016,30 @@ class HqpBackend(PlayerBackend):
             self._local.refusal = f"it is not on this HQPlayer — {why}"
             return False
         if self._mirror != "step" or self._live(self._pressed) is not None:
-            return self._press(item, 0)
+            return self._press(item, 0)     # never behind the command lock
         held = self._spot
-        entry = self._layout().entry(index)
-        with self._intent("select", slot=entry.n if entry is not None else None):
-            ok = self._start_at(index, 0, fallback=False, intent="transport", item="start",
-                                spends=held)
+
+        def tap(h: HQPlayerClient) -> Optional[bool]:
+            with self._press_lock:
+                words = self._inflight
+                if words is not None:
+                    return self._held_tap(words, self._queue.index_of(item) or index,
+                                          item.track_id)
+            if self._mirror != "step" or self._live(self._pressed) is not None:
+                return None         # the press, off this command sequence
+            slot = self._queue.index_of(item)
+            if slot is None:
+                self._local.refusal = "it is no longer in the queue"
+                return False
+            start = self._start_point(slot, 0)
+            if start is None:
+                return self._started(None, f"nothing from slot {slot} on is on this HQPlayer")
+            with self._intent("select", slot=start[0].n):
+                return self._started(start[0], self._start_held(h, *start, fallback=False,
+                                                                spends=held))
+        ok = self._cmd(tap, "transport", item="start")
+        if ok is None:
+            return self._press(item, 0)
         self.poke()
         return ok
 

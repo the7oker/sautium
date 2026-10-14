@@ -1666,9 +1666,11 @@ def jump(req: JumpRequest):
     refused."""
     if req.index < 1:
         raise HTTPException(status_code=400, detail="index must be >= 1")
-    # A queue mutation in flight: the output finds the track among what it
-    # is handed (the queue commits only after it)
-    slot = (req.index if manager.queue.view()[2]
+    # A queue mutation in flight: an output that holds the person's words
+    # finds the track among what it is handed (the queue commits only after
+    # it); any other is handed the slot that holds the track now
+    active = manager.active
+    slot = (req.index if active is not None and active.holds_words and manager.queue.view()[2]
             else manager.queue.slot_of(req.index, req.track_id))
     if slot is None:
         return {"ok": False, "index": req.index, "refusal": "it is no longer in the queue"}

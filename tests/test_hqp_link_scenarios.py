@@ -138,6 +138,7 @@ class _TrackedRLock:
 class _Elsewhere:
     """The output switched to: it takes every command and plays nothing."""
     id, label = "browser", "elsewhere"
+    holds_words = False
 
     def __init__(self, emit, queue) -> None:
         self._gone = False
