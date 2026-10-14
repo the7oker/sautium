@@ -23,7 +23,7 @@ import logging
 import select
 import threading
 import time
-from contextlib import contextmanager
+from contextlib import contextmanager, nullcontext
 from dataclasses import asdict
 from typing import Any, Callable, Iterator, Optional
 
@@ -758,6 +758,31 @@ class PlaybackManager:
         with self._mutate_lock, self.queue.mutation():
             yield
 
+    @contextmanager
+    def _output_mutation(self, pick: Callable[[], Optional[PlayerBackend]]
+                         ) -> Iterator[Optional[PlayerBackend]]:
+        """One queue mutation the output follows (_mutation), the output
+        `pick` names under the queue lock, its mutation held
+        (PlayerBackend.mutation) — and, once the queue lock is let go, what
+        the output owes started and the person's words made meanwhile
+        carried out, the queue committed or not (queue_start). What of them
+        could not go on a mutation that did not commit is said with its
+        refusal (a note on the error, which the routes answer). Yields the
+        output, None when there is none."""
+        backend = None
+        try:
+            with self._mutation():
+                backend = pick()
+                with backend.mutation() if backend is not None else nullcontext():
+                    yield backend
+        except BaseException as e:
+            said = backend.queue_start() if backend is not None else None
+            if said:
+                e.add_note(said)
+            raise
+        if backend is not None:
+            backend.queue_start()
+
     def replace_queue(self, items: list[QueueItem], *, play: bool,
                       probe_first: bool = False,
                       archive: Optional[Callable[[], None]] = None) -> tuple[int, int]:
@@ -769,27 +794,23 @@ class PlaybackManager:
         what it was given (PlayerBackend.queue_abandon). Returns (added,
         generation); generation is what background fillers must guard their
         appends with."""
-        with self._mutation():
-            backend = self.ensure_active() if play else self.backend()
-            with backend.mutation():
-                accepted = backend.queue_replace(items, play=play,
-                                                 probe_first=probe_first)
-                added = len(accepted)
-                if added and archive is not None:
-                    try:
-                        archive()
-                    except Exception:
-                        backend.queue_abandon()
-                        raise
-                if added:
-                    gen = self.queue.replace(accepted)
-                    self._retire_previews(gen)
-                    self._last_slot = 0   # fresh queue — no resume slot in it
-                    backend.queue_changed("replace", play=play)
-                    self._schedule_persist()
-                else:
-                    gen = self.queue.generation
-        backend.queue_start()
+        with self._output_mutation(self.ensure_active if play else self.backend) as backend:
+            accepted = backend.queue_replace(items, play=play, probe_first=probe_first)
+            added = len(accepted)
+            if added and archive is not None:
+                try:
+                    archive()
+                except Exception:
+                    backend.queue_abandon()
+                    raise
+            if added:
+                gen = self.queue.replace(accepted)
+                self._retire_previews(gen)
+                self._last_slot = 0   # fresh queue — no resume slot in it
+                backend.queue_changed("replace", play=play)
+                self._schedule_persist()
+            else:
+                gen = self.queue.generation
         return added, gen
 
     def append(self, items: list[QueueItem], position: str = "end",
@@ -908,20 +929,18 @@ class PlaybackManager:
         of the queue than the one it meets (a filler's append landed first)
         is refused whole (QueueChanged): it would hand HQPlayer an order of a
         queue that is gone."""
-        with self._mutation():
+        # queue reorder is output-independent
+        with self._output_mutation(lambda: self._active) as backend:
             if plan.version is not None and plan.version != self.queue.version:
                 raise QueueChanged("the queue changed while its new order was made")
-            backend = self._active   # queue reorder is output-independent
             if backend is None:
                 self.queue.reorder_by_track_ids(plan.order)
                 self._schedule_persist()
                 return {"removed": 0, "added": 0, "interrupted": False}
-            with backend.mutation():
-                result = backend.queue_reorder(plan)
-                self.queue.reorder_by_track_ids(plan.order)
-                backend.queue_changed("reorder")
+            result = backend.queue_reorder(plan)
+            self.queue.reorder_by_track_ids(plan.order)
+            backend.queue_changed("reorder")
             self._schedule_persist()
-        backend.queue_start()
         return result
 
     def rebind_files(self) -> None:
@@ -938,8 +957,7 @@ class PlaybackManager:
         with the playing slot's new binding so Now Playing refetches."""
         from playback.queue import rebind_origins
         from playback.substitute import native_plays
-        with self._mutation():
-            backend = self._active
+        with self._output_mutation(lambda: self._active) as backend:
             plays = None
             if backend is not None:
                 endpoint_id = getattr(backend, "endpoint_id", None)
@@ -950,8 +968,7 @@ class PlaybackManager:
             logger.info("%d queued slot(s) re-bound: their file left the library",
                         len(moved))
             if backend is not None:
-                with backend.mutation():
-                    backend.queue_changed("rebind")
+                backend.queue_changed("rebind")
             self._schedule_persist()
             status = self._latest_status
             if status.get("state") not in (None, "disconnected"):
@@ -961,8 +978,6 @@ class PlaybackManager:
                     update.update(media_file_id=item.media_file_id,
                                   track_id=item.track_id)
                 self._push_status({**status, **update})
-        if backend is not None:
-            backend.queue_start()
 
     def playlist(self) -> dict:
         """The queue as /api/player/playlist serves it: each slot the active
@@ -971,16 +986,15 @@ class PlaybackManager:
         return self.queue.payload(gap=b.gap if b is not None else None)
 
     def mirror_step(self, backend: PlayerBackend, step: Callable[[], None]) -> None:
-        """An output's own mirror step outside a mutation — HQPlayer
-        following a re-bind once the build that held it off is done: under
-        the queue lock, while `backend` is still the active output, and the
-        start it leaves after."""
-        with self._mutation():
-            if self._active is not backend:
-                return
-            with backend.mutation():
+        """An output's own mirror step — the reconverge, HQPlayer following a
+        re-bind once the build that held it off is done — as a mutation the
+        output follows (_output_mutation): under the queue lock, while
+        `backend` is still the active output; the start it leaves, and the
+        words made meanwhile, after."""
+        with self._output_mutation(
+                lambda: backend if self._active is backend else None) as active:
+            if active is not None:
                 step()
-        backend.queue_start()
 
     def mirror_locked(self, backend: PlayerBackend, step: Callable[[], Any]) -> Any:
         """A part of an output's own work that reads or writes the queue as
@@ -1004,18 +1018,14 @@ class PlaybackManager:
         the radio follows it, history rotated. A play intent made while the
         output clears is the output's to carry out once the queue stands
         (PlayerBackend.mutation, queue_start)."""
-        with self._mutation():
-            backend = self.backend()
-            with backend.mutation():
-                cleared = backend.queue_clear_after_current(archive)
-                gen = self.queue.generation
-                if cleared:
-                    gen = self.queue.clear_for_radio(self._latest_status.get("track_index"))
-                    self._retire_previews(gen)
-                    backend.queue_changed("clear")
+        with self._output_mutation(self.backend) as backend:
+            cleared = backend.queue_clear_after_current(archive)
+            gen = self.queue.generation
             if cleared:
+                gen = self.queue.clear_for_radio(self._latest_status.get("track_index"))
+                self._retire_previews(gen)
+                backend.queue_changed("clear")
                 self._schedule_persist()
-        backend.queue_start()
         return gen
 
     # -- queue persistence -------------------------------------------------------

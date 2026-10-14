@@ -531,8 +531,12 @@ comes after the control port answers again — so neither can end the wait.
   holds them (`PlayerBackend.mutation`, `HqpBackend._hold_words`, which
   numbers the mutation in the same step: every word held is newer than it),
   answered at once (`starts`, the play gate asking nothing), and the newest one no
-  newer intent superseded is carried out once the queue stands
-  (`queue_start`). A word names a track, never a slot, translated against
+  newer intent superseded is carried out once the queue lock is let go
+  (`queue_start`) — on the queue as it then stands, the mutation committed
+  or not (since 2026-10-14), as the same word would go then: a start at
+  its slot's entry while the mirror is in step, else as a play press of its
+  track (HQPlayer's entries are no slots of a tail mirror's or a lost one's).
+  A word names a track, never a slot, translated against
   what HQPlayer is handed — the queue sheet still shows the old queue while
   a new one loads, so a tap carries the track it showed (`/jump`'s
   `track_id`) and plays it wherever the new queue holds it, from its start;
@@ -542,13 +546,19 @@ comes after the control port answers again — so neither can end the wait.
   numbered as the Play: a Play during a new order's rebuild resumes the
   track that played, at its second, never HQPlayer's entry 1. Next and
   Previous count from the newest start (the one owed before any); a Seek
-  changes the newest word's second; a Pause or a Stop drops the starts
-  before it — on a mutation that stopped HQPlayer nothing is sent and the
-  spot is left at the newest start's track, on one that left it playing (a
-  seamless reorder, the radio's clear) the Pause or the Stop is sent. With
+  changes the newest word's second (after a Pause or a Stop, the second the
+  next Play starts at); a Pause or a Stop drops the starts before it and
+  always goes — sent, unless the mutation's own Stop stopped HQPlayer: then
+  nothing starts and the spot is left at the newest start's track. With
   no track to count from — HQPlayer plays on, or the reconverge knows no
   slot it stood on — a Play or a Seek acts once the queue stands, as it
-  would then. A mutation that does not commit takes its words with it.
+  would then. Each word's outcome is its own, never the mutation's route's:
+  overtaken by a person's newer word it does not go, one that meets a build
+  goes once it is done, one HQPlayer refuses is logged. A start whose track
+  the queue it lands on does not hold — a tap on a new queue that did not
+  commit — is said with that queue's refusal. A play press asked while a
+  mutation holds words is one of them, and the reconverge yields to a press
+  asked before it.
 - **Gaps** (since 2026-10-13). HQPlayer's playlist is the queue without its
   gaps, in the same order: a gap is a slot this HQPlayer does not hold —
   nothing it can open (a file held only in another HQPlayer's library, one

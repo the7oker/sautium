@@ -869,6 +869,21 @@ implementation details live in the code, DB and git history.
   runner spreads a sequence's ask and its taking the lock apart at random
   and checks that no number is taken at the lock. Lesson: one clock read at
   two moments is two clocks.
+- **A held word answers for itself** (2026-10-14). The words a person made
+  while a queue mutation handed HQPlayer its playlist were carried out
+  inside the mutation's own call: a Pause held during the radio's clear that
+  met a silence or a filter's build raised its refusal into the radio's
+  route — 409 after the radio's queue had committed, and no radio. On a
+  tail mirror a held tap was started at the layout's entry, which names no
+  slot there, and the playing track restarted; a mutation that did not
+  commit dropped a Pause its route had answered; Pause, Seek, Play lost the
+  Seek; a tap that read the words as the mutation ended joined a mutation
+  that was over. The words now go once the queue lock is let go, committed
+  or not, as the same words would go then, each with its own outcome —
+  overtaken by a newer word, waited out past a build, or logged — and a
+  start whose track the queue does not hold is said with the refusal of the
+  queue that did not commit. Lesson: what a mutation holds for a person is
+  the person's, its outcome included.
 - **Stop-clear-add-select-play sequence** for `play_track`/`play_album`. Without
   explicit stop, HQPlayer occasionally started the wrong track from the
   existing queue.

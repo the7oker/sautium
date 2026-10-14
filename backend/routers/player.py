@@ -2489,15 +2489,20 @@ def _output_error(e: Exception) -> HTTPException:
     output was switched away) — busy, not broken: the UI must not send the
     owner to the Output picker — 503 when it cannot take it. A backend
     detached by the hold that an intent took just before refuses with a
-    plain ConnectionError — the hold names it."""
-    if isinstance(e, OutputHeld):
-        return HTTPException(status_code=409, detail=str(e))
+    plain ConnectionError — the hold names it. What the person's words made
+    meanwhile could not do (a note on the error: a track tapped while a new
+    queue that did not commit loaded) is said with it."""
+    notes = list(getattr(e, "__notes__", ()))
     hold = manager.held
-    if hold is not None and isinstance(e, ConnectionError):
-        return HTTPException(status_code=409, detail=str(OutputHeld(hold)))
-    if isinstance(e, (Building, NotAnswering, Dropped)):
-        return HTTPException(status_code=409, detail=str(e))
-    return HTTPException(status_code=503, detail=str(e))
+    if isinstance(e, OutputHeld):
+        status, why = 409, str(e)
+    elif hold is not None and isinstance(e, ConnectionError):
+        status, why = 409, str(OutputHeld(hold))
+    elif isinstance(e, (Building, NotAnswering, Dropped)):
+        status, why = 409, str(e)
+    else:
+        status, why = 503, str(e)
+    return HTTPException(status_code=status, detail=" — ".join([why, *notes]))
 
 
 def _ensure_output_ready() -> None:

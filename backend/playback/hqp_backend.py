@@ -871,8 +871,9 @@ class _InFlight(_Words):
         # once the queue stands
         self.plain: list = []
         # The newest Pause's or Stop's command: sent once the queue stands
-        # by a mutation that leaves HQPlayer playing
+        # unless the mutation's own Stop stopped HQPlayer (`stopped`)
         self.halt_command: Optional[str] = None
+        self.stopped = False
 
     def halted(self) -> bool:
         """Was a Pause or a Stop the newest word — newer than every start and
@@ -1604,7 +1605,9 @@ class HqpBackend(PlayerBackend):
         layout = self._layout()
         n = self._hold_words(layout.items, stops=True,
                              base=(at, position) if at is not None else None, owes=False,
-                             intent="rebuild")
+                             intent="rebuild", yields=True)
+        if n is None:
+            return False            # a play press asked meanwhile takes the queue to it
         taken, unsent, _ = self._afresh([self._uri_for(it) for it in layout.handed], "rebuild",
                                         number=n)
         if not self._took(layout.handed, taken, unsent, "of the queue"):
@@ -2109,7 +2112,7 @@ class HqpBackend(PlayerBackend):
         raised."""
         self._local.start = (att, item, start, spot, patient, self._spot_gen)
 
-    def queue_start(self) -> None:
+    def queue_start(self) -> Optional[str]:
         """The start a mirror step left (_owe_start), sent now. One that
         meets someone else's build is not refused: the start of an accepted
         intent waits for the build's end on the link, in the background
@@ -2117,14 +2120,15 @@ class HqpBackend(PlayerBackend):
         status says HQPlayer builds. A newer intent that superseded it
         meanwhile drops it, its spot left for the play press. The words a
         person made while the mutation handed HQPlayer its playlist are
-        carried out first (_carry_out)."""
+        carried out first, the queue committed or not (_carry_out). Returns
+        what of them could not be carried out, in words, or None."""
         words = getattr(self._local, "words", None)
         self._local.words = None
-        if words is not None:
-            self._carry_out(words)
+        said = (self._carry_out(words, committed=self._local.committed)
+                if words is not None else None)
         owed = getattr(self._local, "start", None)
         if owed is None:
-            return
+            return said
         self._local.start = None
         att, item, start, spot, patient, gen = owed
         item.queue, item.generation = self._queue, self._queue.generation
@@ -2154,6 +2158,7 @@ class HqpBackend(PlayerBackend):
         if later:
             threading.Thread(target=self._start_after_build, args=(owed,), daemon=True,
                              name="hqp-start").start()
+        return said
 
     @contextmanager
     def mutation(self):
@@ -2161,7 +2166,8 @@ class HqpBackend(PlayerBackend):
         the radio's clear, the reconverge — until the queue commits it or
         gives it up: the person's play intents made while it hands HQPlayer
         its playlist are held (_hold_words), and queue_start carries them
-        out; given up, they go with it."""
+        out once the queue lock is let go — on the queue it left, when it
+        gave up."""
         self._local.mutating = True
         committed = False
         try:
@@ -2171,85 +2177,142 @@ class HqpBackend(PlayerBackend):
             self._local.mutating = False
             with self._press_lock:
                 words, self._inflight = self._inflight, None
-            self._local.words = words if committed else None
-            if not committed and words is not None and (words.starts or words.halts
-                                                        or words.plain):
-                logger.info("the words made while HQPlayer took a queue that was not "
-                            "committed go with it")
+            self._local.words, self._local.committed = words, committed
 
     def _hold_words(self, items: list, *, stops: bool, base: Optional[tuple],
-                    owes: bool, intent: Optional[str] = None) -> Optional[int]:
+                    owes: bool, intent: Optional[str] = None,
+                    yields: bool = False) -> Optional[int]:
         """A hand-over of a queue mutation (mutation) begins: from now until
         the mutation ends, a person's play intents are held, not sent
         (_InFlight). Outside a mutation — an attach taking the queue — they
         act as they come. `intent` — a new queue, a rebuild — is numbered in
         the same step (HqpLink.ask_early): every word held is newer than the
-        mutation. Returns its number, for the sequence that hands over."""
+        mutation. Returns its number, for the sequence that hands over.
+        `yields`: the reconverge's rebuild, which a play press asked before
+        it overtakes — it hands HQPlayer the queue itself — so none begins:
+        None, nothing numbered or held. In the same step as a press that
+        registers, so neither misses the other."""
         mutating = getattr(self._local, "mutating", False)
         with self._press_lock:
+            if yields and self._live(self._pressed) is not None:
+                return None
             n = self._link.ask_early(intent) if intent is not None else None
             if mutating:
                 self._inflight = _InFlight(items, stops=stops, base=base, owes=owes)
         return n
 
-    def _carry_out(self, words: _InFlight) -> None:
+    def _carry_out(self, words: _InFlight, *, committed: bool) -> Optional[str]:
         """The words held while this thread's mutation handed HQPlayer its
-        playlist, now that the queue stands: the newest one no newer intent
-        superseded, once. A start goes at its track's slot in the queue as
-        committed — a Play that asked again for the start the mutation owes
-        goes as owed, numbered as itself. A Pause or a Stop drops the starts
-        before it: on a mutation that stopped HQPlayer nothing is sent and
-        the spot is left at the newest start's track (at the second a Seek
-        after the halt gave it); on one that left it playing the halt is
-        sent. With no start made, the words that name no track made since
-        the last halt act in order — a Play among them, or Seeks alone; on a
-        mutation that owes no start the spot it leaves takes a Seek's
-        second."""
+        playlist, now that the queue stands — the mutation's, or, given up,
+        the one it left: the newest one no newer intent superseded, once,
+        as the same word would go now. A start goes at its track, found by
+        identity in the queue as it stands: at its slot's entry while the
+        mirror is in step, else as a play press of its track at its second
+        (an entry of HQPlayer's is never a slot elsewhere); a Play that
+        asked again for the start a committed mutation owes goes as owed,
+        numbered as itself. A Pause or a Stop drops the starts before it and
+        always goes: sent, unless the mutation's own Stop stopped HQPlayer —
+        then nothing starts and the spot is left at the newest start's track
+        (at the second a Seek after the halt gave it). With no start made,
+        the words that name no track made since the last halt act in order —
+        after a Seek that moved the halt's second; on a mutation that owes no
+        start the spot it leaves takes a Seek's second. Returns what could
+        not go, in words: a start whose track the queue does not hold (a new
+        queue that did not commit)."""
         owed = getattr(self._local, "start", None)
         newest = words.newest()
+        last = max(words.halts, default=0)
         if words.halted():
-            if not words.stops:
+            if not words.stopped:
                 # A Seek of what plays, made before the halt with no start to
                 # move, still holds
                 sought = [] if newest is not None else [
                     w for w in words.plain if w[1] == "Seek"][-1:]
-                self._send_plain(sought + [(0, words.halt_command, None)] + (
-                    [(0, "Seek", words.halt_second)] if words.halt_second is not None else []))
-                return
+                self._send_words(sought + [(last, words.halt_command, None)] + (
+                    [(last, "Seek", words.halt_second)] if words.halt_second is not None else []))
+                return None
             at = (newest.target, newest.position) if newest is not None else words.base
-            if at is not None and self._queue.index_of(at[0]) is not None:
-                self._set_spot(at[0], at[1] if words.halt_second is None else words.halt_second)
-            return
+            spot = self._queued(at[0]) if at is not None else None
+            if spot is not None:
+                self._set_spot(spot, at[1] if words.halt_second is None else words.halt_second)
+            return None
         if newest is None:
-            if words.base_moved and self._queue.index_of(words.base[0]) is not None:
-                self._set_spot(*words.base)
-            self._send_plain([w for w in words.plain if w[0] > max(words.halts, default=0)])
-            return
+            spot = self._queued(words.base[0]) if words.base_moved else None
+            if spot is not None:
+                self._set_spot(spot, words.base[1])
+            after = [w for w in words.plain if w[0] > last]
+            if after and words.halt_second is not None:
+                after = [(last, "Seek", words.halt_second)] + after
+            self._send_words(after)
+            return None
         start = words.live(self._link)
         if start is None:
-            return                  # superseded by an intent of another kind
-        if start.owed and owed is not None:
+            return None             # superseded by an intent of another kind
+        if committed and start.owed and owed is not None:
             att, _, send, spot, patient, gen = owed
             self._local.start = (att, start.item, send, spot, patient, gen)
-            return
+            return None
+        target = self._queued(start.target)
+        if target is None:
+            said = (f"{start.target.title or 'the track'}, played meanwhile, is not in the queue "
+                    "— not played")
+            logger.info("%s", said)
+            return said
+        if self._mirror != "step":
+            self._press(target, start.position, item=start.item)
+            return None
         self._local.start = (owed[0] if owed is not None else self._watch("play"), start.item,
-                             lambda it: self._start_item(start.target, start.position, it),
-                             (start.target, start.position), True, self._spot_gen)
+                             lambda it: self._start_item(target, start.position, it),
+                             (target, start.position), True, self._spot_gen)
+        return None
 
-    def _send_plain(self, words: list) -> None:
+    def _queued(self, item: QueueItem) -> Optional[QueueItem]:
+        """`item` while the queue holds it, else the first slot that holds
+        its track — a word names a track, never an entry of a queue gone —
+        or None."""
+        if self._queue.index_of(item) is not None:
+            return item
+        return next((it for it in self._queue.snapshot()
+                     if item.track_id is not None and it.track_id == item.track_id), None)
+
+    def _send_words(self, words: list) -> None:
         """Held words that name no track — (number, command, second): a
-        Play, a Pause, a Stop, a Seek — each acting now, in order, on the
-        queue as it stands (a playlist the mutation left no mirror gets a
-        play press)."""
-        for _, command, second in words:
-            if command == "Seek":
-                self.seek(second)
-            elif command == "Play":
-                self.play()
-            elif command == "Pause":
-                self.pause()
-            else:
-                self.stop()
+        Play, a Pause, a Stop, a Seek — sent now, in order, as the same words
+        would be on the queue as it stands (a playlist that is no mirror
+        gets a play press). Their outcome is their own, never the mutation's
+        that held them: overtaken by an intent newer than the newest of them
+        (a person's word made once the mutation ended) they do not go; the
+        word that meets a build goes, with those after it, once it is done
+        — in the background, as a start does; one HQPlayer does not take is
+        logged in its words."""
+        if not words:
+            return
+        # Superseded as a start is: by a newer word, a new queue, a rebuild,
+        # a switch away
+        item = Item("start", max(n for n, _, _ in words))
+        link, rest = self._link, list(words)
+        what = "the words made while HQPlayer took the queue"
+
+        def send() -> None:
+            while rest:
+                _, command, second = rest[0]
+                {"Seek": lambda: self.seek(second), "Play": self.play, "Pause": self.pause,
+                 "Stop": self.stop}[command]()
+                rest.pop(0)
+        why = link.superseded(item)
+        if why is not None:
+            logger.info("%s not sent: %s", what, why)
+            return
+        try:
+            send()
+        except Building:
+            threading.Thread(target=background, daemon=True, name="hqp-start",
+                             args=(f"{what} not sent after the build", send),
+                             kwargs={"needed": lambda: link.superseded(item),
+                                     "until": lambda: link.superseded(item) is not None}
+                             ).start()
+        except (Dropped, BrokenPipeError, ConnectionError, OSError) as e:
+            logger.warning("HQPlayer did not take %s: %s", what, e)
 
     def queue_abandon(self) -> None:
         """The replace this thread just mirrored was not committed: its start
@@ -2678,24 +2741,28 @@ class HqpBackend(PlayerBackend):
         """Play while a queue mutation hands HQPlayer its playlist: the newest
         start's track and second again, numbered as it comes — before any,
         the start the mutation owes, or on a mutation that stops HQPlayer
-        its base; with no track to count from (HQPlayer plays on, or the
+        its base; after a Pause or a Stop, at the second a Seek after it
+        gave; with no track to count from (HQPlayer plays on, or the
         mutation knows none it stood on) a Play once the queue stands.
         False when no mutation runs."""
         with self._press_lock:
             words = self._inflight
             if words is None:
                 return False
+            moved = words.halt_second if words.halted() else None
             n = self._link.accept("transport")
             newest = words.newest()
             if newest is not None:
-                words.starts.append(_Start(self._link.item("start", n), newest.target,
-                                           newest.position, newest.following, None,
-                                           owed=newest.owed))
+                words.starts.append(_Start(
+                    self._link.item("start", n), newest.target,
+                    newest.position if moved is None else moved, newest.following, None,
+                    owed=newest.owed and moved is None))
             elif words.stops and words.base is not None:
                 target, second = words.base
-                words.starts.append(_Start(self._link.item("start", n), target, second,
-                                           words.items[words.index(target) - 1:], None,
-                                           owed=words.owes))
+                words.starts.append(_Start(
+                    self._link.item("start", n), target, second if moved is None else moved,
+                    words.items[words.index(target) - 1:], None,
+                    owed=words.owes and moved is None))
             else:
                 words.plain.append((n, "Play", None))
         self.poke()
@@ -2724,9 +2791,8 @@ class HqpBackend(PlayerBackend):
         press, and at either end of the queue nothing is sent: HQPlayer's own
         Next would move it in a playlist that is not the queue's."""
         with self._press_lock:
-            words = self._inflight
-        if words is not None:
-            return self._held_step(words, by)
+            if self._inflight is not None:
+                return self._held_step(self._inflight, by)
         layout = self._layout()
         with self._press_lock:
             press = self._live(self._pressed)
@@ -2773,17 +2839,17 @@ class HqpBackend(PlayerBackend):
         """Next or Previous while a queue mutation hands HQPlayer its playlist:
         a start at the slot after or before the newest start's track — the
         base's before any — that this HQPlayer holds among what it is handed,
-        numbered as it comes; at either end the newest word stays."""
-        with self._press_lock:
-            newest = words.newest()
+        numbered as it comes; at either end the newest word stays. Under the
+        press lock, with the words read: none goes to a mutation that ended
+        meanwhile."""
+        newest = words.newest()
         ref = newest.target if newest is not None else (words.base[0] if words.base else None)
         i = words.index(ref) if ref is not None else None
         slot = _Layout(words.items, self.gap).held(i + by, by) if i is not None else None
         if slot is not None:
-            with self._press_lock:
-                words.starts.append(_Start(
-                    self._link.item("start", self._link.accept("transport")),
-                    words.items[slot - 1], 0, words.items[slot - 1:], None))
+            words.starts.append(_Start(
+                self._link.item("start", self._link.accept("transport")),
+                words.items[slot - 1], 0, words.items[slot - 1:], None))
         self.poke()
         return True
 
@@ -2801,9 +2867,8 @@ class HqpBackend(PlayerBackend):
         hands HQPlayer its playlist the tap names the track the person saw
         in the slot (`track_id`), held as a start of its own (_held_tap)."""
         with self._press_lock:
-            words = self._inflight
-        if words is not None:
-            return self._held_tap(words, index, track_id)
+            if self._inflight is not None:
+                return self._held_tap(self._inflight, index, track_id)
         item = self._queue.item_at(index)
         why = self.gap(item) if item is not None else None
         if why is not None:
@@ -2825,7 +2890,9 @@ class HqpBackend(PlayerBackend):
         the person saw in the slot — `track_id`, else the slot's track as the
         queue stands, the sheet's — wherever the mutation puts it among what
         HQPlayer is handed, from its start, numbered as it comes. A track it
-        is not handed is refused in words; the words before stand."""
+        is not handed is refused in words; the words before stand. Under the
+        press lock, with the words read: none goes to a mutation that ended
+        meanwhile."""
         shown = self._queue.item_at(index)
         tid = track_id if track_id is not None else getattr(shown, "track_id", None)
         target = (shown if shown is not None and shown.track_id == tid
@@ -2839,16 +2906,16 @@ class HqpBackend(PlayerBackend):
         if why is not None:
             self._local.refusal = f"it is not on this HQPlayer — {why}"
             return False
-        with self._press_lock:
-            words.starts.append(_Start(self._link.item("start", self._link.accept("transport")),
-                                       target, 0, words.items[words.index(target) - 1:], None))
+        words.starts.append(_Start(self._link.item("start", self._link.accept("transport")),
+                                   target, 0, words.items[words.index(target) - 1:], None))
         self.poke()
         return True
 
     def _press_play(self) -> bool:
         """Play while a play press runs: its newest target again, at the
-        second it was asked for — a start of its own (_press); a press a new
-        queue overtook is none (_live). Otherwise Play
+        second it was asked for — after a Pause or a Stop, at the one a Seek
+        after it gave — a start of its own (_press); a press a new queue
+        overtook is none (_live). Otherwise Play
         on a playlist that is no mirror (lost, drifted, a tail): on a pause
         it only resumes — the sound never stops for a rebuild — and what lies
         behind the entry HQPlayer reads is repaired as the reconverge does.
@@ -2859,8 +2926,11 @@ class HqpBackend(PlayerBackend):
         with self._press_lock:
             press = self._live(self._pressed)
             newest = press.newest() if press is not None else None
+            moved = press.halt_second if press is not None and press.halted() else None
         if newest is not None:
             target, position = self._resolved(newest) or (newest.target, newest.position)
+            if moved is not None and target is newest.target:
+                position = moved                # the spot a Seek after the halt gave
             return self._press(target, position)
         last = self._last_tick
         if last is not None and last.state in ("paused", "playing"):
@@ -2889,11 +2959,26 @@ class HqpBackend(PlayerBackend):
         it runs — a Play, a tap, Next, Previous, a DSP change's resume
         (`item`) — is one more start of the same press, numbered as it comes
         on the intent clock: at its end the newest one no newer intent
-        superseded goes. No retry; no route waits for it."""
+        superseded goes. One asked while a queue mutation holds words is a
+        start among them, its track found among what HQPlayer is handed (one
+        not there is refused in words). No retry; no route waits for it."""
         items = self._queue.snapshot()
         at = next((i for i, it in enumerate(items) if it is target), None)
         following = items[at:] if at is not None else [target]
         with self._press_lock:
+            words = self._inflight
+            if words is not None:
+                held = (target if words.index(target) is not None else
+                        next((it for it in words.items if target.track_id is not None
+                              and it.track_id == target.track_id), None))
+                if held is None:
+                    self._local.refusal = "it is not in the queue being loaded"
+                    return False
+                words.starts.append(_Start(
+                    item or self._link.item("start", self._link.accept("transport")), held,
+                    position, words.items[words.index(held) - 1:], None))
+                self.poke()
+                return True
             if item is None:
                 item = self._link.item("start", self._link.accept("transport"),
                                        queue=self._queue, generation=self._queue.generation)
@@ -3640,7 +3725,10 @@ class HqpBackend(PlayerBackend):
         with self._link.command(intent, number=number) as n:
             self._check_attached()
             self._given = set(uris)
-            _hqp_safe(self._link, lambda h: h.stop(), "Stop")
+            if _hqp_safe(self._link, lambda h: h.stop(), "Stop"):
+                with self._press_lock:
+                    if self._inflight is not None:
+                        self._inflight.stopped = True
             taken, unsent = _add_uris_with_retry(self._link, uris, clear_first=True)
         return taken, unsent, n
 

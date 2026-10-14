@@ -199,18 +199,22 @@ class PlayerBackend(ABC):
         remove|reorder|clear. Default: nothing to do (HQPlayer acted in the
         mirror hooks)."""
 
-    def queue_start(self) -> None:
+    def queue_start(self) -> Optional[str]:
         """After a mutation, outside the queue lock: the start its mirror
-        left on this thread — a replace that plays, a rebuild that plays on.
-        Default: nothing (a renderer starts in queue_changed)."""
+        left on this thread — a replace that plays, a rebuild that plays on —
+        and the play intents held meanwhile, carried out whether the queue
+        committed or not (mutation). Returns what of them could not go, in
+        words — said with the refusal of a mutation that did not commit —
+        or None. Default: nothing (a renderer starts in queue_changed)."""
+        return None
 
     @contextmanager
     def mutation(self):
         """A queue mutation this output follows — a replace, a reorder, a
         re-bind, a radio start — on this thread, until the queue commits it
         or gives it up: a play intent made while the output takes it is the
-        output's to hold and carry out once the queue stands (queue_start).
-        Default: nothing to hold."""
+        output's to hold and carry out once the queue lock is let go, on the
+        queue as it then stands (queue_start). Default: nothing to hold."""
         yield
 
     def queue_abandon(self) -> None:
