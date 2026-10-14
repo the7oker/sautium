@@ -86,6 +86,7 @@ from playback import hqp_link as hl  # noqa: E402
 from playback import manager as manager_mod  # noqa: E402
 from playback.hqp_backend import HqpBackend  # noqa: E402
 from playback.manager import PlaybackManager  # noqa: E402
+from playback.queue import QueueItem  # noqa: E402
 
 _QUESTIONS = {"Status", "State", "GetInfo", "PlaylistGet", "VolumeRange", "GetModes",
               "GetFilters", "GetShapers", "GetRates", "MatrixListProfiles", "MatrixGetProfile",
@@ -925,7 +926,7 @@ class World:
             with hqp._lock:
                 playlist, track, state = list(hqp.playlist), hqp.track, hqp.state
             snapshot = self.mgr.queue.snapshot()
-            self._gaps(b, snapshot)
+            self._gaps(b, hqp, snapshot)
             want = [b._uri_of(it)[0] for it in b._layout(snapshot).handed]
             if playlist == want:
                 return
@@ -975,9 +976,12 @@ class World:
         foreign = last["foreign"]
         return not (foreign if foreign is not None else any("/Elsewhere/" in u for u in playlist))
 
-    def _gaps(self, b: HqpBackend, snapshot: list) -> None:
+    def _gaps(self, b: HqpBackend, hqp: FakeHqp, snapshot: list) -> None:
         """I13's gaps: a slot is one exactly when HQPlayer cannot open it — a
-        file of the other HQPlayer's library — or its file was refused there."""
+        file of the other HQPlayer's library — or `hqp`, the HQPlayer `b`
+        drives, refused its file: one the runner made it refuse, or one of
+        the other's library a pass-through entry names (the queue took
+        HQPlayer's own playlist over, unresolved)."""
         endpoint = b.endpoint_id
         for it in snapshot:
             why = b.gap(it)
@@ -985,7 +989,9 @@ class World:
             if elsewhere != (why is not None and why != hb.REFUSED_HERE):
                 self.violate(f"I13: {it.title} is {'a gap: ' + why if why else 'no gap'} "
                              f"on endpoint {endpoint}")
-            if why == hb.REFUSED_HERE and it.source.get("path") not in self.refused:
+            src = it.opener()
+            opens = src.get("path") or src.get("uri") or ""
+            if why == hb.REFUSED_HERE and not any(part in opens for part in hqp.refuse):
                 self.violate(f"I13: {it.title} is a gap HQPlayer never refused")
 
     def _press(self) -> bool:
@@ -1543,3 +1549,30 @@ def test_a_batch_that_lost_what_hqplayer_refused_is_caught(fake, fake_b, listens
                            world.mgr.append([refused, fine], "next"), gen)
         assert world.violations == ["I11: a play next took 1 of 2 tracks: what HQPlayer "
                                     "refused of it is no gap"]
+
+
+def test_a_gap_is_judged_by_what_the_driven_hqplayer_refuses(fake, fake_b, listens,
+                                                             monkeypatch):
+    """A pass-through entry the queue took over from A's playlist names a
+    file of A's library; handed to B, which opens none of A's files, it is
+    refused while B takes the rest — a gap B refused, the outcome the design
+    gives, no violation. A gap the driven HQPlayer never refused is still
+    caught."""
+    with _a_world(fake, fake_b, monkeypatch) as world:
+        mgr = world.mgr
+        world.pick(fake_b)
+        assert _wait(lambda: isinstance(mgr.active, HqpBackend)
+                     and mgr.active._link.port == fake_b.port
+                     and len(fake_b.playlist) == 4, timeout=5)
+        b = mgr.active
+        adopted = QueueItem(track_id=None, media_file_id=None,
+                            source={"kind": "uri", "uri": "file:///D:/Library/H/950.flac"},
+                            title="", artist="")
+        fine = _item("E:/Music/S/951.flac", 951)
+        assert mgr.append([adopted, fine]) == 2
+        assert b.gap(adopted) == hb.REFUSED_HERE and b.gap(fine) is None
+        world._gaps(b, fake_b, mgr.queue.snapshot())
+        assert not world.violations, world.violations
+        b._link.refusals.append((fine, hb._slot_key(fine)))     # a refusal B never made
+        world._gaps(b, fake_b, mgr.queue.snapshot())
+        assert world.violations == ["I13: Song 951 is a gap HQPlayer never refused"]
