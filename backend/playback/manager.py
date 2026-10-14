@@ -53,6 +53,12 @@ class OutputHeld(ConnectionError):
                          "finishes, or cancel it on the HQPlayer screen")
 
 
+class QueueRefused(RuntimeError):
+    """The output took none of a new queue: nothing commits, the queue as it
+    was. Its words — and what the person's words made meanwhile could not do,
+    a note — are the play route's answer."""
+
+
 class QueueChanged(RuntimeError):
     """An edit planned on one order of the queue met another: refused
     whole, the queue as it is (409) — the planner reads it again."""
@@ -792,12 +798,17 @@ class PlaybackManager:
         once the output has taken the queue, under the queue lock, before the
         commit: an output that refused it (busy, gone) leaves history as it
         was; a rotation that fails commits nothing, and the output abandons
-        what it was given (PlayerBackend.queue_abandon). Returns (added,
-        generation); generation is what background fillers must guard their
-        appends with."""
+        what it was given (PlayerBackend.queue_abandon). An output that took
+        none of `items` raises QueueRefused. Returns (added, generation);
+        generation is what background fillers must guard their appends
+        with."""
         with self._output_mutation(self.ensure_active if play else self.backend) as backend:
             accepted = backend.queue_replace(items, play=play, probe_first=probe_first)
             added = len(accepted)
+            if items and not added:
+                # Refused whole: raised under the mutation, so what the
+                # person's words made meanwhile could not do goes with it
+                raise QueueRefused(backend.refusal() or "the output took none of the new queue")
             if added and archive is not None:
                 try:
                     archive()

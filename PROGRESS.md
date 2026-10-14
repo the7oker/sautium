@@ -933,6 +933,22 @@ implementation details live in the code, DB and git history.
   record a put-back that went as left to them; and a new run's first step
   closed a run the owner had changed with a notice the new run then ended.
   Lesson: a state you did not see set is evidence of nothing but itself.
+- **A held word goes under the number it was held with** (2026-10-14). The
+  words a person made while a queue mutation handed HQPlayer its playlist
+  were carried out as fresh intents, numbered as they went: a Play pressed
+  after a held Pause, waiting its turn behind a slow command, went first,
+  and the Pause then undid it; and a Seek after a held Pause took a number
+  of its own, so the carry-out found the Pause and the Seek overtaken by
+  that very Seek and sent neither — the route had answered ok, the music
+  played on. A held word now goes under its own number with no intent of
+  its own, and a Seek after a halt only moves the halt's second, as in a
+  play press. With it: a DSP change made while a Pause was held read
+  HQPlayer as playing and resumed it after its build; a Next with nothing
+  to start started playback at a stopped spot; a new queue HQPlayer refused
+  whole answered as if nothing were wrong and dropped what a tap made
+  meanwhile could not do; a Next held over a "play next" HQPlayer refused
+  was lost; Seek, Pause, Play lost the Seek. Lesson: a held word is the
+  same word later, not a new one.
 - **Stop-clear-add-select-play sequence** for `play_track`/`play_album`. Without
   explicit stop, HQPlayer occasionally started the wrong track from the
   existing queue.

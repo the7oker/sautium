@@ -556,18 +556,28 @@ comes after the control port answers again — so neither can end the wait.
   first track, the rebuild's track at its second — and that start goes,
   numbered as the Play: a Play during a new order's rebuild resumes the
   track that played, at its second, never HQPlayer's entry 1. Next and
-  Previous count from the newest start (the one owed before any); a Seek
-  changes the newest word's second (after a Pause or a Stop, the second the
-  next Play starts at); a Pause or a Stop drops the starts before it and
-  always goes — sent, unless the mutation's own Stop stopped HQPlayer: then
-  nothing starts and the spot is left at the newest start's track. With
-  no track to count from — HQPlayer plays on, or the reconverge knows no
-  slot it stood on — a Play or a Seek acts once the queue stands, as it
-  would then. Each word's outcome is its own, never the mutation's route's:
-  overtaken by a person's newer word it does not go, one that meets a build
-  goes once it is done, one HQPlayer refuses is logged. A start whose track
-  the queue it lands on does not hold — a tap on a new queue that did not
-  commit — is said with that queue's refusal. A play press asked while a
+  Previous count from the newest start (the one owed before any) — with no
+  start made and HQPlayer at a spot (a rebuild that does not resume leaves
+  it at one, or it stands at one) they only move the spot, as with nothing
+  in flight; one whose track the queue does not hold once it stands (a
+  "play next" HQPlayer refused whole) counts again from where it began, on
+  the queue as it stands. A Seek changes the newest word's second — after
+  a Pause or a Stop, the second the next Play starts at, with no word of
+  its own; a Pause or a Stop drops the starts before it and always goes —
+  sent, unless the mutation's own Stop stopped HQPlayer: then nothing
+  starts and the spot is left at the newest start's track — and a DSP
+  change made while it is held resumes nothing over it (since 2026-10-14).
+  With no track to count from — HQPlayer plays on, or the reconverge knows
+  no slot it stood on — a Play or a Seek acts once the queue stands, as it
+  would then (a Seek before a Pause still holds when a Play follows). Each
+  word goes under the number it was held with, never numbered again — a
+  word the person made after it, waiting its turn, is never undone by it —
+  and its outcome is its own, never the mutation's route's: overtaken by a
+  person's newer word it does not go, one that meets a build goes once it
+  is done, one HQPlayer refuses is logged. A start whose track the queue it
+  lands on does not hold — a tap on a new queue that did not commit — is
+  said with that queue's refusal; a new queue HQPlayer refused whole is
+  answered as one (`QueueRefused`, in HQPlayer's words). A play press asked while a
   mutation holds words is one of them, and the reconverge yields to a press
   asked before it.
 - **Gaps** (since 2026-10-13). HQPlayer's playlist is the queue without its

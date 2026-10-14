@@ -634,6 +634,11 @@ class HqpLink:
         with self._state_lock:
             self._pending.pop(n, None)
 
+    def newest(self, *kinds: str) -> int:
+        """The newest number that holds among intents of `kinds` (0: none)."""
+        with self._state_lock:
+            return max((self._latest.get(kind, 0) for kind in kinds), default=0)
+
     def item(self, kind: str, n: int, *, queue: Any = None,
              generation: Optional[int] = None) -> Item:
         """What a command sequence serves, made for the intent numbered `n`.

@@ -85,7 +85,7 @@ from playback import hqp_backend as hb  # noqa: E402
 from playback import hqp_link as hl  # noqa: E402
 from playback import manager as manager_mod  # noqa: E402
 from playback.hqp_backend import HqpBackend  # noqa: E402
-from playback.manager import PlaybackManager  # noqa: E402
+from playback.manager import PlaybackManager, QueueRefused  # noqa: E402
 from playback.queue import QueueItem  # noqa: E402
 
 _QUESTIONS = {"Status", "State", "GetInfo", "PlaylistGet", "VolumeRange", "GetModes",
@@ -629,7 +629,7 @@ class World:
     def replace(self) -> None:
         """A play route's replace, its session rotation handed in — now and
         then of files HQPlayer refuses whole: nothing commits, nothing
-        rotates."""
+        rotates, and the replace answers so (QueueRefused)."""
         rotated = []
         items = self.items(self.rng.randint(1, 4))
         refused = self.rng.random() < 0.2
@@ -640,6 +640,9 @@ class World:
         try:
             added, gen = self.mgr.replace_queue(items, play=True,
                                                 archive=lambda: rotated.append(True))
+        except QueueRefused as e:
+            self.rec("step-refused", why=str(e))
+            added, gen = 0, self.mgr.queue.generation
         except BaseException:
             if rotated:
                 self.violate("I12: history rotated for a replace the output refused")
