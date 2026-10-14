@@ -52,7 +52,8 @@ from playback import hqp_link
 from playback import hqp_load
 from playback import hqp_meter
 from playback import queue as queue_mod
-from playback.base import Capabilities, PlaybackStatus, PlayerBackend, ReorderPlan
+from playback.base import (Capabilities, OutputRefused, PlaybackStatus, PlayerBackend,
+                           ReorderPlan)
 from playback import hqp_benchmark
 from playback.hqp_benchmark import _building
 from playback.hqp_link import (NOT_ANSWERING, QUESTION_WAIT_S, UNFINISHED, Building, Dropped,
@@ -3815,7 +3816,7 @@ class HqpBackend(PlayerBackend):
         self._ways_in(items)
         layout = _Layout(items, self.gap)
         if items and not layout.handed:
-            raise RuntimeError(f"none of these tracks is on {self.label} — {self.gap(items[0])}")
+            raise OutputRefused(f"none of these tracks is on {self.label} — {self.gap(items[0])}")
         uris = [self._uri_for(it) for it in layout.handed]
         att = (self._watch("replace", slot=1, uris=uris, items=list(layout.handed))
                if play and uris else None)
@@ -4074,7 +4075,7 @@ class HqpBackend(PlayerBackend):
             self.lose_mirror(f"HQPlayer did not answer a removal ({refusal})")
             return True
         if refusal is not None:
-            raise RuntimeError(f"HQPlayer did not remove it: {refusal}")
+            raise OutputRefused(f"HQPlayer did not remove it: {refusal}")
         return True
 
     def queue_clear_after_current(self, archive: Callable[[], None]) -> bool:
@@ -4181,11 +4182,11 @@ class HqpBackend(PlayerBackend):
             # transcode): a raw file_path_to_uri would hand HQPlayer the
             # whole disc image for a CUE slice and an unplayable path for an
             # m4a.
-            def held(ids: list) -> list:
-                return [mid for mid in ids if self.gap(plan.items_by_id[mid]) is None]
+            def held(items: list) -> list:
+                return [it for it in items if self.gap(it) is None]
             old_after, new_after = held(plan.old_after), held(plan.new_after)
             old_before, new_before = held(plan.old_before), held(plan.new_before)
-            uri_by_id = {mid: self._uri_for(plan.items_by_id[mid]) for mid in new_after}
+            uris = [self._uri_for(it) for it in new_after]
             current = self._layout().entry(plan.status_idx)
 
             unplaced = None
@@ -4204,14 +4205,14 @@ class HqpBackend(PlayerBackend):
                 if k is None:
                     return "HQPlayer holds no entry for the playing slot"
                 taken = (all(_remove(hqp, k + 1) for _ in old_after)
-                         and all(_add_one(hqp, uri_by_id[mid]) for mid in new_after))
+                         and all(_add_one(hqp, uri) for uri in uris))
                 cursor = Entry(1)
                 new_before_remaining = list(new_before)
                 for old_track in old_before:
                     if not taken:
                         break
                     if (new_before_remaining
-                            and new_before_remaining[0] == old_track):
+                            and new_before_remaining[0] is old_track):
                         new_before_remaining.pop(0)
                         cursor = cursor + 1
                     else:
@@ -4220,7 +4221,7 @@ class HqpBackend(PlayerBackend):
             # HQPlayer plays on through it: the play intents made meanwhile
             # are held, counted from the playing track
             last = self._last_tick
-            self._hold_words([plan.items_by_id[mid] for mid in plan.order], stops=False,
+            self._hold_words(plan.order, stops=False,
                              base=(self._queue.item_at(plan.status_idx),
                                    int(last.position) if last is not None else 0),
                              owes=False)
@@ -4236,7 +4237,7 @@ class HqpBackend(PlayerBackend):
                 self._drifted("HQPlayer did not take the new order")
                 logger.warning("HQPlayer did not take the new order: %s",
                                diag.redact_text(refusal))
-                raise RuntimeError(f"HQPlayer did not take the new order: {refusal}")
+                raise OutputRefused(f"HQPlayer did not take the new order: {refusal}")
             return {
                 "removed": len(plan.old_after) + (len(plan.old_before) - len(plan.new_before)),
                 "added": len(plan.new_after),
@@ -4245,7 +4246,7 @@ class HqpBackend(PlayerBackend):
 
         # Fallback: clear+rebuild. Required for cases that need an insert
         # (swap inside before, after→before crossing, current right-shift).
-        items = [plan.items_by_id[mid] for mid in plan.order]
+        items = plan.order
         self._rebuild(items, items[plan.new_status_idx - 1],
                       spot[1] if spot is not None and not plan.resume else plan.position,
                       resume=plan.resume, what="in the new order")

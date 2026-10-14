@@ -938,19 +938,23 @@ class PlaybackManager:
         canonical queue adopts the new order. A plan made on another order of
         the queue than the one it meets (a filler's append landed first) is
         refused whole (QueueChanged): it would hand HQPlayer an order of a
-        queue that is gone. A slot's way in read again moves no slot."""
+        queue that is gone — and so is one made on another output, whose
+        position and resume were that output's. A slot's way in read again
+        moves no slot."""
         # queue reorder is output-independent
         with self._output_mutation(lambda: self._active) as backend:
             now = self.queue.snapshot()
             if plan.items is not None and (len(now) != len(plan.items) or any(
                     a is not b for a, b in zip(now, plan.items))):
                 raise QueueChanged("the queue changed while its new order was made")
+            if plan.output is not backend:
+                raise QueueChanged("the output changed while its new order was made")
             if backend is None:
-                self.queue.reorder_by_track_ids(plan.order)
+                self.queue.reorder(plan.order)
                 self._schedule_persist()
                 return {"removed": 0, "added": 0, "interrupted": False}
             result = backend.queue_reorder(plan)
-            self.queue.reorder_by_track_ids(plan.order)
+            self.queue.reorder(plan.order)
             backend.queue_changed("reorder")
             self._schedule_persist()
         return result

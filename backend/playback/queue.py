@@ -262,24 +262,13 @@ class CanonicalQueue:
                 return item
             return None
 
-    def reorder_by_track_ids(self, order: list[str]) -> None:
-        """Reorder to `order` (universal track UUIDs — the one identity
-        BOTH owned and phantom items carry; media_file_id is None for
-        phantoms, which made radio queues unreorderable). The endpoint has
-        already validated the permutation. Duplicate ids keep their
-        relative order via per-id buckets."""
+    def reorder(self, order: list[QueueItem]) -> None:
+        """Reorder to `order` — the queue's own items, each once, by
+        identity (a track queued twice is two slots); the endpoint has
+        validated the permutation against the items it read, and the
+        manager applies it only to those items (apply_reorder)."""
         with self._lock:
-            by_id: dict[Optional[str], list[QueueItem]] = {}
-            for it in self._items:
-                by_id.setdefault(it.track_id, []).append(it)
-            new_items = []
-            for mid in order:
-                bucket = by_id.get(mid)
-                if bucket:
-                    new_items.append(bucket.pop(0))
-            for bucket in by_id.values():
-                new_items.extend(bucket)
-            self._items = new_items
+            self._items = list(order)
             self._version += 1
 
     def clear_for_radio(self, current_index: Optional[int]) -> int:

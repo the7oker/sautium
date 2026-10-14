@@ -959,6 +959,18 @@ implementation details live in the code, DB and git history.
   published once its sequence holds the lock, withdrawn on any exit before
   that. Lesson: a resource asked in one place and released in another leaks
   on every path between them.
+- **A new order names slots, on its own output** (2026-10-14). The reorder
+  plan named its slots by track id: a track queued twice from two rips was
+  handed to HQPlayer as the first rip twice, a tap on its second copy
+  during the edit restarted the first, and a re-bind that cleared a slot's
+  track id between the route's read and the apply misplaced that slot —
+  HQPlayer and the queue apart, the mirror "in step". Checked by identity
+  against the queue's items, a plan made on one HQPlayer was also taken on
+  another chosen before the apply, which started B from A's position. The
+  plan is now the queue's items in their new order, and the output it was
+  made on refuses no other; a step HQPlayer refuses is its answer
+  (OutputRefused), logged once in its words, never as a fault. Lesson: an
+  id is a name, a slot is a thing — order things.
 - **Stop-clear-add-select-play sequence** for `play_track`/`play_album`. Without
   explicit stop, HQPlayer occasionally started the wrong track from the
   existing queue.

@@ -84,6 +84,7 @@ from hqplayer_client import PlaybackState  # noqa: E402
 from playback import hqp_backend as hb  # noqa: E402
 from playback import hqp_link as hl  # noqa: E402
 from playback import manager as manager_mod  # noqa: E402
+from playback.base import OutputRefused  # noqa: E402
 from playback.hqp_backend import HqpBackend  # noqa: E402
 from playback.manager import PlaybackManager, QueueRefused  # noqa: E402
 from playback.queue import QueueItem  # noqa: E402
@@ -832,10 +833,8 @@ class World:
         out of reach or HQPlayer's own refusal in its words — never a crash
         a route wrapped into a 503."""
         cause = e.__context__
-        if e.status_code != 409 and not (
-                isinstance(cause, (ConnectionError, OSError))
-                or (isinstance(cause, RuntimeError)
-                    and str(cause).startswith(("HQPlayer did not", "none of these tracks is on")))):
+        if e.status_code != 409 and not isinstance(cause, (ConnectionError, OSError,
+                                                           OutputRefused)):
             self.unexpected.append(f"{name}: {e.status_code} {e.detail} — "
                                    + "".join(traceback.format_exception(cause)))
         self.rec("step-refused", step=n, status=e.status_code, why=e.detail)
@@ -858,9 +857,7 @@ class World:
             self._refused(name, n, e)
         except (ConnectionError, OSError) as e:
             self.rec("step-refused", step=n, why=f"{type(e).__name__}: {e}")
-        except RuntimeError as e:
-            if not str(e).startswith(("HQPlayer did not", "none of these tracks is on")):
-                self.unexpected.append(f"{name}: {traceback.format_exc()}")
+        except OutputRefused as e:
             self.rec("step-refused", step=n, why=str(e))
         except Exception:
             self.unexpected.append(f"{name}: {traceback.format_exc()}")

@@ -1551,10 +1551,8 @@ def test_a_new_order_hqplayer_refuses_keeps_the_queues(fake):
     try:
         fake.replies["PlaylistRemove"] = '<PlaylistRemove result="Error">busy</PlaylistRemove>'
         plan = ReorderPlan(seamless=True, status_idx=1, new_status_idx=1, old_before=[],
-                           new_before=[], old_after=["track-2", "track-3"],
-                           new_after=["track-3", "track-2"],
-                           order=["track-1", "track-3", "track-2"],
-                           items_by_id={it.track_id: it for it in items})
+                           new_before=[], old_after=items[1:], new_after=[items[2], items[1]],
+                           order=[items[0], items[2], items[1]], items=items, output=b)
         with pytest.raises(RuntimeError, match="HQPlayer did not take the new order: busy"):
             mgr.apply_reorder(plan)
         assert [it.track_id for it in mgr.queue.snapshot()] == ["track-1", "track-2", "track-3"]
@@ -2014,12 +2012,11 @@ def test_a_new_order_taken_while_stopped_plays_only_on_the_play_press(fake):
     fake.track = 2                      # stopped on slot 2: a build that keeps the index
     fake.commands.clear()
     items = mgr.queue.snapshot()
-    plan = ReorderPlan(seamless=False, status_idx=2, new_status_idx=1, old_before=["track-1"],
-                       new_before=[], old_after=["track-3"], new_after=["track-1", "track-3"],
-                       order=["track-2", "track-1", "track-3"],
-                       items_by_id={it.track_id: it for it in items}, position=0, resume=False)
+    plan = ReorderPlan(seamless=False, status_idx=2, new_status_idx=1, old_before=[items[0]],
+                       new_before=[], old_after=[items[2]], new_after=[items[0], items[2]],
+                       order=[items[1], items[0], items[2]], position=0, resume=False)
     assert b.queue_reorder(plan)["interrupted"]
-    mgr.queue.reorder_by_track_ids(plan.order)      # the manager's commit
+    mgr.queue.reorder(plan.order)      # the manager's commit
     assert fake.playlist == ["file:///E:/Music/A/02.flac", "file:///E:/Music/A/01.flac",
                              "file:///E:/Music/A/03.flac"]
     assert "SelectTrack" not in [c for c, _ in fake.commands]
@@ -2270,12 +2267,11 @@ def test_a_reorder_while_paused_leaves_hqplayer_stopped_at_its_spot(fake, listen
         fake.state, fake.track, fake.position = int(PlaybackState.PAUSED), 2, 150.0
     fake.commands.clear()
     items = mgr.queue.snapshot()
-    plan = ReorderPlan(seamless=False, status_idx=2, new_status_idx=1, old_before=["track-1"],
-                       new_before=[], old_after=["track-3"], new_after=["track-1", "track-3"],
-                       order=["track-2", "track-1", "track-3"],
-                       items_by_id={it.track_id: it for it in items}, position=150, resume=False)
+    plan = ReorderPlan(seamless=False, status_idx=2, new_status_idx=1, old_before=[items[0]],
+                       new_before=[], old_after=[items[2]], new_after=[items[0], items[2]],
+                       order=[items[1], items[0], items[2]], position=150, resume=False)
     b.queue_reorder(plan)
-    mgr.queue.reorder_by_track_ids(plan.order)      # the manager's commit
+    mgr.queue.reorder(plan.order)      # the manager's commit
     assert fake.state == int(PlaybackState.STOPPED)
     assert not [c for c, _ in fake.commands if c in ("SelectTrack", "Seek", "Play")]   # no sound
     stopped = TrackStatus(state=PlaybackState.STOPPED, track_index=0, track_id="",
@@ -2297,12 +2293,11 @@ def test_a_start_a_pause_dropped_leaves_its_spot_for_the_play_press(fake, output
         fake.track, fake.position = 2, 120.0
     assert _wait(lambda: mgr._latest_status.get("track_index") == 2)
     items = mgr.queue.snapshot()
-    plan = ReorderPlan(seamless=False, status_idx=2, new_status_idx=1, old_before=["track-1"],
-                       new_before=[], old_after=["track-3"], new_after=["track-1", "track-3"],
-                       order=["track-2", "track-1", "track-3"],
-                       items_by_id={it.track_id: it for it in items}, position=120, resume=True)
+    plan = ReorderPlan(seamless=False, status_idx=2, new_status_idx=1, old_before=[items[0]],
+                       new_before=[], old_after=[items[2]], new_after=[items[0], items[2]],
+                       order=[items[1], items[0], items[2]], position=120, resume=True)
     b.queue_reorder(plan)
-    mgr.queue.reorder_by_track_ids(plan.order)      # the manager's commit
+    mgr.queue.reorder(plan.order)      # the manager's commit
     b.pause()                                       # before the start the rebuild left goes
     n = len(fake.commands)
     b.queue_start()
@@ -2323,15 +2318,12 @@ def test_a_start_a_newer_intent_dropped_is_interrupted_never_unreachable(fake, o
     for _ in range(3):
         items = mgr.queue.snapshot()
         plan = ReorderPlan(seamless=False, status_idx=1, new_status_idx=2,
-                           old_before=[], new_before=[items[1].track_id],
-                           old_after=[it.track_id for it in items[1:]],
-                           new_after=[items[2].track_id],
-                           order=[items[1].track_id, items[0].track_id, items[2].track_id],
-                           items_by_id={it.track_id: it for it in items}, position=10,
-                           resume=True)
+                           old_before=[], new_before=[items[1]], old_after=items[1:],
+                           new_after=[items[2]], order=[items[1], items[0], items[2]],
+                           position=10, resume=True)
         b.queue_reorder(plan)
         att = b._attempt
-        mgr.queue.reorder_by_track_ids(plan.order)
+        mgr.queue.reorder(plan.order)
         b.pause()
         b.queue_start()
         assert _wait(lambda: att.verdict is not None, timeout=5)
@@ -2644,10 +2636,9 @@ def test_a_play_refused_while_hqplayer_builds_keeps_the_spot(fake, listens, monk
         fake.state, fake.track, fake.position = int(PlaybackState.PAUSED), 2, 150.0
     items = mgr.queue.snapshot()
     b.queue_reorder(ReorderPlan(seamless=False, status_idx=2, new_status_idx=2,
-                                old_before=["track-1"], new_before=["track-3"],
-                                old_after=["track-3"], new_after=["track-1"],
-                                order=["track-3", "track-2", "track-1"],
-                                items_by_id={it.track_id: it for it in items},
+                                old_before=[items[0]], new_before=[items[2]],
+                                old_after=[items[2]], new_after=[items[0]],
+                                order=[items[2], items[1], items[0]],
                                 position=150, resume=False))
     fake.build("SetFilter", 2.0)
     hb.change_dsp({"filter": 57, "filter1x": 57})
@@ -6043,15 +6034,12 @@ def test_a_start_dropped_after_a_newer_start_played_puts_no_spot_back(fake, outp
     assert _wait(lambda: mgr._latest_status.get("state") == "paused")
     items = mgr.queue.snapshot()
     plan = ReorderPlan(seamless=False, status_idx=1, new_status_idx=2,
-                       old_before=[], new_before=[items[1].track_id],
-                       old_after=[it.track_id for it in items[1:]],
-                       new_after=[items[2].track_id],
-                       order=[items[1].track_id, items[0].track_id, items[2].track_id],
-                       items_by_id={it.track_id: it for it in items}, position=120,
-                       resume=True)
+                       old_before=[], new_before=[items[1]], old_after=items[1:],
+                       new_after=[items[2]], order=[items[1], items[0], items[2]],
+                       position=120, resume=True)
     with mgr._mutation():
         b.queue_reorder(plan)
-        mgr.queue.reorder_by_track_ids(plan.order)
+        mgr.queue.reorder(plan.order)
     owed = b._local.start                            # the reorder's start, not sent yet
     b._local.start = None
     assert b.select(3)                               # a tap takes HQPlayer first
@@ -6104,16 +6092,13 @@ def test_a_start_given_up_because_a_newer_word_came_is_superseded_not_unreachabl
     mgr, b = output
     items = mgr.queue.snapshot()
     plan = ReorderPlan(seamless=False, status_idx=1, new_status_idx=2,
-                       old_before=[], new_before=[items[1].track_id],
-                       old_after=[it.track_id for it in items[1:]],
-                       new_after=[items[2].track_id],
-                       order=[items[1].track_id, items[0].track_id, items[2].track_id],
-                       items_by_id={it.track_id: it for it in items}, position=10,
-                       resume=True)
+                       old_before=[], new_before=[items[1]], old_after=items[1:],
+                       new_after=[items[2]], order=[items[1], items[0], items[2]],
+                       position=10, resume=True)
     with mgr._mutation():
         b.queue_reorder(plan)
         att = b._attempt
-        mgr.queue.reorder_by_track_ids(plan.order)
+        mgr.queue.reorder(plan.order)
     fake.build("SetFilter", 2.0)
     hb.change_dsp({"filter": 57, "filter1x": 57})    # someone else's build, before the start
     b.queue_start()                                  # meets it: waits in the background
@@ -8853,3 +8838,134 @@ def test_a_rebuild_whose_uris_fail_leaves_no_number_pending(fake, output, monkey
     assert _wait(lambda: not any(t.name == "hqp-reconverge" for t in threading.enumerate()))
     assert link.superseded(older) is None, (link.superseded(older), link._pending)
     assert link._pending == {}, link._pending
+
+
+# -- A new order names slots, on the output it was made for ----------------------------
+
+
+@pytest.mark.parametrize("order", [["track-2", "track-1", "track-3"],    # a rebuild
+                                   ["track-1", "track-3", "track-2"]])   # seamless
+def test_a_new_order_planned_on_one_hqplayer_is_refused_on_another(fake, fake_b, output,
+                                                                   monkeypatch, order):
+    """A plays; a new order is planned while it does, and the person picks
+    HQPlayer B before the order is applied. The plan's position and resume
+    were A's: on B it is refused whole (409), and B stays stopped as a
+    switch leaves it."""
+    from fastapi import HTTPException
+    mgr, b = output                                 # A plays slot 1
+    settings_router = _picker(monkeypatch, fake)
+    player_router = _routes_on(monkeypatch, mgr)
+    apply = mgr.apply_reorder
+
+    def switched_first(plan):
+        _pick(settings_router, type="hqplayer", hqplayer={"host": "127.0.0.1",
+                                                          "port": fake_b.port})
+        assert mgr.active is not b and fake_b.state == int(PlaybackState.STOPPED)
+        return apply(plan)
+    monkeypatch.setattr(mgr, "apply_reorder", switched_first)
+    try:
+        with pytest.raises(HTTPException) as refused:
+            player_router.reorder(player_router.ReorderRequest(order=order))
+        assert refused.value.status_code == 409, refused.value.detail
+        _settled()
+        assert fake_b.state == int(PlaybackState.STOPPED), (fake_b.track, fake_b.position)
+        assert [it.track_id for it in mgr.queue.snapshot()] == ["track-1", "track-2", "track-3"]
+    finally:
+        if mgr.active is not None:
+            mgr.active.shutdown()
+
+
+def test_a_new_order_over_a_rebind_that_cleared_a_track_moves_that_slot(fake, output,
+                                                                       monkeypatch):
+    """Between the route's read and the apply, slot 3's file left the
+    library with its track — re-bound in place to a pass-through entry, its
+    track id cleared. The new order names slots, not track ids: that slot
+    goes where the order put it, and HQPlayer and the queue agree."""
+    mgr, b = output                                 # playing slot 1 of 3
+    player_router = _routes_on(monkeypatch, mgr)
+    apply = mgr.apply_reorder
+
+    def rebound_first(plan):
+        with mgr._mutate_lock, b.mutation():         # as rebind_files does
+            moved = mgr.queue.rebind(
+                lambda items: [{"track_id": None, "media_file_id": None,
+                                "source": {"kind": "uri", "uri": "file:///E:/Music/A/03.flac"}}
+                               if i == 3 else None for i, _ in enumerate(items, start=1)],
+                None)
+            assert len(moved) == 1
+            b.queue_changed("rebind")
+        b.queue_start()
+        return apply(plan)
+    monkeypatch.setattr(mgr, "apply_reorder", rebound_first)
+    assert player_router.reorder(player_router.ReorderRequest(
+        order=["track-1", "track-3", "track-2"]))["ok"]
+    queue = [it.source.get("uri") or "file:///" + it.source["path"]
+             for it in mgr.queue.snapshot()]
+    assert queue == ["file:///E:/Music/A/01.flac", "file:///E:/Music/A/03.flac",
+                     "file:///E:/Music/A/02.flac"], queue
+    assert b._mirror == "step" and fake.playlist == queue, (fake.playlist, b._mirror)
+
+
+def test_a_new_order_of_a_track_queued_from_two_rips_hands_each_rip(fake, output, monkeypatch):
+    """Track 2 queued twice from two rips — another album's copy: the same
+    track, another file. A new order hands HQPlayer each rip at the slot the
+    order gives it, and HQPlayer and the queue agree."""
+    mgr, b = output                                 # playing slot 1 of 3
+    player_router = _routes_on(monkeypatch, mgr)
+    other = QueueItem(track_id="track-2", media_file_id=22,
+                      source={"kind": "file", "path": "E:/Music/C/02.flac", "format": "FLAC"},
+                      title="Song 2", artist="Artist", album="Compilation")
+    assert mgr.append([other]) == 1
+    assert player_router.reorder(player_router.ReorderRequest(
+        order=["track-1", "track-3", "track-2", "track-2"]))["ok"]
+    queue = ["file:///" + it.source["path"] for it in mgr.queue.snapshot()]
+    assert queue == ["file:///E:/Music/A/01.flac", "file:///E:/Music/A/03.flac",
+                     "file:///E:/Music/A/02.flac", "file:///E:/Music/C/02.flac"], queue
+    assert b._mirror == "step" and fake.playlist == queue, fake.playlist
+
+
+def test_a_tap_on_the_second_copy_during_a_new_order_plays_that_copy(fake, output,
+                                                                     monkeypatch):
+    """Track 1 queued twice — [1, 2, 3, 1'], the first copy playing — and a
+    seamless new order [1, 3, 2, 1'] goes to HQPlayer; the person taps the
+    fourth row (the second copy) meanwhile: HQPlayer plays its fourth entry,
+    never the playing first copy restarted."""
+    mgr, b = output
+    player_router = _routes_on(monkeypatch, mgr)
+    assert mgr.append([_item("E:/Music/A/01.flac", 1)], "end") == 1
+    assert len(fake.playlist) == 4
+    fake.service["PlaylistRemove"] = 0.4
+    n = len(fake.commands)
+    reorder = threading.Thread(target=lambda: player_router.reorder(player_router.ReorderRequest(
+        order=["track-1", "track-3", "track-2", "track-1"])), daemon=True)
+    reorder.start()
+    assert _wait(lambda: any(c == "PlaylistRemove" for c, _ in fake.commands[n:]), timeout=5)
+    assert b._inflight is not None
+    said = _quick(lambda: player_router.jump(
+        player_router.JumpRequest(index=4, track_id="track-1")))
+    reorder.join(10)
+    _settled()
+    assert [it.track_id for it in mgr.queue.snapshot()] == [
+        "track-1", "track-3", "track-2", "track-1"]
+    assert fake.state == int(PlaybackState.PLAYING) and fake.track == 4, (
+        said, fake.track, _start_sent(fake, n))
+
+
+def test_a_new_order_hqplayer_refuses_is_said_once_in_its_words(fake, output, monkeypatch,
+                                                                caplog):
+    """HQPlayer refuses a step of a new order: the route answers its words,
+    and the refusal is logged once, as HQPlayer's answer — never again as a
+    fault with a traceback."""
+    from fastapi import HTTPException
+    mgr, b = output
+    player_router = _routes_on(monkeypatch, mgr)
+    fake.replies["PlaylistRemove"] = '<PlaylistRemove result="Error">busy</PlaylistRemove>'
+    with pytest.raises(HTTPException) as refused:
+        player_router.reorder(player_router.ReorderRequest(
+            order=["track-1", "track-3", "track-2"]))
+    assert refused.value.status_code == 503 and "did not take the new order" in str(
+        refused.value.detail), refused.value.detail
+    said = [r for r in caplog.records if "did not take the new order: busy" in r.getMessage()]
+    assert len(said) == 1 and said[0].levelno == logging.WARNING, [
+        (r.name, r.levelname, r.getMessage()) for r in said]
+    assert not [r for r in caplog.records if r.levelno >= logging.ERROR], caplog.text

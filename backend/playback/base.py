@@ -56,11 +56,18 @@ class Capabilities:
     exclusive_mode: bool = False
 
 
+class OutputRefused(RuntimeError):
+    """The output refused a step of what it was asked, in its own words —
+    its answer, never a fault of the node's."""
+
+
 @dataclass
 class ReorderPlan:
     """A validated /reorder request, precomputed by the endpoint: the
     seamless path drops/keeps around the playing slot without touching it;
-    the rebuild path clears and reloads (audible ~300 ms gap)."""
+    the rebuild path clears and reloads (audible ~300 ms gap). Its lists
+    are the queue's items themselves — a slot by identity, never by track
+    id (a track queued twice is two slots; a re-bind may clear an id)."""
     seamless: bool
     status_idx: int                     # current playing slot (1-based)
     new_status_idx: int                 # where that slot lands in the new order
@@ -68,13 +75,15 @@ class ReorderPlan:
     new_before: list
     old_after: list
     new_after: list
-    order: list                         # full new order of media_file_ids
-    items_by_id: dict                   # media_file_id -> QueueItem (URI derivation)
+    order: list                         # the queue's items in the new order
     position: int = 0                   # rebuild: the second it resumes at
     resume: bool = False                # rebuild: play on (it was playing), else the play press resumes
     # The queue's items, in order, it was planned on: applied to no other
     # order — a re-read of a slot's way in moves no slot
     items: Optional[list] = None
+    # The output it was planned on — its position and `resume` are that
+    # output's: applied on no other
+    output: Optional["PlayerBackend"] = None
 
 
 class PlayerBackend(ABC):

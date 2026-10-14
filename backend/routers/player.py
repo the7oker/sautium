@@ -28,7 +28,7 @@ from ensemble_instruments import present_instruments
 from lrclib import LrclibService
 from playback import queue as queue_mod
 from playback import sessions
-from playback.base import ReorderPlan
+from playback.base import OutputRefused, ReorderPlan
 from playback import hqp_link
 from playback.hqp_link import Building, Dropped, GaveUp, NotAnswering, through
 from playback.hqp_meter import meter as hqp_meter
@@ -1535,48 +1535,61 @@ def reorder(req: ReorderRequest):
     is impossible without an insert primitive, so we fall back to
     a full clear+rebuild + select_track + seek (~300 ms gap).
 
-    The plan is made on the queue as the route reads it and applied under
-    the queue lock only to that order of it: one a filler's append (or any
-    edit that moved a slot) overtook meanwhile is refused whole (409), the
-    queue as it is.
+    The plan is made on the queue as the route reads it, its slots the
+    queue's items themselves (a track queued twice is two slots, taken in
+    their order), and applied under the queue lock only to that order of it
+    and the output it was made on: one a filler's append (or any edit that
+    moved a slot) or an output switch overtook meanwhile is refused whole
+    (409), the queue as it is. A step the output refuses is answered in its
+    words (OutputRefused).
     """
     if not req.order:
         raise HTTPException(status_code=400, detail="order is empty")
 
-    # The plan names the queue's order it was made on: applied under the
-    # queue lock only to that order (a filler's append may land first)
+    # The plan names the queue's order and the output it was made on:
+    # applied under the queue lock only to those (a filler's append, an
+    # output switch may land first)
     current_items = manager.queue.snapshot()
-    current_ids = [it.track_id for it in current_items]
 
     status_idx = manager.latest_status.get("track_index") or 0
-    if status_idx < 1 or status_idx > len(current_ids):
+    if status_idx < 1 or status_idx > len(current_items):
         raise HTTPException(
             status_code=409,
             detail="reorder requires a currently playing track; use /play-tracks",
         )
 
-    if len(req.order) != len(current_ids):
+    if len(req.order) != len(current_items):
         raise HTTPException(
             status_code=400,
             detail="order length must match current playlist length",
         )
 
     from collections import Counter
-    if Counter(req.order) != Counter(current_ids):
+    if Counter(req.order) != Counter(it.track_id for it in current_items):
         raise HTTPException(
             status_code=400,
             detail="order must be a permutation of the current playlist",
         )
 
-    current_id = current_ids[status_idx - 1]
-    new_status_idx = req.order.index(current_id) + 1
+    # The sheet names tracks, the plan slots: a track queued twice takes its
+    # copies in their order
+    copies: dict = {}
+    for it in current_items:
+        copies.setdefault(it.track_id, []).append(it)
+    order = [copies[track_id].pop(0) for track_id in req.order]
 
-    old_before = current_ids[:status_idx - 1]
-    old_after = current_ids[status_idx:]
-    new_before = req.order[:new_status_idx - 1]
-    new_after = req.order[new_status_idx:]
+    current = current_items[status_idx - 1]
+    new_status_idx = next(i for i, it in enumerate(order, 1) if it is current)
 
-    if old_before == new_before and old_after == new_after:
+    old_before = current_items[:status_idx - 1]
+    old_after = current_items[status_idx:]
+    new_before = order[:new_status_idx - 1]
+    new_after = order[new_status_idx:]
+
+    def same(a: list, b: list) -> bool:
+        return len(a) == len(b) and all(x is y for x, y in zip(a, b))
+
+    if same(old_before, new_before) and same(old_after, new_after):
         return {
             "ok": True, "removed": 0, "added": 0,
             "anchor_index": status_idx, "interrupted": False,
@@ -1584,25 +1597,20 @@ def reorder(req: ReorderRequest):
 
     # Zero-interrupt feasibility: new_before must be a subsequence
     # of old_before (we can only drop tracks, never reorder or
-    # add to before), and new_after's multiset must match what we
-    # have available — original after-segment plus any tracks the
-    # before-shrink drops out.
+    # add to before), and new_after must hold exactly the original
+    # after-segment plus what the before-shrink drops out.
     def is_subsequence(needle: list, haystack: list) -> bool:
         j = 0
         for h in haystack:
-            if j < len(needle) and needle[j] == h:
+            if j < len(needle) and needle[j] is h:
                 j += 1
         return j == len(needle)
 
-    expected_after = Counter(old_after) + Counter(old_before) - Counter(new_before)
+    dropped = {id(it) for it in old_before} - {id(it) for it in new_before}
     seamless = (
         is_subsequence(new_before, old_before)
-        and Counter(new_after) == expected_after
+        and {id(it) for it in new_after} == {id(it) for it in old_after} | dropped
     )
-
-    items_by_id = {}
-    for it in current_items:
-        items_by_id.setdefault(it.track_id, it)
 
     plan = ReorderPlan(
         seamless=seamless,
@@ -1612,19 +1620,22 @@ def reorder(req: ReorderRequest):
         new_before=new_before,
         old_after=old_after,
         new_after=new_after,
-        order=req.order,
-        items_by_id=items_by_id,
+        order=order,
         position=int(manager.latest_status.get("position") or 0),
         # A paused HQPlayer is left stopped at its spot, never played to be
         # paused again: the play press resumes it there (HqpBackend._rebuild)
         resume=manager.latest_status.get("state") == "playing",
         items=current_items,
+        output=manager.active,
     )
     try:
         result = manager.apply_reorder(plan)
         return {"ok": True, "anchor_index": new_status_idx, **result}
     except QueueChanged as e:
         raise HTTPException(status_code=409, detail=f"{e} — the queue shows it as it is now")
+    except OutputRefused as e:
+        # The output's answer, logged in its words where it was met
+        raise _output_error(e)
     except Exception as e:
         # The output busy — held, building, silent, a newer intent first —
         # is news; anything else is a fault, with its traceback
