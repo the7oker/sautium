@@ -637,3 +637,26 @@ def test_a_stop_and_a_start_while_the_connection_is_made_leave_it_open(meter, lo
     page.until(state("open"))
     assert all(m.get("state") in (None, "open", "connecting") for m in page.settle(0.5))
     assert meter.metering() and port.ends == 0
+
+
+def test_a_wake_channel_the_os_refuses_is_a_failed_session(meter, loop, port, monkeypatch):
+    """The session's wake channel is a socket pair: one the OS refuses (the
+    descriptor limit) is a session that failed like any other — said to the
+    page — and the meter's thread lives on: the page's next wish connects."""
+    import errno
+    real, made = hqp_meter.Waker, []
+
+    def refused_once():
+        made.append(True)
+        if len(made) == 1:
+            raise OSError(errno.EMFILE, "Too many open files")
+        return real()
+    monkeypatch.setattr(hqp_meter, "Waker", refused_once)
+    meter.attach("127.0.0.1", port.port)
+    page = Page(meter, loop, "a")
+    page.want(True)
+    page.until(state("unavailable"))
+    page.want(False)
+    page.want(True)                              # Retry
+    page.until(state("open"))
+    assert meter.metering()

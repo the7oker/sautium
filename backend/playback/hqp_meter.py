@@ -404,10 +404,19 @@ class HqpMeter:
                     self._cond.wait()
                 self._due = False
                 self._connecting = True
-                # Published with the connect: a stop at any moment of it wakes it
-                self._waker = waker = Waker()
                 target, generation = self._target, self._generation
-                self._publish_locked({"state": "connecting"})
+                try:
+                    # Published with the connect: a stop at any moment of it wakes it
+                    self._waker = waker = Waker()
+                except OSError as e:
+                    # A wake channel the OS refuses (its descriptor limit) is
+                    # a failed session: said below, the thread lives on
+                    waker, refused = None, f"no wake channel: {e}"
+                else:
+                    self._publish_locked({"state": "connecting"})
+            if waker is None:
+                self._fail(generation, "error", target[1], refused)
+                continue
             try:
                 self._session(target, generation, waker)
             except Exception as e:

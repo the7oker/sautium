@@ -8453,3 +8453,70 @@ def test_a_new_order_hqplayer_is_too_busy_for_is_news_not_a_fault(fake, output, 
     assert refused.value.status_code == 409
     assert not [r for r in caplog.records if r.name == "routers.player"
                 and r.levelno >= logging.ERROR], caplog.text
+
+
+def test_a_close_as_the_connection_passes_on_closes_no_socket_another_request_holds(
+        fake, monkeypatch):
+    """A request lets the connection go to the next one waiting for it, and
+    the link is closed as that next request reads its answer. The socket is
+    the next request's now: the first one, done with it, closes nothing
+    under the reader — the read gets its answer, and no loss is counted."""
+    link = _link()
+    c = link.client
+    with link.asking() as hqp:                   # the connection made
+        assert hqp.get_status() is not None
+    threads = {}
+    a_holds, a_go = threading.Event(), threading.Event()
+    gave, b_ready, b_go = threading.Event(), threading.Event(), threading.Event()
+    read, wait_on = c._read_response, c._wait
+
+    def holding(wait=None, on_late=None):
+        out = read(wait, on_late)
+        if threading.current_thread() is threads.get("a"):
+            a_holds.set()                        # answered; the connection still its
+            a_go.wait(5)
+        return out
+
+    def answer_there(sock, event, timeout):
+        got = wait_on(sock, event, timeout)
+        if (threading.current_thread() is threads.get("b") and got == "ready"
+                and not b_ready.is_set()):
+            b_ready.set()                        # B's answer is there, not read yet
+            b_go.wait(5)
+        return got
+    monkeypatch.setattr(c, "_read_response", holding)
+    monkeypatch.setattr(c, "_wait", answer_there)
+
+    class Paused(hl.HqpLink):
+        # A's look at the link's state once it let the connection go
+        @property
+        def state(self):
+            if (threading.current_thread() is threads.get("a")
+                    and sys._getframe(1).f_code.co_name == "_give"
+                    and not self._conn._is_owned()):
+                gave.wait(5)
+            return self.__dict__["state"]
+
+        @state.setter
+        def state(self, value):
+            self.__dict__["state"] = value
+    link.__class__ = Paused
+    out = {}
+
+    def ask(name):
+        with link.asking() as hqp:
+            out[name] = hqp.get_status()
+    threads["a"] = threading.Thread(target=ask, args=("a",), daemon=True)
+    threads["b"] = threading.Thread(target=ask, args=("b",), daemon=True)
+    threads["a"].start()
+    assert a_holds.wait(5)
+    threads["b"].start()
+    assert _wait(lambda: bool(link._waiting), timeout=5)       # B waits its turn
+    a_go.set()                                   # A lets the connection go
+    assert b_ready.wait(5)                       # B holds it; its answer is there
+    link.close("the node is stopping")
+    gave.set()
+    threads["a"].join(5)
+    b_go.set()
+    threads["b"].join(5)
+    assert out.get("b") is not None and c.losses == 0, (out, c.losses)

@@ -752,13 +752,16 @@ class HqpLink:
         """Let the connection go — or, after `hand_over`, a command whose
         silence may follow it, keep it for this thread's next request. A link
         closed while this request held it outside a wait — nothing to wake —
-        has its socket closed here, by the thread that held it."""
+        has its socket closed here, by the thread that held it — read while
+        it still held it: a close after the next request took the socket
+        is that request's to meet."""
         with self._conn:
+            closed = self.state == "closed"
             self._owner = None
             if hand_over is not None:
                 self._reserved, self._after = threading.get_ident(), hand_over
             self._conn.notify_all()
-        if self.state == "closed":
+        if closed:
             self.client.disconnect()
 
     @contextmanager
