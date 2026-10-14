@@ -9603,3 +9603,139 @@ def test_a_tap_across_a_new_queue_that_committed_plays_its_track(fake, output, m
         lambda: fake.state == int(PlaybackState.PLAYING)
         and fake.playlist[fake.track - 1].endswith("A/03.flac"), timeout=5), (
         said, fake.state, fake.track, _start_sent(fake, n))
+
+
+def test_a_play_then_a_seek_held_by_a_clear_that_lost_the_mirror_start_at_the_seek(fake, output):
+    """HQPlayer stopped on track 1; a radio begins (its clear reads no entry
+    to keep: the mirror is lost) and the person presses Play, then drags the
+    position to 60 s while the clear is on its way. Once the queue stands the
+    Play is a play press — HQPlayer takes the queue afresh — and the Seek
+    moves its start, as the same two words do outside a mutation: the start
+    goes at 60 s."""
+    mgr, b = output
+    b.stop()
+    _stopped(mgr, fake)
+    fake.service["PlaylistClear"] = 0.6
+    came = len(fake.arrivals)
+    radio = threading.Thread(target=lambda: mgr.clear_for_radio(lambda: None), daemon=True)
+    radio.start()
+    assert _wait(lambda: b._inflight is not None
+                 and "PlaylistClear" in [c for _, c in fake.arrivals[came:]], timeout=5)
+    n = len(fake.commands)
+    assert _quick(b.play)
+    assert _quick(lambda: b.seek(60))
+    radio.join(10)
+    _settled()
+    sent = [(c, a) for c, a in fake.commands[n:] if c not in _QUESTIONS]
+    selects = [i for i, (c, _) in enumerate(sent) if c == "SelectTrack"]
+    assert selects, sent
+    assert ("Seek", {"position": "60"}) in sent[selects[-1]:], sent
+
+
+def _a_play_next_hqplayer_refuses_whole(mgr, fake, out) -> threading.Thread:
+    """A track queued to play next that HQPlayer refuses whole — the queue
+    stays as it was — its hand-over under way."""
+    fake.service["PlaylistRemove"] = 0.4
+    fake.refuse.add("N/01.flac")
+    came = len(fake.arrivals)
+    inserting = threading.Thread(target=lambda: out.update(added=mgr.append(
+        [_item("E:/Music/N/01.flac", 31)], "next")), daemon=True)
+    inserting.start()
+    assert _wait(lambda: "PlaylistRemove" in [c for _, c in fake.arrivals[came:]], timeout=5)
+    return inserting
+
+
+def test_next_twice_held_by_a_play_next_hqplayer_refused_whole_steps_twice(fake, output,
+                                                                           monkeypatch):
+    """Track 1 of [1, 2, 3, 4] plays; a "play next" HQPlayer refuses whole
+    leaves the queue as it was. Next pressed twice meanwhile counts on the
+    queue as it stands, from what HQPlayer plays: track 3."""
+    mgr, b = output
+    player_router = _routes_on(monkeypatch, mgr)
+    assert mgr.append([_item("E:/Music/A/04.flac", 4)], "end") == 1
+    out = {}
+    inserting = _a_play_next_hqplayer_refuses_whole(mgr, fake, out)
+    assert b._inflight is not None
+    assert _quick(player_router.next_track)["ok"]
+    assert _quick(player_router.next_track)["ok"]
+    inserting.join(10)
+    _settled()
+    assert out.get("added") == 0, out
+    assert _wait(lambda: fake.state == int(PlaybackState.PLAYING)
+                 and fake.playlist[fake.track - 1] == "file:///E:/Music/A/03.flac"), (
+        fake.state, fake.track, fake.playlist)
+
+
+def test_next_then_play_held_by_a_play_next_hqplayer_refused_whole_plays_the_next(
+        fake, output, monkeypatch):
+    """Track 1 of [1, 2, 3] plays; a "play next" HQPlayer refuses whole.
+    Next, then Play, made meanwhile: the Play keeps the Next's count, which
+    counts on the queue as it stands — track 2 plays."""
+    mgr, b = output
+    player_router = _routes_on(monkeypatch, mgr)
+    out = {}
+    inserting = _a_play_next_hqplayer_refuses_whole(mgr, fake, out)
+    assert b._inflight is not None
+    assert _quick(player_router.next_track)["ok"]
+    assert _quick(player_router.play)["ok"]
+    inserting.join(10)
+    _settled()
+    assert out.get("added") == 0, out
+    assert _wait(lambda: fake.state == int(PlaybackState.PLAYING)
+                 and fake.playlist[fake.track - 1] == "file:///E:/Music/A/02.flac"), (
+        fake.state, fake.track, fake.playlist)
+
+
+def test_a_next_held_by_a_removal_hqplayer_refused_counts_on_the_queue_as_it_stands(
+        fake, output, monkeypatch):
+    """Track 1 of [1, 2, 3] plays; the person removes track 2 and HQPlayer
+    refuses the removal — the slot stays. Next pressed while HQPlayer was
+    asked counts on the queue as it stands, from what HQPlayer plays: track
+    2, never the track after it."""
+    from playback.base import OutputRefused
+    mgr, b = output
+    player_router = _routes_on(monkeypatch, mgr)
+    fake.service["PlaylistRemove"] = 0.6
+    fake.replies["PlaylistRemove"] = '<PlaylistRemove result="Error">Not now</PlaylistRemove>'
+    came, out = len(fake.arrivals), {}
+
+    def removing():
+        try:
+            out["ok"] = mgr.remove(2, "track-2")
+        except OutputRefused as e:
+            out["error"] = e
+    r = threading.Thread(target=removing, daemon=True)
+    r.start()
+    assert _wait(lambda: "PlaylistRemove" in [c for _, c in fake.arrivals[came:]], timeout=5)
+    assert b._inflight is not None
+    assert _quick(player_router.next_track)["ok"]
+    r.join(10)
+    _settled()
+    fake.replies.pop("PlaylistRemove", None)
+    assert isinstance(out.get("error"), OutputRefused), out
+    assert [it.track_id for it in mgr.queue.snapshot()] == ["track-1", "track-2", "track-3"]
+    assert _wait(lambda: fake.state == int(PlaybackState.PLAYING)
+                 and fake.playlist[fake.track - 1] == "file:///E:/Music/A/02.flac"), (
+        fake.state, fake.track, fake.playlist)
+
+
+def test_next_then_a_seek_held_by_a_play_next_hqplayer_refused_whole_starts_at_the_seek(
+        fake, output, monkeypatch):
+    """... and Next, then a Seek to 0:30: the Seek keeps the Next's count on
+    the queue as it stands — track 2 plays, from 0:30."""
+    mgr, b = output
+    player_router = _routes_on(monkeypatch, mgr)
+    out = {}
+    inserting = _a_play_next_hqplayer_refuses_whole(mgr, fake, out)
+    assert b._inflight is not None
+    n = len(fake.commands)
+    assert _quick(player_router.next_track)["ok"]
+    assert _quick(lambda: b.seek(30))
+    inserting.join(10)
+    _settled()
+    assert out.get("added") == 0, out
+    assert _wait(lambda: fake.state == int(PlaybackState.PLAYING)
+                 and fake.playlist[fake.track - 1] == "file:///E:/Music/A/02.flac"), (
+        fake.state, fake.track, fake.playlist)
+    sent = _start_sent(fake, n)
+    assert ("Seek", {"position": "30"}) in sent, sent

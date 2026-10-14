@@ -1045,6 +1045,16 @@ implementation details live in the code, DB and git history.
   number — and finds its slot by its track. The scenario runner checks
   every number a sequence publishes under the lock, not only the first.
   Lesson: deciding later must not mean asking later.
+- **A held word is the word later, with all it meant** (2026-10-14). A held
+  Seek after a held Play went raw to HQPlayer when that Play became a play
+  press, in the middle of its hand-over, and was lost; it now moves that
+  press's start. A held Next or Previous was counted again on the queue as
+  it stands only when its target was gone, so over a "play next" or a
+  removal HQPlayer refused it landed where the refused layout put it, and
+  a Play or a Seek after it dropped the count; a held step now always
+  counts on the queue as it stands from where it began, and keeps its
+  count through the words after it. Lesson: carry a word out as the
+  person meant it then, on the queue as it is now.
 - **A tap is decided where its start goes** (2026-10-14). A tap on
   HQPlayer checked whether a queue mutation held words and whether the
   playlist was a mirror, then computed its entry and waited for the command

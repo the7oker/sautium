@@ -803,8 +803,9 @@ class _Start:
     replace's first track, the rebuild's track at its second) — that start
     goes as the mutation owes it, numbered as the Play. `steps`: a start
     Next or Previous made counting from a mutation's base, by how many slots
-    — counted again on the queue as it stands when the target is not in it
-    (a "play next" HQPlayer refused whole)."""
+    — counted again on the queue as it stands (a "play next" HQPlayer
+    refused whole, a removal it refused, left it as it was), and kept by a
+    Play or a Seek made after it."""
     item: Item
     target: QueueItem
     position: int
@@ -2333,10 +2334,14 @@ class HqpBackend(PlayerBackend):
             self._local.start = (att, start.item, send, spot, patient, gen)
             return None
         target = self._queued(start.target)
-        if target is None and start.steps is not None and words.base is not None:
-            target = self._stepped(words.base[0], start.steps)
-            if target is not None:
-                start = replace(start, target=target, position=0,
+        if start.steps is not None and words.base is not None:
+            # A held step counts on the queue as it stands from what HQPlayer
+            # played: the layout it was handed once the mutation changed the
+            # queue, the queue it left when it did not
+            stepped = self._stepped(words.base[0], start.steps)
+            if stepped is not None and stepped is not target:
+                target = stepped
+                start = replace(start, target=target,
                                 following=self._queue.snapshot()[self._queue.index_of(target) - 1:])
         if target is None:
             said = (f"{start.target.title or 'the track'}, played meanwhile, is not in the queue "
@@ -2407,7 +2412,8 @@ class HqpBackend(PlayerBackend):
         item = Item("start", max(n for n, _, _ in words))
         link, rest = self._link, list(words)
         what = "the words made while HQPlayer took the queue"
-        say = {"Seek": lambda s: self._command("Seek", lambda h: h.seek(s), word=item),
+        say = {"Seek": lambda s: (self._seek_pressed(s, word=item)
+                                  or self._command("Seek", lambda h: h.seek(s), word=item)),
                "Play": lambda _: self._play(item),
                "Pause": lambda _: self._command("Pause", lambda h: h.pause(), word=item),
                "Stop": lambda _: self._command("Stop", lambda h: h.stop(), word=item)}
@@ -2893,7 +2899,7 @@ class HqpBackend(PlayerBackend):
                 words.starts.append(_Start(
                     self._link.item("start", n), newest.target,
                     newest.position if moved is None else moved, newest.following, None,
-                    owed=newest.owed and moved is None))
+                    owed=newest.owed and moved is None, steps=newest.steps))
             elif words.stops and words.base is not None:
                 target, second = words.base
                 words.starts.append(_Start(
@@ -3580,7 +3586,7 @@ class HqpBackend(PlayerBackend):
             newest = words.newest()
             if newest is not None:
                 words.starts.append(_Start(self._link.item("start", n), newest.target, seconds,
-                                           newest.following, None))
+                                           newest.following, None, steps=newest.steps))
             elif words.stops and words.base is not None and words.owes:
                 target = words.base[0]
                 words.starts.append(_Start(self._link.item("start", n), target, seconds,
@@ -3591,14 +3597,16 @@ class HqpBackend(PlayerBackend):
                 words.plain.append((n, "Seek", seconds))
         return True
 
-    def _seek_pressed(self, seconds: int) -> bool:
+    def _seek_pressed(self, seconds: int, *, word: Optional[Item] = None) -> bool:
         """A Seek while a play press runs decides nothing about playing: it
         changes the second of the newest word. A start (Play, a tap, Next or
         Previous): a start of its own, numbered as it comes, the same target
         at the new second. A Pause or a Stop: only the spot the press leaves
         takes the second — nothing starts, the next Play starts there. A
         target HQPlayer refused gives way to the next track it took, at 0 s,
-        as before. False when no press runs."""
+        as before. `word`: a held Seek carried out (_send_words) after the
+        held Play its batch made a press of — no intent of its own: that
+        start takes the second. False when no press runs."""
         with self._press_lock:
             press = self._live(self._pressed)
             if press is None:
@@ -3607,6 +3615,9 @@ class HqpBackend(PlayerBackend):
                 press.halt_second = seconds
                 return True
             newest = press.newest()
+            if word is not None:
+                press.starts[press.starts.index(newest)] = replace(newest, position=seconds)
+                return True
             item = self._link.item("start", self._link.accept("transport"),
                                    queue=self._queue, generation=self._queue.generation)
             press.starts.append(_Start(item, newest.target, seconds, newest.following,
