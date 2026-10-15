@@ -11311,31 +11311,33 @@
   // the next run's start — only the next run's once HQPlayer at rest did not
   // let it (`refused`) (playback/hqp_benchmark.py), a test point never taken
   // for the owner's.
-  // A check that left HQPlayer in the measured mode names where it was found
-  // (`back_to`, by name): it goes back there first, then judges.
   NOTICE_COPY['hqplayer.run_unchecked'] = n => {
     const d = n.data || {};
     const mode = escapeHtml(d.mode || 'the measured mode');
-    const b = d.back_to;
-    if (b) {
-      const when = d.refused || !d.unchecked ? 'before the next run'
-        : 'when HQPlayer next rests, or before the next run';
-      const was = [escapeHtml(b.mode || 'its own mode')];
-      if (b.filter) {
-        was.push(escapeHtml(b.filter)
-          + (b.filter1x && b.filter1x !== b.filter ? ` (1x ${escapeHtml(b.filter1x)})` : ''));
-      }
-      if (b.shaper) was.push(escapeHtml(b.shaper));
-      if (b.rate) was.push(`<span class="num">${escapeHtml(fmtRateLabel(b.rate))}</span>`);
-      return {
-        title: `HQPlayer stayed in ${mode}`,
-        text: `HQPlayer stayed in ${mode}; before the check it was in ${was.join(', ')}. It goes back there ${when}${d.unchecked ? `, and the settings of ${mode} are checked then` : ''}.`,
-      };
-    }
     const when = d.refused ? 'before the next run' : 'when HQPlayer next rests, or before the next run';
     return {
       title: 'Benchmark settings not checked yet',
       text: `The settings of ${mode} are not checked yet — HQPlayer did not let them be read (it was busy, or did not switch to ${mode}). They are checked ${when}.`,
+    };
+  };
+  // A check that left HQPlayer in the measured mode names where it was found
+  // (`back_to`, by name): it goes back there first, then judges.
+  NOTICE_COPY['hqplayer.run_stayed'] = n => {
+    const d = n.data || {};
+    const mode = escapeHtml(d.mode || 'the measured mode');
+    const b = d.back_to || {};
+    const when = d.refused || !d.unchecked ? 'before the next run'
+      : 'when HQPlayer next rests, or before the next run';
+    const was = [escapeHtml(b.mode || 'its own mode')];
+    if (b.filter) {
+      was.push(escapeHtml(b.filter)
+        + (b.filter1x && b.filter1x !== b.filter ? ` (1x ${escapeHtml(b.filter1x)})` : ''));
+    }
+    if (b.shaper) was.push(escapeHtml(b.shaper));
+    if (b.rate) was.push(`<span class="num">${escapeHtml(fmtRateLabel(b.rate))}</span>`);
+    return {
+      title: `HQPlayer stayed in ${mode}`,
+      text: `HQPlayer stayed in ${mode}; before the check it was in ${was.join(', ')}. It goes back there ${when}${d.unchecked ? `, and the settings of ${mode} are checked then` : ''}.`,
     };
   };
   // HQPlayer refused files of a batch it was handed: one notice per batch,

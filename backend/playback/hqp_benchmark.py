@@ -1949,7 +1949,9 @@ def _close_owed(run: dict, note: str, left: bool = False, restored: bool = False
                                measured_from_filter1x = CASE WHEN %(theirs)s THEN NULL
                                                              ELSE measured_from_filter1x END,
                                measured_from_shaper = CASE WHEN %(theirs)s THEN NULL
-                                                           ELSE measured_from_shaper END
+                                                           ELSE measured_from_shaper END,
+                               measured_from_at = CASE WHEN %(theirs)s THEN NULL
+                                                       ELSE measured_from_at END
                          WHERE id = %(id)s AND finished_at IS NULL
                         RETURNING id""", {"n": note, "left": left, "restored": restored,
                                           "vl": volume_left, "unchecked": unchecked,
@@ -2427,32 +2429,46 @@ def restored_notice() -> Optional[dict]:
 
 def unchecked_notice() -> Optional[dict]:
     """The notice of a run whose put-back left the mode it measured
-    unchecked — HQPlayer did not let it be read — or whose check left
-    HQPlayer in it (a return point, _keep_point): the newest, on any
-    HQPlayer, until that mode is judged and HQPlayer is back where it was
-    found. `refused`: HQPlayer at rest did not let it be read, only a new
-    run's start tries it; `back_to`: the mode found and its selection, by
-    name (the rate in Hz). Its onset is the mark's, else the run's end;
-    `mode` names the mode measured."""
-    run = db_query_one("""SELECT coalesce(measured_unchecked_at, finished_at) AS since,
-                                 measured_unchecked_at, measured_refused_at, mode,
-                                 measured_from_mode_name, measured_from_rate,
+    unchecked — HQPlayer did not let it be read — HQPlayer back where the
+    check found it: the newest, on any HQPlayer, until that mode is judged
+    at HQPlayer's nearest rest or a new run's start. `refused`: HQPlayer at
+    rest did not let it be read, only a new run's start tries it. Its onset
+    is `measured_unchecked_at`; `mode` names the mode measured."""
+    run = db_query_one("""SELECT measured_unchecked_at, measured_refused_at, mode
+                            FROM hqp_benchmark_runs
+                           WHERE finished_at IS NOT NULL AND measured_unchecked_at IS NOT NULL
+                             AND measured_from_mode IS NULL
+                           ORDER BY measured_unchecked_at DESC LIMIT 1""")
+    if run is None:
+        return None
+    return {"since": run["measured_unchecked_at"], "mode": run["mode"],
+            "refused": run["measured_refused_at"] is not None}
+
+
+def stayed_notice() -> Optional[dict]:
+    """The notice of a run whose check left HQPlayer in the mode it measured
+    (a return point, _keep_point), the run closed: the newest, on any
+    HQPlayer, until HQPlayer is back where the check found it. Its onset is
+    the point's own (`measured_from_at`): a new condition, said anew even
+    over a "not checked yet" already seen. `back_to`: the mode found and its
+    selection, by name (the rate in Hz); `unchecked` and `refused` as the
+    mark stands. A run still owed is in its put-back's hands: none."""
+    run = db_query_one("""SELECT measured_from_at, measured_unchecked_at, measured_refused_at,
+                                 mode, measured_from_mode_name, measured_from_rate,
                                  measured_from_filter, measured_from_filter1x,
                                  measured_from_shaper
                             FROM hqp_benchmark_runs
-                           WHERE measured_unchecked_at IS NOT NULL
-                              OR measured_from_mode IS NOT NULL
-                           ORDER BY coalesce(measured_unchecked_at, finished_at) DESC
-                           LIMIT 1""")
+                           WHERE finished_at IS NOT NULL AND measured_from_mode IS NOT NULL
+                           ORDER BY measured_from_at DESC LIMIT 1""")
     if run is None:
         return None
-    back_to = None if run["measured_from_mode_name"] is None else {
-        "mode": run["measured_from_mode_name"], "rate": run["measured_from_rate"],
-        "filter": run["measured_from_filter"], "filter1x": run["measured_from_filter1x"],
-        "shaper": run["measured_from_shaper"]}
-    return {"since": run["since"], "mode": run["mode"],
+    return {"since": run["measured_from_at"], "mode": run["mode"],
             "unchecked": run["measured_unchecked_at"] is not None,
-            "refused": run["measured_refused_at"] is not None, "back_to": back_to}
+            "refused": run["measured_refused_at"] is not None,
+            "back_to": {"mode": run["measured_from_mode_name"], "rate": run["measured_from_rate"],
+                        "filter": run["measured_from_filter"],
+                        "filter1x": run["measured_from_filter1x"],
+                        "shaper": run["measured_from_shaper"]}}
 
 
 def left_on(endpoint_id: Optional[int], st: Optional[dict],
@@ -2651,7 +2667,7 @@ def _keep_point(link, run: dict, found: dict) -> Optional[str]:
     db_execute("""UPDATE hqp_benchmark_runs SET measured_from_mode = %(m)s,
                          measured_from_mode_name = %(n)s, measured_from_rate = %(r)s,
                          measured_from_filter = %(f)s, measured_from_filter1x = %(f1)s,
-                         measured_from_shaper = %(s)s
+                         measured_from_shaper = %(s)s, measured_from_at = now()
                    WHERE id = %(id)s""",
                {"m": found["mode"], "n": name, "r": names["rate"].get(found["rate"]),
                 "f": names["filter"].get(found["filterNx"]),
@@ -2671,7 +2687,7 @@ def _point_cleared(run: dict, note: Optional[str] = None, notify: bool = True) -
     row = db_execute("""UPDATE hqp_benchmark_runs SET measured_from_mode = NULL,
                                measured_from_mode_name = NULL, measured_from_rate = NULL,
                                measured_from_filter = NULL, measured_from_filter1x = NULL,
-                               measured_from_shaper = NULL,
+                               measured_from_shaper = NULL, measured_from_at = NULL,
                                note = CASE WHEN %(n)s::text IS NULL THEN note
                                            ELSE concat_ws('; ', note, %(n)s::text) END
                          WHERE id = %(id)s AND measured_from_mode IS NOT NULL

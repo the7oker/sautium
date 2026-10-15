@@ -3348,11 +3348,11 @@ def test_hqplayer_switched_back_by_the_owner_ends_the_notice_without_a_setmode(
     run_id = _left_in_pcm(run, refused=True)
     seen = _set_modes(monkeypatch, fake)
     _ticks(run)
-    assert bench.unchecked_notice()["back_to"]["mode"] == "SDM (DSD)"
+    assert bench.stayed_notice()["back_to"]["mode"] == "SDM (DSD)"
     with fake._lock:
         fake.mode = 2                           # the owner's own switch, in HQPlayer
     assert _wait(lambda: (run.mgr.active.poke(), not _point(run, run_id))[1], 10)
-    assert bench.unchecked_notice()["back_to"] is None
+    assert bench.stayed_notice() is None
     assert seen == [], seen
 
 
@@ -3379,7 +3379,7 @@ def test_a_way_back_refused_keeps_the_return_point_and_sets_nothing_in_the_wrong
                                "WHERE id = %s", run_id) == [(True,)])
     assert refused and fake.mode == 1 and fake.sel[1] == [2, 1, 1, 1], fake.settings()
     assert _unchecked(run, run_id) and _refused_at_rest(run, run_id) and _point(run, run_id)
-    notice = bench.unchecked_notice()
+    notice = bench.stayed_notice()
     assert notice["back_to"] == {"mode": "SDM (DSD)", "rate": 11289600,
                                  "filter": "poly-sinc-gauss-long",
                                  "filter1x": "poly-sinc-gauss-long", "shaper": "ASDM7EC"}, notice
@@ -3503,6 +3503,87 @@ def test_a_run_of_another_mode_is_refused_while_hqplayer_is_in_the_unchecked_mod
     assert "not checked yet" in (bench.state()["note"] or ""), bench.state()
     assert run.q("SELECT count(*) FROM hqp_benchmark_runs WHERE id > %s", run_id) == [(0,)]
     assert _unchecked(run, run_id)
+
+
+def _notices() -> list:
+    from routers import settings as settings_router
+    return settings_router._notices_state()["items"]
+
+
+def test_a_put_back_cut_in_its_round_trip_never_breaks_the_notices(run, monkeypatch):
+    """A run cut short owes its put-back; HQPlayer answers at rest and the
+    put-back enters PCM to read it — its return point written on the row of
+    a run still owed — and HQPlayer goes away right then. The notices every
+    tab's live stream derives must still answer: a run still owed is in its
+    put-back's hands, no notice of it yet."""
+    fake = run.fake
+    run_id = _pcm_run_found_in_sdm(run, [1, 0, 0, 0])
+    dispatch, gone = fake._dispatch, []
+
+    def goes_away_in_pcm(cmd, attrs):
+        out = dispatch(cmd, attrs)
+        if cmd == "SetMode" and attrs.get("value") == "1" and not gone:
+            gone.append(True)
+            fake.mute = True                    # every later connection dropped at once
+            return None                         # and this one, unanswered
+        return out
+    monkeypatch.setattr(fake, "_dispatch", goes_away_in_pcm)
+    bench.recover(run.endpoint_id, hl.selected(), gave=run.mgr.active.gave)
+    assert _wait(lambda: gone and run_id not in bench._putting, 10)
+    assert run.q("SELECT finished_at IS NULL, measured_from_mode FROM hqp_benchmark_runs "
+                 "WHERE id = %s", run_id) == [(True, 2)]
+    keys = [n["key"] for n in _notices()]
+    assert "hqplayer.run_stayed" not in keys and "hqplayer.run_unchecked" not in keys, keys
+
+
+def test_a_notices_read_during_a_put_backs_round_trip_answers(run, monkeypatch):
+    """The same window with nothing going wrong: a notices read made while
+    the put-back is inside PCM, its return point written, answers."""
+    fake = run.fake
+    run_id = _pcm_run_found_in_sdm(run, [1, 0, 0, 0])
+    dispatch, read = fake._dispatch, []
+
+    def read_in_pcm(cmd, attrs):
+        out = dispatch(cmd, attrs)
+        if cmd == "SetMode" and attrs.get("value") == "1" and not read:
+            try:
+                read.append(("ok", [n["key"] for n in _notices()]))
+            except Exception as e:
+                read.append((type(e).__name__, str(e)))
+        return out
+    monkeypatch.setattr(fake, "_dispatch", read_in_pcm)
+    bench.recover(run.endpoint_id, hl.selected(), gave=run.mgr.active.gave)
+    assert _wait(lambda: run.q("SELECT finished_at IS NOT NULL FROM hqp_benchmark_runs "
+                               "WHERE id = %s", run_id) == [(True,)])
+    assert read and read[0][0] == "ok", read
+
+
+def test_hqplayer_left_in_the_measured_mode_is_said_anew(run, monkeypatch):
+    """A run marked while HQPlayer was busy: "Benchmark settings not checked
+    yet" stands, and the owner has seen it. At HQPlayer's next rest the check
+    enters PCM and HQPlayer refuses the way back: HQPlayer stays in PCM, the
+    owner's SDM gone until something takes it back. That is said anew — a
+    notice of its own, with its own onset — never folded into the one
+    already seen."""
+    fake, mgr = run.fake, run.mgr
+    run_id = _marked_while_busy(run)
+    before = {n["key"]: n for n in _notices()}
+    assert "hqplayer.run_unchecked" in before and "hqplayer.run_stayed" not in before
+    dispatch = fake._dispatch
+
+    def refuses_sdm(cmd, attrs):
+        if cmd == "SetMode" and attrs.get("value") == "2":
+            return '<SetMode result="Error">Mode not available</SetMode>'
+        return dispatch(cmd, attrs)
+    monkeypatch.setattr(fake, "_dispatch", refuses_sdm)
+    with fake._lock:
+        fake.track, fake.state = 1, int(PlaybackState.STOPPED)
+    assert _wait(lambda: (mgr.active.poke(), _refused_at_rest(run, run_id))[1], 15)
+    after = {n["key"]: n for n in _notices()}
+    assert fake.mode == 1 and "hqplayer.run_stayed" in after, (fake.settings(), list(after))
+    assert "hqplayer.run_unchecked" not in after
+    assert after["hqplayer.run_stayed"]["since"] != before["hqplayer.run_unchecked"]["since"]
+    assert after["hqplayer.run_stayed"]["data"]["back_to"]["mode"] == "SDM (DSD)"
 
 
 def test_a_round_trip_through_the_measured_mode_leaves_the_found_modes_selection_as_found(

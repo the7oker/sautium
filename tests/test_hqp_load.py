@@ -1,5 +1,5 @@
 """What a DSP setting costs on an HQPlayer's host (backend/playback/hqp_load.py)
-and the schema behind it (migrations 033 to 041).
+and the schema behind it (migrations 033 to 042).
 
 The sampler's gate is pure. The rollup, the coverage the benchmark skips by,
 the headroom classes and the retention run on a real PostgreSQL — a
@@ -35,7 +35,8 @@ MIGRATIONS = [Path(__file__).resolve().parent.parent / "desktop" / "migrations" 
                            "037_hqp_run_restored.sql", "038_hqp_run_dsd_source.sql",
                            "039_hqp_run_measured_unchecked.sql",
                            "040_hqp_run_measured_refused.sql",
-                           "041_hqp_run_return_point.sql")]
+                           "041_hqp_run_return_point.sql",
+                           "042_hqp_run_point_onset.sql")]
 
 
 def _status(**kw) -> TrackStatus:
@@ -207,7 +208,7 @@ def _ctx(conn, **kw):
 
 
 def _schema(conn):
-    """What 033 to 041 touch, as the catalogue describes it."""
+    """What 033 to 042 touch, as the catalogue describes it."""
     tables = ("hqp_endpoints", "hqp_benchmark_runs", "hqp_dsp_samples", "hqp_dsp_speed",
               "hqp_benchmark_points")
     return (
@@ -226,7 +227,7 @@ def _schema(conn):
     )
 
 
-def test_033_to_041_re_apply_and_build_what_001_declares():
+def test_033_to_042_re_apply_and_build_what_001_declares():
     name = "sautium_hqp_load_mig_test"
     admin, nb = _make_db(name)
     try:
@@ -256,7 +257,7 @@ def test_033_to_041_re_apply_and_build_what_001_declares():
                              DROP COLUMN last_rate, DROP COLUMN last_filter, DROP COLUMN last_filter1x,
                              DROP COLUMN last_shaper;
                            DROP TYPE hqp_point_result;""")
-            for m in MIGRATIONS[1:]:               # 034 as it shipped, then 035 to 041
+            for m in MIGRATIONS[1:]:               # 034 as it shipped, then 035 to 042
                 cur.execute(m.read_text())
         assert _schema(conn) == declared
         with conn.cursor() as cur:                 # a node that ran 035 before 036 existed
@@ -286,6 +287,10 @@ def test_033_to_041_re_apply_and_build_what_001_declares():
                              DROP COLUMN measured_from_filter, DROP COLUMN measured_from_filter1x,
                              DROP COLUMN measured_from_shaper""")
             cur.execute(MIGRATIONS[8].read_text())
+        assert _schema(conn) == declared
+        with conn.cursor() as cur:                 # a node that ran 041 before 042 existed
+            cur.execute("ALTER TABLE hqp_benchmark_runs DROP COLUMN measured_from_at")
+            cur.execute(MIGRATIONS[9].read_text())
         assert _schema(conn) == declared
         conn.close()
     finally:
