@@ -11309,15 +11309,14 @@
   // measured — HQPlayer busy (switching its mode restarts its output), or at
   // rest and not letting it be read: judged at HQPlayer's nearest rest or
   // the next run's start — only the next run's once HQPlayer at rest did not
-  // let it (`refused`) (playback/hqp_benchmark.py), a test point never taken
-  // for the owner's.
+  // let it (playback/hqp_benchmark.py), a test point never taken for the
+  // owner's. One line for every cause: the run's note names it, and "before
+  // the next run at the latest" holds for both.
   NOTICE_COPY['hqplayer.run_unchecked'] = n => {
     const d = n.data || {};
-    const mode = escapeHtml(d.mode || 'the measured mode');
-    const when = d.refused ? 'before the next run' : 'when HQPlayer next rests, or before the next run';
     return {
       title: 'Benchmark settings not checked yet',
-      text: `The settings of ${mode} are not checked yet — HQPlayer did not let them be read (it was busy, or did not switch to ${mode}). They are checked ${when}.`,
+      text: `The ${escapeHtml(d.mode)} settings are not checked yet — HQPlayer did not let them be read. They are checked again before the next run at the latest.`,
     };
   };
   // A check that left HQPlayer in the measured mode names where it was found

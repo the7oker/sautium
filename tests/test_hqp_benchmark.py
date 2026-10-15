@@ -3287,16 +3287,16 @@ def test_a_mode_hqplayer_at_rest_will_not_switch_to_is_tried_once_then_before_th
         run, monkeypatch):
     """A run marked while HQPlayer was busy; HQPlayer rests now and refuses
     the SetMode into PCM, every time. Its nearest rest tries once — the
-    notice then says the next run checks it — and no later rest tries
-    again; the next run tries once more, and a run of PCM, which would read
-    PCM's selection as the owner's, is refused."""
+    notice stands — and no later rest tries again; the next run tries once
+    more, and a run of PCM, which would read PCM's selection as the
+    owner's, is refused."""
     fake = run.fake
     run_id = _marked_while_busy(run)
     refused = _refuses_pcm(monkeypatch, fake)
     with fake._lock:
         fake.track, fake.state = 1, int(PlaybackState.STOPPED)
     assert _wait(lambda: (run.mgr.active.poke(), _refused_at_rest(run, run_id))[1], 10)
-    assert len(refused) == 1 and bench.unchecked_notice()["refused"]
+    assert len(refused) == 1 and bench.unchecked_notice() is not None
     with fake._lock:                    # a later rest, on another entry
         fake.track = 2
     _ticks(run)

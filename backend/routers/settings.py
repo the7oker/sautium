@@ -1259,12 +1259,12 @@ def _notice_items() -> List[Dict[str, Any]]:
     # One whose put-back could not read the mode it measured — HQPlayer did
     # not let it be read — until that mode is judged at HQPlayer's nearest
     # rest or the next run's start (only the next run's, once HQPlayer at
-    # rest did not let it: `refused`)
+    # rest did not let it)
     unchecked = hqp_benchmark.unchecked_notice()
     if unchecked is not None:
         items.append({"key": "hqplayer.run_unchecked", "kind": "info",
                       "since": unchecked["since"].isoformat(), "until": None,
-                      "data": {"mode": unchecked["mode"], "refused": unchecked["refused"]}})
+                      "data": {"mode": unchecked["mode"]}})
     # One whose check left HQPlayer in that mode, until it is back where it
     # was found (`back_to`) — its own key and onset: a new condition, said
     # even over a "not checked yet" already seen

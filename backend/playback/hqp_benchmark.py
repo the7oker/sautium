@@ -2497,18 +2497,16 @@ def unchecked_notice() -> Optional[dict]:
     """The notice of a run whose put-back left the mode it measured
     unchecked — HQPlayer did not let it be read — HQPlayer back where the
     check found it: the newest, on any HQPlayer, until that mode is judged
-    at HQPlayer's nearest rest or a new run's start. `refused`: HQPlayer at
-    rest did not let it be read, only a new run's start tries it. Its onset
-    is `measured_unchecked_at`; `mode` names the mode measured."""
-    run = db_query_one("""SELECT measured_unchecked_at, measured_refused_at, mode
+    at HQPlayer's nearest rest or a new run's start. Its onset is
+    `measured_unchecked_at`; `mode` names the mode measured."""
+    run = db_query_one("""SELECT measured_unchecked_at, mode
                             FROM hqp_benchmark_runs
                            WHERE finished_at IS NOT NULL AND measured_unchecked_at IS NOT NULL
                              AND measured_from_mode IS NULL
                            ORDER BY measured_unchecked_at DESC LIMIT 1""")
     if run is None:
         return None
-    return {"since": run["measured_unchecked_at"], "mode": run["mode"],
-            "refused": run["measured_refused_at"] is not None}
+    return {"since": run["measured_unchecked_at"], "mode": run["mode"]}
 
 
 def stayed_notice() -> Optional[dict]:

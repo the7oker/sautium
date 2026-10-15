@@ -1109,8 +1109,8 @@ implementation details live in the code, DB and git history.
   the verdict not written, not again until HQPlayer moves; at rest and not
   let through, not at any later rest — only a new run's start tries again
   (migration 040), and it refuses only a run that would read that mode. The
-  notice says HQPlayer did not let the settings be read — busy, or not
-  switching to the mode — and when they are tried; the run's note names the
+  notice says HQPlayer did not let the settings be read, and that they are
+  checked again before the next run at the latest; the run's note names the
   reason. Lesson: a try that ends without a verdict is an outcome, and it is
   recorded as one.
 - **Where a check found HQPlayer, it goes back to** (2026-10-15). A check of
