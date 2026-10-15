@@ -1113,21 +1113,21 @@ implementation details live in the code, DB and git history.
   and when they are tried; the run's note names the reason. Lesson: a try
   that ends without a verdict is an outcome, and it is recorded as one.
 - **Where a check found HQPlayer, it goes back to** (2026-10-15). A check of
-  a measured mode put the found mode's selection back without looking
-  where HQPlayer was: when HQPlayer refused the way back, that selection
-  was set inside the measured mode; and a check cut short between its two
-  SetModes left HQPlayer in the measured mode, which the next check took
-  for the mode it was found in — the owner's mode never put back, and
-  nothing said so. Before it leaves, a check now keeps the mode it found
-  and that mode's selection by name on the run's row (migration 041): the
-  return point. The next check or run start goes back there first, on a
-  stopped HQPlayer, and only then judges — after a node restart too — and
+  a measured mode put the found mode's selection back without looking where
+  HQPlayer was: when HQPlayer refused the way back, that selection was set
+  inside the measured mode; and a check cut short between its two SetModes
+  left HQPlayer in the measured mode, which the next check took for the mode
+  it was found in — the owner's mode never put back, and nothing said so.
+  Before it leaves, a check now keeps the mode it found and that mode's
+  selection by name on the run's row (migration 041): the return point. The
+  next check — a put-back's own too — or run start goes back there first, on
+  a stopped HQPlayer, and only then judges — after a node restart too — and
   a run never reads the mode Sautium left HQPlayer in as the owner's. The
   point goes when HQPlayer is back there (the way back, or the owner's own
-  switch, which the poller sees) or a person's change makes HQPlayer
-  theirs; while it stands, the notice says where HQPlayer was. Lesson: a
-  round trip is done only once it is back, and where it must come back to
-  is written down before it leaves.
+  switch, which the poller sees) or a person's change makes HQPlayer theirs;
+  while it stands, the notice says where HQPlayer was. Lesson: a round trip
+  is done only once it is back, and where it must come back to is written
+  down before it leaves.
 - **What the run handed, it knows by** (2026-10-14). A lost run's
   put-back knew the run's DSD source by the owner's newest DSD listen at
   the time of the put-back: a listen, a Last.fm import or a merge since,

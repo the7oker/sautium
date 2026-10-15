@@ -2548,10 +2548,23 @@ def _recover(link: _Link, run: dict,
     (_check_measured) only on an HQPlayer at rest (_booted) — a mode
     switched under a track restarts the output — else the run is marked
     unchecked, judged at HQPlayer's nearest rest or a new run's start
-    (check_measured, _take_owed)."""
+    (check_measured, _take_owed). A return point its own round trip left,
+    cut short before (_keep_point), is where HQPlayer goes back first, at
+    rest (_go_back): the mode Sautium left it in is never judged as the
+    owner's — not at rest, or not going back, the run is marked and nothing
+    is judged; only a volume still at the run's level goes back."""
     st, listed, status = link("get_state"), link("get_playlist"), link("get_status")
     if st is None or status is None:
         return None
+    if run["measured_from_mode"] is not None:
+        at_rest = _booted(status, listed, gave, run)
+        why = _go_back(link, run) if at_rest else "HQPlayer was busy"
+        if why is not None:
+            return {"note": "cut short; " + _unchecked_note(why) + _left_volume(link, run, st),
+                    "unchecked": True, "refused": at_rest}
+        st, listed, status = link("get_state"), link("get_playlist"), link("get_status")
+        if st is None or status is None:
+            return None
     whole = run["lost_at"] is not None and _booted(status, listed, gave, run)
     owners = [] if whole else _owners(run, st)
     if owners:

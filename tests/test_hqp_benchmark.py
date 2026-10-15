@@ -3723,6 +3723,56 @@ def test_a_round_trip_whose_found_selection_hqplayer_refuses_says_so(run, monkey
     assert "the selection of SDM (DSD) not all put back" in note, note
 
 
+@pytest.mark.parametrize("how", ["at rest", "busy", "refused"])
+def test_a_put_back_cut_on_its_way_back_goes_back_first_next_time(run, monkeypatch, how):
+    """The put-back at rest enters PCM, puts the owner's selection back
+    there, and HQPlayer goes away at the SetMode back into SDM — the return
+    point on the run's row, the run still owed. HQPlayer comes back as it
+    was, in PCM. The next put-back never judges PCM as a change of the
+    owner's: at rest it takes HQPlayer back to SDM first, then judges; with
+    HQPlayer playing, it judges nothing — the run marked, the point kept;
+    at rest but refusing the way back, the same, and no later rest tries."""
+    fake = run.fake
+    run_id = _pcm_run_found_in_sdm(run, [1, 0, 0, 0])
+    with fake._lock:
+        fake.volume = -3.0
+    dispatch, cut = fake._dispatch, []
+
+    def goes_away_on_the_way_back(cmd, attrs):
+        if cmd == "SetMode" and attrs.get("value") == "2" and (not cut or how == "refused"):
+            if not cut:
+                cut.append(True)
+                fake.mute = True                # gone: every connection dropped at once
+                return None
+            return '<SetMode result="Error">Mode not available</SetMode>'
+        return dispatch(cmd, attrs)
+    monkeypatch.setattr(fake, "_dispatch", goes_away_on_the_way_back)
+    bench.recover(run.endpoint_id, hl.selected(), gave=run.mgr.active.gave)
+    assert _wait(lambda: cut and run_id not in bench._putting, 10)
+    assert run.q("SELECT finished_at IS NULL, measured_from_mode FROM hqp_benchmark_runs "
+                 "WHERE id = %s", run_id) == [(True, 2)]
+    with fake._lock:
+        fake.mute = False                       # back, as it was: in PCM
+        if how == "busy":
+            fake.track, fake.state = 1, int(PlaybackState.PLAYING)
+    bench.recover(run.endpoint_id, hl.selected(), gave=run.mgr.active.gave)
+    assert _wait(lambda: run.q("SELECT finished_at IS NOT NULL FROM hqp_benchmark_runs "
+                               "WHERE id = %s", run_id) == [(True,)], 15)
+    note = run.q("SELECT note FROM hqp_benchmark_runs WHERE id = %s", run_id)[0][0]
+    assert "changed since" not in note, note
+    if how == "at rest":
+        assert fake.settings() == (2, (2, 1, 1, 1), (2, 0, 0, 0), -3.0), (fake.settings(), note)
+        assert not _point(run, run_id) and not _unchecked(run, run_id), note
+        assert not _closed_as_left(run, run_id) and "the selection of PCM was put back" in note, (
+            note)
+    else:
+        assert fake.mode == 1 and _unchecked(run, run_id) and _point(run, run_id), (
+            fake.settings(), note)
+        assert _refused_at_rest(run, run_id) == (how == "refused"), note
+        if how == "busy":
+            assert fake.state == int(PlaybackState.PLAYING)
+
+
 def test_a_round_trip_through_the_measured_mode_leaves_the_found_modes_selection_as_found(
         run, monkeypatch):
     """PCM, which State does not show, is the run's only mark left (the
