@@ -1223,16 +1223,28 @@ implementation details live in the code, DB and git history.
   from the ask.
 - **Open after the fixes' review** (2026-10-14), in code the fixes did not
   change: a "play next" on a tail mirror whose anchor HQPlayer moved past
-  goes to the queue alone, before the entry HQPlayer reads, and never
-  plays (whether the entry it reads should place it, as in step, is open);
-  a held Next or Previous that finds no slot among what HQPlayer is handed
-  moves nothing, even where the queue left has one (a removal of the last
-  track HQPlayer refused); and the scenario runner's rest misreads one
-  answer late past its scaled waits — a poller tick that misses re-loses
-  the mirror and the reconverge hands HQPlayer the queue stopped before the
-  rest presses (`test_a_build_left_armed_never_meets_the_rest_press` then
-  fails on its last line), or the play gate's GetInfo late at the rest's
-  press is reported as an I13 refusal with HQPlayer up.
+  goes to the queue alone, before the entry HQPlayer reads, and never plays
+  (whether the entry it reads should place it, as in step, is open) — and
+  the words held meanwhile count from the last status, not from the entry it
+  read: a held Previous starts the track two slots back, two held Nexts
+  restart the track that plays (2026-10-15; with the words held from the
+  ask); a held Next or Previous that finds no slot among what HQPlayer is
+  handed moves nothing, even where the queue left has one (a removal of the
+  last track HQPlayer refused); and the scenario runner's rest misreads one
+  answer late past its scaled waits — a poller tick that misses re-loses the
+  mirror and the reconverge hands HQPlayer the queue stopped before the rest
+  presses (`test_a_build_left_armed_never_meets_the_rest_press` then fails
+  on its last line), or the play gate's GetInfo late at the rest's press is
+  reported as an I13 refusal with HQPlayer up.
+- **One error, not reproduced** (2026-10-15).
+  `test_a_new_run_judges_an_unchecked_measured_mode_before_it_reads_the_owners`
+  (tests/test_hqp_benchmark.py) ended once in an ERROR — in its setup or
+  teardown, not its assertions — in one run of the whole file in a worktree,
+  the scenario runner's seeds running beside it; the error's text was not
+  kept. Since then it ran alone 100 times and 20 times beside seeds 30, 33
+  and 47 in turn: 120 clean runs, and two runs of the whole file stayed
+  clean. Open: should it come back, the whole output is the evidence, never
+  the summary line.
 - **Stop-clear-add-select-play sequence** for `play_track`/`play_album`. Without
   explicit stop, HQPlayer occasionally started the wrong track from the
   existing queue.

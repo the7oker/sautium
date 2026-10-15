@@ -4178,7 +4178,8 @@ class HqpBackend(PlayerBackend):
         it moved on past `item`; in a tail mirror counted from the entry that
         reads the playing slot. No anchor: behind them all. Returns ((that
         number, the queue slot they go behind, the queue's track HQPlayer
-        reads as read here — None with no anchor), None),
+        reads as read here — None with no anchor, or in step with HQPlayer
+        stopped on no slot of the queue's), None),
         or (None, what marks the playlist) when HQPlayer's playlist cannot
         place it: shorter than the queue it holds, reading no slot of the
         queue's — another controller's entry; in step also an entry it is

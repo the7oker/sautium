@@ -2209,13 +2209,13 @@ def check_measured(endpoint_id: int, link, status: TrackStatus, *,
     stopped, reading no other controller's entry (_booted) — and the left
     notice says what is the owner's. One try per rest: busy, the verdict not
     written, or the connection lost under it, the entry it rests on is not
-    tried again until it moves;
-    at rest and not let through (a SetMode refused, no State there, the way
-    back to a mode a check left it in refused first: _go_back), no later
-    rest tries it — a new run's start does (_measured_refused). One
-    check at a time per HQPlayer, behind the command lock; a person's DSP
-    change or switch away made meanwhile drops it — HQPlayer's next answer
-    asks again."""
+    tried again until it moves; at rest and not let through — a return to
+    where a check left it refused first (_go_back), a SetMode refused or not
+    shown, no State there, a selection or the way back refused, the lists of
+    the mode it was found in not given — no later rest tries it, a new run's
+    start does (_measured_refused). One check at a time per HQPlayer, behind
+    the command lock; a person's DSP change or switch away made meanwhile
+    drops it — HQPlayer's next answer asks again."""
     run = unchecked_run(endpoint_id)
     if run is None or running():
         return
@@ -2720,8 +2720,7 @@ def _measured_refused(run: dict, why: str) -> None:
     """HQPlayer at rest did not let the mode a run measured be read (a
     SetMode refused or not shown, no State there, a selection or the way
     back refused, the lists of the mode it was found in not given): no later
-    rest tries it — only a new run's start — and the notice says so; why,
-    in the run's note."""
+    rest tries it — only a new run's start; why, in the run's note."""
     row = db_execute("""UPDATE hqp_benchmark_runs SET measured_refused_at = now(),
                                note = concat_ws('; ', note, %(n)s::text)
                          WHERE id = %(id)s AND measured_unchecked_at IS NOT NULL
@@ -2907,9 +2906,10 @@ def _check_measured(link, run: dict,
     back as found. Before it leaves, the mode found is kept on the run's
     row as the return point (_keep_point), cleared once HQPlayer is back
     there. Returns the owner's knobs there — none: put back, or theirs
-    already — and the State read there; or None and why, when HQPlayer
-    took no mode change, said no state there or did not go back: unchecked
-    still, and — not back — the return point standing."""
+    already — and the State read there; or None and why, when HQPlayer did
+    not list the settings of the mode it is in, took no mode change, said no
+    state there, did not take the owner's selection back or did not go back:
+    unchecked still, and — not back — the return point standing."""
     measured, name = run["own_mode"], run["mode"]
     trip = found["mode"] != measured
     if trip:
