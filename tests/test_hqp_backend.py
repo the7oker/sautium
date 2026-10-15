@@ -8720,6 +8720,38 @@ def test_a_next_during_a_play_next_at_a_spot_only_moves_the_spot(fake, listens, 
         b.shutdown()
 
 
+def test_a_next_made_before_a_play_next_reads_hqplayer_at_a_spot_moves_the_spot(fake, listens,
+                                                                               monkeypatch):
+    """The same spot and insert; the person presses Next before the insert
+    reads what HQPlayer plays. The read names the spot's track, never the
+    one the Next moved to: the spot moves to the new track, nothing sounds."""
+    mgr = _album(3)
+    b = _attach(mgr)
+    try:
+        player_router = _stopped_at_spot(fake, mgr, monkeypatch)
+        place = b._place_after
+        said = {}
+
+        def next_first(*a):
+            if not said:
+                t = threading.Thread(target=lambda: said.update(player_router.next_track()),
+                                     daemon=True)
+                t.start()
+                t.join(5)
+            return place(*a)
+        monkeypatch.setattr(b, "_place_after", next_first)
+        n = len(fake.commands)
+        assert mgr.append([_item("E:/Music/N/01.flac", 31)], "next") == 1
+        _settled()
+        assert said.get("ok"), said
+        assert [it.track_id for it in mgr.queue.snapshot()] == [
+            "track-3", "track-2", "track-31", "track-1"]
+        assert _start_sent(fake, n) == [] and fake.state == int(PlaybackState.STOPPED)
+        assert _wait(lambda: mgr._latest_status.get("resume") == {"index": 3, "position": 0})
+    finally:
+        b.shutdown()
+
+
 def test_a_next_during_a_paused_reorders_rebuild_only_moves_the_spot(fake, listens,
                                                                      monkeypatch):
     """Paused on slot 2 at 2:30; a new order needs a rebuild, which leaves
@@ -9851,6 +9883,50 @@ def test_a_next_held_by_a_play_next_hqplayer_took_after_moving_on_plays_the_new_
     assert ("SelectTrack", {"index": "2"}) not in sent, (said, sent, fake.track, fake.position)
     assert _wait(lambda: fake.state == int(PlaybackState.PLAYING)
                  and fake.playlist[fake.track - 1] == "file:///E:/Music/N/01.flac"), (
+        said, sent, fake.track, fake.playlist)
+
+
+def test_a_next_held_by_a_play_next_run_hqplayer_moved_into_plays_the_runs_next_track(
+        fake, output, monkeypatch):
+    """In step, track 1 of [1, 2, 3] plays, and a "play next" run lands
+    track by track — each insert anchored on the run's last track. Its
+    first track is queued behind track 1; track 1 ends and HQPlayer moves
+    on to it by itself — no status has read it — as the run's second track
+    lands behind it, its anchor. The person presses Next while HQPlayer
+    takes that second track: Next from what plays is the run's second
+    track, never its first, the track HQPlayer plays, started over."""
+    mgr, b = output
+    player_router = _routes_on(monkeypatch, mgr)
+    assert mgr.append([_item("E:/Music/N/01.flac", 31)], "next") == 1
+    n1 = mgr.queue.item_at(2)
+    assert _wait(lambda: b._last_tick is not None and b._last_tick.queue_index == 1
+                 and fake.playlist[1] == "file:///E:/Music/N/01.flac", timeout=5)
+    fake.service["PlaylistRemove"] = 0.4
+    insert = b.queue_insert_next
+
+    def moved_on_first(items, anchor_index):
+        with fake._lock:                    # HQPlayer's own advance, not read yet
+            fake.track, fake.position = 2, 0.5
+        return insert(items, anchor_index)
+    monkeypatch.setattr(b, "queue_insert_next", moved_on_first)
+    came, out = len(fake.arrivals), {}
+    inserting = threading.Thread(target=lambda: out.update(added=mgr.append(
+        [_item("E:/Music/N/02.flac", 32)], "next", after=n1)), daemon=True)
+    inserting.start()
+    assert _wait(lambda: "PlaylistRemove" in [c for _, c in fake.arrivals[came:]], timeout=5)
+    assert b._inflight is not None
+    n = len(fake.commands)
+    said = _quick(player_router.next_track)
+    inserting.join(10)
+    _settled()
+    assert out.get("added") == 1, out
+    assert [it.track_id for it in mgr.queue.snapshot()] == [
+        "track-1", "track-31", "track-32", "track-2", "track-3"]
+    assert said.get("starts") == {"index": 3, "position": 0, "track_id": "track-32"}, said
+    sent = _start_sent(fake, n)
+    assert ("SelectTrack", {"index": "2"}) not in sent, (said, sent, fake.track, fake.position)
+    assert _wait(lambda: fake.state == int(PlaybackState.PLAYING)
+                 and fake.playlist[fake.track - 1] == "file:///E:/Music/N/02.flac"), (
         said, sent, fake.track, fake.playlist)
 
 
