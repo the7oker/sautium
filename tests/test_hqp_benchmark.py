@@ -3586,6 +3586,143 @@ def test_hqplayer_left_in_the_measured_mode_is_said_anew(run, monkeypatch):
     assert after["hqplayer.run_stayed"]["data"]["back_to"]["mode"] == "SDM (DSD)"
 
 
+def _refuses_sdm(monkeypatch, fake) -> list:
+    """HQPlayer refuses every SetMode into SDM: when each was asked."""
+    refused, dispatch = [], fake._dispatch
+
+    def refuses(cmd, attrs):
+        if cmd == "SetMode" and attrs.get("value") == "2":
+            refused.append(time.monotonic())
+            return '<SetMode result="Error">Mode not available</SetMode>'
+        return dispatch(cmd, attrs)
+    monkeypatch.setattr(fake, "_dispatch", refuses)
+    return refused
+
+
+@pytest.mark.parametrize("how", ["refused", "not shown"])
+def test_a_way_back_refused_in_a_put_back_sets_nothing_of_the_found_mode_in_the_measured(
+        run, monkeypatch, how):
+    """At rest, PCM a mark of the run, and the volume still at the run's
+    level: the put-back enters PCM, puts the owner's selection back there,
+    and HQPlayer refuses the way back into SDM — or takes it and stays in
+    PCM — and again when the put-back goes on for the volume. Nothing of
+    SDM's selection is set inside PCM; the volume goes back, and what
+    HQPlayer did is said."""
+    fake = run.fake
+    run_id = _pcm_run_found_in_sdm(run, [1, 0, 0, 0])       # lowered: -60 dB
+    if how == "refused":
+        tries = _refuses_sdm(monkeypatch, fake)
+    else:
+        tries, dispatch = [], fake._dispatch
+
+        def stays_in_pcm(cmd, attrs):
+            if cmd == "SetMode" and attrs.get("value") == "2":
+                tries.append(True)
+                return '<SetMode result="OK"/>'
+            return dispatch(cmd, attrs)
+        monkeypatch.setattr(fake, "_dispatch", stays_in_pcm)
+    bench.recover(run.endpoint_id, hl.selected(), gave=run.mgr.active.gave)
+    assert _wait(lambda: run.q("SELECT finished_at IS NOT NULL FROM hqp_benchmark_runs "
+                               "WHERE id = %s", run_id) == [(True,)])
+    note = run.q("SELECT note FROM hqp_benchmark_runs WHERE id = %s", run_id)[0][0]
+    assert len(tries) == 2 and fake.settings() == (1, (2, 1, 1, 1), (2, 0, 0, 0), -3.0), (
+        fake.settings(), note)
+    assert ("Mode not available" if how == "refused" else "did not show") in note, note
+    assert _point(run, run_id), note
+
+
+def test_a_run_whose_end_cannot_go_back_sets_nothing_of_the_mode_it_found(run, monkeypatch):
+    """A run of PCM from SDM is cancelled, and HQPlayer refuses the SetMode
+    back into SDM at the run's own end: PCM gets its own selection back, and
+    nothing of SDM's is set inside PCM."""
+    fake = run.fake
+    fake.jitter = 0.2
+    monkeypatch.setattr(bench, "SETTLE_CAP_S", 2.0)
+    with fake._lock:
+        fake.mode = 2
+    before = fake.settings()
+    bench.start("pcm")
+    assert _wait(lambda: run.point() >= 2, 10)
+    refused = _refuses_sdm(monkeypatch, fake)
+    assert bench.cancel()
+    assert _wait(lambda: not bench.running(), 10)
+    assert refused and fake.settings() == (1, before[1], before[2], before[3]), (
+        before, fake.settings(), bench.state()["note"])
+
+
+def test_a_selection_hqplayer_will_not_take_back_is_never_said_put_back(run, monkeypatch):
+    """At rest, PCM the run's only mark, on its last point: the check enters
+    PCM to put the owner's selection back, and HQPlayer refuses the filter.
+    The test point stays in PCM — no verdict: the run stays marked, the
+    reason in its note, never "put back"."""
+    fake = run.fake
+    run_id = _pcm_run_found_in_sdm(run, [1, 0, 0, 0])
+    with fake._lock:
+        fake.volume = -3.0
+    dispatch = fake._dispatch
+
+    def refuses_pcms_filter(cmd, attrs):
+        if cmd == "SetFilter" and fake.mode == 1:
+            return '<SetFilter result="Error">Filter not available</SetFilter>'
+        return dispatch(cmd, attrs)
+    monkeypatch.setattr(fake, "_dispatch", refuses_pcms_filter)
+    bench.recover(run.endpoint_id, hl.selected(), gave=run.mgr.active.gave)
+    assert _wait(lambda: run.q("SELECT finished_at IS NOT NULL FROM hqp_benchmark_runs "
+                               "WHERE id = %s", run_id) == [(True,)])
+    note = run.q("SELECT note FROM hqp_benchmark_runs WHERE id = %s", run_id)[0][0]
+    assert _unchecked(run, run_id) and _refused_at_rest(run, run_id), note
+    assert "did not take the selection of PCM back" in note, note
+    assert "the selection of PCM was put back" not in note, note
+
+
+def test_a_return_whose_selection_hqplayer_refuses_says_so(run, monkeypatch):
+    """A check left HQPlayer in PCM; the next run's start takes it back to
+    SDM, and HQPlayer refuses the filter of the owner's selection there: the
+    return point goes — HQPlayer is in SDM — and the run's note says what
+    did not go back."""
+    fake = run.fake
+    run_id = _left_in_pcm(run)
+    dispatch = fake._dispatch
+
+    def refuses_sdms_filter(cmd, attrs):
+        if cmd == "SetFilter" and fake.mode == 2:
+            return '<SetFilter result="Error">Filter not available</SetFilter>'
+        return dispatch(cmd, attrs)
+    monkeypatch.setattr(fake, "_dispatch", refuses_sdms_filter)
+    bench.start("pcm")
+    assert _wait(lambda: not _point(run, run_id), 30)
+    _end_the_run()
+    note = run.q("SELECT note FROM hqp_benchmark_runs WHERE id = %s", run_id)[0][0]
+    assert "went back to SDM (DSD) (not all" in note and "Filter not available" in note, note
+
+
+def test_a_round_trip_whose_found_selection_hqplayer_refuses_says_so(run, monkeypatch):
+    """The round trip through PCM leaves HQPlayer in SDM on another selection
+    than it was found on, and HQPlayer refuses the filter when it is put back
+    as found: the run's note says the selection of SDM did not all go back."""
+    fake = run.fake
+    run_id = _pcm_run_found_in_sdm(run, [1, 0, 0, 0])
+    with fake._lock:
+        fake.volume = -3.0
+    dispatch, moved = fake._dispatch, []
+
+    def resets_sdm_then_refuses(cmd, attrs):
+        if cmd == "SetFilter" and fake.mode == 2 and moved:
+            return '<SetFilter result="Error">Filter not available</SetFilter>'
+        out = dispatch(cmd, attrs)
+        if cmd == "SetMode" and attrs.get("value") == "2" and not moved:
+            moved.append(True)
+            with fake._lock:
+                fake.sel[2] = [1, 1, 1, 1]          # not what the owner had there
+        return out
+    monkeypatch.setattr(fake, "_dispatch", resets_sdm_then_refuses)
+    bench.recover(run.endpoint_id, hl.selected(), gave=run.mgr.active.gave)
+    assert _wait(lambda: run.q("SELECT finished_at IS NOT NULL FROM hqp_benchmark_runs "
+                               "WHERE id = %s", run_id) == [(True,)])
+    note = run.q("SELECT note FROM hqp_benchmark_runs WHERE id = %s", run_id)[0][0]
+    assert "the selection of SDM (DSD) not all put back" in note, note
+
+
 def test_a_round_trip_through_the_measured_mode_leaves_the_found_modes_selection_as_found(
         run, monkeypatch):
     """PCM, which State does not show, is the run's only mark left (the

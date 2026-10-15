@@ -1679,29 +1679,38 @@ def _put_back(link: _Link, *, pre: dict, own: Optional[dict], volume: bool,
     run's own end, a whole put-back: what the run left there is known),
     else only while HQPlayer is in it (one it does not show is no one's to
     judge) — then the mode it found and that mode's selection; the owner's
-    volume (`volume`: the run lowered it, or HQPlayer came back louder).
-    What HQPlayer refused, as "knob: its words"."""
+    volume (`volume`: the run lowered it, or HQPlayer came back louder). A
+    selection goes back only while HQPlayer shows its mode, read after the
+    switch: in a mode HQPlayer did not take, a selection of another mode's
+    indices would set what neither holds. What HQPlayer refused, as "knob:
+    its words"."""
     link("stop")
     if clear:
         link("playlist_clear")
     problems: List[str] = []
     now = link("get_state")
     mode = now["mode"] if now is not None else None
+
+    def switched(to: int) -> Optional[int]:
+        _, failed = link("apply_settings", mode=to)
+        problems.extend(f"{k}: {v}" for k, v in failed.items())
+        there = None if failed else link("get_state")
+        if not failed and (there is None or there["mode"] != to):
+            problems.append("mode: HQPlayer did not show the mode it was switched to")
+        return there["mode"] if there is not None else None
     if own is not None:
         if mode != own["mode"] and enter:
-            _, failed = link("apply_settings", mode=own["mode"])
-            problems += [f"{k}: {v}" for k, v in failed.items()]
-            mode = None if failed else own["mode"]
+            mode = switched(own["mode"])
         if mode == own["mode"]:
             _, failed = link("apply_settings", rate=own["rate"], filter=own["filterNx"],
                              filter1x=own["filter1x"], shaper=own["shaper"])
             problems += [f"{k}: {v}" for k, v in failed.items()]
     if mode != pre["mode"]:
-        _, failed = link("apply_settings", mode=pre["mode"])
+        mode = switched(pre["mode"])
+    if mode == pre["mode"]:
+        _, failed = link("apply_settings", rate=pre["rate"], filter=pre["filterNx"],
+                         filter1x=pre["filter1x"], shaper=pre["shaper"])
         problems += [f"{k}: {v}" for k, v in failed.items()]
-    _, failed = link("apply_settings", rate=pre["rate"], filter=pre["filterNx"],
-                     filter1x=pre["filter1x"], shaper=pre["shaper"])
-    problems += [f"{k}: {v}" for k, v in failed.items()]
     if volume:
         link("set_volume", pre["volume"])
     return problems
@@ -2727,12 +2736,15 @@ def _go_back(link, point: dict) -> Optional[str]:
             "filterNx": index(filters, "name", point["measured_from_filter"]),
             "filter1x": index(filters, "name", point["measured_from_filter1x"]),
             "shaper": index(shapers, "name", point["measured_from_shaper"])}
+    failed = {}
     if any(v is not None and st[k] != v for k, v in want.items()):
-        link("apply_settings", rate=want["rate"], filter=want["filterNx"],
-             filter1x=want["filter1x"], shaper=want["shaper"])
+        _, failed = link("apply_settings", rate=want["rate"], filter=want["filterNx"],
+                         filter1x=want["filter1x"], shaper=want["shaper"])
     lost = [k for k, v in want.items() if v is None]
+    said = ([f"not named in its lists: {', '.join(lost)}"] if lost else []) + [
+        f"{k}: {v}" for k, v in failed.items()]
     _point_cleared(point, f"HQPlayer went back to {name}"
-                          + (f" (not named in its lists: {', '.join(lost)})" if lost else ""))
+                          + (f" (not all: {'; '.join(said)})" if said else ""))
     return None
 
 
@@ -2807,15 +2819,23 @@ def _check_measured(link, run: dict,
                   if there[key] not in (run[f"last_{col}"], run[f"own_{col}"])]
         checked = (theirs, there)
         if not theirs and any(there[key] != run[f"own_{col}"] for _, key, col in _KNOBS):
-            link("apply_settings", rate=run["own_rate"], filter=run["own_filter"],
-                 filter1x=run["own_filter1x"], shaper=run["own_shaper"])
+            _, failed = link("apply_settings", rate=run["own_rate"], filter=run["own_filter"],
+                             filter1x=run["own_filter1x"], shaper=run["own_shaper"])
+            if failed:
+                # The test point still there: no verdict, never the owner's
+                checked = None
+                why = (f"HQPlayer did not take the selection of {name} back ("
+                       + ", ".join(f"{k}: {v}" for k, v in failed.items()) + ")")
     if trip:
         _, failed = link("apply_settings", mode=found["mode"])
         back = None if failed else link("get_state")
         if back is None or back["mode"] != found["mode"]:
             return None, f"HQPlayer did not go back to {back_to}"
+        failed = {}
         if any(back[key] != found[key] for _, key, _ in _KNOBS):
-            link("apply_settings", rate=found["rate"], filter=found["filterNx"],
-                 filter1x=found["filter1x"], shaper=found["shaper"])
-        _point_cleared(run, notify=False)
+            _, failed = link("apply_settings", rate=found["rate"], filter=found["filterNx"],
+                             filter1x=found["filter1x"], shaper=found["shaper"])
+        _point_cleared(run, (f"the selection of {back_to} not all put back: "
+                             + ", ".join(f"{k}: {v}" for k, v in failed.items()))
+                       if failed else None, notify=False)
     return checked, None if checked is not None else why

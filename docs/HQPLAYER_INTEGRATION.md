@@ -1528,58 +1528,60 @@ cooling — so Sautium measures it instead of predicting it
   checked yet; it is judged at HQPlayer's nearest rest, or at a new run's
   start, at the rest the run's own Stop makes (2026-10-15), before that run
   reads the owner's selection — a test point is never taken for theirs
-  (since 2026-10-14). Each rest tries once; HQPlayer at rest that does not
-  let the mode be read (a SetMode refused, no State there) is tried again
-  only at a new run's start (`measured_refused_at`, migration 040), and one
-  that still does not refuses only a run that would read that mode — a run
-  of it, or HQPlayer found in it — while a run of another mode goes, the
-  mark standing (2026-10-15). Before a check leaves the mode it found, that
-  mode and its selection by name go on the run's row as the return point
-  (`measured_from_*`, migration 041): the next check or run start takes
-  HQPlayer back there first, on a stopped HQPlayer, and only then judges —
-  after a node restart too — and a run never reads the mode Sautium left
-  HQPlayer in as the owner's: one HQPlayer does not go back from is
-  refused. The point goes once HQPlayer is back there — the check's own way
-  back, a return, or the owner's own switch, which the poller sees in State
-  — or once a person's change makes HQPlayer theirs (2026-10-15). Neither
-  the put-back nor a person's change waiting for the command lock behind
-  it closes the run the other way: the row is closed while the put-back
-  still holds the lock, and a switch away or another HQPlayer chosen
-  meanwhile — accepted at once, without the lock — leaves the run to the
-  put-back's own end: it went; or the switch drops its next request, wakes
-  the one on its way or leaves it reading no state, and the run is left to
-  the owner. Never the node's own
-  re-attach of the same HQPlayer, nor a new run's hold. The run is then
-  closed as left to the owner (since 2026-10-13): nothing more is put
-  back, and the volume is never raised for them — save one HQPlayer still
-  holds at the level the run lowered it to when a knob of theirs leaves
-  the run to them: that level is the run's, and goes back to theirs (since
-  2026-10-14) — and one notice — through the
-  notices channel and on the HQPlayer screen — names what still holds the
-  run's test values, each as now → before the run (named from HQPlayer's
-  lists of the mode the run measured, read in that mode — a list HQPlayer
-  did not give is asked again at its next answer there), and a volume
-  left at the bottom of the range for them to raise, until they changed it
-  all or a new run opened its row. In another mode State shows that mode's
-  selection, and HQPlayer keeps one per mode: the notice names the knobs
-  the measured mode still keeps by that mode's name, as they were last read
-  there, until HQPlayer is read in it again. The poller reads HQPlayer's
-  State for it while it stands; a write, a read or a wake the database
-  fails costs the notice — done again at a later answer — never the poll,
-  and a read a close or a new run overtook is read again. The notice stands on the run's row, whatever the output
-  is now: a restart or another output never ends it to raise it again;
-  until the poller has read HQPlayer it says the test settings may still be
-  there. A new run takes a put-back still owed first — at its start, and
-  again as its first step — and reads what HQPlayer holds after it; the
-  run it took is closed then with no notice, however it was put back or
-  left — the new run reads HQPlayer as theirs. Forgetting the
-  HQPlayer takes its measurements with it; it is refused while a run measures
-  it. The estimate of a run's length takes the pace of the last run that
-  ended or was cancelled (on a trial-mode Embedded the owner cancels before
-  the half hour is up and runs again: a repeat run measures only the gaps).
-  Without an estimate the block says why (`no_estimate`, since 2026-10-11):
-  the HQPlayer is not registered yet, it did not report its state, a list a
-  run is planned from is missing, or its mode follows the source.
+  (since 2026-10-14). A selection goes back only while HQPlayer shows its
+  mode, and one HQPlayer will not take back is no verdict: the mode stays
+  unchecked, the refusal said (2026-10-15). Each rest tries once; HQPlayer
+  at rest that does not let the mode be read (a SetMode refused, no State
+  there) is tried again only at a new run's start (`measured_refused_at`,
+  migration 040), and one that still does not refuses only a run that would
+  read that mode — a run of it, or HQPlayer found in it — while a run of
+  another mode goes, the mark standing (2026-10-15). Before a check leaves
+  the mode it found, that mode and its selection by name go on the run's
+  row as the return point (`measured_from_*`, migration 041): the next
+  check or run start takes HQPlayer back there first, on a stopped
+  HQPlayer, and only then judges — after a node restart too — and a run
+  never reads the mode Sautium left HQPlayer in as the owner's: one
+  HQPlayer does not go back from is refused. The point goes once HQPlayer
+  is back there — the check's own way back, a return, or the owner's own
+  switch, which the poller sees in State — or once a person's change makes
+  HQPlayer theirs (2026-10-15). Neither the put-back nor a person's change
+  waiting for the command lock behind it closes the run the other way: the
+  row is closed while the put-back still holds the lock, and a switch away
+  or another HQPlayer chosen meanwhile — accepted at once, without the lock
+  — leaves the run to the put-back's own end: it went; or the switch drops
+  its next request, wakes the one on its way or leaves it reading no state,
+  and the run is left to the owner. Never the node's own re-attach of the
+  same HQPlayer, nor a new run's hold. The run is then closed as left to
+  the owner (since 2026-10-13): nothing more is put back, and the volume is
+  never raised for them — save one HQPlayer still holds at the level the
+  run lowered it to when a knob of theirs leaves the run to them: that
+  level is the run's, and goes back to theirs (since 2026-10-14) — and one
+  notice — through the notices channel and on the HQPlayer screen — names
+  what still holds the run's test values, each as now → before the run
+  (named from HQPlayer's lists of the mode the run measured, read in that
+  mode — a list HQPlayer did not give is asked again at its next answer
+  there), and a volume left at the bottom of the range for them to raise,
+  until they changed it all or a new run opened its row. In another mode
+  State shows that mode's selection, and HQPlayer keeps one per mode: the
+  notice names the knobs the measured mode still keeps by that mode's name,
+  as they were last read there, until HQPlayer is read in it again. The
+  poller reads HQPlayer's State for it while it stands; a write, a read or
+  a wake the database fails costs the notice — done again at a later answer
+  — never the poll, and a read a close or a new run overtook is read again.
+  The notice stands on the run's row, whatever the output is now: a restart
+  or another output never ends it to raise it again; until the poller has
+  read HQPlayer it says the test settings may still be there. A new run
+  takes a put-back still owed first — at its start, and again as its first
+  step — and reads what HQPlayer holds after it; the run it took is closed
+  then with no notice, however it was put back or left — the new run reads
+  HQPlayer as theirs. Forgetting the HQPlayer takes its measurements with
+  it; it is refused while a run measures it. The estimate of a run's length
+  takes the pace of the last run that ended or was cancelled (on a
+  trial-mode Embedded the owner cancels before the half hour is up and runs
+  again: a repeat run measures only the gaps). Without an estimate the
+  block says why (`no_estimate`, since 2026-10-11): the HQPlayer is not
+  registered yet, it did not report its state, a list a run is planned from
+  is missing, or its mode follows the source.
 
 Measurements stay on this node: in the `.sbk` backup, not in the life-data
 merge (their endpoint is this node's registry), not in P2P sync.
