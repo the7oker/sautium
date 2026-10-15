@@ -9969,19 +9969,13 @@ def test_a_seek_made_while_a_tap_waited_its_turn_goes(fake, output):
     _shows_what_plays(mgr, b, fake)
 
 
-@pytest.mark.parametrize("word", ["seek", "play"])
-def test_a_word_made_while_a_tap_waited_never_leaves_its_press_stopped(fake, output, monkeypatch,
-                                                                       word):
+def _a_tap_whose_press_yields(b, fake, monkeypatch, act) -> tuple:
     """The same tap waits its turn; an entry is added in HQPlayer's own
-    window (the canary finds the playlist drifted) and the person seeks, or
-    — HQPlayer paused — presses Play, a word that waits behind the tap.
-    Under the lock the tap finds no mirror and becomes a play press; the
-    word goes first, on what played. The press, its start dead before it
-    began, rebuilds nothing: the music plays, and the screen shows it."""
-    mgr, b = output
-    if word == "play":
-        assert b.pause()
-        assert _wait(lambda: mgr._latest_status.get("state") == "paused", timeout=5)
+    window (the canary finds the playlist drifted) and `act` — a word made
+    on what played — waits behind the tap. Under the lock the tap finds no
+    mirror and becomes a play press; the word goes first, so the press's
+    only start is dead before it began. Run to the end: what the tap said,
+    what the word returned, and what was sent from the edit on."""
     monkeypatch.setattr(hb, "DRIFT_CHECK_EVERY", 1)
     link = _link()
     tapper, said, vol = _a_tap_waiting_behind_a_slow_volume(b, link, fake)
@@ -9995,7 +9989,6 @@ def test_a_word_made_while_a_tap_waited_never_leaves_its_press_stopped(fake, out
     tapper.start()
     assert _wait(lambda: len(link.lock._waiting) == 1, timeout=3)
     done = {}
-    act = (lambda: b.seek(60)) if word == "seek" else b.play
     actor = threading.Thread(target=lambda: done.update(ok=act()), daemon=True)
     actor.start()
     assert _wait(lambda: len(link.lock._waiting) == 2, timeout=3)
@@ -10008,10 +10001,96 @@ def test_a_word_made_while_a_tap_waited_never_leaves_its_press_stopped(fake, out
     _settled()
     sent = [(c, a.get("index") or a.get("uri") or a.get("position")) for c, a in fake.commands[n:]
             if c not in _QUESTIONS]
+    return said, done, sent
+
+
+@pytest.mark.parametrize("word", ["seek", "play"])
+def test_a_word_made_while_a_tap_waited_never_leaves_its_press_stopped(fake, output, monkeypatch,
+                                                                       word):
+    """The tap's press yields to a Seek, or — HQPlayer paused — to a Play
+    (_a_tap_whose_press_yields). The press, its start dead before it began,
+    rebuilds nothing: the music plays, and the screen shows it."""
+    mgr, b = output
+    if word == "play":
+        assert b.pause()
+        assert _wait(lambda: mgr._latest_status.get("state") == "paused", timeout=5)
+    act = (lambda: b.seek(60)) if word == "seek" else b.play
+    said, done, sent = _a_tap_whose_press_yields(b, fake, monkeypatch, act)
     assert fake.state == int(PlaybackState.PLAYING), (said, done, fake.state, fake.track,
                                                       b._spot, sent)
     assert "Stop" not in [c for c, _ in sent], sent
     _shows_what_plays(mgr, b, fake)
+
+
+def _as_the_yielded_press_ends(b, monkeypatch, word) -> dict:
+    """`word` made once the yielded tap's press decided to rebuild nothing
+    and before it is over (_press_ended): what it returned."""
+    ended = b._press_ended
+    out = {}
+
+    def word_first(press):
+        if not out:
+            t = threading.Thread(target=lambda: out.update(ok=word()), daemon=True)
+            t.start()
+            t.join(5)
+        return ended(press)
+    monkeypatch.setattr(b, "_press_ended", word_first)
+    return out
+
+
+def test_a_pause_made_as_a_yielded_press_ends_pauses(fake, output, monkeypatch):
+    """The yielded tap's press has decided to rebuild nothing; before it is
+    over the person presses Pause, on the music the Seek kept playing. The
+    Pause goes: never taken by a press over in all but its end, nothing
+    sent, the route answering ok."""
+    mgr, b = output
+    paused = _as_the_yielded_press_ends(b, monkeypatch, b.pause)
+    said, done, sent = _a_tap_whose_press_yields(b, fake, monkeypatch, lambda: b.seek(60))
+    assert paused.get("ok"), paused
+    assert ("Pause", None) in sent, sent
+    assert fake.state == int(PlaybackState.PAUSED), (said, done, fake.state, fake.track, sent)
+
+
+def test_a_tap_made_as_a_yielded_press_ends_plays_what_it_names(fake, output, monkeypatch):
+    """The same moment, the person taps the second row: the track it names
+    starts — never swallowed by the press that chose to rebuild nothing."""
+    mgr, b = output
+    tapped = _as_the_yielded_press_ends(b, monkeypatch, lambda: b.select(2, "track-2"))
+    said, done, sent = _a_tap_whose_press_yields(b, fake, monkeypatch, lambda: b.seek(60))
+    assert tapped.get("ok"), tapped
+
+    def plays_track_2():
+        with fake._lock:
+            return (fake.state == int(PlaybackState.PLAYING)
+                    and 1 <= fake.track <= len(fake.playlist)
+                    and fake.playlist[fake.track - 1] == "file:///E:/Music/A/02.flac")
+    assert _wait(plays_track_2, timeout=5), (fake.state, fake.track, fake.playlist, sent)
+
+
+def test_the_reconverge_a_yielded_press_arms_mends_the_playlist(fake, output, monkeypatch):
+    """The yielded tap's press loses the mirror so that HQPlayer gets the
+    queue back without a stop. The poller, woken by the loss, follows the
+    queue before the press is over: it mends the drifted playlist all the
+    same, never turned away by the press that chose to rebuild nothing."""
+    mgr, b = output
+    follow = b._follow_queue
+    followed = threading.Event()
+
+    def seen(*a, **kw):
+        followed.set()
+        return follow(*a, **kw)
+    monkeypatch.setattr(b, "_follow_queue", seen)
+    ended = b._press_ended
+
+    def after_the_follow(press):
+        assert followed.wait(5)
+        return ended(press)
+    monkeypatch.setattr(b, "_press_ended", after_the_follow)
+    said, done, sent = _a_tap_whose_press_yields(b, fake, monkeypatch, lambda: b.seek(60))
+    assert _wait(lambda: b._mirror in ("step", "tail"), timeout=5), (b._mirror, b._lost_by,
+                                                                     fake.playlist, sent)
+    assert fake.state == int(PlaybackState.PLAYING)
+    assert "Stop" not in [c for c, _ in sent], sent
 
 
 def test_a_pause_during_a_play_press_still_hands_hqplayer_the_queue(fake, output):

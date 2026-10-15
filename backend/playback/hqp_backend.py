@@ -3280,9 +3280,10 @@ class HqpBackend(PlayerBackend):
         the lock again, and the start it owes once the lock is let go. A
         press none of whose starts is live as its rebuild would go, holding
         no Pause or Stop — a word made before it began, without it, came
-        first (a tap that waited its turn) — rebuilds nothing: the playlist
-        stays no mirror, and HQPlayer gets the queue back at its next answer
-        without a stop."""
+        first (a tap that waited its turn) — rebuilds nothing, and is let go
+        as it decides: a word made from then on goes as on a playlist that
+        is no mirror, the playlist stays no mirror, and HQPlayer gets the
+        queue back at its next answer without a stop."""
         from playback.manager import manager
         taking = manager.mirror_locked(self, lambda: self._press_begin(press))
         if taking is None:
@@ -3298,6 +3299,12 @@ class HqpBackend(PlayerBackend):
                     self._check_attached()
                     with self._press_lock:
                         dead = press.live(self._link) is None and not press.halted()
+                        if dead and self._pressed is press:
+                            # Never joined again: a press over in all but its
+                            # end would take a word and act on nothing, and the
+                            # reconverge the loss below arms would leave the
+                            # playlist to it
+                            self._pressed = None
                     if not dead:
                         self._given = set(uris)
                         if _hqp_safe(self._link, lambda h: h.stop(), "Stop"):
