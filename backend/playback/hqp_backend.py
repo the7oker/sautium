@@ -1780,6 +1780,7 @@ class HqpBackend(PlayerBackend):
             reads = None
             sample = None
             left_state = left_lists = None
+            left_gen = 0
             check_due = False
             miss = None         # (what was said, whether HQPlayer kept the connection silent)
             came_back = learned = False
@@ -1845,13 +1846,16 @@ class HqpBackend(PlayerBackend):
                     check_due = (status is not None and status.state == PlaybackState.STOPPED
                                  and self.endpoint_id is not None
                                  and hqp_benchmark.unchecked_run(self.endpoint_id) is not None)
-                    if (status is not None and self.endpoint_id is not None
-                            and (hqp_benchmark.left_pending(self.endpoint_id)
-                                 or hqp_benchmark.point_pending(self.endpoint_id))):
+                    # Both asked, never one for the other: each fills its own
+                    # cache, and a point stands beside a left run's notice too
+                    if status is not None and self.endpoint_id is not None and any([
+                            hqp_benchmark.left_pending(self.endpoint_id),
+                            hqp_benchmark.point_pending(self.endpoint_id)]):
                         # A benchmark run left to the owner: what HQPlayer
                         # still holds of its test settings, for its notice;
                         # a check that left HQPlayer in another mode: whether
                         # it is back where it was found (the owner's switch)
+                        left_gen = hqp_benchmark.watch_gen()
                         left_state = hqp.get_state()
                         if left_state is not None and hqp_benchmark.wants_lists(
                                 self.endpoint_id, left_state["mode"]):
@@ -1881,7 +1885,7 @@ class HqpBackend(PlayerBackend):
                     break               # detached meanwhile: what it heard acts on nothing
                 if left_state is not None:
                     hqp_benchmark.note_left(self.endpoint_id, left_state, left_lists)
-                    hqp_benchmark.note_point(self.endpoint_id, left_state)
+                    hqp_benchmark.note_point(self.endpoint_id, left_state, left_gen)
                 if check_due:
                     hqp_benchmark.check_measured(self.endpoint_id, self._link, status,
                                                  gave=self.gave)

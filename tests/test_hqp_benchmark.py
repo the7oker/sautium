@@ -3773,6 +3773,145 @@ def test_a_put_back_cut_on_its_way_back_goes_back_first_next_time(run, monkeypat
             assert fake.state == int(PlaybackState.PLAYING)
 
 
+@pytest.mark.parametrize("how", ["refused", "dropped"])
+def test_a_state_read_before_our_round_trip_never_clears_the_point_after_it(run, monkeypatch,
+                                                                            how):
+    """The poller's check keeps SDM as the return point; the poller's next
+    tick reads State before the check's SetMode into PCM — HQPlayer still in
+    SDM — and applies it only once the check has ended, HQPlayer having
+    refused the way back, or the connection dropped on it: HQPlayer is in
+    PCM, and the point stands."""
+    fake, mgr = run.fake, run.mgr
+    run_id = _marked_while_busy(run)
+    keep, note_point = bench._keep_point, bench.note_point
+    paused, read = threading.Event(), threading.Event()
+
+    def then_a_read(*a):
+        name = keep(*a)
+        paused.set()                            # the check waits here, HQPlayer in SDM
+        mgr.active.poke()                       # the poller's next tick reads State now
+        assert read.wait(5)
+        paused.clear()
+        return name
+
+    def late(endpoint_id, st, *gen):
+        if paused.is_set() and not read.is_set():
+            read.set()                          # read in SDM, applied once the trip is over
+            assert _wait(lambda: not bench._checking, 5)
+        return note_point(endpoint_id, st, *gen)
+    monkeypatch.setattr(bench, "_keep_point", then_a_read)
+    monkeypatch.setattr(bench, "note_point", late)
+    if how == "refused":
+        _refuses_sdm(monkeypatch, fake)
+    else:
+        dispatch = fake._dispatch
+
+        def drops_on_sdm(cmd, attrs):
+            if cmd == "SetMode" and attrs.get("value") == "2":
+                return None                     # the connection dropped on the way back
+            return dispatch(cmd, attrs)
+        monkeypatch.setattr(fake, "_dispatch", drops_on_sdm)
+    with fake._lock:
+        fake.track, fake.state = 1, int(PlaybackState.STOPPED)
+    assert _wait(lambda: (mgr.active.poke(), read.is_set() and not bench._checking)[1], 15)
+    _ticks(run)
+    assert fake.mode == 1 and _point(run, run_id), (fake.settings(), run.q(
+        "SELECT note FROM hqp_benchmark_runs WHERE id = %s", run_id))
+
+
+def test_a_state_read_before_a_put_backs_round_trip_never_clears_its_point_after_it(
+        run, monkeypatch):
+    """The same with the put-back's own round trip: a State the poller read
+    before the put-back's SetMode into PCM, applied once the put-back has
+    ended — the connection dropped on its way back, the run still owed —
+    leaves the return point standing."""
+    fake, mgr = run.fake, run.mgr
+    assert _wait(lambda: len(fake.playlist) == 2, 10)
+    run_id = _pcm_run_found_in_sdm(run, [1, 0, 0, 0])
+    with fake._lock:
+        fake.volume = -3.0
+    keep, note_point = bench._keep_point, bench.note_point
+    paused, read = threading.Event(), threading.Event()
+
+    def then_a_read(*a):
+        name = keep(*a)
+        with bench._lock:
+            bench._point_rows.pop(run.endpoint_id, None)     # the poller reads the point anew
+        paused.set()
+        mgr.active.poke()
+        assert read.wait(5)
+        paused.clear()
+        return name
+
+    def late(endpoint_id, st, *gen):
+        if paused.is_set() and not read.is_set() and endpoint_id == run.endpoint_id:
+            read.set()
+            assert _wait(lambda: run_id not in bench._putting, 5)
+        return note_point(endpoint_id, st, *gen)
+    monkeypatch.setattr(bench, "_keep_point", then_a_read)
+    monkeypatch.setattr(bench, "note_point", late)
+    dispatch = fake._dispatch
+
+    def drops_on_sdm(cmd, attrs):
+        if cmd == "SetMode" and attrs.get("value") == "2":
+            return None                         # the connection dropped on the way back
+        return dispatch(cmd, attrs)
+    monkeypatch.setattr(fake, "_dispatch", drops_on_sdm)
+    threading.Thread(target=lambda: bench.recover(run.endpoint_id, hl.selected(),
+                                                  gave=run.mgr.active.gave),
+                     daemon=True).start()
+    assert _wait(lambda: read.is_set() and run_id not in bench._putting, 15)
+    _ticks(run)
+    assert fake.mode == 1 and _point(run, run_id), fake.settings()
+
+
+def test_a_check_whose_connection_breaks_is_tried_once_per_rest(run, monkeypatch):
+    """A run marked while HQPlayer was busy; HQPlayer rests, and takes the
+    check's SetMode into PCM and drops the connection each time. The rest's
+    try is spent all the same: no other answer of that rest tries again."""
+    fake, mgr = run.fake, run.mgr
+    run_id = _marked_while_busy(run)
+    dispatch, into_pcm = fake._dispatch, []
+
+    def drops_on_pcm(cmd, attrs):
+        out = dispatch(cmd, attrs)
+        if cmd == "SetMode" and attrs.get("value") == "1":
+            into_pcm.append(time.monotonic())
+            return None                         # taken, and the connection dropped unanswered
+        return out
+    monkeypatch.setattr(fake, "_dispatch", drops_on_pcm)
+    with fake._lock:
+        fake.track, fake.state = 1, int(PlaybackState.STOPPED)
+    assert _wait(lambda: (mgr.active.poke(), into_pcm)[1], 10)
+    _ticks(run, 5)
+    assert len(into_pcm) == 1 and _unchecked(run, run_id), into_pcm
+
+
+def test_the_owners_switch_back_is_seen_beside_a_left_runs_notice(run, monkeypatch):
+    """A run left to the owner, its notice standing, and another run whose
+    check left HQPlayer in PCM: the owner switches HQPlayer back to SDM, and
+    the poller sees it — the return point goes, with no SetMode of ours."""
+    import datetime
+    now = datetime.datetime.now(datetime.timezone.utc)
+    fake = run.fake
+    _cut_short_run(run, mode="PCM", finished_at=now, outcome="interrupted", left_at=now,
+                   own_mode=1, own_rate=2, own_filter=1, own_filter1x=1, own_shaper=1,
+                   last_rate=1, last_filter=0, last_filter1x=0, last_shaper=0)
+    with bench._lock:
+        bench._left.pop(run.endpoint_id, None)
+        bench._bump()
+    # The left run's notice known first, as the poller holds it
+    assert _wait(lambda: (run.mgr.active.poke(), bench._left.get(run.endpoint_id))[1], 10)
+    run_id = _left_in_pcm(run, refused=True)
+    seen = _set_modes(monkeypatch, fake)
+    _ticks(run)
+    assert _point(run, run_id)
+    with fake._lock:
+        fake.mode = 2                           # the owner's own switch, in HQPlayer
+    assert _wait(lambda: (run.mgr.active.poke(), not _point(run, run_id))[1], 10)
+    assert seen == [], seen
+
+
 def test_a_round_trip_through_the_measured_mode_leaves_the_found_modes_selection_as_found(
         run, monkeypatch):
     """PCM, which State does not show, is the run's only mark left (the

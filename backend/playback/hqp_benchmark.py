@@ -1894,6 +1894,7 @@ def _put_run_back(link, run: dict, owed: tuple, again: Callable[[], None],
                 finally:
                     with _lock:
                         _putting.discard(run["id"])
+                        _bump()     # a State read before this end is stale (note_point)
         except Dropped as e:
             why = link.superseded(item)
             if why is None:
@@ -2131,8 +2132,9 @@ def check_measured(endpoint_id: int, link, status: TrackStatus, *,
     """HQPlayer stopped, the mode a run measured unchecked (unchecked_run):
     judged now on its link (_check_measured) if HQPlayer rests there —
     stopped, reading no other controller's entry (_booted) — and the left
-    notice says what is the owner's. One try per rest: busy, or the verdict
-    not written, the entry it rests on is not tried again until it moves;
+    notice says what is the owner's. One try per rest: busy, the verdict not
+    written, or the connection lost under it, the entry it rests on is not
+    tried again until it moves;
     at rest and not let through (a SetMode refused, no State there, the way
     back to a mode a check left it in refused first: _go_back), no later
     rest tries it — a new run's start does (_measured_refused). One
@@ -2169,8 +2171,11 @@ def check_measured(endpoint_id: int, link, status: TrackStatus, *,
             else:
                 _measured_checked(run, checked, notice=True)
             spent = False           # the mark itself says what follows now
-        except (Dropped, _Reopened, _Silent, BrokenPipeError, ConnectionError, OSError) as e:
-            spent = False
+        except Dropped as e:
+            spent = False           # a newer word: HQPlayer's next answer asks again
+            logger.info("HQPlayer benchmark run %s: the mode it measured not checked yet: %s",
+                        run["id"], e)
+        except (_Reopened, _Silent, BrokenPipeError, ConnectionError, OSError) as e:
             logger.info("HQPlayer benchmark run %s: the mode it measured not checked yet: %s",
                         run["id"], e)
         except Exception:       # the thread's boundary: recorded, never lost
@@ -2179,8 +2184,9 @@ def check_measured(endpoint_id: int, link, status: TrackStatus, *,
         finally:
             with _lock:
                 _checking.discard(endpoint_id)
-                if spent:           # HQPlayer busy, or the verdict not written
+                if spent:           # busy, the verdict not written, the connection lost
                     _busy_at[endpoint_id] = at
+                _bump()             # a State read before this end is stale (note_point)
     threading.Thread(target=check, daemon=True, name="hqp-benchmark-check").start()
 
 
@@ -2782,14 +2788,22 @@ def point_pending(endpoint_id: int) -> bool:
         return _point_rows[endpoint_id] is not None
 
 
-def note_point(endpoint_id: int, st: dict) -> None:
+def watch_gen() -> int:
+    """The generation a State read for note_point is taken at."""
+    with _lock:
+        return _left_gen
+
+
+def note_point(endpoint_id: int, st: dict, gen: int) -> None:
     """What HQPlayer's State shows while a return point stands (read by the
-    poller): back in that mode — the owner switched it themselves — the
-    point goes, no SetMode of ours; never while a round trip of ours is on
-    its way, which keeps it first."""
+    poller at generation `gen`, watch_gen): back in that mode — the owner
+    switched it themselves — the point goes, no SetMode of ours. Never on a
+    read older than a round trip of ours — one on its way keeps the point
+    first, and every one's end, a point written or cleared, moves the
+    generation."""
     with _lock:
         point = _point_rows.get(endpoint_id)
-        if (point is None or st["mode"] != point["measured_from_mode"]
+        if (point is None or st["mode"] != point["measured_from_mode"] or _left_gen != gen
                 or endpoint_id in _checking or point["id"] in _putting):
             return
     try:
