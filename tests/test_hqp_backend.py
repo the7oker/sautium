@@ -10016,6 +10016,30 @@ def test_a_next_held_by_a_tail_play_next_run_counts_from_the_track_hqplayer_stil
         said, sent, fake.track, fake.playlist)
 
 
+def test_a_removal_on_a_tail_mirror_stopped_on_an_entry_not_ours_removes_no_other(
+        fake, output):
+    """A tail mirror, [1, x, 2, 3, 4] for the queue [1, 2, 3, 4]. In
+    HQPlayer's own window the person goes to x — no slot of the queue's —
+    and stops there; then removes track 3 in Sautium. HQPlayer reads no
+    slot of the queue's: no entry is guessed, never track 4 removed in its
+    place — the removal is the queue's, the mirror lost."""
+    mgr, b = output
+    _tail(mgr, b, fake)
+    assert _wait(lambda: b._last_tick is not None and b._last_tick.queue_index == 2
+                 and mgr._latest_status.get("track_index") == 2, timeout=5)
+    with fake._lock:
+        fake.track, fake.state, fake.position = 2, int(PlaybackState.STOPPED), 0.0
+    assert _wait(lambda: mgr._latest_status.get("state") == "stopped"
+                 and b._last_tick is not None and b._last_tick.queue_index == 0, timeout=5), (
+        mgr._latest_status, b._mirror)
+    assert mgr.remove(3, "track-3")
+    assert [it.track_id for it in mgr.queue.snapshot()] == ["track-1", "track-2", "track-4"]
+    with fake._lock:
+        playlist = list(fake.playlist)
+    assert "file:///E:/Music/A/04.flac" in playlist, (b._mirror, playlist)
+    assert b._mirror == "lost", b._mirror
+
+
 def test_a_held_seek_never_moves_a_start_made_after_it(fake, output, monkeypatch):
     """HQPlayer stopped on track 1; a radio's clear loses the mirror; Play,
     then Seek 60, held meanwhile. Once the queue stands the Play becomes a

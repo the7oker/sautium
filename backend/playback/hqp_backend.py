@@ -4226,13 +4226,14 @@ class HqpBackend(PlayerBackend):
     def _tail_read(self, h: HQPlayerClient, layout: _Layout) -> tuple:
         """In a tail mirror, the queue slot HQPlayer reads and its entry, read
         inside the edit's own sequence: ((slot, entry), None) — or (None, why)
-        when the entry names no slot of the queue's, or a file queued at more
-        than one slot HQPlayer holds (no verdict which one it reads: an edit
-        behind a guess would land on the wrong copy)."""
+        when the entry names no slot of the queue's (stopped on an entry not
+        the queue's included: slot 0), or a file queued at more than one slot
+        HQPlayer holds (no verdict which one it reads: an edit behind a guess
+        would land on the wrong copy)."""
         now = h.get_status()
         playing = self._playing(now, mutating=True) if now is not None else None
         reads = Entry.read(now) if now is not None else None
-        if playing is None or playing[2] or reads is None:
+        if playing is None or playing[2] or not playing[0] or reads is None:
             return None, "HQPlayer reads no slot of the queue's"
         if len(self._named(now, layout.handed)) > 1:
             return None, "HQPlayer reads a file queued at more than one slot"
