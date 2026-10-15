@@ -1098,20 +1098,21 @@ implementation details live in the code, DB and git history.
   what you cannot see is neither yours nor theirs until you look; and a
   rest is what HQPlayer shows, never what the caller expects of it.
 - **A check is no poll** (2026-10-15). The check of a measured mode left
-  unchecked tried again at every tick of the same rest whenever it found
-  no verdict — HQPlayer refusing the SetMode into the mode, or showing no
-  State there, or the database refusing the verdict — so HQPlayer was
-  switched into the mode and back every second, each time restarting its
-  output; its note and notice said "HQPlayer was busy" of an HQPlayer at
-  rest; and every new run was refused at its start, a run of another mode
-  too, so a mode the output no longer offers blocked the benchmark for
-  good. Now every rest tries once: busy, or the verdict not written, not
-  again until HQPlayer moves; at rest and not let through, not at any
-  later rest — only a new run's start tries again (migration 040), and it
-  refuses only a run that would read that mode. The notice says HQPlayer
-  did not let the settings be read — busy, or not switching to the mode —
-  and when they are tried; the run's note names the reason. Lesson: a try
-  that ends without a verdict is an outcome, and it is recorded as one.
+  unchecked tried again at every tick of the same rest whenever it found no
+  verdict — HQPlayer refusing the SetMode into the mode, or showing no State
+  there, or the database refusing the verdict — so HQPlayer was asked to
+  switch every second, and switched into the mode and back whenever it took
+  the switch, each time restarting its output; its note and notice said
+  "HQPlayer was busy" of an HQPlayer at rest; and every new run was refused
+  at its start, a run of another mode too, so a mode the output no longer
+  offers blocked the benchmark for good. Now every rest tries once: busy, or
+  the verdict not written, not again until HQPlayer moves; at rest and not
+  let through, not at any later rest — only a new run's start tries again
+  (migration 040), and it refuses only a run that would read that mode. The
+  notice says HQPlayer did not let the settings be read — busy, or not
+  switching to the mode — and when they are tried; the run's note names the
+  reason. Lesson: a try that ends without a verdict is an outcome, and it is
+  recorded as one.
 - **Where a check found HQPlayer, it goes back to** (2026-10-15). A check of
   a measured mode put the found mode's selection back without looking where
   HQPlayer was: when HQPlayer refused the way back, that selection was set
@@ -1147,17 +1148,16 @@ implementation details live in the code, DB and git history.
   Seek too — the Pause and the Stop had gone to the console, the Seek
   nowhere, and the music went on. Lesson: a word that did not go is the
   person's to know.
-- **The older word yields** (2026-10-14). A tap numbered as it was asked
-  but decided once it had the command lock — held by a mutation that began
-  while it waited, or a play press once the mirror left step — was older
-  than a Play or a Seek the person made meanwhile, taken on what played
-  without it: that word superseded the tap's start, and the carry-out then
-  sent nothing, or the press rebuilt for a start already dead and left
-  HQPlayer stopped. The older tap now yields: the words made after it go
-  as if it never came, and a press none of whose starts is live, holding
-  no Pause or Stop, rebuilds nothing. Holding words from the ask, so a tap
-  and the words after it
-  combine, is left for the next slice. Lesson: a number taken early must
+- **The older word yields** (2026-10-14). A tap numbered as it was asked but
+  decided once it had the command lock — held by a mutation that began while
+  it waited, or a play press once the mirror left step — was older than a
+  Play or a Seek the person made meanwhile, taken on what played without it:
+  that word superseded the tap's start, and the carry-out then sent nothing,
+  or the press rebuilt for a start already dead and left HQPlayer stopped.
+  The older tap now yields: the words made after it go as if it never came,
+  and a press none of whose starts is live, holding no Pause or Stop,
+  rebuilds nothing. Holding words from the ask, so a tap and the words after
+  it combine, is left for the next slice. Lesson: a number taken early must
   not let a later decision overrule what was decided meanwhile.
 - **A tap is decided where its start goes** (2026-10-14). A tap on
   HQPlayer checked whether a queue mutation held words and whether the
@@ -1188,25 +1188,29 @@ implementation details live in the code, DB and git history.
   cleared (the seen map keeps one onset per key); and a held Play that
   meets a build is recorded as an unreachable attempt with nothing sent
   (its attempt opens before the lock refuses it).
-- **Open after the second look at the fixes** (2026-10-15), in code the
-  series did not change, left for the next slice: a Pause, a Stop or a
-  Seek HQPlayer refuses in its own words (an Error answer: the route says
-  HTTP 200 with `ok: false`) is said to nobody — the UI says only what the
-  route itself refused; and on a tail mirror a "play next", a removal and
-  a new order still take an entry HQPlayer reads in a state the SDK does
-  not name, or with a stop under way, for a reading (the entry read is
-  never touched); when the output no longer offers a mode a run left
-  unchecked, its mark and notice stand for good — the owner is to close
-  them with a word ("leave it as it is"), the run then left to them; and
-  a tap that yielded to the words made after it comes back with the
-  person's second word. Held words count on from the yielded tap's start
-  (a tap, a Play, then a Seek plays the tapped track), and a Seek or a
+- **Open after the second look at the fixes** (2026-10-15), left for the
+  next slice: a Pause, a Stop or a Seek HQPlayer refuses in its own words
+  (an Error answer: the route says HTTP 200 with `ok: false`) is said to
+  nobody — the UI says only what the route itself refused; and on a tail
+  mirror a "play next", a removal and a new order still take an entry
+  HQPlayer reads in a state the SDK does not name, or with a stop under way,
+  for a reading (the entry read is never touched); when the output no longer
+  offers a mode a run left unchecked, its mark and notice stand for good —
+  the owner is to close them with a word ("leave it as it is"), the run then
+  left to them; and a tap that yielded to the words made after it comes back
+  with the person's second word. Held words count on from the yielded tap's
+  start (a tap, a Play, then a Seek plays the tapped track), and a Seek or a
   Pause made while its play press prepares joins that press: a full
-  hand-over to the tapped track, or HQPlayer stopped with Now Playing on
-  it, a track it does not play. Done: a press none of whose starts is
-  live lets go as it decides, so a word made after that goes on its own;
-  left: a start a newer word superseded takes no more words, and a Pause
-  or a Stop such a press holds goes on its own.
+  hand-over to the tapped track, or HQPlayer stopped with Now Playing on it,
+  a track it does not play. Done: a press none of whose starts is live lets
+  go as it decides, so a word made after that goes on its own; left: a start
+  a newer word superseded takes no more words, and a Pause or a Stop such a
+  press holds goes on its own. And two Nexts at a spot with a "play next"
+  inside one status skip the inserted track: the spot a held Next moved was
+  counted on the layout before the insert read HQPlayer, and is kept;
+  counting such a step again from the spot the insert reads belongs, with
+  the held words above and a held step that finds no slot, to words held
+  from the ask.
 - **Open after the fixes' review** (2026-10-14), in code the fixes did not
   change: a "play next" on a tail mirror whose anchor HQPlayer moved past
   goes to the queue alone, before the entry HQPlayer reads, and never

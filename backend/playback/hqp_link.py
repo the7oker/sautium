@@ -31,18 +31,17 @@ A link owns:
     asked — and an intent supersedes only from the moment its command
     sequence holds the command lock: one the lock refuses as busy takes a
     number it never publishes and supersedes nothing, while one refused at
-    its first request,
-    the lock its own (a build or a silence the link's held Status met),
-    keeps its number — an older word never beats the person's newer one.
-    A new queue and a rebuild supersede from their ask
+    its first request, the lock its own (a build or a silence the link's
+    held Status met), keeps its number — an older word never beats the
+    person's newer one. A new queue and a rebuild supersede from their ask
     (a play press's hand-over is cut short at its next add) and withdraw
     that if their sequence never holds the lock — refused by it, or the
     hand-over that owns the number ended first. A sequence that decides
-    under the lock whether it goes at all (a tap) holds only once it says
-    so (hold_as): one it refuses supersedes nothing. An item — a start left
-    for later, a resume, the rest of a DSP change, a Stop an output switch
-    owed — is never sent once a newer intent of a kind that supersedes it
-    holds (SUPERSEDED_BY), checked right before the bytes go;
+    under the lock whether it goes at all (a tap) holds only once it says so
+    (hold_as): one it refuses supersedes nothing. An item — a start left for
+    later, a resume, the rest of a DSP change, a Stop an output switch owed
+    — is never sent once a newer intent of a kind that supersedes it holds
+    (SUPERSEDED_BY), checked right before the bytes go;
   * the Stop a person's switch away owes it (the late Stop): sent at once,
     or once HQPlayer answers through a build or a silence.
 

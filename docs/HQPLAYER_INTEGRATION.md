@@ -274,33 +274,32 @@ lock, so one the lock refuses as busy supersedes nothing (one refused at its
 first request, the lock its own, keeps its number: an older word never beats
 the person's newer one, and the route says the word did not go); a new queue
 and a rebuild hold from their ask — a play press's hand-over is cut short at
-its next add —
-and are withdrawn if the lock then refuses them, or the hand-over fails
-before it holds (making its URIs): the hand-over owns its number
-(`HqpBackend._handing`). An item left for later (a
-start that met a build, a play press's starts and its hand-over, the resume
-after a DSP change, the knobs after a build, a benchmark run's owed put-back,
-the Stop a switch away owes) is dropped at its send once a newer intent of a
-kind that supersedes it holds (`SUPERSEDED_BY`) or its queue was replaced — and
-the Stop every switch away owes (the late Stop, below). Picking another HQPlayer retires the link of the one picked
-before — no other: a library read of a third box goes on — the Stop it owes
-still goes (only while it plays or pauses an entry of ours), everything
-else gives up, then it closes; picking the same HQPlayer again keeps its
-link and its build watched, and the link dials the alias picked last (on a
-Docker node the host's address, not a loopback that reaches nothing — the
-meter follows it). While the benchmark holds the output the link is
-lent — before the backend is detached, so what it still sends (a play
-press's hand-over) is refused at its next request: a request already sent
-is answered first (the lend waits for it, a connection kept for a
-sequence's next request let go), then nothing of it goes out, and a
-person's command meanwhile (the HQPlayer screen's DSP change, the volume)
+its next add — and are withdrawn if the lock then refuses them, or the
+hand-over fails before it holds (making its URIs): the hand-over owns its
+number (`HqpBackend._handing`). An item left for later (a start that met a
+build, a play press's starts and its hand-over, the resume after a DSP
+change, the knobs after a build, a benchmark run's owed put-back, the Stop a
+switch away owes) is dropped at its send once a newer intent of a kind that
+supersedes it holds (`SUPERSEDED_BY`) or its queue was replaced — and the
+Stop every switch away owes (the late Stop, below). Picking another HQPlayer
+retires the link of the one picked before — no other: a library read of a
+third box goes on — the Stop it owes still goes (only while it plays or
+pauses an entry of ours), everything else gives up, then it closes; picking
+the same HQPlayer again keeps its link and its build watched, and the link
+dials the alias picked last (on a Docker node the host's address, not a
+loopback that reaches nothing — the meter follows it). While the benchmark
+holds the output the link is lent — before the backend is detached, so what
+it still sends (a play press's hand-over) is refused at its next request: a
+request already sent is answered first (the lend waits for it, a connection
+kept for a sequence's next request let go), then nothing of it goes out, and
+a person's command meanwhile (the HQPlayer screen's DSP change, the volume)
 is refused with 409 naming the job. The node stop closes every link first
 (`hqp_link.close_all`): its waiters and owed items give up at once, and
 every wait on HQPlayer — a read, a connect, the meter's session included —
 is woken through its wake channel and closes its own socket (since
 2026-10-13). A socket closed by a thread that does not read it raced the one
-that does: CPython reads the descriptor, lets the GIL go, then polls it, so a
-close in between left the reader polling a number that was free or already
+that does: CPython reads the descriptor, lets the GIL go, then polls it, so
+a close in between left the reader polling a number that was free or already
 another socket's — and a close does not wake a poll on macOS. Each wait
 watches its socket and a socketpair together (`hqplayer_client.Waker`,
 `wait_on`, through the selectors module's default, never `select.select`,
@@ -550,74 +549,72 @@ comes after the control port answers again — so neither can end the wait.
 - **Words during a queue mutation** (since 2026-10-13). A replace, a new
   order, a re-bind's or the reconverge's rebuild, the radio's clear — and,
   since 2026-10-14, a "play next" and a removal, which move HQPlayer's
-  entries under a slot — hand HQPlayer a playlist under the queue lock,
-  and commit the queue only after it: the person's play intents made
-  meanwhile are held as a play press
-  holds them (`PlayerBackend.mutation`, `HqpBackend._hold_words`, which
-  numbers the mutation in the same step: every word held is newer than it),
-  answered at once (`starts`, the play gate asking nothing), and the newest one no
-  newer intent superseded is carried out once the queue lock is let go
-  (`queue_start`) — on the queue as it then stands, the mutation committed
-  or not (since 2026-10-14), as the same word would go then: a start at
-  its slot's entry while the mirror is in step, else as a play press of its
-  track (HQPlayer's entries are no slots of a tail mirror's or a lost one's).
-  A word names a track, never a slot, translated against
-  what HQPlayer is handed — the queue sheet still shows the old queue while
-  a new one loads, so a tap carries the track it showed (`/jump`'s
-  `track_id`) and plays it wherever the new queue holds it, from its start;
-  a track the mutation takes away is refused in words, and the words before
-  stand. The same holds with nothing in flight, on every output: a sheet
-  not refreshed yet after a queue played from elsewhere taps the track it
-  showed, wherever the queue holds it now (`CanonicalQueue.slot_of`), and
-  one the queue no longer holds is refused in words. HQPlayer decides the
-  tap as its start goes, under the command lock (since 2026-10-14): a
-  mutation begun between the tap and its start holds it, one committed
-  meanwhile moved its track's slot (found by its track, as the first check
-  finds it), and a playlist that is no mirror by then makes it a play
-  press — whatever it becomes numbered as the tap was asked: its number
-  holds only once it goes, so a tap refused there supersedes nothing and a
-  word made after it stays newer. A word made while it waited its turn was
-  taken on what played, without it, and stands: the tap yields to it — a
-  held tap is not carried out, and a play press it became rebuilds nothing,
-  never leaving HQPlayer stopped (since 2026-10-14). An output that holds
-  no words (a renderer, the browser) is handed that slot even while a
-  mutation is in flight (`PlayerBackend.holds_words`). A Play asks again
-  for the start the
+  entries under a slot — hand HQPlayer a playlist under the queue lock, and
+  commit the queue only after it: the person's play intents made meanwhile
+  are held as a play press holds them (`PlayerBackend.mutation`,
+  `HqpBackend._hold_words`, which numbers the mutation in the same step:
+  every word held is newer than it), answered at once (`starts`, the play
+  gate asking nothing), and the newest one no newer intent superseded is
+  carried out once the queue lock is let go (`queue_start`) — on the queue
+  as it then stands, the mutation committed or not (since 2026-10-14), as
+  the same word would go then: a start at its slot's entry while the mirror
+  is in step, else as a play press of its track (HQPlayer's entries are no
+  slots of a tail mirror's or a lost one's). A word names a track, never a
+  slot, translated against what HQPlayer is handed — the queue sheet still
+  shows the old queue while a new one loads, so a tap carries the track it
+  showed (`/jump`'s `track_id`) and plays it wherever the new queue holds
+  it, from its start; a track the mutation takes away is refused in words,
+  and the words before stand. The same holds with nothing in flight, on
+  every output: a sheet not refreshed yet after a queue played from
+  elsewhere taps the track it showed, wherever the queue holds it now
+  (`CanonicalQueue.slot_of`), and one the queue no longer holds is refused
+  in words. HQPlayer decides the tap as its start goes, under the command
+  lock (since 2026-10-14): a mutation begun between the tap and its start
+  holds it, one committed meanwhile moved its track's slot (found by its
+  track, as the first check finds it), and a playlist that is no mirror by
+  then makes it a play press — whatever it becomes numbered as the tap was
+  asked: its number holds only once it goes, so a tap refused there
+  supersedes nothing and a word made after it stays newer. A word made while
+  it waited its turn was taken on what played, without it, and stands: the
+  tap yields to it — a held tap is not carried out, and a play press it
+  became, holding no Pause or Stop, rebuilds nothing, never leaving HQPlayer
+  stopped (since 2026-10-14). An output that holds no words (a renderer, the
+  browser) is handed that slot even while a mutation is in flight
+  (`PlayerBackend.holds_words`). A Play asks again for the start the
   mutation owes — the replace's first track, the rebuild's track at its
   second — and that start goes, numbered as the Play: a Play during a new
   order's rebuild resumes the track that played, at its second, never
-  HQPlayer's entry 1. Next and
-  Previous count from the newest start (the one owed before any) — with no
-  start made and HQPlayer at a spot (a rebuild that does not resume leaves
-  it at one, or it stands at one) they only move the spot, as with nothing
-  in flight; with nothing to count from — no start, no spot, the queue
-  handed afresh to an HQPlayer back from a restart — they move nothing
-  (since 2026-10-14); a held Next or Previous that finds a slot among what
-  HQPlayer is handed counts on the queue as it stands from where it began
-  — the layout HQPlayer was handed once the mutation changed the queue,
-  the queue it left when it did not (a "play next" HQPlayer refused whole,
-  a removal it refused), a Play or a Seek after it keeping the count — and
-  it begins at the track HQPlayer plays as the edit's own read finds it (a
-  "play next" placed behind a track HQPlayer moved on to); one that finds
-  no slot there moves nothing, even where the queue left has one. A Seek changes the newest word's second — after
-  a Pause or a Stop, the second the next Play starts at, with no word of
-  its own; a Pause or a Stop drops the starts before it and always goes —
-  sent, unless the mutation's own Stop stopped HQPlayer: then nothing
-  starts and the spot is left at the newest start's track — and a DSP
-  change made while it is held resumes nothing over it (since 2026-10-14).
-  With no track to count from — HQPlayer plays on, or the reconverge knows
-  no slot it stood on — a Play or a Seek acts once the queue stands, as it
-  would then (a Seek before a Pause still holds when a Play follows). Each
-  word goes under the number it was held with, never numbered again — a
-  word the person made after it, waiting its turn, is never undone by it —
-  and its outcome is its own, never the mutation's route's: overtaken by a
-  person's newer word it does not go, one that meets a build goes once it
-  is done, one HQPlayer refuses is logged. A start whose track the queue it
-  lands on does not hold — a tap on a new queue that did not commit — is
-  said with that queue's refusal; a new queue HQPlayer refused whole is
-  answered as one (`QueueRefused`, in HQPlayer's words). A play press asked while a
-  mutation holds words is one of them, and the reconverge yields to a press
-  asked before it.
+  HQPlayer's entry 1. Next and Previous count from the newest start (the one
+  owed before any) — with no start made and HQPlayer at a spot (a rebuild
+  that does not resume leaves it at one, or it stands at one) they only move
+  the spot, as with nothing in flight; with nothing to count from — no
+  start, no spot, the queue handed afresh to an HQPlayer back from a restart
+  — they move nothing (since 2026-10-14); a held Next or Previous that finds
+  a slot among what HQPlayer is handed counts on the queue as it stands from
+  where it began — the layout HQPlayer was handed once the mutation changed
+  the queue, the queue it left when it did not (a "play next" HQPlayer
+  refused whole, a removal it refused), a Play or a Seek after it keeping
+  the count — and it begins at the track HQPlayer plays as the edit's own
+  read finds it (a "play next" placed behind a track HQPlayer moved on to);
+  one that finds no slot there moves nothing, even where the queue left has
+  one. A Seek changes the newest word's second — after a Pause or a Stop,
+  the second the next Play starts at, with no word of its own; a Pause or a
+  Stop drops the starts before it and always goes — sent, unless the
+  mutation's own Stop stopped HQPlayer: then nothing starts and the spot is
+  left at the newest start's track — and a DSP change made while it is held
+  resumes nothing over it (since 2026-10-14). With no track to count from —
+  HQPlayer plays on, or the reconverge knows no slot it stood on — a Play or
+  a Seek acts once the queue stands, as it would then (a Seek before a Pause
+  still holds when a Play follows). Each word goes under the number it was
+  held with, never numbered again — a word the person made after it, waiting
+  its turn, is never undone by it — and its outcome is its own, never the
+  mutation's route's: overtaken by a person's newer word it does not go, one
+  that meets a build goes once it is done, one HQPlayer refuses is logged. A
+  start whose track the queue it lands on does not hold — a tap on a new
+  queue that did not commit — is said with that queue's refusal; a new queue
+  HQPlayer refused whole is answered as one (`QueueRefused`, in HQPlayer's
+  words). A play press asked while a mutation holds words is one of them,
+  and the reconverge yields to a press asked before it.
 - **Gaps** (since 2026-10-13). HQPlayer's playlist is the queue without its
   gaps, in the same order: a gap is a slot this HQPlayer does not hold —
   nothing it can open (a file held only in another HQPlayer's library, one
@@ -1531,63 +1528,64 @@ cooling — so Sautium measures it instead of predicting it
   (since 2026-10-14). A selection goes back only while HQPlayer shows its
   mode, and one HQPlayer will not take back is no verdict: the mode stays
   unchecked, the refusal said (2026-10-15). Each rest tries once; HQPlayer
-  at rest that does not let the mode be read (a SetMode refused, no State
-  there) is tried again only at a new run's start (`measured_refused_at`,
-  migration 040), and one that still does not refuses only a run that would
-  read that mode — a run of it, or HQPlayer found in it — while a run of
-  another mode goes, the mark standing (2026-10-15). Before a check leaves
-  the mode it found, that mode and its selection by name go on the run's
-  row as the return point (`measured_from_*`, migration 041): the next
-  check — a put-back's own too — or run start takes HQPlayer back there
-  first, on a stopped HQPlayer, and only then judges — after a node restart
-  too — and a run never reads the mode Sautium left HQPlayer in as the
-  owner's: one HQPlayer does not go back from is refused. The point goes
-  once HQPlayer is back there — the check's own way back, a return, or the
-  owner's own switch, which the poller sees in State — or once a person's
-  change makes HQPlayer theirs (2026-10-15). Neither the put-back nor a
-  person's change waiting for the command lock behind it closes the run the
-  other way: the row is closed while the put-back still holds the lock, and
-  a switch away or another HQPlayer chosen meanwhile — accepted at once,
-  without the lock — leaves the run to the put-back's own end: it went; or
-  the switch drops its next request, wakes the one on its way or leaves it
-  reading no state, and the run is left to the owner. Never the node's own
-  re-attach of the same HQPlayer, nor a new run's hold. The run is then
-  closed as left to the owner (since 2026-10-13): nothing more is put back,
-  and the volume is never raised for them — save one HQPlayer still holds
-  at the level the run lowered it to when a knob of theirs leaves the run
-  to them: that level is the run's, and goes back to theirs (since
-  2026-10-14) — and one notice — through the notices channel and on the
-  HQPlayer screen — names what still holds the run's test values, each as
-  now → before the run (named from HQPlayer's lists of the mode the run
-  measured, read in that mode — a list HQPlayer did not give is asked again
-  at its next answer there), and a volume left at the bottom of the range
-  for them to raise, until they changed it all or a new run opened its row.
-  In another mode State shows that mode's selection, and HQPlayer keeps one
-  per mode: the notice names the knobs the measured mode still keeps by
-  that mode's name, as they were last read there, until HQPlayer is read in
-  it again. The poller reads HQPlayer's State for it while it stands; a
-  write, a read or a wake the database fails costs the notice — done again
-  at a later answer — never the poll, and a read a close or a new run
-  overtook is read again. The notice stands on the run's row, whatever the
-  output is now: a restart or another output never ends it to raise it
-  again; until the poller has read HQPlayer it says the test settings may
-  still be there. A new run takes a put-back still owed first — at its
-  start, and again as its first step — and reads what HQPlayer holds after
-  it; the run it took is closed then with no notice, however it was put back
-  or left — the new run reads HQPlayer as theirs — and a mode it leaves
-  unchecked is said only once no run will judge it: the start refused after
-  all, or the run over before it got there (2026-10-15). A run of the mode
-  HQPlayer is in takes that mode from what it reads at its own rest, not
-  from the start's read: a check of ours may hold HQPlayer in the other mode
-  for a moment, or have left it there for the run to take it back first
-  (2026-10-15). Forgetting the HQPlayer takes its measurements with it; it
-  is refused while a run measures it. The estimate of a run's length takes
-  the pace of the last run that ended or was cancelled (on a trial-mode
-  Embedded the owner cancels before the half hour is up and runs again: a
-  repeat run measures only the gaps). Without an estimate the block says why
-  (`no_estimate`, since 2026-10-11): the HQPlayer is not registered yet, it
-  did not report its state, a list a run is planned from is missing, or its
-  mode follows the source.
+  at rest that does not let the mode be read (a SetMode refused or not
+  shown, no State there, a selection or the way back refused, the lists of
+  the mode it was found in not given) is tried again only at a new run's
+  start (`measured_refused_at`, migration 040), and one that still does not
+  refuses only a run that would read that mode — a run of it, or HQPlayer
+  found in it — while a run of another mode goes, the mark standing
+  (2026-10-15). Before a check leaves the mode it found, that mode and its
+  selection by name go on the run's row as the return point
+  (`measured_from_*`, migration 041): the next check — a put-back's own too
+  — or run start takes HQPlayer back there first, on a stopped HQPlayer, and
+  only then judges — after a node restart too — and a run never reads the
+  mode Sautium left HQPlayer in as the owner's: when HQPlayer does not go
+  back, the run is refused. The point goes once HQPlayer is back there — the
+  check's own way back, a return, or the owner's own switch, which the
+  poller sees in State — or once a person's change makes HQPlayer theirs
+  (2026-10-15). Neither the put-back nor a person's change waiting for the
+  command lock behind it closes the run the other way: the row is closed
+  while the put-back still holds the lock, and a switch away or another
+  HQPlayer chosen meanwhile — accepted at once, without the lock — leaves
+  the run to the put-back's own end: it went; or the switch drops its next
+  request, wakes the one on its way or leaves it reading no state, and the
+  run is left to the owner. Never the node's own re-attach of the same
+  HQPlayer, nor a new run's hold. The run is then closed as left to the
+  owner (since 2026-10-13): nothing more is put back, and the volume is
+  never raised for them — save one HQPlayer still holds at the level the run
+  lowered it to when a knob of theirs leaves the run to them: that level is
+  the run's, and goes back to theirs (since 2026-10-14) — and one notice —
+  through the notices channel and on the HQPlayer screen — names what still
+  holds the run's test values, each as now → before the run (named from
+  HQPlayer's lists of the mode the run measured, read in that mode — a list
+  HQPlayer did not give is asked again at its next answer there), and a
+  volume left at the bottom of the range for them to raise, until they
+  changed it all or a new run opened its row. In another mode State shows
+  that mode's selection, and HQPlayer keeps one per mode: the notice names
+  the knobs the measured mode still keeps by that mode's name, as they were
+  last read there, until HQPlayer is read in it again. The poller reads
+  HQPlayer's State for it while it stands; a write, a read or a wake the
+  database fails costs the notice — done again at a later answer — never the
+  poll, and a read a close or a new run overtook is read again. The notice
+  stands on the run's row, whatever the output is now: a restart or another
+  output never ends it to raise it again; until the poller has read HQPlayer
+  it says the test settings may still be there. A new run takes a put-back
+  still owed first — at its start, and again as its first step — and reads
+  what HQPlayer holds after it; the run it took is closed then with no
+  notice, however it was put back or left — the new run reads HQPlayer as
+  theirs — and a mode it leaves unchecked is said only once no run will
+  judge it: the start refused after all, or the run over before it got there
+  (2026-10-15). A run of the mode HQPlayer is in takes that mode from what
+  it reads at its own rest, not from the start's read: a check of ours may
+  hold HQPlayer in the other mode for a moment, or have left it there for
+  the run to take it back first (2026-10-15). Forgetting the HQPlayer takes
+  its measurements with it; it is refused while a run measures it. The
+  estimate of a run's length takes the pace of the last run that ended or
+  was cancelled (on a trial-mode Embedded the owner cancels before the half
+  hour is up and runs again: a repeat run measures only the gaps). Without
+  an estimate the block says why (`no_estimate`, since 2026-10-11): the
+  HQPlayer is not registered yet, it did not report its state, a list a run
+  is planned from is missing, or its mode follows the source.
 
 Measurements stay on this node: in the `.sbk` backup, not in the life-data
 merge (their endpoint is this node's registry), not in P2P sync.

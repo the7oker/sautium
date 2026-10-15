@@ -10203,8 +10203,8 @@ def _as_the_yielded_press_ends(b, monkeypatch, word) -> dict:
 def test_a_pause_made_as_a_yielded_press_ends_pauses(fake, output, monkeypatch):
     """The yielded tap's press has decided to rebuild nothing; before it is
     over the person presses Pause, on the music the Seek kept playing. The
-    Pause goes: never taken by a press over in all but its end, nothing
-    sent, the route answering ok."""
+    Pause goes on its own: never taken by a press over in all but its end
+    — sent, HQPlayer paused, the route answering ok."""
     mgr, b = output
     paused = _as_the_yielded_press_ends(b, monkeypatch, b.pause)
     said, done, sent = _a_tap_whose_press_yields(b, fake, monkeypatch, lambda: b.seek(60))

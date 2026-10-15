@@ -2689,8 +2689,10 @@ def _unchecked_note(why: str) -> str:
 
 def _measured_refused(run: dict, why: str) -> None:
     """HQPlayer at rest did not let the mode a run measured be read (a
-    SetMode refused, no State there): no later rest tries it — only a new
-    run's start — and the notice says so; why, in the run's note."""
+    SetMode refused or not shown, no State there, a selection or the way
+    back refused, the lists of the mode it was found in not given): no later
+    rest tries it — only a new run's start — and the notice says so; why,
+    in the run's note."""
     row = db_execute("""UPDATE hqp_benchmark_runs SET measured_refused_at = now(),
                                note = concat_ws('; ', note, %(n)s::text)
                          WHERE id = %(id)s AND measured_unchecked_at IS NOT NULL

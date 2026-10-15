@@ -434,9 +434,11 @@ CREATE TABLE IF NOT EXISTS hqp_benchmark_runs (
     -- HQPlayer's nearest such rest or a new run's start, before that run
     -- reads the owner's selection; NULL once checked
     measured_unchecked_at TIMESTAMPTZ,
-    -- When HQPlayer at rest did not let it be read (the SetMode refused, no
-    -- State there): only a new run's start tries it again; NULL — busy so
-    -- far, tried at HQPlayer's nearest rest — and NULL once checked
+    -- When HQPlayer at rest did not let it be read (a SetMode refused or not
+    -- shown, no State there, a selection or the way back refused, the lists
+    -- of the mode it was found in not given): only a new run's start tries
+    -- it again; NULL — busy so far, tried at HQPlayer's nearest rest — and
+    -- NULL once checked
     measured_refused_at TIMESTAMPTZ,
     -- The return point of a check of the measured mode: the mode HQPlayer was
     -- found in when the check left it (the index SetMode takes) and that
