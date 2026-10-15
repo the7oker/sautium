@@ -2131,9 +2131,14 @@ def _take_owed(link: _Link, endpoint_id: int, gave: Callable[[str], bool],
             stuck = False
             if run is None:
                 return
-            st = _again(lambda: link("get_state"))
-            checked, why = (_again(lambda: _check_measured(link, run, st)) if st is not None
-                            else (None, "HQPlayer did not report its state"))
+            try:
+                st = _again(lambda: link("get_state"))
+                checked, why = (_again(lambda: _check_measured(link, run, st))
+                                if st is not None else (None, "HQPlayer did not report its state"))
+            except _Lost:
+                if point is not None:
+                    _notify()       # HQPlayer back where it was found, the mark standing
+                raise
             if checked is not None:
                 _measured_checked(run, checked, notice=False)
                 return
@@ -2205,6 +2210,7 @@ def check_measured(endpoint_id: int, link, status: TrackStatus, *,
 
     def check() -> None:
         spent = True                # this rest's try, unless a newer word cut it
+        back = False                # back where a check found it, the mark not judged
         try:
             with link.command(item=item):
                 on = _OnLink(link)
@@ -2213,6 +2219,7 @@ def check_measured(endpoint_id: int, link, status: TrackStatus, *,
                     return
                 point = _return_point(endpoint_id)
                 checked, why = None, _go_back(on, point) if point is not None else None
+                back = point is not None and why is None
                 if why is None:
                     st = on("get_state") if point is not None else st
                     checked, why = (_check_measured(on, run, st) if st is not None
@@ -2221,7 +2228,7 @@ def check_measured(endpoint_id: int, link, status: TrackStatus, *,
                 _measured_refused(run, why)
             else:
                 _measured_checked(run, checked, notice=True)
-            spent = False           # the mark itself says what follows now
+            spent = back = False    # the mark itself says what follows now
         except Dropped as e:
             spent = False           # a newer word: HQPlayer's next answer asks again
             logger.info("HQPlayer benchmark run %s: the mode it measured not checked yet: %s",
@@ -2238,6 +2245,8 @@ def check_measured(endpoint_id: int, link, status: TrackStatus, *,
                 if spent:           # busy, the verdict not written, the connection lost
                     _busy_at[endpoint_id] = at
                 _bump()             # a State read before this end is stale (note_point)
+            if back:
+                _notify()           # HQPlayer back where it was found, the mark standing
     threading.Thread(target=check, daemon=True, name="hqp-benchmark-check").start()
 
 
@@ -2786,13 +2795,14 @@ def _go_back(link, point: dict) -> Optional[str]:
     holding the return point) — into that mode, unless it is there already
     (the owner's own switch: what it holds there is theirs), and that mode's
     selection put back by name from its lists. None once HQPlayer is there,
-    the point gone; else why not."""
+    the point gone — said by the check that follows, whatever ends it, never
+    over the mark it judges a moment later; else why not."""
     name = point["measured_from_mode_name"]
     st = link("get_state")
     if st is None:
         return "HQPlayer did not report its state"
     if st["mode"] == point["measured_from_mode"]:
-        _point_cleared(point, f"HQPlayer was back in {name}")
+        _point_cleared(point, f"HQPlayer was back in {name}", notify=False)
         return None
     _, failed = link("apply_settings", mode=point["measured_from_mode"])
     st = None if failed else link("get_state")
@@ -2814,7 +2824,7 @@ def _go_back(link, point: dict) -> Optional[str]:
     said = ([f"not named in its lists: {', '.join(lost)}"] if lost else []) + [
         f"{k}: {v}" for k, v in failed.items()]
     _point_cleared(point, f"HQPlayer went back to {name}"
-                          + (f" (not all: {'; '.join(said)})" if said else ""))
+                          + (f" (not all: {'; '.join(said)})" if said else ""), notify=False)
     return None
 
 

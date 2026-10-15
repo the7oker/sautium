@@ -3438,7 +3438,7 @@ def _left_in_pcm(r: Run, refused: bool = False) -> int:
                                    measured_from_rate=11289600,
                                    measured_from_filter="poly-sinc-gauss-long",
                                    measured_from_filter1x="poly-sinc-gauss-long",
-                                   measured_from_shaper="ASDM7EC")
+                                   measured_from_shaper="ASDM7EC", measured_from_at=now)
     with r.fake._lock:
         r.fake.mode, r.fake.volume = 1, -3.0
         r.fake.sel[2] = [1, 1, 1, 1]            # SDM's own selection moved meanwhile
@@ -3738,6 +3738,160 @@ def test_hqplayer_left_in_the_measured_mode_is_said_anew(run, monkeypatch):
     assert "hqplayer.run_unchecked" not in after
     assert after["hqplayer.run_stayed"]["since"] != before["hqplayer.run_unchecked"]["since"]
     assert after["hqplayer.run_stayed"]["data"]["back_to"]["mode"] == "SDM (DSD)"
+
+
+def _held(notices: list) -> dict:
+    return {n["key"]: n["since"] for n in notices}
+
+
+def _wakes(monkeypatch) -> list:
+    """The notices every open tab derives at each wake of the channel."""
+    snaps, notify = [], bench._notify
+    monkeypatch.setattr(bench, "_notify", lambda: (snaps.append(_held(_notices())), notify())[1])
+    return snaps
+
+
+def _toasted(held: dict, snaps: list) -> list:
+    """What a tab holding `held` toasts across `snaps` (app-shell.js
+    notices.apply): every key whose `since` it does not hold yet."""
+    out = []
+    for snap in snaps:
+        out += [k for k, since in snap.items() if held.get(k) != since]
+        held = snap
+    return out
+
+
+def _cleared_points(monkeypatch) -> list:
+    """Whether a return point was cleared yet."""
+    cleared, point_cleared = [], bench._point_cleared
+    monkeypatch.setattr(bench, "_point_cleared", lambda *a, **kw: (
+        point_cleared(*a, **kw), cleared.append(True))[0])
+    return cleared
+
+
+def test_a_return_at_rest_toasts_no_not_checked_yet_over_the_check(run, monkeypatch):
+    """A check left HQPlayer in PCM, the mark busy so far: the tab shows
+    "HQPlayer stayed in PCM". At HQPlayer's next rest the poller's check
+    goes back to SDM first, then judges PCM a moment later — the owner's
+    selection put back. No wake lands between the two: the mark would show
+    again under "not checked yet", a key the tab no longer holds, toasted
+    while HQPlayer lets the settings be read."""
+    fake, mgr = run.fake, run.mgr
+    run_id = _left_in_pcm(run)
+    held = _held(_notices())
+    assert "hqplayer.run_stayed" in held and "hqplayer.run_unchecked" not in held, held
+    snaps = _wakes(monkeypatch)
+    with fake._lock:
+        fake.track, fake.state = 1, int(PlaybackState.STOPPED)
+    assert _wait(lambda: (mgr.active.poke(), not _unchecked(run, run_id))[1], 10)
+    assert fake.settings() == (2, (2, 1, 1, 1), (2, 0, 0, 0), -3.0), fake.settings()
+    assert not _point(run, run_id)
+    assert _toasted(held, snaps) == [], (held, snaps)
+
+
+def test_starts_put_back_over_a_cut_return_wakes_no_notice_over_the_mark_its_run_judges(
+        run, monkeypatch):
+    """A put-back cut on its way back left the run owed with its return
+    point, HQPlayer in PCM on the owner's selection there. The owner's album
+    plays when they press Start: start()'s quiet put-back judges nothing
+    (busy) — marked, the point kept, said by nobody. The run, at the rest
+    its own Stop makes, goes back to SDM and judges PCM right after: no
+    wake finds the mark standing."""
+    import datetime
+    fake = run.fake
+    assert _wait(lambda: len(fake.playlist) == 2, 10)
+    with fake._lock:
+        fake.mode, fake.sel[1], fake.sel[2] = 1, [2, 1, 1, 1], [2, 0, 0, 0]
+        fake.volume = -3.0
+        fake.track, fake.state = 1, int(PlaybackState.PLAYING)     # the owner's album
+    run_id = _cut_short_run(run, mode="PCM", own_mode=1, own_rate=2, own_filter=1, own_filter1x=1,
+                            own_shaper=1, last_rate=1, last_filter=0, last_filter1x=0,
+                            last_shaper=0, measured_from_mode=2,
+                            measured_from_mode_name="SDM (DSD)", measured_from_rate=11289600,
+                            measured_from_filter="poly-sinc-gauss-long",
+                            measured_from_filter1x="poly-sinc-gauss-long",
+                            measured_from_shaper="ASDM7EC",
+                            measured_from_at=datetime.datetime.now(datetime.timezone.utc))
+    with bench._lock:
+        bench._point_rows.pop(run.endpoint_id, None)
+        bench._bump()
+    marked = _marks_at_wakes(monkeypatch, run, run_id)
+    bench.start("pcm")
+    assert _wait(lambda: run.q("SELECT own_rate, own_filter, own_filter1x, own_shaper "
+                               "FROM hqp_benchmark_runs WHERE id > %s", run_id)
+                 == [(2, 1, 1, 1)], 20), run.q("SELECT id, note FROM hqp_benchmark_runs")
+    _end_the_run()
+    assert not _unchecked(run, run_id) and not _point(run, run_id)
+    assert True not in marked, marked
+
+
+def test_a_run_that_finds_hqplayer_back_already_judges_the_mark_with_no_wake_between(
+        run, monkeypatch):
+    """The owner switched HQPlayer back to SDM themselves, and the poller has
+    not read it yet: the return point still stands when the next run starts.
+    The run finds HQPlayer back already, the point goes, and the mark is
+    judged right after — no wake finds it standing in between."""
+    fake = run.fake
+    run_id = _left_in_pcm(run)
+    monkeypatch.setattr(bench, "note_point", lambda *a, **kw: None)   # not read yet
+    monkeypatch.setattr(bench, "check_measured", lambda *a, **kw: None)
+    with fake._lock:
+        fake.mode = 2                           # back in SDM, the owner's own switch
+    marked = _marks_at_wakes(monkeypatch, run, run_id)
+    bench.start("sdm")
+    assert _wait(lambda: run.q("SELECT count(*) FROM hqp_benchmark_runs WHERE id > %s",
+                               run_id) == [(1,)], 20), bench.state()
+    _end_the_run()
+    assert not _unchecked(run, run_id) and not _point(run, run_id)
+    assert True not in marked, marked
+
+
+def test_a_check_cut_after_its_return_says_the_mark_standing(run, monkeypatch):
+    """The poller's check goes back to SDM, and the connection drops at its
+    next request: no verdict follows. HQPlayer stayed in PCM no longer —
+    every open tab learns it, the mark standing."""
+    fake, mgr = run.fake, run.mgr
+    run_id = _left_in_pcm(run)
+    cleared = _cleared_points(monkeypatch)
+    dispatch, dropped = fake._dispatch, []
+
+    def drops_once_back(cmd, attrs):
+        if cleared and not dropped and cmd in ("State", "SetMode"):
+            dropped.append(cmd)
+            return None                 # gone mid-conversation: the connection drops unanswered
+        return dispatch(cmd, attrs)
+    monkeypatch.setattr(fake, "_dispatch", drops_once_back)
+    snaps = _wakes(monkeypatch)
+    with fake._lock:
+        fake.track, fake.state = 1, int(PlaybackState.STOPPED)
+    assert _wait(lambda: (mgr.active.poke(), bool(dropped))[1], 10)
+    assert _wait(lambda: any("hqplayer.run_unchecked" in s and "hqplayer.run_stayed" not in s
+                             for s in snaps), 10), snaps
+    assert _unchecked(run, run_id) and not _point(run, run_id)
+
+
+def test_a_run_cut_after_its_return_says_the_mark_standing(run, monkeypatch):
+    """A run's start goes back to SDM, where the last check left HQPlayer,
+    and then HQPlayer drops every State: the run ends unjudged. HQPlayer
+    stayed in PCM no longer — every open tab learns it, the mark standing."""
+    fake = run.fake
+    run_id = _left_in_pcm(run)
+    monkeypatch.setattr(bench, "check_measured", lambda *a, **kw: None)   # no rest tries it
+    cleared = _cleared_points(monkeypatch)
+    dispatch = fake._dispatch
+
+    def drops_state_once_back(cmd, attrs):
+        if cleared and bench.running() and cmd == "State":
+            return None                 # gone mid-conversation: the connection drops unanswered
+        return dispatch(cmd, attrs)
+    monkeypatch.setattr(fake, "_dispatch", drops_state_once_back)
+    snaps = _wakes(monkeypatch)
+    bench.start("sdm")
+    assert _wait(lambda: not bench.running(), 30)
+    assert bench.state()["outcome"] == "failed", bench.state()
+    assert any("hqplayer.run_unchecked" in s and "hqplayer.run_stayed" not in s
+               for s in snaps), snaps
+    assert _unchecked(run, run_id) and not _point(run, run_id)
 
 
 def _refuses_sdm(monkeypatch, fake) -> list:
