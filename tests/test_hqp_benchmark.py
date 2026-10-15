@@ -4057,6 +4057,84 @@ def test_a_run_whose_end_cannot_set_the_owners_selection_back_marks_the_measured
     assert "the selection of PCM was put back" in note, note
 
 
+@pytest.mark.parametrize("where", ["the poller's check", "a run's start"])
+def test_a_check_a_database_error_cuts_after_its_return_leaves_the_tabs_true(
+        run, monkeypatch, where):
+    """A check left HQPlayer in PCM, the tab holding "HQPlayer stayed in
+    PCM". The next check goes back to SDM first — the return point gone,
+    nobody woken — and the database does not take its verdict once (a
+    pooled connection a restart closed). HQPlayer is back in SDM, the mark
+    standing: what the tabs hold once the check is over says so, the
+    poller's check and a run's start alike."""
+    import psycopg2
+    fake, mgr = run.fake, run.mgr
+    run_id = _left_in_pcm(run, refused=where == "a run's start")
+    held = _held(_notices())
+    assert "hqplayer.run_stayed" in held and "hqplayer.run_unchecked" not in held, held
+    taken, verdict = [], bench._measured_checked
+
+    def outage_once(*a, **kw):
+        if not taken:
+            taken.append(True)
+            raise psycopg2.OperationalError("server closed the connection unexpectedly")
+        return verdict(*a, **kw)
+    monkeypatch.setattr(bench, "_measured_checked", outage_once)
+    snaps = _wakes(monkeypatch)
+    if where == "a run's start":
+        monkeypatch.setattr(bench, "check_measured", lambda *a, **kw: None)  # refused: no rest
+        bench.start("sdm")
+        assert _wait(lambda: not bench.running(), 30)
+        assert bench.state()["outcome"] == "failed", bench.state()
+    else:
+        with fake._lock:
+            fake.track, fake.state = 1, int(PlaybackState.STOPPED)
+        assert _wait(lambda: (mgr.active.poke(), bool(taken))[1], 10)
+        assert _wait(lambda: not bench._checking, 5)
+    assert fake.mode == 2 and not _point(run, run_id) and _unchecked(run, run_id), (
+        taken, fake.settings())
+    now = _held(_notices())
+    assert (snaps[-1] if snaps else held) == now, {"held": held, "wakes": snaps, "now": now}
+
+
+def test_a_mark_a_runs_start_closes_quietly_is_said_when_the_run_ends_before_judging(
+        run, monkeypatch):
+    """A run cut short still owes its put-back once the next run holds
+    HQPlayer. The run's first step puts it back, HQPlayer at rest in SDM,
+    and HQPlayer refuses the SetMode into PCM: closed quietly, marked and
+    refused. Then HQPlayer goes away at the run's own Stop: the run ends
+    before it judges the mark, and what the tabs hold says the mark."""
+    fake = run.fake
+    assert _wait(lambda: len(fake.playlist) == 2, 10)
+    with fake._lock:
+        fake.mode, fake.sel[1], fake.sel[2], fake.volume = 2, [1, 0, 0, 0], [2, 0, 0, 0], -3.0
+    run_id = _cut_short_run(run, mode="PCM", own_mode=1, own_rate=2, own_filter=1, own_filter1x=1,
+                            own_shaper=1, last_rate=1, last_filter=0, last_filter1x=0,
+                            last_shaper=0)
+    monkeypatch.setattr(bench, "recover", lambda endpoint_id, link, **kw: False)
+    monkeypatch.setattr(bench, "check_measured", lambda *a, **kw: None)
+    closed, close_owed = [], bench._close_owed
+    monkeypatch.setattr(bench, "_close_owed", lambda *a, **kw: (close_owed(*a, **kw),
+                                                                 closed.append(True))[0])
+    dispatch = fake._dispatch
+
+    def refuses_pcm_then_gone_at_the_runs_stop(cmd, attrs):
+        if cmd == "SetMode" and attrs.get("value") == "1":
+            return '<SetMode result="Error">Mode not available</SetMode>'
+        if closed and bench.running() and cmd == "Stop":
+            return None                 # gone mid-conversation
+        return dispatch(cmd, attrs)
+    monkeypatch.setattr(fake, "_dispatch", refuses_pcm_then_gone_at_the_runs_stop)
+    held = _held(_notices())
+    snaps = _wakes(monkeypatch)
+    bench.start("sdm")
+    assert _wait(lambda: not bench.running(), 30)
+    assert closed and _unchecked(run, run_id), run.q(
+        "SELECT finished_at, note FROM hqp_benchmark_runs WHERE id = %s", run_id)
+    now = _held(_notices())
+    assert "hqplayer.run_unchecked" in now, now
+    assert (snaps[-1] if snaps else held) == now, {"held": held, "wakes": snaps, "now": now}
+
+
 def _refuses_sdm(monkeypatch, fake) -> list:
     """HQPlayer refuses every SetMode into SDM: when each was asked."""
     refused, dispatch = [], fake._dispatch

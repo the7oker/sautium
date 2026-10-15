@@ -2109,62 +2109,67 @@ def _take_owed(link: _Link, endpoint_id: int, gave: Callable[[str], bool],
     never reads that mode as the owner's, and is refused when HQPlayer does
     not go back. Not judged, the mode stays marked: the new run, of `kind`
     (None: the mode HQPlayer is in), goes only if it reads nothing of it —
-    a run of another mode, HQPlayer in another."""
-    run = db_query_one("""
-        SELECT * FROM hqp_benchmark_runs
-         WHERE hqp_endpoint_id = %(e)s AND finished_at IS NULL
-         ORDER BY started_at DESC LIMIT 1
-    """, {"e": endpoint_id})
-    if run is not None:
-        with _lock:
-            owed = _owed.get(run["id"])
-        why = owed[0].superseded(owed[1]) if owed is not None else None
-        if why is not None:
-            _close_owed(run, f"cut short; not put back — {why}: HQPlayer was left as it was "
-                             "set since", theirs=True)
+    a run of another mode, HQPlayer in another. What it changes of the
+    notices — a mark it closed quietly, a return point gone — is said
+    whatever ends it, a run that cannot go on included."""
+    unsaid = False      # what the notices show changed here, and nothing said it yet
+    try:
+        run = db_query_one("""
+            SELECT * FROM hqp_benchmark_runs
+             WHERE hqp_endpoint_id = %(e)s AND finished_at IS NULL
+             ORDER BY started_at DESC LIMIT 1
+        """, {"e": endpoint_id})
+        if run is not None:
+            with _lock:
+                owed = _owed.get(run["id"])
+            why = owed[0].superseded(owed[1]) if owed is not None else None
+            if why is not None:
+                _close_owed(run, f"cut short; not put back — {why}: HQPlayer was left as it "
+                                 "was set since", theirs=True)
+            else:
+                done = _again(lambda: _recover(link, run, gave))
+                if done is None:
+                    raise _Abort("HQPlayer did not report its state")
+                # No notice: the new run reads what HQPlayer holds as the
+                # owner's now; the mode it measured, if marked, is judged below
+                _close_owed(run, done["note"], unchecked=done.get("unchecked", False),
+                            refused=done.get("refused", False), notify=False)
+                unsaid = done.get("unchecked", False)
+        run = db_query_one("""
+            SELECT * FROM hqp_benchmark_runs
+             WHERE hqp_endpoint_id = %(e)s AND measured_unchecked_at IS NOT NULL
+             ORDER BY started_at DESC LIMIT 1
+        """, {"e": endpoint_id})
+        point = _return_point(endpoint_id)
+        if run is None and point is None:
+            return
+        st, status = _again(lambda: (link("stop"), link("get_state"), link("get_status"))[1:])
+        stuck = point is not None       # in a mode a check left it in, until it goes back
+        if st is None or status is None:
+            why = "HQPlayer did not report its state"
+        elif status.state != PlaybackState.STOPPED:
+            why = "HQPlayer is not at rest"
         else:
-            done = _again(lambda: _recover(link, run, gave))
-            if done is None:
-                raise _Abort("HQPlayer did not report its state")
-            # No notice: the new run reads what HQPlayer holds as the owner's
-            # now; the mode it measured, if marked, is judged below at once
-            _close_owed(run, done["note"], unchecked=done.get("unchecked", False),
-                        refused=done.get("refused", False), notify=False)
-    run = db_query_one("""
-        SELECT * FROM hqp_benchmark_runs
-         WHERE hqp_endpoint_id = %(e)s AND measured_unchecked_at IS NOT NULL
-         ORDER BY started_at DESC LIMIT 1
-    """, {"e": endpoint_id})
-    point = _return_point(endpoint_id)
-    if run is None and point is None:
-        return
-    st, status = _again(lambda: (link("stop"), link("get_state"), link("get_status"))[1:])
-    stuck = point is not None       # in a mode a check left it in, until it goes back
-    if st is None or status is None:
-        why = "HQPlayer did not report its state"
-    elif status.state != PlaybackState.STOPPED:
-        why = "HQPlayer is not at rest"
-    else:
-        why = _again(lambda: _go_back(link, point)) if point is not None else None
-        if why is None:
-            stuck = False
-            if run is None:
-                return
-            try:
+            why = _again(lambda: _go_back(link, point)) if point is not None else None
+            if why is None:
+                stuck, unsaid = False, unsaid or point is not None
+                if run is None:
+                    return
                 st = _again(lambda: link("get_state"))
                 checked, why = (_again(lambda: _check_measured(link, run, st))
                                 if st is not None else (None, "HQPlayer did not report its state"))
-            except _Lost:
-                if point is not None:
-                    _notify()       # HQPlayer back where it was found, the mark standing
-                raise
-            if checked is not None:
-                _measured_checked(run, checked, notice=False)
-                return
-            stuck = _return_point(endpoint_id) is not None
-        if run is not None:
-            _measured_refused(run, why)
-    _notify()                   # the mark, or the way back, stands: said
+                if checked is not None:
+                    _measured_checked(run, checked, notice=False)    # says what stands
+                    unsaid = False
+                    return
+                stuck = _return_point(endpoint_id) is not None
+            if run is not None:
+                _measured_refused(run, why)
+        _notify()                   # the mark, or the way back, stands: said
+        unsaid = False
+    finally:
+        if unsaid:
+            _notify()       # changed here — the run over before it said so
     if stuck:
         raise _Abort(f"{why}: HQPlayer is in the mode the last check left it in")
     if run is not None and (st is None or st["mode"] == run["own_mode"]
