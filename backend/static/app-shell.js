@@ -11306,13 +11306,20 @@
     };
   };
   // A benchmark run cut short whose put-back could not read the mode it
-  // measured — HQPlayer was busy, and switching its mode restarts its output:
-  // judged at HQPlayer's nearest rest or the next run's start
-  // (playback/hqp_benchmark.py), a test point never taken for the owner's.
-  NOTICE_COPY['hqplayer.run_unchecked'] = n => ({
-    title: 'Benchmark settings not checked yet',
-    text: `The settings of ${escapeHtml((n.data && n.data.mode) || 'the measured mode')} are not checked yet — HQPlayer was busy. They are checked when HQPlayer next rests, or before the next run.`,
-  });
+  // measured — HQPlayer busy (switching its mode restarts its output), or at
+  // rest and not letting it be read: judged at HQPlayer's nearest rest or
+  // the next run's start — only the next run's once HQPlayer at rest did not
+  // let it (`refused`) (playback/hqp_benchmark.py), a test point never taken
+  // for the owner's.
+  NOTICE_COPY['hqplayer.run_unchecked'] = n => {
+    const d = n.data || {};
+    const mode = escapeHtml(d.mode || 'the measured mode');
+    const when = d.refused ? 'before the next run' : 'when HQPlayer next rests, or before the next run';
+    return {
+      title: 'Benchmark settings not checked yet',
+      text: `The settings of ${mode} are not checked yet — HQPlayer did not let them be read (it was busy, or did not switch to ${mode}). They are checked ${when}.`,
+    };
+  };
   // HQPlayer refused files of a batch it was handed: one notice per batch,
   // naming both causes it may have — never asserting one.
   NOTICE_COPY['hqplayer.refused'] = n => {

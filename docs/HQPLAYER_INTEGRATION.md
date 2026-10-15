@@ -1528,7 +1528,12 @@ cooling — so Sautium measures it instead of predicting it
   checked yet; it is judged at HQPlayer's nearest rest, or at a new run's
   start, at the rest the run's own Stop makes (2026-10-15), before that run
   reads the owner's selection — a test point is never taken for theirs
-  (since 2026-10-14). Neither
+  (since 2026-10-14). Each rest tries once; HQPlayer at rest that does not
+  let the mode be read (a SetMode refused, no State there) is tried again
+  only at a new run's start (`measured_refused_at`, migration 040), and one
+  that still does not refuses only a run that would read that mode — a run
+  of it, or HQPlayer found in it — while a run of another mode goes, the
+  mark standing (2026-10-15). Neither
   the put-back nor a person's change waiting for the command lock behind
   it closes the run the other way: the row is closed while the put-back
   still holds the lock, and a switch away or another HQPlayer chosen

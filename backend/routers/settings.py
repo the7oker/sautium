@@ -1256,14 +1256,15 @@ def _notice_items() -> List[Dict[str, Any]]:
                       "data": {"run_at": restored["run_at"].isoformat(),
                                "volume_left": restored["volume_left"],
                                "volume_before": restored["volume_before"]}})
-    # One whose put-back could not read the mode it measured — HQPlayer was
-    # busy — until that mode is judged at HQPlayer's nearest rest or the next
-    # run's start
+    # One whose put-back could not read the mode it measured — HQPlayer did
+    # not let it be read — until that mode is judged at HQPlayer's nearest
+    # rest or the next run's start (only the next run's, once HQPlayer at
+    # rest did not let it: `refused`)
     unchecked = hqp_benchmark.unchecked_notice()
     if unchecked is not None:
         items.append({"key": "hqplayer.run_unchecked", "kind": "info",
                       "since": unchecked["since"].isoformat(), "until": None,
-                      "data": {"mode": unchecked["mode"]}})
+                      "data": {"mode": unchecked["mode"], "refused": unchecked["refused"]}})
     # A CLI agent signed out while something needs it: the assistant runs on
     # it, or — Claude Code only — gear research waits for it (the drain
     # claims nothing until the sign-in returns). Each verdict is the CLI's

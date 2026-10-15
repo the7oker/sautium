@@ -2987,6 +2987,8 @@ def test_a_put_back_on_a_busy_hqplayer_leaves_the_measured_mode_unchecked_until_
     assert _wait(lambda: (mgr.active.poke(), not _unchecked(run, run_id))[1], 10)
     assert fake.settings() == (2, (2, 1, 1, 1), (2, 0, 0, 0), -3.0), fake.settings()
     assert bench.unchecked_notice() is None
+    assert _wait(lambda: not bench._checking, 5)
+    assert run.endpoint_id not in bench._busy_at        # a verdict leaves no try behind
 
 
 def _set_modes(monkeypatch, fake) -> list:
@@ -3135,6 +3137,154 @@ def test_a_mode_starts_put_back_could_not_read_stays_marked_for_the_new_run(run,
     _end_the_run()
     assert refused
     assert not _unchecked(run, run_id)
+
+
+def _marked_while_busy(r: Run) -> int:
+    """A "Measure PCM" run from SDM whose put-back found HQPlayer busy:
+    closed and marked, PCM still on its last point, HQPlayer back on the
+    owner's volume and resting on the queue it was handed."""
+    import datetime
+    now = datetime.datetime.now(datetime.timezone.utc)
+    assert _wait(lambda: len(r.fake.playlist) == 2, 10)
+    run_id = _pcm_run_found_in_sdm(r, [1, 0, 0, 0], finished_at=now, outcome="interrupted",
+                                   measured_unchecked_at=now)
+    with r.fake._lock:
+        r.fake.volume = -3.0
+    with bench._lock:               # marked as a close marks it: read again
+        bench._unchecked.pop(r.endpoint_id, None)
+        bench._bump()
+    return run_id
+
+
+def _refuses_pcm(monkeypatch, fake) -> list:
+    """HQPlayer refuses every SetMode into PCM: when each was asked."""
+    refused, dispatch = [], fake._dispatch
+
+    def refuses(cmd, attrs):
+        if cmd == "SetMode" and attrs.get("value") == "1":
+            refused.append(time.monotonic())
+            return '<SetMode result="Error">Mode not available</SetMode>'
+        return dispatch(cmd, attrs)
+    monkeypatch.setattr(fake, "_dispatch", refuses)
+    return refused
+
+
+def _ticks(r: Run, n: int = 3) -> None:
+    """`n` more answers of the poller's."""
+    for _ in range(n):
+        k = len(r.fake.arrivals)
+        r.mgr.active.poke()
+        assert _wait(lambda: [c for _, c in r.fake.arrivals[k:]].count("Status") >= 1)
+
+
+def _refused_at_rest(r: Run, run_id: int) -> bool:
+    return r.q("SELECT measured_refused_at IS NOT NULL FROM hqp_benchmark_runs WHERE id = %s",
+               run_id) == [(True,)]
+
+
+def test_a_mode_hqplayer_at_rest_will_not_switch_to_is_tried_once_then_before_the_next_run(
+        run, monkeypatch):
+    """A run marked while HQPlayer was busy; HQPlayer rests now and refuses
+    the SetMode into PCM, every time. Its nearest rest tries once — the
+    notice then says the next run checks it — and no later rest tries
+    again; the next run tries once more, and a run of PCM, which would read
+    PCM's selection as the owner's, is refused."""
+    fake = run.fake
+    run_id = _marked_while_busy(run)
+    refused = _refuses_pcm(monkeypatch, fake)
+    with fake._lock:
+        fake.track, fake.state = 1, int(PlaybackState.STOPPED)
+    assert _wait(lambda: (run.mgr.active.poke(), _refused_at_rest(run, run_id))[1], 10)
+    assert len(refused) == 1 and bench.unchecked_notice()["refused"]
+    with fake._lock:                    # a later rest, on another entry
+        fake.track = 2
+    _ticks(run)
+    assert len(refused) == 1, refused
+    bench.start("pcm")
+    assert _wait(lambda: not bench.running(), 30)
+    assert "not checked yet" in (bench.state()["note"] or ""), bench.state()
+    assert len(refused) == 2 and _unchecked(run, run_id)
+    assert run.q("SELECT count(*) FROM hqp_benchmark_runs WHERE id > %s", run_id) == [(0,)]
+
+
+@pytest.mark.parametrize("quiet", [False, True])
+def test_a_put_back_at_rest_whose_mode_hqplayer_will_not_switch_to_waits_for_the_next_run(
+        run, monkeypatch, quiet):
+    """The put-back itself finds HQPlayer at rest — at its answer, or at a
+    new run's start (`quiet`) — and HQPlayer refuses the SetMode into PCM:
+    the run is closed and marked, and no later rest tries the mode again;
+    the next run's start does."""
+    run_id = _pcm_run_found_in_sdm(run, [1, 0, 0, 0])
+    refused = _refuses_pcm(monkeypatch, run.fake)
+    bench.recover(run.endpoint_id, hl.selected(), gave=run.mgr.active.gave, quiet=quiet)
+    assert _wait(lambda: run.q("SELECT finished_at IS NOT NULL FROM hqp_benchmark_runs "
+                               "WHERE id = %s", run_id) == [(True,)])
+    assert _unchecked(run, run_id) and _refused_at_rest(run, run_id)
+    _ticks(run)
+    assert len(refused) == 1, refused
+
+
+def test_a_mode_hqplayer_at_rest_does_not_show_after_its_setmode_is_tried_once(
+        run, monkeypatch):
+    """The same with a SetMode HQPlayer takes but State does not show: one
+    round trip at the rest, none at a later one."""
+    fake = run.fake
+    run_id = _marked_while_busy(run)
+    seen, dispatch = [], fake._dispatch
+
+    def stays_in_sdm(cmd, attrs):
+        if cmd == "SetMode" and attrs.get("value") == "1":
+            seen.append(attrs)
+            return '<SetMode result="OK"/>'
+        return dispatch(cmd, attrs)
+    monkeypatch.setattr(fake, "_dispatch", stays_in_sdm)
+    with fake._lock:
+        fake.track, fake.state = 1, int(PlaybackState.STOPPED)
+    assert _wait(lambda: (run.mgr.active.poke(), _refused_at_rest(run, run_id))[1], 10)
+    with fake._lock:
+        fake.track = 2
+    _ticks(run)
+    assert len(seen) == 1, seen
+    assert "did not switch to PCM" in run.q("SELECT note FROM hqp_benchmark_runs WHERE id = %s",
+                                            run_id)[0][0]
+
+
+def test_a_verdict_the_database_does_not_take_is_tried_once_per_rest(run, monkeypatch):
+    """HQPlayer rests and the check reaches its verdict, which the database
+    does not take (an outage): the round trip is not made again at that
+    rest — only at the next one, on another entry."""
+    import psycopg2
+    fake = run.fake
+    run_id = _marked_while_busy(run)
+    seen = _set_modes(monkeypatch, fake)
+
+    def outage(*a, **kw):
+        raise psycopg2.OperationalError("the database is gone")
+    monkeypatch.setattr(bench, "_measured_checked", outage)
+    with fake._lock:
+        fake.track, fake.state = 1, int(PlaybackState.STOPPED)
+    assert _wait(lambda: (run.mgr.active.poke(), [v for v, _ in seen if v == "1"])[1], 10)
+    _ticks(run)
+    assert [v for v, _ in seen].count("1") == 1, seen
+    with fake._lock:                    # the next rest
+        fake.track = 2
+    assert _wait(lambda: (run.mgr.active.poke(), [v for v, _ in seen].count("1") == 2)[1], 10)
+    _ticks(run)
+    assert [v for v, _ in seen].count("1") == 2 and _unchecked(run, run_id), seen
+
+
+def test_a_run_of_another_mode_goes_while_the_measured_mode_stays_unchecked(run, monkeypatch):
+    """HQPlayer, in SDM, refuses the SetMode into PCM, the mode a run before
+    left unchecked. A run of SDM reads neither PCM's selection nor anything
+    PCM holds: it goes, and the mark stands for a later look."""
+    run_id = _marked_while_busy(run)
+    refused = _refuses_pcm(monkeypatch, run.fake)
+    monkeypatch.setattr(bench, "check_measured", lambda *a, **kw: None)   # no rest tries it
+    bench.start("sdm")
+    assert _wait(lambda: run.q("SELECT count(*) FROM hqp_benchmark_runs WHERE id > %s", run_id)
+                 == [(1,)], 30), bench.state()
+    _end_the_run()
+    assert refused and _unchecked(run, run_id)
 
 
 def test_a_round_trip_through_the_measured_mode_leaves_the_found_modes_selection_as_found(

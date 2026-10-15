@@ -434,6 +434,10 @@ CREATE TABLE IF NOT EXISTS hqp_benchmark_runs (
     -- HQPlayer's nearest such rest or a new run's start, before that run
     -- reads the owner's selection; NULL once checked
     measured_unchecked_at TIMESTAMPTZ,
+    -- When HQPlayer at rest did not let it be read (the SetMode refused, no
+    -- State there): only a new run's start tries it again; NULL — busy so
+    -- far, tried at HQPlayer's nearest rest — and NULL once checked
+    measured_refused_at TIMESTAMPTZ,
     CONSTRAINT chk_hqp_benchmark_runs_finished CHECK ((finished_at IS NULL) = (outcome IS NULL))
 );
 CREATE INDEX IF NOT EXISTS idx_hqp_benchmark_runs_endpoint

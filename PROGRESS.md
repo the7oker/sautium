@@ -1097,6 +1097,21 @@ implementation details live in the code, DB and git history.
   owner's track) — before that run reads the owner's selection. Lesson:
   what you cannot see is neither yours nor theirs until you look; and a
   rest is what HQPlayer shows, never what the caller expects of it.
+- **A check is no poll** (2026-10-15). The check of a measured mode left
+  unchecked tried again at every tick of the same rest whenever it found
+  no verdict — HQPlayer refusing the SetMode into the mode, or showing no
+  State there, or the database refusing the verdict — so HQPlayer was
+  switched into the mode and back every second, each time restarting its
+  output; its note and notice said "HQPlayer was busy" of an HQPlayer at
+  rest; and every new run was refused at its start, a run of another mode
+  too, so a mode the output no longer offers blocked the benchmark for
+  good. Now every rest tries once: busy, or the verdict not written, not
+  again until HQPlayer moves; at rest and not let through, not at any
+  later rest — only a new run's start tries again (migration 040), and it
+  refuses only a run that would read that mode. The notice says HQPlayer
+  did not let the settings be read — busy, or not switching to the mode —
+  and when they are tried; the run's note names the reason. Lesson: a try
+  that ends without a verdict is an outcome, and it is recorded as one.
 - **What the run handed, it knows by** (2026-10-14). A lost run's
   put-back knew the run's DSD source by the owner's newest DSD listen at
   the time of the put-back: a listen, a Last.fm import or a merge since,
@@ -1164,7 +1179,9 @@ implementation details live in the code, DB and git history.
   route itself refused; and on a tail mirror a "play next", a removal and
   a new order still take an entry HQPlayer reads in a state the SDK does
   not name, or with a stop under way, for a reading (the entry read is
-  never touched).
+  never touched); and when the output no longer offers a mode a run left
+  unchecked, its mark and notice stand for good — the owner is to close
+  them with a word ("leave it as it is"), the run then left to them.
 - **Open after the fixes' review** (2026-10-14), in code the fixes did not
   change: a "play next" on a tail mirror whose anchor HQPlayer moved past
   goes to the queue alone, before the entry HQPlayer reads, and never
