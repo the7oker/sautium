@@ -427,12 +427,13 @@ CREATE TABLE IF NOT EXISTS hqp_benchmark_runs (
     -- owner's newest DSD listen then; NULL = no DSD source, or a row from
     -- before it was kept (the newest listen is asked, as before)
     dsd_uri TEXT,
-    -- When the put-back left the measured mode's own selection unchecked:
-    -- State shows only the mode HQPlayer is in, and the mode is entered to
-    -- read it only on an HQPlayer at rest (stopped, reading no other
-    -- controller's entry) — SetMode restarts its output. It is checked at
-    -- HQPlayer's nearest such rest or a new run's start, before that run
-    -- reads the owner's selection; NULL once checked
+    -- When the put-back left the measured mode's own selection unchecked
+    -- (HQPlayer busy, or not taking it back): State shows only the mode
+    -- HQPlayer is in, and the mode is entered to read it only on an HQPlayer
+    -- at rest — SetMode restarts its output. It is checked at HQPlayer's
+    -- nearest rest (stopped, reading no other controller's entry) or at a
+    -- new run's start (stopped by the run, on whatever entry), before that
+    -- run reads the owner's selection; NULL once checked
     measured_unchecked_at TIMESTAMPTZ,
     -- When HQPlayer at rest did not let it be read (a SetMode refused or not
     -- shown, no State there, a selection or the way back refused, the lists

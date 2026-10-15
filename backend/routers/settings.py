@@ -1256,10 +1256,10 @@ def _notice_items() -> List[Dict[str, Any]]:
                       "data": {"run_at": restored["run_at"].isoformat(),
                                "volume_left": restored["volume_left"],
                                "volume_before": restored["volume_before"]}})
-    # One whose put-back could not read the mode it measured — HQPlayer did
-    # not let it be read — until that mode is judged at HQPlayer's nearest
-    # rest or the next run's start (only the next run's, once HQPlayer at
-    # rest did not let it)
+    # One whose put-back could not read the mode it measured, or set the
+    # owner's selection there back — HQPlayer did not let it — until that
+    # mode is judged at HQPlayer's nearest rest or the next run's start (only
+    # the next run's, once HQPlayer at rest did not let it be read)
     unchecked = hqp_benchmark.unchecked_notice()
     if unchecked is not None:
         items.append({"key": "hqplayer.run_unchecked", "kind": "info",

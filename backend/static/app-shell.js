@@ -11305,13 +11305,14 @@
       text: `Sautium lost the connection to HQPlayer during the benchmark run of ${run}. The settings from before it were put back as soon as HQPlayer answered again.${volume}`,
     };
   };
-  // A benchmark run cut short whose put-back could not read the mode it
-  // measured — HQPlayer busy (switching its mode restarts its output), or at
-  // rest and not letting it be read: judged at HQPlayer's nearest rest or
-  // the next run's start — only the next run's once HQPlayer at rest did not
-  // let it (playback/hqp_benchmark.py), a test point never taken for the
-  // owner's. One line for every cause: the run's note names it, and "before
-  // the next run at the latest" holds for both.
+  // A benchmark run whose put-back could not read the mode it measured —
+  // HQPlayer busy (switching its mode restarts its output), or at rest and
+  // not letting it be read — or set the owner's selection there back:
+  // judged at HQPlayer's nearest rest or the next run's start — only the
+  // next run's once HQPlayer at rest did not let it be read
+  // (playback/hqp_benchmark.py), a test point never taken for the owner's.
+  // One line for every cause: the run's note names it, and "before the next
+  // run at the latest" holds for each.
   NOTICE_COPY['hqplayer.run_unchecked'] = n => {
     const d = n.data || {};
     return {

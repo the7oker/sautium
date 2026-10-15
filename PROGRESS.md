@@ -1135,10 +1135,15 @@ implementation details live in the code, DB and git history.
   under a notice saying the settings are checked again before the next run
   at the latest. The start is the owner's own act, and the run takes
   HQPlayer over anyway: its own Stop is the rest now, whatever entry
-  HQPlayer stopped on, and the mark is judged before every run of that
-  HQPlayer. The poller's rest keeps the rule — no SetMode under another
-  controller's entry without a run. Lesson: a notice's promise holds on
-  every path it names, or the path changes.
+  HQPlayer stopped on, and the mark is tried before every run of that
+  HQPlayer: judged once HQPlayer carries the Stop out — one it does not
+  carry out makes no rest — and a mode HQPlayer does not let be read there
+  stays marked, only a run that reads nothing of that mode going. The notice
+  names no HQPlayer: its next run is one on the HQPlayer it is about, and a
+  run on another leaves this one's mark as it is. The poller's rest keeps
+  the rule — no SetMode under another controller's entry without a run.
+  Lesson: a notice's promise holds on every path it names, or the path
+  changes.
 - **What the run handed, it knows by** (2026-10-14). A lost run's
   put-back knew the run's DSD source by the owner's newest DSD listen at
   the time of the put-back: a listen, a Last.fm import or a merge since,
@@ -1236,6 +1241,25 @@ implementation details live in the code, DB and git history.
   presses (`test_a_build_left_armed_never_meets_the_rest_press` then fails
   on its last line), or the play gate's GetInfo late at the rest's press is
   reported as an I13 refusal with HQPlayer up.
+- **Open after a further look at the fixes** (2026-10-15), left for the next
+  slice: on a tail mirror HQPlayer moved back, in its own window, onto a
+  slot of the queue's before the tail: the tail's read takes that slot, and
+  an edit lands with the tail's offset — a removal takes off another track,
+  a new order doubles one, a "play next" lays the foreign entry behind it —
+  the mirror still a tail. Stopped there, nothing notices: the canary never
+  judges a stopped tail mirror, and the wrong playlist stays, HQPlayer's own
+  window playing it, until Sautium's next Play hands the queue over.
+  Playing, the canary finds the tail broken at its next turn (about 30 s)
+  and marks drift; nothing mends it but the next Play's hand-over, and an
+  edit made inside that window lands wrong. The cure: each tail edit checks
+  in its own sequence that the tail holds from the entry it read (a
+  PlaylistGet, `_tail_holds`' comparison), which covers a read of slot 0
+  too. And a run's end that marks the measured mode has it judged against
+  the point the run noted last: a cancel between a point's knobs and its
+  note leaves that note a point behind, and the check takes the test knob
+  for the owner's change — the run closed as left to them, the test point
+  kept as theirs. The cure is to note a point before sending it
+  (write-ahead), a new mechanism.
 - **One error, not reproduced** (2026-10-15).
   `test_a_new_run_judges_an_unchecked_measured_mode_before_it_reads_the_owners`
   (tests/test_hqp_benchmark.py) ended once in an ERROR — in its setup or

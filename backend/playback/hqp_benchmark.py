@@ -213,10 +213,11 @@ _left_gen = 0
 # the switch drops its next request (left_by_person)
 _putting: set = set()
 # By endpoint, the run whose put-back left the measured mode's selection
-# unchecked while HQPlayer was busy (its row; None: none), read from the
-# database once, then kept; the rest a check spent its try at (the entry it
-# rested on: HQPlayer busy, or a verdict the database did not take), not
-# tried again until it moves; the endpoints a check runs on
+# unchecked, its row (None: none) — HQPlayer was busy, or did not take the
+# owner's selection there back — read from the database once, then kept;
+# the rest a check spent its try at (the entry it rested on: HQPlayer busy,
+# or a verdict the database did not take), not tried again until it moves;
+# the endpoints a check runs on
 _unchecked: Dict[int, Optional[dict]] = {}
 _busy_at: Dict[int, tuple] = {}
 _checking: set = set()
@@ -1676,7 +1677,8 @@ def _restore(link: _Link, pre: dict, own: Optional[dict],
     the put-back — it closed, reset or refused the connection, counted as
     it happened (the client's losses, the poller's own rule), whatever
     failure came last — rather than only stayed silent, whether the measured
-    mode's own selection was left as the run set it: _put_back). Only the app
+    mode's own selection was left as the run set it: _put_back; False when
+    HQPlayer did not answer, the put-back owed whole: recover). Only the app
     stopping cuts the wait for an HQPlayer that is away short; one that is
     there but silent — a cancel in the middle of a build — is left to
     recover (RESTORE_ANSWER_S)."""
@@ -2008,9 +2010,10 @@ def _close_owed(run: dict, note: str, left: bool = False, restored: bool = False
     (note_left), or a new run read HQPlayer. `restored`: put back after
     HQPlayer went away under the run — one notice says so, and the level its
     volume was left at (`volume_left`) when the put-back did not raise it.
-    `unchecked`: the mode it measured not read yet, the row marked —
-    `refused`: HQPlayer was at rest and did not let it be read, so only a
-    new run's start tries it again (_measured_refused).
+    `unchecked`: the mode it measured not read yet, or the owner's selection
+    there not taken back — the row marked; `refused`: HQPlayer was at rest
+    and did not let it be read, so only a new run's start tries it again
+    (_measured_refused).
     `notify`: False where a run judges the mark at once — its own first step
     (_take_owed), or start()'s put-back the run follows: start() says it
     when it refuses instead, the run's end when it never got there.
@@ -2111,14 +2114,14 @@ def _take_owed(link: _Link, endpoint_id: int, gave: Callable[[str], bool],
     theirs — on HQPlayer at the rest the run's own Stop makes: stopped, on
     whatever entry — the start is the owner's own act, and the run takes
     HQPlayer over; the hold leaves it as it played, and a mode switched
-    under a track restarts the output — and HQPlayer
-    goes back first to a mode a check left it in (_go_back): the new run
-    never reads that mode as the owner's, and is refused when HQPlayer does
-    not go back. Not judged, the mode stays marked: the new run, of `kind`
-    (None: the mode HQPlayer is in), goes only if it reads nothing of it —
-    a run of another mode, HQPlayer in another. What it changes of the
-    notices — a mark it closed quietly, a return point gone — is said
-    whatever ends it, a run that cannot go on included."""
+    under a track restarts the output — and HQPlayer goes back first to a
+    mode a check left it in (_go_back): the new run never reads that mode
+    as the owner's, and is refused when HQPlayer does not go back. Not
+    judged, the mode stays marked: the new run, of `kind` (None: the mode
+    HQPlayer is in), goes only if it reads nothing of it — a run of another
+    mode, HQPlayer in another. What it changes of the notices — a mark it
+    closed quietly, a return point gone — is said whatever ends it, a run
+    that cannot go on included."""
     unsaid = False      # what the notices show changed here, and nothing said it yet
     try:
         run = db_query_one("""
@@ -2188,12 +2191,13 @@ def _take_owed(link: _Link, endpoint_id: int, gave: Callable[[str], bool],
 
 def unchecked_run(endpoint_id: int) -> Optional[dict]:
     """The run whose put-back left the measured mode of this HQPlayer
-    unchecked while it was busy — the mark HQPlayer's nearest rest tries
-    (its row; None: none; one HQPlayer refused at rest waits for a new run's
-    start) — read from the database once, then known (_close_owed,
-    _measured_checked, _measured_refused keep it). A read the database
-    fails, or a close or a check overtook, is asked again at the poller's
-    next answer: it costs the check, never the poll."""
+    unchecked — HQPlayer busy, or not taking the owner's selection there
+    back — the mark HQPlayer's nearest rest tries (its row; None: none; one
+    HQPlayer refused at rest waits for a new run's start), read from the
+    database once, then known (_close_owed, _close_run, _measured_checked,
+    _measured_refused keep it). A read the database fails, or a close or a
+    check overtook, is asked again at the poller's next answer: it costs
+    the check, never the poll."""
     with _lock:
         if endpoint_id in _unchecked:
             return _unchecked[endpoint_id]
@@ -2242,7 +2246,7 @@ def check_measured(endpoint_id: int, link, status: TrackStatus, *,
 
     def check() -> None:
         spent = True                # this rest's try, unless a newer word cut it
-        back = False                # back where a check found it, the mark not judged
+        back = False                # the way back made, the mark not judged
         try:
             with link.command(item=item):
                 on = _OnLink(link)
@@ -2284,7 +2288,7 @@ def check_measured(endpoint_id: int, link, status: TrackStatus, *,
                     _left_to_run.add(endpoint_id)
                 _bump()             # a State read before this end is stale (note_point)
             if back and not to_run:
-                _notify()           # HQPlayer back where it was found, the mark standing
+                _notify()           # the point gone, or kept anew; the mark standing
     threading.Thread(target=check, daemon=True, name="hqp-benchmark-check").start()
 
 
@@ -2542,10 +2546,11 @@ def restored_notice() -> Optional[dict]:
 
 def unchecked_notice() -> Optional[dict]:
     """The notice of a run whose put-back left the mode it measured
-    unchecked — HQPlayer did not let it be read — HQPlayer back where the
-    check found it: the newest, on any HQPlayer, until that mode is judged
-    at HQPlayer's nearest rest or a new run's start. Its onset is
-    `measured_unchecked_at`; `mode` names the mode measured."""
+    unchecked — HQPlayer did not let it be read, or did not take the
+    owner's selection there back — HQPlayer back where the check found it:
+    the newest, on any HQPlayer, until that mode is judged at HQPlayer's
+    nearest rest or a new run's start. Its onset is `measured_unchecked_at`;
+    `mode` names the mode measured."""
     run = db_query_one("""SELECT measured_unchecked_at, mode
                             FROM hqp_benchmark_runs
                            WHERE finished_at IS NOT NULL AND measured_unchecked_at IS NOT NULL
@@ -2650,11 +2655,12 @@ def _recover(link: _Link, run: dict,
     (_check_measured) only on an HQPlayer at rest (_booted) — a mode
     switched under a track restarts the output — else the run is marked
     unchecked, judged at HQPlayer's nearest rest or a new run's start
-    (check_measured, _take_owed). A return point its own round trip left,
-    cut short before (_keep_point), is where HQPlayer goes back first, at
-    rest (_go_back): the mode Sautium left it in is never judged as the
-    owner's — not at rest, or not going back, the run is marked and nothing
-    is judged; only a volume still at the run's level goes back."""
+    (check_measured, _take_owed); so is one whose owner's selection there
+    HQPlayer does not take back (_put_back). A return point its own round
+    trip left, cut short before (_keep_point), is where HQPlayer goes back
+    first, at rest (_go_back): the mode Sautium left it in is never judged
+    as the owner's — not at rest, or not going back, the run is marked and
+    nothing is judged; only a volume still at the run's level goes back."""
     st, listed, status = link("get_state"), link("get_playlist"), link("get_status")
     if st is None or status is None:
         return None
