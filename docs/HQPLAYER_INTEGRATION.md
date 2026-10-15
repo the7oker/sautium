@@ -1533,7 +1533,15 @@ cooling — so Sautium measures it instead of predicting it
   only at a new run's start (`measured_refused_at`, migration 040), and one
   that still does not refuses only a run that would read that mode — a run
   of it, or HQPlayer found in it — while a run of another mode goes, the
-  mark standing (2026-10-15). Neither
+  mark standing (2026-10-15). Before a check leaves the mode it found, that
+  mode and its selection by name go on the run's row as the return point
+  (`measured_from_*`, migration 041): the next check or run start takes
+  HQPlayer back there first, on a stopped HQPlayer, and only then judges —
+  after a node restart too — and a run never reads the mode Sautium left
+  HQPlayer in as the owner's: one HQPlayer does not go back from is
+  refused. The point goes once HQPlayer is back there — the check's own way
+  back, a return, or the owner's own switch, which the poller sees in State
+  — or once a person's change makes HQPlayer theirs (2026-10-15). Neither
   the put-back nor a person's change waiting for the command lock behind
   it closes the run the other way: the row is closed while the put-back
   still holds the lock, and a switch away or another HQPlayer chosen

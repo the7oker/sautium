@@ -438,6 +438,19 @@ CREATE TABLE IF NOT EXISTS hqp_benchmark_runs (
     -- State there): only a new run's start tries it again; NULL — busy so
     -- far, tried at HQPlayer's nearest rest — and NULL once checked
     measured_refused_at TIMESTAMPTZ,
+    -- The return point of a check of the measured mode: the mode HQPlayer was
+    -- found in when the check left it (the index SetMode takes) and that
+    -- mode's selection by name, as HQPlayer lists it there, the rate in Hz.
+    -- Written before the check's first SetMode; the next check or run start
+    -- goes back there first. NULL once HQPlayer is back in that mode (the
+    -- check's way back, a return, the owner's own switch) or a person's
+    -- change made HQPlayer theirs
+    measured_from_mode INTEGER,
+    measured_from_mode_name TEXT,
+    measured_from_rate INTEGER,
+    measured_from_filter TEXT,
+    measured_from_filter1x TEXT,
+    measured_from_shaper TEXT,
     CONSTRAINT chk_hqp_benchmark_runs_finished CHECK ((finished_at IS NULL) = (outcome IS NULL))
 );
 CREATE INDEX IF NOT EXISTS idx_hqp_benchmark_runs_endpoint

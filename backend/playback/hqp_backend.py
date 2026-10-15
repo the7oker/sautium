@@ -1846,9 +1846,12 @@ class HqpBackend(PlayerBackend):
                                  and self.endpoint_id is not None
                                  and hqp_benchmark.unchecked_run(self.endpoint_id) is not None)
                     if (status is not None and self.endpoint_id is not None
-                            and hqp_benchmark.left_pending(self.endpoint_id)):
+                            and (hqp_benchmark.left_pending(self.endpoint_id)
+                                 or hqp_benchmark.point_pending(self.endpoint_id))):
                         # A benchmark run left to the owner: what HQPlayer
-                        # still holds of its test settings, for its notice
+                        # still holds of its test settings, for its notice;
+                        # a check that left HQPlayer in another mode: whether
+                        # it is back where it was found (the owner's switch)
                         left_state = hqp.get_state()
                         if left_state is not None and hqp_benchmark.wants_lists(
                                 self.endpoint_id, left_state["mode"]):
@@ -1878,6 +1881,7 @@ class HqpBackend(PlayerBackend):
                     break               # detached meanwhile: what it heard acts on nothing
                 if left_state is not None:
                     hqp_benchmark.note_left(self.endpoint_id, left_state, left_lists)
+                    hqp_benchmark.note_point(self.endpoint_id, left_state)
                 if check_due:
                     hqp_benchmark.check_measured(self.endpoint_id, self._link, status,
                                                  gave=self.gave)

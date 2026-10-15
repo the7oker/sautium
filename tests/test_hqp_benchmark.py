@@ -3287,6 +3287,224 @@ def test_a_run_of_another_mode_goes_while_the_measured_mode_stays_unchecked(run,
     assert refused and _unchecked(run, run_id)
 
 
+def _left_in_pcm(r: Run, refused: bool = False) -> int:
+    """A "Measure PCM" run from SDM whose check left HQPlayer in PCM — on the
+    run's last point there — its way back not taken: marked (at rest and
+    `refused`, or busy so far), the return point on its row naming SDM and
+    the owner's selection there (11.2 MHz, poly-sinc-gauss-long, ASDM7EC).
+    Read afresh, as a process that just started."""
+    import datetime
+    now = datetime.datetime.now(datetime.timezone.utc)
+    assert _wait(lambda: len(r.fake.playlist) == 2, 10)
+    run_id = _pcm_run_found_in_sdm(r, [1, 0, 0, 0], finished_at=now, outcome="interrupted",
+                                   measured_unchecked_at=now,
+                                   measured_refused_at=now if refused else None,
+                                   measured_from_mode=2, measured_from_mode_name="SDM (DSD)",
+                                   measured_from_rate=11289600,
+                                   measured_from_filter="poly-sinc-gauss-long",
+                                   measured_from_filter1x="poly-sinc-gauss-long",
+                                   measured_from_shaper="ASDM7EC")
+    with r.fake._lock:
+        r.fake.mode, r.fake.volume = 1, -3.0
+        r.fake.sel[2] = [1, 1, 1, 1]            # SDM's own selection moved meanwhile
+    with bench._lock:
+        bench._unchecked.pop(r.endpoint_id, None)
+        bench._point_rows.pop(r.endpoint_id, None)
+        bench._bump()
+    return run_id
+
+
+def _point(r: Run, run_id: int) -> bool:
+    return r.q("SELECT measured_from_mode IS NOT NULL FROM hqp_benchmark_runs WHERE id = %s",
+               run_id) == [(True,)]
+
+
+def test_a_run_after_a_restart_goes_back_to_where_a_check_found_hqplayer_first(
+        run, monkeypatch):
+    """The node restarted while a check had left HQPlayer in PCM. The next
+    run, at the rest its own Stop makes, first takes HQPlayer back to SDM and
+    the owner's selection there, by name, then judges PCM — and reads SDM as
+    the owner's: never the mode Sautium left HQPlayer in."""
+    fake = run.fake
+    run_id = _left_in_pcm(run)
+    seen = _set_modes(monkeypatch, fake)
+    bench.start("pcm")
+    assert _wait(lambda: run.q("SELECT pre_mode, pre_rate, pre_filter, pre_filter1x, pre_shaper "
+                               "FROM hqp_benchmark_runs WHERE id > %s", run_id)
+                 == [(2, 2, 0, 0, 0)], 30), (run.q("SELECT id, note FROM hqp_benchmark_runs"),
+                                             fake.settings())
+    _end_the_run()
+    assert [v for v, _ in seen][:3] == ["2", "1", "2"], seen       # back, then the check
+    assert not _point(run, run_id) and not _unchecked(run, run_id)
+
+
+def test_hqplayer_switched_back_by_the_owner_ends_the_notice_without_a_setmode(
+        run, monkeypatch):
+    """A check left HQPlayer in PCM and its way back was refused at rest; the
+    owner switches HQPlayer back to SDM themselves. The poller sees it: the
+    return point goes and the notice no longer says HQPlayer stayed in PCM,
+    no SetMode of Sautium's sent."""
+    fake = run.fake
+    run_id = _left_in_pcm(run, refused=True)
+    seen = _set_modes(monkeypatch, fake)
+    _ticks(run)
+    assert bench.unchecked_notice()["back_to"]["mode"] == "SDM (DSD)"
+    with fake._lock:
+        fake.mode = 2                           # the owner's own switch, in HQPlayer
+    assert _wait(lambda: (run.mgr.active.poke(), not _point(run, run_id))[1], 10)
+    assert bench.unchecked_notice()["back_to"] is None
+    assert seen == [], seen
+
+
+def test_a_way_back_refused_keeps_the_return_point_and_sets_nothing_in_the_wrong_mode(
+        run, monkeypatch):
+    """At rest, PCM the run's only mark: the put-back enters PCM and puts the
+    owner's selection back there, then HQPlayer refuses the SetMode back
+    into SDM. Nothing of SDM's is set in PCM; the run is marked, the return
+    point names SDM and the notice says HQPlayer stayed in PCM."""
+    fake = run.fake
+    run_id = _pcm_run_found_in_sdm(run, [1, 0, 0, 0])
+    with fake._lock:
+        fake.volume = -3.0
+    refused, dispatch = [], fake._dispatch
+
+    def refuses_sdm(cmd, attrs):
+        if cmd == "SetMode" and attrs.get("value") == "2":
+            refused.append(True)
+            return '<SetMode result="Error">Mode not available</SetMode>'
+        return dispatch(cmd, attrs)
+    monkeypatch.setattr(fake, "_dispatch", refuses_sdm)
+    bench.recover(run.endpoint_id, hl.selected(), gave=run.mgr.active.gave)
+    assert _wait(lambda: run.q("SELECT finished_at IS NOT NULL FROM hqp_benchmark_runs "
+                               "WHERE id = %s", run_id) == [(True,)])
+    assert refused and fake.mode == 1 and fake.sel[1] == [2, 1, 1, 1], fake.settings()
+    assert _unchecked(run, run_id) and _refused_at_rest(run, run_id) and _point(run, run_id)
+    notice = bench.unchecked_notice()
+    assert notice["back_to"] == {"mode": "SDM (DSD)", "rate": 11289600,
+                                 "filter": "poly-sinc-gauss-long",
+                                 "filter1x": "poly-sinc-gauss-long", "shaper": "ASDM7EC"}, notice
+
+
+def test_the_next_check_at_rest_goes_back_to_where_hqplayer_was_found_first(run, monkeypatch):
+    """A check left HQPlayer in PCM, cut short between its two SetModes; the
+    mark busy so far. At HQPlayer's next rest the check takes it back to SDM
+    first — the owner's selection there by name — and only then judges PCM."""
+    fake = run.fake
+    run_id = _left_in_pcm(run)
+    seen = _set_modes(monkeypatch, fake)
+    with fake._lock:
+        fake.track, fake.state = 1, int(PlaybackState.STOPPED)
+    assert _wait(lambda: (run.mgr.active.poke(), not _unchecked(run, run_id))[1], 10)
+    assert [v for v, _ in seen][:3] == ["2", "1", "2"], seen
+    assert fake.settings() == (2, (2, 1, 1, 1), (2, 0, 0, 0), -3.0), fake.settings()
+    assert not _point(run, run_id)
+
+
+def test_a_run_whose_hqplayer_does_not_go_back_is_refused(run, monkeypatch):
+    """A check left HQPlayer in PCM, and at the next run's start HQPlayer
+    refuses the SetMode back into SDM: the run is refused — it would read
+    PCM, where Sautium left HQPlayer, as the owner's — a run of SDM too; the
+    mark and the return point stand."""
+    fake = run.fake
+    run_id = _left_in_pcm(run)
+    dispatch = fake._dispatch
+
+    def refuses_sdm(cmd, attrs):
+        if cmd == "SetMode" and attrs.get("value") == "2":
+            return '<SetMode result="Error">Mode not available</SetMode>'
+        return dispatch(cmd, attrs)
+    monkeypatch.setattr(fake, "_dispatch", refuses_sdm)
+    monkeypatch.setattr(bench, "check_measured", lambda *a, **kw: None)   # no rest tries it
+    bench.start("sdm")
+    assert _wait(lambda: not bench.running(), 30)
+    assert "the mode the last check left it in" in (bench.state()["note"] or ""), bench.state()
+    assert run.q("SELECT count(*) FROM hqp_benchmark_runs WHERE id > %s", run_id) == [(0,)]
+    assert _unchecked(run, run_id) and _point(run, run_id) and _refused_at_rest(run, run_id)
+
+
+def test_a_persons_dsp_change_leaves_the_mode_a_check_left_to_them(run):
+    """A check left HQPlayer in PCM; the person changes a DSP setting: HQPlayer
+    is theirs now — the return point goes, said in the run's note, and
+    nothing takes HQPlayer back to SDM."""
+    run_id = _left_in_pcm(run)
+    bench.left_by_person("127.0.0.1", run.fake.port, "a DSP change came first")
+    assert not _point(run, run_id)
+    note = run.q("SELECT note FROM hqp_benchmark_runs WHERE id = %s", run_id)[0][0]
+    assert "left to the owner" in note, note
+
+
+def test_a_return_point_is_never_cleared_under_a_round_trip_of_ours(run, monkeypatch):
+    """The poller's check keeps SDM as the return point and, before its
+    SetMode into PCM, the poller reads HQPlayer still in SDM: that is the
+    check on its way, not the owner switching back — the point stays, and
+    when HQPlayer then refuses the way back it still names SDM."""
+    fake, mgr = run.fake, run.mgr
+    run_id = _marked_while_busy(run)
+    keep = bench._keep_point
+
+    def then_a_tick(*a):
+        name = keep(*a)
+        _ticks(run, 2)                          # HQPlayer in SDM, the point just written
+        return name
+    monkeypatch.setattr(bench, "_keep_point", then_a_tick)
+    dispatch = fake._dispatch
+
+    def refuses_sdm(cmd, attrs):
+        if cmd == "SetMode" and attrs.get("value") == "2":
+            return '<SetMode result="Error">Mode not available</SetMode>'
+        return dispatch(cmd, attrs)
+    monkeypatch.setattr(fake, "_dispatch", refuses_sdm)
+    with fake._lock:
+        fake.track, fake.state = 1, int(PlaybackState.STOPPED)
+    assert _wait(lambda: (mgr.active.poke(), _refused_at_rest(run, run_id))[1], 15)
+    assert fake.mode == 1 and _point(run, run_id), (fake.settings(), run.q(
+        "SELECT note FROM hqp_benchmark_runs WHERE id = %s", run_id))
+
+
+def test_a_put_back_a_persons_change_cut_short_in_the_measured_mode_leaves_it_to_them(
+        run, monkeypatch):
+    """The put-back at rest enters PCM to read it, and a person's DSP change
+    comes right then: the put-back's next request goes no further, the run is
+    left to them, and so is the mode HQPlayer is in — no return point, no
+    way back taken over their change."""
+    fake = run.fake
+    run_id = _pcm_run_found_in_sdm(run, [1, 0, 0, 0])
+    link, dispatch, cut = hl.selected(), fake._dispatch, []
+
+    def a_change_in_pcm(cmd, attrs):
+        out = dispatch(cmd, attrs)
+        if cmd == "SetMode" and attrs.get("value") == "1" and not cut:
+            cut.append(True)
+            link.accept("dsp")                  # the person's DSP change, as it is asked
+        return out
+    monkeypatch.setattr(fake, "_dispatch", a_change_in_pcm)
+    bench.recover(run.endpoint_id, link, gave=run.mgr.active.gave)
+    assert _wait(lambda: run.q("SELECT finished_at IS NOT NULL FROM hqp_benchmark_runs "
+                               "WHERE id = %s", run_id) == [(True,)])
+    assert cut and _closed_as_left(run, run_id)
+    assert not _point(run, run_id)
+
+
+def test_a_run_of_another_mode_is_refused_while_hqplayer_is_in_the_unchecked_mode(
+        run, monkeypatch):
+    """The owner switched HQPlayer to PCM themselves, the mode a run before
+    left unchecked, and the check at the next run's start finds no verdict
+    there: a run of SDM is refused too — it would read PCM's selection,
+    still unchecked, as the owner's."""
+    fake = run.fake
+    run_id = _marked_while_busy(run)
+    with fake._lock:
+        fake.mode = 1                           # the owner's own switch to PCM
+    monkeypatch.setattr(bench, "check_measured", lambda *a, **kw: None)   # no rest tries it
+    monkeypatch.setattr(bench, "_check_measured",
+                        lambda link, r, found: (None, "HQPlayer showed no state in PCM"))
+    bench.start("sdm")
+    assert _wait(lambda: not bench.running(), 30)
+    assert "not checked yet" in (bench.state()["note"] or ""), bench.state()
+    assert run.q("SELECT count(*) FROM hqp_benchmark_runs WHERE id > %s", run_id) == [(0,)]
+    assert _unchecked(run, run_id)
+
+
 def test_a_round_trip_through_the_measured_mode_leaves_the_found_modes_selection_as_found(
         run, monkeypatch):
     """PCM, which State does not show, is the run's only mark left (the
