@@ -2595,7 +2595,7 @@ def test_another_hqplayer_chosen_while_a_put_back_reads_no_state_leaves_the_run(
     owed_on, item = bench._owed[run_id]
     entered = threading.Event()
 
-    def reads_nothing(on, r, gave=None, at_start=False):
+    def reads_nothing(on, r, gave=None):
         entered.set()
         assert _wait(lambda: owed_on.superseded(item) is not None, 10)
         return None
@@ -2989,25 +2989,152 @@ def test_a_put_back_on_a_busy_hqplayer_leaves_the_measured_mode_unchecked_until_
     assert bench.unchecked_notice() is None
 
 
-def test_a_new_run_judges_an_unchecked_measured_mode_before_it_reads_the_owners(run):
-    """A run marked unchecked — PCM still on its last point — and the owner
-    measures PCM again: before the new run reads PCM's selection as theirs,
-    the mode is judged and the owner's selection put back; the test point is
-    never what the new run puts back at its end."""
+def _set_modes(monkeypatch, fake) -> list:
+    """(value, the transport HQPlayer was in) of every SetMode it carries out."""
+    seen, dispatch = [], fake._dispatch
+
+    def log(cmd, attrs):
+        if cmd == "SetMode":
+            seen.append((attrs.get("value"), fake.state))
+        return dispatch(cmd, attrs)
+    monkeypatch.setattr(fake, "_dispatch", log)
+    return seen
+
+
+def _end_the_run() -> None:
+    if bench.running():
+        bench.cancel()
+    assert _wait(lambda: not bench.running(), 30)
+
+
+def test_a_new_run_judges_an_unchecked_measured_mode_before_it_reads_the_owners(
+        run, monkeypatch):
+    """A run marked unchecked — PCM still on its last point — and the owner,
+    their album playing through Sautium, measures PCM again: before the new
+    run reads PCM's selection as theirs, the mode is judged and the owner's
+    selection put back, never while the album plays (a mode switched under
+    a track restarts the output): at the rest the run's own Stop makes. The
+    test point is never what the new run puts back at its end."""
     import datetime
     now = datetime.datetime.now(datetime.timezone.utc)
+    fake = run.fake
+    assert _wait(lambda: len(fake.playlist) == 2, 10)             # the queue mirrored
     run_id = _pcm_run_found_in_sdm(run, [1, 0, 0, 0], finished_at=now, outcome="interrupted",
                                    measured_unchecked_at=now)
-    with run.fake._lock:
-        run.fake.volume = -3.0
+    with fake._lock:
+        fake.volume = -3.0
+        fake.track, fake.state = 1, int(PlaybackState.PLAYING)     # the owner's album plays
+    seen = _set_modes(monkeypatch, fake)
     bench.start("pcm")
     assert _wait(lambda: run.q("SELECT own_rate, own_filter, own_filter1x, own_shaper "
                                "FROM hqp_benchmark_runs WHERE id > %s", run_id)
                  == [(2, 1, 1, 1)], 20), run.q("SELECT id, own_rate, own_filter FROM "
                                               "hqp_benchmark_runs")
     assert not _unchecked(run, run_id)
-    bench.cancel()
+    _end_the_run()
+    assert seen and [v for v, state in seen if state == int(PlaybackState.PLAYING)] == [], seen
+
+
+def test_a_new_run_that_finds_another_controllers_entry_leaves_the_measured_mode_marked(
+        run, monkeypatch):
+    """A run marked unchecked, and the next run starts while HQPlayer plays
+    an entry another controller loaded. The run's own Stop makes no rest
+    while that entry stays: the measured mode is not entered, the run ends
+    there, the mark stands and the notice is said."""
+    import datetime
+    now = datetime.datetime.now(datetime.timezone.utc)
+    fake = run.fake
+    run_id = _pcm_run_found_in_sdm(run, [1, 0, 0, 0], finished_at=now, outcome="interrupted",
+                                   measured_unchecked_at=now)
+    with fake._lock:
+        fake.volume = -3.0
+        fake.playlist, fake.track = ["http://other-controller.invalid/track.flac"], 1
+        fake.state = int(PlaybackState.PLAYING)
+    seen = _set_modes(monkeypatch, fake)
+    said, notify = [], bench._notify
+    monkeypatch.setattr(bench, "_notify", lambda: (said.append(bench.running()), notify())[1])
+    bench.start("pcm")
     assert _wait(lambda: not bench.running(), 30)
+    assert "not at rest" in (bench.state()["note"] or ""), bench.state()
+    assert seen == [], seen
+    assert _unchecked(run, run_id) and True in said, said
+
+
+def test_a_put_back_owed_at_a_new_runs_start_never_switches_modes_under_a_playing_track(
+        run, monkeypatch):
+    """A run the node's own stop cut short still owes its put-back once the
+    next run holds HQPlayer (start()'s own put-back did not reach it);
+    HQPlayer is back in SDM, PCM on the run's test point, and the owner's
+    album plays. The put-back marks PCM — HQPlayer is not at rest — and the
+    new run judges it at the rest its own Stop makes: no SetMode while the
+    album plays, the owner's selection is what the new run reads, and the
+    notices are never woken over a mark the run judges a moment later."""
+    fake = run.fake
+    assert _wait(lambda: len(fake.playlist) == 2, 10)
+    run_id = _pcm_run_found_in_sdm(run, [1, 0, 0, 0])
+    with fake._lock:
+        fake.volume = -3.0
+        fake.track, fake.state = 1, int(PlaybackState.PLAYING)
+    seen = _set_modes(monkeypatch, fake)
+    monkeypatch.setattr(bench, "recover", lambda endpoint_id, link, **kw: None)
+    marked, notify = [], bench._notify
+    monkeypatch.setattr(bench, "_notify", lambda: (marked.append(_unchecked(run, run_id)),
+                                                   notify())[1])
+    bench.start("pcm")
+    assert _wait(lambda: run.q("SELECT own_rate, own_filter, own_filter1x, own_shaper "
+                               "FROM hqp_benchmark_runs WHERE id > %s", run_id)
+                 == [(2, 1, 1, 1)], 20), run.q("SELECT id, note FROM hqp_benchmark_runs")
+    assert not _unchecked(run, run_id)
+    _end_the_run()
+    assert seen and [v for v, state in seen if state == int(PlaybackState.PLAYING)] == [], seen
+    assert True not in marked, marked
+
+
+def test_starts_put_back_never_switches_modes_under_a_playing_track(run, monkeypatch):
+    """A run the node's own stop cut short still owes its put-back when the
+    owner presses Start, HQPlayer back in SDM and playing another
+    controller's entry. start() puts the run back first, quiet — before it
+    holds HQPlayer and before it asks whether another controller plays: no
+    SetMode under the playing track, the run closed and marked, for a run
+    to judge at the rest its own Stop makes, or HQPlayer's nearest rest."""
+    fake = run.fake
+    run_id = _pcm_run_found_in_sdm(run, [1, 0, 0, 0])
+    with fake._lock:
+        fake.volume = -3.0
+        fake.playlist, fake.track = ["http://other-controller.invalid/track.flac"], 1
+        fake.state, fake.position = int(PlaybackState.PLAYING), 30.0
+    seen = _set_modes(monkeypatch, fake)
+    bench.recover(run.endpoint_id, hl.selected(), gave=run.mgr.active.gave, quiet=True)
+    assert _wait(lambda: run.q("SELECT finished_at IS NOT NULL FROM hqp_benchmark_runs "
+                               "WHERE id = %s", run_id) == [(True,)], 15)
+    assert _unchecked(run, run_id)
+    assert seen == [] and fake.state == int(PlaybackState.PLAYING), (seen, fake.state)
+
+
+def test_a_mode_starts_put_back_could_not_read_stays_marked_for_the_new_run(run, monkeypatch):
+    """start()'s own put-back on an HQPlayer at rest, and HQPlayer refuses
+    the SetMode into PCM this once: PCM is not read, and the run stays
+    marked — closed with no notice, but marked. The new run of PCM judges it
+    before it reads PCM's selection: the test point goes back to the
+    owner's, never taken for theirs."""
+    fake = run.fake
+    run_id = _pcm_run_found_in_sdm(run, [1, 0, 0, 0])
+    refused, dispatch = [], fake._dispatch
+
+    def refuses_once(cmd, attrs):
+        if cmd == "SetMode" and attrs.get("value") == "1" and not refused:
+            refused.append(True)
+            return '<SetMode result="Error">Mode not available</SetMode>'
+        return dispatch(cmd, attrs)
+    monkeypatch.setattr(fake, "_dispatch", refuses_once)
+    bench.start("pcm")
+    assert _wait(lambda: run.q("SELECT own_rate, own_filter, own_filter1x, own_shaper "
+                               "FROM hqp_benchmark_runs WHERE id > %s", run_id)
+                 == [(2, 1, 1, 1)], 30), run.q("SELECT id, note, measured_unchecked_at "
+                                              "FROM hqp_benchmark_runs")
+    _end_the_run()
+    assert refused
+    assert not _unchecked(run, run_id)
 
 
 def test_a_round_trip_through_the_measured_mode_leaves_the_found_modes_selection_as_found(

@@ -1526,8 +1526,9 @@ cooling — so Sautium measures it instead of predicting it
   switching its mode restarts its output. Busy, the run is marked
   (`measured_unchecked_at`, migration 039) and a notice says the mode is not
   checked yet; it is judged at HQPlayer's nearest rest, or at a new run's
-  start before that run reads the owner's selection — a test point is never
-  taken for theirs (since 2026-10-14). Neither
+  start, at the rest the run's own Stop makes (2026-10-15), before that run
+  reads the owner's selection — a test point is never taken for theirs
+  (since 2026-10-14). Neither
   the put-back nor a person's change waiting for the command lock behind
   it closes the run the other way: the row is closed while the put-back
   still holds the lock, and a switch away or another HQPlayer chosen

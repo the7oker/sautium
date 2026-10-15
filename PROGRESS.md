@@ -1092,9 +1092,11 @@ implementation details live in the code, DB and git history.
   mode is now entered and read, and judged knob by knob as the rest — only
   on an HQPlayer at rest, since switching its mode restarts its output;
   busy, the run is marked, a notice says so, and the mode is judged at
-  HQPlayer's nearest rest or at a new run's start, before that run reads
-  the owner's selection. Lesson: what you cannot see is neither yours nor
-  theirs until you look.
+  HQPlayer's nearest rest or at a new run's start — after the run's own
+  Stop (2026-10-15: the first cut checked there before it, under the
+  owner's track) — before that run reads the owner's selection. Lesson:
+  what you cannot see is neither yours nor theirs until you look; and a
+  rest is what HQPlayer shows, never what the caller expects of it.
 - **What the run handed, it knows by** (2026-10-14). A lost run's
   put-back knew the run's DSD source by the owner's newest DSD listen at
   the time of the put-back: a listen, a Last.fm import or a merge since,
