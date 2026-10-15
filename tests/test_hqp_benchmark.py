@@ -4057,6 +4057,35 @@ def test_a_run_whose_end_cannot_set_the_owners_selection_back_marks_the_measured
     assert "the selection of PCM was put back" in note, note
 
 
+def test_an_hqplayer_forgotten_during_a_runs_put_back_leaves_no_mark_to_set(run, monkeypatch):
+    """A run of PCM from SDM is cancelled; as it puts HQPlayer back, the
+    owner forgets this HQPlayer (its rows go with it), and HQPlayer refuses
+    the filter of the owner's PCM selection once. The run's row is gone:
+    there is no mark to set, and the run ends cancelled, nothing of it
+    left."""
+    fake = run.fake
+    fake.jitter = 0.2
+    monkeypatch.setattr(bench, "SETTLE_CAP_S", 2.0)
+    with fake._lock:
+        fake.mode = 2
+    bench.start("pcm")
+    assert _wait(lambda: run.point() >= 2, 10)
+    ending, restore = [], bench._restore
+
+    def forgotten_first(*a, **kw):
+        ending.append(True)
+        run.q("DELETE FROM hqp_endpoints RETURNING id")
+        return restore(*a, **kw)
+    monkeypatch.setattr(bench, "_restore", forgotten_first)
+    refused = _refuses_pcms_filter_once(monkeypatch, fake, when=lambda: bool(ending))
+    assert bench.cancel()
+    assert _wait(lambda: not bench.running(), 10)
+    st = bench.state()
+    assert refused, st
+    assert st["outcome"] == "cancelled", (st["outcome"], st["note"])
+    assert run.q("SELECT count(*) FROM hqp_benchmark_runs") == [(0,)]
+
+
 @pytest.mark.parametrize("where", ["the poller's check", "a run's start"])
 def test_a_check_a_database_error_cuts_after_its_return_leaves_the_tabs_true(
         run, monkeypatch, where):

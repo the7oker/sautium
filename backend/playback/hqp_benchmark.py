@@ -1836,7 +1836,7 @@ def _close_run(run_id: int, outcome: str, note: Optional[str], stats: dict, *,
           "u": unchecked, "n": stats["measured"],
           "d": max(stats["dropouts"]) if stats["dropouts"] else None,
           "first": own[0] if own else None, "last": own[-1] if len(own) > 1 else None})
-    if unchecked:
+    if unchecked and row is not None:      # none: forgotten with its HQPlayer, no mark to set
         with _lock:
             _unchecked.pop(row["hqp_endpoint_id"], None)    # read again: a new mark
             _busy_at.pop(row["hqp_endpoint_id"], None)
