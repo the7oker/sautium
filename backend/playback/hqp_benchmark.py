@@ -2101,9 +2101,10 @@ def _take_owed(link: _Link, endpoint_id: int, gave: Callable[[str], bool],
     (_measure), never before it read anything. The mode a run before
     measured, its selection left unchecked, is judged here too, before the
     new run reads the owner's selection — a test point is never taken for
-    theirs — on HQPlayer at the rest the run's own Stop makes (stopped,
-    reading no other controller's entry): the hold leaves it as it played,
-    and a mode switched under a track restarts the output — and HQPlayer
+    theirs — on HQPlayer at the rest the run's own Stop makes: stopped, on
+    whatever entry — the start is the owner's own act, and the run takes
+    HQPlayer over; the hold leaves it as it played, and a mode switched
+    under a track restarts the output — and HQPlayer
     goes back first to a mode a check left it in (_go_back): the new run
     never reads that mode as the owner's, and is refused when HQPlayer does
     not go back. Not judged, the mode stays marked: the new run, of `kind`
@@ -2137,12 +2138,11 @@ def _take_owed(link: _Link, endpoint_id: int, gave: Callable[[str], bool],
     point = _return_point(endpoint_id)
     if run is None and point is None:
         return
-    st, listed, status = _again(lambda: (link("stop"), link("get_state"), link("get_playlist"),
-                                         link("get_status"))[1:])
+    st, status = _again(lambda: (link("stop"), link("get_state"), link("get_status"))[1:])
     stuck = point is not None       # in a mode a check left it in, until it goes back
     if st is None or status is None:
         why = "HQPlayer did not report its state"
-    elif not _booted(status, listed, gave, run or point):
+    elif status.state != PlaybackState.STOPPED:
         why = "HQPlayer is not at rest"
     else:
         why = _again(lambda: _go_back(link, point)) if point is not None else None

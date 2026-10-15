@@ -1129,6 +1129,16 @@ implementation details live in the code, DB and git history.
   while it stands, the notice says where HQPlayer was. Lesson: a round trip
   is done only once it is back, and where it must come back to is written
   down before it leaves.
+- **A run's start is a rest** (2026-10-15). A run's own Stop made no rest
+  while HQPlayer stopped on another controller's entry: a mode a run before
+  had left unchecked was not tried there, and a run of another mode went —
+  under a notice saying the settings are checked again before the next run
+  at the latest. The start is the owner's own act, and the run takes
+  HQPlayer over anyway: its own Stop is the rest now, whatever entry
+  HQPlayer stopped on, and the mark is judged before every run of that
+  HQPlayer. The poller's rest keeps the rule — no SetMode under another
+  controller's entry without a run. Lesson: a notice's promise holds on
+  every path it names, or the path changes.
 - **What the run handed, it knows by** (2026-10-14). A lost run's
   put-back knew the run's DSD source by the owner's newest DSD listen at
   the time of the put-back: a listen, a Last.fm import or a merge since,
