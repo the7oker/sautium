@@ -1203,7 +1203,7 @@ def _measure(ep: dict, kind: str, gave: Callable[[str], bool],
             outcome, note = "failed", _why(e)
         finally:
             _live = None                # a second cancel must not cut the put-back
-            reached, restore_note, gone = _restore(link, pre, own, mute)
+            reached, restore_note, gone, own_left = _restore(link, pre, own, mute)
             note = "; ".join(x for x in (note, restore_note) if x) or None
             # An HQPlayer that did not answer the restore keeps the run
             # open: the next attach, or its next answer, puts it back
@@ -1214,7 +1214,7 @@ def _measure(ep: dict, kind: str, gave: Callable[[str], bool],
             if not reached:
                 _owe(run_id)
             _close_run(run_id, outcome, note, stats, finished=reached,
-                       lost=gone and not _halt.is_set())
+                       lost=gone and not _halt.is_set(), unchecked=reached and own_left)
         return outcome, note
     finally:
         _live = None
@@ -1663,12 +1663,13 @@ def _outlast(link: _Link, settle: Settle) -> TrackStatus:
 
 
 def _restore(link: _Link, pre: dict, own: Optional[dict],
-             mute: Optional[float]) -> Tuple[bool, Optional[str], bool]:
+             mute: Optional[float]) -> Tuple[bool, Optional[str], bool, bool]:
     """Put back what the run changed, whatever ended it. Returns (HQPlayer
     answered, what could not be put back, whether HQPlayer went away under
     the put-back — it closed, reset or refused the connection, counted as
     it happened (the client's losses, the poller's own rule), whatever
-    failure came last — rather than only stayed silent). Only the app
+    failure came last — rather than only stayed silent, whether the measured
+    mode's own selection was left as the run set it: _put_back). Only the app
     stopping cuts the wait for an HQPlayer that is away short; one that is
     there but silent — a cancel in the middle of a build — is left to
     recover (RESTORE_ANSWER_S)."""
@@ -1682,27 +1683,29 @@ def _restore(link: _Link, pre: dict, own: Optional[dict],
     if sock is not None:
         sock.settimeout(RESTORE_ANSWER_S)
     try:
-        problems = _again(lambda: _put_back(link, pre=pre, own=own, volume=mute is not None,
-                                            clear=True, enter=True),
-                          silent_ends=True)
+        problems, own_left = _again(lambda: _put_back(link, pre=pre, own=own,
+                                                      volume=mute is not None, clear=True,
+                                                      enter=True),
+                                    silent_ends=True)
         after = _again(lambda: link("get_state"), silent_ends=True)
     except _Lost:
         return (False, "HQPlayer did not answer to be put back — it is when it answers again",
-                link.c.losses > losses)
+                link.c.losses > losses, False)
     if after is None:
-        return True, "HQPlayer did not report its state after the run", False
+        return True, "HQPlayer did not report its state after the run", False, own_left
     diff = [k for k in ("mode", "rate", "filterNx", "filter1x", "shaper")
             if after.get(k) != pre.get(k)]
     if mute is not None and abs(after["volume"] - pre["volume"]) > _DB_EPS:
         diff.append("volume")
     if diff or problems:
         logger.warning("HQPlayer benchmark: not put back as it was — %s %s", diff, problems)
-        return True, "not everything was put back: " + ", ".join(diff + problems), False
-    return True, None, False
+        return (True, "not everything was put back: " + ", ".join(diff + problems), False,
+                own_left)
+    return True, None, False, own_left
 
 
 def _put_back(link: _Link, *, pre: dict, own: Optional[dict], volume: bool,
-              clear: bool, enter: bool) -> List[str]:
+              clear: bool, enter: bool) -> Tuple[List[str], bool]:
     """Stop; the run's sources out of the playlist (`clear`); the measured
     mode's own selection when the run switched into it — HQPlayer keeps one
     selection per mode: in that mode, entered for it when `enter` (the
@@ -1713,7 +1716,9 @@ def _put_back(link: _Link, *, pre: dict, own: Optional[dict], volume: bool,
     selection goes back only while HQPlayer shows its mode, read after the
     switch: in a mode HQPlayer did not take, a selection of another mode's
     indices would set what neither holds. What HQPlayer refused, as "knob:
-    its words"."""
+    its words", and whether the measured mode's own selection was left as
+    the run set it — refused, or its mode not shown: a test point HQPlayer
+    may still hold there."""
     link("stop")
     if clear:
         link("playlist_clear")
@@ -1728,6 +1733,7 @@ def _put_back(link: _Link, *, pre: dict, own: Optional[dict], volume: bool,
         if not failed and (there is None or there["mode"] != to):
             problems.append("mode: HQPlayer did not show the mode it was switched to")
         return there["mode"] if there is not None else None
+    own_left = own is not None
     if own is not None:
         if mode != own["mode"] and enter:
             mode = switched(own["mode"])
@@ -1735,6 +1741,7 @@ def _put_back(link: _Link, *, pre: dict, own: Optional[dict], volume: bool,
             _, failed = link("apply_settings", rate=own["rate"], filter=own["filterNx"],
                              filter1x=own["filter1x"], shaper=own["shaper"])
             problems += [f"{k}: {v}" for k, v in failed.items()]
+            own_left = bool(failed)
     if mode != pre["mode"]:
         mode = switched(pre["mode"])
     if mode == pre["mode"]:
@@ -1743,7 +1750,7 @@ def _put_back(link: _Link, *, pre: dict, own: Optional[dict], volume: bool,
         problems += [f"{k}: {v}" for k, v in failed.items()]
     if volume:
         link("set_volume", pre["volume"])
-    return problems
+    return problems, own_left
 
 
 def _open_run(ep: dict, mode_name: str, pre: dict, mute: Optional[float]) -> int:
@@ -1802,20 +1809,32 @@ def _ledger(run_id: int, p: Point, result: str, note: Optional[str] = None,
 
 
 def _close_run(run_id: int, outcome: str, note: Optional[str], stats: dict, *,
-               finished: bool, lost: bool) -> None:
+               finished: bool, lost: bool, unchecked: bool = False) -> None:
+    """The run's row as it ended. `unchecked`: the measured mode's own
+    selection HQPlayer did not take back at the run's end — a test point
+    may stand there: marked, judged at HQPlayer's nearest rest or a new
+    run's start, and said."""
     own = stats["own"]
-    db_execute("""
+    row = db_execute("""
         UPDATE hqp_benchmark_runs
            SET finished_at = CASE WHEN %(fin)s THEN now() END,
                outcome = CASE WHEN %(fin)s THEN %(o)s::hqp_bench_outcome END,
                lost_at = CASE WHEN %(lost)s THEN now() END,
+               measured_unchecked_at = CASE WHEN %(u)s THEN now() END,
                note = %(note)s, points_measured = %(n)s, dropout_speed = %(d)s,
                first_speed = %(first)s, last_speed = %(last)s
          WHERE id = %(id)s
+     RETURNING hqp_endpoint_id
     """, {"id": run_id, "fin": finished, "lost": lost, "o": outcome, "note": note,
-          "n": stats["measured"],
+          "u": unchecked, "n": stats["measured"],
           "d": max(stats["dropouts"]) if stats["dropouts"] else None,
           "first": own[0] if own else None, "last": own[-1] if len(own) > 1 else None})
+    if unchecked:
+        with _lock:
+            _unchecked.pop(row["hqp_endpoint_id"], None)    # read again: a new mark
+            _busy_at.pop(row["hqp_endpoint_id"], None)
+            _bump()
+        _notify()
 
 
 class _OnLink:
@@ -2672,7 +2691,10 @@ def _recover(link: _Link, run: dict,
     own = None if run["own_mode"] is None or hidden else {
         "mode": run["own_mode"], "rate": run["own_rate"], "filterNx": run["own_filter"],
         "filter1x": run["own_filter1x"], "shaper": run["own_shaper"]}
-    problems = _put_back(link, pre=pre, own=own, volume=volume, clear=ours, enter=whole)
+    problems, own_left = _put_back(link, pre=pre, own=own, volume=volume, clear=ours,
+                                   enter=whole)
+    if own_left:
+        unchecked, why = True, f"HQPlayer did not take the selection of {run['mode']} back"
     if whole:
         note = ("cut short; HQPlayer went away under the run — its settings were put back when "
                 "it answered again")
