@@ -10022,7 +10022,8 @@ def test_a_removal_on_a_tail_mirror_stopped_on_an_entry_not_ours_removes_no_othe
     HQPlayer's own window the person goes to x — no slot of the queue's —
     and stops there; then removes track 3 in Sautium. HQPlayer reads no
     slot of the queue's: no entry is guessed, never track 4 removed in its
-    place — the removal is the queue's, the mirror lost."""
+    place — the removal is the queue's, the mirror lost, and HQPlayer,
+    stopped there, takes the queue afresh at the poller's next tick."""
     mgr, b = output
     _tail(mgr, b, fake)
     assert _wait(lambda: b._last_tick is not None and b._last_tick.queue_index == 2
@@ -10032,12 +10033,40 @@ def test_a_removal_on_a_tail_mirror_stopped_on_an_entry_not_ours_removes_no_othe
     assert _wait(lambda: mgr._latest_status.get("state") == "stopped"
                  and b._last_tick is not None and b._last_tick.queue_index == 0, timeout=5), (
         mgr._latest_status, b._mirror)
+    n = len(fake.commands)
     assert mgr.remove(3, "track-3")
     assert [it.track_id for it in mgr.queue.snapshot()] == ["track-1", "track-2", "track-4"]
+    assert _wait(lambda: b._mirror == "step" and fake.playlist == [
+        "file:///E:/Music/A/01.flac", "file:///E:/Music/A/02.flac",
+        "file:///E:/Music/A/04.flac"], timeout=5), (b._mirror, fake.playlist)
+    assert [c for c, _ in fake.commands[n:] if c == "PlaylistRemove"] == []
+
+
+def test_a_removal_on_a_tail_mirror_stopped_within_the_tail_lands_on_its_own_track(
+        fake, output):
+    """The same tail mirror; in HQPlayer's own window the person goes back
+    within the tail only — entry 4 playing, then entry 3 stopped, both
+    behind x — and removes track 4 in Sautium. Stopped there HQPlayer still
+    reads a slot of the queue's: the removal lands on its own entry, x and
+    the mirror kept."""
+    mgr, b = output
+    _tail(mgr, b, fake)
+    assert _wait(lambda: b._last_tick is not None and b._last_tick.queue_index == 2
+                 and mgr._latest_status.get("track_index") == 2, timeout=5)
+    for entry, state, slot, said in ((4, PlaybackState.PLAYING, 3, "playing"),
+                                     (3, PlaybackState.STOPPED, 2, "stopped")):
+        with fake._lock:
+            fake.track, fake.state, fake.position = entry, int(state), 0.0
+        assert _wait(lambda: b._last_tick is not None and b._last_tick.queue_index == slot
+                     and mgr._latest_status.get("state") == said, timeout=5), (
+            mgr._latest_status, b._mirror)
+    assert mgr.remove(4, "track-4")
     with fake._lock:
         playlist = list(fake.playlist)
-    assert "file:///E:/Music/A/04.flac" in playlist, (b._mirror, playlist)
-    assert b._mirror == "lost", b._mirror
+    assert playlist == ["file:///E:/Music/A/01.flac", "file:///E:/Music/X/09.flac",
+                        "file:///E:/Music/A/02.flac", "file:///E:/Music/A/03.flac"], (
+        b._mirror, playlist)
+    assert b._mirror == "tail", b._mirror
 
 
 def test_a_held_seek_never_moves_a_start_made_after_it(fake, output, monkeypatch):
