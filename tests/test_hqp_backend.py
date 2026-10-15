@@ -9930,6 +9930,92 @@ def test_a_next_held_by_a_play_next_run_hqplayer_moved_into_plays_the_runs_next_
         said, sent, fake.track, fake.playlist)
 
 
+def test_a_next_held_by_a_tail_play_next_run_hqplayer_moved_into_plays_the_runs_next_track(
+        fake, output, monkeypatch):
+    """The same run on a tail mirror: HQPlayer plays track 2 of [1, x, 2, 3,
+    4] for the queue [1, 2, 3, 4]. The run's first track is queued behind
+    track 2; HQPlayer moves on to it by itself — no status has read it — as
+    the run's second track lands behind it. The person presses Next while
+    HQPlayer takes that second track: Next from what plays, as the insert's
+    own read of the tail finds it, is the run's second track."""
+    mgr, b = output
+    player_router = _routes_on(monkeypatch, mgr)
+    _tail(mgr, b, fake)
+    assert _wait(lambda: b._last_tick is not None and b._last_tick.queue_index == 2
+                 and mgr._latest_status.get("track_index") == 2, timeout=5)
+    assert mgr.append([_item("E:/Music/N/01.flac", 31)], "next") == 1
+    n1 = mgr.queue.item_at(3)
+    assert _wait(lambda: fake.playlist == [
+        "file:///E:/Music/A/01.flac", "file:///E:/Music/X/09.flac", "file:///E:/Music/A/02.flac",
+        "file:///E:/Music/N/01.flac", "file:///E:/Music/A/03.flac", "file:///E:/Music/A/04.flac"]
+        and b._mirror == "tail", timeout=5), (fake.playlist, b._mirror)
+    assert _wait(lambda: b._last_tick is not None and b._last_tick.queue_index == 2
+                 and mgr._latest_status.get("track_index") == 2, timeout=5)
+    fake.service["PlaylistRemove"] = 0.4
+    insert = b.queue_insert_next
+
+    def moved_on_first(items, anchor_index):
+        with fake._lock:                    # HQPlayer's own advance, not read yet
+            fake.track, fake.position = 4, 0.5
+        return insert(items, anchor_index)
+    monkeypatch.setattr(b, "queue_insert_next", moved_on_first)
+    came, out = len(fake.arrivals), {}
+    inserting = threading.Thread(target=lambda: out.update(added=mgr.append(
+        [_item("E:/Music/N/02.flac", 32)], "next", after=n1)), daemon=True)
+    inserting.start()
+    assert _wait(lambda: "PlaylistRemove" in [c for _, c in fake.arrivals[came:]], timeout=5)
+    assert b._inflight is not None
+    n = len(fake.commands)
+    said = _quick(player_router.next_track)
+    inserting.join(10)
+    _settled()
+    assert out.get("added") == 1, out
+    assert [it.track_id for it in mgr.queue.snapshot()] == [
+        "track-1", "track-2", "track-31", "track-32", "track-3", "track-4"]
+    assert said.get("starts") == {"index": 4, "position": 0, "track_id": "track-32"}, said
+    sent = _start_sent(fake, n)
+    assert _wait(lambda: fake.state == int(PlaybackState.PLAYING)
+                 and 1 <= fake.track <= len(fake.playlist)
+                 and fake.playlist[fake.track - 1] == "file:///E:/Music/N/02.flac"), (
+        said, sent, fake.track, fake.playlist)
+
+
+def test_a_next_held_by_a_tail_play_next_run_counts_from_the_track_hqplayer_still_plays(
+        fake, output, monkeypatch):
+    """The same tail and run, HQPlayer still on track 2 as the run's second
+    track lands behind its first: the insert's read names track 2, never the
+    anchor, and a Next held meanwhile starts the run's first track."""
+    mgr, b = output
+    player_router = _routes_on(monkeypatch, mgr)
+    _tail(mgr, b, fake)
+    assert _wait(lambda: b._last_tick is not None and b._last_tick.queue_index == 2
+                 and mgr._latest_status.get("track_index") == 2, timeout=5)
+    assert mgr.append([_item("E:/Music/N/01.flac", 31)], "next") == 1
+    n1 = mgr.queue.item_at(3)
+    assert _wait(lambda: fake.playlist == [
+        "file:///E:/Music/A/01.flac", "file:///E:/Music/X/09.flac", "file:///E:/Music/A/02.flac",
+        "file:///E:/Music/N/01.flac", "file:///E:/Music/A/03.flac", "file:///E:/Music/A/04.flac"]
+        and b._mirror == "tail", timeout=5), (fake.playlist, b._mirror)
+    fake.service["PlaylistRemove"] = 0.4
+    came, out = len(fake.arrivals), {}
+    inserting = threading.Thread(target=lambda: out.update(added=mgr.append(
+        [_item("E:/Music/N/02.flac", 32)], "next", after=n1)), daemon=True)
+    inserting.start()
+    assert _wait(lambda: "PlaylistRemove" in [c for _, c in fake.arrivals[came:]], timeout=5)
+    assert b._inflight is not None
+    n = len(fake.commands)
+    said = _quick(player_router.next_track)
+    inserting.join(10)
+    _settled()
+    assert out.get("added") == 1, out
+    assert said.get("starts") == {"index": 3, "position": 0, "track_id": "track-31"}, said
+    sent = _start_sent(fake, n)
+    assert _wait(lambda: fake.state == int(PlaybackState.PLAYING)
+                 and 1 <= fake.track <= len(fake.playlist)
+                 and fake.playlist[fake.track - 1] == "file:///E:/Music/N/01.flac"), (
+        said, sent, fake.track, fake.playlist)
+
+
 def test_a_held_seek_never_moves_a_start_made_after_it(fake, output, monkeypatch):
     """HQPlayer stopped on track 1; a radio's clear loses the mirror; Play,
     then Seek 60, held meanwhile. Once the queue stands the Play becomes a

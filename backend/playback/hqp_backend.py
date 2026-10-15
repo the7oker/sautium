@@ -2303,12 +2303,12 @@ class HqpBackend(PlayerBackend):
 
     def _held_from(self, items: list, playing: QueueItem) -> None:
         """A seamless edit's own read named the track HQPlayer plays (a "play
-        next" read in step): the words held meanwhile count from it —
-        HQPlayer may have moved on since the status the hold began with, past
-        the anchor (the tracks placed behind what it reads) or into a "play
-        next" run the tracks extend — translated against `items`, the queue
-        as the edit leaves it. A base a held word moved itself (a step at a
-        spot, which no read of HQPlayer shows) stays."""
+        next", in step or on a tail mirror): the words held meanwhile count
+        from it — HQPlayer may have moved on since the status the hold began
+        with, past the anchor (the tracks placed behind what it reads) or into
+        a "play next" run the tracks extend — translated against `items`, the
+        queue as the edit leaves it. A base a held word moved itself (a step
+        at a spot, which no read of HQPlayer shows) stays."""
         with self._press_lock:
             words = self._inflight
             if words is not None:
@@ -4178,7 +4178,7 @@ class HqpBackend(PlayerBackend):
         it moved on past `item`; in a tail mirror counted from the entry that
         reads the playing slot. No anchor: behind them all. Returns ((that
         number, the queue slot they go behind, the queue's track HQPlayer
-        reads as read here — None in a tail mirror or with no anchor), None),
+        reads as read here — None with no anchor), None),
         or (None, what marks the playlist) when HQPlayer's playlist cannot
         place it: shorter than the queue it holds, reading no slot of the
         queue's — another controller's entry; in step also an entry it is
@@ -4220,7 +4220,8 @@ class HqpBackend(PlayerBackend):
             return None, lambda: self.lose_mirror("HQPlayer reads past its own playlist")
         if slot < playing:
             return None, lambda: None       # the part before the entry read: the queue's
-        return (reads.n + layout.upto(slot) - layout.upto(playing), slot, None), None
+        return (reads.n + layout.upto(slot) - layout.upto(playing), slot,
+                self._queue.item_at(playing)), None
 
     def _tail_read(self, h: HQPlayerClient, layout: _Layout) -> tuple:
         """In a tail mirror, the queue slot HQPlayer reads and its entry, read
