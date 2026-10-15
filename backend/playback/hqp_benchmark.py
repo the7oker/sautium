@@ -220,6 +220,9 @@ _putting: set = set()
 _unchecked: Dict[int, Optional[dict]] = {}
 _busy_at: Dict[int, tuple] = {}
 _checking: set = set()
+# Endpoints whose check a run's hold cut after it went back: that run's end
+# says what stands (_run)
+_left_to_run: set = set()
 # By endpoint, the run row holding a return point — the mode a check of a
 # measured mode found HQPlayer in, kept until HQPlayer is back there
 # (_keep_point) — or None: none; read from the database once, then kept
@@ -1120,10 +1123,14 @@ def _run(ep: dict, kind: str, gave: Callable[[str], bool], asked: Optional[str],
         logger.warning("HQPlayer benchmark did not start: %s", _why(e))
         if running():
             _finish("failed", _why(e))
-    if unsaid:
-        # A mark start()'s put-back left for this run to judge is said once
-        # the run is over — judged, or not reached: HQPlayer gone at its
-        # start, the output not lent
+    with _lock:
+        word = ep["id"] in _left_to_run
+        _left_to_run.discard(ep["id"])
+    if unsaid or word:
+        # A mark start()'s put-back left for this run to judge, or a check
+        # its hold cut after it went back, is said once the run is over —
+        # judged, or not reached: HQPlayer gone at its start, the output not
+        # lent
         _notify()
 
 
@@ -2220,7 +2227,8 @@ def check_measured(endpoint_id: int, link, status: TrackStatus, *,
     the mode it was found in not given — no later rest tries it, a new run's
     start does (_measured_refused). One check at a time per HQPlayer, behind
     the command lock; a person's DSP change or switch away made meanwhile
-    drops it — HQPlayer's next answer asks again."""
+    drops it — HQPlayer's next answer asks again — and so does a run's start,
+    which judges the mark first (_take_owed)."""
     run = unchecked_run(endpoint_id)
     if run is None or running():
         return
@@ -2268,8 +2276,14 @@ def check_measured(endpoint_id: int, link, status: TrackStatus, *,
                 _checking.discard(endpoint_id)
                 if spent:           # busy, the verdict not written, the connection lost
                     _busy_at[endpoint_id] = at
+                # Cut by a run's hold: the run judges the mark at its start,
+                # and its end says what stands — read under the lock that end
+                # takes, after its hold
+                to_run = back and link.lent
+                if to_run:
+                    _left_to_run.add(endpoint_id)
                 _bump()             # a State read before this end is stale (note_point)
-            if back:
+            if back and not to_run:
                 _notify()           # HQPlayer back where it was found, the mark standing
     threading.Thread(target=check, daemon=True, name="hqp-benchmark-check").start()
 

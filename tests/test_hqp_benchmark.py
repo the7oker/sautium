@@ -4135,6 +4135,72 @@ def test_a_mark_a_runs_start_closes_quietly_is_said_when_the_run_ends_before_jud
     assert (snaps[-1] if snaps else held) == now, {"held": held, "wakes": snaps, "now": now}
 
 
+def _check_paused_back(monkeypatch, run, run_id):
+    """The poller's check pauses right after its return to SDM (the point
+    gone): set when it is there, and the event that lets it go on."""
+    import threading
+    call, back, go_on = bench._OnLink.__call__, threading.Event(), threading.Event()
+
+    def pauses_once_back(self, method, *args, **kwargs):
+        out = call(self, method, *args, **kwargs)
+        if (method == "get_state" and out is not None and out["mode"] == 2
+                and not back.is_set() and not _point(run, run_id)):
+            back.set()                  # the return made, the check's next request to go
+            go_on.wait(10)
+        return out
+    monkeypatch.setattr(bench._OnLink, "__call__", pauses_once_back)
+    return back, go_on
+
+
+def test_a_check_a_runs_hold_cuts_after_its_return_wakes_no_one_over_the_runs_verdict(
+        run, monkeypatch):
+    """A check left HQPlayer in PCM: every tab holds "HQPlayer stayed in
+    PCM". HQPlayer rests and the poller's check goes back to SDM — and the
+    owner presses Run right then. The hold lends the link, the check's next
+    request is refused, and the run judges the mark at its own Stop a moment
+    later: no wake finds the mark standing between the two."""
+    fake = run.fake
+    run_id = _left_in_pcm(run)
+    back, go_on = _check_paused_back(monkeypatch, run, run_id)
+    marked = _marks_at_wakes(monkeypatch, run, run_id)
+    with fake._lock:
+        fake.track, fake.state = 1, int(PlaybackState.STOPPED)
+    assert _wait(lambda: (run.mgr.active.poke(), back.is_set())[1], 10)
+    try:
+        bench.start("sdm")
+        assert _wait(lambda: hl.selected().lent, 10)
+    finally:
+        go_on.set()
+    assert _wait(lambda: not _unchecked(run, run_id), 20), bench.state()
+    _end_the_run()
+    assert True not in marked, marked
+
+
+def test_a_check_a_runs_hold_cuts_is_said_when_the_run_never_judges(run, monkeypatch):
+    """The same cut, and the run never reaches its judgement — HQPlayer does
+    not answer its own connection. HQPlayer is back in SDM, the point gone,
+    the mark standing: once the run is over, the tabs hold that (HQPlayer's
+    next rest, which would judge the mark, kept out)."""
+    fake = run.fake
+    run_id = _left_in_pcm(run)
+    back, go_on = _check_paused_back(monkeypatch, run, run_id)
+    monkeypatch.setattr(bench._Link, "connect", lambda self: False)
+    with fake._lock:
+        fake.track, fake.state = 1, int(PlaybackState.STOPPED)
+    assert _wait(lambda: (run.mgr.active.poke(), back.is_set())[1], 10)
+    monkeypatch.setattr(bench, "check_measured", lambda *a, **kw: None)
+    snaps = _wakes(monkeypatch)
+    try:
+        bench.start("sdm")
+        assert _wait(lambda: hl.selected().lent, 10)
+    finally:
+        go_on.set()
+    assert _wait(lambda: not bench.running(), 30)
+    assert _wait(lambda: snaps and "hqplayer.run_unchecked" in snaps[-1]
+                 and "hqplayer.run_stayed" not in snaps[-1], 10), snaps
+    assert _unchecked(run, run_id) and not _point(run, run_id)
+
+
 def _refuses_sdm(monkeypatch, fake) -> list:
     """HQPlayer refuses every SetMode into SDM: when each was asked."""
     refused, dispatch = [], fake._dispatch
