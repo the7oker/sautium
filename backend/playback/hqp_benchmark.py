@@ -955,7 +955,6 @@ def summary(endpoint: Optional[dict]) -> Dict[str, Any]:
 def start(mode: Optional[str] = None, *, fixed_volume_ok: bool = False) -> Dict[str, Any]:
     """Start a run of `mode` ('pcm' | 'sdm'; None = the mode HQPlayer is in).
     Raises BenchmarkRefused with the reason when it cannot start now."""
-    global _thread
     from playback.manager import manager
     if running():
         raise BenchmarkRefused("A benchmark is already running")
@@ -991,7 +990,25 @@ def start(mode: Optional[str] = None, *, fixed_volume_ok: bool = False) -> Dict[
     # (quiet), as the run's own first step closes one (_take_owed). One that
     # sets off a build refuses this start (busy below): the owner starts
     # again once HQPlayer answers.
-    recover(ep["id"], link, gave=b.gave, quiet=True)
+    unsaid = recover(ep["id"], link, gave=b.gave, quiet=True)
+    try:
+        return _start_run(ep, link, b, mode, fixed_volume_ok, unsaid)
+    except BenchmarkRefused:
+        if unsaid:
+            _notify()       # the mark the run would have judged at once: no run follows
+        raise
+
+
+def _start_run(ep: dict, link, b, mode: Optional[str], fixed_volume_ok: bool,
+               unsaid: bool) -> Dict[str, Any]:
+    """start() once a run cut short is put back: what HQPlayer answers is the
+    precondition, and the run's thread starts — `unsaid`: the put-back left
+    a mark for it to judge, said at its end (_run). A run of "the mode
+    HQPlayer is in" (`mode` None) takes that mode at its own rest (_measure):
+    this read may find HQPlayer in the measured mode, where a check of ours
+    holds it a moment or left it."""
+    global _thread
+    from playback import hqp_link
     busy = link.busy()
     if busy is not None:
         raise BenchmarkRefused(f"{busy}. Start the benchmark once it answers again.")
@@ -1034,8 +1051,8 @@ def start(mode: Optional[str] = None, *, fixed_volume_ok: bool = False) -> Dict[
         _state.update(running=True, cancel_requested=False, endpoint_id=ep["id"], mode=kind,
                       point=0, total=0, point_label="Preparing…", eta_s=None,
                       started_at=time.time(), outcome=None, note=None)
-        _thread = threading.Thread(target=_run, args=(ep, kind, b.gave), daemon=True,
-                                   name="hqp-benchmark")
+        _thread = threading.Thread(target=_run, args=(ep, kind, b.gave, mode, unsaid),
+                                   daemon=True, name="hqp-benchmark")
         _thread.start()
     return state()
 
@@ -1081,7 +1098,8 @@ def _why(e: Exception) -> str:
     return str(e) or type(e).__name__
 
 
-def _run(ep: dict, kind: str, gave: Callable[[str], bool]) -> None:
+def _run(ep: dict, kind: str, gave: Callable[[str], bool], asked: Optional[str],
+         unsaid: bool) -> None:
     """The job's thread. Whatever ends it is recorded where the owner reads
     it (state(), and the run row once there is one); the job is closed
     before the output goes back — the attach that takes it back then finds
@@ -1091,7 +1109,7 @@ def _run(ep: dict, kind: str, gave: Callable[[str], bool]) -> None:
     try:
         with manager.hold("benchmark", LABEL):
             try:
-                outcome, note = _measure(ep, kind, gave)
+                outcome, note = _measure(ep, kind, gave, asked)
             except (_Abort, _Lost) as e:
                 outcome, note = "failed", str(e)
             except Exception as e:      # the job's boundary: recorded, never lost
@@ -1102,6 +1120,11 @@ def _run(ep: dict, kind: str, gave: Callable[[str], bool]) -> None:
         logger.warning("HQPlayer benchmark did not start: %s", _why(e))
         if running():
             _finish("failed", _why(e))
+    if unsaid:
+        # A mark start()'s put-back left for this run to judge is said once
+        # the run is over — judged, or not reached: HQPlayer gone at its
+        # start, the output not lent
+        _notify()
 
 
 def _finish(outcome: str, note: Optional[str]) -> None:
@@ -1110,24 +1133,31 @@ def _finish(outcome: str, note: Optional[str]) -> None:
     logger.info("HQPlayer benchmark %s%s", outcome, f": {note}" if note else "")
 
 
-def _measure(ep: dict, kind: str, gave: Callable[[str], bool]) -> Tuple[str, Optional[str]]:
+def _measure(ep: dict, kind: str, gave: Callable[[str], bool],
+             asked: Optional[str]) -> Tuple[str, Optional[str]]:
     """The run proper, inside the hold: put back what a run cut short before
     it still owes (`gave` tells an entry the node gave HQPlayer), read what
     is to be put back, open the run row, measure, and put everything back
-    whatever happens."""
+    whatever happens. A run of the mode HQPlayer is in (`asked` None) takes
+    that mode from what it reads here, never from start()'s read."""
     global _live
     link = _Link(_cancel.wait, answer_s=ANSWER_WAIT_S)
     if not link.connect():
         return "failed", "HQPlayer is not answering"
     _live = link
     try:
-        _take_owed(link, ep["id"], gave, kind)
+        _take_owed(link, ep["id"], gave, asked)
         pre, modes, vr = _again(lambda: (link("get_state"), link("get_modes"),
                                          link("volume_range")))
         if pre is None:
             return "failed", "HQPlayer did not report its state"
         if modes is None:
             return "failed", "HQPlayer did not list its modes"
+        if asked is None:
+            kind = mode_kind(_mode_name(modes, pre["mode"]))
+            if kind is None:
+                return "failed", "HQPlayer's mode is [source] — choose PCM or SDM to measure"
+            _progress(mode=kind)
         mode_index = _mode_index(modes, kind)
         if mode_index is None:
             return "failed", f"This HQPlayer's output offers no {kind.upper()} mode"
@@ -1823,7 +1853,7 @@ def _owe(run_id: int, link=None) -> tuple:
 
 
 def recover(endpoint_id: int, link, *, gave: Optional[Callable[[str], bool]] = None,
-            quiet: bool = False, again: Callable[[], None] = lambda: None) -> None:
+            quiet: bool = False, again: Callable[[], None] = lambda: None) -> bool:
     """A run cut short — the process died in the middle of it, or HQPlayer
     went away or stayed silent through the restore — left HQPlayer stopped
     on its test settings, maybe lowered and holding the signals. The next
@@ -1841,37 +1871,48 @@ def recover(endpoint_id: int, link, *, gave: Optional[Callable[[str], bool]] = N
     left to the owner. `quiet`: at a new run's start — closed with no
     notice, the new run reads what HQPlayer holds as the owner's from then
     (_take_owed) — a measured mode left unchecked stays marked, for the new
-    run to judge at the rest its own Stop makes. One command sequence: a
-    setting HQPlayer builds holds the link as any other, and the caller —
-    the attach, the poller — goes on once the build begins, the rest put
-    back behind it (BuildWatch.waking). Not put back — HQPlayer building,
-    silent, gone — `again` asks for it at HQPlayer's next answer."""
+    run to judge at the rest its own Stop makes, and is said only once no
+    run will judge it: start() refuses after all, the put-back outlived its
+    wait (a build), or the run is over before it got there (_run). One
+    command sequence: a setting HQPlayer builds holds the link as any other,
+    and the caller — the attach, the poller — goes on once the build begins,
+    the rest put back behind it (BuildWatch.waking). Not put back — HQPlayer
+    building, silent, gone — `again` asks for it at HQPlayer's next
+    answer. Returns whether a quiet put-back left a mark it did not say."""
     if running():
-        return
+        return False
     run = db_query_one("""
         SELECT * FROM hqp_benchmark_runs
          WHERE hqp_endpoint_id = %(e)s AND finished_at IS NULL
          ORDER BY started_at DESC LIMIT 1
     """, {"e": endpoint_id})
     if run is None:
-        return
+        return False
     owed = _owe(run["id"], link)
     ready = threading.Event()
+    unsaid = False
 
     def put_back() -> None:
+        nonlocal unsaid
         try:
             with link.build.waking(ready):
-                _put_run_back(link, run, owed, again, gave, quiet)
+                unsaid = _put_run_back(link, run, owed, again, gave, quiet, ready)
         except Exception:       # the thread's boundary: recorded, never lost
             logger.exception("HQPlayer benchmark run %s: putting it back failed", run["id"])
         finally:
             ready.set()
     threading.Thread(target=put_back, daemon=True, name="hqp-benchmark-recover").start()
     ready.wait()
+    # Read once ready is set by the put-back's end; one a build woke early
+    # says its mark itself (_put_run_back)
+    return unsaid
 
 
 def _put_run_back(link, run: dict, owed: tuple, again: Callable[[], None],
-                  gave: Optional[Callable[[str], bool]], quiet: bool) -> None:
+                  gave: Optional[Callable[[str], bool]], quiet: bool,
+                  ready: threading.Event) -> bool:
+    """recover()'s put-back on the command lock. Returns whether it closed
+    the run quietly with a mark it did not say."""
     from playback.hqp_link import Dropped
     owed_on, item = owed
     why, done = owed_on.superseded(item), None
@@ -1888,8 +1929,14 @@ def _put_run_back(link, run: dict, owed: tuple, again: Callable[[], None],
                     done = _recover(_OnLink(link), run, gave)
                     if done is not None:
                         if quiet:
+                            # A mark the new run judges at once wakes nobody
+                            # — start() says it if it refuses after all, the
+                            # run's end if it never got there — and a put-back
+                            # that outlived start()'s wait (a build) says it
+                            # itself: no run follows it
                             done = {k: v for k, v in done.items()
                                     if k in ("note", "unchecked", "refused")}
+                            done["notify"] = ready.is_set()
                         _close_owed(run, **done)
                 finally:
                     with _lock:
@@ -1900,7 +1947,7 @@ def _put_run_back(link, run: dict, owed: tuple, again: Callable[[], None],
             if why is None:
                 # Lent, let go or closed: the next attach tries again
                 logger.info("HQPlayer benchmark run %s not put back yet: %s", run["id"], e)
-                return
+                return False
         except (_Reopened, _Lost, BrokenPipeError, ConnectionError, OSError) as e:
             # A switch away, or another HQPlayer chosen, that woke the request
             # on its way left the run to its end (left_by_person): this one
@@ -1908,16 +1955,18 @@ def _put_run_back(link, run: dict, owed: tuple, again: Callable[[], None],
             if why is None:
                 logger.info("HQPlayer benchmark run %s not put back yet: %s", run["id"], e)
                 again()
-                return
+                return False
         else:
             if done is None:
                 why = link.superseded(item)
                 if why is None:
                     again()
-                    return
+                    return False
     if why is not None:
         _close_owed(run, f"cut short; not put back — {why}: HQPlayer was left as it was set "
                          "since", left=not quiet, theirs=True)
+        return False
+    return bool(quiet and done.get("unchecked") and not done["notify"])
 
 
 def _close_owed(run: dict, note: str, left: bool = False, restored: bool = False,
@@ -1936,11 +1985,12 @@ def _close_owed(run: dict, note: str, left: bool = False, restored: bool = False
     `unchecked`: the mode it measured not read yet, the row marked —
     `refused`: HQPlayer was at rest and did not let it be read, so only a
     new run's start tries it again (_measured_refused).
-    `notify`: False for a caller that judges the mark at once and says what
-    stands itself (_take_owed). `theirs`: a person's change superseded the
-    put-back — a return point its round trip left (_keep_point) goes too,
-    HQPlayer theirs. Once only: a run another path closed meanwhile stays
-    as that path closed it."""
+    `notify`: False where a run judges the mark at once — its own first step
+    (_take_owed), or start()'s put-back the run follows: start() says it
+    when it refuses instead, the run's end when it never got there.
+    `theirs`: a person's change superseded the put-back — a return point its
+    round trip left (_keep_point) goes too, HQPlayer theirs. Once only: a
+    run another path closed meanwhile stays as that path closed it."""
     row = db_execute("""UPDATE hqp_benchmark_runs SET finished_at = now(), outcome = 'interrupted',
                                note = concat_ws('; ', note, %(n)s::text),
                                left_at = CASE WHEN %(left)s THEN now() END,
@@ -2021,7 +2071,8 @@ def left_by_person(host: str, port: int, why: str) -> None:
                        "(%s): %s", why, e)
 
 
-def _take_owed(link: _Link, endpoint_id: int, gave: Callable[[str], bool], kind: str) -> None:
+def _take_owed(link: _Link, endpoint_id: int, gave: Callable[[str], bool],
+               kind: Optional[str]) -> None:
     """A new run's first step: a run cut short before it still owes HQPlayer
     its put-back — it goes first, on this run's connection, so the new run
     reads what HQPlayer holds after it, never the old run's test settings;
@@ -2036,9 +2087,9 @@ def _take_owed(link: _Link, endpoint_id: int, gave: Callable[[str], bool], kind:
     and a mode switched under a track restarts the output — and HQPlayer
     goes back first to a mode a check left it in (_go_back): the new run
     never reads that mode as the owner's, and is refused when HQPlayer does
-    not go back. Not judged, the mode stays marked: the new run, of `kind`,
-    goes only if it reads nothing of it — a run of another mode, HQPlayer
-    in another."""
+    not go back. Not judged, the mode stays marked: the new run, of `kind`
+    (None: the mode HQPlayer is in), goes only if it reads nothing of it —
+    a run of another mode, HQPlayer in another."""
     run = db_query_one("""
         SELECT * FROM hqp_benchmark_runs
          WHERE hqp_endpoint_id = %(e)s AND finished_at IS NULL

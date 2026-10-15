@@ -1573,16 +1573,21 @@ cooling — so Sautium measures it instead of predicting it
   again; until the poller has read HQPlayer it says the test settings may
   still be there. A new run takes a put-back still owed first — at its
   start, and again as its first step — and reads what HQPlayer holds after
-  it; the run it took is closed then with no notice, however it was put
-  back or left — the new run reads HQPlayer as theirs. Forgetting the
-  HQPlayer takes its measurements with it; it is refused while a run
-  measures it. The estimate of a run's length takes the pace of the last
-  run that ended or was cancelled (on a trial-mode Embedded the owner
-  cancels before the half hour is up and runs again: a repeat run measures
-  only the gaps). Without an estimate the block says why (`no_estimate`,
-  since 2026-10-11): the HQPlayer is not registered yet, it did not report
-  its state, a list a run is planned from is missing, or its mode follows
-  the source.
+  it; the run it took is closed then with no notice, however it was put back
+  or left — the new run reads HQPlayer as theirs — and a mode it leaves
+  unchecked is said only once no run will judge it: the start refused after
+  all, or the run over before it got there (2026-10-15). A run of the mode
+  HQPlayer is in takes that mode from what it reads at its own rest, not
+  from the start's read: a check of ours may hold HQPlayer in the other mode
+  for a moment, or have left it there for the run to take it back first
+  (2026-10-15). Forgetting the HQPlayer takes its measurements with it; it
+  is refused while a run measures it. The estimate of a run's length takes
+  the pace of the last run that ended or was cancelled (on a trial-mode
+  Embedded the owner cancels before the half hour is up and runs again: a
+  repeat run measures only the gaps). Without an estimate the block says why
+  (`no_estimate`, since 2026-10-11): the HQPlayer is not registered yet, it
+  did not report its state, a list a run is planned from is missing, or its
+  mode follows the source.
 
 Measurements stay on this node: in the `.sbk` backup, not in the life-data
 merge (their endpoint is this node's registry), not in P2P sync.
