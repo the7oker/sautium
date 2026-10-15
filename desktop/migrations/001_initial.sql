@@ -396,9 +396,11 @@ CREATE TABLE IF NOT EXISTS hqp_benchmark_runs (
     own_filter1x INTEGER,
     own_shaper INTEGER,
     -- The selection the run set last: an HQPlayer still on it is the run's
-    -- mark like its lowered volume and its signals — a run cut short is put
-    -- back only while one remains (one that restarted under the run keeps
-    -- its selection, maybe nothing else)
+    -- mark like its lowered volume and its signals — in the mode the run
+    -- measured too, read there only on an HQPlayer at rest
+    -- (measured_unchecked_at) — and a run cut short is put back only while
+    -- one remains (one that restarted under the run keeps its selection,
+    -- maybe nothing else)
     last_rate INTEGER,
     last_filter INTEGER,
     last_filter1x INTEGER,

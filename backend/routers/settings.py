@@ -1237,8 +1237,10 @@ def _notice_items() -> List[Dict[str, Any]]:
                       "data": {k: refused[k] for k in ("what", "count", "total", "stream")}})
     # A benchmark run cut short whose put-back the owner's own change
     # superseded: what HQPlayer still holds of its test settings — the volume
-    # among them, never raised for them — until they changed it all. Its run
-    # row is the source, whatever the output is now
+    # among them, left at the run's level when a person's DSP change or
+    # switch came first (a knob they set in HQPlayer gives it back) — until
+    # they changed it all. Its run row is the source, whatever the output is
+    # now
     from playback import hqp_benchmark
     left = hqp_benchmark.left_notice()
     if left is not None:

@@ -4173,10 +4173,10 @@ class HqpBackend(PlayerBackend):
         reads as read here — None in a tail mirror or with no anchor), None),
         or (None, what marks the playlist) when HQPlayer's playlist cannot
         place it: shorter than the queue it holds, reading no slot of the
-        queue's — another controller's entry; an entry it is opening, a stop
-        under way or a state the SDK does not name gives no verdict which
-        (_still_reads) — or reading a file queued at more than one slot it
-        holds (no verdict which)."""
+        queue's — another controller's entry; in step also an entry it is
+        opening, a stop under way or a state the SDK does not name, which
+        gives no verdict (_still_reads) — or reading a file queued at more
+        than one slot it holds (no verdict which)."""
         if item is None:
             return (len(raw), None, None), None
         layout = self._layout()

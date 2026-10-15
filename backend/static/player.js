@@ -334,10 +334,10 @@
     try {
       const resp = await fetch('/api/player/' + cmd, { method: 'POST' }).catch(() => null);
       if (resp && resp.ok) return;
-      // A word the output did not take gets its explanation from the
-      // shell's one reporter (a dozing output, streaming, HQPlayer building
-      // or not answering) instead of dying in the console: after a Pause or
-      // a Stop the music goes on, and the person must know.
+      // A word the route refused gets its explanation from the shell's one
+      // reporter (a dozing output, streaming, HQPlayer held, building or not
+      // answering) instead of dying in the console: after a Pause or a Stop
+      // the music goes on, and the person must know.
       if (['play', 'next', 'previous', 'pause', 'stop'].includes(cmd)) {
         await window.reportPlaybackResult(resp);
       } else {
@@ -346,7 +346,7 @@
     } finally { _cmdInFlight.delete(cmd); }
   }
 
-  // A Seek the output did not take is said, as a Pause is (playerCmd).
+  // A Seek the route refused is said, as a Pause is (playerCmd).
   async function playerSeek(position) {
     const resp = await fetch('/api/player/seek', {
       method: 'POST',

@@ -64,7 +64,8 @@ end, on cancel, on failure and when the app stops (shutdown); a run cut
 short before that is put back the next time HQPlayer answers — at the
 attach or when the poller sees it come back (recover) — while HQPlayer still
 shows a mark of the run: its lowered volume, its signals, or the selection
-it set last; one HQPlayer went away under (it closed, reset or refused the
+it set last, in the mode it measured too (read there only on an HQPlayer at
+rest); one HQPlayer went away under (it closed, reset or refused the
 connection) whole, while it shows what a box that just booted shows —
 stopped, reading no other controller's entry. A new run takes it first, and
 closes it with no notice. A person's switch away, DSP change or knob set in
@@ -1815,7 +1816,8 @@ def recover(endpoint_id: int, link, *, gave: Optional[Callable[[str], bool]] = N
     time HQPlayer answers (the attach, or the poller's next answer), before
     anything reads its playlist: put the owner's settings back on its link —
     only while HQPlayer still shows a mark of the run (its signals in the
-    playlist, the volume it lowered to, the selection it set last) — whole
+    playlist, the volume it lowered to, the selection it set last — in the
+    mode it measured too, read there only at rest) — whole
     when HQPlayer went away under the run (lost_at) and shows what a box
     that just booted shows (_booted; `gave` tells an entry this node gave
     it) — and never past a change the owner made since: the put-back is a

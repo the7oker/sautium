@@ -273,8 +273,8 @@ number as it is asked and holds once its command sequence has the command
 lock, so one the lock refuses as busy supersedes nothing (one refused at its
 first request, the lock its own, keeps its number: an older word never beats
 the person's newer one, and the route says the word did not go); a new queue
-and a rebuild
-hold from their ask — a play press's hand-over is cut short at its next add —
+and a rebuild hold from their ask — a play press's hand-over is cut short at
+its next add —
 and are withdrawn if the lock then refuses them, or the hand-over fails
 before it holds (making its URIs): the hand-over owns its number
 (`HqpBackend._handing`). An item left for later (a
@@ -474,9 +474,9 @@ comes after the control port answers again — so neither can end the wait.
     silence is over; the repair is then due again),
     when a re-bind's read of HQPlayer's playlist went unanswered or was
     refused, when HQPlayer moved on from the slot a new order was planned on,
-    or reads none such an edit may go by — another controller's entry, a
-    state the SDK does not name, a stop under way — read in the edit's own
-    sequence, in step too (since 2026-10-14): the entry it plays is never
+    or reads none such an edit may go by — another controller's entry and,
+    in step, a state the SDK does not name or a stop under way — read in the
+    edit's own sequence (since 2026-10-14): the entry it plays is never
     removed, nor restarted by a rebuild (a "play next" that finds it moved
     on to a slot of the queue's loses nothing: it goes behind the entry it
     reads, in the queue as in HQPlayer) — or when it came

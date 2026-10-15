@@ -29,8 +29,9 @@ A link owns:
   * the intent clock: what a person or this node asked of it, in order. The
     order of intents is the order of the asks — each is numbered as it is
     asked — and an intent supersedes only from the moment its command
-    sequence holds the command lock: one the lock refuses as busy takes
-    none and supersedes nothing, while one refused at its first request,
+    sequence holds the command lock: one the lock refuses as busy takes a
+    number it never publishes and supersedes nothing, while one refused at
+    its first request,
     the lock its own (a build or a silence the link's held Status met),
     keeps its number — an older word never beats the person's newer one.
     A new queue and a rebuild supersede from their ask
@@ -173,8 +174,8 @@ class NotAnswering(ConnectionError):
 # link; attach — this link attached again. A play press's own rebuild
 # ("press") goes whatever the person says meanwhile — their words decide
 # only which start follows it — and only a new queue or a switch away drops
-# it (a press no start of which is live by then rebuilds nothing:
-# HqpBackend._press_once).
+# it (a press no start of which is live by then, holding no Pause or Stop,
+# rebuilds nothing: HqpBackend._press_once).
 SUPERSEDED_BY = {
     "start": frozenset({"transport", "queue", "rebuild", "start", "switch"}),
     "resume": frozenset({"transport", "queue", "rebuild", "start", "dsp", "switch"}),

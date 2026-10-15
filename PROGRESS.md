@@ -1112,9 +1112,10 @@ implementation details live in the code, DB and git history.
   number, where the link's own words said a busy refusal supersedes
   nothing. Decided: it keeps its number, or an older word would beat the
   person's newer one; the words now say so. Its route answers that it did
-  not go, and the UI now says it for a Pause, a Stop and a Seek too — it
-  had kept them to the console, and the music went on. Lesson: a word
-  that did not go is the person's to know.
+  not go, and the UI now says such a refusal for a Pause, a Stop and a
+  Seek too — the Pause and the Stop had gone to the console, the Seek
+  nowhere, and the music went on. Lesson: a word that did not go is the
+  person's to know.
 - **The older word yields** (2026-10-14). A tap numbered as it was asked
   but decided once it had the command lock — held by a mutation that began
   while it waited, or a play press once the mirror left step — was older
@@ -1122,8 +1123,9 @@ implementation details live in the code, DB and git history.
   without it: that word superseded the tap's start, and the carry-out then
   sent nothing, or the press rebuilt for a start already dead and left
   HQPlayer stopped. The older tap now yields: the words made after it go
-  as if it never came, and a press none of whose starts is live rebuilds
-  nothing. Holding words from the ask, so a tap and the words after it
+  as if it never came, and a press none of whose starts is live, holding
+  no Pause or Stop, rebuilds nothing. Holding words from the ask, so a tap
+  and the words after it
   combine, is left for the next slice. Lesson: a number taken early must
   not let a later decision overrule what was decided meanwhile.
 - **A tap is decided where its start goes** (2026-10-14). A tap on
@@ -1153,9 +1155,16 @@ implementation details live in the code, DB and git history.
   edit — the oracle excuses nothing); with two HQPlayers, a seen
   restored-run report comes back once the other HQPlayer's newer report is
   cleared (the seen map keeps one onset per key); and a held Play that
-  meets a build is recorded as an
-  unreachable attempt with nothing sent (its attempt opens before the lock
-  refuses it).
+  meets a build is recorded as an unreachable attempt with nothing sent
+  (its attempt opens before the lock refuses it).
+- **Open after the second look at the fixes** (2026-10-15), in code the
+  series did not change, left for the next slice: a Pause, a Stop or a
+  Seek HQPlayer refuses in its own words (an Error answer: the route says
+  HTTP 200 with `ok: false`) is said to nobody — the UI says only what the
+  route itself refused; and on a tail mirror a "play next", a removal and
+  a new order still take an entry HQPlayer reads in a state the SDK does
+  not name, or with a stop under way, for a reading (the entry read is
+  never touched).
 - **Open after the fixes' review** (2026-10-14), in code the fixes did not
   change: a "play next" on a tail mirror whose anchor HQPlayer moved past
   goes to the queue alone, before the entry HQPlayer reads, and never
@@ -1314,7 +1323,8 @@ implementation details live in the code, DB and git history.
   every 30 minutes) and lowers the volume again before anything plays, and a
   run cut short is put back the next time HQPlayer answers, while a mark of
   the run remains — the lowered volume, its signals, or the selection it set
-  last. Mute is the bottom of `VolumeRange`, read back, because `VolumeMute`
+  last, in the mode it measured too (read there only on an HQPlayer at
+  rest). Mute is the bottom of `VolumeRange`, read back, because `VolumeMute`
   is a toggle no reply reports. Sharing over P2P is deferred to its own design, in this shape: the
   host class (CPU, GPU, CUDA, build) + the setting + the speed, never a track.
 

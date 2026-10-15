@@ -11278,8 +11278,9 @@
   // A benchmark run cut short whose put-back the owner's own change
   // superseded (playback/hqp_benchmark.py): what HQPlayer still holds of its
   // test settings, each as now → before the run, and a volume left at the
-  // bottom of the range, which nothing raises for them — null until the
-  // poller's next answer of that HQPlayer (the notice stands on the run's row).
+  // run's level when a person's DSP change or switch came first (a knob they
+  // set in HQPlayer gives it back) — null until the poller's next answer of
+  // that HQPlayer (the notice stands on the run's row).
   NOTICE_COPY['hqplayer.run_left'] = n => ({
     title: 'The benchmark was cut short',
     text: (n.data && n.data.items) == null

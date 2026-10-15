@@ -474,7 +474,9 @@ last batch it was handed, `refused`), a benchmark run cut short whose
 put-back the owner's own change superseded (what HQPlayer still holds of
 its test settings, `playback.hqp_benchmark.left_notice`), a run HQPlayer
 went away under, put back whole once it answered again (a report, gone once
-seen, `restored_notice`) and the CLI
+seen, `restored_notice`), a run whose put-back could not read the mode it
+measured, until that mode is judged at HQPlayer's nearest rest or a new
+run's start (`unchecked_notice`) and the CLI
 agents' sign-ins
 (`claude_code.auth`, `codex_cli.auth`: while the assistant runs on one, or
 gear research waits for Claude Code — the gear chips and sheet say so in
