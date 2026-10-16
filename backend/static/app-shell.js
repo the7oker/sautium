@@ -11317,7 +11317,7 @@
     const d = n.data || {};
     return {
       title: 'Benchmark settings not checked yet',
-      text: `The ${escapeHtml(d.mode)} settings are not checked yet — HQPlayer did not let them be read. They are checked again before the next run at the latest.`,
+      text: `The ${escapeHtml(d.mode)} settings are not checked yet — HQPlayer did not let them be read or set back. They are checked again before the next run at the latest.`,
     };
   };
   // A check that left HQPlayer in the measured mode names where it was found

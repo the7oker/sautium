@@ -1259,7 +1259,16 @@ implementation details live in the code, DB and git history.
   note leaves that note a point behind, and the check takes the test knob
   for the owner's change — the run closed as left to them, the test point
   kept as theirs. The cure is to note a point before sending it
-  (write-ahead), a new mechanism.
+  (write-ahead), a new mechanism. And a run whose HQPlayer the owner forgets
+  while one of its points is being written ends "failed" on the points
+  table's foreign key, not as forgotten: the point's insert (`_ledger`;
+  `hqp_load.write` has the same shape) finds the run's row in its snapshot,
+  and its key check then meets the deletion in flight. In the scene of
+  `test_an_hqplayer_forgotten_mid_run_ends_it` on a run of PCM from SDM, the
+  HQPlayer forgotten as the run's second point starts: 5 of 80 runs, against
+  0 of 20 in that test's own scene. The rows go either way; what is lost is
+  the last run's words. The cure: a violation of the run's or the endpoint's
+  key read as forgotten.
 - **One error, not reproduced** (2026-10-15).
   `test_a_new_run_judges_an_unchecked_measured_mode_before_it_reads_the_owners`
   (tests/test_hqp_benchmark.py) ended once in an ERROR — in its setup or
