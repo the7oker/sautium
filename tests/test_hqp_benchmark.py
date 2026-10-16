@@ -3729,6 +3729,35 @@ def test_a_run_of_another_mode_is_refused_while_hqplayer_is_in_the_unchecked_mod
     assert _unchecked(run, run_id)
 
 
+def test_a_run_of_another_mode_is_refused_while_the_mode_hqplayer_is_in_stays_unchecked(
+        run, monkeypatch):
+    """A run of SDM in SDM left SDM unchecked, and HQPlayer, still in SDM,
+    refuses the owner's selection there again at the next run's start: the
+    mark stands, and a run of PCM is refused too — it would read SDM's
+    selection, still unchecked, as the owner's to put back."""
+    import datetime
+    now = datetime.datetime.now(datetime.timezone.utc)
+    fake = run.fake
+    run_id = _cut_short_run(run, finished_at=now, outcome="interrupted", measured_unchecked_at=now,
+                            last_rate=1, last_filter=1, last_filter1x=1, last_shaper=1)
+    with fake._lock:
+        fake.mode, fake.sel[2] = 2, [1, 1, 1, 1]           # SDM on the run's last point
+    monkeypatch.setattr(bench, "check_measured", lambda *a, **kw: None)   # no rest tries it
+    refused, dispatch = [], fake._dispatch
+
+    def refuses_sdms_filter(cmd, attrs):
+        if cmd == "SetFilter" and fake.mode == 2:
+            refused.append(True)
+            return '<SetFilter result="Error">Filter not available</SetFilter>'
+        return dispatch(cmd, attrs)
+    monkeypatch.setattr(fake, "_dispatch", refuses_sdms_filter)
+    bench.start("pcm")
+    assert _wait(lambda: not bench.running(), 30)
+    assert refused and "not checked yet" in (bench.state()["note"] or ""), bench.state()
+    assert run.q("SELECT count(*) FROM hqp_benchmark_runs WHERE id > %s", run_id) == [(0,)]
+    assert _unchecked(run, run_id)
+
+
 def _notices() -> list:
     from routers import settings as settings_router
     return settings_router._notices_state()["items"]
@@ -3964,12 +3993,12 @@ def test_a_run_cut_after_its_return_says_the_mark_standing(run, monkeypatch):
     assert _unchecked(run, run_id) and not _point(run, run_id)
 
 
-def _refuses_pcms_filter_once(monkeypatch, fake, when=lambda: True) -> list:
-    """HQPlayer refuses the next SetFilter in PCM once `when` says so."""
+def _refuses_filter_once(monkeypatch, fake, mode: int, when=lambda: True) -> list:
+    """HQPlayer refuses the next SetFilter in `mode` once `when` says so."""
     refused, dispatch = [], fake._dispatch
 
     def refuses(cmd, attrs):
-        if not refused and when() and cmd == "SetFilter" and fake.mode == 1:
+        if not refused and when() and cmd == "SetFilter" and fake.mode == mode:
             refused.append(True)
             return '<SetFilter result="Error">Filter not available</SetFilter>'
         return dispatch(cmd, attrs)
@@ -3990,7 +4019,7 @@ def test_a_selection_a_put_back_cannot_set_back_leaves_the_measured_mode_marked(
                             last_shaper=0)
     signal = bench.ensure_signal(44100)
     proxy = streaming_service.get_proxy()
-    refused = _refuses_pcms_filter_once(monkeypatch, fake)
+    refused = _refuses_filter_once(monkeypatch, fake, 1)
     with fake._lock:
         fake.mode, fake.sel[1], fake.volume = 1, [1, 0, 0, 0], -60.0
         fake.playlist = [proxy.file_url(proxy.file_token(str(signal)), host="127.0.0.1")]
@@ -4004,6 +4033,28 @@ def test_a_selection_a_put_back_cannot_set_back_leaves_the_measured_mode_marked(
                 "WHERE id > %s", run_id)
     _end_the_run()
     assert own == [(2, 1, 1, 1)], own
+
+
+def test_a_put_back_that_cannot_set_back_the_selection_of_the_mode_it_found_marks_it(
+        run, monkeypatch):
+    """A "Measure SDM" run of SDM cut short — the mode HQPlayer was in, the
+    owner's selection there the one the run found — HQPlayer still in SDM on
+    the run's last point, lowered, its signal queued; HQPlayer refuses the
+    filter of the owner's SDM selection once. SDM may still hold the test
+    point: the run is marked."""
+    fake = run.fake
+    run_id = _cut_short_run(run, last_rate=1, last_filter=1, last_filter1x=1, last_shaper=1)
+    signal = bench.ensure_signal(44100)
+    proxy = streaming_service.get_proxy()
+    monkeypatch.setattr(bench, "check_measured", lambda *a, **kw: None)   # no rest tries it
+    refused = _refuses_filter_once(monkeypatch, fake, 2)
+    with fake._lock:
+        fake.mode, fake.sel[2], fake.volume = 2, [1, 1, 1, 1], -60.0
+        fake.playlist = [proxy.file_url(proxy.file_token(str(signal)), host="127.0.0.1")]
+    bench.recover(run.endpoint_id, hl.selected())
+    note = run.q("SELECT note FROM hqp_benchmark_runs WHERE id = %s", run_id)[0][0]
+    assert refused and _unchecked(run, run_id), note
+    assert "did not take the selection of SDM (DSD) back" in note, note
 
 
 def test_a_whole_put_back_hqplayer_keeps_out_of_the_measured_mode_leaves_it_marked(
@@ -4028,6 +4079,26 @@ def test_a_whole_put_back_hqplayer_keeps_out_of_the_measured_mode_leaves_it_mark
         "SELECT note, restored_at IS NOT NULL FROM hqp_benchmark_runs WHERE id = %s", run_id)
 
 
+def test_a_whole_put_back_hqplayer_keeps_out_of_the_mode_it_was_found_in_leaves_it_marked(
+        run, monkeypatch):
+    """A run of SDM in SDM that HQPlayer went away under, put back whole once
+    it answers as a box that just booted — in PCM, SDM still on the run's
+    last point — and HQPlayer refuses the SetMode into SDM: the owner's
+    selection there, the one the run found, is not set back, so the run is
+    marked."""
+    import datetime
+    fake = run.fake
+    run_id = _cut_short_run(run, last_rate=1, last_filter=1, last_filter1x=1, last_shaper=1,
+                            lost_at=datetime.datetime.now(datetime.timezone.utc))
+    with fake._lock:
+        fake.mode, fake.sel[1], fake.sel[2] = 1, [2, 1, 1, 1], [1, 1, 1, 1]
+        fake.playlist, fake.track, fake.state = [], 0, int(PlaybackState.STOPPED)
+    refused = _refuses_sdm(monkeypatch, fake)
+    bench.recover(run.endpoint_id, hl.selected(), gave=run.mgr.active.gave)
+    assert refused and _unchecked(run, run_id), run.q(
+        "SELECT note, restored_at IS NOT NULL FROM hqp_benchmark_runs WHERE id = %s", run_id)
+
+
 def test_a_run_whose_end_cannot_set_the_owners_selection_back_marks_the_measured_mode(
         run, monkeypatch):
     """A run of PCM from SDM is cancelled, and at its own end HQPlayer
@@ -4045,7 +4116,7 @@ def test_a_run_whose_end_cannot_set_the_owners_selection_back_marks_the_measured
     ending, restore = [], bench._restore
     monkeypatch.setattr(bench, "_restore", lambda *a, **kw: (ending.append(True),
                                                              restore(*a, **kw))[1])
-    refused = _refuses_pcms_filter_once(monkeypatch, fake, when=lambda: bool(ending))
+    refused = _refuses_filter_once(monkeypatch, fake, 1, when=lambda: bool(ending))
     snaps = _wakes(monkeypatch)
     assert bench.cancel()
     assert _wait(lambda: not bench.running(), 10)
@@ -4055,6 +4126,48 @@ def test_a_run_whose_end_cannot_set_the_owners_selection_back_marks_the_measured
         before, fake.settings())
     note = run.q("SELECT note FROM hqp_benchmark_runs WHERE id = %s", run_id)[0][0]
     assert "the selection of PCM was put back" in note, note
+
+
+def test_a_run_of_the_mode_hqplayer_is_in_whose_end_cannot_set_its_selection_back_marks_it(
+        run, monkeypatch):
+    """A run of SDM started in SDM measures the owner's own selection there,
+    the one it found. Cancelled on a test point, at its end HQPlayer refuses
+    the filter of that selection once: SDM may still hold the test point.
+    The run is marked, and the owner's next run of SDM judges SDM first —
+    the owner's selection put back there — never reading the test point as
+    theirs."""
+    fake = run.fake
+    fake.jitter = 0.2
+    monkeypatch.setattr(bench, "SETTLE_CAP_S", 2.0)
+    monkeypatch.setattr(bench, "check_measured", lambda *a, **kw: None)   # the next run judges it
+    with fake._lock:
+        fake.mode, fake.sel[2] = 2, [2, 0, 0, 0]       # SDM, the owner's own there
+    owners = tuple(fake.sel[2])
+
+    def on_a_noted_test_point() -> bool:
+        held = tuple(fake.sel[2])
+        return held[1:3] != owners[1:3] and run.q(
+            "SELECT last_rate, last_filter, last_filter1x, last_shaper FROM hqp_benchmark_runs "
+            "ORDER BY id DESC LIMIT 1") == [held]
+    bench.start("sdm")
+    assert _wait(lambda: run.point() >= 2 and on_a_noted_test_point(), 20), fake.sel[2]
+    ending, restore = [], bench._restore
+    monkeypatch.setattr(bench, "_restore", lambda *a, **kw: (ending.append(True),
+                                                             restore(*a, **kw))[1])
+    refused = _refuses_filter_once(monkeypatch, fake, 2, when=lambda: bool(ending))
+    assert bench.cancel()
+    assert _wait(lambda: not bench.running(), 20)
+    first = run.q("SELECT max(id) FROM hqp_benchmark_runs")[0][0]
+    assert refused and _unchecked(run, first), run.q(
+        "SELECT note FROM hqp_benchmark_runs WHERE id = %s", first)
+    bench.start("sdm")
+    assert _wait(lambda: run.q("SELECT pre_rate FROM hqp_benchmark_runs WHERE id > %s", first),
+                 20), bench.state()
+    pre = run.q("SELECT pre_rate, pre_filter, pre_filter1x, pre_shaper FROM hqp_benchmark_runs "
+                "WHERE id > %s", first)
+    _end_the_run()
+    assert pre == [owners], pre
+    assert not _unchecked(run, first)
 
 
 def test_an_hqplayer_forgotten_during_a_runs_put_back_leaves_no_mark_to_set(run, monkeypatch):
@@ -4077,7 +4190,7 @@ def test_an_hqplayer_forgotten_during_a_runs_put_back_leaves_no_mark_to_set(run,
         run.q("DELETE FROM hqp_endpoints RETURNING id")
         return restore(*a, **kw)
     monkeypatch.setattr(bench, "_restore", forgotten_first)
-    refused = _refuses_pcms_filter_once(monkeypatch, fake, when=lambda: bool(ending))
+    refused = _refuses_filter_once(monkeypatch, fake, 1, when=lambda: bool(ending))
     assert bench.cancel()
     assert _wait(lambda: not bench.running(), 10)
     st = bench.state()

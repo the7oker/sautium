@@ -1528,15 +1528,17 @@ cooling — so Sautium measures it instead of predicting it
   over (2026-10-15), before that run reads the owner's selection — a test
   point is never taken for theirs (since 2026-10-14). A selection goes back
   only while HQPlayer shows its mode, and one HQPlayer will not take back is
-  no verdict: the mode stays unchecked, the refusal said (2026-10-15). Each
-  rest tries once; HQPlayer at rest that does not let the mode be read (a
-  SetMode refused or not shown, no State there, a selection or the way back
-  refused, the lists of the mode it was found in not given) is tried again
-  only at a new run's start (`measured_refused_at`, migration 040), and one
-  that still does not refuses only a run that would read that mode — a run
-  of it, or HQPlayer found in it — while a run of another mode goes, the
-  mark standing (2026-10-15). Before a check leaves the mode it found, that
-  mode and its selection by name go on the run's row as the return point
+  no verdict: the mode stays unchecked, the refusal said (2026-10-15) — on a
+  run of the mode HQPlayer was in too, the owner's selection there the one
+  the run found (2026-10-16). Each rest tries once; HQPlayer at rest that
+  does not let the mode be read (a SetMode refused or not shown, no State
+  there, a selection or the way back refused, the lists of the mode it was
+  found in not given) is tried again only at a new run's start
+  (`measured_refused_at`, migration 040), and one that still does not
+  refuses only a run that would read that mode — a run of it, or HQPlayer
+  found in it — while a run of another mode goes, the mark standing
+  (2026-10-15). Before a check leaves the mode it found, that mode and its
+  selection by name go on the run's row as the return point
   (`measured_from_*`, migration 041): the next check — a put-back's own too
   — or run start takes HQPlayer back there first, on a stopped HQPlayer, and
   only then judges — after a node restart too — and a run never reads the

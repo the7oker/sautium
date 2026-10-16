@@ -1211,7 +1211,7 @@ def _measure(ep: dict, kind: str, gave: Callable[[str], bool],
             outcome, note = "failed", _why(e)
         finally:
             _live = None                # a second cancel must not cut the put-back
-            reached, restore_note, gone, own_left = _restore(link, pre, own, mute)
+            reached, restore_note, gone, measured_left = _restore(link, pre, own, mute)
             note = "; ".join(x for x in (note, restore_note) if x) or None
             # An HQPlayer that did not answer the restore keeps the run
             # open: the next attach, or its next answer, puts it back
@@ -1222,7 +1222,7 @@ def _measure(ep: dict, kind: str, gave: Callable[[str], bool],
             if not reached:
                 _owe(run_id)
             _close_run(run_id, outcome, note, stats, finished=reached,
-                       lost=gone and not _halt.is_set(), unchecked=reached and own_left)
+                       lost=gone and not _halt.is_set(), unchecked=reached and measured_left)
         return outcome, note
     finally:
         _live = None
@@ -1676,8 +1676,9 @@ def _restore(link: _Link, pre: dict, own: Optional[dict],
     answered, what could not be put back, whether HQPlayer went away under
     the put-back — it closed, reset or refused the connection, counted as
     it happened (the client's losses, the poller's own rule), whatever
-    failure came last — rather than only stayed silent, whether the measured
-    mode's own selection was left as the run set it: _put_back; False when
+    failure came last — rather than only stayed silent, whether the
+    owner's selection of the mode measured — the one switched into, else
+    the one found — was left as the run set it: _put_back; False when
     HQPlayer did not answer, the put-back owed whole: recover). Only the app
     stopping cuts the wait for an HQPlayer that is away short; one that is
     there but silent — a cancel in the middle of a build — is left to
@@ -1692,16 +1693,17 @@ def _restore(link: _Link, pre: dict, own: Optional[dict],
     if sock is not None:
         sock.settimeout(RESTORE_ANSWER_S)
     try:
-        problems, own_left = _again(lambda: _put_back(link, pre=pre, own=own,
-                                                      volume=mute is not None, clear=True,
-                                                      enter=True),
-                                    silent_ends=True)
+        problems, unset = _again(lambda: _put_back(link, pre=pre, own=own,
+                                                   volume=mute is not None, clear=True,
+                                                   enter=True),
+                                 silent_ends=True)
         after = _again(lambda: link("get_state"), silent_ends=True)
     except _Lost:
         return (False, "HQPlayer did not answer to be put back — it is when it answers again",
                 link.c.losses > losses, False)
+    measured_left = unset["own" if own is not None else "pre"]
     if after is None:
-        return True, "HQPlayer did not report its state after the run", False, own_left
+        return True, "HQPlayer did not report its state after the run", False, measured_left
     diff = [k for k in ("mode", "rate", "filterNx", "filter1x", "shaper")
             if after.get(k) != pre.get(k)]
     if mute is not None and abs(after["volume"] - pre["volume"]) > _DB_EPS:
@@ -1709,12 +1711,12 @@ def _restore(link: _Link, pre: dict, own: Optional[dict],
     if diff or problems:
         logger.warning("HQPlayer benchmark: not put back as it was — %s %s", diff, problems)
         return (True, "not everything was put back: " + ", ".join(diff + problems), False,
-                own_left)
-    return True, None, False, own_left
+                measured_left)
+    return True, None, False, measured_left
 
 
 def _put_back(link: _Link, *, pre: dict, own: Optional[dict], volume: bool,
-              clear: bool, enter: bool) -> Tuple[List[str], bool]:
+              clear: bool, enter: bool) -> Tuple[List[str], Dict[str, bool]]:
     """Stop; the run's sources out of the playlist (`clear`); the measured
     mode's own selection when the run switched into it — HQPlayer keeps one
     selection per mode: in that mode, entered for it when `enter` (the
@@ -1725,9 +1727,10 @@ def _put_back(link: _Link, *, pre: dict, own: Optional[dict], volume: bool,
     selection goes back only while HQPlayer shows its mode, read after the
     switch: in a mode HQPlayer did not take, a selection of another mode's
     indices would set what neither holds. What HQPlayer refused, as "knob:
-    its words", and whether the measured mode's own selection was left as
-    the run set it — refused, or its mode not shown: a test point HQPlayer
-    may still hold there."""
+    its words", and by selection — the mode the run switched into (`own`),
+    the mode it found (`pre`) — whether it was not set back: refused, or its
+    mode not shown; in the mode the run measured, a test point HQPlayer may
+    still hold."""
     link("stop")
     if clear:
         link("playlist_clear")
@@ -1742,7 +1745,7 @@ def _put_back(link: _Link, *, pre: dict, own: Optional[dict], volume: bool,
         if not failed and (there is None or there["mode"] != to):
             problems.append("mode: HQPlayer did not show the mode it was switched to")
         return there["mode"] if there is not None else None
-    own_left = own is not None
+    unset = {"own": own is not None, "pre": True}
     if own is not None:
         if mode != own["mode"] and enter:
             mode = switched(own["mode"])
@@ -1750,16 +1753,17 @@ def _put_back(link: _Link, *, pre: dict, own: Optional[dict], volume: bool,
             _, failed = link("apply_settings", rate=own["rate"], filter=own["filterNx"],
                              filter1x=own["filter1x"], shaper=own["shaper"])
             problems += [f"{k}: {v}" for k, v in failed.items()]
-            own_left = bool(failed)
+            unset["own"] = bool(failed)
     if mode != pre["mode"]:
         mode = switched(pre["mode"])
     if mode == pre["mode"]:
         _, failed = link("apply_settings", rate=pre["rate"], filter=pre["filterNx"],
                          filter1x=pre["filter1x"], shaper=pre["shaper"])
         problems += [f"{k}: {v}" for k, v in failed.items()]
+        unset["pre"] = bool(failed)
     if volume:
         link("set_volume", pre["volume"])
-    return problems, own_left
+    return problems, unset
 
 
 def _open_run(ep: dict, mode_name: str, pre: dict, mute: Optional[float]) -> int:
@@ -2182,7 +2186,7 @@ def _take_owed(link: _Link, endpoint_id: int, gave: Callable[[str], bool],
             _notify()       # changed here — the run over before it said so
     if stuck:
         raise _Abort(f"{why}: HQPlayer is in the mode the last check left it in")
-    if run is not None and (st is None or st["mode"] == run["own_mode"]
+    if run is not None and (st is None or st["mode"] == _measured(run)
                             or mode_kind(run["mode"]) == kind):
         raise _Abort(f"{why}: the mode the last run measured is not checked yet")
     logger.info("HQPlayer benchmark run %s: the mode it measured not checked yet (%s) — a run "
@@ -2655,12 +2659,14 @@ def _recover(link: _Link, run: dict,
     (_check_measured) only on an HQPlayer at rest (_booted) — a mode
     switched under a track restarts the output — else the run is marked
     unchecked, judged at HQPlayer's nearest rest or a new run's start
-    (check_measured, _take_owed); so is one whose owner's selection there
-    HQPlayer does not take back (_put_back). A return point its own round
-    trip left, cut short before (_keep_point), is where HQPlayer goes back
-    first, at rest (_go_back): the mode Sautium left it in is never judged
-    as the owner's — not at rest, or not going back, the run is marked and
-    nothing is judged; only a volume still at the run's level goes back."""
+    (check_measured, _take_owed); so is any run whose owner's selection in
+    the mode it measured — the one it found, for a run that did not
+    switch — HQPlayer does not take back (_put_back). A return point its
+    own round trip left, cut short before (_keep_point), is where HQPlayer
+    goes back first, at rest (_go_back): the mode Sautium left it in is
+    never judged as the owner's — not at rest, or not going back, the run
+    is marked and nothing is judged; only a volume still at the run's level
+    goes back."""
     st, listed, status = link("get_state"), link("get_playlist"), link("get_status")
     if st is None or status is None:
         return None
@@ -2716,9 +2722,9 @@ def _recover(link: _Link, run: dict,
     own = None if run["own_mode"] is None or hidden else {
         "mode": run["own_mode"], "rate": run["own_rate"], "filterNx": run["own_filter"],
         "filter1x": run["own_filter1x"], "shaper": run["own_shaper"]}
-    problems, own_left = _put_back(link, pre=pre, own=own, volume=volume, clear=ours,
-                                   enter=whole)
-    if own_left:
+    problems, unset = _put_back(link, pre=pre, own=own, volume=volume, clear=ours,
+                                enter=whole)
+    if unset["own" if run["own_mode"] is not None else "pre"]:
         unchecked, why = True, f"HQPlayer did not take the selection of {run['mode']} back"
     if whole:
         note = ("cut short; HQPlayer went away under the run — its settings were put back when "
@@ -2922,12 +2928,13 @@ def note_point(endpoint_id: int, st: dict, gen: int) -> None:
 
 def _check_measured(link, run: dict,
                     found: dict) -> Tuple[Optional[Tuple[List[str], dict]], Optional[str]]:
-    """The selection of the mode `run` switched into, which State shows only
-    in that mode (HQPlayer keeps one per mode): into it and read, each knob
-    judged as any of a run cut short — the run's last point goes back to
-    the owner's selection there (`own_*`); a knob that is neither is theirs,
-    and leaves the mode as it is. Then back into the mode HQPlayer was found
-    in (`found`), its selection read again: one the round trip moved is put
+    """The selection of the mode `run` measured (_measured), which State
+    shows only in that mode (HQPlayer keeps one per mode): into it and read,
+    each knob judged as any of a run cut short — the run's last point goes
+    back to the owner's selection there (`own_*`, or `pre_*` for a run of
+    the mode HQPlayer was in); a knob that is neither is theirs, and leaves
+    the mode as it is. Then back into the mode HQPlayer was found in
+    (`found`), its selection read again: one the round trip moved is put
     back as found. Before it leaves, the mode found is kept on the run's
     row as the return point (_keep_point), cleared once HQPlayer is back
     there. Returns the owner's knobs there — none: put back, or theirs
@@ -2935,7 +2942,8 @@ def _check_measured(link, run: dict,
     not list the settings of the mode it is in, took no mode change, said no
     state there, did not take the owner's selection back or did not go back:
     unchecked still, and — not back — the return point standing."""
-    measured, name = run["own_mode"], run["mode"]
+    measured, name = _measured(run), run["mode"]
+    before = "own" if run["own_mode"] is not None else "pre"
     trip = found["mode"] != measured
     if trip:
         back_to = _keep_point(link, run, found)
@@ -2951,11 +2959,13 @@ def _check_measured(link, run: dict,
            else f"HQPlayer did not switch to {name}")
     if there is not None and there["mode"] == measured:
         theirs = [what for what, key, col in _KNOBS
-                  if there[key] not in (run[f"last_{col}"], run[f"own_{col}"])]
+                  if there[key] not in (run[f"last_{col}"], run[f"{before}_{col}"])]
         checked = (theirs, there)
-        if not theirs and any(there[key] != run[f"own_{col}"] for _, key, col in _KNOBS):
-            _, failed = link("apply_settings", rate=run["own_rate"], filter=run["own_filter"],
-                             filter1x=run["own_filter1x"], shaper=run["own_shaper"])
+        if not theirs and any(there[key] != run[f"{before}_{col}"] for _, key, col in _KNOBS):
+            _, failed = link("apply_settings", rate=run[f"{before}_rate"],
+                             filter=run[f"{before}_filter"],
+                             filter1x=run[f"{before}_filter1x"],
+                             shaper=run[f"{before}_shaper"])
             if failed:
                 # The test point still there: no verdict, never the owner's
                 checked = None
