@@ -1266,12 +1266,18 @@ implementation details live in the code, DB and git history.
   and its key check then meets the deletion in flight. In the scene of
   `test_an_hqplayer_forgotten_mid_run_ends_it` on a run of PCM from SDM, the
   rows deleted as the run's second point starts: 5 of 80 runs, against 0 of
-  20 in that test's own scene. The owner cannot forget an HQPlayer a run
-  measures — the route refuses it — so the rows go during a run only through
-  the forget's own window, its check made before the run began and its
-  deletion after: Forget and Run pressed together. That window is open too.
-  The rows go either way; what is lost is the last run's words. The cure: a
-  violation of the run's or the endpoint's key read as forgotten.
+  20 in that test's own scene. The route refuses to forget an HQPlayer a run
+  measures, so through it the rows go during a run only in the forget's own
+  window — its check made before the run began, its deletion after: Forget
+  and Run pressed together; the library CLI's `--forget-endpoint` deletes
+  them with no such check. Both are open too. The rows go either way; what
+  is lost is the last run's words. The cure: a violation of the run's or the
+  endpoint's key read as forgotten. And a check cut on its very switch,
+  HQPlayer never carrying it out, leaves the return point its round trip
+  wrote before the SetMode: every tab is told HQPlayer stayed in the
+  measured mode while it never left the mode it was in — for a tick at the
+  poller's rest; at a run's start, until HQPlayer answers again. The cure:
+  the point's onset written once HQPlayer is seen in the measured mode.
 - **One error, not reproduced** (2026-10-15).
   `test_a_new_run_judges_an_unchecked_measured_mode_before_it_reads_the_owners`
   (tests/test_hqp_benchmark.py) ended once in an ERROR — in its setup or
@@ -1281,6 +1287,17 @@ implementation details live in the code, DB and git history.
   and 47 in turn: 120 clean runs, and two runs of the whole file stayed
   clean. Open: should it come back, the whole output is the evidence, never
   the summary line.
+- **Open after the checks on Windows** (2026-10-16). On HQPlayer Desktop
+  6.2.4 a long filter set in mid-play, in PCM and in SDM, never stopped the
+  transport — its build only fell silent — so the resume after such a
+  change, with its Seek before the start, never ran: to check again should
+  a newer HQPlayer stop after such a change. A track change in PCM answered
+  once after 1.3–1.4 s, HQPlayer re-initialising its CUDA offload — slow
+  in the first run, at once in a later one — so the link called about
+  0.3 s of it a build: open whether a late answer to a track change is one.
+  The assistant's `hqplayer_set_matrix_profile` only switches a profile on
+  and has no way back to none, while HQPlayer has one: MatrixSetProfile with
+  an empty name answers OK and turns the active profile off.
 - **Stop-clear-add-select-play sequence** for `play_track`/`play_album`. Without
   explicit stop, HQPlayer occasionally started the wrong track from the
   existing queue.

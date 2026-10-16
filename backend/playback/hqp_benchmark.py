@@ -221,8 +221,8 @@ _putting: set = set()
 _unchecked: Dict[int, Optional[dict]] = {}
 _busy_at: Dict[int, tuple] = {}
 _checking: set = set()
-# Endpoints whose check a run's hold cut after it went back: that run's end
-# says what stands (_run)
+# Endpoints whose check a run's hold cut once past its way back — a point
+# gone, or one kept anew, may stand: that run's end says what stands (_run)
 _left_to_run: set = set()
 # By endpoint, the run row holding a return point — the mode a check of a
 # measured mode found HQPlayer in, kept until HQPlayer is back there
@@ -1129,9 +1129,9 @@ def _run(ep: dict, kind: str, gave: Callable[[str], bool], asked: Optional[str],
         _left_to_run.discard(ep["id"])
     if unsaid or word:
         # A mark start()'s put-back left for this run to judge, or a check
-        # its hold cut after it went back, is said once the run is over —
-        # judged, or not reached: HQPlayer gone at its start, the output not
-        # lent
+        # its hold cut once past its way back, is said once the run is over
+        # — judged, or not reached: HQPlayer gone at its start, the output
+        # not lent
         _notify()
 
 
@@ -1681,10 +1681,9 @@ def _restore(link: _Link, pre: dict, own: Optional[dict], mute: Optional[float],
     owner's selection of the mode measured — the one the run switched into
     (`switched`), else the one it found — was left as the run set it:
     _put_back; False when HQPlayer did not answer, the put-back owed in
-    full: recover). Only the app
-    stopping cuts the wait for an HQPlayer that is away short; one that is
-    there but silent — a cancel in the middle of a build — is left to
-    recover (RESTORE_ANSWER_S)."""
+    full: recover). Only the app stopping cuts the wait for an HQPlayer
+    that is away short; one that is there but silent — a cancel in the
+    middle of a build — is left to recover (RESTORE_ANSWER_S)."""
     losses = link.c.losses
     link.wait = _halt.wait
     link.c.timeout = RESTORE_ANSWER_S
@@ -2669,12 +2668,13 @@ def _recover(link: _Link, run: dict,
     unchecked, judged at HQPlayer's nearest rest or a new run's start
     (check_measured, _take_owed); so is any run whose owner's selection in
     the mode it measured — the one it found, for a run that did not
-    switch — HQPlayer does not take back (_put_back). A return point its
-    own round trip left, cut short before (_keep_point), is where HQPlayer
-    goes back first, at rest (_go_back): the mode Sautium left it in is
-    never judged as the owner's — not at rest, or not going back, the run
-    is marked and nothing is judged; only a volume still at the run's level
-    goes back."""
+    switch — HQPlayer does not take back (_put_back), a row with no own
+    selection only once it noted a point there: one cut after its switch,
+    before it read that mode, set none. A return point its own round trip
+    left, cut short before (_keep_point), is where HQPlayer goes back
+    first, at rest (_go_back): the mode Sautium left it in is never judged
+    as the owner's — not at rest, or not going back, the run is marked and
+    nothing is judged; only a volume still at the run's level goes back."""
     st, listed, status = link("get_state"), link("get_playlist"), link("get_status")
     if st is None or status is None:
         return None

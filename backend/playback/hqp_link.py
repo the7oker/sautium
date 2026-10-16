@@ -77,11 +77,11 @@ logger = logging.getLogger(__name__)
 # heavy SDM filter changed mid-play for ten (Desktop 6.2.4 on a laptop,
 # 2026-10-11). A hot swap stays below it.
 BUILDING_AFTER_S = 1.0
-# A Stop is answered once the output is torn down: a second in PCM, up to
-# three and a half in SDM through CoreAudio (Desktop 6.2.4, 2026-10-11), more
-# on a slower output. A short silence, never a build: more than four times
-# the longest one measured, with room for outputs not measured (a Pi's ALSA,
-# Windows). Past it, HQPlayer is not answering.
+# A Stop is answered once the output is torn down: a second or two in PCM,
+# about four with a matrix EQ on, up to about six in SDM at the highest rate
+# with the longest filters. A short silence, never a build: more than twice
+# the longest one measured, with room for outputs not measured (HQPlayer
+# Embedded's ALSA). Past it, HQPlayer is not answering.
 STOP_ANSWER_S = 15.0
 # A command's answer otherwise, and a question's.
 COMMAND_WAIT_S = 5.0
