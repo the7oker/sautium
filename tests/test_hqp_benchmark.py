@@ -4295,11 +4295,11 @@ def test_a_run_of_the_mode_hqplayer_is_in_whose_end_cannot_set_its_selection_bac
 
 
 def test_an_hqplayer_forgotten_during_a_runs_put_back_leaves_no_mark_to_set(run, monkeypatch):
-    """A run of PCM from SDM is cancelled; as it puts HQPlayer back, the
-    owner forgets this HQPlayer (its rows go with it), and HQPlayer refuses
-    the filter of the owner's PCM selection once. The run's row is gone:
-    there is no mark to set, and the run ends cancelled, nothing of it
-    left."""
+    """A run of PCM from SDM is cancelled; as it puts HQPlayer back, this
+    HQPlayer's rows go — a forget whose check came before the run began
+    (the route refuses one during a run) — and HQPlayer refuses the filter
+    of the owner's PCM selection once. The run's row is gone: there is no
+    mark to set, and the run ends cancelled, nothing of it left."""
     fake = run.fake
     fake.jitter = 0.2
     monkeypatch.setattr(bench, "SETTLE_CAP_S", 2.0)
