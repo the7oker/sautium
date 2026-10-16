@@ -3327,6 +3327,74 @@ def _marked_while_busy(r: Run) -> int:
     return run_id
 
 
+def _drops_after_the_setmode_into_pcm(monkeypatch, fake, *, for_good: bool,
+                                      while_=lambda: True) -> list:
+    """HQPlayer takes a SetMode into PCM and drops the connection at the
+    State asked right after it — and, `for_good`, every later one too."""
+    dispatch, armed, dropped = fake._dispatch, [], []
+
+    def drops(cmd, attrs):
+        if dropped and for_good:
+            return None
+        if not dropped and while_():
+            if cmd == "SetMode" and attrs.get("value") == "1":
+                armed.append(True)
+            elif armed and cmd == "State":
+                dropped.append(True)
+                if for_good:
+                    fake.mute = True            # every later connection dropped at once
+                return None
+        return dispatch(cmd, attrs)
+    monkeypatch.setattr(fake, "_dispatch", drops)
+    return dropped
+
+
+def test_a_runs_start_cut_after_its_check_kept_a_point_says_the_point(run, monkeypatch):
+    """A run marked while HQPlayer was busy — PCM on its last point, HQPlayer
+    back in SDM: every tab holds "not checked yet". The owner runs SDM; at
+    the run's own Stop its check keeps SDM as the return point and switches
+    HQPlayer into PCM — and HQPlayer goes away right then. The run fails,
+    HQPlayer stayed in PCM, and the tabs say so."""
+    fake = run.fake
+    run_id = _marked_while_busy(run)
+    held = _held(_notices())
+    assert "hqplayer.run_unchecked" in held and "hqplayer.run_stayed" not in held, held
+    monkeypatch.setattr(bench, "check_measured", lambda *a, **kw: None)   # no rest tries it
+    dropped = _drops_after_the_setmode_into_pcm(monkeypatch, fake, for_good=True,
+                                                while_=bench.running)
+    snaps = _wakes(monkeypatch)
+    bench.start("sdm")
+    assert _wait(lambda: not bench.running(), 30)
+    assert dropped and bench.state()["outcome"] == "failed", bench.state()
+    assert fake.mode == 1 and _point(run, run_id) and _unchecked(run, run_id), fake.settings()
+    now = _held(_notices())
+    assert "hqplayer.run_stayed" in now and snaps and snaps[-1] == now, {
+        "held": held, "wakes": snaps, "now": now}
+
+
+def test_the_pollers_check_cut_after_it_kept_a_point_says_the_point(run, monkeypatch):
+    """The same mark; HQPlayer rests, and the poller's check keeps SDM as the
+    return point and switches into PCM — and the connection drops once at
+    its next request. This rest's try is spent, and HQPlayer stayed in PCM:
+    the tabs say so all the same."""
+    fake, mgr = run.fake, run.mgr
+    run_id = _marked_while_busy(run)
+    held = _held(_notices())
+    assert "hqplayer.run_unchecked" in held and "hqplayer.run_stayed" not in held, held
+    dropped = _drops_after_the_setmode_into_pcm(monkeypatch, fake, for_good=False,
+                                                while_=lambda: bool(bench._checking))
+    snaps = _wakes(monkeypatch)
+    with fake._lock:
+        fake.track, fake.state = 1, int(PlaybackState.STOPPED)
+    assert _wait(lambda: (mgr.active.poke(), bool(dropped))[1], 10)
+    assert _wait(lambda: not bench._checking, 5)
+    assert fake.mode == 1 and _point(run, run_id) and _unchecked(run, run_id), fake.settings()
+    now = _held(_notices())
+    assert "hqplayer.run_stayed" in now, now
+    assert _wait(lambda: snaps and snaps[-1] == now, 5), {"held": held, "wakes": snaps,
+                                                          "now": now}
+
+
 def _refuses_pcm(monkeypatch, fake) -> list:
     """HQPlayer refuses every SetMode into PCM: when each was asked."""
     refused, dispatch = [], fake._dispatch

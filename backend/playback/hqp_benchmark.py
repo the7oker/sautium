@@ -2124,8 +2124,8 @@ def _take_owed(link: _Link, endpoint_id: int, gave: Callable[[str], bool],
     judged, the mode stays marked: the new run, of `kind` (None: the mode
     HQPlayer is in), goes only if it reads nothing of it — a run of another
     mode, HQPlayer in another. What it changes of the notices — a mark it
-    closed quietly, a return point gone — is said whatever ends it, a run
-    that cannot go on included."""
+    closed quietly, a return point gone, or one its check keeps — is said
+    whatever ends it, a run that cannot go on included."""
     unsaid = False      # what the notices show changed here, and nothing said it yet
     try:
         run = db_query_one("""
@@ -2170,6 +2170,9 @@ def _take_owed(link: _Link, endpoint_id: int, gave: Callable[[str], bool],
                 if run is None:
                     return
                 st = _again(lambda: link("get_state"))
+                # The check may keep a return point before it leaves the mode
+                # HQPlayer is in (_keep_point): cut after that, it is said too
+                unsaid = True
                 checked, why = (_again(lambda: _check_measured(link, run, st))
                                 if st is not None else (None, "HQPlayer did not report its state"))
                 if checked is not None:
@@ -2250,7 +2253,7 @@ def check_measured(endpoint_id: int, link, status: TrackStatus, *,
 
     def check() -> None:
         spent = True                # this rest's try, unless a newer word cut it
-        back = False                # the way back made, the mark not judged
+        back = False                # past the way back, the mark not judged
         try:
             with link.command(item=item):
                 on = _OnLink(link)
@@ -2259,7 +2262,9 @@ def check_measured(endpoint_id: int, link, status: TrackStatus, *,
                     return
                 point = _return_point(endpoint_id)
                 checked, why = None, _go_back(on, point) if point is not None else None
-                back = point is not None and why is None
+                # From here what the notices show may change: the point gone
+                # with the way back, or one the check keeps (_keep_point)
+                back = why is None
                 if why is None:
                     st = on("get_state") if point is not None else st
                     checked, why = (_check_measured(on, run, st) if st is not None
