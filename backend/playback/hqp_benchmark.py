@@ -1211,7 +1211,8 @@ def _measure(ep: dict, kind: str, gave: Callable[[str], bool],
             outcome, note = "failed", _why(e)
         finally:
             _live = None                # a second cancel must not cut the put-back
-            reached, restore_note, gone, measured_left = _restore(link, pre, own, mute)
+            reached, restore_note, gone, measured_left = _restore(link, pre, own, mute,
+                                                                  switched)
             note = "; ".join(x for x in (note, restore_note) if x) or None
             # An HQPlayer that did not answer the restore keeps the run
             # open: the next attach, or its next answer, puts it back
@@ -1670,16 +1671,17 @@ def _outlast(link: _Link, settle: Settle) -> TrackStatus:
         return status
 
 
-def _restore(link: _Link, pre: dict, own: Optional[dict],
-             mute: Optional[float]) -> Tuple[bool, Optional[str], bool, bool]:
+def _restore(link: _Link, pre: dict, own: Optional[dict], mute: Optional[float],
+             switched: bool) -> Tuple[bool, Optional[str], bool, bool]:
     """Put back what the run changed, whatever ended it. Returns (HQPlayer
     answered, what could not be put back, whether HQPlayer went away under
     the put-back — it closed, reset or refused the connection, counted as
     it happened (the client's losses, the poller's own rule), whatever
     failure came last — rather than only stayed silent, whether the
-    owner's selection of the mode measured — the one switched into, else
-    the one found — was left as the run set it: _put_back; False when
-    HQPlayer did not answer, the put-back owed whole: recover). Only the app
+    owner's selection of the mode measured — the one the run switched into
+    (`switched`), else the one it found — was left as the run set it:
+    _put_back; False when HQPlayer did not answer, the put-back owed in
+    full: recover). Only the app
     stopping cuts the wait for an HQPlayer that is away short; one that is
     there but silent — a cancel in the middle of a build — is left to
     recover (RESTORE_ANSWER_S)."""
@@ -1701,7 +1703,8 @@ def _restore(link: _Link, pre: dict, own: Optional[dict],
     except _Lost:
         return (False, "HQPlayer did not answer to be put back — it is when it answers again",
                 link.c.losses > losses, False)
-    measured_left = unset["own" if own is not None else "pre"]
+    # Switched with no own selection read: the run set nothing there
+    measured_left = unset["own" if switched else "pre"]
     if after is None:
         return True, "HQPlayer did not report its state after the run", False, measured_left
     diff = [k for k in ("mode", "rate", "filterNx", "filter1x", "shaper")
@@ -2729,7 +2732,10 @@ def _recover(link: _Link, run: dict,
         "filter1x": run["own_filter1x"], "shaper": run["own_shaper"]}
     problems, unset = _put_back(link, pre=pre, own=own, volume=volume, clear=ours,
                                 enter=whole)
-    if unset["own" if run["own_mode"] is not None else "pre"]:
+    # No own selection on the row: a run of the mode HQPlayer was in — or one
+    # cut after its switch before it read that mode, which set no point
+    if (unset["own"] if run["own_mode"] is not None
+            else unset["pre"] and run["last_rate"] is not None):
         unchecked, why = True, f"HQPlayer did not take the selection of {run['mode']} back"
     if whole:
         note = ("cut short; HQPlayer went away under the run — its settings were put back when "

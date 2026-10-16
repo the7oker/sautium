@@ -4167,6 +4167,62 @@ def test_a_whole_put_back_hqplayer_keeps_out_of_the_mode_it_was_found_in_leaves_
         "SELECT note, restored_at IS NOT NULL FROM hqp_benchmark_runs WHERE id = %s", run_id)
 
 
+def test_a_run_cut_before_it_read_the_mode_it_switched_into_marks_no_mode(run, monkeypatch):
+    """A run of PCM from SDM: HQPlayer takes the SetMode into PCM and then
+    does not list its shapers there, so the run ends before it reads PCM's
+    selection or sets a test point. Its put-back asks HQPlayer back into
+    SDM, which HQPlayer refuses once. Neither mode holds a test value: the
+    run is not marked."""
+    fake = run.fake
+    with fake._lock:
+        fake.mode = 2                           # SDM: a run of PCM switches modes
+    before = fake.settings()
+    ending, restore = [], bench._restore
+    monkeypatch.setattr(bench, "_restore", lambda *a, **kw: (ending.append(True),
+                                                             restore(*a, **kw))[1])
+    dispatch, refused = fake._dispatch, []
+
+    def answers(cmd, attrs):
+        if cmd == "GetShapers" and fake.mode == 1 and not ending:
+            return '<GetShapers result="Error"/>'
+        if cmd == "SetMode" and attrs.get("value") == "2" and ending and not refused:
+            refused.append(True)
+            return '<SetMode result="Error">Mode not available</SetMode>'
+        return dispatch(cmd, attrs)
+    monkeypatch.setattr(fake, "_dispatch", answers)
+    monkeypatch.setattr(bench, "check_measured", lambda *a, **kw: None)   # no rest tries it
+    bench.start("pcm")
+    assert _wait(lambda: not bench.running(), 30)
+    run_id = run.q("SELECT max(id) FROM hqp_benchmark_runs")[0][0]
+    assert refused and "shapers" in (bench.state()["note"] or ""), bench.state()
+    assert fake.sel[1] == list(before[1]) and fake.sel[2] == list(before[2]), fake.settings()
+    assert not _unchecked(run, run_id), run.q(
+        "SELECT own_mode, mode, note FROM hqp_benchmark_runs WHERE id = %s", run_id)
+
+
+def test_a_lost_run_cut_before_it_read_the_mode_it_switched_into_marks_no_mode(
+        run, monkeypatch):
+    """A run of PCM from SDM that HQPlayer went away under right after the
+    run's SetMode into PCM, before the run read PCM's selection: its row has
+    no own selection and no point. HQPlayer answers again as a box that just
+    booted, in PCM, and refuses the SetMode back into SDM. Neither mode
+    holds a test value: the run is not marked."""
+    import datetime
+    fake = run.fake
+    run_id = _cut_short_run(run, mode="PCM",
+                            lost_at=datetime.datetime.now(datetime.timezone.utc))
+    with fake._lock:
+        fake.mode, fake.sel[1], fake.sel[2], fake.volume = 1, [2, 1, 1, 1], [2, 0, 0, 0], -3.0
+        fake.playlist, fake.track, fake.state = [], 0, int(PlaybackState.STOPPED)
+    refused = _refuses_sdm(monkeypatch, fake)
+    monkeypatch.setattr(bench, "check_measured", lambda *a, **kw: None)   # no rest tries it
+    bench.recover(run.endpoint_id, hl.selected(), gave=run.mgr.active.gave)
+    assert _wait(lambda: run.q("SELECT finished_at IS NOT NULL FROM hqp_benchmark_runs "
+                               "WHERE id = %s", run_id) == [(True,)], 10)
+    note = run.q("SELECT note FROM hqp_benchmark_runs WHERE id = %s", run_id)[0][0]
+    assert refused and not _unchecked(run, run_id), note
+
+
 def test_a_run_whose_end_cannot_set_the_owners_selection_back_marks_the_measured_mode(
         run, monkeypatch):
     """A run of PCM from SDM is cancelled, and at its own end HQPlayer
