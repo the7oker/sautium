@@ -89,7 +89,7 @@ def test_proxy_statuses_name_their_cause():
 def test_too_slow_names_the_dsp_setting():
     v = diag.verdict(_trace("too_slow_speed"))
     assert v["speed"] == 0.82
-    assert "poly-sinc-gauss-xla" in v["sentence"] and "22.5792 MHz" in v["sentence"]
+    assert "poly-sinc-gauss-xla" in v["sentence"] and "DSD512" in v["sentence"]
     assert diag.verdict(_trace("too_slow_output_draining"))["output_fill"] == 0.05
 
 

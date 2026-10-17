@@ -36,6 +36,7 @@ from mcp.server.fastmcp import FastMCP
 backend_path = os.environ.get("BACKEND_PATH", os.path.join(os.path.dirname(__file__), "..", "backend"))
 sys.path.insert(0, backend_path)
 import assistant_queries as aq
+import hqp_atlas
 
 # -- Logging to stderr (NEVER stdout — would corrupt STDIO transport) ---------
 logging.basicConfig(
@@ -1122,7 +1123,8 @@ def hqplayer_get_settings() -> str:
                            + (f" — {f['description']}" if f.get("description") else "")),
                 ("\nAvailable dither/shapers", "shapers", lambda s: f"  [{s['index']}] {s['name']}"),
                 ("\nOutput modes", "modes", lambda m: f"  [{m['index']}] {m['name']}"),
-                ("\nSample rates", "rates", lambda r: f"  [{r['index']}] {r['rate'] / 1000:.1f} kHz")):
+                ("\nSample rates", "rates",
+                 lambda r: f"  [{r['index']}] {hqp_atlas.rate_name(r['rate']) if r['rate'] else 'Auto'}")):
             aq.hqp_list(lines, title, state.get(name), refused.get(name, ""), line)
 
         return "\n".join(lines)

@@ -268,6 +268,12 @@ name's card over the sheet (layer 210). The Filter row's hint shows the
 active filter's facts in place of HQPlayer's raw line. A number is drawn
 from its token in `<data value>`, a leading hyphen-minus as the minus sign.
 
+The module also holds the node's one rate namer (since 2026-10-17):
+`hqp_atlas.rate_name` names a rate HQPlayer reports as the screen's
+`fmtRateLabel` does — kHz up to 768 kHz, a DSD rate as "DSD256" or "DSD512
+(48k)", anything else in MHz. The benchmark's point labels (the run's
+progress), a verdict's DSP line and the assistant's lists of rates use it.
+
 ### Answers: `result` and HQPlayer's reason
 Setters and transport commands echo their element with `result="OK"` or
 `result="Error"`, and on an error the element's TEXT is HQPlayer's reason —

@@ -38,6 +38,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional
 
+from hqp_atlas import rate_name
 from hqplayer_client import CommandOutcome, redact_path, redact_uri, uri_to_file_path
 
 logger = logging.getLogger(__name__)
@@ -561,16 +562,10 @@ def verdict(f: dict) -> dict:
     return _v("unknown", f)
 
 
-def _rate(rate) -> str:
-    if not rate:
-        return ""
-    return f"{rate / 1e6:g} MHz" if rate >= 1_000_000 else f"{rate / 1e3:g} kHz"
-
-
 def dsp_line(f: dict) -> str:
     t = next((t for t in reversed(f.get("ticks") or []) if t.get("filter") or t.get("mode")), None)
     matrix = ((f.get("context") or {}).get("dsp") or {}).get("matrix_profile")
-    parts = [t["mode"], t["filter"], t["shaper"], _rate(t["rate"])] if t else []
+    parts = [t["mode"], t["filter"], t["shaper"], rate_name(t["rate"]) if t["rate"] else ""] if t else []
     if matrix:
         parts.append(f"matrix {matrix}")
     return " · ".join(p for p in parts if p)

@@ -92,6 +92,7 @@ import psycopg2
 
 from config import settings
 from db_pool import db_execute, db_query, db_query_one
+from hqp_atlas import rate_name
 from hqplayer_client import HQPlayerClient, PlaybackState, TrackStatus
 
 from playback import hqp_load
@@ -441,8 +442,8 @@ def build_grid(kind: str, *, filters: List[dict], shapers: List[dict], rates: Li
         running = running_filter(fname, nx, x1, s["rate"])
         rate_hz = hz.get(rate, 0)
         key = (rate_hz, running, sname.get(shaper, ""), s["rate"], s["channels"])
-        rate_txt = _fmt_rate(rate_hz) if rate_hz else "auto rate"
-        label = f"{running} · {sname.get(shaper, '')} · {rate_txt} · {_fmt_rate(s['rate'])} source"
+        rate_txt = rate_name(rate_hz) if rate_hz else "auto rate"
+        label = f"{running} · {sname.get(shaper, '')} · {rate_txt} · {rate_name(s['rate'])} source"
         return Point(rate, rate_hz, nx, x1, shaper, src, label, key, own)
 
     cur_rate, nx, x1, cur_shaper = (current["rate"], current["filterNx"],
@@ -554,21 +555,6 @@ def _descend(rungs: List[Point], known: Dict[tuple, bool], passed: set) -> Optio
         return None
     lowest = min(r.rate_hz for r in failing)
     return next((r for r in reversed(under) if r.rate_hz < lowest and r.key not in passed), None)
-
-
-def _fmt_rate(hz: int) -> str:
-    """A rate as every HQPlayer screen names it (app-shell.js fmtRateLabel):
-    kHz up to 768 kHz, base × power-of-two multiple from the DSD rates up."""
-    if not hz:
-        return "—"
-    if hz <= 768000:
-        return f"{hz // 1000} kHz" if hz % 1000 == 0 else f"{hz / 1000:.1f} kHz"
-    for base, name in ((44100, "44.1k"), (48000, "48k"), (32000, "32k"), (22050, "22.05k")):
-        mult = hz // base
-        if hz % base == 0 and mult >= 64 and mult & (mult - 1) == 0:
-            return f"{name} × {mult}"
-    mhz = hz / 1_000_000
-    return f"{mhz:.0f} MHz" if mhz % 1 == 0 else f"{mhz:.2f} MHz"
 
 
 # -- settling ----------------------------------------------------------------------

@@ -195,12 +195,13 @@ def test_a_source_plays_at_its_own_family_and_the_owners_rate():
     assert not any(p.rate_hz in (3072000, 12288000, 49152000) for p in grid.points)
 
 
-def test_rates_are_named_as_the_hqplayer_screen_names_them():
-    # app-shell.js fmtRateLabel, the 32k and 22.05k families included
-    assert [bench._fmt_rate(hz) for hz in (44100, 48000, 705600, 768000, 352800)] == \
-        ["44.1 kHz", "48 kHz", "705.6 kHz", "768 kHz", "352.8 kHz"]
-    assert [bench._fmt_rate(hz) for hz in (11289600, 12288000, 2048000, 1411200, 3000000)] == \
-        ["44.1k × 256", "48k × 256", "32k × 64", "22.05k × 64", "3 MHz"]
+def test_a_points_label_names_its_rates_as_the_hqplayer_screen_does():
+    # hqp_atlas.rate_name: the run's progress under a Rate row that says
+    # "DSD256" says it too
+    _, _, grid = _grid("desktop_sdm.json")
+    labels = {p.rate_hz: p.label.split(" · ")[2:] for p in grid.points}
+    assert labels[11289600] == ["DSD256", "44.1 kHz source"]
+    assert labels[22579200] == ["DSD512", "44.1 kHz source"]
 
 
 # -- settling ----------------------------------------------------------------------

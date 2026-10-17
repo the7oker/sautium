@@ -2818,7 +2818,10 @@ AHM); a PCM dither keeps the plain picker. A DSD rate is named as the
 atlas's pages name it — "DSD256", "DSD512 (48k)" — wherever the app words a
 rate itself: the Rate row and its picker, the rate playing, the Benchmark's
 results, a cut-short run's line and the notice of a run that stayed in
-another mode.
+another mode; and wherever the node words one, through one namer
+(`hqp_atlas.rate_name`): the benchmark's progress, a verdict's DSP line and
+the assistant's lists of rates, which call rate 0 "Auto" as the Rate knob
+does.
 
 ## Known Gotchas
 

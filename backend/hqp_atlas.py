@@ -27,6 +27,9 @@ no date.
 What a screen gets is wire-ready: a phrase is a list of parts, {"t": text} or
 {"n": a number's token}, so a number reaches the screen as the file wrote it;
 `plain` prints the same phrase as text.
+
+`rate_name` names a rate HQPlayer reports as the HQPlayer screen does, for
+every text the node words about one; it reads no atlas.
 """
 
 import json
@@ -936,13 +939,32 @@ def context_label(key: str) -> str:
 
 def rate_label(rate: str, fs_in: str) -> str:
     """"DSD256 · from 44.1k": the rate key over its source's, a label — the
-    only arithmetic here, on keys."""
+    only arithmetic on the file's keys."""
     return RATE_LABEL.format(n=int(rate) // int(fs_in), family=FAMILY[fs_in])
 
 
 def rate_short(rate: str, fs_in: str) -> str:
     """"DSD256", "DSD512 (48k)"."""
     return (RATE_SHORT_48 if fs_in == "48000" else RATE_SHORT).format(n=int(rate) // int(fs_in))
+
+
+def rate_name(hz: int) -> str:
+    """A rate HQPlayer reports, named as the HQPlayer screen names it
+    (app-shell.js fmtRateLabel) — the one namer for every text the node
+    words: kHz up to 768 kHz; above, a DSD rate by its power-of-two multiple
+    (64 and up) of a 44.1k, 48k, 32k or 22.05k base, any base but 44.1k said
+    beside it ("DSD256", "DSD512 (48k)", "DSD64 (32k)"); anything else in
+    MHz. "—" for none."""
+    if not hz:
+        return "—"
+    if hz <= 768000:
+        return f"{hz // 1000} kHz" if hz % 1000 == 0 else f"{hz / 1000:.1f} kHz"
+    for base, beside in ((44100, ""), (48000, " (48k)"), (32000, " (32k)"), (22050, " (22.05k)")):
+        mult = hz // base
+        if hz % base == 0 and mult >= 64 and mult & (mult - 1) == 0:
+            return f"DSD{mult}{beside}"
+    mhz = hz / 1_000_000
+    return f"{mhz:.0f} MHz" if mhz % 1 == 0 else f"{mhz:.2f} MHz"
 
 
 def _by_rate(rates: Dict[str, Dict[str, Any]]) -> List[Tuple[str, Dict[str, Any]]]:

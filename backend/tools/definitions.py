@@ -16,6 +16,7 @@ import logging
 from contextlib import contextmanager
 
 import assistant_queries as aq
+import hqp_atlas
 from db_pool import db_query as _db_query, db_query_one as _db_query_one
 from tools.registry import REGISTRY, ToolDef, ToolParam
 
@@ -429,7 +430,7 @@ def _h_hqplayer_get_settings() -> str:
                      lambda s: f"  [{s['index']}] {s['name']}"),
                     ("\nOutput modes", hqp.get_modes, lambda m: f"  [{m['index']}] {m['name']}"),
                     ("\nSample rates", hqp.get_rates,
-                     lambda r: f"  [{r['index']}] {r['rate'] / 1000:.1f} kHz")):
+                     lambda r: f"  [{r['index']}] {hqp_atlas.rate_name(r['rate']) if r['rate'] else 'Auto'}")):
                 aq.hqp_list(lines, title, read(), hqp.refusal(), line)
         return "\n".join(lines)
     except Exception as e:
