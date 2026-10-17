@@ -1767,8 +1767,7 @@ def _add_owned(rows: list, *, clear_first: bool, position: str = "end",
 
     if not needs_roll:
         if clear_first:
-            added, _gen = manager.replace_queue(items, play=True, probe_first=True,
-                                                archive=archive)
+            added, _gen = manager.replace_queue(items, play=True, archive=archive)
         else:
             added = manager.append(items, position) or 0
         return added

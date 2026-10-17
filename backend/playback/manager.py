@@ -791,7 +791,6 @@ class PlaybackManager:
             backend.queue_start()
 
     def replace_queue(self, items: list[QueueItem], *, play: bool,
-                      probe_first: bool = False,
                       archive: Optional[Callable[[], None]] = None) -> tuple[int, int]:
         """Replace the queue (and start playback, once the queue lock is let
         go). `archive` — the session rotation a play route starts with — runs
@@ -803,7 +802,7 @@ class PlaybackManager:
         generation is what background fillers must guard their appends
         with."""
         with self._output_mutation(self.ensure_active if play else self.backend) as backend:
-            accepted = backend.queue_replace(items, play=play, probe_first=probe_first)
+            accepted = backend.queue_replace(items, play=play)
             added = len(accepted)
             if items and not added:
                 # Refused whole: raised under the mutation, so what the

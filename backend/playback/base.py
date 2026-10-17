@@ -258,7 +258,7 @@ class PlayerBackend(ABC):
     # goes, when it moved on past the anchor — and the queue puts the tracks
     # there too.
 
-    def queue_replace(self, items: list, *, play: bool, probe_first: bool = False) -> list:
+    def queue_replace(self, items: list, *, play: bool) -> list:
         return list(items)
 
     def queue_append(self, items: list) -> list:

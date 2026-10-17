@@ -98,6 +98,10 @@ class FakeHqp:
         self.service: dict[str, float] = {}
         # Parts of URIs whose PlaylistAdd it refuses — files it cannot open
         self.refuse: set = set()
+        # Parts of URIs of entries it takes a Play for and stops on at once,
+        # at 0 s: a rate combination it refuses ("Requested filter not
+        # possible with this rate combination …, stop" in its log)
+        self.refuse_play: set = set()
         # (time.time(), command) as each command ARRIVES — `commands` logs
         # them as they are carried out, after any silence, in the order they
         # arrived on whichever connection: HQPlayer's one control thread
@@ -266,6 +270,14 @@ class FakeHqp:
             uri = uri.replace("[", "%5B").replace("]", "%5D")
         return escape(uri, {'"': "&quot;"})
 
+    def _stops_if_refused(self) -> None:
+        """The entry a Play went to is one it refuses at Play (refuse_play):
+        stopped on at once. Under the lock."""
+        if (1 <= self.track <= len(self.playlist)
+                and any(part in self.playlist[self.track - 1] for part in self.refuse_play)):
+            self.state = int(PlaybackState.STOPPED)
+            self.position = 0.0
+
     def _dispatch(self, cmd: str, attrs: dict) -> str:
         with self._lock:
             self.commands.append((cmd, attrs))
@@ -339,6 +351,7 @@ class FakeHqp:
                         self._starting = self.start_polls
                     self.state = int(PlaybackState.PLAYING)
                     self.track = self.track or 1
+                    self._stops_if_refused()
                 return '<Play result="OK"/>'
             if cmd == "Stop":
                 self.state = int(PlaybackState.STOPPED)
@@ -355,6 +368,7 @@ class FakeHqp:
                     # "GoTo 1", then "Play (1/0)"; Desktop 6.2.4).
                     self.state = int(PlaybackState.PLAYING)
                     self._starting = self.start_polls
+                    self._stops_if_refused()
                 return '<SelectTrack result="OK"/>'
             return f'<{cmd} result="OK"/>'
 
@@ -1398,6 +1412,29 @@ def test_replacing_the_queue_with_play_is_one_attempt_and_never_deadlocks(traced
     assert a.facts["expected_uri"] == "file:///E:/Music/B/01.flac"
     assert a.facts["adds"]["count"] == 2
     assert [s["command"] for s in a.facts["steps"]] == ["Stop", "Play"]
+
+
+def test_a_new_queue_whose_first_track_hqplayer_stops_on_is_judged_on_that_track(
+        fake, output, monkeypatch):
+    """An album's Play all of files here (routers.player._add_owned), and
+    HQPlayer takes the Play and stops on the first track at once — a rate
+    combination it refuses: one Play and no SelectTrack, the attempt
+    judged on that track, never moved on to a later one that plays."""
+    from routers import player as player_router
+    mgr, b = output
+    monkeypatch.setattr(diag, "OBSERVE_S", 1.5)
+    monkeypatch.setattr(player_router, "manager", mgr)
+    items = [_item(f"E:/Music/R/0{i}.flac", 400 + i) for i in (1, 2, 3)]
+    monkeypatch.setattr(player_router.queue_mod, "items_for_owned_rows", lambda rows: items)
+    fake.refuse_play.add("R/01.flac")
+    n = len(fake.commands)
+    assert player_router._add_owned([{"id": it.media_file_id} for it in items],
+                                    clear_first=True) == 3
+    assert _wait(lambda: any(a.intent == "replace" for a in diag.attempts()))
+    a = next(a for a in diag.attempts() if a.intent == "replace")
+    assert a.facts["slot"] == 1 and a.verdict["code"] == "not_played", a.verdict
+    assert [s["command"] for s in a.facts["steps"]] == ["Stop", "Play"]
+    assert [c for c, _ in fake.commands[n:] if c in ("Play", "SelectTrack")] == ["Play"]
 
 
 def test_hqplayers_error_text_reaches_the_caller(fake):
@@ -4527,7 +4564,7 @@ class _Away:
     def resume_at(self, index):
         pass
 
-    def queue_replace(self, items, *, play, probe_first=False):
+    def queue_replace(self, items, *, play):
         return list(items)
 
     def queue_append(self, items):
@@ -5695,12 +5732,11 @@ def test_a_thousand_links_opened_and_closed_leave_no_descriptor_behind(fake):
     assert _wait(lambda: count() <= base, timeout=10), (count(), base)
 
 
-def test_a_probed_play_that_builds_after_its_answer_is_watched(fake, output, monkeypatch):
-    """A Play HQPlayer answers before its build, on the path every owned play
-    takes (a replace that probes its first track): the request after it in
-    the sequence waits as the Play may make it — watched, up to the build
-    limit — so the silence is said as a build, no question meets it, and no
-    connection is dropped."""
+def test_a_new_queues_play_that_builds_after_its_answer_is_watched(fake, output, monkeypatch):
+    """A Play HQPlayer answers before its build, the start of a new queue,
+    with the plain wait below the build: the request after it waits as the
+    Play may make it — watched, up to the build limit — so the silence is
+    said as a build, no question meets it, and no connection is dropped."""
     mgr, b = output
     _quick_polls(monkeypatch)
     link = _link()
@@ -5709,8 +5745,7 @@ def test_a_probed_play_that_builds_after_its_answer_is_watched(fake, output, mon
     fake.build("Play", 3.0)                             # answered, then silent
     connections = link.client.connections
     t0 = time.time()
-    mgr.replace_queue([_item(f"E:/Music/C/0{i}.flac", 200 + i) for i in range(1, 4)],
-                      play=True, probe_first=True)
+    mgr.replace_queue([_item(f"E:/Music/C/0{i}.flac", 200 + i) for i in range(1, 4)], play=True)
     assert _wait(lambda: time.time() > t0 + 4.5, timeout=8)
     assert any(buildings), "the build was never said"
     assert link.client.connections == connections, "a request timed out in the build"
@@ -5724,8 +5759,7 @@ def test_a_short_start_build_after_a_play_answered_first_is_said(fake, output, m
     buildings = _seen(mgr, "building")
     fake.build("Play", 2.5)
     t0 = time.time()
-    mgr.replace_queue([_item(f"E:/Music/C/0{i}.flac", 200 + i) for i in range(1, 4)],
-                      play=True, probe_first=True)
+    mgr.replace_queue([_item(f"E:/Music/C/0{i}.flac", 200 + i) for i in range(1, 4)], play=True)
     assert _wait(lambda: time.time() > t0 + 4.0, timeout=8)
     assert any(buildings), "the build was never said"
 

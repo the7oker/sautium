@@ -491,29 +491,6 @@ def _same_entry(a: str, b: str) -> bool:
     return a == b
 
 
-def _skip_to_first_playable(hqp: HQPlayerClient, added: int) -> None:
-    """If the first queued track didn't start (e.g. a [Vinyl] placeholder path that
-    isn't real audio), skip ahead until one plays. Best-effort, in the replace
-    start's command sequence; the link's own refusals end it."""
-    try:
-        time.sleep(0.5)
-        status = hqp.get_status()
-        if status and status.state == PlaybackState.STOPPED and added > 1:
-            logger.warning("play: first track didn't start, skipping ahead")
-            for skip_idx in range(2, min(added + 1, 6)):
-                _select(hqp, Entry(skip_idx))
-                hqp.play()
-                time.sleep(0.5)
-                status = hqp.get_status()
-                if status and status.state != PlaybackState.STOPPED:
-                    logger.info(f"play: track {skip_idx} started")
-                    break
-    except (Building, Dropped):
-        raise
-    except (BrokenPipeError, ConnectionError, OSError) as e:
-        logger.info("play: skipping ahead stopped: %s", e)
-
-
 _local_provider = None
 
 
@@ -3975,7 +3952,7 @@ class HqpBackend(PlayerBackend):
             raise Dropped("its track left the queue")
         return self._start_at(index, position, fallback=True, item=start, spends=held)
 
-    def queue_replace(self, items: list, *, play: bool, probe_first: bool = False) -> list:
+    def queue_replace(self, items: list, *, play: bool) -> list:
         """HQPlayer's playlist becomes what it holds of `items` — a new queue
         (intent queue), each slot's way in read for it — and the queue all of
         them (mirror-first): a slot it cannot open, or refuses while it takes
@@ -4018,8 +3995,7 @@ class HqpBackend(PlayerBackend):
                 self._took(layout.handed, taken, unsent, "of a new queue")
                 accepted = list(items)
                 if play:
-                    self._owe_start(att, self._link.item("start", n),
-                                    lambda it: self._play_replaced(it, sum(taken), probe_first))
+                    self._owe_start(att, self._link.item("start", n), self._play_replaced)
         self.poke()
         return accepted
 
@@ -4046,12 +4022,8 @@ class HqpBackend(PlayerBackend):
             taken, unsent = _add_uris_with_retry(self._link, uris, clear_first=True)
         return taken, unsent, n
 
-    def _play_replaced(self, item: Item, added: int, probe_first: bool) -> None:
-        def start(h: HQPlayerClient) -> None:
-            _hqp_safe(self._link, lambda c: c.play(), "Play")
-            if probe_first:
-                _skip_to_first_playable(h, added)
-        self._cmd(start, item=item)
+    def _play_replaced(self, item: Item) -> None:
+        self._cmd(lambda h: _hqp_safe(self._link, lambda c: c.play(), "Play"), item=item)
 
     def _queue_takes(self, items: list, handed: list, taken: list, unsent: int,
                      what: str) -> list:

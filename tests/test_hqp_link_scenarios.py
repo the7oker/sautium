@@ -172,7 +172,7 @@ class _Elsewhere:
     def pressing(self) -> None:
         return None
 
-    def queue_replace(self, items, *, play, probe_first=False) -> list:
+    def queue_replace(self, items, *, play) -> list:
         return list(items)
 
     def queue_append(self, items) -> list:
