@@ -1,0 +1,273 @@
+{
+  "fictional": "Every name, number and word in this file is invented for Sautium's tests; none is a measurement.",
+  "schema": "hqp-atlas-app/v1",
+  "releases": {"9.4.1/pcm": null, "9.4.1/sdm": null},
+  "slugs": [
+    {"kind": "filter", "slug": "demo-sinc-a", "name": "demo-sinc-a", "first_engine": "9.4.1"},
+    {"kind": "filter", "slug": "demo-sinc-b", "name": "demo-sinc-b", "first_engine": "9.4.1"},
+    {"kind": "filter", "slug": "demo-poly-lp", "name": "demo-poly-lp", "first_engine": "9.4.1"},
+    {"kind": "filter", "slug": "demo-poly-mp", "name": "demo-poly-mp", "first_engine": "9.4.1"},
+    {"kind": "filter", "slug": "demo-gauss-x", "name": "demo-gauss-x", "first_engine": "9.4.1"},
+    {"kind": "filter", "slug": "demo-gauss-xa", "name": "demo-gauss-xa", "first_engine": "9.4.1"},
+    {"kind": "filter", "slug": "demo-2s", "name": "demo-2s", "first_engine": "9.4.1"},
+    {"kind": "filter", "slug": "demo-gone", "name": "demo-gone", "first_engine": "9.4.1"},
+    {"kind": "modulator", "slug": "dmx7ec-a", "name": "DMX7EC-a", "first_engine": "9.4.1"},
+    {"kind": "modulator", "slug": "dmx7ec-b", "name": "DMX7EC-b", "first_engine": "9.4.1"},
+    {"kind": "modulator", "slug": "dmx7ec-c", "name": "DMX7EC-c", "first_engine": "9.4.1"},
+    {"kind": "modulator", "slug": "dmx5", "name": "DMX5", "first_engine": "9.4.1"},
+    {"kind": "modulator", "slug": "dmx7-512fs", "name": "DMX7 512+fs", "first_engine": "9.4.1"},
+    {"kind": "modulator", "slug": "dmxh8", "name": "DMXH8", "first_engine": "9.4.1"},
+    {"kind": "dither", "slug": "demo-tpdf", "name": "DEMO-TPDF", "first_engine": "9.4.1"}
+  ],
+  "groups": [
+    {"id": "demo-sinc-a+demo-sinc-b", "kind": "filter", "relation": "within_1_lsb",
+     "members": ["demo-sinc-a", "demo-sinc-b"],
+     "cross_family": {"demo-sinc-a": "plays", "demo-sinc-b": "refused"},
+     "say": "the same output within one step, in this fictional file",
+     "choose_by": "the fictional listener's own ears",
+     "note": "A fictional note on how the two were compared.",
+     "sources": [], "status": "approved"},
+    {"id": "demo-poly-lp+demo-poly-mp", "kind": "filter", "relation": "same_magnitude",
+     "members": ["demo-poly-lp", "demo-poly-mp"],
+     "say": "one magnitude with two phases, in this fictional file", "choose_by": null,
+     "note": "A fictional note on the two phases.", "sources": [], "status": "approved"},
+    {"id": "dmx7ec-a+dmx7ec-b+dmx7ec-c", "kind": "modulator", "relation": "same_figures_within_precision",
+     "members": ["DMX7EC-a", "DMX7EC-b", "DMX7EC-c"], "rates": ["5644800", "12288000"],
+     "say": "three fictional names alike in every figure of this file",
+     "choose_by": "the fictional computer's spare time",
+     "note": "A fictional note on how the three were compared.", "sources": [], "status": "approved"}
+  ],
+  "pairs": [
+    {"id": "phase:demo-poly-lp|demo-poly-mp", "kind": "filter", "axis": "phase",
+     "members": ["demo-poly-lp", "demo-poly-mp"], "contexts_both": ["1x-44.1k-705.6k"], "ratio_scope_both": "Any",
+     "contexts": {"1x-44.1k-705.6k": {
+       "difference": {"phase": ["linear", "minimum"], "group_delay_20k_us": [12.345, null]},
+       "also_differs": {"process_speed_min": [987.65, 876.54], "filter_delay_ms": [6.0, -0.5]}}},
+     "default_context": "1x-44.1k-705.6k", "unmeasured_axes": [], "sources": [],
+     "note": "A fictional note the card never shows.", "status": "approved"},
+    {"id": "apodizing:demo-gauss-x|demo-gauss-xa", "kind": "filter", "axis": "apodizing",
+     "members": ["demo-gauss-x", "demo-gauss-xa"], "contexts_both": ["1x-44.1k-705.6k"], "ratio_scope_both": "Any",
+     "contexts": {"1x-44.1k-705.6k": {
+       "difference": {"apodizing": [false, true], "f_3db_khz": [15.75, 14.5]},
+       "also_differs": {"process_speed_min": "not comparable", "ratio_class": ["Any", "2^x up"]}}},
+     "default_context": "1x-44.1k-705.6k", "unmeasured_axes": ["window"],
+     "sources": ["signalyst-fictional-manual-9-9"], "note": "A fictional note the card never shows.",
+     "status": "approved"},
+    {"id": "length:demo-gauss-x|demo-sinc-a", "kind": "filter", "axis": "length",
+     "members": ["demo-sinc-a", "demo-gauss-x"], "contexts_both": ["1x-44.1k-705.6k"], "ratio_scope_both": "Any",
+     "contexts": {"1x-44.1k-705.6k": {
+       "difference": {"length_ms_100": [24.69, 4.0], "transition_hz": [111, 2222]},
+       "also_differs": {"process_speed_min": [987.65, 98.765], "filter_delay_ms": [6.0, 0.300]}}},
+     "default_context": "1x-44.1k-705.6k", "unmeasured_axes": [], "sources": [],
+     "note": "A fictional note the card never shows.", "status": "approved"},
+    {"id": "order:dmx5|dmx7ec-a", "kind": "modulator", "axis": "order",
+     "members": ["DMX5", "DMX7EC-a"], "contexts_both": ["5644800"],
+     "contexts": {"5644800": {
+       "difference": {"idle_db": [-81.75, -91.25], "shaping_max_db": 9.25},
+       "also_differs": {"process_speed_min": [987.65, 9.8765], "generation": ["Gen1", "Gen9"]}}},
+     "sources": ["jussi-fictional-2001-02-03"], "note": "A fictional note the card never shows.",
+     "status": "approved"}
+  ],
+  "sources": [
+    {"id": "signalyst-fictional-manual-9-9", "src": "signalyst.doc", "who": "Fictional Vendor",
+     "where": "Fictional User Manual 0.0.0, §9.9 Fictional filter table", "date": "2001-01-01", "status": "O"},
+    {"id": "jussi-fictional-2001-02-03", "src": "jussi", "who": "Fictional Author",
+     "where": "Fictional Forum › Fictional thread #1", "date": "2001-02-03", "url": "https://forum.example.org/t/1",
+     "status": "O", "quote": "A fictional sentence, quoted only by Sautium's tests."},
+    {"id": "fictional-forum-snippet", "src": "community", "who": "Fictional Poster",
+     "where": "Fictional Forum › Fictional thread #2", "date": "2001-03-04", "status": "S",
+     "quote": "A snippet this file never re-read in full."}
+  ],
+  "engines": {
+    "9.4.1": {
+      "filters": {
+        "demo-sinc-a": {
+          "name": "demo-sinc-a", "release": "9.4.1/pcm", "modes": {"pcm": "measured", "sdm": "pcm-measurement"},
+          "apodizing": false, "log_name": "Demo sinc A (fictional)",
+          "groups": ["demo-sinc-a+demo-sinc-b"], "pairs": ["length:demo-gauss-x|demo-sinc-a"],
+          "contexts": {
+            "1x-44.1k-705.6k": {"phase": "linear", "f_3db_khz": 17.531, "transition_end_khz": 18.531,
+                                "att_nyquist_db": {"v": 77.37, "b": "ge"},
+                                "stopband_min_db": {"v": 87.73, "b": "ge", "by": "sweep"},
+                                "pre_ring_ms_100": 12.345, "post_ring_ms_100": 12.345, "length_ms_100": 24.69,
+                                "filter_delay_ms": {"v": 6.0, "pm": 20}, "time_invariant": true},
+            "nx-88.2k-705.6k": {"phase": "linear", "f_3db_khz": 17.631, "transition_end_khz": 18.631,
+                                "att_nyquist_db": 71.73, "stopband_min_db": {"v": 85.37, "b": "ge", "by": "impulse"},
+                                "pre_ring_ms_100": 6.13, "post_ring_ms_100": 6.13, "length_ms_100": 12.26,
+                                "filter_delay_ms": {"v": 3.0, "pm": 20}, "time_invariant": true}},
+          "identity_group": "demo-sinc-a+demo-sinc-b",
+          "apod_doc": "Y", "doc_sources": ["signalyst-fictional-manual-9-9"], "variant_of": "demo-gauss-x",
+          "history": {"introduced": {"release": "HQPlayer Desktop 9.0.0", "sources": ["jussi-fictional-2001-02-03"]}},
+          "intent": [{"id": "intent-fictional-demo",
+                      "text": "A fictional line on what the author meant this filter for.",
+                      "sources": ["jussi-fictional-2001-02-03", "fictional-forum-snippet"]}],
+          "genre_doc": ["classical", "any-by-length"]},
+        "demo-sinc-b": {
+          "name": "demo-sinc-b", "release": "9.4.1/pcm", "modes": {"pcm": "measured", "sdm": "pcm-measurement"},
+          "apodizing": false, "log_name": "Demo sinc B (fictional)",
+          "groups": ["demo-sinc-a+demo-sinc-b"], "pairs": [],
+          "contexts": {
+            "1x-44.1k-705.6k": {"phase": "linear", "f_3db_khz": 17.533, "transition_end_khz": 18.533,
+                                "att_nyquist_db": {"v": 77.37, "b": "ge"},
+                                "stopband_min_db": {"v": 87.73, "b": "ge", "by": "sweep"},
+                                "pre_ring_ms_100": 12.347, "post_ring_ms_100": 12.347, "length_ms_100": 24.694,
+                                "filter_delay_ms": {"v": 6.5, "pm": 20}, "time_invariant": true},
+            "nx-88.2k-705.6k": {"phase": "linear", "f_3db_khz": 17.633, "transition_end_khz": 18.633,
+                                "att_nyquist_db": 71.73, "stopband_min_db": {"v": 85.37, "b": "ge", "by": "impulse"},
+                                "pre_ring_ms_100": 6.13, "post_ring_ms_100": 6.13, "length_ms_100": 12.26,
+                                "filter_delay_ms": {"v": 3.5, "pm": 20}, "time_invariant": true}},
+          "identity_group": "demo-sinc-a+demo-sinc-b",
+          "apod_doc": "N", "doc_sources": ["signalyst-fictional-manual-9-9"]},
+        "demo-poly-lp": {
+          "name": "demo-poly-lp", "release": "9.4.1/pcm", "modes": {"pcm": "measured", "sdm": "pcm-measurement"},
+          "apodizing": false, "log_name": "Demo poly LP",
+          "groups": ["demo-poly-lp+demo-poly-mp"], "pairs": ["phase:demo-poly-lp|demo-poly-mp"],
+          "contexts": {
+            "1x-44.1k-705.6k": {"phase": "linear", "f_3db_khz": 16.375, "transition_end_khz": 23.75,
+                                "att_nyquist_db": 3.25, "stopband_min_db": 57.375,
+                                "pre_ring_ms_100": 0.300, "post_ring_ms_100": 0.300, "length_ms_100": 0.2,
+                                "filter_delay_ms": {"v": 6.0, "pm": 20}, "time_invariant": true}},
+          "apod_doc": "½", "doc_sources": ["signalyst-fictional-manual-9-9"]},
+        "demo-poly-mp": {
+          "name": "demo-poly-mp", "release": "9.4.1/pcm", "modes": {"pcm": "measured", "sdm": "pcm-measurement"},
+          "apodizing": false, "log_name": "Demo poly MP",
+          "groups": ["demo-poly-lp+demo-poly-mp"], "pairs": ["phase:demo-poly-lp|demo-poly-mp"],
+          "contexts": {
+            "1x-44.1k-705.6k": {"phase": "minimum", "f_3db_khz": 16.375, "transition_end_khz": 23.75,
+                                "att_nyquist_db": 3.25, "stopband_min_db": 57.375,
+                                "pre_ring_ms_100": 0.0, "post_ring_ms_100": 0.300, "length_ms_100": 0.1,
+                                "filter_delay_ms": {"v": -0.5, "pm": 20}, "time_invariant": true}}},
+        "demo-gauss-x": {
+          "name": "demo-gauss-x", "release": "9.4.1/pcm", "modes": {"pcm": "measured"},
+          "apodizing": false, "log_name": "Demo gauss X",
+          "groups": [], "pairs": ["apodizing:demo-gauss-x|demo-gauss-xa", "length:demo-gauss-x|demo-sinc-a"],
+          "contexts": {
+            "1x-44.1k-705.6k": {"phase": "intermediate", "transition_end_khz": null,
+                                "stopband_min_db": {"v": 81.37, "b": "ge", "by": "contradict"},
+                                "pre_ring_ms_100": 1.5, "post_ring_ms_100": 2.5, "length_ms_100": 4.0,
+                                "filter_delay_ms": {"v": 0.300, "pm": 20}, "time_invariant": false,
+                                "position_dependent": {
+                                  "f_3db_khz": {"min": 15.5, "median": 15.75, "max": 16.0},
+                                  "att_nyquist_db": {"min": 79.37, "median": 79.37, "max": 79.37, "bounds": 0}}}}},
+        "demo-gauss-xa": {
+          "name": "demo-gauss-xa", "release": "9.4.1/pcm", "modes": {"pcm": "measured"},
+          "apodizing": true, "log_name": "Demo gauss XA (fictional)",
+          "groups": [], "pairs": ["apodizing:demo-gauss-x|demo-gauss-xa"],
+          "contexts": {
+            "1x-44.1k-705.6k": {"phase": "linear", "f_3db_khz": 14.5, "transition_end_khz": 21.375,
+                                "att_nyquist_db": 61.37, "stopband_min_db": 63.73,
+                                "pre_ring_ms_100": 2.25, "post_ring_ms_100": 2.25, "length_ms_100": 4.5,
+                                "filter_delay_ms": {"v": 1.25, "pm": 20}, "time_invariant": true}},
+          "apod_doc": "Y", "doc_sources": ["signalyst-fictional-manual-9-9"]},
+        "demo-2s": {
+          "name": "demo-2s", "release": "9.4.1/sdm", "modes": {"sdm": "not-measured"},
+          "groups": [], "pairs": [], "contexts": {}}
+      },
+      "modulators": {
+        "dmx7ec-a": {
+          "name": "DMX7EC-a", "release": "9.4.1/sdm", "generation": "Gen9",
+          "structure": {"order": 7, "ec": true, "adaptive": true, "multibit": null, "tuning": null, "src": "name"},
+          "context_filter": "demo-sinc-a",
+          "groups": ["dmx7ec-a+dmx7ec-b+dmx7ec-c"], "pairs": ["order:dmx5|dmx7ec-a"],
+          "rates": {
+            "5644800": {"fs_in": 44100, "idle_db": -91.25,
+                        "highest_stable_tone_dbfs": -11, "highest_stable_pair_dbfs": -13},
+            "12288000": {"fs_in": 48000,
+                         "idle_db": {"v": -97.5, "b": "le", "routes": "both", "routes_agree": true, "source_floor": false},
+                         "highest_stable_tone_dbfs": -11, "highest_stable_pair_dbfs": -13}},
+          "rates_refused": {},
+          "identity_group": "dmx7ec-a+dmx7ec-b+dmx7ec-c",
+          "history": {"introduced": {"release": "HQPlayer Desktop 9.1.0", "sources": ["jussi-fictional-2001-02-03"]}}},
+        "dmx7ec-b": {
+          "name": "DMX7EC-b", "release": "9.4.1/sdm", "generation": "Gen9",
+          "structure": {"order": 7, "ec": true, "adaptive": true, "multibit": null, "tuning": null, "src": "name"},
+          "context_filter": "demo-sinc-a",
+          "groups": ["dmx7ec-a+dmx7ec-b+dmx7ec-c"], "pairs": [],
+          "rates": {
+            "5644800": {"fs_in": 44100, "idle_db": -91.75,
+                        "highest_stable_tone_dbfs": -11, "highest_stable_pair_dbfs": -13},
+            "12288000": {"fs_in": 48000,
+                         "idle_db": {"v": -97.5, "b": "le", "routes": "both", "routes_agree": true, "source_floor": false},
+                         "highest_stable_tone_dbfs": -11, "highest_stable_pair_dbfs": -13}},
+          "rates_refused": {},
+          "identity_group": "dmx7ec-a+dmx7ec-b+dmx7ec-c"},
+        "dmx7ec-c": {
+          "name": "DMX7EC-c", "release": "9.4.1/sdm", "generation": "Gen9",
+          "structure": {"order": 7, "ec": true, "adaptive": true, "multibit": null, "tuning": null, "src": "name"},
+          "context_filter": "demo-sinc-a",
+          "groups": ["dmx7ec-a+dmx7ec-b+dmx7ec-c"], "pairs": [],
+          "rates": {
+            "5644800": {"fs_in": 44100, "idle_db": -91.5,
+                        "highest_stable_tone_dbfs": -11, "highest_stable_pair_dbfs": -13},
+            "12288000": {"fs_in": 48000,
+                         "idle_db": {"v": -97.5, "b": "le", "routes": "both", "routes_agree": true, "source_floor": false},
+                         "highest_stable_tone_dbfs": -11, "highest_stable_pair_dbfs": -13}},
+          "rates_refused": {},
+          "identity_group": "dmx7ec-a+dmx7ec-b+dmx7ec-c"},
+        "dmx5": {
+          "name": "DMX5", "release": "9.4.1/sdm", "generation": "Gen1",
+          "structure": {"order": 5, "ec": false, "adaptive": false, "multibit": null, "tuning": null, "src": "name"},
+          "context_filter": "demo-sinc-a",
+          "groups": [], "pairs": ["order:dmx5|dmx7ec-a"],
+          "rates": {
+            "5644800": {"fs_in": 44100, "idle_db": -81.75,
+                        "highest_stable_tone_dbfs": -11, "highest_stable_pair_dbfs": -13}},
+          "rates_refused": {
+            "11289600": {"fs_in": 44100,
+                         "line": "Requested filter not possible with this rate combination 44100/11289600, stop"}}},
+        "dmx7-512fs": {
+          "name": "DMX7 512+fs", "release": "9.4.1/sdm", "generation": "Gen5",
+          "structure": {"order": 7, "ec": false, "adaptive": true, "multibit": null, "tuning": "512+fs", "src": "name"},
+          "context_filter": "demo-sinc-a",
+          "groups": [], "pairs": [],
+          "rates": {
+            "22579200": {"fs_in": 44100, "idle_db": -93.375,
+                         "highest_stable_tone_dbfs": -11, "highest_stable_pair_dbfs": -13}},
+          "rates_refused": {
+            "5644800": {"fs_in": 44100,
+                        "line": "Requested filter not possible with this rate combination 44100/5644800, stop"},
+            "12288000": {"fs_in": 48000,
+                         "line": "Requested filter not possible with this rate combination 48000/12288000, stop"}}},
+        "dmxh8": {
+          "name": "DMXH8", "release": "9.4.1/sdm", "generation": "Gen8",
+          "structure": {"order": 5, "ec": true, "adaptive": true, "multibit": "8B", "tuning": null, "src": "name"},
+          "context_filter": "demo-sinc-a",
+          "groups": [], "pairs": [],
+          "rates": {},
+          "rates_refused": {
+            "5644800": {"fs_in": 44100,
+                        "line": "Requested filter not possible with this rate combination 44100/5644800, stop"},
+            "12288000": {"fs_in": 48000,
+                         "line": "Requested filter not possible with this rate combination 48000/12288000, stop"}}}
+      },
+      "fullscale": {
+        "dmx7ec-a": {
+          "5644800": {"0": {"tone_dbfs": -0.5, "pair_dbfs": -6}, "-3": {"tone_dbfs": -3.5, "pair_dbfs": null}},
+          "12288000": {"0": {"tone_dbfs": -0.5}}}
+      },
+      "identity_groups": [
+        {"id": "demo-sinc-a+demo-sinc-b", "kind": "filter", "relation": "within_1_lsb",
+         "members": ["demo-sinc-a", "demo-sinc-b"],
+         "figures": {
+           "1x-44.1k-705.6k": {"f_3db_khz": {"value": 17.532, "spread": 0.002},
+                               "transition_end_khz": {"value": 18.532, "spread": 0.002},
+                               "att_nyquist_db": {"value": {"v": 77.37, "b": "ge"}, "spread": 0.0},
+                               "stopband_min_db": {"value": {"v": 87.73, "b": "ge"}, "spread": 0.0},
+                               "pre_ring_ms_100": {"value": 12.346, "spread": 0.002},
+                               "post_ring_ms_100": {"value": 12.346, "spread": 0.002},
+                               "length_ms_100": {"value": 24.692, "spread": 0.004}},
+           "nx-88.2k-705.6k": {"f_3db_khz": {"value": 17.632, "spread": 0.002},
+                               "transition_end_khz": {"value": 18.632, "spread": 0.002},
+                               "att_nyquist_db": {"value": 71.73, "spread": 0.0},
+                               "stopband_min_db": {"value": {"v": 85.37, "b": "ge"}, "spread": 0.0},
+                               "pre_ring_ms_100": {"value": 6.13, "spread": 0.0},
+                               "post_ring_ms_100": {"value": 6.13, "spread": 0.0},
+                               "length_ms_100": {"value": 12.26, "spread": 0.0}}}},
+        {"id": "dmx7ec-a+dmx7ec-b+dmx7ec-c", "kind": "modulator", "relation": "same_figures_within_precision",
+         "members": ["DMX7EC-a", "DMX7EC-b", "DMX7EC-c"],
+         "figures": {"5644800": {"idle_db": {"value": -91.5, "spread": 0.5}},
+                     "12288000": {"idle_db": {"value": {"v": -97.5, "b": "le"}, "spread": 0.0}}}}
+      ]
+    }
+  }
+}

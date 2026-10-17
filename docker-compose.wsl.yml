@@ -150,6 +150,11 @@ services:
       - ./data/backup:/app/data/backup   # node backups (python -m backup create; the weekly task)
       - ./data/export:/app/data/export   # share exports for other collectors (python -m backup export)
       - ./data/seed:/app/data/seed       # the cold-start seed bundle (downloaded on first start; exported here on the master)
+      # The node's own copy of the HQPlayer atlas, read only while no atlas
+      # file is shipped (backend/hqp_atlas.py). A directory, not the file:
+      # Docker turns a single-file mount whose source is missing into a
+      # directory of that name.
+      - ./data/atlas:/app/data/atlas:ro
       # The launcher tree as an importable `desktop` package — the peer
       # surface reuses its sync_client import gate for pushed enrichment
       # instead of mirroring the seal verification (see routers/sync.py

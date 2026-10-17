@@ -170,6 +170,12 @@ class Settings(BaseSettings):
     # on the first start that needs it; the tree carries only its digest.
     seed_dir: str = "/app/data/seed"
     pg_bin: str = ""
+    # The node's own copy of the HQPlayer atlas (hqp_atlas.py), read only
+    # while no atlas file is shipped beside that module. It never leaves the
+    # node. On Docker a read-only directory mount of the checkout's
+    # data/atlas/, outside the image's build context; <data_dir>/hqp_atlas.json
+    # under the launcher.
+    hqp_atlas_overlay: str = "/app/data/atlas/hqp_atlas.json"
 
     model_config = SettingsConfigDict(
         env_file=".env",

@@ -226,6 +226,24 @@ assistant tool, no control in the Web UI (as of 2026-09-29):
   `<defaults>` hold `filter`/`dither`/`samplerate` for PCM and
   `oversampling`/`modulator`/`bitrate` for SDM)
 
+### The atlas: measured facts of filters and modulators (since 2026-10-17)
+`backend/hqp_atlas.py` reads Sautium's measurements of HQPlayer's filters and
+modulators, the atlas, and words each fact for the HQPlayer screen's pickers
+and a card per name: HQPlayer's own facts from its live lists (the rating, the
+focus words in HQPlayer's order, the ratio class, a modulator's generation)
+and, while the node holds an atlas file, the measured ones. It reads the file
+shipped beside it (`backend/hqp_atlas.json`, not in the tree as of
+2026-10-17) or, only while none is shipped, the node's own copy at
+`HQP_ATLAS_OVERLAY`: on Docker `./data/atlas/hqp_atlas.json`, mounted
+read-only at `/app/data/atlas/` (a directory, so a node without the file gets
+an empty folder, never a directory named like the file); under the launcher
+`<data dir>/hqp_atlas.json`. The node's copy stays on the node: no backup,
+share export, sync or support bundle carries it. The file is read whole and
+checked against the shape the module reads; one that breaks it is refused
+whole, logged in one line that names a place in the file and never a value,
+and the pickers keep HQPlayer's own facts. A changed file is read again on the
+next read; no restart. As of 2026-10-17 no route reads the module yet.
+
 ### Answers: `result` and HQPlayer's reason
 Setters and transport commands echo their element with `result="OK"` or
 `result="Error"`, and on an error the element's TEXT is HQPlayer's reason —
