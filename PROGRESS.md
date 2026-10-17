@@ -2793,6 +2793,33 @@ differs, never with a pick.
   went in — and a failed switch shows under a row that still reads "Signed
   in" (Claude keeps the old credential when a switch fails).
 
+### The pickers say what HQPlayer says, and what was measured (2026-10-17)
+
+The HQPlayer screen's filter and modulator pickers show each row's facts in
+place of HQPlayer's raw line. Without an atlas file — none ships in the
+tree yet — a row shows HQPlayer's own line, read: the ratio class as
+HQPlayer writes it ("2^x up"), the focus words in HQPlayer's order, and the
+rating as a neutral tag, "Signalyst 4/5", whose title says it is Signalyst's
+technical rating relative to the other filters, not a listening score. With
+an atlas file (`backend/hqp_atlas.py`: the shipped one, else the node's own
+copy, which never leaves the node) a row adds what Sautium measured — the
+phase, the impulse before and after its peak at −100 dB, a response that
+moves with the impulse's position, HQPlayer's apodizing label and the
+manual's mark each with its source, a twin's line — a name not measured
+says "not measured on engine …", and ⓘ opens a card per name. The rules:
+the node words every fact and the browser draws what it is given, a number
+as the token the file wrote; the facts are those of HQPlayer's own major
+engine version only, since a label does not undo a wrong number shown as
+measured; nothing sorts by a measured value; the measuring host's speed is
+never shown — the pickers' only CPU fact stays this host's headroom; a
+link to a page waits for its release's date. The Modulator knob opens a
+sheet like the filter picker's, by family (DSD5, ASDM5, DSD7, ASDM7, AMSDM,
+AHM); a PCM dither keeps the plain picker. A DSD rate is named as the
+atlas's pages name it — "DSD256", "DSD512 (48k)" — wherever the app words a
+rate itself: the Rate row and its picker, the rate playing, the Benchmark's
+results, a cut-short run's line and the notice of a run that stayed in
+another mode.
+
 ## Known Gotchas
 
 - **The Docker image took the node's secrets.** `./backend` is the build

@@ -293,9 +293,11 @@ reports them:
 | SDM | `ASDM7EC-super` (modulator) | `Gen7` |
 
 The full list, a line for every name, is live: HQPlayer shows it, and
-Sautium's HQPlayer screen reads it from the running HQPlayer — the filter
-picker puts each filter's line under its name. The lines are Signalyst's
-text, and this file does not reproduce them.
+Sautium's HQPlayer screen reads it from the running HQPlayer — since
+2026-10-17 the filter picker shows each filter's line read: the ratio class,
+the focus words and the rating as a tag that says what the rating is (a line
+in a shape the client does not read stays as HQPlayer gives it). The lines
+are Signalyst's text, and this file does not reproduce them.
 
 - **Signalyst's rating (n/5)** is Signalyst's technical rating relative to the
   other filters — **not a listening score**. It says nothing about what a

@@ -129,7 +129,8 @@ Rules:
   not a grid with an inner scroller.
 - **Tablet layers, bottom up:** mini-player 49, rail 50, More card 52,
   section window 55, then the task overlays a section opens — add-gear
-  sheets 60, the three cards 100/110, the HQPlayer filter picker 200,
+  sheets 60, the three cards 100/110, the HQPlayer filter and modulator
+  picker 200, a name's detail card over it 210 (since 2026-10-17),
   `<dialog>` in the top layer. Anything opened from inside a window
   sits at 60 or above; the ladder lives next to `.route-window` in
   `style.css`.

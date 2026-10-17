@@ -256,8 +256,17 @@ which the atlas holds none of. A name's card is `GET
 /api/hqplayer/facts?kind=filter|modulator&name=`, read from HQPlayer's list
 as the screen reads it: 404 for a name it does not list now (a modulator only
 while its list is SDM's), 409 while the output is lent or HQPlayer builds,
-503 when it cannot be reached. The plain state carries no facts. As of
-2026-10-17 the screen does not draw them yet.
+503 when it cannot be reached. The plain state carries no facts.
+
+The screen draws them as given (since 2026-10-17): each row of the filter
+sheet, and in SDM of the modulator sheet (the Modulator knob opens the
+filter sheet's frame; a PCM dither keeps the plain picker), shows its chips,
+the focus words, the rating tag, the caption and a twin's line under its
+name; the sheet opens with the atlas's head lines; an identical group of
+three or more gets one head above each run of its members; ⓘ opens the
+name's card over the sheet (layer 210). The Filter row's hint shows the
+active filter's facts in place of HQPlayer's raw line. A number is drawn
+from its token in `<data value>`, a leading hyphen-minus as the minus sign.
 
 ### Answers: `result` and HQPlayer's reason
 Setters and transport commands echo their element with `result="OK"` or

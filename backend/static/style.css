@@ -4621,6 +4621,7 @@ a.am-kind { text-decoration: none; }
   font-weight: 400;
   font-size: calc(10 * var(--px));
   color: var(--color-text-dim);
+  white-space: normal;      /* "DSD64 (48k)" over two lines, not past the sheet */
 }
 .hqp-bench-table tbody th {
   min-width: calc(96 * var(--px));
@@ -4713,7 +4714,7 @@ a.am-kind { text-decoration: none; }
 .hqp-sheet-row {
   display: grid;
   grid-template-columns: 1fr calc(40 * var(--px));
-  align-items: center;
+  align-items: start;
   border-bottom: 1px solid var(--color-divider);
 }
 .hqp-sheet-row:last-child { border-bottom: 0; }
@@ -4734,11 +4735,6 @@ a.am-kind { text-decoration: none; }
 .hqp-sheet-row-head {
   display: flex; align-items: center; gap: calc(8 * var(--px));
 }
-.hqp-sheet-row-desc {
-  font-size: var(--text-caption);
-  line-height: var(--lh-normal);
-  color: var(--color-text-dim);
-}
 .hqp-sheet-row.is-current .hqp-sheet-row-name { color: var(--color-amber); }
 .hqp-sheet-dot {
   display: inline-block;
@@ -4757,6 +4753,201 @@ a.am-kind { text-decoration: none; }
   cursor: pointer;
 }
 .hqp-sheet-star.is-on { color: var(--color-amber); }
+/* The row's right column: a filter's star beside line 1 and ⓘ under it; on
+   a modulator's row ⓘ alone, beside its chips. */
+.hqp-sheet-side {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+}
+.hqp-sheet-side.is-starless { padding-top: calc(30 * var(--px)); }
+.hqp-sheet-info {
+  width: calc(40 * var(--px));
+  height: calc(36 * var(--px));
+  display: grid; place-items: center;
+  background: transparent;
+  border: 0;
+  color: var(--color-text-dim);
+  cursor: pointer;
+}
+
+/* A row's facts (hqp_atlas): chips in the neutral status-tag look, set in
+   the prose face — mono is for numbers, and a number in a chip is mono and
+   blue; HQPlayer's focus words; the rating tag at the line's end, neutral,
+   its n/5 in mono. */
+.hqp-facts {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: calc(5 * var(--px)) calc(6 * var(--px));
+  width: 100%;
+}
+.hqp-chip {
+  display: inline-block;      /* not flex: a flex box drops the spaces around a number */
+  padding: calc(2 * var(--px)) calc(7 * var(--px));
+  border: 1px solid var(--color-divider);
+  border-radius: calc(3 * var(--px));
+  background: rgba(237, 226, 212, 0.02);
+  font-size: var(--text-caption);
+  line-height: var(--lh-normal);
+  color: var(--color-text-muted);
+  white-space: nowrap;
+}
+.hqp-chip.is-muted { color: var(--color-text-dim); border-style: dashed; }
+.hqp-facts .num,
+.hqp-facts-caption .num,
+.hqp-facts-twin .num,
+.hqp-sheet-head .num,
+.hqp-bracket-head .num,
+.hqp-card .num { font-family: var(--font-mono); color: var(--color-blue); }
+.hqp-facts-words { font-size: var(--text-caption); color: var(--color-text-dim); }
+.hqp-rating {
+  margin-left: auto;
+  font-size: var(--text-caption);
+  color: var(--color-text-muted);
+  white-space: nowrap;
+}
+.hqp-rating-n { font-family: var(--font-mono); }
+.hqp-facts-caption,
+.hqp-facts-twin {
+  font-size: var(--text-caption);
+  line-height: var(--lh-normal);
+  color: var(--color-text-dim);
+}
+.hqp-facts-twin { color: var(--color-text-muted); }
+/* Under the screen's Filter row the facts stand right, under the name. */
+.hqp-row-facts .hqp-facts { justify-content: flex-end; }
+.hqp-row-facts .hqp-facts-caption { display: block; }
+
+/* The atlas's head lines, above the list: the engine, the chips' context,
+   where an SDM list's properties come from. */
+.hqp-sheet-head {
+  padding: calc(6 * var(--px)) calc(16 * var(--px)) calc(2 * var(--px));
+  font-size: var(--text-caption);
+  line-height: var(--lh-normal);
+  color: var(--color-text-muted);
+}
+.hqp-sheet-head p { margin: 0 0 calc(3 * var(--px)); }
+/* An identical group of three or more: its head once above each run of its
+   members, a rule at the left joining them. */
+.hqp-bracket-head {
+  margin: calc(8 * var(--px)) 0 0 calc(10 * var(--px));
+  padding: calc(6 * var(--px)) calc(16 * var(--px)) calc(6 * var(--px)) calc(10 * var(--px));
+  border-left: calc(2 * var(--px)) solid var(--color-divider);
+  font-size: var(--text-caption);
+  line-height: var(--lh-normal);
+  color: var(--color-text-muted);
+}
+.hqp-bracket-head p { margin: 0; }
+.hqp-sheet-row.is-bracketed {
+  margin-left: calc(10 * var(--px));
+  border-left: calc(2 * var(--px)) solid var(--color-divider);
+}
+
+/* The detail card of a filter or a modulator (ⓘ), over the picker: layer
+   210, above the sheet (200), below the toasts (300). A bottom sheet on the
+   phone, a centred card on the tablet, like the add-gear sheets. */
+.hqp-card-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 210;
+  display: flex;
+  align-items: flex-end;
+  background: rgba(14, 10, 8, 0.55);
+}
+.hqp-card {
+  width: 100%;
+  max-height: 85vh;
+  display: flex;
+  flex-direction: column;
+  padding: calc(8 * var(--px)) 0 calc(20 * var(--px));
+  background: var(--color-foundation);
+  border-top-left-radius: var(--radius-lg);
+  border-top-right-radius: var(--radius-lg);
+}
+.hqp-card-bar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: calc(8 * var(--px));
+  padding: 0 calc(12 * var(--px)) calc(4 * var(--px)) calc(20 * var(--px));
+  flex-shrink: 0;
+}
+.hqp-card-title {
+  margin: 0;
+  font-size: calc(17 * var(--px));
+  font-weight: 600;
+  letter-spacing: -0.01em;
+  color: var(--color-text);
+  overflow-wrap: anywhere;
+}
+.hqp-card-body {
+  min-height: 0;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  padding: 0 calc(20 * var(--px));
+}
+.hqp-card-status {
+  margin: 0 0 calc(4 * var(--px));
+  font-size: var(--text-caption);
+  line-height: var(--lh-normal);
+  color: var(--color-text-muted);
+}
+.hqp-card-section { padding-top: calc(14 * var(--px)); }
+.hqp-card-head {
+  margin: 0 0 calc(6 * var(--px));
+  font-family: var(--font-mono);
+  font-size: calc(10.5 * var(--px));
+  font-weight: 400;
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+  color: var(--color-text-muted);
+}
+.hqp-card-term { margin: 0 0 calc(8 * var(--px)); }
+.hqp-card-t { font-size: var(--text-caption); color: var(--color-text-muted); }
+.hqp-card-d,
+.hqp-card-line {
+  font-size: calc(13 * var(--px));
+  line-height: var(--lh-normal);
+  color: var(--color-text);
+}
+.hqp-card-line { margin: 0 0 calc(6 * var(--px)); }
+.hqp-card-note {
+  margin: 0 0 calc(6 * var(--px));
+  font-size: var(--text-caption);
+  line-height: var(--lh-normal);
+  color: var(--color-text-dim);
+}
+.hqp-card-table-wrap { overflow-x: auto; margin: 0 0 calc(6 * var(--px)); }
+.hqp-card-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: calc(12 * var(--px));
+}
+.hqp-card-table th,
+.hqp-card-table td {
+  padding: calc(4 * var(--px)) 0 calc(4 * var(--px)) calc(8 * var(--px));
+  border-bottom: 1px solid var(--color-divider);
+  text-align: right;
+  vertical-align: top;
+  font-weight: 400;
+}
+.hqp-card-table th:first-child { padding-left: 0; text-align: left; color: var(--color-text-muted); }
+.hqp-card-table thead th { font-size: var(--text-caption); color: var(--color-text-muted); }
+.hqp-card-table td { color: var(--color-text); }
+.hqp-card-more { margin: calc(2 * var(--px)) 0 calc(6 * var(--px)); }
+.hqp-card-more summary {
+  padding: calc(6 * var(--px)) 0;
+  font-size: calc(13 * var(--px));
+  color: var(--color-text-muted);
+  cursor: pointer;
+}
+.hqp-card-link {
+  display: inline-block;
+  margin-top: calc(14 * var(--px));
+  font-size: calc(13 * var(--px));
+  color: var(--color-amber);
+}
 
 /* ---- Peak meter: the Meter chip on the Volume row and its sheet (the
    filter picker's .hqp-sheet frame). Reference:
@@ -6991,8 +7182,9 @@ html { -webkit-tap-highlight-color: transparent; }
    layer. Tablet layer order, bottom up: mini-player 49, rail 50, the More
    card 52 (over the chrome, as drawn), the window 55, then every task
    overlay a section opens — add-gear sheets 60, the three cards 100/110,
-   the HQPlayer filter picker 200, dialogs in the top layer. Anything
-   opened from inside a window sits at 60 or above. */
+   the HQPlayer filter and modulator picker 200, a name's detail card over
+   it 210, dialogs in the top layer. Anything opened from inside a window
+   sits at 60 or above. */
 .route-window {
   position: fixed;
   inset: 0;
@@ -7273,6 +7465,19 @@ html { -webkit-tap-highlight-color: transparent; }
     overflow: hidden;
   }
   .hqp-sheet-card .hqp-sheet-body { padding-bottom: calc(12 * var(--px)); }
+  /* A name's detail card: the add-gear dialogs' centred card. */
+  .hqp-card-overlay {
+    align-items: center;
+    justify-content: center;
+    padding: calc(24 * var(--px));
+  }
+  .hqp-card {
+    width: var(--window-w);
+    max-width: 100%;
+    max-height: 100%;
+    border-radius: var(--radius-lg);
+    box-shadow: var(--shadow-4);
+  }
 }
 
 /* Landscape tablet: the album's cover column stays put on the left while

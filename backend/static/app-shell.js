@@ -8473,23 +8473,24 @@
   function fmtRateLabel(hz) {
     if (!hz) return '—';
     // PCM range — straight kHz (44.1 kHz … 768 kHz). The audiophile
-    // convention switches at the DSD line, where rates are read as
-    // base × multiplier (DSD64 = 44.1k × 64) instead of raw MHz.
+    // convention switches at the DSD line, where a rate is named by its
+    // multiple of the base instead of raw MHz.
     if (hz <= 768000) {
       if (hz % 1000 === 0) return (hz / 1000) + ' kHz';
       return (hz / 1000).toFixed(1) + ' kHz';
     }
-    // 32k base appears too — HQP exposes 32k × 64/128/256/512 for
-    // DACs that prefer the lower base (2.048, 4.096, 8.192,
-    // 16.384 MHz). 22.05k family covers some legacy / mastering
-    // rates. Multiplier must be a clean power of two ≥ 64 for the
-    // base × N naming to be honest; anything else falls through.
-    const labels = {44100: '44.1k', 48000: '48k', 32000: '32k', 22050: '22.05k'};
+    // Named as the atlas's pages name a DSD rate: "DSD256" in the 44.1k
+    // family, any other base said beside it — "DSD512 (48k)". HQP also
+    // exposes a 32k base (2.048 … 16.384 MHz, for DACs that prefer it) and a
+    // 22.05k one (legacy and mastering rates). The multiple must be a clean
+    // power of two ≥ 64 for the DSD name to be honest; anything else falls
+    // through.
+    const bases = {44100: '', 48000: ' (48k)', 32000: ' (32k)', 22050: ' (22.05k)'};
     for (const base of [44100, 48000, 32000, 22050]) {
       if (hz % base === 0) {
         const mult = hz / base;
         if (mult >= 64 && (mult & (mult - 1)) === 0) {
-          return `${labels[base]} × ${mult}`;
+          return `DSD${mult}${bases[base]}`;
         }
       }
     }
@@ -8563,6 +8564,15 @@
       return parts[0];
     }
     return name;
+  }
+
+  // Modulators by family, as HQPlayer's names give them: DSD and ASDM with
+  // their order (DSD5, ASDM5, DSD7, ASDM7), AMSDM and AHM alone; any other
+  // name by its letters and its first digit.
+  function modulatorFamily(name) {
+    const m = /^([A-Za-z]+)(\d)?/.exec(name || '');
+    if (!m) return 'Other';
+    return m[1] === 'AMSDM' || m[1] === 'AHM' ? m[1] : m[1] + (m[2] || '');
   }
 
   // Keep the HQPlayer screen's DSP readout current straight off the player
@@ -8821,6 +8831,107 @@
       entry.settled ? '' : '~'}${entry.speed.toFixed(1)}×</span>`;
   }
 
+  // What the node says of a filter or a modulator (hqp_atlas, through the
+  // state's rows and /api/hqplayer/facts), drawn as given: no word or number
+  // is decided here. A phrase is parts — {t} text, {n} a number's token as
+  // the atlas wrote it, in <data> so its value reads back byte for byte, a
+  // leading hyphen-minus drawn as the minus sign.
+  function hqpPhrase(parts) {
+    return (parts || []).map(p => ('n' in p
+      ? `<data class="num" value="${escapeHtml(p.n)}">${escapeHtml(p.n.replace(/^-/, '−'))}</data>`
+      : escapeHtml(p.t))).join('');
+  }
+
+  // A row's facts: its chips (a muted one for a name the atlas did not
+  // measure), HQPlayer's focus words, the rating tag at the line's end — its
+  // n/5 in mono, never blue, or the rating would be the brightest mark on
+  // every row — then the caption and a twin's line.
+  function hqpFactsHtml(f, { twin = true } = {}) {
+    if (!f) return '';
+    const chips = f.chips.map(c => `<span class="hqp-chip${c.muted ? ' is-muted' : ''}" title="${
+      escapeHtml(c.title)}">${hqpPhrase(c.parts)}</span>`).join('');
+    const words = f.words
+      ? `<span class="hqp-facts-words" title="${escapeHtml(f.words.title)}">${escapeHtml(f.words.text)}</span>` : '';
+    const tag = f.tag ? `<span class="hqp-rating" title="${escapeHtml(f.tag.title)}">${
+      escapeHtml(f.tag.text).replace(/(\d+\/5)$/, '<span class="hqp-rating-n">$1</span>')}</span>` : '';
+    return (chips || words || tag ? `<span class="hqp-facts">${chips}${words}${tag}</span>` : '')
+      + (f.caption ? `<span class="hqp-facts-caption">${hqpPhrase(f.caption)}</span>` : '')
+      + (twin && f.line3 ? `<span class="hqp-facts-twin">${hqpPhrase(f.line3)}</span>` : '');
+  }
+
+  const SVG_INFO = '<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" aria-hidden="true"><circle cx="12" cy="12" r="8.5"/><path d="M12 11v5.5M12 7.6v.2"/></svg>';
+
+  // A name's card: HQPlayer's own facts and, with an atlas file, the measured
+  // ones, in the sections the node words. Over the sheet, at layer 210: a
+  // bottom sheet on the phone, a centred card on the tablet, like the
+  // add-gear sheets.
+  async function openHqpCard(kind, name) {
+    let card;
+    let why = 'The node is not answering right now.';
+    try {
+      const r = await fetch(`/api/hqplayer/facts?kind=${encodeURIComponent(kind)}&name=${encodeURIComponent(name)}`,
+                            { cache: 'no-store' });
+      if (!r.ok) {
+        const out = await r.json().catch(() => ({}));
+        if (typeof out.detail === 'string') why = out.detail;
+        throw new Error('HTTP ' + r.status);
+      }
+      card = await r.json();
+    } catch (err) {
+      notices.toast({ kind: 'error', key: 'hqp.card', title: 'Details unavailable', text: escapeHtml(why) });
+      return;
+    }
+    const overlay = document.createElement('div');
+    overlay.className = 'hqp-card-overlay';
+    overlay.innerHTML = `
+      <div class="hqp-card" role="dialog" aria-label="${escapeHtml(card.title)}">
+        <div class="sheet-handle"></div>
+        <div class="hqp-card-bar">
+          <h2 class="hqp-card-title">${escapeHtml(card.title)}</h2>
+          <button class="icon-btn" type="button" data-close aria-label="Close">${PROFILE_ICONS.close}</button>
+        </div>
+        <div class="hqp-card-body">
+          ${card.status.map(line => `<p class="hqp-card-status">${hqpPhrase(line)}</p>`).join('')}
+          ${card.sections.map(s => `
+            <section class="hqp-card-section">
+              ${s.head ? `<h3 class="hqp-card-head">${escapeHtml(s.head)}</h3>` : ''}
+              ${hqpCardItems(s.items)}
+            </section>`).join('')}
+          ${card.link ? `<a class="hqp-card-link" href="${escapeHtml(card.link.href)}" rel="noreferrer">${
+            escapeHtml(card.link.text)}</a>` : ''}
+        </div>
+      </div>`;
+    document.body.appendChild(overlay);
+    const close = () => overlay.remove();
+    // The second tap of a double-tap on ⓘ lands on the scrim: it repeats the
+    // wish to open, it is not a wish to close.
+    overlay.addEventListener('click', e => { if (e.target === overlay && e.detail < 2) close(); });
+    overlay.querySelector('[data-close]').addEventListener('click', close);
+    overlay.querySelector('[data-close]').focus();
+  }
+
+  function hqpCardItems(items) {
+    return items.map(it => {
+      if ('term' in it) {
+        return `<div class="hqp-card-term"><div class="hqp-card-t">${escapeHtml(it.term)}</div><div class="hqp-card-d">${
+          hqpPhrase(it.def)}</div></div>`;
+      }
+      if ('line' in it) return `<p class="hqp-card-line">${hqpPhrase(it.line)}</p>`;
+      if ('note' in it) return `<p class="hqp-card-note">${hqpPhrase(it.note)}</p>`;
+      if ('more' in it) {
+        return `<details class="hqp-card-more"><summary>${escapeHtml(it.more)}</summary>${hqpCardItems(it.items)}</details>`;
+      }
+      const t = it.table;
+      return `
+        <div class="hqp-card-table-wrap"><table class="hqp-card-table">
+          <thead><tr><th scope="col">${escapeHtml(t.corner || '')}</th>${
+            t.columns.map(c => `<th scope="col">${escapeHtml(c)}</th>`).join('')}</tr></thead>
+          <tbody>${t.rows.map(r => `<tr><th scope="row">${escapeHtml(r.label)}</th>${
+            r.cells.map(c => `<td>${hqpPhrase(c)}</td>`).join('')}</tr>`).join('')}</tbody>
+        </table></div>`;
+    }).join('');
+  }
+
   const HQP_CUDA = { full: 'Filters and convolution', convolution: 'Convolution only', off: 'Off' };
 
   // What forgetting an HQPlayer also takes: the DSP load measured on it is
@@ -8995,12 +9106,11 @@
   }
 
   // A table header's rate: fmtRateLabel's name, squeezed — "705.6k" in PCM,
-  // "×256" at the DSD rates of the 44.1k family ("48k×64" for the others).
-  // An asked automatic rate (a refused or unstarted combination) is "auto".
+  // a DSD rate as named ("DSD256", "DSD64 (48k)": the header wraps). An
+  // asked automatic rate (a refused or unstarted combination) is "auto".
   function hqpRateShort(hz) {
     if (!hz) return 'auto';
-    return fmtRateLabel(hz).replace(' kHz', 'k').replace(' MHz', 'M')
-      .replace(/^44\.1k × /, '×').replace(' × ', '×');
+    return fmtRateLabel(hz).replace(' kHz', 'k').replace(' MHz', 'M');
   }
 
   // Columns are keyed "rate" or "rate|source rate", ordered by those numbers.
@@ -9255,7 +9365,6 @@
       const rateName = rateNameFromState(st, s.rates);
       const filterName = filterNameFromIndex(st.filter, s.filters);
       const activeFilter = (s.filters || []).find(f => f.index === st.filter);
-      const filterDescription = (activeFilter && activeFilter.description) || '';
       const shaperName = shaperNameFromIndex(st.shaper, s.shapers);
       const matrixActive = st.matrix_profile || '';
       // How each entry runs here (hqpHeadroomMark); while a benchmark holds
@@ -9293,6 +9402,10 @@
       const isPcm = modeUpper === 'PCM';
       const isSdm = modeUpper.includes('SDM') || modeUpper.includes('DSD');
       const shaperLabel = isPcm ? 'Dither' : isSdm ? 'Modulator' : 'Shaper';
+      // Modulators open the filter picker's sheet, with their facts; a PCM
+      // dither keeps the plain picker — the atlas holds no dithers, and
+      // HQPlayer describes none.
+      const modulatorSheet = isSdm || (s.shapers || []).some(sh => sh.parsed && sh.parsed.generation);
       // A list HQPlayer did not give (it refused, or its answer was lost)
       // comes as null and is named in `missing`: its picker stays shut
       // rather than open on nothing, and one line says what is missing.
@@ -9490,8 +9603,8 @@
               <path d="M9 6l6 6-6 6"/>
             </svg>
           </button>
-          ${filterDescription
-            ? `<p class="hqp-row-hint">${escapeProfileHtml(filterDescription)}</p>`
+          ${activeFilter && activeFilter.facts
+            ? `<p class="hqp-row-hint hqp-row-facts">${hqpFactsHtml(activeFilter.facts, { twin: false })}</p>`
             : ''}
           ${favouritesStrip}
           <div class="hqp-row">
@@ -9526,7 +9639,17 @@
       // one chain: HQPlayer applies them in tap order, and the reload after
       // each one paints only if it is still the latest (claimFresh in load()).
       body.querySelectorAll('button[data-knob]').forEach(btn => {
-        btn.addEventListener('click', () => onceInFlight(btn, async () => {
+        btn.addEventListener('click', (e) => {
+          if (btn.dataset.knob !== 'shaper' || !modulatorSheet) return pickKnob(btn);
+          if (e.detail > 1) return;      // the second click of a double-click
+          openHqpSheet(s, 'modulator', (chosen) => serialized('hqp.config', async () => {
+            await postHqpConfig({shaper: chosen.index});
+            await load();
+          }));
+        });
+      });
+      function pickKnob(btn) {
+        onceInFlight(btn, async () => {
           const knob = btn.dataset.knob;
           const k = knobs[knob];
           const picked = await openSettingsPicker({ title: k.title, options: k.options, currentId: k.current });
@@ -9539,8 +9662,8 @@
             // e.g. mode flip changes filter availability).
             await load();
           });
-        }));
-      });
+        });
+      }
 
       body.querySelectorAll('.hqp-fav-chip').forEach(btn => {
         btn.addEventListener('click', () => {
@@ -9604,8 +9727,9 @@
       if (lib.own_library) guide.seen('hqp_library');
       guide.paint();
 
-      body.querySelector('[data-action="open-filter"]').addEventListener('click', () => {
-        openFilterPicker(s, (chosen) => serialized('hqp.config', async () => {
+      body.querySelector('[data-action="open-filter"]').addEventListener('click', (e) => {
+        if (e.detail > 1) return;        // the second click of a double-click
+        openHqpSheet(s, 'filter', (chosen) => serialized('hqp.config', async () => {
           await postHqpConfig({filter: chosen.index, filter1x: chosen.index});
           await load();
         }));
@@ -9643,10 +9767,18 @@
     load();
   }
 
-  // Modal sheet: full filter list, search box, sections (Favourites
-  // first, then by family). Sized to fill most of the viewport so
-  // the user can scan 77 entries comfortably.
-  function openFilterPicker(state, onPick) {
+  // Modal sheet: HQPlayer's full filter or modulator list, a search box,
+  // sections — the favourite filters first, then by family. Sized to fill
+  // most of the viewport so the user can scan 77 entries comfortably. A row:
+  // the current-row dot, the name and this host's headroom mark (a filter's
+  // star beside it), then the facts the state carries and ⓘ for its card —
+  // buttons beside the row's pick button, which cannot hold a button. The
+  // atlas's head lines, when the node holds one, open the list; members of
+  // an identical group of three or more are joined by a rule under the
+  // group's head, drawn once above each run of them the search leaves
+  // together.
+  function openHqpSheet(state, kind, onPick) {
+    const filter = kind === 'filter';
     const sheet = document.createElement('div');
     sheet.className = 'hqp-sheet';
     sheet.innerHTML = `
@@ -9659,7 +9791,7 @@
             <path d="M6 6l12 12M18 6L6 18"/>
           </svg>
         </button>
-        <h2 class="hqp-sheet-title">Filter</h2>
+        <h2 class="hqp-sheet-title">${filter ? 'Filter' : 'Modulator'}</h2>
         <input class="hqp-sheet-search" type="search" placeholder="Search…">
       </div>
       <div class="hqp-sheet-body" id="hqpSheetBody"></div>
@@ -9667,18 +9799,44 @@
     `;
     document.body.appendChild(sheet);
 
-    const filters = state.filters || [];
-    const favs = new Set(state.favorite_filters || []);
-    const currentIdx = (state.state && state.state.filter) ?? -1;
-    const measured = (state.headroom && state.headroom.filters) || {};
+    const entries = (filter ? state.filters : state.shapers) || [];
+    const favs = new Set(filter ? state.favorite_filters || [] : []);
+    const st = state.state || {};
+    const currentIdx = (filter ? st.filter : st.shaper) ?? -1;
+    const measured = (state.headroom && state.headroom[filter ? 'filters' : 'shapers']) || {};
+    const head = (state.atlas && state.atlas[filter ? 'filters' : 'modulators']) || [];
+    const family = filter ? filterFamily : modulatorFamily;
     const search = sheet.querySelector('.hqp-sheet-search');
     const body = sheet.querySelector('#hqpSheetBody');
+
+    const lines = (cls, phrases) => `<div class="${cls}">${phrases.map(p => `<p>${hqpPhrase(p)}</p>`).join('')}</div>`;
+    const rowHtml = (r, bracketed) => {
+      const current = r.index === currentIdx;
+      const f = r.facts;
+      return `
+        <div class="hqp-sheet-row${current ? ' is-current' : ''}${bracketed ? ' is-bracketed' : ''}" data-idx="${r.index}">
+          <button class="hqp-sheet-row-name" type="button" data-pick="${r.index}">
+            <span class="hqp-sheet-row-head">
+              ${current ? '<span class="hqp-sheet-dot"></span>' : ''}
+              ${escapeHtml(r.name)}
+              ${hqpHeadroomMark(measured[r.name])}
+            </span>
+            ${hqpFactsHtml(f)}
+          </button>
+          <div class="hqp-sheet-side${filter ? '' : ' is-starless'}">
+            ${filter ? `<button class="hqp-sheet-star${favs.has(r.name) ? ' is-on' : ''}" type="button"
+                                data-fav="${escapeHtml(r.name)}" aria-label="Toggle favourite">★</button>` : ''}
+            ${f && f.card ? `<button class="hqp-sheet-info" type="button" data-info="${escapeHtml(r.name)}"
+                                     aria-label="Details: ${escapeHtml(r.name)}">${SVG_INFO}</button>` : ''}
+          </div>
+        </div>`;
+    };
 
     function paint() {
       const q = (search.value || '').trim().toLowerCase();
       const filtered = q
-        ? filters.filter(f => f.name.toLowerCase().includes(q))
-        : filters.slice();
+        ? entries.filter(f => f.name.toLowerCase().includes(q))
+        : entries.slice();
 
       const groups = new Map();
       // Favourites group is synthesised from the filtered set so
@@ -9687,49 +9845,42 @@
       if (favRows.length) groups.set('★ Favourites', favRows);
       for (const f of filtered) {
         if (favs.has(f.name)) continue;
-        const fam = filterFamily(f.name);
+        const fam = family(f.name);
         if (!groups.has(fam)) groups.set(fam, []);
         groups.get(fam).push(f);
       }
 
+      const headHtml = head.length ? lines('hqp-sheet-head', head) : '';
       if (!groups.size) {
-        body.innerHTML = `<div class="hqp-sheet-empty">No filters match.</div>`;
+        body.innerHTML = `${headHtml}<div class="hqp-sheet-empty">${filter ? 'No filters match.' : 'No modulators match.'}</div>`;
         return;
       }
 
-      body.innerHTML = Array.from(groups.entries()).map(([fam, rows]) => `
-        <div class="hqp-sheet-group">
-          <div class="hqp-sheet-group-label">${escapeHtml(fam)}</div>
-          ${rows.map(r => `
-            <div class="hqp-sheet-row${
-              r.index === currentIdx ? ' is-current' : ''}" data-idx="${r.index}">
-              <button class="hqp-sheet-row-name" type="button" data-pick="${r.index}">
-                <span class="hqp-sheet-row-head">
-                  ${r.index === currentIdx ? '<span class="hqp-sheet-dot"></span>' : ''}
-                  ${escapeHtml(r.name)}
-                  ${hqpHeadroomMark(measured[r.name])}
-                </span>
-                ${r.description
-                  ? `<span class="hqp-sheet-row-desc">${escapeHtml(r.description)}</span>`
-                  : ''}
-              </button>
-              <button class="hqp-sheet-star${
-                favs.has(r.name) ? ' is-on' : ''}" type="button"
-                      data-fav="${escapeHtml(r.name)}" aria-label="Toggle favourite">
-                ★
-              </button>
-            </div>
-          `).join('')}
-        </div>
-      `).join('');
+      body.innerHTML = headHtml + Array.from(groups.entries()).map(([fam, rows]) => {
+        let run = null;
+        return `
+          <div class="hqp-sheet-group">
+            <div class="hqp-sheet-group-label">${escapeHtml(fam)}</div>
+            ${rows.map(r => {
+              const bracket = r.facts && r.facts.bracket;
+              const key = bracket ? bracket.key : null;
+              const opens = key !== null && key !== run;
+              run = key;
+              return (opens ? lines('hqp-bracket-head', bracket.head) : '') + rowHtml(r, key !== null);
+            }).join('')}
+          </div>`;
+      }).join('');
 
       body.querySelectorAll('[data-pick]').forEach(btn => {
         btn.addEventListener('click', () => {
           const idx = parseInt(btn.dataset.pick, 10);
-          const f = filters.find(x => x.index === idx);
+          const f = entries.find(x => x.index === idx);
           close();
           if (f) onPick(f);
         });
+      });
+      body.querySelectorAll('[data-info]').forEach(btn => {
+        btn.addEventListener('click', () => onceInFlight(btn, () => openHqpCard(kind, btn.dataset.info)));
       });
       body.querySelectorAll('[data-fav]').forEach(btn => {
         btn.addEventListener('click', async (e) => {
