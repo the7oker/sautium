@@ -262,9 +262,13 @@ def read(shipped: Path, overlay: Optional[Path]) -> Optional["Atlas"]:
             continue
         try:
             stat = path.stat()
+            key = (stat.st_mtime_ns, stat.st_size)
         except (FileNotFoundError, NotADirectoryError):
             continue
-        key = (stat.st_mtime_ns, stat.st_size)
+        except OSError as exc:
+            # There, but not to be looked at (a folder not readable, a link
+            # loop, a failing disk): the read says why, once per error
+            key = (-1, exc.errno or 0)
         with _cache_lock:
             held = _cache.get(path)
             if held is None or held[0] != key:
@@ -288,6 +292,8 @@ def _load(path: Path, origin: str) -> Optional["Atlas"]:
         reason, at = refused.reason, refused.at
     except json.JSONDecodeError as exc:
         reason, at = "not JSON", f"line {exc.lineno}, column {exc.colno}"
+    except RecursionError:
+        reason, at = "nested deeper than JSON is read here", "the file"
     except UnicodeDecodeError:
         reason, at = "not UTF-8 text", "the file"
     except OSError as exc:
@@ -401,9 +407,13 @@ def _cites(x: Any, at: str, sources: Dict[str, Any], least: int) -> None:
 
 
 def _bound(x: Any, b: Iterable[str], at: str) -> None:
+    # `by` is read wherever a bound is drawn (_value), so it is checked
+    # wherever one stands
     _obj(x, at)
     _num(x.get("v"), f"{at}.v")
     _one_of(x.get("b"), b, f"{at}.b")
+    if "by" in x:
+        _one_of(x["by"], BY, f"{at}.by")
 
 
 def _check(doc: Any) -> None:
@@ -660,8 +670,6 @@ def _check_context(c: Any, at: str) -> None:
         x = c.get(key)
         if x is not None and not isinstance(x, Num):
             _bound(x, ("ge",), f"{at}.{key}")
-            if "by" in x:
-                _one_of(x["by"], BY, f"{at}.{key}.by")
     if "filter_delay_ms" in c:
         delay = _obj(c["filter_delay_ms"], f"{at}.filter_delay_ms")
         _num(delay.get("v"), f"{at}.filter_delay_ms.v")
@@ -671,7 +679,9 @@ def _check_context(c: Any, at: str) -> None:
         for key, r in ranges.items():
             _obj(r, f"{at}.position_dependent")
             for end in ("min", "median", "max"):
-                _num(r.get(end), f"{at}.position_dependent", null=True)
+                # all three, as a range is told from a bound by its ends (_value)
+                _need(end in r, "a range without its three ends", f"{at}.position_dependent")
+                _num(r[end], f"{at}.position_dependent", null=True)
 
 
 def _check_modulator(e: Any, at: str, sources: Dict[str, Any]) -> None:

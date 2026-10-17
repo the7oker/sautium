@@ -233,6 +233,12 @@ def _break(doc, how):
         entry["doc_sources"] = ["signalyst-fictional-other"]
     elif how == "no engine":
         doc["engines"] = {}
+    elif how == "a group figure's bound set by a list":
+        doc["engines"]["9.4.1"]["identity_groups"][1]["figures"]["12288000"]["idle_db"]["value"]["by"] = ["impulse"]
+    elif how == "an idle bound set by no excitation the words name":
+        doc["engines"]["9.4.1"]["modulators"]["dmx7ec-a"]["rates"]["12288000"]["idle_db"]["by"] = "echo"
+    elif how == "a range without its min":
+        del _filter(doc, "demo-gauss-x")["contexts"]["1x-44.1k-705.6k"]["position_dependent"]["f_3db_khz"]["min"]
     return doc
 
 
@@ -241,7 +247,8 @@ BREAKS = ("another schema", "a missing key", "a wrong type deep inside", "an unr
           "a manual mark without its sources", "manual sources without a mark",
           "a group figure outside the closed list", "a group it names that the file does not hold",
           "an entry under another slug", "a rate no label names", "a group not approved",
-          "a source it cites that the file does not hold", "no engine")
+          "a source it cites that the file does not hold", "no engine", "a group figure's bound set by a list",
+          "an idle bound set by no excitation the words name", "a range without its min")
 
 
 @pytest.mark.parametrize("how", BREAKS)
@@ -269,15 +276,33 @@ def test_a_refusal_names_the_place_by_keys_that_passed_their_shape(tmp_path, cap
     caplog.clear()
     assert _read(tmp_path, _break(_doc(), "a name of another shape")) is None
     assert "not text of its shape, at slugs[0].name" in caplog.text
+    caplog.clear()
+    assert _read(tmp_path, _break(_doc(), "a group figure's bound set by a list")) is None
+    assert "not one of its values, at engines.9.4.1.identity_groups[1].figures.12288000.idle_db.value.by" \
+        in caplog.text
 
 
 @pytest.mark.parametrize("raw", [b"", b'{"schema": "hqp-atlas-app/v1", "releases": {', b'{"schema": NaN}',
-                                 b"\xff\xfe not utf-8"])
+                                 b"\xff\xfe not utf-8", b"[" * 100_000])
 def test_a_truncated_or_unreadable_file_is_refused_whole(tmp_path, caplog, raw):
     caplog.set_level(logging.INFO, logger="hqp_atlas")
     (tmp_path / "overlay.json").write_bytes(raw)
     assert hqp_atlas.read(tmp_path / "shipped.json", tmp_path / "overlay.json") is None
     assert "refused whole" in caplog.text
+
+
+def test_a_file_that_cannot_be_looked_at_is_refused_whole_once(tmp_path, caplog):
+    # A link to itself: stat and open both fail, as on a folder not readable
+    caplog.set_level(logging.INFO, logger="hqp_atlas")
+    overlay = tmp_path / "overlay.json"
+    overlay.symlink_to(overlay)
+    assert hqp_atlas.read(tmp_path / "shipped.json", overlay) is None
+    assert hqp_atlas.read(tmp_path / "shipped.json", overlay) is None
+    lines = [r.getMessage() for r in caplog.records if r.name == "hqp_atlas" and r.levelno == logging.WARNING]
+    assert len(lines) == 1 and "the node's own atlas copy refused whole — not readable" in lines[0]
+    # The shipped path counts as a file there: the overlay is not read
+    _write(tmp_path / "copy.json", _doc())
+    assert hqp_atlas.read(overlay, tmp_path / "copy.json") is None
 
 
 def test_a_key_not_read_is_ignored(tmp_path):
