@@ -385,7 +385,7 @@ def _flag(value: str) -> bool:
 # HQPlayer 6 describes each filter in its own words: Signalyst's rating out of
 # five, the focus words, the mode's arrow and the ratio class —
 # "4/5 transients, timbre, space ⥮ 2^x up". PCM mode writes ⥮, SDM mode ⥣;
-# only PCM adds "up" (a filter that converts upwards only). A focus list may
+# only PCM adds "up", which HQPlayer's manual does not explain. A focus list may
 # keep a trailing comma ("4/5 space, ⥮ Any") or be absent ("4/5 ⥮ Any"). The
 # focus words keep HQPlayer's order, the order a screen shows them in; the two
 # modes may order one filter's words differently, so two descriptions compare

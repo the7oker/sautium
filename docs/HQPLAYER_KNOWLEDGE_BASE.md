@@ -305,8 +305,9 @@ are Signalyst's text, and this file does not reproduce them.
 - **Focus words** (transients, timbre, space) are the author's, as HQPlayer
   shows them — not a recommendation for a kind of music.
 - **Ratio class**: `Int` — integer ratios; `2ˣ` (HQPlayer writes `2^x`) —
-  power-of-two ratios; `Any` — any ratio; `1:1` — no conversion; `up` —
-  upsampling only. The class can differ between modes:
+  power-of-two ratios; `Any` — any ratio; `1:1` — no conversion. In PCM
+  mode HQPlayer writes `up` after some classes (`2^x up`), which the manual
+  does not explain. The class can differ between modes:
   `poly-sinc-mqa/mp3-lp` is `Int up` in PCM mode and `Any` in SDM mode.
 - Names ending in **`-2s`** are two-stage variants. 6.2.3 lists them in SDM
   mode only.
@@ -449,13 +450,20 @@ The 48 kHz family's DSD rates are 48k × the same multipliers (3.072 MHz,
 
 ## Adaptive output rate
 
-**When enabled:**
-- HQPlayer picks the output rate automatically
-- Based on the source rate and the filter's capabilities
-- "Sample rate" becomes an upper limit
+A setting of HQPlayer's own (Settings, Output tab). The manual (6.1, §4.2)
+gives it three states:
 
-**When disabled:**
-- Fixed output rate (in PCM mode)
+- **grayed** — HQPlayer picks the default rate or a lower one, by what the
+  filter and the DAC can do;
+- **checked** — HQPlayer picks a rate that is a multiple of the same base
+  rate as the source;
+- **not checked** — the chosen output rate is fixed.
+
+While it is grayed or checked, and whenever the default output mode is
+`[source]`, the rate chosen under "Sample rate" (PCM tab) is "only a default
+and upper limit" (§4.4): the engine selects the rate as it plays, by the
+rates available and what the filter converts. In PCM mode with the setting
+not checked, the chosen rate is the static output rate.
 
 ---
 
