@@ -6,12 +6,13 @@ status, current DSP selections, all available lists (modes / rates /
 filters / shapers / matrix profiles) and the user's favourite-filter list
 from the user_settings key/value store; with `dsp=1` (the screen itself)
 also how each picker entry runs on this HQPlayer (`headroom`,
-playback.hqp_load) and the benchmark's block (playback.hqp_benchmark).
-Writes go through /config (any subset of filter / mode / rate / shaper /
-matrix_profile / convolution — the last the assistant's switch, no control
-on the screen), /favorites (add/remove a filter name from the favourites
-list), /benchmark and /cuda; /meter records a page's peak-meter interest
-(its readings ride the page's /api/events stream).
+playback.hqp_load), the benchmark's block (playback.hqp_benchmark), and
+each filter and shaper row's `facts` (hqp_atlas); a name's card comes from
+/facts. Writes go through /config (any subset of filter / mode / rate /
+shaper / matrix_profile / convolution — the last the assistant's switch, no
+control on the screen), /favorites (add/remove a filter name from the
+favourites list), /benchmark and /cuda; /meter records a page's peak-meter
+interest (its readings ride the page's /api/events stream).
 
 The screen reads state on mount only — no polling. If the user
 changes settings via HQP Desktop, a manual refresh in the UI picks
@@ -19,6 +20,7 @@ up the new values.
 """
 
 import logging
+from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 from fastapi import APIRouter, HTTPException
@@ -27,6 +29,7 @@ from pydantic import BaseModel, Field
 from config import settings
 
 logger = logging.getLogger(__name__)
+import hqp_atlas
 from db_pool import db_execute, db_query_one
 from hqplayer_client import VOLUME_FIXED
 from playback import hqp_link
@@ -199,7 +202,76 @@ def get_state(dsp: bool = False) -> Dict[str, Any]:
     # Said by the server, in the words the volume route and the assistant use.
     response["volume_fixed"] = (VOLUME_FIXED if volume_range is not None
                                 and not volume_range["enabled"] else None)
+    _join_facts(response, info, state, lists)
     return response
+
+
+def _atlas() -> Optional[hqp_atlas.Atlas]:
+    """The atlas this node holds: the shipped file, else its own copy."""
+    overlay = settings.hqp_atlas_overlay
+    return hqp_atlas.read(hqp_atlas.SHIPPED, Path(overlay) if overlay else None)
+
+
+def _list_mode(state: Optional[dict], modes: Optional[List[dict]],
+               filters: Optional[List[dict]]) -> Optional[str]:
+    """The mode HQPlayer's lists belong to: the filters' own arrow (⥮ PCM,
+    ⥣ SDM), or for lists without descriptions (HQPlayer 5) the mode it runs;
+    None when neither says."""
+    from playback.hqp_benchmark import mode_kind
+    arrows = {f["parsed"]["mode"] for f in filters or () if f["parsed"]}
+    if arrows:
+        return arrows.pop() if len(arrows) == 1 else None
+    return mode_kind(_mode_of(state, modes)) if state and modes else None
+
+
+def _join_facts(response: Dict[str, Any], info: Optional[dict], state: Optional[dict],
+                lists: dict) -> None:
+    """Each row of the filter and shaper lists gains `facts`, in HQPlayer's
+    order and by name: HQPlayer's own and, while the node holds an atlas
+    file, the measured ones; the sheets' head lines ride in `atlas`, absent
+    without a file. A PCM shapers list is dithers, which the atlas holds
+    none of."""
+    atlas = _atlas()
+    engine = (info or {}).get("engine")
+    mode = _list_mode(state, lists["modes"], lists["filters"])
+    for key, kind in (("filters", "filter"), ("shapers", "modulator" if mode == "sdm" else "dither")):
+        rows = lists[key]
+        if rows is not None:
+            response[key] = [{**row, "facts": facts}
+                             for row, facts in zip(rows, hqp_atlas.facts(atlas, kind, rows, engine, mode))]
+    if atlas is not None:
+        response["atlas"] = hqp_atlas.head(atlas, engine, mode)
+
+
+@router.get("/facts")
+def get_facts(kind: str, name: str) -> Dict[str, Any]:
+    """The card of one of HQPlayer's names (hqp_atlas.card): HQPlayer's own
+    facts and, while the node holds an atlas file, the measured ones. Read
+    from HQPlayer's list as the screen reads it, so it answers only for a
+    name HQPlayer lists now — a modulator only while its list is SDM's: 404
+    otherwise; 409 while the output is lent, HQPlayer builds or answers
+    nothing; 503 when it cannot be reached or did not give the list."""
+    if kind not in ("filter", "modulator"):
+        raise HTTPException(status_code=400, detail="kind must be 'filter' or 'modulator'")
+    link = hqp_link.selected()
+    try:
+        link.refuse()
+        with link.asking() as hqp:
+            info, state, modes, filters = hqp.get_info(), hqp.get_state(), hqp.get_modes(), hqp.get_filters()
+            shapers = hqp.get_shapers() if kind == "modulator" else None
+    except (Building, Dropped, NotAnswering) as e:
+        raise _busy(e)
+    except (BrokenPipeError, ConnectionError, OSError) as e:
+        raise HTTPException(status_code=503, detail=f"HQPlayer not reachable: {e}")
+    rows = filters if kind == "filter" else shapers
+    if rows is None:
+        raise HTTPException(status_code=503, detail=f"HQPlayer did not list its {kind}s")
+    mode = _list_mode(state, modes, filters)
+    card = (hqp_atlas.card(_atlas(), kind, name, rows, (info or {}).get("engine"), mode)
+            if kind == "filter" or mode == "sdm" else None)
+    if card is None:
+        raise HTTPException(status_code=404, detail="HQPlayer does not list it now — Refresh asks again.")
+    return card
 
 
 def _mode_of(state: dict, modes: List[dict]) -> Optional[str]:

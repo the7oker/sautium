@@ -242,7 +242,22 @@ share export, sync or support bundle carries it. The file is read whole and
 checked against the shape the module reads; one that breaks it is refused
 whole, logged in one line that names a place in the file and never a value,
 and the pickers keep HQPlayer's own facts. A changed file is read again on the
-next read; no restart. As of 2026-10-17 no route reads the module yet.
+next read; no restart.
+
+The HQPlayer screen's own read, `GET /api/hqplayer/state?dsp=1`, joins it by
+name in HQPlayer's order: each row of the filter and shaper lists gains
+`facts` (its chips, the rating tag, a caption, a twin's line, an identical
+group's bracket, whether it has a card), and while the node holds an atlas
+file `atlas` carries the sheets' head lines and where the file was read from
+— without a file there is no `atlas` key and `facts` are HQPlayer's alone.
+The list's mode is its filters' own arrow (⥮ PCM, ⥣ SDM), else the mode
+HQPlayer runs (HQPlayer 5 describes nothing); a PCM shapers list is dithers,
+which the atlas holds none of. A name's card is `GET
+/api/hqplayer/facts?kind=filter|modulator&name=`, read from HQPlayer's list
+as the screen reads it: 404 for a name it does not list now (a modulator only
+while its list is SDM's), 409 while the output is lent or HQPlayer builds,
+503 when it cannot be reached. The plain state carries no facts. As of
+2026-10-17 the screen does not draw them yet.
 
 ### Answers: `result` and HQPlayer's reason
 Setters and transport commands echo their element with `result="OK"` or

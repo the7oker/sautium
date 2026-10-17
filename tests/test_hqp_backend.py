@@ -5,6 +5,7 @@ HQPlayer restarts (a trial-mode Embedded stops every 30 minutes)."""
 
 import errno
 import itertools
+import json
 import logging
 import os
 import re
@@ -1968,6 +1969,212 @@ def test_the_hqplayer_screen_is_told_which_lists_hqplayer_did_not_give(fake, mon
     # the marks of a queued file are not made from a list it did not give
     lists = {"modes": s["modes"], "rates": [], "filters": [], "shapers": None}
     assert hqp_router._headroom({"id": 7, "hqp_engine": "6.2.4"}, {"mode": 0}, None, lists) == {}
+
+
+# -- The atlas on the HQPlayer screen: rows joined by name, a card per name -------
+# On the synthetic atlas of tests/fixtures/hqp_atlas (every name, number and
+# word invented), as the node's own copy; nothing shipped.
+
+_ATLAS = Path(__file__).parent / "fixtures" / "hqp_atlas" / "app-synthetic.json"
+_ATLAS_MODES = ('<GetModes><ModesItem index="0" name="[source]" value="-1"/>'
+                '<ModesItem index="1" name="PCM" value="0"/><ModesItem index="2" name="SDM (DSD)" value="1"/>'
+                '</GetModes>')
+
+
+def _items(tag, rows):
+    arg = ' arg="1"' if tag == "FiltersItem" else ""
+    return "".join(f'<{tag} index="{i}" name="{name}" value="{i}"{arg} description="{text}"/>'
+                   for i, name, text in rows)
+
+
+_ATLAS_PCM = ("<GetFilters>" + _items("FiltersItem", [
+    (3, "demo-new", "1/5 ⥮ 1:1"), (5, "demo-sinc-a", "4/5 transients, timbre, space ⥮ 2^x up"),
+    (6, "demo-sinc-b", "4/5 transients, timbre, space ⥮ 2^x up"), (8, "demo-gauss-x", "5/5 timbre ⥮ Any")])
+    + "</GetFilters>")
+_ATLAS_SDM = ("<GetFilters>" + _items("FiltersItem", [
+    (2, "demo-sinc-a", "4/5 transients, timbre, space ⥣ 2^x"), (4, "demo-2s", "2/5 ⥣ Any")]) + "</GetFilters>")
+_ATLAS_DITHERS = "<GetShapers>" + _items("ShapersItem", [(0, "none", ""), (1, "DEMO-TPDF", "")]) + "</GetShapers>"
+_ATLAS_MODULATORS = ("<GetShapers>" + _items("ShapersItem", [
+    (0, "DMX5", "Gen1"), (1, "DMX7EC-c", "Gen9"), (2, "DMX7EC-a", "Gen9"), (3, "DMX7EC-b", "Gen9"),
+    (4, "DMXH8", "Gen8")]) + "</GetShapers>")
+
+
+def _atlas_screen(monkeypatch, fake, tmp_path, *, atlas=True, engine="9.4.1", sdm=False, doc=None):
+    """The HQPlayer screen over a fake HQPlayer listing some of the synthetic
+    atlas's names, the atlas as the node's own copy — or none at all."""
+    import hqp_atlas
+    hqp_router = _screen(monkeypatch)
+    overlay = tmp_path / "hqp_atlas.json"
+    if not atlas:
+        overlay.unlink(missing_ok=True)
+    elif doc is None:
+        overlay.write_bytes(_ATLAS.read_bytes())
+    else:
+        overlay.write_text(json.dumps(doc), encoding="utf-8")
+    monkeypatch.setattr(hqp_atlas, "SHIPPED", tmp_path / "shipped.json")
+    monkeypatch.setattr(settings, "hqp_atlas_overlay", str(overlay))
+    fake.replies["GetInfo"] = ('<GetInfo name="fake" product="Signalyst HQPlayer Fake" version="9" '
+                               f'platform="Linux" engine="{engine}"/>')
+    fake.replies["GetModes"] = _ATLAS_MODES
+    fake.replies["State"] = f'<State mode="{2 if sdm else 1}" filter="5" shaper="0" rate="0" volume="-3"/>'
+    fake.replies["GetFilters"] = _ATLAS_SDM if sdm else _ATLAS_PCM
+    fake.replies["GetShapers"] = _ATLAS_MODULATORS if sdm else _ATLAS_DITHERS
+    return hqp_router
+
+
+def _facts_text(row):
+    from hqp_atlas import plain
+    f = row["facts"]
+    return [plain(c["parts"]) for c in f["chips"]], f["line3"] and plain(f["line3"])
+
+
+def test_without_an_atlas_file_the_screens_rows_carry_hqplayers_facts_alone(fake, monkeypatch, tmp_path):
+    import hqp_atlas
+    hqp_router = _atlas_screen(monkeypatch, fake, tmp_path, atlas=False)
+    s = hqp_router.get_state(dsp=True)
+    assert s["connected"] and "atlas" not in s
+    assert [r["name"] for r in s["filters"]] == ["demo-new", "demo-sinc-a", "demo-sinc-b", "demo-gauss-x"]
+    assert all(set(row) == {"index", "name", "value", "arg", "description", "parsed", "facts"}
+               for row in s["filters"])
+    assert all(set(row) == {"index", "name", "value", "description", "parsed", "facts"} for row in s["shapers"])
+    a = s["filters"][1]
+    assert a["facts"] == hqp_atlas.runtime("filter", a)
+    assert _facts_text(a) == (["2^x up"], None)
+    assert a["facts"]["words"]["text"] == "transients, timbre, space"
+    assert a["facts"]["tag"]["text"] == "Signalyst 4/5"
+    assert all(r["facts"]["chips"] == [] and not r["facts"]["card"] for r in s["shapers"])  # dithers
+    assert s["favorite_filters"] == []
+
+
+def test_with_the_nodes_atlas_the_rows_carry_its_facts_by_name_in_hqplayers_order(fake, monkeypatch, tmp_path):
+    from hqp_atlas import plain
+    hqp_router = _atlas_screen(monkeypatch, fake, tmp_path)
+    s = hqp_router.get_state(dsp=True)
+    assert s["atlas"]["origin"] == "overlay"
+    assert [plain(line) for line in s["atlas"]["filters"]] == [
+        "Measured on HQPlayer engine 9.4.1", "Properties at 1x · 44.1k → 705.6k"]
+    assert [r["name"] for r in s["filters"]] == ["demo-new", "demo-sinc-a", "demo-sinc-b", "demo-gauss-x"]
+    rows = {r["name"]: r for r in s["filters"]}
+    assert _facts_text(rows["demo-new"]) == (["1:1", "not measured on engine 9.4.1"], None)
+    assert rows["demo-new"]["facts"]["chips"][-1]["muted"] is True
+    assert _facts_text(rows["demo-sinc-a"]) == (["linear phase", "±12.346 ms", "2^x up"],
+                                                "Same output as demo-sinc-b (within one step)")
+    assert _facts_text(rows["demo-gauss-x"])[0] == ["intermediate phase", "1.5 ms before · 2.5 ms after",
+                                                    "position-dependent", "Any"]
+    # Every key HQPlayer gave stays as it gave it; only `facts` is added.
+    assert {k: v for k, v in rows["demo-sinc-a"].items() if k != "facts"} == {
+        "index": 5, "name": "demo-sinc-a", "value": 5, "arg": 1,
+        "description": "4/5 transients, timbre, space ⥮ 2^x up",
+        "parsed": {"rating": 4, "focus": ["transients", "timbre", "space"], "ratio": "2^x", "up": True,
+                   "mode": "pcm"}}
+    every = json.dumps(s, ensure_ascii=False)
+    for unlisted in ("demo-poly-lp", "demo-poly-mp", "demo-gauss-xa", "demo-2s", "demo-gone", "DMX7EC", "DMX5"):
+        assert unlisted not in every
+    assert all(r["facts"]["chips"] == [] for r in s["shapers"])  # a PCM list's dithers: none in the atlas
+
+
+def test_in_sdm_mode_the_rows_show_their_pcm_facts_and_the_modulators_theirs(fake, monkeypatch, tmp_path):
+    from hqp_atlas import plain
+    hqp_router = _atlas_screen(monkeypatch, fake, tmp_path, sdm=True)
+    s = hqp_router.get_state(dsp=True)
+    assert [plain(line) for line in s["atlas"]["filters"]] == [
+        "Measured on HQPlayer engine 9.4.1", "Properties at 1x · 44.1k → 705.6k",
+        "In SDM mode: the properties each filter showed in PCM mode."]
+    assert [plain(line) for line in s["atlas"]["modulators"]] == ["Measured on HQPlayer engine 9.4.1"]
+    rows = {r["name"]: r for r in s["filters"]}
+    assert _facts_text(rows["demo-sinc-a"])[0] == ["linear phase", "±12.346 ms", "2^x"]
+    assert _facts_text(rows["demo-2s"])[0] == ["Any", "not measured on engine 9.4.1"]
+    mods = {r["name"]: r for r in s["shapers"]}
+    assert _facts_text(mods["DMX5"])[0] == ["Gen1", "fifth order", "refused at DSD256"]
+    assert _facts_text(mods["DMXH8"])[0] == ["Gen8", "fifth order", "refused at every measured rate"]
+    bracket = mods["DMX7EC-a"]["facts"]["bracket"]
+    assert bracket["key"] == 1 and mods["DMX7EC-b"]["facts"]["bracket"] == bracket
+    assert plain(bracket["head"][0]).startswith("DMX7EC: -c, -a, -b — ")
+
+
+def test_the_engine_hqplayer_reports_decides_what_the_rows_say(fake, monkeypatch, tmp_path):
+    from hqp_atlas import plain
+    hqp_router = _atlas_screen(monkeypatch, fake, tmp_path, engine="9.5.0")
+    s = hqp_router.get_state(dsp=True)
+    assert plain(s["atlas"]["filters"][0]) == "Measured on HQPlayer engine 9.4.1 · this HQPlayer runs engine 9.5.0"
+    assert _facts_text(s["filters"][1])[0][0] == "linear phase"
+    # Another major engine: HQPlayer's facts, and not measured on every row.
+    hqp_router = _atlas_screen(monkeypatch, fake, tmp_path, engine="8.0.0")
+    s = hqp_router.get_state(dsp=True)
+    assert [plain(line) for line in s["atlas"]["filters"]] == [
+        "Measured on HQPlayer engine 9.4.1 · this HQPlayer runs engine 8.0.0"]
+    assert all(_facts_text(r)[0][-1] == "not measured on engine 9.4.1" for r in s["filters"])
+
+
+def test_the_plain_state_carries_no_facts(fake, monkeypatch, tmp_path):
+    hqp_router = _atlas_screen(monkeypatch, fake, tmp_path)
+    s = hqp_router.get_state()
+    assert "atlas" not in s
+    assert not any("facts" in row for row in s["filters"] + s["shapers"])
+
+
+def test_a_names_card_answers_only_for_a_name_hqplayer_lists_now(fake, monkeypatch, tmp_path):
+    from fastapi import HTTPException
+    hqp_router = _atlas_screen(monkeypatch, fake, tmp_path)
+    card = hqp_router.get_facts("filter", "demo-sinc-a")
+    assert (card["title"], card["origin"]) == ("demo-sinc-a", "overlay")
+    assert [s["head"] for s in card["sections"]] == [
+        "What HQPlayer says", "Apodizing", "The manual", None, "Properties", "Differs only in",
+        "The author's stated purpose", "History", "Sources"]
+    for kind, name, code in (("filter", "demo-poly-lp", 404),      # in the atlas, not listed
+                             ("modulator", "DEMO-TPDF", 404),      # listed: a PCM shapers list is dithers
+                             ("dither", "none", 400)):
+        with pytest.raises(HTTPException) as e:
+            hqp_router.get_facts(kind, name)
+        assert e.value.status_code == code
+    assert e.value.detail == "kind must be 'filter' or 'modulator'"
+    with pytest.raises(HTTPException) as e:
+        hqp_router.get_facts("filter", "demo-poly-lp")
+    assert e.value.detail == "HQPlayer does not list it now — Refresh asks again."
+    hqp_router = _atlas_screen(monkeypatch, fake, tmp_path, sdm=True)
+    card = hqp_router.get_facts("modulator", "DMX7EC-a")
+    assert "Per rate" in [s["head"] for s in card["sections"]]
+    hqp_router = _atlas_screen(monkeypatch, fake, tmp_path, atlas=False)
+    card = hqp_router.get_facts("filter", "demo-sinc-a")
+    assert card["origin"] is None and [s["head"] for s in card["sections"]] == ["What HQPlayer says"]
+
+
+def test_no_link_to_an_atlas_page_until_its_release_has_a_date(fake, monkeypatch, tmp_path):
+    hqp_router = _atlas_screen(monkeypatch, fake, tmp_path)
+    names = ["demo-new", "demo-sinc-a", "demo-sinc-b", "demo-gauss-x"]
+    said = [hqp_router.get_state(dsp=True)] + [hqp_router.get_facts("filter", n) for n in names]
+    assert "sautium.net/hqplayer" not in json.dumps(said)
+    doc = json.loads(_ATLAS.read_text(encoding="utf-8"))
+    doc["releases"]["9.4.1/pcm"] = "2001-05-06"
+    hqp_router = _atlas_screen(monkeypatch, fake, tmp_path, doc=doc)
+    assert "sautium.net/hqplayer" not in json.dumps(hqp_router.get_state(dsp=True))
+    links = {n: hqp_router.get_facts("filter", n)["link"] for n in names}
+    assert links["demo-sinc-a"]["href"] == "https://sautium.net/hqplayer/filters/demo-sinc-a/"
+    assert links["demo-new"] is None
+
+
+def test_a_card_while_hqplayer_builds_or_is_lent_is_busy(fake, output, monkeypatch, tmp_path):
+    from fastapi import HTTPException
+    mgr, b = output
+    hqp_router = _atlas_screen(monkeypatch, fake, tmp_path)
+    fake.build("SetFilter", 2.0)
+    assert hb.change_dsp({"filter": 5, "filter1x": 5})["building"] is not None
+    with pytest.raises(HTTPException) as e:
+        hqp_router.get_facts("filter", "demo-sinc-a")
+    assert e.value.status_code == 409 and "building the filter" in e.value.detail
+    assert _wait(lambda: _link().build.state is None)
+    _picker(monkeypatch, fake)
+    monkeypatch.setattr(hqp_router, "manager", mgr)
+    try:
+        with mgr.hold("benchmark", "The HQPlayer benchmark is running"):
+            n = len(fake.commands)
+            with pytest.raises(HTTPException) as e:
+                hqp_router.get_facts("filter", "demo-sinc-a")
+            assert fake.commands[n:] == []
+        assert e.value.status_code == 409 and "benchmark is running" in e.value.detail
+    finally:
+        if mgr.active is not None and mgr.active is not b:
+            mgr.active.shutdown()
 
 
 def test_the_benchmark_block_says_why_it_has_no_estimate(monkeypatch):
