@@ -2795,6 +2795,20 @@ differs, never with a pick.
 
 ## Known Gotchas
 
+- **The Docker image took the node's secrets.** `./backend` is the build
+  context of both backend Dockerfiles and, bind-mounted, the running
+  container's `/app`, and both copy the whole context (`COPY . .`); the
+  `.dockerignore` at the repository root named `data/`, but no build read
+  it. So every `docker compose build` put into an image layer what the node
+  keeps under `backend/`: in `data/` the backend's node key, the API secret
+  (at its old place, and in the identity directory wherever compose mounts
+  nothing over it) and, likewise, the peer surface's TLS key; the MCP
+  configs with the database password; a `.env` where one existed. Since
+  2026-10-17 `backend/.dockerignore` keeps them out; the container never
+  ran the image's copy (compose mounts `./backend` over `/app`), so nothing
+  at runtime changed. An image or build cache from before still holds them:
+  rebuild, then `docker image prune` and `docker builder prune`.
+
 - **A Docker stop never reached the backend's shutdown.** Two things,
   measured 2026-10-03: uvicorn waits for open connections before the
   lifespan's shutdown, with no limit unless given one, and the Web UI's

@@ -1,0 +1,23 @@
+# backend/ is the image's build context and, bind-mounted, the running
+# container's /app: what a node writes there sits beside the source, and
+# `COPY . .` would put it into an image layer. The container never runs the
+# image's copy (every compose file mounts ./backend over /app), so leaving
+# these out costs nothing at runtime.
+
+# The node's own files: the backend's node key, the API secret where it used
+# to live, and where compose mounts nothing over them the identity directory
+# (the API secret now, the certificate, the proof) and the peer surface's TLS
+# key; the transcode cache and the benchmark's signals.
+data/
+
+# Credentials in config: a .env (the launcher wrote backend/.env before it
+# moved to its own data dir), the MCP configs with the database password,
+# Claude Code's local permissions.
+**/.env
+mcp-windows.json
+mcp-docker.json
+mcp-wsl.json
+**/.claude/settings.local.json
+
+# Bring-your-own provider plugins: the owner's own repositories.
+streaming/providers/
