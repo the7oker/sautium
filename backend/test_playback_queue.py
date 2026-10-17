@@ -45,14 +45,13 @@ def test_append_insert_remove():
     assert q.remove(99) is None
 
 
-def test_reorder_with_duplicates_keeps_relative_order():
+def test_reorder_places_each_item_where_it_is_named():
     q = CanonicalQueue()
     a1, b, a2 = _item(1, "t1", "first"), _item(2, "t2"), _item(1, "t1", "second")
     q.replace([a1, b, a2])
-    q.reorder_by_track_ids(["t2", "t1", "t1"])
+    q.reorder([a2, b, a1])
     snap = q.snapshot()
-    assert [it.media_file_id for it in snap] == [2, 1, 1]
-    assert snap[1] is a1 and snap[2] is a2   # duplicate ids keep their order
+    assert snap[0] is a2 and snap[1] is b and snap[2] is a1   # a track queued twice: two slots
 
 
 def test_clear_for_radio_keeps_current_slot():

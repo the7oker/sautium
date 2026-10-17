@@ -49,6 +49,7 @@ refuses while the control port answers is reported and left alone.
 
 import asyncio
 import logging
+import selectors
 import socket
 import struct
 import threading
@@ -57,6 +58,8 @@ from typing import Dict, List, Optional, Tuple
 
 import numpy as np
 from scipy.signal import resample_poly
+
+from hqplayer_client import Interrupted, Waker, connect_address, open_connection, wait_on
 
 logger = logging.getLogger(__name__)
 
@@ -234,6 +237,9 @@ class HqpMeter:
         self._generation = 0
         self._due = False
         self._sock: Optional[socket.socket] = None
+        # What ends the session's waits — its connect, its reads — from the
+        # thread that stops it: the session closes its own socket
+        self._waker: Optional[Waker] = None
         self._connecting = False
         self._unavailable: Optional[dict] = None
         self._last: Optional[dict] = None
@@ -384,19 +390,12 @@ class HqpMeter:
                 page.conn.send(msg)
 
     def _stop_locked(self) -> None:
-        # Wake the owner's blocked read: a shutdown does on Linux and macOS,
-        # Windows leaves the read blocked until the socket is closed
-        # (hqp_benchmark's Link.interrupt). Under the lock, so the owner has
-        # not let go of it in between; its own close after that is a no-op.
-        sock, self._sock = self._sock, None
-        if sock is not None:
-            try:
-                sock.shutdown(socket.SHUT_RDWR)
-            except OSError as e:
-                # ENOTCONN: the peer reset the connection first; the owner's
-                # read has ended (or is about to) on that reset already.
-                logger.debug("meter socket already down: %s", e)
-            sock.close()
+        # The session's wait is woken, and the session closes its own socket:
+        # one closed by a thread that does not read it races the reader
+        # (hqplayer_client's Waker). A session no longer open is let go.
+        self._sock = None
+        if self._waker is not None:
+            self._waker.wake()
 
     def _run(self) -> None:
         while True:
@@ -406,19 +405,52 @@ class HqpMeter:
                 self._due = False
                 self._connecting = True
                 target, generation = self._target, self._generation
-                self._publish_locked({"state": "connecting"})
+                try:
+                    # Published with the connect: a stop at any moment of it wakes it
+                    self._waker = waker = Waker()
+                except OSError as e:
+                    # A wake channel the OS refuses (its descriptor limit) is
+                    # a failed session: said below, the thread lives on
+                    waker, refused = None, f"no wake channel: {e}"
+                else:
+                    self._publish_locked({"state": "connecting"})
+            if waker is None:
+                self._fail(generation, "error", target[1], refused)
+                continue
             try:
-                self._session(target, generation)
+                self._session(target, generation, waker)
             except Exception as e:
                 # The meter's one thread outlives any session: what broke
                 # this one is logged and shown, and the next wish connects.
                 logger.exception("HQPlayer meter session failed")
                 self._fail(generation, "error", target[1], f"{type(e).__name__}: {e}")
 
-    def _session(self, target: Tuple[str, int], generation: int) -> None:
-        host, port = target
+    def _session(self, target: Tuple[str, int], generation: int, waker: Waker) -> None:
         try:
-            sock = socket.create_connection(target, timeout=CONNECT_TIMEOUT_S)
+            self._connected(target, generation, waker)
+        finally:
+            with self._cond:
+                if self._waker is waker:
+                    self._waker = None
+            waker.close()
+
+    def _connected(self, target: Tuple[str, int], generation: int, waker: Waker) -> None:
+        host, port = target
+
+        def wait(sock: socket.socket, event: int, timeout: Optional[float]) -> str:
+            return wait_on(sock, event, timeout, waker)
+        try:
+            sock = open_connection((connect_address(host), port), CONNECT_TIMEOUT_S, wait)
+        except Interrupted:
+            # Stopped while it connected: the newest wish may want the meter
+            # again — a page turned it off and on — and asks for a connection
+            with self._cond:
+                self._connecting = False
+                if (generation == self._generation and self._target is not None
+                        and self._wanted_locked()):
+                    self._due = True
+                    self._cond.notify()
+            return
         except ConnectionRefusedError:
             self._fail(generation, "refused", port, f"{host}:{port} refused the connection")
             return
@@ -439,12 +471,16 @@ class HqpMeter:
                 self._connecting = False
                 if generation != self._generation or not self._wanted_locked():
                     return
+                # Wanted now: a stop's wake-up given while it connected was
+                # undone by a newer wish, and is spent here — never read as
+                # the stream's end
+                waker.take()
                 self._sock = sock
                 # a reconnect edge that came while connecting is spent here
                 self._due = False
                 self._publish_locked({"state": "open"})
             logger.info("HQPlayer meter stream open (%s:%d)", host, port)
-            delivered, ended = self._read(sock)
+            delivered, ended = self._read(sock, wait)
         finally:
             with self._cond:
                 self._connecting = False
@@ -472,17 +508,20 @@ class HqpMeter:
         else:
             self._fail(generation, "closed", port, f"{host}:{port} closed the meter connection")
 
-    def _read(self, sock: socket.socket) -> Tuple[bool, Optional[Tuple[str, str]]]:
-        """Read until the stream ends or is shut: (frames seen, how it ended —
-        None for an end of stream, ("lost", the error) for a connection that
-        failed, ("protocol", why) for what is not a meter stream). A reading
-        goes out per READING_S of the source rebuilt."""
+    def _read(self, sock: socket.socket, wait) -> Tuple[bool, Optional[Tuple[str, str]]]:
+        """Read until the stream ends or the session is stopped (`wait` woken):
+        (frames seen, how it ended — None for an end of stream or a stop,
+        ("lost", the error) for a connection that failed, ("protocol", why)
+        for what is not a meter stream). A reading goes out per READING_S of
+        the source rebuilt."""
         buf = bytearray(1 << 20)
         view = memoryview(buf)
         fill = 0
         delivered = False
         rebuild = None
         while True:
+            if wait(sock, selectors.EVENT_READ, None) == "woken":
+                return delivered, None
             try:
                 n = sock.recv_into(view[fill:])
             except OSError as e:

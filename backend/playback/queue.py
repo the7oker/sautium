@@ -150,6 +150,18 @@ class CanonicalQueue:
                     return i + 1
             return None
 
+    def slot_of(self, index: int, track_id: Optional[str]) -> Optional[int]:
+        """The slot a tap on a queue sheet means: `index` while it holds the
+        track the sheet showed there (`track_id`), else the slot nearest it
+        that holds that track — the queue moved under a sheet not refreshed
+        yet (a replace, the radio, another device) — or None once the queue
+        no longer holds it. An entry with no track (None) names the slot."""
+        with self._lock:
+            if track_id is None:
+                return index if 1 <= index <= len(self._items) else None
+            slots = [s for s, it in enumerate(self._items, 1) if it.track_id == track_id]
+            return min(slots, key=lambda s: (abs(s - index), s)) if slots else None
+
     def refresh_proxy_items(self, token: str, *, provider: Optional[str],
                             excerpt: bool, duration_seconds: Optional[float]) -> bool:
         """Bring every slot streaming `token` up to date with what the proxy
@@ -250,24 +262,13 @@ class CanonicalQueue:
                 return item
             return None
 
-    def reorder_by_track_ids(self, order: list[str]) -> None:
-        """Reorder to `order` (universal track UUIDs — the one identity
-        BOTH owned and phantom items carry; media_file_id is None for
-        phantoms, which made radio queues unreorderable). The endpoint has
-        already validated the permutation. Duplicate ids keep their
-        relative order via per-id buckets."""
+    def reorder(self, order: list[QueueItem]) -> None:
+        """Reorder to `order` — the queue's own items, each once, by
+        identity (a track queued twice is two slots); the endpoint has
+        validated the permutation against the items it read, and the
+        manager applies it only to those items (apply_reorder)."""
         with self._lock:
-            by_id: dict[Optional[str], list[QueueItem]] = {}
-            for it in self._items:
-                by_id.setdefault(it.track_id, []).append(it)
-            new_items = []
-            for mid in order:
-                bucket = by_id.get(mid)
-                if bucket:
-                    new_items.append(bucket.pop(0))
-            for bucket in by_id.values():
-                new_items.extend(bucket)
-            self._items = new_items
+            self._items = list(order)
             self._version += 1
 
     def clear_for_radio(self, current_index: Optional[int]) -> int:
@@ -284,11 +285,17 @@ class CanonicalQueue:
 
     # -- payload -------------------------------------------------------------
 
-    def payload(self) -> dict:
+    def payload(self, gap=None) -> dict:
         """The exact `/api/player/playlist` JSON shape the UI has always
-        consumed (owned / preview / foreign row variants)."""
+        consumed (owned / preview / foreign row variants). `gap` — the
+        active output's (PlayerBackend.gap) — names each slot that output
+        does not hold."""
         with self._lock:
             tracks = [self._row(it, idx) for idx, it in enumerate(self._items)]
+            gaps = [gap(it) for it in self._items] if gap is not None else []
+        for row, why in zip(tracks, gaps):
+            if why is not None:
+                row["gap"] = why
         return {"tracks": tracks, "count": len(tracks)}
 
     @staticmethod

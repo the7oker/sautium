@@ -1,5 +1,5 @@
 """What a DSP setting costs on an HQPlayer's host (backend/playback/hqp_load.py)
-and the schema behind it (migrations 033, 034 and 035).
+and the schema behind it (migrations 033 to 043).
 
 The sampler's gate is pure. The rollup, the coverage the benchmark skips by,
 the headroom classes and the retention run on a real PostgreSQL — a
@@ -31,7 +31,13 @@ PG = dict(host=os.environ.get("SAUTIUM_TEST_PGHOST", "postgres"),
 DBNAME = "sautium_hqp_load_test"
 MIGRATIONS = [Path(__file__).resolve().parent.parent / "desktop" / "migrations" / name
               for name in ("033_hqp_dsp_load.sql", "034_hqp_benchmark_points.sql",
-                           "035_hqp_point_unstarted.sql")]
+                           "035_hqp_point_unstarted.sql", "036_hqp_run_left.sql",
+                           "037_hqp_run_restored.sql", "038_hqp_run_dsd_source.sql",
+                           "039_hqp_run_measured_unchecked.sql",
+                           "040_hqp_run_measured_refused.sql",
+                           "041_hqp_run_return_point.sql",
+                           "042_hqp_run_point_onset.sql",
+                           "043_hqp_run_point_onset_backfill.sql")]
 
 
 def _status(**kw) -> TrackStatus:
@@ -203,7 +209,7 @@ def _ctx(conn, **kw):
 
 
 def _schema(conn):
-    """What 033, 034 and 035 touch, as the catalogue describes it."""
+    """What 033 to 043 touch, as the catalogue describes it."""
     tables = ("hqp_endpoints", "hqp_benchmark_runs", "hqp_dsp_samples", "hqp_dsp_speed",
               "hqp_benchmark_points")
     return (
@@ -222,7 +228,7 @@ def _schema(conn):
     )
 
 
-def test_033_to_035_re_apply_and_build_what_001_declares():
+def test_033_to_043_re_apply_and_build_what_001_declares():
     name = "sautium_hqp_load_mig_test"
     admin, nb = _make_db(name)
     try:
@@ -252,13 +258,81 @@ def test_033_to_035_re_apply_and_build_what_001_declares():
                              DROP COLUMN last_rate, DROP COLUMN last_filter, DROP COLUMN last_filter1x,
                              DROP COLUMN last_shaper;
                            DROP TYPE hqp_point_result;""")
-            for m in MIGRATIONS[1:]:               # 034 as it shipped, then 035
+            for m in MIGRATIONS[1:]:               # 034 as it shipped, then 035 to 043
                 cur.execute(m.read_text())
+        assert _schema(conn) == declared
+        with conn.cursor() as cur:                 # a node that ran 035 before 036 existed
+            cur.execute("ALTER TABLE hqp_benchmark_runs DROP COLUMN left_at")
+            cur.execute(MIGRATIONS[3].read_text())
+        assert _schema(conn) == declared
+        with conn.cursor() as cur:                 # a node that ran 036 before 037 existed
+            cur.execute("""ALTER TABLE hqp_benchmark_runs DROP COLUMN lost_at,
+                             DROP COLUMN restored_at, DROP COLUMN volume_left""")
+            cur.execute(MIGRATIONS[4].read_text())
+        assert _schema(conn) == declared
+        with conn.cursor() as cur:                 # a node that ran 037 before 038 existed
+            cur.execute("ALTER TABLE hqp_benchmark_runs DROP COLUMN dsd_uri")
+            cur.execute(MIGRATIONS[5].read_text())
+        assert _schema(conn) == declared
+        with conn.cursor() as cur:                 # a node that ran 038 before 039 existed
+            cur.execute("ALTER TABLE hqp_benchmark_runs DROP COLUMN measured_unchecked_at")
+            cur.execute(MIGRATIONS[6].read_text())
+        assert _schema(conn) == declared
+        with conn.cursor() as cur:                 # a node that ran 039 before 040 existed
+            cur.execute("ALTER TABLE hqp_benchmark_runs DROP COLUMN measured_refused_at")
+            cur.execute(MIGRATIONS[7].read_text())
+        assert _schema(conn) == declared
+        with conn.cursor() as cur:                 # a node that ran 040 before 041 existed
+            cur.execute("""ALTER TABLE hqp_benchmark_runs DROP COLUMN measured_from_mode,
+                             DROP COLUMN measured_from_mode_name, DROP COLUMN measured_from_rate,
+                             DROP COLUMN measured_from_filter, DROP COLUMN measured_from_filter1x,
+                             DROP COLUMN measured_from_shaper""")
+            cur.execute(MIGRATIONS[8].read_text())
+        assert _schema(conn) == declared
+        with conn.cursor() as cur:                 # a node that ran 041 before 042 existed
+            cur.execute("ALTER TABLE hqp_benchmark_runs DROP COLUMN measured_from_at")
+            cur.execute(MIGRATIONS[9].read_text())
         assert _schema(conn) == declared
         conn.close()
     finally:
         nb._drop_database(admin, name)
         admin.close()
+
+
+def test_043_dates_a_return_point_kept_before_its_onset(db):
+    """A node whose checks kept return points before 042 (their onset
+    unwritten): 043 dates each from the run's mark, else — a run still owed
+    — its start; the notice that HQPlayer stayed in the measured mode orders
+    by that onset, and an undated one broke every notices read. A point
+    dated already, and a row with no point, stay as they are; a second run
+    changes nothing."""
+    import datetime
+    utc = datetime.timezone.utc
+    start = datetime.datetime(2026, 10, 15, 9, 0, tzinfo=utc)
+    mark = datetime.datetime(2026, 10, 15, 10, 0, tzinfo=utc)
+    end = datetime.datetime(2026, 10, 15, 10, 5, tzinfo=utc)
+    dated = datetime.datetime(2026, 10, 15, 11, 0, tzinfo=utc)
+
+    def run(*, finished: bool, point: bool, onset=None) -> int:
+        with db.cursor() as cur:
+            cur.execute("""INSERT INTO hqp_benchmark_runs
+                               (hqp_endpoint_id, hqp_engine, mode, points_planned, pre_mode,
+                                pre_rate, pre_filter, pre_filter1x, pre_shaper, pre_volume,
+                                started_at, finished_at, outcome, measured_unchecked_at,
+                                measured_from_mode, measured_from_at)
+                           VALUES (%s, '6.2.3', 'PCM', 8, 2, 2, 0, 0, 0, -3.0, %s, %s, %s, %s,
+                                   %s, %s) RETURNING id""",
+                        (db.endpoint_id, start, end if finished else None,
+                         "interrupted" if finished else None, mark if finished else None,
+                         2 if point else None, onset))
+            return cur.fetchone()[0]
+    marked, owed = run(finished=True, point=True), run(finished=False, point=True)
+    kept, none = run(finished=True, point=True, onset=dated), run(finished=True, point=False)
+    with db.cursor() as cur:
+        for _ in range(2):
+            cur.execute(MIGRATIONS[-1].read_text())
+    assert _q(db.conn, "SELECT id, measured_from_at FROM hqp_benchmark_runs ORDER BY id") == [
+        (marked, mark), (owed, start), (kept, dated), (none, None)]
 
 
 def test_rollup_p10_and_median_since_the_newest_benchmark_point(db):

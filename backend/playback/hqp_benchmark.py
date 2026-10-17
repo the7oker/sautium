@@ -48,9 +48,10 @@ handed over as the media proxy's /file/ URLs: a Docker node's container
 path is nothing HQPlayer can open, and the input path changes no DSP cost.
 
 One owner of HQPlayer at a time: the run borrows the output
-(PlaybackManager.hold) — the backend is detached as an output switch
-detaches it, every other Sautium path is refused until the output comes
-back, and the canonical queue mirrors back into HQPlayer when it does. The
+(PlaybackManager.hold) — the backend is detached without a switch away, no
+Stop (the run stops HQPlayer itself), every other Sautium path is refused
+until the output comes back, and the canonical queue mirrors back into
+HQPlayer when it does. The
 run drives HQPlayer on a connection of its own (_Link), which waits out
 HQPlayer's silence while it builds a setting — its control port answers
 nothing until the build is done, and a command given up on would still be
@@ -63,7 +64,14 @@ end, on cancel, on failure and when the app stops (shutdown); a run cut
 short before that is put back the next time HQPlayer answers — at the
 attach or when the poller sees it come back (recover) — while HQPlayer still
 shows a mark of the run: its lowered volume, its signals, or the selection
-it set last.
+it set last, in the mode it measured too (read there only on an HQPlayer at
+rest); one HQPlayer went away under (it closed, reset or refused the
+connection) whole, while it shows what a box that just booted shows —
+stopped, reading no other controller's entry. A new run takes it first, and
+closes it with no notice. A person's switch away, DSP change or knob set in
+HQPlayer's own window since leaves HQPlayer to them instead: the run is
+closed as left, nothing more is put back, and one notice names what still
+holds the run's test values.
 
 Each point waits for HQPlayer's average to settle (Settle) and writes one
 sample: the p10 of the accepted readings, whether they settled, how long
@@ -74,15 +82,16 @@ thresholds).
 
 import logging
 import random
-import socket
 import threading
 import time
 from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
+import psycopg2
+
 from config import settings
-from db_pool import db_execute, db_query_one
+from db_pool import db_execute, db_query, db_query_one
 from hqplayer_client import HQPlayerClient, PlaybackState, TrackStatus
 
 from playback import hqp_load
@@ -152,9 +161,9 @@ TICK_S = 1.0
 # Stopped this many ticks in a row, the position never having moved: HQPlayer
 # did not start it — once to start it again, twice to call it refused.
 STOP_TICKS = 3
-# A SelectTrack on a stopped HQPlayer needs a beat to register before Play
-# honours it (the resume watcher's quirk, 04c46b8): the run reads <Status/>
-# until it names the slot, this long at most.
+# After a SelectTrack the run reads <Status/> until it names the slot, this
+# long at most: a stopped HQPlayer plays the slot it is given (Desktop 6.2.4),
+# and the read confirms which entry it took.
 SELECT_WAIT_S = 2.0
 SELECT_POLL_S = 0.2
 # Seconds a point takes before this endpoint has run one: start, five stable
@@ -187,9 +196,47 @@ _halt = threading.Event()
 _thread: Optional[threading.Thread] = None
 # The run's own connection, for a cancel to wake a read it is waiting on.
 _live: Optional["_Link"] = None
+# The put-back each run cut short still owes HQPlayer, by run id: a DSP item of
+# the HQPlayer's link (link, item) as of the run's end — a person's newer DSP
+# change, or their switch away, supersedes it, and HQPlayer is theirs then.
+_owed: Dict[int, tuple] = {}
+# By endpoint, a run left to the owner there: its row, what of its test
+# settings HQPlayer still held when the poller last read it (note_left; None
+# until it did), and HQPlayer's lists by the mode they were read in, each
+# one it gave — or None: no run left there. Absent: not read yet.
+_left: Dict[int, Optional[dict]] = {}
+# Bumped by every close and clear of a run left to the owner: a read of the
+# row a change overtook is not kept (left_pending)
+_left_gen = 0
+# Runs whose put-back holds the command lock: a person's switch away, or
+# another HQPlayer chosen, is left to that put-back's own end — it went, or
+# the switch drops its next request (left_by_person)
+_putting: set = set()
+# By endpoint, the run whose put-back left the measured mode's selection
+# unchecked, its row (None: none) — HQPlayer was busy, or did not take the
+# owner's selection there back — read from the database once, then kept;
+# the rest a check spent its try at (the entry it rested on: HQPlayer busy,
+# or a verdict the database did not take), not tried again until it moves;
+# the endpoints a check runs on
+_unchecked: Dict[int, Optional[dict]] = {}
+_busy_at: Dict[int, tuple] = {}
+_checking: set = set()
+# Endpoints whose check a run's hold cut once past its way back — a point
+# gone, or one kept anew, may stand: that run's end says what stands (_run)
+_left_to_run: set = set()
+# By endpoint, the run row holding a return point — the mode a check of a
+# measured mode found HQPlayer in, kept until HQPlayer is back there
+# (_keep_point) — or None: none; read from the database once, then kept
+_point_rows: Dict[int, Optional[dict]] = {}
 _state: Dict[str, Any] = {"running": False, "cancel_requested": False, "endpoint_id": None,
                           "mode": None, "point": 0, "total": 0, "point_label": "",
                           "eta_s": None, "started_at": None, "outcome": None, "note": None}
+
+
+def _bump() -> None:
+    """Under _lock: what a run left to the owner says changed."""
+    global _left_gen
+    _left_gen += 1
 
 
 class BenchmarkRefused(RuntimeError):
@@ -786,19 +833,15 @@ class _Link:
         return self.c.connect()
 
     def close(self) -> None:
+        """The run is over: its connection and its client's wake channel go."""
         self.c.disconnect()
+        self.c.close()
 
     def interrupt(self) -> None:
-        """Wake a read waiting on HQPlayer's answer — a cancel from another
-        thread: it ends as a dropped connection. A shutdown wakes it on
-        Linux; Windows leaves the read blocked until the socket is closed."""
-        sock = self.c.socket
-        if sock is not None:
-            for wake in (lambda: sock.shutdown(socket.SHUT_RDWR), sock.close):
-                try:
-                    wake()
-                except OSError:
-                    pass    # closed meanwhile: nothing waits on it
+        """Wake a read — or a connect — waiting on HQPlayer, from another
+        thread (a cancel): it ends as a connection let go, and the run's own
+        thread closes its socket (HQPlayerClient.interrupt)."""
+        self.c.interrupt()
 
     def refusal(self) -> str:
         return self.c.refusal()
@@ -916,14 +959,18 @@ def summary(endpoint: Optional[dict]) -> Dict[str, Any]:
 def start(mode: Optional[str] = None, *, fixed_volume_ok: bool = False) -> Dict[str, Any]:
     """Start a run of `mode` ('pcm' | 'sdm'; None = the mode HQPlayer is in).
     Raises BenchmarkRefused with the reason when it cannot start now."""
-    global _thread
     from playback.manager import manager
     if running():
         raise BenchmarkRefused("A benchmark is already running")
     b = manager.active
     if b is None or b.id != "hqplayer":
         raise BenchmarkRefused("Pick this HQPlayer as the audio output first")
+    from playback import hqp_link
     from playback.hqp_backend import _stream_mode
+    link = hqp_link.selected()
+    busy = link.busy()
+    if busy is not None:
+        raise BenchmarkRefused(f"{busy}. Start the benchmark once it answers again.")
     if not _stream_mode():
         import main
         import model_cache
@@ -941,18 +988,46 @@ def start(mode: Optional[str] = None, *, fixed_volume_ok: bool = False) -> Dict[
     if ep is None or not ep.get("hqp_engine"):
         raise BenchmarkRefused("This HQPlayer is not registered yet — try again once it "
                                "has played")
-    link = _Link(lambda s: True)
-    if not link.connect():
-        raise BenchmarkRefused("HQPlayer is not answering")
+    # A run cut short before still owes HQPlayer its put-back: it goes first,
+    # and this run reads what HQPlayer holds after it — never the old run's
+    # test mode or lowered volume — as the owner's: closed with no notice
+    # (quiet), as the run's own first step closes one (_take_owed). One that
+    # sets off a build refuses this start (busy below): the owner starts
+    # again once HQPlayer answers.
+    unsaid = recover(ep["id"], link, gave=b.gave, quiet=True)
     try:
-        status, st = link("get_status"), link("get_state")
-        modes, vr = link("get_modes"), link("volume_range")
-    except (_Reopened, _Lost):
-        raise BenchmarkRefused("HQPlayer dropped the connection — try again")
-    finally:
-        link.close()
+        return _start_run(ep, link, b, mode, fixed_volume_ok, unsaid)
+    except BenchmarkRefused:
+        if unsaid:
+            _notify()       # the mark the run would have judged at once: no run follows
+        raise
+
+
+def _start_run(ep: dict, link, b, mode: Optional[str], fixed_volume_ok: bool,
+               unsaid: bool) -> Dict[str, Any]:
+    """start() once a run cut short is put back: what HQPlayer answers is the
+    precondition, and the run's thread starts — `unsaid`: the put-back left
+    a mark for it to judge, said at its end (_run). A run of "the mode
+    HQPlayer is in" (`mode` None) takes that mode at its own rest (_measure):
+    this read may find HQPlayer in the measured mode, where a check of ours
+    holds it a moment or left it."""
+    global _thread
+    from playback import hqp_link
+    busy = link.busy()
+    if busy is not None:
+        raise BenchmarkRefused(f"{busy}. Start the benchmark once it answers again.")
+    try:
+        with link.asking() as c:
+            status, st = c.get_status(), c.get_state()
+            modes, vr = c.get_modes(), c.volume_range()
+    except (hqp_link.Building, hqp_link.NotAnswering) as e:
+        raise BenchmarkRefused(f"{e}. Start the benchmark once it answers again.")
+    except (BrokenPipeError, ConnectionError, OSError):
+        raise BenchmarkRefused(hqp_link.NOT_ANSWERING)
     if status is None or st is None:
         raise BenchmarkRefused("HQPlayer did not report its state")
+    if modes is None:
+        raise BenchmarkRefused("HQPlayer did not list its modes — try again")
     # HQPlayer answering is the whole precondition — a queue mirror the
     # attach could not make (HQPlayer not up yet, 2026-10-03) is none: the
     # run sets HQPlayer's playlist itself, and the attach that takes the
@@ -980,8 +1055,8 @@ def start(mode: Optional[str] = None, *, fixed_volume_ok: bool = False) -> Dict[
         _state.update(running=True, cancel_requested=False, endpoint_id=ep["id"], mode=kind,
                       point=0, total=0, point_label="Preparing…", eta_s=None,
                       started_at=time.time(), outcome=None, note=None)
-        _thread = threading.Thread(target=_run, args=(ep, kind), daemon=True,
-                                   name="hqp-benchmark")
+        _thread = threading.Thread(target=_run, args=(ep, kind, b.gave, mode, unsaid),
+                                   daemon=True, name="hqp-benchmark")
         _thread.start()
     return state()
 
@@ -1027,7 +1102,8 @@ def _why(e: Exception) -> str:
     return str(e) or type(e).__name__
 
 
-def _run(ep: dict, kind: str) -> None:
+def _run(ep: dict, kind: str, gave: Callable[[str], bool], asked: Optional[str],
+         unsaid: bool) -> None:
     """The job's thread. Whatever ends it is recorded where the owner reads
     it (state(), and the run row once there is one); the job is closed
     before the output goes back — the attach that takes it back then finds
@@ -1037,7 +1113,7 @@ def _run(ep: dict, kind: str) -> None:
     try:
         with manager.hold("benchmark", LABEL):
             try:
-                outcome, note = _measure(ep, kind)
+                outcome, note = _measure(ep, kind, gave, asked)
             except (_Abort, _Lost) as e:
                 outcome, note = "failed", str(e)
             except Exception as e:      # the job's boundary: recorded, never lost
@@ -1048,6 +1124,15 @@ def _run(ep: dict, kind: str) -> None:
         logger.warning("HQPlayer benchmark did not start: %s", _why(e))
         if running():
             _finish("failed", _why(e))
+    with _lock:
+        word = ep["id"] in _left_to_run
+        _left_to_run.discard(ep["id"])
+    if unsaid or word:
+        # A mark start()'s put-back left for this run to judge, or a check
+        # its hold cut once past its way back, is said once the run is over
+        # — judged, or not reached: HQPlayer gone at its start, the output
+        # not lent
+        _notify()
 
 
 def _finish(outcome: str, note: Optional[str]) -> None:
@@ -1056,25 +1141,40 @@ def _finish(outcome: str, note: Optional[str]) -> None:
     logger.info("HQPlayer benchmark %s%s", outcome, f": {note}" if note else "")
 
 
-def _measure(ep: dict, kind: str) -> Tuple[str, Optional[str]]:
-    """The run proper, inside the hold: read what is to be put back, open
-    the run row, measure, and put everything back whatever happens."""
+def _measure(ep: dict, kind: str, gave: Callable[[str], bool],
+             asked: Optional[str]) -> Tuple[str, Optional[str]]:
+    """The run proper, inside the hold: put back what a run cut short before
+    it still owes (`gave` tells an entry the node gave HQPlayer), read what
+    is to be put back, open the run row, measure, and put everything back
+    whatever happens. A run of the mode HQPlayer is in (`asked` None) takes
+    that mode from what it reads here, never from start()'s read."""
     global _live
     link = _Link(_cancel.wait, answer_s=ANSWER_WAIT_S)
     if not link.connect():
         return "failed", "HQPlayer is not answering"
     _live = link
     try:
+        _take_owed(link, ep["id"], gave, asked)
         pre, modes, vr = _again(lambda: (link("get_state"), link("get_modes"),
                                          link("volume_range")))
-        if pre is None or not modes:
+        if pre is None:
             return "failed", "HQPlayer did not report its state"
+        if modes is None:
+            return "failed", "HQPlayer did not list its modes"
+        if asked is None:
+            kind = mode_kind(_mode_name(modes, pre["mode"]))
+            if kind is None:
+                return "failed", "HQPlayer's mode is [source] — choose PCM or SDM to measure"
+            _progress(mode=kind)
         mode_index = _mode_index(modes, kind)
         if mode_index is None:
             return "failed", f"This HQPlayer's output offers no {kind.upper()} mode"
         mode_name = _mode_name(modes, mode_index)
         mute = mute_level(vr, pre["volume"])
         run_id = _open_run(ep, mode_name, pre, mute)
+        # It read what HQPlayer holds as the owner's: a run left to them there
+        # is no one's to name now
+        clear_left(ep["id"])
         switched = pre["mode"] != mode_index
         own: Optional[dict] = None
         stats: Dict[str, Any] = {"measured": 0, "dropouts": [], "own": [], "refused": 0,
@@ -1095,8 +1195,8 @@ def _measure(ep: dict, kind: str) -> Tuple[str, Optional[str]]:
             uris = {name: (_dsd_uri(s["file"]) if name == "dsd"
                            else _signal_uri(ensure_signal(s["rate"])))
                     for name, s in srcs.items() if name in used}
-            db_execute("UPDATE hqp_benchmark_runs SET points_planned = %(n)s WHERE id = %(id)s",
-                       {"n": grid.asks(), "id": run_id})
+            db_execute("UPDATE hqp_benchmark_runs SET points_planned = %(n)s, dsd_uri = %(d)s "
+                       "WHERE id = %(id)s", {"n": grid.asks(), "d": uris.get("dsd"), "id": run_id})
             mode = (mode_index, _lists_key(filters, shapers, rates))
             slots = _prepare(link, uris, mute, mode)
             outcome, note = _points(link, grid, slots, uris, srcs, mute, mode, ep, run_id, st,
@@ -1111,11 +1211,19 @@ def _measure(ep: dict, kind: str) -> Tuple[str, Optional[str]]:
             outcome, note = "failed", _why(e)
         finally:
             _live = None                # a second cancel must not cut the put-back
-            reached, restore_note = _restore(link, pre, own, mute)
+            reached, restore_note, gone, measured_left = _restore(link, pre, own, mute,
+                                                                  switched)
             note = "; ".join(x for x in (note, restore_note) if x) or None
             # An HQPlayer that did not answer the restore keeps the run
-            # open: the next attach, or its return, puts it back (recover).
-            _close_run(run_id, outcome, note, stats, finished=reached)
+            # open: the next attach, or its next answer, puts it back
+            # (recover) — unless the owner changes it first. One that went
+            # away — it closed, reset or refused the connection, the app not
+            # stopping — may come back with what it booted with (lost_at);
+            # one that stayed silent, busy, did not.
+            if not reached:
+                _owe(run_id)
+            _close_run(run_id, outcome, note, stats, finished=reached,
+                       lost=gone and not _halt.is_set(), unchecked=reached and measured_left)
         return outcome, note
     finally:
         _live = None
@@ -1124,13 +1232,26 @@ def _measure(ep: dict, kind: str) -> Tuple[str, Optional[str]]:
 
 def _enter_mode(link: _Link, mode_index: int, switched: bool) -> tuple:
     """Into the measured mode — HQPlayer keeps one selection per mode, read
-    as it is there — and its lists."""
+    as it is there — and its lists. Stopped first: the hold leaves HQPlayer
+    as it played, and a mode switched under the owner's track would rebuild
+    it while it sounds."""
+    link("stop")
     if switched and not link("set_mode", mode_index):
         raise _Abort(f"HQPlayer did not switch modes: {link.refusal()}")
     st = link("get_state")
     if st is None:
         raise _Abort("HQPlayer did not report its state")
-    return st, link("get_filters"), link("get_shapers"), link("get_rates")
+    return (st, *_lists(link))
+
+
+def _lists(link: _Link) -> tuple:
+    """The measured mode's filters, shapers and rates: a run neither plans
+    on, nor checks its plan against, a list HQPlayer did not give."""
+    lists = link("get_filters"), link("get_shapers"), link("get_rates")
+    missing = [name for name, items in zip(("filters", "shapers", "rates"), lists) if items is None]
+    if missing:
+        raise _Abort(f"HQPlayer did not list its {', '.join(missing)}")
+    return lists
 
 
 def _lists_key(filters: List[dict], shapers: List[dict], rates: List[dict]) -> tuple:
@@ -1160,7 +1281,7 @@ def _prepare(link: _Link, uris: Dict[str, str], mute: Optional[float], mode: tup
                 raise _Abort("HQPlayer did not report its state")
             if st["mode"] != mode_index and not link("set_mode", mode_index):
                 raise _Abort(f"HQPlayer did not go back to the measured mode: {link.refusal()}")
-            if _lists_key(link("get_filters"), link("get_shapers"), link("get_rates")) != lists:
+            if _lists_key(*_lists(link)) != lists:
                 raise _Abort("HQPlayer came back with other lists — the run's settings would "
                              "name others")
         if mute is not None:
@@ -1485,9 +1606,9 @@ def _play(link: _Link, slot: int, src_rate: Optional[int], entries: int, *,
                 stopped += 1
                 if not replayed and (settle.playing is not None or stopped >= STOP_TICKS):
                     # HQPlayer stops the transport once a heavy setting is
-                    # built and does not start again by itself (the DSP
-                    # resume watcher's quirk), or it stopped at once: start
-                    # it again, once.
+                    # built and does not start again by itself (Desktop 6.2.3
+                    # on Windows; 6.2.4 plays on), or it stopped at once:
+                    # start it again, once.
                     replayed, stopped = True, 0
                     _select(send, read, slot)
                     send("play")
@@ -1550,62 +1671,101 @@ def _outlast(link: _Link, settle: Settle) -> TrackStatus:
         return status
 
 
-def _restore(link: _Link, pre: dict, own: Optional[dict],
-             mute: Optional[float]) -> Tuple[bool, Optional[str]]:
+def _restore(link: _Link, pre: dict, own: Optional[dict], mute: Optional[float],
+             switched: bool) -> Tuple[bool, Optional[str], bool, bool]:
     """Put back what the run changed, whatever ended it. Returns (HQPlayer
-    answered, what could not be put back). Only the app stopping cuts the
-    wait for an HQPlayer that is away short; one that is there but silent —
-    a cancel in the middle of a build — is left to recover (RESTORE_ANSWER_S)."""
+    answered, what could not be put back, whether HQPlayer went away under
+    the put-back — it closed, reset or refused the connection, counted as
+    it happened (the client's losses, the poller's own rule), whatever
+    failure came last — rather than only stayed silent, whether the
+    owner's selection of the mode measured — the one the run switched into
+    (`switched`), else the one it found — was left as the run set it:
+    _put_back; False when HQPlayer did not answer, the put-back owed in
+    full: recover). Only the app stopping cuts the wait for an HQPlayer
+    that is away short; one that is there but silent — a cancel in the
+    middle of a build — is left to recover (RESTORE_ANSWER_S)."""
+    losses = link.c.losses
     link.wait = _halt.wait
     link.c.timeout = RESTORE_ANSWER_S
+    # A cancel's wake-up no wait of the run met is spent here: the run acted
+    # on the cancel, and the put-back is no part of it
+    link.c.interrupted()
     sock = link.c.socket
     if sock is not None:
-        if sock.fileno() < 0:
-            link.close()        # closed under it by a cancel's interrupt: connects anew
-        else:
-            sock.settimeout(RESTORE_ANSWER_S)
+        sock.settimeout(RESTORE_ANSWER_S)
     try:
-        problems = _again(lambda: _put_back(link, pre=pre, own=own, mute=mute, clear=True),
-                          silent_ends=True)
+        problems, unset = _again(lambda: _put_back(link, pre=pre, own=own,
+                                                   volume=mute is not None, clear=True,
+                                                   enter=True),
+                                 silent_ends=True)
         after = _again(lambda: link("get_state"), silent_ends=True)
     except _Lost:
-        return False, "HQPlayer did not answer to be put back — it is when it answers again"
+        return (False, "HQPlayer did not answer to be put back — it is when it answers again",
+                link.c.losses > losses, False)
+    # Switched with no own selection read: the run set nothing there
+    measured_left = unset["own" if switched else "pre"]
     if after is None:
-        return True, "HQPlayer did not report its state after the run"
+        return True, "HQPlayer did not report its state after the run", False, measured_left
     diff = [k for k in ("mode", "rate", "filterNx", "filter1x", "shaper")
             if after.get(k) != pre.get(k)]
     if mute is not None and abs(after["volume"] - pre["volume"]) > _DB_EPS:
         diff.append("volume")
     if diff or problems:
         logger.warning("HQPlayer benchmark: not put back as it was — %s %s", diff, problems)
-        return True, "not everything was put back: " + ", ".join(diff + problems)
-    return True, None
+        return (True, "not everything was put back: " + ", ".join(diff + problems), False,
+                measured_left)
+    return True, None, False, measured_left
 
 
-def _put_back(link: _Link, *, pre: dict, own: Optional[dict], mute: Optional[float],
-              clear: bool) -> List[str]:
+def _put_back(link: _Link, *, pre: dict, own: Optional[dict], volume: bool,
+              clear: bool, enter: bool) -> Tuple[List[str], Dict[str, bool]]:
     """Stop; the run's sources out of the playlist (`clear`); the measured
-    mode's own selection when the run switched into it, then the mode it
-    found and that mode's selection; the volume, when the run lowered it.
-    What HQPlayer refused, as "knob: its words"."""
+    mode's own selection when the run switched into it — HQPlayer keeps one
+    selection per mode: in that mode, entered for it when `enter` (the
+    run's own end, a whole put-back: what the run left there is known),
+    else only while HQPlayer is in it (one it does not show is no one's to
+    judge) — then the mode it found and that mode's selection; the owner's
+    volume (`volume`: the run lowered it, or HQPlayer came back louder). A
+    selection goes back only while HQPlayer shows its mode, read after the
+    switch: in a mode HQPlayer did not take, a selection of another mode's
+    indices would set what neither holds. What HQPlayer refused, as "knob:
+    its words", and by selection — the mode the run switched into (`own`),
+    the mode it found (`pre`) — whether it was not set back: refused, or its
+    mode not shown; in the mode the run measured, a test point HQPlayer may
+    still hold."""
     link("stop")
     if clear:
         link("playlist_clear")
     problems: List[str] = []
     now = link("get_state")
-    if own is not None and now is not None and now["mode"] == own["mode"]:
-        _, failed = link("apply_settings", rate=own["rate"], filter=own["filterNx"],
-                         filter1x=own["filter1x"], shaper=own["shaper"])
+    mode = now["mode"] if now is not None else None
+
+    def switched(to: int) -> Optional[int]:
+        _, failed = link("apply_settings", mode=to)
+        problems.extend(f"{k}: {v}" for k, v in failed.items())
+        there = None if failed else link("get_state")
+        if not failed and (there is None or there["mode"] != to):
+            problems.append("mode: HQPlayer did not show the mode it was switched to")
+        return there["mode"] if there is not None else None
+    unset = {"own": own is not None, "pre": True}
+    if own is not None:
+        if mode != own["mode"] and enter:
+            mode = switched(own["mode"])
+        if mode == own["mode"]:
+            _, failed = link("apply_settings", rate=own["rate"], filter=own["filterNx"],
+                             filter1x=own["filter1x"], shaper=own["shaper"])
+            problems += [f"{k}: {v}" for k, v in failed.items()]
+            unset["own"] = bool(failed)
+    if mode != pre["mode"]:
+        mode = switched(pre["mode"])
+    if mode == pre["mode"]:
+        _, failed = link("apply_settings", rate=pre["rate"], filter=pre["filterNx"],
+                         filter1x=pre["filter1x"], shaper=pre["shaper"])
         problems += [f"{k}: {v}" for k, v in failed.items()]
-    if now is None or now["mode"] != pre["mode"]:
-        _, failed = link("apply_settings", mode=pre["mode"])
-        problems += [f"{k}: {v}" for k, v in failed.items()]
-    _, failed = link("apply_settings", rate=pre["rate"], filter=pre["filterNx"],
-                     filter1x=pre["filter1x"], shaper=pre["shaper"])
-    problems += [f"{k}: {v}" for k, v in failed.items()]
-    if mute is not None:
+        unset["pre"] = bool(failed)
+    if volume:
         link("set_volume", pre["volume"])
-    return problems
+    return problems, unset
 
 
 def _open_run(ep: dict, mode_name: str, pre: dict, mute: Optional[float]) -> int:
@@ -1664,82 +1824,1174 @@ def _ledger(run_id: int, p: Point, result: str, note: Optional[str] = None,
 
 
 def _close_run(run_id: int, outcome: str, note: Optional[str], stats: dict, *,
-               finished: bool) -> None:
+               finished: bool, lost: bool, unchecked: bool = False) -> None:
+    """The run's row as it ended. `unchecked`: the measured mode's own
+    selection HQPlayer did not take back at the run's end — a test point
+    may stand there: marked, judged at HQPlayer's nearest rest or a new
+    run's start, and said."""
     own = stats["own"]
-    db_execute("""
+    row = db_execute("""
         UPDATE hqp_benchmark_runs
            SET finished_at = CASE WHEN %(fin)s THEN now() END,
                outcome = CASE WHEN %(fin)s THEN %(o)s::hqp_bench_outcome END,
+               lost_at = CASE WHEN %(lost)s THEN now() END,
+               measured_unchecked_at = CASE WHEN %(u)s THEN now() END,
                note = %(note)s, points_measured = %(n)s, dropout_speed = %(d)s,
                first_speed = %(first)s, last_speed = %(last)s
          WHERE id = %(id)s
-    """, {"id": run_id, "fin": finished, "o": outcome, "note": note, "n": stats["measured"],
+     RETURNING hqp_endpoint_id
+    """, {"id": run_id, "fin": finished, "lost": lost, "o": outcome, "note": note,
+          "u": unchecked, "n": stats["measured"],
           "d": max(stats["dropouts"]) if stats["dropouts"] else None,
           "first": own[0] if own else None, "last": own[-1] if len(own) > 1 else None})
+    if unchecked and row is not None:      # none: forgotten with its HQPlayer, no mark to set
+        with _lock:
+            _unchecked.pop(row["hqp_endpoint_id"], None)    # read again: a new mark
+            _busy_at.pop(row["hqp_endpoint_id"], None)
+            _bump()
+        _notify()
 
 
-def recover(endpoint_id: int) -> None:
+class _OnLink:
+    """The playback link (playback.hqp_link) in _Link's shape, for putting a
+    run back outside a hold: its requests go where every other request of
+    this node to HQPlayer goes. A connection replaced under it is a
+    _Reopened (_Silent after a silence), as on the run's own."""
+
+    def __init__(self, link):
+        self.c = link.client
+
+    def refusal(self) -> str:
+        return self.c.refusal()
+
+    def __call__(self, method: str, *args, **kwargs):
+        result = getattr(self.c, method)(*args, **kwargs)
+        if not self.c.is_connected():
+            raise (_Silent if self.c.timed_out else _Reopened)(self.c.refusal())
+        return result
+
+
+def _owe(run_id: int, link=None) -> tuple:
+    """The put-back of a run cut short, owed from now: a DSP item of the
+    HQPlayer's link (dsp_knob) — a person's DSP change or switch away after
+    it supersedes it. Made once per run and link; a link made afresh owes it
+    anew — unless a person superseded it on the link it was owed on: then it
+    stays superseded."""
+    from playback import hqp_link
+    link = link if link is not None else hqp_link.selected()
+    with _lock:
+        owed = _owed.get(run_id)
+        if owed is None or (owed[0] is not link and owed[0].superseded(owed[1]) is None):
+            owed = _owed[run_id] = (link, link.item("dsp_knob", link.accept("dsp")))
+        return owed
+
+
+def recover(endpoint_id: int, link, *, gave: Optional[Callable[[str], bool]] = None,
+            quiet: bool = False, again: Callable[[], None] = lambda: None) -> bool:
     """A run cut short — the process died in the middle of it, or HQPlayer
-    went away and did not answer the restore — left HQPlayer stopped on its
-    test settings, maybe lowered and holding the signals. The next time
-    HQPlayer answers (the attach, or the poller seeing it come back), before
-    anything reads its playlist: put the owner's settings back — only while
-    HQPlayer still shows a mark of the run (its signals in the playlist, the
-    volume it lowered to, the selection it set last); a HQPlayer changed
-    since is the owner's again. A HQPlayer that drops the connection
-    meanwhile is tried at its next return."""
+    went away or stayed silent through the restore — left HQPlayer stopped
+    on its test settings, maybe lowered and holding the signals. The next
+    time HQPlayer answers (the attach, or the poller's next answer), before
+    anything reads its playlist: put the owner's settings back on its link —
+    only while HQPlayer still shows a mark of the run (its signals in the
+    playlist, the volume it lowered to, the selection it set last — in the
+    mode it measured too, read there only at rest) — whole
+    when HQPlayer went away under the run (lost_at) and shows what a box
+    that just booted shows (_booted; `gave` tells an entry this node gave
+    it) — and never past a change the owner made since: the put-back is a
+    DSP item (_owe), a newer DSP change or a switch away supersedes it —
+    written in the run's row where it happens (left_by_person) — and so does
+    a knob they set in HQPlayer's own window (_owners); the run is closed as
+    left to the owner. `quiet`: at a new run's start — closed with no
+    notice, the new run reads what HQPlayer holds as the owner's from then
+    (_take_owed) — a measured mode left unchecked stays marked, for the new
+    run to judge at the rest its own Stop makes, and is said only once no
+    run will judge it: start() refuses after all, the put-back outlived its
+    wait (a build), or the run is over before it got there (_run). One
+    command sequence: a setting HQPlayer builds holds the link as any other,
+    and the caller — the attach, the poller — goes on once the build begins,
+    the rest put back behind it (BuildWatch.waking). Not put back — HQPlayer
+    building, silent, gone — `again` asks for it at HQPlayer's next
+    answer. Returns whether a quiet put-back left a mark it did not say."""
     if running():
-        return
+        return False
     run = db_query_one("""
         SELECT * FROM hqp_benchmark_runs
          WHERE hqp_endpoint_id = %(e)s AND finished_at IS NULL
          ORDER BY started_at DESC LIMIT 1
     """, {"e": endpoint_id})
     if run is None:
+        return False
+    owed = _owe(run["id"], link)
+    ready = threading.Event()
+    unsaid = False
+
+    def put_back() -> None:
+        nonlocal unsaid
+        try:
+            with link.build.waking(ready):
+                unsaid = _put_run_back(link, run, owed, again, gave, quiet, ready)
+        except Exception:       # the thread's boundary: recorded, never lost
+            logger.exception("HQPlayer benchmark run %s: putting it back failed", run["id"])
+        finally:
+            ready.set()
+    threading.Thread(target=put_back, daemon=True, name="hqp-benchmark-recover").start()
+    ready.wait()
+    # Read once ready is set by the put-back's end; one a build woke early
+    # says its mark itself (_put_run_back)
+    return unsaid
+
+
+def _put_run_back(link, run: dict, owed: tuple, again: Callable[[], None],
+                  gave: Optional[Callable[[str], bool]], quiet: bool,
+                  ready: threading.Event) -> bool:
+    """recover()'s put-back on the command lock. Returns whether it closed
+    the run quietly with a mark it did not say."""
+    from playback.hqp_link import Dropped
+    owed_on, item = owed
+    why, done = owed_on.superseded(item), None
+    if why is None:
+        try:
+            with link.command(item=item):
+                # Closed while the command lock is the put-back's: a person's
+                # DSP change waiting for it finds the run closed, and a switch
+                # away meanwhile leaves the run to this end (left_by_person) —
+                # never closed as left over a put-back that went
+                with _lock:
+                    _putting.add(run["id"])
+                try:
+                    done = _recover(_OnLink(link), run, gave)
+                    if done is not None:
+                        if quiet:
+                            # A mark the new run judges at once wakes nobody
+                            # — start() says it if it refuses after all, the
+                            # run's end if it never got there — and a put-back
+                            # that outlived start()'s wait (a build) says it
+                            # itself: no run follows it
+                            done = {k: v for k, v in done.items()
+                                    if k in ("note", "unchecked", "refused")}
+                            done["notify"] = ready.is_set()
+                        _close_owed(run, **done)
+                finally:
+                    with _lock:
+                        _putting.discard(run["id"])
+                        _bump()     # a State read before this end is stale (note_point)
+        except Dropped as e:
+            why = link.superseded(item)
+            if why is None:
+                # Lent, let go or closed: the next attach tries again
+                logger.info("HQPlayer benchmark run %s not put back yet: %s", run["id"], e)
+                return False
+        except (_Reopened, _Lost, BrokenPipeError, ConnectionError, OSError) as e:
+            # A switch away, or another HQPlayer chosen, that woke the request
+            # on its way left the run to its end (left_by_person): this one
+            why = link.superseded(item)
+            if why is None:
+                logger.info("HQPlayer benchmark run %s not put back yet: %s", run["id"], e)
+                again()
+                return False
+        else:
+            if done is None:
+                why = link.superseded(item)
+                if why is None:
+                    again()
+                    return False
+    if why is not None:
+        _close_owed(run, f"cut short; not put back — {why}: HQPlayer was left as it was set "
+                         "since", left=not quiet, theirs=True)
+        return False
+    return bool(quiet and done.get("unchecked") and not done["notify"])
+
+
+def _close_owed(run: dict, note: str, left: bool = False, restored: bool = False,
+                volume_left: Optional[float] = None, unchecked: bool = False,
+                refused: bool = False, seen: Optional[List[dict]] = None,
+                notify: bool = True, theirs: bool = False) -> None:
+    """A run cut short is over: put back, or — `left` — its put-back
+    superseded by a person's DSP change or switch away, or by a knob they
+    changed in HQPlayer's own window. HQPlayer is theirs then: nothing more
+    is put back — its volume raised for them only from the run's own level,
+    when a knob of theirs left the run (_recover) — and what still holds
+    the run's test values is said in one notice until they changed it all
+    (note_left), or a new run read HQPlayer. `restored`: put back after
+    HQPlayer went away under the run — one notice says so, and the level its
+    volume was left at (`volume_left`) when the put-back did not raise it.
+    `unchecked`: the mode it measured not read yet, or the owner's selection
+    there not taken back — the row marked; `refused`: HQPlayer was at rest
+    and did not let it be read, so only a new run's start tries it again
+    (_measured_refused).
+    `notify`: False where a run judges the mark at once — its own first step
+    (_take_owed), or start()'s put-back the run follows: start() says it
+    when it refuses instead, the run's end when it never got there.
+    `theirs`: a person's change superseded the put-back — a return point its
+    round trip left (_keep_point) goes too, HQPlayer theirs. Once only: a
+    run another path closed meanwhile stays as that path closed it."""
+    row = db_execute("""UPDATE hqp_benchmark_runs SET finished_at = now(), outcome = 'interrupted',
+                               note = concat_ws('; ', note, %(n)s::text),
+                               left_at = CASE WHEN %(left)s THEN now() END,
+                               restored_at = CASE WHEN %(restored)s THEN now() END,
+                               volume_left = %(vl)s,
+                               measured_unchecked_at = CASE WHEN %(unchecked)s THEN now() END,
+                               measured_refused_at = CASE WHEN %(refused)s THEN now() END,
+                               measured_from_mode = CASE WHEN %(theirs)s THEN NULL
+                                                         ELSE measured_from_mode END,
+                               measured_from_mode_name = CASE WHEN %(theirs)s THEN NULL
+                                                              ELSE measured_from_mode_name END,
+                               measured_from_rate = CASE WHEN %(theirs)s THEN NULL
+                                                         ELSE measured_from_rate END,
+                               measured_from_filter = CASE WHEN %(theirs)s THEN NULL
+                                                           ELSE measured_from_filter END,
+                               measured_from_filter1x = CASE WHEN %(theirs)s THEN NULL
+                                                             ELSE measured_from_filter1x END,
+                               measured_from_shaper = CASE WHEN %(theirs)s THEN NULL
+                                                           ELSE measured_from_shaper END,
+                               measured_from_at = CASE WHEN %(theirs)s THEN NULL
+                                                       ELSE measured_from_at END
+                         WHERE id = %(id)s AND finished_at IS NULL
+                        RETURNING id""", {"n": note, "left": left, "restored": restored,
+                                          "vl": volume_left, "unchecked": unchecked,
+                                          "refused": unchecked and refused, "theirs": theirs,
+                                          "id": run["id"]})
+    with _lock:
+        _owed.pop(run["id"], None)
+        _left.pop(run["hqp_endpoint_id"], None)         # read again at the next answer
+        if left and seen is not None and row is not None:
+            # What the mode the run measured was read to hold, the moment
+            # it was: the notice names it as read, never as the run set it
+            _left[run["hqp_endpoint_id"]] = {"run": run, "items": None, "lists": {},
+                                             "seen": seen}
+        _unchecked.pop(run["hqp_endpoint_id"], None)
+        _point_rows.pop(run["hqp_endpoint_id"], None)
+        if unchecked:
+            _busy_at.pop(run["hqp_endpoint_id"], None)  # a new mark: its own nearest rest
+        _bump()
+    if row is not None:
+        logger.info("HQPlayer benchmark run %s %s: %s", run["id"],
+                    "left to the owner" if left else "recovered", note)
+        if (left or restored or unchecked) and notify:
+            _notify()
+
+
+def left_by_person(host: str, port: int, why: str) -> None:
+    """A person's switch away from the HQPlayer at this address, or their
+    DSP change on it, supersedes the put-back a run cut short there still
+    owes (_owe): the run is closed as left to them where it happens — in its
+    row, so neither a later answer of HQPlayer nor a restart puts it back
+    over what they set. A run going in this process is no run cut short.
+    The database failing costs that record, never the person's change: the
+    link's own supersession still holds in this process."""
+    if running():
         return
-    link = _Link(lambda s: True)       # never holds up the attach: tried again at the next one
-    if not link.connect():
-        return
+    import hqp_library
     try:
-        note = _recover(link, run)
-    except (_Reopened, _Lost) as e:
-        logger.info("HQPlayer benchmark run %s not put back yet: %s", run["id"], e)
-        return
+        ep = hqp_library.endpoint_by_address(host, port)
+        runs = [] if ep is None else db_query(
+            """SELECT * FROM hqp_benchmark_runs
+                WHERE hqp_endpoint_id = %(e)s AND finished_at IS NULL""", {"e": ep["id"]})
+        for run in runs:
+            with _lock:
+                if run["id"] in _putting:
+                    continue        # its put-back's own end decides (_put_run_back)
+            _close_owed(run, f"cut short; not put back — {why}: HQPlayer was left as it was "
+                             "set since", left=True, theirs=True)
+        # A return point a check left (_keep_point): HQPlayer is theirs now
+        for point in [] if ep is None else db_query(
+                """SELECT * FROM hqp_benchmark_runs
+                    WHERE hqp_endpoint_id = %(e)s AND measured_from_mode IS NOT NULL""",
+                {"e": ep["id"]}):
+            _point_cleared(point, f"the way back to {point['measured_from_mode_name']} left "
+                                  f"to the owner — {why}")
+    except psycopg2.Error as e:
+        logger.warning("HQPlayer benchmark: a run cut short not recorded as left to the owner "
+                       "(%s): %s", why, e)
+
+
+def _take_owed(link: _Link, endpoint_id: int, gave: Callable[[str], bool],
+               kind: Optional[str]) -> None:
+    """A new run's first step: a run cut short before it still owes HQPlayer
+    its put-back — it goes first, on this run's connection, so the new run
+    reads what HQPlayer holds after it, never the old run's test settings;
+    one a person superseded is left as they set it. Closed with no notice —
+    the new run reads what HQPlayer holds as the owner's from now — and a
+    notice of a run left before ends once the new run opened its row
+    (_measure), never before it read anything. The mode a run before
+    measured, its selection left unchecked, is judged here too, before the
+    new run reads the owner's selection — a test point is never taken for
+    theirs — on HQPlayer at the rest the run's own Stop makes: stopped, on
+    whatever entry — the start is the owner's own act, and the run takes
+    HQPlayer over; the hold leaves it as it played, and a mode switched
+    under a track restarts the output — and HQPlayer goes back first to a
+    mode a check left it in (_go_back): the new run never reads that mode
+    as the owner's, and is refused when HQPlayer does not go back. Not
+    judged, the mode stays marked: the new run, of `kind` (None: the mode
+    HQPlayer is in), goes only if it reads nothing of it — a run of another
+    mode, HQPlayer in another. What it changes of the notices — a mark it
+    closed quietly, a return point gone, or one its check keeps — is said
+    whatever ends it, a run that cannot go on included."""
+    unsaid = False      # what the notices show changed here, and nothing said it yet
+    try:
+        run = db_query_one("""
+            SELECT * FROM hqp_benchmark_runs
+             WHERE hqp_endpoint_id = %(e)s AND finished_at IS NULL
+             ORDER BY started_at DESC LIMIT 1
+        """, {"e": endpoint_id})
+        if run is not None:
+            with _lock:
+                owed = _owed.get(run["id"])
+            why = owed[0].superseded(owed[1]) if owed is not None else None
+            if why is not None:
+                _close_owed(run, f"cut short; not put back — {why}: HQPlayer was left as it "
+                                 "was set since", theirs=True)
+            else:
+                done = _again(lambda: _recover(link, run, gave))
+                if done is None:
+                    raise _Abort("HQPlayer did not report its state")
+                # No notice: the new run reads what HQPlayer holds as the
+                # owner's now; the mode it measured, if marked, is judged below
+                _close_owed(run, done["note"], unchecked=done.get("unchecked", False),
+                            refused=done.get("refused", False), notify=False)
+                unsaid = done.get("unchecked", False)
+        run = db_query_one("""
+            SELECT * FROM hqp_benchmark_runs
+             WHERE hqp_endpoint_id = %(e)s AND measured_unchecked_at IS NOT NULL
+             ORDER BY started_at DESC LIMIT 1
+        """, {"e": endpoint_id})
+        point = _return_point(endpoint_id)
+        if run is None and point is None:
+            return
+        st, status = _again(lambda: (link("stop"), link("get_state"), link("get_status"))[1:])
+        stuck = point is not None       # in a mode a check left it in, until it goes back
+        if st is None or status is None:
+            why = "HQPlayer did not report its state"
+        elif status.state != PlaybackState.STOPPED:
+            why = "HQPlayer is not at rest"
+        else:
+            why = _again(lambda: _go_back(link, point)) if point is not None else None
+            if why is None:
+                stuck, unsaid = False, unsaid or point is not None
+                if run is None:
+                    return
+                st = _again(lambda: link("get_state"))
+                # The check may keep a return point before it leaves the mode
+                # HQPlayer is in (_keep_point): cut after that, it is said too
+                unsaid = True
+                checked, why = (_again(lambda: _check_measured(link, run, st))
+                                if st is not None else (None, "HQPlayer did not report its state"))
+                if checked is not None:
+                    _measured_checked(run, checked, notice=False)    # says what stands
+                    unsaid = False
+                    return
+                stuck = _return_point(endpoint_id) is not None
+            if run is not None:
+                _measured_refused(run, why)
+        _notify()                   # the mark, or the way back, stands: said
+        unsaid = False
     finally:
-        link.close()
-    if note is None:
-        return
-    db_execute("""UPDATE hqp_benchmark_runs SET finished_at = now(), outcome = 'interrupted',
-                         note = concat_ws('; ', note, %(n)s::text)
-                   WHERE id = %(id)s""", {"n": note, "id": run["id"]})
-    logger.info("HQPlayer benchmark run %s recovered: %s", run["id"], note)
+        if unsaid:
+            _notify()       # changed here — the run over before it said so
+    if stuck:
+        raise _Abort(f"{why}: HQPlayer is in the mode the last check left it in")
+    if run is not None and (st is None or st["mode"] == _measured(run)
+                            or mode_kind(run["mode"]) == kind):
+        raise _Abort(f"{why}: the mode the last run measured is not checked yet")
+    logger.info("HQPlayer benchmark run %s: the mode it measured not checked yet (%s) — a run "
+                "of another mode goes", run["id"], why)
 
 
-def _recover(link: _Link, run: dict) -> Optional[str]:
-    st, listed = link("get_state"), link("get_playlist")
-    if st is None:
+def unchecked_run(endpoint_id: int) -> Optional[dict]:
+    """The run whose put-back left the measured mode of this HQPlayer
+    unchecked — HQPlayer busy, or not taking the owner's selection there
+    back — the mark HQPlayer's nearest rest tries (its row; None: none; one
+    HQPlayer refused at rest waits for a new run's start), read from the
+    database once, then known (_close_owed, _close_run, _measured_checked,
+    _measured_refused keep it). A read the database fails, or a close or a
+    check overtook, is asked again at the poller's next answer: it costs
+    the check, never the poll."""
+    with _lock:
+        if endpoint_id in _unchecked:
+            return _unchecked[endpoint_id]
+        gen = _left_gen
+    try:
+        run = db_query_one("""
+            SELECT * FROM hqp_benchmark_runs
+             WHERE hqp_endpoint_id = %(e)s AND measured_unchecked_at IS NOT NULL
+               AND measured_refused_at IS NULL
+             ORDER BY started_at DESC LIMIT 1
+        """, {"e": endpoint_id})
+    except psycopg2.Error as e:
+        logger.warning("HQPlayer benchmark: a run left unchecked not read: %s", e)
         return None
+    with _lock:
+        if _left_gen != gen:
+            return None
+        return _unchecked.setdefault(endpoint_id, run)
+
+
+def check_measured(endpoint_id: int, link, status: TrackStatus, *,
+                   gave: Callable[[str], bool]) -> None:
+    """HQPlayer stopped, the mode a run measured unchecked (unchecked_run):
+    judged now on its link (_check_measured) if HQPlayer rests there —
+    stopped, reading no other controller's entry (_booted) — and the left
+    notice says what is the owner's. One try per rest: busy, the verdict not
+    written, or the connection lost under it, the entry it rests on is not
+    tried again until it moves; at rest and not let through — a return to
+    where a check left it refused first (_go_back), a SetMode refused or not
+    shown, no State there, a selection or the way back refused, the lists of
+    the mode it was found in not given — no later rest tries it, a new run's
+    start does (_measured_refused). One check at a time per HQPlayer, behind
+    the command lock; a person's DSP change or switch away made meanwhile
+    drops it — HQPlayer's next answer asks again — and so does a run's start,
+    which judges the mark first (_take_owed)."""
+    run = unchecked_run(endpoint_id)
+    if run is None or running():
+        return
+    at = (status.track_index, status.uri)
+    with _lock:
+        if endpoint_id in _checking or _busy_at.get(endpoint_id) == at:
+            return
+        _checking.add(endpoint_id)
+    from playback.hqp_link import Dropped
+    item = link.item("dsp_knob", link.newest("dsp", "switch"))
+
+    def check() -> None:
+        spent = True                # this rest's try, unless a newer word cut it
+        back = False                # past the way back, the mark not judged
+        try:
+            with link.command(item=item):
+                on = _OnLink(link)
+                st, listed, now = on("get_state"), on("get_playlist"), on("get_status")
+                if st is None or now is None or not _booted(now, listed, gave, run):
+                    return
+                point = _return_point(endpoint_id)
+                checked, why = None, _go_back(on, point) if point is not None else None
+                # From here what the notices show may change: the point gone
+                # with the way back, or one the check keeps (_keep_point)
+                back = why is None
+                if why is None:
+                    st = on("get_state") if point is not None else st
+                    checked, why = (_check_measured(on, run, st) if st is not None
+                                    else (None, "HQPlayer showed no state"))
+            if checked is None:
+                _measured_refused(run, why)
+            else:
+                _measured_checked(run, checked, notice=True)
+            spent = back = False    # the mark itself says what follows now
+        except Dropped as e:
+            spent = False           # a newer word: HQPlayer's next answer asks again
+            logger.info("HQPlayer benchmark run %s: the mode it measured not checked yet: %s",
+                        run["id"], e)
+        except (_Reopened, _Silent, BrokenPipeError, ConnectionError, OSError) as e:
+            logger.info("HQPlayer benchmark run %s: the mode it measured not checked yet: %s",
+                        run["id"], e)
+        except Exception:       # the thread's boundary: recorded, never lost
+            logger.exception("HQPlayer benchmark run %s: checking the mode it measured failed",
+                             run["id"])
+        finally:
+            with _lock:
+                _checking.discard(endpoint_id)
+                if spent:           # busy, the verdict not written, the connection lost
+                    _busy_at[endpoint_id] = at
+                # Cut by a run's hold: the run judges the mark at its start,
+                # and its end says what stands — read under the lock that end
+                # takes, after its hold
+                to_run = back and link.lent
+                if to_run:
+                    _left_to_run.add(endpoint_id)
+                _bump()             # a State read before this end is stale (note_point)
+            if back and not to_run:
+                _notify()           # the point gone, or kept anew; the mark standing
+    threading.Thread(target=check, daemon=True, name="hqp-benchmark-check").start()
+
+
+def _measured_checked(run: dict, checked: Tuple[List[str], dict], notice: bool) -> None:
+    """The mode a run measured, left unchecked at its put-back, judged: the
+    mark goes. Knobs the owner set there leave the run to them — said in the
+    left notice (`notice`), what the mode holds named as read there; at a
+    new run's start quietly, the new run reading HQPlayer as theirs."""
+    theirs, there = checked
+    left = bool(theirs) and notice
+    note = (f"{', '.join(theirs)} of {run['mode']} changed in HQPlayer since: left as it was set"
+            if theirs else f"the selection of {run['mode']} was put back")
+    row = db_execute("""UPDATE hqp_benchmark_runs SET measured_unchecked_at = NULL,
+                               measured_refused_at = NULL,
+                               left_at = CASE WHEN %(left)s THEN now() ELSE left_at END,
+                               note = concat_ws('; ', note, %(n)s::text)
+                         WHERE id = %(id)s AND measured_unchecked_at IS NOT NULL
+                        RETURNING id""", {"left": left, "n": note, "id": run["id"]})
+    with _lock:
+        _unchecked.pop(run["hqp_endpoint_id"], None)
+        _busy_at.pop(run["hqp_endpoint_id"], None)
+        if left and row is not None:
+            _left[run["hqp_endpoint_id"]] = {"run": run, "items": None, "lists": {},
+                                             "seen": _still_left(run, there)}
+        _bump()
+    if row is not None:
+        logger.info("HQPlayer benchmark run %s: %s", run["id"], note)
+        _notify()
+
+
+def _measured(run: dict) -> int:
+    """The mode a run measured: the one it switched into, else the one it found."""
+    return run["own_mode"] if run["own_mode"] is not None else run["pre_mode"]
+
+
+# A knob of State: what it is named, its State key, the run row's column
+_KNOBS = (("rate", "rate", "rate"), ("filter", "filterNx", "filter"),
+          ("filter1x", "filter1x", "filter1x"), ("shaper", "shaper", "shaper"))
+
+
+def _still_left(run: dict, st: dict, seen: Optional[List[dict]] = None) -> List[dict]:
+    """What of a run's test settings HQPlayer still holds, by State indices,
+    each with what it was before the run: the volume it lowered to; in the
+    measured mode, the switch into it and the selection it set last. In
+    another mode State shows that mode's selection, and HQPlayer keeps one
+    per mode: what the measured mode holds is named as the knobs the run
+    left there (`what` "elsewhere", its mode by name) — as it was last read
+    there (`seen`, those items), else as the run set them."""
+    items: List[dict] = []
+    if run["mute_volume"] is not None and abs(st["volume"] - run["mute_volume"]) < _DB_EPS:
+        items.append({"what": "volume", "now": st["volume"], "before": run["pre_volume"]})
+    switched = run["own_mode"] is not None
+    if st["mode"] != _measured(run):
+        before = "own" if switched else "pre"
+        knobs = ([it["what"] for it in seen if it["what"] not in ("volume", "mode")]
+                 if seen is not None else
+                 [what for what, _, col in _KNOBS if run[f"last_{col}"] is not None
+                  and run[f"last_{col}"] != run[f"{before}_{col}"]])
+        if knobs:
+            items.append({"what": "elsewhere", "mode": run["mode"], "knobs": knobs})
+        return items
+    if switched:
+        items.append({"what": "mode", "now": st["mode"], "before": run["pre_mode"]})
+    before = "own" if switched else "pre"
+    for what, key, col in _KNOBS:
+        test, was = run[f"last_{col}"], run[f"{before}_{col}"]
+        if test is not None and st[key] == test and test != was:
+            items.append({"what": what, "now": test, "before": was})
+    return items
+
+
+def _owners(run: dict, st: dict) -> List[str]:
+    """The knobs HQPlayer holds that are neither the run's — its last point,
+    the volume it lowered to — nor what was there before it: each one the
+    owner set in HQPlayer's own window, whatever the others still hold.
+    Judged on State as HQPlayer answers it: a Desktop says nothing while it
+    builds, an Embedded box answers with the selection it builds — a knob's
+    value either way, never one between. A run HQPlayer went away under is
+    judged here only once HQPlayer shows more than what it booted with —
+    no one's change (_recover, _booted)."""
+    changed: List[str] = []
+    measured, switched = _measured(run), run["own_mode"] is not None
+    if st["mode"] not in (measured, run["pre_mode"]):
+        changed.append("mode")
+    elif st["mode"] == measured:
+        before = "own" if switched else "pre"
+        changed += [what for what, key, col in _KNOBS
+                    if st[key] not in (run[f"last_{col}"], run[f"{before}_{col}"])]
+    else:
+        # Back in the mode it found: the run set nothing there
+        changed += [what for what, key, col in _KNOBS if st[key] != run[f"pre_{col}"]]
+    if (run["mute_volume"] is not None and abs(st["volume"] - run["mute_volume"]) >= _DB_EPS
+            and abs(st["volume"] - run["pre_volume"]) >= _DB_EPS):
+        changed.append("volume")
+    return changed
+
+
+def _named(items: List[dict], lists: Dict[str, Optional[list]]) -> List[dict]:
+    """`items` with what they name: a mode, filter or modulator by name, a
+    rate in Hz — from HQPlayer's lists of the mode they belong to; None for
+    one a list does not hold (or not read yet)."""
+    by = {"mode": {m["index"]: m["name"] for m in lists.get("modes") or []},
+          "rate": {r["index"]: r["rate"] for r in lists.get("rates") or []},
+          "filter": {f["index"]: f["name"] for f in lists.get("filters") or []},
+          "shaper": {s["index"]: s["name"] for s in lists.get("shapers") or []}}
+    by["filter1x"] = by["filter"]
+    return [it if it["what"] in ("volume", "elsewhere") else
+            {**it, "now": by[it["what"]].get(it["now"]),
+             "before": by[it["what"]].get(it["before"])}
+            for it in items]
+
+
+def _left_run(endpoint_id: int) -> Optional[dict]:
+    return db_query_one("""
+        SELECT * FROM hqp_benchmark_runs
+         WHERE hqp_endpoint_id = %(e)s AND left_at IS NOT NULL
+         ORDER BY started_at DESC LIMIT 1
+    """, {"e": endpoint_id})
+
+
+def left_pending(endpoint_id: int) -> bool:
+    """Is a run left to the owner on this HQPlayer, its notice standing —
+    read from the database once, then known (_close_owed, note_left,
+    clear_left keep it). A read the database fails, or a close or a clear
+    overtook, is asked again at the poller's next answer: it costs the
+    notice, never the poll."""
+    with _lock:
+        if endpoint_id in _left:
+            return _left[endpoint_id] is not None
+        gen = _left_gen
+    try:
+        run = _left_run(endpoint_id)
+    except psycopg2.Error as e:
+        logger.warning("HQPlayer benchmark: a run left to the owner not read: %s", e)
+        return False
+    with _lock:
+        if _left_gen != gen:
+            return False
+        _left.setdefault(endpoint_id, None if run is None else
+                         {"run": run, "items": None, "lists": {}, "seen": None})
+        return _left[endpoint_id] is not None
+
+
+# A mode's lists the notice names knobs from
+_LISTS = ("modes", "rates", "filters", "shapers")
+
+
+def wants_lists(endpoint_id: int, mode: int) -> bool:
+    """Does the notice of a run left on this HQPlayer need its lists of
+    `mode` — the mode HQPlayer is in — to name what it says? Only those of
+    the mode the run measured, at an answer in that mode, until HQPlayer
+    gave each one: what the run left in it is named from them, never from
+    another mode's."""
+    with _lock:
+        left = _left.get(endpoint_id)
+        return (left is not None and mode == _measured(left["run"])
+                and any(k not in left["lists"].get(mode, {}) for k in _LISTS))
+
+
+def note_left(endpoint_id: int, st: dict, lists: Optional[Dict[str, Optional[list]]]) -> None:
+    """What HQPlayer holds now (State, read by the poller while a run left
+    to the owner stands; `lists`, read with it, of the mode it is in — each
+    one HQPlayer gave) against the run's test settings: once the person
+    changed every one, the notice ends for good; else it says what is left,
+    and the channel is woken when that changed. A write the database
+    refuses — the end, the wake — costs the notice: it is written again at a
+    later answer, never the poll."""
+    with _lock:
+        left = _left.get(endpoint_id)
+        if left is None:
+            return
+        if lists is not None:
+            left["lists"].setdefault(st["mode"], {}).update(
+                {k: v for k, v in lists.items() if v is not None})
+        run = left["run"]
+        here = st["mode"] == _measured(run)
+        raw = _still_left(run, st, left["seen"])
+        items = _named(raw, left["lists"].get(_measured(run)) or {})
+        changed = items != left["items"]
+    if not items:
+        try:
+            db_execute("UPDATE hqp_benchmark_runs SET left_at = NULL WHERE id = %(id)s",
+                       {"id": run["id"]})
+        except psycopg2.Error as e:
+            logger.warning("HQPlayer benchmark run %s: its notice not ended yet: %s",
+                           run["id"], e)
+            return
+        logger.info("HQPlayer benchmark run %s: every setting it left was changed", run["id"])
+    if changed:
+        try:
+            _notify()
+        except psycopg2.Error as e:
+            logger.warning("HQPlayer benchmark run %s: its notice not sent yet: %s", run["id"], e)
+            return                  # kept as it was: the next answer sends it again
+    with _lock:
+        if _left.get(endpoint_id) is left:
+            if here:
+                left["seen"] = raw
+            if items:
+                left["items"] = items
+            else:
+                _left[endpoint_id] = None
+                _bump()
+
+
+def clear_left(endpoint_id: int) -> None:
+    """A new run opened its row, reading what HQPlayer holds as the owner's:
+    a notice of a run left to the owner there ends, and so does one of a
+    run put back after HQPlayer went away under it."""
+    row = db_execute("""UPDATE hqp_benchmark_runs SET left_at = NULL, restored_at = NULL
+                         WHERE hqp_endpoint_id = %(e)s
+                           AND (left_at IS NOT NULL OR restored_at IS NOT NULL)
+                        RETURNING id""", {"e": endpoint_id})
+    with _lock:
+        _left[endpoint_id] = None
+        _bump()
+    if row is not None:
+        _notify()
+
+
+def left_notice() -> Optional[dict]:
+    """The notice of a run left to the owner — the newest, on any HQPlayer,
+    whatever the output is now. Its run row is its source and its onset
+    (left_at): a restart, or another output picked, never ends it to raise
+    it again. `items`: what still holds the run's test values (what, now →
+    before), as the poller last read it of that HQPlayer — None until it
+    read it."""
+    run = db_query_one("""SELECT id, hqp_endpoint_id, left_at FROM hqp_benchmark_runs
+                           WHERE left_at IS NOT NULL ORDER BY left_at DESC LIMIT 1""")
+    if run is None:
+        return None
+    with _lock:
+        left = _left.get(run["hqp_endpoint_id"])
+        items = (list(left["items"]) if left is not None and left["run"]["id"] == run["id"]
+                 and left["items"] is not None else None)
+    return {"since": run["left_at"], "items": items}
+
+
+def restored_notice() -> Optional[dict]:
+    """The notice of a run put back after HQPlayer went away under it — the
+    newest, on any HQPlayer: a report, not a condition. It stands until a
+    new run opened its row there (clear_left), or the owner saw it (the
+    notices channel drops it then). Its onset is `restored_at`; `run_at`
+    dates the run, so a put-back days later does not read as a change made
+    on its own; `volume_left`, with the owner's level, when the put-back
+    left HQPlayer's volume as it came back."""
+    run = db_query_one("""SELECT restored_at, started_at, volume_left, pre_volume
+                            FROM hqp_benchmark_runs
+                           WHERE restored_at IS NOT NULL ORDER BY restored_at DESC LIMIT 1""")
+    if run is None:
+        return None
+    return {"since": run["restored_at"], "run_at": run["started_at"],
+            "volume_left": run["volume_left"], "volume_before": run["pre_volume"]}
+
+
+def unchecked_notice() -> Optional[dict]:
+    """The notice of a run whose put-back left the mode it measured
+    unchecked — HQPlayer did not let it be read, or did not take the
+    owner's selection there back — HQPlayer back where the check found it:
+    the newest, on any HQPlayer, until that mode is judged at HQPlayer's
+    nearest rest or a new run's start. Its onset is `measured_unchecked_at`;
+    `mode` names the mode measured."""
+    run = db_query_one("""SELECT measured_unchecked_at, mode
+                            FROM hqp_benchmark_runs
+                           WHERE finished_at IS NOT NULL AND measured_unchecked_at IS NOT NULL
+                             AND measured_from_mode IS NULL
+                           ORDER BY measured_unchecked_at DESC LIMIT 1""")
+    if run is None:
+        return None
+    return {"since": run["measured_unchecked_at"], "mode": run["mode"]}
+
+
+def stayed_notice() -> Optional[dict]:
+    """The notice of a run whose check left HQPlayer in the mode it measured
+    (a return point, _keep_point), the run closed: the newest, on any
+    HQPlayer, until HQPlayer is back where the check found it. Its onset is
+    the point's own (`measured_from_at`): a new condition, said anew even
+    over a "not checked yet" already seen. `back_to`: the mode found and its
+    selection, by name (the rate in Hz); `unchecked` and `refused` as the
+    mark stands. A run still owed is in its put-back's hands: none."""
+    run = db_query_one("""SELECT measured_from_at, measured_unchecked_at, measured_refused_at,
+                                 mode, measured_from_mode_name, measured_from_rate,
+                                 measured_from_filter, measured_from_filter1x,
+                                 measured_from_shaper
+                            FROM hqp_benchmark_runs
+                           WHERE finished_at IS NOT NULL AND measured_from_mode IS NOT NULL
+                           ORDER BY measured_from_at DESC LIMIT 1""")
+    if run is None:
+        return None
+    return {"since": run["measured_from_at"], "mode": run["mode"],
+            "unchecked": run["measured_unchecked_at"] is not None,
+            "refused": run["measured_refused_at"] is not None,
+            "back_to": {"mode": run["measured_from_mode_name"], "rate": run["measured_from_rate"],
+                        "filter": run["measured_from_filter"],
+                        "filter1x": run["measured_from_filter1x"],
+                        "shaper": run["measured_from_shaper"]}}
+
+
+def left_on(endpoint_id: Optional[int], st: Optional[dict],
+            lists: Dict[str, Optional[list]]) -> Optional[List[dict]]:
+    """For the HQPlayer screen, from what it read itself: what a run left to
+    the owner still holds of its test settings, named — None when no run is
+    left, or HQPlayer did not report its state."""
+    if endpoint_id is None or not st or not left_pending(endpoint_id):
+        return None
+    with _lock:
+        left = _left.get(endpoint_id)
+        run, seen = (left["run"], left["seen"]) if left is not None else (None, None)
+    return _named(_still_left(run, st, seen), lists) if run is not None else None
+
+
+def _notify() -> None:
+    db_execute("NOTIFY sautium_notices")
+
+
+def _booted(status: TrackStatus, listed: list, gave: Optional[Callable[[str], bool]],
+            run: dict) -> bool:
+    """Does HQPlayer show what a box that just booted shows — stopped,
+    reading no entry of another controller's: none, a source of `run`
+    (_run_source), or one this node gave it (`gave`; None: no entry but the
+    run's own is the node's)? An entry the playlist as read does not show —
+    not given, or moved since — is no one's it can tell: not."""
+    if status.state != PlaybackState.STOPPED:
+        return False
+    i = status.track_index
+    if i < 1:
+        return True
+    if i > len(listed):
+        return False
+    uri = listed[i - 1].get("uri", "")
+    return _run_source(uri, run) or (gave is not None and gave(uri))
+
+
+def _run_source(uri: str, run: dict) -> bool:
+    """Is `uri` a source `run` handed HQPlayer — a signal, or the owner's DSD
+    file it measured, known by the URI its row keeps (`dsd_uri`)? A row
+    from before it was kept asks the owner's newest DSD listen, as it did."""
+    if any(t in uri for t in _signal_tokens()):
+        return True
+    from playback.hqp_backend import _same_entry
+    if run["dsd_uri"] is not None:
+        return _same_entry(uri, run["dsd_uri"])
+    f = _dsd_file()
+    return f is not None and _same_entry(uri, _dsd_uri(f))
+
+
+def _recover(link: _Link, run: dict,
+             gave: Optional[Callable[[str], bool]] = None) -> Optional[dict]:
+    """The put-back of a run cut short, once HQPlayer answers: how the run
+    closes (_close_owed's words), None when HQPlayer did not report its
+    state or its transport. A run HQPlayer went away under
+    (`lost_at`) is put back whole while HQPlayer shows what a box that just
+    booted shows (_booted) — what it booted with is never a person's change
+    — its volume lowered to the owner's level when it came back louder,
+    raised only from the level the run itself set, else left as it is, and
+    said. Otherwise — and for a lost run HQPlayer plays, pauses or reads
+    another controller's entry for — a knob the owner set in HQPlayer's own
+    window since (_owners) leaves it all to them — nothing more is sent, the
+    volume raised for them only while it still stands at the run's own
+    level (_left_volume), the notice naming what still holds the run's test
+    values — and only what still bears a mark of the run is put back. The
+    mode the run switched into, which State does not show while HQPlayer is
+    in another, is a mark of its own: read and judged there
+    (_check_measured) only on an HQPlayer at rest (_booted) — a mode
+    switched under a track restarts the output — else the run is marked
+    unchecked, judged at HQPlayer's nearest rest or a new run's start
+    (check_measured, _take_owed); so is any run whose owner's selection in
+    the mode it measured — the one it found, for a run that did not
+    switch — HQPlayer does not take back (_put_back), a row with no own
+    selection only once it noted a point there: one cut after its switch,
+    before it read that mode, set none. A return point its own round trip
+    left, cut short before (_keep_point), is where HQPlayer goes back
+    first, at rest (_go_back): the mode Sautium left it in is never judged
+    as the owner's — not at rest, or not going back, the run is marked and
+    nothing is judged; only a volume still at the run's level goes back."""
+    st, listed, status = link("get_state"), link("get_playlist"), link("get_status")
+    if st is None or status is None:
+        return None
+    if run["measured_from_mode"] is not None:
+        at_rest = _booted(status, listed, gave, run)
+        why = _go_back(link, run) if at_rest else "HQPlayer was busy"
+        if why is not None:
+            return {"note": "cut short; " + _unchecked_note(why) + _left_volume(link, run, st),
+                    "unchecked": True, "refused": at_rest}
+        st, listed, status = link("get_state"), link("get_playlist"), link("get_status")
+        if st is None or status is None:
+            return None
+    whole = run["lost_at"] is not None and _booted(status, listed, gave, run)
+    owners = [] if whole else _owners(run, st)
+    if owners:
+        return {"note": f"cut short; not put back — {', '.join(owners)} changed in HQPlayer "
+                        f"since: HQPlayer was left as it was set{_left_volume(link, run, st)}",
+                "left": True}
     tokens = _signal_tokens()
     ours = any(t in e.get("uri", "") for e in listed for t in tokens)
     lowered = (run["mute_volume"] is not None
                and abs(st["volume"] - run["mute_volume"]) < _DB_EPS)
-    measured = run["own_mode"] if run["own_mode"] is not None else run["pre_mode"]
-    on_point = (run["last_rate"] is not None and st["mode"] == measured
+    on_point = (run["last_rate"] is not None and st["mode"] == _measured(run)
                 and (st["rate"], st["filterNx"], st["filter1x"], st["shaper"])
                 == (run["last_rate"], run["last_filter"], run["last_filter1x"], run["last_shaper"]))
-    note = "cut short"
-    if not (ours or lowered or on_point):
-        return note + "; HQPlayer had been changed since and was left as it is"
+    hidden = run["own_mode"] is not None and not whole and st["mode"] != run["own_mode"]
+    if not (whole or ours or lowered or on_point or hidden):
+        return {"note": "cut short; HQPlayer had been changed since and was left as it is"}
+    unchecked = refused = False
+    if hidden:
+        refused = _booted(status, listed, gave, run)
+        checked, why = (_check_measured(link, run, st) if refused
+                        else (None, "HQPlayer was busy"))
+        if checked is not None and checked[0]:
+            theirs, there = checked
+            return {"note": f"cut short; not put back — {', '.join(theirs)} of {run['mode']} "
+                            "changed in HQPlayer since: HQPlayer was left as it was set"
+                            f"{_left_volume(link, run, st)}", "left": True,
+                    "seen": _still_left(run, there)}
+        unchecked = checked is None
+        refused = refused and unchecked
+        if not (ours or lowered or on_point):
+            return {"note": "cut short; " + (_unchecked_note(why) if unchecked else
+                                             f"the selection of {run['mode']} was put back"),
+                    "unchecked": unchecked, "refused": refused}
+    louder = st["volume"] > run["pre_volume"] + _DB_EPS
+    volume = lowered or (whole and louder)
+    left_at = (st["volume"] if whole and not volume
+               and abs(st["volume"] - run["pre_volume"]) >= _DB_EPS else None)
     pre = {"mode": run["pre_mode"], "rate": run["pre_rate"], "filterNx": run["pre_filter"],
            "filter1x": run["pre_filter1x"], "shaper": run["pre_shaper"],
            "volume": run["pre_volume"]}
-    own = None if run["own_mode"] is None else {
+    own = None if run["own_mode"] is None or hidden else {
         "mode": run["own_mode"], "rate": run["own_rate"], "filterNx": run["own_filter"],
         "filter1x": run["own_filter1x"], "shaper": run["own_shaper"]}
-    problems = _put_back(link, pre=pre, own=own, mute=run["mute_volume"] if lowered else None,
-                         clear=ours)
-    note += "; HQPlayer's settings" + (" and volume" if lowered else "") + \
-        " were put back when it answered again"
+    problems, unset = _put_back(link, pre=pre, own=own, volume=volume, clear=ours,
+                                enter=whole)
+    # No own selection on the row: a run of the mode HQPlayer was in — or one
+    # cut after its switch before it read that mode, which set no point
+    if (unset["own"] if run["own_mode"] is not None
+            else unset["pre"] and run["last_rate"] is not None):
+        unchecked, why = True, f"HQPlayer did not take the selection of {run['mode']} back"
+    if whole:
+        note = ("cut short; HQPlayer went away under the run — its settings were put back when "
+                "it answered again")
+        if left_at is not None:
+            note += f" (its volume left as it is, {left_at:g} dB)"
+    else:
+        note = ("cut short; HQPlayer's settings" + (" and volume" if lowered else "")
+                + " were put back when it answered again")
     if problems:
         note += " (not all: " + ", ".join(problems) + ")"
-    return note
+    if unchecked:
+        note += "; " + _unchecked_note(why)
+    return {"note": note, "restored": whole, "volume_left": left_at, "unchecked": unchecked,
+            "refused": refused}
+
+
+def _unchecked_note(why: str) -> str:
+    """What a run's note says of a measured mode left unchecked, and why."""
+    return f"the mode it measured not checked yet: {why}"
+
+
+def _measured_refused(run: dict, why: str) -> None:
+    """HQPlayer at rest did not let the mode a run measured be read (a
+    SetMode refused or not shown, no State there, a selection or the way
+    back refused, the lists of the mode it was found in not given): no later
+    rest tries it — only a new run's start; why, in the run's note."""
+    row = db_execute("""UPDATE hqp_benchmark_runs SET measured_refused_at = now(),
+                               note = concat_ws('; ', note, %(n)s::text)
+                         WHERE id = %(id)s AND measured_unchecked_at IS NOT NULL
+                           AND measured_refused_at IS NULL
+                        RETURNING id""", {"n": _unchecked_note(f"{why} at rest"),
+                                          "id": run["id"]})
+    with _lock:
+        _unchecked.pop(run["hqp_endpoint_id"], None)
+        _busy_at.pop(run["hqp_endpoint_id"], None)
+        _bump()
+    if row is not None:
+        logger.info("HQPlayer benchmark run %s: the mode it measured not let be read at rest "
+                    "(%s): tried again before the next run", run["id"], why)
+        _notify()
+
+
+def _left_volume(link, run: dict, st: dict) -> str:
+    """A run left to the owner: a volume HQPlayer still holds at the level the
+    run lowered it to is the run's, not theirs — it goes back. What the run's
+    note says of it."""
+    if run["mute_volume"] is None or abs(st["volume"] - run["mute_volume"]) >= _DB_EPS:
+        return ""
+    link("set_volume", run["pre_volume"])
+    return "; its volume, still at the run's level, went back"
+
+
+def _return_point(endpoint_id: int) -> Optional[dict]:
+    """The run row of this HQPlayer holding a return point (_keep_point),
+    the newest; None: none."""
+    return db_query_one("""
+        SELECT * FROM hqp_benchmark_runs
+         WHERE hqp_endpoint_id = %(e)s AND measured_from_mode IS NOT NULL
+         ORDER BY started_at DESC LIMIT 1
+    """, {"e": endpoint_id})
+
+
+def _keep_point(link, run: dict, found: dict) -> Optional[str]:
+    """Before a check of the mode `run` measured leaves the mode HQPlayer is
+    in (`found`): that mode and its selection, named from its own lists —
+    names hold across a restart, an index is read again there — kept on the
+    run's row as the return point, until HQPlayer is back there. The mode's
+    name; None when HQPlayer did not give a list to name them by: no round
+    trip without a way back."""
+    modes, filters = link("get_modes"), link("get_filters")
+    shapers, rates = link("get_shapers"), link("get_rates")
+    if any(x is None for x in (modes, filters, shapers, rates)):
+        return None
+    names = {"mode": {m["index"]: m["name"] for m in modes},
+             "filter": {f["index"]: f["name"] for f in filters},
+             "shaper": {x["index"]: x["name"] for x in shapers},
+             "rate": {r["index"]: r["rate"] for r in rates}}
+    name = names["mode"].get(found["mode"])
+    db_execute("""UPDATE hqp_benchmark_runs SET measured_from_mode = %(m)s,
+                         measured_from_mode_name = %(n)s, measured_from_rate = %(r)s,
+                         measured_from_filter = %(f)s, measured_from_filter1x = %(f1)s,
+                         measured_from_shaper = %(s)s, measured_from_at = now()
+                   WHERE id = %(id)s""",
+               {"m": found["mode"], "n": name, "r": names["rate"].get(found["rate"]),
+                "f": names["filter"].get(found["filterNx"]),
+                "f1": names["filter"].get(found["filter1x"]),
+                "s": names["shaper"].get(found["shaper"]), "id": run["id"]})
+    with _lock:
+        _point_rows.pop(run["hqp_endpoint_id"], None)
+        _bump()
+    return name
+
+
+def _point_cleared(run: dict, note: Optional[str] = None, notify: bool = True) -> None:
+    """HQPlayer is back in the mode a check found it in, or a person's change
+    made it theirs: the run's return point goes, `note` said in its row.
+    `notify`: False inside a check, whose verdict or refusal says what
+    stands right after."""
+    row = db_execute("""UPDATE hqp_benchmark_runs SET measured_from_mode = NULL,
+                               measured_from_mode_name = NULL, measured_from_rate = NULL,
+                               measured_from_filter = NULL, measured_from_filter1x = NULL,
+                               measured_from_shaper = NULL, measured_from_at = NULL,
+                               note = CASE WHEN %(n)s::text IS NULL THEN note
+                                           ELSE concat_ws('; ', note, %(n)s::text) END
+                         WHERE id = %(id)s AND measured_from_mode IS NOT NULL
+                        RETURNING id""", {"n": note, "id": run["id"]})
+    with _lock:
+        _point_rows.pop(run["hqp_endpoint_id"], None)
+        _bump()
+    if row is not None:
+        if note is not None:
+            logger.info("HQPlayer benchmark run %s: %s", run["id"], note)
+        if notify:
+            _notify()
+
+
+def _go_back(link, point: dict) -> Optional[str]:
+    """HQPlayer back in the mode a check found it in (`point`: the run row
+    holding the return point) — into that mode, unless it is there already
+    (the owner's own switch: what it holds there is theirs), and that mode's
+    selection put back by name from its lists. None once HQPlayer is there,
+    the point gone — said by the check that follows, whatever ends it, never
+    over the mark it judges a moment later; else why not."""
+    name = point["measured_from_mode_name"]
+    st = link("get_state")
+    if st is None:
+        return "HQPlayer did not report its state"
+    if st["mode"] == point["measured_from_mode"]:
+        _point_cleared(point, f"HQPlayer was back in {name}", notify=False)
+        return None
+    _, failed = link("apply_settings", mode=point["measured_from_mode"])
+    st = None if failed else link("get_state")
+    if st is None or st["mode"] != point["measured_from_mode"]:
+        return f"HQPlayer did not go back to {name}"
+    filters, shapers, rates = link("get_filters"), link("get_shapers"), link("get_rates")
+
+    def index(items, key, value):
+        return next((x["index"] for x in items or [] if x[key] == value), None)
+    want = {"rate": index(rates, "rate", point["measured_from_rate"]),
+            "filterNx": index(filters, "name", point["measured_from_filter"]),
+            "filter1x": index(filters, "name", point["measured_from_filter1x"]),
+            "shaper": index(shapers, "name", point["measured_from_shaper"])}
+    failed = {}
+    if any(v is not None and st[k] != v for k, v in want.items()):
+        _, failed = link("apply_settings", rate=want["rate"], filter=want["filterNx"],
+                         filter1x=want["filter1x"], shaper=want["shaper"])
+    lost = [k for k, v in want.items() if v is None]
+    said = ([f"not named in its lists: {', '.join(lost)}"] if lost else []) + [
+        f"{k}: {v}" for k, v in failed.items()]
+    _point_cleared(point, f"HQPlayer went back to {name}"
+                          + (f" (not all: {'; '.join(said)})" if said else ""), notify=False)
+    return None
+
+
+def point_pending(endpoint_id: int) -> bool:
+    """Does a return point stand on this HQPlayer — read from the database
+    once, then known (_keep_point, _point_cleared keep it)? The poller then
+    reads State at each answer (note_point). A read the database fails, or
+    a change overtook, is asked again at the next answer."""
+    with _lock:
+        if endpoint_id in _point_rows:
+            return _point_rows[endpoint_id] is not None
+        gen = _left_gen
+    try:
+        point = _return_point(endpoint_id)
+    except psycopg2.Error as e:
+        logger.warning("HQPlayer benchmark: a return point not read: %s", e)
+        return False
+    with _lock:
+        if _left_gen != gen:
+            return False
+        _point_rows.setdefault(endpoint_id, point)
+        return _point_rows[endpoint_id] is not None
+
+
+def watch_gen() -> int:
+    """The generation a State read for note_point is taken at."""
+    with _lock:
+        return _left_gen
+
+
+def note_point(endpoint_id: int, st: dict, gen: int) -> None:
+    """What HQPlayer's State shows while a return point stands (read by the
+    poller at generation `gen`, watch_gen): back in that mode — the owner
+    switched it themselves — the point goes, no SetMode of ours. Never on a
+    read older than a round trip of ours — one on its way keeps the point
+    first, and every one's end, a point written or cleared, moves the
+    generation."""
+    with _lock:
+        point = _point_rows.get(endpoint_id)
+        if (point is None or st["mode"] != point["measured_from_mode"] or _left_gen != gen
+                or endpoint_id in _checking or point["id"] in _putting):
+            return
+    try:
+        _point_cleared(point, f"HQPlayer was back in {point['measured_from_mode_name']}")
+    except psycopg2.Error as e:
+        logger.warning("HQPlayer benchmark run %s: its return point not cleared yet: %s",
+                       point["id"], e)
+
+
+def _check_measured(link, run: dict,
+                    found: dict) -> Tuple[Optional[Tuple[List[str], dict]], Optional[str]]:
+    """The selection of the mode `run` measured (_measured), which State
+    shows only in that mode (HQPlayer keeps one per mode): into it and read,
+    each knob judged as any of a run cut short — the run's last point goes
+    back to the owner's selection there (`own_*`, or `pre_*` for a run of
+    the mode HQPlayer was in); a knob that is neither is theirs, and leaves
+    the mode as it is. Then back into the mode HQPlayer was found in
+    (`found`), its selection read again: one the round trip moved is put
+    back as found. Before it leaves, the mode found is kept on the run's
+    row as the return point (_keep_point), cleared once HQPlayer is back
+    there. Returns the owner's knobs there — none: put back, or theirs
+    already — and the State read there; or None and why, when HQPlayer did
+    not list the settings of the mode it is in, took no mode change, said no
+    state there, did not take the owner's selection back or did not go back:
+    unchecked still, and — not back — the return point standing."""
+    measured, name = _measured(run), run["mode"]
+    before = "own" if run["own_mode"] is not None else "pre"
+    trip = found["mode"] != measured
+    if trip:
+        back_to = _keep_point(link, run, found)
+        if back_to is None:
+            return None, "HQPlayer did not list the settings of the mode it is in"
+        _, failed = link("apply_settings", mode=measured)
+        if failed:
+            _point_cleared(run, notify=False)
+            return None, f"HQPlayer did not switch to {name}"
+    there = link("get_state")
+    checked = None
+    why = (f"HQPlayer showed no state in {name}" if there is None
+           else f"HQPlayer did not switch to {name}")
+    if there is not None and there["mode"] == measured:
+        theirs = [what for what, key, col in _KNOBS
+                  if there[key] not in (run[f"last_{col}"], run[f"{before}_{col}"])]
+        checked = (theirs, there)
+        if not theirs and any(there[key] != run[f"{before}_{col}"] for _, key, col in _KNOBS):
+            _, failed = link("apply_settings", rate=run[f"{before}_rate"],
+                             filter=run[f"{before}_filter"],
+                             filter1x=run[f"{before}_filter1x"],
+                             shaper=run[f"{before}_shaper"])
+            if failed:
+                # The test point still there: no verdict, never the owner's
+                checked = None
+                why = (f"HQPlayer did not take the selection of {name} back ("
+                       + ", ".join(f"{k}: {v}" for k, v in failed.items()) + ")")
+    if trip:
+        _, failed = link("apply_settings", mode=found["mode"])
+        back = None if failed else link("get_state")
+        if back is None or back["mode"] != found["mode"]:
+            return None, f"HQPlayer did not go back to {back_to}"
+        failed = {}
+        if any(back[key] != found[key] for _, key, _ in _KNOBS):
+            _, failed = link("apply_settings", rate=found["rate"], filter=found["filterNx"],
+                             filter1x=found["filter1x"], shaper=found["shaper"])
+        _point_cleared(run, (f"the selection of {back_to} not all put back: "
+                             + ", ".join(f"{k}: {v}" for k, v in failed.items()))
+                       if failed else None, notify=False)
+    return checked, None if checked is not None else why

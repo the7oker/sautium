@@ -869,6 +869,12 @@ async def lifespan(app: FastAPI):
     yield
 
     # Shutdown
+    # Every HQPlayer link first (playback.hqp_link): what waits on HQPlayer
+    # — a build's held answer, background work waiting it out, a Stop an
+    # output switch owed — gives up at once: a wait is woken and its own
+    # thread closes its socket, an idle socket is closed by the close.
+    from playback import hqp_link
+    hqp_link.close_all("the node is stopping")
     # A benchmark run drives HQPlayer on its own connection: cancelled, and
     # given the seconds to put HQPlayer back (its volume, its settings)
     # before anything else stops — the compose files give a stop ten in all,

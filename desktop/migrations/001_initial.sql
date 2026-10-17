@@ -396,13 +396,67 @@ CREATE TABLE IF NOT EXISTS hqp_benchmark_runs (
     own_filter1x INTEGER,
     own_shaper INTEGER,
     -- The selection the run set last: an HQPlayer still on it is the run's
-    -- mark like its lowered volume and its signals — a run cut short is put
-    -- back only while one remains (one that restarted under the run keeps
-    -- its selection, maybe nothing else)
+    -- mark like its lowered volume and its signals — in the mode the run
+    -- measured too, read there only on an HQPlayer at rest
+    -- (measured_unchecked_at) — and a run cut short is put back only while
+    -- one remains (one that restarted under the run keeps its selection,
+    -- maybe nothing else)
     last_rate INTEGER,
     last_filter INTEGER,
     last_filter1x INTEGER,
     last_shaper INTEGER,
+    -- When the put-back of a run cut short was left to the owner — a
+    -- person's DSP change, their switch away or another HQPlayer chosen, or
+    -- a knob they set in HQPlayer's own window: HQPlayer was left on what
+    -- the run set, and what of it still holds the run's test values is said
+    -- until the person changed it all, or a new run opened its row (NULL
+    -- again)
+    left_at TIMESTAMPTZ,
+    -- When HQPlayer went away under the run (it closed, reset or refused
+    -- the connection as the restore tried it): the put-back owed goes whole
+    -- once it answers again showing what it booted with — stopped, reading
+    -- no other controller's entry — dated by `restored_at`, which the
+    -- notice that says so stands on; `volume_left`: the level it came back
+    -- at and was left at — the put-back raises only from the run's own
+    -- level and lowers one louder than the owner's
+    lost_at TIMESTAMPTZ,
+    restored_at TIMESTAMPTZ,
+    volume_left REAL,
+    -- The URI the run handed HQPlayer for the owner's DSD file it measured:
+    -- a lost run's put-back knows the run's own entry by it, never by the
+    -- owner's newest DSD listen then; NULL = no DSD source, or a row from
+    -- before it was kept (the newest listen is asked, as before)
+    dsd_uri TEXT,
+    -- When the put-back left the measured mode's own selection unchecked
+    -- (HQPlayer busy, or not taking it back): State shows only the mode
+    -- HQPlayer is in, and the mode is entered to read it only on an HQPlayer
+    -- at rest — SetMode restarts its output. It is checked at HQPlayer's
+    -- nearest rest (stopped, reading no other controller's entry) or at a
+    -- new run's start (stopped by the run, on whatever entry), before that
+    -- run reads the owner's selection; NULL once checked
+    measured_unchecked_at TIMESTAMPTZ,
+    -- When HQPlayer at rest did not let it be read (a SetMode refused or not
+    -- shown, no State there, a selection or the way back refused, the lists
+    -- of the mode it was found in not given): only a new run's start tries
+    -- it again; NULL — busy so far, tried at HQPlayer's nearest rest — and
+    -- NULL once checked
+    measured_refused_at TIMESTAMPTZ,
+    -- The return point of a check of the measured mode: the mode HQPlayer was
+    -- found in when the check left it (the index SetMode takes) and that
+    -- mode's selection by name, as HQPlayer lists it there, the rate in Hz.
+    -- Written before the check's first SetMode; the next check or run start
+    -- goes back there first. NULL once HQPlayer is back in that mode (the
+    -- check's way back, a return, the owner's own switch) or a person's
+    -- change made HQPlayer theirs
+    measured_from_mode INTEGER,
+    measured_from_mode_name TEXT,
+    measured_from_rate INTEGER,
+    measured_from_filter TEXT,
+    measured_from_filter1x TEXT,
+    measured_from_shaper TEXT,
+    -- When the return point was kept: the onset of the notice that HQPlayer
+    -- stayed in the measured mode, its own; NULL with the point
+    measured_from_at TIMESTAMPTZ,
     CONSTRAINT chk_hqp_benchmark_runs_finished CHECK ((finished_at IS NULL) = (outcome IS NULL))
 );
 CREATE INDEX IF NOT EXISTS idx_hqp_benchmark_runs_endpoint

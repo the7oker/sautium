@@ -12,7 +12,7 @@ import os
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
-from typing import Optional
+from typing import Callable, Optional
 
 from fastapi import APIRouter, HTTPException, Query
 from fastapi.responses import StreamingResponse
@@ -25,14 +25,14 @@ from db_pool import (
     db_query_one as _db_query_one,
 )
 from ensemble_instruments import present_instruments
-from hqplayer_client import PlaybackState, format_time
 from lrclib import LrclibService
 from playback import queue as queue_mod
 from playback import sessions
-from playback.base import ReorderPlan
-from playback.hqp_backend import _get_hqp, _hqp_lock
+from playback.base import OutputRefused, ReorderPlan
+from playback import hqp_link
+from playback.hqp_link import Building, Dropped, GaveUp, NotAnswering, through
 from playback.hqp_meter import meter as hqp_meter
-from playback.manager import OutputHeld, active_hqp_endpoint, manager
+from playback.manager import OutputHeld, QueueChanged, active_hqp_endpoint, manager
 from playback.queue import resolved_artwork as _resolved_artwork
 from playback.queue import resolved_durations as _resolved_durations
 from playback.sessions import _SESSION_ORIGINS
@@ -144,10 +144,14 @@ class QueueSessionRequest(BaseModel):
     position: str = "end"   # 'next' | 'end' — next only for an all-owned snapshot
 
 class JumpRequest(BaseModel):
-    index: int  # 1-based, matches HQPlayer's select_track convention
+    index: int  # the queue's 1-based slot, as the status's track_index names it
+    # The track the client saw in that slot: the tap names it, never the slot
+    # alone — a queue played from elsewhere, or a mutation in flight (a new
+    # queue handed over, a new order), moves slots under the sheet
+    track_id: Optional[str] = None
 
 class RemoveRequest(BaseModel):
-    index: int  # 1-based — HQPlayer's PlaylistRemove convention
+    index: int  # the queue's 1-based slot (HQPlayer's entry differs past a gap)
     # The identity the client saw in that slot. A queue that moved under
     # the tap (radio refill, another device, the client's own optimistic
     # re-render) makes the removal refuse instead of taking whatever now
@@ -686,6 +690,9 @@ async def _scan_run():
     # not hold the scan for the others.
     async def _resolve(host: str) -> tuple:
         try:
+            # Its link says first whether HQPlayer takes anything now — a
+            # build, one it did not finish, a silence: busy, never asked into
+            hqp_link.link_for(host, 4321).refuse()
             return host, await asyncio.to_thread(hqp_library.resolve_endpoint, host, 4321), None
         except OSError as e:
             return host, None, e
@@ -695,7 +702,15 @@ async def _scan_run():
         facts = found_hqp[host]
         entry = {"name": facts["name"], "product": facts["product"], "endpoint_id": None,
                  "control": True}
-        if err is not None:
+        if isinstance(err, (Building, Dropped, NotAnswering)):
+            # Busy, not gone: the link of the HQPlayer driven refused the
+            # question — it builds or did not finish a build, is lent to the
+            # benchmark, or answers nothing. Its row is read by address;
+            # nothing is asked.
+            ep = await asyncio.to_thread(hqp_library.endpoint_by_address, host, 4321)
+            if ep is not None:
+                entry["endpoint_id"] = ep["id"]
+        elif err is not None:
             # Answers discovery, refuses control: an Embedded past its trial
             # half-hour looks exactly like this (the daemon still answers the
             # datagram while the control port closes at once) — listed as
@@ -936,9 +951,10 @@ def browser_event(req: BrowserEventRequest):
 
 @router.get("/playlist")
 def get_playlist():
-    """The canonical queue, serialized. Always instant — the queue lives
-    here; no player round-trip, no cache."""
-    return manager.queue.payload()
+    """The canonical queue, serialized — each slot the active output does
+    not hold named with why (a gap). Always instant — the queue lives here;
+    no player round-trip, no cache."""
+    return manager.playlist()
 
 
 @router.get("/status/stream")
@@ -1161,46 +1177,6 @@ def get_status():
     return manager.latest_status
 
 
-# Legacy synchronous status (rarely needed; UI uses cached /status above
-# and SSE for live updates). Kept for tools that explicitly want a fresh
-# read direct from HQPlayer.
-@router.get("/status/fresh")
-def get_status_fresh():
-    """Force a fresh HQPlayer status read. Slower (may hang up to socket
-    timeout if HQPlayer is unresponsive)."""
-    try:
-        with _hqp_lock:
-            hqp = _get_hqp()
-            status = hqp.get_status()
-        if status is None:
-            return {"state": "unknown"}
-
-        state_names = {
-            PlaybackState.STOPPED: "stopped",
-            PlaybackState.PAUSED: "paused",
-            PlaybackState.PLAYING: "playing",
-            PlaybackState.STOPREQ: "stopping",
-        }
-
-        return {
-            "state": state_names.get(status.state, "unknown"),
-            "artist": status.artist,
-            "album": status.album,
-            "song": status.song,
-            "genre": status.genre,
-            "position": status.position,
-            "length": status.length,
-            "volume": status.volume,
-            "process_speed": status.process_speed,
-            "track_index": status.track_index,
-            "progress_percent": round(status.progress_percent, 1),
-            "position_formatted": format_time(status.position),
-            "length_formatted": format_time(status.length),
-        }
-    except Exception:
-        return {"state": "disconnected"}
-
-
 def _stream_quality(provider_id: Optional[str]) -> str:
     """'lossless' / 'lossy' for the serving provider — the preview analog of the
     owned file-quality badge (a stream has no file bit-depth)."""
@@ -1420,68 +1396,67 @@ def now_playing_detail(media_file_id: int = None, track_id: str = None,
     return row
 
 
-@router.post("/play")
-def play():
+def _transport(intent: bool, command: str, *args) -> dict:
+    """One transport command on the active output — a play intent through
+    the gate that (re)attaches it — and whether it was taken; one that was
+    not carries the output's own words (`refusal`), which the assistant
+    quotes. While a play intent goes on behind the answer (HQPlayer taking
+    the queue again, or a queue mutation in flight) `starts` names the track
+    it will start — null when a Pause, a Stop or any newer intent that
+    supersedes it dropped it."""
     try:
-        return {"ok": manager.ensure_active().play()}
+        b = manager.ensure_active() if intent else manager.backend()
+        ok = getattr(b, command)(*args)
     except Exception as e:
         raise _output_error(e)
+    return _starting(b, {"ok": True} if ok else {"ok": False, "refusal": b.refusal()})
+
+
+def _starting(b, answer: dict) -> dict:
+    """`answer`, with the track a play press will start (PlayerBackend.pressing)
+    while one runs — or a queue mutation will, once it stands."""
+    press = b.pressing()
+    return answer if press is None else {**answer, "starts": press or None}
+
+
+@router.post("/play")
+def play():
+    return _transport(True, "play")
 
 
 @router.post("/pause")
 def pause():
-    try:
-        return {"ok": manager.backend().pause()}
-    except Exception as e:
-        raise _output_error(e)
+    return _transport(False, "pause")
 
 
 @router.post("/stop")
 def stop():
-    try:
-        return {"ok": manager.backend().stop()}
-    except Exception as e:
-        raise _output_error(e)
+    return _transport(False, "stop")
 
 
 @router.post("/next")
 def next_track():
-    try:
-        return {"ok": manager.ensure_active().next()}
-    except Exception as e:
-        raise _output_error(e)
+    return _transport(True, "next")
 
 
 @router.post("/previous")
 def previous_track():
-    try:
-        return {"ok": manager.ensure_active().previous()}
-    except Exception as e:
-        raise _output_error(e)
+    return _transport(True, "previous")
 
 
 @router.post("/volume/up")
 def volume_up():
-    try:
-        return {"ok": manager.backend().volume_up()}
-    except Exception as e:
-        raise _output_error(e)
+    return _transport(False, "volume_up")
 
 
 @router.post("/volume/down")
 def volume_down():
-    try:
-        return {"ok": manager.backend().volume_down()}
-    except Exception as e:
-        raise _output_error(e)
+    return _transport(False, "volume_down")
 
 
 @router.post("/volume")
 def set_volume(req: VolumeRequest):
-    try:
-        return {"ok": manager.backend().set_volume(req.level)}
-    except Exception as e:
-        raise _output_error(e)
+    return _transport(False, "set_volume", req.level)
 
 
 @router.post("/seek")
@@ -1491,17 +1466,20 @@ def seek(req: SeekRequest):
     if req.position < 0:
         raise HTTPException(status_code=400, detail="position must be >= 0")
     try:
-        return {"ok": manager.backend().seek(int(req.position))}
+        b = manager.backend()
+        ok = b.seek(int(req.position))
     except Exception as e:
         raise _output_error(e)
+    return _starting(b, {"ok": ok})
 
 
 # -- Smart play ----------------------------------------------------------------
 
 @router.post("/remove")
 def remove(req: RemoveRequest):
-    """Remove a queue slot by 1-based index (HQPlayer's PlaylistRemove
-    convention). The play_count for the removed slot is unaffected —
+    """Remove the queue's slot at the 1-based `index` — the output finds its
+    own entry for it (a gap of HQPlayer's has none). The play_count for the
+    removed slot is unaffected —
     tracking records past plays, not pending queue contents. 409 is the
     slot no longer holding `track_id`; a removal the output refused is a
     503 in its words (_output_error), the slot still in the queue."""
@@ -1546,42 +1524,62 @@ def reorder(req: ReorderRequest):
     pulling a track from after into before, shifting current right)
     is impossible without an insert primitive, so we fall back to
     a full clear+rebuild + select_track + seek (~300 ms gap).
+
+    The plan is made on the queue as the route reads it, its slots the
+    queue's items themselves (a track queued twice is two slots, taken in
+    their order), and applied under the queue lock only to that order of it
+    and the output it was made on: one a filler's append (or any edit that
+    moved a slot) or an output switch overtook meanwhile is refused whole
+    (409), the queue as it is. A step the output refuses is answered in its
+    words (OutputRefused).
     """
     if not req.order:
         raise HTTPException(status_code=400, detail="order is empty")
 
+    # The plan names the queue's order and the output it was made on:
+    # applied under the queue lock only to those (a filler's append, an
+    # output switch may land first)
     current_items = manager.queue.snapshot()
-    current_ids = [it.track_id for it in current_items]
 
     status_idx = manager.latest_status.get("track_index") or 0
-    if status_idx < 1 or status_idx > len(current_ids):
+    if status_idx < 1 or status_idx > len(current_items):
         raise HTTPException(
             status_code=409,
             detail="reorder requires a currently playing track; use /play-tracks",
         )
 
-    if len(req.order) != len(current_ids):
+    if len(req.order) != len(current_items):
         raise HTTPException(
             status_code=400,
             detail="order length must match current playlist length",
         )
 
     from collections import Counter
-    if Counter(req.order) != Counter(current_ids):
+    if Counter(req.order) != Counter(it.track_id for it in current_items):
         raise HTTPException(
             status_code=400,
             detail="order must be a permutation of the current playlist",
         )
 
-    current_id = current_ids[status_idx - 1]
-    new_status_idx = req.order.index(current_id) + 1
+    # The sheet names tracks, the plan slots: a track queued twice takes its
+    # copies in their order
+    copies: dict = {}
+    for it in current_items:
+        copies.setdefault(it.track_id, []).append(it)
+    order = [copies[track_id].pop(0) for track_id in req.order]
 
-    old_before = current_ids[:status_idx - 1]
-    old_after = current_ids[status_idx:]
-    new_before = req.order[:new_status_idx - 1]
-    new_after = req.order[new_status_idx:]
+    current = current_items[status_idx - 1]
+    new_status_idx = next(i for i, it in enumerate(order, 1) if it is current)
 
-    if old_before == new_before and old_after == new_after:
+    old_before = current_items[:status_idx - 1]
+    old_after = current_items[status_idx:]
+    new_before = order[:new_status_idx - 1]
+    new_after = order[new_status_idx:]
+
+    def same(a: list, b: list) -> bool:
+        return len(a) == len(b) and all(x is y for x, y in zip(a, b))
+
+    if same(old_before, new_before) and same(old_after, new_after):
         return {
             "ok": True, "removed": 0, "added": 0,
             "anchor_index": status_idx, "interrupted": False,
@@ -1589,25 +1587,20 @@ def reorder(req: ReorderRequest):
 
     # Zero-interrupt feasibility: new_before must be a subsequence
     # of old_before (we can only drop tracks, never reorder or
-    # add to before), and new_after's multiset must match what we
-    # have available — original after-segment plus any tracks the
-    # before-shrink drops out.
+    # add to before), and new_after must hold exactly the original
+    # after-segment plus what the before-shrink drops out.
     def is_subsequence(needle: list, haystack: list) -> bool:
         j = 0
         for h in haystack:
-            if j < len(needle) and needle[j] == h:
+            if j < len(needle) and needle[j] is h:
                 j += 1
         return j == len(needle)
 
-    expected_after = Counter(old_after) + Counter(old_before) - Counter(new_before)
+    dropped = {id(it) for it in old_before} - {id(it) for it in new_before}
     seamless = (
         is_subsequence(new_before, old_before)
-        and Counter(new_after) == expected_after
+        and {id(it) for it in new_after} == {id(it) for it in old_after} | dropped
     )
-
-    items_by_id = {}
-    for it in current_items:
-        items_by_id.setdefault(it.track_id, it)
 
     plan = ReorderPlan(
         seamless=seamless,
@@ -1617,51 +1610,120 @@ def reorder(req: ReorderRequest):
         new_before=new_before,
         old_after=old_after,
         new_after=new_after,
-        order=req.order,
-        items_by_id=items_by_id,
+        order=order,
         position=int(manager.latest_status.get("position") or 0),
-        resume=manager.latest_status.get("state") in ("playing", "paused"),
+        # A paused HQPlayer is left stopped at its spot, never played to be
+        # paused again: the play press resumes it there (HqpBackend._rebuild)
+        resume=manager.latest_status.get("state") == "playing",
+        items=current_items,
+        output=manager.active,
     )
     try:
         result = manager.apply_reorder(plan)
         return {"ok": True, "anchor_index": new_status_idx, **result}
-    except Exception as e:
-        logger.error(f"reorder failed: {e}", exc_info=True)
+    except QueueChanged as e:
+        raise HTTPException(status_code=409, detail=f"{e} — the queue shows it as it is now")
+    except OutputRefused as e:
+        # The output's answer, logged in its words where it was met
         raise _output_error(e)
+    except Exception as e:
+        # The output busy — held, building, silent, a newer intent first —
+        # is news; anything else is a fault, with its traceback
+        refused = _output_error(e)
+        if refused.status_code == 409:
+            logger.warning("reorder not applied: %s", refused.detail)
+        else:
+            logger.error(f"reorder failed: {e}", exc_info=True)
+        raise refused
 
 @router.post("/jump")
 def jump(req: JumpRequest):
-    """Jump to a specific position in the current HQPlayer playlist.
+    """Jump to a slot of the queue.
 
-    `index` is 1-based to match HQPlayer's own `select_track` API and
-    the SSE `track_index` field. Used by the Queue sheet to play a
-    specific track without rebuilding the playlist."""
+    `index` is the queue's 1-based slot, as the SSE `track_index` field
+    names it — HQPlayer's entry for it is the output's to find (a slot it
+    does not hold has none). Used by the Queue sheet to play a specific
+    track without rebuilding the playlist; on a playlist that is no mirror
+    the tap is a play press, answered at once with the track it will start
+    (`starts`). A slot the output does not take — a gap of this HQPlayer —
+    is answered with the output's own words (`refusal`), as every transport
+    command is. The tap names the track the sheet showed (`track_id`): a
+    sheet not refreshed yet — a replace or a radio from another device —
+    plays that track wherever the queue holds it now, and one the queue no
+    longer holds is refused in words. While HQPlayer takes a queue mutation
+    (a new queue, a new order, a "play next", a removal) it plays the
+    track wherever the mutation puts it — one the mutation takes away is
+    refused."""
     if req.index < 1:
         raise HTTPException(status_code=400, detail="index must be >= 1")
+    # A queue mutation in flight: an output that holds the person's words
+    # finds the track among what it is handed (the queue commits only after
+    # it); any other is handed the slot that holds the track now
+    active = manager.active
+    slot = (req.index if active is not None and active.holds_words and manager.queue.view()[2]
+            else manager.queue.slot_of(req.index, req.track_id))
+    if slot is None:
+        return {"ok": False, "index": req.index, "refusal": "it is no longer in the queue"}
     try:
-        ok = manager.jump(req.index)
-        return {"ok": ok, "index": req.index}
+        # select() loads AND plays the slot (PlayerBackend contract): a
+        # play() after it raced the DLNA load and resumed the OLD track for
+        # the seconds the new one took to buffer
+        b = manager.ensure_active()
+        ok = b.select(slot, req.track_id)
     except Exception as e:
         raise _output_error(e)
+    answer = {"ok": True, "index": slot} if ok else {
+        "ok": False, "index": slot, "refusal": b.refusal()}
+    return _starting(b, answer)
 
 
 def _filler_append(item, gen: int, *, position: str = "end",
                    after=None) -> Optional[bool]:
-    """Append one filler item, retrying through control-link blips — a DHT
-    announce window can drop a single add while the audio stream itself rides
-    on, and silently losing an already-fetched track leaves a "buffering"
-    ghost in the album UI. None = generation superseded (caller must stop);
-    False = dropped after retries."""
-    for attempt in range(4):
-        if attempt:
-            time.sleep(5)
-        added = manager.append([item], position, generation=gen, after=after)
+    """Append one filler item through the manager, on the output there is.
+    A build HQPlayer is in — it answers nothing — is waited out
+    (hqp_link.through), off the queue lock. One it does not finish, or an
+    HQPlayer gone during it, loses nothing: the output's mirror is marked
+    lost and the item goes into the queue alone, as what follows does —
+    HQPlayer gets the queue back when it answers again. An add — or a wait —
+    the link did not send because the output changed meanwhile (another
+    HQPlayer chosen, the output lent) goes again once that change is over
+    (PlaybackManager.wait_for_output_change), on the output it left; the
+    node stopping ends the filler. A file the output refused is not offered
+    again. None = the queue moved on, or the node stops (the caller stops);
+    False = not added."""
+    def moved_on() -> Optional[str]:
+        return "the queue moved on" if manager.queue.generation != gen else None
+
+    def elsewhere() -> bool:
+        b = manager.active
+        return moved_on() is not None or b is None or b.id != "hqplayer"
+
+    for _ in range(4):
+        seen = manager.output_changes()
+        try:
+            added = through(
+                lambda: manager.append([item], position, generation=gen, after=after),
+                needed=moved_on, until=elsewhere)
+        except GaveUp as e:
+            if moved_on() is not None or hqp_link.stopping() is not None:
+                return None
+            active = manager.active
+            if e.failed and active is not None:
+                active.lose_mirror(f"filler: {e}; {item.artist} — {item.title} and what "
+                                   "follows go into the queue alone")
+            continue                # the queue, or the output it has now, takes it at once
+        except Dropped as e:
+            if hqp_link.stopping() is not None:
+                return None
+            logger.info("filler: %s — %s not added (%s); again once the output change is over",
+                        item.artist, item.title, e)
+            if not manager.wait_for_output_change(seen, hqp_link.BUILD_LIMIT_S):
+                break
+            continue
         if added is None:
             return None
-        if added:
-            return True
-    logger.warning("filler: dropped %s — %s after add retries",
-                   item.artist, item.title)
+        return bool(added)          # 0: the output refused the file (one notice says so)
+    logger.warning("filler: dropped %s — %s, the output did not settle", item.artist, item.title)
     return False
 
 
@@ -1681,7 +1743,8 @@ def _owned_filler(items: list, gen: int, *, position: str = "end",
             cursor = item
 
 
-def _add_owned(rows: list, *, clear_first: bool, position: str = "end") -> int:
+def _add_owned(rows: list, *, clear_first: bool, position: str = "end",
+               archive: Optional[Callable[[], None]] = None) -> int:
     """THE single path for queueing owned tracks. Rows (id, ...) become
     full-metadata QueueItems; the active backend mirrors them as needed
     (HQPlayer: a file:// URI or a media-proxy URL by file-access mode, m4a via
@@ -1690,9 +1753,10 @@ def _add_owned(rows: list, *, clear_first: bool, position: str = "end") -> int:
     added (and, for a replace, played) now, the rest fill in behind via a
     background filler — so a slow transcode never blocks the add. A native-
     only set takes the fast add-everything-at-once path. ``clear_first``
-    replaces the queue (and starts playback); otherwise tracks append
-    (``position`` next|end). Returns the count queued (rolling appends
-    finish async)."""
+    replaces the queue (and starts playback) — ``archive``, the session
+    rotation, once the output has taken it (PlaybackManager.replace_queue);
+    otherwise tracks append (``position`` next|end). Returns the count
+    queued (rolling appends finish async)."""
     from streaming.local import TRANSCODE_FORMATS
     items = queue_mod.items_for_owned_rows(rows)
     # CUE slices roll like m4a: each needs its FLAC cut encoded at
@@ -1703,7 +1767,8 @@ def _add_owned(rows: list, *, clear_first: bool, position: str = "end") -> int:
 
     if not needs_roll:
         if clear_first:
-            added, _gen = manager.replace_queue(items, play=True, probe_first=True)
+            added, _gen = manager.replace_queue(items, play=True, probe_first=True,
+                                                archive=archive)
         else:
             added = manager.append(items, position) or 0
         return added
@@ -1711,7 +1776,7 @@ def _add_owned(rows: list, *, clear_first: bool, position: str = "end") -> int:
     # Rolling: add/play the first now, background-fill the rest in order.
     first, rest = items[0], items[1:]
     if clear_first:
-        added, gen = manager.replace_queue([first], play=True)
+        added, gen = manager.replace_queue([first], play=True, archive=archive)
     else:
         added = manager.append([first], position) or 0
         gen = manager.queue.generation
@@ -1740,11 +1805,9 @@ def play_track(req: PlayTrackRequest):
     if not row:
         raise HTTPException(status_code=404, detail="Track not found")
 
-    sessions.rotate_session(manager.queue, 'track',
-                            seed_media_file_id=req.track_id)
-
     try:
-        added = _add_owned([row], clear_first=True)
+        added = _add_owned([row], clear_first=True, archive=lambda: sessions.rotate_session(
+            manager.queue, 'track', seed_media_file_id=req.track_id))
         _exit_radio_mode()
         if not added:
             raise HTTPException(
@@ -1826,16 +1889,11 @@ def _play_album_rows(best_album: dict):
     if not rows:
         return play_phantom_album(PlayPhantomAlbumRequest(album_id=str(best_album["id"])))
 
-    sessions.rotate_session(
-        manager.queue,
-        'album',
-        origin_album_id=str(best_album["id"]),
-        seed_media_file_id=next((r["id"] for r in rows if r["location"] == "local"), None),
-    )
-
     try:
         items = queue_mod.items_for_owned_rows(rows)
-        added, _gen = manager.replace_queue(items, play=True)
+        added, _gen = manager.replace_queue(items, play=True, archive=lambda: sessions.rotate_session(
+            manager.queue, 'album', origin_album_id=str(best_album["id"]),
+            seed_media_file_id=next((r["id"] for r in rows if r["location"] == "local"), None)))
         _exit_radio_mode()
 
         if added < len(rows):
@@ -2445,17 +2503,26 @@ class PlayPhantomAlbumRequest(BaseModel):
 
 def _output_error(e: Exception) -> HTTPException:
     """What a play intent or transport command the output did not take
-    answers: 409 while the output is lent (the HQPlayer benchmark — busy,
-    not broken: the UI must not send the owner to the Output picker), 503
-    when it cannot take it. A backend detached by the hold that an intent
-    took just before refuses with a plain ConnectionError — the hold
-    names it."""
-    if isinstance(e, OutputHeld):
-        return HTTPException(status_code=409, detail=str(e))
+    answers: 409 while the output is lent (the HQPlayer benchmark), while
+    HQPlayer builds a setting or takes the connection and says nothing, and
+    for a command its link no longer sends (a newer intent came first, the
+    output was switched away) — busy, not broken: the UI must not send the
+    owner to the Output picker — 503 when it cannot take it. A backend
+    detached by the hold that an intent took just before refuses with a
+    plain ConnectionError — the hold names it. What the person's words made
+    meanwhile could not do (a note on the error: a track tapped while a new
+    queue that did not commit loaded) is said with it."""
+    notes = list(getattr(e, "__notes__", ()))
     hold = manager.held
-    if hold is not None and isinstance(e, ConnectionError):
-        return HTTPException(status_code=409, detail=str(OutputHeld(hold)))
-    return HTTPException(status_code=503, detail=str(e))
+    if isinstance(e, OutputHeld):
+        status, why = 409, str(e)
+    elif hold is not None and isinstance(e, ConnectionError):
+        status, why = 409, str(OutputHeld(hold))
+    elif isinstance(e, (Building, NotAnswering, Dropped)):
+        status, why = 409, str(e)
+    else:
+        status, why = 503, str(e)
+    return HTTPException(status_code=status, detail=" — ".join([why, *notes]))
 
 
 def _ensure_output_ready() -> None:
@@ -2560,17 +2627,16 @@ def play_phantom_album(req: PlayPhantomAlbumRequest):
     if not prefix:
         raise HTTPException(status_code=502, detail="No tracks could be fetched from the provider")
 
-    # Snapshot the prior queue into a session, then open a phantom-album one —
-    # streamed albums land in the Home shelf like owned albums (origin_album_id
-    # is the phantom album's UUID; the seed is its first available track).
-    sessions.rotate_session(manager.queue, 'album',
-                            origin_album_id=str(req.album_id),
-                            seed_track_id=avail_q[0].track_id)
-
     prefix_items = [it for it in (queue_mod.item_for_proxy_token(t) for t in prefix)
                     if it is not None]
     try:
-        added, gen = manager.replace_queue(prefix_items, play=True)
+        # The prior queue snapshotted into a session once the output took the
+        # new one, then a phantom-album one opened — streamed albums land in
+        # the Home shelf like owned albums (origin_album_id is the phantom
+        # album's UUID; the seed is its first available track).
+        added, gen = manager.replace_queue(prefix_items, play=True, archive=lambda: sessions.rotate_session(
+            manager.queue, 'album', origin_album_id=str(req.album_id),
+            seed_track_id=avail_q[0].track_id))
         # The session belongs to this queue now — moving to another one cancels
         # whatever of it is still downloading.
         proxy.bind(tokens, gen)
@@ -2639,16 +2705,15 @@ def play_phantom_track(req: PlayPhantomTrackRequest):
     if e is None or e.audio is None:
         raise HTTPException(status_code=502, detail="This track isn't available to stream right now.")
 
-    # A single streamed track is a 'track'-origin session seeded by its UUID;
-    # the album the row was clicked on is the session's origin album, so the
-    # card wears that edition's cover.
-    sessions.rotate_session(manager.queue, 'track',
-                            seed_track_id=req.track_id,
-                            origin_album_id=req.album_id)
-
     try:
         item = queue_mod.item_for_proxy_token(tokens[0])
-        added, gen = manager.replace_queue([item] if item else [], play=True)
+        # A single streamed track is a 'track'-origin session seeded by its
+        # UUID; the album the row was clicked on is the session's origin
+        # album, so the card wears that edition's cover.
+        added, gen = manager.replace_queue([item] if item else [], play=True,
+                                           archive=lambda: sessions.rotate_session(
+                                               manager.queue, 'track', seed_track_id=req.track_id,
+                                               origin_album_id=req.album_id))
         proxy.bind(tokens, gen)
         _exit_radio_mode()
         if not added:
@@ -2851,11 +2916,13 @@ def _queue_segments_worker(segments: list, gen: int) -> None:
         _phantom_filler(proxy, tokens, 0, gen)
 
 
-def _play_segments(segments: list, worker_name: str, *, play: bool = True) -> None:
+def _play_segments(segments: list, worker_name: str, *, archive: Callable[[], None],
+                   play: bool = True) -> None:
     """Replace the queue with these segments. The FIRST item goes in alone — a
     transcode or a provider fetch must never hold up the answer — and everything
-    behind it rolls in through the ordered worker. The caller rotates the session
-    BEFORE this (the old queue is archived intact).
+    behind it rolls in through the ordered worker. `archive`, the caller's
+    session rotation, runs once the output has taken the first item, before
+    the commit (the old queue is archived intact; a refusal leaves it be).
 
     `play=False` assembles the queue without starting it: "put together a
     playlist" is a curation act, not a play command, and the canonical queue is
@@ -2863,11 +2930,11 @@ def _play_segments(segments: list, worker_name: str, *, play: bool = True) -> No
     head_kind, head_items = segments[0]
     if head_kind == "owned":
         if play:
-            added = _add_owned([head_items[0]], clear_first=True)
+            added = _add_owned([head_items[0]], clear_first=True, archive=archive)
             gen = manager.queue.generation
         else:
             added, gen = manager.replace_queue(
-                queue_mod.items_for_owned_rows([head_items[0]]), play=False)
+                queue_mod.items_for_owned_rows([head_items[0]]), play=False, archive=archive)
         head_rest = head_items[1:]
     else:
         from streaming import service as streaming_service
@@ -2888,7 +2955,7 @@ def _play_segments(segments: list, worker_name: str, *, play: bool = True) -> No
             raise HTTPException(status_code=502,
                                 detail="The opening track isn\u2019t available to stream right now.")
         item = queue_mod.item_for_proxy_token(tokens[0])
-        added, gen = manager.replace_queue([item] if item else [], play=play)
+        added, gen = manager.replace_queue([item] if item else [], play=play, archive=archive)
         proxy.bind(tokens, gen)
         head_rest = [q for q, _ch in pairs[1:]]
     if not added:
@@ -2936,8 +3003,13 @@ def queue_entities(req: QueueEntitiesRequest):
     # appends strictly in order, and _add_owned's own rolling filler would race
     # that ordering for a set that needs transcoding (m4a, CUE cuts).
     if len(segments) == 1 and segments[0][0] == "owned":
-        _add_owned(segments[0][1], clear_first=False,
-                   position="next" if req.position == "next" else "end")
+        try:
+            _add_owned(segments[0][1], clear_first=False,
+                       position="next" if req.position == "next" else "end")
+        except HTTPException:
+            raise
+        except Exception as e:
+            raise _output_error(e)
     else:
         _queue_segments_async(segments, gen, "queue-entities")
     return {"ok": True, "queued": owned, "streaming": phantom, "not_found": missing}
@@ -2973,15 +3045,18 @@ def play_entities(req: QueueEntitiesRequest):
     album_ids = [i.id for i in req.items if i.kind == "album"]
     single_album = album_ids[0] if len(req.items) == 1 and album_ids else None
     head_kind, head_items = segments[0]
-    sessions.rotate_session(
-        manager.queue, "album" if single_album else "mix",
-        origin_album_id=single_album,
-        seed_media_file_id=(head_items[0]["id"] if head_kind == "owned"
-                            and (head_items[0].get("location") or "local") == "local" else None),
-        seed_track_id=(None if head_kind == "owned" else head_items[0].track_id))
+
+    def archive() -> None:
+        sessions.rotate_session(
+            manager.queue, "album" if single_album else "mix",
+            origin_album_id=single_album,
+            seed_media_file_id=(head_items[0]["id"] if head_kind == "owned"
+                                and (head_items[0].get("location") or "local") == "local"
+                                else None),
+            seed_track_id=(None if head_kind == "owned" else head_items[0].track_id))
 
     try:
-        _play_segments(segments, "play-entities", play=req.autoplay)
+        _play_segments(segments, "play-entities", archive=archive, play=req.autoplay)
     except HTTPException:
         raise
     except Exception as e:
@@ -3091,19 +3166,22 @@ def play_session(req: PlaySessionRequest):
 
     head_kind, head_items = segments[0]
     origin = "mix" if header["origin"] == "radio" else header["origin"]
-    sessions.rotate_session(
-        manager.queue, origin,
-        origin_album_id=header["origin_album_id"],
-        seed_media_file_id=(head_items[0]["id"] if head_kind == "owned"
-                            and (head_items[0].get("location") or "local") == "local" else None),
-        seed_track_id=(None if head_kind == "owned" else head_items[0].track_id),
-        # A mix keeps the name it was archived under (a radio, replaying as a
-        # static mix, keeps its seed's); album and track cards are recomputed
-        # from their origin and need nothing carried.
-        title=(header["title"] if origin == "mix" else None))
+
+    def archive() -> None:
+        sessions.rotate_session(
+            manager.queue, origin,
+            origin_album_id=header["origin_album_id"],
+            seed_media_file_id=(head_items[0]["id"] if head_kind == "owned"
+                                and (head_items[0].get("location") or "local") == "local"
+                                else None),
+            seed_track_id=(None if head_kind == "owned" else head_items[0].track_id),
+            # A mix keeps the name it was archived under (a radio, replaying
+            # as a static mix, keeps its seed's); album and track cards are
+            # recomputed from their origin and need nothing carried.
+            title=(header["title"] if origin == "mix" else None))
 
     try:
-        _play_segments(segments, "play-session")
+        _play_segments(segments, "play-session", archive=archive)
     except HTTPException:
         raise
     except Exception as e:
@@ -3127,7 +3205,12 @@ def queue_session(req: QueueSessionRequest):
         _ensure_streaming_ready()
 
     if len(segments) == 1 and segments[0][0] == "owned":
-        _add_owned(segments[0][1], clear_first=False, position=req.position)
+        try:
+            _add_owned(segments[0][1], clear_first=False, position=req.position)
+        except HTTPException:
+            raise
+        except Exception as e:
+            raise _output_error(e)
     else:
         if req.position == "next":
             raise HTTPException(status_code=400,
@@ -3169,11 +3252,10 @@ def play_similar(req: PlaySimilarRequest):
         SELECT mf.id FROM media_files mf WHERE mf.track_id = %(tid)s::uuid
         ORDER BY {best_rip_order('mf')} LIMIT 1
     """, {"tid": req.track_id})
-    sessions.rotate_session(manager.queue, 'radio', seed_track_id=req.track_id,
-                            seed_media_file_id=(seed_mf or {}).get("id"))
-
     try:
-        _play_segments(segments, "play-similar")
+        _play_segments(segments, "play-similar", archive=lambda: sessions.rotate_session(
+            manager.queue, 'radio', seed_track_id=req.track_id,
+            seed_media_file_id=(seed_mf or {}).get("id")))
     except HTTPException:
         raise
     except Exception as e:
@@ -3220,15 +3302,10 @@ def play_tracks(req: PlayTracksRequest):
     if not rows:
         raise HTTPException(status_code=404, detail="No tracks found")
 
-    sessions.rotate_session(
-        manager.queue,
-        req.origin or 'mix',
-        origin_album_id=req.origin_album_id,
-        seed_media_file_id=rows[0]["id"],
-    )
-
     try:
-        added = _add_owned(rows, clear_first=True)
+        added = _add_owned(rows, clear_first=True, archive=lambda: sessions.rotate_session(
+            manager.queue, req.origin or 'mix', origin_album_id=req.origin_album_id,
+            seed_media_file_id=rows[0]["id"]))
         _exit_radio_mode()
         if added < len(rows):
             raise HTTPException(
@@ -3564,15 +3641,19 @@ def _radio_start(req: RadioStartRequest):
             status_code=409,
             detail="This track isn't analysed yet — play it a moment, then start radio.")
 
-    # seed_uuid is resolved for BOTH an owned (req.track_id) and a phantom
-    # (req.track_uuid) seed — pass it as the logical seed so a radio started
-    # from a streamed track gets a proper session card (previously this passed
-    # the owned-only req.track_id, which was None for a phantom seed).
-    sessions.rotate_session(manager.queue, 'radio', seed_track_id=seed_uuid,
-                            seed_media_file_id=req.track_id)
     # Clear everything around the reading slot — the seed plays on while the
-    # batch flows in behind. New generation supersedes any prior filler.
-    gen = manager.clear_for_radio()
+    # batch flows in behind. New generation supersedes any prior filler. The
+    # session rotates in the output's own clear, before it: one that cannot
+    # be asked (HQPlayer building, the output lent or gone) refuses with
+    # history intact. seed_uuid is resolved for BOTH an owned (req.track_id) and a
+    # phantom (req.track_uuid) seed — the logical seed, so a radio started
+    # from a streamed track gets a proper session card.
+    try:
+        gen = manager.clear_for_radio(
+            lambda: sessions.rotate_session(manager.queue, 'radio', seed_track_id=seed_uuid,
+                                            seed_media_file_id=req.track_id))
+    except (BrokenPipeError, ConnectionError, OSError) as e:
+        raise _output_error(e)
 
     _radio_played = {seed_uuid}
     _radio_last_artist = seed_row["artist"]

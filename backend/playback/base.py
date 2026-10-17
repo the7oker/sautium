@@ -15,12 +15,16 @@ from the canonical queue (local engine, browser) keep the no-op
 defaults.
 """
 
+import logging
 from abc import ABC, abstractmethod
+from contextlib import contextmanager
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Callable, Optional
 
 if TYPE_CHECKING:
     from playback.queue import QueueItem
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass
@@ -52,11 +56,18 @@ class Capabilities:
     exclusive_mode: bool = False
 
 
+class OutputRefused(RuntimeError):
+    """The output refused a step of what it was asked, in its own words —
+    its answer, never a fault of the node's."""
+
+
 @dataclass
 class ReorderPlan:
     """A validated /reorder request, precomputed by the endpoint: the
     seamless path drops/keeps around the playing slot without touching it;
-    the rebuild path clears and reloads (audible ~300 ms gap)."""
+    the rebuild path clears and reloads (audible ~300 ms gap). Its lists
+    are the queue's items themselves — a slot by identity, never by track
+    id (a track queued twice is two slots; a re-bind may clear an id)."""
     seamless: bool
     status_idx: int                     # current playing slot (1-based)
     new_status_idx: int                 # where that slot lands in the new order
@@ -64,15 +75,24 @@ class ReorderPlan:
     new_before: list
     old_after: list
     new_after: list
-    order: list                         # full new order of media_file_ids
-    items_by_id: dict                   # media_file_id -> QueueItem (URI derivation)
-    position: int = 0                   # rebuild: resume seek position
-    resume: bool = False                # rebuild: resume playback after select
+    order: list                         # the queue's items in the new order
+    position: int = 0                   # rebuild: the second it resumes at
+    resume: bool = False                # rebuild: play on (it was playing), else the play press resumes
+    # The queue's items, in order, it was planned on: applied to no other
+    # order — a re-read of a slot's way in moves no slot
+    items: Optional[list] = None
+    # The output it was planned on — its position and `resume` are that
+    # output's: applied on no other
+    output: Optional["PlayerBackend"] = None
 
 
 class PlayerBackend(ABC):
     id: str = ""
     label: str = ""
+    # Holds a person's play intents while a queue mutation hands it its
+    # playlist, and finds a tap's track among what it is handed (HQPlayer):
+    # the jump route hands it the row's index as the sheet sent it then
+    holds_words: bool = False
 
     def __init__(self, emit: Callable[["PlayerBackend", PlaybackStatus], None]):
         # Every tick names the backend it came from: the manager listens to
@@ -124,6 +144,34 @@ class PlayerBackend(ABC):
     @abstractmethod
     def stop(self) -> bool: ...
 
+    def release(self) -> Optional[str]:
+        """The output is switched away from — a person's switch to another
+        output: stop what it plays. Returns what the person is told when the
+        stop is left for later — HQPlayer, building a setting or answering
+        nothing, stops once it answers; the switch does not wait for it. A
+        backend that believes its device off the network sends no stop: it
+        would fail exactly as the last command did and burn the command
+        timeout on a ghost (the switch away from a vanished phone renderer
+        waited out its whole Stop + unsubscribe budget)."""
+        if not self.healthy():
+            logger.info("%s believed off the network — switched away without a stop", self.id)
+            return None
+        self.stop()
+        return None
+
+    def refusal(self) -> str:
+        """Why the last command this thread sent was not taken, in the
+        device's own words when it gave any — what the assistant quotes."""
+        return ""
+
+    def pressing(self) -> Optional[dict]:
+        """While a play intent goes on behind its answer — HQPlayer taking
+        the queue again, or a queue mutation it is held for — the track it
+        will start ({"index", "track_id", "position"}), or {} when it will
+        start none; None otherwise. Default: none — every other output starts
+        before it answers."""
+        return None
+
     @abstractmethod
     def next(self) -> bool: ...
 
@@ -131,11 +179,15 @@ class PlayerBackend(ABC):
     def previous(self) -> bool: ...
 
     @abstractmethod
-    def select(self, index: int) -> bool:
+    def select(self, index: int, track_id: Optional[str] = None) -> bool:
         """Play queue slot `index` (1-based): load it and start it in ONE
         step. Every backend owns that atomically — a caller-side play()
         after select() raced the DLNA load and resumed the previous track
-        while the new one buffered."""
+        while the new one buffered. `index` holds the track the person saw
+        (the jump route finds it, CanonicalQueue.slot_of); `track_id` is
+        that track — an output that holds play intents while a queue
+        mutation is in flight (mutation) plays it wherever the mutation puts
+        it."""
 
     def seek(self, seconds: int) -> bool:
         return False
@@ -156,25 +208,69 @@ class PlayerBackend(ABC):
     # the manager commits only that prefix). `queue_changed` runs AFTER the
     # canonical commit — backends that render the canonical queue directly
     # (local engine) act here, when the queue is already in its new shape.
+    # Both run under the queue lock; `queue_start` runs once it is let go:
+    # a start the mirror left (HQPlayer may build it for minutes).
 
     def queue_changed(self, kind: str, *, play: bool = False) -> None:
         """Post-commit notification: kind ∈ replace|append|insert_next|
         remove|reorder|clear. Default: nothing to do (HQPlayer acted in the
         mirror hooks)."""
 
+    def queue_start(self) -> Optional[str]:
+        """After a mutation, outside the queue lock: the start its mirror
+        left on this thread — a replace that plays, a rebuild that plays on —
+        and the play intents held meanwhile, carried out whether the queue
+        committed or not (mutation). Returns what of them could not go, in
+        words — said with the refusal of a mutation that did not commit —
+        or None. Default: nothing (a renderer starts in queue_changed)."""
+        return None
+
+    @contextmanager
+    def mutation(self):
+        """A queue mutation this output follows — a replace, a reorder, a
+        re-bind, a radio start — on this thread, until the queue commits it
+        or gives it up: a play intent made while the output takes it is the
+        output's to hold and carry out once the queue lock is let go, on the
+        queue as it then stands (queue_start). Default: nothing to hold."""
+        yield
+
+    def queue_abandon(self) -> None:
+        """A replace this output mirrored was not committed (the session
+        rotation before the commit failed): what its mirror left on this
+        thread is not carried out. Default: nothing (a renderer had not
+        started anything)."""
+
     def slot_ready(self, index: int) -> None:
         """A slot this output could not open when it was reached now can —
         a stream substitute landed on it (playback.substitute). Default:
         nothing; an output that parked a play there starts it."""
 
-    def queue_replace(self, items: list, *, play: bool, probe_first: bool = False) -> int:
-        return len(items)
+    def gap(self, item) -> Optional[str]:
+        """Why this output does not hold the queue's slot `item` — it stays
+        in the queue, named with this — or None. Default: every slot is
+        held; HQPlayer's playlist leaves out what it cannot open."""
+        return None
 
-    def queue_append(self, items: list) -> int:
-        return len(items)
+    # The three take what the output took of `items` into the queue — all of
+    # them here and on HQPlayer, which has a gap for what it did not open;
+    # nothing when HQPlayer refused them whole (mirror-first). A play next
+    # also names the slot it went behind — HQPlayer's, read as the insert
+    # goes, when it moved on past the anchor — and the queue puts the tracks
+    # there too.
 
-    def queue_insert_next(self, items: list, anchor_index: Optional[int]) -> int:
-        return len(items)
+    def queue_replace(self, items: list, *, play: bool, probe_first: bool = False) -> list:
+        return list(items)
+
+    def queue_append(self, items: list) -> list:
+        return list(items)
+
+    def queue_insert_next(self, items: list, anchor_index: Optional[int]) -> tuple:
+        return list(items), anchor_index
+
+    def lose_mirror(self, why: str) -> None:
+        """Background work could not hand the output what the queue took (a
+        filler whose wait gave up). Default: nothing — only HQPlayer keeps a
+        mirror of the queue."""
 
     def queue_remove(self, index: int) -> bool:
         return True
@@ -182,5 +278,9 @@ class PlayerBackend(ABC):
     def queue_reorder(self, plan: ReorderPlan) -> dict:
         return {"removed": 0, "added": 0, "interrupted": False}
 
-    def queue_clear_after_current(self) -> bool:
+    def queue_clear_after_current(self, archive: Callable[[], None]) -> bool:
+        """Radio start: everything around the playing slot goes. `archive`
+        (the session rotation) runs first — a rotation that fails clears
+        nothing."""
+        archive()
         return True

@@ -97,6 +97,88 @@ def active_hqp_endpoint(q):
     rows = q("SELECT id FROM hqp_endpoints WHERE host = %(h)s AND port = %(p)s", {"h": host, "p": port})
     return rows[0]["id"] if rows else None
 
+
+def hqp_list(lines: list, title: str, items, why: str, line) -> None:
+    """One of HQPlayer's lists (`HQPlayerClient.get_filters` and its kin)
+    as the assistant reads it — and when HQPlayer did not give it (None),
+    that and `why`, its refusal: read as "none", an absent list has the
+    assistant tell the owner HQPlayer offers nothing."""
+    if items is None:
+        lines.append(f"{title}: HQPlayer did not list them ({why}).")
+    elif not items:
+        lines.append(f"{title}: none.")
+    else:
+        lines.append(f"{title} ({len(items)}):")
+        lines.extend(line(x) for x in items)
+
+
+_HQP_LISTS = {"filter": ("filters", "Filter", "Available filters"),
+              "shaper": ("dithers/shapers", "Shaper", "Available shapers"),
+              "profile": ("matrix profiles", "Profile", "Available")}
+
+
+def hqp_pick(kind: str, items, name: str, why: str, key=lambda x: x) -> tuple:
+    """A filter, a shaper or a matrix profile picked by name off HQPlayer's
+    list, as both assistant surfaces pick it: the name exactly as written —
+    two can differ in case alone — else in any case, else the first that
+    contains it. (match, None), or (None, what the assistant says: HQPlayer
+    did not list them — `why`, its refusal — lists none, or none by that
+    name). An empty profile list lets the name through — HQPlayer's own
+    answer to it decides (match: the name itself)."""
+    plural, label, available = _HQP_LISTS[kind]
+    if items is None:
+        return None, f"HQPlayer did not list its {plural} ({why}) — nothing was changed."
+    if not items:
+        return ((name, None) if kind == "profile"
+                else (None, f"HQPlayer lists no {plural} in its current mode."))
+    wanted = name.lower()
+    match = (next((x for x in items if key(x) == name), None)
+             or next((x for x in items if key(x).lower() == wanted), None)
+             or next((x for x in items if wanted in key(x).lower()), None))
+    if match is None:
+        return None, f"{label} '{name}' not found. {available}: {', '.join(key(x) for x in items)}"
+    return match, None
+
+
+def hqp_change_text(outcome: dict, what: str, done: str) -> str:
+    """A DSP change's outcome (playback.hqp_backend.change_dsp, the one path
+    behind /api/hqplayer/config) as the assistant tells it: refused in
+    HQPlayer's words; taken and still building — HQPlayer answers nothing
+    until a build is done —; building before it answered at all (the knob
+    still `pending`: whether it took it shows once it does); or `done`,
+    taken at once."""
+    if outcome.get("failed"):
+        return f"HQPlayer did not take {what}: {'; '.join(outcome['failed'].values())}"
+    if outcome.get("building") and outcome.get("pending"):
+        return (f"HQPlayer is building {what} — it answers nothing until the build is done, "
+                "and whether it took it shows then.")
+    if outcome.get("building"):
+        return (f"HQPlayer took {what} and is building it — it answers nothing until the "
+                "build is done, then plays on with it.")
+    return done
+
+
+# The assistant's HQPlayer transport (/api/player/<command>): what failed,
+# and what it says when HQPlayer took it.
+_HQP_TRANSPORT = {"play": ("start playback", "Playback started."),
+                  "pause": ("pause", "Playback paused."),
+                  "stop": ("stop", "Playback stopped."),
+                  "next": ("skip", "Skipped to next track."),
+                  "previous": ("go back", "Went to previous track."),
+                  "volume/up": ("change volume", "Volume increased."),
+                  "volume/down": ("change volume", "Volume decreased."),
+                  "volume": ("set volume", "Volume set to {level}.")}
+
+
+def hqp_transport_text(command: str, outcome: dict, **values) -> str:
+    """A transport command's outcome as the assistant tells it: done, or
+    refused in the output's own words (routers.player._transport)."""
+    failed, done = _HQP_TRANSPORT[command]
+    if outcome.get("ok"):
+        return done.format(**values)
+    return f"Failed to {failed}: {outcome.get('refusal') or 'HQPlayer did not confirm it'}"
+
+
 _PH_LATERAL = """
     LEFT JOIN LATERAL (
         SELECT atr.length_ms, al.id AS album_id, al.title AS album,

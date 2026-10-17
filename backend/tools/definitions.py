@@ -13,6 +13,7 @@ and the output choice.
 
 import json
 import logging
+from contextlib import contextmanager
 
 import assistant_queries as aq
 from db_pool import db_query as _db_query, db_query_one as _db_query_one
@@ -20,19 +21,14 @@ from tools.registry import REGISTRY, ToolDef, ToolParam
 
 logger = logging.getLogger(__name__)
 
-_hqp_client = None
-
-
-def _get_hqp():
-    """The HQPlayer client every HQPlayer tool here goes through — the
-    same two rules the MCP server's tools follow: refuse when HQPlayer is
-    not the chosen output (a filter change or a skip would reconfigure a
-    device in another room while the sound goes elsewhere, with the
-    canonical queue none the wiser), and follow the endpoint the owner
-    saved (the cached socket is dropped when host or port changed)."""
-    global _hqp_client
-    from config import settings
-    from hqplayer_client import HQPlayerClient
+def _hqp_gate(*, commands: bool = True) -> None:
+    """The rules every HQPlayer tool here keeps, the MCP server's too:
+    refuse when HQPlayer is not the chosen output (a filter change or a
+    skip would reconfigure a device in another room while the sound goes
+    elsewhere, with the canonical queue none the wiser) and while it is
+    lent to the benchmark; a transport or DSP tool (`commands`) also while
+    its link refuses people (HqpLink.refuse: a build, one it did not
+    finish, a silence). A reading tool goes on: its questions do."""
     from routers.settings import _read
     from playback.manager import manager
     active = _read("output.type")
@@ -50,25 +46,39 @@ def _get_hqp():
             "come back when it finishes; the user can cancel it on the HQPlayer "
             "screen."
         )
-    endpoint = (settings.hqplayer_host, settings.hqplayer_port)
-    if (_hqp_client is None or not _hqp_client.is_connected()
-            or (_hqp_client.host, _hqp_client.port) != endpoint):
-        if _hqp_client is not None:
-            _hqp_client.disconnect()
-        _hqp_client = HQPlayerClient(host=endpoint[0], port=endpoint[1],
-                                     timeout=10.0)
-        if not _hqp_client.connect():
-            _hqp_client = None
-            raise ConnectionError(
-                f"Cannot connect to HQPlayer at {endpoint[0]}:{endpoint[1]}. "
-                "Make sure HQPlayer is running (an HQPlayer Embedded in trial "
-                "mode stops every 30 minutes and must be restarted)."
-            )
-        # A stop or a DSP change asked of the assistant is the owner's: the
-        # playback trace watching a play must hear it (playback.hqp_diagnostics).
-        from playback.hqp_backend import _route_outcome
-        _hqp_client.on_outcome = _route_outcome
-    return _hqp_client
+    if commands:
+        from playback import hqp_link
+        hqp_link.selected().refuse()
+
+
+@contextmanager
+def _hqp_asking(*, commands: bool = False):
+    """The selected HQPlayer's link for the reading tools here (_hqp_gate
+    first, as a reading; a DSP setter's reading of the lists it names from,
+    `commands`, through the command gate — refused at once while the link
+    refuses people): their questions go where every request of this node to
+    it goes, one at a time — refused by the link itself only while HQPlayer
+    builds. A command goes the backend's way instead (_hqp_transport,
+    change_dsp) — after the block: a change holds the link itself."""
+    _hqp_gate(commands=commands)
+    from playback import hqp_link
+    with hqp_link.selected().asking() as hqp:
+        yield hqp
+
+
+def _hqp_transport(command: str, route, req=None, **values) -> str:
+    """A transport command the way the Web UI sends it (routers.player):
+    the backend's own command sequence on the link, the play press's resume
+    spot, the playback trace; refused in HQPlayer's words when it did not
+    take it."""
+    try:
+        _hqp_gate()
+    except Exception as e:
+        return f"Error: {e}"
+    r, err = _player_call(lambda req: route(req) if req is not None else route(), req)
+    if err:
+        return f"Error: {err}"
+    return aq.hqp_transport_text(command, r, **values)
 
 
 # ===========================================================================
@@ -335,51 +345,35 @@ def _h_add_to_queue(ids: list) -> str:
 # -- HQPlayer control handlers -----------------------------------------------
 
 def _h_hqplayer_play() -> str:
-    try:
-        hqp = _get_hqp()
-        return "Playback started." if hqp.play() else f"Failed to start playback: {hqp.refusal()}"
-    except Exception as e:
-        return f"Error: {e}"
+    from routers.player import play
+    return _hqp_transport("play", play)
 
 
 def _h_hqplayer_pause() -> str:
-    try:
-        hqp = _get_hqp()
-        return "Playback paused." if hqp.pause() else f"Failed to pause: {hqp.refusal()}"
-    except Exception as e:
-        return f"Error: {e}"
+    from routers.player import pause
+    return _hqp_transport("pause", pause)
 
 
 def _h_hqplayer_stop() -> str:
-    try:
-        hqp = _get_hqp()
-        return "Playback stopped." if hqp.stop() else f"Failed to stop: {hqp.refusal()}"
-    except Exception as e:
-        return f"Error: {e}"
+    from routers.player import stop
+    return _hqp_transport("stop", stop)
 
 
 def _h_hqplayer_next() -> str:
-    try:
-        hqp = _get_hqp()
-        return "Skipped to next track." if hqp.next() else f"Failed to skip: {hqp.refusal()}"
-    except Exception as e:
-        return f"Error: {e}"
+    from routers.player import next_track
+    return _hqp_transport("next", next_track)
 
 
 def _h_hqplayer_previous() -> str:
-    try:
-        hqp = _get_hqp()
-        return ("Went to previous track." if hqp.previous()
-                else f"Failed to go back: {hqp.refusal()}")
-    except Exception as e:
-        return f"Error: {e}"
+    from routers.player import previous_track
+    return _hqp_transport("previous", previous_track)
 
 
 def _h_hqplayer_get_status() -> str:
     try:
         from hqplayer_client import PlaybackState, format_time
-        hqp = _get_hqp()
-        status = hqp.get_status()
+        with _hqp_asking() as hqp:
+            status = hqp.get_status()
         if status is None:
             return "Could not get HQPlayer status."
         state_names = {
@@ -404,136 +398,98 @@ def _h_hqplayer_get_status() -> str:
 
 
 def _h_hqplayer_volume_up() -> str:
-    try:
-        hqp = _get_hqp()
-        return ("Volume increased." if hqp.volume_up()
-                else f"Failed to change volume: {hqp.volume_refusal()}")
-    except Exception as e:
-        return f"Error: {e}"
+    from routers.player import volume_up
+    return _hqp_transport("volume/up", volume_up)
 
 
 def _h_hqplayer_volume_down() -> str:
-    try:
-        hqp = _get_hqp()
-        return ("Volume decreased." if hqp.volume_down()
-                else f"Failed to change volume: {hqp.volume_refusal()}")
-    except Exception as e:
-        return f"Error: {e}"
+    from routers.player import volume_down
+    return _hqp_transport("volume/down", volume_down)
 
 
 def _h_hqplayer_set_volume(level: float) -> str:
-    try:
-        hqp = _get_hqp()
-        return (f"Volume set to {level}." if hqp.set_volume(level)
-                else f"Failed to set volume: {hqp.volume_refusal()}")
-    except Exception as e:
-        return f"Error: {e}"
+    from routers.player import VolumeRequest, set_volume
+    return _hqp_transport("volume", set_volume, VolumeRequest(level=level), level=level)
 
 
 def _h_hqplayer_get_settings() -> str:
     try:
-        hqp = _get_hqp()
         lines = []
-        info = hqp.get_info()
-        if info:
-            lines.append(f"HQPlayer: {info.get('product', '')} v{info.get('version', '')}")
-            lines.append(f"Engine: {info.get('engine', '')}")
-            lines.append("")
-        filters = hqp.get_filters()
-        if filters:
-            lines.append(f"Available filters ({len(filters)}):")
-            for f in filters:
-                desc = f.get("description", "")
-                suffix = f" — {desc}" if desc else ""
-                lines.append(f"  [{f['index']}] {f['name']}{suffix}")
-        shapers = hqp.get_shapers()
-        if shapers:
-            lines.append(f"\nAvailable dither/shapers ({len(shapers)}):")
-            for s in shapers:
-                lines.append(f"  [{s['index']}] {s['name']}")
-        modes = hqp.get_modes()
-        if modes:
-            lines.append(f"\nOutput modes ({len(modes)}):")
-            for m in modes:
-                lines.append(f"  [{m['index']}] {m['name']}")
-        rates = hqp.get_rates()
-        if rates:
-            lines.append(f"\nSample rates ({len(rates)}):")
-            for r in rates:
-                rate_khz = r['rate'] / 1000
-                lines.append(f"  [{r['index']}] {rate_khz:.1f} kHz")
-        return "\n".join(lines) if lines else "No settings info available."
+        with _hqp_asking() as hqp:
+            info = hqp.get_info()
+            if info:
+                lines.append(f"HQPlayer: {info.get('product', '')} v{info.get('version', '')}")
+                lines.append(f"Engine: {info.get('engine', '')}")
+                lines.append("")
+            for title, read, line in (
+                    ("Available filters", hqp.get_filters,
+                     lambda f: f"  [{f['index']}] {f['name']}"
+                               + (f" — {f['description']}" if f.get("description") else "")),
+                    ("\nAvailable dither/shapers", hqp.get_shapers,
+                     lambda s: f"  [{s['index']}] {s['name']}"),
+                    ("\nOutput modes", hqp.get_modes, lambda m: f"  [{m['index']}] {m['name']}"),
+                    ("\nSample rates", hqp.get_rates,
+                     lambda r: f"  [{r['index']}] {r['rate'] / 1000:.1f} kHz")):
+                aq.hqp_list(lines, title, read(), hqp.refusal(), line)
+        return "\n".join(lines)
     except Exception as e:
         return f"Error getting settings: {e}"
 
 
 def _h_hqplayer_set_filter(filter_name: str) -> str:
     try:
-        hqp = _get_hqp()
-        filters = hqp.get_filters()
-        if not filters:
-            return "Could not retrieve filter list from HQPlayer."
-        match = None
-        for f in filters:
-            if f["name"].lower() == filter_name.lower():
-                match = f
-                break
+        with _hqp_asking(commands=True) as hqp:
+            filters = hqp.get_filters()
+            match, said = aq.hqp_pick("filter", filters, filter_name, hqp.refusal(),
+                                      key=lambda f: f["name"])
         if match is None:
-            for f in filters:
-                if filter_name.lower() in f["name"].lower():
-                    match = f
-                    break
-        if match is None:
-            available = ", ".join(f["name"] for f in filters)
-            return f"Filter '{filter_name}' not found. Available filters: {available}"
-        ok = hqp.set_filter(match["index"])
-        if not ok:
-            return f"Failed to set filter to {match['name']}: {hqp.refusal()}"
+            return said
+        # Both slots, as the HQPlayer screen sends it: a 44.1/48 kHz source
+        # plays through the 1x slot
+        from playback.hqp_backend import change_dsp
+        outcome = change_dsp({"filter": match["index"], "filter1x": match["index"]})
         desc = match.get("description", "")
-        return f"Filter set to: {match['name']}" + (f" — {desc}" if desc else "")
+        return aq.hqp_change_text(outcome, f"the filter {match['name']}",
+                                  f"Filter set to: {match['name']}" + (f" — {desc}" if desc else ""))
     except Exception as e:
         return f"Error setting filter: {e}"
 
 
 def _h_hqplayer_set_shaper(shaper_name: str) -> str:
     try:
-        hqp = _get_hqp()
-        shapers = hqp.get_shapers()
-        if not shapers:
-            return "Could not retrieve shaper list from HQPlayer."
-        match = None
-        for s in shapers:
-            if s["name"].lower() == shaper_name.lower():
-                match = s
-                break
+        with _hqp_asking(commands=True) as hqp:
+            shapers = hqp.get_shapers()
+            match, said = aq.hqp_pick("shaper", shapers, shaper_name, hqp.refusal(),
+                                      key=lambda s: s["name"])
         if match is None:
-            for s in shapers:
-                if shaper_name.lower() in s["name"].lower():
-                    match = s
-                    break
-        if match is None:
-            available = ", ".join(s["name"] for s in shapers)
-            return f"Shaper '{shaper_name}' not found. Available shapers: {available}"
-        ok = hqp.set_shaping(match["index"])
-        return (f"Dither/shaper set to: {match['name']}" if ok
-                else f"Failed to set shaper to {match['name']}: {hqp.refusal()}")
+            return said
+        from playback.hqp_backend import change_dsp
+        outcome = change_dsp({"shaper": match["index"]})
+        return aq.hqp_change_text(outcome, f"the dither/shaper {match['name']}",
+                                  f"Dither/shaper set to: {match['name']}")
     except Exception as e:
         return f"Error setting shaper: {e}"
 
 
 def _h_hqplayer_set_convolution(enabled: bool) -> str:
     try:
-        hqp = _get_hqp()
-        ok = hqp.set_convolution(enabled)
+        _hqp_gate()
+        from playback.hqp_backend import change_dsp
+        outcome = change_dsp({"convolution": enabled})
         state = "enabled" if enabled else "disabled"
-        return f"Convolution {state}." if ok else f"Failed to {state} convolution: {hqp.refusal()}"
+        return aq.hqp_change_text(outcome, f"convolution {'on' if enabled else 'off'}",
+                                  f"Convolution {state}.")
     except Exception as e:
         return f"Error: {e}"
 
 
 def _h_hqplayer_list_matrix_profiles() -> str:
     try:
-        profiles = _get_hqp().matrix_list_profiles()
+        with _hqp_asking() as hqp:
+            profiles = hqp.matrix_list_profiles()
+            refusal = hqp.refusal()
+        if profiles is None:
+            return f"HQPlayer did not list its matrix profiles ({refusal})."
         if not profiles:
             return "No matrix profiles found."
         lines = [f"Available matrix profiles ({len(profiles)}):"]
@@ -546,7 +502,8 @@ def _h_hqplayer_list_matrix_profiles() -> str:
 
 def _h_hqplayer_get_matrix_profile() -> str:
     try:
-        profile = _get_hqp().matrix_get_profile()
+        with _hqp_asking() as hqp:
+            profile = hqp.matrix_get_profile()
         if profile is None:
             return "Could not get current matrix profile."
         return f"Current matrix profile: '{profile}'" if profile else "No matrix profile active."
@@ -556,41 +513,35 @@ def _h_hqplayer_get_matrix_profile() -> str:
 
 def _h_hqplayer_set_matrix_profile(profile_name: str) -> str:
     try:
-        hqp = _get_hqp()
-        profiles = hqp.matrix_list_profiles()
-        if profiles and profile_name not in profiles:
-            match = None
-            for p in profiles:
-                if p.lower() == profile_name.lower():
-                    match = p
-                    break
-            if match is None:
-                for p in profiles:
-                    if profile_name.lower() in p.lower():
-                        match = p
-                        break
-            if match is None:
-                available = ", ".join(profiles)
-                return f"Profile '{profile_name}' not found. Available: {available}"
-            profile_name = match
-        ok = hqp.matrix_set_profile(profile_name)
-        return (f"Matrix profile set to: '{profile_name}'" if ok
-                else f"Failed to set profile: {hqp.refusal()}")
+        with _hqp_asking(commands=True) as hqp:
+            profiles = hqp.matrix_list_profiles()
+            match, said = aq.hqp_pick("profile", profiles, profile_name, hqp.refusal())
+        if match is None:
+            return said
+        profile_name = match
+        from playback.hqp_backend import change_dsp
+        outcome = change_dsp({"matrix_profile": profile_name})
+        return aq.hqp_change_text(outcome, f"the matrix profile '{profile_name}'",
+                                  f"Matrix profile set to: '{profile_name}'")
     except Exception as e:
         return f"Error: {e}"
 
 
 def _h_hqplayer_get_dsp_state() -> str:
     try:
-        hqp = _get_hqp()
-        state = hqp.get_state()
+        with _hqp_asking() as hqp:
+            state = hqp.get_state()
+            filters = hqp.get_filters() if state else None
+            refusal = hqp.refusal()
         if not state:
             return "Could not get DSP state."
-        active_filter = next(
-            (f for f in hqp.get_filters() if f["index"] == state["filter"]), None
+        active_filter = None if filters is None else next(
+            (f for f in filters if f["index"] == state["filter"]), None
         )
         filter_line = f"  Active filter index: {state['filter']}"
-        if active_filter:
+        if filters is None:
+            filter_line += f" (its name unknown: HQPlayer did not list its filters — {refusal})"
+        elif active_filter:
             filter_line += f" ({active_filter['name']})"
             if active_filter.get("description"):
                 filter_line += f" — {active_filter['description']}"

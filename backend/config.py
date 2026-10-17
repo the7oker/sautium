@@ -66,7 +66,9 @@ class Settings(BaseSettings):
     genius_access_token: Optional[str] = None
 
     # HQPlayer Integration (Phase 3.2)
-    hqplayer_host: str = "localhost"
+    # An address, never "localhost": Windows resolves it to ::1 first and
+    # HQPlayer listens on IPv4 only, a refused attempt on every connect.
+    hqplayer_host: str = "127.0.0.1"
     hqplayer_port: int = 4321
     hqplayer_enabled: bool = False
     # Where an HQPlayer Desktop on this machine keeps its log

@@ -59,6 +59,23 @@
     };
   }
 
+  // Why a queue slot is a gap of the output (the playlist row's `gap`:
+  // playback.substitute, playback.hqp_backend), in words short enough for
+  // one line of the queue sheet at 360 px; a tap brings the output's full
+  // words. A reason not named here reads as the output not holding it.
+  const QUEUE_GAP_LINES = {
+    "held in another HQPlayer's library": "Only in another HQPlayer's library",
+    'its file left the library': 'Its file left the library',
+    'this HQPlayer did not open it': 'This HQPlayer could not open it',
+    'streaming is off on this node': 'Streaming is off on this node',
+    'nothing to stream it from': 'Nothing to stream it from',
+    'no provider has it': 'No provider has it',
+    'the stream could not be fetched': 'The stream could not be fetched',
+  };
+  function queueGapLine(why) {
+    return QUEUE_GAP_LINES[why] || 'Not on this output';
+  }
+
   /* ---------- HTML escape ---------- */
 
   // A fetch that failed to reach the node and a 404 read the same in a
@@ -995,6 +1012,7 @@
       this.qBadge = document.getElementById('npQBadge');
       this.excerptBadge = document.getElementById('npExcerptBadge');
       this.whyBtn = document.getElementById('npWhy');
+      this.hqpTag = document.getElementById('npHqpTag');
       this.keyPill = document.getElementById('npKeyPill');
       this.bpm = document.getElementById('npBpm');
       this.bpmNum = document.getElementById('npBpmNum');
@@ -1266,11 +1284,7 @@
         preview(frac);
         const pos = Math.round(frac * this._trackLength);
         this._seekHoldUntil = Date.now() + 1500;
-        fetch('/api/player/seek', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ position: pos }),
-        }).catch(() => {});
+        window.playerSeek(pos);
       };
       track.addEventListener('pointerup', finish);
       track.addEventListener('pointercancel', () => {
@@ -1294,6 +1308,19 @@
       const why = !!diag && (!diag.track_id || diag.track_id === data.track_id);
       this.whyBtn.hidden = !why;
       this.whyBtn.dataset.attempt = why ? diag.id : '';
+      // What the HQPlayer output says beside the track: the build it is in —
+      // its transport waits meanwhile — a silence no build of ours explains,
+      // or, for a stopped HQPlayer, the spot the play press resumes (a
+      // paused one whose playlist was taken afresh is left stopped: never
+      // "paused").
+      const b = data.building, r = data.resume;
+      const tag = b ? (b.unfinished ? 'Filter build unfinished — restart HQPlayer' : 'Building the filter…')
+        : data.not_answering ? 'HQPlayer is not answering'
+        : data.rebuilding ? 'HQPlayer is taking the queue again'
+        : r && r.position > 0 && data.state === 'stopped'
+          ? `Stopped at ${fmtDuration(r.position)} — Play resumes here` : '';
+      this.hqpTag.hidden = !tag;
+      this.hqpTag.textContent = tag;
 
       // Track length for the scrub → seek-target math (seconds).
       this._trackLength = data.length || 0;
@@ -1835,8 +1862,11 @@
         </svg>`;
 
       this.list.innerHTML = tracks.map((t, idx) => {
-        const oneIdx = idx + 1;          // HQPlayer is 1-based
+        const oneIdx = idx + 1;          // the queue's slot, 1-based
         const isCurrent = oneIdx === currentIdx;
+        // A slot the output does not hold (`gap`: why) — faded, its reason
+        // on a line of its own; it moves and leaves like any other slot
+        const gap = t.gap ? queueGapLine(t.gap) : '';
         // Every track is draggable, including the current one —
         // moving the current row is equivalent to "shift before-
         // tracks across to after-current". Backend rebuilds and
@@ -1872,7 +1902,7 @@
             ${removeSvg}
           </button>`;
         return `
-          <div class="q-row${isCurrent ? ' is-current' : ''}"
+          <div class="q-row${isCurrent ? ' is-current' : ''}${gap ? ' is-gap' : ''}"
                data-index="${oneIdx}" data-mfid="${t.id || ''}">
             <span class="q-drag" ${isLocked ? '' : 'data-drag="1"'}>
               ${dragHandleSvg}
@@ -1881,6 +1911,7 @@
             <div class="q-info">
               <div class="q-title">${escapeHtml(t.title || '')}</div>
               <div class="q-artist">${escapeHtml(t.artist || '')}</div>
+              ${gap ? `<div class="q-gap">${escapeHtml(gap)}</div>` : ''}
             </div>
             ${right}
             ${removeBtn}
@@ -2014,12 +2045,24 @@
 
     async jumpTo(index) {
       window.maybeClaimRenderer();
+      // The tap names the track this row shows, not the row: a queue being
+      // handed to the output (a new album, a new order) moves rows under it
+      const shown = this.tracks[index - 1];
       const resp = await fetch('/api/player/jump', {
         method: 'POST',
         headers: {'Content-Type': 'application/json'},
-        body: JSON.stringify({index}),
+        body: JSON.stringify({index, track_id: (shown && shown.track_id) || null}),
       }).catch(() => null);
-      if (!resp || !resp.ok) await reportPlaybackResult(resp);
+      if (!resp || !resp.ok) {
+        await reportPlaybackResult(resp);
+        return;
+      }
+      // A slot the output does not take (a gap) is refused in its words
+      const out = await resp.json();
+      if (out.ok === false && out.refusal) {
+        notices.toast({ kind: 'info', key: 'queue.refused', title: 'Not played',
+                        text: escapeHtml(out.refusal.charAt(0).toUpperCase() + out.refusal.slice(1)) });
+      }
       // The queue sheet stays open — user typically wants to keep
       // browsing. Status SSE will repaint the active row.
     },
@@ -6234,6 +6277,27 @@
                     action: { label: 'Why?', run: () => openHqpDiagnosis(d.id) } });
   });
 
+  // A DSP change that went through a build answered its caller before it was
+  // done (hqp_backend.change_dsp): a knob HQPlayer refused behind that answer
+  // is told here, once, in HQPlayer's words. The status a tab connects with
+  // paints nothing, and a status without the change (another output, an
+  // outage, a benchmark's hold) forgets nothing: a change this tab has seen
+  // since its first status — its id no restart repeats — is no news.
+  let dspChangesSeen;
+  document.addEventListener('np-update', (e) => {
+    const c = e.detail && e.detail.dsp_change;
+    if (dspChangesSeen === undefined) {
+      dspChangesSeen = new Set(c ? [c.id] : []);
+      return;
+    }
+    if (!c || dspChangesSeen.has(c.id)) return;
+    dspChangesSeen.add(c.id);
+    const reasons = Object.values(c.failed || {});
+    if (!reasons.length) return;
+    notices.toast({ kind: 'error', key: 'hqp.config', title: 'HQPlayer did not take the change',
+                    text: escapeProfileHtml(reasons.join(' · ')) });
+  });
+
   // Surface a queue/play failure as a toast instead of a swallowed
   // console.warn — the ONE reporter for every play intent, the transport
   // commands in player.js included (window.reportPlaybackResult): a 503 is
@@ -6270,6 +6334,14 @@
       notices.toast({ kind: 'info', key: 'player.held', title: 'HQPlayer is being measured',
                       text: escapeProfileHtml(detail),
                       action: { label: 'HQPlayer', run: () => navigate('more/hqplayer') } });
+      return false;
+    }
+    // 409 while HQPlayer builds a setting, or takes the connection and says
+    // nothing: it answers nothing until it is done — busy, not broken.
+    if (resp && resp.status === 409 && window.currentStatus
+        && (window.currentStatus.building || window.currentStatus.not_answering)) {
+      notices.toast({ kind: 'info', key: 'player.building', title: 'HQPlayer is busy',
+                      text: escapeProfileHtml(detail) });
       return false;
     }
     // Past the 503 the audio output is not implicated: a thrown fetch (resp
@@ -8431,6 +8503,29 @@
     return sign + db.toFixed(1) + ' dB';
   }
 
+  // What a cut-short benchmark run still holds of its test settings on
+  // HQPlayer (hqp_benchmark: left_notice, left_on), in one line: each
+  // setting as now → before the run, then the volume left at the bottom of
+  // the range — the owner's to raise. Empty when nothing is left.
+  const HQP_LEFT_NAMES = { mode: 'mode', rate: 'rate', filter: 'filter', filter1x: '1x filter',
+                           shaper: 'modulator or dither' };
+  function hqpLeftLine(items) {
+    const shown = (it, v) => v == null ? '—'
+      : it.what === 'rate' ? (v ? `<span class="num">${escapeHtml(fmtRateLabel(v))}</span>` : 'Auto')
+      : escapeHtml(String(v));
+    const kept = (items || []).filter(it => it.what !== 'volume' && it.what !== 'elsewhere').map(it =>
+      `${HQP_LEFT_NAMES[it.what] || escapeHtml(it.what)} ${shown(it, it.now)} → ${shown(it, it.before)}`);
+    // HQPlayer is in another mode: the one the run measured keeps the
+    // knobs it set, which State does not show from here
+    const away = (items || []).find(it => it.what === 'elsewhere');
+    const low = (items || []).some(it => it.what === 'volume');
+    return [kept.length ? `HQPlayer is still on its test settings (now → before the run): ${kept.join(', ')}.` : '',
+            away ? `Its ${escapeHtml(away.mode)} mode keeps the run's test ${
+              away.knobs.map(k => HQP_LEFT_NAMES[k] || escapeHtml(k)).join(', ')} — check them there.` : '',
+            low ? 'Its volume is at the bottom of the range — raise it yourself.' : '']
+      .filter(Boolean).join(' ');
+  }
+
   function modeNameFromState(s, modes) {
     if (!s || !modes) return '—';
     const m = modes.find(x => x.index === s.mode);
@@ -8755,6 +8850,24 @@
   // settings no sample covers yet), shown as the pickers' headroom marks.
   // While HQPlayer does not answer (a heavy point can hold its control port)
   // the block keeps the run's progress and its Cancel.
+  // Why the Benchmark block has no estimate, in the server's terms
+  // (routers/hqplayer.py _benchmark_block).
+  const HQP_BENCH_NO_ESTIMATE = {
+    unregistered: 'This HQPlayer is not registered yet — a run can start once it has played.',
+    state: 'HQPlayer did not report its state — Refresh asks again.',
+    lists: 'A run is planned from HQPlayer\'s lists — it can start once HQPlayer gives them.',
+    source: 'HQPlayer\'s mode follows the source here ([source]): measure PCM or SDM with a button above.',
+  };
+
+  // The HQPlayer screen's line on a build: one HQPlayer is silent in holds
+  // its controls; an Embedded box's answering build is only said.
+  function hqpBuildNote(b) {
+    if (!b) return '';
+    if (b.not_answering) return 'HQPlayer is not answering. Its controls wait for its answer.';
+    if (b.unfinished) return 'HQPlayer did not finish building the filter — restart HQPlayer.';
+    return 'HQPlayer is building the filter…' + (b.silent ? ' Its controls wait until it is done.' : '');
+  }
+
   function hqpBenchmarkBlock(s) {
     const b = s.benchmark;
     if (!b) return '';
@@ -8762,6 +8875,7 @@
     const run = b.last_run;
     const est = b.estimate;
     const hold = window.currentStatus && window.currentStatus.hold;
+    const buildWaits = !!(s.building && s.building.silent && !s.building.unfinished);
     const lastRun = run
       ? new Date(run.started_at).toLocaleDateString([], { day: 'numeric', month: 'short' })
       : 'Never';
@@ -8774,19 +8888,26 @@
       hint = escapeHtml(hqpBenchProgress(hold));
     } else if (!s.connected) {
       hint = 'HQPlayer is not answering — a run can start once it does.';
+    } else if (buildWaits) {
+      hint = s.building.not_answering
+        ? 'HQPlayer is not answering — a run can start once it does.'
+        : 'HQPlayer is building the filter — a run can start once it is done.';
     } else if (est && est.points <= 2) {
       hint = `Every ${escapeHtml(est.mode)} setting is measured on this HQPlayer — a run only checks your own setting again.`;
     } else if (est) {
       hint = `Plays test noise${b.volume_control ? " at HQPlayer's lowest volume" : ''} through the ${est.points} ${escapeHtml(est.mode)} settings not measured here yet — ${fmtAbout(est.seconds)}.`;
     } else {
-      hint = 'HQPlayer\'s mode follows the source here ([source]): measure PCM or SDM with a button above.';
+      hint = HQP_BENCH_NO_ESTIMATE[b.no_estimate];
     }
     // How the last attempt ended: a job that never opened a run (it could
     // not start) says so itself; a run says its outcome and its note.
     const jobOnly = !job.running && job.outcome
       && (!run || Date.parse(run.started_at) / 1000 < job.started_at - 1);
+    const left = job.running ? '' : hqpLeftLine(b.left);
     if (jobOnly) {
       hint = `The benchmark did not run${job.note ? ': ' + escapeHtml(job.note) : ''}. ` + hint;
+    } else if (left) {
+      hint = `The last run was cut short. ${left} ` + hint;
     } else if (!job.running && run && !run.outcome) {
       hint = 'The last run was cut short — HQPlayer\'s settings are put back when it answers again. ' + hint;
     } else if (!job.running && run && HQP_BENCH_OUTCOME[run.outcome] && (run.outcome !== 'done' || run.note)) {
@@ -8806,7 +8927,7 @@
       : '';
     const chips = job.running
       ? `<button type="button" class="hqp-chip-btn is-danger" data-action="bench-cancel" ${job.cancel_requested ? 'disabled' : ''}><span>${job.cancel_requested ? 'Cancelling…' : 'Cancel'}</span></button>`
-      : !s.connected ? ''
+      : !s.connected || buildWaits ? ''
       : `${est ? `<button type="button" class="hqp-chip-btn" data-action="bench-run"><span>${run && run.stale ? 'Re-run' : 'Run benchmark'}</span></button>` : ''}
          ${(b.other_modes || []).map(m => `<button type="button" class="hqp-chip-btn" data-action="bench-other" data-mode="${escapeHtml(m)}"><span>Measure ${escapeHtml(m.toUpperCase())}</span></button>`).join('')}
          ${run ? '<button type="button" class="hqp-chip-btn" data-action="bench-results"><span>Results</span></button>' : ''}`;
@@ -8903,13 +9024,18 @@
 
   async function openHqpBenchResults() {
     let b;
+    let why = 'HQPlayer or the node is not answering right now.';
     try {
       const r = await fetch('/api/hqplayer/benchmark', { cache: 'no-store' });
-      if (!r.ok) throw new Error('HTTP ' + r.status);
+      if (!r.ok) {
+        const out = await r.json().catch(() => ({}));
+        if (typeof out.detail === 'string') why = out.detail + '.';
+        throw new Error('HTTP ' + r.status);
+      }
       b = await r.json();
     } catch (err) {
       notices.toast({ kind: 'error', key: 'hqp.bench', title: 'Results unavailable',
-                      text: 'HQPlayer or the node is not answering right now.' });
+                      text: escapeHtml(why) });
       return;
     }
     const ctx = b.context || {};
@@ -9022,6 +9148,12 @@
     // status (`hold`) into the Benchmark hint, and the screen reloads when
     // the output comes back.
     let shownHold = !!(window.currentStatus && window.currentStatus.hold);
+    // A build HQPlayer is silent in begins or ends — or is not finished —
+    // and the screen reloads: its controls wait for it, and what it took is
+    // read once it answers again. An Embedded box's answering build (at
+    // every start) waits for nothing: its line changes in place.
+    const buildKey = (b) => (!b ? '' : b.unfinished ? 'unfinished' : b.silent ? 'silent' : '');
+    let shownBuilding = buildKey(window.currentStatus && window.currentStatus.building);
     const detachDiag = () => {
       document.removeEventListener('np-update', onDiagnosis);
       window.removeEventListener('sautium:route', onRoute);
@@ -9036,6 +9168,17 @@
         if (hint) hint.textContent = hqpBenchProgress(hold);
       }
       if (!!hold !== shownHold) { shownHold = !!hold; load(); }
+      const building = e.detail && e.detail.building;
+      if (buildKey(building) !== shownBuilding) {
+        shownBuilding = buildKey(building);
+        load();
+      } else {
+        const note = screen.querySelector('[data-hqp-build-note]');
+        if (note) {
+          note.textContent = hqpBuildNote(building);
+          note.hidden = !note.textContent;
+        }
+      }
     };
     const onRoute = () => { if (!document.contains(screen)) detachDiag(); };
     document.addEventListener('np-update', onDiagnosis);
@@ -9098,6 +9241,10 @@
       }
       s.diagnostics = await diagnostics;
       if (!fresh()) return;          // a later load owns the panel
+      // A building HQPlayer answers nothing, and one lent to the benchmark is
+      // asked nothing: what it said last stands, the build beside it.
+      if (s.building && lastState) s = { ...lastState, building: s.building };
+      else if (s.held && lastState) s = { ...lastState, benchmark: s.benchmark || lastState.benchmark };
       lastState = s;
       renderBody(body, s);
     }
@@ -9115,6 +9262,13 @@
       // HQPlayer every knob waits for it.
       const hr = s.headroom || {};
       const held = !!(s.benchmark && s.benchmark.job && s.benchmark.job.running);
+      // HQPlayer building a setting answers nothing until it is done: its
+      // controls wait — a command would be refused — and one line says why.
+      // An Embedded box answers through its builds: only said, nothing waits.
+      const building = s.building || (window.currentStatus && window.currentStatus.building) || null;
+      const buildWaits = !!(building && building.silent && !building.unfinished);
+      const waits = held || buildWaits;
+      const buildNote = hqpBuildNote(building);
       const currentRateHz = ((s.rates || []).find(r => r.index === st.rate) || {}).rate || st.active_rate;
       const shortMark = {
         shaper: hqpHeadroomMark((hr.shapers || {})[shaperName], { onlyShort: true }),
@@ -9139,6 +9293,15 @@
       const isPcm = modeUpper === 'PCM';
       const isSdm = modeUpper.includes('SDM') || modeUpper.includes('DSD');
       const shaperLabel = isPcm ? 'Dither' : isSdm ? 'Modulator' : 'Shaper';
+      // A list HQPlayer did not give (it refused, or its answer was lost)
+      // comes as null and is named in `missing`: its picker stays shut
+      // rather than open on nothing, and one line says what is missing.
+      const missing = new Set(s.connected ? s.missing : []);
+      const missingNames = { modes: 'modes', rates: 'rates', filters: 'filters',
+                             shapers: shaperLabel.toLowerCase() + 's', matrix_profiles: 'matrix profiles' };
+      const missingNote = missing.size
+        ? `HQPlayer did not list its ${new Intl.ListFormat('en').format([...missing].map(k => missingNames[k]))} — Refresh asks again.`
+        : '';
 
       const info = s.info || {};
       const productLine = [info.version, info.platform].filter(Boolean).map(escapeHtml).join(' · ')
@@ -9185,7 +9348,7 @@
       const volume = Number(st.volume) || 0;
       const volumeFixed = s.volume_fixed || '';
       const volumeNote = volumeFixed || volumeRefusal;
-      const volOff = atEdge => (held || volumeFixed || atEdge) ? ' disabled' : '';
+      const volOff = atEdge => (waits || volumeFixed || atEdge) ? ' disabled' : '';
       const limitedText = hqpLimitedText(window.currentStatus && window.currentStatus.limited);
 
       // What each knob's picker lists. The trigger's label and the picker's
@@ -9193,21 +9356,22 @@
       // "(none)" option for the matrix: HQPlayer has no call that clears the
       // active profile, so picking it would do nothing.
       const knobs = {
-        mode: { title: 'Mode', current: st.mode,
+        mode: { title: 'Mode', current: st.mode, list: 'modes',
                 options: (s.modes || []).map(m => ({ id: m.index, label: m.name })) },
-        rate: { title: 'Rate', current: st.rate,
+        rate: { title: 'Rate', current: st.rate, list: 'rates',
                 options: (s.rates || []).map(r => ({ id: r.index, label: r.rate ? fmtRateLabel(r.rate) : 'Auto',
                                                      meta: r.rate ? hqpHeadroomMark((hr.rates || {})[String(r.rate)]) : '' })) },
-        shaper: { title: shaperLabel, current: st.shaper,
+        shaper: { title: shaperLabel, current: st.shaper, list: 'shapers',
                   options: (s.shapers || []).map(sh => ({ id: sh.index, label: sh.name,
                                                           meta: hqpHeadroomMark((hr.shapers || {})[sh.name]) })) },
-        matrix_profile: { title: 'Matrix profile', current: matrixActive,
+        matrix_profile: { title: 'Matrix profile', current: matrixActive, list: 'matrix_profiles',
                           options: profiles.map(p => ({ id: p, label: p })) },
       };
       const knobTrigger = (knob, id) => {
         const k = knobs[knob];
         const cur = k.options.find(o => String(o.id) === String(k.current));
-        return `<button class="hqp-select" type="button" id="${id}" data-knob="${knob}"${held ? ' disabled' : ''}>${
+        return `<button class="hqp-select" type="button" id="${id}" data-knob="${knob}"${
+          waits || missing.has(k.list) ? ' disabled' : ''}>${
           escapeHtml(cur ? cur.label : (knob === 'matrix_profile' ? '(none)' : '—'))}</button>`;
       };
 
@@ -9220,16 +9384,19 @@
       // PCM 48k). A favourite missing from the live filter list is
       // dimmed and inert — the chip stays so the user sees it's still
       // saved, just not selectable here right now.
+      // Without HQPlayer's filter list no favourite is judged unavailable:
+      // the strip only waits, like the Filter row above it.
+      const filtersMissing = missing.has('filters');
       const availableNames = new Set((s.filters || []).map(f => f.name));
-      const hasUnavailableFav = favourites.some(name => !availableNames.has(name));
+      const hasUnavailableFav = !filtersMissing && favourites.some(name => !availableNames.has(name));
       const favouritesStrip = favourites.length
         ? `<div class="hqp-fav-strip">${favourites.map(name => {
             const isCurrent = name === filterName;
-            const available = availableNames.has(name);
+            const available = filtersMissing || availableNames.has(name);
             return `<button type="button" class="hqp-fav-chip${
               isCurrent ? ' is-current' : ''}${available ? '' : ' is-unavailable'}"${
               available ? '' : ' title="Not available in the current output mode/rate"'}${
-              held ? ' disabled' : ''} data-fav="${escapeHtml(name)}">
+              waits || filtersMissing ? ' disabled' : ''} data-fav="${escapeHtml(name)}">
               <span class="hqp-fav-star">★</span>
               <span class="hqp-fav-name">${escapeHtml(name)}</span>
             </button>`;
@@ -9279,6 +9446,8 @@
         <section class="hqp-section">
           <div class="hqp-section-label">Connection</div>
           ${connBlock}
+          <p class="hqp-row-hint is-left" data-hqp-build-note${buildNote ? '' : ' hidden'}>${escapeHtml(buildNote)}</p>
+          ${missingNote ? `<p class="hqp-row-hint is-left">${escapeHtml(missingNote)}</p>` : ''}
         </section>
 
         <section class="hqp-section">
@@ -9312,7 +9481,7 @@
 
         <section class="hqp-section">
           <div class="hqp-section-label">Filter</div>
-          <button class="hqp-row hqp-row-tap" type="button" data-action="open-filter"${held ? ' disabled' : ''}>
+          <button class="hqp-row hqp-row-tap" type="button" data-action="open-filter"${waits || filtersMissing ? ' disabled' : ''}>
             <span class="hqp-row-label">Active ${shortMark.filter}</span>
             <span class="hqp-row-value">${escapeHtml(filterName)}</span>
             <svg width="18" height="18" viewBox="0 0 24 24" fill="none"
@@ -9340,7 +9509,7 @@
           </div>
         </section>
         ` : ''}
-        ${hqpBenchmarkBlock(s)}
+        ${hqpBenchmarkBlock({ ...s, building })}
         ${hqpDiagnosticsBlock(s.diagnostics)}
         ${libraryBlock}
       `;
@@ -11106,6 +11275,83 @@
     title: 'HQPlayer is not playing',
     text: `${escapeHtml((n.data && n.data.title) || 'Plays fail')} — <span class="num">${(n.data && n.data.count) || 3}</span> plays in a row. More → HQPlayer → Diagnostics has the cause and what to do.`,
   });
+  // A benchmark run cut short whose put-back the owner's own change
+  // superseded (playback/hqp_benchmark.py): what HQPlayer still holds of its
+  // test settings, each as now → before the run, and a volume left at the
+  // run's level when a person's DSP change or switch came first (a knob they
+  // set in HQPlayer gives it back) — null until the poller's next answer of
+  // that HQPlayer (the notice stands on the run's row).
+  NOTICE_COPY['hqplayer.run_left'] = n => ({
+    title: 'The benchmark was cut short',
+    text: (n.data && n.data.items) == null
+      ? 'HQPlayer may still hold the run\'s test settings — check them, and its volume, before you play.'
+      : hqpLeftLine(n.data.items),
+  });
+  // A benchmark run HQPlayer went away under — it closed, reset or refused
+  // the connection — put back whole when it answered again
+  // (playback/hqp_benchmark.py): a report, gone once seen. The run's date
+  // keeps a put-back days later from reading as a change made on its own.
+  // Its volume is lowered when it came back louder than the owner's, raised
+  // only from the run's own level — from any other it is left, and said.
+  NOTICE_COPY['hqplayer.run_restored'] = n => {
+    const d = n.data || {};
+    const db = v => `<span class="num">${escapeHtml(String(Math.round(v * 10) / 10))}</span> dB`;
+    const at = new Date(d.run_at);
+    const run = `${escapeHtml(at.toLocaleDateString([], { month: 'short', day: 'numeric' }))} at <span class="num">${escapeHtml(at.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }))}</span>`;
+    const volume = d.volume_left == null ? ''
+      : ` Its volume was left as it is — ${db(d.volume_left)}; yours was ${db(d.volume_before)}.`;
+    return {
+      title: 'HQPlayer went away during a benchmark',
+      text: `Sautium lost the connection to HQPlayer during the benchmark run of ${run}. The settings from before it were put back as soon as HQPlayer answered again.${volume}`,
+    };
+  };
+  // A benchmark run whose put-back could not read the mode it measured —
+  // HQPlayer busy (switching its mode restarts its output), or at rest and
+  // not letting it be read — or set the owner's selection there back:
+  // judged at HQPlayer's nearest rest or the next run's start — only the
+  // next run's once HQPlayer at rest did not let it be read
+  // (playback/hqp_benchmark.py), a test point never taken for the owner's.
+  // One line for every cause: the run's note names it, and "before the next
+  // run at the latest" holds for each.
+  NOTICE_COPY['hqplayer.run_unchecked'] = n => {
+    const d = n.data || {};
+    return {
+      title: 'Benchmark settings not checked yet',
+      text: `The ${escapeHtml(d.mode)} settings are not checked yet — HQPlayer did not let them be read or set back. They are checked again before the next run at the latest.`,
+    };
+  };
+  // A check that left HQPlayer in the measured mode names where it was found
+  // (`back_to`, by name): it goes back there first, then judges.
+  NOTICE_COPY['hqplayer.run_stayed'] = n => {
+    const d = n.data || {};
+    const mode = escapeHtml(d.mode || 'the measured mode');
+    const b = d.back_to || {};
+    const when = d.refused || !d.unchecked ? 'before the next run'
+      : 'when HQPlayer next rests, or before the next run';
+    const was = [escapeHtml(b.mode || 'its own mode')];
+    if (b.filter) {
+      was.push(escapeHtml(b.filter)
+        + (b.filter1x && b.filter1x !== b.filter ? ` (1x ${escapeHtml(b.filter1x)})` : ''));
+    }
+    if (b.shaper) was.push(escapeHtml(b.shaper));
+    if (b.rate) was.push(`<span class="num">${escapeHtml(fmtRateLabel(b.rate))}</span>`);
+    return {
+      title: `HQPlayer stayed in ${mode}`,
+      text: `HQPlayer stayed in ${mode}; before the check it was in ${was.join(', ')}. It goes back there ${when}${d.unchecked ? `, and the settings of ${mode} are checked then` : ''}.`,
+    };
+  };
+  // HQPlayer refused files of a batch it was handed: one notice per batch,
+  // naming both causes it may have — never asserting one.
+  NOTICE_COPY['hqplayer.refused'] = n => {
+    const d = n.data || {};
+    const reach = d.stream
+      ? 'HQPlayer may not reach this node\'s media proxy (a firewall, or the proxy\'s address)'
+      : 'the music disk may be unreachable';
+    return {
+      title: 'HQPlayer could not open some files',
+      text: `${escapeHtml(d.what || 'Tracks')} — <span class="num">${d.count || 1}</span> of <span class="num">${d.total || 1}</span> not taken: ${reach}, or the files themselves cannot be opened (format, permissions).`,
+    };
+  };
   NOTICE_COPY['tools.missing'] = n => ({
     title: 'Media tools missing',
     text: `${escapeHtml(((n.data && n.data.tools) || []).join(', '))} not found — audio analysis and fingerprinting are skipped until installed.`,
@@ -13681,8 +13927,22 @@
           const err = await r.json().catch(() => ({}));
           notices.toast({ kind: 'error', key: 'output.switch', title: 'Audio output',
                           text: escapeProfileHtml(err.detail || 'Failed to switch output') });
+        } else {
+          // The HQPlayer switched away from did not answer at once: its Stop
+          // is owed, and the person is told what happens to it
+          const out = await r.json();
+          if (out.hqplayer_stop) {
+            notices.toast({ kind: 'info', key: 'output.hqp-stop', title: 'HQPlayer',
+                            text: escapeProfileHtml(out.hqplayer_stop) });
+          }
         }
-      } catch (_) {}
+      } catch (e) {
+        // The node did not answer, or answered what cannot be read: said —
+        // the list below shows the output the node uses
+        console.error('output switch', e);
+        notices.toast({ kind: 'error', key: 'output.switch', title: 'Audio output',
+                        text: 'The switch was not confirmed — the list shows the output in use.' });
+      }
       await renderOutputSettings(root);
     });
     root.querySelectorAll('[data-action="select-hqp"]').forEach(el =>

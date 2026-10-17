@@ -8,7 +8,8 @@ from the user_settings key/value store; with `dsp=1` (the screen itself)
 also how each picker entry runs on this HQPlayer (`headroom`,
 playback.hqp_load) and the benchmark's block (playback.hqp_benchmark).
 Writes go through /config (any subset of filter / mode / rate / shaper /
-matrix_profile), /favorites (add/remove a filter name from the favourites
+matrix_profile / convolution — the last the assistant's switch, no control
+on the screen), /favorites (add/remove a filter name from the favourites
 list), /benchmark and /cuda; /meter records a page's peak-meter interest
 (its readings ride the page's /api/events stream).
 
@@ -18,8 +19,6 @@ up the new values.
 """
 
 import logging
-import threading
-import time
 from typing import Any, Dict, List, Optional
 
 from fastapi import APIRouter, HTTPException
@@ -30,14 +29,9 @@ from config import settings
 logger = logging.getLogger(__name__)
 from db_pool import db_execute, db_query_one
 from hqplayer_client import VOLUME_FIXED
-from playback.hqp_backend import (
-    _hqp_lock,
-    _hqp_status_lock,
-    _get_hqp,
-    _get_hqp_status,
-    _reset_hqp,
-    _reset_hqp_status,
-)
+from playback import hqp_link
+from playback.hqp_backend import change_dsp
+from playback.hqp_link import Building, Dropped, NotAnswering
 from playback.hqp_meter import meter as hqp_meter
 from playback.manager import OutputHeld, manager
 
@@ -78,6 +72,7 @@ class ConfigRequest(BaseModel):
     mode: Optional[int] = None
     rate: Optional[int] = None
     matrix_profile: Optional[str] = None
+    convolution: Optional[bool] = None     # the assistant's switch: no control on the screen
 
 
 class FavoriteRequest(BaseModel):
@@ -145,26 +140,33 @@ def get_state(dsp: bool = False) -> Dict[str, Any]:
         # run's Cancel must still be there.
         from playback import hqp_benchmark
         response["benchmark"] = hqp_benchmark.summary(ep)
+    link = hqp_link.selected()
+    held = manager.held
+    if link.lent and held is not None:
+        # The benchmark drives HQPlayer on its own connection: nothing else
+        # asks it meanwhile — the screen keeps what it read last.
+        return {**response, "connected": True, "held": held["label"]}
+    building = link.build.silent()
+    if building is not None:
+        # HQPlayer answers nothing while it builds: the screen keeps what it
+        # read last and says why its controls wait.
+        return {**response, "connected": True, "building": building, "busy": link.busy()}
 
     try:
-        with _hqp_status_lock:
-            try:
-                hqp = _get_hqp_status()
-            except (BrokenPipeError, ConnectionError, OSError):
-                _reset_hqp_status()
-                hqp = _get_hqp_status()
+        with link.asking() as hqp:
             info = hqp.get_info()
             state = hqp.get_state()
-            modes = hqp.get_modes()
-            rates = hqp.get_rates()
-            filters = hqp.get_filters()
-            shapers = hqp.get_shapers()
-            try:
-                matrix_profiles = hqp.matrix_list_profiles()
-            except Exception:
-                matrix_profiles = []
+            lists, refused = {}, {}
+            for name, read in (("modes", hqp.get_modes), ("rates", hqp.get_rates),
+                               ("filters", hqp.get_filters), ("shapers", hqp.get_shapers),
+                               ("matrix_profiles", hqp.matrix_list_profiles)):
+                lists[name] = read()
+                if lists[name] is None:
+                    refused[name] = hqp.refusal()
             status = hqp.get_status() if dsp else None
             volume_range = hqp.volume_range() if dsp else None
+    except Building as e:
+        return {**response, "connected": True, "building": e.state, "busy": str(e)}
     except (BrokenPipeError, ConnectionError, OSError) as e:
         return {**response, "error": str(e)}
 
@@ -179,19 +181,18 @@ def get_state(dsp: bool = False) -> Dict[str, Any]:
     response["connected"] = really_connected
     response["info"] = info or {}
     response["state"] = state or {}
-    response["modes"] = modes or []
-    response["rates"] = rates or []
-    response["filters"] = filters or []
-    response["shapers"] = shapers or []
-    response["matrix_profiles"] = matrix_profiles
+    # A list HQPlayer did not give (a refusal, a lost answer) is null and
+    # named in `missing`, its refusal in `refused` — never an empty one: an
+    # empty picker would say HQPlayer has nothing to choose from.
+    response.update(lists)
+    response["missing"] = [name for name, items in lists.items() if items is None]
+    response["refused"] = refused
     response["favorite_filters"] = _load_favorites()
     if not dsp:
         return response
     if ep is not None and info:
         hqp_library.note_info(ep["id"], info, here=not _stream_mode())
         ep = hqp_library.endpoint_by_address(settings.hqplayer_host, settings.hqplayer_port)
-    lists = {"modes": modes or [], "filters": filters or [], "shapers": shapers or [],
-             "rates": rates or []}
     response["headroom"] = _headroom(ep, state, status, lists)
     response["benchmark"] = _benchmark_block(ep, state, lists, volume_range)
     response["volume_range"] = volume_range
@@ -214,7 +215,8 @@ def _mode_of(state: dict, modes: List[dict]) -> Optional[str]:
 def _headroom(ep: Optional[dict], state: Optional[dict], status, lists: dict) -> Dict[str, Any]:
     """How each picker entry runs on this HQPlayer, for the source the owner
     hears: the playing one (what HQPlayer decodes), else the file the queue
-    plays next. Empty without a measured build or a known source."""
+    plays next. Empty without a measured build or a known source — or, for
+    the queued file, a list HQPlayer did not give."""
     from hqplayer_client import PlaybackState
     from playback import hqp_load
     from playback.hqp_benchmark import running_filter
@@ -226,6 +228,8 @@ def _headroom(ep: Optional[dict], state: Optional[dict], status, lists: dict) ->
         filt, shaper = status.active_filter, status.active_shaper
         src = (status.src_rate, status.src_channels)
     else:
+        if any(lists[k] is None for k in ("modes", "rates", "filters", "shapers")):
+            return {}
         item = manager.queue.item_at(manager.latest_status.get("track_index") or 1)
         src = hqp_load.file_source(item.opener()) if item is not None else None
         mode = _mode_of(state, lists["modes"])
@@ -246,11 +250,17 @@ def _benchmark_block(ep: Optional[dict], state: Optional[dict], lists: dict,
     """The Benchmark block: the job and the last run, CUDA offload and where
     it is known from, whether HQPlayer can lower its volume here, the
     machine it runs on (this one only), and what a run of the current mode
-    would measure now."""
+    would measure now — or, while no run is running, why that is not known
+    (`no_estimate`): the HQPlayer is not registered yet, it did not report
+    its state, a list the run is planned from is missing, or its mode
+    follows the source."""
     import hqp_library
     from playback import hqp_benchmark
     from playback.hqp_backend import _stream_mode
     out = hqp_benchmark.summary(ep)
+    # What a run left to the owner still holds of its test settings, named
+    # from the lists this screen read
+    out["left"] = hqp_benchmark.left_on((ep or {}).get("id"), state, lists)
     here = not _stream_mode()
     out.update(cuda=(ep or {}).get("cuda"),
                cuda_read=here and hqp_library.local_cuda()[0],
@@ -258,8 +268,15 @@ def _benchmark_block(ep: Optional[dict], state: Optional[dict], lists: dict,
                    volume_range, state["volume"]) is not None,
                host=({k: ep.get(f"host_{k}") for k in ("cpu", "cores", "gpu", "ram_gb")}
                      if here and ep else None),
-               estimate=None, other_modes=[])
-    if not ep or not ep.get("hqp_engine") or not state or out["job"]["running"]:
+               estimate=None, no_estimate=None, other_modes=[])
+    if out["job"]["running"]:
+        return out
+    out["no_estimate"] = ("unregistered" if not ep or not ep.get("hqp_engine")
+                          else "state" if not state
+                          else "lists" if any(lists[k] is None
+                                              for k in ("modes", "rates", "filters", "shapers"))
+                          else None)
+    if out["no_estimate"] is not None:
         return out
     # A run measures the mode chosen in HQPlayer ([source] chooses none):
     # the others are measured on request.
@@ -267,21 +284,34 @@ def _benchmark_block(ep: Optional[dict], state: Optional[dict], lists: dict,
     kind = hqp_benchmark.mode_kind(mode)
     kinds = {hqp_benchmark.mode_kind(m["name"]) for m in lists["modes"]} - {None}
     out["other_modes"] = sorted(kinds - {kind})
-    if kind is not None:
-        grid = hqp_benchmark.plan(ep, kind=kind, mode_name=mode, state=state,
-                                  filters=lists["filters"], shapers=lists["shapers"],
-                                  rates=lists["rates"])
-        asks = grid.asks()
-        out["estimate"] = {"mode": mode, "points": asks,
-                           "seconds": round(asks * hqp_benchmark.pace(ep["id"]))}
+    if kind is None:
+        out["no_estimate"] = "source"
+        return out
+    grid = hqp_benchmark.plan(ep, kind=kind, mode_name=mode, state=state,
+                              filters=lists["filters"], shapers=lists["shapers"],
+                              rates=lists["rates"])
+    asks = grid.asks()
+    out["estimate"] = {"mode": mode, "points": asks,
+                       "seconds": round(asks * hqp_benchmark.pace(ep["id"]))}
     return out
 
 
+def _busy(e: Exception) -> HTTPException:
+    """409 for a request HQPlayer's link does not send now: lent to the
+    benchmark (named by its job — the link only knows it is lent), building
+    a setting, answering nothing, or superseded by a newer intent. Busy, not
+    broken."""
+    hold = manager.held
+    return HTTPException(status_code=409,
+                         detail=str(OutputHeld(hold)) if hold is not None else str(e))
+
+
 def _refuse_while_held() -> None:
-    """A lent output (the benchmark drives HQPlayer) takes no DSP or volume
-    change from here: it would land in the middle of a measurement. Called
-    under _hqp_lock — the hold detaches the backend under it, so a change
-    that passed the check is through before the run sends anything."""
+    """A lent output (the benchmark drives HQPlayer) takes no volume change
+    from here (a DSP change checks it in change_dsp): it would land in the
+    middle of a measurement. Called under the link's command lock — the
+    hold detaches the backend under it, so a change that passed the check
+    is through before the run sends anything."""
     hold = manager.held
     if hold is not None:
         raise HTTPException(status_code=409, detail=str(OutputHeld(hold)))
@@ -289,73 +319,20 @@ def _refuse_while_held() -> None:
 
 # -- Config -------------------------------------------------------------------
 
-# Applying a heavy DSP change mid-play (e.g. a long-initialisation filter
-# like sinc-MGa) makes HQPlayer STOP the transport while it rebuilds the
-# pipeline — and it never resumes on its own (light filters hot-swap with a
-# sub-second dropout). The watcher below restores the exact pre-change spot
-# once HQPlayer answers again. The 1 s wait-loop is the same documented
-# boundary exception as the status poller: HQPlayer cannot push "I'm ready".
-_RESUME_WATCH_DEADLINE_S = 90.0
-
-
-def _resume_after_dsp_change(pre_index: int, pre_position: int, generation: int) -> None:
-    deadline = time.monotonic() + _RESUME_WATCH_DEADLINE_S
-    while time.monotonic() < deadline:
-        time.sleep(1.0)
-        if manager.queue.generation != generation:
-            return                      # user started a new queue — back off
-        state = manager.latest_status.get("state")
-        if state in ("playing", "paused"):
-            return                      # hot-swapped / user already resumed
-        if state == "stopped":
-            backend = manager.active
-            if backend is None or backend.id != "hqplayer":
-                return
-            try:
-                backend.resume_after_rebuild(pre_index, pre_position)
-                logger.info("resumed playback after DSP rebuild "
-                            "(track %d @ %ds)", pre_index, pre_position)
-            except Exception as e:
-                logger.warning("post-DSP resume failed: %s", e)
-            return
-        # "disconnected" — HQPlayer is still rebuilding; keep waiting.
-    logger.warning("post-DSP resume: HQPlayer did not come back within %.0fs",
-                   _RESUME_WATCH_DEADLINE_S)
-
-
 @router.post("/config")
 def set_config(req: ConfigRequest) -> Dict[str, Any]:
-    """Apply any subset of the DSP knobs.
-
-    Each non-None field triggers exactly one HQPlayer Set* command;
-    the request is rejected as 503 on connection trouble. Successful
-    fields are reported back so the client can reconcile partial
-    failures (e.g. wrong index for the current mode). A change applied
-    mid-play arms a resume watcher — see _resume_after_dsp_change."""
-    pre = dict(manager.latest_status)
+    """Apply any subset of the DSP knobs (hqp_backend.change_dsp): each
+    knob's outcome — taken, or refused in HQPlayer's words — and, when
+    HQPlayer builds past a moment, `building` at once with the knobs still
+    to go; the rest follows behind the answer. 409 while the output is lent,
+    HQPlayer builds or answers nothing past a short silence, or a newer
+    intent took over; 503 when it cannot be reached."""
     try:
-        with _hqp_lock:
-            _refuse_while_held()
-            try:
-                hqp = _get_hqp()
-            except (BrokenPipeError, ConnectionError, OSError):
-                _reset_hqp()
-                hqp = _get_hqp()
-            applied, failed = hqp.apply_settings(
-                mode=req.mode, rate=req.rate, filter=req.filter, filter1x=req.filter1x,
-                shaper=req.shaper, matrix_profile=req.matrix_profile)
+        return change_dsp(req.model_dump())
+    except (OutputHeld, Building, Dropped, NotAnswering) as e:
+        raise _busy(e)
     except (BrokenPipeError, ConnectionError, OSError) as e:
         raise HTTPException(status_code=503, detail=f"HQPlayer not reachable: {e}")
-
-    if applied and pre.get("state") == "playing":
-        threading.Thread(
-            target=_resume_after_dsp_change,
-            args=(int(pre.get("track_index") or 1),
-                  int(pre.get("position") or 0),
-                  manager.queue.generation),
-            daemon=True, name="hqp-dsp-resume").start()
-
-    return {"ok": not failed, "applied": applied, "failed": failed}
 
 
 # -- Volume -------------------------------------------------------------------
@@ -371,14 +348,11 @@ def nudge_volume(req: VolumeRequest) -> Dict[str, Any]:
     own answer to the Volume is a bare Error. With no range given the
     step never goes above 0 dB: a tap must not be what turns a pair of
     headphones past full scale."""
+    link = hqp_link.selected()
     try:
-        with _hqp_lock:
+        with link.command():
             _refuse_while_held()
-            try:
-                hqp = _get_hqp()
-            except (BrokenPipeError, ConnectionError, OSError):
-                _reset_hqp()
-                hqp = _get_hqp()
+            hqp = link.client
             state = hqp.get_state()
             if state is None:
                 raise HTTPException(status_code=503, detail="HQPlayer state unavailable")
@@ -391,6 +365,8 @@ def nudge_volume(req: VolumeRequest) -> Dict[str, Any]:
                 new_vol = max(span["min"], new_vol)
             ok = hqp.set_volume(new_vol)
             refusal = None if ok else hqp.refusal()
+    except (Building, Dropped, NotAnswering) as e:
+        raise _busy(e)
     except (BrokenPipeError, ConnectionError, OSError) as e:
         raise HTTPException(status_code=503, detail=f"HQPlayer not reachable: {e}")
     if not ok:
@@ -431,19 +407,24 @@ def get_benchmark() -> Dict[str, Any]:
     out.update(rows=[], context=None, current=None, thresholds=None)
     if ep is None:
         return out
+    link = hqp_link.selected()
     try:
-        with _hqp_status_lock:
-            try:
-                hqp = _get_hqp_status()
-            except (BrokenPipeError, ConnectionError, OSError):
-                _reset_hqp_status()
-                hqp = _get_hqp_status()
+        link.refuse()
+        with link.asking() as hqp:
             state, modes = hqp.get_state(), hqp.get_modes()
             filters, shapers, rates = hqp.get_filters(), hqp.get_shapers(), hqp.get_rates()
+    except (Building, Dropped, NotAnswering) as e:
+        raise _busy(e)
     except (BrokenPipeError, ConnectionError, OSError) as e:
         raise HTTPException(status_code=503, detail=f"HQPlayer not reachable: {e}")
     if state is None:
         raise HTTPException(status_code=503, detail="HQPlayer state unavailable")
+    missing = [name for name, items in (("modes", modes), ("filters", filters),
+                                        ("shapers", shapers), ("rates", rates)) if items is None]
+    if missing:
+        # The sheet's tables are cut at the current filter, shaper and rate.
+        raise HTTPException(status_code=503,
+                            detail=f"HQPlayer did not list its {', '.join(missing)}")
     mode = _mode_of(state, modes)
     run = out["last_run"]
     engine = run["hqp_engine"] if run and run["stale"] else ep.get("hqp_engine")

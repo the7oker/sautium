@@ -505,7 +505,8 @@ implementation details live in the code, DB and git history.
   failed polls across a power cycle — the case a same-tick socket comparison
   missed live on 2026-09-27) triggers an immediate playlist read: a
   restarted HQPlayer (trial-mode Embedded stops every 30 min) that lost the
-  mirror is re-mirrored by the next play through the play-intent gate. The
+  mirror gets the queue back at its first answer (since 2026-10-12; the next
+  play re-mirrored it through the play-intent gate before). The
   gate's liveness probe asks `GetInfo` — the trial stop keeps the port open
   and closes every connection.
   **The HQPlayer library as a source** (2026-09-27, evening): `hqp_library`
@@ -574,10 +575,729 @@ implementation details live in the code, DB and git history.
   21k files of the same library as copies before it was cancelled and
   reverted (`--forget-endpoint`); `album_genres.count` for the albums that
   import touched stayed roughly doubled (no per-file record to undo it).
-- **A SelectTrack on a stopped HQPlayer needs a beat.** One second between
-  select and play on a resume (`hqp_backend.play`) — a boundary exception:
-  HQPlayer cannot say it is ready. The first client's 2 s wait after a
-  playlist load is gone.
+- **A SelectTrack starts a stopped HQPlayer** (Desktop 6.2.4, 2026-10-11).
+  The one-second beat between select and play on a resume rested on the
+  opposite reading and is gone: a start is a build, and Play waits for its
+  own answer. No path sends a SelectTrack just to ready a slot — a queue
+  rebuilt while stopped sent one, and played; a paused one is now left
+  stopped at its spot, resumed by the play press.
+- **A DSP change waits out a build** (2026-10-11). HQPlayer answers nothing
+  while it builds a setting and carries out afterwards what was sent
+  meanwhile, so the 5 s command client reported a long filter build as a
+  failure, and the knobs after it as "not connected", while HQPlayer applied
+  them later anyway. The end of a build is the answer to a request held on
+  the same client — a new connection is accepted all through it, and the
+  meter's first frame comes after the answer — and the one build watch
+  (`hqp_link.BuildWatch`) holds every other command out meanwhile.
+- **People are refused, background work waits a build out** (2026-10-12).
+  Refusing every command at once (409) during a build was right for a tap
+  and wrong for the work behind it: a filler adding an album died on the
+  refusal, the radio start answered 500 with the session already rotated,
+  a re-bind of the queue's files dropped, and an output switch swallowed
+  its Stop, leaving HQPlayer playing undriven beside the new output.
+  Background work now waits for the build's end through one mechanism
+  (`hqp_link.through`: the watch's event, bounded by the build limit, called
+  off when the work goes elsewhere), checks again whether it is still
+  wanted and goes on, or gives up with why when HQPlayer does not finish or
+  goes away; the switch goes on at once and the Stop follows the build,
+  called off if HQPlayer is picked again first. A held answer whose
+  connection breaks is HQPlayer gone or restarted — no build, no
+  `unfinished` — and the poller reads its return as any other: counting
+  every miss only while the build was on had hidden a restart (the mirror
+  never marked lost) and kept a vanished HQPlayer "building" forever. A
+  start waits without the queue lock — a Play holding it through a start
+  build parked every queue edit behind it — and the play gate's probe goes
+  under the command lock, where a command's silence turning into a build is
+  busy, not "offline". The assistants' transport goes through the backend's
+  routes: their own connections set off builds the watch never heard of.
+- **One link per HQPlayer** (2026-10-12). The fixes above kept landing on
+  two questions — whose command is this, and when may it go: work outlived
+  the HQPlayer it was made for, a start left for later overrode a later
+  intent, and neither the node stop nor an address change cancelled
+  anything. Everything this node says to an HQPlayer now goes through that
+  HQPlayer's link (`playback/hqp_link.py`): one connection, one request of
+  this node's on it at a time — two connections only sent requests into each other's
+  silences, and HQPlayer's one control thread answers in order anyway — an
+  intent clock that drops what was left for later once a newer intent
+  supersedes it, checked right before the bytes go, and a life cycle:
+  another HQPlayer retires the old link, the node stop closes every link
+  first, sockets shut down and closed so a blocked read ends on Windows
+  too. A dedicated executor thread per HQPlayer was weighed and not taken:
+  the caller's thread already sends one request at a time, and a thread of
+  its own added no coverage. The link's invariants are checked under random
+  interleavings by a seeded scenario runner
+  (`tests/test_hqp_link_scenarios.py`); taking one guarantee out of the
+  link — the check right before the send, a question waiting for the
+  connection's owner, the wake at a build's end — fails it within a dozen
+  seeds, and the run found a filler that a pick of another HQPlayer stopped
+  for good. Around the link: a queue edit HQPlayer could not take lands in
+  the queue all the same, the mirror lost, and HQPlayer gets the queue back
+  once it answers; the resume spot names a queue item; listening history
+  rotates only once the output took the queue.
+- **The link reviewed again** (2026-10-12). A review of the three link
+  commits found faults, nearly all regressions of those commits: one file
+  HQPlayer refused kept a re-mirror going round, a lost mirror read as an
+  unhealthy output
+  (so a switch away sent no Stop), and a command sequence held the
+  connection for an album's adds while the poller waited. The fixes: each
+  request takes the connection for itself, and after a command a build or a
+  Stop's teardown may follow it passes on, to the sequence's next request or
+  to a Status the link holds itself; the mirror has one state — in step, a
+  tail mirror, lost, drifted — and HQPlayer is back only when it ended a
+  connection, never on a reconnect of our own; what HQPlayer refuses leaves
+  the queue only when it took the rest of the batch, and a person's replace
+  or append refused whole commits nothing; a play press on a playlist that
+  is no mirror rebuilds it in the background; the switch-away Stop is judged
+  on what HQPlayer was given and the switch waits a second at most for it;
+  one line for an HQPlayer that refuses people, a filler that never sleeps,
+  a benchmark put-back the owner's newer change supersedes. Lesson: a test
+  that guards a fix must fail on the code without it — four of this round's
+  passed on the old code for the wrong reason (a Stop the fixture's own
+  attach had sent, adds the fixture had made), caught only by running each
+  against the parent commit and against a mutation of the new code.
+- **Gaps, not removal** (2026-10-13). The next review found that removal
+  broke what an output switch promises: a slot held only in another
+  HQPlayer's library, or one whose file left the library, was handed over,
+  refused and deleted from the queue at the first mirror, so the switch back
+  found it gone. A slot an HQPlayer does not hold is now a gap of that
+  output: it stays in the queue, named in the playlist, and is never handed
+  over — HQPlayer's playlist is the queue without its gaps, in order, and
+  each slot's way in is read again at every mirroring, so a copy that came
+  back is taken; a file HQPlayer refused is tried again at the next full
+  mirror. A queue slot and HQPlayer's entry are different types (`Entry`),
+  translated by one layout, and the client's SelectTrack and PlaylistRemove
+  take only an entry. On the way: the clear of a full mirror rode on the
+  first add alone, so a refused first file left the new queue behind the old
+  playlist (pre-existing); the mirror steps asked for HQPlayer's slot
+  through the poller's guard against a read made before a commit — a guard
+  for one caller that, inside their own mutation, refused every tail-mirror
+  edit. Lesson: a rule about one batch (what HQPlayer refused) must not
+  decide what the queue — which every output shares — holds.
+- **A wait another thread ends closes its own socket** (2026-10-13). A
+  benchmark cancel waited its whole 45 s answer now and then — once in 6 to
+  40 cancels — because the cancelling thread shut down and closed the socket
+  the run was reading: CPython reads the descriptor, lets the GIL go, then
+  polls it, so a close in between left the read polling a number that was
+  free or already another socket's, and macOS does not wake a poll on a
+  close. Every wait on HQPlayer now watches its socket and a socketpair
+  together (`hqplayer_client.Waker`, through the selectors module's
+  default — `select.select` refuses a descriptor past 1023); another thread
+  wakes it, and the waiting thread closes its own socket — the links' reads
+  and connects, the benchmark's, the meter's. A wake-up that comes before the
+  wait is kept until a wait meets it. The same commit: the request a
+  command's silence passes to waits as that command may make it (watched to
+  the build limit, or `STOP_ANSWER_S`), and past `STOP_ANSWER_S` HQPlayer is
+  not answering before the connection goes on. Lesson: a test of who closes
+  what is red every time where a loop of the symptom is red now and then.
+- **The play press: the newest word wins** (2026-10-13). A play press held
+  the queue lock through its whole hand-over, and every play route took that
+  lock first: a second Play, a tap or Next waited out the adds, a Play that
+  came while one was pending joined it without a word of its own (Play,
+  Pause, Play ended stopped; a tap played the first press's track), and a
+  queue edit waited too. The press now reads the queue under the lock, hands
+  it over off it, and judges what HQPlayer took under it again; a route
+  takes the queue lock only to attach an output. Every play intent made
+  while it runs is a start of its own, numbered as it comes, and the newest
+  one no newer intent superseded goes at its end; a Pause or a Stop drops
+  the start while the hand-over completes. On the way: a start spends the
+  spot under the command lock, and a start dropped later puts its spot back
+  only if nothing moved it since (a dropped press start re-armed a spot under
+  a playing track); a start given up on past the build limit and then taken
+  by HQPlayer is judged at its next answer; a DSP change reads the entry it
+  would resume in its own command sequence (it read the old queue's while a replace
+  still added, and its resume cancelled the new album's Play); the detach
+  waits for no teardown (the owed Stop's, a person's Stop just before) and
+  not for the old poller.
+  Lesson: an intent that joins pending work without a number of its own is
+  not the newest word — it is no word at all.
+- **A switch away is a person's word** (2026-10-13). A switch supersedes
+  what was made for the output it leaves — a benchmark run's owed put-back,
+  the rest of a DSP change, a start left for later — and every detach said
+  "switch", two that are none among them: the play gate re-attaching the
+  HQPlayer it drives after an unanswered probe, and a benchmark run's own
+  hold. The first closed an owed put-back as left to the owner, HQPlayer on
+  the run's test settings with its volume at the bottom of the range. Only a
+  person's word says it now — their release of the output, or another
+  HQPlayer picked — and a new run takes a put-back still owed before it
+  reads what it found. A put-back a person's change did supersede stays
+  superseded — their change wins, and the volume is never raised after it
+  — and is no longer a line in the run's record
+  alone: one notice, in the notices channel and on the HQPlayer screen,
+  names each setting still at the run's test value (now → before the run)
+  and the volume left to raise; it ends once each of them changed, or a new
+  run starts (`hqp_benchmark_runs.left_at`). On the way: the drift canary's
+  verdict is a compare-and-set on the mirror's moves (a loss between its
+  read and its "in step" was undone); the reading tools go on while
+  HQPlayer refuses commands, and the status tool says its line; a radio
+  begun on a stopped HQPlayer loses the mirror — the clear keeps the
+  reading entry only while one plays, so the seed was gone from a playlist
+  marked in step; an attach that finds HQPlayer playing judges its playlist
+  at once — a tap ahead of the poller's first answer selected into another
+  controller's playlist and played its entry. Lesson: an intent clock is
+  ticked by the decision, never by the mechanism that serves it — a detach
+  serves a switch, a re-attach and a hold alike.
+- **A refusal of everything is no gap** (2026-10-13). The review of the
+  series found the gaps commit's own regression: a mirror batch HQPlayer
+  refused whole made every slot a gap, and over its empty playlist the
+  canary then read "the queue without its gaps" — in step — so Play sent a
+  bare Play to nothing and every tap was refused, until a new queue. A
+  refused file is now a gap only while HQPlayer took others of its batch
+  (beside a slot it cannot open at all), and the refusals are the
+  HQPlayer's (its link's), not one attachment's: a
+  backend attached again read a refused gap as drift and rebuilt on the
+  next Next. A "play next" goes after the last entry HQPlayer holds at or
+  before its anchor — a spot on a gap, a run's piece HQPlayer does not hold,
+  a tail mirror counted from the entry read; it fell back to HQPlayer's end
+  unmarked. A gap is never the entry HQPlayer reads (the same track queued
+  as a gap elsewhere stopped the reconverge); a tail edit behind a file
+  queued twice lands on no copy by a guess; a radio that keeps the entry
+  read leaves the mirror in step. The queue sheet now fades a gap and says
+  why on a line of its own; a tap answers the output's words. Lesson: a
+  rule about what HQPlayer holds must count what it holds — an empty
+  playlist and a queue of gaps compared equal.
+- **What HQPlayer answers late, it still does** (2026-10-13). A removal or
+  the radio's clear HQPlayer left unanswered within its wait was taken as
+  refused — the queue kept the slot, the mirror stayed in step — and
+  HQPlayer carried it out after its silence, so the next removal by index
+  took the wrong entry. Unanswered is now a silence, as it was for adds:
+  the queue takes the edit, the mirror is lost, and HQPlayer answering
+  again gets the queue back. A new order is applied only to the order of
+  the queue it was planned on (a filler's append landing between the
+  route's read and the apply left HQPlayer in another order than the queue,
+  "in step"), refused whole otherwise. An entry not ours that HQPlayer
+  reads while the mirror is in step is judged at that answer, not at the
+  canary's next turn half a minute later, during which a tap selected into
+  the other controller's playlist. Lesson: an edit planned off the lock is
+  a compare-and-set or a guess.
+- **Only a live press takes words** (2026-10-13). The press joined every
+  Play, tap, Next, Pause and Stop without asking whether a new queue had
+  overtaken it: a Play while a picked album loaded cancelled the album's
+  start and joined a press that led nowhere — nothing played — and a Pause
+  after a radio start sent nothing. A press takes words only while its
+  queue and its hand-over stand — and only then does the reconverge leave
+  HQPlayer's playlist to it; a new queue is the newest word as it is
+  asked (numbered before it waits for the command lock), so the hand-over's
+  next add is dropped instead of waited out for seconds, and a Play made
+  while the new queue is handed over plays that queue. A Seek during a
+  press moves the newest word's second instead of waiting the hand-over out
+  and dropping the start. A plain Play spends the spot: a Play during a
+  reorder's rebuild left the old spot under what played (and started the
+  wrong track — the lesson below). Around it: the judge of a start given
+  up on waits for a
+  tick that names a slot; "ours" at a switch is what this attachment handed
+  HQPlayer, never the process's ledger of every file ever handed; the
+  benchmark's hold lends the link before it detaches the backend; the play
+  gate asks nothing while the press drives HQPlayer; a switch waits for no
+  Stop still waiting its turn on the connection. Lesson: a pending word
+  belongs to the work that will carry it out — once that work is overtaken,
+  joining it is dropping the word.
+- **A word names a track while the queue is in flight** (2026-10-13). A
+  replace, a new order, a re-bind and the radio's clear hand HQPlayer a
+  playlist before the queue commits it, and the words a person made
+  meanwhile were translated by slot against the queue as it stood: a tap on
+  the old sheet's third row during a new album's hand-over played the new
+  album's third track, and a Play during a reorder's rebuild started
+  HQPlayer's entry 1 of the new order from 0:00, dropping the rebuild's own
+  resume of the track that played. The mutation now holds the words as a
+  play press does (`PlayerBackend.mutation`): each names a track — the tap
+  carries the one the sheet showed (`/jump`'s `track_id`) — translated
+  against what HQPlayer is handed, the newest goes once the queue stands,
+  and a Play joins the start the mutation owes. Lesson: a slot is a name
+  for a track only while the queue under it holds still; carry the identity
+  and translate it against what the output is handed.
+- **A run left to the owner is written where it happens** (2026-10-13). A
+  person's switch away or DSP change superseded a benchmark run's owed
+  put-back only in what the process held: after a restart, HQPlayer picked
+  and answering again had the run put back over their change and its volume
+  raised. The supersession is now the run's row (`left_by_person`), and a
+  knob the owner set in HQPlayer's own window counts too — judged knob by
+  knob on what HQPlayer answers once it is not building: one that is
+  neither the run's last point nor what was there before it is theirs. The
+  notice of such a run stands on its row (a restart or another output no
+  longer ended and raised it again), names what is left from the lists of
+  the mode the run measured, and ends only once a new run opened its row;
+  the database failing a read or a write of it costs the notice, never the
+  poll. Lesson: a decision a person made is state — kept only in memory, it
+  is undone by the next restart.
+- **Every wait of a connect is one the node can end** (2026-10-13). Three
+  waits still escaped the wake channel: the meter's connect, which a page's
+  stop ended for good even when the page turned the meter on again before
+  it was made (and a stop's wake-up that outlived it closed the stream it
+  then opened); a request that held the connection outside a wait when its
+  link closed, whose socket stayed open; and the connect's name lookup,
+  which nothing could wake or bound — a `.local` HQPlayer switched off held
+  the node stop for seconds. The lookup now runs on a helper the same wait
+  watches, a closed link's holder closes its socket as it lets go, and the
+  meter's newest wish decides whether a connect that was stopped connects
+  again. The media host's own lookup of the same name, at each attach and
+  each read of HQPlayer's state, is still neither woken nor bounded: such
+  an HQPlayer can still hold an attach, and the node stop behind it, for
+  seconds (open, 2026-10-14). Lesson: a wake-up is about a moment — spend
+  it when the moment has passed, or it ends the next one.
+- **A property runner must ask that something happens** (2026-10-13). The
+  scenario runner checked that nothing went wrong and never that the music
+  played: a press that never handed the queue over, or every start dropped,
+  passed a dozen seeds; a refusal at rest passed as "busy"; the tail mirror
+  it claimed to check was never reached at rest; and two of its checks read
+  the wrong evidence (the last drift logged instead of the move that made
+  the state, a radio's mark kept past its own step). At rest a press must
+  now be taken unless HQPlayer is away, silent, building or its breaker
+  open, and the track it starts must play; every move of the mirror is
+  logged with its reason; the step that makes a tail mirror makes its own
+  precondition and is judged at rest. Lesson: invariants of the form
+  "never" need a twin of the form "eventually", or a system that does
+  nothing passes them all.
+- **An oracle's false alarm is a way the design gets there** (2026-10-14).
+  The "eventually" checks above called the design a fault: a link that
+  refuses until it hears HQPlayer after a build, a build of HQPlayer's own
+  left armed for the rest's press, a pressed file HQPlayer refused (the next
+  track plays) — and the tail mirror was still never judged, the rest's
+  press always beating the reconverge it waited for. The rest now waits for
+  every way the design converges — the link hearing HQPlayer, the reconverge
+  a silence made due — and judges the track the press starts; it is quiet
+  (nothing armed), says what never got quiet, and the runner's own judgments
+  have tests. Lesson: before an "eventually" may fail, every path to it the
+  design has must have had its turn.
+- **An oracle may not be excused by its own setup** (2026-10-14). The tail
+  mirror judged at rest still could not fail: a tail that did not hold was
+  waited on until the canary drifted it, and the drift was excused as an
+  edit made elsewhere by the very entry the tail step had put before the
+  playing one. Right after that step a tail that does not hold is now a
+  broken invariant at once, and a tail's drift is explained only by an
+  entry at or behind the one HQPlayer reads. The self-test of the rest's
+  wait after an unfinished build asked only that nothing broke; it now asks
+  that the press was taken. Lesson: an explanation an oracle accepts must
+  not be one its own setup supplies.
+- **The order of intents is the order of the asks** (2026-10-14). The
+  intent clock numbered a new queue and a rebuild as they were asked and
+  everything else once it held the command lock. A queue edit refused with
+  409 while HQPlayer built had still superseded — it cancelled a DSP
+  change's resume and HQPlayer stayed stopped; a Play asked before a new
+  order but waiting its turn behind a slow command was numbered after it and
+  cancelled the order's resume; and a replace or a rebuild was numbered
+  after it began holding words, so a word between — the reconverge cutting
+  a CUE slice for its URIs — was older than the mutation and dropped though
+  the route had named what it starts. Every intent is now numbered as it is
+  asked and holds once its sequence has the lock; a new queue and a rebuild
+  hold from their ask and are withdrawn if the lock refuses them; a mutation
+  takes its number in the step that begins holding words. The scenario
+  runner spreads a sequence's ask and its taking the lock apart at random
+  and checks that no number is taken at the lock. Lesson: one clock read at
+  two moments is two clocks.
+- **A held word answers for itself** (2026-10-14). The words a person made
+  while a queue mutation handed HQPlayer its playlist were carried out
+  inside the mutation's own call: a Pause held during the radio's clear that
+  met a silence or a filter's build raised its refusal into the radio's
+  route — 409 after the radio's queue had committed, and no radio. On a
+  tail mirror a held tap was started at the layout's entry, which names no
+  slot there, and the playing track restarted; a mutation that did not
+  commit dropped a Pause its route had answered; Pause, Seek, Play lost the
+  Seek; a tap that read the words as the mutation ended joined a mutation
+  that was over. The words now go once the queue lock is let go, committed
+  or not, as the same words would go then, each with its own outcome —
+  overtaken by a newer word, waited out past a build, or logged — and a
+  start whose track the queue does not hold is said with the refusal of the
+  queue that did not commit. Lesson: what a mutation holds for a person is
+  the person's, its outcome included.
+- **A tap names its track, whenever it is made** (2026-10-14). The sheet
+  sent the track a row showed only so that a mutation in flight could find
+  it; with none in flight the slot alone was played — a sheet not yet
+  refreshed after a queue was played from another device started that
+  queue's track at the tapped row — and a "play next" or a removal, which
+  move HQPlayer's entries under a slot, held no words: a tap during one
+  started the entry its slot had before the move. The jump route now plays
+  the track the row showed wherever the queue holds it, for every output,
+  refuses one the queue no longer holds, and a "play next" and a removal
+  hold a person's words as the other mutations do. Lesson: an index is a
+  name only for the list the reader saw.
+- **No answer is no reading** (2026-10-14). A "play next" whose PlaylistGet
+  HQPlayer left unanswered took the empty list for a playlist shorter than
+  the queue and marked it drifted — an edit made elsewhere, which nothing
+  mends — so HQPlayer played the old next track; it is a silence now, the
+  mirror lost and the queue given back at the next answer. The same
+  confusion of "not read" with "read as": the at-once judge of an entry not
+  ours was spent when asked, not when it judged, so a tick whose read
+  failed left the entry to the canary's half-minute cadence; a new order was
+  refused as made on another queue when only a slot's way in had been read
+  again — it is checked against the order of the queue now; a new order
+  behind a tail entry that names no one slot of the queue's was answered as
+  a refusal of HQPlayer's instead of being the queue's; and a new order at a
+  spot on a gap moved the spot to the next track. Lesson: an absence of an
+  answer is not an answer of absence.
+- **What HQPlayer boots with is no one's change** (2026-10-14). A benchmark
+  run HQPlayer went away under (powered off, restarted) owed its put-back
+  to the next answer, and that put-back judged HQPlayer as it found it:
+  the mode or the volume HQPlayer booted with read as the owner's change,
+  so the run was left to the owner — the test settings kept, a level the
+  box had saved taken for theirs. Such a run is marked as it ends
+  (`lost_at`) and put back whole once HQPlayer answers. Its volume is
+  lowered when HQPlayer came back louder, raised only from the level the
+  run set itself, and otherwise left — and one notice says HQPlayer
+  restarted during the run and its settings were put back. The bookkeeping
+  of the notice of a run left to the owner had the same blind spots: a
+  NOTIFY the database refused cost the poll a miss; a list HQPlayer did not
+  give was never asked again; in another mode the notice ended though the
+  measured mode still kept the run's test values (HQPlayer keeps one
+  selection per mode); a close overtaking the poller's first read was
+  kept as "no run left"; a person's DSP change waiting for the lock could
+  record a put-back that went as left to them; and a new run's first step
+  closed a run the owner had changed with a notice the new run then ended.
+  Lesson: a state you did not see set is evidence of nothing but itself.
+- **A licence to put back is bounded by what licenses it** (2026-10-14).
+  The whole put-back of a run HQPlayer went away under had no bound: at
+  the node's next meeting with HQPlayer — the poller's first answer after
+  its back-off, or the attach after the node was stopped or asleep — it
+  stopped HQPlayer and reset its mode and selection whatever HQPlayer did,
+  another controller's playback included, and the mirror then replaced
+  that controller's playlist. It now goes whole only while HQPlayer shows
+  what a box that just booted shows — stopped, reading no other
+  controller's entry — and otherwise the run is judged as any run cut
+  short. A run cancelled during a silent build was marked lost too — a
+  busy HQPlayer is no lost one: the mark is now for a connection HQPlayer
+  closed, reset or refused, the causes the poller's "came back" reads. The
+  notice names the run's date and says the connection was lost, never
+  that HQPlayer restarted. With them: the whole put-back left the measured
+  mode's own selection when HQPlayer came back in the mode the run found
+  (HQPlayer keeps one per mode); the restored notice, once seen, came back
+  unseen at the next visit (the seen map was written from the filtered
+  list); a new run's start closed the run it took with a notice the run
+  ended a moment later; and a switch away accepted at once could record a
+  put-back that went as left. Lesson: a licence granted by a moment ends
+  with that moment.
+- **A put-back's end is what it met** (2026-10-14). A switch away that
+  woke the put-back's request on its way read as a failure to retry, and
+  the run was recorded nowhere: after a restart the person's choice was
+  overwritten. The put-back of a run cut short by the node's own stop
+  entered a mode it never read. The node's own entries — at a new run's
+  first step, the run's DSD source, streams of an earlier session — read
+  as another controller's. And a lost run was judged by the class of the
+  last failure, not by whether HQPlayer had closed, reset or refused the
+  connection. Each now ends as what happened. Lesson: judge by the events
+  you counted, not by the last error you happened to hold.
+- **A held word goes under the number it was held with** (2026-10-14). The
+  words a person made while a queue mutation handed HQPlayer its playlist
+  were carried out as fresh intents, numbered as they went: a Play pressed
+  after a held Pause, waiting its turn behind a slow command, went first,
+  and the Pause then undid it; and a Seek after a held Pause took a number
+  of its own, so the carry-out found the Pause and the Seek overtaken by
+  that very Seek and sent neither — the route had answered ok, the music
+  played on. A held word now goes under its own number with no intent of
+  its own, and a Seek after a halt only moves the halt's second, as in a
+  play press. With it: a DSP change made while a Pause was held read
+  HQPlayer as playing and resumed it after its build; a Next with nothing
+  to start started playback at a stopped spot; a new queue HQPlayer refused
+  whole answered as if nothing were wrong and dropped what a tap made
+  meanwhile could not do; a Next held over a "play next" HQPlayer refused
+  was lost; Seek, Pause, Play lost the Seek. Lesson: a held word is the
+  same word later, not a new one.
+- **An early number has one owner** (2026-10-14). A new queue's or a
+  rebuild's number holds from its ask, and was withdrawn only when the
+  command lock refused its sequence. The reconverge asks its number and
+  then makes each slot's URI: when that failed (a media port another
+  process held), the number stayed pending for the life of the link, and
+  every start or resume older than it was dropped as "the queue was taken
+  afresh". The hand-over now owns its number from the ask to the end:
+  published once its sequence holds the lock, withdrawn on any exit before
+  that. Lesson: a resource asked in one place and released in another leaks
+  on every path between them.
+- **A new order names slots, on its own output** (2026-10-14). The reorder
+  plan named its slots by track id: a track queued twice from two rips was
+  handed to HQPlayer as the first rip twice, a tap on its second copy
+  during the edit restarted the first, and a re-bind that cleared a slot's
+  track id between the route's read and the apply misplaced that slot —
+  HQPlayer and the queue apart, the mirror "in step". Checked by identity
+  against the queue's items, a plan made on one HQPlayer was also taken on
+  another chosen before the apply, which started B from A's position. The
+  plan is now the queue's items in their new order, and it is refused on
+  any output but the one it was made on; a step HQPlayer refuses is its
+  answer (OutputRefused), logged once in its words, never as a fault.
+  Lesson: an id is a name, a slot is a thing — order things.
+- **In step is a reading, not a memory** (2026-10-14). "No answer is no
+  reading" had reached the "play next" and the removal, not two more edits:
+  a seamless new order whose removal HQPlayer left unanswered answered 503,
+  kept the old order and marked the playlist drifted — nothing mends a
+  drift — while HQPlayer removed the track late; and the reconverge's
+  repair, met by the same silence, left the mirror lost for good, never due
+  again. A re-bind took a playlist HQPlayer did not give for an empty one.
+  And in step, a seamless new order and a "play next" took the playing slot
+  from the last status: HQPlayer moving on by itself in that second made
+  the edit remove the entry it now played — the sound stopped — or a
+  rebuild start the finished track again. The edits now read HQPlayer's
+  entry in their own sequence, as the tail mirror's did: moved on, a new
+  order is the queue's and the mirror lost — what plays is never stopped
+  nor restarted, the reconverge repairs behind it — and a "play next" goes
+  behind what HQPlayer reads. Lesson: the state an edit acts on is read in
+  the edit, not remembered from before it.
+- **What the edit read, both sides take** (2026-10-14). The in-step read
+  put a "play next" behind the slot HQPlayer had moved on to, while the
+  queue still took it behind the slot of the last status: the two apart,
+  the mirror said in step — a removal of the new track by its row then
+  removed the playing one, and a tap on it restarted what played. The
+  output now names the slot it went behind, and the queue puts the tracks
+  there. The same reads took a status that gives no verdict — a state the
+  SDK does not name, an entry HQPlayer is opening — as leave to act, and
+  removed or restarted what HQPlayer was starting: such a status is now no
+  reading, the edit the queue's and the mirror lost. A rebuild that sent
+  nothing for it left a failed attempt for Now Playing to explain; a Play's
+  repair of a drifted playlist that met a silence armed nothing, and
+  HQPlayer's late removal left it short with nothing to mend it. Lesson:
+  a reading taken in one place must be the one every party acts on.
+- **One rule, every reader** (2026-10-14). The read a "play next" makes
+  in its own sequence was the one in-step read that still took another
+  controller's entry, or a state the SDK does not name, as HQPlayer
+  reading its anchor: it removed the entries behind the anchor — the one
+  another controller played among them — and HQPlayer stopped. It now
+  reads as a new order's reads do. Lesson: a rule stated for "the reads"
+  is checked at every read, not at the first two.
+- **Decided late, numbered as asked** (2026-10-14). The tap decided again
+  under the command lock took a fresh number when a mutation held it or
+  it became a play press: a Pause the person made while the tap waited
+  its turn was then older than it, and the tapped track played over the
+  Pause. Its sequence also held its number from the moment it had the
+  lock, before it decided: a tap refused there still dropped a new queue's
+  own start, and nothing played. And it looked its slot up by the queue
+  item, so a replace that committed meanwhile with the same track refused
+  it. The tap now reserves its number as it asks, holds it only once it
+  goes (HqpLink.hold_as) — held, pressed or started under that very
+  number — and finds its slot by its track. The scenario runner checks
+  every number a sequence publishes under the lock, not only the first.
+  Lesson: deciding later must not mean asking later.
+- **A held word is the word later, with all it meant** (2026-10-14). A held
+  Seek after a held Play went raw to HQPlayer when that Play became a play
+  press, in the middle of its hand-over, and was lost; it now moves that
+  press's start. A held Next or Previous was counted again on the queue as
+  it stands only when its target was gone, so over a "play next" or a
+  removal HQPlayer refused it landed where the refused layout put it, and
+  a Play or a Seek after it dropped the count; a held step that finds a
+  slot among what HQPlayer is handed now always counts on the queue as it
+  stands from where it began, and keeps its count through the words after
+  it. Lesson: carry a word out as the person meant it then, on the queue
+  as it is now.
+- **What the edit read, the words count from** (2026-10-14). A "play next"
+  that found HQPlayer moved on went behind the track it read, but the
+  words held meanwhile still counted from the track of the status before,
+  on the old anchor's layout: a Next made during the insert restarted the
+  track HQPlayer played, where the route had said the new track starts.
+  They now count from the track the insert read. And a held Seek met by
+  the press its batch's Play became moved that press's newest start even
+  when a tap made after the Seek led it; it now moves only a start no
+  newer than itself. Lesson: when a reading moves the anchor, move all
+  that counts from it.
+- **A mode HQPlayer does not show is read before it is judged**
+  (2026-10-14). The put-back of a run cut short by the node's own stop had
+  stopped entering the mode the run measured, since it reset a selection it
+  never read; but when the owner had only gone back to their own mode, that
+  mode kept the run's test point under a note saying the settings went
+  back, and the next run of that mode took it for the owner's own. The
+  mode is now entered and read, and judged knob by knob as the rest — only
+  on an HQPlayer at rest, since switching its mode restarts its output;
+  busy, the run is marked, a notice says so, and the mode is judged at
+  HQPlayer's nearest rest or at a new run's start — after the run's own
+  Stop (2026-10-15: the first cut checked there before it, under the
+  owner's track) — before that run reads the owner's selection. Lesson:
+  what you cannot see is neither yours nor theirs until you look; and a
+  rest is what HQPlayer shows, never what the caller expects of it.
+- **A check is no poll** (2026-10-15). The check of a measured mode left
+  unchecked tried again at every tick of the same rest whenever it found no
+  verdict — HQPlayer refusing the SetMode into the mode, or showing no State
+  there, or the database refusing the verdict — so HQPlayer was asked to
+  switch every second, and switched into the mode and back whenever it took
+  the switch, each time restarting its output; its note and notice said
+  "HQPlayer was busy" of an HQPlayer at rest; and every new run was refused
+  at its start, a run of another mode too, so a mode the output no longer
+  offers blocked the benchmark for good. Now every rest tries once: busy, or
+  the verdict not written, not again until HQPlayer moves; at rest and not
+  let through, not at any later rest — only a new run's start tries again
+  (migration 040), and it refuses only a run that would read that mode. The
+  notice says HQPlayer did not let the settings be read, and that they are
+  checked again before the next run at the latest; the run's note names the
+  reason. Lesson: a try that ends without a verdict is an outcome, and it is
+  recorded as one.
+- **Where a check found HQPlayer, it goes back to** (2026-10-15). A check of
+  a measured mode put the found mode's selection back without looking where
+  HQPlayer was: when HQPlayer refused the way back, that selection was set
+  inside the measured mode; and a check cut short between its two SetModes
+  left HQPlayer in the measured mode, which the next check took for the mode
+  it was found in — the owner's mode never put back, and nothing said so.
+  Before it leaves, a check now keeps the mode it found and that mode's
+  selection by name on the run's row (migration 041): the return point. The
+  next check — a put-back's own too — or run start goes back there first, on
+  a stopped HQPlayer, and only then judges — after a node restart too — and
+  a run never reads the mode Sautium left HQPlayer in as the owner's. The
+  point goes when HQPlayer is back there (the way back, or the owner's own
+  switch, which the poller sees) or a person's change makes HQPlayer theirs;
+  while it stands, the notice says where HQPlayer was. Lesson: a round trip
+  is done only once it is back, and where it must come back to is written
+  down before it leaves.
+- **A run's start is a rest** (2026-10-15). A run's own Stop made no rest
+  while HQPlayer stopped on another controller's entry: a mode a run before
+  had left unchecked was not tried there, and a run of another mode went —
+  under a notice saying the settings are checked again before the next run
+  at the latest. The start is the owner's own act, and the run takes
+  HQPlayer over anyway: its own Stop is the rest now, whatever entry
+  HQPlayer stopped on, and the mark is tried before every run of that
+  HQPlayer: judged once HQPlayer carries the Stop out — one it does not
+  carry out makes no rest — and a mode HQPlayer does not let be read there
+  stays marked, only a run that reads nothing of that mode going. The notice
+  names no HQPlayer: its next run is one on the HQPlayer it is about, and a
+  run on another leaves this one's mark as it is. The poller's rest keeps
+  the rule — no SetMode under another controller's entry without a run.
+  Lesson: a notice's promise holds on every path it names, or the path
+  changes.
+- **What the run handed, it knows by** (2026-10-14). A lost run's
+  put-back knew the run's DSD source by the owner's newest DSD listen at
+  the time of the put-back: a listen, a Last.fm import or a merge since,
+  and the run's own entry read as another controller's — the run was left
+  to the owner at the bottom of the volume range. The run's row now keeps
+  the URI it handed HQPlayer (migration 038). And a run left to the owner
+  because of a knob of theirs kept a volume still at the run's own level:
+  that level is the run's, and goes back to theirs. Lesson: know your own
+  by what you did, not by what is newest now.
+- **A refused word keeps its place, and is said** (2026-10-14). A command
+  refused at its first request once it held the command lock — HQPlayer
+  found building, or silent behind the link's held Status — kept its
+  number, where the link's own words said a busy refusal supersedes
+  nothing. Decided: it keeps its number, or an older word would beat the
+  person's newer one; the words now say so. Its route answers that it did
+  not go, and the UI now says such a refusal for a Pause, a Stop and a
+  Seek too — the Pause and the Stop had gone to the console, the Seek
+  nowhere, and the music went on. Lesson: a word that did not go is the
+  person's to know.
+- **The older word yields** (2026-10-14). A tap numbered as it was asked but
+  decided once it had the command lock — held by a mutation that began while
+  it waited, or a play press once the mirror left step — was older than a
+  Play or a Seek the person made meanwhile, taken on what played without it:
+  that word superseded the tap's start, and the carry-out then sent nothing,
+  or the press rebuilt for a start already dead and left HQPlayer stopped.
+  The older tap now yields: the words made after it go as if it never came,
+  and a press none of whose starts is live, holding no Pause or Stop,
+  rebuilds nothing. Holding words from the ask, so a tap and the words after
+  it combine, is left for the next slice. Lesson: a number taken early must
+  not let a later decision overrule what was decided meanwhile.
+- **A tap is decided where its start goes** (2026-10-14). A tap on
+  HQPlayer checked whether a queue mutation held words and whether the
+  playlist was a mirror, then computed its entry and waited for the command
+  lock: a "play next" that began in between moved HQPlayer's entries under
+  it, a removal that committed in between moved the slot, and a playlist
+  that drifted in between named another track at the entry — the tap
+  started the wrong track, and the route said ok. And while any mutation
+  was in flight the jump route handed every output the row's index as the
+  sheet sent it, for HQPlayer to find the track among what it was handed —
+  but a renderer plays the slot it is given. The tap is now decided inside
+  its own command sequence (held by a mutation begun meanwhile, moved with
+  a slot that moved, a play press on a playlist that is no mirror), its
+  attempt watched only from the start it sends, and only an output that
+  holds words is handed the raw index. A Play that resumes a spot still
+  finds its entry before the command lock — the same window, left open
+  (2026-10-14). Lesson: a check and the act it guards belong to one
+  critical section.
+- **Open after the series' review** (2026-10-14), found in code the series
+  did not change, left for the next slice: a removal of the very slot
+  HQPlayer reads on a tail mirror is the queue's alone, and the canary then
+  calls the node's own removal an external edit — the scenario runner's
+  narrowed drift explanation reports it (decided: the removal stays the
+  queue's alone, the track playing out, and the node remembers it until
+  HQPlayer passes that entry, so the canary never calls it an external
+  edit — the oracle excuses nothing); with two HQPlayers, a seen
+  restored-run report comes back once the other HQPlayer's newer report is
+  cleared (the seen map keeps one onset per key); and a held Play that
+  meets a build is recorded as an unreachable attempt with nothing sent
+  (its attempt opens before the lock refuses it).
+- **Open after the second look at the fixes** (2026-10-15), left for the
+  next slice: a Pause, a Stop or a Seek HQPlayer refuses in its own words
+  (an Error answer: the route says HTTP 200 with `ok: false`) is said to
+  nobody — the UI says only what the route itself refused; and on a tail
+  mirror a "play next", a removal and a new order still take an entry
+  HQPlayer reads in a state the SDK does not name, or with a stop under way,
+  for a reading (the entry read is never touched); when the output no longer
+  offers a mode a run left unchecked, its mark and notice stand for good —
+  the owner is to close them with a word ("leave it as it is"), the run then
+  left to them; and a tap that yielded to the words made after it comes back
+  with the person's second word. Held words count on from the yielded tap's
+  start (a tap, a Play, then a Seek plays the tapped track), and a Seek or a
+  Pause made while its play press prepares joins that press: a full
+  hand-over to the tapped track, or HQPlayer stopped with Now Playing on it,
+  a track it does not play. Done: a press none of whose starts is live lets
+  go as it decides, so a word made after that goes on its own; left: a start
+  a newer word superseded takes no more words, and a Pause or a Stop such a
+  press holds goes on its own. And two Nexts at a spot with a "play next"
+  inside one status skip the inserted track: the spot a held Next moved was
+  counted on the layout before the insert read HQPlayer, and is kept;
+  counting such a step again from the spot the insert reads belongs, with
+  the held words above and a held step that finds no slot, to words held
+  from the ask.
+- **Open after the fixes' review** (2026-10-14), in code the fixes did not
+  change: a "play next" on a tail mirror whose anchor HQPlayer moved past
+  goes to the queue alone, before the entry HQPlayer reads, and never plays
+  (whether the entry it reads should place it, as in step, is open) — and
+  the words held meanwhile count from the last status, not from the entry it
+  read: a held Previous starts the track two slots back, two held Nexts
+  restart the track that plays (2026-10-15; with the words held from the
+  ask); a held Next or Previous that finds no slot among what HQPlayer is
+  handed moves nothing, even where the queue left has one (a removal of the
+  last track HQPlayer refused); and the scenario runner's rest misreads one
+  answer late past its scaled waits — a poller tick that misses re-loses the
+  mirror and the reconverge hands HQPlayer the queue stopped before the rest
+  presses (`test_a_build_left_armed_never_meets_the_rest_press` then fails
+  on its last line), or the play gate's GetInfo late at the rest's press is
+  reported as an I13 refusal with HQPlayer up.
+- **Open after a further look at the fixes** (2026-10-15), left for the next
+  slice: on a tail mirror HQPlayer moved back, in its own window, onto a
+  slot of the queue's before the tail: the tail's read takes that slot, and
+  an edit lands with the tail's offset — a removal takes off another track,
+  a new order doubles one, a "play next" lays the foreign entry behind it —
+  the mirror still a tail. Stopped there, nothing notices: the canary never
+  judges a stopped tail mirror, and the wrong playlist stays, HQPlayer's own
+  window playing it, until Sautium's next Play hands the queue over.
+  Playing, the canary finds the tail broken at its next turn (about 30 s)
+  and marks drift; nothing mends it but the next Play's hand-over, and an
+  edit made inside that window lands wrong. The cure: each tail edit checks
+  in its own sequence that the tail holds from the entry it read (a
+  PlaylistGet, `_tail_holds`' comparison), which covers a read of slot 0
+  too. And a run's end that marks the measured mode has it judged against
+  the point the run noted last: a cancel between a point's knobs and its
+  note leaves that note a point behind, and the check takes the test knob
+  for the owner's change — the run closed as left to them, the test point
+  kept as theirs. The cure is to note a point before sending it
+  (write-ahead), a new mechanism. And a run whose HQPlayer's rows go while
+  one of its points is being written ends "failed" on the points table's
+  foreign key, not as forgotten: the point's insert (`_ledger`;
+  `hqp_load.write` has the same shape) finds the run's row in its snapshot,
+  and its key check then meets the deletion in flight. In the scene of
+  `test_an_hqplayer_forgotten_mid_run_ends_it` on a run of PCM from SDM, the
+  rows deleted as the run's second point starts: 5 of 80 runs, against 0 of
+  20 in that test's own scene. The route refuses to forget an HQPlayer a run
+  measures, so through it the rows go during a run only in the forget's own
+  window — its check made before the run began, its deletion after: Forget
+  and Run pressed together; the library CLI's `--forget-endpoint` deletes
+  them with no such check. Both are open too. The rows go either way; what
+  is lost is the last run's words. The cure: a violation of the run's or the
+  endpoint's key read as forgotten. And a check cut on its very switch,
+  HQPlayer never carrying it out, leaves the return point its round trip
+  wrote before the SetMode: every tab is told HQPlayer stayed in the
+  measured mode while it never left the mode it was in — for a tick at the
+  poller's rest; at a run's start, until HQPlayer answers again. The cure:
+  the point's onset written once HQPlayer is seen in the measured mode.
+- **One error, not reproduced** (2026-10-15).
+  `test_a_new_run_judges_an_unchecked_measured_mode_before_it_reads_the_owners`
+  (tests/test_hqp_benchmark.py) ended once in an ERROR — in its setup or
+  teardown, not its assertions — in one run of the whole file in a worktree,
+  the scenario runner's seeds running beside it; the error's text was not
+  kept. Since then it ran alone 100 times and 20 times beside seeds 30, 33
+  and 47 in turn: 120 clean runs, and two runs of the whole file stayed
+  clean. Open: should it come back, the whole output is the evidence, never
+  the summary line.
+- **Open after the checks on Windows** (2026-10-16). On HQPlayer Desktop
+  6.2.4 a long filter set in mid-play, in PCM and in SDM, never stopped the
+  transport — its build only fell silent — so the resume after such a
+  change, with its Seek before the start, never ran: to check again should
+  a newer HQPlayer stop after such a change. A track change in PCM answered
+  once after 1.3–1.4 s, HQPlayer re-initialising its CUDA offload — slow
+  in the first run, at once in a later one — so the link called about
+  0.3 s of it a build: open whether a late answer to a track change is one.
+  The assistant's `hqplayer_set_matrix_profile` only switches a profile on
+  and has no way back to none, while HQPlayer has one: MatrixSetProfile with
+  an empty name answers OK and turns the active profile off.
 - **Stop-clear-add-select-play sequence** for `play_track`/`play_album`. Without
   explicit stop, HQPlayer occasionally started the wrong track from the
   existing queue.
@@ -724,7 +1444,8 @@ implementation details live in the code, DB and git history.
   every 30 minutes) and lowers the volume again before anything plays, and a
   run cut short is put back the next time HQPlayer answers, while a mark of
   the run remains — the lowered volume, its signals, or the selection it set
-  last. Mute is the bottom of `VolumeRange`, read back, because `VolumeMute`
+  last, in the mode it measured too (read there only on an HQPlayer at
+  rest). Mute is the bottom of `VolumeRange`, read back, because `VolumeMute`
   is a toggle no reply reports. Sharing over P2P is deferred to its own design, in this shape: the
   host class (CPU, GPU, CUDA, build) + the setting + the speed, never a track.
 

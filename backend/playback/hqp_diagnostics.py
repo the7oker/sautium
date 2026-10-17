@@ -58,9 +58,9 @@ HTTP_MODES = frozenset({"stream", "cut", "transcode", "preview"})
 TRANSPORT = frozenset({"Play", "SelectTrack", "Next", "Previous"})
 STEP_COMMANDS = TRANSPORT | {"Stop", "Pause", "Seek", "PlaylistClear", "PlaylistRemove"}
 # Sent from outside an attempt's own intent, these end it: the owner moved on
-# — a stop or a pause, a DSP change (HQPlayer stops while it rebuilds), a
-# playlist emptied or replaced. Appends (a filler streaming an album in) and
-# seeks or volume do not.
+# — a stop or a pause, a DSP change (HQPlayer may stop the transport for its
+# build: 6.2.3 on Windows did), a playlist emptied or replaced. Appends (a
+# filler streaming an album in) and seeks or volume do not.
 OWNER_COMMANDS = frozenset({"Stop", "Pause", "PlaylistClear", "SetMode", "SetFilter",
                             "SetShaping", "SetRate", "SetConvolution", "MatrixSetProfile"})
 PROXY_ERRORS = frozenset({401, 403, 404, 500, 502, 504})
@@ -148,7 +148,9 @@ def _new_id() -> int:
 @dataclass
 class Attempt:
     intent: str
-    slot: Optional[int] = None           # the slot it should play; None = read off HQPlayer
+    # HQPlayer's entry it should play — never the queue's slot, which the
+    # gaps move away from it (playback.hqp_backend.Entry); None = read off HQPlayer
+    slot: Optional[int] = None
     uris: Optional[list] = None          # what this intent handed, in playlist order
     items: Optional[list] = None         # their queue items (a replace: the queue still holds the old ones)
     id: int = field(default_factory=_new_id)
@@ -215,9 +217,9 @@ class Attempt:
     def intent_done(self, exc: Optional[BaseException]) -> None:
         """The intent returned: a fact that settles it now — a command that
         never reached HQPlayer, the FINAL answer to a transport command being
-        a refusal (play()'s resume sends Play twice, so a first refusal is not
-        final), or no transport command sent at all — closes it on the next
-        poller pass instead of after the window."""
+        a refusal (the last answer of each command counts), or no transport
+        command sent at all — closes it on the next poller pass instead of
+        after the window."""
         with _lock:
             if exc is not None and self.error is None:
                 self.error = str(exc) or type(exc).__name__
@@ -337,6 +339,40 @@ def note_playing(slot: int, generation: int) -> bool:
     return _run_changed()
 
 
+# -- What HQPlayer refused of a batch ------------------------------------------------
+# One notice per batch it refused files of — never one per track: what (the
+# album, or the first track) and how many; the notices channel words the
+# causes it may have. A batch it takes whole ends it.
+
+_refused: Optional[dict] = None
+
+
+def note_refused(items: list, total: int, *, stream: bool) -> bool:
+    """HQPlayer refused `items` of a batch of `total` tracks it was handed.
+    Returns whether the notices changed: a batch is a notice of its own."""
+    global _refused
+    albums = {it.album for it in items}
+    what = items[0].album if len(albums) == 1 and items[0].album else items[0].title
+    with _lock:
+        _refused = {"since": _iso(time.time()), "what": what, "count": len(items),
+                    "total": total, "stream": stream}
+    return True
+
+
+def note_taken() -> bool:
+    """HQPlayer took a batch whole: the last refusal's notice is over.
+    Returns whether the notices changed."""
+    global _refused
+    with _lock:
+        changed, _refused = _refused is not None, None
+    return changed
+
+
+def refused() -> Optional[dict]:
+    with _lock:
+        return dict(_refused) if _refused else None
+
+
 def failing_run() -> Optional[dict]:
     """Three or more closed attempts in a row ending in the same failure — a
     dead output, as opposed to one track that would not play."""
@@ -445,10 +481,11 @@ def _moved(ticks: list) -> bool:
 
 
 def _dsp_changed(ticks: list) -> bool:
-    """Someone changed the DSP while the track was loaded — HQPlayer stops to
-    rebuild, so the stop that follows is the owner's, whoever sent it (the
-    assistant's own HQPlayer connection, HQPlayer's window). Only ticks of a
-    loaded track count: before it loads, the previous track's rate shows."""
+    """Someone changed the DSP while the track was loaded — HQPlayer may
+    stop the transport for the build (6.2.3 on Windows did; 6.2.4 plays
+    on), so a stop that follows is the owner's, whoever made the change
+    (HQPlayer's own window included). Only ticks of a loaded track count:
+    before it loads, the previous track's rate shows."""
     loaded = {(t["mode"], t["filter"], t["shaper"], t["rate"]) for t in ticks
               if t["track"] >= 1 and t["length"] and t["filter"]}
     return len(loaded) > 1

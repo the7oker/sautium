@@ -9,14 +9,18 @@ Protocol: XML over TCP
 Default port: 4321
 """
 
+import errno
+import ipaddress
 import logging
+import os
 import re
+import selectors
 import socket
 import threading
 import time
 import xml.etree.ElementTree as ET
 from collections import deque
-from typing import Callable, Optional, Dict, Any, List
+from typing import Any, Callable, Dict, Iterator, List, Optional, Protocol, Tuple
 from dataclasses import asdict, dataclass
 from enum import IntEnum
 from urllib.parse import unquote
@@ -28,6 +32,165 @@ logger = logging.getLogger(__name__)
 # a bare result="Error". Direct SDM fixes it (Desktop 6.2.3, seen live).
 VOLUME_FIXED = ("HQPlayer holds its volume fixed — Direct SDM or a fixed volume "
                 "is on in its settings. Turn your amplifier instead.")
+
+
+def connect_address(host: str) -> str:
+    """The address a connection to HQPlayer dials: "localhost" is this
+    machine's IPv4 loopback. Windows resolves the name to ::1 first, and
+    HQPlayer listens on IPv4 only — a refused attempt on every connect. A
+    saved "localhost" stays as it is (hqp_library reads it as this machine)."""
+    return "127.0.0.1" if host.strip().lower() == "localhost" else host
+
+
+# -- Waits another thread can end -----------------------------------------------
+# A socket closed by a thread that does not read it races the one that does:
+# CPython reads the descriptor, lets the GIL go and only then polls it, so a
+# shutdown and close landing in between leave the reader polling a number
+# that is free, or already another socket's — and on macOS a close does not
+# wake a poll at all. So nothing here closes a socket another thread reads:
+# the reader waits on its socket and on a Waker together, and closes its own
+# socket once woken.
+
+class Interrupted(ConnectionError):
+    """A wait a Waker ended: this node let the connection go — no answer of
+    HQPlayer's, and no loss of its making."""
+
+
+class Waker:
+    """Wakes, from any thread, a wait on a socket (wait_on): one byte on a
+    socketpair the wait watches beside it. A wake-up given before the wait
+    began is not lost — the flag and its byte stay until the owner acts on
+    it (take), never drained at the start of a wait. After close a wake-up
+    does nothing: what it was for has ended."""
+
+    def __init__(self) -> None:
+        self._r, self._w = socket.socketpair()
+        self._lock = threading.Lock()
+        self._woken = False
+        self._closed = False
+
+    def fileno(self) -> int:
+        return self._r.fileno()
+
+    def wake(self) -> None:
+        with self._lock:
+            if self._woken or self._closed:
+                return
+            self._w.send(b"!")
+            self._woken = True
+
+    def take(self) -> bool:
+        """The wake-up given, spent now — False when there was none, or the
+        Waker is closed. Its byte was sent before the flag was raised, so the
+        read finds it."""
+        with self._lock:
+            if not self._woken or self._closed:
+                return False
+            self._woken = False
+            self._r.recv(1)
+            return True
+
+    def close(self) -> None:
+        with self._lock:
+            self._closed = True
+            self._r.close()
+            self._w.close()
+
+
+def wait_on(sock: socket.socket, event: int, timeout: Optional[float], waker: Waker) -> str:
+    """Until `sock` is ready for `event` (selectors.EVENT_READ or
+    EVENT_WRITE), `waker` is woken, or `timeout` seconds pass (None: no
+    limit): "ready", "woken" or "timeout". Through selectors' default —
+    epoll or kqueue, select() only on Windows — never select.select, which
+    refuses a descriptor past 1023."""
+    with selectors.DefaultSelector() as sel:
+        sel.register(sock, event)
+        sel.register(waker, selectors.EVENT_READ)
+        events = sel.select(None if timeout is None else max(timeout, 0.0))
+    if any(key.fileobj is waker for key, _ in events):
+        return "woken"
+    return "ready" if events else "timeout"
+
+
+# What a connect that is on its way says: on Windows WSAEWOULDBLOCK
+_CONNECTING = {errno.EINPROGRESS, errno.EWOULDBLOCK, errno.EALREADY,
+               getattr(errno, "WSAEWOULDBLOCK", errno.EWOULDBLOCK)}
+
+
+def _lookup(host: str, port: int, timeout: float,
+            wait: Callable[[socket.socket, int, Optional[float]], str]) -> str:
+    """`host`'s IPv4 address. getaddrinfo can be neither woken nor bounded —
+    a .local name of a box switched off takes the resolver seconds — so it
+    runs on a helper thread, and `wait` watches this end of a socketpair
+    the helper writes to: Interrupted when it is woken, TimeoutError past
+    `timeout`. The helper finishes on its own, and closes its end itself."""
+    mine, theirs = socket.socketpair()
+    found: dict = {}
+
+    def look() -> None:
+        try:
+            found["address"] = socket.getaddrinfo(host, port, socket.AF_INET,
+                                                  socket.SOCK_STREAM)[0][4][0]
+        except (OSError, UnicodeError) as e:     # UnicodeError: a name IDNA cannot encode
+            found["error"] = e
+        finally:
+            try:
+                theirs.send(b"!")
+            except OSError:
+                pass                             # the wait let it go
+            theirs.close()
+    threading.Thread(target=look, daemon=True, name="hqp-name-lookup").start()
+    try:
+        got = wait(mine, selectors.EVENT_READ, timeout)
+        if got == "woken":
+            raise Interrupted("the name lookup was let go")
+        if got == "timeout":
+            raise TimeoutError(f"no address for {host} within {timeout:g} s")
+        if "error" in found:
+            raise found["error"]
+        return found["address"]
+    finally:
+        mine.close()
+
+
+def _literal(host: str) -> bool:
+    try:
+        ipaddress.ip_address(host)
+    except ValueError:
+        return False
+    return True
+
+
+def open_connection(address: Tuple[str, int], timeout: float,
+                    wait: Callable[[socket.socket, int, Optional[float]], str]) -> socket.socket:
+    """A TCP connection to `address`, its name looked up (_lookup) and the
+    connect waited out through `wait` (wait_on with the caller's Waker):
+    Interrupted when that wakes either, TimeoutError past `timeout`, OSError
+    when it is refused or unreachable. Blocking once made."""
+    host, port = address
+    deadline = time.monotonic() + timeout
+    if not _literal(host):
+        host = _lookup(host, port, timeout, wait)
+    sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    try:
+        sock.setblocking(False)
+        err = sock.connect_ex((host, port))
+        if err not in (0, *_CONNECTING):
+            raise OSError(err, os.strerror(err))
+        if err:
+            got = wait(sock, selectors.EVENT_WRITE, max(deadline - time.monotonic(), 0.0))
+            if got == "woken":
+                raise Interrupted("the connect was let go")
+            if got == "timeout":
+                raise TimeoutError("timed out")
+            err = sock.getsockopt(socket.SOL_SOCKET, socket.SO_ERROR)
+            if err:
+                raise OSError(err, os.strerror(err))
+        sock.setblocking(True)
+        return sock
+    except BaseException:
+        sock.close()
+        raise
 
 
 # -- Redaction -------------------------------------------------------------------
@@ -168,6 +331,22 @@ class TrackStatus:
     # unauthenticated client). The slot index names an entry only through
     # the playlist; this names it outright.
     uri: str = ""
+    # HQPlayer 6's further Status fields; None from a build that does not
+    # report them (HQPlayer 5). `apod` is its Apod counter for the track
+    # playing — it starts at 0 with every track; `active_bits` and
+    # `active_channels` describe the OUTPUT, like active_rate; `output_delay`
+    # is the time from a sample's position to the output, in seconds
+    # (HQPlayer reports microseconds); `display_position` is the position it
+    # shows; `correction` and `filter_20k` are its switches, `filter_junk`
+    # the junk filter it runs (an index into its own list of them).
+    apod: Optional[int] = None
+    active_bits: Optional[int] = None
+    active_channels: Optional[int] = None
+    output_delay: Optional[float] = None
+    correction: Optional[bool] = None
+    filter_20k: Optional[bool] = None
+    filter_junk: Optional[int] = None
+    display_position: Optional[float] = None
 
     @property
     def is_playing(self) -> bool:
@@ -180,6 +359,118 @@ class TrackStatus:
         return 0.0
 
 
+# The DSP knobs in the order HQPlayer needs them set: the mode decides which
+# rate, filter and shaper lists the indices after it point into; the
+# convolution switch comes last, over whatever a matrix profile brought.
+DSP_KNOBS = ("mode", "rate", "filter", "shaper", "matrix_profile", "convolution")
+
+# The TrackStatus fields the playback status carries as HQPlayer gives them
+# (playback.hqp_backend._status_of → PlaybackManager), each only while it
+# reports one.
+STATUS_READINGS = ("apod", "active_bits", "active_channels", "output_delay",
+                   "correction", "filter_20k", "filter_junk", "display_position")
+
+
+def _optional(el: ET.Element, key: str, cast: Callable[[str], Any]) -> Any:
+    """An attribute a build may not report: None when it does not."""
+    value = el.get(key)
+    return None if value is None or value == "" else cast(value)
+
+
+def _flag(value: str) -> bool:
+    return bool(int(value))
+
+
+# -- Filter and modulator descriptions ---------------------------------------------
+# HQPlayer 6 describes each filter in its own words: Signalyst's rating out of
+# five, the focus words, the mode's arrow and the ratio class —
+# "4/5 transients, timbre, space ⥮ 2^x up". PCM mode writes ⥮, SDM mode ⥣;
+# only PCM adds "up" (a filter that converts upwards only). A focus list may
+# keep a trailing comma ("4/5 space, ⥮ Any") or be absent ("4/5 ⥮ Any"), and the
+# two modes may list one filter's words in another order, so the focus is a
+# set: two descriptions of one filter agree when their rating, focus and ratio
+# class do. A modulator's description is its generation ("Gen7"). A shape not
+# read here is left unparsed — never guessed — and said once per string.
+
+_FILTER_DESCRIPTION = re.compile(r"^([1-5])/5 (?:(.+?),? )?([⥮⥣]) (1:1|Int|Any|2\^x)( up)?$")
+_FOCUS_WORDS = frozenset({"space", "transients", "timbre"})
+_ARROW_MODE = {"⥮": "pcm", "⥣": "sdm"}
+_GENERATION = re.compile(r"^Gen([1-9][0-9]?)$")
+_unread_descriptions: set = set()
+_unread_lock = threading.Lock()
+
+
+def _unread(kind: str, text: str) -> None:
+    with _unread_lock:
+        if text in _unread_descriptions:
+            return
+        _unread_descriptions.add(text)
+    logger.warning("HQPlayer describes a %s as %r — a shape this client does not read", kind, text)
+
+
+def parse_filter_description(text: str) -> Optional[Dict[str, Any]]:
+    """{rating, focus (sorted), ratio, up, mode} from a filter's description;
+    None for none (HQPlayer 5) or a shape not read here."""
+    if not text:
+        return None
+    m = _FILTER_DESCRIPTION.match(text)
+    focus = frozenset(w.strip() for w in (m.group(2) or "").split(",") if w.strip()) if m else None
+    if m is None or not focus <= _FOCUS_WORDS:
+        _unread("filter", text)
+        return None
+    return {"rating": int(m.group(1)), "focus": sorted(focus), "ratio": m.group(4),
+            "up": m.group(5) is not None, "mode": _ARROW_MODE[m.group(3)]}
+
+
+def parse_shaper_description(text: str) -> Optional[Dict[str, Any]]:
+    """{generation} from a modulator's description; None for none (PCM
+    dithers, HQPlayer 5) or a shape not read here."""
+    if not text:
+        return None
+    m = _GENERATION.match(text)
+    if m is None:
+        _unread("modulator", text)
+        return None
+    return {"generation": int(m.group(1))}
+
+
+class LateAnswers(Protocol):
+    """Who hears of a late answer (HQPlayerClient `late`). HQPlayer answers
+    nothing on its control port while it builds a setting, so an answer to
+    one of `commands` that has not come after `after` seconds is that.
+    `begin` is told on the thread that waits for it, and returns what that
+    thread calls once the wait ends, with how it ended: "answered", "timeout"
+    (the wait ran out, the connection open) or "lost" (the connection broke
+    — HQPlayer closed it, restarted, or its machine stopped answering the
+    keepalive probes)."""
+    after: float
+    commands: frozenset
+
+    def begin(self, command: str, attributes: Dict[str, str]) -> Callable[[str], None]: ...
+
+
+class _PerThread:
+    """What the latest request a thread sent came to — its failure, whether
+    HQPlayer kept the connection silent, whether it answered — is that
+    thread's: a link's one client is shared, and its requests interleave
+    (playback.hqp_link), so a caller reads its own outcome in the same call
+    as its request, never another thread's."""
+
+    def __init__(self, default: Any) -> None:
+        self.default = default
+
+    def __set_name__(self, owner: type, name: str) -> None:
+        self.name = name
+
+    def __get__(self, obj: Any, owner: Optional[type] = None) -> Any:
+        if obj is None:
+            return self
+        return getattr(obj._outcomes, self.name, self.default)
+
+    def __set__(self, obj: Any, value: Any) -> None:
+        setattr(obj._outcomes, self.name, value)
+
+
 class HQPlayerClient:
     """
     HQPlayer Desktop 5/6 Control API Client
@@ -188,8 +479,8 @@ class HQPlayerClient:
     For full feature set including encrypted commands, authentication would be needed.
 
     Every failed command lands in one ring shared by all instances
-    (`last_errors()`): the playback backend replaces its client on every
-    reconnect, and the drop that killed one instance must outlive it.
+    (`last_errors()`): the diagnostics read every HQPlayer's failures —
+    each link's client, the benchmark's own — in one place.
 
     A command is taken when its outcome did not fail (`CommandOutcome.failed`,
     `_accepted`): `result="OK"`, or a bare element — some setters answer that
@@ -200,39 +491,129 @@ class HQPlayerClient:
     _error_ring: deque = deque(maxlen=50)
     _error_lock = threading.Lock()
 
-    def __init__(self, host: str = "localhost", port: int = 4321, timeout: float = 5.0,
-                 *, ring: bool = True):
+    # The failure of the thread's latest command (None when HQPlayer accepted
+    # it) — what a caller quotes when a setter returns False.
+    last_error = _PerThread(None)
+    # A command since the last connect found HQPlayer there and got no answer
+    # within the timeout — as opposed to a connection that closed or refused.
+    # Building a heavy setting blocks HQPlayer's control port for many
+    # seconds (playback.hqp_benchmark waits it out). Kept until the next
+    # connect: without a gate the commands after the silent one in a step
+    # (apply_settings) fail as "not connected", and still mean it; a link's
+    # gate clears it before each request it lets through.
+    timed_out = _PerThread(False)
+    # The latest read got its line: HQPlayer answered, whatever it said.
+    answered = _PerThread(False)
+    _io_error = _PerThread(None)
+    # (seconds, watched) the next answer this thread waits for takes on
+    # (inherit) — the wait of the command before it in its sequence
+    _inherited = _PerThread(None)
+
+    def __init__(self, host: str = "127.0.0.1", port: int = 4321, timeout: float = 5.0,
+                 *, ring: bool = True, waits: Optional[Dict[str, float]] = None,
+                 late: Optional["LateAnswers"] = None, gate: Any = None):
         """
         Initialize HQPlayer client
 
         Args:
-            host: HQPlayer host (use host.docker.internal for Docker, or Windows IP)
+            host: HQPlayer host — "localhost" is dialled as 127.0.0.1
+                (connect_address); the Docker node names host.docker.internal
+                or the HQPlayer's IP
             port: Control port (default 4321)
-            timeout: Socket timeout in seconds
+            timeout: Socket timeout in seconds — how long an answer is waited
+                for, unless `waits` names the command
             ring: whether this instance's failures join the shared ring — the
                 benchmark's client says no: it asks for settings HQPlayer may
                 refuse by design, and records each refusal in its own log
+            waits: seconds to wait for the answer to a command, by command —
+                what a Stop's output teardown or a build may take; a command
+                given up on is carried out by HQPlayer all the same
+            late: told when the answer to one of its commands is late — the
+                HQPlayer link's build watch (playback.hqp_link.BuildWatch)
+            gate: what every request passes, around its send and its answer
+                (`gate.request(command)`, a context), and around its bytes
+                (`gate.sending()`) — the HQPlayer link (playback.hqp_link):
+                one request on its connection at a time, and none it may no
+                longer send
         """
         self.host = host
         self.port = port
         self.timeout = timeout
         self.ring = ring
+        self.waits: Dict[str, float] = dict(waits or {})
+        self.late = late
+        self.gate = gate
         self.socket: Optional[socket.socket] = None
-        self.buffer = b""
-        # The failure of this instance's latest command (None when HQPlayer
-        # accepted it) — what a caller quotes when a setter returns False.
-        self.last_error: Optional[CommandOutcome] = None
+        self.buffer = bytearray()
+        # Connections made so far, and the ones HQPlayer ended — closed,
+        # reset, refused: a status poller sharing the client tells an
+        # HQPlayer that came back by the latter, never by a reconnect of
+        # this node's own after a silence
+        self.connections = 0
+        self.losses = 0
+        self._outcomes = threading.local()
         # Called with every outcome, failures and successes alike — the
-        # playback backend's trace listens on its command client.
+        # playback backend's trace listens on its link's client.
         self.on_outcome: Optional[Callable[[CommandOutcome], None]] = None
-        self._io_error: Optional[str] = None
-        # A command since the last connect found HQPlayer there and got no
-        # answer within the timeout — as opposed to a connection that closed
-        # or refused. Building a heavy setting blocks HQPlayer's control port
-        # for many seconds (playback.hqp_benchmark waits it out). Kept until
-        # the next connect: the commands after the silent one in a step
-        # (apply_settings) fail as "not connected", and still mean it.
-        self.timed_out = False
+        # What ends a wait of this client's from another thread (interrupt,
+        # close), and the waits on it: the last one out of a closed client
+        # closes the Waker
+        self._waker = Waker()
+        self._life = threading.Lock()
+        self._waits = 0
+        self._closed = False
+
+    def interrupt(self) -> None:
+        """End, from any thread, the wait this client is in — or the next
+        one, when none is: it ends as a connection this node let go
+        (`interrupted`), and the waiting thread closes the socket itself.
+        The owner spends a wake-up it acted on otherwise (interrupted)."""
+        self._waker.wake()
+
+    def interrupted(self) -> bool:
+        """Whether a wake-up was given that no wait has met — spent now: the
+        owner acted on what it was for."""
+        return self._waker.take()
+
+    def close(self) -> None:
+        """For good: a wait in progress is woken and closes its socket; the
+        Waker goes with the last wait out. The connection of an idle client
+        is its owner's to let go (disconnect)."""
+        with self._life:
+            if self._closed:
+                return
+            self._closed = True
+            idle = not self._waits
+        if idle:
+            self._waker.close()
+        else:
+            self._waker.wake()
+
+    def _wait(self, sock: socket.socket, event: int, timeout: Optional[float]) -> str:
+        """wait_on with this client's Waker; a closed client waits no more.
+        The wait a wake-up ends spends it: its owner acts on it."""
+        with self._life:
+            if self._closed:
+                return "woken"
+            self._waits += 1
+        try:
+            got = wait_on(sock, event, timeout, self._waker)
+            if got == "woken":
+                self._waker.take()
+            return got
+        finally:
+            with self._life:
+                self._waits -= 1
+                last = self._closed and not self._waits
+            if last:
+                self._waker.close()
+
+    def inherit(self, wait: float, watched: bool) -> None:
+        """The next answer this thread waits for is waited `wait` seconds at
+        least, `watched` by `late` — the command before it in its sequence
+        may set off a silence that falls on it (playback.hqp_link's
+        hand-over)."""
+        self._inherited = (wait, watched)
 
     @classmethod
     def last_errors(cls, since: Optional[float] = None) -> List[Dict[str, Any]]:
@@ -242,8 +623,9 @@ class HQPlayerClient:
         return [e.public() for e in reversed(entries) if since is None or e.ts >= since]
 
     def refusal(self) -> str:
-        """Why the latest command was not accepted, in HQPlayer's words when
-        it gave any — what a caller reports when a command returns False."""
+        """Why this thread's latest command was not accepted, in HQPlayer's
+        words when it gave any — what a caller reports when a command returns
+        False."""
         e = self.last_error
         if e is None:
             return "HQPlayer did not confirm it"
@@ -272,16 +654,35 @@ class HQPlayerClient:
         Returns:
             True if connected successfully
         """
+        sock = self.dial()
+        if sock is None:
+            self.socket = None
+            return False
+        self.use(sock)
+        return True
+
+    def use(self, sock: socket.socket) -> None:
+        """Talk to HQPlayer on `sock`, a connection `dial` made."""
+        self.socket = sock
+        self.buffer = bytearray()
+        self.connections += 1
+        logger.info(f"Connected to HQPlayer at {self.host}:{self.port}")
+
+    def dial(self) -> Optional[socket.socket]:
+        """A new connection to HQPlayer, set up for this client's reads — not
+        yet the one it talks on (use) — or None, the outcome saying why. Its
+        connect is a wait like a read's: another thread ends it
+        (interrupt, close)."""
         self.timed_out = False      # a failed connect is HQPlayer away, never its silence
+        sock = None
         try:
-            self.socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
             # Connect must be quick on LAN/localhost. A stalled HQPlayer that
             # accepts SYN slowly would otherwise burn the full read timeout on
             # every reconnect attempt. Cap connect at 2s, then restore the
             # full timeout for reads (commands can legitimately take seconds).
-            self.socket.settimeout(min(self.timeout, 2.0))
-            self.socket.connect((self.host, self.port))
-            self.socket.settimeout(self.timeout)
+            sock = open_connection((connect_address(self.host), self.port),
+                                   min(self.timeout, 2.0), self._wait)
+            sock.settimeout(self.timeout)
             # Tight TCP keepalive: the WSL2→Windows NAT silently drops idle
             # TCP mappings (no RST) — an idle command socket then surfaces
             # only as the NEXT command's full read-timeout + reconnect cycle.
@@ -289,23 +690,33 @@ class HQPlayerClient:
             # in ~35 s instead. Timer constants are per-platform (Linux:
             # KEEPIDLE/KEEPINTVL/KEEPCNT; macOS: TCP_KEEPALIVE; availability
             # probed with hasattr — plain SO_KEEPALIVE everywhere else).
-            self.socket.setsockopt(socket.SOL_SOCKET, socket.SO_KEEPALIVE, 1)
+            # Keepalive probes only an idle connection: TCP_USER_TIMEOUT
+            # (Linux, ms) keeps the same bound while a command sent to a
+            # vanished HQPlayer is still unacknowledged — a build's held
+            # answer waits minutes, and a dead peer must not pass for one.
+            sock.setsockopt(socket.SOL_SOCKET, socket.SO_KEEPALIVE, 1)
             for opt, val in (("TCP_KEEPIDLE", 20), ("TCP_KEEPINTVL", 5),
-                             ("TCP_KEEPCNT", 3), ("TCP_KEEPALIVE", 20)):
+                             ("TCP_KEEPCNT", 3), ("TCP_KEEPALIVE", 20),
+                             ("TCP_USER_TIMEOUT", 35_000)):
                 if hasattr(socket, opt):
                     try:
-                        self.socket.setsockopt(socket.IPPROTO_TCP,
-                                               getattr(socket, opt), val)
+                        sock.setsockopt(socket.IPPROTO_TCP, getattr(socket, opt), val)
                     except OSError:
                         pass  # platform exposes the constant but rejects it
-            logger.info(f"Connected to HQPlayer at {self.host}:{self.port}")
-            return True
+            return sock
+        except Interrupted as e:
+            # Let go by this node (a close, a cancel): no loss of HQPlayer's
+            self._outcome("<connection>", None, "interrupted",
+                          f"connect to {self.host}:{self.port}: {e}")
+            return None
         except Exception as e:
             logger.error(f"Failed to connect to HQPlayer: {e}")
-            self.socket = None
+            self.losses += 1
+            if sock is not None:
+                sock.close()
             self._outcome("<connection>", None, "refused",
                           f"connect to {self.host}:{self.port}: {e}")
-            return False
+            return None
 
     def disconnect(self):
         """Disconnect from HQPlayer"""
@@ -315,7 +726,7 @@ class HQPlayerClient:
             except:
                 pass
             self.socket = None
-            self.buffer = b""
+            self.buffer = bytearray()
             logger.info("Disconnected from HQPlayer")
 
     def is_connected(self) -> bool:
@@ -338,48 +749,111 @@ class HQPlayerClient:
             return False
 
         try:
+            # A read leaves the socket at whatever its wait had left
+            self.socket.settimeout(self.timeout)
             self.socket.sendall(xml_command.encode('utf-8'))
             return True
         except Exception as e:
             logger.error(f"Failed to send command: {e}")
             self._io_error = f"send failed: {e}"
+            self.losses += 1
             self.disconnect()
             return False
 
-    def _read_response(self) -> Optional[ET.Element]:
+    def _read_line(self, wait: Optional[float] = None,
+                   on_late: Optional[Callable[[], Callable[[str], None]]] = None
+                   ) -> Optional[bytes]:
         """
-        Read XML response from HQPlayer
-
-        Returns:
-            Parsed XML element or None
+        Read one answer — a newline-framed line — waiting `wait` seconds for
+        it (the client's timeout by default). With `on_late`, an answer that
+        has not come after `late.after` seconds is told to it, and what it
+        returns hears how the wait ended (LateAnswers). None when there is
+        none: `_io_error` says why, `timed_out` whether HQPlayer kept the
+        connection and said nothing; `answered` whether a line came. The wait
+        is one another thread may end (interrupt, close): then this thread
+        closes its own socket, `_io_error` "interrupted" — no loss of
+        HQPlayer's.
         """
+        self.answered = False
         if not self.socket:
             self._io_error = "not connected"
             return None
 
+        wait = self.timeout if wait is None else wait
+        now = time.monotonic()
+        deadline = now + wait
+        late_at = now + self.late.after if on_late is not None else deadline
+        ended: Optional[Callable[[str], None]] = None
+        how = "lost"
         try:
-            # Read until we get a complete XML document (ends with newline)
-            while b'\n' not in self.buffer:
-                chunk = self.socket.recv(4096)
+            scanned = 0
+            while (nl := self.buffer.find(b"\n", scanned)) < 0:
+                scanned = len(self.buffer)
+                # Watched, it is late at `after` — or at the end of a wait
+                # shorter than that — and then waited out to the end
+                late = on_late is not None and ended is None
+                got = self._wait(self.socket, selectors.EVENT_READ,
+                                 (min(late_at, deadline) if late else deadline) - time.monotonic())
+                if got == "woken":
+                    self._io_error = "interrupted"
+                    self.disconnect()
+                    return None
+                if got == "timeout":
+                    if not late:
+                        raise TimeoutError("timed out")
+                    ended = on_late()
+                    continue
+                chunk = self.socket.recv(1 << 16)
                 if not chunk:
                     # EOF: HQPlayer closed its side. Close ours immediately so
                     # the socket doesn't linger in CLOSE_WAIT until the next
-                    # _ensure_connected peek happens to notice it (which, with
-                    # backoff, can be up to 30s away — and on the command
-                    # socket, until the user's next action).
+                    # request's peek happens to notice it.
                     self._io_error = "closed by HQPlayer"
+                    self.losses += 1
                     self.disconnect()
                     return None
                 self.buffer += chunk
+            how = "answered"
+            self.answered = True
+            line = bytes(self.buffer[:nl])
+            del self.buffer[:nl + 1]
+            return line
+        except TimeoutError as e:
+            if e.errno is not None:
+                logger.error(f"Failed to read response: {e}")
+                self._io_error = f"no answer: {e}"
+                self.losses += 1
+                self.disconnect()
+                return None
+            # The connection goes all the same: the late answer would be
+            # read as the next command's.
+            logger.warning(f"HQPlayer did not answer within {wait:g} s")
+            self._io_error = f"no answer within {wait:g} s"
+            self.timed_out = True
+            how = "timeout"
+            self.disconnect()
+            return None
+        except Exception as e:
+            logger.error(f"Failed to read response: {e}")
+            self._io_error = f"no answer: {e}"
+            self.losses += 1
+            self.disconnect()
+            return None
+        finally:
+            if ended is not None:
+                ended(how)
 
-            # Extract first complete line
-            if b'\n' in self.buffer:
-                line, self.buffer = self.buffer.split(b'\n', 1)
-                xml_str = line.decode('utf-8').strip()
-
-                if xml_str:
-                    return ET.fromstring(xml_str)
-
+    def _read_response(self, wait: Optional[float] = None,
+                       on_late: Optional[Callable[[], Callable[[str], None]]] = None
+                       ) -> Optional[ET.Element]:
+        """The answer (_read_line) as an XML element, or None."""
+        line = self._read_line(wait, on_late)
+        if line is None:
+            return None
+        try:
+            xml_str = line.decode('utf-8').strip()
+            if xml_str:
+                return ET.fromstring(xml_str)
             self._io_error = "empty answer"
             return None
         except (ET.ParseError, UnicodeDecodeError) as e:
@@ -387,22 +861,10 @@ class HQPlayerClient:
             self._io_error = f"unreadable answer: {e}"
             self.disconnect()
             return None
-        except TimeoutError:
-            # The connection goes all the same: the late answer would be
-            # read as the next command's.
-            logger.warning(f"HQPlayer did not answer within {self.timeout:g} s")
-            self._io_error = f"no answer within {self.timeout:g} s"
-            self.timed_out = True
-            self.disconnect()
-            return None
-        except Exception as e:
-            logger.error(f"Failed to read response: {e}")
-            self._io_error = f"no answer: {e}"
-            self.disconnect()
-            return None
 
     def _execute_command(self, command: str, attributes: Optional[Dict[str, str]] = None,
-                        expect_response: bool = True) -> Optional[ET.Element]:
+                        expect_response: bool = True, *, wait: Optional[float] = None,
+                        watched: Optional[bool] = None) -> Optional[ET.Element]:
         """
         Execute command and optionally wait for response
 
@@ -410,6 +872,10 @@ class HQPlayerClient:
             command: Command name (e.g., "Play", "Stop")
             attributes: Command attributes dict
             expect_response: Whether to wait for response
+            wait: seconds to wait for the answer — by default what `waits`
+                says for the command, else the client's timeout
+            watched: whether a late answer is told to `late` — by default
+                whether `late` names the command
 
         Returns:
             Response element or None
@@ -418,9 +884,23 @@ class HQPlayerClient:
         `result`, and on "Error" its reason — the element's text, which is
         the only place HQPlayer says why (the Signalyst SDK's client reads it
         at the start tag, where Qt's stream reader has no text yet).
+
+        With a gate, the request passes it first: it may be refused there
+        (the gate's own exceptions — HQPlayer building, a request no longer
+        wanted, no connection to be had), and then nothing was sent.
         """
+        if self.gate is None:
+            return self._exchange(command, attributes, expect_response, wait, watched)
+        with self.gate.request(command):
+            return self._exchange(command, attributes, expect_response, wait, watched)
+
+    def _exchange(self, command: str, attributes: Optional[Dict[str, str]],
+                  expect_response: bool, wait: Optional[float],
+                  watched: Optional[bool]) -> Optional[ET.Element]:
         self.last_error = None
         self._io_error = None
+        self.answered = False
+        inherited, self._inherited = self._inherited, None
         # Build XML command
         root = ET.Element(command)
         if attributes:
@@ -430,16 +910,25 @@ class HQPlayerClient:
         xml_str = ET.tostring(root, encoding='unicode')
 
         # Send command
-        if not self._send_command(xml_str):
+        if not self._send(xml_str):
             self._outcome("<connection>", attributes, "lost",
                           f"{command}: {self._io_error}", during=command)
             return None
 
         # Read response if expected
         if expect_response:
-            response = self._read_response()
+            if wait is None:
+                wait = self.waits.get(command, self.timeout)
+            if watched is None:
+                watched = self.late is not None and command in self.late.commands
+            if inherited is not None and inherited[0] > wait:
+                wait, watched = inherited[0], watched or inherited[1]
+            on_late = ((lambda: self.late.begin(command, dict(attributes or {})))
+                       if watched and self.late is not None else None)
+            response = self._read_response(wait, on_late)
             if response is None:
-                self._outcome("<connection>", attributes, "lost",
+                self._outcome("<connection>", attributes,
+                              "interrupted" if self._io_error == "interrupted" else "lost",
                               f"{command}: {self._io_error}", during=command)
                 return None
             result = response.get("result")
@@ -448,6 +937,36 @@ class HQPlayerClient:
             return response
 
         return None
+
+    def raw(self, xml: str, wait: float) -> bytes:
+        """One request sent as it stands, answered as the line of bytes
+        HQPlayer sent — a library listing is no XML a parser takes as it
+        stands (hqp_library). Raises ConnectionError — TimeoutError when
+        HQPlayer kept the connection and said nothing — when there is none."""
+        if self.gate is None:
+            return self._raw(xml, wait)
+        with self.gate.request("raw"):
+            return self._raw(xml, wait)
+
+    def _send(self, xml_command: str) -> bool:
+        """_send_command, the gate's last word on it first (`gate.sending()`,
+        a context): it may still refuse, and then nothing was sent."""
+        if self.gate is None:
+            return self._send_command(xml_command)
+        with self.gate.sending():
+            return self._send_command(xml_command)
+
+    def _raw(self, xml: str, wait: float) -> bytes:
+        self._io_error = None
+        self.answered = False
+        self._inherited = None
+        if not self._send(xml):
+            raise ConnectionError(f"HQPlayer at {self.host}:{self.port}: {self._io_error}")
+        line = self._read_line(wait)
+        if line is None:
+            error = TimeoutError if self._io_error.startswith("no answer within") else ConnectionError
+            raise error(f"HQPlayer at {self.host}:{self.port}: {self._io_error}")
+        return line
 
     def _accepted(self, command: str, attributes: Optional[Dict[str, str]] = None) -> bool:
         """Sent, answered, and not refused — by the one rule the error ring,
@@ -504,7 +1023,7 @@ class HQPlayerClient:
         Select track by index in playlist
 
         Args:
-            index: Track index (0-based)
+            index: HQPlayer's entry (1-based)
         """
         response = self._execute_command("SelectTrack", {"index": str(index)})
         return response is not None and response.get("result") == "OK"
@@ -564,6 +1083,10 @@ class HQPlayerClient:
             value: Volume level (range depends on HQPlayer configuration)
         """
         return self._accepted("Volume", {"value": str(value)})
+
+    def set_adaptive_volume(self, enabled: bool) -> bool:
+        """Turn HQPlayer's adaptive volume on or off — State `adaptive`."""
+        return self._accepted("SetAdaptiveVolume", {"value": "1" if enabled else "0"})
 
     # ========== Playlist Control ==========
 
@@ -636,14 +1159,18 @@ class HQPlayerClient:
 
     # ========== Status & Info ==========
 
-    def get_status(self) -> Optional[TrackStatus]:
+    def get_status(self, *, wait: Optional[float] = None,
+                   watched: Optional[bool] = None) -> Optional[TrackStatus]:
         """
-        Get current playback status
+        Get current playback status — `wait` and `watched` as
+        `_execute_command` takes them: the ask held open after a Set* until
+        HQPlayer answers again (the link's build watch, playback.hqp_link)
 
         Returns:
             TrackStatus object or None
         """
-        response = self._execute_command("Status", {"subscribe": "0"})
+        response = self._execute_command("Status", {"subscribe": "0"},
+                                         wait=wait, watched=watched)
 
         if response is None:
             return None
@@ -672,6 +1199,14 @@ class HQPlayerClient:
                 active_filter=response.get("active_filter", ""),
                 active_shaper=response.get("active_shaper", ""),
                 active_rate=int(response.get("active_rate") or 0),
+                apod=_optional(response, "apod", int),
+                active_bits=_optional(response, "active_bits", int),
+                active_channels=_optional(response, "active_channels", int),
+                output_delay=_optional(response, "output_delay", lambda v: int(v) / 1e6),
+                correction=_optional(response, "correction", _flag),
+                filter_20k=_optional(response, "filter_20k", _flag),
+                filter_junk=_optional(response, "filter_junk", int),
+                display_position=_optional(response, "display_position", float),
             )
 
             # Parse metadata if present
@@ -700,7 +1235,9 @@ class HQPlayerClient:
         Get current HQPlayer DSP state (filter, shaper, mode, convolution, matrix profile).
 
         Returns:
-            Dict with: mode, filter, shaper, rate, convolution, matrix_profile, etc.
+            Dict with: mode, filter, shaper, rate, convolution, matrix_profile, etc.;
+            filter_20k, filter_junk, random and repeat None from a build that
+            does not report them.
         """
         response = self._execute_command("State")
 
@@ -727,20 +1264,25 @@ class HQPlayerClient:
                 "invert": bool(int(response.get("invert", 0))),
                 "adaptive": bool(int(response.get("adaptive", 0))),
                 "volume": float(response.get("volume", 0.0)),
+                "filter_20k": _optional(response, "filter_20k", _flag),
+                "filter_junk": _optional(response, "filter_junk", int),
+                "random": _optional(response, "random", _flag),
+                "repeat": _optional(response, "repeat", int),
             }
         except Exception as e:
             logger.error(f"Failed to parse state: {e}")
             self._outcome("State", None, "unparsed", str(e))
             return None
 
-    def get_info(self) -> Optional[Dict[str, str]]:
+    def get_info(self, *, wait: Optional[float] = None) -> Optional[Dict[str, str]]:
         """
-        Get HQPlayer info
+        Get HQPlayer info, waiting `wait` seconds (the client's timeout by
+        default)
 
         Returns:
             Dict with name, product, version, platform, engine
         """
-        response = self._execute_command("GetInfo")
+        response = self._execute_command("GetInfo", wait=wait)
 
         if response is None or response.tag != "GetInfo":
             return None
@@ -763,28 +1305,36 @@ class HQPlayerClient:
 
     # ========== DSP Settings ==========
 
-    def get_modes(self) -> List[Dict[str, Any]]:
+    def _listing(self, command: str, item: str) -> Optional[List[ET.Element]]:
+        """The items of a list HQPlayer gave — [] only for a list it answered
+        empty. None when it refused, answered another element or never
+        answered: a list HQPlayer did not give is not an empty one, and a
+        picker drawn from it would say HQPlayer has nothing to choose."""
+        response = self._execute_command(command)
+        if response is None or self.last_error is not None:
+            return None
+        if response.tag != command:
+            self._outcome(command, None, "unparsed", f"answered <{response.tag}>")
+            return None
+        return response.findall(item)
+
+    def get_modes(self) -> Optional[List[Dict[str, Any]]]:
         """
         Get available output modes (PCM/DSD)
 
         Returns:
-            List of dicts with: index, name, value
+            List of dicts with: index, name, value; None when HQPlayer did
+            not give the list (`_listing`)
             Example: [{"index": 0, "name": "[source]", "value": -1}, {"index": 1, "name": "PCM", "value": 0}, ...]
         """
-        response = self._execute_command("GetModes")
-        if response is None or response.tag != "GetModes":
-            return []
-
-        modes = []
-        # Parse ModesItem children
-        for item in response.findall("ModesItem"):
-            modes.append({
-                "index": int(item.get("index", 0)),
-                "name": item.get("name", ""),
-                "value": int(item.get("value", 0)),
-            })
-
-        return modes
+        items = self._listing("GetModes", "ModesItem")
+        if items is None:
+            return None
+        return [{
+            "index": int(item.get("index", 0)),
+            "name": item.get("name", ""),
+            "value": int(item.get("value", 0)),
+        } for item in items]
 
     def set_mode(self, index: int) -> bool:
         """
@@ -795,35 +1345,35 @@ class HQPlayerClient:
         """
         return self._accepted("SetMode", {"value": str(index)})
 
-    def get_filters(self) -> List[Dict[str, Any]]:
+    def get_filters(self) -> Optional[List[Dict[str, Any]]]:
         """
         Get available filters (PCM and SDM/DSD)
 
         Returns:
-            List of dicts with: index, name, value, arg, description
+            List of dicts with: index, name, value, arg, description, parsed;
+            None when HQPlayer did not give the list (`_listing`)
             `description` is HQPlayer 6's own line for the filter (its rating,
-            focus and ratio); empty string on HQP5.
+            focus and ratio); empty string on HQP5. `parsed` is that line
+            read (`parse_filter_description`), None when there is none or
+            its shape is not read here.
             Example, SDM mode on engine 6.2.3: [{"index": 6, "name": "poly-sinc-lp",
-                       "value": 0, "arg": 2, "description": "4/5 space ⥣ Any"}, ...]
+                       "value": 0, "arg": 2, "description": "4/5 space ⥣ Any",
+                       "parsed": {"rating": 4, "focus": ["space"], "ratio": "Any",
+                                  "up": False, "mode": "sdm"}}, ...]
             PCM mode lists the same filter as index 7, value 6, "4/5 space ⥮ Any":
             the index, the value and the arrow belong to the mode.
         """
-        response = self._execute_command("GetFilters")
-        if response is None or response.tag != "GetFilters":
-            return []
-
-        filters = []
-        # Parse FiltersItem children
-        for item in response.findall("FiltersItem"):
-            filters.append({
-                "index": int(item.get("index", 0)),
-                "name": item.get("name", ""),
-                "value": int(item.get("value", 0)),
-                "arg": int(item.get("arg", 0)),
-                "description": item.get("description", ""),
-            })
-
-        return filters
+        items = self._listing("GetFilters", "FiltersItem")
+        if items is None:
+            return None
+        return [{
+            "index": int(item.get("index", 0)),
+            "name": item.get("name", ""),
+            "value": int(item.get("value", 0)),
+            "arg": int(item.get("arg", 0)),
+            "description": item.get("description", ""),
+            "parsed": parse_filter_description(item.get("description", "")),
+        } for item in items]
 
     def set_filter(self, index: int, index_1x: Optional[int] = None) -> bool:
         """
@@ -839,29 +1389,27 @@ class HQPlayerClient:
 
         return self._accepted("SetFilter", attrs)
 
-    def get_shapers(self) -> List[Dict[str, Any]]:
+    def get_shapers(self) -> Optional[List[Dict[str, Any]]]:
         """
         Get available dither/noise shapers
 
         Returns:
-            List of dicts with: index, name, value, description — HQPlayer 6.1+
-            names a modulator's generation there ("Gen7"); empty before.
+            List of dicts with: index, name, value, description, parsed;
+            None when HQPlayer did not give the list (`_listing`).
+            HQPlayer 6.1+ names a modulator's generation in its description
+            ("Gen7"; `parsed` {"generation": 7}); PCM dithers and earlier
+            builds leave it empty (`parsed` None).
         """
-        response = self._execute_command("GetShapers")
-        if response is None or response.tag != "GetShapers":
-            return []
-
-        shapers = []
-        # Parse ShapersItem children
-        for item in response.findall("ShapersItem"):
-            shapers.append({
-                "index": int(item.get("index", 0)),
-                "name": item.get("name", ""),
-                "value": int(item.get("value", 0)),
-                "description": item.get("description", ""),
-            })
-
-        return shapers
+        items = self._listing("GetShapers", "ShapersItem")
+        if items is None:
+            return None
+        return [{
+            "index": int(item.get("index", 0)),
+            "name": item.get("name", ""),
+            "value": int(item.get("value", 0)),
+            "description": item.get("description", ""),
+            "parsed": parse_shaper_description(item.get("description", "")),
+        } for item in items]
 
     def set_shaping(self, index: int) -> bool:
         """
@@ -872,27 +1420,22 @@ class HQPlayerClient:
         """
         return self._accepted("SetShaping", {"value": str(index)})
 
-    def get_rates(self) -> List[Dict[str, Any]]:
+    def get_rates(self) -> Optional[List[Dict[str, Any]]]:
         """
         Get available output sample rates
 
         Returns:
-            List of dicts with: index, rate (Hz)
+            List of dicts with: index, rate (Hz); None when HQPlayer did not
+            give the list (`_listing`)
             Example: [{"index": 0, "rate": 44100}, {"index": 1, "rate": 88200}, ...]
         """
-        response = self._execute_command("GetRates")
-        if response is None or response.tag != "GetRates":
-            return []
-
-        rates = []
-        # Parse RatesItem children
-        for item in response.findall("RatesItem"):
-            rates.append({
-                "index": int(item.get("index", 0)),
-                "rate": int(item.get("rate", 0)),
-            })
-
-        return rates
+        items = self._listing("GetRates", "RatesItem")
+        if items is None:
+            return None
+        return [{
+            "index": int(item.get("index", 0)),
+            "rate": int(item.get("rate", 0)),
+        } for item in items]
 
     def set_rate(self, index: int) -> bool:
         """
@@ -903,23 +1446,18 @@ class HQPlayerClient:
         """
         return self._accepted("SetRate", {"value": str(index)})
 
-    def get_inputs(self) -> List[str]:
+    def get_inputs(self) -> Optional[List[str]]:
         """
         Get available input devices
 
         Returns:
-            List of input device names
+            List of input device names; None when HQPlayer did not give the
+            list (`_listing`)
         """
-        response = self._execute_command("GetInputs")
-        if response is None or response.tag != "GetInputs":
-            return []
-
-        inputs = []
-        # Parse InputsItem children
-        for item in response.findall("InputsItem"):
-            inputs.append(item.get("name", ""))
-
-        return inputs
+        items = self._listing("GetInputs", "InputsItem")
+        if items is None:
+            return None
+        return [item.get("name", "") for item in items]
 
     # ========== Convolution & Matrix ==========
 
@@ -932,23 +1470,18 @@ class HQPlayerClient:
         """
         return self._accepted("SetConvolution", {"value": "1" if enabled else "0"})
 
-    def matrix_list_profiles(self) -> List[str]:
+    def matrix_list_profiles(self) -> Optional[List[str]]:
         """
         Get list of saved matrix profiles.
 
         Returns:
-            List of profile names
+            List of profile names; None when HQPlayer did not give the list
+            (`_listing`)
         """
-        response = self._execute_command("MatrixListProfiles")
-        if response is None or response.tag != "MatrixListProfiles":
-            return []
-
-        profiles = []
-        for item in response.findall("MatrixProfile"):
-            name = item.get("name", "")
-            if name:
-                profiles.append(name)
-        return profiles
+        items = self._listing("MatrixListProfiles", "MatrixProfile")
+        if items is None:
+            return None
+        return [item.get("name") for item in items if item.get("name")]
 
     def matrix_get_profile(self) -> Optional[str]:
         """
@@ -971,43 +1504,53 @@ class HQPlayerClient:
         """
         return self._accepted("MatrixSetProfile", {"value": profile})
 
+    def set_knob(self, knob: str, value: Any, filter1x: Optional[int] = None) -> bool:
+        """One of DSP_KNOBS by its Set* command — `filter1x` goes with the
+        filter."""
+        if knob == "mode":
+            return self.set_mode(value)
+        if knob == "rate":
+            return self.set_rate(value)
+        if knob == "filter":
+            return self.set_filter(value, filter1x)
+        if knob == "shaper":
+            return self.set_shaping(value)
+        if knob == "matrix_profile":
+            return self.matrix_set_profile(value)
+        return self.set_convolution(bool(value))
+
+    def set_knobs(self, knobs: Dict[str, Any]) -> Iterator[Tuple[str, Optional[Dict[str, Any]], str]]:
+        """Each DSP knob `knobs` names, one Set* command each in DSP_KNOBS'
+        order (`filter1x` rides with the filter): (knob, what HQPlayer took —
+        the filter with its 1x slot —, "") or (knob, None, its refusal). A
+        caller acts between them, or stops."""
+        filter1x = knobs.get("filter1x")
+        for knob in DSP_KNOBS:
+            if knobs.get(knob) is None:
+                continue
+            if self.set_knob(knob, knobs[knob], filter1x):
+                yield knob, ({knob: knobs[knob], "filter1x": filter1x}
+                             if knob == "filter" and filter1x is not None
+                             else {knob: knobs[knob]}), ""
+            else:
+                yield knob, None, self.refusal()
+
     def apply_settings(self, *, mode: Optional[int] = None, rate: Optional[int] = None,
                        filter: Optional[int] = None, filter1x: Optional[int] = None,
-                       shaper: Optional[int] = None,
-                       matrix_profile: Optional[str] = None) -> tuple:
-        """Apply any subset of the DSP knobs, one Set* command each, in the
-        order HQPlayer needs: the mode decides which rate, filter and shaper
-        lists the indices after it point into. Returns (applied, failed) —
-        a refused knob carries HQPlayer's reason and the rest still go."""
+                       shaper: Optional[int] = None, matrix_profile: Optional[str] = None,
+                       convolution: Optional[bool] = None) -> tuple:
+        """Apply any subset of the DSP knobs (set_knobs). Returns (applied,
+        failed) — a refused knob carries HQPlayer's reason and the rest still
+        go."""
         applied: Dict[str, Any] = {}
         failed: Dict[str, str] = {}
-        if mode is not None:
-            if self.set_mode(mode):
-                applied["mode"] = mode
+        for knob, taken, refusal in self.set_knobs({
+                "mode": mode, "rate": rate, "filter": filter, "filter1x": filter1x,
+                "shaper": shaper, "matrix_profile": matrix_profile, "convolution": convolution}):
+            if taken is None:
+                failed[knob] = refusal
             else:
-                failed["mode"] = self.refusal()
-        if rate is not None:
-            if self.set_rate(rate):
-                applied["rate"] = rate
-            else:
-                failed["rate"] = self.refusal()
-        if filter is not None:
-            if self.set_filter(filter, filter1x):
-                applied["filter"] = filter
-                if filter1x is not None:
-                    applied["filter1x"] = filter1x
-            else:
-                failed["filter"] = self.refusal()
-        if shaper is not None:
-            if self.set_shaping(shaper):
-                applied["shaper"] = shaper
-            else:
-                failed["shaper"] = self.refusal()
-        if matrix_profile is not None:
-            if self.matrix_set_profile(matrix_profile):
-                applied["matrix_profile"] = matrix_profile
-            else:
-                failed["matrix_profile"] = self.refusal()
+                applied.update(taken)
         return applied, failed
 
 
@@ -1016,7 +1559,7 @@ class HQPlayerClient:
 class HQPlayerConnection:
     """Context manager for HQPlayer connection"""
 
-    def __init__(self, host: str = "localhost", port: int = 4321):
+    def __init__(self, host: str = "127.0.0.1", port: int = 4321):
         self.client = HQPlayerClient(host, port)
 
     def __enter__(self) -> HQPlayerClient:
@@ -1026,6 +1569,7 @@ class HQPlayerConnection:
 
     def __exit__(self, exc_type, exc_val, exc_tb):
         self.client.disconnect()
+        self.client.close()
         return False
 
 
