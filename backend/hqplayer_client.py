@@ -386,11 +386,11 @@ def _flag(value: str) -> bool:
 # five, the focus words, the mode's arrow and the ratio class —
 # "4/5 transients, timbre, space ⥮ 2^x up". PCM mode writes ⥮, SDM mode ⥣;
 # only PCM adds "up" (a filter that converts upwards only). A focus list may
-# keep a trailing comma ("4/5 space, ⥮ Any") or be absent ("4/5 ⥮ Any"), and the
-# two modes may list one filter's words in another order, so the focus is a
-# set: two descriptions of one filter agree when their rating, focus and ratio
-# class do. A modulator's description is its generation ("Gen7"). A shape not
-# read here is left unparsed — never guessed — and said once per string.
+# keep a trailing comma ("4/5 space, ⥮ Any") or be absent ("4/5 ⥮ Any"). The
+# focus words keep HQPlayer's order, the order a screen shows them in; the two
+# modes may order one filter's words differently, so two descriptions compare
+# them as a set. A modulator's description is its generation ("Gen7"). A shape
+# not read here is left unparsed — never guessed — and said once per string.
 
 _FILTER_DESCRIPTION = re.compile(r"^([1-5])/5 (?:(.+?),? )?([⥮⥣]) (1:1|Int|Any|2\^x)( up)?$")
 _FOCUS_WORDS = frozenset({"space", "transients", "timbre"})
@@ -409,16 +409,16 @@ def _unread(kind: str, text: str) -> None:
 
 
 def parse_filter_description(text: str) -> Optional[Dict[str, Any]]:
-    """{rating, focus (sorted), ratio, up, mode} from a filter's description;
-    None for none (HQPlayer 5) or a shape not read here."""
+    """{rating, focus (in HQPlayer's order), ratio, up, mode} from a filter's
+    description; None for none (HQPlayer 5) or a shape not read here."""
     if not text:
         return None
     m = _FILTER_DESCRIPTION.match(text)
-    focus = frozenset(w.strip() for w in (m.group(2) or "").split(",") if w.strip()) if m else None
-    if m is None or not focus <= _FOCUS_WORDS:
+    focus = [w.strip() for w in (m.group(2) or "").split(",") if w.strip()] if m else None
+    if m is None or not _FOCUS_WORDS.issuperset(focus):
         _unread("filter", text)
         return None
-    return {"rating": int(m.group(1)), "focus": sorted(focus), "ratio": m.group(4),
+    return {"rating": int(m.group(1)), "focus": focus, "ratio": m.group(4),
             "up": m.group(5) is not None, "mode": _ARROW_MODE[m.group(3)]}
 
 

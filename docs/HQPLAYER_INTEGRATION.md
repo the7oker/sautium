@@ -194,10 +194,13 @@ assistant tool, no control in the Web UI (as of 2026-09-29):
   - 77+ filters available: IIR, FIR, poly-sinc, closed-form, etc.
   - Separate 1x filter for PCM
   - `parsed` - the description read (`parse_filter_description`): rating,
-    focus (a set, sorted), ratio class, `up`, and the mode by its arrow; one
-    filter's two descriptions agree on rating, focus and ratio. `None` for no
-    description (HQPlayer 5) or a shape not read here — the raw line stays,
-    and the shape is logged once
+    the focus words in HQPlayer's order, ratio class, `up`, and the mode by
+    its arrow. One filter's two descriptions need not agree: 6.2.4 orders
+    poly-sinc-short-lp's focus words one way in PCM and the other in SDM,
+    gives poly-sinc-xtr-short-lp/-mp "timbre" in PCM and "timbre, transients"
+    in SDM, and poly-sinc-mqa/mp3-lp/-mp "Int up" in PCM and "Any" in SDM.
+    `None` for no description (HQPlayer 5) or a shape not read here — the raw
+    line stays, and the shape is logged once
 - `get_shapers()` / `set_shaping(index)` - Noise shaping/dither
   - 36+ shapers: DSD5, ASDM5, ASDM7, etc.
   - `parsed` - a modulator's generation (`Gen7` → `{"generation": 7}`);

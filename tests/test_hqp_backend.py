@@ -1783,7 +1783,7 @@ _LIST_GETTERS = [
      'description="4/5 transients, timbre, space ⥮ 2^x up"/>',
      [{"index": 57, "name": "sinc-MGa", "value": 20, "arg": 0,
        "description": "4/5 transients, timbre, space ⥮ 2^x up",
-       "parsed": {"rating": 4, "focus": ["space", "timbre", "transients"], "ratio": "2^x",
+       "parsed": {"rating": 4, "focus": ["transients", "timbre", "space"], "ratio": "2^x",
                   "up": True, "mode": "pcm"}}]),
     ("get_shapers", "GetShapers", '<ShapersItem index="24" name="ASDM7EC-fast" value="34" '
      'description="Gen7"/>',
@@ -1829,7 +1829,7 @@ _DESCRIPTIONS = [
     ("2/5 ⥣ 2^x", (2, [], "2^x", False, "sdm")),
     ("3/5 ⥣ 2^x", (3, [], "2^x", False, "sdm")),
     ("4/5 space, timbre ⥣ 2^x", (4, ["space", "timbre"], "2^x", False, "sdm")),
-    ("4/5 transients, timbre, space ⥣ 2^x", (4, ["space", "timbre", "transients"], "2^x", False, "sdm")),
+    ("4/5 transients, timbre, space ⥣ 2^x", (4, ["transients", "timbre", "space"], "2^x", False, "sdm")),
     ("4/5 ⥣ 2^x", (4, [], "2^x", False, "sdm")),
     ("4/5 ⥮ 2^x", (4, [], "2^x", False, "pcm")),
     ("2/5 ⥣ Any", (2, [], "Any", False, "sdm")),
@@ -1837,9 +1837,9 @@ _DESCRIPTIONS = [
     ("3/5 space, transients ⥮ Any", (3, ["space", "transients"], "Any", False, "pcm")),
     ("3/5 transients ⥣ Any", (3, ["transients"], "Any", False, "sdm")),
     ("3/5 transients ⥮ Any", (3, ["transients"], "Any", False, "pcm")),
-    ("3/5 transients, space ⥣ Any", (3, ["space", "transients"], "Any", False, "sdm")),
-    ("3/5 transients, timbre, space ⥣ Any", (3, ["space", "timbre", "transients"], "Any", False, "sdm")),
-    ("3/5 transients, timbre, space ⥮ Any", (3, ["space", "timbre", "transients"], "Any", False, "pcm")),
+    ("3/5 transients, space ⥣ Any", (3, ["transients", "space"], "Any", False, "sdm")),
+    ("3/5 transients, timbre, space ⥣ Any", (3, ["transients", "timbre", "space"], "Any", False, "sdm")),
+    ("3/5 transients, timbre, space ⥮ Any", (3, ["transients", "timbre", "space"], "Any", False, "pcm")),
     ("3/5 ⥣ Any", (3, [], "Any", False, "sdm")),
     ("3/5 ⥮ Any", (3, [], "Any", False, "pcm")),
     ("4/5 space ⥣ Any", (4, ["space"], "Any", False, "sdm")),
@@ -1851,18 +1851,18 @@ _DESCRIPTIONS = [
     ("4/5 timbre ⥮ Any", (4, ["timbre"], "Any", False, "pcm")),
     ("4/5 transients ⥣ Any", (4, ["transients"], "Any", False, "sdm")),
     ("4/5 transients ⥮ Any", (4, ["transients"], "Any", False, "pcm")),
-    ("4/5 transients, timbre ⥣ Any", (4, ["timbre", "transients"], "Any", False, "sdm")),
-    ("4/5 transients, timbre ⥮ Any", (4, ["timbre", "transients"], "Any", False, "pcm")),
-    ("4/5 transients, timbre, space ⥣ Any", (4, ["space", "timbre", "transients"], "Any", False, "sdm")),
-    ("4/5 transients, timbre, space ⥮ Any", (4, ["space", "timbre", "transients"], "Any", False, "pcm")),
+    ("4/5 transients, timbre ⥣ Any", (4, ["transients", "timbre"], "Any", False, "sdm")),
+    ("4/5 transients, timbre ⥮ Any", (4, ["transients", "timbre"], "Any", False, "pcm")),
+    ("4/5 transients, timbre, space ⥣ Any", (4, ["transients", "timbre", "space"], "Any", False, "sdm")),
+    ("4/5 transients, timbre, space ⥮ Any", (4, ["transients", "timbre", "space"], "Any", False, "pcm")),
     ("4/5 transients, ⥮ Any", (4, ["transients"], "Any", False, "pcm")),
     ("4/5 ⥣ Any", (4, [], "Any", False, "sdm")),
     ("4/5 ⥮ Any", (4, [], "Any", False, "pcm")),
     ("5/5 timbre ⥣ Any", (5, ["timbre"], "Any", False, "sdm")),
     ("5/5 timbre ⥮ Any", (5, ["timbre"], "Any", False, "pcm")),
     ("5/5 timbre, transients ⥣ Any", (5, ["timbre", "transients"], "Any", False, "sdm")),
-    ("5/5 transients, timbre, space ⥣ Any", (5, ["space", "timbre", "transients"], "Any", False, "sdm")),
-    ("5/5 transients, timbre, space ⥮ Any", (5, ["space", "timbre", "transients"], "Any", False, "pcm")),
+    ("5/5 transients, timbre, space ⥣ Any", (5, ["transients", "timbre", "space"], "Any", False, "sdm")),
+    ("5/5 transients, timbre, space ⥮ Any", (5, ["transients", "timbre", "space"], "Any", False, "pcm")),
     ("1/5 ⥣ Int", (1, [], "Int", False, "sdm")),
     ("2/5 transients ⥣ Int", (2, ["transients"], "Int", False, "sdm")),
     ("2/5 ⥣ Int", (2, [], "Int", False, "sdm")),
@@ -1883,7 +1883,7 @@ _DESCRIPTIONS = [
     ("4/5 space, timbre ⥮ 2^x up", (4, ["space", "timbre"], "2^x", True, "pcm")),
     ("4/5 timbre ⥮ Int up", (4, ["timbre"], "Int", True, "pcm")),
     ("4/5 transients ⥮ Int up", (4, ["transients"], "Int", True, "pcm")),
-    ("4/5 transients, timbre, space ⥮ 2^x up", (4, ["space", "timbre", "transients"], "2^x", True, "pcm")),
+    ("4/5 transients, timbre, space ⥮ 2^x up", (4, ["transients", "timbre", "space"], "2^x", True, "pcm")),
     ("4/5 ⥮ 2^x up", (4, [], "2^x", True, "pcm")),
 ]
 
@@ -1899,16 +1899,19 @@ def test_every_filter_description_hqplayer_6_gives_is_read():
                                                    "up": up, "mode": mode}, text
 
 
-def test_one_filter_described_in_both_modes_compares_on_rating_focus_and_ratio():
+def test_one_filter_described_in_both_modes_keeps_each_modes_word_order():
     from hqplayer_client import parse_filter_description as read
-    # poly-sinc-short-lp: SDM and PCM order its focus words differently;
-    # poly-sinc-long-lp: PCM keeps a trailing comma; sinc-L: only PCM says `up`.
+    # poly-sinc-short-lp: SDM and PCM order its focus words differently, and
+    # each description keeps its own order; poly-sinc-long-lp: PCM keeps a
+    # trailing comma; sinc-L: only PCM says `up`.
+    a, b = read("3/5 transients, space ⥣ Any"), read("3/5 space, transients ⥮ Any")
+    assert (a["focus"], b["focus"]) == (["transients", "space"], ["space", "transients"])
     for sdm, pcm in (("3/5 transients, space ⥣ Any", "3/5 space, transients ⥮ Any"),
                      ("4/5 space ⥣ Any", "4/5 space, ⥮ Any"),
                      ("3/5 ⥣ 2^x", "3/5 ⥮ 2^x up")):
         a, b = read(sdm), read(pcm)
         assert (a["mode"], b["mode"]) == ("sdm", "pcm")
-        assert [a[k] for k in ("rating", "focus", "ratio")] == [b[k] for k in ("rating", "focus", "ratio")]
+        assert (a["rating"], set(a["focus"]), a["ratio"]) == (b["rating"], set(b["focus"]), b["ratio"])
 
 
 def test_modulator_generations_are_read_and_a_dither_has_none():
