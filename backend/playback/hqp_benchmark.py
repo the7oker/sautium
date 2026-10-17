@@ -420,9 +420,12 @@ def same_family(rate_hz: int, src_rate: int) -> bool:
 
 
 def running_filter(names: Dict[int, str], nx: int, x1: int, src_rate: int) -> str:
-    """The filter HQPlayer runs for a source: the 1x slot for 44.1/48 kHz
-    when one is set, the Nx slot otherwise."""
-    return names.get(x1 if src_rate in (44100, 48000) and x1 >= 0 else nx, "")
+    """The filter HQPlayer runs for a source: the 1x slot when one is set
+    and the source is under 50 kHz — 22.05 and 32 kHz as much as 44.1 and
+    48 (HQPlayer Desktop manual 6.1, §4.6: the "1x" selection "covers
+    source sampling rates below 50 kHz, so called base rates") — the Nx
+    slot otherwise."""
+    return names.get(x1 if src_rate < 50_000 and x1 >= 0 else nx, "")
 
 
 def build_grid(kind: str, *, filters: List[dict], shapers: List[dict], rates: List[dict],

@@ -176,6 +176,18 @@ def test_a_pcm_source_is_never_asked_below_its_own_rate():
     assert any(p.source == "pcm44" and p.rate_hz == 48000 for p in plan.points)
 
 
+def test_the_1x_filter_runs_every_source_under_50_khz():
+    # HQPlayer Desktop manual 6.1, §4.6: the "1x" selection "covers source
+    # sampling rates below 50 kHz, so called base rates"
+    names = {3: "poly-sinc-gauss-long", 7: "sinc-M"}
+    assert [bench.running_filter(names, 3, 7, hz) for hz in (22050, 32000, 44100, 48000)] == \
+        ["sinc-M"] * 4
+    assert [bench.running_filter(names, 3, 7, hz) for hz in (88200, 96000, 192000, 2822400)] == \
+        ["poly-sinc-gauss-long"] * 4
+    # no 1x filter set: the Nx one runs every source
+    assert bench.running_filter(names, 3, -1, 32000) == "poly-sinc-gauss-long"
+
+
 def test_a_source_plays_at_its_own_family_and_the_owners_rate():
     assert bench.same_family(11289600, 44100) and bench.same_family(768000, 96000)
     assert bench.same_family(352800, 2822400)              # a DSD source down to PCM
