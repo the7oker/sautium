@@ -9365,6 +9365,9 @@
       const rateName = rateNameFromState(st, s.rates);
       const filterName = filterNameFromIndex(st.filter, s.filters);
       const activeFilter = (s.filters || []).find(f => f.index === st.filter);
+      // The Filter row's facts: none for a filter HQPlayer does not describe
+      // (HQPlayer 5) while the node holds no atlas
+      const activeFacts = activeFilter ? hqpFactsHtml(activeFilter.facts, { twin: false }) : '';
       const shaperName = shaperNameFromIndex(st.shaper, s.shapers);
       const matrixActive = st.matrix_profile || '';
       // How each entry runs here (hqpHeadroomMark); while a benchmark holds
@@ -9603,9 +9606,7 @@
               <path d="M9 6l6 6-6 6"/>
             </svg>
           </button>
-          ${activeFilter && activeFilter.facts
-            ? `<p class="hqp-row-hint hqp-row-facts">${hqpFactsHtml(activeFilter.facts, { twin: false })}</p>`
-            : ''}
+          ${activeFacts ? `<p class="hqp-row-hint hqp-row-facts">${activeFacts}</p>` : ''}
           ${favouritesStrip}
           <div class="hqp-row">
             <label class="hqp-row-label" for="hqpShaper">${escapeHtml(shaperLabel)} ${shortMark.shaper}</label>
@@ -9642,10 +9643,15 @@
         btn.addEventListener('click', (e) => {
           if (btn.dataset.knob !== 'shaper' || !modulatorSheet) return pickKnob(btn);
           if (e.detail > 1) return;      // the second click of a double-click
-          openHqpSheet(s, 'modulator', (chosen) => serialized('hqp.config', async () => {
-            await postHqpConfig({shaper: chosen.index});
-            await load();
-          }));
+          openHqpSheet(s, 'modulator', (chosen) => {
+            // The current one again sends nothing, as the plain picker did:
+            // HQPlayer would build the same setting anew
+            if (chosen.index === st.shaper) return;
+            serialized('hqp.config', async () => {
+              await postHqpConfig({shaper: chosen.index});
+              await load();
+            });
+          });
         });
       });
       function pickKnob(btn) {
@@ -9909,10 +9915,19 @@
     }
 
     sheet.querySelector('[data-action="close"]').addEventListener('click', close);
-    // The sheet itself is only reachable as the tablet's scrim.
-    sheet.addEventListener('click', e => { if (e.target === sheet) close(); });
+    // The sheet itself is only reachable as the tablet's scrim; the second
+    // tap of a double-tap on the trigger lands there: it repeats the wish to
+    // open, it is not a wish to close.
+    sheet.addEventListener('click', e => { if (e.target === sheet && e.detail < 2) close(); });
     search.addEventListener('input', paint);
     paint();
+    // HQPlayer's long modulator list opens on the current choice, as the
+    // plain picker did; the filter sheet opens on its favourites.
+    const current = filter ? null : body.querySelector('.hqp-sheet-row.is-current');
+    if (current) {
+      body.scrollTop += current.getBoundingClientRect().top - body.getBoundingClientRect().top
+        - (body.clientHeight - current.offsetHeight) / 2;
+    }
   }
 
   /* ---- Peak meter (HQPlayer screen, the Meter chip on the Volume row) ----
