@@ -93,6 +93,7 @@ import psycopg2
 from config import settings
 from db_pool import db_execute, db_query, db_query_one
 from hqp_atlas import rate_name
+from hqp_rate_check import mode_kind, running_slot, same_family
 from hqplayer_client import HQPlayerClient, PlaybackState, TrackStatus
 
 from playback import hqp_load
@@ -355,16 +356,6 @@ def sources(kind: str, engine: Optional[str]) -> Dict[str, dict]:
 
 # -- the grid --------------------------------------------------------------------
 
-def mode_kind(name: Optional[str]) -> Optional[str]:
-    """'pcm' or 'sdm' for a mode's name; None for [source]."""
-    n = (name or "").upper()
-    if n == "PCM":
-        return "pcm"
-    if "SDM" in n or "DSD" in n:
-        return "sdm"
-    return None
-
-
 @dataclass(frozen=True)
 class Point:
     rate: int                 # GetRates index
@@ -406,26 +397,10 @@ class Plan:
         return sum(1 for p in self.points if not self.deferred(p, self.known))
 
 
-def same_family(rate_hz: int, src_rate: int) -> bool:
-    """An output rate the source reaches by a whole power of two — its own
-    family (44.1 kHz: 88.2 kHz … 44.1k × 1024). Every filter runs those;
-    another family takes an asynchronous conversion some refuse at Play
-    (sinc-MGa: "Requested filter not possible with this rate combination
-    44100/49152000", Desktop 6.2.3, 2026-10-03)."""
-    high, low = max(rate_hz, src_rate), min(rate_hz, src_rate)
-    if low <= 0 or high % low:
-        return False
-    ratio = high // low
-    return ratio & (ratio - 1) == 0
-
-
 def running_filter(names: Dict[int, str], nx: int, x1: int, src_rate: int) -> str:
-    """The filter HQPlayer runs for a source: the 1x slot when one is set
-    and the source is under 50 kHz — 22.05 and 32 kHz as much as 44.1 and
-    48 (HQPlayer Desktop manual 6.1, §4.6: the "1x" selection "covers
-    source sampling rates below 50 kHz, so called base rates") — the Nx
-    slot otherwise."""
-    return names.get(x1 if src_rate < 50_000 and x1 >= 0 else nx, "")
+    """The name of the filter HQPlayer runs for a source, of the two slots'
+    indices — `x1` -1 when no 1x filter is set (hqp_rate_check.running_slot)."""
+    return names.get(running_slot(nx, x1 if x1 >= 0 else None, src_rate), "")
 
 
 def build_grid(kind: str, *, filters: List[dict], shapers: List[dict], rates: List[dict],

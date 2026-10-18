@@ -41,7 +41,7 @@ import threading
 import time
 import xml.etree.ElementTree as ET
 from datetime import datetime, timezone
-from typing import Any, Callable, Dict, List, Optional, Tuple
+from typing import Any, Callable, Dict, List, NamedTuple, Optional, Tuple
 
 from sqlalchemy import text
 
@@ -324,37 +324,62 @@ def _this_machine() -> Dict[str, Any]:
 # checked box (filters and convolution, observed 2026-10-02), the word
 # "convolution" the grayed one (observed 2026-10-03); "0" the clear box.
 _CUDA_SETTING = {"0": "off", "1": "full", "convolution": "convolution"}
+# Its adaptive output rate is a three-state box too (HQPlayer Desktop manual
+# 6.1, §4.2): "1" reads as on and "0" as off, as the CUDA box writes its
+# checked and clear states; what the grayed state writes was never seen, so
+# any other value reads as not known.
+_ADAPTIVE_SETTING = {"0": False, "1": True}
 
 
-def local_cuda() -> Tuple[bool, Optional[str]]:
-    """CUDA offload as this machine's HQPlayer saved it (<engine cuda="…"/>
-    in its settings.xml): (read, value). A value other than those seen
-    (_CUDA_SETTING) reads as not known (None) rather than leaving an older
-    answer standing. Not read at all — no such file here, a data folder that
-    is not mounted or not readable, HQPlayer rewriting it this very moment —
-    keeps what is stored."""
+class EngineSettings(NamedTuple):
+    read: bool                        # settings.xml was read
+    cuda: Optional[str]
+    adaptive_rate: Optional[bool]
+
+
+_NOT_READ = EngineSettings(False, None, None)
+
+
+def local_engine() -> EngineSettings:
+    """This machine's HQPlayer's engine settings as it saved them (<engine
+    cuda="…" adaptive_rate="…"/> in its settings.xml): CUDA offload and the
+    adaptive output rate. A value other than those seen (_CUDA_SETTING,
+    _ADAPTIVE_SETTING) reads as not known (None) rather than leaving an
+    older answer standing. Not read at all — no such file here, a data
+    folder that is not mounted or not readable, HQPlayer rewriting it this
+    very moment — `read` is False."""
     from playback.hqp_diagnostics import local_log_dir
     d = local_log_dir()
     if d is None:
-        return False, None
+        return _NOT_READ
     path = d / "settings.xml"
     try:
         mtime = path.stat().st_mtime_ns
     except OSError:               # absent, or a drvfs mount that dropped (ENODEV, EIO, ESTALE)
-        return False, None
-    return _read_cuda(str(path), mtime)
+        return _NOT_READ
+    return _read_engine(str(path), mtime)
+
+
+def local_cuda() -> Tuple[bool, Optional[str]]:
+    """CUDA offload as this machine's HQPlayer saved it (local_engine):
+    (read, value) — not read keeps what is stored (note_info)."""
+    engine = local_engine()
+    return engine.read, engine.cuda
 
 
 @functools.lru_cache(maxsize=4)
-def _read_cuda(path: str, mtime: int) -> Tuple[bool, Optional[str]]:
+def _read_engine(path: str, mtime: int) -> EngineSettings:
     """settings.xml read once per version of it (`mtime` keys the cache):
     the HQPlayer screen asks on every open, the poller on every return."""
     try:
         node = ET.parse(path).getroot().find(".//engine")
     except (OSError, ET.ParseError) as e:
         logger.warning("HQPlayer's settings.xml not readable: %s", e)
-        return False, None
-    return True, _CUDA_SETTING.get(node.get("cuda")) if node is not None else None
+        return _NOT_READ
+    if node is None:
+        return EngineSettings(True, None, None)
+    return EngineSettings(True, _CUDA_SETTING.get(node.get("cuda")),
+                          _ADAPTIVE_SETTING.get(node.get("adaptive_rate")))
 
 
 def note_info(endpoint_id: int, info: Dict[str, str], *, here: bool) -> None:

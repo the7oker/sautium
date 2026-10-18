@@ -31,6 +31,7 @@ from config import settings
 logger = logging.getLogger(__name__)
 import hqp_atlas
 from db_pool import db_execute, db_query_one
+from hqp_rate_check import mode_kind
 from hqplayer_client import VOLUME_FIXED
 from playback import hqp_link
 from playback.hqp_backend import change_dsp
@@ -217,7 +218,6 @@ def _list_mode(state: Optional[dict], modes: Optional[List[dict]],
     """The mode HQPlayer's lists belong to: the filters' own arrow (⥮ PCM,
     ⥣ SDM), or for lists without descriptions (HQPlayer 5) the mode it runs;
     None when neither says."""
-    from playback.hqp_benchmark import mode_kind
     arrows = {f["parsed"]["mode"] for f in filters or () if f["parsed"]}
     if arrows:
         return arrows.pop() if len(arrows) == 1 else None
@@ -277,7 +277,6 @@ def get_facts(kind: str, name: str) -> Dict[str, Any]:
 def _mode_of(state: dict, modes: List[dict]) -> Optional[str]:
     """The mode a setting is measured in, by name: the one chosen, or for
     [source] the one HQPlayer runs (State active_mode is a ModesItem value)."""
-    from playback.hqp_benchmark import mode_kind
     name = next((m["name"] for m in modes if m["index"] == state.get("mode")), None)
     if mode_kind(name) is None:
         name = next((m["name"] for m in modes if m["value"] == state.get("active_mode")), None)
@@ -353,8 +352,8 @@ def _benchmark_block(ep: Optional[dict], state: Optional[dict], lists: dict,
     # A run measures the mode chosen in HQPlayer ([source] chooses none):
     # the others are measured on request.
     mode = next((m["name"] for m in lists["modes"] if m["index"] == state.get("mode")), None)
-    kind = hqp_benchmark.mode_kind(mode)
-    kinds = {hqp_benchmark.mode_kind(m["name"]) for m in lists["modes"]} - {None}
+    kind = mode_kind(mode)
+    kinds = {mode_kind(m["name"]) for m in lists["modes"]} - {None}
     out["other_modes"] = sorted(kinds - {kind})
     if kind is None:
         out["no_estimate"] = "source"

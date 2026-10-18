@@ -31,9 +31,10 @@ import re
 import threading
 import time
 from dataclasses import asdict, dataclass
-from typing import Any, Dict, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
 from db_pool import db_query, db_query_one, transaction
+from hqp_rate_check import Sources
 from hqplayer_client import PlaybackState
 
 logger = logging.getLogger(__name__)
@@ -460,3 +461,45 @@ def file_source(opener: dict) -> Optional[Tuple[int, int]]:
     else:
         return None
     return (row["sample_rate"], row["channels"]) if row else None
+
+
+# What a queue slot opens when no file row names it: a stream, whose rate is
+# known once it plays (playback.queue.QueueItem's kinds).
+_STREAMED = frozenset({"proxy", "uri", "track", "pending"})
+
+
+def sources(openers: List[dict]) -> Sources:
+    """What HQPlayer will decode from these queue slots, the first being the
+    one it reads — their source rates for the rate check, in one query: a
+    file's from the row the scan or the library sync wrote (a CUE image's
+    every slice its own slot), a DSD file counted apart, and so is a stream.
+    A file whose row gives no rate, and a slot nothing can serve, are in
+    none of them."""
+    files = [(n, o) for n, o in enumerate(openers, 1) if o.get("kind") in ("file", "hqp")]
+    rows = db_query("""
+        SELECT r.sample_rate AS rate, r.dsd, count(*) AS slots, bool_or(s.n = 1) AS first
+          FROM unnest(%(ns)s::int[], %(kinds)s::text[], %(paths)s::text[], %(endpoints)s::int[])
+               AS s(n, kind, path, endpoint)
+         CROSS JOIN LATERAL (
+               SELECT mf.sample_rate, coalesce(mf.file_format IN ('DSF', 'DFF'), false) AS dsd
+                 FROM media_files mf
+                WHERE s.kind = 'file' AND mf.file_path = s.path AND mf.sample_rate > 0
+               UNION ALL
+               SELECT f.sample_rate, coalesce(f.file_format IN ('DSF', 'DFF'), false)
+                 FROM hqp_library_files f JOIN album_variants av ON av.id = f.album_variant_id
+                WHERE s.kind = 'hqp' AND av.hqp_endpoint_id = s.endpoint AND f.hqp_path = s.path
+                  AND f.sample_rate > 0
+                LIMIT 1) r
+         GROUP BY r.sample_rate, r.dsd
+    """, {"ns": [n for n, _ in files], "kinds": [o["kind"] for _, o in files],
+          "paths": [o.get("path") for _, o in files],
+          "endpoints": [o.get("endpoint") for _, o in files]}) if files else []
+    pcm: Dict[int, int] = {}
+    dsd, first = 0, None
+    for r in rows:
+        if r["dsd"]:
+            dsd += r["slots"]
+        else:
+            pcm[r["rate"]] = r["slots"]
+            first = r["rate"] if r["first"] else first
+    return Sources(pcm, dsd, sum(1 for o in openers if o.get("kind") in _STREAMED), first)

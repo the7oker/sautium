@@ -588,3 +588,71 @@ def test_local_cuda_reads_hqplayers_engine_setting(tmp_path, monkeypatch):
     # a data folder that is there but cannot be read (a mount that dropped)
     monkeypatch.setattr(hqp_diagnostics, "local_log_dir", lambda: tmp_path / "gone")
     assert hqp_library.local_cuda() == (False, None)
+
+
+def test_local_engine_reads_hqplayers_adaptive_output_rate(tmp_path, monkeypatch):
+    import hqp_library
+    from playback import hqp_diagnostics
+    monkeypatch.setattr(hqp_diagnostics, "local_log_dir", lambda: tmp_path)
+    assert hqp_library.local_engine() == (False, None, None)
+    # "1" on and "0" off, as the CUDA box writes its checked and clear
+    # states; a value never seen, and none at all: not known
+    for i, (attr, expect) in enumerate((('adaptive_rate="1"', True), ('adaptive_rate="0"', False),
+                                        ('adaptive_rate="2"', None), ("", None)), start=1):
+        path = tmp_path / "settings.xml"
+        path.write_text(f'<?xml version="1.0"?><hqplayer><engine cuda="1" {attr} type="asio"/></hqplayer>')
+        os.utime(path, ns=(0, i * 1000))                            # a new version of the file
+        assert hqp_library.local_engine() == (True, "full", expect)
+        assert hqp_library.local_cuda() == (True, "full")
+    path.write_text('<?xml version="1.0"?><hqplayer><output/></hqplayer>')
+    os.utime(path, ns=(0, 9000))
+    assert hqp_library.local_engine() == (True, None, None)
+
+
+def test_sources_reads_the_queues_source_rates_in_one_query(db):
+    """The rate check's sources: by path from media_files (a CUE image's
+    every slice a slot), by endpoint and path from an HQPlayer's own library,
+    DSD files and streams apart, a file whose row gives no rate in none."""
+    import uuid
+    from hqp_rate_check import Sources
+    album, track = str(uuid.uuid4()), str(uuid.uuid4())
+    with db.cursor() as cur:
+        cur.execute("INSERT INTO albums (id, title) VALUES (%s, 'Q')", (album,))
+        cur.execute("INSERT INTO tracks (id, title) VALUES (%s, 'q')", (track,))
+        cur.execute("INSERT INTO album_variants (album_id, directory_path) VALUES (%s, '/m/Q') RETURNING id",
+                    (album,))
+        local = cur.fetchone()[0]
+        cur.execute("INSERT INTO album_variants (album_id, directory_path, location, hqp_endpoint_id) "
+                    "VALUES (%s, '/box/Q', 'hqplayer', %s) RETURNING id", (album, db.endpoint_id))
+        held = cur.fetchone()[0]
+        for path, fmt, rate, cue in (("/m/Q/01.flac", "FLAC", 44100, None), ("/m/Q/02.flac", "FLAC", 48000, None),
+                                     ("/m/Q/03.flac", "FLAC", 44100, None), ("/m/Q/04.dsf", "DSF", 2822400, None),
+                                     ("/m/Q/05.flac", "FLAC", None, None),
+                                     ("/m/Q/image.flac", "FLAC", 88200, 0.0),
+                                     ("/m/Q/image.flac", "FLAC", 88200, 245.5),
+                                     ("/m/Q/image.flac", "FLAC", 88200, 501.0)):
+            cur.execute("INSERT INTO media_files (track_id, album_variant_id, file_path, file_format, "
+                        "sample_rate, channels, cue_start_seconds) VALUES (%s, %s, %s, %s, %s, 2, %s)",
+                        (track, local, path, fmt, rate, cue))
+        cur.execute("INSERT INTO hqp_library_files (track_id, album_variant_id, hqp_path, file_format, "
+                    "sample_rate, channels) VALUES (%s, %s, '/box/Q/01.flac', 'FLAC', 96000, 2)", (track, held))
+    try:
+        def f(path, **span):
+            return {"kind": "file", "path": path, "format": "FLAC", **span}
+
+        held_file = {"kind": "hqp", "path": "/box/Q/01.flac", "format": "FLAC", "endpoint": db.endpoint_id}
+        openers = [f("/m/Q/01.flac"), f("/m/Q/02.flac"), f("/m/Q/image.flac", cue_start=0.0),
+                   f("/m/Q/image.flac", cue_start=245.5), f("/m/Q/03.flac"), f("/m/Q/04.dsf"), held_file,
+                   {**held_file, "endpoint": db.endpoint_id + 1},      # another HQPlayer's library
+                   {"kind": "proxy", "token": "t1"}, {"kind": "uri", "uri": "http://example.com/a.flac"},
+                   f("/m/Q/05.flac"), {"kind": "unplayable"}]
+        assert hqp_load.sources(openers) == Sources({44100: 2, 48000: 1, 88200: 2, 96000: 1}, dsd=1,
+                                                    streamed=2, first=44100)
+        # the slot HQPlayer reads first a stream, or a DSD file: no PCM rate of its own
+        assert hqp_load.sources(openers[8:]) == Sources({}, streamed=2)
+        assert hqp_load.sources(openers[5:7]) == Sources({96000: 1}, dsd=1)
+        assert hqp_load.sources([]) == Sources({})
+    finally:
+        with db.cursor() as cur:
+            cur.execute("DELETE FROM tracks WHERE id = %s", (track,))
+            cur.execute("DELETE FROM albums WHERE id = %s", (album,))

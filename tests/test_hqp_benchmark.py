@@ -189,10 +189,7 @@ def test_the_1x_filter_runs_every_source_under_50_khz():
 
 
 def test_a_source_plays_at_its_own_family_and_the_owners_rate():
-    assert bench.same_family(11289600, 44100) and bench.same_family(768000, 96000)
-    assert bench.same_family(352800, 2822400)              # a DSD source down to PCM
-    assert not bench.same_family(12288000, 44100) and not bench.same_family(705600, 96000)
-    assert not bench.same_family(12000000, 44100) and not bench.same_family(0, 44100)
+    # the family: hqp_rate_check.same_family (tests/test_hqp_rate_check.py)
     rates = [{"index": 0, "rate": 0}] + [{"index": i + 1, "rate": r} for i, r in enumerate(
         (2822400, 3072000, 5644800, 6144000, 11289600, 12288000, 45158400, 49152000))]
     # the owner on 48k × 128 — another family than the 44.1 kHz signal's
