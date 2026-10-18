@@ -2845,12 +2845,14 @@ rate. The adaptive output rate is read in its three states, by the manual's
 names — not checked, grayed, checked (`settings.xml`'s `adaptive_rate` and
 `auto_family`); grayed took a lower rate the filter reaches, as the manual
 says, so the rule says nothing there, as in checked (2026-10-18). The rule
-and every word it says are `backend/hqp_rate_check.py`, one place; on
-2026-10-18 the verdict is the only surface that reads it. A
-verdict reads the atlas only as the site published it: the shipped file, and
-of it only an entry whose release has a date — a trace and the log travel in
-a support warrant, and neither the node's own copy nor a file put at the
-shipped path before its release may. The verdict's log line says the cause's
+and every word it says are `backend/hqp_rate_check.py`, one place; the
+verdict reads it, and since the same day the HQPlayer screen too, before a
+play: a line under the row it names, the node's own atlas copy speaking
+there as on every screen of the node's. A verdict reads the atlas only as
+the site published it: the shipped file, and of it only an entry whose
+release has a date — a trace and the log travel in a support warrant, and
+neither the node's own copy nor a file put at the shipped path before its
+release may. The verdict's log line says the cause's
 kind alone. A new queue's start is one Play since the same
 day: its first track used to be probed and skipped past when HQPlayer
 stopped on it, which hid such a refusal behind the track that played. And

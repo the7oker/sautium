@@ -4972,7 +4972,8 @@ a.am-kind { text-decoration: none; }
   cursor: pointer;
 }
 .hqp-meter-chip svg { flex: none; color: var(--color-blue); }
-.hqp-row-hint.is-limit { color: var(--color-negative); }
+.hqp-row-hint.is-limit,
+.hqp-row-hint.is-refused { color: var(--color-negative); }
 
 .pm-sheet .hqp-sheet-bar {
   grid-template-columns: calc(44 * var(--px)) 1fr auto;

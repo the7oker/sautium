@@ -146,8 +146,8 @@ def test_the_modulator_first_for_the_family_its_refusal_was_measured_from(tmp_pa
     assert c.started_refused
     lines = {k: [plain(p) for p in v] for k, v in rc.lines(c).items()}
     assert lines == {
-        "modulator": ["HQPlayer refused DMX7 512+fs at DSD128 · from 44.1k on engine 9.4.1, so it will stop on "
-                      "the 44.1 kHz and 88.2 kHz tracks in the queue.",
+        "modulator": ["HQPlayer refused DMX7 512+fs at DSD128 on engine 9.4.1, so it will stop on the 44.1 kHz "
+                      "and 88.2 kHz tracks in the queue.",
                       "Pick another modulator, or another output rate."],
         "filter": ["HQPlayer describes demo-sinc-a as 2^x: DSD128 is no power-of-two multiple of 48 kHz or "
                    "96 kHz, so HQPlayer will stop on the 48 kHz and 96 kHz tracks in the queue.",
@@ -157,7 +157,7 @@ def test_the_modulator_first_for_the_family_its_refusal_was_measured_from(tmp_pa
     c = rc.check(_sdm(tmp_path, rate=5), _src(44100, 48000, 96000))
     assert [(g.cause, g.sources) for g in c.groups] == [("modulator", (48000, 96000)), ("filter", (44100,))]
     assert plain(rc.lines(c)["modulator"][0]).startswith(
-        "HQPlayer refused DMX7 512+fs at DSD256 · from 48k on engine 9.4.1")
+        "HQPlayer refused DMX7 512+fs at DSD256 (48k) on engine 9.4.1, so it will stop on the 48 kHz and 96 kHz")
     assert plain(rc.lines(c)["filter"][0]).startswith(
         "HQPlayer describes demo-sinc-a as 2^x: DSD256 (48k) is no power-of-two multiple of 44.1 kHz")
 
@@ -261,8 +261,8 @@ def test_the_verdict_names_the_cause_and_quotes_hqplayers_line(tmp_path):
     assert rc.verdict(rc.check(_inp(adaptive=None), _src(44100)), 44100, None)["sentence"].endswith(
         "and HQPlayer stopped on this track.")                  # the stop is the evidence: no hedge
     m = rc.verdict(rc.check(_sdm(tmp_path), _src(88200)), 88200, None)
-    assert m["sentence"] == ("HQPlayer refused DMX7 512+fs at DSD128 · from 44.1k on engine 9.4.1, and it "
-                             "stopped on this 88.2 kHz track.")
+    assert m["sentence"] == ("HQPlayer refused DMX7 512+fs at DSD128 on engine 9.4.1, and it stopped on this "
+                             "88.2 kHz track.")
     assert m["next"] == "Pick another modulator, or another output rate."
     # the line alone: the rule names nothing (here a class that reaches)
     alone = rc.check(_inp("Any"), _src(44100))
@@ -295,10 +295,12 @@ def test_the_modulator_is_said_refused_at_exactly_the_rate_the_file_holds(tmp_pa
         said = [plain(p) for p in rc.lines(c)["modulator"]]
         said += [plain(p) for p in rc.notice(c)["text"] if plain(p).startswith("HQPlayer refused")]
         said.append(rc.verdict(c, 48000 if c.rate == 12288000 else 44100, None)["sentence"])
-        seen |= {label for label in ("DSD128 · from 44.1k", "DSD256 · from 48k") if label in said[0]}
-        for word in ("only", "below", "×", "1024", "512×"):
+        seen |= {name for name in ("DSD128", "DSD256 (48k)") if f" at {name} on engine " in said[0]}
+        # the rate as the HQPlayer screen names it, the same on the line, the notice and the verdict
+        assert len({s.split(" on engine ")[0] for s in said if s.startswith("HQPlayer refused")}) == 1, said
+        for word in ("only", "below", "×", "1024", "512×", "· from"):
             assert not any(word in s for s in said), (word, said)
-    assert seen == {"DSD128 · from 44.1k", "DSD256 · from 48k"}
+    assert seen == {"DSD128", "DSD256 (48k)"}
 
 
 def test_no_word_ranks_none_speaks_of_an_engine_stopping_and_none_links(tmp_path):

@@ -82,8 +82,8 @@ def test_a_refused_rate_names_the_filter_or_the_modulator_with_their_fixes():
     assert v["dsp"] == "PCM · demo-sinc-a · TPDF · 768 kHz"
     m = diag.verdict(_trace("rate_refused_modulator"))
     assert (m["cause"], m["next"]) == ("modulator", "Pick another modulator, or another output rate.")
-    assert m["sentence"] == ("HQPlayer refused DMX7 512+fs at DSD256 · from 48k on engine 9.4.1, and it "
-                             "stopped on this 48 kHz track.")
+    assert m["sentence"] == ("HQPlayer refused DMX7 512+fs at DSD256 (48k) on engine 9.4.1, and it stopped on "
+                             "this 48 kHz track.")
 
 
 def test_hqplayers_line_is_quoted_and_alone_names_nothing():

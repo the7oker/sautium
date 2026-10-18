@@ -6,8 +6,9 @@ status, current DSP selections, all available lists (modes / rates /
 filters / shapers / matrix profiles) and the user's favourite-filter list
 from the user_settings key/value store; with `dsp=1` (the screen itself)
 also how each picker entry runs on this HQPlayer (`headroom`,
-playback.hqp_load), the benchmark's block (playback.hqp_benchmark), and
-each filter and shaper row's `facts` (hqp_atlas); a name's card comes from
+playback.hqp_load), the benchmark's block (playback.hqp_benchmark), each
+filter and shaper row's `facts` (hqp_atlas), and what the queue meets at
+this setting (`rate_check`, hqp_rate_check); a name's card comes from
 /facts. Writes go through /config (any subset of filter / mode / rate /
 shaper / matrix_profile / convolution — the last the assistant's switch, no
 control on the screen), /favorites (add/remove a filter name from the
@@ -204,6 +205,9 @@ def get_state(dsp: bool = False) -> Dict[str, Any]:
     response["volume_fixed"] = (VOLUME_FIXED if volume_range is not None
                                 and not volume_range["enabled"] else None)
     _join_facts(response, info, state, lists)
+    rate_check = _rate_lines(info, state, lists)
+    if rate_check:
+        response["rate_check"] = rate_check
     return response
 
 
@@ -241,6 +245,33 @@ def _join_facts(response: Dict[str, Any], info: Optional[dict], state: Optional[
                              for row, facts in zip(rows, hqp_atlas.facts(atlas, kind, rows, engine, mode))]
     if atlas is not None:
         response["atlas"] = hqp_atlas.head(atlas, engine, mode)
+
+
+def _rate_lines(info: Optional[dict], state: Optional[dict], lists: dict) -> Dict[str, list]:
+    """What the screen says when the queue meets a rate HQPlayer cannot reach
+    (hqp_rate_check): each phrase under the row it names, for the queue from
+    the slot HQPlayer reads — the first while nothing has played — to the
+    end. Nothing without State and the four lists, while HQPlayer is not the
+    output, or while another controller's playlist plays (an entry not ours,
+    a mirror that drifted). The node's own atlas copy speaks here, on the
+    node's own screen."""
+    import hqp_library
+    import hqp_rate_check
+    from playback import hqp_load
+    from playback.hqp_backend import _stream_mode
+    active, status = manager.active, manager.latest_status
+    if (not state or any(lists[k] is None for k in ("modes", "rates", "filters", "shapers"))
+            or active is None or active.id != "hqplayer" or active.drift
+            or status.get("source") == "external"):
+        return {}
+    items = manager.queue.snapshot()[max(status.get("track_index") or 1, 1) - 1:]
+    if not items:
+        return {}
+    inputs = hqp_rate_check.inputs(
+        state, lists["modes"], lists["rates"], lists["filters"], lists["shapers"],
+        adaptive=None if _stream_mode() else hqp_library.local_engine().adaptive_rate,
+        atlas=_atlas(), engine=(info or {}).get("engine"))
+    return hqp_rate_check.lines(hqp_rate_check.check(inputs, hqp_load.sources([it.opener() for it in items])))
 
 
 @router.get("/facts")

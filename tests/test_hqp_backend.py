@@ -1596,7 +1596,7 @@ def test_an_atlas_not_published_never_reaches_a_verdict_its_line_does(traced, fa
     # the file holds DMX7 512+fs refused at DSD256 (48k) from 48k: none of it anywhere
     for said in (json.dumps(a.facts, ensure_ascii=False), json.dumps(a.verdict, ensure_ascii=False),
                  caplog.text, json.dumps(bundle, ensure_ascii=False)):
-        assert "· from 48k" not in said and "refused DMX7" not in said and '"12288000": 48000' not in said
+        assert "refused DMX7" not in said and "(48k) on engine" not in said and '"12288000": 48000' not in said
 
 
 def test_a_published_atlas_names_the_modulator_hqplayer_refused(traced, fake, monkeypatch, tmp_path, caplog):
@@ -1605,11 +1605,11 @@ def test_a_published_atlas_names_the_modulator_hqplayer_refused(traced, fake, mo
     assert traced.select(1)
     a = _closed(timeout=8.0)
     assert a.end == "refused" and a.verdict["cause"] == "modulator"
-    assert a.verdict["sentence"] == ("HQPlayer refused DMX7 512+fs at DSD256 · from 48k on engine 9.4.1, and it "
+    assert a.verdict["sentence"] == ("HQPlayer refused DMX7 512+fs at DSD256 (48k) on engine 9.4.1, and it "
                                      "stopped on this 48 kHz track.")
     assert a.verdict["next"] == "Pick another modulator, or another output rate."
     # the log line says the cause's kind, no sentence built from the atlas
-    assert "rate_refused (modulator)" in caplog.text and "from 48k" not in caplog.text
+    assert "rate_refused (modulator)" in caplog.text and "refused DMX7" not in caplog.text
 
 
 _STOPPED = TrackStatus(state=PlaybackState.STOPPED, track_index=0, track_id="", position=0.0, length=0.0,
@@ -2508,6 +2508,99 @@ def test_no_link_to_an_atlas_page_until_its_release_has_a_date(fake, monkeypatch
     links = {n: hqp_router.get_facts("filter", n)["link"] for n in names}
     assert links["demo-sinc-a"]["href"] == "https://sautium.net/hqplayer/filters/demo-sinc-a/"
     assert links["demo-new"] is None
+
+
+def _settings_xml(tmp_path, adaptive, version):
+    """HQPlayer's settings.xml here, its adaptive output rate as (adaptive_rate,
+    auto_family) — each `version` a new one, as the reader keys it."""
+    path = tmp_path / "settings.xml"
+    path.write_text('<?xml version="1.0"?><hqplayer><engine cuda="0" '
+                    f'adaptive_rate="{adaptive[0]}" auto_family="{adaptive[1]}"/></hqplayer>')
+    os.utime(path, ns=(0, version * 1000))
+
+
+def _rate_screen(monkeypatch, fake, tmp_path, mgr, sources, *, sdm=False):
+    """The HQPlayer screen over a fake HQPlayer at a fixed rate — PCM 705.6 kHz
+    with demo-sinc-a (2^x up) in both slots, or SDM at DSD256 (48k) with
+    DMX7 512+fs — the synthetic atlas as the node's own copy, `sources` the
+    queue's source rates, its adaptive output rate not checked here."""
+    from playback import hqp_load
+    hqp_router = _atlas_screen(monkeypatch, fake, tmp_path, sdm=sdm)
+    monkeypatch.setattr(hqp_router, "manager", mgr)
+    fake.replies["State"], fake.replies["GetRates"] = _RATE_SDM if sdm else _RATE_PCM
+    if sdm:
+        fake.replies["GetShapers"] = ("<GetShapers>" + _items("ShapersItem", [(0, "DMX5", "Gen1"),
+                                                                               (4, "DMX7 512+fs", "Gen5")])
+                                      + "</GetShapers>")
+    monkeypatch.setattr(hqp_load, "sources", lambda openers: sources)
+    monkeypatch.setattr(diag, "local_log_dir", lambda: tmp_path)
+    _settings_xml(tmp_path, ("0", "0"), 1)
+    return hqp_router
+
+
+def _rate_said(s):
+    from hqp_atlas import plain
+    return {row: [plain(p) for p in phrases] for row, phrases in (s.get("rate_check") or {}).items()}
+
+
+def test_the_screen_says_which_tracks_in_the_queue_hqplayer_cannot_reach_at_its_rate(fake, output, monkeypatch,
+                                                                                     tmp_path):
+    from hqp_rate_check import Sources
+    mgr, b = output
+    hqp_router = _rate_screen(monkeypatch, fake, tmp_path, mgr, Sources({44100: 2, 48000: 1}, first=44100))
+    claim = ("HQPlayer describes demo-sinc-a as 2^x up: 705.6 kHz is no power-of-two multiple of 48 kHz, so "
+             "HQPlayer will stop on the 48 kHz tracks in the queue")
+    fix = "Pick a filter HQPlayer describes as Any, or turn on adaptive output rate in HQPlayer's own settings (Output)"
+    assert _rate_said(hqp_router.get_state(dsp=True)) == {"filter": [claim + ".", fix + "."]}
+    # grayed or checked: HQPlayer picks the rate as it plays, nothing to say
+    for version, adaptive in enumerate((("1", "0"), ("1", "1")), start=2):
+        _settings_xml(tmp_path, adaptive, version)
+        assert "rate_check" not in hqp_router.get_state(dsp=True)
+    # a pair never seen: not known, every claim hedged
+    _settings_xml(tmp_path, ("0", "1"), 4)
+    assert _rate_said(hqp_router.get_state(dsp=True)) == {
+        "filter": [claim + " unless its adaptive output rate is on.", fix + " if it is off."]}
+    # every track still to play refused, of one family: its rate at the same multiple is a fix too
+    _settings_xml(tmp_path, ("0", "0"), 5)
+    from playback import hqp_load
+    monkeypatch.setattr(hqp_load, "sources", lambda openers: Sources({48000: 3}, first=48000))
+    assert _rate_said(hqp_router.get_state(dsp=True))["filter"][1] == fix + ", or pick 768 kHz."
+    # the plain state, the More drawer's, says none of it
+    assert "rate_check" not in hqp_router.get_state()
+
+
+def test_the_screens_line_names_a_refused_modulator_under_its_row(fake, output, monkeypatch, tmp_path):
+    from hqp_rate_check import Sources
+    mgr, b = output
+    hqp_router = _rate_screen(monkeypatch, fake, tmp_path, mgr, Sources({48000: 1}, first=48000), sdm=True)
+    # the node's own copy speaks on the node's own screen
+    assert _rate_said(hqp_router.get_state(dsp=True)) == {"modulator": [
+        "HQPlayer refused DMX7 512+fs at DSD256 (48k) on engine 9.4.1, so it will stop on the 48 kHz tracks in "
+        "the queue.", "Pick another modulator, or another output rate."]}
+
+
+def test_the_screen_says_nothing_where_the_queue_is_not_what_hqplayer_plays(fake, output, monkeypatch, tmp_path):
+    import types
+    from hqp_rate_check import Sources
+    mgr, b = output
+    hqp_router = _rate_screen(monkeypatch, fake, tmp_path, mgr, Sources({44100: 2, 48000: 1}, first=44100))
+    assert "rate_check" in hqp_router.get_state(dsp=True)
+    with monkeypatch.context() as m:
+        m.setattr(type(mgr), "latest_status", property(lambda self: {**self._latest_status, "source": "external"}))
+        assert "rate_check" not in hqp_router.get_state(dsp=True)      # another controller's entry plays
+    with monkeypatch.context() as m:
+        m.setattr(type(b), "drift", property(lambda self: True))
+        assert "rate_check" not in hqp_router.get_state(dsp=True)      # its playlist edited elsewhere
+    with monkeypatch.context() as m:
+        m.setattr(mgr, "_active", types.SimpleNamespace(id="local"))
+        assert "rate_check" not in hqp_router.get_state(dsp=True)      # HQPlayer is not the output
+    with monkeypatch.context() as m:
+        m.setattr(mgr.queue, "snapshot", lambda: [])
+        assert "rate_check" not in hqp_router.get_state(dsp=True)      # an empty queue
+    for state in (_RATE_PCM[0].replace('rate="3"', 'rate="0"'),         # Auto
+                  _RATE_PCM[0].replace('mode="1"', 'mode="0"')):        # [source]
+        fake.replies["State"] = state
+        assert "rate_check" not in hqp_router.get_state(dsp=True)
 
 
 def test_a_card_while_hqplayer_builds_or_is_lent_is_busy(fake, output, monkeypatch, tmp_path):

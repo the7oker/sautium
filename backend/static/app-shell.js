@@ -9371,6 +9371,14 @@
       // The Filter row's facts: none for a filter HQPlayer does not describe
       // (HQPlayer 5) while the node holds no atlas
       const activeFacts = activeFilter ? hqpFactsHtml(activeFilter.facts, { twin: false }) : '';
+      // When the queue meets a rate HQPlayer cannot reach: the server's
+      // phrases (hqp_rate_check), each under the row it names — the filter's
+      // after its facts, the modulator's under its row
+      const rateCheck = s.rate_check || {};
+      const rateLine = (row) => (rateCheck[row] || []).length
+        ? `<p class="hqp-row-hint is-left is-refused" data-hqp-rate-check="${row}">${
+            rateCheck[row].map(hqpPhrase).join(' ')}</p>`
+        : '';
       const shaperName = shaperNameFromIndex(st.shaper, s.shapers);
       const matrixActive = st.matrix_profile || '';
       // How each entry runs here (hqpHeadroomMark); while a benchmark holds
@@ -9610,11 +9618,13 @@
             </svg>
           </button>
           ${activeFacts ? `<p class="hqp-row-hint hqp-row-facts">${activeFacts}</p>` : ''}
+          ${rateLine('filter')}
           ${favouritesStrip}
           <div class="hqp-row">
             <label class="hqp-row-label" for="hqpShaper">${escapeHtml(shaperLabel)} ${shortMark.shaper}</label>
             ${knobTrigger('shaper', 'hqpShaper')}
           </div>
+          ${rateLine('modulator')}
         </section>
 
         ${profiles.length ? `

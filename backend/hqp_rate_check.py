@@ -40,7 +40,7 @@ no database, no HQPlayer, no file.
 
 from typing import Any, Dict, List, Mapping, NamedTuple, Optional, Tuple
 
-from hqp_atlas import AND, rate_label, rate_name, wire
+from hqp_atlas import AND, rate_name, wire
 
 # -- The words -------------------------------------------------------------------
 # Every string the rate check says, one place: {x} is a value from HQPlayer, the
@@ -176,7 +176,6 @@ class Group(NamedTuple):
     name: str
     ratio: str                           # the class as HQPlayer writes it; "" for a modulator
     sources: Tuple[int, ...]             # ascending
-    measured: Optional[int] = None       # a modulator's: the source rate its refusal was measured from
 
 
 class Check(NamedTuple):
@@ -206,7 +205,7 @@ def check(inp: Inputs, src: Sources) -> Check:
         f = running_slot(inp.nx, inp.x1, s)
         if f is not None and f.ratio and not reaches(f.ratio, s, inp.rate):
             found.setdefault(("filter", f.name, f.described()), []).append(s)
-    groups = sorted((Group(*k, tuple(v), fs_in if k[0] == "modulator" else None) for k, v in found.items()),
+    groups = sorted((Group(*k, tuple(v)) for k, v in found.items()),
                     key=lambda g: (g.cause != "modulator", g.sources[0]))
     refused = {s for g in groups for s in g.sources}
     return Check(inp.mode, inp.rate, tuple(groups), inp.adaptive is None,
@@ -294,8 +293,8 @@ def _names(rates: Tuple[int, ...], last: str) -> str:
 def _claim(c: Check, g: Group) -> str:
     """One group's sentence, as the screen and the notice say it."""
     if g.cause == "modulator":
-        text = MODULATOR_LINE.format(modulator=g.name, rate=rate_label(str(c.rate), str(g.measured)),
-                                     engine=c.engine, tracks=_names(g.sources, AND))
+        text = MODULATOR_LINE.format(modulator=g.name, rate=rate_name(c.rate), engine=c.engine,
+                                     tracks=_names(g.sources, AND))
         return text + (MODULATOR_UNLESS if c.hedged else "") + END
     text = FILTER_LINE[g.ratio.split(" ")[0]].format(filter=g.name, ratio=g.ratio, out=rate_name(c.rate),
                                                      of=_names(g.sources, OR), tracks=_names(g.sources, AND))
@@ -345,8 +344,8 @@ def verdict(c: Check, source: Optional[int], line: Optional[str]) -> Optional[Di
                 "next": LINE_FIX["sdm" if c.mode == "sdm" else "pcm"]}
     g = c.groups[0]
     if g.cause == "modulator":
-        sentence = VERDICT_MODULATOR.format(modulator=g.name, rate=rate_label(str(c.rate), str(g.measured)),
-                                            engine=c.engine, source=rate_name(source))
+        sentence = VERDICT_MODULATOR.format(modulator=g.name, rate=rate_name(c.rate), engine=c.engine,
+                                            source=rate_name(source))
         nxt = MODULATOR_FIX
     else:
         sentence = VERDICT_FILTER[g.ratio.split(" ")[0]].format(

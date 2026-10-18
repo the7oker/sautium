@@ -1295,6 +1295,17 @@ the manual names them. Grayed or checked, HQPlayer picks the rate as it plays
 filter), so the check says nothing; another pair, or an HQPlayer elsewhere,
 reads as not known.
 
+Before a play the check speaks on the HQPlayer screen (since 2026-10-18):
+`GET /api/hqplayer/state?dsp=1` carries `rate_check`, `{"filter": […],
+"modulator": […]}` — its phrases under the row each names — for the queue
+from the slot HQPlayer reads (the first while nothing has played) to the
+end, judged on that read's State and lists; there the node's own atlas copy
+speaks too, the screen being the node's own. The key is absent with nothing
+to say, while HQPlayer is not the output, and while another controller's
+playlist plays (an entry not ours, a mirror that drifted). The screen draws
+the phrases in the limiter line's colour, the filter's after its facts, the
+modulator's under its row.
+
 **HQPlayer's own log** is read on demand — the Diagnostics screen, an
 attempt that ends `not_played` / `unknown` / `rate_refused` / `rejected`
 without HQPlayer's words, a support warrant — and followed only while an
