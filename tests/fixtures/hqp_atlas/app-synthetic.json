@@ -65,13 +65,13 @@
      "contexts": {"5644800": {
        "difference": {"idle_db": [-81.75, -91.25], "shaping_max_db": 9.25},
        "also_differs": {"process_speed_min": [987.65, 9.8765], "generation": ["Gen1", "Gen9"]}}},
-     "sources": ["jussi-fictional-2001-02-03"], "note": "A fictional note the card never shows.",
+     "sources": ["fictional-forum-post"], "note": "A fictional note the card never shows.",
      "status": "approved"}
   ],
   "sources": [
     {"id": "signalyst-fictional-manual-9-9", "src": "signalyst.doc", "who": "Fictional Vendor",
      "where": "Fictional User Manual 0.0.0, §9.9 Fictional filter table", "date": "2001-01-01", "status": "O"},
-    {"id": "jussi-fictional-2001-02-03", "src": "jussi", "who": "Fictional Author",
+    {"id": "fictional-forum-post", "src": "community", "who": "Fictional Author",
      "where": "Fictional Forum › Fictional thread #1", "date": "2001-02-03", "url": "https://forum.example.org/t/1",
      "status": "O", "quote": "A fictional sentence, quoted only by Sautium's tests."},
     {"id": "fictional-forum-snippet", "src": "community", "who": "Fictional Poster",
@@ -97,10 +97,10 @@
                                 "filter_delay_ms": {"v": 3.0, "pm": 20}, "time_invariant": true}},
           "identity_group": "demo-sinc-a+demo-sinc-b",
           "apod_doc": "Y", "doc_sources": ["signalyst-fictional-manual-9-9"], "variant_of": "demo-gauss-x",
-          "history": {"introduced": {"release": "HQPlayer Desktop 9.0.0", "sources": ["jussi-fictional-2001-02-03"]}},
+          "history": {"introduced": {"release": "HQPlayer Desktop 9.0.0", "sources": ["fictional-forum-post"]}},
           "intent": [{"id": "intent-fictional-demo",
                       "text": "A fictional line on what the author meant this filter for.",
-                      "sources": ["jussi-fictional-2001-02-03", "fictional-forum-snippet"]}],
+                      "sources": ["fictional-forum-post", "fictional-forum-snippet"]}],
           "genre_doc": ["classical", "any-by-length"]},
         "demo-sinc-b": {
           "name": "demo-sinc-b", "release": "9.4.1/pcm", "modes": {"pcm": "measured", "sdm": "pcm-measurement"},
@@ -177,7 +177,7 @@
                          "highest_stable_tone_dbfs": -11, "highest_stable_pair_dbfs": -13}},
           "rates_refused": {},
           "identity_group": "dmx7ec-a+dmx7ec-b+dmx7ec-c",
-          "history": {"introduced": {"release": "HQPlayer Desktop 9.1.0", "sources": ["jussi-fictional-2001-02-03"]}}},
+          "history": {"introduced": {"release": "HQPlayer Desktop 9.1.0", "sources": ["fictional-forum-post"]}}},
         "dmx7ec-b": {
           "name": "DMX7EC-b", "release": "9.4.1/sdm", "generation": "Gen9",
           "structure": {"order": 7, "ec": true, "adaptive": true, "multibit": null, "tuning": null, "src": "name"},

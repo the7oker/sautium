@@ -663,9 +663,9 @@ def test_a_filters_card(atlas):
         "transition: 111 / 2222 Hz. Also differs: filter delay: 6.0 / 0.300 ms.",
         "## The author's stated purpose",
         "A fictional line on what the author meant this filter for.",
-        "In Sautium's words, from Jussi Laako, 2001-02-03.",
+        "In Sautium's words, from Fictional Author, 2001-02-03.",
         "## History",
-        "Introduced in HQPlayer Desktop 9.0.0 — Jussi Laako, 2001-02-03.",
+        "Introduced in HQPlayer Desktop 9.0.0 — Fictional Author, 2001-02-03.",
         "Only what the sources state; a missing event means not stated in the sources read.",
         "## Sources",
         "Measured by Sautium on HQPlayer engine 9.4.1.",
@@ -702,7 +702,7 @@ def test_pairs_in_the_card_never_carry_the_measuring_hosts_speed_or_a_note(atlas
     assert "Same magnitude as demo-poly-lp — one magnitude with two phases, in this fictional file." in text
     text = _card_text(_card(atlas, "modulator", "DMX5", MODULATORS, mode="sdm"))
     assert text[text.index("## Differs only in") + 1:text.index("## Sources")] == [
-        "Order — from DMX7EC-a.", "From Jussi Laako, 2001-02-03."]
+        "Order — from DMX7EC-a.", "From Fictional Author, 2001-02-03."]
     every = json.dumps(_everything(atlas), ensure_ascii=False)
     for token in ("987.65", "876.54", "98.765", "9.8765", "process_speed", "not comparable", "card never shows"):
         assert token not in every
@@ -750,9 +750,9 @@ def test_a_modulators_card(atlas):
         "Tone: one sine; pair: two tones together. Not tested: no play at that volume.",
         "## Differs only in",
         "Order — from DMX5.",
-        "From Jussi Laako, 2001-02-03.",
+        "From Fictional Author, 2001-02-03.",
         "## History",
-        "Introduced in HQPlayer Desktop 9.1.0 — Jussi Laako, 2001-02-03.",
+        "Introduced in HQPlayer Desktop 9.1.0 — Fictional Author, 2001-02-03.",
         "Only what the sources state; a missing event means not stated in the sources read.",
         "## Sources",
         "Measured by Sautium on HQPlayer engine 9.4.1.",
@@ -819,6 +819,16 @@ def test_a_source_not_reread_in_full_is_never_quoted_or_cited(tmp_path, atlas):
     text = _card_text(_card(_read(tmp_path, doc), "filter", "demo-sinc-a", PCM))
     assert "## The author's stated purpose" not in text and "## History" not in text
     assert not any("Fictional Author" in line for line in text)
+
+
+def test_a_jussi_source_is_cited_as_the_site_cites_one(tmp_path):
+    # The cite's format alone, as the site's cite() prints it: the name and
+    # the date, whoever `who` names. No entry names this source, so no line of
+    # the fixture (all invented) stands beside a real name
+    doc = _doc()
+    doc["sources"].append({"id": "cited-alone", "src": "jussi", "who": "Fictional Author",
+                           "where": "Fictional Forum › Fictional thread #3", "date": "2001-04-05", "status": "O"})
+    assert _read(tmp_path, doc).cites(["cited-alone"]) == "Jussi Laako, 2001-04-05"
 
 
 def test_a_link_waits_for_a_dated_release(tmp_path, atlas):
