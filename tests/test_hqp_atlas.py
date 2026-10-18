@@ -291,6 +291,37 @@ def test_a_truncated_or_unreadable_file_is_refused_whole(tmp_path, caplog, raw):
     assert "refused whole" in caplog.text
 
 
+def test_a_lone_surrogate_in_a_text_is_refused_whole_and_an_escaped_pair_is_not(tmp_path, caplog):
+    # A JSON escape can carry half of a UTF-16 pair, which no answer can
+    caplog.set_level(logging.INFO, logger="hqp_atlas")
+    doc = _doc()
+    doc["groups"][1]["say"] = "three names \ud800 alike"
+    (tmp_path / "overlay.json").write_text(json.dumps(doc), encoding="utf-8")      # the escape, in ASCII
+    assert hqp_atlas.read(tmp_path / "shipped.json", tmp_path / "overlay.json") is None
+    assert "not text of its shape, at groups[1].say" in caplog.text
+    doc["groups"][1]["say"] = "three names \U0001f3a7 alike"
+    (tmp_path / "overlay.json").write_text(json.dumps(doc), encoding="utf-8")      # an escaped pair
+    assert hqp_atlas.read(tmp_path / "shipped.json", tmp_path / "overlay.json") is not None
+
+
+def test_a_bound_with_a_key_of_a_range_is_drawn_as_a_bound(tmp_path):
+    # A range stands only over the impulse's positions; elsewhere a key the
+    # shape does not read is ignored
+    doc = _doc()
+    _filter(doc, "demo-gauss-x")["contexts"]["1x-44.1k-705.6k"]["stopband_min_db"]["min"] = True
+    text = _card_text(_card(_read(tmp_path, doc), "filter", "demo-gauss-x", PCM))
+    assert "Stopband minimum, dB | ≥ 81.37ˣ" in text
+
+
+def test_a_modulators_manual_sources_are_not_read(tmp_path):
+    # The manual's rows are a filter's; on a modulator the key is not of its
+    # shape, so not read, whatever it names
+    doc = _doc()
+    doc["engines"]["9.4.1"]["modulators"]["dmx5"]["doc_sources"] = ["no-such-source"]
+    text = _card_text(_card(_read(tmp_path, doc), "modulator", "DMX5", MODULATORS, mode="sdm"))
+    assert "## Sources" in text and "no-such-source" not in text
+
+
 def test_a_file_that_cannot_be_looked_at_is_refused_whole_once(tmp_path, caplog):
     # A link to itself: stat and open both fail, as on a folder not readable
     caplog.set_level(logging.INFO, logger="hqp_atlas")

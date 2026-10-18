@@ -2823,6 +2823,11 @@ another mode; and wherever the node words one, through one namer
 the assistant's lists of rates, which call rate 0 "Auto" as the Rate knob
 does.
 
+Open (2026-10-18): a row of either sheet takes the second click of a
+double-click on the knob that opened it as a pick — the sheet covers the
+knob at once, so that click lands on whatever row is under it — as the
+plain picker's rows did.
+
 ## Known Gotchas
 
 - **The Docker image took the node's secrets.** `./backend` is the build

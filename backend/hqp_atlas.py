@@ -315,7 +315,9 @@ def _constant(name: str) -> None:
 # that passed their own pattern (an entry by its slug, a context, a rate) and of
 # indices (a group, a pair, a source), so no value of the file reaches the log.
 
-_LINE = re.compile(r"[^\x00-\x1f]*")
+# No control character, and no lone surrogate: a JSON escape can make one,
+# and no answer of the node could carry it
+_LINE = re.compile(r"[^\x00-\x1f\ud800-\udfff]*")
 _RELEASE = re.compile(r"[0-9]+\.[0-9]+\.[0-9]+/(?:pcm|sdm)")
 _DATE = re.compile(r"[0-9]{4}-[0-9]{2}-[0-9]{2}")
 _ENGINE = re.compile(r"[0-9]+\.[0-9]+\.[0-9]+")
@@ -679,7 +681,7 @@ def _check_context(c: Any, at: str) -> None:
         for key, r in ranges.items():
             _obj(r, f"{at}.position_dependent")
             for end in ("min", "median", "max"):
-                # all three, as a range is told from a bound by its ends (_value)
+                # all three, as a range is drawn by its ends (_range)
                 _need(end in r, "a range without its three ends", f"{at}.position_dependent")
                 _num(r[end], f"{at}.position_dependent", null=True)
 
@@ -1328,17 +1330,13 @@ def _group(g: Dict[str, Any], name: str, order: Dict[str, int]) -> Optional[Dict
 
 
 def _value(x: Any, used: set) -> List[Any]:
-    """One reading: a number, a bound with what set it, a range over the
-    impulse's positions, or "—" where the method defines none."""
+    """One reading: a number, a bound with what set it, or "—" where the
+    method defines none."""
     if x is None:
         used.add("none")
         return [NONE]
     if isinstance(x, Num):
         return [x]
-    if "min" in x:
-        used.add("range")
-        ends = [_value(x.get(end), used) for end in ("min", "median", "max")]
-        return ends[0] if ends[0] == ends[2] else _phrase(RANGE, min=ends[0], median=ends[1], max=ends[2])
     used.add("bound")
     out = _phrase(AT_LEAST if x["b"] == "ge" else AT_MOST, v=x["v"])
     mark = BY.get(x.get("by"))
@@ -1346,6 +1344,15 @@ def _value(x: Any, used: set) -> List[Any]:
         used.add(mark)
         out.append(mark)
     return out
+
+
+def _range(r: Dict[str, Any], used: set) -> List[Any]:
+    """A reading over the impulse's positions (`position_dependent`, the only
+    place a range stands — never told from a bound by its keys): its ends,
+    one value where they meet."""
+    used.add("range")
+    ends = [_value(r[end], used) for end in ("min", "median", "max")]
+    return ends[0] if ends[0] == ends[2] else _phrase(RANGE, min=ends[0], median=ends[1], max=ends[2])
 
 
 def _notes(used: set) -> List[Dict[str, Any]]:
@@ -1369,7 +1376,7 @@ def _context_table(e: Dict[str, Any], key: str, figures: Dict[str, Any], used: s
         elif field in c:
             value = _value(c[field], used)
         elif field in c.get("position_dependent", {}):
-            value = _value(c["position_dependent"][field], used)
+            value = _range(c["position_dependent"][field], used)
         else:
             continue
         rows.append({"label": label, "cells": [wire(value)]})
@@ -1543,7 +1550,9 @@ def _cited(atlas: Atlas, found: Found) -> List[str]:
     """The sources the card cites: the manual's rows, the shown purpose and
     history lines', the groups' and the pairs'."""
     e = found.entry
-    ids = list(e.get("doc_sources", ()))
+    # The manual's rows are a filter's (`doc_sources` beside `apod_doc`); a
+    # modulator's entry has none, and a key not of its shape is not read
+    ids = list(e.get("doc_sources", ())) if found.kind == "filter" else []
     ids += [sid for line in e.get("intent", ()) for sid in line["sources"]]
     ids += [sid for event in e.get("history", {}).values() for sid in event["sources"]]
     ids += [sid for g in atlas.groups(found) if g["relation"] in RELATION for sid in g.get("sources", ())]
