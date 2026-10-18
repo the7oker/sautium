@@ -329,7 +329,10 @@
     "refused": {},
     "engine": null
    },
-   "source": 44100
+   "source": 44100,
+   "queue": {
+    "44100": 1
+   }
   },
   "advance": {
    "from": 1,

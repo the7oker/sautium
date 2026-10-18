@@ -1555,6 +1555,8 @@ def test_a_rate_the_filter_does_not_reach_is_judged_at_hqplayers_first_stop(trac
                                     "multiple of 48 kHz, and HQPlayer stopped on this track.")
     assert v["next"] == ("Pick a filter HQPlayer describes as Any, or turn on adaptive output rate in HQPlayer's "
                          "own settings (Output), or pick 768 kHz.")
+    # the queue from the refused slot on, every track of the refused family: the rate to pick named
+    assert a.facts["rate"]["queue"] == {"48000": 1}
     # HQPlayer's log, read after the close: its line quoted in place
     assert _wait(lambda: a.hqp_log is not None and "HQPlayer's log" in a.verdict["sentence"], 5.0)
     assert a.verdict["sentence"].endswith(

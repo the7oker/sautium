@@ -38,7 +38,7 @@ from collections import OrderedDict, deque
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Optional
+from typing import Mapping, Optional
 
 import hqp_rate_check as rc
 from hqp_atlas import rate_name
@@ -805,21 +805,27 @@ def verdict(f: dict, log: Optional[dict] = None) -> dict:
 _RATE_LINE = re.compile(r"Requested filter not possible with this rate combination (\d+)/(\d+)[^\n]*")
 
 
-def rate_facts(inputs: "rc.Inputs", source: Optional[int]) -> dict:
+def rate_facts(inputs: "rc.Inputs", source: Optional[int], queue: Optional[Mapping[int, int]]) -> dict:
     """The rate check's inputs as an attempt's facts keep them (JSON: the
-    traces record them, a warrant's playback scope carries them whole)."""
+    traces record them, a warrant's playback scope carries them whole), with
+    the PCM rates of the queue from the attempt's slot to its end — tracks
+    by rate, None when they were not read."""
     f = inputs.nx
     return {"inputs": {"mode": inputs.mode, "rate": inputs.rate, "adaptive": inputs.adaptive,
                        "filter": {"name": f.name, "ratio": f.ratio, "up": f.up} if f else None,
                        "rates": list(inputs.rates), "modulator": inputs.modulator,
                        "refused": {str(r): fs for r, fs in inputs.refused.items()},
                        "engine": inputs.engine},
-            "source": source}
+            "source": source,
+            "queue": {str(r): n for r, n in queue.items()} if queue is not None else None}
 
 
 def _rate_check(rate: Optional[dict], source: Optional[int]) -> Optional["rc.Check"]:
     """The rate check over an attempt's one source, by the filter HQPlayer
-    ran it with (both slots, its own choice); None without its inputs."""
+    ran it with (both slots, its own choice); None without its inputs. The
+    rate its fix names is the queue's to say: one only when every PCM track
+    from the attempt's slot to the queue's end is refused, all of one
+    family (hqp_rate_check._fix_rate) — none when the facts hold no queue."""
     d = (rate or {}).get("inputs")
     if not d or not source:
         return None
@@ -827,7 +833,12 @@ def _rate_check(rate: Optional[dict], source: Optional[int]) -> Optional["rc.Che
     filt = rc.Filter(f["name"], f["ratio"], f["up"]) if f else None
     inputs = rc.Inputs(d["mode"], d["rate"], d["adaptive"], filt, filt, tuple(d["rates"]), d["modulator"],
                        {int(r): fs for r, fs in d["refused"].items()}, d["engine"])
-    return rc.check(inputs, rc.Sources({source: 1}, first=source))
+    fix = None
+    if rate.get("queue"):
+        ahead = {int(r): n for r, n in rate["queue"].items()}
+        ahead.setdefault(source, 1)
+        fix = rc.check(inputs, rc.Sources(ahead, first=source)).fix_rate
+    return rc.check(inputs, rc.Sources({source: 1}, first=source))._replace(fix_rate=fix)
 
 
 def names_cause(rate: Optional[dict]) -> bool:

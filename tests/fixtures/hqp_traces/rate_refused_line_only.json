@@ -123,7 +123,10 @@
     "refused": {},
     "engine": null
    },
-   "source": 48000
+   "source": 48000,
+   "queue": {
+    "48000": 1
+   }
   }
  },
  "hqp_log": {

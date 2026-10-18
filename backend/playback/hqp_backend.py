@@ -2910,7 +2910,9 @@ class HqpBackend(PlayerBackend):
         (backend.log, a warrant's playback scope), and neither the node's own
         copy of the atlas nor a file put at the shipped path before its
         release may. The source: the rate HQPlayer reported, else the slot's
-        file row. None without the reads."""
+        file row; and the PCM rates of the queue from that slot to its end,
+        in the same one query — the verdict names a rate to pick only when
+        every one of them is refused. None without the reads."""
         import hqp_library
         state, lists = (reads or {}).get("state"), (reads or {}).get("lists") or {}
         if state is None or any(lists.get(k) is None for k in ("modes", "rates", "filters", "shapers")):
@@ -2926,14 +2928,20 @@ class HqpBackend(PlayerBackend):
             adaptive=None if _stream_mode() else hqp_library.local_engine().adaptive_rate,
             atlas=hqp_atlas.read(hqp_atlas.SHIPPED, None), engine=self._info.get("engine"), published=True)
         source = next((t["src_rate"] for t in ticks if t.get("src_rate")), None)
-        if source is None and item is not None:
+        queue = None
+        if item is not None:
+            slot = self._queue.index_of(item)
             try:
-                source = hqp_load.sources([item.opener()]).first
+                ahead = hqp_load.sources([it.opener() for it in self._queue.snapshot()[slot - 1:]]
+                                         if slot is not None else [item.opener()])
             except psycopg2.Error as e:
-                # A database that cannot answer costs the verdict its
-                # source, never the poll: it is not HQPlayer failing
-                logger.warning("A stopped track's source rate not read: %s", e)
-        return diag.rate_facts(inputs, source)
+                # A database that cannot answer costs the verdict its source
+                # and its rate to pick, never the poll: it is not HQPlayer failing
+                logger.warning("A stopped track's source rates not read: %s", e)
+            else:
+                source = source or ahead.first
+                queue = ahead.pcm if slot is not None else None
+        return diag.rate_facts(inputs, source, queue)
 
     def _queue_refs(self) -> set:
         """Every path and verbatim URI the queue hands over, as HQPlayer's

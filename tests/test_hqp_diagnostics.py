@@ -86,6 +86,19 @@ def test_a_refused_rate_names_the_filter_or_the_modulator_with_their_fixes():
                              "this 48 kHz track.")
 
 
+def test_the_verdict_names_a_rate_to_pick_only_when_every_track_still_to_play_is_refused():
+    facts = _trace("rate_refused_filter")                   # 44.1 kHz tracks only, from the refused one on
+    fix = ("Pick a filter HQPlayer describes as Any, or turn on adaptive output rate in HQPlayer's own "
+           "settings (Output)")
+    assert diag.verdict(facts)["next"] == fix + ", or pick 705.6 kHz."
+    # 48 kHz tracks after it reach 768 kHz, and would not reach 705.6 kHz: no rate named
+    mixed = {**facts, "rate": {**facts["rate"], "queue": {"44100": 1, "48000": 2}}}
+    assert diag.verdict(mixed)["next"] == fix + "."
+    # the queue's rates not read: none named either
+    unread = {**facts, "rate": {**facts["rate"], "queue": None}}
+    assert diag.verdict(unread)["next"] == fix + "."
+
+
 def test_hqplayers_line_is_quoted_and_alone_names_nothing():
     line_only = _case("rate_refused_line_only")
     # without the log the rule names nothing: no cause, as before
