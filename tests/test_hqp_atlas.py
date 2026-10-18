@@ -297,17 +297,20 @@ def test_a_truncated_or_unreadable_file_is_refused_whole(tmp_path, caplog, raw):
     assert "refused whole" in caplog.text
 
 
-def test_a_lone_surrogate_in_a_text_is_refused_whole_and_an_escaped_pair_is_not(tmp_path, caplog):
-    # A JSON escape can carry half of a UTF-16 pair, which no answer can
+@pytest.mark.parametrize("char", ["\ud800", "\x01"], ids=["half a pair", "a control character"])
+def test_a_lone_surrogate_or_a_control_character_in_a_text_is_refused_whole_and_an_escaped_pair_is_not(
+        tmp_path, caplog, char):
+    # A JSON escape can carry half of a UTF-16 pair, which no answer can, or a
+    # control character, which no line holds
     caplog.set_level(logging.INFO, logger="hqp_atlas")
     doc = _doc()
-    doc["groups"][1]["say"] = "three names \ud800 alike"
+    doc["groups"][1]["say"] = f"three names {char} alike"
     (tmp_path / "overlay.json").write_text(json.dumps(doc), encoding="utf-8")      # the escape, in ASCII
     assert hqp_atlas.read(tmp_path / "shipped.json", tmp_path / "overlay.json") is None
     assert "not text of its shape, at groups[1].say" in caplog.text
     # A pair's difference is free in shape, but a text in it is drawn as it stands
     doc = _doc()
-    doc["pairs"][0]["contexts"]["1x-44.1k-705.6k"]["difference"]["phase"] = ["linear", "mini\ud800mum"]
+    doc["pairs"][0]["contexts"]["1x-44.1k-705.6k"]["difference"]["phase"] = ["linear", f"mini{char}mum"]
     (tmp_path / "overlay.json").write_text(json.dumps(doc), encoding="utf-8")
     assert hqp_atlas.read(tmp_path / "shipped.json", tmp_path / "overlay.json") is None
     assert "not text of its shape, at pairs[0].contexts.1x-44.1k-705.6k.difference" in caplog.text
@@ -518,6 +521,22 @@ def test_another_major_engine_shows_hqplayers_facts_and_not_measured_on_every_ro
         "Measured on HQPlayer engine 9.4.1 · this HQPlayer runs engine 8.0.0",
         "Not measured on HQPlayer engine 9.4.1."]
     assert [s["head"] for s in card["sections"]] == ["What HQPlayer says"] and card["link"] is None
+
+
+def test_an_engine_longer_than_any_build_is_one_the_atlas_does_not_know(atlas):
+    # HQPlayer's own string: int() would raise on a digit run past 4300
+    # digits, and the sheets' state and the card would answer 500
+    assert atlas.engine_for("9.4.1".ljust(hqp_atlas.MAX_ENGINE_LEN)) == "9.4.1"
+    assert atlas.engine_for("9.4.1".ljust(hqp_atlas.MAX_ENGINE_LEN + 1)) is None
+    long = "9.4." + "1" * 5000
+    for kind, spec, mode in (("filter", PCM, "pcm"), ("modulator", MODULATORS, "sdm")):
+        for f in _facts_of(atlas, kind, spec, long, mode).values():
+            assert _chips(f)[-1] == "not measured on engine 9.4.1"
+    assert len(hqp_atlas.head(atlas, long, "sdm")["filters"]) == 1
+    card = _card(atlas, "filter", "demo-sinc-a", PCM, long)
+    assert [plain(s) for s in card["status"]] == [
+        f"Measured on HQPlayer engine 9.4.1 · this HQPlayer runs engine {long}",
+        "Not measured on HQPlayer engine 9.4.1."]
 
 
 def test_in_sdm_mode_the_rows_show_their_pcm_facts_and_the_head_says_so(atlas):

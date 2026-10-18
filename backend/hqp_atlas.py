@@ -321,12 +321,14 @@ _LINE = re.compile(r"[^\x00-\x1f\ud800-\udfff]*")
 _RELEASE = re.compile(r"[0-9]+\.[0-9]+\.[0-9]+/(?:pcm|sdm)")
 _DATE = re.compile(r"[0-9]{4}-[0-9]{2}-[0-9]{2}")
 # Digits are bounded where `int()` reads them — an engine's parts here, a
-# rate and fs_in (_RATE, _INT) below: Python refuses to read past 4300
-# digits, and that would raise instead of refusing the file
+# rate (_RATE) below: Python refuses to read past 4300 digits, and that would
+# raise instead of refusing the file
 _ENGINE = re.compile(r"[0-9]{1,6}\.[0-9]{1,6}\.[0-9]{1,6}")
 _SLUG = re.compile(r"[a-z0-9]+(?:-[a-z0-9]+)*")
 _CONTEXT = re.compile(r"(?:1x|nx)-[0-9.]+k-[0-9.]+k")
 _RATE = re.compile(r"[0-9]{1,10}")
+# An integer's shape — an order, drawn as it stands, and fs_in — bounding no
+# digits int() reads: fs_in reaches int() only as one of FAMILY's keys
 _INT = re.compile(r"-?[0-9]{1,10}")
 _VOLUME = re.compile(r"-?[0-9]+(?:\.[0-9]+)?")
 _GROUP_ID = re.compile(r"[a-z0-9-]+(?:\+[a-z0-9-]+)+")
@@ -726,11 +728,20 @@ def _check_modulator(e: Any, at: str, sources: Dict[str, Any]) -> None:
 
 # -- The atlas -------------------------------------------------------------------
 
+# HQPlayer's engine is read up to this length, a longer one as none: the
+# string is HQPlayer's own, and int() raises on a digit run past 4300 digits —
+# the sheets' state and the card would answer 500.
+MAX_ENGINE_LEN = 64
+
 
 def _version(engine: Optional[str]) -> Tuple[int, ...]:
     """GetInfo's engine as a comparable tuple, read as playback.hqp_load.build
-    reads it (that module opens the database; this one never does)."""
-    return tuple(int(x) for x in re.findall(r"\d+", engine or "")[:3])
+    reads it (that module opens the database; this one never does): () for
+    none, and for one past MAX_ENGINE_LEN — an engine the atlas does not know."""
+    engine = engine or ""
+    if len(engine) > MAX_ENGINE_LEN:
+        return ()
+    return tuple(int(x) for x in re.findall(r"\d+", engine)[:3])
 
 
 def _first_context(entry: Dict[str, Any]) -> Optional[str]:
@@ -781,7 +792,8 @@ class Atlas:
         holds not newer than its own, else the oldest — within its own major
         version only: a major release may change what a name does, and a label
         does not undo a wrong number shown as measured. None when the atlas
-        holds no engine of that major, or HQPlayer reports none."""
+        holds no engine of that major, or `_version` reads HQPlayer's as
+        none."""
         own = _version(user_engine)
         if not own:
             return None

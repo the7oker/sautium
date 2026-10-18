@@ -66,11 +66,20 @@ _pruned_at: Optional[float] = None
 # 5.17.0 computed process_speed wrongly for a DSD source; the next release
 # fixed it (Jussi Laako, Roon community, 2026-03-03).
 _DSD_SPEED_WRONG = (5, 17, 0)
+# HQPlayer's engine is read as a build up to this length, a longer one as none:
+# the string is HQPlayer's own, and int() raises on a digit run past 4300
+# digits — the status tick would fail while HQPlayer plays a DSD slot of ours.
+# hqp_atlas reads it with the same bound.
+MAX_ENGINE_LEN = 64
 
 
 def build(engine: Optional[str]) -> Tuple[int, ...]:
-    """<GetInfo engine="6.2.3"/> as a comparable tuple."""
-    return tuple(int(x) for x in re.findall(r"\d+", engine or "")[:3])
+    """<GetInfo engine="6.2.3"/> as a comparable tuple; () for none, and for
+    one past MAX_ENGINE_LEN."""
+    engine = engine or ""
+    if len(engine) > MAX_ENGINE_LEN:
+        return ()
+    return tuple(int(x) for x in re.findall(r"\d+", engine)[:3])
 
 
 def dsd_speed_wrong(engine: Optional[str]) -> bool:

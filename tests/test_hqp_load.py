@@ -130,6 +130,18 @@ def test_sampler_skips_a_dsd_source_on_5_17_0():
     assert s.due(dsd, ours=True, engine="5.18.0", now=30.0)
 
 
+def test_an_engine_longer_than_any_build_reads_as_none():
+    # HQPlayer's own string: int() would raise on a digit run past 4300
+    # digits, in every status tick that plays a DSD slot of ours
+    assert hqp_load.build("5.17.0".ljust(hqp_load.MAX_ENGINE_LEN)) == (5, 17, 0)
+    assert hqp_load.build("5.17.0".ljust(hqp_load.MAX_ENGINE_LEN + 1)) == ()
+    long = "5.17." + "0" * 5000
+    dsd = _status(src_rate=2822400, src_bits=1, src_sdm=True)
+    s = hqp_load.Sampler()
+    s.due(dsd, ours=True, engine=long, now=0.0)
+    assert s.due(dsd, ours=True, engine=long, now=30.0)
+
+
 # -- the database -----------------------------------------------------------------
 
 def _make_db(name):
