@@ -2378,6 +2378,11 @@ were wrong, one hidden behind the other.
   `config.json` and `backend.env`: it records the username, the credential
   stays in the database.
 
+Open (2026-10-18): with the Scrobbling switch off, a play still tells
+Last.fm what is playing — `playback/tracker.py` sends
+`update_now_playing` at every new play whenever a Last.fm session exists;
+only the scrobble asks the switch.
+
 ### The install-time AI pick reaches the database (2026-09-22)
 
 A launcher installed with Claude Code as the assistant showed the AI button
@@ -2848,7 +2853,9 @@ says, so the rule says nothing there, as in checked (2026-10-18). The rule
 and every word it says are `backend/hqp_rate_check.py`, one place; the
 verdict reads it, and since the same day the HQPlayer screen too, before a
 play: a line under the row it names, the node's own atlas copy speaking
-there as on every screen of the node's. A verdict reads the atlas only as
+there as on every screen of the node's; while a track of such a queue that
+can play plays, a notice says it once per queue and setting, its Why?
+leading to that screen. A verdict reads the atlas only as
 the site published it: the shipped file, and of it only an entry whose
 release has a date — a trace and the log travel in a support warrant, and
 neither the node's own copy nor a file put at the shipped path before its

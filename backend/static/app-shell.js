@@ -11531,6 +11531,15 @@
       text: `${escapeHtml(d.what || 'Tracks')} — <span class="num">${d.count || 1}</span> of <span class="num">${d.total || 1}</span> not taken: ${reach}, or the files themselves cannot be opened (format, permissions).`,
     };
   };
+  // A queue that meets a rate HQPlayer cannot reach (backend/hqp_rate_check.py):
+  // its words are the rate check's own, carried in the notice's data and drawn
+  // as phrases — one place for them — and its toast leads to the HQPlayer
+  // screen, where the line and the knobs are.
+  NOTICE_COPY['hqplayer.rate_check'] = n => {
+    const d = n.data || {};
+    return { title: hqpPhrase(d.title), text: (d.text || []).map(hqpPhrase).join(' '),
+             action: { label: 'Why?', run: () => navigate('more/hqplayer') } };
+  };
   NOTICE_COPY['tools.missing'] = n => ({
     title: 'Media tools missing',
     text: `${escapeHtml(((n.data && n.data.tools) || []).join(', '))} not found — audio analysis and fingerprinting are skipped until installed.`,
@@ -11586,7 +11595,7 @@
           const prev = this.items.get(key);
           if (prev && prev.since === n.since) return;
           const c = noticeCopy(n);
-          this.toast({ kind: n.kind, title: c.title, text: c.text, key });
+          this.toast({ kind: n.kind, title: c.title, text: c.text, action: c.action || null, key });
         });
       }
       this.items = next;

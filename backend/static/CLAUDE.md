@@ -479,13 +479,20 @@ seen, `restored_notice`), a run whose put-back could not read the mode it
 measured or set the owner's selection there back, until that mode is judged
 at HQPlayer's nearest rest or a new run's start (`unchecked_notice`), one
 whose check left HQPlayer in that mode, until it is back where it was found
-(`stayed_notice`) and the CLI agents' sign-ins
+(`stayed_notice`), a queue that meets a rate HQPlayer cannot reach while a
+track of it that can play plays (the check the HQPlayer backend holds,
+`rate_notice`, since 2026-10-18) and the CLI agents' sign-ins
 (`claude_code.auth`, `codex_cli.auth`: while the assistant runs on one, or
 gear research waits for Claude Code — the gear chips and sheet say so in
 place, and the `ai_signin` guidance task lights the trail to the Sign in
 button until the sign-in is back) — the
 rule for WHEN a condition exists lives there, the words and the clock
-(local time, mono) live in `NOTICE_COPY` here. A condition with no ledger
+(local time, mono) live in `NOTICE_COPY` here — but for the rate check's
+notice (`hqplayer.rate_check`), whose words are the rate check's own
+(`backend/hqp_rate_check.py`, one place for every word it says), carried in
+its `data` as phrases its `NOTICE_COPY` entry draws. A copy may name an
+`action`: the notice's toast then carries it (the rate check's Why? opens
+the HQPlayer screen). A condition with no ledger
 keeps its `since` in `_derived_since` (`routers/settings.py`); its
 producers wake the channel on the bad AND the good transition. The music
 folder: every stream derives the set on every wake, so the readers share

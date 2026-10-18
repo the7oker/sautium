@@ -1235,6 +1235,16 @@ def _notice_items() -> List[Dict[str, Any]]:
         items.append({"key": "hqplayer.refused", "kind": "warning",
                       "since": refused["since"], "until": None,
                       "data": {k: refused[k] for k in ("what", "count", "total", "stream")}})
+    # A queue that meets a rate HQPlayer cannot reach (hqp_rate_check): said
+    # once per queue and setting while a track of it that can play plays —
+    # the HQPlayer backend holds the check; the words are the module's own,
+    # drawn as phrases, the toast's Why? the HQPlayer screen
+    from playback.manager import manager
+    active = manager.active
+    rate = active.rate_notice() if active is not None and active.id == "hqplayer" else None
+    if rate is not None:
+        items.append({"key": "hqplayer.rate_check", "kind": "warning",
+                      "since": rate["since"], "until": None, "data": rate["data"]})
     # A benchmark run cut short whose put-back the owner's own change
     # superseded: what HQPlayer still holds of its test settings — the volume
     # among them, left at the run's level when a person's DSP change or

@@ -2603,6 +2603,89 @@ def test_the_screen_says_nothing_where_the_queue_is_not_what_hqplayer_plays(fake
         assert "rate_check" not in hqp_router.get_state(dsp=True)
 
 
+def _rate_queue(fake, output, monkeypatch, tmp_path, sources):
+    """The queue on HQPlayer at a fixed 705.6 kHz, demo-sinc-a (2^x up) in
+    both slots, its adaptive output rate not checked here, no atlas file:
+    `sources` the queue's source rates — the held check judged again."""
+    import hqp_atlas
+    from playback import hqp_load
+    mgr, b = output
+    fake.replies["GetModes"], fake.replies["GetFilters"] = _ATLAS_MODES, _ATLAS_PCM
+    fake.replies["GetShapers"] = _ATLAS_DITHERS
+    fake.replies["State"], fake.replies["GetRates"] = _RATE_PCM
+    monkeypatch.setattr(hqp_load, "sources", lambda openers: sources)
+    monkeypatch.setattr(diag, "local_log_dir", lambda: tmp_path)
+    monkeypatch.setattr(hqp_atlas, "SHIPPED", tmp_path / "shipped.json")
+    monkeypatch.setattr(settings, "hqp_atlas_overlay", "")
+    _settings_xml(tmp_path, ("0", "0"), 1)
+    b._rate_event("state", "lists")
+    b.poke()
+    return mgr, b
+
+
+def _rate_notice_said(b):
+    from hqp_atlas import plain
+    n = b.rate_notice()
+    return n and (plain(n["data"]["title"]), [plain(t) for t in n["data"]["text"]])
+
+
+def test_a_queue_hqplayer_cannot_play_in_part_is_said_once_while_a_track_that_can_play_plays(
+        fake, output, monkeypatch, tmp_path):
+    from hqp_rate_check import Sources
+    from playback import hqp_load
+    mgr, b = _rate_queue(fake, output, monkeypatch, tmp_path, Sources({44100: 2, 48000: 1}, first=44100))
+    assert _wait(lambda: b.rate_notice() is not None, 5.0)
+    assert _rate_notice_said(b) == ("Some tracks in the queue cannot play at 705.6 kHz", [
+        "HQPlayer describes demo-sinc-a as 2^x up: 705.6 kHz is no power-of-two multiple of 48 kHz, so "
+        "HQPlayer will stop on the 48 kHz tracks in the queue."])
+    since = b.rate_notice()["since"]
+    # a source rate joining the refused ones in the same queue: the words, not the onset
+    monkeypatch.setattr(hqp_load, "sources", lambda openers: Sources({44100: 2, 48000: 1, 96000: 1}, first=44100))
+    b.queue_changed("append")
+    assert _wait(lambda: "48 kHz and 96 kHz" in _rate_notice_said(b)[1][0], 5.0)
+    assert b.rate_notice()["since"] == since
+    # a pause, then Play again in the same queue: the same onset, no new toast
+    assert b.pause()
+    assert _wait(lambda: mgr._latest_status.get("state") == "paused", 5.0)
+    assert b.rate_notice()["since"] == since
+    assert b.play()
+    assert _wait(lambda: mgr._latest_status.get("state") == "playing", 5.0)
+    assert b.rate_notice()["since"] == since
+    # an Any filter through the screen's change: gone at the next tick
+    fake.replies["State"] = _RATE_PCM[0].replace('filter="5" filter1x="5" filterNx="5"',
+                                                 'filter="8" filter1x="8" filterNx="8"')
+    hb.change_dsp({"filter": 8, "filter1x": 8})
+    assert _wait(lambda: b.rate_notice() is None, 5.0)
+
+
+def test_a_started_track_hqplayer_cannot_reach_speaks_through_its_verdict_alone(fake, output, monkeypatch,
+                                                                                tmp_path):
+    from hqp_rate_check import Sources
+    mgr, b = _rate_queue(fake, output, monkeypatch, tmp_path, Sources({48000: 2, 44100: 1}, first=48000))
+    assert _wait(lambda: b._rate_check is not None and b._rate_check.started_refused, 5.0)
+    _polls(fake, 2)
+    assert b._rate_check.groups and b.rate_notice() is None
+
+
+def test_the_held_rate_check_asks_nothing_on_a_plays_path(fake, output, monkeypatch, tmp_path):
+    from hqp_rate_check import Sources
+    mgr, b = _rate_queue(fake, output, monkeypatch, tmp_path, Sources({44100: 2, 48000: 1}, first=44100))
+    assert _wait(lambda: b.rate_notice() is not None, 5.0)
+    monkeypatch.setattr(b._sampler, "due", lambda *a, **k: False)     # its State reads aside
+    asked = ("State", "GetModes", "GetRates", "GetFilters", "GetShapers")
+    # a play: no event of the check's, nothing asked from the call to its answer
+    before = len(fake.arrivals)
+    assert b.play()
+    assert not [c for _, c in fake.arrivals[before:] if c in asked]
+    # a new queue: the check's event, its questions only once the owed Play has gone
+    before = len(fake.arrivals)
+    mgr.replace_queue([_item(f"E:/Music/D/0{i}.flac", 300 + i) for i in range(1, 4)], play=True)
+    assert _wait(lambda: "State" in [c for _, c in fake.arrivals[before:]], 8.0)
+    sent = [c for _, c in fake.arrivals[before:]]
+    adds = [i for i, c in enumerate(sent) if c == "PlaylistAdd"]
+    assert adds and not [c for c in sent[adds[0]:sent.index("Play")] if c in asked]
+
+
 def test_a_card_while_hqplayer_builds_or_is_lent_is_busy(fake, output, monkeypatch, tmp_path):
     from fastapi import HTTPException
     mgr, b = output
@@ -2763,11 +2846,12 @@ def test_a_change_answered_before_its_build_answers_building_and_sends_nothing_i
     assert _wait(lambda: mgr._latest_status.get("building") is not None)    # the poller says it
     with pytest.raises(hl.Building):
         b.pause()                                    # refused, never sent into the silence
-    began = out["building"]["since"]
     assert _wait(lambda: "building" not in mgr._latest_status
                  and mgr._latest_status["state"] == "playing")
-    during = [c for ts, c in fake.arrivals if ts >= began and c != "Status"]
-    assert during == []                              # nothing but Status asks reached it
+    # Nothing but Status asks reached it — what the change asks once it is
+    # built (the held rate check's State) comes after its silence
+    during = [c for ts, c in fake.arrivals if any(a <= ts < b for a, b in fake.silences) and c != "Status"]
+    assert during == []
     assert "Pause" not in [c for c, _ in fake.commands]
     assert "SelectTrack" not in [c for c, _ in fake.commands]    # it played on: no resume
     assert any(x and x["silent"] for x in buildings)

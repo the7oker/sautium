@@ -1304,7 +1304,16 @@ speaks too, the screen being the node's own. The key is absent with nothing
 to say, while HQPlayer is not the output, and while another controller's
 playlist plays (an entry not ours, a mirror that drifted). The screen draws
 the phrases in the limiter line's colour, the filter's after its facts, the
-modulator's under its row.
+modulator's under its row. While a track of such a queue that can play
+plays, the same is said once per queue and setting as the notice
+`hqplayer.rate_check`, its toast's Why? opening the HQPlayer screen: the
+HQPlayer backend holds the check, judged again on the poller's tick after an
+event — a queue change, a DSP change of this node's, HQPlayer coming back,
+the attach, the slot read moving, a sampled State that differs — reading
+State for a new queue, a DSP change, a return or the attach and the lists
+when none are held, the mode moved or HQPlayer came back, never while a
+mutation or a play press runs nor before a watched intent's first transport
+command. A started track that cannot play speaks through its verdict alone.
 
 **HQPlayer's own log** is read on demand — the Diagnostics screen, an
 attempt that ends `not_played` / `unknown` / `rate_refused` / `rejected`

@@ -95,3 +95,24 @@ def test_a_dump_node_has_no_deferral_for_its_family(cur):
     _status(cur, "lb_slice")
     _setting(cur, "musicbrainz.db_version", "20261007-002147")
     assert list(_deferred()) == ["lb_slice.deferred"]
+
+
+def test_the_rate_check_notice_is_the_hqplayer_backends_own(cur, monkeypatch):
+    """A queue that meets a rate HQPlayer cannot reach: the notice the
+    HQPlayer backend holds (its rate_notice), served as it gives it — the
+    module's phrases in `data` — and none while another output plays."""
+    import types
+    from playback import manager as manager_mod
+    held = {"since": ONSET, "data": {"title": [{"t": "Some tracks in the queue cannot play at 705.6 kHz"}],
+                                     "text": [[{"t": "HQPlayer describes demo-sinc-a as 2^x up: …"}]]}}
+
+    def served(active):
+        monkeypatch.setattr(manager_mod, "manager", types.SimpleNamespace(active=active))
+        return {i["key"]: i for i in settings_router._notice_items()}.get("hqplayer.rate_check")
+
+    assert served(types.SimpleNamespace(id="hqplayer", rate_notice=lambda: held)) == {
+        "key": "hqplayer.rate_check", "kind": "warning", "since": ONSET, "until": None,
+        "data": held["data"], "seen": False}
+    assert served(types.SimpleNamespace(id="hqplayer", rate_notice=lambda: None)) is None
+    assert served(types.SimpleNamespace(id="local")) is None
+    assert served(None) is None
