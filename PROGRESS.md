@@ -2841,8 +2841,12 @@ refused for that track's family — with HQPlayer's log line once its log is
 read, or that line alone. The next step names a filter HQPlayer describes as
 Any, the adaptive output rate in HQPlayer's own settings, or a rate of
 HQPlayer's list the tracks reach; for a modulator, another modulator or
-rate. The rule and every word it says are `backend/hqp_rate_check.py`, one
-place; on 2026-10-18 the verdict is the only surface that reads it. A
+rate. The adaptive output rate is read in its three states, by the manual's
+names — not checked, grayed, checked (`settings.xml`'s `adaptive_rate` and
+`auto_family`); grayed took a lower rate the filter reaches, as the manual
+says, so the rule says nothing there, as in checked (2026-10-18). The rule
+and every word it says are `backend/hqp_rate_check.py`, one place; on
+2026-10-18 the verdict is the only surface that reads it. A
 verdict reads the atlas only as the site published it: the shipped file, and
 of it only an entry whose release has a date — a trace and the log travel in
 a support warrant, and neither the node's own copy nor a file put at the

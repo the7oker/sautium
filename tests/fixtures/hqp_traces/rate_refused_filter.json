@@ -106,7 +106,7 @@
    "inputs": {
     "mode": "pcm",
     "rate": 768000,
-    "adaptive": false,
+    "adaptive": "not checked",
     "filter": {
      "name": "demo-sinc-a",
      "ratio": "2^x",

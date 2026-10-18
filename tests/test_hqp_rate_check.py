@@ -41,7 +41,7 @@ SDM_RATES = [{"index": i, "rate": r} for i, r in enumerate((0, 2822400, 5644800,
 PCM_RATES = [{"index": i, "rate": r} for i, r in enumerate((0, 44100, 88200, 705600, 768000))]
 
 
-def _inp(ratio="2^x", rate=768000, *, up=False, adaptive=False, mode="pcm", x1=True, **kw):
+def _inp(ratio="2^x", rate=768000, *, up=False, adaptive="not checked", mode="pcm", x1=True, **kw):
     f = Filter("demo-sinc-a", ratio, up)
     return Inputs(mode, rate, adaptive, f, f if x1 else None, **kw)
 
@@ -63,7 +63,7 @@ def _said(c):
     return out
 
 
-def _sdm(tmp_path, *, rate=2, engine="9.4.1", shaper=14, mode=2, adaptive=False, described=True, doc=None,
+def _sdm(tmp_path, *, rate=2, engine="9.4.1", shaper=14, mode=2, adaptive="not checked", described=True, doc=None,
          published=False):
     """HQPlayer in SDM mode with the synthetic atlas (or `doc`, a variant of
     it): demo-sinc-a ("⥣ 2^x") in both slots, the modulator by its index in
@@ -107,15 +107,17 @@ def test_the_1x_filter_judges_every_source_under_50_khz():
     assert [(g.name, g.sources) for g in c.groups] == [("demo-gauss-xa", (88200,))]
 
 
-def test_nothing_is_said_at_source_auto_or_with_the_adaptive_output_rate_on(tmp_path):
+def test_nothing_is_said_at_source_auto_or_with_the_adaptive_output_rate_grayed_or_checked(tmp_path):
     src = _src(44100, 48000, 96000)
     assert rc.check(_inp(), src).groups
-    for inp in (_inp(mode=None), _inp(rate=0), _inp(adaptive=True), _inp(ratio=None)):
+    for inp in (_inp(mode=None), _inp(rate=0), _inp(adaptive="grayed"), _inp(adaptive="checked"),
+                _inp(ratio=None)):
         c = rc.check(inp, src)
         assert not c.groups and rc.lines(c) == {} and rc.notice(c) is None
-    # SDM, where both halves would speak: the adaptive output rate on silences both
+    # SDM, where both halves would speak: HQPlayer picking the rate silences both
     assert {g.cause for g in rc.check(_sdm(tmp_path), src).groups} == {"modulator", "filter"}
-    assert not rc.check(_sdm(tmp_path, adaptive=True), src).groups
+    for state in ("grayed", "checked"):
+        assert not rc.check(_sdm(tmp_path, adaptive=state), src).groups
     assert not rc.check(_sdm(tmp_path, mode=0), src).groups           # [source]
     assert not rc.check(_sdm(tmp_path, rate=0), src).groups           # Auto
 
@@ -169,7 +171,7 @@ def test_the_modulator_half_reads_only_its_own_major_engine_and_what_it_names(tm
     assert later.engine == "9.4.1" and later.refused == {5644800: 44100, 12288000: 48000}
     assert not _sdm(tmp_path, shaper=16).refused           # a name the atlas does not hold
     pcm = rc.inputs({"mode": 1, "rate": 4, "filterNx": 10, "filter1x": -1, "shaper": 14}, MODES, PCM_RATES,
-                    _rows(PCM, "filter"), _rows(MODULATORS, "modulator"), adaptive=False,
+                    _rows(PCM, "filter"), _rows(MODULATORS, "modulator"), adaptive="not checked",
                     atlas=_read(tmp_path), engine="9.4.1")
     assert (pcm.mode, pcm.rate, pcm.modulator, pcm.refused, pcm.x1) == ("pcm", 768000, None, {}, None)
     assert pcm.nx == Filter("demo-sinc-a", "2^x", True)
@@ -238,7 +240,9 @@ def test_the_filters_fix_names_a_rate_only_where_every_track_reaches_it():
 
 
 def test_the_setting_key_is_the_mode_rate_slots_modulator_and_adaptive_state():
-    assert rc.check(_inp(), _src(44100)).key == ("pcm", 768000, "demo-sinc-a", "demo-sinc-a", None, False)
+    assert rc.check(_inp(), _src(44100)).key == ("pcm", 768000, "demo-sinc-a", "demo-sinc-a", None,
+                                                 "not checked")
+    assert rc.check(_inp(adaptive="grayed"), _src(44100)).key[-1] == "grayed"
     assert rc.check(_inp(adaptive=None, x1=False), _src()).key == \
         ("pcm", 768000, None, "demo-sinc-a", None, None)
 
@@ -275,7 +279,7 @@ def test_the_verdict_names_the_cause_and_quotes_hqplayers_line(tmp_path):
 def _states(tmp_path):
     """A check of every state the words cover."""
     src = Sources({44100: 2, 88200: 1, 48000: 1, 96000: 1}, dsd=1, streamed=1, first=44100)
-    for adaptive in (False, None):
+    for adaptive in ("not checked", None):
         yield rc.check(_sdm(tmp_path, adaptive=adaptive), src)
         yield rc.check(_sdm(tmp_path, rate=5, adaptive=adaptive), src)
         for ratio in ("2^x", "Int"):

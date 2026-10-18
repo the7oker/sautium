@@ -590,15 +590,18 @@ def test_local_cuda_reads_hqplayers_engine_setting(tmp_path, monkeypatch):
     assert hqp_library.local_cuda() == (False, None)
 
 
-def test_local_engine_reads_hqplayers_adaptive_output_rate(tmp_path, monkeypatch):
+def test_local_engine_reads_hqplayers_adaptive_output_rate_in_its_three_states(tmp_path, monkeypatch):
     import hqp_library
     from playback import hqp_diagnostics
     monkeypatch.setattr(hqp_diagnostics, "local_log_dir", lambda: tmp_path)
     assert hqp_library.local_engine() == (False, None, None)
-    # "1" on and "0" off, as the CUDA box writes its checked and clear
-    # states; a value never seen, and none at all: not known
-    for i, (attr, expect) in enumerate((('adaptive_rate="1"', True), ('adaptive_rate="0"', False),
-                                        ('adaptive_rate="2"', None), ("", None)), start=1):
+    # each state as Desktop 6.2.4 writes it, named as the manual names it;
+    # a pair never seen, half of one, and none at all: not known
+    for i, (attr, expect) in enumerate((('adaptive_rate="0" auto_family="0"', "not checked"),
+                                        ('adaptive_rate="1" auto_family="0"', "grayed"),
+                                        ('adaptive_rate="1" auto_family="1"', "checked"),
+                                        ('adaptive_rate="0" auto_family="1"', None),
+                                        ('adaptive_rate="1"', None), ("", None)), start=1):
         path = tmp_path / "settings.xml"
         path.write_text(f'<?xml version="1.0"?><hqplayer><engine cuda="1" {attr} type="asio"/></hqplayer>')
         os.utime(path, ns=(0, i * 1000))                            # a new version of the file

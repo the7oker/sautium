@@ -1455,17 +1455,19 @@ _RATE_SDM = ('<State mode="2" rate="5" filter="2" filter1x="2" filterNx="2" shap
 
 
 def _refusing(backend, fake, monkeypatch, tmp_path, *, sdm=False, filter="demo-sinc-a", line=None,
-              adaptive="0", shipped=None):
+              adaptive=("0", "0"), shipped=None):
     """HQPlayer on this machine at a fixed rate — PCM 705.6 kHz, or SDM at
     DSD256 (48k) with DMX7 512+fs — refusing the queue's first file at Play;
-    `line`: what its log says then; the synthetic atlas as the node's own
-    copy, and with `shipped` (dates for its releases, every one null in the
-    file) at the shipped path too."""
+    `adaptive`: its settings.xml's adaptive_rate and auto_family (not
+    checked); `line`: what its log says then; the synthetic atlas as the
+    node's own copy, and with `shipped` (dates for its releases, every one
+    null in the file) at the shipped path too."""
     import hqp_atlas
     from hqp_rate_check import Sources
     from playback import hqp_load
     (tmp_path / "settings.xml").write_text('<?xml version="1.0"?><hqplayer><engine cuda="0" '
-                                           f'adaptive_rate="{adaptive}"/><log enabled="1"/></hqplayer>')
+                                           f'adaptive_rate="{adaptive[0]}" auto_family="{adaptive[1]}"/>'
+                                           '<log enabled="1"/></hqplayer>')
     log = ["I 2001/05/06 10:00:00 AddURI(): file:///E:/Music/A [TR24]/01.flac", "I 2001/05/06 10:00:01 Play"]
     (tmp_path / "HQPlayer9Desktop.log").write_text("\n".join(log + ([line] if line else [])) + "\n")
     monkeypatch.setattr(diag, "local_log_dir", lambda: tmp_path)
@@ -1520,11 +1522,13 @@ def test_a_stop_the_rate_check_does_not_explain_is_watched_to_the_window(traced,
     a = _closed(timeout=8.0)
     assert a.end == "window" and a.verdict["code"] == "not_played", a.verdict
     assert a.facts["rate"]["inputs"]["filter"] == {"name": "demo-gauss-x", "ratio": "Any", "up": False}
-    # the adaptive output rate on: nothing to judge by either
-    _refusing(traced, fake, monkeypatch, tmp_path, adaptive="1")
+    assert a.facts["rate"]["inputs"]["adaptive"] == "not checked"
+    # the adaptive output rate grayed: HQPlayer picks the rate, nothing to judge by either
+    _refusing(traced, fake, monkeypatch, tmp_path, adaptive=("1", "0"))
     assert traced.select(1)
     assert _wait(lambda: len(diag.attempts()) == 2)
     assert diag.attempts()[0].end == "window" and diag.attempts()[0].verdict["code"] == "not_played"
+    assert diag.attempts()[0].facts["rate"]["inputs"]["adaptive"] == "grayed"
 
 
 @pytest.mark.parametrize("shipped", [None, {}], ids=["the node's own copy", "shipped before its release"])

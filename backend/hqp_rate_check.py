@@ -10,8 +10,10 @@ the output rate ("Requested filter not possible with this rate combination
 
 - Nothing is said in the mode [source] or at the rate Auto, where the chosen
   rate is "only a default and upper limit" (HQPlayer Desktop manual 6.1,
-  §4.4), nor while HQPlayer's adaptive output rate is on: it then picks the
-  rate as it plays (§4.2).
+  §4.4), nor while HQPlayer's adaptive output rate is grayed or checked: it
+  then picks the rate as it plays (§4.2) — grayed, the default rate or a
+  lower one the filter and the DAC take; checked, a multiple of the
+  source's base rate.
 - In SDM mode the modulator comes first: an output rate the atlas measured
   it refused, for a source of the family the refusal was measured from, on
   the engine the atlas shows this HQPlayer (hqp_atlas.Atlas.engine_for) —
@@ -83,6 +85,10 @@ LOG_CAUSE = "HQPlayer refused this rate combination."
 OR = " or "
 
 BASE_LIMIT = 50_000       # a source under it runs the 1x filter (running_slot)
+# The adaptive output rate's states in which HQPlayer picks the rate as it
+# plays — grayed took 705.6 kHz for a 44.1 kHz source under a 768 kHz
+# default and a 2^x filter (Desktop 6.2.4, 2026-10-18)
+PICKS_RATE = frozenset({"grayed", "checked"})
 
 
 # -- What runs, and what reaches ---------------------------------------------------
@@ -147,7 +153,7 @@ class Filter(NamedTuple):
 class Inputs(NamedTuple):
     mode: Optional[str]                  # "pcm", "sdm"; None: [source], or not read
     rate: int                            # the chosen output rate, Hz; 0: Auto
-    adaptive: Optional[bool]             # the adaptive output rate: on, off; None: not known
+    adaptive: Optional[str]              # its box: "not checked", "grayed", "checked"; None: not known
     nx: Optional[Filter]
     x1: Optional[Filter]                 # None: no 1x filter set
     rates: Tuple[int, ...] = ()          # HQPlayer's rate list, for the fix that names one
@@ -190,7 +196,7 @@ def check(inp: Inputs, src: Sources) -> Check:
     """The rule (the module's docstring) over the source rates still to play."""
     key = (inp.mode, inp.rate, inp.x1.name if inp.x1 else None, inp.nx.name if inp.nx else None,
            inp.modulator, inp.adaptive)
-    silent = inp.mode is None or not inp.rate or inp.adaptive is True
+    silent = inp.mode is None or not inp.rate or inp.adaptive in PICKS_RATE
     fs_in = inp.refused.get(inp.rate) if inp.mode == "sdm" and inp.modulator else None
     found: Dict[tuple, List[int]] = {}
     for s in () if silent else sorted(src.pcm):
@@ -238,17 +244,19 @@ def _fix_rate(inp: Inputs, src: Sources, groups: List[Group]) -> Optional[int]:
 # -- The inputs from HQPlayer's answers ---------------------------------------------
 
 def inputs(state: Mapping[str, Any], modes: List[dict], rates: List[dict], filters: List[dict],
-           shapers: List[dict], *, adaptive: Optional[bool], atlas: Any = None,
+           shapers: List[dict], *, adaptive: Optional[str], atlas: Any = None,
            engine: Optional[str] = None, published: bool = False) -> Inputs:
     """The rule's inputs from what HQPlayer answered: its State (indices into
     the lists of the mode it is in) and those lists, as hqplayer_client
     returns them — the one mapping the screen, the notice and the verdict
-    share. `adaptive`: the adaptive output rate as HQPlayer saved it, None
-    where it is not known. `atlas` (hqp_atlas.Atlas) gives an SDM
-    modulator's refused rates on the engine it shows HQPlayer's (`engine`,
-    as GetInfo reports it); `published`, only an entry whose release has a
-    date, what the site published — a file at the shipped path may be one
-    put there before its release, and then it gives nothing at all."""
+    share. `adaptive`: the adaptive output rate as HQPlayer saved it, by the
+    manual's names for its box's states ("not checked", "grayed",
+    "checked"), None where it is not known. `atlas` (hqp_atlas.Atlas) gives
+    an SDM modulator's refused rates on the engine it shows HQPlayer's
+    (`engine`, as GetInfo reports it); `published`, only an entry whose
+    release has a date, what the site published — a file at the shipped
+    path may be one put there before its release, and then it gives nothing
+    at all."""
     mode = mode_kind(next((m["name"] for m in modes if m["index"] == state.get("mode")), None))
     rate = next((r["rate"] for r in rates if r["index"] == state.get("rate")), 0)
     by_index = {f["index"]: f for f in filters}

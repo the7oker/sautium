@@ -325,16 +325,16 @@ def _this_machine() -> Dict[str, Any]:
 # "convolution" the grayed one (observed 2026-10-03); "0" the clear box.
 _CUDA_SETTING = {"0": "off", "1": "full", "convolution": "convolution"}
 # Its adaptive output rate is a three-state box too (HQPlayer Desktop manual
-# 6.1, §4.2): "1" reads as on and "0" as off, as the CUDA box writes its
-# checked and clear states; what the grayed state writes was never seen, so
-# any other value reads as not known.
-_ADAPTIVE_SETTING = {"0": False, "1": True}
+# 6.1, §4.2), written as two values — (adaptive_rate, auto_family), each
+# state as Desktop 6.2.4 wrote it (observed 2026-10-18) — and named as the
+# manual names them; any other pair reads as not known.
+_ADAPTIVE_SETTING = {("0", "0"): "not checked", ("1", "0"): "grayed", ("1", "1"): "checked"}
 
 
 class EngineSettings(NamedTuple):
     read: bool                        # settings.xml was read
     cuda: Optional[str]
-    adaptive_rate: Optional[bool]
+    adaptive_rate: Optional[str]      # "not checked", "grayed", "checked"
 
 
 _NOT_READ = EngineSettings(False, None, None)
@@ -342,12 +342,12 @@ _NOT_READ = EngineSettings(False, None, None)
 
 def local_engine() -> EngineSettings:
     """This machine's HQPlayer's engine settings as it saved them (<engine
-    cuda="…" adaptive_rate="…"/> in its settings.xml): CUDA offload and the
-    adaptive output rate. A value other than those seen (_CUDA_SETTING,
-    _ADAPTIVE_SETTING) reads as not known (None) rather than leaving an
-    older answer standing. Not read at all — no such file here, a data
-    folder that is not mounted or not readable, HQPlayer rewriting it this
-    very moment — `read` is False."""
+    cuda="…" adaptive_rate="…" auto_family="…"/> in its settings.xml):
+    CUDA offload and the adaptive output rate. A value other than those
+    seen (_CUDA_SETTING, _ADAPTIVE_SETTING) reads as not known (None)
+    rather than leaving an older answer standing. Not read at all — no such
+    file here, a data folder that is not mounted or not readable, HQPlayer
+    rewriting it this very moment — `read` is False."""
     from playback.hqp_diagnostics import local_log_dir
     d = local_log_dir()
     if d is None:
@@ -379,7 +379,7 @@ def _read_engine(path: str, mtime: int) -> EngineSettings:
     if node is None:
         return EngineSettings(True, None, None)
     return EngineSettings(True, _CUDA_SETTING.get(node.get("cuda")),
-                          _ADAPTIVE_SETTING.get(node.get("adaptive_rate")))
+                          _ADAPTIVE_SETTING.get((node.get("adaptive_rate"), node.get("auto_family"))))
 
 
 def note_info(endpoint_id: int, info: Dict[str, str], *, here: bool) -> None:

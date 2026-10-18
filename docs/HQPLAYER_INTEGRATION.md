@@ -1266,6 +1266,15 @@ back a failure from its start. The same failure three plays in a row is the
 `unreachable`, or on that slot playing). API: `GET /api/player/diagnostics/hqplayer` (attempts, the failing
 run, `client_errors`), `…/hqplayer/{id}` (one whole trace), `…/hqplayer/log`.
 
+The rate check reads the adaptive output rate of an HQPlayer on this machine
+from its `settings.xml`: the three-state box is two values of `<engine>`,
+`adaptive_rate` and `auto_family` — `"0"`/`"0"` not checked, `"1"`/`"0"`
+grayed, `"1"`/`"1"` checked (Desktop 6.2.4, observed 2026-10-18) — named as
+the manual names them. Grayed or checked, HQPlayer picks the rate as it plays
+(grayed took 705.6 kHz for a 44.1 kHz track under a 768 kHz default and a 2^x
+filter), so the check says nothing; another pair, or an HQPlayer elsewhere,
+reads as not known.
+
 **HQPlayer's own log** is read only on demand — the Diagnostics screen, an
 attempt that ends `not_played` / `unknown` / `rate_refused` / `rejected`
 without HQPlayer's words, a support warrant — never tailed. A refused rate
