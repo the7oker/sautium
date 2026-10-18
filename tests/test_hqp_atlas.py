@@ -239,6 +239,11 @@ def _break(doc, how):
         doc["engines"]["9.4.1"]["modulators"]["dmx7ec-a"]["rates"]["12288000"]["idle_db"]["by"] = "echo"
     elif how == "a range without its min":
         del _filter(doc, "demo-gauss-x")["contexts"]["1x-44.1k-705.6k"]["position_dependent"]["f_3db_khz"]["min"]
+    elif how == "a rate longer than int() reads":
+        rates = doc["engines"]["9.4.1"]["modulators"]["dmx5"]["rates"]
+        rates["1" * 5000] = rates["5644800"]
+    elif how == "an engine longer than int() reads":
+        doc["engines"]["9" * 5000 + ".4.1"] = doc["engines"]["9.4.1"]
     return doc
 
 
@@ -248,7 +253,8 @@ BREAKS = ("another schema", "a missing key", "a wrong type deep inside", "an unr
           "a group figure outside the closed list", "a group it names that the file does not hold",
           "an entry under another slug", "a rate no label names", "a group not approved",
           "a source it cites that the file does not hold", "no engine", "a group figure's bound set by a list",
-          "an idle bound set by no excitation the words name", "a range without its min")
+          "an idle bound set by no excitation the words name", "a range without its min",
+          "a rate longer than int() reads", "an engine longer than int() reads")
 
 
 @pytest.mark.parametrize("how", BREAKS)
@@ -299,6 +305,13 @@ def test_a_lone_surrogate_in_a_text_is_refused_whole_and_an_escaped_pair_is_not(
     (tmp_path / "overlay.json").write_text(json.dumps(doc), encoding="utf-8")      # the escape, in ASCII
     assert hqp_atlas.read(tmp_path / "shipped.json", tmp_path / "overlay.json") is None
     assert "not text of its shape, at groups[1].say" in caplog.text
+    # A pair's difference is free in shape, but a text in it is drawn as it stands
+    doc = _doc()
+    doc["pairs"][0]["contexts"]["1x-44.1k-705.6k"]["difference"]["phase"] = ["linear", "mini\ud800mum"]
+    (tmp_path / "overlay.json").write_text(json.dumps(doc), encoding="utf-8")
+    assert hqp_atlas.read(tmp_path / "shipped.json", tmp_path / "overlay.json") is None
+    assert "not text of its shape, at pairs[0].contexts.1x-44.1k-705.6k.difference" in caplog.text
+    doc = _doc()
     doc["groups"][1]["say"] = "three names \U0001f3a7 alike"
     (tmp_path / "overlay.json").write_text(json.dumps(doc), encoding="utf-8")      # an escaped pair
     assert hqp_atlas.read(tmp_path / "shipped.json", tmp_path / "overlay.json") is not None

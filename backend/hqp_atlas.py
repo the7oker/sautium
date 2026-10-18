@@ -320,11 +320,14 @@ def _constant(name: str) -> None:
 _LINE = re.compile(r"[^\x00-\x1f\ud800-\udfff]*")
 _RELEASE = re.compile(r"[0-9]+\.[0-9]+\.[0-9]+/(?:pcm|sdm)")
 _DATE = re.compile(r"[0-9]{4}-[0-9]{2}-[0-9]{2}")
-_ENGINE = re.compile(r"[0-9]+\.[0-9]+\.[0-9]+")
+# Digits are bounded where `int()` reads them — an engine's parts here, a
+# rate and fs_in (_RATE, _INT) below: Python refuses to read past 4300
+# digits, and that would raise instead of refusing the file
+_ENGINE = re.compile(r"[0-9]{1,6}\.[0-9]{1,6}\.[0-9]{1,6}")
 _SLUG = re.compile(r"[a-z0-9]+(?:-[a-z0-9]+)*")
 _CONTEXT = re.compile(r"(?:1x|nx)-[0-9.]+k-[0-9.]+k")
-_RATE = re.compile(r"[0-9]+")
-_INT = re.compile(r"-?[0-9]+")
+_RATE = re.compile(r"[0-9]{1,10}")
+_INT = re.compile(r"-?[0-9]{1,10}")
 _VOLUME = re.compile(r"-?[0-9]+(?:\.[0-9]+)?")
 _GROUP_ID = re.compile(r"[a-z0-9-]+(?:\+[a-z0-9-]+)+")
 _PAIR_ID = re.compile(r"[a-z_]+:[a-z0-9-]+\|[a-z0-9-]+")
@@ -516,9 +519,15 @@ def _check(doc: Any) -> None:
 
 def _check_pair_context(c: Any, at: str) -> None:
     # A difference is free in the file's shape: one without words here shows
-    # nothing (`_pair_detail`). What else differs is closed.
+    # nothing (`_pair_detail`). A text in it is drawn as it stands, so it is
+    # held to a line's shape; its key is free, so the place stops before it.
+    # What else differs is closed.
     _obj(c, at)
-    _obj(c.get("difference"), f"{at}.difference")
+    difference = _obj(c.get("difference"), f"{at}.difference")
+    for values in difference.values():
+        for x in values if type(values) is list else ():
+            if type(x) is str:
+                _text(x, f"{at}.difference")
     also = _obj(c.get("also_differs"), f"{at}.also_differs")
     for key, value in also.items():
         _need(key in _ALSO, "a quantity what else differs does not hold", f"{at}.also_differs")
