@@ -43,6 +43,8 @@ from urllib.parse import urlsplit
 
 import psycopg2
 
+import hqp_atlas
+import hqp_rate_check
 from config import settings
 from hqplayer_client import (DSP_KNOBS, STATUS_READINGS, HQPlayerClient, PlaybackState,
                              file_path_to_uri, redact_uri, uri_to_file_path)
@@ -1841,9 +1843,10 @@ class HqpBackend(PlayerBackend):
                                           "shapers": hqp.get_shapers()}
                     if att is not None and status is not None:
                         att.tick(status, STATE_NAMES.get(status.state, "unknown"))
-                        if att.due(time.time()) is not None:
+                        if att.due(time.time()) is not None or att.stopped_at_start():
                             # Judged on what HQPlayer holds NOW, read in the
-                            # same tick.
+                            # same tick — and a track it stopped on at its
+                            # start at once, when the rate check says why.
                             reads = self._close_reads(hqp, att)
                     now = time.monotonic()
                     playing = self._playing(status) if status is not None else None
@@ -1925,6 +1928,9 @@ class HqpBackend(PlayerBackend):
                 self._register_failure(silent=miss[1])
                 if att is not None:
                     att.miss(miss[0], silent=miss[1])
+            if (att is not None and reads is not None and att.due(time.time()) is None
+                    and diag.names_cause(self._facts(att, reads)["rate"])):
+                att.request_end("refused")
             self._settle(att if att is not None and att.due(time.time()) is not None
                          else None, reads)
 
@@ -2570,12 +2576,16 @@ class HqpBackend(PlayerBackend):
     def _close_reads(self, hqp: HQPlayerClient, att: diag.Attempt) -> dict:
         """What HQPlayer holds as the attempt closes — its playlist (whose
         entries are ours, which one it plays) and, for a slot that never
-        played, its matrix profile. Questions of the poller's tick."""
+        moved, its State (the matrix profile; the setting the rate check
+        reads) and the lists of the mode it is in (_rate_facts). Questions of
+        the poller's tick, on a failure only."""
         entries = hqp.get_playlist()
         reads = {"playlist": None if hqp.last_error is not None
                  else [t.get("uri", "") for t in entries]}
-        if not att.played_so_far():
+        if not att.moved():
             reads["state"] = hqp.get_state()
+            reads["lists"] = {"modes": hqp.get_modes(), "rates": hqp.get_rates(),
+                              "filters": hqp.get_filters(), "shapers": hqp.get_shapers()}
         return reads
 
     def _settle(self, due_att: Optional[diag.Attempt], reads: Optional[dict]) -> None:
@@ -2595,20 +2605,25 @@ class HqpBackend(PlayerBackend):
         changed = diag.close(att, facts)
         self._last_closed = att
         v = att.verdict
-        if v["code"] not in ("played", "interrupted"):
+        if v["code"] == "rate_refused":
+            # Its words may name a refusal an atlas measured: the log line
+            # says the cause's kind only (backend.log travels in a warrant)
+            logger.info("HQPlayer %s attempt %d: rate_refused (%s)", att.intent, att.id, v["cause"])
+        elif v["code"] not in ("played", "interrupted"):
             logger.info("HQPlayer %s attempt %d: %s — %s", att.intent, att.id, v["code"],
                         diag.redact_text(v["sentence"]))
         if changed:
             _notify_notices()
-        if v["code"] in ("not_played", "unknown") or (v["code"] == "rejected"
-                                                      and not v.get("quote")):
+        if v["code"] in ("not_played", "unknown", "rate_refused") or (v["code"] == "rejected"
+                                                                      and not v.get("quote")):
             # HQPlayer's log names what the protocol did not — read once, now.
             threading.Thread(target=self._attach_log, args=(att, facts.get("uri")),
                              daemon=True, name="hqp-log").start()
 
     def _attach_log(self, att: diag.Attempt, uri: Optional[str]) -> None:
         source = diag.log_source(self._link.host, self._info)
-        diag.attach_log(att, diag.read_log(source, self._info, uri))
+        if diag.attach_log(att, diag.read_log(source, self._info, uri)):
+            _notify_notices()
 
     @property
     def link(self) -> HqpLink:
@@ -2696,7 +2711,41 @@ class HqpBackend(PlayerBackend):
                 "proxy": hits, "playlist": playlist, "item": who,
                 "context": {**self._context(),
                             "dsp": {"matrix_profile": state.get("matrix_profile") or None}},
+                "rate": self._rate_facts(ticks, item, reads),
                 "generation": self._queue.generation}
+
+    def _rate_facts(self, ticks: list, item: Optional[QueueItem], reads: Optional[dict]) -> Optional[dict]:
+        """What the rate check weighs for a slot that never moved
+        (diag.rate_facts): HQPlayer's setting and the lists read at the
+        close, with the filter and the modulator it ran — its own choice; the
+        adaptive output rate where this machine's HQPlayer saved it; a
+        modulator's refusals from a shipped atlas only — a verdict leaves the
+        node (backend.log, a warrant's playback scope), the node's own copy
+        of the atlas never does. The source: the rate HQPlayer reported, else
+        the slot's file row. None without the reads."""
+        import hqp_library
+        state, lists = (reads or {}).get("state"), (reads or {}).get("lists") or {}
+        if state is None or any(lists.get(k) is None for k in ("modes", "rates", "filters", "shapers")):
+            return None
+        ran = next((t for t in reversed(ticks) if t.get("filter")), None) or {}
+        for key, rows, slots in (("filter", lists["filters"], ("filterNx", "filter1x")),
+                                 ("shaper", lists["shapers"], ("shaper",))):
+            index = next((r["index"] for r in rows if r["name"] == ran.get(key)), None)
+            if index is not None:
+                state = {**state, **{s: index for s in slots}}
+        inputs = hqp_rate_check.inputs(
+            state, lists["modes"], lists["rates"], lists["filters"], lists["shapers"],
+            adaptive=None if _stream_mode() else hqp_library.local_engine().adaptive_rate,
+            atlas=hqp_atlas.read(hqp_atlas.SHIPPED, None), engine=self._info.get("engine"))
+        source = next((t["src_rate"] for t in ticks if t.get("src_rate")), None)
+        if source is None and item is not None:
+            try:
+                source = hqp_load.sources([item.opener()]).first
+            except psycopg2.Error as e:
+                # A database that cannot answer costs the verdict its
+                # source, never the poll: it is not HQPlayer failing
+                logger.warning("A stopped track's source rate not read: %s", e)
+        return diag.rate_facts(inputs, source)
 
     def _queue_refs(self) -> set:
         """Every path and verbatim URI the queue hands over, as HQPlayer's

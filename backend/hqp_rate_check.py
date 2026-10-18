@@ -79,6 +79,7 @@ VERDICT_LINE = "HQPlayer stopped on it: “{line}”."
 VERDICT_LOG = " HQPlayer's log: “{line}”."
 LINE_FIX = {"sdm": "Pick another filter, modulator or output rate.",
             "pcm": "Pick another filter or output rate."}
+LOG_CAUSE = "HQPlayer refused this rate combination."
 OR = " or "
 
 BASE_LIMIT = 50_000       # a source under it runs the 1x filter (running_slot)

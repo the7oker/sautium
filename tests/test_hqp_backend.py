@@ -84,6 +84,9 @@ class FakeHqp:
         # Further <Status> attributes, sent as they stand — HQPlayer 6's
         # apod, output_delay and their kin.
         self.status_extra: dict[str, str] = {}
+        # What its <Status active_*> says it runs: the mode, the filter, the
+        # dither or modulator, the output rate.
+        self.active = {"mode": "PCM", "filter": "poly-sinc-gauss-long", "shaper": "none", "rate": 705600}
         self.mute = False
         self._down = False
         # Until when it answers nothing, on any connection — busy building a
@@ -302,9 +305,9 @@ class FakeHqp:
                 return (f'<Status state="{self.state}" track="{track}" '
                         f'position="{self.position}" length="{length}" volume="-3"{clips} '
                         f'tracks_total="{len(self.playlist)}" process_speed="1.6" '
-                        f'input_fill="0.9" output_fill="0.9" active_mode="PCM" '
-                        f'active_filter="poly-sinc-gauss-long" active_shaper="none" '
-                        f'active_rate="705600"{extra}>'
+                        f'input_fill="0.9" output_fill="0.9" active_mode="{self.active["mode"]}" '
+                        f'active_filter="{self.active["filter"]}" active_shaper="{self.active["shaper"]}" '
+                        f'active_rate="{self.active["rate"]}"{extra}>'
                         f'<metadata artist="Fake artist" album="Fake album" '
                         f'song="Fake song" genre=""{uri}'
                         + (f' gain="{self.track_gain}"' if self.track_gain is not None else '')
@@ -1435,6 +1438,119 @@ def test_a_new_queue_whose_first_track_hqplayer_stops_on_is_judged_on_that_track
     assert a.facts["slot"] == 1 and a.verdict["code"] == "not_played", a.verdict
     assert [s["command"] for s in a.facts["steps"]] == ["Stop", "Play"]
     assert [c for c, _ in fake.commands[n:] if c in ("Play", "SelectTrack")] == ["Play"]
+
+
+# -- A rate HQPlayer refuses (hqp_rate_check): rate_refused --------------------------
+# The traced queue's first file is a 48 kHz one (its row, as hqp_load.sources
+# reads it); HQPlayer, the fake, takes the Play for it and stops at once. Its
+# folder on this machine — settings.xml, its log — is a temporary one.
+
+_RATE_PCM = ('<State mode="1" rate="3" filter="5" filter1x="5" filterNx="5" shaper="1" volume="-3"/>',
+             "<GetRates>" + "".join(f'<RatesItem index="{i}" rate="{r}"/>' for i, r in
+                                    enumerate((0, 44100, 88200, 705600, 768000))) + "</GetRates>")
+_RATE_SDM = ('<State mode="2" rate="5" filter="2" filter1x="2" filterNx="2" shaper="4" volume="-3"/>',
+             "<GetRates>" + "".join(f'<RatesItem index="{i}" rate="{r}"/>' for i, r in
+                                    enumerate((0, 2822400, 5644800, 11289600, 6144000, 12288000)))
+             + "</GetRates>")
+
+
+def _refusing(backend, fake, monkeypatch, tmp_path, *, sdm=False, filter="demo-sinc-a", line=None,
+              adaptive="0", shipped=False):
+    """HQPlayer on this machine at a fixed rate — PCM 705.6 kHz, or SDM at
+    DSD256 (48k) with DMX7 512+fs — refusing the queue's first file at Play;
+    `line`: what its log says then; the synthetic atlas as the node's own
+    copy, and `shipped` as the shipped file too."""
+    import hqp_atlas
+    from hqp_rate_check import Sources
+    from playback import hqp_load
+    (tmp_path / "settings.xml").write_text('<?xml version="1.0"?><hqplayer><engine cuda="0" '
+                                           f'adaptive_rate="{adaptive}"/><log enabled="1"/></hqplayer>')
+    log = ["I 2001/05/06 10:00:00 AddURI(): file:///E:/Music/A [TR24]/01.flac", "I 2001/05/06 10:00:01 Play"]
+    (tmp_path / "HQPlayer9Desktop.log").write_text("\n".join(log + ([line] if line else [])) + "\n")
+    monkeypatch.setattr(diag, "local_log_dir", lambda: tmp_path)
+    monkeypatch.setattr(hqp_load, "sources", lambda openers: Sources({48000: 1}, first=48000))
+    (tmp_path / "overlay.json").write_bytes(_ATLAS.read_bytes())
+    monkeypatch.setattr(settings, "hqp_atlas_overlay", str(tmp_path / "overlay.json"))
+    monkeypatch.setattr(hqp_atlas, "SHIPPED", tmp_path / ("overlay.json" if shipped else "shipped.json"))
+    fake.replies["GetInfo"] = ('<GetInfo name="fake" product="Signalyst HQPlayer Fake" version="9" '
+                               'platform="Linux" engine="9.4.1"/>')
+    fake.replies["GetModes"] = _ATLAS_MODES
+    fake.replies["State"], fake.replies["GetRates"] = _RATE_SDM if sdm else _RATE_PCM
+    fake.replies["GetFilters"] = _ATLAS_SDM if sdm else _ATLAS_PCM
+    fake.replies["GetShapers"] = ("<GetShapers>" + _items("ShapersItem", [(0, "DMX5", "Gen1"), (4, "DMX7 512+fs", "Gen5")])
+                                  + "</GetShapers>") if sdm else _ATLAS_DITHERS
+    fake.active.update(mode="SDM (DSD)" if sdm else "PCM", filter=filter,
+                       shaper="DMX7 512+fs" if sdm else "DEMO-TPDF", rate=12288000 if sdm else 705600)
+    fake.refuse_play.add("A [TR24]/01.flac")
+    backend._info_due = True            # what HQPlayer says of itself, asked again at the next tick
+    backend.poke()
+    assert _wait(lambda: backend.info.get("engine") == "9.4.1", 5.0)
+
+
+def test_a_rate_the_filter_does_not_reach_is_judged_at_hqplayers_first_stop(traced, fake, monkeypatch,
+                                                                            tmp_path):
+    line = "E 2001/05/06 10:00:01 Requested filter not possible with this rate combination 48000/705600, stop"
+    _refusing(traced, fake, monkeypatch, tmp_path, line=line)
+    monkeypatch.setattr(diag, "OBSERVE_S", 60.0)        # closed at the first stopped tick, not the window
+    assert traced.select(1)
+    a = _closed(timeout=8.0)
+    assert a.end == "refused" and a.facts["closed"] - a.facts["t0"] < 5
+    v = a.verdict
+    assert (v["code"], v["cause"], v["title"]) == ("rate_refused", "filter", "HQPlayer refused the rate combination")
+    assert v["sentence"].startswith("HQPlayer describes demo-sinc-a as 2^x up: 705.6 kHz is no power-of-two "
+                                    "multiple of 48 kHz, and HQPlayer stopped on this track.")
+    assert v["next"] == ("Pick a filter HQPlayer describes as Any, or turn on adaptive output rate in HQPlayer's "
+                         "own settings (Output), or pick 768 kHz.")
+    # HQPlayer's log, read after the close: its line quoted in place
+    assert _wait(lambda: a.hqp_log is not None and "HQPlayer's log" in a.verdict["sentence"], 5.0)
+    assert a.verdict["sentence"].endswith(
+        "HQPlayer's log: “Requested filter not possible with this rate combination 48000/705600, stop”.")
+    assert traced._diagnosis(TrackStatus(state=PlaybackState.STOPPED, track_index=1, track_id="", position=0.0,
+                                         length=300.0, volume=-3.0))["code"] == "rate_refused"
+
+
+def test_a_stop_the_rate_check_does_not_explain_is_watched_to_the_window(traced, fake, monkeypatch, tmp_path):
+    _refusing(traced, fake, monkeypatch, tmp_path, filter="demo-gauss-x")      # Any: it reaches the rate
+    assert traced.select(1)
+    a = _closed(timeout=8.0)
+    assert a.end == "window" and a.verdict["code"] == "not_played", a.verdict
+    assert a.facts["rate"]["inputs"]["filter"] == {"name": "demo-gauss-x", "ratio": "Any", "up": False}
+    # the adaptive output rate on: nothing to judge by either
+    _refusing(traced, fake, monkeypatch, tmp_path, adaptive="1")
+    assert traced.select(1)
+    assert _wait(lambda: len(diag.attempts()) == 2)
+    assert diag.attempts()[0].end == "window" and diag.attempts()[0].verdict["code"] == "not_played"
+
+
+def test_the_nodes_own_atlas_never_reaches_a_verdict_its_line_does(traced, fake, monkeypatch, tmp_path, caplog):
+    line = "E 2001/05/06 10:00:01 Requested filter not possible with this rate combination 48000/12288000, stop"
+    _refusing(traced, fake, monkeypatch, tmp_path, sdm=True, line=line)
+    caplog.set_level(logging.INFO)
+    assert traced.select(1)
+    a = _closed(timeout=8.0)
+    assert a.end == "window" and a.facts["rate"]["inputs"]["refused"] == {}
+    assert _wait(lambda: a.hqp_log is not None and a.verdict["code"] == "rate_refused", 5.0)
+    assert a.verdict["sentence"] == ("HQPlayer stopped on it: “Requested filter not possible with this rate "
+                                     "combination 48000/12288000, stop”.")
+    assert a.verdict["next"] == "Pick another filter, modulator or output rate." and a.verdict["cause"] == "line"
+    bundle = diag.bundle_view(diag.log_source(traced.link.host, traced.info), traced.info)
+    # the node's copy holds DMX7 512+fs refused at DSD256 (48k) from 48k: none of it anywhere
+    for said in (json.dumps(a.facts, ensure_ascii=False), json.dumps(a.verdict, ensure_ascii=False),
+                 caplog.text, json.dumps(bundle, ensure_ascii=False)):
+        assert "· from 48k" not in said and "refused DMX7" not in said and '"12288000": 48000' not in said
+
+
+def test_a_shipped_atlas_names_the_modulator_hqplayer_refused(traced, fake, monkeypatch, tmp_path, caplog):
+    _refusing(traced, fake, monkeypatch, tmp_path, sdm=True, shipped=True)
+    caplog.set_level(logging.INFO)
+    assert traced.select(1)
+    a = _closed(timeout=8.0)
+    assert a.end == "refused" and a.verdict["cause"] == "modulator"
+    assert a.verdict["sentence"] == ("HQPlayer refused DMX7 512+fs at DSD256 · from 48k on engine 9.4.1, and it "
+                                     "stopped on this 48 kHz track.")
+    assert a.verdict["next"] == "Pick another modulator, or another output rate."
+    # the log line says the cause's kind, no sentence built from the atlas
+    assert "rate_refused (modulator)" in caplog.text and "from 48k" not in caplog.text
 
 
 def test_hqplayers_error_text_reaches_the_caller(fake):

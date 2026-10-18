@@ -1,0 +1,128 @@
+{
+ "expect": "rate_refused",
+ "note": "HQPlayer took the Play and stopped at once on a 44.1 kHz file at a fixed 768 kHz, the adaptive output rate off: the filter it describes as 2^x up reaches no power-of-two multiple of 44.1 kHz there. Closed at the first stopped tick.",
+ "facts": {
+  "intent": "replace",
+  "started": 1000.0,
+  "t0": 1000.2,
+  "closed": 1001.3,
+  "end": "refused",
+  "error": null,
+  "slot": 1,
+  "entry": 1,
+  "expected_uri": "file:///E:/Music/Artist/Album/01. Track.flac",
+  "uri": "file:///E:/Music/Artist/Album/01. Track.flac",
+  "mode": "path",
+  "token": null,
+  "handover": {
+   "uri": "file:///E:/Music/Artist/Album/01. Track.flac",
+   "ts": 999.8,
+   "add_ts": 999.9,
+   "mode": "path",
+   "track_id": "t-1",
+   "media_file_id": 11,
+   "title": "Track",
+   "artist": "Artist",
+   "ok": true,
+   "result": null,
+   "message": ""
+  },
+  "steps": [
+   {
+    "ts": 999.7,
+    "command": "Stop",
+    "result": "OK",
+    "message": "",
+    "attributes": {}
+   },
+   {
+    "ts": 1000.2,
+    "command": "Play",
+    "result": "OK",
+    "message": "",
+    "attributes": {}
+   }
+  ],
+  "adds": {
+   "count": 3,
+   "failed": []
+  },
+  "ticks": [
+   {
+    "ts": 1001.2,
+    "state": "stopped",
+    "track": 1,
+    "position": 0.0,
+    "length": 300.0,
+    "speed": 0.0,
+    "in_fill": 0.0,
+    "out_fill": 0.0,
+    "tracks_total": 3,
+    "mode": "PCM",
+    "filter": "demo-sinc-a",
+    "shaper": "TPDF",
+    "rate": 768000,
+    "src_rate": null
+   }
+  ],
+  "misses": [],
+  "proxy": null,
+  "playlist": {
+   "read": true,
+   "count": 3,
+   "at_slot": "file:///E:/Music/Artist/Album/01. Track.flac",
+   "at_slot_ours": true,
+   "at_slot_expected": true,
+   "expected_present": true,
+   "foreign": 0
+  },
+  "item": {
+   "track_id": "t-1",
+   "media_file_id": 11,
+   "title": "Track",
+   "artist": "Artist",
+   "album": "Album",
+   "kind": "file"
+  },
+  "context": {
+   "hqplayer": "127.0.0.1:4321",
+   "media_url": "192.0.2.10:8830",
+   "remote": false,
+   "mirror": "ours",
+   "endpoint_id": 7,
+   "info": {
+    "name": "EXAMPLE-PC",
+    "product": "Signalyst HQPlayer Desktop",
+    "version": "9",
+    "platform": "Windows",
+    "engine": "9.4.1"
+   },
+   "dsp": {
+    "matrix_profile": null
+   }
+  },
+  "generation": 4,
+  "rate": {
+   "inputs": {
+    "mode": "pcm",
+    "rate": 768000,
+    "adaptive": false,
+    "filter": {
+     "name": "demo-sinc-a",
+     "ratio": "2^x",
+     "up": true
+    },
+    "rates": [
+     44100,
+     88200,
+     705600,
+     768000
+    ],
+    "modulator": null,
+    "refused": {},
+    "engine": null
+   },
+   "source": 44100
+  }
+ }
+}

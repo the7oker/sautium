@@ -42,7 +42,7 @@ def fresh():
 @pytest.mark.parametrize("path", TRACES, ids=lambda p: p.stem)
 def test_recorded_traces_get_their_verdict(path):
     case = json.loads(path.read_text(encoding="utf-8"))
-    v = diag.verdict(case["facts"])
+    v = diag.verdict(case["facts"], case.get("hqp_log"))
     assert v["code"] == case["expect"], case["note"]
     assert v["title"] and v["sentence"]
 
@@ -62,7 +62,62 @@ def test_the_stop_after_a_dsp_change_elsewhere_is_the_owners():
 def test_every_cause_is_recorded():
     codes = {json.loads(p.read_text(encoding="utf-8"))["expect"] for p in TRACES}
     assert codes == {"unreachable", "played", "too_slow", "proxy_error", "no_fetch",
-                     "rejected", "external", "not_played", "unknown", "interrupted"}
+                     "rejected", "external", "not_played", "rate_refused", "unknown", "interrupted"}
+
+
+def _case(name):
+    return json.loads((FIXTURES / "hqp_traces" / f"{name}.json").read_text(encoding="utf-8"))
+
+
+def test_a_refused_rate_names_the_filter_or_the_modulator_with_their_fixes():
+    v = diag.verdict(_trace("rate_refused_filter"))
+    assert (v["title"], v["cause"]) == ("HQPlayer refused the rate combination", "filter")
+    assert v["sentence"] == ("HQPlayer describes demo-sinc-a as 2^x up: 768 kHz is no power-of-two multiple "
+                             "of 44.1 kHz, and HQPlayer stopped on this track.")
+    assert v["next"] == ("Pick a filter HQPlayer describes as Any, or turn on adaptive output rate in "
+                         "HQPlayer's own settings (Output), or pick 705.6 kHz.")
+    assert v["dsp"] == "PCM · demo-sinc-a · TPDF · 768 kHz"
+    m = diag.verdict(_trace("rate_refused_modulator"))
+    assert (m["cause"], m["next"]) == ("modulator", "Pick another modulator, or another output rate.")
+    assert m["sentence"] == ("HQPlayer refused DMX7 512+fs at DSD256 · from 48k on engine 9.4.1, and it "
+                             "stopped on this 48 kHz track.")
+
+
+def test_hqplayers_line_is_quoted_and_alone_names_nothing():
+    line_only = _case("rate_refused_line_only")
+    # without the log the rule names nothing: no cause, as before
+    assert diag.verdict(line_only["facts"])["code"] == "not_played"
+    v = diag.verdict(line_only["facts"], line_only["hqp_log"])
+    assert (v["code"], v["cause"]) == ("rate_refused", "line")
+    assert v["sentence"] == ("HQPlayer stopped on it: “Requested filter not possible with this rate combination "
+                             "48000/12288000, stop”.")
+    assert v["next"] == "Pick another filter, modulator or output rate."
+    # the rule's cause with the log: the line beside it
+    v = diag.verdict(_trace("rate_refused_filter"), line_only["hqp_log"])
+    assert v["sentence"].endswith("HQPlayer's log: “Requested filter not possible with this rate combination "
+                                  "48000/12288000, stop”.")
+    # a source no file row gave: the line's
+    facts = {**line_only["facts"], "rate": {**line_only["facts"]["rate"], "source": None}}
+    assert diag.verdict(facts, line_only["hqp_log"])["code"] == "rate_refused"
+
+
+def test_the_log_read_after_the_close_judges_the_attempt_again(fresh):
+    line_only = _case("rate_refused_line_only")
+    a = diag.Attempt(intent="replace", slot=1)
+    diag.close(a, line_only["facts"])
+    assert a.verdict["code"] == "not_played"
+    diag.attach_log(a, line_only["hqp_log"])
+    assert a.verdict["code"] == "rate_refused" and a.hqp_log is line_only["hqp_log"]
+    # a verdict with a cause of its own is left as it was
+    played = diag.Attempt(intent="select", slot=3)
+    diag.close(played, _trace("played_ran_out"))
+    diag.attach_log(played, line_only["hqp_log"])
+    assert played.verdict["code"] == "played"
+
+
+def test_the_logs_cause_names_neither_the_filter_nor_the_modulator():
+    line = "E 2001/05/06 10:00:01 Requested filter not possible with this rate combination 48000/12288000, stop"
+    assert diag.classify([line])["sentence"] == "HQPlayer refused this rate combination."
 
 
 def test_the_verdict_quotes_hqplayer_and_names_the_next_step():

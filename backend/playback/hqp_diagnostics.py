@@ -38,6 +38,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional
 
+import hqp_rate_check as rc
 from hqp_atlas import rate_name
 from hqplayer_client import CommandOutcome, redact_path, redact_uri, uri_to_file_path
 
@@ -162,13 +163,14 @@ class Attempt:
     ticks: list = field(default_factory=list)
     misses: list = field(default_factory=list)
     error: Optional[str] = None          # raised before a command reached HQPlayer
-    end: Optional[str] = None            # window | hard | owner | superseded | shutdown
+    end: Optional[str] = None            # window | hard | owner | superseded | shutdown | refused
     facts: Optional[dict] = None
     verdict: Optional[dict] = None
     hqp_log: Optional[dict] = None
     # A failure HQPlayer has since gone past — answered (an `unreachable`),
     # or played that very slot (note_playing): it explains nothing any more.
     cleared: bool = False
+    stop_asked: bool = False             # its stop at the start was judged (stopped_at_start)
 
     def record(self, o: CommandOutcome) -> None:
         """A command this intent sent, with HQPlayer's answer."""
@@ -206,7 +208,23 @@ class Attempt:
                 "speed": status.process_speed, "in_fill": status.input_fill,
                 "out_fill": status.output_fill, "tracks_total": status.tracks_total,
                 "mode": status.active_mode, "filter": status.active_filter,
-                "shaper": status.active_shaper, "rate": status.active_rate})
+                "shaper": status.active_shaper, "rate": status.active_rate,
+                "src_rate": status.src_rate})
+
+    def stopped_at_start(self) -> bool:
+        """Its first tick since the transport command says HQPlayer stopped
+        at 0 s, nothing having played: how a rate HQPlayer refuses looks — it
+        takes the Play and stops at once. True once: the close's questions
+        are asked then, and an attempt the rate check names a cause for
+        closes at that tick (end "refused") instead of at the window."""
+        with _lock:
+            if self.stop_asked or self.t0 is None or not self.ticks or _moved(self.ticks):
+                return False
+            last = self.ticks[-1]
+            if last["state"] != "stopped" or last["position"] > 0:
+                return False
+            self.stop_asked = True
+            return True
 
     def miss(self, message: str, *, silent: bool = False) -> None:
         """A status read that got nothing: `silent` when HQPlayer took it and
@@ -271,9 +289,10 @@ class Attempt:
                     "steps": copy.deepcopy(self.steps), "adds": copy.deepcopy(self.adds),
                     "ticks": copy.deepcopy(self.ticks), "misses": list(self.misses)}
 
-    def played_so_far(self) -> bool:
+    def moved(self) -> bool:
+        """Its position moved while HQPlayer said it played: audio left."""
         with _lock:
-            return any(t["state"] == "playing" for t in self.ticks)
+            return _moved(self.ticks)
 
 
 def close(attempt: Attempt, facts: dict) -> bool:
@@ -300,9 +319,22 @@ def record_unreachable(message: str, context: dict) -> bool:
                            "item": None, "context": context})
 
 
-def attach_log(attempt: Attempt, log: dict) -> None:
+def attach_log(attempt: Attempt, log: dict) -> bool:
+    """HQPlayer's log, read after the attempt closed. A verdict the protocol
+    left without a cause, or a refused rate, is judged again with it: the
+    log's line can name the refusal, and is quoted. The new verdict replaces
+    the old in place — the Diagnostics list, the sheet, Now Playing's offer;
+    no new toast. Returns whether the failing run changed."""
     with _lock:
         attempt.hqp_log = log
+        code = (attempt.verdict or {}).get("code")
+        facts = attempt.facts
+    if facts is None or code not in ("not_played", "unknown", "rate_refused"):
+        return False
+    v = verdict(facts, log)
+    with _lock:
+        attempt.verdict = v
+    return _run_changed()
 
 
 def note_answered() -> bool:
@@ -492,12 +524,13 @@ def _dsp_changed(ticks: list) -> bool:
     return len(loaded) > 1
 
 
-def verdict(f: dict) -> dict:
+def verdict(f: dict, log: Optional[dict] = None) -> dict:
     """The cause, from the facts an attempt gathered (playback.hqp_backend
-    _finalize; the shape the fixtures in tests/fixtures/hqp_traces record).
-    Positive evidence of playback is weighed before any absence of evidence:
-    a Next onto a track HQPlayer pre-buffered for gapless sends no new GET,
-    and a playlist that drifted mid-append is still ours."""
+    _finalize; the shape the fixtures in tests/fixtures/hqp_traces record)
+    and HQPlayer's log once it was read (attach_log). Positive evidence of
+    playback is weighed before any absence of evidence: a Next onto a track
+    HQPlayer pre-buffered for gapless sends no new GET, and a playlist that
+    drifted mid-append is still ours."""
     steps, ticks = f.get("steps") or [], f.get("ticks") or []
     t0 = f.get("t0") or f["started"]
     pl = f.get("playlist") or {}
@@ -557,9 +590,70 @@ def verdict(f: dict) -> dict:
         return _v("external", f)
     if owner:
         return _v("interrupted", f)
+    if ticks and not started and ticks[-1]["state"] == "stopped":
+        refused = _rate_refused(f, log)
+        if refused is not None:
+            return _v("rate_refused", f, **refused)
     if ticks and (not playing or ticks[-1]["state"] == "stopped"):
         return _v("not_played", f, stopped_after=stopped_after)
     return _v("unknown", f)
+
+
+# HQPlayer's line for a refused rate combination, the source's rate first
+# (_CAUSES rate_filter finds it in the log)
+_RATE_LINE = re.compile(r"Requested filter not possible with this rate combination (\d+)/(\d+)[^\n]*")
+
+
+def rate_facts(inputs: "rc.Inputs", source: Optional[int]) -> dict:
+    """The rate check's inputs as an attempt's facts keep them (JSON: the
+    traces record them, a warrant's playback scope carries them whole)."""
+    f = inputs.nx
+    return {"inputs": {"mode": inputs.mode, "rate": inputs.rate, "adaptive": inputs.adaptive,
+                       "filter": {"name": f.name, "ratio": f.ratio, "up": f.up} if f else None,
+                       "rates": list(inputs.rates), "modulator": inputs.modulator,
+                       "refused": {str(r): fs for r, fs in inputs.refused.items()},
+                       "engine": inputs.engine},
+            "source": source}
+
+
+def _rate_check(rate: Optional[dict], source: Optional[int]) -> Optional["rc.Check"]:
+    """The rate check over an attempt's one source, by the filter HQPlayer
+    ran it with (both slots, its own choice); None without its inputs."""
+    d = (rate or {}).get("inputs")
+    if not d or not source:
+        return None
+    f = d["filter"]
+    filt = rc.Filter(f["name"], f["ratio"], f["up"]) if f else None
+    inputs = rc.Inputs(d["mode"], d["rate"], d["adaptive"], filt, filt, tuple(d["rates"]), d["modulator"],
+                       {int(r): fs for r, fs in d["refused"].items()}, d["engine"])
+    return rc.check(inputs, rc.Sources({source: 1}, first=source))
+
+
+def names_cause(rate: Optional[dict]) -> bool:
+    """Whether the rate check names why an attempt's track stopped at its
+    start — the attempt then closes at once (Attempt.stopped_at_start)."""
+    check = _rate_check(rate, (rate or {}).get("source"))
+    return bool(check and check.groups)
+
+
+def _rate_refused(f: dict, log: Optional[dict]) -> Optional[dict]:
+    """rate_refused's words for an attempt that never moved and stopped: the
+    rate check's cause, the filter's or the modulator's, and HQPlayer's line
+    when its log was read — or that line alone; None with neither. The
+    source is the slot's rate as HQPlayer reported it or its file row gave
+    it (_facts), else the line's."""
+    cause = (log or {}).get("cause") or {}
+    line = _RATE_LINE.search(cause.get("line") or "") if cause.get("code") == "rate_filter" else None
+    rate = f.get("rate") or {}
+    source = rate.get("source") or (int(line.group(1)) if line else None)
+    check = _rate_check(rate, source)
+    if check is None:
+        mode = rc.mode_kind(next((t["mode"] for t in reversed(f.get("ticks") or []) if t.get("mode")), None))
+        check = rc.check(rc.Inputs(mode, 0, None, None, None), rc.Sources({}))
+    words = rc.verdict(check, source, line.group(0) if line else None)
+    if words is None:
+        return None
+    return {**words, "cause": check.groups[0].cause if check.groups else "line"}
 
 
 def dsp_line(f: dict) -> str:
@@ -652,6 +746,9 @@ def _v(code: str, f: dict, **detail) -> dict:
             sentence = (f"HQPlayer {got} but never started playing — a decoding problem, or "
                         "the output could not open at the required rate.")
         nxt = f"HQPlayer's log names the reason.{f' DSP: {dsp}.' if dsp else ''}"
+    elif code == "rate_refused":
+        # hqp_rate_check's words (_rate_refused), its cause kind beside them
+        title, sentence, nxt = detail.pop("title"), detail.pop("sentence"), detail.pop("next")
     elif code == "interrupted":
         title = "Interrupted"
         sentence = "Another action took over before it could play."
@@ -662,7 +759,7 @@ def _v(code: str, f: dict, **detail) -> dict:
         nxt = "HQPlayer's log may say more."
     out = {"code": code, "title": title, "sentence": sentence, "next": nxt}
     out.update({k: v for k, v in detail.items() if v is not None})
-    if dsp and code in ("too_slow", "not_played", "unknown"):
+    if dsp and code in ("too_slow", "not_played", "rate_refused", "unknown"):
         out["dsp"] = dsp
     return out
 
@@ -744,8 +841,8 @@ _CAUSES = [
     ("naa_lost", re.compile(r"NAA output .*not connected to adapter|NAA output network timeout"
                             r"|Audio Adapter keepalive", re.I),
      "HQPlayer lost its Network Audio Adapter."),
-    ("rate_filter", re.compile(r"Requested filter not possible with this rate combination"),
-     "This filter cannot run at this rate combination — pick another filter or output rate."),
+    # The filter or the modulator: the line names neither (rate_refused tells them apart)
+    ("rate_filter", re.compile(r"Requested filter not possible with this rate combination"), rc.LOG_CAUSE),
     ("format_rejected", re.compile(r"StartAudioClient\(\): no formats available"),
      "The output device accepts none of the formats HQPlayer offered."),
     ("decode_failed", re.compile(r"FLAC__STREAM_DECODER_SEEK_ERROR"),

@@ -1247,6 +1247,7 @@ checked in this order — positive evidence before any absence of it:
 | `proxy_error` | the media proxy answered 404 (token not registered — the restart race), 500 (file gone, CUE cut failed), 502/504 (provider), 401/403 (a bug) | play again / check the music folder |
 | `no_fetch` | an http hand-over HQPlayer never requested (none from the hand-over to 5 s after Play) | same LAN, the firewall for the media port, the Docker forward — host and port named |
 | `rejected` | PlaylistAdd or Play refused (HQPlayer's words quoted; "Empty transport" = nothing was taken), or the expected entry missing from its playlist | the file must be readable here; a copy in HQPlayer's library: Rescan it |
+| `rate_refused` | taken, then stopped at its start without moving, where the rate check (`backend/hqp_rate_check.py`) names why — the filter HQPlayer ran, by the ratio class HQPlayer describes it with; in SDM first the modulator, at a rate a shipped atlas file measured it refused for the track's family — or HQPlayer's log names a refused rate combination (its line quoted, attributed to nothing); judged at HQPlayer's first stop when the check names a cause | a filter HQPlayer describes as Any, the adaptive output rate in HQPlayer's own settings, a rate of HQPlayer's list the tracks reach; another modulator or rate |
 | `not_played` | taken (bytes served, or a path) but never `playing`, or it stopped again | HQPlayer's log, the DSP line |
 | `unknown` / `interrupted` | nothing explains it / another action took over first (not counted) | HQPlayer's log |
 
@@ -1266,8 +1267,13 @@ back a failure from its start. The same failure three plays in a row is the
 run, `client_errors`), `…/hqplayer/{id}` (one whole trace), `…/hqplayer/log`.
 
 **HQPlayer's own log** is read only on demand — the Diagnostics screen, an
-attempt that ends `not_played` / `unknown` / `rejected` without HQPlayer's
-words, a support warrant — never tailed. Lines read `<mark> YYYY/MM/DD
+attempt that ends `not_played` / `unknown` / `rate_refused` / `rejected`
+without HQPlayer's words, a support warrant — never tailed. A refused rate
+combination it names judges a `not_played`, `unknown` or `rate_refused`
+attempt again, in place: `rate_refused`, the line quoted. A verdict reads a
+shipped atlas file only, never the node's own copy — a trace and the log
+travel in a support warrant, that copy never does — and the log line of a
+`rate_refused` verdict says the cause's kind alone. Lines read `<mark> YYYY/MM/DD
 HH:MM:SS <text>` on Desktop and Embedded alike, in HQPlayer's LOCAL time (the
 Pi logs UTC, the Desktop here local time, the Docker node runs UTC), so an
 attempt's lines are found by its URI, never by time — the cause is read from
@@ -1300,7 +1306,8 @@ proxy's 404 (`AddURI(…): …GetHead(): 404`, `404 for range request`), a strea
 type refused (`unknown mime type`), the media server unreachable
 (`GetHead(): … socket error`), an empty playlist (`Empty transport`), the
 device busy or missing (`snd_pcm_open()`, `ASIOInit()`), the NAA lost, a
-filter impossible at the rate combination, an output accepting no format
+rate combination refused (`Requested filter not possible with this rate
+combination`, which names neither the filter nor the modulator), an output accepting no format
 (`StartAudioClient(): no formats available`), a decode failure, a file that
 would not open (`SetTransport(): failed`). `ReadFLACErrorCB(): lost sync`
 alone is a transient of FLAC over HTTP, not a cause. No licence or trial line
