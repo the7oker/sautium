@@ -2882,6 +2882,18 @@ into `rate_refused` after the toast keeps the toast's first title (older
 than the rate check); and an advance HQPlayer refuses inside a watched
 intent's window is judged as that intent's own slot, not as an advance.
 
+Open too (2026-10-19): a status is stamped before the poller waits for the
+connection, so one that waited behind another question starts an advance's
+deadline early by that wait, and one that waited behind a transport command
+is dropped though it already holds it (its tick comes one later); while
+HQPlayer refuses State or one of the four lists (no output device), the
+held rate check asks them again on every tick, each refusal entering the
+client's error ring; its questions are guarded once before up to five go
+out, so a press or an intent that comes meanwhile waits behind them; a
+database error in its judgement drops that judgement until another event;
+and the verdict's queue rates read the slot and the queue in two looks, so
+a track removed between them shifts them by one.
+
 ## Known Gotchas
 
 - **The Docker image took the node's secrets.** `./backend` is the build

@@ -226,10 +226,12 @@ class Attempt:
                                "message": message, "attributes": {}})
 
     def tick(self, status, state: str, read_at: float) -> None:
-        """A status the poller asked for at `read_at`. One asked before the
-        transport command went is what HQPlayer held before it — another
-        thread's command may pass between the poller's read and this call —
-        and no tick of the attempt."""
+        """A status the poller stamped at `read_at`, before asking for it.
+        One stamped before the transport command's answer (t0) is no tick of
+        the attempt: it may say what HQPlayer held before the command —
+        another thread's command passes between the poller's questions — and
+        one that waited behind the command for the connection only moves the
+        first tick to the next."""
         with _lock:
             if self.t0 is None or read_at < self.t0:
                 return
@@ -365,7 +367,7 @@ class Attempt:
 
 def tick_of(status, state: str, read_at: float) -> dict:
     """One status read as an attempt's trace keeps it, at the time the
-    poller asked for it."""
+    poller stamped it, before asking."""
     return {"ts": read_at, "state": state, "track": status.track_index,
             "position": status.position, "length": status.length,
             "speed": status.process_speed, "in_fill": status.input_fill,
