@@ -1,6 +1,6 @@
 {
  "expect": "rate_refused",
- "note": "SDM at DSD256 (48k), a 48 kHz file, the shipped atlas holding the modulator refused at that rate from 48k on the engine shown: the modulator's refusal, the filter reaching the rate.",
+ "note": "SDM at DSD256 (48k), a 48 kHz file, the atlas as published (the shipped file, its SDM release dated) holding the modulator refused at that rate from 48k on the engine shown: the modulator's refusal, the filter reaching the rate.",
  "facts": {
   "intent": "replace",
   "started": 1000.0,

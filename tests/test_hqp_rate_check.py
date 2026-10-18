@@ -18,7 +18,7 @@ import hqp_rate_check as rc  # noqa: E402
 from hqp_atlas import plain  # noqa: E402
 from hqp_rate_check import Filter, Inputs, Sources  # noqa: E402
 
-from test_hqp_atlas import BANNED, MODULATORS, PCM, SDM, _read, _rows  # noqa: E402
+from test_hqp_atlas import BANNED, MODULATORS, PCM, SDM, _doc, _read, _rows  # noqa: E402
 
 SOURCES = (22050, 32000, 44100, 48000, 88200, 96000, 176400, 192000)
 # The sources each class does not reach, by output rate: 705.6 kHz, 768 kHz,
@@ -63,16 +63,18 @@ def _said(c):
     return out
 
 
-def _sdm(tmp_path, *, rate=2, engine="9.4.1", shaper=14, mode=2, adaptive=False, described=True):
-    """HQPlayer in SDM mode with the synthetic atlas: demo-sinc-a ("⥣ 2^x")
-    in both slots, the modulator by its index in MODULATORS (14: DMX7 512+fs,
-    which the file refuses at DSD128 from 44.1k and at DSD256 (48k) from 48k)."""
+def _sdm(tmp_path, *, rate=2, engine="9.4.1", shaper=14, mode=2, adaptive=False, described=True, doc=None,
+         published=False):
+    """HQPlayer in SDM mode with the synthetic atlas (or `doc`, a variant of
+    it): demo-sinc-a ("⥣ 2^x") in both slots, the modulator by its index in
+    MODULATORS (14: DMX7 512+fs, which the file refuses at DSD128 from 44.1k
+    and at DSD256 (48k) from 48k)."""
     filters = _rows(SDM, "filter")
     if not described:
         filters = [{**f, "description": "", "parsed": None} for f in filters]
     state = {"mode": mode, "rate": rate, "filterNx": 10, "filter1x": 10, "shaper": shaper}
     return rc.inputs(state, MODES, SDM_RATES, filters, _rows(MODULATORS, "modulator"),
-                     adaptive=adaptive, atlas=_read(tmp_path), engine=engine)
+                     adaptive=adaptive, atlas=_read(tmp_path, doc), engine=engine, published=published)
 
 
 # -- What runs, and what reaches ---------------------------------------------------
@@ -171,6 +173,22 @@ def test_the_modulator_half_reads_only_its_own_major_engine_and_what_it_names(tm
                     atlas=_read(tmp_path), engine="9.4.1")
     assert (pcm.mode, pcm.rate, pcm.modulator, pcm.refused, pcm.x1) == ("pcm", 768000, None, {}, None)
     assert pcm.nx == Filter("demo-sinc-a", "2^x", True)
+
+
+def test_published_takes_a_modulators_refusals_only_from_a_release_with_a_date(tmp_path):
+    # every release of the synthetic file is null: a file put at the shipped
+    # path before its release, which gives nothing — as no file at all
+    early = _sdm(tmp_path, published=True)
+    assert early == _sdm(tmp_path)._replace(refused={}, engine=None)
+    assert [(g.cause, g.sources) for g in rc.check(early, _src(44100, 48000, 96000)).groups] == [
+        ("filter", (48000, 96000))]
+    doc = _doc()
+    doc["releases"]["9.4.1/sdm"] = "2001-05-06"
+    dated = _sdm(tmp_path, doc=doc, published=True)
+    assert dated == _sdm(tmp_path, doc=doc) and dated.refused == {5644800: 44100, 12288000: 48000}
+    # a PCM release's date is none of a modulator's
+    doc["releases"] = {"9.4.1/pcm": "2001-05-06", "9.4.1/sdm": None}
+    assert _sdm(tmp_path, doc=doc, published=True) == early
 
 
 def test_hqplayer_5_describes_no_class_and_knows_no_atlas_engine(tmp_path):

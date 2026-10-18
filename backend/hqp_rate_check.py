@@ -239,14 +239,16 @@ def _fix_rate(inp: Inputs, src: Sources, groups: List[Group]) -> Optional[int]:
 
 def inputs(state: Mapping[str, Any], modes: List[dict], rates: List[dict], filters: List[dict],
            shapers: List[dict], *, adaptive: Optional[bool], atlas: Any = None,
-           engine: Optional[str] = None) -> Inputs:
+           engine: Optional[str] = None, published: bool = False) -> Inputs:
     """The rule's inputs from what HQPlayer answered: its State (indices into
     the lists of the mode it is in) and those lists, as hqplayer_client
     returns them — the one mapping the screen, the notice and the verdict
     share. `adaptive`: the adaptive output rate as HQPlayer saved it, None
     where it is not known. `atlas` (hqp_atlas.Atlas) gives an SDM
     modulator's refused rates on the engine it shows HQPlayer's (`engine`,
-    as GetInfo reports it)."""
+    as GetInfo reports it); `published`, only an entry whose release has a
+    date, what the site published — a file at the shipped path may be one
+    put there before its release, and then it gives nothing at all."""
     mode = mode_kind(next((m["name"] for m in modes if m["index"] == state.get("mode")), None))
     rate = next((r["rate"] for r in rates if r["index"] == state.get("rate")), 0)
     by_index = {f["index"]: f for f in filters}
@@ -261,11 +263,11 @@ def inputs(state: Mapping[str, Any], modes: List[dict], rates: List[dict], filte
     modulator = (next((s["name"] for s in shapers if s["index"] == state.get("shaper")), None)
                  if mode == "sdm" else None)
     shown = atlas.engine_for(engine) if atlas is not None and modulator else None
-    refused: Dict[int, int] = {}
-    if shown is not None:
-        found = atlas.lookup("modulator", modulator, shown, "sdm")
-        if found is not None and found.entry is not None:
-            refused = {int(r): int(v["fs_in"]) for r, v in found.entry["rates_refused"].items()}
+    found = atlas.lookup("modulator", modulator, shown, "sdm") if shown is not None else None
+    entry = found.entry if found is not None else None
+    if published and (entry is None or not atlas.releases[entry["release"]]):
+        entry = shown = None
+    refused = {int(r): int(v["fs_in"]) for r, v in entry["rates_refused"].items()} if entry is not None else {}
     x1 = state.get("filter1x")
     return Inputs(mode, rate, adaptive, slot(state.get("filterNx")),
                   slot(x1) if x1 is not None and x1 >= 0 else None,

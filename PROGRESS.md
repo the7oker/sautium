@@ -2836,16 +2836,18 @@ rate. Such a stop read "HQPlayer could not play it"; since 2026-10-18 it is
 the verdict `rate_refused`, judged at HQPlayer's first stop: the filter
 HQPlayer ran, by the ratio class HQPlayer describes it with ("HQPlayer
 describes … as 2^x: 768 kHz is no power-of-two multiple of 44.1 kHz"), or in
-SDM mode first the modulator, at a rate a shipped atlas file measured it
+SDM mode first the modulator, at a rate the published atlas measured it
 refused for that track's family — with HQPlayer's log line once its log is
 read, or that line alone. The next step names a filter HQPlayer describes as
 Any, the adaptive output rate in HQPlayer's own settings, or a rate of
 HQPlayer's list the tracks reach; for a modulator, another modulator or
 rate. The rule and every word it says are `backend/hqp_rate_check.py`, one
 place; on 2026-10-18 the verdict is the only surface that reads it. A
-verdict reads a shipped atlas file only — a trace and the log travel in a
-support warrant, the node's own copy never does — and the verdict's log line
-says the cause's kind alone. A new queue's start is one Play since the same
+verdict reads the atlas only as the site published it: the shipped file, and
+of it only an entry whose release has a date — a trace and the log travel in
+a support warrant, and neither the node's own copy nor a file put at the
+shipped path before its release may. The verdict's log line says the cause's
+kind alone. A new queue's start is one Play since the same
 day: its first track used to be probed and skipped past when HQPlayer
 stopped on it, which hid such a refusal behind the track that played.
 

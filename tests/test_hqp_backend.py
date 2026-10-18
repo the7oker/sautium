@@ -1455,11 +1455,12 @@ _RATE_SDM = ('<State mode="2" rate="5" filter="2" filter1x="2" filterNx="2" shap
 
 
 def _refusing(backend, fake, monkeypatch, tmp_path, *, sdm=False, filter="demo-sinc-a", line=None,
-              adaptive="0", shipped=False):
+              adaptive="0", shipped=None):
     """HQPlayer on this machine at a fixed rate — PCM 705.6 kHz, or SDM at
     DSD256 (48k) with DMX7 512+fs — refusing the queue's first file at Play;
     `line`: what its log says then; the synthetic atlas as the node's own
-    copy, and `shipped` as the shipped file too."""
+    copy, and with `shipped` (dates for its releases, every one null in the
+    file) at the shipped path too."""
     import hqp_atlas
     from hqp_rate_check import Sources
     from playback import hqp_load
@@ -1471,7 +1472,11 @@ def _refusing(backend, fake, monkeypatch, tmp_path, *, sdm=False, filter="demo-s
     monkeypatch.setattr(hqp_load, "sources", lambda openers: Sources({48000: 1}, first=48000))
     (tmp_path / "overlay.json").write_bytes(_ATLAS.read_bytes())
     monkeypatch.setattr(settings, "hqp_atlas_overlay", str(tmp_path / "overlay.json"))
-    monkeypatch.setattr(hqp_atlas, "SHIPPED", tmp_path / ("overlay.json" if shipped else "shipped.json"))
+    if shipped is not None:
+        doc = json.loads(_ATLAS.read_text(encoding="utf-8"))
+        doc["releases"].update(shipped)
+        (tmp_path / "shipped.json").write_text(json.dumps(doc), encoding="utf-8")
+    monkeypatch.setattr(hqp_atlas, "SHIPPED", tmp_path / "shipped.json")
     fake.replies["GetInfo"] = ('<GetInfo name="fake" product="Signalyst HQPlayer Fake" version="9" '
                                'platform="Linux" engine="9.4.1"/>')
     fake.replies["GetModes"] = _ATLAS_MODES
@@ -1522,26 +1527,29 @@ def test_a_stop_the_rate_check_does_not_explain_is_watched_to_the_window(traced,
     assert diag.attempts()[0].end == "window" and diag.attempts()[0].verdict["code"] == "not_played"
 
 
-def test_the_nodes_own_atlas_never_reaches_a_verdict_its_line_does(traced, fake, monkeypatch, tmp_path, caplog):
+@pytest.mark.parametrize("shipped", [None, {}], ids=["the node's own copy", "shipped before its release"])
+def test_an_atlas_not_published_never_reaches_a_verdict_its_line_does(traced, fake, monkeypatch, tmp_path, caplog,
+                                                                      shipped):
     line = "E 2001/05/06 10:00:01 Requested filter not possible with this rate combination 48000/12288000, stop"
-    _refusing(traced, fake, monkeypatch, tmp_path, sdm=True, line=line)
+    _refusing(traced, fake, monkeypatch, tmp_path, sdm=True, line=line, shipped=shipped)
     caplog.set_level(logging.INFO)
     assert traced.select(1)
     a = _closed(timeout=8.0)
     assert a.end == "window" and a.facts["rate"]["inputs"]["refused"] == {}
+    assert a.facts["rate"]["inputs"]["engine"] is None
     assert _wait(lambda: a.hqp_log is not None and a.verdict["code"] == "rate_refused", 5.0)
     assert a.verdict["sentence"] == ("HQPlayer stopped on it: “Requested filter not possible with this rate "
                                      "combination 48000/12288000, stop”.")
     assert a.verdict["next"] == "Pick another filter, modulator or output rate." and a.verdict["cause"] == "line"
     bundle = diag.bundle_view(diag.log_source(traced.link.host, traced.info), traced.info)
-    # the node's copy holds DMX7 512+fs refused at DSD256 (48k) from 48k: none of it anywhere
+    # the file holds DMX7 512+fs refused at DSD256 (48k) from 48k: none of it anywhere
     for said in (json.dumps(a.facts, ensure_ascii=False), json.dumps(a.verdict, ensure_ascii=False),
                  caplog.text, json.dumps(bundle, ensure_ascii=False)):
         assert "· from 48k" not in said and "refused DMX7" not in said and '"12288000": 48000' not in said
 
 
-def test_a_shipped_atlas_names_the_modulator_hqplayer_refused(traced, fake, monkeypatch, tmp_path, caplog):
-    _refusing(traced, fake, monkeypatch, tmp_path, sdm=True, shipped=True)
+def test_a_published_atlas_names_the_modulator_hqplayer_refused(traced, fake, monkeypatch, tmp_path, caplog):
+    _refusing(traced, fake, monkeypatch, tmp_path, sdm=True, shipped={"9.4.1/sdm": "2001-05-06"})
     caplog.set_level(logging.INFO)
     assert traced.select(1)
     a = _closed(timeout=8.0)

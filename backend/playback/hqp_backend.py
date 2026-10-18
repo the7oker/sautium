@@ -2719,10 +2719,12 @@ class HqpBackend(PlayerBackend):
         (diag.rate_facts): HQPlayer's setting and the lists read at the
         close, with the filter and the modulator it ran — its own choice; the
         adaptive output rate where this machine's HQPlayer saved it; a
-        modulator's refusals from a shipped atlas only — a verdict leaves the
-        node (backend.log, a warrant's playback scope), the node's own copy
-        of the atlas never does. The source: the rate HQPlayer reported, else
-        the slot's file row. None without the reads."""
+        modulator's refusals only as the site published them, the shipped
+        file's entries whose release has a date — a verdict leaves the node
+        (backend.log, a warrant's playback scope), and neither the node's own
+        copy of the atlas nor a file put at the shipped path before its
+        release may. The source: the rate HQPlayer reported, else the slot's
+        file row. None without the reads."""
         import hqp_library
         state, lists = (reads or {}).get("state"), (reads or {}).get("lists") or {}
         if state is None or any(lists.get(k) is None for k in ("modes", "rates", "filters", "shapers")):
@@ -2736,7 +2738,7 @@ class HqpBackend(PlayerBackend):
         inputs = hqp_rate_check.inputs(
             state, lists["modes"], lists["rates"], lists["filters"], lists["shapers"],
             adaptive=None if _stream_mode() else hqp_library.local_engine().adaptive_rate,
-            atlas=hqp_atlas.read(hqp_atlas.SHIPPED, None), engine=self._info.get("engine"))
+            atlas=hqp_atlas.read(hqp_atlas.SHIPPED, None), engine=self._info.get("engine"), published=True)
         source = next((t["src_rate"] for t in ticks if t.get("src_rate")), None)
         if source is None and item is not None:
             try:
