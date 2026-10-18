@@ -347,6 +347,12 @@ class TrackStatus:
     filter_20k: Optional[bool] = None
     filter_junk: Optional[int] = None
     display_position: Optional[float] = None
+    # HQPlayer 6's count of the entries it took: one more at each Play, a
+    # refused one included, and at each of its own Next at an entry's end —
+    # the end of the playlist too — while the stop it makes after a refusal
+    # or at the playlist's end leaves it (Desktop 6.2.4, observed
+    # 2026-10-18). None from a build that does not report it.
+    track_serial: Optional[int] = None
 
     @property
     def is_playing(self) -> bool:
@@ -1207,6 +1213,7 @@ class HQPlayerClient:
                 filter_20k=_optional(response, "filter_20k", _flag),
                 filter_junk=_optional(response, "filter_junk", int),
                 display_position=_optional(response, "display_position", float),
+                track_serial=_optional(response, "track_serial", int),
             )
 
             # Parse metadata if present

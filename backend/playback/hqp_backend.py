@@ -1018,6 +1018,9 @@ class HqpBackend(PlayerBackend):
         self._local = threading.local()
         self._last_closed: Optional[diag.Attempt] = None
         self._last_entry: Optional[Entry] = None
+        # The tick before this one, as (status, playing): HQPlayer's own
+        # advance is told by the two (_advance)
+        self._before: Optional[tuple] = None
         self._info: dict = {}
         # When a listen leaves a DSP sample (playback.hqp_load).
         self._sampler = hqp_load.Sampler()
@@ -1788,6 +1791,8 @@ class HqpBackend(PlayerBackend):
                         # lands on an empty list (live, 2026-09-27). A tick it
                         # did not answer is no return.
                         came_back = hqp.losses != self._losses or self._failures > 0
+                        if hqp.losses != self._losses:
+                            self._before = None     # a restart counts its track_serial afresh
                         self._losses = hqp.losses
                         if came_back:
                             self._verify_mirror = True
@@ -1841,6 +1846,8 @@ class HqpBackend(PlayerBackend):
                             left_lists = {"modes": hqp.get_modes(), "rates": hqp.get_rates(),
                                           "filters": hqp.get_filters(),
                                           "shapers": hqp.get_shapers()}
+                    if att is None and status is not None:
+                        att = self._advance(status)
                     if att is not None and status is not None:
                         att.tick(status, STATE_NAMES.get(status.state, "unknown"))
                         if att.due(time.time()) is not None or att.stopped_at_start():
@@ -1896,6 +1903,10 @@ class HqpBackend(PlayerBackend):
                     hqp_meter.meter.set_gain(None if status.track_gain is None
                                              else status.volume + status.track_gain)
                     self._last_entry = Entry.read(status) or self._last_entry
+                    self._before = (status, playing)
+                    if status.state == PlaybackState.PLAYING and diag.late_start(
+                            diag.tick_of(status, "playing"), self._queue.generation):
+                        _notify_notices()
                     if playing is not None:
                         # The slot playing on, its position moving and the DSP
                         # keeping up: a failure judged on it explains nothing now.
@@ -1945,6 +1956,31 @@ class HqpBackend(PlayerBackend):
             self._wake.wait(timeout=_poll_interval(max(self._failures, self._silent_misses)))
             self._wake.clear()
             tick += 1
+
+    def _advance(self, status) -> Optional[diag.Attempt]:
+        """HQPlayer's own advance as an attempt of its own (diag.advance):
+        this tick stopped, its track_serial one more than the tick before,
+        which played an entry of ours to its last seconds with one after it
+        — while no intent of ours is watched and no mutation or play press
+        runs. On this machine its log is followed while the attempt waits
+        (diag.LogFollower). Called on the poller."""
+        before, playing = self._before or (None, None)
+        if (before is None or playing is None or playing[1] is None or playing[2]
+                or status.state != PlaybackState.STOPPED or before.state != PlaybackState.PLAYING
+                or status.track_serial is None or before.track_serial is None
+                or status.track_serial != before.track_serial + 1
+                or not 1 <= before.track_index < before.tracks_total
+                or before.length <= 0 or before.position < before.length - diag.ADVANCE_END_S
+                or self._pressed is not None or self._queue.view()[2]):
+            return None
+        att = diag.advance(before.track_index, status.track_serial, before.output_delay, time.time())
+        with self._att_lock:
+            if self._attempt is not None:
+                return None         # an intent of ours began meanwhile: its attempt sees it
+            self._attempt = att
+        if diag.log_source(self._link.host, self._info)["kind"] == "local":
+            att.follow(self._info, self.poke)
+        return att
 
     def _playing(self, status, *, mutating: bool = False) -> Optional[tuple]:
         """Which queue slot HQPlayer reads: (index, item, foreign), or None —

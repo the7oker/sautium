@@ -87,6 +87,15 @@ class FakeHqp:
         # What its <Status active_*> says it runs: the mode, the filter, the
         # dither or modulator, the output rate.
         self.active = {"mode": "PCM", "filter": "poly-sinc-gauss-long", "shaper": "none", "rate": 705600}
+        # Its <Status track_serial>, one more at each Play and at each Next
+        # of its own (_end_of_track); None: not reported (HQPlayer 5)
+        self.track_serial = 0
+        # Every entry's length: at its end HQPlayer moves on by itself —
+        # stopped on no entry for `advance_polls` status reads (the tail, the
+        # next one's build), then playing the next
+        self.length = 300
+        self.advance_polls = 0
+        self._advancing = None
         self.mute = False
         self._down = False
         # Until when it answers nothing, on any connection — busy building a
@@ -273,6 +282,25 @@ class FakeHqp:
             uri = uri.replace("[", "%5B").replace("]", "%5D")
         return escape(uri, {'"': "&quot;"})
 
+    def _end_of_track(self) -> None:
+        """The entry it plays ran out: its own Next — track_serial one more,
+        stopped on no entry (track 0) for `advance_polls` status reads, then
+        playing the next; stopped there for good on one it refuses at Play
+        (refuse_play), and at the playlist's end (Desktop 6.2.4,
+        2026-10-18). Under the lock."""
+        nxt = self.track + 1
+        if self.track_serial is not None:
+            self.track_serial += 1
+        self.state, self.track, self.position = int(PlaybackState.STOPPED), 0, 0.0
+        if nxt <= len(self.playlist) and not any(part in self.playlist[nxt - 1] for part in self.refuse_play):
+            self._advancing = [nxt, self.advance_polls]
+
+    def _took(self) -> None:
+        """A Play or a jump took an entry: track_serial one more. Under the lock."""
+        self._advancing = None
+        if self.track_serial is not None:
+            self.track_serial += 1
+
     def _stops_if_refused(self) -> None:
         """The entry a Play went to is one it refuses at Play (refuse_play):
         stopped on at once. Under the lock."""
@@ -288,20 +316,30 @@ class FakeHqp:
                 return self.replies[cmd]
             if cmd == "Status":
                 opening = self.state == int(PlaybackState.PLAYING) and self.opening > 0
-                if opening:
+                if self._advancing is not None:
+                    if self._advancing[1] > 0:
+                        self._advancing[1] -= 1
+                    else:
+                        self.state, self.track = int(PlaybackState.PLAYING), self._advancing[0]
+                        self._advancing = None
+                elif opening:
                     self.opening -= 1
                 elif self.state == int(PlaybackState.PLAYING):
                     if self._starting:
                         self._starting -= 1
                     else:
                         self.position += 1.0
+                        if self.position >= self.length:
+                            self._end_of_track()
                 # The entry it reads, named as its playlist names it (Desktop
                 # 6.2.3 sends it to an unauthenticated client).
                 uri = (f' uri="{self._uri_out(self.playlist[self.track - 1])}"'
                        if 1 <= self.track <= len(self.playlist) else "")
-                track, length = (0, 0) if opening else (self.track, 300)
+                track, length = (0, 0) if opening else (self.track, self.length)
                 clips = f' clips="{self.clips}"' if self.clips is not None else ""
                 extra = "".join(f' {k}="{v}"' for k, v in self.status_extra.items())
+                if self.track_serial is not None:
+                    extra += f' track_serial="{self.track_serial}"'
                 return (f'<Status state="{self.state}" track="{track}" '
                         f'position="{self.position}" length="{length}" volume="-3"{clips} '
                         f'tracks_total="{len(self.playlist)}" process_speed="1.6" '
@@ -349,6 +387,8 @@ class FakeHqp:
                 return '<PlaylistRemove result="OK"/>'
             if cmd == "Play":
                 if self.playlist:
+                    if self.state == int(PlaybackState.STOPPED):
+                        self._took()
                     if self.state != int(PlaybackState.PLAYING):
                         self.position = 0.0
                         self._starting = self.start_polls
@@ -366,6 +406,8 @@ class FakeHqp:
             if cmd == "SelectTrack":
                 self.track = int(attrs["index"])
                 self.position = 0.0
+                if self.playlist:
+                    self._took()
                 if self.state == int(PlaybackState.STOPPED) and self.playlist:
                     # A stopped HQPlayer plays the slot it is given (its log:
                     # "GoTo 1", then "Play (1/0)"; Desktop 6.2.4).
@@ -384,6 +426,9 @@ class FakeHqp:
             self.playlist = []
             self.state = int(PlaybackState.STOPPED)
             self.track = 0
+            self._advancing = None
+            if self.track_serial is not None:
+                self.track_serial = 0           # counted afresh
             self._builds.clear()
             self._epoch += 1
             while True:
@@ -1455,9 +1500,10 @@ _RATE_SDM = ('<State mode="2" rate="5" filter="2" filter1x="2" filterNx="2" shap
 
 
 def _refusing(backend, fake, monkeypatch, tmp_path, *, sdm=False, filter="demo-sinc-a", line=None,
-              adaptive=("0", "0"), shipped=None):
+              adaptive=("0", "0"), shipped=None, refused="A [TR24]/01.flac"):
     """HQPlayer on this machine at a fixed rate — PCM 705.6 kHz, or SDM at
-    DSD256 (48k) with DMX7 512+fs — refusing the queue's first file at Play;
+    DSD256 (48k) with DMX7 512+fs — refusing the queue's first file at Play
+    (`refused`: another, or None);
     `adaptive`: its settings.xml's adaptive_rate and auto_family (not
     checked); `line`: what its log says then; the synthetic atlas as the
     node's own copy, and with `shipped` (dates for its releases, every one
@@ -1488,7 +1534,8 @@ def _refusing(backend, fake, monkeypatch, tmp_path, *, sdm=False, filter="demo-s
                                   + "</GetShapers>") if sdm else _ATLAS_DITHERS
     fake.active.update(mode="SDM (DSD)" if sdm else "PCM", filter=filter,
                        shaper="DMX7 512+fs" if sdm else "DEMO-TPDF", rate=12288000 if sdm else 705600)
-    fake.refuse_play.add("A [TR24]/01.flac")
+    if refused:
+        fake.refuse_play.add(refused)
     backend._info_due = True            # what HQPlayer says of itself, asked again at the next tick
     backend.poke()
     assert _wait(lambda: backend.info.get("engine") == "9.4.1", 5.0)
@@ -1563,6 +1610,151 @@ def test_a_published_atlas_names_the_modulator_hqplayer_refused(traced, fake, mo
     assert a.verdict["next"] == "Pick another modulator, or another output rate."
     # the log line says the cause's kind, no sentence built from the atlas
     assert "rate_refused (modulator)" in caplog.text and "from 48k" not in caplog.text
+
+
+_STOPPED = TrackStatus(state=PlaybackState.STOPPED, track_index=0, track_id="", position=0.0, length=0.0,
+                       volume=-3.0)
+
+
+def _advancing(traced, fake, monkeypatch, tmp_path, *, build=30.0, delay="100000", polls=0,
+               refused="A [TR24]/02.flac", log=True):
+    """The queue's first track played to its end at _refusing's setting —
+    PCM at a fixed 705.6 kHz, a 2^x filter, the 48 kHz source the rule finds
+    refused — then HQPlayer's own Next onto the second: refused at Play
+    (`refused`; None: none), or played once its stop has lasted `polls`
+    status reads. `delay`: its output delay in µs (None: not reported);
+    `build`: the deadline's allowance; `log`: its log there to follow.
+    Returns the advance's attempt, opened at the first stopped tick."""
+    monkeypatch.setattr(diag, "ADVANCE_BUILD_S", build)
+    _refusing(traced, fake, monkeypatch, tmp_path, refused=refused)
+    if not log:
+        (tmp_path / "HQPlayer9Desktop.log").unlink()
+    if delay is not None:
+        fake.status_extra["output_delay"] = delay
+    # long enough for the select's window to close first: an intent watched sees the stop itself
+    fake.length, fake.advance_polls = 6, polls
+    assert traced.select(1)
+    first = _closed()
+    assert first.intent == "select" and first.verdict["code"] == "played", first.verdict
+    assert _wait(lambda: traced._attempt is not None and traced._attempt.intent == "advance", 8.0)
+    return traced._attempt
+
+
+def _polls(fake, n):
+    """Wait out `n` more status reads of the poller."""
+    def count():
+        with fake._lock:
+            return sum(1 for c, _ in fake.commands if c == "Status")
+    start = count()
+    assert _wait(lambda: count() >= start + n, 3.0 * n)
+
+
+def test_hqplayers_own_advance_onto_a_refused_rate_is_judged_at_its_log_line(traced, fake, monkeypatch,
+                                                                              tmp_path):
+    att = _advancing(traced, fake, monkeypatch, tmp_path)
+    assert _wait(lambda: att.snapshot()["advance"]["log"] == "followed")
+    # HQPlayer writes its refusal once the tail has played out, after the stop
+    line = "E 2001/05/06 10:00:09 Requested filter not possible with this rate combination 48000/705600, stop"
+    with open(tmp_path / "HQPlayer9Desktop.log", "a", encoding="utf-8") as f:
+        f.write(line + "\n")
+    assert _wait(lambda: att.verdict is not None, 5.0)
+    assert diag.attempts()[0] is att and att.end == "refused"
+    f = att.facts
+    adv = f["advance"]
+    assert f["closed"] < adv["deadline"] == pytest.approx(f["t0"] + 2 * 0.1 + 30.0)
+    assert (adv["from"], adv["serial"], adv["output_delay"], adv["delay_assumed"], adv["log"], adv["line"]) == \
+        (1, fake.track_serial, 0.1, False, "followed", line)
+    assert f["slot"] == 2 and f["item"]["title"] == "Song 2" and f["steps"] == []
+    assert {t["state"] for t in f["ticks"]} == {"stopped"}
+    v = att.verdict
+    assert (v["code"], v["cause"]) == ("rate_refused", "filter")
+    assert v["sentence"] == ("HQPlayer describes demo-sinc-a as 2^x up: 705.6 kHz is no power-of-two multiple "
+                             "of 48 kHz, and HQPlayer stopped on this track. HQPlayer's log: “Requested filter "
+                             "not possible with this rate combination 48000/705600, stop”.")
+    assert traced._diagnosis(_STOPPED)["code"] == "rate_refused"
+
+
+def test_an_advance_whose_log_is_not_followed_is_judged_at_its_deadline(traced, fake, monkeypatch, tmp_path,
+                                                                        caplog):
+    caplog.set_level(logging.INFO)
+    monkeypatch.setattr(diag, "ADVANCE_DELAY_S", 0.25)
+    att = _advancing(traced, fake, monkeypatch, tmp_path, build=0.5, delay=None, log=False)
+    assert _wait(lambda: att.verdict is not None, 5.0)
+    adv = att.facts["advance"]
+    # no output delay reported: the one assumed, and the trace says so
+    assert (adv["output_delay"], adv["delay_assumed"], adv["log"]) == (0.25, True, None)
+    assert adv["deadline"] == pytest.approx(att.t0 + 2 * 0.25 + 0.5)
+    # its first tick a stop the rule explains, yet watched to its deadline: E17 is a Play's
+    assert att.end == "window" and att.facts["closed"] >= adv["deadline"]
+    assert (att.verdict["code"], att.verdict["cause"]) == ("rate_refused", "filter")
+    assert caplog.text.count(f"HQPlayer's log not followed for attempt {att.id}") == 1
+
+
+def test_a_log_that_shrinks_is_followed_no_further(traced, fake, monkeypatch, tmp_path, caplog):
+    caplog.set_level(logging.INFO)
+    att = _advancing(traced, fake, monkeypatch, tmp_path, build=2.0)
+    assert _wait(lambda: att.snapshot()["advance"]["log"] == "followed")
+    (tmp_path / "HQPlayer9Desktop.log").write_text("I 2001/05/06 10:00:00 rotated\n", encoding="utf-8")
+    assert _wait(lambda: att.verdict is not None, 8.0)
+    assert att.end == "window" and att.facts["advance"]["log"] == "lost"
+    assert att.verdict["code"] == "rate_refused"            # the rule's cause, at the deadline
+    assert caplog.text.count(f"not followed further for attempt {att.id}") == 1
+
+
+def test_an_advance_hqplayer_plays_is_not_kept(traced, fake, monkeypatch, tmp_path):
+    att = _advancing(traced, fake, monkeypatch, tmp_path, build=4.0, polls=1, refused=None)
+    assert _wait(lambda: att.verdict is not None, 10.0)
+    assert (att.verdict["code"], att.end) == ("played", "window")
+    assert [a.intent for a in diag.attempts()] == ["select"]
+
+
+def test_a_start_after_the_deadline_withdraws_the_verdict(traced, fake, monkeypatch, tmp_path):
+    att = _advancing(traced, fake, monkeypatch, tmp_path, build=0.5, polls=4, refused=None, log=False)
+    assert _wait(lambda: att.verdict is not None, 5.0)
+    assert att.verdict["code"] == "rate_refused"            # judged before HQPlayer played it
+    assert traced._diagnosis(_STOPPED)["code"] == "rate_refused"
+    # HQPlayer plays it after all, on the same take: the attempt is played
+    assert _wait(lambda: att.verdict["code"] == "played", 10.0)
+    assert att.cleared and att.verdict["late_s"] > att.facts["advance"]["deadline"] - att.t0
+    assert traced._diagnosis(_STOPPED) is None
+
+
+def test_a_play_of_a_refused_advances_entry_is_an_attempt_of_its_own(traced, fake, monkeypatch, tmp_path):
+    att = _advancing(traced, fake, monkeypatch, tmp_path, build=0.5, log=False)
+    assert _wait(lambda: att.verdict is not None, 5.0)
+    fake.refuse_play.clear()
+    fake.length = 300
+    serial = fake.track_serial
+    assert traced.select(2)                                 # another take: track_serial one more
+    assert _wait(lambda: diag.attempts()[0].intent == "select" and diag.attempts()[0].verdict is not None, 8.0)
+    assert diag.attempts()[0].verdict["code"] == "played" and fake.track_serial == serial + 1
+    assert att.verdict["code"] == "rate_refused"
+
+
+def test_no_advance_at_the_playlists_end_nor_for_a_stop_hqplayer_did_not_move_on_from(traced, fake,
+                                                                                       monkeypatch, tmp_path):
+    _refusing(traced, fake, monkeypatch, tmp_path, refused=None)
+    fake.length = 4
+    assert traced.select(2)             # the last entry, played to its end: its Next finds none
+    assert _closed().intent == "select"
+    assert _wait(lambda: fake.state == int(PlaybackState.STOPPED) and fake.track_serial == 2, 8.0)
+    _polls(fake, 2)
+    assert traced._attempt is None and [a.intent for a in diag.attempts()] == ["select"]
+    fake.length = 300
+    assert traced.select(1)
+    assert _wait(lambda: len(diag.attempts()) == 2)
+    # a stop from HQPlayer's own window: its track_serial stays
+    with fake._lock:
+        fake.state = int(PlaybackState.STOPPED)
+    _polls(fake, 2)
+    # an entry clicked mid-track in its window, which it refuses: one more, nowhere near the end
+    assert traced.select(1)
+    assert _wait(lambda: len(diag.attempts()) == 3)
+    with fake._lock:
+        fake.track_serial += 1
+        fake.state, fake.track = int(PlaybackState.STOPPED), 0
+    _polls(fake, 2)
+    assert traced._attempt is None and [a.intent for a in diag.attempts()] == ["select"] * 3
 
 
 def test_hqplayers_error_text_reaches_the_caller(fake):

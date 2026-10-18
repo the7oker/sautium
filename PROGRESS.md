@@ -2853,7 +2853,13 @@ a support warrant, and neither the node's own copy nor a file put at the
 shipped path before its release may. The verdict's log line says the cause's
 kind alone. A new queue's start is one Play since the same
 day: its first track used to be probed and skipped past when HQPlayer
-stopped on it, which hid such a refusal behind the track that played.
+stopped on it, which hid such a refusal behind the track that played. And
+HQPlayer's own advance onto an entry of another rate is an attempt of its
+own since then: HQPlayer stops on no entry first, its `track_serial` one
+more, and decides only after its tail, so the attempt is judged at the first
+stopped tick plus twice the output delay plus 11 s (the longest build
+measured), or at once on HQPlayer's refusal line where its log is read here;
+a start on the same take after that withdraws the verdict.
 
 ## Known Gotchas
 

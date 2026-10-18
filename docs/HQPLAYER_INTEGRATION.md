@@ -1247,7 +1247,7 @@ checked in this order — positive evidence before any absence of it:
 | `proxy_error` | the media proxy answered 404 (token not registered — the restart race), 500 (file gone, CUE cut failed), 502/504 (provider), 401/403 (a bug) | play again / check the music folder |
 | `no_fetch` | an http hand-over HQPlayer never requested (none from the hand-over to 5 s after Play) | same LAN, the firewall for the media port, the Docker forward — host and port named |
 | `rejected` | PlaylistAdd or Play refused (HQPlayer's words quoted; "Empty transport" = nothing was taken), or the expected entry missing from its playlist | the file must be readable here; a copy in HQPlayer's library: Rescan it |
-| `rate_refused` | taken, then stopped at its start without moving, where the rate check (`backend/hqp_rate_check.py`) names why — the filter HQPlayer ran, by the ratio class HQPlayer describes it with; in SDM first the modulator, at a rate the atlas as published (the shipped file, its release dated) measured it refused for the track's family — or HQPlayer's log names a refused rate combination (its line quoted, attributed to nothing); judged at HQPlayer's first stop when the check names a cause | a filter HQPlayer describes as Any, the adaptive output rate in HQPlayer's own settings, a rate of HQPlayer's list the tracks reach; another modulator or rate |
+| `rate_refused` | taken, then stopped at its start without moving, where the rate check (`backend/hqp_rate_check.py`) names why — the filter HQPlayer ran, by the ratio class HQPlayer describes it with; in SDM first the modulator, at a rate the atlas as published (the shipped file, its release dated) measured it refused for the track's family — or HQPlayer's log names a refused rate combination (its line quoted, attributed to nothing); judged at HQPlayer's first stop when the check names a cause — HQPlayer's own advance at its deadline, or at once on its log line here | a filter HQPlayer describes as Any, the adaptive output rate in HQPlayer's own settings, a rate of HQPlayer's list the tracks reach; another modulator or rate |
 | `not_played` | taken (bytes served, or a path) but never `playing`, or it stopped again | HQPlayer's log, the DSP line |
 | `unknown` / `interrupted` | nothing explains it / another action took over first (not counted) | HQPlayer's log |
 
@@ -1266,6 +1266,26 @@ back a failure from its start. The same failure three plays in a row is the
 `unreachable`, or on that slot playing). API: `GET /api/player/diagnostics/hqplayer` (attempts, the failing
 run, `client_errors`), `…/hqplayer/{id}` (one whole trace), `…/hqplayer/log`.
 
+HQPlayer's own advance is an attempt too (`advance`, since 2026-10-18).
+Onto an entry of another rate HQPlayer stops on no entry at the end of the
+one before — `track` 0, its `track_serial` one more (Desktop 6.2.4: one more
+at each Play, a refused one included, and at each Next of its own, the
+playlist's end too) — plays out its tail, then builds the next entry or
+refuses it, and Status shows neither. So the attempt opens at that first
+stopped tick when the tick before played an entry of ours in its last
+seconds with one after it, no intent of ours watched and no mutation or play
+press running, and is judged at its deadline: the first stopped tick + 2 ×
+the last playing tick's `output_delay` + 11 s — the tail measured up to
+1.71 × the delay (an output delay of 3.05 s: decided at +5.2 s, playing at
++6.2 s), the 11 s the longest build measured (a heavy SDM filter changed
+mid-play, ten seconds); with no delay reported, 3.5 s, and the trace says
+so. On this machine HQPlayer's log is followed meanwhile, and its refusal
+line closes the attempt at once as `rate_refused`. The close at the first
+stopped tick stays a Play's. An advance that played, or one another action
+took over, is not kept; a start on the same take after the deadline (the
+same `track_serial`) makes it `played` and clears its failure — a Play of
+that entry is another take, an attempt of its own.
+
 The rate check reads the adaptive output rate of an HQPlayer on this machine
 from its `settings.xml`: the three-state box is two values of `<engine>`,
 `adaptive_rate` and `auto_family` — `"0"`/`"0"` not checked, `"1"`/`"0"`
@@ -1275,11 +1295,17 @@ the manual names them. Grayed or checked, HQPlayer picks the rate as it plays
 filter), so the check says nothing; another pair, or an HQPlayer elsewhere,
 reads as not known.
 
-**HQPlayer's own log** is read only on demand — the Diagnostics screen, an
+**HQPlayer's own log** is read on demand — the Diagnostics screen, an
 attempt that ends `not_played` / `unknown` / `rate_refused` / `rejected`
-without HQPlayer's words, a support warrant — never tailed. A refused rate
-combination it names judges a `not_played`, `unknown` or `rate_refused`
-attempt again, in place: `rate_refused`, the line quoted. A verdict reads the
+without HQPlayer's words, a support warrant — and followed only while an
+advance attempt waits for its deadline, from the offset at its first stopped
+tick, on this machine only: opened once per attempt by a thread of its own,
+each status tick reads what was appended, and a log gone, cut or unreadable
+leaves the attempt to its deadline with one line in Sautium's log; while an
+earlier attempt's reader still hangs (an open on a mount that dropped), a
+newer one starts none and has its deadline alone, as its trace says. A refused
+rate combination it names judges a `not_played`, `unknown` or
+`rate_refused` attempt again, in place: `rate_refused`, the line quoted. A verdict reads the
 atlas only as the site published it — the shipped file, and of it only an
 entry whose release has a date: a trace and the log travel in a support
 warrant, and neither the node's own copy nor a file put at the shipped path
@@ -1297,9 +1323,9 @@ answers. Where it lives:
   on (on by default on the maintainer's machine; hundreds of MB, so it is read
   backwards to the last 200 meaningful lines — the NAA discovery heartbeat,
   `clUPnP::OnRequest()` and startup listings are dropped).
-- **HQPlayer Desktop, macOS**: data in `~/.hqplayer/`; on the test Mac
-  `<log enabled="0"/>` and no log file, so the file name with logging on is not
-  recorded here.
+- **HQPlayer Desktop, macOS**: data in `~/.hqplayer/`; with logging on the log
+  is `HQPlayer6Desktop.log` beside `settings.xml` (Desktop 6, the test Mac,
+  2026-10-18).
 - **HQPlayer Embedded / HQPlayer OS**: `GET http://<box>:8088/log` — plain
   text, the whole log since hqplayerd started, **no login** (verified
   2026-10-02 on HQPlayer OS, Embedded 6.1.0 / engine 6.2.3; the other admin

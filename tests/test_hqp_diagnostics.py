@@ -5,10 +5,13 @@ sizes, redaction on the way out, and HQPlayer's own log read and classified
 (lines as the maintainer's Desktop 5/6 and Embedded installations print them)."""
 
 import json
+import logging
 import sys
 import threading
+import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
+from types import SimpleNamespace
 
 BACKEND = Path(__file__).resolve().parent.parent / "backend"
 if str(BACKEND) not in sys.path:
@@ -118,6 +121,108 @@ def test_the_log_read_after_the_close_judges_the_attempt_again(fresh):
 def test_the_logs_cause_names_neither_the_filter_nor_the_modulator():
     line = "E 2001/05/06 10:00:01 Requested filter not possible with this rate combination 48000/12288000, stop"
     assert diag.classify([line])["sentence"] == "HQPlayer refused this rate combination."
+
+
+# -- HQPlayer's own advance -----------------------------------------------------------
+
+def _wait(pred, timeout=5.0):
+    end = time.monotonic() + timeout
+    while time.monotonic() < end:
+        if pred():
+            return True
+        time.sleep(0.02)
+    return pred()
+
+
+def _stopped_status(serial=5):
+    return SimpleNamespace(track_index=0, position=0.0, length=0.0, process_speed=0.0, input_fill=0.0,
+                           output_fill=0.0, tracks_total=0, active_mode="PCM", active_filter="demo-sinc-a",
+                           active_shaper="TPDF", active_rate=768000, src_rate=None, track_serial=serial)
+
+
+def test_the_start_signal_counts_an_advances_own_take_only():
+    def tick(state, position, serial):
+        return {"state": state, "position": position, "serial": serial}
+    assert not diag.started([tick("stopped", 0.0, 5)])
+    assert diag.started([tick("playing", 1.0, 5)], 5) and diag.started([tick("playing", 1.0, None)])
+    assert diag.started([tick("playing", 0.2, 5), tick("playing", 0.6, 5)], 5)
+    # a Play of that entry afterwards takes it again, one more: not this advance's start
+    assert not diag.started([tick("stopped", 0.0, 5), tick("playing", 2.0, 6)], 5)
+
+
+def test_an_advance_is_watched_from_its_first_stop_to_its_deadline():
+    att = diag.advance(1, 5, 1.04, 1000.0)
+    assert (att.intent, att.slot, att.t0) == ("advance", 2, 1000.0)
+    assert att.advance["deadline"] == pytest.approx(1000.0 + 2 * 1.04 + 11.0)
+    att.tick(_stopped_status(), "stopped")
+    # a stop the rule may explain, at its first tick: E17 is a Play's, not closed there
+    assert not att.stopped_at_start()
+    assert att.due(1013.0) is None and att.due(1013.1) == "window"
+    assumed = diag.advance(1, 5, None, 1000.0)
+    assert (assumed.advance["output_delay"], assumed.advance["delay_assumed"]) == (3.5, True)
+    assert assumed.advance["deadline"] == pytest.approx(1000.0 + 2 * 3.5 + 11.0)
+
+
+def test_hqplayers_log_is_followed_from_the_stop_a_whole_line_at_a_time(tmp_path, monkeypatch):
+    monkeypatch.setattr(settings, "hqplayer_data_dir", str(tmp_path))
+    log = tmp_path / "HQPlayer9Desktop.log"
+    # a refusal from before the stop is no refusal of this advance
+    log.write_text("E 2001/05/06 09:00:00 Requested filter not possible with this rate combination "
+                   "48000/705600, stop\n", encoding="utf-8")
+    woke = threading.Event()
+    att = diag.advance(1, 5, 1.0, time.time())
+    att.follow({"version": "9"}, woke.set)
+    assert _wait(lambda: att.snapshot()["advance"]["log"] == "followed")
+    line = "E 2001/05/06 10:00:09 Requested filter not possible with this rate combination 48000/705600, stop"
+    with open(log, "a", encoding="utf-8") as f:
+        f.write(line[:40])
+    att.follower.wake()
+    assert _wait(lambda: att.follower.offset == log.stat().st_size)      # half a line, read: it waits
+    assert att.end is None and not woke.is_set()
+    with open(log, "a", encoding="utf-8") as f:
+        f.write(line[40:] + "\n")
+    att.follower.wake()
+    assert _wait(woke.is_set)
+    assert att.end == "refused" and att.snapshot()["advance"]["line"] == line
+
+
+def test_a_log_gone_or_cut_leaves_an_advance_to_its_deadline_with_one_line(tmp_path, monkeypatch, caplog):
+    caplog.set_level(logging.INFO)
+    monkeypatch.setattr(settings, "hqplayer_data_dir", str(tmp_path))
+    gone = diag.advance(1, 5, 1.0, time.time())
+    gone.follow({"version": "9"}, lambda: None)
+    assert _wait(lambda: f"not followed for attempt {gone.id}" in caplog.text and not gone.follower.alive())
+    assert gone.snapshot()["advance"]["log"] is None and gone.end is None
+    log = tmp_path / "HQPlayer9Desktop.log"
+    log.write_text("I 2001/05/06 10:00:00 Play (1/0)\n" * 50, encoding="utf-8")
+    cut = diag.advance(1, 5, 1.0, time.time())
+    cut.follow({"version": "9"}, lambda: None)
+    assert _wait(lambda: cut.snapshot()["advance"]["log"] == "followed")
+    log.write_text("I 2001/05/06 10:00:09 rotated\n", encoding="utf-8")     # cut, or another file there
+    for _ in range(3):
+        cut.follower.wake()
+    assert _wait(lambda: cut.snapshot()["advance"]["log"] == "lost")
+    assert cut.end is None and caplog.text.count(f"attempt {cut.id}") == 1
+
+
+def test_while_a_log_read_hangs_a_newer_advance_starts_none(monkeypatch):
+    release = threading.Event()
+
+    def hanging(info):                  # an open on a mount that dropped
+        release.wait(5.0)
+        return None, "gone", None
+    monkeypatch.setattr(diag, "_local_log", hanging)
+    first = diag.advance(1, 5, 1.0, time.time())
+    first.follow({"version": "9"}, lambda: None)
+    second = diag.advance(2, 6, 1.0, time.time())
+    second.follow({"version": "9"}, lambda: None)
+    # its deadline alone, and the trace says why
+    assert second.follower is None and second.snapshot()["advance"]["log"] == "hung"
+    release.set()
+    assert _wait(lambda: not first.follower.alive())
+    third = diag.advance(3, 7, 1.0, time.time())
+    third.follow({"version": "9"}, lambda: None)
+    assert third.follower is not None and _wait(lambda: not third.follower.alive())
 
 
 def test_the_verdict_quotes_hqplayer_and_names_the_next_step():

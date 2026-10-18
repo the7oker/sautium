@@ -4,19 +4,21 @@ Why didn't it play? — the HQPlayer output's playback diagnostics
 
 Every play intent on the HQPlayer output — play, a jump, next/previous, a
 queue replaced with play, a rebuild that resumes, the resume after a DSP
-change — is one ATTEMPT: what Sautium handed HQPlayer for that slot and how
+change — is one ATTEMPT, and so is HQPlayer's own advance onto an entry it
+stops before (`advance`): what Sautium handed HQPlayer for that slot and how
 (a path it opens, a stream from the media proxy, a phantom preview), every
 command and HQPlayer's answer to it, the status for ten seconds after the
-first transport command, what the media proxy saw for that file's token, and
-a VERDICT: one of a fixed set of causes, with a sentence and the owner's next
-step. The last 20 are kept in memory and never in the database — a trace
+first transport command (an advance: from its first stopped tick to its
+deadline), what the media proxy saw for that file's token, and a VERDICT:
+one of a fixed set of causes, with a sentence and the owner's next step. The last 20 are kept in memory and never in the database — a trace
 holds paths and track identities, which are content: it leaves the process
 only through the local API (whole) and a support warrant's `playback` scope
 (paths cut to their last two components).
 
 HQPlayer's own log names what the protocol does not. It is read on demand —
 the Diagnostics screen, an attempt the protocol does not explain, a warrant
-— never tailed.
+— and followed only while an advance attempt waits for its deadline, from
+the offset at its first stopped tick, on this machine only (LogFollower).
 
 This module holds the data and the rules; playback.hqp_backend feeds it. The
 lock is a LEAF lock: held only to change or copy memory, never across a
@@ -52,6 +54,23 @@ FETCH_WINDOW_S = 5.0   # an http hand-over HQPlayer has not fetched by then neve
 # DSD256 on a laptop's CPU: 5–7 s, the port answering no Status meanwhile —
 # observed 2026-10-03; the WSL2 hop flaps for seconds while music plays on).
 START_LIMIT_S = 60.0
+# HQPlayer's own advance onto an entry of another rate: at the end of the one
+# before it stops on no entry (track 0, its track_serial one more), plays out
+# the tail, then builds the next entry or refuses it — the tail up to 1.71 ×
+# the output delay (an output delay of 3.05 s: decided at +5.2 s, playing at
+# +6.2 s; Desktop 6.2.4, 2026-10-18), a build up to ten seconds (a heavy SDM
+# filter changed mid-play, 2026-10-11). Judged at the first stopped tick +
+# ADVANCE_DELAYS × the last playing tick's output delay + ADVANCE_BUILD_S;
+# with no output delay reported, ADVANCE_DELAY_S (the largest measured,
+# rounded up), and the trace says so.
+ADVANCE_DELAYS = 2
+ADVANCE_BUILD_S = 11.0
+ADVANCE_DELAY_S = 3.5
+# ... and only from an entry's last seconds — its status read up to a second
+# before the stop, the position HQPlayer refreshes once a second, the length
+# in whole seconds: a click elsewhere in its window takes an entry of the
+# owner's choosing, not the next
+ADVANCE_END_S = 5.0
 RING_SIZE = 20
 LEDGER_SIZE = 2048
 LOG_LINES = 200
@@ -73,6 +92,7 @@ _ledger: "OrderedDict[str, dict]" = OrderedDict()   # handed URI → how and wit
 _by_slot: "OrderedDict[tuple, str]" = OrderedDict()  # slot key → the URI it was last handed as
 _last_id = 0
 _run_key = None
+_follower: Optional["LogFollower"] = None   # the newest advance's log reader
 
 
 # -- The hand-over ledger ---------------------------------------------------------
@@ -171,6 +191,13 @@ class Attempt:
     # or played that very slot (note_playing): it explains nothing any more.
     cleared: bool = False
     stop_asked: bool = False             # its stop at the start was judged (stopped_at_start)
+    # HQPlayer's own advance (advance()): the entry before, the take's
+    # track_serial, the output delay its deadline counts and the deadline,
+    # its log — None not followed (no log here), "followed", "lost" (a read
+    # that failed, a file cut short), "hung" (an earlier reader still hangs:
+    # none started) — and the refusal it named (heard): the trace's "advance"
+    advance: Optional[dict] = None
+    follower: Optional["LogFollower"] = None
 
     def record(self, o: CommandOutcome) -> None:
         """A command this intent sent, with HQPlayer's answer."""
@@ -202,14 +229,10 @@ class Attempt:
         with _lock:
             if self.t0 is None:
                 return
-            self.ticks.append({
-                "ts": time.time(), "state": state, "track": status.track_index,
-                "position": status.position, "length": status.length,
-                "speed": status.process_speed, "in_fill": status.input_fill,
-                "out_fill": status.output_fill, "tracks_total": status.tracks_total,
-                "mode": status.active_mode, "filter": status.active_filter,
-                "shaper": status.active_shaper, "rate": status.active_rate,
-                "src_rate": status.src_rate})
+            self.ticks.append(tick_of(status, state))
+            follower = self.follower
+        if follower is not None:
+            follower.wake()
 
     def stopped_at_start(self) -> bool:
         """Its first tick since the transport command says HQPlayer stopped
@@ -218,7 +241,9 @@ class Attempt:
         are asked then, and an attempt the rate check names a cause for
         closes at that tick (end "refused") instead of at the window."""
         with _lock:
-            if self.stop_asked or self.t0 is None or not self.ticks or _moved(self.ticks):
+            # An advance stops by its first tick: HQPlayer decides after its tail
+            if (self.stop_asked or self.t0 is None or self.advance is not None or not self.ticks
+                    or started(self.ticks)):
                 return False
             last = self.ticks[-1]
             if last["state"] != "stopped" or last["position"] > 0:
@@ -254,13 +279,16 @@ class Attempt:
 
     def due(self, now: float) -> Optional[str]:
         """Why it closes now, or None while it is still watching: the
-        window, and past it a start HQPlayer is still making (see
-        START_LIMIT_S) — judged before the audio leaves, a play that
-        initialises for seven seconds read as nothing explaining it."""
+        window — an advance's deadline — and past it a start HQPlayer is
+        still making (see START_LIMIT_S) — judged before the audio leaves, a
+        play that initialises for seven seconds read as nothing explaining
+        it."""
         with _lock:
             if self.end is not None:
                 return self.end
-            if self.t0 is None or now < self.t0 + OBSERVE_S:
+            if self.t0 is None:
+                return None
+            if now < (self.advance["deadline"] if self.advance else self.t0 + OBSERVE_S):
                 return None
             if now < self.t0 + START_LIMIT_S and self._starting():
                 return None
@@ -273,7 +301,7 @@ class Attempt:
         started a play) — or silence: it took the read and said nothing (a
         build). Refused or closed is HQPlayer away, judged at the window.
         Called under _lock."""
-        if _moved(self.ticks):
+        if started(self.ticks, self._serial()):
             return False
         last_tick = self.ticks[-1] if self.ticks else None
         last_miss = self.misses[-1] if self.misses else None
@@ -283,25 +311,179 @@ class Attempt:
 
     def snapshot(self) -> dict:
         with _lock:
-            return {"intent": self.intent, "started": self.started, "t0": self.t0,
-                    "end": self.end, "error": self.error, "slot": self.slot,
-                    "uris": list(self.uris) if self.uris else None,
-                    "steps": copy.deepcopy(self.steps), "adds": copy.deepcopy(self.adds),
-                    "ticks": copy.deepcopy(self.ticks), "misses": list(self.misses)}
+            out = {"intent": self.intent, "started": self.started, "t0": self.t0,
+                   "end": self.end, "error": self.error, "slot": self.slot,
+                   "uris": list(self.uris) if self.uris else None,
+                   "steps": copy.deepcopy(self.steps), "adds": copy.deepcopy(self.adds),
+                   "ticks": copy.deepcopy(self.ticks), "misses": list(self.misses)}
+            if self.advance is not None:
+                out["advance"] = dict(self.advance)
+            return out
 
     def moved(self) -> bool:
-        """Its position moved while HQPlayer said it played: audio left."""
+        """HQPlayer started it: audio left (started)."""
         with _lock:
-            return _moved(self.ticks)
+            return started(self.ticks, self._serial())
+
+    def _serial(self) -> Optional[int]:
+        """An advance's take; None for a play. Called under _lock."""
+        return self.advance["serial"] if self.advance else None
+
+    def follow(self, info: dict, wake_poller) -> None:
+        """Follow HQPlayer's log on this machine while this advance waits
+        for its deadline (LogFollower) — stopped as it closes. While an
+        earlier advance's reader is still alive (an open on a mount that
+        dropped hangs), none is started: this one has its deadline alone,
+        and the trace says so."""
+        global _follower
+        with _lock:
+            if _follower is not None and _follower.alive():
+                self.advance["log"] = "hung"
+                return
+            self.follower = _follower = LogFollower(self, info, wake_poller)
+        self.follower.start()
+
+    def heard(self, line: str) -> None:
+        """HQPlayer's log refused this advance's rate combination
+        (LogFollower): it closes at the poller's next pass, as refused."""
+        with _lock:
+            self.advance["line"] = line
+            if self.end is None:
+                self.end = "refused"
+
+    def following(self, state: str) -> None:
+        """Its log "followed" from the stop's offset, or "lost" on a read
+        that failed: the trace says which (LogFollower)."""
+        with _lock:
+            self.advance["log"] = state
+
+
+def tick_of(status, state: str) -> dict:
+    """One status read as an attempt's trace keeps it."""
+    return {"ts": time.time(), "state": state, "track": status.track_index,
+            "position": status.position, "length": status.length,
+            "speed": status.process_speed, "in_fill": status.input_fill,
+            "out_fill": status.output_fill, "tracks_total": status.tracks_total,
+            "mode": status.active_mode, "filter": status.active_filter,
+            "shaper": status.active_shaper, "rate": status.active_rate,
+            "src_rate": status.src_rate, "serial": status.track_serial}
+
+
+def started(ticks: list, serial: Optional[int] = None) -> bool:
+    """The start signal, asked of this one place by every attempt, a play's
+    and an advance's — so that another, the meter stream's first sound, can
+    take its place here alone: HQPlayer said it played and the position
+    moved, audio left. For an advance, only on its take (`serial`:
+    HQPlayer's track_serial at its first stopped tick) — a Play of that
+    entry afterwards takes it again, one more, and is an attempt of its
+    own."""
+    playing = [t for t in ticks
+               if t["state"] == "playing" and (serial is None or t.get("serial") == serial)]
+    return (any(t["position"] >= 1.0 for t in playing)
+            or (len(playing) >= 2 and playing[-1]["position"] > playing[0]["position"]))
+
+
+def advance(entry: int, serial: int, output_delay: Optional[float], now: float) -> Attempt:
+    """HQPlayer's own advance from `entry`, seen at its first stopped tick
+    (`now`, its track_serial `serial`): an attempt on the entry after it,
+    watched from that tick to its deadline (ADVANCE_DELAYS)."""
+    delay = output_delay or ADVANCE_DELAY_S
+    return Attempt(intent="advance", slot=entry + 1, t0=now,
+                   advance={"from": entry, "serial": serial, "output_delay": delay,
+                            "delay_assumed": not output_delay,
+                            "deadline": now + ADVANCE_DELAYS * delay + ADVANCE_BUILD_S,
+                            "log": None, "line": None})
+
+
+class LogFollower:
+    """HQPlayer's log on this machine, followed while an advance attempt
+    waits for its deadline: from the log's size at the first stopped tick, a
+    refused rate combination HQPlayer writes closes the attempt at once
+    (Attempt.heard, then `wake_poller`). Its own thread finds and opens the
+    file once and, woken by each status tick (wake), reads only the bytes
+    appended since — a partial last line waits for the next tick; the
+    poller never touches the file (an open on a mount that dropped can hang
+    for minutes), and while one hangs no other is started (Attempt.follow).
+    Any trouble — no log, a refused read, a file shorter than at the stop
+    (cut or rotated) — ends the following quietly, with one line in our
+    log: the deadline judges the attempt."""
+
+    def __init__(self, attempt: Attempt, info: dict, wake_poller) -> None:
+        self._attempt, self._info, self._wake_poller = attempt, dict(info or {}), wake_poller
+        self._tick = threading.Event()
+        self._stopped = False
+        self._thread: Optional[threading.Thread] = None
+        self.offset = None              # how far into the file it has read
+
+    def start(self) -> None:
+        self._thread = threading.Thread(target=self._run, daemon=True, name="hqp-log-follow")
+        self._thread.start()
+
+    def alive(self) -> bool:
+        return self._thread is None or self._thread.is_alive()
+
+    def wake(self) -> None:
+        self._tick.set()
+
+    def stop(self) -> None:
+        self._stopped = True
+        self._tick.set()
+
+    def _run(self) -> None:
+        att = self._attempt.id
+        try:
+            path, note, _ = _local_log(self._info)
+            if path is None:
+                logger.info("HQPlayer's log not followed for attempt %d: %s", att, note)
+                return
+            with open(path, "rb") as f:
+                self.offset = f.seek(0, os.SEEK_END)
+                self._attempt.following("followed")
+                rest = b""
+                while True:
+                    self._tick.wait()
+                    self._tick.clear()
+                    if self._stopped:
+                        return
+                    size = os.fstat(f.fileno()).st_size
+                    if size < self.offset:
+                        self._attempt.following("lost")
+                        logger.info("HQPlayer's log not followed further for attempt %d: "
+                                    "shorter than at its stop", att)
+                        return
+                    chunk = f.read(size - self.offset)
+                    self.offset += len(chunk)
+                    *lines, rest = (rest + chunk).split(b"\n")
+                    for raw in lines:
+                        line = raw.decode("utf-8", "replace").rstrip("\r")
+                        if _RATE_LINE.search(line):
+                            self._attempt.heard(line)
+                            self._wake_poller()
+                            return
+        except (OSError, ET.ParseError) as e:
+            if self.offset is None:
+                logger.info("HQPlayer's log not followed for attempt %d: %s", att, e)
+            else:
+                self._attempt.following("lost")
+                logger.info("HQPlayer's log not followed further for attempt %d: %s", att, e)
 
 
 def close(attempt: Attempt, facts: dict) -> bool:
-    """Judge a finished attempt and keep it. Returns whether the failing run
-    (failing_run) changed — the notices channel is woken on that."""
-    v = verdict(facts)
+    """Judge a finished attempt — an advance with the refusal its log named
+    while it waited — and keep it; an advance HQPlayer played, or one another
+    action took over, is not kept: the ring holds what failed. Returns
+    whether the failing run (failing_run) changed — the notices channel is
+    woken on that."""
+    if attempt.follower is not None:
+        attempt.follower.stop()
+    with _lock:
+        line = (attempt.advance or {}).get("line")
+    v = verdict(facts, {"cause": classify([line])} if line else None)
     with _lock:
         attempt.facts = facts
         attempt.verdict = v
+        if attempt.advance is not None and v["code"] in ("played", "interrupted"):
+            return False
         _ring.append(attempt)
     return _run_changed()
 
@@ -347,6 +529,25 @@ def note_answered() -> bool:
             return False
         newest.cleared = True
     return _run_changed()
+
+
+def late_start(tick: dict, generation: int) -> bool:
+    """HQPlayer started an advance's entry after its deadline judged it, on
+    that same take (track_serial as at its first stopped tick) — the start
+    signal (started) says so: the attempt becomes `played` and its failure
+    is cleared. A Play of that entry is another take, an attempt of its own,
+    and changes nothing here. Returns whether the failing run changed."""
+    with _lock:
+        late = [a for a in _ring
+                if a.advance is not None and a.verdict
+                and a.verdict["code"] not in ("played", "interrupted")
+                and a.advance["serial"] == tick.get("serial")
+                and (a.facts or {}).get("generation") == generation
+                and started([tick], a.advance["serial"])]
+        for a in late:
+            a.verdict = _v("played", a.facts, late_s=round(tick["ts"] - a.t0, 1))
+            a.cleared = True
+    return bool(late) and _run_changed()
 
 
 def note_playing(slot: int, generation: int) -> bool:
@@ -506,13 +707,6 @@ def _ran_out(tick: dict) -> bool:
     return bool(tick.get("length")) and tick["position"] >= tick["length"] - 2.0
 
 
-def _moved(ticks: list) -> bool:
-    """The position moved while HQPlayer said it played: audio left."""
-    playing = [t for t in ticks if t["state"] == "playing"]
-    return (any(t["position"] >= 1.0 for t in playing)
-            or (len(playing) >= 2 and playing[-1]["position"] > playing[0]["position"]))
-
-
 def _dsp_changed(ticks: list) -> bool:
     """Someone changed the DSP while the track was loaded — HQPlayer may
     stop the transport for the build (6.2.3 on Windows did; 6.2.4 plays
@@ -533,6 +727,9 @@ def verdict(f: dict, log: Optional[dict] = None) -> dict:
     drifted mid-append is still ours."""
     steps, ticks = f.get("steps") or [], f.get("ticks") or []
     t0 = f.get("t0") or f["started"]
+    adv = f.get("advance") or {}
+    # An advance's entry is asked for once HQPlayer takes it, after the tail
+    fetch_by = adv.get("deadline") or t0 + FETCH_WINDOW_S
     pl = f.get("playlist") or {}
     mode = f.get("mode")
     ho = f.get("handover") or {}
@@ -540,14 +737,14 @@ def verdict(f: dict, log: Optional[dict] = None) -> dict:
     hits = ([h for h in f["proxy"] if h["ts"] >= since]
             if mode in HTTP_MODES and f.get("proxy") is not None else None)
     playing = [t for t in ticks if t["state"] == "playing"]
-    started = (_moved(ticks)
-               and (not pl.get("read") or (pl.get("at_slot_ours")
-                                           and (not f.get("expected_uri") or pl.get("at_slot_expected"))))
-               and (hits is None or any(h.get("bytes", 0) > 0 for h in hits)))
-    stopped_after = (started and ticks[-1]["state"] == "stopped"
+    began = (started(ticks, adv.get("serial"))
+             and (not pl.get("read") or (pl.get("at_slot_ours")
+                                         and (not f.get("expected_uri") or pl.get("at_slot_expected"))))
+             and (hits is None or any(h.get("bytes", 0) > 0 for h in hits)))
+    stopped_after = (began and ticks[-1]["state"] == "stopped"
                      and not _ran_out(playing[-1]))
     owner = f["end"] in ("owner", "superseded", "shutdown") or _dsp_changed(ticks)
-    if started:
+    if began:
         load = _load(ticks)
         if load:
             return _v("too_slow", f, **load)
@@ -572,9 +769,8 @@ def verdict(f: dict, log: Optional[dict] = None) -> dict:
         if bad:
             return _v("proxy_error", f, status=bad["status"])
         add_failed = ho.get("ok") is False
-        watched = f["closed"] >= t0 + FETCH_WINDOW_S
-        if not started and (add_failed or watched) and not any(
-                h["ts"] <= t0 + FETCH_WINDOW_S for h in hits):
+        watched = f["closed"] >= fetch_by
+        if not began and (add_failed or watched) and not any(h["ts"] <= fetch_by for h in hits):
             return _v("no_fetch", f)
 
     if ho.get("ok") is False:
@@ -590,7 +786,7 @@ def verdict(f: dict, log: Optional[dict] = None) -> dict:
         return _v("external", f)
     if owner:
         return _v("interrupted", f)
-    if ticks and not started and ticks[-1]["state"] == "stopped":
+    if ticks and not began and ticks[-1]["state"] == "stopped":
         refused = _rate_refused(f, log)
         if refused is not None:
             return _v("rate_refused", f, **refused)
@@ -939,10 +1135,12 @@ _MOUNT_HINT = ("On a Docker node, set HQPLAYER_DATA_DIR in .env to HQPlayer's fo
                "host (on Windows %LOCALAPPDATA%\\HQPlayer) and recreate the container.")
 
 
-def _read_local(info: dict) -> tuple:
+def _local_log(info: dict) -> tuple:
+    """This machine's HQPlayer log: (path, note, where) — no path, and the
+    note saying why, when there is none to read."""
     d = local_log_dir()
     if d is None:
-        return [], f"No HQPlayer folder is known on this machine. {_MOUNT_HINT}", None
+        return None, f"No HQPlayer folder is known on this machine. {_MOUNT_HINT}", None
     major = _major((info or {}).get("version"))
     path = d / f"HQPlayer{major}Desktop.log" if major else None
     if path is None or not path.is_file():
@@ -953,12 +1151,17 @@ def _read_local(info: dict) -> tuple:
     if settings_xml.is_file():
         node = ET.parse(settings_xml).getroot().find(".//log")
         if node is not None and node.get("enabled") == "0":
-            return [], "HQPlayer's log is off — turn logging on in HQPlayer's settings.", str(d)
+            return None, "HQPlayer's log is off — turn logging on in HQPlayer's settings.", str(d)
     elif path is None:
-        return [], f"Nothing of HQPlayer's in {d}. {_MOUNT_HINT}", str(d)
+        return None, f"Nothing of HQPlayer's in {d}. {_MOUNT_HINT}", str(d)
     if path is None:
-        return [], f"No HQPlayer log in {d}.", str(d)
-    return _tail(path), None, str(path)
+        return None, f"No HQPlayer log in {d}.", str(d)
+    return path, None, str(path)
+
+
+def _read_local(info: dict) -> tuple:
+    path, note, where = _local_log(info)
+    return (_tail(path) if path is not None else []), note, where
 
 
 def _tail(path: Path, want: int = LOG_LINES, cap: int = 4 * 1024 * 1024) -> list:

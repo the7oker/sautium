@@ -8638,14 +8638,16 @@
         <path d="M21 12a9 9 0 11-3-6.7L21 8"/><path d="M21 3v5h-5"/></svg>`;
 
   /* ---------- HQPlayer diagnostics: why a slot did not play ----------
-     The backend watches every play intent on the HQPlayer output and judges
-     it (playback/hqp_diagnostics.py). A failed one rides the status as
-     `diagnosis`: a toast once, the tag on Now Playing while it concerns the
-     track on screen, and this sheet with the trace behind it. Everything in
-     a trace or a log line came from HQPlayer or the disk — escaped. */
+     The backend watches every play intent on the HQPlayer output, and
+     HQPlayer's own advance, and judges it (playback/hqp_diagnostics.py). A
+     failed one rides the status as `diagnosis`: a toast once, the tag on Now
+     Playing while it concerns the track on screen, and this sheet with the
+     trace behind it. Everything in a trace or a log line came from HQPlayer
+     or the disk — escaped. */
   const HQP_INTENTS = {
     play: 'Play', select: 'Play this track', next: 'Next', previous: 'Previous',
     replace: 'Play a new queue', rebuild: 'Queue rebuilt', resume: 'Resume after a DSP change',
+    advance: 'Next track (automatic)',
   };
   const HQP_HANDED = {
     path: 'a path HQPlayer opens itself', stream: 'a stream from the media server',
