@@ -304,11 +304,12 @@ are Signalyst's text, and this file does not reproduce them.
   listener will prefer on a given system.
 - **Focus words** (transients, timbre, space) are the author's, as HQPlayer
   shows them — not a recommendation for a kind of music.
-- **Ratio class**: `Int` — integer ratios; `2ˣ` (HQPlayer writes `2^x`) —
-  power-of-two ratios; `Any` — any ratio; `1:1` — no conversion. In PCM
-  mode HQPlayer writes `up` after some classes (`2^x up`), which the manual
-  does not explain. The class can differ between modes:
-  `poly-sinc-mqa/mp3-lp` is `Int up` in PCM mode and `Any` in SDM mode.
+- **Ratio class**: what the description ends with — `Int`, `2ˣ` (HQPlayer
+  writes `2^x`), `Any` or `1:1`. The manual's filter table has a Ratio column
+  too (6.1, §4.6). In PCM mode HQPlayer writes `up` after some classes
+  (`2^x up`), which the manual does not explain. The class can differ
+  between modes: `poly-sinc-mqa/mp3-lp` is `Int up` in PCM mode and `Any` in
+  SDM mode.
 - Names ending in **`-2s`** are two-stage variants. 6.2.3 lists them in SDM
   mode only.
 - **The manual's notes** (5.7.3): it advises against ASRC (heavy to compute)
@@ -316,13 +317,11 @@ are Signalyst's text, and this file does not reproduce them.
 
 ### Ratio class and rate families
 
-- A **`2ˣ`** filter converts only by powers of two, so the output stays in
-  the source's family: 44.1 kHz → 88.2 … 705.6 kHz, 48 kHz → 96 … 768 kHz.
-- An **`Int`** filter converts by integer ratios, which also stay inside a
-  family: 48/44.1 is not an integer.
-- Only an **`Any`** filter converts across families — 44.1 kHz to 768 kHz, or
-  a 96 kHz source to a 44.1k-family DSD rate.
-- **In 6.2.3:**
+- **The families are arithmetic.** 44.1 kHz times a power of two gives
+  88.2 … 705.6 kHz, 48 kHz times one gives 96 … 768 kHz, and no rate of one
+  family is an integer multiple of a rate of the other: 48/44.1 is 160/147
+  ("Base-rate families" below).
+- **HQPlayer's descriptions in 6.2.3:**
   - `sinc-short`, `sinc-medium` and `sinc-long` are `Any up` in PCM mode and
     `Any` in SDM mode;
   - `sinc-long-h` is `Any`;
@@ -330,10 +329,12 @@ are Signalyst's text, and this file does not reproduce them.
     `sinc-Lm`, `sinc-Ll`, `sinc-Lh` and the `closed-form` filters are `2ˣ up`
     in PCM mode and `2ˣ` in SDM mode;
   - `FFT` is `2ˣ`.
-- **When the filter's class cannot reach the output rate,** HQPlayer refuses
-  the conversion. Its log says "Requested filter not possible with this rate
-  combination". With adaptive output rate on, HQPlayer picks an output rate
-  the filter can reach.
+- **A rate combination HQPlayer refuses** is named in its log: "Requested
+  filter not possible with this rate combination", the source rate over the
+  output rate, then "stop". The class is HQPlayer's description, and this
+  file reads no rule into it: which combinations a filter takes is
+  HQPlayer's to say. The adaptive output rate lets HQPlayer pick the rate
+  itself ("Adaptive output rate" below).
 
 ### Special filters
 
@@ -619,10 +620,11 @@ Every sample rate derives from one of two base rates:
 A rate belongs to the 44.1k family when it is a multiple of 44100, to the 48k
 family when it is a multiple of 48000.
 
-Which filters convert between the families is a matter of their ratio class
-("Ratio class and rate families" above): only `Any` filters do. A mixed
-library — 44.1k CD rips beside 96k downloads — played at one fixed output
-rate meets both cases; adaptive output rate, or an `Any` filter, covers both.
+A mixed library — 44.1k CD rips beside 96k downloads — played at one fixed
+output rate puts one family's tracks at a rate of the other family.
+HQPlayer's description of each filter names its ratio class ("Ratio class
+and rate families" above), and the adaptive output rate lets HQPlayer pick
+the rate itself ("Adaptive output rate" above).
 
 ---
 
