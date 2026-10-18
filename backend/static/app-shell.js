@@ -8481,12 +8481,13 @@
     }
     // Named as the atlas's pages name a DSD rate: "DSD256" in the 44.1k
     // family, any other base said beside it — "DSD512 (48k)". HQP also
-    // exposes a 32k base (2.048 … 16.384 MHz, for DACs that prefer it) and a
-    // 22.05k one (legacy and mastering rates). The multiple must be a clean
-    // power of two ≥ 64 for the DSD name to be honest; anything else falls
-    // through.
-    const bases = {44100: '', 48000: ' (48k)', 32000: ' (32k)', 22050: ' (22.05k)'};
-    for (const base of [44100, 48000, 32000, 22050]) {
+    // exposes a 32k base (2.048 … 16.384 MHz, for DACs that prefer it). The
+    // multiple must be a clean power of two ≥ 64 for the DSD name to be
+    // honest; anything else falls through. No 22.05k base: its multiples
+    // from 128 up are the 44.1k family's, and 64 × 22.05k is 1.4112 MHz, a
+    // PCM rate — HQPlayer's SDM rates start at 2.048 MHz.
+    const bases = {44100: '', 48000: ' (48k)', 32000: ' (32k)'};
+    for (const base of [44100, 48000, 32000]) {
       if (hz % base === 0) {
         const mult = hz / base;
         if (mult >= 64 && (mult & (mult - 1)) === 0) {

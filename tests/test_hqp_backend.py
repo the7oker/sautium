@@ -2202,21 +2202,20 @@ def test_the_benchmark_block_says_why_it_has_no_estimate(monkeypatch):
 
 
 def test_the_assistant_is_told_a_list_hqplayer_did_not_give(fake, monkeypatch):
-    import assistant_queries as aq
     from routers import settings as settings_router
     from tools import definitions
     monkeypatch.setattr(settings_router, "_read", lambda key: "hqplayer" if key == "output.type" else None)
     fake.replies["GetFilters"] = '<GetFilters result="Error">no output device</GetFilters>'
+    fake.replies["GetRates"] = ('<GetRates><RatesItem index="0" rate="0"/>'
+                                '<RatesItem index="1" rate="11289600"/></GetRates>')
     assert definitions._h_hqplayer_set_filter("sinc-MGa") == (
         "HQPlayer did not list its filters (no output device) — nothing was changed.")
     assert "SetFilter" not in [c for c, _ in fake.commands]
     text = definitions._h_hqplayer_get_settings()
     assert "Available filters: HQPlayer did not list them (no output device)." in text
     assert "Output modes: none." in text                            # answered, and empty
-    lines: list = []
-    aq.hqp_list(lines, "Sample rates", [{"index": 1, "rate": 705600}], None,
-                lambda r: f"  [{r['index']}] {r['rate'] / 1000:.1f} kHz")
-    assert lines == ["Sample rates (1):", "  [1] 705.6 kHz"]
+    # the rates as the Rate knob names them (hqp_atlas.rate_name)
+    assert "Sample rates (2):\n  [0] Auto\n  [1] DSD256" in text
 
 
 def test_a_run_does_not_plan_on_a_list_hqplayer_did_not_give(fake):

@@ -371,16 +371,17 @@ def test_the_labels():
 def test_a_rate_is_named_as_the_hqplayer_screen_names_it():
     assert [hqp_atlas.rate_name(hz) for hz in (0, 44100, 48000, 352800, 705600, 768000)] == \
         ["—", "44.1 kHz", "48 kHz", "352.8 kHz", "705.6 kHz", "768 kHz"]
-    assert [hqp_atlas.rate_name(hz) for hz in (2822400, 11289600, 12288000, 24576000, 2048000, 1411200)] == \
-        ["DSD64", "DSD256", "DSD256 (48k)", "DSD512 (48k)", "DSD64 (32k)", "DSD64 (22.05k)"]
-    # above 768 kHz and no power-of-two multiple of a base from 64 up
-    assert [hqp_atlas.rate_name(hz) for hz in (1536000, 3000000)] == ["1.54 MHz", "3 MHz"]
+    assert [hqp_atlas.rate_name(hz) for hz in (2822400, 11289600, 12288000, 24576000, 2048000)] == \
+        ["DSD64", "DSD256", "DSD256 (48k)", "DSD512 (48k)", "DSD64 (32k)"]
+    # above 768 kHz and no power-of-two multiple of a base from 64 up: the
+    # PCM rates 32 × 44.1k and 32 × 48k (no SDM rate is under 2.048 MHz)
+    assert [hqp_atlas.rate_name(hz) for hz in (1411200, 1536000, 3000000)] == ["1.41 MHz", "1.54 MHz", "3 MHz"]
 
 
 @pytest.mark.skipif(shutil.which("node") is None, reason="node not installed")
 def test_the_node_names_every_rate_as_the_screen_does():
-    # app-shell.js fmtRateLabel run as written, on every rate of the four
-    # families and a few no family holds
+    # app-shell.js fmtRateLabel run as written, on every power-of-two
+    # multiple of four bases and a few rates outside them
     src = (BACKEND / "static" / "app-shell.js").read_text(encoding="utf-8")
     fn = re.search(r"\n  function fmtRateLabel\(hz\) \{\n.*?\n  \}\n", src, re.S).group(0)
     rates = [base * 2 ** k for base in (44100, 48000, 32000, 22050) for k in range(12)]

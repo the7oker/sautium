@@ -962,14 +962,14 @@ def rate_name(hz: int) -> str:
     """A rate HQPlayer reports, named as the HQPlayer screen names it
     (app-shell.js fmtRateLabel) — the one namer for every text the node
     words: kHz up to 768 kHz; above, a DSD rate by its power-of-two multiple
-    (64 and up) of a 44.1k, 48k, 32k or 22.05k base, any base but 44.1k said
-    beside it ("DSD256", "DSD512 (48k)", "DSD64 (32k)"); anything else in
-    MHz. "—" for none."""
+    (64 and up) of a 44.1k, 48k or 32k base, any base but 44.1k said beside
+    it ("DSD256", "DSD512 (48k)", "DSD64 (32k)"); anything else — the PCM
+    rates 1.4112 and 1.536 MHz among them — in MHz. "—" for none."""
     if not hz:
         return "—"
     if hz <= 768000:
         return f"{hz // 1000} kHz" if hz % 1000 == 0 else f"{hz / 1000:.1f} kHz"
-    for base, beside in ((44100, ""), (48000, " (48k)"), (32000, " (32k)"), (22050, " (22.05k)")):
+    for base, beside in ((44100, ""), (48000, " (48k)"), (32000, " (32k)")):
         mult = hz // base
         if hz % base == 0 and mult >= 64 and mult & (mult - 1) == 0:
             return f"DSD{mult}{beside}"
