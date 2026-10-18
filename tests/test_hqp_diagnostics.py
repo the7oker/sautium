@@ -169,7 +169,7 @@ def test_an_advance_is_watched_from_its_first_stop_to_its_deadline():
     assert att.advance["deadline"] == pytest.approx(1000.0 + 2 * 1.04 + 11.0)
     att.tick(_stopped_status(), "stopped", 1000.0)          # the first stopped tick, asked for at t0
     assert [t["ts"] for t in att.snapshot()["ticks"]] == [1000.0]
-    # a stop the rule may explain, at its first tick: E17 is a Play's, not closed there
+    # a stop the rule may explain, at its first tick: the close there is a Play's, not an advance's
     assert not att.stopped_at_start()
     assert att.due(1013.0) is None and att.due(1013.1) == "window"
     assumed = diag.advance(1, 5, None, 1000.0)

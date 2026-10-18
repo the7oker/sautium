@@ -461,8 +461,8 @@ gives it three states:
 - **not checked** — the chosen output rate is fixed.
 
 While it is grayed or checked, and whenever the default output mode is
-`[source]`, the rate chosen under "Sample rate" (PCM tab) is "only a default
-and upper limit" (§4.4): the engine selects the rate as it plays, by the
+`[source]`, the rate chosen under "Sample rate" (PCM tab) only sets a default
+and a ceiling (§4.4): the engine selects the rate as it plays, by the
 rates available and what the filter converts. In PCM mode with the setting
 not checked, the chosen rate is the static output rate.
 

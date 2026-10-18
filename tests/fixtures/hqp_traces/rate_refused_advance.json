@@ -1,6 +1,6 @@
 {
  "expect": "rate_refused",
- "note": "HQPlayer's own advance from a 48 kHz entry onto a 44.1 kHz one at a fixed 768 kHz, the adaptive output rate not checked: stopped on no entry at the first entry's end, its track_serial one more, and never played the next — the filter it describes as 2^x up reaches no power-of-two multiple of 44.1 kHz there. Its log not followed (an HQPlayer elsewhere): judged at the deadline, the first stopped tick + 2 × 1.04 s + 11 s.",
+ "note": "HQPlayer's own advance from a 48 kHz entry onto a 44.1 kHz one at a fixed 768 kHz, the adaptive output rate not checked: stopped on no entry at the first entry's end, its track_serial one more, and never played the next — the filter it describes as 2^x up reaches no power-of-two multiple of 44.1 kHz there. Its log not followed (none on this machine to follow): judged at the deadline, the first stopped tick + 2 × 1.04 s + 11 s.",
  "facts": {
   "intent": "advance",
   "started": 1000.0,

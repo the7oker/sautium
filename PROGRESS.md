@@ -2870,6 +2870,18 @@ stopped tick plus twice the output delay plus 11 s (the longest build
 measured), or at once on HQPlayer's refusal line where its log is read here;
 a start on the same take after that withdraws the verdict.
 
+Open (2026-10-19), not yet fixed: a DSD track HQPlayer stopped on is
+judged as a PCM rate (the trace keeps no `src_sdm`), though the rule leaves
+DSD tracks unchecked; the facts keep the Nx slot's filter alone, so with no
+filter reported in the ticks a base-rate source is judged by it; a log line
+naming another cause (a file not opened) does not take `rate_refused` back;
+nothing wakes the notices channel on an output switch or while HQPlayer
+answers nothing, so the rate check's notice stays until another wake; the
+diagnosis toast is keyed by its attempt, so a verdict HQPlayer's log turns
+into `rate_refused` after the toast keeps the toast's first title (older
+than the rate check); and an advance HQPlayer refuses inside a watched
+intent's window is judged as that intent's own slot, not as an advance.
+
 ## Known Gotchas
 
 - **The Docker image took the node's secrets.** `./backend` is the build

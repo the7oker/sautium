@@ -100,10 +100,10 @@ def test_each_class_reaches_what_its_arithmetic_does(ratio, up):
 
 def test_the_1x_filter_judges_every_source_under_50_khz():
     nx, x1 = Filter("demo-poly-lp", "Any"), Filter("demo-gauss-xa", "2^x", True)
-    c = rc.check(Inputs("pcm", 768000, False, nx, x1), _src(32000, 44100, 88200))
+    c = rc.check(Inputs("pcm", 768000, "not checked", nx, x1), _src(32000, 44100, 88200))
     assert [(g.name, g.ratio, g.sources) for g in c.groups] == [("demo-gauss-xa", "2^x up", (32000, 44100))]
-    assert not rc.check(Inputs("pcm", 768000, False, nx, None), _src(32000, 44100, 88200)).groups
-    c = rc.check(Inputs("pcm", 768000, False, x1, nx), _src(32000, 44100, 88200))
+    assert not rc.check(Inputs("pcm", 768000, "not checked", nx, None), _src(32000, 44100, 88200)).groups
+    c = rc.check(Inputs("pcm", 768000, "not checked", x1, nx), _src(32000, 44100, 88200))
     assert [(g.name, g.sources) for g in c.groups] == [("demo-gauss-xa", (88200,))]
 
 

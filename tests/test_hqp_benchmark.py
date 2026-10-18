@@ -177,8 +177,8 @@ def test_a_pcm_source_is_never_asked_below_its_own_rate():
 
 
 def test_the_1x_filter_runs_every_source_under_50_khz():
-    # HQPlayer Desktop manual 6.1, §4.6: the "1x" selection "covers source
-    # sampling rates below 50 kHz, so called base rates"
+    # HQPlayer Desktop manual 6.1, §4.6: the 1x selection covers every source
+    # rate under 50 kHz, the base rates
     names = {3: "poly-sinc-gauss-long", 7: "sinc-M"}
     assert [bench.running_filter(names, 3, 7, hz) for hz in (22050, 32000, 44100, 48000)] == \
         ["sinc-M"] * 4

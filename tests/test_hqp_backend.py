@@ -1686,7 +1686,8 @@ def test_an_advance_whose_log_is_not_followed_is_judged_at_its_deadline(traced, 
     # no output delay reported: the one assumed, and the trace says so
     assert (adv["output_delay"], adv["delay_assumed"], adv["log"]) == (0.25, True, None)
     assert adv["deadline"] == pytest.approx(att.t0 + 2 * 0.25 + 0.5)
-    # its first tick a stop the rule explains, yet watched to its deadline: E17 is a Play's
+    # its first tick a stop the rule explains, yet watched to its deadline: the close at the
+    # first stopped tick is a Play's
     assert att.end == "window" and att.facts["closed"] >= adv["deadline"]
     assert (att.verdict["code"], att.verdict["cause"]) == ("rate_refused", "filter")
     assert caplog.text.count(f"HQPlayer's log not followed for attempt {att.id}") == 1
@@ -1745,10 +1746,15 @@ def test_no_advance_at_the_playlists_end_nor_for_a_stop_hqplayer_did_not_move_on
     fake.length = 300
     assert traced.select(1)
     assert _wait(lambda: len(diag.attempts()) == 2)
-    # a stop from HQPlayer's own window: its track_serial stays
+    # a stop from HQPlayer's own window in the entry's last seconds: its
+    # track_serial stays, so it is no advance — the last seconds alone would open one
+    with fake._lock:
+        fake.position = fake.length - 4.5
+    _polls(fake, 2)
     with fake._lock:
         fake.state = int(PlaybackState.STOPPED)
     _polls(fake, 2)
+    assert traced._attempt is None
     # an entry clicked mid-track in its window, which it refuses: one more, nowhere near the end
     assert traced.select(1)
     assert _wait(lambda: len(diag.attempts()) == 3)

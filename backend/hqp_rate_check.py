@@ -9,7 +9,7 @@ the output rate ("Requested filter not possible with this rate combination
 …, stop"). The rule takes each distinct PCM source rate still to play:
 
 - Nothing is said in the mode [source] or at the rate Auto, where the chosen
-  rate is "only a default and upper limit" (HQPlayer Desktop manual 6.1,
+  rate only sets a default and a ceiling (HQPlayer Desktop manual 6.1,
   §4.4), nor while HQPlayer's adaptive output rate is grayed or checked: it
   then picks the rate as it plays (§4.2) — grayed, the default rate or a
   lower one the filter and the DAC take; checked, a multiple of the
@@ -119,9 +119,9 @@ def same_family(rate_hz: int, src_rate: int) -> bool:
 def running_slot(nx: Any, x1: Any, src_rate: int) -> Any:
     """Which of HQPlayer's two filter slots runs a source: the 1x one when it
     is set (`x1` not None) and the source is under 50 kHz — 22.05 and 32 kHz
-    as much as 44.1 and 48 (HQPlayer Desktop manual 6.1, §4.6: the "1x"
-    selection "covers source sampling rates below 50 kHz, so called base
-    rates") — the Nx one otherwise."""
+    as much as 44.1 and 48 (HQPlayer Desktop manual 6.1, §4.6: the 1x
+    selection covers every source rate under 50 kHz, the base rates) — the
+    Nx one otherwise."""
     return x1 if x1 is not None and src_rate < BASE_LIMIT else nx
 
 

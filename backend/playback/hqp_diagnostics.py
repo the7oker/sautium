@@ -239,11 +239,12 @@ class Attempt:
             follower.wake()
 
     def stopped_at_start(self) -> bool:
-        """Its first tick since the transport command says HQPlayer stopped
-        at 0 s, nothing having played: how a rate HQPlayer refuses looks — it
-        takes the Play and stops at once. True once: the close's questions
-        are asked then, and an attempt the rate check names a cause for
-        closes at that tick (end "refused") instead of at the window."""
+        """The first tick since the transport command that says HQPlayer
+        stopped at 0 s, nothing having played yet: how a rate HQPlayer
+        refuses looks — it takes the Play and stops at once. True once: the
+        close's questions are asked then, and an attempt the rate check
+        names a cause for closes at that tick (end "refused") instead of at
+        the window."""
         with _lock:
             # An advance stops by its first tick: HQPlayer decides after its tail
             if (self.stop_asked or self.t0 is None or self.advance is not None or not self.ticks
