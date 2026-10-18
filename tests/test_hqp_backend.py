@@ -3937,6 +3937,9 @@ def test_the_mcp_assistant_reads_hqplayer_through_the_backend_and_keeps_no_conne
         (path, body)) or {"ok": True, "applied": body, "failed": {}, "building": None})
     settings_text = server.hqplayer_get_settings()
     assert "sinc-MGa" in settings_text and "Sample rates: HQPlayer did not list them (no output device)." in settings_text
+    # and a list it gave: the rates as the Rate knob names them (hqp_atlas.rate_name)
+    state.update(rates=[{"index": 0, "rate": 0}, {"index": 1, "rate": 11289600}], refused={})
+    assert "Sample rates (2):\n  [0] Auto\n  [1] DSD256" in server.hqplayer_get_settings()
     assert server.hqplayer_set_filter("sinc-MGa").startswith("Filter set to: sinc-MGa")
     assert "Track: Artist - Song 1" in server.hqplayer_get_status()
     assert "Active filter index: 57 (sinc-MGa)" in server.hqplayer_get_dsp_state()
