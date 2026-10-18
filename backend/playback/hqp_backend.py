@@ -1029,13 +1029,18 @@ class HqpBackend(PlayerBackend):
         # The rate check this backend holds for the queue it plays
         # (hqp_rate_check), the notice's source: what an event asks the next
         # tick to read — "state", "lists", or nothing but judging again —
-        # None while nothing is due (the attach asks both); the State, the
-        # lists and the queue generation it last read; the check, its
-        # generation and the slot it was judged from; the notice's onset and
-        # what the notices channel serves
+        # None while nothing is due (the attach asks both), and how many
+        # events were raised, so that one raised while its questions are
+        # asked stays due; the State and the lists it last read, and what a
+        # tick read with the queue generation it was read for, waiting for a
+        # tick's judgement — kept over a tick that ends before it; the check,
+        # its generation and the slot it was judged from; the notice's onset
+        # and what the notices channel serves
         self._rate_lock = threading.Lock()
         self._rate_due: Optional[set] = {"state", "lists"}
+        self._rate_events = 0
         self._rate_reads: Optional[tuple] = None
+        self._rate_pending: Optional[tuple] = None
         self._rate_check: Optional[hqp_rate_check.Check] = None
         self._rate_gen: Optional[int] = None
         self._rate_slot: Optional[int] = None
@@ -1780,7 +1785,6 @@ class HqpBackend(PlayerBackend):
             status = None
             playing = None
             reads = None
-            rate_reads = None
             sample = None
             left_state = left_lists = None
             left_gen = 0
@@ -1877,13 +1881,15 @@ class HqpBackend(PlayerBackend):
                             # same tick — and a track it stopped on at its
                             # start at once, when the rate check says why.
                             reads = self._close_reads(hqp, att)
+                    watched = self._attempt
                     if (status is not None and self._rate_due is not None and self._pressed is None
-                            and not self._queue.view()[2] and (att is None or att.t0 is not None)):
+                            and not self._queue.view()[2] and (watched is None or watched.t0 is not None)):
                         # The held rate check's questions: never while a
                         # mutation or a play press runs, nor before a watched
-                        # intent's first transport command has gone — none
-                        # stands between a replace and its owed Play
-                        rate_reads = self._rate_read(hqp)
+                        # intent's first transport command has gone — the
+                        # intent watched now, one since this tick began among
+                        # them: none stands between a replace and its owed Play
+                        self._rate_read(hqp)
                     now = time.monotonic()
                     playing = self._playing(status) if status is not None else None
                     if playing is not None and self._sampler.due(
@@ -1935,8 +1941,9 @@ class HqpBackend(PlayerBackend):
                                              else status.volume + status.track_gain)
                     self._last_entry = Entry.read(status) or self._last_entry
                     self._before = (status, playing)
-                    if rate_reads is not None:
-                        self._rate_judge(rate_reads, playing)
+                    if self._rate_pending is not None:
+                        pending, self._rate_pending = self._rate_pending, None
+                        self._rate_judge(pending, playing)
                     elif (playing is not None and playing[0] and self._rate_reads is not None
                           and playing[0] != self._rate_slot):
                         self._rate_event()      # the slot of ours HQPlayer reads moved
@@ -2008,14 +2015,18 @@ class HqpBackend(PlayerBackend):
         a return); nothing: judged again on what is held."""
         with self._rate_lock:
             self._rate_due = (self._rate_due or set()) | set(asks)
+            self._rate_events += 1
 
-    def _rate_read(self, hqp: HQPlayerClient) -> Optional[tuple]:
+    def _rate_read(self, hqp: HQPlayerClient) -> None:
         """The questions the due event asks, on the poller's tick: State
         when asked or none is held, the four lists when asked, none held or
-        the mode changed. (state, lists, the queue generation) to judge;
-        None when HQPlayer gave nothing — asked again next tick."""
+        the mode changed. The event stays due until HQPlayer has answered
+        them all — a question it refuses (a build) or leaves unanswered asks
+        again next tick, as does an event raised meanwhile — and what they
+        read, with the queue generation, waits for a tick's judgement
+        (_rate_pending): a tick that ends before it does not lose it."""
         with self._rate_lock:
-            asks, self._rate_due = self._rate_due or set(), None
+            asks, raised = set(self._rate_due or ()), self._rate_events
         held = self._rate_reads
         generation = self._queue.generation
         state = hqp.get_state() if "state" in asks or held is None else held[0]
@@ -2024,10 +2035,12 @@ class HqpBackend(PlayerBackend):
             lists = {"modes": hqp.get_modes(), "rates": hqp.get_rates(),
                      "filters": hqp.get_filters(), "shapers": hqp.get_shapers()}
         if state is None or any(v is None for v in lists.values()):
-            self._rate_event(*asks)
-            return None
+            return
+        with self._rate_lock:
+            if self._rate_events == raised:
+                self._rate_due = None
         self._rate_reads = (state, lists)
-        return state, lists, generation
+        self._rate_pending = (state, lists, generation)
 
     def _rate_sampled(self, dsp: dict) -> None:
         """A State the DSP sampler read while HQPlayer played: a setting the

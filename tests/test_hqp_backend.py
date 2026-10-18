@@ -2686,6 +2686,57 @@ def test_the_held_rate_check_asks_nothing_on_a_plays_path(fake, output, monkeypa
     assert adds and not [c for c in sent[adds[0]:sent.index("Play")] if c in asked]
 
 
+def test_the_held_rate_checks_event_outlasts_a_tick_that_ends_before_its_judgement(fake, output, monkeypatch,
+                                                                                    tmp_path):
+    from hqp_rate_check import Sources
+    mgr, b = _rate_queue(fake, output, monkeypatch, tmp_path, Sources({44100: 2, 48000: 1}, first=44100))
+    assert _wait(lambda: b.rate_notice() is not None, 5.0)
+    monkeypatch.setattr(b._sampler, "due", lambda *a, **k: False)     # its State reads aside
+    # an Any filter set in HQPlayer's own window, its event's State read on a
+    # tick in a state HQPlayer does not name (Embedded starting a play), which
+    # judges nothing
+    fake.replies["State"] = _RATE_PCM[0].replace('filter="5" filter1x="5" filterNx="5"',
+                                                 'filter="8" filter1x="8" filterNx="8"')
+    with fake._lock:
+        named, fake.state = fake.state, 5
+    _polls(fake, 1)
+    before = len(fake.arrivals)
+    b._rate_event("state")
+    assert _wait(lambda: "State" in [c for _, c in fake.arrivals[before:]], 5.0)
+    _polls(fake, 1)
+    assert b.rate_notice() is not None
+    # judged on the first tick in a state it names, without asking again
+    with fake._lock:
+        fake.state = named
+    assert _wait(lambda: b.rate_notice() is None, 5.0)
+    assert [c for _, c in fake.arrivals[before:]].count("State") == 1
+
+
+def test_the_held_rate_check_asks_nothing_for_an_intent_watched_since_its_tick_began(fake, output, monkeypatch,
+                                                                                      tmp_path):
+    from hqp_rate_check import Sources
+    mgr, b = _rate_queue(fake, output, monkeypatch, tmp_path, Sources({44100: 2, 48000: 1}, first=44100))
+    assert _wait(lambda: b.rate_notice() is not None, 5.0)
+    monkeypatch.setattr(b._sampler, "due", lambda *a, **k: False)     # its State reads aside
+    watched, advance = [], b._advance
+
+    def watched_mid_tick(status):
+        # the check's event, then an intent watched while this tick runs, its Play still owed
+        if not watched:
+            b._rate_event("state")
+            watched.append(b._watch("play"))
+        return advance(status)
+
+    before = len(fake.arrivals)
+    monkeypatch.setattr(b, "_advance", watched_mid_tick)
+    assert _wait(lambda: watched, 5.0)
+    _polls(fake, 3)
+    assert "State" not in [c for _, c in fake.arrivals[before:]]
+    # the intent ended without a Play: the event, still due, asks then
+    watched[0].intent_done(None)
+    assert _wait(lambda: "State" in [c for _, c in fake.arrivals[before:]], 5.0)
+
+
 def test_a_card_while_hqplayer_builds_or_is_lent_is_busy(fake, output, monkeypatch, tmp_path):
     from fastapi import HTTPException
     mgr, b = output
