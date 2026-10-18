@@ -2720,12 +2720,12 @@ def test_the_held_rate_check_asks_nothing_for_an_intent_watched_since_its_tick_b
     monkeypatch.setattr(b._sampler, "due", lambda *a, **k: False)     # its State reads aside
     watched, advance = [], b._advance
 
-    def watched_mid_tick(status):
+    def watched_mid_tick(status, read_at):
         # the check's event, then an intent watched while this tick runs, its Play still owed
         if not watched:
             b._rate_event("state")
             watched.append(b._watch("play"))
-        return advance(status)
+        return advance(status, read_at)
 
     before = len(fake.arrivals)
     monkeypatch.setattr(b, "_advance", watched_mid_tick)

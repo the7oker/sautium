@@ -1782,7 +1782,7 @@ class HqpBackend(PlayerBackend):
                     self._wake.wait()
                     self._wake.clear()
                     continue
-            status = None
+            status = read_at = None
             playing = None
             reads = None
             sample = None
@@ -1795,10 +1795,15 @@ class HqpBackend(PlayerBackend):
             try:
                 hqp_playlist = None
                 with link.asking(until=lambda: not self._running) as hqp:
+                    # Stamped as it is asked: what HQPlayer answers it held
+                    # then, a command another thread sent meanwhile not yet
+                    # in it (Attempt.tick)
+                    read_at = time.time()
                     status = hqp.get_status(wait=QUESTION_WAIT_S)
                     if status is None and not hqp.timed_out:
                         # The connection broke under the read: once more, on
                         # a fresh one — HQPlayer restarted answers it
+                        read_at = time.time()
                         status = hqp.get_status(wait=QUESTION_WAIT_S)
                     if status is None:
                         miss = (hqp.last_error.message if hqp.last_error else "no status answer",
@@ -1873,9 +1878,9 @@ class HqpBackend(PlayerBackend):
                                           "filters": hqp.get_filters(),
                                           "shapers": hqp.get_shapers()}
                     if att is None and status is not None:
-                        att = self._advance(status)
+                        att = self._advance(status, read_at)
                     if att is not None and status is not None:
-                        att.tick(status, STATE_NAMES.get(status.state, "unknown"))
+                        att.tick(status, STATE_NAMES.get(status.state, "unknown"), read_at)
                         if att.due(time.time()) is not None or att.stopped_at_start():
                             # Judged on what HQPlayer holds NOW, read in the
                             # same tick — and a track it stopped on at its
@@ -1952,7 +1957,7 @@ class HqpBackend(PlayerBackend):
                         self._rate_served = served
                         _notify_notices()
                     if status.state == PlaybackState.PLAYING and diag.late_start(
-                            diag.tick_of(status, "playing"), self._queue.generation):
+                            diag.tick_of(status, "playing", read_at), self._queue.generation):
                         _notify_notices()
                     if playing is not None:
                         # The slot playing on, its position moving and the DSP
@@ -2101,12 +2106,13 @@ class HqpBackend(PlayerBackend):
         None."""
         return self._rate_served
 
-    def _advance(self, status) -> Optional[diag.Attempt]:
+    def _advance(self, status, read_at: float) -> Optional[diag.Attempt]:
         """HQPlayer's own advance as an attempt of its own (diag.advance):
         this tick stopped, its track_serial one more than the tick before,
         which played an entry of ours to its last seconds with one after it
         — while no intent of ours is watched and no mutation or play press
-        runs. On this machine its log is followed while the attempt waits
+        runs, watched from `read_at`, when this tick's status was asked for.
+        On this machine its log is followed while the attempt waits
         (diag.LogFollower). Called on the poller."""
         before, playing = self._before or (None, None)
         if (before is None or playing is None or playing[1] is None or playing[2]
@@ -2117,7 +2123,7 @@ class HqpBackend(PlayerBackend):
                 or before.length <= 0 or before.position < before.length - diag.ADVANCE_END_S
                 or self._pressed is not None or self._queue.view()[2]):
             return None
-        att = diag.advance(before.track_index, status.track_serial, before.output_delay, time.time())
+        att = diag.advance(before.track_index, status.track_serial, before.output_delay, read_at)
         with self._att_lock:
             if self._attempt is not None:
                 return None         # an intent of ours began meanwhile: its attempt sees it

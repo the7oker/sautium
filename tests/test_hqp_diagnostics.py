@@ -154,13 +154,25 @@ def test_an_advance_is_watched_from_its_first_stop_to_its_deadline():
     att = diag.advance(1, 5, 1.04, 1000.0)
     assert (att.intent, att.slot, att.t0) == ("advance", 2, 1000.0)
     assert att.advance["deadline"] == pytest.approx(1000.0 + 2 * 1.04 + 11.0)
-    att.tick(_stopped_status(), "stopped")
+    att.tick(_stopped_status(), "stopped", 1000.0)          # the first stopped tick, asked for at t0
+    assert [t["ts"] for t in att.snapshot()["ticks"]] == [1000.0]
     # a stop the rule may explain, at its first tick: E17 is a Play's, not closed there
     assert not att.stopped_at_start()
     assert att.due(1013.0) is None and att.due(1013.1) == "window"
     assumed = diag.advance(1, 5, None, 1000.0)
     assert (assumed.advance["output_delay"], assumed.advance["delay_assumed"]) == (3.5, True)
     assert assumed.advance["deadline"] == pytest.approx(1000.0 + 2 * 3.5 + 11.0)
+
+
+def test_a_status_asked_for_before_the_transport_command_is_no_tick_of_the_attempt():
+    from hqplayer_client import CommandOutcome
+    att = diag.Attempt(intent="play", slot=1)
+    att.record(CommandOutcome(1000.0, "h", 1, "Play", {}, "OK"))
+    # asked for before the Play went: what HQPlayer held then, stopped at 0 after a replace's Stop
+    att.tick(_stopped_status(), "stopped", 999.9)
+    assert att.snapshot()["ticks"] == [] and not att.stopped_at_start()
+    att.tick(_stopped_status(), "stopped", 1000.2)
+    assert [t["ts"] for t in att.snapshot()["ticks"]] == [1000.2] and att.stopped_at_start()
 
 
 def test_hqplayers_log_is_followed_from_the_stop_a_whole_line_at_a_time(tmp_path, monkeypatch):

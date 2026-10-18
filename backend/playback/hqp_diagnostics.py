@@ -225,11 +225,15 @@ class Attempt:
             self.steps.append({"ts": time.time(), "command": command, "result": "refused",
                                "message": message, "attributes": {}})
 
-    def tick(self, status, state: str) -> None:
+    def tick(self, status, state: str, read_at: float) -> None:
+        """A status the poller asked for at `read_at`. One asked before the
+        transport command went is what HQPlayer held before it — another
+        thread's command may pass between the poller's read and this call —
+        and no tick of the attempt."""
         with _lock:
-            if self.t0 is None:
+            if self.t0 is None or read_at < self.t0:
                 return
-            self.ticks.append(tick_of(status, state))
+            self.ticks.append(tick_of(status, state, read_at))
             follower = self.follower
         if follower is not None:
             follower.wake()
@@ -358,9 +362,10 @@ class Attempt:
             self.advance["log"] = state
 
 
-def tick_of(status, state: str) -> dict:
-    """One status read as an attempt's trace keeps it."""
-    return {"ts": time.time(), "state": state, "track": status.track_index,
+def tick_of(status, state: str, read_at: float) -> dict:
+    """One status read as an attempt's trace keeps it, at the time the
+    poller asked for it."""
+    return {"ts": read_at, "state": state, "track": status.track_index,
             "position": status.position, "length": status.length,
             "speed": status.process_speed, "in_fill": status.input_fill,
             "out_fill": status.output_fill, "tracks_total": status.tracks_total,
