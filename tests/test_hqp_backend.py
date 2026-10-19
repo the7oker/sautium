@@ -2760,30 +2760,76 @@ def test_the_held_rate_check_asks_nothing_for_an_intent_watched_since_its_tick_b
 
 def test_a_list_hqplayer_refuses_is_asked_again_only_after_an_event_that_can_change_it(fake, output,
                                                                                          monkeypatch, tmp_path):
-    from hqp_rate_check import Sources
-    mgr, b = _rate_queue(fake, output, monkeypatch, tmp_path, Sources({44100: 2, 48000: 1}, first=44100))
-    assert _wait(lambda: b.rate_notice() is not None, 5.0)
-    monkeypatch.setattr(b._sampler, "due", lambda *a, **k: False)     # its State reads aside
-    # the output device gone: HQPlayer refuses its rate list, asked once
-    fake.replies["GetRates"] = '<GetRates result="Error">no output device</GetRates>'
-    before = len(fake.arrivals)
-    b._rate_event("state", "lists")                         # as HQPlayer coming back asks
-    assert _wait(lambda: "GetRates" in [c for _, c in fake.arrivals[before:]], 5.0)
-    _polls(fake, 3)
-    assert [c for _, c in fake.arrivals[before:]].count("GetRates") == 1
+    mgr, b, playing, rates = _parked(fake, output, monkeypatch, tmp_path)     # refused once, asked once
     # an event that cannot change the answer asks nothing
-    before = len(fake.arrivals)
+    mark = len(fake.arrivals)
     b._rate_event("state")                                  # as a new queue asks
     _polls(fake, 3)
-    assert [c for _, c in fake.arrivals[before:] if c != "Status"] == []
+    assert [c for _, c in fake.arrivals[mark:] if c != "Status"] == []
     # a DSP change of this node's can: the lists asked again, answered now, and judged
     fake.replies["GetRates"] = _RATE_PCM[1]
     fake.replies["State"] = _RATE_PCM[0].replace('filter="5" filter1x="5" filterNx="5"',
                                                  'filter="8" filter1x="8" filterNx="8"')
-    before = len(fake.arrivals)
+    mark = len(fake.arrivals)
     hb.change_dsp({"filter": 8, "filter1x": 8})
-    assert _wait(lambda: "GetRates" in [c for _, c in fake.arrivals[before:]], 8.0)
-    assert _wait(lambda: b.rate_notice() is None, 5.0)      # an Any filter: nothing to say
+    assert _wait(lambda: rates(mark) == 1, 8.0)
+    assert _wait(lambda: not b._rate_refused and b._rate_check is not None and not b._rate_check.groups, 5.0)
+
+
+def _parked(fake, output, monkeypatch, tmp_path):
+    """The held check parked on a refused rate list while HQPlayer stands
+    still, its output device gone: (manager, backend, HQPlayer's playing
+    state to give back, a count of rate-list questions since a mark)."""
+    from hqp_rate_check import Sources
+    mgr, b = _rate_queue(fake, output, monkeypatch, tmp_path, Sources({44100: 2, 48000: 1}, first=44100))
+    assert _wait(lambda: b.rate_notice() is not None, 5.0)
+    monkeypatch.setattr(b._sampler, "due", lambda *a, **k: False)     # its State reads aside
+    with fake._lock:
+        playing, fake.state = fake.state, int(PlaybackState.STOPPED)
+    fake.replies["GetRates"] = '<GetRates result="Error">no output device</GetRates>'
+    rates = lambda mark: [c for _, c in fake.arrivals[mark:]].count("GetRates")      # noqa: E731
+    mark = len(fake.arrivals)
+    b._rate_event("state", "lists")                         # as HQPlayer coming back asks
+    assert _wait(lambda: rates(mark) == 1, 5.0)
+    _polls(fake, 3)
+    assert rates(mark) == 1
+    return mgr, b, playing, rates
+
+
+def test_a_parked_rate_check_asks_again_once_when_hqplayer_plays_a_slot_of_ours(fake, output, monkeypatch,
+                                                                                 tmp_path, caplog):
+    caplog.set_level(logging.INFO)
+    mgr, b, playing, rates = _parked(fake, output, monkeypatch, tmp_path)
+    # HQPlayer plays a slot of ours: asked again, once — refused again, the park stays, said no more,
+    # and another play of the same park asks nothing
+    mark = len(fake.arrivals)
+    with fake._lock:
+        fake.state = playing
+    assert _wait(lambda: rates(mark) == 1, 5.0)
+    _polls(fake, 4)
+    assert rates(mark) == 1
+    assert caplog.text.count("the rate check waits for an event") == 1
+    # answered at an event that can change it, then refused anew: a new park, whose first play asks again
+    fake.replies["GetRates"] = _RATE_PCM[1]
+    b._rate_event("state", "again")                         # as a DSP change of this node's asks
+    assert _wait(lambda: "the rate check judges anew" in caplog.text, 5.0)
+    fake.replies["GetRates"] = '<GetRates result="Error">no output device</GetRates>'
+    mark = len(fake.arrivals)
+    b._rate_event("state", "lists")
+    assert _wait(lambda: rates(mark) == 2, 5.0)             # the park's own question, then its play's
+    _polls(fake, 4)
+    assert rates(mark) == 2 and caplog.text.count("the rate check waits for an event") == 2
+
+
+def test_a_parked_rate_check_asks_nothing_when_hqplayer_plays_an_entry_not_ours(fake, output, monkeypatch,
+                                                                                 tmp_path):
+    mgr, b, playing, rates = _parked(fake, output, monkeypatch, tmp_path)
+    monkeypatch.setattr(b, "_playing", lambda status, **k: (1, None, True))      # another controller's entry
+    mark = len(fake.arrivals)
+    with fake._lock:
+        fake.state = playing
+    _polls(fake, 4)
+    assert rates(mark) == 0
 
 
 def test_a_card_while_hqplayer_builds_or_is_lent_is_busy(fake, output, monkeypatch, tmp_path):

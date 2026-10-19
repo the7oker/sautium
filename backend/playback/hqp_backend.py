@@ -1034,15 +1034,17 @@ class HqpBackend(PlayerBackend):
         # asked stays due; the State and the lists it last read, and what a
         # tick read with the queue generation it was read for, waiting for a
         # tick's judgement — kept over a tick that ends before it; whether
-        # HQPlayer refused one of the lists at the last read; the check, its
-        # generation and the slot it was judged from; the notice's onset and
-        # what the notices channel serves
+        # HQPlayer refused one of the lists at the last read (the check
+        # parked), and whether that park's first play of a slot of ours has
+        # asked again; the check, its generation and the slot it was judged
+        # from; the notice's onset and what the notices channel serves
         self._rate_lock = threading.Lock()
         self._rate_due: Optional[set] = {"state", "lists"}
         self._rate_events = 0
         self._rate_reads: Optional[tuple] = None
         self._rate_pending: Optional[tuple] = None
         self._rate_refused = False
+        self._rate_woken = False
         self._rate_check: Optional[hqp_rate_check.Check] = None
         self._rate_gen: Optional[int] = None
         self._rate_slot: Optional[int] = None
@@ -1949,6 +1951,13 @@ class HqpBackend(PlayerBackend):
                                              else status.volume + status.track_gain)
                     self._last_entry = Entry.read(status) or self._last_entry
                     self._before = (status, playing)
+                    if (self._rate_refused and not self._rate_woken
+                            and status.state == PlaybackState.PLAYING and playing is not None
+                            and playing[1] is not None and not playing[2]):
+                        # Parked on a refused list: HQPlayer playing a slot of
+                        # ours shows its output answers — asked again, once a park
+                        self._rate_woken = True
+                        self._rate_event("again")
                     if self._rate_pending is not None:
                         pending, self._rate_pending = self._rate_pending, None
                         self._rate_judge(pending, playing)
@@ -2020,9 +2029,9 @@ class HqpBackend(PlayerBackend):
         HQPlayer coming back, the slot read moving, a sampled State that
         differs. `asks`: what that tick reads first — "state" (a new queue
         generation, a DSP change, a return, the attach), "lists" (none held,
-        a return, the mode moved), "again" (a DSP change of this node's: it
-        may change a list HQPlayer refused); nothing: judged again on what is
-        held."""
+        a return, the mode moved), "again" (a DSP change of this node's, the
+        first play of a slot of ours after a park: either may change a list
+        HQPlayer refused); nothing: judged again on what is held."""
         with self._rate_lock:
             self._rate_due = (self._rate_due or set()) | set(asks)
             self._rate_events += 1
@@ -2038,7 +2047,9 @@ class HqpBackend(PlayerBackend):
         HQPlayer refuses (no output device) parks the check instead: it is
         asked again only after an event that can change the answer —
         HQPlayer back or the mode moving ("lists"), a DSP change of this
-        node's ("again") — and any other event is spent unasked."""
+        node's or the first time HQPlayer plays a slot of ours after the park
+        ("again", once a park) — and any other event is spent unasked. The
+        park and its end are said once each."""
         with self._rate_lock:
             asks, raised = set(self._rate_due or ()), self._rate_events
         again = self._rate_refused
@@ -2051,22 +2062,33 @@ class HqpBackend(PlayerBackend):
         lists = held[1] if held is not None else None
         if state is not None and (lists is None or again or "lists" in asks
                                   or state.get("mode") != held[0].get("mode")):
-            lists, refused = {}, False
+            lists, refused = {}, []
             for name, ask in (("modes", hqp.get_modes), ("rates", hqp.get_rates),
                               ("filters", hqp.get_filters), ("shapers", hqp.get_shapers)):
                 lists[name] = ask()
-                refused = refused or (lists[name] is None and hqp.last_error is not None
-                                      and hqp.last_error.result == "Error")
-            self._rate_refused = refused
+                if lists[name] is None and hqp.last_error is not None and hqp.last_error.result == "Error":
+                    refused.append(name)
             if refused:
+                self._rate_park(refused)
                 self._rate_reads = (state, None)
                 self._rate_spent(raised)
                 return
         if state is None or any(v is None for v in lists.values()):
             return
+        if self._rate_refused:
+            self._rate_refused = False
+            logger.info("HQPlayer answers its lists again: the rate check judges anew")
         self._rate_spent(raised)
         self._rate_reads = (state, lists)
         self._rate_pending = (state, lists, generation)
+
+    def _rate_park(self, refused: list) -> None:
+        """A list HQPlayer refused parks the held check, said once a park: a
+        re-ask refused again keeps it, its first play's re-ask spent."""
+        if not self._rate_refused:
+            logger.info("HQPlayer refused its %s: the rate check waits for an event that can change "
+                        "the answer", " and ".join(f"{name} list" for name in refused))
+            self._rate_refused, self._rate_woken = True, False
 
     def _rate_spent(self, raised: int) -> None:
         """The due event done with — read for its judgement, or parked on a
@@ -2079,7 +2101,8 @@ class HqpBackend(PlayerBackend):
         """A State the DSP sampler read while HQPlayer played: a setting the
         held check did not judge — changed in HQPlayer's own window — is
         held instead and judged again, its lists read anew when the mode
-        moved."""
+        moved — while a refused list parks the check, only a moved mode asks
+        again."""
         held = self._rate_reads
         knobs = ("mode", "rate", "filter1x", "filterNx", "shaper")
         if held is not None and any(dsp.get(k) != held[0].get(k) for k in knobs):
@@ -4026,7 +4049,8 @@ class HqpBackend(PlayerBackend):
         (PlaybackManager.rebind_files) — with nothing to mirror first, so
         HQPlayer converges on it here; while it builds and answers nothing,
         once the build is done (_converge_after_build). Every change is the
-        held rate check's event, a new queue generation asking State."""
+        held rate check's event, a new queue generation asking State —
+        spent unasked while a refused list parks the check."""
         self._rate_event(*(("state",) if self._queue.generation != self._rate_gen else ()))
         if kind == "rebind":
             try:
