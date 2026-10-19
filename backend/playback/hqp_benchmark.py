@@ -433,10 +433,11 @@ def build_grid(kind: str, *, filters: List[dict], shapers: List[dict], rates: Li
 
     def rates_for(src: str) -> List[int]:
         """Its family's rates and the owner's own, whatever its family —
-        never under a PCM source's own rate: HQPlayer does not downsample PCM
-        ("clHQPlayerEngine::Execute(): lInRate > lOutRate", then it stops —
-        Embedded 6.2.3, a 96 kHz source at 48 kHz, 2026-10-03). A DSD source
-        goes down to PCM rates, which is its conversion."""
+        never under a PCM source's own rate: the benchmark measures
+        upsampling. (Embedded 6.2.3 stopped a 96 kHz source at 48 kHz with
+        "clHQPlayerEngine::Execute(): lInRate > lOutRate", 2026-10-03; the
+        filter was not recorded.) A DSD source goes down to PCM rates, which
+        is its conversion."""
         floor = 0 if src == "dsd" else srcs[src]["rate"]
         owners = [cur_rate] if cur_rate in real_rates else []
         return [i for i in dict.fromkeys(family(src) + owners) if hz[i] >= floor]

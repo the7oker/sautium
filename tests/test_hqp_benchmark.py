@@ -155,8 +155,8 @@ def test_pcm_ladders_climb_every_filter_from_8x_and_an_automatic_rate_is_keyed_b
 
 
 def test_a_pcm_source_is_never_asked_below_its_own_rate():
-    # HQPlayer does not downsample PCM: "clHQPlayerEngine::Execute(): lInRate
-    # > lOutRate", then it stops (Embedded 6.2.3, 96 kHz at 48 kHz, 2026-10-03)
+    # the benchmark measures upsampling (Embedded 6.2.3 stopped a 96 kHz source
+    # at 48 kHz with "lInRate > lOutRate", 2026-10-03, the filter not recorded)
     d, cur = _lists("desktop_sdm.json")
     shapers = [{"index": 0, "name": "none", "value": 0}, {"index": 1, "name": "TPDF", "value": 1}]
     rates = [{"index": 0, "rate": 0}] + [{"index": i + 1, "rate": r} for i, r in enumerate(

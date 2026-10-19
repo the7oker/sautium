@@ -23,9 +23,8 @@ the output rate ("Requested filter not possible with this rate combination
   power-of-two multiple of the source, `Int` one that is no integer
   multiple; `Any` and `1:1` reach every rate. HQPlayer 5 describes no
   class, and a description not read gives none: nothing is said. An output
-  rate under the source's is HQPlayer's own stop for every class and is not
-  judged here. The "up" HQPlayer writes after a class is printed, never
-  read.
+  rate under the source's is not judged here. The "up" HQPlayer writes after
+  a class is printed, never read.
 
 Where the adaptive output rate is not known (an HQPlayer on another
 machine), every claim is hedged. DSD and streamed tracks are not checked: a
@@ -126,8 +125,8 @@ def running_slot(nx: Any, x1: Any, src_rate: int) -> Any:
 def reaches(ratio: Optional[str], src_rate: int, rate_out: int) -> bool:
     """Whether a filter HQPlayer describes with `ratio` converts `src_rate`
     to `rate_out` by that class's arithmetic: always for a class that names
-    no limit, and for none read; always for an output under the source,
-    HQPlayer's own stop rather than the class's."""
+    no limit, and for none read; an output under the source is not judged
+    here, and True there claims nothing."""
     if rate_out < src_rate:
         return True
     if ratio == "2^x":

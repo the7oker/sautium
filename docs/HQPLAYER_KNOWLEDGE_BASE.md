@@ -61,7 +61,7 @@ From Signalyst's public release notes:
 - Minimal processing
 
 ### 2. **PCM**
-- Upsamples PCM to higher sample rates
+- Resamples PCM, usually to higher sample rates
 - Noise shaping and dithering
 
 ### 3. **SDM (DSD)**
@@ -559,7 +559,7 @@ DSD1024 = 44100 × 1024 = 45,158,400 Hz = 45.1584 MHz ≈ 45.2 MHz
 **Converting between formats:**
 - PCM → DSD: delta-sigma modulation (needs a modulator)
 - DSD → PCM: decimation (needs an integrator + noise filter)
-- PCM → PCM: upsampling (needs a filter)
+- PCM → PCM: a rate conversion (needs a filter)
 - DSD → DSD: remodulation (needs an integrator + modulator)
 
 ### Signal processing

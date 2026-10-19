@@ -93,7 +93,7 @@ def test_each_class_reaches_what_its_arithmetic_does(ratio, up):
     for rate in (705600, 768000, 5644800, 6144000, 11289600):
         c = rc.check(_inp(ratio, rate, up=up), _src(*SOURCES))
         assert _refused(c) == NOT_REACHED.get(ratio, {}).get(rate, set()), (ratio, rate)
-    # an output under the source is HQPlayer's own stop, not the class's
+    # an output under the source is not judged here
     assert _refused(rc.check(_inp(ratio, 88200, up=up), _src(*SOURCES))) == \
         ({32000, 48000} if ratio in ("2^x", "Int") else set())
 

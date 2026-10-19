@@ -104,13 +104,13 @@ mode lists it reads live through `hqplayer_get_settings`.
 
 ### Operating modes
 - **[source]** — no processing
-- **PCM** — upsampling to high PCM rates
+- **PCM** — a rate conversion of PCM (needs a filter)
 - **SDM (DSD)** — conversion to DSD
 
 ### DSP pipeline
 ```
-Source → Filter → Modulator/Shaper → Output
-         (upsampling)  (noise shaping)
+Source → Filter            → Modulator/Shaper → Output
+         (rate conversion)   (noise shaping)
 ```
 
 ### Automatic setting selection

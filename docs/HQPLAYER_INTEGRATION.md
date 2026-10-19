@@ -1465,10 +1465,11 @@ cooling — so Sautium measures it instead of predicting it
   plays at the rates of its own family — a whole power of two away, 44.1 kHz:
   88.2 kHz … 44.1k × 1024 — and at the owner's rate: another family takes an
   asynchronous conversion some filters refuse. A PCM source is never asked
-  under its own rate: HQPlayer does not downsample PCM (Embedded 6.2.3, a
-  96 kHz source at 48 kHz: "clHQPlayerEngine::Execute(): lInRate >
-  lOutRate", then it reset itself and played another entry); a DSD source
-  goes down to PCM rates, its conversion. Each modulator (PCM: filter)
+  under its own rate: the benchmark measures upsampling. (On 2026-10-03
+  Embedded 6.2.3 stopped a 96 kHz source at 48 kHz with
+  "clHQPlayerEngine::Execute(): lInRate > lOutRate", then reset itself and
+  played another entry; the filter was not recorded.) A DSD source goes down
+  to PCM rates, its conversion. Each modulator (PCM: filter)
   on a source is a ladder over its family's rates (Valerii, 2026-10-03): it
   starts at DSD256 (PCM: 8×, 352.8 or 384 kHz), climbs while the setting
   keeps up — at the host's "ok" boundary or above, no dropout — and goes
