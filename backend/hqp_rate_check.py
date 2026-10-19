@@ -105,10 +105,8 @@ def mode_kind(name: Optional[str]) -> Optional[str]:
 
 def same_family(rate_hz: int, src_rate: int) -> bool:
     """An output rate the source reaches by a whole power of two — its own
-    family (44.1 kHz: 88.2 kHz … 44.1k × 1024). Every filter runs those;
-    another family takes an asynchronous conversion some refuse at Play
-    (sinc-MGa: "Requested filter not possible with this rate combination
-    44100/49152000", Desktop 6.2.3, 2026-10-03)."""
+    family (44.1 kHz: 88.2 kHz … 44.1k × 1024); a rate of another family
+    takes an asynchronous conversion."""
     high, low = max(rate_hz, src_rate), min(rate_hz, src_rate)
     if low <= 0 or high % low:
         return False
