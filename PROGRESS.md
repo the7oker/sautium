@@ -2883,16 +2883,22 @@ than the rate check); and an advance HQPlayer refuses inside a watched
 intent's window is judged as that intent's own slot, not as an advance.
 
 Open too (2026-10-19): a status is stamped before the poller waits for the
-connection, so one that waited behind another question starts an advance's
-deadline early by that wait, and one that waited behind a transport command
-is dropped though it already holds it (its tick comes one later); while
-HQPlayer refuses State or one of the four lists (no output device), the
-held rate check asks them again on every tick, each refusal entering the
-client's error ring; its questions are guarded once before up to five go
-out, so a press or an intent that comes meanwhile waits behind them; a
-database error in its judgement drops that judgement until another event;
+connection, so one that waited behind another request starts an advance's
+deadline early by that wait, and one that waited behind an attempt's first
+transport command is dropped though it already holds it (the attempt's
+first tick is then the next status); while HQPlayer refuses one of the four
+lists (no output device), the held rate check asks State and the lists again
+on every tick, each refusal entering the client's error ring, and a State
+HQPlayer refuses in its own words is read as its defaults — the client reads
+no result there — and judged as such; the check's questions are guarded
+once, before up to five go one at a time, so those still to go pass between
+the commands of a press, a mutation or an intent that begins meanwhile —
+between a replace and its owed Play too; a database error in its judgement
+drops it until another event — the next tick raises one itself while the
+slot HQPlayer reads is not the one judged last, a warning each time — and
+the judgement before is served meanwhile while the queue generation holds;
 and the verdict's queue rates read the slot and the queue in two looks, so
-a track removed between them shifts them by one.
+a track removed or added before that slot between them shifts them by one.
 
 ## Known Gotchas
 

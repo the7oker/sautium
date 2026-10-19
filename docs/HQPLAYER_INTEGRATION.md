@@ -1311,9 +1311,11 @@ HQPlayer backend holds the check, judged again on the poller's tick after an
 event — a queue change, a DSP change of this node's, HQPlayer coming back,
 the attach, the slot read moving, a sampled State that differs — reading
 State for a new queue, a DSP change, a return or the attach and the lists
-when none are held, the mode moved or HQPlayer came back, never while a
-mutation or a play press runs nor before a watched intent's first transport
-command. A started track that cannot play speaks through its verdict alone.
+when none are held, the mode moved or HQPlayer came back, begun never while
+a mutation or a play press runs nor before a watched intent's first transport
+command — checked once, before its questions go one at a time, so what
+begins meanwhile has the rest pass between its commands. A started track
+that cannot play speaks through its verdict alone.
 
 **HQPlayer's own log** is read on demand — the Diagnostics screen, an
 attempt that ends `not_played` / `unknown` / `rate_refused` / `rejected`

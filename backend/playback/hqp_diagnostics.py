@@ -227,7 +227,9 @@ class Attempt:
 
     def tick(self, status, state: str, read_at: float) -> None:
         """A status the poller stamped at `read_at`, before asking for it.
-        One stamped before the transport command's answer (t0) is no tick of
+        One stamped before t0 — the outcome of the attempt's first transport
+        command, HQPlayer's answer or the moment the client gave up on it; an
+        advance's, the stamp of its own first stopped status — is no tick of
         the attempt: it may say what HQPlayer held before the command —
         another thread's command passes between the poller's questions — and
         one that waited behind the command for the connection only moves the

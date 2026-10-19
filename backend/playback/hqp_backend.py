@@ -1796,10 +1796,11 @@ class HqpBackend(PlayerBackend):
                 hqp_playlist = None
                 with link.asking(until=lambda: not self._running) as hqp:
                     # Stamped before it is asked, its wait for the connection
-                    # included: one stamped before a transport command's
-                    # answer is no tick of that attempt (Attempt.tick) — what
-                    # HQPlayer held before the command, or a status that
-                    # waited behind it, whose tick then comes one later
+                    # included: one stamped before the outcome of an
+                    # attempt's first transport command is no tick of it
+                    # (Attempt.tick) — what HQPlayer held before the command,
+                    # or a status that waited behind it; the attempt's first
+                    # tick is then the next status
                     read_at = time.time()
                     status = hqp.get_status(wait=QUESTION_WAIT_S)
                     if status is None and not hqp.timed_out:
@@ -1891,11 +1892,12 @@ class HqpBackend(PlayerBackend):
                     watched = self._attempt
                     if (status is not None and self._rate_due is not None and self._pressed is None
                             and not self._queue.view()[2] and (watched is None or watched.t0 is not None)):
-                        # The held rate check's questions: never while a
-                        # mutation or a play press runs, nor before a watched
-                        # intent's first transport command has gone — the
-                        # intent watched now, one since this tick began among
-                        # them: none stands between a replace and its owed Play
+                        # The held rate check's questions: begun only while no
+                        # mutation or play press runs and a watched intent's
+                        # first transport command has gone — the intent watched
+                        # now, one since this tick began among them. Checked
+                        # once, before they go one at a time: what begins
+                        # meanwhile has the rest pass between its commands
                         self._rate_read(hqp)
                     now = time.monotonic()
                     playing = self._playing(status) if status is not None else None
@@ -2115,7 +2117,7 @@ class HqpBackend(PlayerBackend):
         — while no intent of ours is watched and no mutation or play press
         runs, watched from `read_at`, when this tick's status was stamped —
         before its wait for the connection, so a status that waited behind
-        another question starts the deadline early by that wait. On this
+        another request starts the deadline early by that wait. On this
         machine its log is followed while the attempt waits
         (diag.LogFollower). Called on the poller."""
         before, playing = self._before or (None, None)
