@@ -2838,7 +2838,10 @@ plain picker's rows did.
 HQPlayer takes a Play and stops at once on a track whose rate the filter that
 runs it, or in SDM mode its modulator, does not convert to the chosen output
 rate. Such a stop read "HQPlayer could not play it"; since 2026-10-18 it is
-the verdict `rate_refused`, judged at HQPlayer's first stop: the filter
+the verdict `rate_refused`, judged at HQPlayer's first stop (since
+2026-10-19 a claim without a hedge only: one where the adaptive output
+rate is not known waits for the window, as HQPlayer may yet pick a rate
+the filter reaches): the filter
 HQPlayer ran, by the ratio class HQPlayer describes it with ("HQPlayer
 describes … as 2^x: 768 kHz is no power-of-two multiple of 44.1 kHz"), or in
 SDM mode first the modulator, at a rate the published atlas measured it

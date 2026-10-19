@@ -247,8 +247,8 @@ class Attempt:
         stopped at 0 s, nothing having played yet: how a rate HQPlayer
         refuses looks — it takes the Play and stops at once. True once: the
         close's questions are asked then, and an attempt the rate check
-        names a cause for closes at that tick (end "refused") instead of at
-        the window."""
+        names a cause for without a hedge closes at that tick (end
+        "refused") instead of at the window (names_cause)."""
         with _lock:
             # An advance stops by its first tick: HQPlayer decides after its tail
             if (self.stop_asked or self.t0 is None or self.advance is not None or not self.ticks
@@ -847,10 +847,12 @@ def _rate_check(rate: Optional[dict], source: Optional[int]) -> Optional["rc.Che
 
 
 def names_cause(rate: Optional[dict]) -> bool:
-    """Whether the rate check names why an attempt's track stopped at its
-    start — the attempt then closes at once (Attempt.stopped_at_start)."""
+    """Whether the rate check names, without a hedge, why an attempt's track
+    stopped at its start — the attempt then closes at once
+    (Attempt.stopped_at_start). A hedged claim, the adaptive output rate not
+    known, waits for the window: HQPlayer may yet pick a rate it reaches."""
     check = _rate_check(rate, (rate or {}).get("source"))
-    return bool(check and check.groups)
+    return bool(check and check.groups and not check.hedged)
 
 
 def _rate_refused(f: dict, log: Optional[dict]) -> Optional[dict]:

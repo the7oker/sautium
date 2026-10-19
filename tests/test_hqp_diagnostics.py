@@ -99,6 +99,13 @@ def test_the_verdict_names_a_rate_to_pick_only_when_every_track_still_to_play_is
     assert diag.verdict(unread)["next"] == fix + "."
 
 
+def test_only_a_claim_without_a_hedge_closes_an_attempt_at_its_first_stop():
+    rate = _trace("rate_refused_filter")["rate"]              # the adaptive output rate read: not checked
+    assert diag.names_cause(rate)
+    # not known, as for an HQPlayer elsewhere: HQPlayer may yet pick a rate the filter reaches
+    assert not diag.names_cause({**rate, "inputs": {**rate["inputs"], "adaptive": None}})
+
+
 def test_hqplayers_line_is_quoted_and_alone_names_nothing():
     line_only = _case("rate_refused_line_only")
     # without the log the rule names nothing: no cause, as before

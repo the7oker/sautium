@@ -1541,6 +1541,19 @@ def _refusing(backend, fake, monkeypatch, tmp_path, *, sdm=False, filter="demo-s
     assert _wait(lambda: backend.info.get("engine") == "9.4.1", 5.0)
 
 
+def test_a_hedged_claim_is_judged_at_the_window_not_at_hqplayers_first_stop(traced, fake, monkeypatch,
+                                                                             tmp_path):
+    # the adaptive output rate in a state the manual does not name, so not known here: HQPlayer may yet
+    # pick a rate the filter reaches, and its first stop closes nothing
+    _refusing(traced, fake, monkeypatch, tmp_path, adaptive=("1", "2"))
+    monkeypatch.setattr(diag, "OBSERVE_S", 3.0)
+    assert traced.select(1)
+    a = _closed(timeout=10.0)
+    assert a.end == "window" and a.facts["closed"] - a.facts["t0"] >= 3.0
+    assert a.facts["rate"]["inputs"]["adaptive"] is None
+    assert (a.verdict["code"], a.verdict["cause"]) == ("rate_refused", "filter")
+
+
 def test_a_rate_the_filter_does_not_reach_is_judged_at_hqplayers_first_stop(traced, fake, monkeypatch,
                                                                             tmp_path):
     line = "E 2001/05/06 10:00:01 Requested filter not possible with this rate combination 48000/705600, stop"
