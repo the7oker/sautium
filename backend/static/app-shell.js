@@ -11362,11 +11362,13 @@
      sits in flow above #app and pushes it down.
 
      The server publishes the whole ACTIVE SET on /api/events ('notice')
-     — a snapshot, never single events — and this side diffs it: a key
-     that appears, or re-arms with a newer `since`, toasts once; a key that
-     goes away just leaves the rows. The connect-time snapshot is flagged
-     `initial` and paints state only, so a tab that slept through a change
-     wakes to the rows and the trail, not to a burst of stale toasts.
+     — a snapshot, never single events — and this side diffs it: an onset
+     (a key with its `since`) the tab has not met before toasts once; a key
+     that goes away just leaves the rows, and one that comes back with the
+     same onset is no news (notices._news). The connect-time snapshot is
+     flagged `initial` and paints state only — its onsets become known
+     without a toast — so a tab that slept through a change wakes to the
+     rows and the trail, not to a burst of stale toasts.
 
      Copy lives here, facts come from the server: a notice carries `key`,
      `kind`, `since`, `until` (ISO, or null) and `data`; NOTICE_COPY turns
@@ -11584,40 +11586,45 @@
     _strips: new Map(),
     _queue: [],
     _shown: [],
-    // The onsets this tab has toasted, key → since: a notice that goes and
-    // comes back with the same onset (an advance's tail, a Stop, a reload)
-    // is no news. sessionStorage carries them over a reload; where it is
-    // refused (a private window, blocked site data) memory alone does.
-    _toasted: null,
+    // The onsets this tab knows, key → since — toasted, or painted by a
+    // connect-time snapshot: a notice that goes and comes back with the same
+    // onset (an advance's tail, a Stop, a reload) is no news. sessionStorage
+    // carries them over a reload; where it is refused (a private window,
+    // blocked site data) memory alone does.
+    _known: null,
 
     get(key) { return this.items.get(key) || null; },
     list() { return [...this.items.values()]; },
 
     apply(snapshot) {
       const next = new Map((snapshot.items || []).map(n => [n.key, n]));
-      if (!snapshot.initial) {
-        next.forEach((n, key) => {
-          const prev = this.items.get(key);
-          if ((prev && prev.since === n.since) || !this._news(key, n.since)) return;
-          const c = noticeCopy(n);
-          this.toast({ kind: n.kind, title: c.title, text: c.text, action: c.action || null, key });
-        });
-      }
+      next.forEach((n, key) => {
+        const prev = this.items.get(key);
+        if (prev && prev.since === n.since) return;
+        // The connect-time snapshot paints state only: its onsets, older than
+        // this connection, become known without a toast
+        if (!this._news(key, n.since) || snapshot.initial) return;
+        const c = noticeCopy(n);
+        this.toast({ kind: n.kind, title: c.title, text: c.text, action: c.action || null, key });
+      });
       this.items = next;
       window.dispatchEvent(new CustomEvent('sautium:notices-changed'));
     },
 
-    /* Whether this tab has not toasted this onset yet — from now on it has.
-       A notice without an onset is news whenever it appears. */
+    /* Whether this tab meets this onset for the first time — from now on it
+       knows it. A notice without an onset is news whenever it appears. */
     _news(key, since) {
       if (since == null) return true;
-      if (this._toasted === null) {
-        try { this._toasted = JSON.parse(sessionStorage.getItem('sautiumNoticesToasted')) || {}; }
-        catch (_) { this._toasted = {}; }
+      if (this._known === null) {
+        let kept = null;
+        try { kept = JSON.parse(sessionStorage.getItem('sautiumNoticeOnsets')); }
+        catch (_) { /* refused, or not ours to read: memory alone */ }
+        // only an object of onsets is ours: anything else starts afresh
+        this._known = kept && typeof kept === 'object' && !Array.isArray(kept) ? kept : {};
       }
-      if (this._toasted[key] === since) return false;
-      this._toasted[key] = since;
-      try { sessionStorage.setItem('sautiumNoticesToasted', JSON.stringify(this._toasted)); }
+      if (this._known[key] === since) return false;
+      this._known[key] = since;
+      try { sessionStorage.setItem('sautiumNoticeOnsets', JSON.stringify(this._known)); }
       catch (_) { /* memory alone: after a reload this onset may toast once more */ }
       return true;
     },

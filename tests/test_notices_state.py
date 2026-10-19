@@ -6,7 +6,8 @@ holds that family's dump, whatever the row still says.
 On a real PostgreSQL — a throwaway database built from the migrations, the
 connection pool pointed at it. Skipped where there is no cluster. The tab's
 side — an onset toasted once — runs app-shell.js's `notices` under Node,
-skipped where Node is not.
+strict as the page is; skipped where Node is not, and with this module
+where psycopg2 or the settings router is not.
 """
 
 import json
@@ -126,9 +127,9 @@ _TABS = r"""
 const fs = require('node:fs'), vm = require('node:vm');
 const src = fs.readFileSync(process.argv[process.argv.length - 1], 'utf8');
 const literal = src.slice(src.indexOf('  const notices = {'), src.indexOf('  window.notices = notices;'));
-function storage(refused) {
-  const kept = new Map();
-  return refused
+function storage(kind) {
+  const kept = new Map(kind === 'junk' ? [['sautiumNoticeOnsets', '5']] : []);
+  return kind === 'refused'
     ? { getItem() { throw new Error('refused'); }, setItem() { throw new Error('refused'); } }
     : { getItem: (k) => (kept.has(k) ? kept.get(k) : null), setItem: (k, v) => kept.set(k, String(v)) };
 }
@@ -136,13 +137,14 @@ function tab(sessionStorage) {
   const toasted = [];
   const context = { sessionStorage, window: { dispatchEvent() {} }, CustomEvent: class {},
                     noticeCopy: () => ({ title: '', text: '' }) };
-  vm.runInNewContext(`${literal}\nthis.notices = notices;`, context);
+  // strict, as the page's own code is
+  vm.runInNewContext(`'use strict';\n${literal}\nthis.notices = notices;`, context);
   context.notices.toast = (t) => toasted.push(t.key);
   return { apply: (items, initial) => context.notices.apply({ items, initial }), toasted };
 }
 const out = {};
-for (const refused of [false, true]) {
-  const kept = storage(refused), rate = { key: 'hqplayer.rate_check', since: '2001-05-06T09:00:00+00:00' };
+for (const kind of ['kept', 'refused', 'junk']) {
+  const kept = storage(kind), rate = { key: 'hqplayer.rate_check', since: '2001-05-06T09:00:00+00:00' };
   const first = tab(kept);
   first.apply([], true);
   first.apply([rate]);                              // the onset
@@ -153,7 +155,13 @@ for (const refused of [false, true]) {
   reloaded.apply([rate]);
   reloaded.apply([{ ...rate, since: '2001-05-06T09:30:00+00:00' }]);   // a new onset
   for (const items of [[], [{ key: 'x', since: null }], [], [{ key: 'x', since: null }]]) reloaded.apply(items);
-  out[refused ? 'refused' : 'kept'] = { first: first.toasted, reloaded: reloaded.toasted };
+  // a tab that connects while an onset already stands: painted, never toasted, a gap included
+  const late = tab(storage(kind));
+  late.apply([rate], true);
+  late.apply([]);
+  late.apply([rate]);
+  late.apply([{ ...rate, since: '2001-05-06T10:00:00+00:00' }]);       // a new onset
+  out[kind] = { first: first.toasted, reloaded: reloaded.toasted, late: late.toasted };
 }
 process.stdout.write(JSON.stringify(out));
 """
@@ -163,11 +171,15 @@ process.stdout.write(JSON.stringify(out));
 def test_a_tab_toasts_an_onset_once_through_a_gap_and_a_reload():
     """A notice that goes and comes back with the same onset — an advance's
     tail, a Stop — toasts once in a tab, and once only across a reload while
-    sessionStorage keeps the onsets; refused, memory keeps them for the page.
-    A new onset toasts; a notice without one, whenever it appears."""
+    sessionStorage keeps the onsets; refused, memory keeps them for the page,
+    and junk there starts afresh. An onset the tab first met in the
+    connect-time snapshot never toasts, a gap included. A new onset toasts; a
+    notice without an onset, whenever it appears."""
     proc = subprocess.run([shutil.which("node"), "-e", _TABS, "--", str(BACKEND / "static" / "app-shell.js")],
                           capture_output=True, check=True)
+    once = ["hqplayer.rate_check"]
     assert json.loads(proc.stdout) == {
-        "kept": {"first": ["hqplayer.rate_check"], "reloaded": ["hqplayer.rate_check", "x", "x"]},
-        "refused": {"first": ["hqplayer.rate_check"],
-                    "reloaded": ["hqplayer.rate_check", "hqplayer.rate_check", "x", "x"]}}, proc.stdout
+        "kept": {"first": once, "reloaded": ["hqplayer.rate_check", "x", "x"], "late": once},
+        "refused": {"first": once, "reloaded": ["hqplayer.rate_check", "hqplayer.rate_check", "x", "x"],
+                    "late": once},
+        "junk": {"first": once, "reloaded": ["hqplayer.rate_check", "x", "x"], "late": once}}, proc.stdout

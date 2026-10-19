@@ -492,7 +492,8 @@ notice (`hqplayer.rate_check`), whose words are the rate check's own
 (`backend/hqp_rate_check.py`, one place for every word it says), carried in
 its `data` as phrases its `NOTICE_COPY` entry draws. A copy may name an
 `action`: the notice's toast then carries it (the rate check's Why? opens
-the HQPlayer screen). A condition with no ledger
+the HQPlayer screen); its row on Sync & P2P draws none and names the reason
+in its own text. A condition with no ledger
 keeps its `since` in `_derived_since` (`routers/settings.py`); its
 producers wake the channel on the bad AND the good transition. The music
 folder: every stream derives the set on every wake, so the readers share
@@ -512,9 +513,11 @@ re-raises the same toast on every run (the slice rows did, every few
 seconds — `lb_slice_cycle.publish_status` keeps it now); the connect-time snapshot is
 `initial` and paints state only, so a tab that slept through a change
 wakes to the rows, never to a burst of stale toasts. The tab remembers
-each onset it toasted (`notices._news`: sessionStorage, memory where it is
-refused), so a notice that goes and comes back with the same `since` — a
-gap, a reload — toasts no second time (since 2026-10-19). Wake the channel
+each onset it has met (`notices._news`: sessionStorage, memory where it is
+refused) — toasted, or painted by the connect-time snapshot — so a notice
+that goes and comes back with the same `since` (a gap; a reload, while
+sessionStorage keeps them) toasts no second time, and one older than the
+connection never (since 2026-10-19). Wake the channel
 with `NOTIFY sautium_notices` after changing a source.
 
 `title` and `text` are HTML — escape anything user-controlled, exactly

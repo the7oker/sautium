@@ -1306,10 +1306,14 @@ playlist plays (an entry not ours, a mirror that drifted). The screen draws
 the phrases in the limiter line's colour, the filter's after its facts, the
 modulator's under its row. While a track of such a queue that can play
 plays, the same is said as the notice `hqplayer.rate_check`, its toast once
-per queue and setting in a tab — the notice is served only while such a
-track plays, and since 2026-10-19 the client remembers the onsets it
-toasted, so neither a gap (an advance's tail, a Stop) nor a reload toasts
-one again — its toast's Why? opening the HQPlayer screen: the
+per onset in a tab — the queue and setting meeting it, anew when either
+changes. The notice is served only while such a track plays, and since
+2026-10-19 the tab remembers the onsets it has met, toasted or painted at
+connect, so neither a gap (an advance's tail, a Stop) nor, while
+sessionStorage keeps them, a reload toasts one again, and one older than
+the connection toasts never. Why? is on the toast, opening the HQPlayer
+screen, whose line says it in place; the row on Sync & P2P names the reason
+in its own text. The
 HQPlayer backend holds the check, judged again on the poller's tick after an
 event — a queue change, a DSP change of this node's, HQPlayer coming back,
 the attach, the slot read moving, a sampled State that differs — reading
