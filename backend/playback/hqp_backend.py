@@ -2141,10 +2141,13 @@ class HqpBackend(PlayerBackend):
         """What the notices channel serves of the held check: while HQPlayer
         plays or pauses a slot of ours that can play and refused tracks lie
         ahead — a started slot refused speaks through its verdict instead,
-        another controller's playlist through nothing — with its onset, the
-        first time this queue generation and setting met it (a source rate
-        joining the refused ones in the same generation changes the words
-        only), and the module's words."""
+        another controller's playlist through nothing — with its onset, new
+        whenever this backend serves the notice for a queue generation and
+        setting (Check.key) other than the last it served it for, its first
+        serving included (an attach is a new backend), and the same while it
+        serves it for that one, a gap included (a source rate joining the
+        refused ones in the same generation changes the words only), and the
+        module's words."""
         check = self._rate_check
         if (check is None or not check.groups or check.started_refused
                 or self._rate_gen != self._queue.generation

@@ -2829,13 +2829,13 @@ def test_a_parked_rate_check_asks_again_once_when_hqplayer_plays_a_slot_of_ours(
     fake.replies["GetRates"] = '<GetRates result="Error">no output device</GetRates>'
 
     def stops_as_it_refuses(f, conn, what, command):
+        # once, and by the fake itself: the test may see the question arrive before the fake runs this
         if what == "in" and command == "GetRates":
-            f.state = int(PlaybackState.STOPPED)
+            f.state, f.on_wire = int(PlaybackState.STOPPED), None
     fake.on_wire = stops_as_it_refuses
     mark = len(fake.arrivals)
     b._rate_event("state", "lists")                         # as HQPlayer coming back asks
     assert _wait(lambda: rates(mark) == 1, 5.0)
-    fake.on_wire = None
     _polls(fake, 3)
     assert rates(mark) == 1 and caplog.text.count("the rate check waits for an event") == 2
     with fake._lock:

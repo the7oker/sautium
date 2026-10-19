@@ -480,8 +480,8 @@ measured or set the owner's selection there back, until that mode is judged
 at HQPlayer's nearest rest or a new run's start (`unchecked_notice`), one
 whose check left HQPlayer in that mode, until it is back where it was found
 (`stayed_notice`), a queue that meets a rate HQPlayer cannot reach while a
-track of it that can play plays (the check the HQPlayer backend holds,
-`rate_notice`, since 2026-10-18) and the CLI agents' sign-ins
+track of it that can play plays or is paused (the check the HQPlayer
+backend holds, `rate_notice`, since 2026-10-18) and the CLI agents' sign-ins
 (`claude_code.auth`, `codex_cli.auth`: while the assistant runs on one, or
 gear research waits for Claude Code — the gear chips and sheet say so in
 place, and the `ai_signin` guidance task lights the trail to the Sign in
@@ -516,9 +516,10 @@ wakes to the rows, never to a burst of stale toasts. The tab remembers
 each onset it has met (`notices._news`: sessionStorage, memory where it is
 refused) — toasted, or painted by the connect-time snapshot — so a notice
 that goes and comes back with the same `since` (a gap; a reload, while
-sessionStorage keeps them) toasts no second time, and one the connect-time
-snapshot carried never (since 2026-10-19); a notice the tab first meets
-later toasts once, however old its `since`. Wake the channel
+sessionStorage keeps them) toasts no second time, and one a connect-time
+snapshot carried never while the tab holds it (since 2026-10-19); a notice
+the tab meets later with a `since` it does not hold toasts once, however
+old. Wake the channel
 with `NOTIFY sautium_notices` after changing a source.
 
 `title` and `text` are HTML — escape anything user-controlled, exactly

@@ -1305,15 +1305,25 @@ to say, while HQPlayer is not the output, and while another controller's
 playlist plays (an entry not ours, a mirror that drifted). The screen draws
 the phrases in the limiter line's colour, the filter's after its facts, the
 modulator's under its row. While a track of such a queue that can play
-plays, the same is said as the notice `hqplayer.rate_check`, its toast once
-per onset in a tab — the queue and setting meeting it, anew when either
-changes. The notice is served only while such a track plays, and since
-2026-10-19 the tab remembers the onsets it has met, toasted or painted at
-connect, so neither a gap (an advance's tail, a Stop) nor, while
-sessionStorage keeps them, a reload toasts one again, and one the
-connect-time snapshot carried toasts never. A tab that connects while no
-such track plays meets the notice at the next play, however old its
-onset, and toasts it then. Why? is on the toast, opening the HQPlayer
+plays or is paused, the same is said as the notice `hqplayer.rate_check`,
+its toast once per onset in a tab — the onset new whenever the HQPlayer
+backend serves the notice for a queue and setting other than the last it
+served it for, and the same while it serves it for that one, a gap
+included. The setting is the mode, the output rate, both filters, the
+adaptive output rate and, in SDM, the modulator (a PCM dither is not part
+of it), so a setting left and returned to keeps the onset unless the
+notice was served in between, and HQPlayer attached anew as the output
+(any attach, such as a switch back to it, another HQPlayer picked, a
+benchmark run's end, a play after one that found it offline or a restart
+of the node) takes a new one. The notice is served only while such a
+track plays or is paused,
+as the poller last judged it (an HQPlayer that stops answering leaves it
+as it was), and since 2026-10-19 the tab remembers the onsets it has met:
+one toasts the first
+time the tab meets it, however old, unless that is in the connect-time
+snapshot, which paints it only; so neither a gap (an advance's tail, a
+Stop) nor, while sessionStorage keeps them, a reload toasts one again.
+Why? is on the toast, opening the HQPlayer
 screen, whose line says it in place; the row on Sync & P2P names the reason
 in its own text. The
 HQPlayer backend holds the check, judged again on the poller's tick after an

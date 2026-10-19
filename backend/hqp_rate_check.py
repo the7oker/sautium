@@ -1,6 +1,7 @@
 """Whether HQPlayer reaches its output rate from the tracks the queue still
-has to play: the rule behind the HQPlayer screen's line, the notice while
-such a queue plays and the verdict `rate_refused`, and every word they say.
+has to play: the rule behind the HQPlayer screen's line, the notice
+`hqplayer.rate_check` and the verdict `rate_refused`, and every word they
+say.
 
 HQPlayer takes a Play and stops at once on a track whose source rate the
 filter that runs it, or in SDM mode its modulator, does not convert to the
@@ -320,9 +321,10 @@ def lines(c: Check) -> Dict[str, List[List[Dict[str, str]]]]:
 
 
 def notice(c: Check) -> Optional[Dict[str, Any]]:
-    """The notice while such a queue plays: its title and the claims, the
-    modulator's first; the fix is on the screen its Why? opens. None when
-    there is nothing to say."""
+    """The notice's words, served by the HQPlayer backend while a track of
+    such a queue that can play plays or is paused: its title and the
+    claims, the modulator's first; the fix is on the screen its Why? opens.
+    None when there is nothing to say."""
     if not c.groups:
         return None
     return {"title": wire([NOTICE_TITLE.format(out=rate_name(c.rate))]),

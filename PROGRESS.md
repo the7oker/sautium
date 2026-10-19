@@ -1839,7 +1839,8 @@ for a Last.fm cooldown (30 min doubling to 24 h) that reads as "Idle".
   double-tap cannot be hijacked into "open Sync". The toast is narrower
   than the header so the corner buttons stay uncovered; only a toast with
   an action opts back in. Long-lived conditions never float: the
-  reconnecting strip sits in flow and pushes the app down.
+  reconnecting strip sat in flow and pushed the app down; since 2026-09-16
+  it is fixed to the top of the viewport, the page starting beneath it.
 - **Snapshots, not events.** The server publishes the whole active set on
   `/api/events` and the client diffs it; the connect-time copy paints state
   only. Conditions are DERIVED (cooldown ledger, the slice cycles' status
@@ -2857,8 +2858,10 @@ and every word it says are `backend/hqp_rate_check.py`, one place; the
 verdict reads it, and since the same day the HQPlayer screen too, before a
 play: a line under the row it names, the node's own atlas copy speaking
 there as on every screen of the node's; while a track of such a queue that
-can play plays, a notice says it, its toast once per onset in a tab — the
-queue and setting meeting it, anew when either changes; since 2026-10-19
+can play plays or is paused, a notice says it, its toast once per onset in
+a tab — the onset new whenever the HQPlayer backend serves the notice for
+a queue and setting other than the last it served it for, or first since
+HQPlayer was attached; since 2026-10-19
 the tab remembers the onsets it has met, toasted or painted at connect, so
 neither a gap in the notice nor (while sessionStorage keeps them) a reload
 toasts one again — its Why? leading to that screen, and the row on Sync &
@@ -2882,8 +2885,10 @@ judged as a PCM rate (the trace keeps no `src_sdm`), though the rule leaves
 DSD tracks unchecked; the facts keep the Nx slot's filter alone, so with no
 filter reported in the ticks a base-rate source is judged by it; a log line
 naming another cause (a file not opened) does not take `rate_refused` back;
-nothing wakes the notices channel on an output switch or while HQPlayer
-answers nothing, so the rate check's notice stays until another wake; the
+nothing wakes the notices channel on an output switch, so the rate check's
+notice stays until another wake, and while HQPlayer answers nothing it
+stays as last judged, served at every wake until the poller judges it
+again; the
 diagnosis toast is keyed by its attempt, so a verdict HQPlayer's log turns
 into `rate_refused` after the toast keeps the toast's first title (older
 than the rate check); and an advance HQPlayer refuses inside a watched

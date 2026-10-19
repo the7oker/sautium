@@ -1236,9 +1236,10 @@ def _notice_items() -> List[Dict[str, Any]]:
                       "since": refused["since"], "until": None,
                       "data": {k: refused[k] for k in ("what", "count", "total", "stream")}})
     # A queue that meets a rate HQPlayer cannot reach (hqp_rate_check): said
-    # once per queue and setting while a track of it that can play plays —
-    # the HQPlayer backend holds the check; the words are the module's own,
-    # drawn as phrases, the toast's Why? the HQPlayer screen
+    # while a track of it that can play plays or is paused, with the onset
+    # the HQPlayer backend keeps (its _rate_notice_now) — the backend holds
+    # the check; the words are the module's own, drawn as phrases, the
+    # toast's Why? the HQPlayer screen
     from playback.manager import manager
     active = manager.active
     rate = active.rate_notice() if active is not None and active.id == "hqplayer" else None
