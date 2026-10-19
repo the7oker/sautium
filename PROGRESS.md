@@ -2854,7 +2854,9 @@ and every word it says are `backend/hqp_rate_check.py`, one place; the
 verdict reads it, and since the same day the HQPlayer screen too, before a
 play: a line under the row it names, the node's own atlas copy speaking
 there as on every screen of the node's; while a track of such a queue that
-can play plays, a notice says it once per queue and setting, its Why?
+can play plays, a notice says it, its toast once per queue and setting in a
+tab — since 2026-10-19 the client remembers the onsets it toasted, so
+neither a gap in the notice nor a reload toasts one again — its Why?
 leading to that screen. A verdict reads the atlas only as
 the site published it: the shipped file, and of it only an entry whose
 release has a date — a trace and the log travel in a support warrant, and

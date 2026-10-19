@@ -511,7 +511,10 @@ ONSET, stable while it lasts: a producer that restamps it per run
 re-raises the same toast on every run (the slice rows did, every few
 seconds — `lb_slice_cycle.publish_status` keeps it now); the connect-time snapshot is
 `initial` and paints state only, so a tab that slept through a change
-wakes to the rows, never to a burst of stale toasts. Wake the channel
+wakes to the rows, never to a burst of stale toasts. The tab remembers
+each onset it toasted (`notices._news`: sessionStorage, memory where it is
+refused), so a notice that goes and comes back with the same `since` — a
+gap, a reload — toasts no second time (since 2026-10-19). Wake the channel
 with `NOTIFY sautium_notices` after changing a source.
 
 `title` and `text` are HTML — escape anything user-controlled, exactly

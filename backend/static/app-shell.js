@@ -11584,6 +11584,11 @@
     _strips: new Map(),
     _queue: [],
     _shown: [],
+    // The onsets this tab has toasted, key → since: a notice that goes and
+    // comes back with the same onset (an advance's tail, a Stop, a reload)
+    // is no news. sessionStorage carries them over a reload; where it is
+    // refused (a private window, blocked site data) memory alone does.
+    _toasted: null,
 
     get(key) { return this.items.get(key) || null; },
     list() { return [...this.items.values()]; },
@@ -11593,13 +11598,28 @@
       if (!snapshot.initial) {
         next.forEach((n, key) => {
           const prev = this.items.get(key);
-          if (prev && prev.since === n.since) return;
+          if ((prev && prev.since === n.since) || !this._news(key, n.since)) return;
           const c = noticeCopy(n);
           this.toast({ kind: n.kind, title: c.title, text: c.text, action: c.action || null, key });
         });
       }
       this.items = next;
       window.dispatchEvent(new CustomEvent('sautium:notices-changed'));
+    },
+
+    /* Whether this tab has not toasted this onset yet — from now on it has.
+       A notice without an onset is news whenever it appears. */
+    _news(key, since) {
+      if (since == null) return true;
+      if (this._toasted === null) {
+        try { this._toasted = JSON.parse(sessionStorage.getItem('sautiumNoticesToasted')) || {}; }
+        catch (_) { this._toasted = {}; }
+      }
+      if (this._toasted[key] === since) return false;
+      this._toasted[key] = since;
+      try { sessionStorage.setItem('sautiumNoticesToasted', JSON.stringify(this._toasted)); }
+      catch (_) { /* memory alone: after a reload this onset may toast once more */ }
+      return true;
     },
 
     /* The rows were on screen: retire the trail for exactly these

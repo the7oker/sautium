@@ -1305,8 +1305,11 @@ to say, while HQPlayer is not the output, and while another controller's
 playlist plays (an entry not ours, a mirror that drifted). The screen draws
 the phrases in the limiter line's colour, the filter's after its facts, the
 modulator's under its row. While a track of such a queue that can play
-plays, the same is said once per queue and setting as the notice
-`hqplayer.rate_check`, its toast's Why? opening the HQPlayer screen: the
+plays, the same is said as the notice `hqplayer.rate_check`, its toast once
+per queue and setting in a tab — the notice is served only while such a
+track plays, and since 2026-10-19 the client remembers the onsets it
+toasted, so neither a gap (an advance's tail, a Stop) nor a reload toasts
+one again — its toast's Why? opening the HQPlayer screen: the
 HQPlayer backend holds the check, judged again on the poller's tick after an
 event — a queue change, a DSP change of this node's, HQPlayer coming back,
 the attach, the slot read moving, a sampled State that differs — reading
