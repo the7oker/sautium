@@ -2788,6 +2788,7 @@ def _parked(fake, output, monkeypatch, tmp_path):
         playing, fake.state = fake.state, int(PlaybackState.STOPPED)
     fake.replies["GetRates"] = '<GetRates result="Error">no output device</GetRates>'
     rates = lambda mark: [c for _, c in fake.arrivals[mark:]].count("GetRates")      # noqa: E731
+    _polls(fake, 1)                                         # its stop read by the poller
     mark = len(fake.arrivals)
     b._rate_event("state", "lists")                         # as HQPlayer coming back asks
     assert _wait(lambda: rates(mark) == 1, 5.0)
@@ -2800,31 +2801,57 @@ def test_a_parked_rate_check_asks_again_once_when_hqplayer_plays_a_slot_of_ours(
                                                                                  tmp_path, caplog):
     caplog.set_level(logging.INFO)
     mgr, b, playing, rates = _parked(fake, output, monkeypatch, tmp_path)
-    # HQPlayer plays a slot of ours: asked again, once — refused again, the park stays, said no more,
-    # and another play of the same park asks nothing
+    asked = lambda mark: [c for _, c in fake.arrivals[mark:]                          # noqa: E731
+                          if c in ("State", "GetModes", "GetRates", "GetFilters", "GetShapers")]
+    # HQPlayer plays a slot of ours: asked again, State with the lists, once — refused again, the park
+    # stays, said no more
     mark = len(fake.arrivals)
     with fake._lock:
         fake.state = playing
     assert _wait(lambda: rates(mark) == 1, 5.0)
     _polls(fake, 4)
-    assert rates(mark) == 1
+    assert asked(mark) == ["State", "GetModes", "GetRates", "GetFilters", "GetShapers"]
     assert caplog.text.count("the rate check waits for an event") == 1
-    # answered at an event that can change it, then refused anew: a new park, whose first play asks again
+    # another play of the same park — a Stop, then Play — asks nothing
+    with fake._lock:
+        fake.state = int(PlaybackState.STOPPED)
+    _polls(fake, 2)
+    with fake._lock:
+        fake.state = playing
+    _polls(fake, 4)
+    assert rates(mark) == 1
+    # answered at an event that can change it, then refused anew as HQPlayer plays, its output gone and
+    # the play with it: a new park — the status of its own tick, asked for before the refusal, no play
+    # after it — whose next play asks again
     fake.replies["GetRates"] = _RATE_PCM[1]
     b._rate_event("state", "again")                         # as a DSP change of this node's asks
     assert _wait(lambda: "the rate check judges anew" in caplog.text, 5.0)
     fake.replies["GetRates"] = '<GetRates result="Error">no output device</GetRates>'
+
+    def stops_as_it_refuses(f, conn, what, command):
+        if what == "in" and command == "GetRates":
+            f.state = int(PlaybackState.STOPPED)
+    fake.on_wire = stops_as_it_refuses
     mark = len(fake.arrivals)
-    b._rate_event("state", "lists")
-    assert _wait(lambda: rates(mark) == 2, 5.0)             # the park's own question, then its play's
+    b._rate_event("state", "lists")                         # as HQPlayer coming back asks
+    assert _wait(lambda: rates(mark) == 1, 5.0)
+    fake.on_wire = None
+    _polls(fake, 3)
+    assert rates(mark) == 1 and caplog.text.count("the rate check waits for an event") == 2
+    with fake._lock:
+        fake.state = playing
+    assert _wait(lambda: rates(mark) == 2, 5.0)
     _polls(fake, 4)
-    assert rates(mark) == 2 and caplog.text.count("the rate check waits for an event") == 2
+    assert rates(mark) == 2
+    said = [r for r in caplog.records if any(line in r.getMessage() for line in (
+        "the rate check waits for an event", "the rate check judges anew"))]
+    assert [r.levelno for r in said] == [logging.INFO] * 3, said      # a park, its end, a park
 
 
 def test_a_parked_rate_check_asks_nothing_when_hqplayer_plays_an_entry_not_ours(fake, output, monkeypatch,
                                                                                  tmp_path):
     mgr, b, playing, rates = _parked(fake, output, monkeypatch, tmp_path)
-    monkeypatch.setattr(b, "_playing", lambda status, **k: (1, None, True))      # another controller's entry
+    monkeypatch.setattr(b, "_playing", lambda status, **k: (0, None, True))      # another controller's entry
     mark = len(fake.arrivals)
     with fake._lock:
         fake.state = playing

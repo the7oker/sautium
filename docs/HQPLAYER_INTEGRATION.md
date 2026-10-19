@@ -1317,18 +1317,19 @@ in its own text. The
 HQPlayer backend holds the check, judged again on the poller's tick after an
 event — a queue change, a DSP change of this node's, HQPlayer coming back,
 the attach, the slot read moving, a sampled State that differs — reading
-State for a new queue, a DSP change, a return or the attach and the lists
-when none are held, the mode moved or HQPlayer came back, begun never while
+State for a new queue, a DSP change, a return, the attach or a park's first
+play (below) and the lists when none are held, the mode moved or HQPlayer
+came back, begun never while
 a mutation or a play press runs nor before a watched intent's first transport
 command — checked once, before its questions go one at a time, so what
 begins meanwhile has the rest pass between its commands. A list HQPlayer
 refuses (no output device) parks the check: it is asked again only after an
 event that can change the answer — HQPlayer back, a DSP change of this
-node's, the mode moving as sampled while HQPlayer plays, or the first time
-HQPlayer plays a slot of ours after the park, its output answering then
-(once a park) — while a question left unanswered or a build asks again on
-the next tick; the park and its end are logged once each (since
-2026-10-19). A started track that cannot play
+node's, the mode moving as sampled while HQPlayer plays, or the first status
+asked for since the park in which HQPlayer plays a slot of ours, its output
+answering then (once a park) — while a question left unanswered or a build
+asks again on the next tick; the park and its end are logged once each
+(since 2026-10-19). A started track that cannot play
 speaks through its verdict alone.
 
 **HQPlayer's own log** is read on demand — the Diagnostics screen, an

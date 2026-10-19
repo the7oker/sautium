@@ -1796,6 +1796,7 @@ class HqpBackend(PlayerBackend):
             miss = None         # (what was said, whether HQPlayer kept the connection silent)
             came_back = learned = False
             att = self._attempt
+            parked = self._rate_refused     # parked before this tick's status is asked for
             try:
                 hqp_playlist = None
                 with link.asking(until=lambda: not self._running) as hqp:
@@ -1951,13 +1952,16 @@ class HqpBackend(PlayerBackend):
                                              else status.volume + status.track_gain)
                     self._last_entry = Entry.read(status) or self._last_entry
                     self._before = (status, playing)
-                    if (self._rate_refused and not self._rate_woken
+                    if (parked and self._rate_refused and not self._rate_woken
                             and status.state == PlaybackState.PLAYING and playing is not None
                             and playing[1] is not None and not playing[2]):
                         # Parked on a refused list: HQPlayer playing a slot of
-                        # ours shows its output answers — asked again, once a park
+                        # ours shows its output answers — asked again, once a
+                        # park, never on the park's own tick, whose status was
+                        # asked for before the refusal; State with the lists,
+                        # the mode free to have moved meanwhile
                         self._rate_woken = True
-                        self._rate_event("again")
+                        self._rate_event("state", "again")
                     if self._rate_pending is not None:
                         pending, self._rate_pending = self._rate_pending, None
                         self._rate_judge(pending, playing)
@@ -2028,7 +2032,8 @@ class HqpBackend(PlayerBackend):
         poller's next tick: a queue change, a DSP change of this node's,
         HQPlayer coming back, the slot read moving, a sampled State that
         differs. `asks`: what that tick reads first — "state" (a new queue
-        generation, a DSP change, a return, the attach), "lists" (none held,
+        generation, a DSP change, a return, the attach, a park's first play
+        of a slot of ours), "lists" (none held,
         a return, the mode moved), "again" (a DSP change of this node's, the
         first play of a slot of ours after a park: either may change a list
         HQPlayer refused); nothing: judged again on what is held."""
