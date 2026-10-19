@@ -2887,21 +2887,17 @@ into `rate_refused` after the toast keeps the toast's first title (older
 than the rate check); and an advance HQPlayer refuses inside a watched
 intent's window is judged as that intent's own slot, not as an advance.
 
-Open too (2026-10-19): a status is stamped before the poller waits for the
-connection, so one that waited behind another request starts an advance's
-deadline early by that wait, and one that waited behind an attempt's first
-transport command is dropped though it already holds it (the attempt's
-first tick is then the next status); a State HQPlayer refuses in its own
-words is read as its defaults — the client reads no result there — and
-judged by the held rate check as such; the check's questions are guarded
-once, before up to five go one at a time, so those still to go pass between
-the commands of a press, a mutation or an intent that begins meanwhile —
-between a replace and its owed Play too; a database error in its judgement
-drops it until another event — the next tick raises one itself while the
-slot HQPlayer reads is not the one judged last, a warning each time — and
-the judgement before is served meanwhile while the queue generation holds;
-and the verdict's queue rates read the slot and the queue in two looks, so
-a track removed or added before that slot between them shifts them by one.
+Open too (2026-10-19): a State HQPlayer refuses in its own words is read as
+its defaults — the client reads no result there — and judged by the held
+rate check as such; the check's questions are guarded once, before up to
+five go one at a time, so those still to go pass between the commands of a
+press, a mutation or an intent that begins meanwhile — between a replace and
+its owed Play too; a database error in its judgement drops it until another
+event — the next tick raises one itself while the slot HQPlayer reads is not
+the one judged last, a warning each time — and the judgement before is
+served meanwhile while the queue generation holds; and the verdict's queue
+rates read the slot and the queue in two looks, so a track removed or added
+before that slot between them shifts them by one.
 
 ## Known Gotchas
 

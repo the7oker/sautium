@@ -510,6 +510,10 @@ class HQPlayerClient:
     timed_out = _PerThread(False)
     # The latest read got its line: HQPlayer answered, whatever it said.
     answered = _PerThread(False)
+    # When the thread's latest request went onto the connection — after any
+    # wait for it (playback.hqp_link hands it out a request at a time), so it
+    # orders the request exactly against another thread's.
+    sent_at = _PerThread(None)
     _io_error = _PerThread(None)
     # (seconds, watched) the next answer this thread waits for takes on
     # (inherit) — the wait of the command before it in its sequence
@@ -757,6 +761,7 @@ class HQPlayerClient:
         try:
             # A read leaves the socket at whatever its wait had left
             self.socket.settimeout(self.timeout)
+            self.sent_at = time.time()
             self.socket.sendall(xml_command.encode('utf-8'))
             return True
         except Exception as e:
@@ -906,6 +911,7 @@ class HQPlayerClient:
         self.last_error = None
         self._io_error = None
         self.answered = False
+        self.sent_at = None
         inherited, self._inherited = self._inherited, None
         # Build XML command
         root = ET.Element(command)

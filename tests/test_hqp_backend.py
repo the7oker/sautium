@@ -4778,6 +4778,30 @@ def test_a_silence_ends_the_sequence_that_met_it(fake, monkeypatch):
     assert [c for _, c in fake.arrivals] == ["PlaylistAdd"]
 
 
+def test_a_question_is_stamped_when_its_bytes_go_not_while_it_waits_for_the_connection(fake):
+    """A status asked while another thread's request holds the connection is
+    stamped as it is sent, after that request — the moment HQPlayer was
+    asked, which orders it exactly against a command another thread sends."""
+    link = _link()
+    fake.service["State"] = 0.6
+
+    def hold():
+        with link.asking() as c:
+            c.get_state()
+
+    other = threading.Thread(target=hold)
+    other.start()
+    assert _wait(lambda: "State" in [c for _, c in fake.arrivals], 2.0)
+    with link.asking() as c:
+        assert c.get_status() is not None
+        sent = c.sent_at
+    other.join(2.0)
+    # on the fake's own clock: after the State it waited behind was served, before the fake had it
+    state = next(ts for ts, c in fake.arrivals if c == "State")
+    status = next(ts for ts, c in fake.arrivals if c == "Status" and ts > state)
+    assert state + 0.5 <= sent <= status
+
+
 def test_the_hqplayer_screen_stops_at_its_first_silence(fake, monkeypatch):
     """I1: the HQPlayer screen's questions are one block — the first one
     HQPlayer leaves unanswered ends it, within one wait, far inside the

@@ -1797,19 +1797,16 @@ class HqpBackend(PlayerBackend):
             try:
                 hqp_playlist = None
                 with link.asking(until=lambda: not self._running) as hqp:
-                    # Stamped before it is asked, its wait for the connection
-                    # included: one stamped before the outcome of an
-                    # attempt's first transport command is no tick of it
-                    # (Attempt.tick) — what HQPlayer held before the command,
-                    # or a status that waited behind it; the attempt's first
-                    # tick is then the next status
-                    read_at = time.time()
                     status = hqp.get_status(wait=QUESTION_WAIT_S)
                     if status is None and not hqp.timed_out:
                         # The connection broke under the read: once more, on
                         # a fresh one — HQPlayer restarted answers it
-                        read_at = time.time()
                         status = hqp.get_status(wait=QUESTION_WAIT_S)
+                    # When the status was asked for, its bytes going onto the
+                    # connection: one asked before the outcome of an
+                    # attempt's first transport command is no tick of it
+                    # (Attempt.tick) — what HQPlayer held before the command
+                    read_at = hqp.sent_at
                     if status is None:
                         miss = (hqp.last_error.message if hqp.last_error else "no status answer",
                                 hqp.timed_out)
@@ -2142,10 +2139,8 @@ class HqpBackend(PlayerBackend):
         this tick stopped, its track_serial one more than the tick before,
         which played an entry of ours to its last seconds with one after it
         — while no intent of ours is watched and no mutation or play press
-        runs, watched from `read_at`, when this tick's status was stamped —
-        before its wait for the connection, so a status that waited behind
-        another request starts the deadline early by that wait. On this
-        machine its log is followed while the attempt waits
+        runs, watched from `read_at`, when this tick's status was asked for.
+        On this machine its log is followed while the attempt waits
         (diag.LogFollower). Called on the poller."""
         before, playing = self._before or (None, None)
         if (before is None or playing is None or playing[1] is None or playing[2]
