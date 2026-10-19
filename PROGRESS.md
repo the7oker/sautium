@@ -2891,11 +2891,9 @@ Open too (2026-10-19): a status is stamped before the poller waits for the
 connection, so one that waited behind another request starts an advance's
 deadline early by that wait, and one that waited behind an attempt's first
 transport command is dropped though it already holds it (the attempt's
-first tick is then the next status); while HQPlayer refuses one of the four
-lists (no output device), the held rate check asks State and the lists again
-on every tick, each refusal entering the client's error ring, and a State
-HQPlayer refuses in its own words is read as its defaults — the client reads
-no result there — and judged as such; the check's questions are guarded
+first tick is then the next status); a State HQPlayer refuses in its own
+words is read as its defaults — the client reads no result there — and
+judged by the held rate check as such; the check's questions are guarded
 once, before up to five go one at a time, so those still to go pass between
 the commands of a press, a mutation or an intent that begins meanwhile —
 between a replace and its owed Play too; a database error in its judgement

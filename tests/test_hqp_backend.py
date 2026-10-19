@@ -2758,6 +2758,34 @@ def test_the_held_rate_check_asks_nothing_for_an_intent_watched_since_its_tick_b
     assert _wait(lambda: "State" in [c for _, c in fake.arrivals[before:]], 5.0)
 
 
+def test_a_list_hqplayer_refuses_is_asked_again_only_after_an_event_that_can_change_it(fake, output,
+                                                                                         monkeypatch, tmp_path):
+    from hqp_rate_check import Sources
+    mgr, b = _rate_queue(fake, output, monkeypatch, tmp_path, Sources({44100: 2, 48000: 1}, first=44100))
+    assert _wait(lambda: b.rate_notice() is not None, 5.0)
+    monkeypatch.setattr(b._sampler, "due", lambda *a, **k: False)     # its State reads aside
+    # the output device gone: HQPlayer refuses its rate list, asked once
+    fake.replies["GetRates"] = '<GetRates result="Error">no output device</GetRates>'
+    before = len(fake.arrivals)
+    b._rate_event("state", "lists")                         # as HQPlayer coming back asks
+    assert _wait(lambda: "GetRates" in [c for _, c in fake.arrivals[before:]], 5.0)
+    _polls(fake, 3)
+    assert [c for _, c in fake.arrivals[before:]].count("GetRates") == 1
+    # an event that cannot change the answer asks nothing
+    before = len(fake.arrivals)
+    b._rate_event("state")                                  # as a new queue asks
+    _polls(fake, 3)
+    assert [c for _, c in fake.arrivals[before:] if c != "Status"] == []
+    # a DSP change of this node's can: the lists asked again, answered now, and judged
+    fake.replies["GetRates"] = _RATE_PCM[1]
+    fake.replies["State"] = _RATE_PCM[0].replace('filter="5" filter1x="5" filterNx="5"',
+                                                 'filter="8" filter1x="8" filterNx="8"')
+    before = len(fake.arrivals)
+    hb.change_dsp({"filter": 8, "filter1x": 8})
+    assert _wait(lambda: "GetRates" in [c for _, c in fake.arrivals[before:]], 8.0)
+    assert _wait(lambda: b.rate_notice() is None, 5.0)      # an Any filter: nothing to say
+
+
 def test_a_card_while_hqplayer_builds_or_is_lent_is_busy(fake, output, monkeypatch, tmp_path):
     from fastapi import HTTPException
     mgr, b = output

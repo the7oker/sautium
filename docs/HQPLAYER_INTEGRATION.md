@@ -1317,8 +1317,12 @@ State for a new queue, a DSP change, a return or the attach and the lists
 when none are held, the mode moved or HQPlayer came back, begun never while
 a mutation or a play press runs nor before a watched intent's first transport
 command — checked once, before its questions go one at a time, so what
-begins meanwhile has the rest pass between its commands. A started track
-that cannot play speaks through its verdict alone.
+begins meanwhile has the rest pass between its commands. A list HQPlayer
+refuses (no output device) parks the check: it is asked again only after an
+event that can change the answer — HQPlayer back, a DSP change of this
+node's, the mode moving — while a question left unanswered or a build asks
+again on the next tick (since 2026-10-19). A started track that cannot play
+speaks through its verdict alone.
 
 **HQPlayer's own log** is read on demand — the Diagnostics screen, an
 attempt that ends `not_played` / `unknown` / `rate_refused` / `rejected`
