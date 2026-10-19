@@ -3929,8 +3929,10 @@ def _wakes(monkeypatch) -> list:
 
 
 def _toasted(held: dict, snaps: list) -> list:
-    """What a tab holding `held` toasts across `snaps` (app-shell.js
-    notices.apply): every key whose `since` it does not hold yet."""
+    """What a tab holding `held` may toast across `snaps`: every key whose
+    `since` is not the one the snapshot before it held (`held`, before the
+    first). Every onset app-shell.js's notices.apply toasts is counted here
+    — it also spares one met before a gap — so none here means none there."""
     out = []
     for snap in snaps:
         out += [k for k, since in snap.items() if held.get(k) != since]

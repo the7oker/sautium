@@ -128,7 +128,8 @@ const fs = require('node:fs'), vm = require('node:vm');
 const src = fs.readFileSync(process.argv[process.argv.length - 1], 'utf8');
 const literal = src.slice(src.indexOf('  const notices = {'), src.indexOf('  window.notices = notices;'));
 function storage(kind) {
-  const kept = new Map(kind === 'junk' ? [['sautiumNoticeOnsets', '5']] : []);
+  const junk = { number: '5', array: '["x"]' }[kind];
+  const kept = new Map(junk ? [['sautiumNoticeOnsets', junk]] : []);
   return kind === 'refused'
     ? { getItem() { throw new Error('refused'); }, setItem() { throw new Error('refused'); } }
     : { getItem: (k) => (kept.has(k) ? kept.get(k) : null), setItem: (k, v) => kept.set(k, String(v)) };
@@ -143,7 +144,7 @@ function tab(sessionStorage) {
   return { apply: (items, initial) => context.notices.apply({ items, initial }), toasted };
 }
 const out = {};
-for (const kind of ['kept', 'refused', 'junk']) {
+for (const kind of ['kept', 'refused', 'number', 'array']) {
   const kept = storage(kind), rate = { key: 'hqplayer.rate_check', since: '2001-05-06T09:00:00+00:00' };
   const first = tab(kept);
   first.apply([], true);
@@ -172,8 +173,9 @@ def test_a_tab_toasts_an_onset_once_through_a_gap_and_a_reload():
     """A notice that goes and comes back with the same onset — an advance's
     tail, a Stop — toasts once in a tab, and once only across a reload while
     sessionStorage keeps the onsets; refused, memory keeps them for the page,
-    and junk there starts afresh. An onset the tab first met in the
-    connect-time snapshot never toasts, a gap included. A new onset toasts; a
+    and junk there (a number, an array) starts afresh. An onset the
+    connect-time snapshot carried never toasts, a gap included; one the tab
+    first meets after it toasts once, however old. A new onset toasts; a
     notice without an onset, whenever it appears."""
     proc = subprocess.run([shutil.which("node"), "-e", _TABS, "--", str(BACKEND / "static" / "app-shell.js")],
                           capture_output=True, check=True)
@@ -182,4 +184,5 @@ def test_a_tab_toasts_an_onset_once_through_a_gap_and_a_reload():
         "kept": {"first": once, "reloaded": ["hqplayer.rate_check", "x", "x"], "late": once},
         "refused": {"first": once, "reloaded": ["hqplayer.rate_check", "hqplayer.rate_check", "x", "x"],
                     "late": once},
-        "junk": {"first": once, "reloaded": ["hqplayer.rate_check", "x", "x"], "late": once}}, proc.stdout
+        "number": {"first": once, "reloaded": ["hqplayer.rate_check", "x", "x"], "late": once},
+        "array": {"first": once, "reloaded": ["hqplayer.rate_check", "x", "x"], "late": once}}, proc.stdout

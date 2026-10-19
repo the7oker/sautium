@@ -516,8 +516,9 @@ wakes to the rows, never to a burst of stale toasts. The tab remembers
 each onset it has met (`notices._news`: sessionStorage, memory where it is
 refused) — toasted, or painted by the connect-time snapshot — so a notice
 that goes and comes back with the same `since` (a gap; a reload, while
-sessionStorage keeps them) toasts no second time, and one older than the
-connection never (since 2026-10-19). Wake the channel
+sessionStorage keeps them) toasts no second time, and one the connect-time
+snapshot carried never (since 2026-10-19); a notice the tab first meets
+later toasts once, however old its `since`. Wake the channel
 with `NOTIFY sautium_notices` after changing a source.
 
 `title` and `text` are HTML — escape anything user-controlled, exactly

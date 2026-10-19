@@ -1310,8 +1310,10 @@ per onset in a tab — the queue and setting meeting it, anew when either
 changes. The notice is served only while such a track plays, and since
 2026-10-19 the tab remembers the onsets it has met, toasted or painted at
 connect, so neither a gap (an advance's tail, a Stop) nor, while
-sessionStorage keeps them, a reload toasts one again, and one older than
-the connection toasts never. Why? is on the toast, opening the HQPlayer
+sessionStorage keeps them, a reload toasts one again, and one the
+connect-time snapshot carried toasts never. A tab that connects while no
+such track plays meets the notice at the next play, however old its
+onset, and toasts it then. Why? is on the toast, opening the HQPlayer
 screen, whose line says it in place; the row on Sync & P2P names the reason
 in its own text. The
 HQPlayer backend holds the check, judged again on the poller's tick after an

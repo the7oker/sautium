@@ -11359,7 +11359,8 @@
      pointer events — a tap goes to whatever is beneath it, and the second
      tap of a double-tap cannot land on it — and only a toast with an
      action opts back in. Long-lived conditions never float: the strip
-     sits in flow above #app and pushes it down.
+     holds them, fixed to the top of the viewport, and the page starts
+     beneath it.
 
      The server publishes the whole ACTIVE SET on /api/events ('notice')
      — a snapshot, never single events — and this side diffs it: an onset
