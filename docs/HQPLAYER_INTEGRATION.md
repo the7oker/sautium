@@ -251,12 +251,21 @@ group's bracket, whether it has a card), and while the node holds an atlas
 file `atlas` carries the sheets' head lines and where the file was read from
 — without a file there is no `atlas` key and `facts` are HQPlayer's alone.
 A file's releases are per engine and family — the filters' PCM, the
-modulators' SDM — and a shipped file holds the dated ones alone: a sheet whose
-family the file holds no release of on the engine shown gets no head line,
-and its rows and cards are HQPlayer's alone, never "not measured" (since
-2026-10-20). The list's mode is its filters' own arrow (⥮ PCM, ⥣ SDM), else the mode
-HQPlayer runs (HQPlayer 5 describes nothing); a PCM shapers list is dithers,
-which the atlas holds none of. A name's card is `GET
+modulators' SDM — and a shipped file holds the dated ones alone. Each sheet
+is shown the newest engine of HQPlayer's own major that holds its family's
+release, not newer than HQPlayer's (else the oldest), and its head names that
+engine. A sheet whose family no engine holds — or, where the file holds
+HQPlayer's major, no engine of that major — gets no head line, and its rows
+and cards are HQPlayer's alone, never "not measured" (since 2026-10-20). The
+filters HQPlayer lists in SDM mode alone go with the filter sheet's family,
+PCM. An HQPlayer of a major the file holds no engine of, or one that reports
+no engine, is shown no engine's facts on a sheet whose family some engine
+holds: its head and cards name the newest engine that holds the family and
+the one HQPlayer runs, or that it reports none, and its rows and cards say
+"not measured" on that engine. The list's mode is its filters' own arrow
+(⥮ PCM, ⥣ SDM), else the mode HQPlayer runs (HQPlayer 5 describes nothing); a
+PCM shapers list is dithers, which the atlas holds none of.
+A name's card is `GET
 /api/hqplayer/facts?kind=filter|modulator&name=`, read from HQPlayer's list
 as the screen reads it: 404 for a name it does not list now (a modulator only
 while its list is SDM's), 409 while the output is lent or HQPlayer builds,

@@ -93,6 +93,22 @@ def _filter(doc, slug):
     return doc["engines"]["9.4.1"]["filters"][slug]
 
 
+def _another_engine(doc, engine, families=("pcm", "sdm")):
+    """The fixture's engine copied as `engine`, measured in `families`: its
+    entries of those releases, each its own engine's, and the releases
+    undated."""
+    body = copy.deepcopy(doc["engines"]["9.4.1"])
+    for plural in hqp_atlas.KINDS.values():
+        body[plural] = {slug: {**e, "release": e["release"].replace("9.4.1", engine)}
+                        for slug, e in body[plural].items() if e["release"].split("/")[1] in families}
+    names = {e["name"] for plural in hqp_atlas.KINDS.values() for e in body[plural].values()}
+    body["identity_groups"] = [g for g in body["identity_groups"] if set(g["members"]) <= names]
+    body["fullscale"] = {slug: c for slug, c in body["fullscale"].items() if slug in body["modulators"]}
+    doc["engines"][engine] = body
+    doc["releases"].update({f"{engine}/{family}": None for family in families})
+    return body
+
+
 def _one_family(doc, family, date="2001-05-06"):
     """The fixture as a shipped file holds it with one family dated and the
     other not: the dated release's entries alone, their slugs, the groups and
@@ -263,6 +279,9 @@ def _break(doc, how):
         rates["1" * 5000] = rates["5644800"]
     elif how == "an engine longer than int() reads":
         doc["engines"]["9" * 5000 + ".4.1"] = doc["engines"]["9.4.1"]
+    elif how == "a release of another engine":
+        doc["releases"]["9.6.0/pcm"] = None
+        entry["release"] = "9.6.0/pcm"
     return doc
 
 
@@ -273,7 +292,7 @@ BREAKS = ("another schema", "a missing key", "a wrong type deep inside", "an unr
           "an entry under another slug", "a rate no label names", "a group not approved",
           "a source it cites that the file does not hold", "no engine", "a group figure's bound set by a list",
           "an idle bound set by no excitation the words name", "a range without its min",
-          "a rate longer than int() reads", "an engine longer than int() reads")
+          "a rate longer than int() reads", "an engine longer than int() reads", "a release of another engine")
 
 
 @pytest.mark.parametrize("how", BREAKS)
@@ -408,7 +427,7 @@ def test_the_engine_shown_is_the_newest_not_newer_within_the_major(tmp_path, atl
     assert [atlas.engine_for(e) for e in ("9.4.1", "9.5.0", "9.0.0", "8.9.9", "10.0.0", "", None)] == \
         ["9.4.1", "9.4.1", "9.4.1", None, None, None, None]
     doc = _doc()
-    doc["engines"]["9.6.0"] = copy.deepcopy(doc["engines"]["9.4.1"])
+    _another_engine(doc, "9.6.0")
     two = _read(tmp_path, doc)
     assert two.engines == ["9.4.1", "9.6.0"]
     assert [two.engine_for(e) for e in ("9.5.0", "9.7.2", "9.6.0", "9.0.0", "8.0.0")] == \
@@ -417,7 +436,7 @@ def test_the_engine_shown_is_the_newest_not_newer_within_the_major(tmp_path, atl
 
 def test_the_engine_line(atlas):
     def note(engine):
-        return plain(hqp_atlas.wire(atlas.engine_note(engine)))
+        return plain(hqp_atlas.wire(atlas.engine_note(engine, "filter")))
 
     assert note("9.4.1") == "Measured on HQPlayer engine 9.4.1"
     assert note("9.5.0") == "Measured on HQPlayer engine 9.4.1 · this HQPlayer runs engine 9.5.0"
@@ -591,10 +610,11 @@ def test_the_head_names_the_chips_context_only_while_every_row_shares_it(tmp_pat
     assert xa["chips"][0]["title"] == "Measured by Sautium, Nx · 88.2k → 705.6k"
 
 
-# -- A family the file holds no release of ------------------------------------------
-# A shipped file holds the dated releases alone. With one family dated and the
-# other not — the other withdrawn for a correction, or a newer engine measured
-# in one family first — the other's names are absent from it, measured or not.
+# -- Each family from its own engine ---------------------------------------------
+# A file's releases are per engine and family, and a shipped file holds the
+# dated ones alone: with one family dated and the other not — the other
+# withdrawn for a correction, or a newer engine measured in one family first —
+# the other's names are absent from it, measured or not.
 
 
 def test_a_family_the_file_holds_no_release_of_shows_hqplayers_facts_alone(tmp_path):
@@ -602,7 +622,7 @@ def test_a_family_the_file_holds_no_release_of_shows_hqplayers_facts_alone(tmp_p
     rows = _rows(MODULATORS, "modulator")
     assert hqp_atlas.facts(atlas, "modulator", rows, "9.4.1", "sdm") == \
         [hqp_atlas.runtime("modulator", row) for row in rows]
-    assert {atlas.lookup("modulator", name, "9.4.1", "sdm").state for name, _ in MODULATORS} == {"unpublished"}
+    assert (atlas.engine_for("9.4.1", "modulator"), atlas.speaks_of("9.4.1", "modulator")) == (None, False)
     head = hqp_atlas.head(atlas, "9.4.1", "sdm")
     assert head["modulators"] == []
     assert [plain(x) for x in head["filters"]] == [
@@ -612,45 +632,57 @@ def test_a_family_the_file_holds_no_release_of_shows_hqplayers_facts_alone(tmp_p
         assert _card(atlas, "modulator", name, MODULATORS, mode="sdm") == \
             _card(None, "modulator", name, MODULATORS, mode="sdm")
     # The family the file holds reads as before: a filter it has no entry of
-    # is not measured — the SDM release's own filters among them
+    # is not measured, the SDM release's own filters among them
     f = _facts_of(atlas, "filter", SDM, "9.4.1", "sdm")
     assert _chips(f["demo-sinc-a"]) == ["linear phase", "±12.346 ms", "2^x"]
     assert _chips(f["demo-2s"]) == ["Any", "not measured on engine 9.4.1"]
     assert _chips(_facts_of(atlas, "filter", PCM, "9.4.1", "pcm")["demo-new"]) == \
         ["1:1", "not measured on engine 9.4.1"]
     assert "Not measured on HQPlayer engine 9.4.1." in _card_text(_card(atlas, "filter", "demo-new", PCM))
+    # Another major's HQPlayer: the file holds no SDM release at all, so the
+    # modulator sheet says nothing, not even the engine line
+    assert hqp_atlas.facts(atlas, "modulator", rows, "8.0.0", "sdm") == \
+        [hqp_atlas.runtime("modulator", row) for row in rows]
+    head = hqp_atlas.head(atlas, "8.0.0", "sdm")
+    assert (head["modulators"], [plain(x) for x in head["filters"]]) == (
+        [], ["Measured on HQPlayer engine 9.4.1 · this HQPlayer runs engine 8.0.0"])
 
     atlas = _read(tmp_path, _one_family(_doc(), "sdm"))
-    rows = _rows(PCM, "filter")
-    assert hqp_atlas.facts(atlas, "filter", rows, "9.4.1", "pcm") == [hqp_atlas.runtime("filter", row) for row in rows]
-    assert hqp_atlas.head(atlas, "9.4.1", "pcm")["filters"] == []
-    assert _card(atlas, "filter", "demo-sinc-a", PCM) == _card(None, "filter", "demo-sinc-a", PCM)
-    # demo-2s is the SDM release's own entry: it says what that release says
-    assert _chips(_facts_of(atlas, "filter", SDM, "9.4.1", "sdm")["demo-2s"]) == ["Any", "not measured on engine 9.4.1"]
+    for mode, spec in (("pcm", PCM), ("sdm", SDM)):
+        rows = _rows(spec, "filter")
+        # in SDM mode demo-2s too, the SDM release's own filter: the filter
+        # sheet's facts are PCM's
+        assert hqp_atlas.facts(atlas, "filter", rows, "9.4.1", mode) == \
+            [hqp_atlas.runtime("filter", row) for row in rows]
+        assert hqp_atlas.head(atlas, "9.4.1", mode)["filters"] == []
+    assert _card(atlas, "filter", "demo-2s", SDM, mode="sdm") == _card(None, "filter", "demo-2s", SDM, mode="sdm")
     assert _chips(_facts_of(atlas, "modulator", MODULATORS, "9.4.1", "sdm")["DMX5"]) == \
         ["Gen1", "fifth order", "refused at DSD256"]
     assert [plain(x) for x in hqp_atlas.head(atlas, "9.4.1", "sdm")["modulators"]] == \
         ["Measured on HQPlayer engine 9.4.1"]
 
 
-def test_a_newer_engine_published_in_one_family_leaves_the_other_hqplayers_alone(tmp_path):
+def test_each_family_is_shown_from_the_newest_engine_of_the_major_that_holds_it(tmp_path):
+    # 9.6.0 measured in PCM alone: a 9.6 HQPlayer is shown 9.6.0's filters and
+    # 9.4.1's modulators, each sheet naming its own engine
     doc = _doc()
-    newer = copy.deepcopy(doc["engines"]["9.4.1"])
-    newer["filters"] = {slug: {**e, "release": "9.6.0/pcm"} for slug, e in newer["filters"].items()
-                        if e["release"] == "9.4.1/pcm"}
-    newer["modulators"], newer["fullscale"] = {}, {}
-    newer["identity_groups"] = [g for g in newer["identity_groups"] if g["kind"] == "filter"]
-    doc["engines"]["9.6.0"] = newer
-    doc["releases"] = {"9.4.1/pcm": "2001-05-06", "9.4.1/sdm": "2001-05-06", "9.6.0/pcm": "2001-07-08"}
+    _another_engine(doc, "9.6.0", ("pcm",))["filters"]["demo-sinc-a"]["contexts"]["1x-44.1k-705.6k"]["phase"] = \
+        "minimum"
     atlas = _read(tmp_path, doc)
-    rows = _rows(MODULATORS, "modulator")
-    assert hqp_atlas.facts(atlas, "modulator", rows, "9.6.2", "sdm") == \
-        [hqp_atlas.runtime("modulator", row) for row in rows]
-    assert hqp_atlas.head(atlas, "9.6.2", "sdm")["modulators"] == []
-    assert _chips(_facts_of(atlas, "filter", PCM, "9.6.2", "pcm")["demo-sinc-a"])[0] == "linear phase"
-    # An HQPlayer older than the newer engine is shown the older one's, both families
-    assert _chips(_facts_of(atlas, "modulator", MODULATORS, "9.5.0", "sdm")["DMX5"]) == \
+    assert [atlas.engine_for("9.6.2", kind) for kind in ("filter", "modulator")] == ["9.6.0", "9.4.1"]
+    assert _chips(_facts_of(atlas, "filter", PCM, "9.6.2", "pcm")["demo-sinc-a"])[0] == "minimum phase"
+    assert _chips(_facts_of(atlas, "modulator", MODULATORS, "9.6.2", "sdm")["DMX5"]) == \
         ["Gen1", "fifth order", "refused at DSD256"]
+    head = hqp_atlas.head(atlas, "9.6.2", "sdm")
+    assert [[plain(x) for x in head[sheet]][0] for sheet in ("filters", "modulators")] == [
+        "Measured on HQPlayer engine 9.6.0 · this HQPlayer runs engine 9.6.2",
+        "Measured on HQPlayer engine 9.4.1 · this HQPlayer runs engine 9.6.2"]
+    assert [plain(s) for s in _card(atlas, "modulator", "DMX-new", MODULATORS, "9.6.2", "sdm")["status"]] == [
+        "Measured on HQPlayer engine 9.4.1 · this HQPlayer runs engine 9.6.2",
+        "Not measured on HQPlayer engine 9.4.1."]
+    # An HQPlayer older than the newer engine is shown the older one's, both families
+    assert [atlas.engine_for("9.5.0", kind) for kind in ("filter", "modulator")] == ["9.4.1", "9.4.1"]
+    assert _chips(_facts_of(atlas, "filter", PCM, "9.5.0", "pcm")["demo-sinc-a"])[0] == "linear phase"
 
 
 def test_a_modulator_row(atlas):

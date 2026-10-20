@@ -18,7 +18,7 @@ import hqp_rate_check as rc  # noqa: E402
 from hqp_atlas import plain  # noqa: E402
 from hqp_rate_check import Filter, Inputs, Sources  # noqa: E402
 
-from test_hqp_atlas import BANNED, MODULATORS, PCM, SDM, _doc, _read, _rows  # noqa: E402
+from test_hqp_atlas import BANNED, MODULATORS, PCM, SDM, _another_engine, _doc, _read, _rows  # noqa: E402
 
 SOURCES = (22050, 32000, 44100, 48000, 88200, 96000, 176400, 192000)
 # The sources each class does not reach, by output rate: 705.6 kHz, 768 kHz,
@@ -175,6 +175,16 @@ def test_the_modulator_half_reads_only_its_own_major_engine_and_what_it_names(tm
                     atlas=_read(tmp_path), engine="9.4.1")
     assert (pcm.mode, pcm.rate, pcm.modulator, pcm.refused, pcm.x1) == ("pcm", 768000, None, {}, None)
     assert pcm.nx == Filter("demo-sinc-a", "2^x", True)
+
+
+def test_the_modulator_half_reads_the_engine_that_holds_the_modulators(tmp_path):
+    # A newer engine measured in PCM alone: a 9.6 HQPlayer's modulator is
+    # judged on 9.4.1's refusals, the newest engine of its major that holds
+    # an SDM release — the screen shows it the same engine's modulators
+    doc = _doc()
+    _another_engine(doc, "9.6.0", ("pcm",))
+    inp = _sdm(tmp_path, engine="9.6.2", doc=doc)
+    assert inp.engine == "9.4.1" and inp.refused == {5644800: 44100, 12288000: 48000}
 
 
 def test_published_takes_a_modulators_refusals_only_from_a_release_with_a_date(tmp_path):

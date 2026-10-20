@@ -17,8 +17,8 @@ the output rate ("Requested filter not possible with this rate combination
   source's base rate.
 - In SDM mode the modulator comes first: an output rate the atlas measured
   it refused, for a source of the family the refusal was measured from, on
-  the engine the atlas shows this HQPlayer (hqp_atlas.Atlas.engine_for) —
-  never stretched to another rate or family.
+  the engine the atlas shows this HQPlayer's modulators from
+  (hqp_atlas.Atlas.engine_for) — never stretched to another rate or family.
 - Else the filter that runs the source (`running_slot`), by the ratio class
   HQPlayer describes it with: `2^x` does not reach an output rate that is no
   power-of-two multiple of the source, `Int` one that is no integer
@@ -267,7 +267,7 @@ def inputs(state: Mapping[str, Any], modes: List[dict], rates: List[dict], filte
 
     modulator = (next((s["name"] for s in shapers if s["index"] == state.get("shaper")), None)
                  if mode == "sdm" else None)
-    shown = atlas.engine_for(engine) if atlas is not None and modulator else None
+    shown = atlas.engine_for(engine, "modulator") if atlas is not None and modulator else None
     found = atlas.lookup("modulator", modulator, shown, "sdm") if shown is not None else None
     entry = found.entry if found is not None else None
     if published and (entry is None or not atlas.releases[entry["release"]]):

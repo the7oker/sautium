@@ -518,7 +518,7 @@ def _check(doc: Any) -> None:
     _need(engines, "no engine", "engines")
     _keys(engines, _ENGINE, "an engine", "engines")
     for engine, body in engines.items():
-        _check_engine(body, f"engines.{engine}", releases, registry, groups, pairs, sources)
+        _check_engine(body, engine, f"engines.{engine}", releases, registry, groups, pairs, sources)
 
 
 def _check_pair_context(c: Any, at: str) -> None:
@@ -546,7 +546,7 @@ def _check_pair_context(c: Any, at: str) -> None:
                 _text(x, f"{at}.also_differs.{key}", _RATIO if key == "ratio_class" else _GENERATION)
 
 
-def _check_engine(body: Any, at: str, releases: Dict[str, Any], registry: Dict[Tuple[str, str], str],
+def _check_engine(body: Any, engine: str, at: str, releases: Dict[str, Any], registry: Dict[Tuple[str, str], str],
                   groups: Dict[str, Any], pairs: Dict[str, Any], sources: Dict[str, Any]) -> None:
     _obj(body, at)
     identical: Dict[str, Any] = {}
@@ -583,6 +583,9 @@ def _check_engine(body: Any, at: str, releases: Dict[str, Any], registry: Dict[T
             _need(registry.get((kind, e["name"])) == slug, "an entry whose key is not the registry's slug of its name",
                   eat)
             _need(e["release"] in releases, "a release the releases do not hold", f"{eat}.release")
+            # Which engine's facts a family has is read off its releases
+            # (Atlas.holds): an entry's release is its own engine's
+            _need(e["release"].split("/")[0] == engine, "a release of another engine", f"{eat}.release")
             for key, held, what in (("groups", groups, "a group"), ("pairs", pairs, "a pair")):
                 for ref in e[key]:
                     other = held.get(ref)
@@ -758,9 +761,7 @@ class Found(NamedTuple):
     pcm-measurement (a filter in SDM mode, its PCM facts); refused (a modulator
     HQPlayer refused at every measured rate); not-measured (a name the
     registry lacks, an entry the engine lacks, a mode the entry was not
-    measured in); unpublished (no entry, in a file that holds no release of
-    the name's family on that engine — `Atlas.holds`). `entry` and `slug` are
-    None where the file holds none."""
+    measured in). `entry` and `slug` are None where the file holds none."""
     kind: str
     state: str
     entry: Optional[Dict[str, Any]]
@@ -791,28 +792,35 @@ class Atlas:
         so a name the registry has no row for has none."""
         return self._slugs.get((kind, name))
 
-    def engine_for(self, user_engine: Optional[str]) -> Optional[str]:
-        """The engine whose facts this HQPlayer is shown: the newest the atlas
-        holds not newer than its own, else the oldest — within its own major
-        version only: a major release may change what a name does, and a label
-        does not undo a wrong number shown as measured. None when the atlas
-        holds no engine of that major, or `_version` reads HQPlayer's as
+    def engine_for(self, user_engine: Optional[str], kind: Optional[str] = None) -> Optional[str]:
+        """The engine whose facts this HQPlayer is shown — of `kind`'s names,
+        among the engines that hold their family's release (holds): the
+        newest the atlas holds not newer than its own, else the oldest —
+        within its own major version only: a major release may change what a
+        name does, and a label does not undo a wrong number shown as
+        measured. A file's releases are per engine and family, so a newer
+        engine measured in one family first leaves the other's names with
+        the engine before it. None when the atlas holds no engine of that
+        major (holding that family), or `_version` reads HQPlayer's as
         none."""
         own = _version(user_engine)
         if not own:
             return None
-        same = [e for e in self.engines if _version(e)[0] == own[0]]
+        same = [e for e in self.engines if _version(e)[0] == own[0] and (kind is None or self.holds(e, kind))]
         older = [e for e in same if _version(e) <= own]
         return older[-1] if older else (same[0] if same else None)
 
-    def named_engine(self, user_engine: Optional[str]) -> str:
-        """The engine the words name: the one whose facts are shown, else the
-        newest the atlas holds."""
-        return self.engine_for(user_engine) or self.engines[-1]
+    def named_engine(self, user_engine: Optional[str], kind: str) -> Optional[str]:
+        """The engine the words name of `kind`'s family: the one whose facts
+        are shown, else the newest that holds the family; None when none
+        does."""
+        held = [e for e in self.engines if self.holds(e, kind)]
+        return self.engine_for(user_engine, kind) or (held[-1] if held else None)
 
-    def engine_note(self, user_engine: Optional[str]) -> List[Any]:
-        """The head's engine line, and the card's."""
-        named = self.named_engine(user_engine)
+    def engine_note(self, user_engine: Optional[str], kind: str) -> List[Any]:
+        """The head's engine line, and the card's, of `kind`'s family — one
+        the file speaks of (speaks_of)."""
+        named = self.named_engine(user_engine, kind)
         note = _phrase(MEASURED_ON, engine=named)
         if not user_engine:
             note.append(NO_ENGINE)
@@ -823,10 +831,21 @@ class Atlas:
     def holds(self, engine: str, kind: str) -> bool:
         """Whether the file holds a release, dated or not, of the family
         `kind`'s names are measured in — a filter's PCM, a modulator's SDM —
-        on `engine`. A shipped file holds the dated releases alone: with one
-        family dated and the other not, the other's names are absent from
-        it, measured or not, and it can say nothing of them."""
+        on `engine`."""
         return f"{engine}/{RELEASE_FAMILY[kind]}" in self.releases
+
+    def speaks_of(self, user_engine: Optional[str], kind: str) -> bool:
+        """Whether the file says anything of `kind`'s names to this HQPlayer:
+        it holds their family's release, on HQPlayer's own major wherever the
+        file holds that major. A shipped file holds the dated releases alone:
+        with one family dated and the other not, it says nothing of the
+        other's names. The SDM release's own filters, the names HQPlayer
+        lists in SDM mode alone, are the filter sheet's names and go with
+        PCM's. Another major's HQPlayer, or one that reports no engine, is
+        told so by the engine line (engine_for is None)."""
+        if self.named_engine(user_engine, kind) is None:
+            return False
+        return self.engine_for(user_engine, kind) is not None or self.engine_for(user_engine) is None
 
     def lookup(self, kind: str, name: str, engine: Optional[str], mode: Optional[str]) -> Optional[Found]:
         """What the atlas says of HQPlayer's `name` on `engine` (engine_for's)
@@ -837,17 +856,15 @@ class Atlas:
         slug = self.slug_of(kind, name)
         entry = self._engines[engine][KINDS[kind]].get(slug) if engine and slug else None
         state = "not-measured"
-        if entry is None:
-            if engine is not None and not self.holds(engine, kind):
-                state = "unpublished"
-        elif kind == "filter":
-            listed = entry["modes"].get(mode)
-            if listed in ("measured", "pcm-measurement") and _first_context(entry):
-                state = listed
-        elif entry["rates"]:
-            state = "measured"
-        elif entry["rates_refused"]:
-            state = "refused"
+        if entry is not None:
+            if kind == "filter":
+                listed = entry["modes"].get(mode)
+                if listed in ("measured", "pcm-measurement") and _first_context(entry):
+                    state = listed
+            elif entry["rates"]:
+                state = "measured"
+            elif entry["rates_refused"]:
+                state = "refused"
         return Found(kind, state, entry, slug, engine, self.origin)
 
     def identical(self, found: Found) -> Optional[Tuple[Dict[str, Any], Dict[str, Any]]]:
@@ -1098,25 +1115,27 @@ def runtime(kind: str, row: Dict[str, Any]) -> Dict[str, Any]:
 
 
 def head(atlas: Optional[Atlas], user_engine: Optional[str], mode: Optional[str]) -> Optional[Dict[str, Any]]:
-    """The sheets' head lines while the node holds an atlas: the engine line,
-    and on the filter sheet the chips' context and, in SDM mode, where the
-    properties come from. No line for a sheet whose family the file holds
-    no release of on that engine (Atlas.holds): its rows are HQPlayer's
+    """The sheets' head lines while the node holds an atlas: each sheet's
+    engine line, and on the filter sheet the chips' context and, in SDM
+    mode, where the properties come from. No line for a sheet whose family
+    the file says nothing of (Atlas.speaks_of): its rows are HQPlayer's
     alone."""
     if atlas is None:
         return None
-    engine = atlas.engine_for(user_engine)
-    note = wire(atlas.engine_note(user_engine))
-    filters = [note]
-    if engine is not None and mode in ("pcm", "sdm"):
-        key = atlas.chips_context(engine, mode)
-        if key:
-            filters.append(wire(_phrase(PROPERTIES_AT, context=context_label(key))))
-        if mode == "sdm":
-            filters.append(wire([SDM_HEAD]))
-    held = {kind: engine is None or atlas.holds(engine, kind) for kind in KINDS}
-    return {"origin": atlas.origin, "filters": filters if held["filter"] else [],
-            "modulators": [note] if held["modulator"] else []}
+    out: Dict[str, Any] = {"origin": atlas.origin}
+    for kind, plural in KINDS.items():
+        lines = []
+        if atlas.speaks_of(user_engine, kind):
+            lines.append(wire(atlas.engine_note(user_engine, kind)))
+            engine = atlas.engine_for(user_engine, kind)
+            if kind == "filter" and engine is not None and mode in ("pcm", "sdm"):
+                key = atlas.chips_context(engine, mode)
+                if key:
+                    lines.append(wire(_phrase(PROPERTIES_AT, context=context_label(key))))
+                if mode == "sdm":
+                    lines.append(wire([SDM_HEAD]))
+        out[plural] = lines
+    return out
 
 
 def facts(atlas: Optional[Atlas], kind: str, rows: List[Dict[str, Any]], user_engine: Optional[str],
@@ -1125,20 +1144,18 @@ def facts(atlas: Optional[Atlas], kind: str, rows: List[Dict[str, Any]], user_en
     "modulator", "dither"), in its order: HQPlayer's own, and with an atlas the
     measured ones — the chips, the rating tag, a caption, a twin's line, an
     identical group's bracket. `mode` is the list's ("pcm", "sdm"); a filter
-    list in no known mode, and a row of a family the file holds no release
-    of, get HQPlayer's facts alone."""
-    if atlas is None or kind not in KINDS or (kind == "filter" and mode not in ("pcm", "sdm")):
+    list in no known mode, and a list of a family the file says nothing of
+    (Atlas.speaks_of), get HQPlayer's facts alone."""
+    if (atlas is None or kind not in KINDS or (kind == "filter" and mode not in ("pcm", "sdm"))
+            or not atlas.speaks_of(user_engine, kind)):
         return [runtime(kind, row) for row in rows]
-    engine = atlas.engine_for(user_engine)
-    named = atlas.named_engine(user_engine)
+    engine = atlas.engine_for(user_engine, kind)
+    named = atlas.named_engine(user_engine, kind)
     order = _order(rows)
     out = []
     for row in rows:
         found = atlas.lookup(kind, row["name"], engine, mode)
         own = runtime(kind, row)
-        if found.state == "unpublished":
-            out.append(own)
-            continue
         f = _blank()
         f["tag"], f["caption"], f["card"] = own["tag"], own["caption"], True
         if found.state == "not-measured":
@@ -1253,16 +1270,14 @@ def card(atlas: Optional[Atlas], kind: str, name: str, rows: List[Dict[str, Any]
         return None
     out: Dict[str, Any] = {"title": name, "origin": None, "status": [], "sections": [], "link": None}
     found = None
-    if atlas is not None and kind in KINDS and (kind == "modulator" or mode in ("pcm", "sdm")):
-        found = atlas.lookup(kind, name, atlas.engine_for(user_engine), mode)
-        # A name of a family the file holds no release of: as without a file
-        if found.state == "unpublished":
-            found = None
-    if found is not None:
+    # A name of a family the file says nothing of (speaks_of): as without a file
+    if (atlas is not None and kind in KINDS and (kind == "modulator" or mode in ("pcm", "sdm"))
+            and atlas.speaks_of(user_engine, kind)):
+        found = atlas.lookup(kind, name, atlas.engine_for(user_engine, kind), mode)
         out["origin"] = atlas.origin
-        out["status"].append(wire(atlas.engine_note(user_engine)))
+        out["status"].append(wire(atlas.engine_note(user_engine, kind)))
         if found.state == "not-measured":
-            out["status"].append(wire(_phrase(NOT_MEASURED_CARD, engine=atlas.named_engine(user_engine))))
+            out["status"].append(wire(_phrase(NOT_MEASURED_CARD, engine=atlas.named_engine(user_engine, kind))))
         elif found.state == "pcm-measurement":
             ratio = _ratio(row.get("parsed"))
             out["status"] += [wire([SDM_PATH]),
