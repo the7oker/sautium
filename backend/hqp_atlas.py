@@ -44,6 +44,8 @@ logger = logging.getLogger(__name__)
 SCHEMA = "hqp-atlas-app/v1"
 SHIPPED = Path(__file__).with_name("hqp_atlas.json")
 KINDS = {"filter": "filters", "modulator": "modulators"}
+# The release family each kind's names are measured in
+RELEASE_FAMILY = {"filter": "pcm", "modulator": "sdm"}
 PAGES = "https://sautium.net/hqplayer"
 MINUS = "−"
 
@@ -756,7 +758,9 @@ class Found(NamedTuple):
     pcm-measurement (a filter in SDM mode, its PCM facts); refused (a modulator
     HQPlayer refused at every measured rate); not-measured (a name the
     registry lacks, an entry the engine lacks, a mode the entry was not
-    measured in). `entry` and `slug` are None where the file holds none."""
+    measured in); unpublished (no entry, in a file that holds no release of
+    the name's family on that engine — `Atlas.holds`). `entry` and `slug` are
+    None where the file holds none."""
     kind: str
     state: str
     entry: Optional[Dict[str, Any]]
@@ -816,6 +820,14 @@ class Atlas:
             note += _phrase(RUNS_ENGINE, engine=user_engine)
         return note
 
+    def holds(self, engine: str, kind: str) -> bool:
+        """Whether the file holds a release, dated or not, of the family
+        `kind`'s names are measured in — a filter's PCM, a modulator's SDM —
+        on `engine`. A shipped file holds the dated releases alone: with one
+        family dated and the other not, the other's names are absent from
+        it, measured or not, and it can say nothing of them."""
+        return f"{engine}/{RELEASE_FAMILY[kind]}" in self.releases
+
     def lookup(self, kind: str, name: str, engine: Optional[str], mode: Optional[str]) -> Optional[Found]:
         """What the atlas says of HQPlayer's `name` on `engine` (engine_for's)
         in `mode` ("pcm", "sdm"; a modulator's is SDM's); None for a kind it
@@ -825,15 +837,17 @@ class Atlas:
         slug = self.slug_of(kind, name)
         entry = self._engines[engine][KINDS[kind]].get(slug) if engine and slug else None
         state = "not-measured"
-        if entry is not None:
-            if kind == "filter":
-                listed = entry["modes"].get(mode)
-                if listed in ("measured", "pcm-measurement") and _first_context(entry):
-                    state = listed
-            elif entry["rates"]:
-                state = "measured"
-            elif entry["rates_refused"]:
-                state = "refused"
+        if entry is None:
+            if engine is not None and not self.holds(engine, kind):
+                state = "unpublished"
+        elif kind == "filter":
+            listed = entry["modes"].get(mode)
+            if listed in ("measured", "pcm-measurement") and _first_context(entry):
+                state = listed
+        elif entry["rates"]:
+            state = "measured"
+        elif entry["rates_refused"]:
+            state = "refused"
         return Found(kind, state, entry, slug, engine, self.origin)
 
     def identical(self, found: Found) -> Optional[Tuple[Dict[str, Any], Dict[str, Any]]]:
@@ -1086,7 +1100,9 @@ def runtime(kind: str, row: Dict[str, Any]) -> Dict[str, Any]:
 def head(atlas: Optional[Atlas], user_engine: Optional[str], mode: Optional[str]) -> Optional[Dict[str, Any]]:
     """The sheets' head lines while the node holds an atlas: the engine line,
     and on the filter sheet the chips' context and, in SDM mode, where the
-    properties come from."""
+    properties come from. No line for a sheet whose family the file holds
+    no release of on that engine (Atlas.holds): its rows are HQPlayer's
+    alone."""
     if atlas is None:
         return None
     engine = atlas.engine_for(user_engine)
@@ -1098,7 +1114,9 @@ def head(atlas: Optional[Atlas], user_engine: Optional[str], mode: Optional[str]
             filters.append(wire(_phrase(PROPERTIES_AT, context=context_label(key))))
         if mode == "sdm":
             filters.append(wire([SDM_HEAD]))
-    return {"origin": atlas.origin, "filters": filters, "modulators": [note]}
+    held = {kind: engine is None or atlas.holds(engine, kind) for kind in KINDS}
+    return {"origin": atlas.origin, "filters": filters if held["filter"] else [],
+            "modulators": [note] if held["modulator"] else []}
 
 
 def facts(atlas: Optional[Atlas], kind: str, rows: List[Dict[str, Any]], user_engine: Optional[str],
@@ -1107,7 +1125,8 @@ def facts(atlas: Optional[Atlas], kind: str, rows: List[Dict[str, Any]], user_en
     "modulator", "dither"), in its order: HQPlayer's own, and with an atlas the
     measured ones — the chips, the rating tag, a caption, a twin's line, an
     identical group's bracket. `mode` is the list's ("pcm", "sdm"); a filter
-    list in no known mode gets HQPlayer's facts alone."""
+    list in no known mode, and a row of a family the file holds no release
+    of, get HQPlayer's facts alone."""
     if atlas is None or kind not in KINDS or (kind == "filter" and mode not in ("pcm", "sdm")):
         return [runtime(kind, row) for row in rows]
     engine = atlas.engine_for(user_engine)
@@ -1117,6 +1136,9 @@ def facts(atlas: Optional[Atlas], kind: str, rows: List[Dict[str, Any]], user_en
     for row in rows:
         found = atlas.lookup(kind, row["name"], engine, mode)
         own = runtime(kind, row)
+        if found.state == "unpublished":
+            out.append(own)
+            continue
         f = _blank()
         f["tag"], f["caption"], f["card"] = own["tag"], own["caption"], True
         if found.state == "not-measured":
@@ -1233,6 +1255,10 @@ def card(atlas: Optional[Atlas], kind: str, name: str, rows: List[Dict[str, Any]
     found = None
     if atlas is not None and kind in KINDS and (kind == "modulator" or mode in ("pcm", "sdm")):
         found = atlas.lookup(kind, name, atlas.engine_for(user_engine), mode)
+        # A name of a family the file holds no release of: as without a file
+        if found.state == "unpublished":
+            found = None
+    if found is not None:
         out["origin"] = atlas.origin
         out["status"].append(wire(atlas.engine_note(user_engine)))
         if found.state == "not-measured":

@@ -250,7 +250,11 @@ name in HQPlayer's order: each row of the filter and shaper lists gains
 group's bracket, whether it has a card), and while the node holds an atlas
 file `atlas` carries the sheets' head lines and where the file was read from
 — without a file there is no `atlas` key and `facts` are HQPlayer's alone.
-The list's mode is its filters' own arrow (⥮ PCM, ⥣ SDM), else the mode
+A file's releases are per engine and family — the filters' PCM, the
+modulators' SDM — and a shipped file holds the dated ones alone: a sheet whose
+family the file holds no release of on the engine shown gets no head line,
+and its rows and cards are HQPlayer's alone, never "not measured" (since
+2026-10-20). The list's mode is its filters' own arrow (⥮ PCM, ⥣ SDM), else the mode
 HQPlayer runs (HQPlayer 5 describes nothing); a PCM shapers list is dithers,
 which the atlas holds none of. A name's card is `GET
 /api/hqplayer/facts?kind=filter|modulator&name=`, read from HQPlayer's list
