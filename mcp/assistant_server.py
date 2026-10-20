@@ -20,22 +20,26 @@ All logging goes to stderr (stdout is reserved for STDIO MCP transport).
 
 import hashlib
 import hmac
+import inspect
 import json
 import logging
 import os
 import sys
 import time
 import urllib.parse
+from typing import Annotated
 
 import httpx
 import psycopg2
 import psycopg2.extras
 from mcp.server.fastmcp import FastMCP
+from pydantic import Field
 
 # -- Shared assistant queries (stdlib only, safe to import from backend) ------
 backend_path = os.environ.get("BACKEND_PATH", os.path.join(os.path.dirname(__file__), "..", "backend"))
 sys.path.insert(0, backend_path)
 import assistant_queries as aq
+import hqp_assistant
 import hqp_atlas
 
 # -- Logging to stderr (NEVER stdout — would corrupt STDIO transport) ---------
@@ -1303,6 +1307,31 @@ def hqplayer_get_dsp_state() -> str:
         return "\n".join(lines)
     except Exception as e:
         return f"Error: {e}"
+
+
+def _hqp_assistant(tool: hqp_assistant.Tool):
+    """One of hqp_assistant's six filter and modulator tools, from its table:
+    the backend's route (GET /api/hqplayer/assistant/{tool}), the path the
+    in-process tools take too — this process reads no atlas and asks
+    HQPlayer nothing."""
+    short = tool.name.removeprefix("hqplayer_")
+
+    def call(**args) -> str:
+        try:
+            return _backend_get(f"/api/hqplayer/assistant/{short}", args)["text"]
+        except Exception as e:
+            return f"Error: {e}"
+    call.__name__ = tool.name
+    call.__signature__ = inspect.Signature(
+        [inspect.Parameter(p.name, inspect.Parameter.KEYWORD_ONLY,
+                           default=inspect.Parameter.empty if p.required else "",
+                           annotation=Annotated[str, Field(description=p.description)])
+         for p in tool.params], return_annotation=str)
+    return call
+
+
+for _tool in hqp_assistant.TOOLS:
+    mcp.add_tool(_hqp_assistant(_tool), name=_tool.name, description=_tool.description)
 
 
 @mcp.tool()

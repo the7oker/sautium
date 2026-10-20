@@ -11313,3 +11313,208 @@ def test_a_pause_refused_at_its_first_request_says_it_did_not_go(fake, output, m
     assert e.value.status_code == 409, e.value.detail
     assert e.value.detail == hl.NOT_ANSWERING, e.value.detail
     assert "Pause" not in [c for _, c in fake.arrivals]
+
+
+# -- The assistant's filter and modulator tools (hqp_assistant) ----------------------
+# Six tools, one route (GET /api/hqplayer/assistant/{tool}): the in-process
+# handlers call its function, the MCP server reads it over HTTP — here its
+# _backend_get answers with the same function. The atlas the route reads is
+# the shipped file alone, of it what the site published.
+
+_DATED = '"releases": {"9.4.1/pcm": "2001-05-06", "9.4.1/sdm": "2001-05-06"}'
+_ASSISTANT_CALLS = (
+    ("hqplayer_filter_facts", {"name": "demo-sinc-a"}),
+    ("hqplayer_filter_facts", {"name": "Demo-Sinc-B"}),
+    ("hqplayer_filter_facts", {"name": "sinc"}),
+    ("hqplayer_compare", {"name_a": "demo-sinc-a", "name_b": "demo-sinc-b"}),
+    ("hqplayer_differs_only_in", {"name": "demo-gauss-x", "axis": "length"}),
+    ("hqplayer_ab_pair", {"axis": "length", "near": "demo-sinc-a"}),
+    ("hqplayer_host_fit", {"name": "demo-sinc-a"}),
+    ("hqplayer_atlas_link", {"name": "demo-sinc-a"}),
+)
+
+
+def _assistant(monkeypatch, fake, tmp_path, *, shipped=_DATED, overlay=True):
+    """The HQPlayer screen's fake HQPlayer (_atlas_screen) for the six: the
+    synthetic atlas as the node's own copy (`overlay`), and at the shipped
+    path with `shipped` for its releases (None: no file there); the six's
+    MCP module, its backend reads answered by the route's function."""
+    import importlib.util
+    hqp_router = _atlas_screen(monkeypatch, fake, tmp_path, atlas=overlay)
+    _picker(monkeypatch, fake)
+    if shipped is not None:
+        text = _ATLAS.read_text(encoding="utf-8").replace(
+            '"releases": {"9.4.1/pcm": null, "9.4.1/sdm": null}', shipped)
+        (tmp_path / "shipped.json").write_text(text, encoding="utf-8")
+    spec = importlib.util.spec_from_file_location("assistant_server_six", BACKEND.parent / "mcp" / "assistant_server.py")
+    server = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(server)
+    prefix = "/api/hqplayer/assistant/"
+
+    def backend_get(path, params=None):
+        assert path.startswith(prefix), path
+        return hqp_router.assistant(path[len(prefix):], **(params or {}))
+    monkeypatch.setattr(server, "_backend_get", backend_get)
+    return hqp_router, server
+
+
+def _mcp_says(server, name, args):
+    import asyncio
+    content, _ = asyncio.run(server.mcp.call_tool(name, args))
+    return content[0].text
+
+
+def _both_say(server, name, args):
+    from tools.executor import execute_tool
+    return execute_tool(name, args), _mcp_says(server, name, args)
+
+
+def test_the_six_register_from_one_table_on_both_surfaces(fake, monkeypatch, tmp_path):
+    import asyncio
+    import hqp_assistant
+    from tools import REGISTRY, ensure_definitions
+    _, server = _assistant(monkeypatch, fake, tmp_path)
+    ensure_definitions()
+    listed = {t.name: t for t in asyncio.run(server.mcp.list_tools())}
+    for tool in hqp_assistant.TOOLS:
+        reg = REGISTRY.get(tool.name)
+        assert (reg.description, [(p.name, p.type, p.description, p.required, p.default) for p in reg.parameters]) \
+            == (tool.description, [(p.name, "string", p.description, p.required, None if p.required else "")
+                                   for p in tool.params])
+        schema = listed[tool.name].inputSchema
+        assert listed[tool.name].description == tool.description
+        assert {k: v["description"] for k, v in schema["properties"].items()} == \
+            {p.name: p.description for p in tool.params}
+        assert schema.get("required", []) == [p.name for p in tool.params if p.required]
+
+
+def test_both_surfaces_say_the_same_from_the_published_file(fake, monkeypatch, tmp_path):
+    _, server = _assistant(monkeypatch, fake, tmp_path)
+    for name, args in _ASSISTANT_CALLS:
+        here, there = _both_say(server, name, args)
+        assert here == there, (name, args)
+        assert not here.startswith("Error"), here
+    facts, _ = _both_say(server, "hqplayer_filter_facts", {"name": "demo-sinc-a"})
+    assert facts.startswith("demo-sinc-a — a filter HQPlayer lists in PCM mode.\nMeasured on HQPlayer engine 9.4.1\n")
+    assert "    −3 dB, kHz: 17.532" in facts
+    assert facts.endswith("Measured properties: https://sautium.net/hqplayer/filters/demo-sinc-a/")
+
+
+@pytest.mark.parametrize("shipped", [None, '"releases": {"9.4.1/pcm": null, "9.4.1/sdm": null}'])
+def test_the_nodes_own_copy_and_an_undated_file_give_the_assistant_nothing(fake, monkeypatch, tmp_path, caplog,
+                                                                          shipped):
+    # The node's own copy holds the whole synthetic atlas: nothing of it
+    # reaches a tool, a log line or the support bundle's playback scope
+    import logging
+    caplog.set_level(logging.DEBUG)
+    _, server = _assistant(monkeypatch, fake, tmp_path, shipped=shipped)
+    said = [text for name, args in _ASSISTANT_CALLS for text in _both_say(server, name, args)]
+    assert "Sautium has published no measurement of it." in said[0]
+    every = "\n".join(said) + caplog.text + json.dumps(
+        diag.bundle_view(diag.log_source("127.0.0.1", {}), {}), ensure_ascii=False)
+    for token in ("17.532", "12.346", "24.69", "Same output", "fictional", "Fictional", "sautium.net",
+                  "Measured on HQPlayer engine"):
+        assert token not in every, token
+
+
+def test_the_six_refuse_while_another_output_is_chosen_or_the_output_is_lent(fake, monkeypatch, tmp_path):
+    from routers import settings as settings_router
+    hqp_router, server = _assistant(monkeypatch, fake, tmp_path)
+    monkeypatch.setattr(settings_router, "_read", lambda key: "dlna" if key == "output.type" else None)
+    for name, args in _ASSISTANT_CALLS:
+        here, there = _both_say(server, name, args)
+        assert here == there and here.startswith("HQPlayer is not the active audio output (currently: dlna): ")
+    monkeypatch.setattr(settings_router, "_read", lambda key: "hqplayer" if key == "output.type" else None)
+
+    class Lent:
+        held = {"label": "the benchmark measures the filters"}
+    monkeypatch.setattr(hqp_router, "manager", Lent())
+    here, there = _both_say(server, "hqplayer_compare", {"name_a": "demo-sinc-a", "name_b": "demo-sinc-b"})
+    assert here == there == ("HQPlayer is busy: the benchmark measures the filters. Its filters and modulators "
+                             "can be read again when it finishes.")
+
+
+def test_the_six_say_the_links_line_while_hqplayer_builds_and_when_it_is_gone(fake, monkeypatch, tmp_path):
+    from contextlib import contextmanager
+    hqp_router, server = _assistant(monkeypatch, fake, tmp_path)
+    real = hl.selected
+
+    class Builds:
+        @contextmanager
+        def asking(self):
+            raise hl.Building(real(), {})
+            yield
+    monkeypatch.setattr(hl, "selected", Builds)
+    here, there = _both_say(server, "hqplayer_atlas_link", {"name": "demo-sinc-a"})
+    assert here == there == hl.BUILDING
+    monkeypatch.setattr(hl, "selected", real)
+    fake.close()
+    # The first question after the close fails to connect and opens the
+    # link's breaker: both surfaces then meet the same link
+    assert hqp_router.assistant("atlas_link", name="demo-sinc-a")["text"].startswith("HQPlayer is not answering (")
+    here, there = _both_say(server, "hqplayer_atlas_link", {"name": "demo-sinc-a"})
+    assert here == there and here.startswith("HQPlayer is not answering ("), here
+
+
+def test_filter_facts_adds_the_rate_checks_lines_through_the_route(fake, output, monkeypatch, tmp_path):
+    from hqp_rate_check import Sources
+    mgr, b = output
+    _assistant(monkeypatch, fake, tmp_path)
+    hqp_router = _rate_screen(monkeypatch, fake, tmp_path, mgr, Sources({44100: 2, 48000: 1}, first=44100))
+    said = hqp_router.assistant("filter_facts", name="demo-sinc-b")["text"].split("\n")
+    at = said.index("With demo-sinc-b in both filter slots, at this output rate and queue:")
+    assert said[at + 1] == ("  HQPlayer describes demo-sinc-b as 2^x up: 705.6 kHz is no power-of-two multiple of "
+                            "48 kHz, so HQPlayer will stop on the 48 kHz tracks in the queue.")
+
+
+def test_compare_and_host_fit_read_this_hosts_own_speeds(fake, monkeypatch, tmp_path):
+    import hqp_library
+    from playback import hqp_load
+    hqp_router, server = _assistant(monkeypatch, fake, tmp_path)
+    fake.replies["GetRates"] = _RATE_PCM[1]
+    monkeypatch.setattr(hqp_library, "endpoint_by_address",
+                        lambda host, port: {"id": 7, "name": "fake", "hqp_engine": "9.4.1", "cuda": "off"})
+    asked = {}
+
+    def names(ctx):
+        asked["names"] = ctx
+        return {"filters": ["demo-sinc-a"], "shapers": ["none"]}
+
+    def fit(ctx, **kw):
+        asked["fit"] = kw
+        return {"thresholds": {"ok": 1.25, "no": 1.0, "dropout_speed": None}, "total": 1,
+                "rows": [{"filter": "demo-sinc-a", "shaper": "none", "rate_out": 705600, "src_rate": 44100,
+                          "src_channels": 2, "n": 2, "speed": 3.21, "class": "ok", "bench_settled": True,
+                          "init_s": None, "dropout": False}]}
+    monkeypatch.setattr(hqp_load, "names", names)
+    monkeypatch.setattr(hqp_load, "fit", fit)
+    here, there = _both_say(server, "hqplayer_host_fit", {"name": "DEMO-SINC-A", "rate": "705.6 kHz"})
+    assert here == there == "\n".join([
+        "On this HQPlayer — engine 9.4.1, CUDA off, PCM:",
+        "  From a 44.1 kHz source:",
+        "    705.6 kHz · none: runs at 3.21× (2 samples) — keeps up here (from 1.25×)",
+        "These speeds are this HQPlayer's own, measured while it played and by its Benchmark."])
+    assert asked["names"]["engine"] == "9.4.1" and asked["names"]["mode"] == "PCM"
+    assert asked["fit"] == {"filter": "demo-sinc-a", "rate_out": 705600}
+    monkeypatch.setattr(hqp_load, "headroom", lambda ctx, **kw: {
+        "filters": {"demo-sinc-a": {"class": "tight", "speed": 1.1, "n": 1, "settled": False}}, "shapers": {},
+        "rates": {}, "thresholds": {"ok": 1.25, "no": 1.0, "dropout_speed": None},
+        "source": {"rate": 44100, "channels": 2}})
+    monkeypatch.setattr(hqp_load, "file_source", lambda opener: (44100, 2))
+
+    class Queued:
+        held = active = None
+        latest_status = {"track_index": 1}
+
+        class queue:
+            @staticmethod
+            def item_at(i):
+                return types.SimpleNamespace(opener=lambda: {"kind": "file", "path": "E:/Music/A/01.flac"})
+    monkeypatch.setattr(hqp_router, "manager", Queued())
+    text = hqp_router.assistant("compare", name_a="demo-sinc-a", name_b="demo-gauss-x")["text"].split("\n")
+    at = next(i for i, line in enumerate(text) if line.startswith("On this HQPlayer, at "))
+    assert text[at].endswith("with none, for a 44.1 kHz source:")
+    assert text[at + 1:at + 3] == [
+        "  demo-sinc-a runs at 1.10× (1 sample), the readings did not settle within 15 s — tight here "
+        "(from 1× to 1.25×)",
+        "  demo-gauss-x: not measured on this HQPlayer — the Benchmark on the HQPlayer screen measures it."]

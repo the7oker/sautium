@@ -163,7 +163,7 @@ Not implemented — searched over `backend desktop mcp`, only the definitions ma
 ## 7. Assistant and MCP tools
 
 - [UI] Two selectable agents, Claude Code and OpenAI Codex, each driving the same MCP servers; API providers (Anthropic, OpenAI, an OpenAI-compatible endpoint) as the alternative — `claude_code_runner.py`; `codex_runner.py`; `providers/__init__.py: _init_providers`
-- **41 MCP tools** — `mcp/assistant_server.py` (`grep -c '^@mcp.tool'` → 41):
+- **47 MCP tools** — `mcp/assistant_server.py`: 41 functions (`grep -c '^@mcp.tool'` → 41) and the six rows of `hqp_assistant.TOOLS`, registered from that table:
 
 | Area | Tools |
 |---|---|
@@ -173,13 +173,15 @@ Not implemented — searched over `backend desktop mcp`, only the definitions ma
 | Playback on the chosen output (6) | `play_track`, `play_album`, `play_similar`, `play_all`, `build_playlist`, `add_to_queue` |
 | HQPlayer transport (9) | `hqplayer_play`, `_pause`, `_stop`, `_next`, `_previous`, `_get_status`, `_volume_up`, `_volume_down`, `_set_volume` |
 | HQPlayer DSP (8) | `hqplayer_get_settings`, `_get_dsp_state`, `_set_filter`, `_set_shaper`, `_set_convolution`, `_list_matrix_profiles`, `_get_matrix_profile`, `_set_matrix_profile` |
+| HQPlayer filters and modulators (6) | `hqplayer_filter_facts`, `_compare`, `_differs_only_in`, `_ab_pair`, `_host_fit`, `_atlas_link` |
 | EQ (1) | `generate_eq_preset` |
 | Gear (3) | `gear_advisor_report`, `gear_system_report`, `gear_add_candidate` |
 
 - [auto] A second, read-only PostgreSQL MCP server gives the agent the database — `desktop/config_manager.py: generate_mcp_config`
-- [auto] The API providers get 34 tools of their own, `execute_query` among them — `tools/definitions.py`
+- [auto] The API providers get 40 tools of their own, `execute_query` among them — `tools/definitions.py`
 - [auto] Play tools take track UUIDs, so a phantom plays through them; `build_playlist` assembles a queue without starting it — `mcp/assistant_server.py: play_all`, `build_playlist`
 - [auto] The `hqplayer_*` tools refuse while another output is selected, while the benchmark holds HQPlayer, and while its link refuses people — a build, one it did not finish, a silence — in the link's own words; they read HQPlayer and command it through the backend's routes, so the MCP server keeps no connection of its own — `mcp/assistant_server.py: _hqp_gate`, `_hqp_state`, `_hqp_transport`
+- [auto] The six filter and modulator tools say what HQPlayer lists and what Sautium published of its measurements (the shipped atlas file, an entry once its release has a date — never the node's own copy), side by side and never ranked, and how each runs on this HQPlayer as measured here; both surfaces call one route — `hqp_assistant.py`; `routers/hqplayer.py: assistant`
 - [UI] Chat: sessions, a streamed reply that survives a dropped connection, tiles and track rows in replies that open and play — `POST /api/chat/sessions/{id}/messages`, `GET …/stream`; `static/app-shell.js` (blocks `artist`, `album`, `tracks`)
 - [auto] The assistant is told what is playing; it is not told which screen is open — `routers/chat.py: _get_player_context`
 - [auto] A turn is capped at 150 s; the agent's file, shell and web tools are off — `claude_code_runner.py: DISALLOWED_TOOLS_MCP`; `codex_runner.py: _DISABLED_FEATURES`

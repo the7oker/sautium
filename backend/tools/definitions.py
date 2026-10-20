@@ -16,6 +16,7 @@ import logging
 from contextlib import contextmanager
 
 import assistant_queries as aq
+import hqp_assistant
 import hqp_atlas
 from db_pool import db_query as _db_query, db_query_one as _db_query_one
 from tools.registry import REGISTRY, ToolDef, ToolParam
@@ -396,6 +397,16 @@ def _h_hqplayer_get_status() -> str:
         return "\n".join(lines)
     except Exception as e:
         return f"Error: {e}"
+
+
+def _h_hqp_assistant(short: str):
+    """One of hqp_assistant's six filter and modulator tools, in process: the
+    route's own function, the path the MCP server takes over HTTP
+    (routers.hqplayer.assistant)."""
+    def handler(**args) -> str:
+        from routers.hqplayer import assistant
+        return assistant(short, **args)["text"]
+    return handler
 
 
 def _h_hqplayer_volume_up() -> str:
@@ -907,6 +918,15 @@ def register_all():
         parameters=[],
         handler=_h_hqplayer_get_dsp_state,
     ))
+
+    for tool in hqp_assistant.TOOLS:
+        REGISTRY.register(ToolDef(
+            name=tool.name,
+            description=tool.description,
+            parameters=[ToolParam(p.name, "string", p.description, required=p.required,
+                                  default=None if p.required else "") for p in tool.params],
+            handler=_h_hqp_assistant(tool.name.removeprefix("hqplayer_")),
+        ))
 
     REGISTRY.register(ToolDef(
         name="generate_eq_preset",

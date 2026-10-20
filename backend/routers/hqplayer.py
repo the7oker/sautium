@@ -13,7 +13,9 @@ this setting (`rate_check`, hqp_rate_check); a name's card comes from
 shaper / matrix_profile / convolution — the last the assistant's switch, no
 control on the screen), /favorites (add/remove a filter name from the
 favourites list), /benchmark and /cuda; /meter records a page's peak-meter
-interest (its readings ride the page's /api/events stream).
+interest (its readings ride the page's /api/events stream). The assistant's
+six filter and modulator tools read through /assistant/{tool}
+(hqp_assistant), the one path of both its tool surfaces.
 
 The screen reads state on mount only — no polling. If the user
 changes settings via HQP Desktop, a manual refresh in the UI picks
@@ -22,7 +24,7 @@ up the new values.
 
 import logging
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Literal, Optional, Tuple
 
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel, Field
@@ -30,6 +32,7 @@ from pydantic import BaseModel, Field
 from config import settings
 
 logger = logging.getLogger(__name__)
+import hqp_assistant
 import hqp_atlas
 from db_pool import db_execute, db_query_one
 from hqp_rate_check import mode_kind
@@ -247,31 +250,42 @@ def _join_facts(response: Dict[str, Any], info: Optional[dict], state: Optional[
         response["atlas"] = hqp_atlas.head(atlas, engine, mode)
 
 
-def _rate_lines(info: Optional[dict], state: Optional[dict], lists: dict) -> Dict[str, list]:
-    """What the screen says when the queue meets a rate HQPlayer cannot reach
-    (hqp_rate_check): each phrase under the row it names, for the queue from
-    the slot HQPlayer reads — the first while nothing has played — to the
-    end. Nothing without State and the four lists, while HQPlayer is not the
-    output, or while another controller's playlist plays (an entry not ours,
-    a mirror that drifted). The node's own atlas copy speaks here, on the
-    node's own screen."""
+def _rate_queue(state: Optional[dict], lists: dict) -> Optional[Tuple[Optional[str], Any]]:
+    """What the rate check (hqp_rate_check) reads besides HQPlayer's State
+    and lists: the adaptive output rate as HQPlayer saved it, and the
+    sources of the queue from the slot HQPlayer reads — the first while
+    nothing has played — to the end. None without State and the four lists,
+    while HQPlayer is not the output, while another controller's playlist
+    plays (an entry not ours, a mirror that drifted), or for an empty
+    queue."""
     import hqp_library
-    import hqp_rate_check
     from playback import hqp_load
     from playback.hqp_backend import _stream_mode
     active, status = manager.active, manager.latest_status
-    if (not state or any(lists[k] is None for k in ("modes", "rates", "filters", "shapers"))
+    if (not state or any(lists.get(k) is None for k in ("modes", "rates", "filters", "shapers"))
             or active is None or active.id != "hqplayer" or active.drift
             or status.get("source") == "external"):
-        return {}
+        return None
     items = manager.queue.snapshot()[max(status.get("track_index") or 1, 1) - 1:]
     if not items:
+        return None
+    return (None if _stream_mode() else hqp_library.local_engine().adaptive_rate,
+            hqp_load.sources([it.opener() for it in items]))
+
+
+def _rate_lines(info: Optional[dict], state: Optional[dict], lists: dict) -> Dict[str, list]:
+    """What the screen says when the queue meets a rate HQPlayer cannot reach
+    (hqp_rate_check): each phrase under the row it names, for the queue
+    _rate_queue reads. The node's own atlas copy speaks here, on the node's
+    own screen."""
+    import hqp_rate_check
+    queue = _rate_queue(state, lists)
+    if queue is None:
         return {}
-    inputs = hqp_rate_check.inputs(
-        state, lists["modes"], lists["rates"], lists["filters"], lists["shapers"],
-        adaptive=None if _stream_mode() else hqp_library.local_engine().adaptive_rate,
-        atlas=_atlas(), engine=(info or {}).get("engine"))
-    return hqp_rate_check.lines(hqp_rate_check.check(inputs, hqp_load.sources([it.opener() for it in items])))
+    adaptive, sources = queue
+    inputs = hqp_rate_check.inputs(state, lists["modes"], lists["rates"], lists["filters"], lists["shapers"],
+                                   adaptive=adaptive, atlas=_atlas(), engine=(info or {}).get("engine"))
+    return hqp_rate_check.lines(hqp_rate_check.check(inputs, sources))
 
 
 @router.get("/facts")
@@ -317,8 +331,10 @@ def _mode_of(state: dict, modes: List[dict]) -> Optional[str]:
 def _headroom(ep: Optional[dict], state: Optional[dict], status, lists: dict) -> Dict[str, Any]:
     """How each picker entry runs on this HQPlayer, for the source the owner
     hears: the playing one (what HQPlayer decodes), else the file the queue
-    plays next. Empty without a measured build or a known source — or, for
-    the queued file, a list HQPlayer did not give."""
+    plays next — and the setting the marks are read at (`setting`: the
+    output rate, the filter and the shaper). Empty without a measured build
+    or a known source — or, for the queued file, a list HQPlayer did not
+    give."""
     from hqplayer_client import PlaybackState
     from playback import hqp_load
     from playback.hqp_benchmark import running_filter
@@ -343,8 +359,9 @@ def _headroom(ep: Optional[dict], state: Optional[dict], status, lists: dict) ->
                                state["filterNx"], state["filter1x"], src[0])
         shaper = next((sh["name"] for sh in lists["shapers"] if sh["index"] == state["shaper"]), "")
     ctx = hqp_load.context(ep, mode=mode, state=state)
-    return hqp_load.headroom(ctx, rate_out=rate_out, filter=filt, shaper=shaper,
-                             src_rate=src[0], src_channels=src[1])
+    return {**hqp_load.headroom(ctx, rate_out=rate_out, filter=filt, shaper=shaper,
+                                src_rate=src[0], src_channels=src[1]),
+            "setting": {"rate_out": rate_out, "filter": filt, "shaper": shaper}}
 
 
 def _benchmark_block(ep: Optional[dict], state: Optional[dict], lists: dict,
@@ -417,6 +434,90 @@ def _refuse_while_held() -> None:
     hold = manager.held
     if hold is not None:
         raise HTTPException(status_code=409, detail=str(OutputHeld(hold)))
+
+
+# -- The assistant's filter and modulator tools ------------------------------
+
+_LIST_READS = {"modes": "get_modes", "rates": "get_rates", "filters": "get_filters", "shapers": "get_shapers"}
+
+
+@router.get("/assistant/{tool}")
+def assistant(tool: Literal[tuple(hqp_assistant.BY_SHORT)], name: str = "", name_a: str = "",
+              name_b: str = "", axis: str = "", near: str = "", rate: str = "", mode: str = "") -> Dict[str, str]:
+    """One of the assistant's six HQPlayer filter and modulator tools
+    (hqp_assistant), the one path both its tool surfaces take — in process,
+    and the MCP server over HTTP — so the two say one thing: the refusals,
+    what HQPlayer answers on its link, the atlas as the site published it
+    (the shipped file, never the node's own copy), this host's speeds.
+    Always 200 with the tool's text: a refusal is its answer."""
+    args = {k: v.strip() for k, v in (("name", name), ("name_a", name_a), ("name_b", name_b), ("axis", axis),
+                                      ("near", near), ("rate", rate), ("mode", mode))}
+    return {"text": hqp_assistant.answer(tool, args, _assistant_read(tool, args))}
+
+
+def _assistant_read(tool: str, args: Dict[str, str]) -> hqp_assistant.Read:
+    """What one of the six reads: nothing while another output is chosen or
+    the output is lent; else HQPlayer's answers on its link in one asking
+    block — a reading, never held at the command gate — and what the tool
+    reads besides."""
+    from routers.settings import _read
+    output = _read("output.type")
+    if output and output != "hqplayer":
+        return hqp_assistant.Read(output=output)
+    hold = manager.held
+    if hold is not None:
+        return hqp_assistant.Read(held=hold["label"])
+    needs = hqp_assistant.READS[tool] + (("rates",) if tool == "host_fit" and args["rate"] else ())
+    try:
+        with hqp_link.selected().asking() as hqp:
+            info, state = hqp.get_info(), hqp.get_state()
+            lists, refused = {}, {}
+            for name in needs:
+                lists[name] = getattr(hqp, _LIST_READS[name])()
+                if lists[name] is None:
+                    refused[name] = hqp.refusal()
+            status = hqp.get_status() if tool == "compare" else None
+    except (Building, Dropped, NotAnswering) as e:
+        return hqp_assistant.Read(busy=_busy(e).detail)
+    except (BrokenPipeError, ConnectionError, OSError) as e:
+        return hqp_assistant.Read(error=str(e))
+    if not (info and info.get("product")):
+        return hqp_assistant.Read(error="no answer to GetInfo")
+    read = hqp_assistant.Read(info=info, state=state or {}, lists=lists, refused=refused,
+                              mode=_list_mode(state, lists.get("modes"), lists.get("filters")))
+    if tool == "host_fit":
+        return read._replace(host=_host_records(args, read))
+    read = read._replace(atlas=hqp_atlas.read(hqp_atlas.SHIPPED, None))
+    if tool in ("filter_facts", "compare"):
+        queue = _rate_queue(state, lists)
+        if queue is not None:
+            read = read._replace(adaptive=queue[0], sources=queue[1])
+    if tool == "compare":
+        import hqp_library
+        ep = hqp_library.endpoint_by_address(settings.hqplayer_host, settings.hqplayer_port)
+        read = read._replace(endpoint=ep, headroom=_headroom(ep, state, status, lists))
+    return read
+
+
+def _host_records(args: Dict[str, str], read: hqp_assistant.Read) -> Dict[str, Any]:
+    """host_fit's: the context HQPlayer is in now — the engine it reports,
+    this endpoint's CUDA offload, the mode asked, the matrix profile and
+    convolution — and one name's rows there (hqp_load.fit); or the words why
+    there are none."""
+    import hqp_library
+    from playback import hqp_load
+    ep = hqp_library.endpoint_by_address(settings.hqplayer_host, settings.hqplayer_port)
+    if ep is None or not ep.get("hqp_engine"):
+        return {"words": hqp_assistant.NOTHING_HERE}
+    mode, rate, why = hqp_assistant.host_ask(args, read)
+    if why is not None:
+        return {"words": why}
+    ctx = hqp_load.context({**ep, "hqp_engine": read.info.get("engine")}, mode=mode, state=read.state)
+    picked = hqp_assistant.host_name(args["name"], hqp_load.names(ctx))
+    if picked is None:
+        return {"rows": []}
+    knob, name = picked
+    return {"context": ctx, "knob": knob, **hqp_load.fit(ctx, **{knob: name}, rate_out=rate)}
 
 
 # -- Config -------------------------------------------------------------------

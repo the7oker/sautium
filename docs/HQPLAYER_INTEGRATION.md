@@ -281,6 +281,15 @@ name's card over the sheet (layer 210). The Filter row's hint shows the
 active filter's facts in place of HQPlayer's raw line. A number is drawn
 from its token in `<data value>`, a leading hyphen-minus as the minus sign.
 
+The assistant reads it through six tools of its own (since 2026-10-20,
+`backend/hqp_assistant.py`: their table and every word they say), one route
+for both of its tool surfaces, `GET /api/hqplayer/assistant/{tool}`: it
+refuses while another output is chosen or the output is lent, asks HQPlayer
+on its link as the screen does, and reads the atlas as the site published
+it — the shipped file alone, never the node's own copy, and of it only the
+releases that have a date. Before publication a tool gives HQPlayer's own
+facts and this host's speeds, and says that nothing is published.
+
 The module also holds the node's one rate namer (since 2026-10-17):
 `hqp_atlas.rate_name` names a rate HQPlayer reports as the screen's
 `fmtRateLabel` does — kHz up to 768 kHz, a DSD rate as "DSD256" or "DSD512
