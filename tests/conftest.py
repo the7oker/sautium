@@ -14,6 +14,11 @@ closed its scratch one — fails on the missing table instead of writing the
 node's catalog. On 2026-10-09 a leaked queue persist overwrote the node's
 player.queue, and the backend's next start crash-looped on it.
 
+HQPlayer's folder on this machine (HQPLAYER_DATA_DIR) is the run's own, empty
+and removed at the end, for the same reason: the diagnostics, the rate check
+and the benchmark read HQPlayer's settings.xml and its log there, and a test
+that needs either writes its own.
+
 The peer protocol between two real nodes is not tested here: that is the
 two-node checks (launcher stand <-> Docker) and the `--selftest` CLIs, per
 CLAUDE.md "Testing Expectations".
@@ -22,7 +27,9 @@ Run from the repo root: `python -m pytest tests/`.
 """
 
 import os
+import shutil
 import sys
+import tempfile
 from pathlib import Path
 
 import pytest
@@ -44,10 +51,15 @@ if not SESSION_DATABASE.startswith("sautium_pytest"):
     raise pytest.UsageError(f"SAUTIUM_TEST_PGDATABASE names {SESSION_DATABASE!r}: the run drops "
                             "its session database, so only a sautium_pytest* name is taken")
 
+# Unset, HQPlayer's folder is the platform's own (~/.hqplayer on macOS): a
+# machine with HQPlayer Desktop beside the checkout had its real settings and
+# log decide what tests expect from nothing.
+HQPLAYER_DIR = tempfile.mkdtemp(prefix="sautium-test-hqplayer-")
+
 # Before any backend module builds config.settings.
 os.environ.update(POSTGRES_HOST=PG["host"], POSTGRES_PORT=str(PG["port"]),
                   POSTGRES_USER=PG["user"], POSTGRES_PASSWORD=PG["password"],
-                  POSTGRES_DB=SESSION_DATABASE)
+                  POSTGRES_DB=SESSION_DATABASE, HQPLAYER_DATA_DIR=HQPLAYER_DIR)
 
 
 def _admin():
@@ -85,6 +97,7 @@ def pytest_sessionstart(session):
 
 def pytest_sessionfinish(session, exitstatus):
     _recreate(SESSION_DATABASE, create=False)
+    shutil.rmtree(HQPLAYER_DIR)
 
 
 @pytest.fixture(scope="module")
