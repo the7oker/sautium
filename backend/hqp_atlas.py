@@ -504,9 +504,11 @@ def _check(doc: Any) -> None:
         _names(p.get("members"), f"{at}.members", 2, 2)
         _need(p.get("status") == "approved", "not approved", f"{at}.status")
         contexts = _obj(p.get("contexts"), f"{at}.contexts")
+        # A filter pair is measured per context and a modulator pair per rate,
+        # and its keys are read so (context_label, rate_name)
         for key, c in contexts.items():
-            _need(_CONTEXT.fullmatch(key) or _RATE.fullmatch(key), "a key that is neither a context nor a rate",
-                  f"{at}.contexts")
+            _need((_CONTEXT if kind == "filter" else _RATE).fullmatch(key),
+                  "a key that is not its kind's: a filter pair's context, a modulator pair's rate", f"{at}.contexts")
             _check_pair_context(c, f"{at}.contexts.{key}")
         if "sources" in p:
             _cites(p["sources"], f"{at}.sources", sources, 0)
@@ -602,6 +604,17 @@ def _check_engine(body: Any, engine: str, at: str, releases: Dict[str, Any], reg
                 ident = identical.get(e["identity_group"])
                 _need(ident is not None and e["name"] in ident["members"] and e["identity_group"] in e["groups"],
                       "an identical group that does not name it", f"{eat}.identity_group")
+
+    # A group or a pair is of one release: the shipped file holds the dated
+    # releases alone, and a dated member's group or pair would name a member
+    # whose release has no date
+    release_of = {(kind, e["name"]): e["release"] for kind, plural in KINDS.items() for e in body[plural].values()}
+    for kind, plural in KINDS.items():
+        for slug, e in body[plural].items():
+            for key, held in (("groups", groups), ("pairs", pairs)):
+                for ref in e[key]:
+                    _need(all(release_of.get((kind, m), e["release"]) == e["release"] for m in held[ref]["members"]),
+                          "a member of another release", f"{at}.{plural}.{slug}.{key}")
 
     modulators = body["modulators"]
     fullscale = _obj(body.get("fullscale"), f"{at}.fullscale")
@@ -1198,13 +1211,15 @@ def facts(atlas: Optional[Atlas], kind: str, rows: List[Dict[str, Any]], user_en
         own = runtime(kind, row)
         f = _blank()
         f["tag"], f["caption"], f["card"] = own["tag"], own["caption"], True
-        if found.state == "not-measured":
-            # On an engine of another major — none shown — the head's engine
-            # line says so once: a chip on every row would say of each name,
-            # measured ones too, that it was not measured
-            f["chips"] = own["chips"] + ([_chip(_phrase(NOT_MEASURED, engine=named),
-                                                NOT_MEASURED_TITLE.format(engine=named), muted=True)]
-                                         if engine is not None else [])
+        if found.state == "not-measured" and engine is None:
+            # Another major's — no engine shown: the head's engine line says
+            # so once, and the row is HQPlayer's own, its focus words with it.
+            # A chip on every row would say of each name, measured ones too,
+            # that it was not measured
+            f["chips"], f["words"] = own["chips"], own["words"]
+        elif found.state == "not-measured":
+            f["chips"] = own["chips"] + [_chip(_phrase(NOT_MEASURED, engine=named),
+                                               NOT_MEASURED_TITLE.format(engine=named), muted=True)]
         elif kind == "filter":
             f["chips"] = _filter_chips(atlas, found) + own["chips"]
             f["caption"] = own["caption"] or _apodizing_caption(found.entry)
@@ -1522,10 +1537,18 @@ def _properties(atlas: Atlas, found: Found, order: Dict[str, int]) -> Optional[D
         more_used: set = set()
         more = [_context_table(atlas, found, key, more_used) for key in rest]
         items.append({"more": OTHER_CONTEXTS, "items": more + notes(more_used - used)})
+    return _section(PROPERTIES, items + figures_note(atlas, found, order))
+
+
+def figures_note(atlas: Atlas, found: Found, order: Dict[str, int]) -> List[Dict[str, Any]]:
+    """The note under a member's numbers, where its identical group's
+    figures stand for its own readings: a filter's properties, a
+    modulator's idle noise. Empty for a name in no identical group."""
     ident = atlas.identical(found)
-    if ident:
-        items.append(_note(_phrase(FIGURES_NOTE, names=_group_names(ident[0]["members"], order))))
-    return _section(PROPERTIES, items)
+    if not ident:
+        return []
+    return [_note(_phrase(FIGURES_NOTE if found.kind == "filter" else IDLE_NOTE,
+                          names=_group_names(ident[0]["members"], order)))]
 
 
 def idle_rows(atlas: Atlas, found: Found, used: set) -> List[Tuple[str, Dict[str, Any], List[Any]]]:
@@ -1547,10 +1570,7 @@ def _per_rate(atlas: Atlas, found: Found, order: Dict[str, int],
     rows = [{"label": name_rate(rate, x["fs_in"]), "cells": [wire(value)]}
             for rate, x, value in idle_rows(atlas, found, used)]
     items = [_table([IDLE], rows, corner=RATE)] + notes(used)
-    ident = atlas.identical(found)
-    if ident:
-        items.append(_note(_phrase(IDLE_NOTE, names=_group_names(ident[0]["members"], order))))
-    return _section(PER_RATE, items)
+    return _section(PER_RATE, items + figures_note(atlas, found, order))
 
 
 def _refused(e: Dict[str, Any], name_rate: Callable[[str, str], str]) -> Optional[Dict[str, Any]]:

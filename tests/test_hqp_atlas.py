@@ -282,6 +282,14 @@ def _break(doc, how):
     elif how == "a release of another engine":
         doc["releases"]["9.6.0/pcm"] = None
         entry["release"] = "9.6.0/pcm"
+    elif how == "a filter pair keyed by a rate":
+        p = next(p for p in doc["pairs"] if p["kind"] == "filter")
+        p["contexts"]["705600"] = p["contexts"][p["default_context"]]
+    elif how == "a modulator pair keyed by a context":
+        p = next(p for p in doc["pairs"] if p["kind"] == "modulator")
+        p["contexts"]["1x-44.1k-705.6k"] = next(iter(p["contexts"].values()))
+    elif how == "a group of two releases":
+        _filter(doc, "demo-sinc-b")["release"] = "9.4.1/sdm"
     return doc
 
 
@@ -292,7 +300,8 @@ BREAKS = ("another schema", "a missing key", "a wrong type deep inside", "an unr
           "an entry under another slug", "a rate no label names", "a group not approved",
           "a source it cites that the file does not hold", "no engine", "a group figure's bound set by a list",
           "an idle bound set by no excitation the words name", "a range without its min",
-          "a rate longer than int() reads", "an engine longer than int() reads", "a release of another engine")
+          "a rate longer than int() reads", "an engine longer than int() reads", "a release of another engine",
+          "a filter pair keyed by a rate", "a modulator pair keyed by a context", "a group of two releases")
 
 
 @pytest.mark.parametrize("how", BREAKS)
@@ -556,7 +565,8 @@ def test_another_major_engine_is_said_once_by_the_engine_line_never_on_a_row(atl
                                        ("modulator", "DMX5", MODULATORS, "sdm")):
             rows = _rows(spec, kind)
             for row, f in zip(rows, hqp_atlas.facts(atlas, kind, rows, engine, mode)):
-                assert f["chips"] == hqp_atlas.runtime(kind, row)["chips"]
+                own = hqp_atlas.runtime(kind, row)
+                assert (f["chips"], f["words"], f["tag"]) == (own["chips"], own["words"], own["tag"])
                 assert (f["line3"], f["bracket"], f["card"]) == (None, None, True)
             card = _card(atlas, kind, name, spec, engine, mode)
             assert [plain(s) for s in card["status"]] == [note]
