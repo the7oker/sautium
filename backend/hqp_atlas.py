@@ -761,7 +761,8 @@ class Found(NamedTuple):
     pcm-measurement (a filter in SDM mode, its PCM facts); refused (a modulator
     HQPlayer refused at every measured rate); not-measured (a name the
     registry lacks, an entry the engine lacks, a mode the entry was not
-    measured in). `entry` and `slug` are None where the file holds none."""
+    measured in, no engine shown — another major's). `entry` and `slug` are
+    None where the file holds none."""
     kind: str
     state: str
     entry: Optional[Dict[str, Any]]
@@ -1159,8 +1160,12 @@ def facts(atlas: Optional[Atlas], kind: str, rows: List[Dict[str, Any]], user_en
         f = _blank()
         f["tag"], f["caption"], f["card"] = own["tag"], own["caption"], True
         if found.state == "not-measured":
-            f["chips"] = own["chips"] + [_chip(_phrase(NOT_MEASURED, engine=named),
-                                               NOT_MEASURED_TITLE.format(engine=named), muted=True)]
+            # On an engine of another major — none shown — the head's engine
+            # line says so once: a chip on every row would say of each name,
+            # measured ones too, that it was not measured
+            f["chips"] = own["chips"] + ([_chip(_phrase(NOT_MEASURED, engine=named),
+                                                NOT_MEASURED_TITLE.format(engine=named), muted=True)]
+                                         if engine is not None else [])
         elif kind == "filter":
             f["chips"] = _filter_chips(atlas, found) + own["chips"]
             f["caption"] = own["caption"] or _apodizing_caption(found.entry)
@@ -1276,7 +1281,8 @@ def card(atlas: Optional[Atlas], kind: str, name: str, rows: List[Dict[str, Any]
         found = atlas.lookup(kind, name, atlas.engine_for(user_engine, kind), mode)
         out["origin"] = atlas.origin
         out["status"].append(wire(atlas.engine_note(user_engine, kind)))
-        if found.state == "not-measured":
+        # Another major's: the engine line says it, as on the sheet's head
+        if found.state == "not-measured" and found.engine is not None:
             out["status"].append(wire(_phrase(NOT_MEASURED_CARD, engine=atlas.named_engine(user_engine, kind))))
         elif found.state == "pcm-measurement":
             ratio = _ratio(row.get("parsed"))

@@ -261,8 +261,8 @@ filters HQPlayer lists in SDM mode alone go with the filter sheet's family,
 PCM. An HQPlayer of a major the file holds no engine of, or one that reports
 no engine, is shown no engine's facts on a sheet whose family some engine
 holds: its head and cards name the newest engine that holds the family and
-the one HQPlayer runs, or that it reports none, and its rows and cards say
-"not measured" on that engine. The list's mode is its filters' own arrow
+the one HQPlayer runs, or that it reports none, and no row or card says "not
+measured" (since 2026-10-20). The list's mode is its filters' own arrow
 (⥮ PCM, ⥣ SDM), else the mode HQPlayer runs (HQPlayer 5 describes nothing); a
 PCM shapers list is dithers, which the atlas holds none of.
 A name's card is `GET

@@ -2476,12 +2476,12 @@ def test_the_engine_hqplayer_reports_decides_what_the_rows_say(fake, monkeypatch
     s = hqp_router.get_state(dsp=True)
     assert plain(s["atlas"]["filters"][0]) == "Measured on HQPlayer engine 9.4.1 · this HQPlayer runs engine 9.5.0"
     assert _facts_text(s["filters"][1])[0][0] == "linear phase"
-    # Another major engine: HQPlayer's facts, and not measured on every row.
+    # Another major engine: HQPlayer's facts, the engine line saying it once.
     hqp_router = _atlas_screen(monkeypatch, fake, tmp_path, engine="8.0.0")
     s = hqp_router.get_state(dsp=True)
     assert [plain(line) for line in s["atlas"]["filters"]] == [
         "Measured on HQPlayer engine 9.4.1 · this HQPlayer runs engine 8.0.0"]
-    assert all(_facts_text(r)[0][-1] == "not measured on engine 9.4.1" for r in s["filters"])
+    assert [_facts_text(r)[0] for r in s["filters"]] == [["1:1"], ["2^x up"], ["2^x up"], ["Any"]]
 
 
 def test_the_plain_state_carries_no_facts(fake, monkeypatch, tmp_path):

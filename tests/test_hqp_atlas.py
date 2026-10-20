@@ -546,19 +546,23 @@ def test_a_name_the_atlas_does_not_measure_says_so_on_the_atlas_engine(atlas):
     assert _chips(f["demo-new"]) == ["1:1", "not measured on engine 9.4.1"]
 
 
-def test_another_major_engine_shows_hqplayers_facts_and_not_measured_on_every_row(atlas):
+def test_another_major_engine_is_said_once_by_the_engine_line_never_on_a_row(atlas):
+    # "Not measured" read as a claim about each name is false for every name
+    # the atlas measured: the engine line names both engines, once
     for engine in ("8.0.0", "10.1.0", ""):
-        for kind, spec, mode in (("filter", PCM, "pcm"), ("modulator", MODULATORS, "sdm")):
-            for f in _facts_of(atlas, kind, spec, engine, mode).values():
-                assert _chips(f)[-1] == "not measured on engine 9.4.1"
-                assert f["line3"] is None and f["bracket"] is None
+        note = ("Measured on HQPlayer engine 9.4.1 · this HQPlayer does not report its engine" if not engine
+                else f"Measured on HQPlayer engine 9.4.1 · this HQPlayer runs engine {engine}")
+        for kind, name, spec, mode in (("filter", "demo-sinc-a", PCM, "pcm"),
+                                       ("modulator", "DMX5", MODULATORS, "sdm")):
+            rows = _rows(spec, kind)
+            for row, f in zip(rows, hqp_atlas.facts(atlas, kind, rows, engine, mode)):
+                assert f["chips"] == hqp_atlas.runtime(kind, row)["chips"]
+                assert (f["line3"], f["bracket"], f["card"]) == (None, None, True)
+            card = _card(atlas, kind, name, spec, engine, mode)
+            assert [plain(s) for s in card["status"]] == [note]
+            assert [s["head"] for s in card["sections"]] == ["What HQPlayer says"] and card["link"] is None
         head = hqp_atlas.head(atlas, engine, "sdm")
-        assert len(head["filters"]) == 1
-    card = _card(atlas, "filter", "demo-sinc-a", PCM, "8.0.0")
-    assert [plain(s) for s in card["status"]] == [
-        "Measured on HQPlayer engine 9.4.1 · this HQPlayer runs engine 8.0.0",
-        "Not measured on HQPlayer engine 9.4.1."]
-    assert [s["head"] for s in card["sections"]] == ["What HQPlayer says"] and card["link"] is None
+        assert [[plain(x) for x in head[sheet]] for sheet in ("filters", "modulators")] == [[note], [note]]
 
 
 def test_an_engine_longer_than_any_build_is_one_the_atlas_does_not_know(atlas):
@@ -569,12 +573,11 @@ def test_an_engine_longer_than_any_build_is_one_the_atlas_does_not_know(atlas):
     long = "9.4." + "1" * 5000
     for kind, spec, mode in (("filter", PCM, "pcm"), ("modulator", MODULATORS, "sdm")):
         for f in _facts_of(atlas, kind, spec, long, mode).values():
-            assert _chips(f)[-1] == "not measured on engine 9.4.1"
+            assert not any(chip.get("muted") for chip in f["chips"])
     assert len(hqp_atlas.head(atlas, long, "sdm")["filters"]) == 1
     card = _card(atlas, "filter", "demo-sinc-a", PCM, long)
     assert [plain(s) for s in card["status"]] == [
-        f"Measured on HQPlayer engine 9.4.1 · this HQPlayer runs engine {long}",
-        "Not measured on HQPlayer engine 9.4.1."]
+        f"Measured on HQPlayer engine 9.4.1 · this HQPlayer runs engine {long}"]
 
 
 def test_in_sdm_mode_the_rows_show_their_pcm_facts_and_the_head_says_so(atlas):
