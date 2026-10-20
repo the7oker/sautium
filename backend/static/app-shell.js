@@ -3208,6 +3208,11 @@
     if (/^shell$/i.test(n)) return 'running a command…';
     if (/postgres|query|sql/i.test(n)) return 'querying the library…';
     if (/search|similar/i.test(n)) return 'searching the library…';
+    // The six that read HQPlayer's filters and modulators (hqp_assistant):
+    // before the playback words, which "hqplayer" itself would match
+    if (/hqplayer_(filter_facts|compare|differs_only_in|ab_pair|host_fit|atlas_link)$/i.test(n)) {
+      return 'looking up filters and modulators…';
+    }
     if (/play|queue|volume|pause|next|previous|stop/i.test(n)) return 'controlling playback…';
     if (/lyrics/i.test(n)) return 'reading lyrics…';
     if (/track_info|album|artist|genre/i.test(n)) return 'gathering details…';

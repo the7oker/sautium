@@ -2936,7 +2936,8 @@ names it. This host's speeds are the Benchmark's and the listens' own,
 grouped by the source they were measured from — never another machine's.
 The prompt tells the model to call them first, to rank nothing, to give
 each number as the tool writes it, and that Sautium holds no rules that tie
-a DAC to these settings yet.
+a DAC to these settings yet; the chat's pip says "looking up filters and
+modulators…" while one runs, not "controlling playback…".
 
 ## Known Gotchas
 

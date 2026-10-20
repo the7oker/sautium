@@ -6,6 +6,8 @@ of this host. Pure: no database, no HQPlayer."""
 
 import json
 import re
+import shutil
+import subprocess
 import sys
 from pathlib import Path
 
@@ -509,3 +511,16 @@ def test_both_prompts_carry_the_block_once_and_it_ranks_nothing_and_names_no_fin
     for tool in hqp_assistant.TOOLS:
         params = ", ".join(p.name for p in tool.params)
         assert assistant_prompt.API_SYSTEM_PROMPT.count(f"- **{tool.name}({params})**: {tool.description}") == 1
+
+
+@pytest.mark.skipif(shutil.which("node") is None, reason="node not installed")
+def test_the_chat_says_the_six_look_up_filters_and_modulators():
+    # app-shell.js toolPipLabel run as written: "hqplayer" holds "play", and
+    # the six read; the transport keeps its label
+    src = (BACKEND / "static" / "app-shell.js").read_text(encoding="utf-8")
+    fn = re.search(r"\n  function toolPipLabel\(raw\) \{\n.*?\n  \}\n", src, re.S).group(0)
+    names = [t.name for t in hqp_assistant.TOOLS]
+    asked = names + [f"mcp__assistant__{name}" for name in names] + ["hqplayer_play", "mcp__assistant__hqplayer_next"]
+    script = f"{fn}\nconsole.log(JSON.stringify({json.dumps(asked)}.map(toolPipLabel)));"
+    out = subprocess.run([shutil.which("node"), "-e", script], capture_output=True, text=True, check=True)
+    assert json.loads(out.stdout) == ["looking up filters and modulators…"] * 12 + ["controlling playback…"] * 2
