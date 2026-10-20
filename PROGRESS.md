@@ -2906,6 +2906,38 @@ served meanwhile while the queue generation holds; and the verdict's queue
 rates read the slot and the queue in two looks, so a track removed or added
 before that slot between them shifts them by one.
 
+### The assistant speaks of filters and modulators from what was published (2026-10-20)
+
+The assistant has six tools for HQPlayer's filters and modulators since
+2026-10-20: `hqplayer_filter_facts` (what HQPlayer says of one and what
+Sautium published of its measurements), `hqplayer_compare` (two of one kind
+side by side), `hqplayer_differs_only_in` (the approved pairs that differ
+from it in one property, with the size of the difference),
+`hqplayer_ab_pair` (pairs on one axis for a blind comparison by listening,
+with how to run it), `hqplayer_host_fit` (how one runs on this HQPlayer's
+own host, as measured here) and `hqplayer_atlas_link`. One table holds
+their names, descriptions and parameters (`backend/hqp_assistant.py`),
+and both tool surfaces register from it; both call one route, `GET
+/api/hqplayer/assistant/{tool}` — the in-process tools its function, the
+MCP server over HTTP — so the two say one thing. The route refuses while
+another output is chosen or the output is lent, asks HQPlayer on its link
+as the screen does, and reads the atlas as the site published it: the file
+shipped beside `hqp_atlas`, and of it only an entry whose release has a
+date. The node's own copy never reaches the assistant — what a tool says
+goes to the model's provider and back into the chat's replies, which a
+backup, a life merge and a support warrant's `chat` scope carry. Before
+publication a tool gives HQPlayer's own facts, this host's speeds and
+"Sautium has published no measurement of it". Nothing ranks: lists keep
+HQPlayer's order, the file's or their labels', two values stand side by
+side, and "the same output" comes only from the file's own groups. A number
+is the token the file wrote; a rate that stands alone is named as the
+HQPlayer screen names it, and a filter's measured context as the site
+names it. This host's speeds are the Benchmark's and the listens' own,
+grouped by the source they were measured from — never another machine's.
+The prompt tells the model to call them first, to rank nothing, to give
+each number as the tool writes it, and that Sautium holds no rules that tie
+a DAC to these settings yet.
+
 ## Known Gotchas
 
 - **The Docker image took the node's secrets.** `./backend` is the build

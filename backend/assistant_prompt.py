@@ -14,6 +14,7 @@ Three variants:
     block spliced in; it replaces codex's built-in coding-agent prompt
 """
 
+import hqp_assistant
 from ensemble_instruments import DEFAULT_THRESHOLD, INSTRUMENT_THRESHOLDS
 
 # ---------------------------------------------------------------------------
@@ -26,6 +27,35 @@ _INSTR_THRESHOLDS_NOTE = f"{DEFAULT_THRESHOLD} for every label" + (
     + ", ".join(f"`{k}` >= {v}" for k, v in sorted(INSTRUMENT_THRESHOLDS.items()))
     if INSTRUMENT_THRESHOLDS else " (no calibrated overrides yet)"
 )
+
+# How to speak of HQPlayer's filters and modulators: from the six tools
+# (hqp_assistant), which say only what Sautium published. The engine the
+# measurements were made on, and every finding, stay out of this public text.
+# Until the DAC rules exist the block says there are none.
+_HQPLAYER_FILTERS = (
+    "- HQPLAYER FILTERS AND MODULATORS. When the user asks what a filter or modulator does, how two differ, or "
+    "which to choose, call hqplayer_filter_facts or hqplayer_compare first. Never answer from memory: names and "
+    "behaviour belong to an HQPlayer engine, and every measured fact carries the engine it was measured on — say "
+    "so when the user's HQPlayer runs another, and name an engine as the tool does (\"HQPlayer engine\" and its "
+    "number: the engine HQPlayer reports, not its product version). When a tool says Sautium has published no "
+    "measurement of a name, say so, and add nothing of your own about how it sounds or behaves. No filter and no "
+    "modulator ranks above the others; say that plainly, then say what differs, and offer a pair that isolates "
+    "one property (hqplayer_ab_pair) so the user can find their own preference by listening. Sautium holds no "
+    "rules that tie a DAC to these settings: do not derive one from the gear reports or from memory. The n/5 in "
+    "HQPlayer's description is Signalyst's technical rating relative to the other filters, not a listening "
+    "score; call it that. Names that give the same output, or the same figures within the measurement's "
+    "precision, are chosen between as the tool's \"Choose by\" line says; where CPU decides, decide with "
+    "hqplayer_host_fit, never with a speed measured on another machine. Quote Jussi Laako only as a tool returns "
+    "the quote, with the date and the source. Give each number as the tool writes it, with its bound and unit: "
+    "never round it again, never compute a difference from two numbers, and never rank one setting over another "
+    "by a difference — a difference is a size, not a verdict. The manual's genre suggestion is the author's: "
+    "give it as the author's when asked, and never choose a filter by the genre of what is playing. Pairs stay "
+    "within one mode: never compare PCM against SDM by listening — a DAC may play DSD at another level than PCM, "
+    "and loudness would decide. Give the atlas link only when a tool returns one, and add nothing to it.")
+
+# The six in the API prompt's tool list, from their own table
+_HQPLAYER_TOOLS = "\n".join(f"- **{t.name}({', '.join(p.name for p in t.params)})**: {t.description}"
+                            for t in hqp_assistant.TOOLS)
 
 _RULES_COMMON = """\
 - IMPORTANT: Always respond in the same language as the user's query. \
@@ -515,6 +545,7 @@ catalog behind you exists precisely for this.
 generate_eq_preset. These are HQPlayer's own DSP — if HQPlayer is not the selected output they will \
 refuse, and the honest answer is that this DSP belongs to a device the sound is not going to. \
 If the user asks for EQ adjustments and no suitable tool exists, generate a REW preset file.
+{hqplayer_filters}
 - If a requested feature is NOT available through your tools, say so immediately. Do NOT waste time searching.
 {{player_context}}
 
@@ -525,6 +556,8 @@ If the user asks for EQ adjustments and no suitable tool exists, generate a REW 
 {track_output}
 """.format(
     rules_common=_RULES_COMMON,
+    hqplayer_filters=_HQPLAYER_FILTERS,
+    hqplayer_tools=_HQPLAYER_TOOLS,
     db_schema=_DB_SCHEMA,
     sql_patterns=_SQL_PATTERNS,
     track_output=_TRACK_OUTPUT_FORMAT,
@@ -562,6 +595,7 @@ and verify candidates. Do NOT recommend artists outside the requested genre base
 - Prefer using similar_artists table as the primary source for "similar artist" recommendations — it contains \
 curated Last.fm data that respects genre boundaries.
 - After finding tracks, ALWAYS write a textual explanation of your recommendation. Never respond with ONLY a SAUTIUM_BLOCKS marker.
+{hqplayer_filters}
 {{player_context}}
 
 # Available Tools
@@ -612,6 +646,7 @@ NOTE: Simple Convolution and Matrix Pipeline should NOT be used simultaneously.
 - **hqplayer_get_matrix_profile**: Get current active matrix pipeline profile.
 - **hqplayer_set_matrix_profile(profile_name)**: Switch to a saved matrix pipeline profile (contains EQ, \
 channel routing, crossfeed, loudness and other DSP settings).
+{hqplayer_tools}
 - **generate_eq_preset(name, filters_json, description)**: Generate parametric EQ preset file (REW format) \
 for HQPlayer. Use when user asks for custom EQ (de-essing, warmth, bass boost). Creates downloadable file \
 with loading instructions. filters_json example: [{{{{\"type\":\"peak\",\"freq\":6500,\"gain\":-3,\"q\":4}}}}]. \
@@ -661,6 +696,8 @@ Do NOT rely solely on audio features — an artist can sound similar but belong 
 {track_output}
 """.format(
     rules_common=_RULES_COMMON,
+    hqplayer_filters=_HQPLAYER_FILTERS,
+    hqplayer_tools=_HQPLAYER_TOOLS,
     db_schema=_DB_SCHEMA,
     sql_patterns=_SQL_PATTERNS,
     track_output=_TRACK_OUTPUT_FORMAT,

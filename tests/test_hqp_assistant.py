@@ -494,3 +494,18 @@ def test_no_word_ranks_and_no_rate_is_said_as_a_label(tmp_path):
     assert not any(re.search(r"\bonly at\b|\bbelow\b|×\d", text) for text in said)
     contexts = {hqp_atlas.context_label(k) for k in ("1x-44.1k-705.6k", "nx-88.2k-705.6k")}
     assert {m for text in said for m in re.findall(r"(?:1x|Nx) · [0-9.]+k → [0-9.]+k", text)} == contexts
+
+
+def test_both_prompts_carry_the_block_once_and_it_ranks_nothing_and_names_no_finding():
+    import assistant_prompt
+    block = assistant_prompt._HQPLAYER_FILTERS
+    for prompt in (assistant_prompt.CLAUDE_SYSTEM_PROMPT, assistant_prompt.CODEX_SYSTEM_PROMPT,
+                   assistant_prompt.API_SYSTEM_PROMPT):
+        assert prompt.count(block) == 1
+    assert BANNED.search(block) is None
+    assert set(re.findall(r"\bhqplayer_[a-z_]+", block)) <= {t.name for t in hqp_assistant.TOOLS}
+    # No engine number, no address and no measured value: the block is public text
+    assert re.search(r"\d|sautium\.net|https?:", block.replace("n/5", "")) is None
+    for tool in hqp_assistant.TOOLS:
+        params = ", ".join(p.name for p in tool.params)
+        assert assistant_prompt.API_SYSTEM_PROMPT.count(f"- **{tool.name}({params})**: {tool.description}") == 1
