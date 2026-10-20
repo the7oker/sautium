@@ -590,6 +590,9 @@ def test_both_prompts_carry_the_block_once_and_it_ranks_nothing_and_names_no_fin
         assert prompt.count(block) == 1
     assert BANNED.search(block) is None
     assert set(re.findall(r"\bhqplayer_[a-z_]+", block)) <= {t.name for t in hqp_assistant.TOOLS}
+    # A model told to "offer a pair" offered two names with the same output,
+    # on a property no axis holds: the block names the tool's pairs alone
+    assert "approved pairs hqplayer_ab_pair returns" in block and "are no pair to listen to" in block
     # No engine number, no address and no measured value: the block is public text
     assert re.search(r"\d|sautium\.net|https?:", block.replace("n/5", "")) is None
     for tool in hqp_assistant.TOOLS:
