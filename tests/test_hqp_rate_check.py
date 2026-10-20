@@ -185,6 +185,13 @@ def test_the_modulator_half_reads_the_engine_that_holds_the_modulators(tmp_path)
     _another_engine(doc, "9.6.0", ("pcm",))
     inp = _sdm(tmp_path, engine="9.6.2", doc=doc)
     assert inp.engine == "9.4.1" and inp.refused == {5644800: 44100, 12288000: 48000}
+    # Published: 9.6.0 measured in SDM too, undated — the dated 9.4.1 judges,
+    # as the shipped file, which holds the dated releases alone, would
+    _another_engine(doc, "9.6.0")
+    doc["releases"].update({"9.4.1/pcm": "2001-05-06", "9.4.1/sdm": "2001-05-06"})
+    assert _sdm(tmp_path, engine="9.6.2", doc=doc).engine == "9.6.0"
+    published = _sdm(tmp_path, engine="9.6.2", doc=doc, published=True)
+    assert published.engine == "9.4.1" and published.refused == {5644800: 44100, 12288000: 48000}
 
 
 def test_published_takes_a_modulators_refusals_only_from_a_release_with_a_date(tmp_path):

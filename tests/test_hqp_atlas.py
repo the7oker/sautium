@@ -987,6 +987,77 @@ def test_a_link_waits_for_a_dated_release(tmp_path, atlas):
     assert _card(dated, "filter", "demo-sinc-a", SDM, mode="sdm")["link"] is None  # its release is PCM's
 
 
+def test_published_reads_only_what_a_dated_release_holds(tmp_path):
+    # The assistant's reading: a file at the shipped path may be one put there
+    # before a release, and what it holds undated says nothing; the node's own
+    # screens read every release as before
+    doc = _doc()
+    doc["releases"] = {"9.4.1/pcm": "2001-05-06", "9.4.1/sdm": None}
+    atlas = _read(tmp_path, doc)
+    assert [atlas.speaks_of("9.4.1", kind, published=True) for kind in ("filter", "modulator")] == [True, False]
+    assert atlas.speaks_of("9.4.1", "modulator") and atlas.engine_for("9.4.1", "modulator", published=True) is None
+    assert atlas.holds("9.4.1", "modulator") and not atlas.holds("9.4.1", "modulator", published=True)
+    found = atlas.lookup("modulator", "DMX5", "9.4.1", "sdm", published=True)
+    assert (found.state, found.entry, found.slug) == ("not-measured", None, None)
+    assert atlas.lookup("modulator", "DMX5", "9.4.1", "sdm").state == "measured"
+    assert atlas.lookup("filter", "demo-sinc-a", "9.4.1", "pcm", published=True).state == "measured"
+    rows = _rows(MODULATORS, "modulator")
+    assert hqp_atlas.card(atlas, "modulator", "DMX5", rows, "9.4.1", "sdm", published=True) == \
+        hqp_atlas.card(None, "modulator", "DMX5", rows, "9.4.1", "sdm")
+    assert hqp_atlas.card(atlas, "modulator", "DMX5", rows, "9.4.1", "sdm")["status"] != []
+    # Nothing dated at all: no engine is named either
+    doc["releases"]["9.4.1/pcm"] = None
+    atlas = _read(tmp_path, doc)
+    assert [atlas.named_engine("9.4.1", kind, published=True) for kind in ("filter", "modulator")] == [None, None]
+    assert not atlas.speaks_of("8.0.0", "filter", published=True)
+
+
+def test_a_card_can_name_each_rate_one_way(atlas):
+    # The screen's card labels a modulator's rates with their source
+    # (rate_label); a text that names each rate one way passes rate_named
+    rows = _rows(MODULATORS, "modulator")
+    text = _card_text(hqp_atlas.card(atlas, "modulator", "DMX7EC-a", rows, "9.4.1", "sdm",
+                                     name_rate=hqp_atlas.rate_named))
+    assert "DSD128 | −91.5" in text and "DSD256 (48k) | ≤ −97.5" in text
+    assert "DSD128 | −0.5 dBFS · tone; −6 dBFS · pair | −3.5 dBFS · tone; none of the tested levels" in text
+    refused = _card_text(hqp_atlas.card(atlas, "modulator", "DMXH8", rows, "9.4.1", "sdm",
+                                        name_rate=hqp_atlas.rate_named))
+    assert "DSD256 (48k): “Requested filter not possible with this rate combination 48000/12288000, stop”" in refused
+    assert not any("· from" in line for line in text + refused)
+
+
+def test_a_modulator_pairs_size_per_rate_in_the_words_of_the_atlas_pages(tmp_path, atlas):
+    found = atlas.lookup("modulator", "DMX7EC-a", "9.4.1", "sdm")
+    pair = atlas.pairs(found)[0]
+    used: set = set()
+    lines = [plain(it.get("line") or it["note"]) for it in hqp_atlas.pair_items(atlas, found, pair, used, sizes=True)]
+    assert lines == [
+        "Order — from DMX5.",
+        "At DSD128, DMX7EC-a / DMX5: idle noise: −91.25 / −81.75 dB; the noise shaping's largest difference: "
+        "9.25 dB. Also differs: HQPlayer's generation field: Gen9 / Gen1.",
+        "From Fictional Author, 2001-02-03."]
+    # The card shows none of it yet; a bound is drawn with its mark, and the
+    # highest stable levels and the measuring host's speed stay out
+    assert [plain(it.get("line") or it["note"]) for it in hqp_atlas.pair_items(atlas, found, pair, set())] == \
+        ["Order — from DMX5.", "From Fictional Author, 2001-02-03."]
+    doc = _doc()
+    diff = doc["pairs"][3]["contexts"]["5644800"]["difference"]
+    diff["tone_m1_noise_db"] = [-77.5, {"v": -80.25, "b": "le", "routes": "both"}]
+    diff["highest_stable_tone_dbfs"] = [-11, -12]
+    bound = _read(tmp_path, doc)
+    found = bound.lookup("modulator", "DMX5", "9.4.1", "sdm")
+    used = set()
+    detail = hqp_atlas.pair_detail(bound.pairs(found)[0], 0, used, sizes=True)
+    assert [plain(hqp_atlas.wire(d)) for d in detail] == [
+        "At DSD128, DMX5 / DMX7EC-a: idle noise: −81.75 / −91.25 dB; the noise shaping's largest difference: "
+        "9.25 dB; the −1 dBFS tone's noise: −77.5 / ≤ −80.25 dB. Also differs: HQPlayer's generation field: "
+        "Gen1 / Gen9."]
+    assert used == {"bound"}
+    diff["unknown_db"] = [1.5, 2.5]
+    found = _read(tmp_path, doc).lookup("modulator", "DMX5", "9.4.1", "sdm")
+    assert hqp_atlas.pair_detail(_read(tmp_path, doc).pairs(found)[0], 0, set(), sizes=True) == []
+
+
 def test_where_the_atlas_was_read_from_travels_with_every_result(tmp_path, atlas):
     found = atlas.lookup("filter", "demo-sinc-a", "9.4.1", "pcm")
     assert (atlas.origin, found.origin) == ("overlay", "overlay")

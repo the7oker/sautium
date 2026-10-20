@@ -267,7 +267,7 @@ def inputs(state: Mapping[str, Any], modes: List[dict], rates: List[dict], filte
 
     modulator = (next((s["name"] for s in shapers if s["index"] == state.get("shaper")), None)
                  if mode == "sdm" else None)
-    shown = atlas.engine_for(engine, "modulator") if atlas is not None and modulator else None
+    shown = atlas.engine_for(engine, "modulator", published=published) if atlas is not None and modulator else None
     found = atlas.lookup("modulator", modulator, shown, "sdm") if shown is not None else None
     entry = found.entry if found is not None else None
     if published and (entry is None or not atlas.releases[entry["release"]]):

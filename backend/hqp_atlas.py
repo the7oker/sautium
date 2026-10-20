@@ -37,7 +37,7 @@ import logging
 import re
 import threading
 from pathlib import Path
-from typing import Any, Dict, Iterable, List, NamedTuple, Optional, Tuple
+from typing import Any, Callable, Dict, Iterable, List, NamedTuple, Optional, Tuple
 
 logger = logging.getLogger(__name__)
 
@@ -223,6 +223,13 @@ DIFF = {
     "generation": ("HQPlayer's generation field", ""),
 }
 DIFF_ITEM = "{label}: {a} / {b}{unit}"
+# A modulator pair's differences at a rate, in the words of the atlas's pages.
+# Its highest stable levels stay out: near full scale stands in its own table,
+# and beside it they would read as a contradiction.
+PAIR_RATE = "At {rate}, {name} / {other}: {diffs}."
+PAIR_DIFF = {"idle_db": ("idle noise", " dB"), "tone_m1_noise_db": ("the −1 dBFS tone's noise", " dB")}
+PAIR_ONE = {"shaping_max_db": "the noise shaping's largest difference: {v} dB"}
+PAIR_NOT_SHOWN = ("highest_stable_tone_dbfs", "highest_stable_pair_dbfs")
 UNMEASURED = "Not measured: the {axes}."
 UNMEASURED_JOIN = ", the "
 FROM = "From {cites}."
@@ -739,7 +746,7 @@ def _check_modulator(e: Any, at: str, sources: Dict[str, Any]) -> None:
 MAX_ENGINE_LEN = 64
 
 
-def _version(engine: Optional[str]) -> Tuple[int, ...]:
+def engine_version(engine: Optional[str]) -> Tuple[int, ...]:
     """GetInfo's engine as a comparable tuple, read as playback.hqp_load.build
     reads it (that module opens the database; this one never does): () for
     none, and for one past MAX_ENGINE_LEN — an engine the atlas does not know."""
@@ -780,7 +787,7 @@ class Atlas:
         _check(doc)
         self.origin = origin
         self.releases: Dict[str, Optional[str]] = doc["releases"]
-        self.engines: List[str] = sorted(doc["engines"], key=_version)
+        self.engines: List[str] = sorted(doc["engines"], key=engine_version)
         self._engines = doc["engines"]
         self._slugs = {(row["kind"], row["name"]): row["slug"] for row in doc["slugs"]}
         self._groups = {g["id"]: g for g in doc["groups"]}
@@ -793,49 +800,62 @@ class Atlas:
         so a name the registry has no row for has none."""
         return self._slugs.get((kind, name))
 
-    def engine_for(self, user_engine: Optional[str], kind: Optional[str] = None) -> Optional[str]:
+    def _held(self, kind: Optional[str], published: bool) -> List[str]:
+        """The engines that hold a release of `kind`'s family — of either
+        family for None — a dated one with `published`; every engine for
+        neither."""
+        if kind is None and not published:
+            return self.engines
+        return [e for e in self.engines
+                if any(self.holds(e, k, published=published) for k in ([kind] if kind else KINDS))]
+
+    def engine_for(self, user_engine: Optional[str], kind: Optional[str] = None, *,
+                   published: bool = False) -> Optional[str]:
         """The engine whose facts this HQPlayer is shown — of `kind`'s names,
-        among the engines that hold their family's release (holds): the
-        newest the atlas holds not newer than its own, else the oldest —
-        within its own major version only: a major release may change what a
-        name does, and a label does not undo a wrong number shown as
-        measured. A file's releases are per engine and family, so a newer
-        engine measured in one family first leaves the other's names with
-        the engine before it. None when the atlas holds no engine of that
-        major (holding that family), or `_version` reads HQPlayer's as
-        none."""
-        own = _version(user_engine)
+        among the engines that hold their family's release (holds; a dated
+        one with `published`): the newest the atlas holds not newer than its
+        own, else the oldest — within its own major version only: a major
+        release may change what a name does, and a label does not undo a
+        wrong number shown as measured. A file's releases are per engine and
+        family, so a newer engine measured in one family first leaves the
+        other's names with the engine before it. None when the atlas holds no
+        engine of that major (holding that family), or `engine_version` reads
+        HQPlayer's as none."""
+        own = engine_version(user_engine)
         if not own:
             return None
-        same = [e for e in self.engines if _version(e)[0] == own[0] and (kind is None or self.holds(e, kind))]
-        older = [e for e in same if _version(e) <= own]
+        same = [e for e in self._held(kind, published) if engine_version(e)[0] == own[0]]
+        older = [e for e in same if engine_version(e) <= own]
         return older[-1] if older else (same[0] if same else None)
 
-    def named_engine(self, user_engine: Optional[str], kind: str) -> Optional[str]:
+    def named_engine(self, user_engine: Optional[str], kind: str, *,
+                     published: bool = False) -> Optional[str]:
         """The engine the words name of `kind`'s family: the one whose facts
         are shown, else the newest that holds the family; None when none
         does."""
-        held = [e for e in self.engines if self.holds(e, kind)]
-        return self.engine_for(user_engine, kind) or (held[-1] if held else None)
+        held = self._held(kind, published)
+        return self.engine_for(user_engine, kind, published=published) or (held[-1] if held else None)
 
-    def engine_note(self, user_engine: Optional[str], kind: str) -> List[Any]:
+    def engine_note(self, user_engine: Optional[str], kind: str, *,
+                    published: bool = False) -> List[Any]:
         """The head's engine line, and the card's, of `kind`'s family — one
         the file speaks of (speaks_of)."""
-        named = self.named_engine(user_engine, kind)
+        named = self.named_engine(user_engine, kind, published=published)
         note = _phrase(MEASURED_ON, engine=named)
         if not user_engine:
             note.append(NO_ENGINE)
-        elif _version(user_engine) != _version(named):
+        elif engine_version(user_engine) != engine_version(named):
             note += _phrase(RUNS_ENGINE, engine=user_engine)
         return note
 
-    def holds(self, engine: str, kind: str) -> bool:
+    def holds(self, engine: str, kind: str, *, published: bool = False) -> bool:
         """Whether the file holds a release, dated or not, of the family
         `kind`'s names are measured in — a filter's PCM, a modulator's SDM —
-        on `engine`."""
-        return f"{engine}/{RELEASE_FAMILY[kind]}" in self.releases
+        on `engine`; `published`, a dated one: what the site published."""
+        key = f"{engine}/{RELEASE_FAMILY[kind]}"
+        return bool(self.releases.get(key)) if published else key in self.releases
 
-    def speaks_of(self, user_engine: Optional[str], kind: str) -> bool:
+    def speaks_of(self, user_engine: Optional[str], kind: str, *, published: bool = False) -> bool:
         """Whether the file says anything of `kind`'s names to this HQPlayer:
         it holds their family's release, on HQPlayer's own major wherever the
         file holds that major. A shipped file holds the dated releases alone:
@@ -843,19 +863,26 @@ class Atlas:
         other's names. The SDM release's own filters, the names HQPlayer
         lists in SDM mode alone, are the filter sheet's names and go with
         PCM's. Another major's HQPlayer, or one that reports no engine, is
-        told so by the engine line (engine_for is None)."""
-        if self.named_engine(user_engine, kind) is None:
+        told so by the engine line (engine_for is None). `published`: of the
+        dated releases alone, as the site published them — a file at the
+        shipped path may be one put there before a release."""
+        if self.named_engine(user_engine, kind, published=published) is None:
             return False
-        return self.engine_for(user_engine, kind) is not None or self.engine_for(user_engine) is None
+        return (self.engine_for(user_engine, kind, published=published) is not None
+                or self.engine_for(user_engine, published=published) is None)
 
-    def lookup(self, kind: str, name: str, engine: Optional[str], mode: Optional[str]) -> Optional[Found]:
+    def lookup(self, kind: str, name: str, engine: Optional[str], mode: Optional[str], *,
+               published: bool = False) -> Optional[Found]:
         """What the atlas says of HQPlayer's `name` on `engine` (engine_for's)
         in `mode` ("pcm", "sdm"; a modulator's is SDM's); None for a kind it
-        holds no entries of — a dither."""
+        holds no entries of — a dither. `published`: an entry whose release
+        has no date gives nothing, as one the file does not hold."""
         if kind not in KINDS:
             return None
         slug = self.slug_of(kind, name)
         entry = self._engines[engine][KINDS[kind]].get(slug) if engine and slug else None
+        if entry is not None and published and not self.releases[entry["release"]]:
+            entry = slug = None
         state = "not-measured"
         if entry is not None:
             if kind == "filter":
@@ -882,6 +909,10 @@ class Atlas:
         """Every approved pair naming the entry. A pair's speeds of the
         measuring host are never read."""
         return [self._pairs[pid] for pid in found.entry["pairs"]] if found.entry else []
+
+    def axis_pairs(self, axis: str) -> List[Dict[str, Any]]:
+        """Every approved pair on `axis`, in the file's order."""
+        return [p for p in self._pairs.values() if p["axis"] == axis]
 
     def source(self, sid: str) -> Optional[Dict[str, Any]]:
         """A source re-read in full (status O); any other is treated as absent,
@@ -991,7 +1022,7 @@ def _minus(token: str) -> str:
     return MINUS + token[1:] if token.startswith("-") else token
 
 
-def _words(items: List[str]) -> str:
+def words(items: List[str]) -> str:
     """"a", "a and b", "a, b and c"."""
     return items[0] if len(items) == 1 else ", ".join(items[:-1]) + AND + items[-1]
 
@@ -1032,7 +1063,15 @@ def rate_name(hz: int) -> str:
     return f"{mhz:.0f} MHz" if mhz % 1 == 0 else f"{mhz:.2f} MHz"
 
 
-def _by_rate(rates: Dict[str, Dict[str, Any]]) -> List[Tuple[str, Dict[str, Any]]]:
+def rate_named(rate: str, fs_in: str) -> str:
+    """A file's rate key by rate_name, for a text that gives each rate one
+    name — the assistant's: a key is always a multiple of its own source's
+    family (the shape read here), so the name says the family and the source
+    needs no word."""
+    return rate_name(int(rate))
+
+
+def by_rate(rates: Dict[str, Dict[str, Any]]) -> List[Tuple[str, Dict[str, Any]]]:
     """A modulator's rates as the site lists them: the 44.1k family first,
     then by rate — labels, never a measured value."""
     return sorted(rates.items(), key=lambda kv: (int(kv[1]["fs_in"]), int(kv[0])))
@@ -1055,7 +1094,7 @@ def _group_names(members: List[str], order: Dict[str, int]) -> str:
         parts = [_STEM.fullmatch(name) for name in names]
         if all(parts) and len({p[1] for p in parts}) == 1 and len({p[3] or "" for p in parts}) == 1:
             return STEM_NAMES.format(stem=parts[0][1] + (parts[0][3] or ""), ends=", ".join(f"-{p[2]}" for p in parts))
-    return _words(names)
+    return words(names)
 
 
 _unworded: set = set()
@@ -1223,12 +1262,12 @@ def _order_words(structure: Dict[str, Any]) -> str:
 def _modulator_chips(found: Found) -> List[Dict[str, Any]]:
     e = found.entry
     chips = [_chip([_order_words(e["structure"])], ORDER_TITLE)]
-    refused = _by_rate(e["rates_refused"])
-    short = _words([rate_short(rate, x["fs_in"]) for rate, x in refused]) if refused else ""
+    refused = by_rate(e["rates_refused"])
+    short = words([rate_short(rate, x["fs_in"]) for rate, x in refused]) if refused else ""
     if found.state == "refused":
         chips.append(_chip([REFUSED_ALL], REFUSED_ALL_TITLE.format(rates=short)))
     elif refused:
-        labels = _words([rate_label(rate, x["fs_in"]) for rate, x in refused])
+        labels = words([rate_label(rate, x["fs_in"]) for rate, x in refused])
         chips.append(_chip(_phrase(REFUSED_SOME, rates=short), REFUSED_SOME_TITLE.format(rates=labels,
                                                                                           engine=found.engine)))
     return chips
@@ -1265,11 +1304,14 @@ def _bracket(atlas: Atlas, found: Found, rows: List[Dict[str, Any]],
 
 
 def card(atlas: Optional[Atlas], kind: str, name: str, rows: List[Dict[str, Any]], user_engine: Optional[str],
-         mode: Optional[str]) -> Optional[Dict[str, Any]]:
+         mode: Optional[str], *, published: bool = False,
+         name_rate: Callable[[str, str], str] = rate_label) -> Optional[Dict[str, Any]]:
     """The detail card of HQPlayer's `name`, which `rows` — its live list of
     that kind — holds now; None when it does not. Status lines, then sections
     in order, a section with nothing to say left out; `link` only once the
-    entry's release has a date."""
+    entry's release has a date. `published`: of the dated releases alone, as
+    Atlas.speaks_of's. `name_rate` names a modulator's rates — the screen's
+    labels, or rate_named for a text that gives each rate one name."""
     row = next((r for r in rows if r["name"] == name), None)
     if row is None:
         return None
@@ -1277,13 +1319,15 @@ def card(atlas: Optional[Atlas], kind: str, name: str, rows: List[Dict[str, Any]
     found = None
     # A name of a family the file says nothing of (speaks_of): as without a file
     if (atlas is not None and kind in KINDS and (kind == "modulator" or mode in ("pcm", "sdm"))
-            and atlas.speaks_of(user_engine, kind)):
-        found = atlas.lookup(kind, name, atlas.engine_for(user_engine, kind), mode)
+            and atlas.speaks_of(user_engine, kind, published=published)):
+        found = atlas.lookup(kind, name, atlas.engine_for(user_engine, kind, published=published), mode,
+                             published=published)
         out["origin"] = atlas.origin
-        out["status"].append(wire(atlas.engine_note(user_engine, kind)))
+        out["status"].append(wire(atlas.engine_note(user_engine, kind, published=published)))
         # Another major's: the engine line says it, as on the sheet's head
         if found.state == "not-measured" and found.engine is not None:
-            out["status"].append(wire(_phrase(NOT_MEASURED_CARD, engine=atlas.named_engine(user_engine, kind))))
+            out["status"].append(wire(_phrase(NOT_MEASURED_CARD,
+                                              engine=atlas.named_engine(user_engine, kind, published=published))))
         elif found.state == "pcm-measurement":
             ratio = _ratio(row.get("parsed"))
             out["status"] += [wire([SDM_PATH]),
@@ -1294,11 +1338,12 @@ def card(atlas: Optional[Atlas], kind: str, name: str, rows: List[Dict[str, Any]
         e = found.entry
         if kind == "filter":
             sections += [_apodizing(atlas, e), _manual(atlas, e)]
-        sections += [_group(g, name, order) for g in atlas.groups(found)]
+        sections += [group_section(g, name, order) for g in atlas.groups(found)]
         if kind == "filter":
             sections.append(_properties(atlas, found, order))
         else:
-            sections += [_per_rate(atlas, found, order), _refused(e), _fullscale(atlas, found)]
+            sections += [_per_rate(atlas, found, order, name_rate), _refused(e, name_rate),
+                         _fullscale(atlas, found, name_rate)]
         sections += [_differs(atlas, found), _purpose(atlas, e), _history(atlas, e), _sources(atlas, found)]
         link = atlas.link(found)
         if link:
@@ -1378,7 +1423,7 @@ def _manual(atlas: Atlas, e: Dict[str, Any]) -> Optional[Dict[str, Any]]:
     return _section(MANUAL, items)
 
 
-def _group(g: Dict[str, Any], name: str, order: Dict[str, int]) -> Optional[Dict[str, Any]]:
+def group_section(g: Dict[str, Any], name: str, order: Dict[str, int]) -> Optional[Dict[str, Any]]:
     relation = RELATION.get(g["relation"])
     if relation is None:
         _no_words("relation", g["relation"])
@@ -1423,12 +1468,20 @@ def _range(r: Dict[str, Any], used: set) -> List[Any]:
     return ends[0] if ends[0] == ends[2] else _phrase(RANGE, min=ends[0], median=ends[1], max=ends[2])
 
 
-def _notes(used: set) -> List[Dict[str, Any]]:
+def notes(used: set) -> List[Dict[str, Any]]:
+    """The notes of the marks a table or a line used, once each, in NOTES'
+    order."""
     return [_note([NOTES[key]]) for key in NOTES if key in used]
 
 
-def _context_table(e: Dict[str, Any], key: str, figures: Dict[str, Any], used: set) -> Dict[str, Any]:
-    c = e["contexts"][key]
+def context_rows(atlas: Atlas, found: Found, key: str, used: set) -> List[Tuple[str, List[Any]]]:
+    """A filter's readings at one measured context, as the card's table and
+    the assistant's comparison give them: (label, value) in ROWS' order, a
+    row the context has no reading for left out. A member of an identical
+    group reads the group's figure wherever the group holds one; the marks
+    a value uses go into `used`."""
+    c = found.entry["contexts"][key]
+    figures = _figures_at(atlas, found, key)
     rows = []
     for label, field in ROWS:
         if field == "phase":
@@ -1447,8 +1500,13 @@ def _context_table(e: Dict[str, Any], key: str, figures: Dict[str, Any], used: s
             value = _range(c["position_dependent"][field], used)
         else:
             continue
-        rows.append({"label": label, "cells": [wire(value)]})
-    return _table([context_label(key)], rows)
+        rows.append((label, value))
+    return rows
+
+
+def _context_table(atlas: Atlas, found: Found, key: str, used: set) -> Dict[str, Any]:
+    return _table([context_label(key)], [{"label": label, "cells": [wire(value)]}
+                                         for label, value in context_rows(atlas, found, key, used)])
 
 
 def _properties(atlas: Atlas, found: Found, order: Dict[str, int]) -> Optional[Dict[str, Any]]:
@@ -1458,46 +1516,53 @@ def _properties(atlas: Atlas, found: Found, order: Dict[str, int]) -> Optional[D
     e = found.entry
     first = _first_context(e)
     used: set = set()
-    items = [_context_table(e, first, _figures_at(atlas, found, first), used)] + _notes(used)
+    items = [_context_table(atlas, found, first, used)] + notes(used)
     rest = [key for key, c in e["contexts"].items() if key != first and "void" not in c]
     if rest:
         more_used: set = set()
-        more = [_context_table(e, key, _figures_at(atlas, found, key), more_used) for key in rest]
-        items.append({"more": OTHER_CONTEXTS, "items": more + _notes(more_used - used)})
+        more = [_context_table(atlas, found, key, more_used) for key in rest]
+        items.append({"more": OTHER_CONTEXTS, "items": more + notes(more_used - used)})
     ident = atlas.identical(found)
     if ident:
         items.append(_note(_phrase(FIGURES_NOTE, names=_group_names(ident[0]["members"], order))))
     return _section(PROPERTIES, items)
 
 
-def _per_rate(atlas: Atlas, found: Found, order: Dict[str, int]) -> Optional[Dict[str, Any]]:
+def idle_rows(atlas: Atlas, found: Found, used: set) -> List[Tuple[str, Dict[str, Any], List[Any]]]:
+    """A modulator's idle noise per measured rate, as the card's table and
+    the assistant's comparison give it: (rate key, its row, value) in the
+    site's order of rates, the identical group's figure wherever the group
+    holds one; the marks a value uses go into `used`."""
+    return [(rate, x, _value(_figures_at(atlas, found, rate).get("idle_db", x["idle_db"]), used))
+            for rate, x in by_rate(found.entry["rates"])]
+
+
+def _per_rate(atlas: Atlas, found: Found, order: Dict[str, int],
+              name_rate: Callable[[str, str], str]) -> Optional[Dict[str, Any]]:
     """A modulator's idle noise per measured rate. Its highest stable levels
     stay out: near full scale stands in its own table, under its own words."""
-    e = found.entry
-    if not e["rates"]:
+    if not found.entry["rates"]:
         return None
     used: set = set()
-    rows = []
-    for rate, x in _by_rate(e["rates"]):
-        idle = _figures_at(atlas, found, rate).get("idle_db", x["idle_db"])
-        rows.append({"label": rate_label(rate, x["fs_in"]), "cells": [wire(_value(idle, used))]})
-    items = [_table([IDLE], rows, corner=RATE)] + _notes(used)
+    rows = [{"label": name_rate(rate, x["fs_in"]), "cells": [wire(value)]}
+            for rate, x, value in idle_rows(atlas, found, used)]
+    items = [_table([IDLE], rows, corner=RATE)] + notes(used)
     ident = atlas.identical(found)
     if ident:
         items.append(_note(_phrase(IDLE_NOTE, names=_group_names(ident[0]["members"], order))))
     return _section(PER_RATE, items)
 
 
-def _refused(e: Dict[str, Any]) -> Optional[Dict[str, Any]]:
-    refused = _by_rate(e["rates_refused"])
+def _refused(e: Dict[str, Any], name_rate: Callable[[str, str], str]) -> Optional[Dict[str, Any]]:
+    refused = by_rate(e["rates_refused"])
     if not refused:
         return None
-    lead = _line(_phrase(REFUSED_LEAD, rates=_words([rate_short(rate, x["fs_in"]) for rate, x in refused])))
-    lines = [_line(_phrase(REFUSED_LINE, rate=rate_label(rate, x["fs_in"]), line=x["line"])) for rate, x in refused]
+    lead = _line(_phrase(REFUSED_LEAD, rates=words([rate_short(rate, x["fs_in"]) for rate, x in refused])))
+    lines = [_line(_phrase(REFUSED_LINE, rate=name_rate(rate, x["fs_in"]), line=x["line"])) for rate, x in refused]
     return _section(REFUSED, [lead] + lines)
 
 
-def _fullscale(atlas: Atlas, found: Found) -> Optional[Dict[str, Any]]:
+def _fullscale(atlas: Atlas, found: Found, name_rate: Callable[[str, str], str]) -> Optional[Dict[str, Any]]:
     """The highest level stable at each HQPlayer volume tested; a volume not
     played at a rate is "not tested"."""
     cells = atlas.fullscale(found)
@@ -1507,7 +1572,7 @@ def _fullscale(atlas: Atlas, found: Found) -> Optional[Dict[str, Any]]:
     # Volume keys are labels: listed from 0 dB down, as the site does.
     volumes = sorted({volume for played in cells.values() for volume in played}, key=float, reverse=True)
     rows = []
-    for rate, x in _by_rate({rate: held[rate] for rate in cells}):
+    for rate, x in by_rate({rate: held[rate] for rate in cells}):
         row = []
         for volume in volumes:
             cell = cells[rate].get(volume)
@@ -1517,7 +1582,7 @@ def _fullscale(atlas: Atlas, found: Found) -> Optional[Dict[str, Any]]:
             bits = [[NONE_TESTED] if cell[key] is None else _phrase(CELL, v=cell[key], what=what)
                     for key, what in TONE_PAIR if key in cell]
             row.append(wire(_join(bits, "; ")))
-        rows.append({"label": rate_label(rate, x["fs_in"]), "cells": row})
+        rows.append({"label": name_rate(rate, x["fs_in"]), "cells": row})
     columns = [VOLUME.format(volume=_minus(volume)) for volume in volumes]
     return _section(FULLSCALE, [_line([FULLSCALE_LEAD]), _table(columns, rows, corner=RATE),
                                 _note([FULLSCALE_NOTE])])
@@ -1533,21 +1598,22 @@ def _side(key: str, x: Any, used: set) -> List[Any]:
     return _value(x, used)
 
 
-def _pair_detail(p: Dict[str, Any], i: int, name: str, other: str, used: set) -> Optional[List[Any]]:
+def _filter_pair(p: Dict[str, Any], i: int, used: set) -> Optional[List[Any]]:
     """A filter pair at its default context: each difference and what else
-    differs, this entry's value first. A difference without words here, or a
+    differs, member `i`'s value first. A difference without words here, or a
     value of a shape not read, leaves the line out."""
+    name, other = p["members"][i], p["members"][1 - i]
     c = p["contexts"][p["default_context"]]
     items: Dict[str, List[List[Any]]] = {"difference": [], "also_differs": []}
     for part in items:
         for key, values in c[part].items():
             if key == "process_speed_min":
                 continue
-            words = DIFF.get(key)
-            if words is None or not _two_readings(values):
+            worded = DIFF.get(key)
+            if worded is None or not _two_readings(values):
                 _no_words("difference", key)
                 return None
-            label, unit = words
+            label, unit = worded
             items[part].append(_phrase(DIFF_ITEM, label=label, a=_side(key, values[i], used),
                                        b=_side(key, values[1 - i], used), unit=unit))
     out = _phrase(PAIR_AT, context=context_label(p["default_context"]), name=name, other=other,
@@ -1557,35 +1623,111 @@ def _pair_detail(p: Dict[str, Any], i: int, name: str, other: str, used: set) ->
     return out
 
 
-def _two_readings(values: Any) -> bool:
-    return type(values) is list and len(values) == 2 and all(
-        x is None or type(x) in (bool, str, Num) for x in values)
+def _modulator_pair(p: Dict[str, Any], i: int, used: set) -> List[List[Any]]:
+    """A modulator pair at each rate it holds, member `i`'s value first, in
+    the words of the atlas's pages; a rate whose differences cannot all be
+    said is left out."""
+    name, other = p["members"][i], p["members"][1 - i]
+    out = []
+    for rate, c in p["contexts"].items():
+        said = _rate_differences(c, i, used)
+        if said is None:
+            continue
+        diffs, also = said
+        line = _phrase(PAIR_RATE, rate=rate_name(int(rate)), name=name, other=other, diffs=_join(diffs, "; "))
+        out.append(line + (_phrase(PAIR_ALSO, diffs=_join(also, "; ")) if also else []))
+    return out
+
+
+def _rate_differences(c: Dict[str, Any], i: int, used: set) -> Optional[Tuple[List[Any], List[Any]]]:
+    """A modulator pair's differences at one rate, and what else differs;
+    None for a difference without words here or a value of a shape not
+    read."""
+    diffs: List[List[Any]] = []
+    also: List[List[Any]] = []
+    for key, values in c["difference"].items():
+        if key in PAIR_NOT_SHOWN:
+            continue
+        if key in PAIR_ONE and _one_reading(values):
+            diffs.append(_phrase(PAIR_ONE[key], v=_value(values, used)))
+        elif key in PAIR_DIFF and _two_readings(values, bounds=True):
+            label, unit = PAIR_DIFF[key]
+            diffs.append(_phrase(DIFF_ITEM, label=label, a=_side(key, values[i], used),
+                                 b=_side(key, values[1 - i], used), unit=unit))
+        else:
+            _no_words("difference", key)
+            return None
+    for key, values in c["also_differs"].items():
+        if key == "process_speed_min":
+            continue
+        if key not in DIFF or not _two_readings(values):
+            _no_words("difference", key)
+            return None
+        label, unit = DIFF[key]
+        also.append(_phrase(DIFF_ITEM, label=label, a=_side(key, values[i], used),
+                            b=_side(key, values[1 - i], used), unit=unit))
+    return (diffs, also) if diffs else None
+
+
+def _reading(x: Any, bounds: bool = False) -> bool:
+    """A value read here: none, a yes or no, a text, a number, and where
+    `bounds` a bound drawn with its mark."""
+    if x is None or type(x) in (bool, str, Num):
+        return True
+    return bounds and type(x) is dict and isinstance(x.get("v"), Num) and x.get("b") in ("ge", "le") \
+        and ("by" not in x or x["by"] in BY)
+
+
+def _two_readings(values: Any, bounds: bool = False) -> bool:
+    return type(values) is list and len(values) == 2 and all(_reading(x, bounds) for x in values)
+
+
+def _one_reading(value: Any) -> bool:
+    return isinstance(value, Num)
+
+
+def pair_detail(p: Dict[str, Any], i: int, used: set, *, sizes: bool = False) -> List[List[Any]]:
+    """An approved pair's size, member `i`'s side first: a filter pair's at
+    its default context; with `sizes`, a modulator pair's at each rate it
+    holds — the card shows none of those yet. Phrases; the marks a value
+    uses go into `used`."""
+    if p["kind"] == "filter":
+        detail = _filter_pair(p, i, used)
+        return [detail] if detail else []
+    return _modulator_pair(p, i, used) if sizes else []
+
+
+def pair_tail(atlas: Atlas, p: Dict[str, Any]) -> List[Any]:
+    """What a pair did not measure, and its sources; empty without either."""
+    tail: List[Any] = []
+    if p.get("unmeasured_axes"):
+        tail += _phrase(UNMEASURED, axes=UNMEASURED_JOIN.join(p["unmeasured_axes"]))
+    cites = atlas.cites(p.get("sources", ()))
+    if cites:
+        tail += ([" "] if tail else []) + _phrase(FROM, cites=cites)
+    return tail
+
+
+def pair_items(atlas: Atlas, found: Found, p: Dict[str, Any], used: set, *,
+               sizes: bool = False) -> List[Dict[str, Any]]:
+    """One approved pair as the card's "Differs only in" says it of the
+    entry: its axis and the other member, its size (pair_detail), what was
+    not measured and its sources. Empty for an axis without words."""
+    axis = AXIS.get(p["axis"])
+    if axis is None:
+        _no_words("axis", p["axis"])
+        return []
+    i = p["members"].index(found.entry["name"])
+    items = [_line(_phrase(PAIR_LEAD, axis=axis, other=p["members"][1 - i]))]
+    items += [_note(detail) for detail in pair_detail(p, i, used, sizes=sizes)]
+    tail = pair_tail(atlas, p)
+    return items + ([_note(tail)] if tail else [])
 
 
 def _differs(atlas: Atlas, found: Found) -> Optional[Dict[str, Any]]:
-    name = found.entry["name"]
-    items = []
     used: set = set()
-    for p in atlas.pairs(found):
-        axis = AXIS.get(p["axis"])
-        if axis is None:
-            _no_words("axis", p["axis"])
-            continue
-        i = p["members"].index(name)
-        other = p["members"][1 - i]
-        items.append(_line(_phrase(PAIR_LEAD, axis=axis, other=other)))
-        detail = _pair_detail(p, i, name, other, used) if found.kind == "filter" else None
-        if detail:
-            items.append(_note(detail))
-        tail: List[Any] = []
-        if p.get("unmeasured_axes"):
-            tail += _phrase(UNMEASURED, axes=UNMEASURED_JOIN.join(p["unmeasured_axes"]))
-        cites = atlas.cites(p.get("sources", ()))
-        if cites:
-            tail += ([" "] if tail else []) + _phrase(FROM, cites=cites)
-        if tail:
-            items.append(_note(tail))
-    return _section(DIFFERS, items + _notes(used) if items else [])
+    items = [item for p in atlas.pairs(found) for item in pair_items(atlas, found, p, used)]
+    return _section(DIFFERS, items + notes(used) if items else [])
 
 
 def _purpose(atlas: Atlas, e: Dict[str, Any]) -> Optional[Dict[str, Any]]:
