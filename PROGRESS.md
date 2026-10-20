@@ -2232,8 +2232,8 @@ untouched: Valerii's call, track level only.
   MB loader's VERSION-file + DB-key pair is what let its signed version
   and its serve gate disagree; the LB archive name carries the version for
   download resume instead. The `.sha256` is verified before anything reads
-  the archive and fails closed (the MB `verify_md5` is dead code that
-  fails open — left as is).
+  the archive and fails closed (the MB archive took the same shape on
+  2026-10-20 — see "A dump archive resumes only into its own version").
 - **Versioned from the start.** The MB slice family has no staleness: a
   ledger row is never re-asked, a dump node keeps re-serving blobs cached
   from an older dump. Here `dump_version` rides in every ledger and data
@@ -2941,6 +2941,30 @@ that Sautium holds no rules that tie a DAC to these settings yet; the
 chat's pip says "looking up filters and modulators…" while one runs, not
 "controlling playback…".
 
+### A dump archive resumes only into its own version (2026-10-20)
+
+The MB loader kept its archive under one fixed name, `mbdump.tar.bz2`, and
+resumed whatever partial sat there with a Range request for the newest
+version. On 2026-10-20 that partial was 2.3 GB of the 2026-10-07 dump, left
+by an interrupted update; the 2026-10-17 download continued it, lbzip2 met
+"bad block header magic" at the seam, and the COPY reported only
+`ReadError unexpected end of data` 13.8 M rows into `mb_recording`. Every
+retry would have failed the same way: a full-size file answers the Range
+request with 416, which the download takes for "complete". The MB archive
+now has the LB loader's shape: the version in the file name
+(`mbdump-<version>.tar.bz2`), so a resume only ever continues the same
+archive; any other version's file deleted before the download; the
+mirror's `SHA256SUMS` fetched before the download and checked after it,
+failing closed — a mismatch deletes the file and the next attempt starts
+over. The never-called `verify_md5`, which failed open, is gone.
+
+The failed load also left the live `mb_recording` without its primary key
+and index: they were dropped in autocommit before the TRUNCATE+COPY
+transaction, so the rollback restored the rows but not the indexes, and only
+a later load that got past the table would have rebuilt them from the DDL
+snapshot. The drop now runs inside that transaction, and a spooled member is
+removed when its pass ends, failed or not.
+
 ## Known Gotchas
 
 - **The Docker image took the node's secrets.** `./backend` is the build
@@ -3163,9 +3187,10 @@ chat's pip says "looking up filters and modulators…" while one runs, not
 - **Bulk COPY into indexed tables is the slow path.** The MB dump loader
   drops every index + PK/UNIQUE constraint before each table's COPY and
   rebuilds after (sorted build ≫ per-row maintenance; the trigram GINs are
-  the worst offenders). TRUNCATE+COPY share one transaction so
-  `wal_level=minimal` (set in docker-compose + launcher db_init) skips WAL
-  for the bulk write; a DDL snapshot next to the archive makes a crash
+  the worst offenders). The drop, TRUNCATE and COPY share one transaction,
+  so `wal_level=minimal` (set in docker-compose + launcher db_init) skips
+  WAL for the bulk write and a failed COPY rolls back with the indexes; a
+  DDL snapshot next to the archive makes a crash during the rebuild
   recoverable. Rebuild sets `maintenance_work_mem=1GB` +
   `max_parallel_maintenance_workers=4` per statement via SET LOCAL.
 - **PostgreSQL ENUM type changes** require drop default → drop constraint →

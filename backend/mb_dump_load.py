@@ -2,7 +2,11 @@
 
 The engine behind the canonical-data roadmap: one ~7 GB download replaces tens
 of thousands of throttled MB-API calls with unlimited local joins. Loads only
-the artist + release-group subset — no ``recording`` (35 M rows, skipped).
+the tables listed in ``TABLES``, never the whole MB schema.
+
+VERIFIED download: the archive's file name carries the dump version, so a
+resume only ever continues the same archive, and its SHA-256 is checked
+against the mirror's ``SHA256SUMS`` before anything reads it.
 
 ECONOMICAL load path (no intermediate extracted files at all): decompress the
 tarball ONCE through ``lbzip2``/``bzip2`` and pipe each needed member's TSV
@@ -12,10 +16,11 @@ both the Docker backend and the desktop launcher (both reach Postgres over the
 network), and as a CLI. Idempotent: ``TRUNCATE`` + reload per table.
 
 FAST load path: indexes + PK/UNIQUE constraints are dropped before each
-table's COPY and rebuilt right after (see the index drop/rebuild section), and
-TRUNCATE+COPY share one transaction so ``wal_level=minimal`` skips WAL for the
-bulk write. A DDL snapshot persisted next to the archive makes a crash at any
-point recoverable: the next run merges it with the live catalogs and rebuilds.
+table's COPY and rebuilt right after (see the index drop/rebuild section). The
+drop, TRUNCATE and COPY share one transaction, so ``wal_level=minimal`` skips
+WAL for the bulk write and a failed COPY rolls back to the old rows with their
+indexes. A DDL snapshot persisted next to the archive makes a crash during the
+rebuild recoverable: the next run merges it with the live catalogs and rebuilds.
 
 Column order in the headerless dump TSV == MB ``CreateTables.sql`` order; the
 ``mb_*`` definitions (001_initial.sql) mirror it, so a default ``COPY`` round-
@@ -23,7 +28,6 @@ trips it and a schema drift fails loudly on field count.
 """
 
 import argparse
-import hashlib
 import logging
 import os
 import re
@@ -35,13 +39,12 @@ from typing import Callable, Dict, Optional
 
 from dump_common import (ProgressCb, ProgressReader, collect_index_ddl,
                          download_resumable, drop_indexes, noop as _noop,
-                         rebuild_indexes, unlock_all)
+                         rebuild_indexes, unlock_all, verify_sha256)
 
 logger = logging.getLogger("mb_dump_load")
 
 _HERE = os.path.dirname(os.path.abspath(__file__))
 _DATA = os.environ.get("MB_DUMP_DIR") or os.path.normpath(os.path.join(_HERE, "..", "data", "mbdump"))
-DUMP_PATH = os.path.join(_DATA, "mbdump.tar.bz2")
 VERSION_PATH = os.path.join(_DATA, "VERSION")
 
 # Runtime disk gate (agent quote + update precondition). Measured 2026-08:
@@ -123,8 +126,8 @@ def _archives() -> list:
     return out
 
 
-def _dump_path(archive: str) -> str:
-    return os.path.join(_DATA, f"{archive}.tar.bz2")
+def _dump_path(archive: str, version: str) -> str:
+    return os.path.join(_DATA, f"{archive}-{version}.tar.bz2")
 
 # Approx fraction of total load each table represents (by TSV size) — so the bar
 # is byte-weighted (smooth) instead of one even 1/10 step per table (which jumps
@@ -253,32 +256,64 @@ def loaded_version() -> Optional[str]:
         return None
 
 
-# ── download (resumable) ─────────────────────────────────────────────────────
+# ── download (resumable, verified) ───────────────────────────────────────────
+
+_HEX64 = re.compile(r"[0-9a-fA-F]{64}")
+
+
+def expected_sha256(version: str, archive: str) -> str:
+    """The mirror's SHA-256 for ``{archive}.tar.bz2`` at ``version``, from
+    that version's SHA256SUMS. Fail closed, like the LB loader: no checksum,
+    no download."""
+    import httpx
+    r = httpx.get(f"{_MIRROR}/{version}/SHA256SUMS", timeout=30.0, follow_redirects=True)
+    r.raise_for_status()
+    name = f"{archive}.tar.bz2"
+    for line in r.text.splitlines():
+        parts = line.split()
+        # "<hex> *<name>": the star is sha256sum's binary-mode marker
+        if len(parts) == 2 and parts[1].lstrip("*") == name and _HEX64.fullmatch(parts[0]):
+            return parts[0].lower()
+    raise RuntimeError(f"no SHA-256 for {name} in {version}/SHA256SUMS")
+
+
+def _discard_other_versions(archive: str, keep: str) -> None:
+    """Delete this archive's files of other versions — an older dump's
+    interrupted download, or one saved before the name carried the version —
+    so a stale partial neither sits there at gigabytes nor counts as progress
+    in disk_budget."""
+    other = re.compile(rf"{re.escape(archive)}(-\d{{8}}-\d{{6}})?\.tar\.bz2")
+    for name in os.listdir(_DATA) if os.path.isdir(_DATA) else []:
+        path = os.path.join(_DATA, name)
+        if other.fullmatch(name) and path != keep:
+            os.remove(path)
+            logger.info("removed %s: not the version being downloaded", name)
+
 
 def download(version: str, archive: str = _DEFAULT_ARCHIVE,
-             progress_cb: ProgressCb = _noop) -> None:
+             progress_cb: ProgressCb = _noop) -> str:
     """Resumable streaming download of ``{archive}.tar.bz2`` for ``version``
-    (dump_common.download_resumable: Range resume, stuck-slow reconnect)."""
-    download_resumable(f"{_MIRROR}/{version}/{archive}.tar.bz2", _dump_path(archive),
+    (dump_common.download_resumable: Range resume, stuck-slow reconnect),
+    verified against the mirror's SHA-256 before anything reads it. The
+    version in the file name is what makes the resume safe: under one fixed
+    name an older dump's interrupted download was resumed with a newer
+    dump's bytes, and the spliced archive failed mid-load (2026-10-20). A
+    mismatch deletes the file: the next attempt starts over instead of
+    resuming into a corrupt archive."""
+    path = _dump_path(archive, version)
+    expected = expected_sha256(version, archive)   # before the 7 GB, not after
+    _discard_other_versions(archive, path)
+    download_resumable(f"{_MIRROR}/{version}/{archive}.tar.bz2", path,
                        progress_cb, label=f"MB {archive}")
-
-
-def verify_md5(version: str) -> bool:
-    """Compare the archive's MD5 against the mirror's MD5SUMS."""
-    import httpx
+    size = os.path.getsize(path)
+    progress_cb({"phase": "verifying", "pct": 0})
     try:
-        sums = httpx.get(f"{_MIRROR}/{version}/MD5SUMS", timeout=20.0).text
-        expect = next((ln.split()[0] for ln in sums.splitlines()
-                       if "mbdump.tar.bz2" in ln), None)
-    except Exception:
-        return True  # mirror unreachable → don't block on it
-    if not expect:
-        return True
-    h = hashlib.md5()
-    with open(DUMP_PATH, "rb") as f:
-        for blk in iter(lambda: f.read(1 << 22), b""):
-            h.update(blk)
-    return h.hexdigest() == expect
+        verify_sha256(path, expected, on_bytes=lambda n: progress_cb(
+            {"phase": "verifying", "pct": min(99, round(n / size * 100)) if size else 0}))
+    except RuntimeError:
+        os.remove(path)
+        raise
+    return path
 
 
 # ── streaming load ───────────────────────────────────────────────────────────
@@ -320,17 +355,17 @@ def _saved_ddl_path(archive: str) -> str:
     return os.path.join(_DATA, f"indexes_{archive}.json")
 
 
-def stream_load(archive: str = _DEFAULT_ARCHIVE,
+def stream_load(archive: str, version: str,
                 progress_cb: ProgressCb = _noop,
                 tables: Optional[list] = None) -> Dict[str, int]:
-    """Decompress ``{archive}.tar.bz2`` once and pipe each member belonging to
-    that archive straight into ``COPY`` — no extracted files, indexes dropped
-    for the COPY and rebuilt per table. ``tables`` narrows the pass to a
-    subset of the archive's (table, member) pairs — how tables added to
-    TABLES after a dump landed are loaded without redoing the rest.
-    Returns ``{table: load_order}``."""
+    """Decompress ``{archive}.tar.bz2`` of ``version`` once and pipe each
+    member belonging to that archive straight into ``COPY`` — no extracted
+    files, indexes dropped for the COPY and rebuilt per table. ``tables``
+    narrows the pass to a subset of the archive's (table, member) pairs — how
+    tables added to TABLES after a dump landed are loaded without redoing the
+    rest. Returns ``{table: load_order}``."""
     from db_pool import get_conn
-    path = _dump_path(archive)
+    path = _dump_path(archive, version)
     if not os.path.exists(path):
         raise RuntimeError(f"dump not found: {path}")
 
@@ -352,6 +387,7 @@ def stream_load(archive: str = _DEFAULT_ARCHIVE,
         tar = tarfile.open(path, mode="r:bz2")  # Python bz2, single-thread
 
     counts: Dict[str, int] = {}
+    spooled: list = []   # (table, path, size) parked until their dependency lands
     t0 = time.monotonic()
     try:
         with get_conn() as conn:
@@ -378,11 +414,14 @@ def stream_load(archive: str = _DEFAULT_ARCHIVE,
                     if keep:
                         reader = _FilteredReader(reader, keep)
                     with conn.cursor() as cur:
-                        drop_indexes(cur, table, ddl[table])
-                        # One transaction for TRUNCATE+COPY: under
-                        # wal_level=minimal the COPY then skips WAL entirely,
-                        # and readers never see a half-loaded table.
+                        # One transaction for the drop, TRUNCATE and COPY:
+                        # under wal_level=minimal the COPY then skips WAL
+                        # entirely, readers never see a half-loaded table, and
+                        # a failed COPY rolls back to the old rows WITH their
+                        # indexes. Dropped outside it, a failed COPY left the
+                        # live table unindexed until a later load got past it.
                         cur.execute("BEGIN")
+                        drop_indexes(cur, table, ddl[table])
                         cur.execute(f"TRUNCATE {table}")
                         cur.copy_expert(f"COPY {table} FROM STDIN", reader)
                         cur.execute("COMMIT")
@@ -400,7 +439,6 @@ def stream_load(archive: str = _DEFAULT_ARCHIVE,
                                  "pct": min(99, round(cum_w * 100))})
                     logger.info("loaded %s (%d/%d)", table, len(counts), expected)
 
-                spooled: list = []   # (table, path, size) parked until their dependency lands
                 for member in tar:
                     table = member_table.get(member.name)
                     if not table:
@@ -415,9 +453,9 @@ def stream_load(archive: str = _DEFAULT_ARCHIVE,
                         spath = os.path.join(_DATA, f"spool_{table}.tsv")
                         progress_cb({"phase": "loading", "table": table,
                                      "pct": min(99, round(cum_w * 100))})
+                        spooled.append((table, spath, member.size or 0))
                         with open(spath, "wb") as out:
                             shutil.copyfileobj(fh, out, 1 << 20)
-                        spooled.append((table, spath, member.size or 0))
                         logger.info("spooled %s (%d MB) until %s is loaded",
                                     table, (member.size or 0) >> 20, dep)
                     else:
@@ -433,7 +471,6 @@ def stream_load(archive: str = _DEFAULT_ARCHIVE,
                 for table, spath, size in spooled:
                     with open(spath, "rb") as fh:
                         _load_table(table, fh, size)
-                    os.remove(spath)
             finally:
                 unlock_all(conn)
     finally:
@@ -446,6 +483,13 @@ def stream_load(archive: str = _DEFAULT_ARCHIVE,
                 proc.stdout.close()
             proc.terminate()
             proc.wait()
+        # A spool serves only the pass that wrote it: a failed pass must not
+        # leave a gigabyte of raw member text behind.
+        for _, spath, _ in spooled:
+            try:
+                os.remove(spath)
+            except FileNotFoundError:
+                pass
 
     if len(counts) != expected:
         raise RuntimeError(f"loaded only {len(counts)}/{expected} tables from {archive}")
@@ -499,10 +543,10 @@ def download_and_load(progress_cb: ProgressCb = _noop, force: bool = False) -> D
             subset = [(t, m) for t, m in _archive_tables(archive) if t in missing]
             if not subset:
                 continue
-            download(version, archive, progress_cb)
-            stream_load(archive, progress_cb, tables=subset)
+            path = download(version, archive, progress_cb)
+            stream_load(archive, version, progress_cb, tables=subset)
             try:
-                os.remove(_dump_path(archive))
+                os.remove(path)
             except OSError:
                 pass
         # The node holds every wire table again → it is a dump source again.
@@ -513,12 +557,12 @@ def download_and_load(progress_cb: ProgressCb = _noop, force: bool = False) -> D
                 "added": missing}
 
     for archive in _archives():
-        download(version, archive, progress_cb)  # resumes a partial; complete → 416, instant
-        stream_load(archive, progress_cb)
+        path = download(version, archive, progress_cb)  # resumes this version's partial
+        stream_load(archive, version, progress_cb)
         # Reclaim the archive — the data now lives in the DB, and a future
         # update re-downloads the (newer) version anyway.
         try:
-            os.remove(_dump_path(archive))
+            os.remove(path)
         except OSError:
             pass
     # Genres aren't in the dump archives — refresh the curated vocabulary too so a
@@ -561,33 +605,6 @@ def download_and_load(progress_cb: ProgressCb = _noop, force: bool = False) -> D
     db_execute("NOTIFY sautium_mb_sources")
     progress_cb({"phase": "done", "version": version})
     return {"version": version, "loaded": True, "up_to_date": False}
-
-
-def load_archive(archive: str, version: Optional[str] = None,
-                 progress_cb: ProgressCb = _noop) -> Dict:
-    """Download + stream-load ONE archive at ``version`` (default: the currently
-    loaded core version, so a derived add lines up with the core's entity ids).
-    Removes the tarball after; leaves the VERSION marker alone (the core owns it).
-    Used to add the *_tag/genre tables without re-fetching the 7 GB core."""
-    version = version or loaded_version() or latest_version()
-    if not version:
-        raise RuntimeError("could not determine an MB version to load")
-    progress_cb({"phase": "checking", "version": version})
-    download(version, archive, progress_cb)
-    counts = stream_load(archive, progress_cb)
-    # The derived archive carries release_group_tag → rebuild album mb-genres.
-    if archive == "mbdump-derived":
-        try:
-            from canon.genres import refresh_album_mb_genres
-            refresh_album_mb_genres(progress_cb)
-        except Exception as e:
-            logger.warning("album mb-genre refresh failed (kept previous): %s", e)
-    try:
-        os.remove(_dump_path(archive))
-    except OSError:
-        pass
-    progress_cb({"phase": "done", "version": version})
-    return {"version": version, "archive": archive, "loaded": counts}
 
 
 def load_genre_list(progress_cb: ProgressCb = _noop) -> int:
@@ -706,12 +723,13 @@ def main() -> None:
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
     ap = argparse.ArgumentParser(description="Download + load the MusicBrainz dump subset")
     ap.add_argument("--force", action="store_true", help="re-download even if current")
-    ap.add_argument("--load-only", action="store_true", help="stream-load the existing archive")
+    ap.add_argument("--load-only", metavar="VERSION",
+                    help="stream-load the archives already on disk for VERSION")
     args = ap.parse_args()
     cb = lambda u: logger.info("progress %s", u)
     if args.load_only:
         for a in _archives():
-            stream_load(a, cb)
+            stream_load(a, args.load_only, cb)
     else:
         print(download_and_load(cb, force=args.force))
 
