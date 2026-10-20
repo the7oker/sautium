@@ -407,13 +407,10 @@ def headroom(ctx: Dict[str, Any], *, rate_out: int, filter: str, shaper: str,
     return out
 
 
-def results(ctx: Dict[str, Any]) -> list:
-    """Every key measured in this context, classed, and every combination a
-    run asked for that HQPlayer refused or never got going here
-    (class 'refused' / 'unstarted', no speed; the newest answer) — the
-    benchmark's results sheet lays them out per axis."""
-    th = thresholds(ctx)
-    return db_query(f"""
+# Every key measured in a context, classed at its thresholds, and every
+# combination a run asked for that HQPlayer refused or never got going here
+# (class 'refused' / 'unstarted', no speed; the newest answer) — unordered.
+_RESULTS_SQL = f"""
         SELECT filter, shaper, rate_out, src_rate, src_channels, n,
                round(speed_p10::numeric, 2)::float AS speed, {_CLASS} AS class,
                bench_settled, round(bench_init_s::numeric, 1)::float AS init_s, dropout
@@ -437,8 +434,55 @@ def results(ctx: Dict[str, Any]) -> list:
                           AND s.src_rate = p.src_rate AND s.src_channels = p.src_channels)
                  ORDER BY p.rate_hz, p.filter, p.shaper, p.src_rate, p.src_channels,
                           p.at DESC) asked
-        ORDER BY src_rate, rate_out, shaper, filter
-    """, {**ctx, **th})
+"""
+
+# The most rows of one name the assistant is told (hqplayer_host_fit)
+FIT_ROWS = 24
+
+
+def results(ctx: Dict[str, Any]) -> list:
+    """Every key measured in this context, classed, and every combination a
+    run asked for that HQPlayer refused or never got going here
+    (class 'refused' / 'unstarted', no speed; the newest answer) — the
+    benchmark's results sheet lays them out per axis."""
+    return db_query(f"{_RESULTS_SQL} ORDER BY src_rate, rate_out, shaper, filter", {**ctx, **thresholds(ctx)})
+
+
+def fit(ctx: Dict[str, Any], *, filter: Optional[str] = None, shaper: Optional[str] = None,
+        rate_out: Optional[int] = None, limit: int = FIT_ROWS) -> Dict[str, Any]:
+    """What one filter (`filter`) or one shaper (`shaper`) costs on this
+    HQPlayer in this context — results' rows of it, at `rate_out` when
+    given — for the assistant: ordered by labels, never by a speed (the
+    source's rate and channels, the output rate, the other knob), the first
+    `limit` of them, how many there are, and the thresholds they are
+    classed at."""
+    th = thresholds(ctx)
+    rows = db_query(f"""
+        SELECT r.*, count(*) OVER () AS total
+          FROM ({_RESULTS_SQL}) r
+         WHERE (%(f)s::text IS NULL OR r.filter = %(f)s)
+           AND (%(s)s::text IS NULL OR r.shaper = %(s)s)
+           AND (%(r)s::int IS NULL OR r.rate_out = %(r)s)
+         ORDER BY r.src_rate, r.src_channels, r.rate_out, r.{"shaper" if filter is not None else "filter"}
+         LIMIT %(limit)s
+    """, {**ctx, **th, "f": filter, "s": shaper, "r": rate_out, "limit": limit})
+    return {"thresholds": th, "rows": rows, "total": rows[0]["total"] if rows else 0}
+
+
+def names(ctx: Dict[str, Any]) -> Dict[str, List[str]]:
+    """The filters and the shapers this context holds a key of, or a
+    combination a run asked for that HQPlayer refused or never got going —
+    every name fit() finds rows of."""
+    row = db_query_one(f"""
+        SELECT coalesce(array_agg(DISTINCT filter), '{{}}') AS filters,
+               coalesce(array_agg(DISTINCT shaper), '{{}}') AS shapers
+          FROM (SELECT filter, shaper FROM hqp_dsp_speed WHERE {_KEY}
+                UNION ALL
+                SELECT p.filter, p.shaper
+                  FROM hqp_benchmark_points p JOIN hqp_benchmark_runs r ON r.id = p.run_id
+                 WHERE p.result IN ('refused', 'unstarted') AND {_RUN_KEY}) k
+    """, ctx)
+    return {"filters": row["filters"], "shapers": row["shapers"]}
 
 
 def file_source(opener: dict) -> Optional[Tuple[int, int]]:

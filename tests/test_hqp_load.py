@@ -533,6 +533,50 @@ def test_headroom_classes_by_axis_and_the_hosts_own_boundary(db):
     assert hr["shapers"]["ASDM7EC-super"]["class"] == "tight"
 
 
+def test_fit_gives_one_names_rows_by_their_labels_never_by_speed(db):
+    f = "poly-sinc-gauss-xla"
+    # (source rate, output rate, shaper, speed): the speeds run neither up nor
+    # down along the labels, so an order by speed either way reads otherwise
+    for src, rate, shaper, speed in ((44100, 5644800, "ASDM7ECv3", 3.0),
+                                     (44100, 11289600, "ASDM7EC-super", 1.9),
+                                     (44100, 11289600, "ASDM7ECv3", 2.0),
+                                     (88200, 11289600, "ASDM7ECv3", 1.1),
+                                     (2822400, 11289600, "ASDM7ECv3", 0.9)):
+        hqp_load.write(_sample(db, speed, filter=f, shaper=shaper, rate_out=rate, src_rate=src))
+    hqp_load.write(_sample(db, 1.5, filter="sinc-L"))
+    run = _run_row(db)
+    _asked(db, run, "refused", rate=22579200, filter=f)
+    _asked(db, run, "unstarted", rate=0, filter=f, shaper="ASDM7EC-super")
+    got = hqp_load.fit(_ctx(db), filter=f)
+    assert [(r["src_rate"], r["rate_out"], r["shaper"], r["speed"], r["class"]) for r in got["rows"]] == [
+        (44100, 0, "ASDM7EC-super", None, "unstarted"),
+        (44100, 5644800, "ASDM7ECv3", 3.0, "ok"),
+        (44100, 11289600, "ASDM7EC-super", 1.9, "ok"),
+        (44100, 11289600, "ASDM7ECv3", 2.0, "ok"),
+        (44100, 22579200, "ASDM7ECv3", None, "refused"),
+        (88200, 11289600, "ASDM7ECv3", 1.1, "tight"),
+        (2822400, 11289600, "ASDM7ECv3", 0.9, "no")]
+    assert (got["total"], got["thresholds"]) == (7, {"ok": 1.25, "no": 1.0, "dropout_speed": None})
+    at = hqp_load.fit(_ctx(db), filter=f, rate_out=11289600)
+    assert [(r["src_rate"], r["shaper"]) for r in at["rows"]] == [
+        (44100, "ASDM7EC-super"), (44100, "ASDM7ECv3"), (88200, "ASDM7ECv3"), (2822400, "ASDM7ECv3")]
+    first = hqp_load.fit(_ctx(db), filter=f, limit=2)
+    assert ([r["rate_out"] for r in first["rows"]], first["total"]) == ([0, 5644800], 7)
+    by_shaper = hqp_load.fit(_ctx(db), shaper="ASDM7EC-super")
+    assert [(r["rate_out"], r["filter"]) for r in by_shaper["rows"]] == [(0, f), (11289600, f)]
+    assert {k: sorted(v) for k, v in hqp_load.names(_ctx(db)).items()} == {
+        "filters": [f, "sinc-L"], "shapers": ["ASDM7EC-super", "ASDM7ECv3"]}
+    # Another build, CUDA state or mode: another context, nothing of this one
+    for other in (_ctx(db, engine="6.2.4"), _ctx(db, cuda="off"), _ctx(db, mode="PCM")):
+        assert (hqp_load.fit(other, filter=f)["rows"], hqp_load.names(other)) == \
+            ([], {"filters": [], "shapers": []})
+    # A point that dropped out moves the host's boundary, and the classes with it
+    _dropped(db, 1.12, filter="sinc-M", src_rate=96000)
+    moved = hqp_load.fit(_ctx(db), filter=f, rate_out=11289600)
+    assert [r["class"] for r in moved["rows"]] == ["ok", "ok", "no", "no"]
+    assert moved["thresholds"]["no"] == 1.15
+
+
 def test_retention_drops_old_samples_and_keeps_the_rollup(db):
     for _ in range(3):
         hqp_load.write(_sample(db, 2.0))
