@@ -564,12 +564,13 @@ def test_fit_gives_one_names_rows_by_their_labels_never_by_speed(db):
     assert ([r["rate_out"] for r in first["rows"]], first["total"]) == ([0, 5644800], 7)
     by_shaper = hqp_load.fit(_ctx(db), shaper="ASDM7EC-super")
     assert [(r["rate_out"], r["filter"]) for r in by_shaper["rows"]] == [(0, f), (11289600, f)]
-    assert {k: sorted(v) for k, v in hqp_load.names(_ctx(db)).items()} == {
-        "filters": [f, "sinc-L"], "shapers": ["ASDM7EC-super", "ASDM7ECv3"]}
+    held = hqp_load.names(_ctx(db))
+    assert (sorted(held["filters"]), sorted(held["shapers"]), held["rates"]) == (
+        [f, "sinc-L"], ["ASDM7EC-super", "ASDM7ECv3"], [0, 5644800, 11289600, 22579200])
     # Another build, CUDA state or mode: another context, nothing of this one
     for other in (_ctx(db, engine="6.2.4"), _ctx(db, cuda="off"), _ctx(db, mode="PCM")):
         assert (hqp_load.fit(other, filter=f)["rows"], hqp_load.names(other)) == \
-            ([], {"filters": [], "shapers": []})
+            ([], {"filters": [], "shapers": [], "rates": []})
     # A point that dropped out moves the host's boundary, and the classes with it
     _dropped(db, 1.12, filter="sinc-M", src_rate=96000)
     moved = hqp_load.fit(_ctx(db), filter=f, rate_out=11289600)

@@ -66,17 +66,12 @@ def _dated(tmp_path, pcm="2001-05-06", sdm="2001-05-06"):
     return _shipped(tmp_path, FIXTURE.read_text(encoding="utf-8").replace(UNDATED, f'"releases": {releases}'))
 
 
-def _one_family(tmp_path, family="pcm", canary=False):
+def _one_family(tmp_path, family="pcm"):
     """The fixture as a shipped file holds it with one family dated and the
-    other absent; with `canary`, the other family's entries planted with a
-    token in their numbers and words first — the overlay that holds both."""
+    other absent."""
     doc = json.loads(FIXTURE.read_text(encoding="utf-8"))
     engine = doc["engines"]["9.4.1"]
     key = f"9.4.1/{family}"
-    if canary:
-        other = engine["modulators"] if family == "pcm" else engine["filters"]
-        for e in other.values():
-            e["log_name"] = CANARY
     for plural in hqp_atlas.KINDS.values():
         engine[plural] = {slug: e for slug, e in engine[plural].items() if e["release"] == key}
     names = {e["name"] for plural in hqp_atlas.KINDS.values() for e in engine[plural].values()}
@@ -151,8 +146,9 @@ def test_a_missing_argument_or_a_refusal_is_the_answer():
     assert _say("filter_facts", _read(), name="") == "Give name: this tool needs it."
     assert _say("filter_facts", Read(output="dlna"), name="x").startswith(
         "HQPlayer is not the active audio output (currently: dlna): ")
-    assert _say("compare", Read(held="the benchmark"), name_a="a", name_b="b") == (
-        "HQPlayer is busy: the benchmark. Its filters and modulators can be read again when it finishes.")
+    assert _say("compare", Read(held="The HQPlayer benchmark is running"), name_a="a", name_b="b") == (
+        "The HQPlayer benchmark is running: HQPlayer's filters and modulators can be read again when it "
+        "finishes.")
     assert _say("host_fit", Read(busy="HQPlayer is building the filter"), name="x") == \
         "HQPlayer is building the filter"
     assert _say("atlas_link", Read(error="timed out"), name="x") == "HQPlayer is not answering (timed out)."
@@ -245,6 +241,12 @@ def test_compare_twins_say_their_group_and_side_by_side_values(tmp_path):
     assert "Same output as demo-sinc-b — the same output within one step, in this fictional file." in text
     assert "Properties, demo-sinc-a / demo-sinc-b:" in text
     assert "    −3 dB, kHz: 17.532, both" in text and "    Filter delay, ms: 6.0 ± 20 / 6.5 ± 20" in text
+    # The group's figure stands for each member's reading, and the card's
+    # note says so — once for the two
+    note = [line for line in text if line.startswith("  For a member of ")]
+    assert note == ["  For a member of demo-sinc-a and demo-sinc-b, each number is the group's figure where it "
+                    "holds one — the members' median, a bound where any member's reading is one; the filter delay "
+                    "is the member's own."]
 
 
 def test_compare_never_computes_and_keeps_each_side(tmp_path):
@@ -252,10 +254,40 @@ def test_compare_never_computes_and_keeps_each_side(tmp_path):
     assert "Same magnitude as demo-poly-lp — one magnitude with two phases, in this fictional file." in text
     assert "    Phase: minimum / linear" in text
     assert "    Ringing before the main lobe, above −100 dB, ms: 0.0 / 0.300" in text
-    text = _say("compare", _read(_dated(tmp_path), "sdm"), name_a="DMX5", name_b="DMX7EC-a")
+    text = _say("compare", _read(_dated(tmp_path), "sdm"), name_a="DMX5", name_b="DMX7EC-a").split("\n")
+    assert text[1:3] == ["Measured on HQPlayer engine 9.4.1", "What HQPlayer says; the structure:"]
     assert "  HQPlayer's generation field: Gen1 / Gen9" in text
-    assert "    DSD128: −81.75 / −91.5" in text and "    DSD256 (48k): — / ≤ −97.5" in text
+    # A side with no reading at a rate is "not given": the card's "—" says
+    # the method defines none
+    assert "    DSD128: −81.75 / −91.5" in text and "    DSD256 (48k): not given / ≤ −97.5" in text
     assert "  Rates HQPlayer refused: DSD256 / none" in text
+    # DMX7EC-a's idle noise is its group's figure; its pair with DMX5 gives
+    # its own reading above
+    assert [line for line in text if line.startswith("  For a member of ")] == [
+        "  For a member of DMX7EC: -c, -a, -b, the idle noise is the group's figure where it holds one — the "
+        "members' median, a bound where any member's reading is one."]
+
+
+def test_compare_of_two_names_with_no_idle_reading_gives_no_empty_table(tmp_path):
+    doc = json.loads(FIXTURE.read_text(encoding="utf-8"))
+    doc["releases"] = {"9.4.1/pcm": "2001-05-06", "9.4.1/sdm": "2001-05-06"}
+    body = doc["engines"]["9.4.1"]
+    body["modulators"]["dmx7-512fs"]["rates"] = {}
+    body["fullscale"].pop("dmx7-512fs", None)
+    text = _say("compare", _read(_shipped(tmp_path, json.dumps(doc, ensure_ascii=False)), "sdm"),
+                name_a="DMXH8", name_b="DMX7 512+fs").split("\n")
+    at = text.index("Per rate, DMXH8 / DMX7 512+fs:")
+    assert text[at + 1:at + 2] == ["  Rates HQPlayer refused: DSD128 and DSD256 (48k) / DSD128 and DSD256 (48k)"]
+    assert not any(line.startswith("  Idle noise") or line.startswith("  For a member of ") for line in text)
+
+
+def test_compare_says_not_given_for_a_side_hqplayer_does_not_describe(tmp_path):
+    filters = _rows([(name, "" if name == "demo-sinc-b" else text) for name, text in PCM], parse_filter_description)
+    text = _say("compare", _read(_dated(tmp_path), filters=filters), name_a="demo-sinc-a",
+                name_b="demo-sinc-b").split("\n")
+    assert "  Signalyst's technical rating: 4/5 / not given — relative to the other filters; not a listening " \
+           "score" in text
+    assert "  The author's focus: transients, timbre, space / not given" in text
 
 
 def test_compare_refuses_one_name_twice_and_two_kinds(tmp_path):
@@ -295,6 +327,10 @@ def test_compares_cpu_line_is_the_pickers_marks():
     assert text[at + 1:at + 3] == [
         "  demo-sinc-a runs at 2.50× (3 samples) — keeps up here (from 1.25×)",
         "  demo-sinc-b: not measured on this HQPlayer — the Benchmark on the HQPlayer screen measures it."]
+    auto = {**hr, "setting": {**hr["setting"], "rate_out": 0}, "source": {"rate": 48000, "channels": 1}}
+    assert "On this HQPlayer, at auto with none, for a 48 kHz source with 1 channel:" in _say(
+        "compare", _read(endpoint={"hqp_engine": "9.4.1"}, headroom=auto), name_a="demo-sinc-a",
+        name_b="demo-sinc-b").split("\n")
     assert hqp_assistant.CPU_NO_SOURCE in _say("compare", _read(endpoint={"hqp_engine": "9.4.1"}, headroom={}),
                                                name_a="demo-sinc-a", name_b="demo-sinc-b")
     assert hqp_assistant.NOTHING_HERE in _say("compare", _read(), name_a="demo-sinc-a", name_b="demo-sinc-b")
@@ -311,7 +347,8 @@ def test_host_fit_groups_this_hosts_rows_by_source_and_names_no_source_in_a_row(
             _host_row(44100, 5644800, "DMX5", "ok", 2.5, 4),
             _host_row(88200, 5644800, "DMX5", "tight", 1.1, 1, settled=False),
             _host_row(2822400, 5644800, "DMX5", "no", 0.8, 2, dropout=True),
-            _host_row(2822400, 11289600, "DMX5", "refused", channels=6)]
+            _host_row(2822400, 11289600, "DMX5", "refused", channels=6),
+            _host_row(48000, 5644800, "DMX5", "ok", 3.0, 2, channels=1)]
     host = {"context": {"engine": "9.4.1", "cuda": "full", "mode": "SDM (DSD)", "matrix_profile": "Room",
                         "convolution": True},
             "knob": "filter", "thresholds": _TH, "rows": rows, "total": len(rows)}
@@ -328,27 +365,42 @@ def test_host_fit_groups_this_hosts_rows_by_source_and_names_no_source_in_a_row(
         "    DSD128 · DMX5: runs at 0.80× (2 samples), and it dropped out here — too slow here (under 1×)",
         "  From a DSD64 source with 6 channels:",
         "    DSD256 · DMX5: refused by HQPlayer when the Benchmark asked it",
+        "  From a 48 kHz source with 1 channel:",
+        "    DSD128 · DMX5: runs at 3.00× (2 samples) — keeps up here (from 1.25×)",
         "These speeds are this HQPlayer's own, measured while it played and by its Benchmark."]
     assert not any("source" in line for line in text if line.startswith("    "))
     more = _say("host_fit", _read(host={**host, "total": 30}), name="demo-sinc-a").split("\n")
-    assert more[-2] == "  … and 25 more."
+    assert more[-2] == "  … and 24 more."
 
 
 def test_host_fit_says_why_it_has_nothing():
-    for host, words in (({"words": hqp_assistant.NOTHING_HERE}, hqp_assistant.NOTHING_HERE),
-                        ({"rows": []}, "x: not measured on this HQPlayer — the Benchmark on the HQPlayer screen "
-                                       "measures it.")):
-        assert _say("host_fit", _read(host=host), name="x") == words
+    assert _say("host_fit", _read(host={"words": hqp_assistant.NOTHING_HERE}), name="x") == \
+        hqp_assistant.NOTHING_HERE
+    # HQPlayer's lists are not read for host_fit: the words neither say the
+    # name is HQPlayer's nor that it is not
+    assert hqp_assistant.no_record("x", "SDM (DSD)") == (
+        "This HQPlayer holds no record of “x” in SDM (DSD) mode: the Benchmark on the HQPlayer screen measures "
+        "what HQPlayer lists.")
+    at = {"context": {"engine": "9.4.1", "cuda": "off", "mode": "PCM", "matrix_profile": None,
+                      "convolution": False},
+          "knob": "filter", "name": "demo-sinc-a", "rate": 705600, "thresholds": _TH, "rows": [], "total": 0}
+    assert _say("host_fit", _read(host=at), name="DEMO-SINC-A") == (
+        "This HQPlayer holds no record of “demo-sinc-a” at 705.6 kHz in PCM mode: the Benchmark on the HQPlayer "
+        "screen measures what HQPlayer lists.")
 
 
-def test_host_fit_reads_a_rate_and_a_mode_as_hqplayer_names_them():
-    rates = [{"index": i, "rate": r} for i, r in enumerate((0, 705600, 5644800, 24576000))]
-    assert hqp_assistant.host_rate("", rates) == (None, None)
-    assert hqp_assistant.host_rate("705.6 kHz", rates) == (705600, None)
-    assert hqp_assistant.host_rate("dsd128", rates) == (5644800, None)
-    assert hqp_assistant.host_rate("24576000", rates) == (24576000, None)
-    assert hqp_assistant.host_rate("DSD256", rates) == (
-        None, "HQPlayer lists no rate “DSD256” now. Its rates: Auto, 705.6 kHz, DSD128, DSD512 (48k).")
+def test_host_fit_reads_a_rate_this_host_holds_speeds_at_and_a_mode_as_hqplayer_names_them():
+    # The rates are this host's records' in the mode asked — HQPlayer's own
+    # list is the mode it is in
+    rates = [0, 705600, 5644800, 24576000]
+    assert hqp_assistant.host_rate("", rates, "SDM (DSD)") == (None, None)
+    assert hqp_assistant.host_rate("705.6 kHz", rates, "SDM (DSD)") == (705600, None)
+    assert hqp_assistant.host_rate("dsd128", rates, "SDM (DSD)") == (5644800, None)
+    assert hqp_assistant.host_rate("24576000", rates, "SDM (DSD)") == (24576000, None)
+    assert hqp_assistant.host_rate("Auto", rates, "SDM (DSD)") == (0, None)
+    assert hqp_assistant.host_rate("DSD256", rates, "SDM (DSD)") == (
+        None, "This HQPlayer holds no record at “DSD256” in SDM (DSD) mode. The rates it holds records at there: "
+              "auto, 705.6 kHz, DSD128, DSD512 (48k).")
     state = {"mode": 0, "active_mode": 1}
     assert hqp_assistant.host_mode("", state, MODES) == ("SDM (DSD)", None)
     assert hqp_assistant.host_mode("PCM", state, MODES) == ("PCM", None)
@@ -423,6 +475,18 @@ def test_filter_facts_adds_the_rate_checks_lines_for_the_name_as_if_set(tmp_path
     assert "in both filter slots" not in _say("filter_facts", read, name="demo-gauss-x")   # Any
 
 
+def test_an_empty_line_of_the_file_is_an_empty_line_never_an_error(tmp_path):
+    # The file's shape takes an empty text: the card's line of it is empty,
+    # as on the screen
+    doc = json.loads(FIXTURE.read_text(encoding="utf-8"))
+    doc["releases"] = {"9.4.1/pcm": "2001-05-06", "9.4.1/sdm": "2001-05-06"}
+    doc["engines"]["9.4.1"]["filters"]["demo-sinc-a"]["intent"][0]["text"] = ""
+    text = _say("filter_facts", _read(_shipped(tmp_path, json.dumps(doc, ensure_ascii=False))),
+                name="demo-sinc-a").split("\n")
+    at = text.index("The author's stated purpose:")
+    assert text[at + 1].strip() == "" and text[at + 2].startswith("  In Sautium's words, from ")
+
+
 # -- What leaves the node: the published atlas alone (F4 (a)) -----------------------------
 
 
@@ -447,9 +511,29 @@ def test_nothing_of_an_undated_family_reaches_any_output(tmp_path):
     assert "Measured properties: https://sautium.net/hqplayer/filters/demo-sinc-a/" in every
 
 
+def test_a_newer_engine_of_the_major_with_no_date_is_never_named(tmp_path):
+    # 9.6.0 in the file, undated, after 9.4.1, dated: a 9.6 HQPlayer is told
+    # 9.4.1's facts, as the shipped file, which holds the dated releases
+    # alone, would tell it
+    from test_hqp_atlas import _another_engine
+    doc = json.loads(FIXTURE.read_text(encoding="utf-8"))
+    doc["releases"] = {"9.4.1/pcm": "2001-05-06", "9.4.1/sdm": "2001-05-06"}
+    _another_engine(doc, "9.6.0")["filters"]["demo-sinc-a"]["contexts"]["1x-44.1k-705.6k"]["phase"] = "minimum"
+    atlas = _shipped(tmp_path, json.dumps(doc, ensure_ascii=False))
+    outputs = []
+    for mode, spec, shapers in (("pcm", PCM, DITHERS), ("sdm", SDM, MODULATORS)):
+        read = _read(atlas, mode, "9.6.2")
+        for name, _ in spec + shapers:
+            outputs += [_say(tool, read, name=name) for tool in ("filter_facts", "atlas_link", "differs_only_in")]
+        outputs += [_say("ab_pair", read, axis=axis) for axis in hqp_atlas.AXIS]
+    assert "9.6.0" not in "\n".join(outputs)
+    facts = _say("filter_facts", _read(atlas, "pcm", "9.6.2"), name="demo-sinc-a").split("\n")
+    assert facts[1] == "Measured on HQPlayer engine 9.4.1 · this HQPlayer runs engine 9.6.2"
+    assert facts[facts.index("  1x · 44.1k → 705.6k:") + 1] == "    Phase: linear"
+
+
 def test_an_undated_file_at_the_shipped_path_gives_no_number_and_no_word_of_the_file(tmp_path):
     every = "\n".join(_every_output(_shipped(tmp_path, FIXTURE.read_text(encoding="utf-8"))))
-    doc = json.loads(FIXTURE.read_text(encoding="utf-8"))
     for token in ("17.532", "−91.5", "9.25", "Same output", "Same figures", "fictional", "Fictional", "9.4.1",
                   "sautium.net"):
         assert token not in every, token

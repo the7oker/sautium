@@ -13,7 +13,7 @@ implementation details live in the code, DB and git history.
 | **P2** | Last.fm enrichment (bios, tags, similar; the album wiki fetch was removed 2026-06-09), text embeddings (BGE-M3), enhanced RAG | DONE |
 | **P3.1** | Audio feature extraction (librosa + CLAP zero-shot, no essentia) | DONE |
 | **P3.2** | HQPlayer control via XML protocol (port 4321) | DONE |
-| **P3.3** | MCP server for HQPlayer + PostgreSQL + search + gear (41 tools) | DONE |
+| **P3.3** | MCP server for HQPlayer + PostgreSQL + search + gear (47 tools) | DONE |
 | **P3.4** | Desktop launcher (CustomTkinter; Windows installer + macOS bundle as carriers) | DONE |
 | **P2P-P0..P4** | Launcher↔backend bridge, UUID v5 refactor, P2P sync, NAT traversal, account system, E2E chat, email CA | DONE — see `P2P_NETWORK.md` |
 
@@ -2910,34 +2910,36 @@ before that slot between them shifts them by one.
 
 The assistant has six tools for HQPlayer's filters and modulators since
 2026-10-20: `hqplayer_filter_facts` (what HQPlayer says of one and what
-Sautium published of its measurements), `hqplayer_compare` (two of one kind
-side by side), `hqplayer_differs_only_in` (the approved pairs that differ
-from it in one property, with the size of the difference),
+Sautium published of its measurements), `hqplayer_compare` (two of one
+kind side by side), `hqplayer_differs_only_in` (the approved pairs that
+differ from it in one property, with the size of the difference),
 `hqplayer_ab_pair` (pairs on one axis for a blind comparison by listening,
 with how to run it), `hqplayer_host_fit` (how one runs on this HQPlayer's
 own host, as measured here) and `hqplayer_atlas_link`. One table holds
-their names, descriptions and parameters (`backend/hqp_assistant.py`),
-and both tool surfaces register from it; both call one route, `GET
+their names, descriptions and parameters (`backend/hqp_assistant.py`), and
+both tool surfaces register from it; both call one route, `GET
 /api/hqplayer/assistant/{tool}` — the in-process tools its function, the
 MCP server over HTTP — so the two say one thing. The route refuses while
-another output is chosen or the output is lent, asks HQPlayer on its link
-as the screen does, and reads the atlas as the site published it: the file
-shipped beside `hqp_atlas`, and of it only an entry whose release has a
-date. The node's own copy never reaches the assistant — what a tool says
-goes to the model's provider and back into the chat's replies, which a
-backup, a life merge and a support warrant's `chat` scope carry. Before
-publication a tool gives HQPlayer's own facts, this host's speeds and
-"Sautium has published no measurement of it". Nothing ranks: lists keep
-HQPlayer's order, the file's or their labels', two values stand side by
-side, and "the same output" comes only from the file's own groups. A number
-is the token the file wrote; a rate that stands alone is named as the
-HQPlayer screen names it, and a filter's measured context as the site
-names it. This host's speeds are the Benchmark's and the listens' own,
-grouped by the source they were measured from — never another machine's.
-The prompt tells the model to call them first, to rank nothing, to give
-each number as the tool writes it, and that Sautium holds no rules that tie
-a DAC to these settings yet; the chat's pip says "looking up filters and
-modulators…" while one runs, not "controlling playback…".
+another output is chosen, the output is lent or HQPlayer builds; otherwise
+it asks HQPlayer one block of questions on its link, which a silence or a
+build HQPlayer did not finish does not stop, and reads the atlas as the
+site published it: the file shipped beside `hqp_atlas`, and of it only an
+entry whose release has a date. The node's own copy never reaches the
+assistant — what a tool says goes to the model's provider and back into
+the chat's replies, which a backup, a life merge and a support warrant's
+`chat` scope carry. Before publication a tool gives HQPlayer's own facts,
+this host's speeds and "Sautium has published no measurement of it".
+Nothing ranks: lists keep HQPlayer's order, the file's or their labels',
+two values stand side by side, and "the same output" comes only from the
+file's own groups. A number is the token the file wrote; a rate that
+stands alone is named as the HQPlayer screen names it, and a filter's
+measured context as the site names it. This host's speeds are the
+Benchmark's and the listens' own, grouped by the source they were measured
+from — never another machine's. The prompt tells the model to call them
+first, to rank nothing, to give each number as the tool writes it, and
+that Sautium holds no rules that tie a DAC to these settings yet; the
+chat's pip says "looking up filters and modulators…" while one runs, not
+"controlling playback…".
 
 ## Known Gotchas
 

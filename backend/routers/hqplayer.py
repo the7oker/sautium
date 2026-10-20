@@ -467,7 +467,7 @@ def _assistant_read(tool: str, args: Dict[str, str]) -> hqp_assistant.Read:
     hold = manager.held
     if hold is not None:
         return hqp_assistant.Read(held=hold["label"])
-    needs = hqp_assistant.READS[tool] + (("rates",) if tool == "host_fit" and args["rate"] else ())
+    needs = hqp_assistant.READS[tool]
     try:
         with hqp_link.selected().asking() as hqp:
             info, state = hqp.get_info(), hqp.get_state()
@@ -478,7 +478,9 @@ def _assistant_read(tool: str, args: Dict[str, str]) -> hqp_assistant.Read:
                     refused[name] = hqp.refusal()
             status = hqp.get_status() if tool == "compare" else None
     except (Building, Dropped, NotAnswering) as e:
-        return hqp_assistant.Read(busy=_busy(e).detail)
+        # Lent while it read: the hold's words, as before it
+        hold = manager.held
+        return hqp_assistant.Read(held=hold["label"]) if hold is not None else hqp_assistant.Read(busy=str(e))
     except (BrokenPipeError, ConnectionError, OSError) as e:
         return hqp_assistant.Read(error=str(e))
     if not (info and info.get("product")):
@@ -495,29 +497,40 @@ def _assistant_read(tool: str, args: Dict[str, str]) -> hqp_assistant.Read:
     if tool == "compare":
         import hqp_library
         ep = hqp_library.endpoint_by_address(settings.hqplayer_host, settings.hqplayer_port)
-        read = read._replace(endpoint=ep, headroom=_headroom(ep, state, status, lists))
+        # This host's speeds under the engine HQPlayer reports now — the
+        # endpoint's last one while it reports none — as host_fit reads them
+        live = ({**ep, "hqp_engine": info.get("engine") or ep["hqp_engine"]}
+                if ep and ep.get("hqp_engine") else ep)
+        read = read._replace(endpoint=ep, headroom=_headroom(live, state, status, lists))
     return read
 
 
 def _host_records(args: Dict[str, str], read: hqp_assistant.Read) -> Dict[str, Any]:
-    """host_fit's: the context HQPlayer is in now — the engine it reports,
-    this endpoint's CUDA offload, the mode asked, the matrix profile and
-    convolution — and one name's rows there (hqp_load.fit); or the words why
-    there are none."""
+    """host_fit's: the context of the mode asked (the one HQPlayer is in, by
+    default) — the engine HQPlayer reports (the endpoint's last one while it
+    reports none), this endpoint's CUDA offload, the matrix profile and
+    convolution — and one name's rows there (hqp_load.fit), at a rate this
+    host holds records at in it; or the words why there are none."""
     import hqp_library
     from playback import hqp_load
     ep = hqp_library.endpoint_by_address(settings.hqplayer_host, settings.hqplayer_port)
     if ep is None or not ep.get("hqp_engine"):
         return {"words": hqp_assistant.NOTHING_HERE}
-    mode, rate, why = hqp_assistant.host_ask(args, read)
+    mode, why = hqp_assistant.host_ask(args, read)
     if why is not None:
         return {"words": why}
-    ctx = hqp_load.context({**ep, "hqp_engine": read.info.get("engine")}, mode=mode, state=read.state)
-    picked = hqp_assistant.host_name(args["name"], hqp_load.names(ctx))
+    ctx = hqp_load.context({**ep, "hqp_engine": read.info.get("engine") or ep["hqp_engine"]}, mode=mode,
+                           state=read.state)
+    held = hqp_load.names(ctx)
+    picked = hqp_assistant.host_name(args["name"], held)
     if picked is None:
-        return {"rows": []}
+        return {"words": hqp_assistant.no_record(args["name"], mode)}
+    rate, why = hqp_assistant.host_rate(args["rate"], held["rates"], mode)
+    if why is not None:
+        return {"words": why}
     knob, name = picked
-    return {"context": ctx, "knob": knob, **hqp_load.fit(ctx, **{knob: name}, rate_out=rate)}
+    return {"context": ctx, "knob": knob, "name": name, "rate": rate,
+            **hqp_load.fit(ctx, **{knob: name}, rate_out=rate)}
 
 
 # -- Config -------------------------------------------------------------------

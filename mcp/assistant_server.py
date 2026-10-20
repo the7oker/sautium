@@ -151,10 +151,12 @@ def _hqp_gate(*, commands: bool = True) -> dict:
     """Refuses when HQPlayer is not the chosen output and while it is lent
     to the benchmark; a transport or DSP tool (`commands`) also while its
     link refuses people — a build, one it did not finish, a silence — in the
-    backend's own words (`busy`); a reading tool goes on. Every HQPlayer
-    tool comes through here, so this is the one place the rule has to
-    exist. It exists because the tools are named for what they do and an
-    agent will reach for one: asking to change a filter, or to skip a track,
+    backend's own words (`busy`); a reading tool goes on. Every other
+    HQPlayer tool comes through here, so this is the one place the rule has
+    to exist for them; the six filter and modulator tools read through one
+    route, which keeps it (routers.hqplayer._assistant_read). It exists
+    because the tools are named for what they do and an agent will reach
+    for one: asking to change a filter, or to skip a track,
     while the sound is going to a phone over DLNA would reconfigure — or
     start — a device in another room, with the canonical queue none the
     wiser. Returns the output as the backend said it."""

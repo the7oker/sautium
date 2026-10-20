@@ -11336,11 +11336,13 @@ _ASSISTANT_CALLS = (
 
 def _assistant(monkeypatch, fake, tmp_path, *, shipped=_DATED, overlay=True):
     """The HQPlayer screen's fake HQPlayer (_atlas_screen) for the six: the
-    synthetic atlas as the node's own copy (`overlay`), and at the shipped
-    path with `shipped` for its releases (None: no file there); the six's
-    MCP module, its backend reads answered by the route's function."""
+    synthetic atlas as the node's own copy (`overlay`: True, or a document
+    of its own), and at the shipped path with `shipped` for its releases
+    (None: no file there); the six's MCP module, its backend reads answered
+    by the route's function."""
     import importlib.util
-    hqp_router = _atlas_screen(monkeypatch, fake, tmp_path, atlas=overlay)
+    hqp_router = _atlas_screen(monkeypatch, fake, tmp_path, atlas=bool(overlay),
+                               doc=overlay if isinstance(overlay, dict) else None)
     _picker(monkeypatch, fake)
     if shipped is not None:
         text = _ATLAS.read_text(encoding="utf-8").replace(
@@ -11403,17 +11405,22 @@ def test_both_surfaces_say_the_same_from_the_published_file(fake, monkeypatch, t
 @pytest.mark.parametrize("shipped", [None, '"releases": {"9.4.1/pcm": null, "9.4.1/sdm": null}'])
 def test_the_nodes_own_copy_and_an_undated_file_give_the_assistant_nothing(fake, monkeypatch, tmp_path, caplog,
                                                                           shipped):
-    # The node's own copy holds the whole synthetic atlas: nothing of it
-    # reaches a tool, a log line or the support bundle's playback scope
+    # The node's own copy holds the whole synthetic atlas, dated, a canary
+    # where filter_facts would print it: the route never opens it, so nothing
+    # of it reaches a tool, a log line or the support bundle's playback scope
     import logging
     caplog.set_level(logging.DEBUG)
-    _, server = _assistant(monkeypatch, fake, tmp_path, shipped=shipped)
+    canary = "CANARY-c4-own-copy-7f3a"
+    own = json.loads(_ATLAS.read_text(encoding="utf-8"))
+    own["releases"] = {"9.4.1/pcm": "2001-05-06", "9.4.1/sdm": "2001-05-06"}
+    own["engines"]["9.4.1"]["filters"]["demo-sinc-a"]["log_name"] = canary
+    _, server = _assistant(monkeypatch, fake, tmp_path, shipped=shipped, overlay=own)
     said = [text for name, args in _ASSISTANT_CALLS for text in _both_say(server, name, args)]
     assert "Sautium has published no measurement of it." in said[0]
     every = "\n".join(said) + caplog.text + json.dumps(
         diag.bundle_view(diag.log_source("127.0.0.1", {}), {}), ensure_ascii=False)
-    for token in ("17.532", "12.346", "24.69", "Same output", "fictional", "Fictional", "sautium.net",
-                  "Measured on HQPlayer engine"):
+    for token in (canary, "17.532", "12.346", "24.69", "Same output", "fictional", "Fictional", "sautium.net",
+                  "Measured on HQPlayer engine", "the node's own atlas copy"):
         assert token not in every, token
 
 
@@ -11426,12 +11433,28 @@ def test_the_six_refuse_while_another_output_is_chosen_or_the_output_is_lent(fak
         assert here == there and here.startswith("HQPlayer is not the active audio output (currently: dlna): ")
     monkeypatch.setattr(settings_router, "_read", lambda key: "hqplayer" if key == "output.type" else None)
 
+    from playback.hqp_benchmark import LABEL
+    held = ("The HQPlayer benchmark is running: HQPlayer's filters and modulators can be read again when it "
+            "finishes.")
+
     class Lent:
-        held = {"label": "the benchmark measures the filters"}
+        held = {"label": LABEL}
     monkeypatch.setattr(hqp_router, "manager", Lent())
     here, there = _both_say(server, "hqplayer_compare", {"name_a": "demo-sinc-a", "name_b": "demo-sinc-b"})
-    assert here == there == ("HQPlayer is busy: the benchmark measures the filters. Its filters and modulators "
-                             "can be read again when it finishes.")
+    assert here == there == held
+    # Lent while it reads: the link says it is lent, the hold's words answer
+    from contextlib import contextmanager
+    later = types.SimpleNamespace(held=None)
+    monkeypatch.setattr(hqp_router, "manager", later)
+
+    class LentNow:
+        @contextmanager
+        def asking(self):
+            later.held = {"label": LABEL}
+            raise hl.Dropped("HQPlayer is lent to the benchmark")
+            yield
+    monkeypatch.setattr(hl, "selected", LentNow)
+    assert hqp_router.assistant("compare", name_a="demo-sinc-a", name_b="demo-sinc-b")["text"] == held
 
 
 def test_the_six_say_the_links_line_while_hqplayer_builds_and_when_it_is_gone(fake, monkeypatch, tmp_path):
@@ -11456,6 +11479,22 @@ def test_the_six_say_the_links_line_while_hqplayer_builds_and_when_it_is_gone(fa
     assert here == there and here.startswith("HQPlayer is not answering ("), here
 
 
+@pytest.mark.parametrize("how", ["silence", "unfinished"])
+def test_the_six_read_on_through_a_silence_and_a_build_hqplayer_did_not_finish(fake, monkeypatch, tmp_path, how):
+    # A reading is no command: refused only while HQPlayer builds, never
+    # behind a Stop's silence or a build past its limit, which an answer
+    # ends (the screen's card refuses there: link.refuse())
+    _, server = _assistant(monkeypatch, fake, tmp_path)
+    before = _both_say(server, "hqplayer_filter_facts", {"name": "demo-sinc-a"})
+    link = hl.selected()
+    if how == "silence":
+        link.silent_since = time.time()
+    else:
+        link.build.state = {"since": time.time(), "command": "SetFilter", "silent": True, "unfinished": True}
+    assert _both_say(server, "hqplayer_filter_facts", {"name": "demo-sinc-a"}) == before
+    assert before[0].startswith("demo-sinc-a — a filter HQPlayer lists in PCM mode.\nMeasured on HQPlayer engine")
+
+
 def test_filter_facts_adds_the_rate_checks_lines_through_the_route(fake, output, monkeypatch, tmp_path):
     from hqp_rate_check import Sources
     mgr, b = output
@@ -11472,13 +11511,15 @@ def test_compare_and_host_fit_read_this_hosts_own_speeds(fake, monkeypatch, tmp_
     from playback import hqp_load
     hqp_router, server = _assistant(monkeypatch, fake, tmp_path)
     fake.replies["GetRates"] = _RATE_PCM[1]
+    # The endpoint's row keeps the engine its last sync saw; the speeds are
+    # read under the one HQPlayer reports now
     monkeypatch.setattr(hqp_library, "endpoint_by_address",
-                        lambda host, port: {"id": 7, "name": "fake", "hqp_engine": "9.4.1", "cuda": "off"})
+                        lambda host, port: {"id": 7, "name": "fake", "hqp_engine": "9.3.0", "cuda": "off"})
     asked = {}
 
     def names(ctx):
         asked["names"] = ctx
-        return {"filters": ["demo-sinc-a"], "shapers": ["none"]}
+        return {"filters": ["demo-sinc-a"], "shapers": ["none"], "rates": [705600, 11289600]}
 
     def fit(ctx, **kw):
         asked["fit"] = kw
@@ -11496,10 +11537,22 @@ def test_compare_and_host_fit_read_this_hosts_own_speeds(fake, monkeypatch, tmp_
         "These speeds are this HQPlayer's own, measured while it played and by its Benchmark."])
     assert asked["names"]["engine"] == "9.4.1" and asked["names"]["mode"] == "PCM"
     assert asked["fit"] == {"filter": "demo-sinc-a", "rate_out": 705600}
-    monkeypatch.setattr(hqp_load, "headroom", lambda ctx, **kw: {
-        "filters": {"demo-sinc-a": {"class": "tight", "speed": 1.1, "n": 1, "settled": False}}, "shapers": {},
-        "rates": {}, "thresholds": {"ok": 1.25, "no": 1.0, "dropout_speed": None},
-        "source": {"rate": 44100, "channels": 2}})
+    # Another mode than HQPlayer's: its rate is one this host holds records at
+    # there, never one of HQPlayer's list for the mode it is in
+    here, there = _both_say(server, "hqplayer_host_fit", {"name": "demo-sinc-a", "rate": "DSD256", "mode": "sdm"})
+    assert here == there and asked["names"]["mode"] == "SDM (DSD)" and asked["fit"]["rate_out"] == 11289600
+    here, there = _both_say(server, "hqplayer_host_fit", {"name": "demo-sinc-a", "rate": "768 kHz"})
+    assert here == there == ("This HQPlayer holds no record at “768 kHz” in PCM mode. The rates it holds records "
+                             "at there: 705.6 kHz, DSD256.")
+    here, there = _both_say(server, "hqplayer_host_fit", {"name": "demo-sinc-x"})
+    assert here == there == ("This HQPlayer holds no record of “demo-sinc-x” in PCM mode: the Benchmark on the "
+                             "HQPlayer screen measures what HQPlayer lists.")
+    def headroom(ctx, **kw):
+        asked["headroom"] = ctx
+        return {"filters": {"demo-sinc-a": {"class": "tight", "speed": 1.1, "n": 1, "settled": False}},
+                "shapers": {}, "rates": {}, "thresholds": {"ok": 1.25, "no": 1.0, "dropout_speed": None},
+                "source": {"rate": 44100, "channels": 2}}
+    monkeypatch.setattr(hqp_load, "headroom", headroom)
     monkeypatch.setattr(hqp_load, "file_source", lambda opener: (44100, 2))
 
     class Queued:
@@ -11518,3 +11571,10 @@ def test_compare_and_host_fit_read_this_hosts_own_speeds(fake, monkeypatch, tmp_
         "  demo-sinc-a runs at 1.10× (1 sample), the readings did not settle within 15 s — tight here "
         "(from 1× to 1.25×)",
         "  demo-gauss-x: not measured on this HQPlayer — the Benchmark on the HQPlayer screen measures it."]
+    assert asked["headroom"]["engine"] == "9.4.1"
+    # HQPlayer reporting no engine: the endpoint's last one
+    fake.replies["GetInfo"] = '<GetInfo name="fake" product="Signalyst HQPlayer Fake" version="9" platform="Linux"/>'
+    hqp_router.assistant("compare", name_a="demo-sinc-a", name_b="demo-gauss-x")
+    assert asked["headroom"]["engine"] == "9.3.0"
+    hqp_router.assistant("host_fit", name="demo-sinc-a")
+    assert asked["names"]["engine"] == "9.3.0"

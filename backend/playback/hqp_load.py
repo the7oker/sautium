@@ -469,20 +469,21 @@ def fit(ctx: Dict[str, Any], *, filter: Optional[str] = None, shaper: Optional[s
     return {"thresholds": th, "rows": rows, "total": rows[0]["total"] if rows else 0}
 
 
-def names(ctx: Dict[str, Any]) -> Dict[str, List[str]]:
-    """The filters and the shapers this context holds a key of, or a
-    combination a run asked for that HQPlayer refused or never got going —
-    every name fit() finds rows of."""
+def names(ctx: Dict[str, Any]) -> Dict[str, list]:
+    """The filters, the shapers and the output rates this context holds a key
+    of, or a combination a run asked for that HQPlayer refused or never got
+    going — every name and rate fit() finds rows of; the rates in order."""
     row = db_query_one(f"""
         SELECT coalesce(array_agg(DISTINCT filter), '{{}}') AS filters,
-               coalesce(array_agg(DISTINCT shaper), '{{}}') AS shapers
-          FROM (SELECT filter, shaper FROM hqp_dsp_speed WHERE {_KEY}
+               coalesce(array_agg(DISTINCT shaper), '{{}}') AS shapers,
+               coalesce(array_agg(DISTINCT rate_out ORDER BY rate_out), '{{}}') AS rates
+          FROM (SELECT filter, shaper, rate_out FROM hqp_dsp_speed WHERE {_KEY}
                 UNION ALL
-                SELECT p.filter, p.shaper
+                SELECT p.filter, p.shaper, p.rate_hz
                   FROM hqp_benchmark_points p JOIN hqp_benchmark_runs r ON r.id = p.run_id
                  WHERE p.result IN ('refused', 'unstarted') AND {_RUN_KEY}) k
     """, ctx)
-    return {"filters": row["filters"], "shapers": row["shapers"]}
+    return {"filters": row["filters"], "shapers": row["shapers"], "rates": row["rates"]}
 
 
 def file_source(opener: dict) -> Optional[Tuple[int, int]]:

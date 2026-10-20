@@ -42,7 +42,7 @@ MODE_NAME = {"pcm": "PCM", "sdm": "SDM"}
 NOT_OUTPUT = ("HQPlayer is not the active audio output (currently: {output}): its filters and modulators are "
               "read against HQPlayer itself — the names it lists and the engine it reports — so nothing is said "
               "of them meanwhile.")
-HELD = "HQPlayer is busy: {label}. Its filters and modulators can be read again when it finishes."
+HELD = "{label}: HQPlayer's filters and modulators can be read again when it finishes."
 UNREACHABLE = "HQPlayer is not answering ({error})."
 NOT_LISTED = "HQPlayer did not list its {list} ({refusal})."
 LISTS = {"filters": "filters", "shapers": "modulators or dithers", "modes": "modes", "rates": "rates"}
@@ -72,13 +72,14 @@ SIDE_BY_SIDE = "Properties, {a} / {b}:"
 PER_RATE_BOTH = "Per rate, {a} / {b}:"
 REFUSED_BOTH = "Rates HQPlayer refused: {a} / {b}"
 NONE_REFUSED = "none"
+NOT_GIVEN = "not given"
 PAGE_OF = "Measured properties of {name}: {href}"
 
 # This host's speeds: compare's CPU line and host_fit
-CPU_AT = "On this HQPlayer, at {rate} with {other}, for a {source} source:"
+CPU_AT = "On this HQPlayer, at {rate} with {other}, for a {source}:"
 CPU_RUNS = "{name} runs at {speed}× ({samples}){unsettled} — {cls}"
-CPU_NO_SOURCE = ("On this HQPlayer no track plays or waits in the queue, so no speed is read for a source; "
-                 "hqplayer_host_fit lists each one measured.")
+CPU_NO_SOURCE = ("On this HQPlayer no speed is read for the setting now: it is read for the track playing, else "
+                 "for a file next in the queue. hqplayer_host_fit lists each one measured.")
 NOT_MEASURED_HERE = "{name}: not measured on this HQPlayer — the Benchmark on the HQPlayer screen measures it."
 SAMPLES = ("{n} sample", "{n} samples")
 UNSETTLED = ", the readings did not settle within 15 s"
@@ -88,16 +89,18 @@ HOST = "On this HQPlayer — engine {engine}, CUDA {cuda}, {mode}{matrix}{convol
 CUDA = {"full": "filters and convolution", "convolution": "convolution only", "off": "off", None: "not known"}
 MATRIX = ", matrix {profile}"
 CONVOLUTION = ", convolution on"
-FROM_SOURCE = "From a {source} source{channels}:"
-CHANNELS = " with {n} channels"
+FROM_SOURCE = "From a {source}:"
+CHANNELS = (" with {n} channel", " with {n} channels")
 RUNS = "{rate} · {other}: runs at {speed}× ({samples}){unsettled}{dropout} — {cls}"
 DROPOUT = ", and it dropped out here"
 REFUSED_HERE = "{rate} · {other}: refused by HQPlayer when the Benchmark asked it"
 UNSTARTED_HERE = "{rate} · {other}: never got going here when the Benchmark asked it"
 AUTO = "auto"
 MORE = "… and {n} more."
-NO_RATE = "HQPlayer lists no rate “{rate}” now. Its rates: {rates}."
-AUTO_RATE = "Auto"
+NO_RATE = "This HQPlayer holds no record at “{rate}” in {mode} mode. The rates it holds records at there: {rates}."
+NO_RECORD = ("This HQPlayer holds no record of “{name}”{at} in {mode} mode: the Benchmark on the HQPlayer screen "
+             "measures what HQPlayer lists.")
+AT_RATE = " at {rate}"
 BAD_MODE = "A mode is pcm or sdm."
 NO_SUCH_MODE = "HQPlayer lists no {mode} mode."
 NOTHING_HERE = "Nothing is measured on this HQPlayer: the Benchmark on the HQPlayer screen measures it."
@@ -358,7 +361,7 @@ def _items(items: List[Dict[str, Any]], pad: str) -> List[str]:
         if "term" in it:
             out.append(f"{pad}{it['term']}: {plain(it['def'])}")
         elif "line" in it or "note" in it:
-            out.append(pad + plain(it.get("line") or it["note"]))
+            out.append(pad + plain(it["line"] if "line" in it else it["note"]))
         elif "more" in it:
             out += [f"{pad}{it['more']}:"] + _items(it["items"], pad + INDENT)
         else:
@@ -459,7 +462,8 @@ def _says_both(a: Named, fa: Facts, b: Named, fb: Facts) -> List[str]:
     labels = list(dict.fromkeys(list(terms_a) + list(terms_b)))
     if not labels:
         return []
-    out = [f"{hqp_atlas.SAYS}:"]
+    heads = {s["head"] for f in (fa, fb) for s in f.card["sections"]}
+    out = [f"{hqp_atlas.SAYS_STRUCTURE if hqp_atlas.SAYS_STRUCTURE in heads else hqp_atlas.SAYS}:"]
     for label in labels:
         if label == hqp_atlas.RATING:
             rated = [f"{n.row['parsed']['rating']}/5" if label in terms else None
@@ -478,8 +482,9 @@ def _terms(card: Dict[str, Any]) -> Dict[str, str]:
 
 def _pair(a: Optional[str], b: Optional[str]) -> str:
     """Two values side by side: "a / b", one where the two read alike as
-    text, "—" for a side that has none."""
-    a, b = a or hqp_atlas.NONE, b or hqp_atlas.NONE
+    text, "not given" for a side that has none — never the card's "—", which
+    says the method defines no reading."""
+    a, b = a or NOT_GIVEN, b or NOT_GIVEN
     return BOTH.format(v=a) if a == b else SIDES.format(a=a, b=b)
 
 
@@ -511,6 +516,7 @@ def _side_by_side(read: Read, a: Named, fa: Facts, b: Named, fb: Facts) -> List[
         keys = [k for k, c in ea["contexts"].items()
                 if "void" not in c and k in eb["contexts"] and "void" not in eb["contexts"][k]]
         out = [SIDE_BY_SIDE.format(a=a.name, b=b.name)] if keys else []
+        valued = bool(keys)
         for key in keys:
             rows_a = dict(hqp_atlas.context_rows(atlas, fa.found, key, used))
             rows_b = dict(hqp_atlas.context_rows(atlas, fb.found, key, used))
@@ -521,11 +527,20 @@ def _side_by_side(read: Read, a: Named, fa: Facts, b: Named, fb: Facts) -> List[
         idle_a = {rate: value for rate, _, value in hqp_atlas.idle_rows(atlas, fa.found, used)}
         idle_b = {rate: value for rate, _, value in hqp_atlas.idle_rows(atlas, fb.found, used)}
         held = {**fb.found.entry["rates"], **fa.found.entry["rates"]}
-        out = [PER_RATE_BOTH.format(a=a.name, b=b.name), f"{INDENT}{hqp_atlas.IDLE}:"]
-        out += [f"{INDENT * 2}{rate_name(int(rate))}: " + _pair(_said(idle_a.get(rate)), _said(idle_b.get(rate)))
-                for rate, _ in hqp_atlas.by_rate(held)]
+        out = [PER_RATE_BOTH.format(a=a.name, b=b.name)]
+        valued = bool(held)
+        if valued:
+            out.append(f"{INDENT}{hqp_atlas.IDLE}:")
+            out += [f"{INDENT * 2}{rate_name(int(rate))}: " + _pair(_said(idle_a.get(rate)), _said(idle_b.get(rate)))
+                    for rate, _ in hqp_atlas.by_rate(held)]
         out.append(INDENT + REFUSED_BOTH.format(a=_refused(fa.found), b=_refused(fb.found)))
-    return out + [INDENT + plain(note["note"]) for note in hqp_atlas.notes(used)]
+    out += [INDENT + plain(note["note"]) for note in hqp_atlas.notes(used)]
+    # A member of an identical group shows the group's figure, as the card
+    # says under it: its pair's line above gives its own reading
+    order = {row["name"]: i for i, row in enumerate(a.rows)}
+    group_notes = dict.fromkeys(plain(note["note"]) for f in (fa, fb)
+                                for note in hqp_atlas.figures_note(atlas, f.found, order)) if valued else {}
+    return out + [INDENT + line for line in group_notes]
 
 
 def _said(value: Optional[List[Any]]) -> Optional[str]:
@@ -551,8 +566,8 @@ def _cpu(read: Read, a: Named, b: Named) -> List[str]:
     setting, src, th = hr["setting"], hr["source"], hr["thresholds"]
     marks = hr["filters"] if a.kind == "filter" else hr["shapers"]
     other = setting["shaper"] if a.kind == "filter" else setting["filter"]
-    out = [CPU_AT.format(rate=rate_name(setting["rate_out"]), other=other, source=_source(src["rate"],
-                                                                                          src["channels"]))]
+    out = [CPU_AT.format(rate=_rate_word(setting["rate_out"]), other=other,
+                         source=_source(src["rate"], src["channels"]))]
     for n in (a, b):
         mark = marks.get(n.name)
         out.append(INDENT + (NOT_MEASURED_HERE.format(name=n.name) if mark is None else CPU_RUNS.format(
@@ -562,7 +577,12 @@ def _cpu(read: Read, a: Named, b: Named) -> List[str]:
 
 
 def _source(rate: int, channels: int) -> str:
-    return rate_name(rate) + (CHANNELS.format(n=channels) if channels != 2 else "")
+    """A source as the six name it: its rate, and its channels when not two."""
+    return f"{rate_name(rate)} source" + (CHANNELS[channels != 1].format(n=channels) if channels != 2 else "")
+
+
+def _rate_word(hz: int) -> str:
+    return rate_name(hz) if hz else AUTO
 
 
 def _samples(n: int) -> str:
@@ -574,15 +594,15 @@ def _class(cls: str, th: Mapping[str, Any]) -> str:
 
 
 def _host_fit(args: Mapping[str, str], read: Read) -> List[str]:
-    """This host's records of one name: every key measured in the context
-    HQPlayer is in, by source, then rate and the other knob — never by
-    speed."""
+    """This host's records of one name in the mode asked (the one HQPlayer
+    is in, by default): every key measured there, by source, then rate and
+    the other knob — never by speed."""
     host = read.host or {}
     if "words" in host:
         return [host["words"]]
-    if not host.get("rows"):
-        return [NOT_MEASURED_HERE.format(name=args["name"])]
     ctx, th = host["context"], host["thresholds"]
+    if not host["rows"]:
+        return [no_record(host["name"], ctx["mode"], host["rate"])]
     out = [HOST.format(engine=ctx["engine"], cuda=CUDA.get(ctx["cuda"], ctx["cuda"]), mode=ctx["mode"],
                        matrix=MATRIX.format(profile=ctx["matrix_profile"]) if ctx["matrix_profile"] else "",
                        convolution=CONVOLUTION if ctx["convolution"] else "")]
@@ -590,8 +610,7 @@ def _host_fit(args: Mapping[str, str], read: Read) -> List[str]:
     for r in host["rows"]:
         if (r["src_rate"], r["src_channels"]) != source:
             source = (r["src_rate"], r["src_channels"])
-            out.append(INDENT + FROM_SOURCE.format(source=rate_name(source[0]),
-                                                   channels=CHANNELS.format(n=source[1]) if source[1] != 2 else ""))
+            out.append(INDENT + FROM_SOURCE.format(source=_source(*source)))
         out.append(INDENT * 2 + _host_row(r, host["knob"], th))
     if host["total"] > len(host["rows"]):
         out.append(INDENT + MORE.format(n=host["total"] - len(host["rows"])))
@@ -599,7 +618,7 @@ def _host_fit(args: Mapping[str, str], read: Read) -> List[str]:
 
 
 def _host_row(r: Mapping[str, Any], knob: str, th: Mapping[str, Any]) -> str:
-    rate = rate_name(r["rate_out"]) if r["rate_out"] else AUTO
+    rate = _rate_word(r["rate_out"])
     other = r["shaper"] if knob == "filter" else r["filter"]
     if r["class"] == "refused":
         return REFUSED_HERE.format(rate=rate, other=other)
@@ -610,18 +629,13 @@ def _host_row(r: Mapping[str, Any], knob: str, th: Mapping[str, Any]) -> str:
                        dropout=DROPOUT if r["dropout"] else "", cls=_class(r["class"], th))
 
 
-def host_ask(args: Mapping[str, str], read: Read) -> Tuple[Optional[str], Optional[int], Optional[str]]:
-    """What host_fit asks this host's records: the mode by HQPlayer's own
-    name for it, and the rate (None: every rate) — or the words why it
-    cannot ask."""
-    gone = _missing(read, ("modes",) + (("rates",) if args["rate"] else ()))
+def host_ask(args: Mapping[str, str], read: Read) -> Tuple[Optional[str], Optional[str]]:
+    """The mode host_fit asks this host's records in, by HQPlayer's own name
+    for it — or the words why it cannot ask."""
+    gone = _missing(read, ("modes",))
     if gone:
-        return None, None, gone
-    mode, why = host_mode(args["mode"], read.state, read.lists["modes"])
-    if why:
-        return None, None, why
-    rate, why = host_rate(args["rate"], read.lists.get("rates"))
-    return mode, rate, why
+        return None, gone
+    return host_mode(args["mode"], read.state, read.lists["modes"])
 
 
 def host_mode(arg: str, state: Optional[dict], modes: Optional[List[dict]]) -> Tuple[Optional[str], Optional[str]]:
@@ -639,17 +653,25 @@ def host_mode(arg: str, state: Optional[dict], modes: Optional[List[dict]]) -> T
     return (chosen["name"], None) if chosen else (None, NO_MODE)
 
 
-def host_rate(arg: str, rates: Optional[List[dict]]) -> Tuple[Optional[int], Optional[str]]:
-    """host_fit's rate: one of HQPlayer's rates, given as the screen names it
-    or in Hz; None for "" (every rate); else the words why not."""
+def host_rate(arg: str, rates: List[int], mode: str) -> Tuple[Optional[int], Optional[str]]:
+    """host_fit's rate: one of the output rates this host holds records at in
+    `mode` (hqp_load.names), given as the HQPlayer screen names it or in Hz;
+    None for "" (every rate); else the words why not. HQPlayer's own rate
+    list is the mode it is in, which need not be the one asked."""
     if not arg:
         return None, None
-    hz = [r["rate"] for r in rates or ()]
     given = arg.strip().lower()
-    match = next((r for r in hz if str(r) == given or (rate_name(r) if r else AUTO_RATE).lower() == given), None)
+    match = next((r for r in rates if str(r) == given or _rate_word(r).lower() == given), None)
     if match is None:
-        return None, NO_RATE.format(rate=arg, rates=", ".join(rate_name(r) if r else AUTO_RATE for r in hz))
+        return None, NO_RATE.format(rate=arg, mode=mode, rates=", ".join(_rate_word(r) for r in rates))
     return match, None
+
+
+def no_record(name: str, mode: str, rate: Optional[int] = None) -> str:
+    """host_fit's words for a name this host holds no record of in `mode` — at
+    `rate`, when one was asked. HQPlayer's lists are not read for it, so they
+    neither say the name is HQPlayer's nor that it is not."""
+    return NO_RECORD.format(name=name, mode=mode, at="" if rate is None else AT_RATE.format(rate=_rate_word(rate)))
 
 
 def host_name(arg: str, names: Mapping[str, List[str]]) -> Optional[Tuple[str, str]]:
