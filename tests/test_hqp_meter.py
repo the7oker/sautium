@@ -162,11 +162,19 @@ class FakeMeterPort:
         with self._cv:
             assert self._cv.wait_for(pred, timeout), f"accepts={self.accepts} ends={self.ends}"
 
+    def _newest(self, pop: bool) -> socket.socket:
+        """The newest connection, once this fake took it: the meter's connect
+        is done, and its page told "open", as soon as the kernel holds the
+        connection — before the accept thread runs."""
+        with self._cv:
+            assert self._cv.wait_for(lambda: self._conns, 5.0), \
+                f"accepts={self.accepts} ends={self.ends}"
+            return self._conns.pop() if pop else self._conns[-1]
+
     def send(self, data, chunk=4096) -> bool:
         """False when the client closed before all of it went — what HQPlayer
         sees when a meter goes away mid-burst."""
-        with self._cv:
-            c = self._conns[-1]
+        c = self._newest(pop=False)
         try:
             for i in range(0, len(data), chunk):
                 c.sendall(data[i:i + chunk])
@@ -175,16 +183,18 @@ class FakeMeterPort:
         return True
 
     def reset(self):
-        """The newest connection reset (RST): an error, not an end of stream."""
-        with self._cv:
-            c = self._conns.pop()
+        """The newest connection reset (RST): an error, not an end of stream.
+        Its read side is shut down first: this fake's own _watch thread blocks
+        in recv() on it, and Linux keeps a socket a syscall holds alive — the
+        close alone sends no RST there (macOS wakes the recv and resets)."""
+        c = self._newest(pop=True)
         c.setsockopt(socket.SOL_SOCKET, socket.SO_LINGER, struct.pack("ii", 1, 0))
+        c.shutdown(socket.SHUT_RD)
         c.close()
 
     def drop(self):
         """HQPlayer ends the newest connection (its meter server restarting)."""
-        with self._cv:
-            c = self._conns.pop()
+        c = self._newest(pop=True)
         c.shutdown(socket.SHUT_RDWR)
         c.close()
 
@@ -620,16 +630,20 @@ def test_a_stop_and_a_start_while_the_connection_is_made_leave_it_open(meter, lo
     """The connection is made; before the session takes it, the page turns
     the meter off and on again: the stop's wake-up is spent as the session
     opens — the meter stays open, never told that HQPlayer closed it."""
-    go = threading.Event()
+    made, go = threading.Event(), threading.Event()
     real = hqp_meter._keepalive
 
     def held(sock):
+        made.set()
         go.wait(5)
         real(sock)
     monkeypatch.setattr(hqp_meter, "_keepalive", held)
     meter.attach("127.0.0.1", port.port)
     page = Page(meter, loop, "a")
     page.want(True)
+    # Made as the session sees it: the fake's accept can come before the
+    # session's connect returns, and a stop then cuts the connect short
+    assert made.wait(5)
     port.wait(lambda: port.accepts == 1)
     page.want(False)
     page.want(True)
