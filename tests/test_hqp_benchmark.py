@@ -4758,23 +4758,53 @@ def test_a_state_read_before_a_put_backs_round_trip_never_clears_its_point_after
     assert fake.mode == 1 and _point(run, run_id), fake.settings()
 
 
-def test_a_check_whose_connection_breaks_is_tried_once_per_rest(run, monkeypatch):
-    """A run marked while HQPlayer was busy; HQPlayer rests, and takes the
-    check's SetMode into PCM and drops the connection each time. The rest's
-    try is spent all the same: no other answer of that rest tries again."""
-    fake, mgr = run.fake, run.mgr
-    run_id = _marked_while_busy(run)
+def _drops_at_the_setmode_into_pcm(monkeypatch, fake) -> list:
+    """HQPlayer takes every SetMode into PCM and drops the connection
+    unanswered: when each was taken."""
     dispatch, into_pcm = fake._dispatch, []
 
     def drops_on_pcm(cmd, attrs):
         out = dispatch(cmd, attrs)
         if cmd == "SetMode" and attrs.get("value") == "1":
             into_pcm.append(time.monotonic())
-            return None                         # taken, and the connection dropped unanswered
+            return None
         return out
     monkeypatch.setattr(fake, "_dispatch", drops_on_pcm)
-    with fake._lock:
+    return into_pcm
+
+
+def test_a_check_whose_connection_breaks_is_tried_once_per_rest(run, monkeypatch):
+    """A run marked while HQPlayer was busy; HQPlayer rests, and takes the
+    check's SetMode into PCM and drops the connection each time. The rest's
+    try is spent all the same: no other answer of that rest tries again."""
+    fake, mgr = run.fake, run.mgr
+    into_pcm = _drops_at_the_setmode_into_pcm(monkeypatch, fake)
+    assert _wait(lambda: len(fake.playlist) == 2, 10)
+    with fake._lock:                    # the rest, before the mark: no check sees another
         fake.track, fake.state = 1, int(PlaybackState.STOPPED)
+    run_id = _marked_while_busy(run)
+    assert _wait(lambda: (mgr.active.poke(), into_pcm)[1], 10)
+    _ticks(run, 5)
+    assert len(into_pcm) == 1 and _unchecked(run, run_id), into_pcm
+
+
+def test_a_checks_try_is_spent_at_the_rest_it_read_itself(run, monkeypatch):
+    """The same; the poller reads HQPlayer resting on no entry, and it rests
+    on the queue's first by the check's own read (moved in between). The try
+    is spent at the rest the check read: the poller's answers there, which
+    read that rest too, try no more."""
+    fake, mgr = run.fake, run.mgr
+    into_pcm = _drops_at_the_setmode_into_pcm(monkeypatch, fake)
+    check = bench.check_measured
+
+    def moved(endpoint_id, link, status, **kw):
+        with fake._lock:
+            fake.track = 1                      # after the poller's read, before the check's
+        return check(endpoint_id, link, status, **kw)
+    monkeypatch.setattr(bench, "check_measured", moved)        # before the mark: every check moves
+    assert _wait(lambda: len(fake.playlist) == 2, 10)
+    assert fake.track == 0 and fake.state == int(PlaybackState.STOPPED)    # no check due yet
+    run_id = _marked_while_busy(run)
     assert _wait(lambda: (mgr.active.poke(), into_pcm)[1], 10)
     _ticks(run, 5)
     assert len(into_pcm) == 1 and _unchecked(run, run_id), into_pcm

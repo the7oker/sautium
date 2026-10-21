@@ -1111,8 +1111,11 @@ implementation details live in the code, DB and git history.
   (migration 040), and it refuses only a run that would read that mode. The
   notice says HQPlayer did not let the settings be read, and that they are
   checked again before the next run at the latest; the run's note names the
-  reason. Lesson: a try that ends without a verdict is an outcome, and it is
-  recorded as one.
+  reason. The rest a try is spent at is the one the check reads HQPlayer in
+  itself (2026-10-21): keyed by the poller's read, which comes first, a
+  check that found HQPlayer moved since spent its try at the rest it had
+  left, and the next answer tried the same rest again. Lesson: a try that
+  ends without a verdict is an outcome, and it is recorded as one.
 - **Where a check found HQPlayer, it goes back to** (2026-10-15). A check of
   a measured mode put the found mode's selection back without looking where
   HQPlayer was: when HQPlayer refused the way back, that selection was set
@@ -1303,7 +1306,7 @@ implementation details live in the code, DB and git history.
   existing queue.
 - **What plays is the entry HQPlayer names, not its index (2026-10-04).**
   The poller mapped `<Status track>` onto the canonical queue and left an
-  external edit to the 30-tick drift canary. The loopback measurement run
+  external edit to the 30-tick drift canary. A measurement run
   found the cost: a file played from HQPlayer's own window was tracked,
   now-played and scrobbled as the queued track at that index for up to half
   a minute, and once the canary flagged drift the open listen went on

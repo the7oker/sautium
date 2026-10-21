@@ -406,7 +406,8 @@ comes after the control port answers again — so neither can end the wait.
   its command may take (`hqp_link._command_waits`, read when a link is
   made): 5 s for a query (4 s for the poller's),
   `STOP_ANSWER_S` (15 s) for a Stop and a PlaylistClear — the output's
-  teardown, a second in PCM and up to three and a half in SDM on a Mac; a
+  teardown: a second or two in PCM, about four with a matrix EQ on, up to
+  about six in SDM at the highest rate with the longest filters; a
   short silence, never a build: a command behind it waits, and past it
   HQPlayer is "not answering" (people's commands refused with that line,
   questions go on until it answers) — and `BUILD_LIMIT_S` (10 min) for what may set off a build or meet

@@ -2221,10 +2221,16 @@ def check_measured(endpoint_id: int, link, status: TrackStatus, *,
     def check() -> None:
         spent = True                # this rest's try, unless a newer word cut it
         back = False                # past the way back, the mark not judged
+        # The rest the try is spent at: the one the check reads HQPlayer in
+        # itself — the poller's read came first, and HQPlayer may have moved
+        # since (one rest tried twice, 2026-10-21) — else the poller's
+        rest = at
         try:
             with link.command(item=item):
                 on = _OnLink(link)
                 st, listed, now = on("get_state"), on("get_playlist"), on("get_status")
+                if now is not None and now.state == PlaybackState.STOPPED:
+                    rest = (now.track_index, now.uri)
                 if st is None or now is None or not _booted(now, listed, gave, run):
                     return
                 point = _return_point(endpoint_id)
@@ -2255,7 +2261,7 @@ def check_measured(endpoint_id: int, link, status: TrackStatus, *,
             with _lock:
                 _checking.discard(endpoint_id)
                 if spent:           # busy, the verdict not written, the connection lost
-                    _busy_at[endpoint_id] = at
+                    _busy_at[endpoint_id] = rest
                 # Cut by a run's hold: the run judges the mark at its start,
                 # and its end says what stands — read under the lock that end
                 # takes, after its hold
