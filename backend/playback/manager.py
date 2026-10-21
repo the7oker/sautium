@@ -347,6 +347,13 @@ class PlaybackManager:
             # 'NoneType' errors and an empty Now Playing).
             self._active = backend
             try:
+                # The status names the output attached from now, before its
+                # start: the payload so far named none (the detach) or the
+                # old one, and the new backend's own first word may be long
+                # in coming — an HQPlayer that does not answer is said away
+                # only past five misses, about half a minute. Inside the
+                # rollback: its label may ask the database
+                self._push_status({**self._latest_status, "output": self.output_info})
                 backend.start()
             except Exception:
                 self._active = None

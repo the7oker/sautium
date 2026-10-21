@@ -7251,6 +7251,34 @@ def test_an_address_set_back_to_a_building_hqplayer_supersedes_its_owed_stop(
         mgr.active.shutdown()
 
 
+def _closed_port() -> int:
+    """A port on this machine nothing listens on."""
+    closed = socket.socket()
+    closed.bind(("127.0.0.1", 0))
+    port = closed.getsockname()[1]
+    closed.close()
+    return port
+
+
+def test_an_address_changed_to_an_hqplayer_that_does_not_answer_names_the_output_at_once(
+        fake, output, monkeypatch):
+    """PUT /api/settings/hqplayer to an address nothing answers at: the
+    status names the HQPlayer the output is attached to at once — not the
+    detach's "none attached", which stood until the poller said HQPlayer
+    away, five misses later."""
+    mgr, b = output
+    settings_router = _picker(monkeypatch, fake)
+    nobody = _closed_port()
+    settings_router.put_hqplayer_prefs(settings_router.HqplayerPrefs(host="127.0.0.1",
+                                                                     port=nobody))
+    try:
+        assert mgr.active is not b and mgr.active.link.port == nobody
+        assert mgr.latest_status["output"] == {"type": "hqplayer", "label": "HQPlayer · fake",
+                                               "attached": True}
+    finally:
+        mgr.active.shutdown()
+
+
 def test_a_track_handed_over_then_removed_from_a_lost_mirror_still_owes_the_stop(
         fake, output, monkeypatch):
     """What HQPlayer was given is ours: a slot removed from the queue alone
