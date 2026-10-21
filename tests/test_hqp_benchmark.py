@@ -3063,6 +3063,11 @@ def test_a_new_run_judges_the_measured_mode_at_its_own_stop_on_another_controlle
     fake = run.fake
     run_id = _pcm_run_found_in_sdm(run, [1, 0, 0, 0], finished_at=now, outcome="interrupted",
                                    measured_unchecked_at=now)
+    # The poller's first round has read the queue's mirror back (its drift
+    # check at the first tick): the entry loaded below meets the next check
+    # only DRIFT_CHECK_EVERY ticks on, and the start reads it as the
+    # mirror's slot. Without the wait that first check races the load.
+    assert _wait(lambda: any(c == "PlaylistGet" for c, _ in fake.commands), 5)
     with fake._lock:
         fake.volume = -3.0
         fake.playlist, fake.track = ["http://other-controller.invalid/track.flac"], 1

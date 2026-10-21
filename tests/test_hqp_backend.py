@@ -11,6 +11,7 @@ import os
 import re
 import socket
 import socketserver
+import struct
 import sys
 import threading
 import time
@@ -32,6 +33,7 @@ from hqplayer_client import (VOLUME_FIXED, HQPlayerClient, PlaybackState,  # noq
 from playback import hqp_backend as hb  # noqa: E402
 from playback import hqp_diagnostics as diag  # noqa: E402
 from playback import hqp_link as hl  # noqa: E402
+from playback import hqp_meter  # noqa: E402
 from playback.base import PlaybackStatus  # noqa: E402
 from playback import queue as queue_mod  # noqa: E402
 from playback import tracker  # noqa: E402
@@ -96,6 +98,12 @@ class FakeHqp:
         self.length = 300
         self.advance_polls = 0
         self._advancing = None
+        # Status polls after its own advance during which the position stays
+        # at 0 while the entry sounds on the meter
+        self.advance_lag_polls = 0
+        # When its own Next at an entry's end came (time.monotonic()): the
+        # tail of its output delay plays on from there (HqpMeterPort)
+        self.ended_at = None
         self.mute = False
         self._down = False
         # Until when it answers nothing, on any connection — busy building a
@@ -291,6 +299,7 @@ class FakeHqp:
         nxt = self.track + 1
         if self.track_serial is not None:
             self.track_serial += 1
+        self.ended_at = time.monotonic()
         self.state, self.track, self.position = int(PlaybackState.STOPPED), 0, 0.0
         if nxt <= len(self.playlist) and not any(part in self.playlist[nxt - 1] for part in self.refuse_play):
             self._advancing = [nxt, self.advance_polls]
@@ -322,6 +331,7 @@ class FakeHqp:
                     else:
                         self.state, self.track = int(PlaybackState.PLAYING), self._advancing[0]
                         self._advancing = None
+                        self._starting = self.advance_lag_polls
                 elif opening:
                     self.opening -= 1
                 elif self.state == int(PlaybackState.PLAYING):
@@ -1802,11 +1812,15 @@ def _advancing(traced, fake, monkeypatch, tmp_path, *, build=30.0, delay="100000
         (tmp_path / "HQPlayer9Desktop.log").unlink()
     if delay is not None:
         fake.status_extra["output_delay"] = delay
-    # long enough for the select's window to close first: an intent watched sees the stop itself
-    fake.length, fake.advance_polls = 6, polls
+    fake.advance_polls = polls
     assert traced.select(1)
     first = _closed()
     assert first.intent == "select" and first.verdict["code"] == "played", first.verdict
+    # its end two status reads after the select's window closed — an intent
+    # watched sees the stop itself, and a poll the meter's sound wakes moves
+    # this fake's position too
+    with fake._lock:
+        fake.length = int(fake.position) + 2
     assert _wait(lambda: traced._attempt is not None and traced._attempt.intent == "advance", 8.0)
     return traced._attempt
 
@@ -1901,6 +1915,128 @@ def test_a_play_of_a_refused_advances_entry_is_an_attempt_of_its_own(traced, fak
     assert _wait(lambda: diag.attempts()[0].intent == "select" and diag.attempts()[0].verdict is not None, 8.0)
     assert diag.attempts()[0].verdict["code"] == "played" and fake.track_serial == serial + 1
     assert att.verdict["code"] == "rate_refused"
+
+
+class HqpMeterPort:
+    """HQPlayer's meter port beside a FakeHqp, as the live look of
+    2026-10-22 showed it: a frame of sound every 50 ms while it plays an
+    entry — whatever its Status says of the position — silence (all-zero
+    frames) for `tail_s` after its own Next at an entry's end, while the
+    tail plays out, and nothing while it is stopped or builds the next."""
+
+    HEAD = (struct.pack("<IIIiffff", 1, 1, 1025, 16, 22050.0, 1024 / 44100, 2.0, 0.0)
+            + struct.pack("<ffff", -20.0, -20.0, -23.0, -20.0))
+    SOUND = HEAD + struct.pack("<2050f", *[0.1] * 2050)
+    SILENCE = HEAD + bytes(8 * 1025)
+
+    def __init__(self, fake: FakeHqp, tail_s: float = 0.3):
+        self.fake, self.tail_s = fake, tail_s
+        self._srv = socket.create_server(("127.0.0.1", 0))
+        self.port = self._srv.getsockname()[1]
+        self.accepts = 0
+        self._stopping = threading.Event()
+        threading.Thread(target=self._serve, daemon=True).start()
+
+    def _serve(self) -> None:
+        while not self._stopping.is_set():
+            try:
+                conn, _ = self._srv.accept()
+            except OSError:
+                return
+            self.accepts += 1
+            threading.Thread(target=self._stream, args=(conn,), daemon=True).start()
+
+    def _frame(self):
+        f = self.fake
+        with f._lock:
+            if f.state == int(PlaybackState.PLAYING) and f.track >= 1 and f._advancing is None:
+                return self.SOUND
+            if f.ended_at is not None and time.monotonic() - f.ended_at < self.tail_s:
+                return self.SILENCE
+            return None
+
+    def _stream(self, conn) -> None:
+        with conn:
+            while not self._stopping.is_set():
+                frame = self._frame()
+                if frame is not None:
+                    try:
+                        conn.sendall(frame)
+                    except OSError:
+                        return
+                self._stopping.wait(0.05)
+
+    def close(self) -> None:
+        self._stopping.set()
+        self._srv.close()
+
+
+@pytest.fixture
+def metered(traced, fake):
+    """The traced backend's meter on an HqpMeterPort of its own."""
+    port = HqpMeterPort(fake)
+    traced._meter_attachment = hqp_meter.meter.attach("127.0.0.1", port.port, traced._sound_began)
+    yield port
+    port.close()
+
+
+def test_a_start_its_meter_shows_while_its_status_keeps_the_position_at_0_is_played(traced, fake, monkeypatch,
+                                                                                    metered):
+    # a position kept at 0 while the meter shows sound: without the meter this
+    # start is unknown (test_a_failure_the_slot_then_played_is_not_offered_when_it_stops)
+    monkeypatch.setattr(diag, "START_LIMIT_S", 3.0)
+    fake.start_polls = 100
+    assert traced.select(2)
+    a = _closed(timeout=10.0)
+    assert a.verdict["code"] == "played", a.verdict
+    assert all(t["position"] == 0.0 for t in a.facts["ticks"]) and a.facts["meter"]["runs"]
+    # the start window is let go once its start is seen, before the attempt closes
+    (session,) = a.facts["meter"]["sessions"]
+    assert session["closed"] is not None and session["closed"] < a.facts["closed"]
+
+
+def test_an_attempts_start_window_is_watched_before_anyone_can_close_it(traced, monkeypatch):
+    """A double-tapped Next, or a command of the owner's, may close an attempt
+    the moment it is seen: its start window is watched by then, so the close
+    finds it to end — never a window nobody ends, holding the socket open."""
+    seen = []
+    watch = hqp_meter.meter.watch
+
+    def watching(key, attachment):
+        seen.append(traced._attempt is not None and traced._attempt.id == key)
+        watch(key, attachment)
+    monkeypatch.setattr(hqp_meter.meter, "watch", watching)
+    att = traced._watch("play", slot=1)
+    assert seen == [False] and traced._attempt is att
+
+
+def test_a_backend_that_let_go_takes_no_meter_when_its_link_readdresses(traced):
+    """HqpLink.readdress may reach a backend between its meter's detach and
+    its link's (shutdown): it attaches no meter again, so no start window of
+    its own holds the next backend's socket open."""
+    traced.shutdown()
+    traced.readdressed()
+    assert hqp_meter.meter._target is None
+
+
+def test_the_tail_the_meter_shows_after_hqplayers_own_advance_is_no_start(traced, fake, monkeypatch, tmp_path,
+                                                                         metered):
+    metered.tail_s = 2.0
+    att = _advancing(traced, fake, monkeypatch, tmp_path, build=1.0, log=False)    # the next entry refused
+    assert _wait(lambda: att.verdict is not None, 8.0)
+    assert att.verdict["code"] == "rate_refused", att.verdict
+    (session,) = att.facts["meter"]["sessions"]             # the tail's silence, seen and no sound in it
+    assert session["first"] is not None and not att.facts["meter"]["runs"]
+
+
+def test_an_advance_whose_status_lags_is_started_by_the_frames_after_its_tail(traced, fake, monkeypatch, tmp_path,
+                                                                             metered):
+    fake.advance_lag_polls = 100                            # the next entry's Status keeps its position at 0
+    att = _advancing(traced, fake, monkeypatch, tmp_path, build=5.0, polls=3, refused=None, log=False)
+    assert _wait(lambda: att.verdict is not None, 12.0)
+    assert att.verdict["code"] == "played", att.verdict
+    assert all(t["position"] == 0.0 for t in att.facts["ticks"])
+    assert [a.intent for a in diag.attempts()] == ["select"]     # played: not kept
 
 
 def test_no_advance_at_the_playlists_end_nor_for_a_stop_hqplayer_did_not_move_on_from(traced, fake,

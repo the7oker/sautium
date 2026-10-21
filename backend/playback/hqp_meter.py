@@ -35,16 +35,29 @@ limiter takes away. A gain stage not in that sum (convolution, an EQ) is
 not in the reading.
 
 The stream costs HQPlayer an FFT per frame and the link ~0.7 MB/s per
-44.1 kHz of source rate, so the socket exists only while a page has the
-meter open and an HQPlayer backend is attached. A page states its interest
-through PUT /api/hqplayer/meter for the /api/events connection it holds;
-the interest dies with that connection, and a reconnect of the same page
-takes the registration over (the browser renderer's rule). One thread owns
-the socket and does every connect, read and close; everyone else changes
-state under the lock and wakes it. It connects on edges only — an attach,
-a page's interest, HQPlayer coming back to the status poller, one retry
-when a stream that delivered frames drops — never on a timer: a port that
-refuses while the control port answers is reported and left alone.
+44.1 kHz of source rate, so the socket exists only while an HQPlayer
+backend is attached and someone wants it: a page with the meter open, or
+a play attempt's start window (watch — hqp_diagnostics.started reads the
+start off the frames, playback.hqp_backend holds the window from the
+intent, or HQPlayer's own advance, until the start is seen or the attempt
+closes). A page states its interest through PUT /api/hqplayer/meter for
+the /api/events connection it holds; the interest dies with that
+connection, and a reconnect of the same page takes the registration over
+(the browser renderer's rule). One thread owns the socket and does every
+connect, read and close; everyone else changes state under the lock and
+wakes it. It connects on edges only — an attach, a page's interest, a
+start window, HQPlayer coming back to the status poller, one retry when a
+stream that delivered frames drops — never on a timer: a port that refuses
+while the control port answers is reported and left alone, and a start
+window does not ask it again until the next attach or return.
+
+For the start windows the thread keeps what the stream showed (seen): its
+sessions — when each opened, gave its first frame and closed — and the
+runs of sound in them: frames whose spectra are not all zero, no further
+apart than RUN_GAP_S. All-zero frames are silence: HQPlayer sends them
+while it pauses, through the tail it plays out after an entry's end — a
+while after Status says stopped — and for a source's digital silence. The
+source is rebuilt only while a page wants readings.
 """
 
 import asyncio
@@ -53,8 +66,9 @@ import selectors
 import socket
 import struct
 import threading
+import time
 from collections import deque
-from typing import Dict, List, Optional, Tuple
+from typing import Callable, Dict, List, Optional, Tuple
 
 import numpy as np
 from scipy.signal import resample_poly
@@ -82,6 +96,13 @@ READING_S = 0.16
 # not run (a blocked loop, a send the OS has stopped taking) — before the
 # page loses its interest; it is told, and asks again if it still wants.
 PAGE_BACKLOG = 32
+# Sound further apart than this begins a run of its own: HQPlayer sends a
+# burst every 160 ms while it plays, silence (all-zero frames) through a
+# pause and an entry's tail, and nothing while it builds or is stopped
+RUN_GAP_S = 0.5
+# What the stream showed is kept this far back: a start window reads its own
+SESSIONS_KEPT = 8
+RUNS_KEPT = 32
 
 
 class MeterProtocolError(ValueError):
@@ -247,13 +268,26 @@ class HqpMeter:
         # status poller has said
         self._gain_db: Optional[float] = None
         self._thread: Optional[threading.Thread] = None
+        # The start windows that want the stream (watch), and what it showed
+        # them (seen): the sessions, the current one, and the runs of frames,
+        # the newest last
+        self._watches: set = set()
+        self._sessions: deque = deque(maxlen=SESSIONS_KEPT)
+        self._current: Optional[dict] = None
+        self._runs: deque = deque(maxlen=RUNS_KEPT)
+        # Told on the meter's thread of each run's first frame: the status
+        # poller's wake-up (attach)
+        self._on_run = None
 
     # -- the HqpBackend's lifecycle --------------------------------------------
 
-    def attach(self, host: str, port: int) -> None:
-        """An HQPlayer backend attached: its meter lives at host:port."""
+    def attach(self, host: str, port: int, on_run=None) -> int:
+        """An HQPlayer backend attached: its meter lives at host:port, and
+        `on_run` is told of each run's first sound. Returns the attachment's
+        number, which its start windows name (watch)."""
         with self._cond:
             self._target = (host, port)
+            self._on_run = on_run
             self._generation += 1
             self._unavailable = None
             self._last = None
@@ -261,13 +295,16 @@ class HqpMeter:
             self._due = True
             self._ensure_thread()
             self._cond.notify()
+            return self._generation
 
     def detach(self) -> None:
         """The backend went (an output switch, a benchmark's hold, a new
         address): the socket closes, pages keep their interest for the
-        next attach."""
+        next attach, and its start windows end with it."""
         with self._cond:
             self._target = None
+            self._watches.clear()
+            self._on_run = None
             self._generation += 1
             self._unavailable = None
             self._last = None
@@ -286,6 +323,43 @@ class HqpMeter:
     def metering(self) -> bool:
         """The socket is open — HQPlayer is computing meters for us."""
         return self._sock is not None
+
+    def watch(self, key, attachment: int) -> None:
+        """A play attempt's start window wants the stream (`key`: its id) for
+        the attachment it was made in (attach's number): one of a backend
+        detached since is no window, and would hold the next attachment's
+        socket open. It connects unless the socket is open or on its way, or
+        the port was unavailable at this attach: a start window is no retry
+        of a port that refused (hqplayer_back and an attach are)."""
+        with self._cond:
+            if attachment != self._generation or self._target is None:
+                return
+            self._watches.add(key)
+            if (self._sock is None and not self._connecting and self._target is not None
+                    and self._unavailable is None):
+                self._due = True
+                self._ensure_thread()
+                self._cond.notify()
+
+    def unwatch(self, key) -> None:
+        """The start window `key` is over: its start was seen, or its attempt
+        closed. Nothing happens for one that never watched or was let go."""
+        with self._cond:
+            if key not in self._watches:
+                return
+            self._watches.discard(key)
+            if not self._wanted_locked():
+                self._stop_locked()
+
+    def seen(self) -> dict:
+        """What the stream showed (hqp_diagnostics.started): its sessions —
+        when each opened, gave its first frame of any kind (None: none yet),
+        closed (None: open) — and the runs of sound in them, each with
+        `since`, when the quiet before it began: the sound before it, or its
+        session's open for a session's first run. Times are time.time()."""
+        with self._cond:
+            return {"sessions": [{k: s[k] for k in ("open", "first", "closed")} for s in self._sessions],
+                    "runs": [{k: r[k] for k in ("since", "start", "last", "frames")} for r in self._runs]}
 
     def set_gain(self, gain_db: Optional[float]) -> None:
         """What HQPlayer applies ahead of its limiter, from every status
@@ -368,6 +442,9 @@ class HqpMeter:
             self._thread.start()
 
     def _wanted_locked(self) -> bool:
+        return self._paging_locked() or bool(self._watches)
+
+    def _paging_locked(self) -> bool:
         return any(p.on for p in self._pages.values())
 
     def _state_locked(self) -> dict:
@@ -436,6 +513,7 @@ class HqpMeter:
 
     def _connected(self, target: Tuple[str, int], generation: int, waker: Waker) -> None:
         host, port = target
+        session, level = None, logging.DEBUG
 
         def wait(sock: socket.socket, event: int, timeout: Optional[float]) -> str:
             return wait_on(sock, event, timeout, waker)
@@ -476,10 +554,14 @@ class HqpMeter:
                 # the stream's end
                 waker.take()
                 self._sock = sock
+                self._current = session = {"open": time.time(), "first": None, "closed": None}
+                self._sessions.append(session)
                 # a reconnect edge that came while connecting is spent here
                 self._due = False
                 self._publish_locked({"state": "open"})
-            logger.info("HQPlayer meter stream open (%s:%d)", host, port)
+                # a page's meter is a lifecycle; a start window's, per play
+                level = logging.INFO if self._paging_locked() else logging.DEBUG
+            logger.log(level, "HQPlayer meter stream open (%s:%d)", host, port)
             delivered, ended = self._read(sock, wait)
         finally:
             with self._cond:
@@ -488,9 +570,13 @@ class HqpMeter:
                 if not deliberate:
                     self._sock = None
                     self._last = None
+                if session is not None:
+                    session["closed"] = time.time()
+                    if self._current is session:
+                        self._current = None
             sock.close()
         if deliberate:
-            logger.info("HQPlayer meter stream closed")
+            logger.log(level, "HQPlayer meter stream closed")
             return
         if ended is not None and ended[0] == "protocol":
             self._fail(generation, "protocol", port, ended[1])
@@ -512,8 +598,9 @@ class HqpMeter:
         """Read until the stream ends or the session is stopped (`wait` woken):
         (frames seen, how it ended — None for an end of stream or a stop,
         ("lost", the error) for a connection that failed, ("protocol", why)
-        for what is not a meter stream). A reading goes out per READING_S of
-        the source rebuilt."""
+        for what is not a meter stream). Every frame's arrival goes into the
+        runs (_came); while a page wants readings, one goes out per READING_S
+        of the source rebuilt."""
         buf = bytearray(1 << 20)
         view = memoryview(buf)
         fill = 0
@@ -526,6 +613,7 @@ class HqpMeter:
                 n = sock.recv_into(view[fill:])
             except OSError as e:
                 return delivered, ("lost", str(e) or type(e).__name__)
+            at = time.time()
             if n == 0:
                 return delivered, None
             fill += n
@@ -533,19 +621,53 @@ class HqpMeter:
                 frames, used, need = parse_frames(view[:fill])
             except MeterProtocolError as e:
                 return delivered, ("protocol", str(e))
-            for rate, spectra in frames:
-                if rebuild is None or rebuild.shape != spectra.shape:
-                    rebuild = SourceRebuild(*spectra.shape)
-                rebuild.add(spectra)
+            if frames:
                 delivered = True
-                if rebuild.pending >= READING_S * rate:
-                    self._reading(sock, rebuild.peaks())
+                began, paging = self._came(sock, at, sum(1 for _, spectra in frames if spectra.any()))
+                if began is not None:
+                    began()
+                if not paging:
+                    rebuild = None      # a page that turns the meter on later starts afresh
+                for rate, spectra in frames if paging else ():
+                    if rebuild is None or rebuild.shape != spectra.shape:
+                        rebuild = SourceRebuild(*spectra.shape)
+                    rebuild.add(spectra)
+                    if rebuild.pending >= READING_S * rate:
+                        self._reading(sock, rebuild.peaks())
             if used:
                 buf[:fill - used] = buf[used:fill]     # same length: allowed while viewed
                 fill -= used
             if need > len(buf):
                 buf = buf[:fill] + bytearray(need - fill)
                 view = memoryview(buf)
+
+    def _came(self, sock: socket.socket, at: float, sound: int) -> Tuple[Optional[Callable], bool]:
+        """Frames came in one read at `at`, `sound` of them not all zero: the
+        session's newest run of sound goes on, or one begins — RUN_GAP_S or
+        more after the sound before it, or the session's first.
+        Returns whom to tell that one began (attach's `on_run`, taken under
+        the lock: a detach clears it), and whether a page wants readings —
+        while none does, the last reading goes: a page that turns the meter
+        on later is never shown one from before."""
+        with self._cond:
+            if self._sock is not sock:
+                return None, False
+            paging = self._paging_locked()
+            if not paging:
+                self._last = None
+            session = self._current
+            if session["first"] is None:
+                session["first"] = at
+            if not sound:
+                return None, paging
+            run = self._runs[-1] if self._runs and self._runs[-1]["session"] is session else None
+            if run is not None and at - run["last"] < RUN_GAP_S:
+                run["last"] = at
+                run["frames"] += sound
+                return None, paging
+            self._runs.append({"session": session, "since": run["last"] if run is not None else session["open"],
+                               "start": at, "last": at, "frames": sound})
+            return self._on_run, paging
 
     def _reading(self, sock: socket.socket, peaks: Optional[np.ndarray]) -> None:
         floor = 10 ** (SILENT_DB / 20)

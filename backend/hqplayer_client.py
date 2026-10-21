@@ -239,7 +239,8 @@ class CommandOutcome:
     or what went wrong below the protocol: "refused" (no connection), "lost"
     (no answer: the socket dropped, timed out, or returned no XML; `during`
     names the command it was carrying) or "unparsed" (a Status/State answer
-    that did not parse)."""
+    that did not parse). `ts` is when the outcome was known, `sent` when the
+    command went onto the connection (None: it never left)."""
     ts: float
     host: str
     port: int
@@ -248,6 +249,7 @@ class CommandOutcome:
     result: Optional[str]
     message: str = ""
     during: Optional[str] = None
+    sent: Optional[float] = None
 
     @property
     def failed(self) -> bool:
@@ -658,7 +660,8 @@ class HQPlayerClient:
         host, port = at or (self.host, self.port)
         outcome = CommandOutcome(ts=time.time(), host=host, port=port,
                                  command=command, attributes=dict(attributes or {}),
-                                 result=result, message=message, during=during)
+                                 result=result, message=message, during=during,
+                                 sent=self.sent_at)
         if outcome.failed:
             self.last_error = outcome
             if self.ring:

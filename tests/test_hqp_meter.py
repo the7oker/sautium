@@ -674,3 +674,135 @@ def test_a_wake_channel_the_os_refuses_is_a_failed_session(meter, loop, port, mo
     page.want(True)                              # Retry
     page.until(state("open"))
     assert meter.metering()
+
+
+# -- the start windows (hqp_diagnostics.started) ----------------------------------------
+
+def _closed_port() -> int:
+    s = socket.socket()
+    s.bind(("127.0.0.1", 0))
+    nobody = s.getsockname()[1]
+    s.close()
+    return nobody
+
+
+def test_a_start_window_opens_the_socket_and_its_end_closes_it(meter, port):
+    attachment = meter.attach("127.0.0.1", port.port)
+    meter.watch(7, attachment)
+    port.wait(lambda: port.accepts == 1)
+    _wait(meter.metering)                        # the fake's accept can come before the connect returns
+    meter.unwatch(8)                             # never watched: nothing happens
+    time.sleep(0.2)
+    assert port.ends == 0
+    meter.unwatch(7)
+    port.wait(lambda: port.ends == 1)
+    assert not meter.metering() and meter.seen()["sessions"][0]["closed"] is not None
+
+
+def test_the_stream_shows_its_sessions_and_its_runs_of_sound(meter, port, monkeypatch):
+    monkeypatch.setattr(hqp_meter, "RUN_GAP_S", 0.3)
+    began = []
+    meter.watch(1, meter.attach("127.0.0.1", port.port, on_run=lambda: began.append(time.time())))
+    port.wait(lambda: port.accepts == 1)
+    _wait(lambda: meter.seen()["sessions"])
+    # silence is frames, and no sound: a pause, an entry's tail, a source's digital silence
+    port.send(burst(np.zeros((4 * HOP, 2))))
+    _wait(lambda: meter.seen()["sessions"][0]["first"] is not None)
+    assert meter.seen()["runs"] == [] and began == []
+    port.send(burst(over_sine(0.2)))
+    _wait(lambda: meter.seen()["runs"])
+    time.sleep(0.6)                              # quiet longer than a run's gap: HQPlayer builds
+    port.send(burst(over_sine(0.2)))
+    _wait(lambda: len(meter.seen()["runs"]) == 2)
+    seen = meter.seen()
+    (session,), (one, two) = seen["sessions"], seen["runs"]
+    assert session["open"] == one["since"] <= session["first"] <= one["start"] <= one["last"]
+    assert two["since"] == one["last"] and two["start"] - one["last"] >= 0.3 and session["closed"] is None
+    _wait(lambda: len(began) == 2)              # told after the lock is let go
+    assert began[1] >= two["start"]
+
+
+def test_a_start_window_does_not_ask_a_port_that_refused_again(meter, loop, monkeypatch):
+    dials = []
+    real = hqp_meter.open_connection
+
+    def counted(*a, **k):
+        dials.append(1)
+        return real(*a, **k)
+    monkeypatch.setattr(hqp_meter, "open_connection", counted)
+    attachment = meter.attach("127.0.0.1", _closed_port())
+    page = Page(meter, loop, "a")               # only to hear the meter's state
+    meter.watch(1, attachment)
+    _wait(lambda: meter._unavailable is not None)
+    meter.unwatch(1)
+    meter.watch(2, attachment)                   # the next play's window: no retry of a refusing port
+    time.sleep(0.3)
+    assert len(dials) == 1
+    meter.hqplayer_back()                        # HQPlayer came back: an edge
+    _wait(lambda: len(dials) == 2)
+    assert page.conn is not None
+
+
+def test_a_start_window_alone_rebuilds_no_source(meter, loop, port):
+    attachment = meter.attach("127.0.0.1", port.port)
+    meter.set_gain(0.0)
+    meter.watch(1, attachment)
+    port.wait(lambda: port.accepts == 1)
+    port.send(burst(over_sine(0.5)))
+    _wait(lambda: meter.seen()["runs"] and meter.seen()["runs"][-1]["frames"] >= 20)
+    assert meter._last is None                   # no reading: no page wants one
+    page = Page(meter, loop, "a")
+    page.want(True)
+    assert page.until(state("open"))
+    port.send(burst(over_sine(0.5)))
+    assert loudest(readings(page.until(lambda m: "p" in m) + page.settle())) == pytest.approx([2.0, 2.0], abs=0.1)
+    assert port.accepts == 1                     # the window's socket, shared
+
+
+def _sound(data) -> int:
+    return sum(1 for _, spectra in parse_frames(memoryview(data))[0] if spectra.any())
+
+
+def _heard(meter) -> int:
+    return sum(r["frames"] for r in meter.seen()["runs"])
+
+
+def test_a_page_that_turns_the_meter_on_in_a_start_window_hears_no_reading_from_before(meter, loop, port):
+    attachment = meter.attach("127.0.0.1", port.port)
+    meter.set_gain(0.0)
+    page = Page(meter, loop, "a")
+    page.want(True)
+    page.until(state("open"))
+    read = burst(over_sine(0.3))
+    port.send(read)
+    _wait(lambda: _heard(meter) == _sound(read) and meter._last is not None)   # a read is counted, then read
+    assert readings(page.settle(0.3))
+    meter.watch(1, attachment)                   # the socket stays open for the start window alone
+    page.want(False)
+    unread = burst(over_sine(0.3))               # sound no page reads
+    port.send(unread)
+    _wait(lambda: _heard(meter) == _sound(read) + _sound(unread))
+    page.want(True)
+    assert meter._last is None and all("p" not in m for m in page.settle(0.3))
+
+
+def test_a_detach_ends_the_start_windows(meter, port):
+    first = meter.attach("127.0.0.1", port.port)
+    meter.watch(1, first)
+    port.wait(lambda: port.accepts == 1)
+    meter.detach()
+    port.wait(lambda: port.ends == 1)
+    meter.watch(2, first)                        # a window the detached backend opened late
+    second = meter.attach("127.0.0.1", port.port)    # another backend: no window of the old one holds its socket
+    meter.watch(3, first)
+    time.sleep(0.3)
+    assert port.accepts == 1 and not meter.metering()
+    meter.watch(4, second)
+    port.wait(lambda: port.accepts == 2)
+
+
+def _wait(pred, timeout=5.0):
+    deadline = time.monotonic() + timeout
+    while not pred():
+        assert time.monotonic() < deadline, "timed out"
+        time.sleep(0.01)

@@ -830,8 +830,9 @@ Limited is `limited`, counted from the last volume step. In SDM mode an amber
 arc marks −3…0 dBTP: the manual asks for 3 dB of room for the modulator
 (§2.15). The design reference is `docs/design/reference/hqp-meter/`.
 
-The socket to 4322 exists only while some page shows the sheet
-(`playback.hqp_meter`). A page states its wish with `PUT /api/hqplayer/meter
+The socket to 4322 exists only while some page shows the sheet, or a play
+attempt's start window wants it (§ "Diagnostics": the start on the meter
+stream; such a socket rebuilds no source) (`playback.hqp_meter`). A page states its wish with `PUT /api/hqplayer/meter
 {tab, on, seq}` for the `/api/events?tab=` stream it holds; the readings ride
 that stream as `meter` messages, and the wish dies with the stream. A
 reconnect of the same page takes the wish over, and every connection opens
@@ -1251,7 +1252,8 @@ a minute, while HQPlayer is still making the start: it says it plays, or its
 control port is silent, and the position has not moved (a long filter
 initialises before any audio leaves: sinc-MGa at DSD256 on a laptop's CPU took
 5–7 s, the port answering no Status meanwhile, 2026-10-03; judged at ten
-seconds, those plays read `unknown`) — what the media
+seconds, those plays read `unknown`) — what HQPlayer's meter stream showed
+meanwhile (the start signal, below), what the media
 proxy saw for that file's token (each request's status, range and bytes —
 `MediaProxy.hits`), and, read as it closes, HQPlayer's playlist: whether the
 expected entry is in it and whose entry it plays. A stop, a pause, a DSP change
@@ -1271,7 +1273,7 @@ checked in this order — positive evidence before any absence of it:
 | Verdict | When | The owner's next step |
 |---|---|---|
 | `unreachable` | a command never reached HQPlayer (or the play gate's GetInfo got no answer) | start HQPlayer; an Embedded in trial mode stops every 30 minutes |
-| `played` | `playing`, the position moving, on our entry (over http: its token was served) | — |
+| `played` | started — the meter's frames, or where none came `playing` with the position moving — on our entry (over http: its token was served) | — |
 | `too_slow` | it played, but past start-up `process_speed` < 1 on three ticks in a row (one dip plays through), or the output buffer drained while the input held (`input_fill` -1 = a file, no input buffer) | a lighter filter or modulator, a lower rate (the setting is named) |
 | `external` | HQPlayer plays an entry Sautium did not put there | stop the other controller (Roon?), play again here |
 | `proxy_error` | the media proxy answered 404 (token not registered — the restart race), 500 (file gone, CUE cut failed), 502/504 (provider), 401/403 (a bug) | play again / check the music folder |
@@ -1295,6 +1297,30 @@ back a failure from its start. The same failure three plays in a row is the
 `hqplayer.failing` notice (a run ends on HQPlayer's first answer after an
 `unreachable`, or on that slot playing). API: `GET /api/player/diagnostics/hqplayer` (attempts, the failing
 run, `client_errors`), `…/hqplayer/{id}` (one whole trace), `…/hqplayer/log`.
+
+**The start, on the meter stream** (since 2026-10-22). Every attempt opens
+the meter's socket for its start window — from the intent, or HQPlayer's
+own advance, until its start is seen or it closes — and the poller hands
+it what the stream showed: the sessions and the runs of sound in them, frames whose spectra
+are not all zero, no further apart than half a second. HQPlayer sends a
+burst every 160 ms while it plays; all-zero frames are silence: a pause, a
+source's digital silence, and the tail it plays out after an entry's end
+while Status already says stopped; while it is stopped or builds it sends
+nothing. An entry has started when a status says HQPlayer plays an entry
+it names while sound runs, and the sound goes on half a second past it; or
+when sound begins after the take — the attempt's first transport command
+going out (`sent`, on the command's outcome), or the advance seen — after
+a quiet the meter watched for half a second or more, and lasts as long
+(for an advance, with no status of another take read before it). Never on
+the meter alone: the entry before HQPlayer's own advance, or the one a jump
+leaves, sounds on for a moment past the take while a status may already
+name the next, and a socket opened then meets that sound at once. Or
+HQPlayer said it played and the position moved, as before: a source's
+digital silence shows on the meter as none. A position that has not moved
+judges nothing where the meter heard the start: a start whose position
+stays at 0 for seconds while the meter shows sound is still started. A
+start window does not ask a port that refused at this attach again (HQPlayer's return or the next attach does),
+and one made after its backend let go holds no later attachment's socket.
 
 HQPlayer's own advance is an attempt too (`advance`, since 2026-10-18).
 Onto an entry of another rate HQPlayer stops on no entry at the end of the

@@ -184,6 +184,104 @@ def test_an_advance_is_watched_from_its_first_stop_to_its_deadline():
     assert assumed.advance["deadline"] == pytest.approx(1000.0 + 2 * 3.5 + 11.0)
 
 
+# -- the start on the meter stream ------------------------------------------------------
+
+def _tick(ts, state="playing", track=1, position=0.0, serial=None):
+    return {"ts": ts, "state": state, "track": track, "position": position, "serial": serial}
+
+
+def _seen(*runs, opened=None):
+    """What the meter showed: runs as (since, start, last), one session from `opened`."""
+    first = min((r[1] for r in runs), default=None)
+    return {"sessions": [{"open": opened if opened is not None else min(r[0] for r in runs), "first": first,
+                          "closed": None}],
+            "runs": [{"since": a, "start": b, "last": c, "frames": int((c - b) / 0.16) + 1} for a, b, c in runs]}
+
+
+def test_frames_running_while_a_status_names_the_entry_it_plays_are_its_start():
+    # its Status names the entry and keeps the position at 0 for seconds while the meter shows sound
+    lagging = [_tick(10.1, track=0), _tick(11.0), _tick(12.0)]
+    assert not diag.started(lagging)
+    assert diag.started(lagging, meter=_seen((5.0, 10.6, 14.0)))
+    # the frames came seconds after the status, or ended seconds before it: nothing beside it
+    assert not diag.started([_tick(11.0)], meter=_seen((5.0, 13.0, 14.0)))
+    assert not diag.started([_tick(11.0)], meter=_seen((5.0, 6.0, 9.9)))
+    # an opening status names no entry yet
+    assert not diag.started([_tick(11.0, track=0)], meter=_seen((5.0, 10.6, 14.0)))
+
+
+def test_sound_after_the_take_and_a_quiet_the_meter_watched_is_its_start_though_no_status_names_it():
+    stale = [_tick(10.1, track=0), _tick(11.0, track=0)]
+    # the meter watched, quiet, through the take (a Play from stopped): the sound is the take's
+    assert diag.started(stale, meter=_seen((9.0, 10.6, 20.0)), take=10.0)
+    # ... but sound that began before the take is not
+    assert not diag.started(stale, meter=_seen((5.0, 9.0, 20.0)), take=10.0)
+    # a session opened after the take whose sound came at once may have caught what played before it
+    assert not diag.started(stale, meter=_seen((10.3, 10.4, 20.0)), take=10.0)
+    # ... one quiet for a while first did not
+    assert diag.started(stale, meter=_seen((10.3, 11.0, 20.0)), take=10.0)
+    # HQPlayer's own advance onto a refused entry, live: the window opened at its first stopped tick, and the entry
+    # before sounded on for 80 ms (2026-10-22); a jump's window opened a moment before its SelectTrack went
+    assert not diag.started(stale, meter=_seen((10.0, 10.02, 10.08)), take=10.0)
+    assert not diag.started(stale, meter=_seen((9.995, 10.1, 10.4)), take=10.0)
+
+
+def test_the_sound_a_jump_leaves_is_no_start_beside_a_status_that_names_the_next():
+    # HQPlayer names the entry tapped, at 0, while the one it left sounds on for a moment past the take
+    named = [_tick(10.15, track=2)]
+    assert not diag.started(named, meter=_seen((5.0, 6.0, 10.4)), take=10.0)
+    # the sound goes on past the status: the next entry's
+    assert diag.started(named, meter=_seen((5.0, 6.0, 12.0)), take=10.0)
+
+
+def test_a_burst_a_stalled_stream_delivers_at_once_is_no_resume():
+    """The sound from before the take, held up past a quiet of the stream's own and delivered in one read."""
+    stale = [_tick(10.1, track=0), _tick(11.0, track=0)]
+    assert not diag.started(stale, meter=_seen((9.4, 10.5, 10.5)), take=10.0)
+    assert diag.started(stale, meter=_seen((9.4, 10.5, 11.2)), take=10.0)
+
+
+def test_sound_after_a_status_of_another_take_is_no_start_of_the_advance():
+    ticks = [_tick(100.0, "stopped", 0, serial=6), _tick(101.0, "playing", 0, serial=7)]    # a Play since, its own take
+    assert not diag.started(ticks, 6, _seen((40.0, 101.5, 105.0)), take=100.0)
+    assert diag.started(ticks[:1], 6, _seen((40.0, 101.5, 105.0)), take=100.0)
+
+
+def test_the_tail_after_hqplayers_own_advance_is_no_start_and_what_follows_its_gap_is():
+    # its own Next at 100.0 (the first stopped tick, track_serial 6): stopped on no entry while the entry before
+    # plays out the tail of its output delay
+    tail = [_tick(100.0, "stopped", 0, serial=6), _tick(101.0, "stopped", 0, serial=6),
+            _tick(102.0, "stopped", 0, serial=6)]
+    flowing = _seen((40.0, 40.2, 103.0))
+    assert not diag.started(tail, 6, flowing, take=100.0)
+    opened_at_the_stop = _seen((100.1, 100.2, 103.0))           # the window opened with the advance
+    assert not diag.started(tail, 6, opened_at_the_stop, take=100.0)
+    # the tail ends, the next entry builds, and its frames begin after a gap: its start
+    after = {**flowing, "runs": flowing["runs"] + _seen((103.0, 104.4, 106.0))["runs"]}
+    assert diag.started(tail, 6, after, take=100.0)
+    # a status of another take beside those frames is no start of this advance
+    assert not diag.started([_tick(104.5, serial=7)], 6, flowing, take=100.0)
+
+
+def test_an_attempt_takes_its_entry_when_its_first_transport_command_went():
+    from hqplayer_client import CommandOutcome
+    att = diag.Attempt(intent="play", slot=1, started=999.5)
+    att.record(CommandOutcome(1000.0, "h", 1, "Play", {}, "OK", sent=999.6))
+    assert (att.t0, att.take) == (1000.0, 999.6)
+    att.tick(_stopped_status(), "stopped", 1000.1, _seen((998.0, 1000.05, 1001.0)))
+    assert att.moved()                          # its frames began after the Play went, before its answer
+    assert diag.advance(1, 5, 1.0, 2000.0).take == 2000.0
+
+
+def test_an_attempt_keeps_what_the_meter_showed_from_its_beginning_on():
+    att = diag.Attempt(intent="play", slot=1, started=1000.0)
+    shown = {"sessions": [{"open": 900.0, "first": 901.0, "closed": 950.0},
+                          {"open": 999.0, "first": None, "closed": None}],
+             "runs": [{"since": 900.0, "start": 901.0, "last": 949.0, "frames": 300}]}
+    att.tick(_stopped_status(), "stopped", 1000.5, shown)
+    assert att.snapshot()["meter"] == {"sessions": [{"open": 999.0, "first": None, "closed": None}], "runs": []}
+
+
 def test_a_status_asked_for_before_the_transport_command_is_no_tick_of_the_attempt():
     from hqplayer_client import CommandOutcome
     att = diag.Attempt(intent="play", slot=1)
@@ -631,3 +729,15 @@ def test_the_embedded_log_page_is_read_and_filtered():
     assert log["lines"] == ["& 2026/10/02 12:48:17 Play (-1/0)",
                             "# 2026/10/02 12:48:18 NAA output network timeout"]
     assert log["cause"]["code"] == "naa_lost"
+
+
+def test_a_start_the_meter_saw_and_no_status_called_playing_is_played():
+    """Frames that resumed after the take while every status HQPlayer gave stayed on its opening tick, then
+    stopped: no stop of its own to judge."""
+    f = {"intent": "play", "started": 99.0, "t0": 100.0, "take": 99.9, "end": "window", "error": None, "slot": 1,
+         "steps": [{"ts": 100.0, "command": "Play", "result": "OK", "message": "", "attributes": {}}],
+         "adds": {"count": 1, "failed": []}, "misses": [], "proxy": None, "playlist": None, "handover": None,
+         "mode": "path", "ticks": [_tick(100.2, "stopped", 0)], "meter": _seen((99.0, 100.5, 110.0)),
+         "closed": 111.0}
+    assert diag.verdict(f)["code"] == "played"
+    assert diag.verdict({**f, "meter": None})["code"] == "not_played"

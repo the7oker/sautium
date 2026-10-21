@@ -1017,6 +1017,10 @@ class HqpBackend(PlayerBackend):
         self._attempt: Optional[diag.Attempt] = None
         self._closing: list = []
         self._att_lock = threading.Lock()
+        # The meter's number for this backend's attachment (HqpMeter.attach):
+        # an attempt's start window names it, so a window opened after a
+        # detach holds no later attachment's socket open
+        self._meter_attachment = 0
         # The intent each thread is carrying out: two can overlap (a Next
         # pressed while a replace still adds), and each one's commands are its
         # own steps — never the owner ending the other.
@@ -1105,8 +1109,10 @@ class HqpBackend(PlayerBackend):
             if self._detached:
                 return
             # Where its meter stream lives: the control port + 1 (Signalyst's
-            # SDK). Opened only while a page has the meter open.
-            hqp_meter.meter.attach(link.host, link.port + 1)
+            # SDK). Opened only while a page has the meter open or a play
+            # attempt's start window wants it (_watch, _advance); each run of
+            # frames it shows wakes the poller
+            self._meter_attachment = hqp_meter.meter.attach(link.host, link.port + 1, self._sound_began)
             self._losses = link.client.losses
             self._running = True
             self._thread = threading.Thread(target=self._poll_loop, daemon=True,
@@ -1218,8 +1224,21 @@ class HqpBackend(PlayerBackend):
 
     def readdressed(self) -> None:
         """The link dials another alias of this HQPlayer (HqpLink.readdress):
-        the meter stream, at the control port + 1, goes there too."""
-        hqp_meter.meter.attach(self._link.host, self._link.port + 1)
+        the meter stream, at the control port + 1, goes there too — unless
+        this backend let go meanwhile (shutdown): its meter is detached, and
+        a start window of its own would hold the next one's socket open."""
+        with self._life:
+            if self._detached:
+                return
+            self._meter_attachment = hqp_meter.meter.attach(self._link.host, self._link.port + 1,
+                                                            self._sound_began)
+
+    def _sound_began(self) -> None:
+        """The meter heard a run of sound begin: the attempt watched, if
+        any, is judged again at once (diag.started). With none, the poller
+        keeps its pace and its back-off."""
+        if self._attempt is not None:
+            self.poke()
 
     def _library_check(self) -> None:
         """An HQPlayer we just attached to or that just came back may have
@@ -1885,7 +1904,10 @@ class HqpBackend(PlayerBackend):
                     if att is None and status is not None:
                         att = self._advance(status, read_at)
                     if att is not None and status is not None:
-                        att.tick(status, STATE_NAMES.get(status.state, "unknown"), read_at)
+                        att.tick(status, STATE_NAMES.get(status.state, "unknown"), read_at,
+                                 hqp_meter.meter.seen())
+                        if att.moved():
+                            hqp_meter.meter.unwatch(att.id)     # its start window is done
                         if att.due(time.time()) is not None or att.stopped_at_start():
                             # Judged on what HQPlayer holds NOW, read in the
                             # same tick — and a track it stopped on at its
@@ -1973,7 +1995,8 @@ class HqpBackend(PlayerBackend):
                         self._rate_served = served
                         _notify_notices()
                     if status.state == PlaybackState.PLAYING and diag.late_start(
-                            diag.tick_of(status, "playing", read_at), self._queue.generation):
+                            diag.tick_of(status, "playing", read_at), self._queue.generation,
+                            hqp_meter.meter.seen()):
                         _notify_notices()
                     if playing is not None:
                         # The slot playing on, its position moving and the DSP
@@ -2183,10 +2206,14 @@ class HqpBackend(PlayerBackend):
                 or self._pressed is not None or self._queue.view()[2]):
             return None
         att = diag.advance(before.track_index, status.track_serial, before.output_delay, read_at)
+        hqp_meter.meter.watch(att.id, self._meter_attachment)       # before anyone can close it (_watch)
         with self._att_lock:
-            if self._attempt is not None:
-                return None         # an intent of ours began meanwhile: its attempt sees it
-            self._attempt = att
+            began = self._attempt is not None
+            if not began:
+                self._attempt = att
+        if began:
+            hqp_meter.meter.unwatch(att.id)
+            return None             # an intent of ours began meanwhile: its attempt sees it
         if diag.log_source(self._link.host, self._info)["kind"] == "local":
             att.follow(self._info, self.poke)
         return att
@@ -2352,6 +2379,11 @@ class HqpBackend(PlayerBackend):
         """A new play intent's attempt: the one watched now, superseding the
         one before."""
         att = diag.Attempt(intent=intent, slot=slot, uris=uris, items=items)
+        # Its start window: the meter stream, from before its first command
+        # to the start it shows or the attempt's close (diag.started) —
+        # watched before anyone can see the attempt, so whoever closes it
+        # finds the window to end
+        hqp_meter.meter.watch(att.id, self._meter_attachment)
         with self._att_lock:
             old, self._attempt = self._attempt, att
             if old is not None:
@@ -2846,6 +2878,7 @@ class HqpBackend(PlayerBackend):
             self._finalize(att, reads if att is due_att else None)
 
     def _finalize(self, att: diag.Attempt, reads: Optional[dict]) -> None:
+        hqp_meter.meter.unwatch(att.id)
         facts = self._facts(att, reads)
         changed = diag.close(att, facts)
         self._last_closed = att
