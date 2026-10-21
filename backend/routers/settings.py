@@ -1238,8 +1238,8 @@ def _notice_items() -> List[Dict[str, Any]]:
     # A queue that meets a rate HQPlayer cannot reach (hqp_rate_check): said
     # while a track of it that can play plays or is paused, with the onset
     # the HQPlayer backend keeps (its _rate_notice_now) — the backend holds
-    # the check; the words are the module's own, drawn as phrases, the
-    # toast's Why? the HQPlayer screen
+    # the check; the words are the module's own, drawn as phrases, and
+    # Why?, on the toast and on the row, the HQPlayer screen
     from playback.manager import manager
     active = manager.active
     rate = active.rate_notice() if active is not None and active.id == "hqplayer" else None

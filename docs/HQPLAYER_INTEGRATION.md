@@ -1352,9 +1352,9 @@ one toasts the first
 time the tab meets it, however old, unless that is in the connect-time
 snapshot, which paints it only; so neither a gap (an advance's tail, a
 Stop) nor, while sessionStorage keeps them, a reload toasts one again.
-Why? is on the toast, opening the HQPlayer
-screen, whose line says it in place; the row on Sync & P2P names the reason
-in its own text. The
+Why? is on the toast and, since 2026-10-21, on the notice's row on Sync &
+P2P, opening the HQPlayer screen, whose line says it in place; the row names
+the reason in its own text too. The
 HQPlayer backend holds the check, judged again on the poller's tick after an
 event — a queue change, a DSP change of this node's, HQPlayer coming back,
 the attach, the slot read moving, a sampled State that differs — reading

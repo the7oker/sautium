@@ -2865,8 +2865,9 @@ a queue and setting other than the last it served it for, or first since
 HQPlayer was attached; since 2026-10-19
 the tab remembers the onsets it has met, toasted or painted at connect, so
 neither a gap in the notice nor (while sessionStorage keeps them) a reload
-toasts one again — its Why? leading to that screen, and the row on Sync &
-P2P naming the reason in its own text. A verdict reads the atlas only as
+toasts one again — its Why? leading to that screen, from the toast and
+(since 2026-10-21) from its row on Sync & P2P, whose text names the reason
+too. A verdict reads the atlas only as
 the site published it: the shipped file, and of it only an entry whose
 release has a date — a trace and the log travel in a support warrant, and
 neither the node's own copy nor a file put at the shipped path before its

@@ -11541,8 +11541,8 @@
   };
   // A queue that meets a rate HQPlayer cannot reach (backend/hqp_rate_check.py):
   // its words are the rate check's own, carried in the notice's data and drawn
-  // as phrases — one place for them — and its toast leads to the HQPlayer
-  // screen, where the line and the knobs are.
+  // as phrases — one place for them — and its Why?, on the toast and on the
+  // row, leads to the HQPlayer screen, where the line and the knobs are.
   NOTICE_COPY['hqplayer.rate_check'] = n => {
     const d = n.data || {};
     return { title: hqpPhrase(d.title), text: (d.text || []).map(hqpPhrase).join(' '),
@@ -11659,6 +11659,15 @@
       this._pump();
     },
 
+    /* A notice's action taken from its row: what its toast's button does —
+       the toast, shown or still queued, goes, and the copy's action runs. */
+    act(key) {
+      this._queue = this._queue.filter(t => t.key !== key);
+      const live = this._shown.find(t => t.key === key);
+      if (live) this._dismiss(live);
+      noticeCopy(this.get(key)).action.run();
+    },
+
     flush() { this._pump(); },
 
     _cap() { return layoutMode() === 'tablet' ? 3 : 1; },
@@ -11733,7 +11742,9 @@
   };
   window.notices = notices;
 
-  /* Rows for Sync & P2P — the place the facts live. */
+  /* Rows for Sync & P2P — the place the facts live. A copy's action is the
+     row's button too, the toast's label beside the title; renderSync runs it,
+     from one listener on the block the rows are redrawn in. */
   function _renderNoticeRows() {
     const items = notices.list();
     if (!items.length) return '';
@@ -11745,7 +11756,8 @@
           <div class="form-row stacked notice-row kind-${escapeHtml(n.kind)}">
             <div class="row-stack">
               <span class="row-stack-label">${c.title}</span>
-              <span></span>
+              ${c.action ? `<button class="btn-link" type="button" data-notice-action="${escapeHtml(n.key)}">${
+                escapeHtml(c.action.label)}</button>` : '<span></span>'}
             </div>
             <div class="row-stack-sub">${c.text}</div>
           </div>`;
@@ -15482,6 +15494,13 @@
     `;
     _wireBack(root);
     _wireSyncActions(root, sync);
+    // A notice row's button (_renderNoticeRows) does what its toast's button
+    // does (notices.act). The rows are redrawn inside this block on every
+    // snapshot and every refresh, so the block holds the one listener
+    root.querySelector('[data-sync-content]').addEventListener('click', e => {
+      const btn = e.target.closest('[data-notice-action]');
+      if (btn) notices.act(btn.dataset.noticeAction);
+    });
     _subscribeSyncStream(root);
     notices.markSeen();
   }

@@ -491,9 +491,14 @@ rule for WHEN a condition exists lives there, the words and the clock
 notice (`hqplayer.rate_check`), whose words are the rate check's own
 (`backend/hqp_rate_check.py`, one place for every word it says), carried in
 its `data` as phrases its `NOTICE_COPY` entry draws. A copy may name an
-`action`: the notice's toast then carries it (the rate check's Why? opens
-the HQPlayer screen); its row on Sync & P2P draws none and names the reason
-in its own text. A condition with no ledger
+`action` (`{ label, run }`): the notice's toast carries it, and so does its
+row on Sync & P2P (since 2026-10-21), as a `.btn-link` beside the title —
+the toast's label, doing what the toast's button does (the rate check's Why?
+opens the HQPlayer screen); the row's text still names the reason itself.
+`renderSync` runs a row's action from one listener on the block the rows are
+redrawn in, through `notices.act`: the notice's toast, shown or queued, goes
+as its own button would close it, and the action runs. A condition with no
+ledger
 keeps its `since` in `_derived_since` (`routers/settings.py`); its
 producers wake the channel on the bad AND the good transition. The music
 folder: every stream derives the set on every wake, so the readers share
