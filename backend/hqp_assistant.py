@@ -324,8 +324,7 @@ def _facts(read: Read, n: Named) -> Facts:
     if shown is None:
         return Facts([_no_engine(atlas, engine, n.kind)], None, alone, None)
     found = atlas.lookup(n.kind, n.name, shown, read.mode, published=True)
-    card = hqp_atlas.card(atlas, n.kind, n.name, n.rows, engine, read.mode, published=True,
-                          name_rate=hqp_atlas.rate_named)
+    card = hqp_atlas.card(atlas, n.kind, n.name, n.rows, engine, read.mode, published=True)
     status = [plain(line) for line in card["status"]]
     if found.state in ("measured", "refused"):
         return Facts(status, None, card, found)
@@ -745,7 +744,8 @@ def _ab_pair(args: Mapping[str, str], read: Read) -> List[str]:
     shown = atlas.engine_for(engine, kind, published=True)
     if shown is None:
         return [_no_engine(atlas, engine, kind)]
-    pairs = [p for p in atlas.axis_pairs(axis) if all(_published(atlas, p["kind"], m, shown) for m in p["members"])]
+    pairs = [p for p in atlas.axis_pairs(axis, shown)
+             if all(_published(atlas, p["kind"], m, shown) for m in p["members"])]
     if not pairs:
         return [AB_NONE]
     shown_pairs = [p for p in pairs if _listed(read, p)]

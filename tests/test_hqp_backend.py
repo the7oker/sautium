@@ -2511,7 +2511,9 @@ def test_a_names_card_answers_only_for_a_name_hqplayer_lists_now(fake, monkeypat
     assert e.value.detail == "HQPlayer does not list it now — Refresh asks again."
     hqp_router = _atlas_screen(monkeypatch, fake, tmp_path, sdm=True)
     card = hqp_router.get_facts("modulator", "DMX7EC-a")
-    assert "Per rate" in [s["head"] for s in card["sections"]]
+    per_rate = next(s for s in card["sections"] if s["head"] == "Per rate")
+    # A rate as the screen names it, its family in the name
+    assert [r["label"] for r in per_rate["items"][0]["table"]["rows"]] == ["DSD128", "DSD256 (48k)"]
     hqp_router = _atlas_screen(monkeypatch, fake, tmp_path, atlas=False)
     card = hqp_router.get_facts("filter", "demo-sinc-a")
     assert card["origin"] is None and [s["head"] for s in card["sections"]] == ["What HQPlayer says"]

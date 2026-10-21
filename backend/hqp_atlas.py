@@ -41,7 +41,7 @@ import re
 import threading
 import time
 from pathlib import Path
-from typing import Any, Callable, Dict, Iterable, List, NamedTuple, Optional, Tuple
+from typing import Any, Dict, Iterable, List, NamedTuple, Optional, Tuple
 
 logger = logging.getLogger(__name__)
 
@@ -114,10 +114,6 @@ AND = " and "
 
 # Labels
 CONTEXT_LABEL = "{slot} · {source} → {output}"
-RATE_LABEL = "DSD{n} · from {family}"
-RATE_SHORT = "DSD{n}"
-RATE_SHORT_48 = "DSD{n} (48k)"
-FAMILY = {"44100": "44.1k", "48000": "48k"}
 
 # The card
 NOT_MEASURED_CARD = "Not measured on HQPlayer engine {engine}."
@@ -370,9 +366,12 @@ _DATE = re.compile(r"[0-9]{4}-[0-9]{2}-[0-9]{2}")
 _ENGINE = re.compile(r"[0-9]{1,6}\.[0-9]{1,6}\.[0-9]{1,6}")
 _SLUG = re.compile(r"[a-z0-9]+(?:-[a-z0-9]+)*")
 _CONTEXT = re.compile(r"(?:1x|nx)-[0-9.]+k-[0-9.]+k")
-_RATE = re.compile(r"[0-9]{1,10}")
+# No leading zero: two keys must never name one rate
+_RATE = re.compile(r"[1-9][0-9]{0,9}")
+# A modulator's source rate (fs_in): the base of a rate family
+_FAMILY = ("44100", "48000")
 # An integer's shape — an order, drawn as it stands, and fs_in — bounding no
-# digits int() reads: fs_in reaches int() only as one of FAMILY's keys
+# digits int() reads: fs_in reaches int() only as one of _FAMILY's bases
 _INT = re.compile(r"-?[0-9]{1,10}")
 _VOLUME = re.compile(r"-?[0-9]+(?:\.[0-9]+)?")
 _GROUP_ID = re.compile(r"[a-z0-9-]+(?:\+[a-z0-9-]+)+")
@@ -651,6 +650,24 @@ def _check_engine(body: Any, engine: str, at: str, releases: Dict[str, Any], reg
                     _need(all(release_of.get((kind, m), e["release"]) == e["release"] for m in held[ref]["members"]),
                           "a member of another release", f"{at}.{plural}.{slug}.{key}")
 
+    # A pair is the engine's through its members (Atlas.axis_pairs): each is
+    # an entry here that lists it. A pair's size is said at each rate or
+    # context it holds, so each is one both members were measured at — where
+    # both play, as the tools say
+    for kind, plural in KINDS.items():
+        for slug, e in body[plural].items():
+            for ref in e["pairs"]:
+                members = [body[plural].get(registry.get((kind, m))) for m in pairs[ref]["members"]]
+                _need(all(m is not None and ref in m["pairs"] for m in members), "a pair a member of it does not list",
+                      f"{at}.{plural}.{slug}.pairs")
+                if kind == "modulator":
+                    _need(all(rate in e["rates"] for rate in pairs[ref]["contexts"]),
+                          "a pair at a rate its member was not measured at", f"{at}.{plural}.{slug}.pairs")
+                else:
+                    measured = {key for key, c in e["contexts"].items() if "void" not in c}
+                    _need(all(key in measured for key in pairs[ref]["contexts"]),
+                          "a pair at a context its member was not measured at", f"{at}.{plural}.{slug}.pairs")
+
     modulators = body["modulators"]
     fullscale = _obj(body.get("fullscale"), f"{at}.fullscale")
     for slug, rates in fullscale.items():
@@ -776,8 +793,13 @@ def _check_modulator(e: Any, at: str, sources: Dict[str, Any]) -> None:
             rat = f"{at}.{key}.{rate}"
             _obj(x, rat)
             _int(x.get("fs_in"), f"{rat}.fs_in")
-            # The labels name a DSD rate by its multiple of a 44.1k or 48k source.
-            _need(x["fs_in"] in FAMILY and int(rate) % int(x["fs_in"]) == 0, "a rate no label names", rat)
+            _need(x["fs_in"] in _FAMILY, "a source no rate family is based on", f"{rat}.fs_in")
+            # A DSD rate of its source's family — a power-of-two multiple, 64
+            # and up, of a 44.1k or 48k source: rate_name names it with its
+            # family ("DSD256", "DSD256 (48k)"), so no word of the source is
+            # needed beside it
+            n, left = divmod(int(rate), int(x["fs_in"]))
+            _need(n >= 64 and not left and not n & (n - 1), "not a DSD rate of its source", rat)
             if key == "rates_refused":
                 _text(x.get("line"), f"{rat}.line", _REFUSAL)
                 continue
@@ -958,9 +980,12 @@ class Atlas:
         measuring host are never read."""
         return [self._pairs[pid] for pid in found.entry["pairs"]] if found.entry else []
 
-    def axis_pairs(self, axis: str) -> List[Dict[str, Any]]:
-        """Every approved pair on `axis`, in the file's order."""
-        return [p for p in self._pairs.values() if p["axis"] == axis]
+    def axis_pairs(self, axis: str, engine: str) -> List[Dict[str, Any]]:
+        """Every approved pair on `axis` that `engine`'s entries list, in the
+        file's order — another engine's pair is never offered as this one's."""
+        listed = {ref for plural in KINDS.values() for e in self._engines[engine][plural].values()
+                  for ref in e["pairs"]}
+        return [p for p in self._pairs.values() if p["axis"] == axis and p["id"] in listed]
 
     def source(self, sid: str) -> Optional[Dict[str, Any]]:
         """A source re-read in full (status O); any other is treated as absent,
@@ -1081,17 +1106,6 @@ def context_label(key: str) -> str:
     return CONTEXT_LABEL.format(slot="Nx" if slot == "nx" else "1x", source=source, output=output)
 
 
-def rate_label(rate: str, fs_in: str) -> str:
-    """"DSD256 · from 44.1k": the rate key over its source's, a label — the
-    only arithmetic on the file's keys."""
-    return RATE_LABEL.format(n=int(rate) // int(fs_in), family=FAMILY[fs_in])
-
-
-def rate_short(rate: str, fs_in: str) -> str:
-    """"DSD256", "DSD512 (48k)"."""
-    return (RATE_SHORT_48 if fs_in == "48000" else RATE_SHORT).format(n=int(rate) // int(fs_in))
-
-
 def rate_name(hz: int) -> str:
     """A rate HQPlayer reports, named as the HQPlayer screen names it
     (app-shell.js fmtRateLabel) — the one namer for every text the node
@@ -1109,14 +1123,6 @@ def rate_name(hz: int) -> str:
             return f"DSD{mult}{beside}"
     mhz = hz / 1_000_000
     return f"{mhz:.0f} MHz" if mhz % 1 == 0 else f"{mhz:.2f} MHz"
-
-
-def rate_named(rate: str, fs_in: str) -> str:
-    """A file's rate key by rate_name, for a text that gives each rate one
-    name — the assistant's: a key is always a multiple of its own source's
-    family (the shape read here), so the name says the family and the source
-    needs no word."""
-    return rate_name(int(rate))
 
 
 def by_rate(rates: Dict[str, Dict[str, Any]]) -> List[Tuple[str, Dict[str, Any]]]:
@@ -1313,12 +1319,11 @@ def _modulator_chips(found: Found) -> List[Dict[str, Any]]:
     e = found.entry
     chips = [_chip([_order_words(e["structure"])], ORDER_TITLE)]
     refused = by_rate(e["rates_refused"])
-    short = words([rate_short(rate, x["fs_in"]) for rate, x in refused]) if refused else ""
+    rates = words([rate_name(int(rate)) for rate, _ in refused]) if refused else ""
     if found.state == "refused":
-        chips.append(_chip([REFUSED_ALL], REFUSED_ALL_TITLE.format(rates=short)))
+        chips.append(_chip([REFUSED_ALL], REFUSED_ALL_TITLE.format(rates=rates)))
     elif refused:
-        labels = words([rate_label(rate, x["fs_in"]) for rate, x in refused])
-        chips.append(_chip(_phrase(REFUSED_SOME, rates=short), REFUSED_SOME_TITLE.format(rates=labels,
+        chips.append(_chip(_phrase(REFUSED_SOME, rates=rates), REFUSED_SOME_TITLE.format(rates=rates,
                                                                                           engine=found.engine)))
     return chips
 
@@ -1354,14 +1359,12 @@ def _bracket(atlas: Atlas, found: Found, rows: List[Dict[str, Any]],
 
 
 def card(atlas: Optional[Atlas], kind: str, name: str, rows: List[Dict[str, Any]], user_engine: Optional[str],
-         mode: Optional[str], *, published: bool = False,
-         name_rate: Callable[[str, str], str] = rate_label) -> Optional[Dict[str, Any]]:
+         mode: Optional[str], *, published: bool = False) -> Optional[Dict[str, Any]]:
     """The detail card of HQPlayer's `name`, which `rows` — its live list of
     that kind — holds now; None when it does not. Status lines, then sections
     in order, a section with nothing to say left out; `link` only once the
     entry's release has a date. `published`: of the dated releases alone, as
-    Atlas.speaks_of's. `name_rate` names a modulator's rates — the screen's
-    labels, or rate_named for a text that gives each rate one name."""
+    Atlas.speaks_of's."""
     row = next((r for r in rows if r["name"] == name), None)
     if row is None:
         return None
@@ -1392,8 +1395,7 @@ def card(atlas: Optional[Atlas], kind: str, name: str, rows: List[Dict[str, Any]
         if kind == "filter":
             sections.append(_properties(atlas, found, order))
         else:
-            sections += [_per_rate(atlas, found, order, name_rate), _refused(e, name_rate),
-                         _fullscale(atlas, found, name_rate)]
+            sections += [_per_rate(atlas, found, order), _refused(e), _fullscale(atlas, found)]
         sections += [_differs(atlas, found), _purpose(atlas, e), _history(atlas, e), _sources(atlas, found)]
         link = atlas.link(found)
         if link:
@@ -1595,29 +1597,28 @@ def idle_rows(atlas: Atlas, found: Found, used: set) -> List[Tuple[str, Dict[str
             for rate, x in by_rate(found.entry["rates"])]
 
 
-def _per_rate(atlas: Atlas, found: Found, order: Dict[str, int],
-              name_rate: Callable[[str, str], str]) -> Optional[Dict[str, Any]]:
+def _per_rate(atlas: Atlas, found: Found, order: Dict[str, int]) -> Optional[Dict[str, Any]]:
     """A modulator's idle noise per measured rate. Its highest stable levels
     stay out: near full scale stands in its own table, under its own words."""
     if not found.entry["rates"]:
         return None
     used: set = set()
-    rows = [{"label": name_rate(rate, x["fs_in"]), "cells": [wire(value)]}
-            for rate, x, value in idle_rows(atlas, found, used)]
+    rows = [{"label": rate_name(int(rate)), "cells": [wire(value)]}
+            for rate, _, value in idle_rows(atlas, found, used)]
     items = [_table([IDLE], rows, corner=RATE)] + notes(used)
     return _section(PER_RATE, items + figures_note(atlas, found, order))
 
 
-def _refused(e: Dict[str, Any], name_rate: Callable[[str, str], str]) -> Optional[Dict[str, Any]]:
+def _refused(e: Dict[str, Any]) -> Optional[Dict[str, Any]]:
     refused = by_rate(e["rates_refused"])
     if not refused:
         return None
-    lead = _line(_phrase(REFUSED_LEAD, rates=words([rate_short(rate, x["fs_in"]) for rate, x in refused])))
-    lines = [_line(_phrase(REFUSED_LINE, rate=name_rate(rate, x["fs_in"]), line=x["line"])) for rate, x in refused]
+    lead = _line(_phrase(REFUSED_LEAD, rates=words([rate_name(int(rate)) for rate, _ in refused])))
+    lines = [_line(_phrase(REFUSED_LINE, rate=rate_name(int(rate)), line=x["line"])) for rate, x in refused]
     return _section(REFUSED, [lead] + lines)
 
 
-def _fullscale(atlas: Atlas, found: Found, name_rate: Callable[[str, str], str]) -> Optional[Dict[str, Any]]:
+def _fullscale(atlas: Atlas, found: Found) -> Optional[Dict[str, Any]]:
     """The highest level stable at each HQPlayer volume tested; a volume not
     played at a rate is "not tested"."""
     cells = atlas.fullscale(found)
@@ -1627,7 +1628,7 @@ def _fullscale(atlas: Atlas, found: Found, name_rate: Callable[[str, str], str])
     # Volume keys are labels: listed from 0 dB down, as the site does.
     volumes = sorted({volume for played in cells.values() for volume in played}, key=float, reverse=True)
     rows = []
-    for rate, x in by_rate({rate: held[rate] for rate in cells}):
+    for rate, _ in by_rate({rate: held[rate] for rate in cells}):
         row = []
         for volume in volumes:
             cell = cells[rate].get(volume)
@@ -1637,7 +1638,7 @@ def _fullscale(atlas: Atlas, found: Found, name_rate: Callable[[str, str], str])
             bits = [[NONE_TESTED] if cell[key] is None else _phrase(CELL, v=cell[key], what=what)
                     for key, what in TONE_PAIR if key in cell]
             row.append(wire(_join(bits, "; ")))
-        rows.append({"label": name_rate(rate, x["fs_in"]), "cells": row})
+        rows.append({"label": rate_name(int(rate)), "cells": row})
     columns = [VOLUME.format(volume=_minus(volume)) for volume in volumes]
     return _section(FULLSCALE, [_line([FULLSCALE_LEAD]), _table(columns, rows, corner=RATE),
                                 _note([FULLSCALE_NOTE])])

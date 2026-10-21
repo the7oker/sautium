@@ -22,7 +22,7 @@ if str(BACKEND) not in sys.path:
 import pytest  # noqa: E402
 
 import hqp_atlas  # noqa: E402
-from hqp_atlas import Num, plain  # noqa: E402
+from hqp_atlas import plain  # noqa: E402
 from hqplayer_client import parse_filter_description, parse_shaper_description  # noqa: E402
 
 FIXTURE = Path(__file__).resolve().parent / "fixtures" / "hqp_atlas" / "app-synthetic.json"
@@ -309,8 +309,32 @@ def _break(doc, how):
         entry["groups"] = ["demo-sinc-a+demo-zzz"]
     elif how == "an entry under another slug":
         doc["engines"]["9.4.1"]["filters"]["demo-other"] = doc["engines"]["9.4.1"]["filters"].pop("demo-sinc-a")
-    elif how == "a rate no label names":
+    elif how == "a source of no family's base":
         doc["engines"]["9.4.1"]["modulators"]["dmx5"]["rates"]["5644800"]["fs_in"] = 88200
+    elif how == "a rate no DSD rate of its source":
+        rates = doc["engines"]["9.4.1"]["modulators"]["dmx5"]["rates"]
+        rates["8467200"] = rates["5644800"]                  # 192 × 44.1k
+    elif how == "a rate under DSD64":
+        rates = doc["engines"]["9.4.1"]["modulators"]["dmx5"]["rates"]
+        rates["1411200"] = rates["5644800"]                  # 32 × 44.1k, a PCM rate
+    elif how == "a rate no multiple of its source":
+        rates = doc["engines"]["9.4.1"]["modulators"]["dmx5"]["rates"]
+        rates["5644801"] = rates["5644800"]
+    elif how == "a rate written with a leading zero":
+        rates = doc["engines"]["9.4.1"]["modulators"]["dmx5"]["rates"]
+        rates["05644800"] = rates["5644800"]                 # two keys, one rate
+    elif how == "a modulator pair at a rate a member was not measured at":
+        p = next(p for p in doc["pairs"] if p["kind"] == "modulator")
+        p["contexts"]["12288000"] = p["contexts"].pop("5644800")   # DMX7EC-a's, not DMX5's
+    elif how == "a pair a member of it does not list":
+        doc["engines"]["9.4.1"]["modulators"]["dmx5"]["pairs"] = []
+    elif how == "a pair whose member the engine does not hold":
+        del doc["engines"]["9.4.1"]["modulators"]["dmx5"]
+    elif how == "a filter pair at a context a member was not measured at":
+        p = next(p for p in doc["pairs"] if p["kind"] == "filter")
+        p["contexts"]["nx-88.2k-705.6k"] = p["contexts"][p["default_context"]]   # neither member's
+    elif how == "a filter pair at a context a member's measurement is void at":
+        _filter(doc, "demo-gauss-xa")["contexts"]["1x-44.1k-705.6k"] = {"void": ["analysis failed"]}
     elif how == "a group not approved":
         doc["groups"][1]["status"] = "candidate"
     elif how == "a source it cites that the file does not hold":
@@ -346,7 +370,11 @@ BREAKS = ("another schema", "a missing key", "a wrong type deep inside", "an unr
           "a name of another shape", "apodizing without its log name", "a log name without apodizing",
           "a manual mark without its sources", "manual sources without a mark",
           "a group figure outside the closed list", "a group it names that the file does not hold",
-          "an entry under another slug", "a rate no label names", "a group not approved",
+          "an entry under another slug", "a source of no family's base", "a rate no DSD rate of its source",
+          "a rate under DSD64", "a rate no multiple of its source", "a rate written with a leading zero",
+          "a modulator pair at a rate a member was not measured at", "a pair a member of it does not list",
+          "a pair whose member the engine does not hold", "a filter pair at a context a member was not measured at",
+          "a filter pair at a context a member's measurement is void at", "a group not approved",
           "a source it cites that the file does not hold", "no engine", "a group figure's bound set by a list",
           "an idle bound set by no excitation the words name", "a range without its min",
           "a rate longer than int() reads", "an engine longer than int() reads", "a release of another engine",
@@ -381,6 +409,22 @@ def test_a_refusal_names_the_place_by_keys_that_passed_their_shape(tmp_path, cap
     caplog.clear()
     assert _read(tmp_path, _break(_doc(), "a group figure's bound set by a list")) is None
     assert "not one of its values, at engines.9.4.1.identity_groups[1].figures.12288000.idle_db.value.by" \
+        in caplog.text
+    caplog.clear()
+    assert _read(tmp_path, _break(_doc(), "a rate no DSD rate of its source")) is None
+    assert "not a DSD rate of its source, at engines.9.4.1.modulators.dmx5.rates.8467200" in caplog.text
+    caplog.clear()
+    assert _read(tmp_path, _break(_doc(), "a source of no family's base")) is None
+    assert "a source no rate family is based on, at engines.9.4.1.modulators.dmx5.rates.5644800.fs_in" in caplog.text
+    caplog.clear()
+    assert _read(tmp_path, _break(_doc(), "a modulator pair at a rate a member was not measured at")) is None
+    assert "a pair at a rate its member was not measured at, at engines.9.4.1.modulators.dmx5.pairs" in caplog.text
+    caplog.clear()
+    assert _read(tmp_path, _break(_doc(), "a pair a member of it does not list")) is None
+    assert "a pair a member of it does not list, at engines.9.4.1.modulators.dmx7ec-a.pairs" in caplog.text
+    caplog.clear()
+    assert _read(tmp_path, _break(_doc(), "a filter pair at a context a member's measurement is void at")) is None
+    assert "a pair at a context its member was not measured at, at engines.9.4.1.filters.demo-gauss-xa.pairs" \
         in caplog.text
 
 
@@ -505,10 +549,6 @@ def test_the_engine_line(atlas):
 def test_the_labels():
     assert hqp_atlas.context_label("1x-44.1k-705.6k") == "1x · 44.1k → 705.6k"
     assert hqp_atlas.context_label("nx-96k-768k") == "Nx · 96k → 768k"
-    assert hqp_atlas.rate_label("5644800", Num("44100")) == "DSD128 · from 44.1k"
-    assert hqp_atlas.rate_label("12288000", Num("48000")) == "DSD256 · from 48k"
-    assert hqp_atlas.rate_short("5644800", Num("44100")) == "DSD128"
-    assert hqp_atlas.rate_short("24576000", Num("48000")) == "DSD512 (48k)"
 
 
 def test_a_rate_is_named_as_the_hqplayer_screen_names_it():
@@ -665,6 +705,10 @@ def test_the_head_names_the_chips_context_only_while_every_row_shares_it(tmp_pat
     contexts = _filter(doc, "demo-gauss-xa")["contexts"]
     contexts["nx-88.2k-705.6k"] = contexts.pop("1x-44.1k-705.6k")
     contexts["1x-44.1k-705.6k"] = {"void": ["analysis failed"]}
+    # Its pair there goes with it: a pair is measured where both play
+    doc["pairs"] = [p for p in doc["pairs"] if "demo-gauss-xa" not in p["members"]]
+    for e in doc["engines"]["9.4.1"]["filters"].values():
+        e["pairs"] = [ref for ref in e["pairs"] if not ref.endswith("|demo-gauss-xa")]
     atlas = _read(tmp_path, doc)
     assert [plain(x) for x in hqp_atlas.head(atlas, "9.4.1", "pcm")["filters"]] == \
         ["Measured on HQPlayer engine 9.4.1"]
@@ -751,7 +795,7 @@ def test_a_modulator_row(atlas):
     f = _facts_of(atlas, "modulator", MODULATORS, "9.4.1", "sdm")
     assert _chips(f["DMX5"]) == ["Gen1", "fifth order", "refused at DSD256"]
     assert f["DMX5"]["chips"][1]["title"] == "Order, read off the name"
-    assert f["DMX5"]["chips"][2]["title"] == "HQPlayer refused it at DSD256 · from 44.1k on engine 9.4.1"
+    assert f["DMX5"]["chips"][2]["title"] == "HQPlayer refused it at DSD256 on engine 9.4.1"
     assert _chips(f["DMX7 512+fs"]) == ["Gen5", "seventh order", "refused at DSD128 and DSD256 (48k)"]
     assert _chips(f["DMXH8"]) == ["Gen8", "fifth order", "refused at every measured rate"]
     assert f["DMXH8"]["chips"][2]["title"] == \
@@ -931,16 +975,16 @@ def test_a_modulators_card(atlas):
         "A fictional note on how the three were compared.",
         "## Per rate",
         "Rate | Idle noise, 20 Hz–20 kHz, dB",
-        "DSD128 · from 44.1k | −91.5",
-        "DSD256 · from 48k | ≤ −97.5",
+        "DSD128 | −91.5",
+        "DSD256 (48k) | ≤ −97.5",
         "≥ at least, ≤ at most: the reading lies within reach of the measurement's noise, so it is a bound.",
         "For a member of DMX7EC: -c, -a, -b, the idle noise is the group's figure where it holds one — the "
         "members' median, a bound where any member's reading is one.",
         "## Near full scale",
         "The highest level stable on both channels at the modulator's input.",
         "Rate | HQPlayer volume 0 dB | HQPlayer volume −3 dB",
-        "DSD128 · from 44.1k | −0.5 dBFS · tone; −6 dBFS · pair | −3.5 dBFS · tone; none of the tested levels",
-        "DSD256 · from 48k | −0.5 dBFS · tone | not tested",
+        "DSD128 | −0.5 dBFS · tone; −6 dBFS · pair | −3.5 dBFS · tone; none of the tested levels",
+        "DSD256 (48k) | −0.5 dBFS · tone | not tested",
         "Tone: one sine; pair: two tones together. Not tested: no play at that volume.",
         "## Differs only in",
         "Order — from DMX5.",
@@ -968,8 +1012,8 @@ def test_a_modulator_refused_at_every_rate(atlas):
         "From HQPlayer's description “Gen8”.",
         "## Rates HQPlayer refused",
         "HQPlayer refused it at DSD128 and DSD256 (48k).",
-        "DSD128 · from 44.1k: “Requested filter not possible with this rate combination 44100/5644800, stop”",
-        "DSD256 · from 48k: “Requested filter not possible with this rate combination 48000/12288000, stop”",
+        "DSD128: “Requested filter not possible with this rate combination 44100/5644800, stop”",
+        "DSD256 (48k): “Requested filter not possible with this rate combination 48000/12288000, stop”",
         "## Sources",
         "Measured by Sautium on HQPlayer engine 9.4.1.",
         "Measured with demo-sinc-a in both filter slots."]
@@ -1071,18 +1115,22 @@ def test_published_reads_only_what_a_dated_release_holds(tmp_path):
     assert not atlas.speaks_of("8.0.0", "filter", published=True)
 
 
-def test_a_card_can_name_each_rate_one_way(atlas):
-    # The screen's card labels a modulator's rates with their source
-    # (rate_label); a text that names each rate one way passes rate_named
-    rows = _rows(MODULATORS, "modulator")
-    text = _card_text(hqp_atlas.card(atlas, "modulator", "DMX7EC-a", rows, "9.4.1", "sdm",
-                                     name_rate=hqp_atlas.rate_named))
-    assert "DSD128 | −91.5" in text and "DSD256 (48k) | ≤ −97.5" in text
-    assert "DSD128 | −0.5 dBFS · tone; −6 dBFS · pair | −3.5 dBFS · tone; none of the tested levels" in text
-    refused = _card_text(hqp_atlas.card(atlas, "modulator", "DMXH8", rows, "9.4.1", "sdm",
-                                        name_rate=hqp_atlas.rate_named))
-    assert "DSD256 (48k): “Requested filter not possible with this rate combination 48000/12288000, stop”" in refused
-    assert not any("· from" in line for line in text + refused)
+def test_every_rate_is_named_as_the_hqplayer_screen_names_it(atlas):
+    # One name for a rate on a screen: a file's rate key is a DSD rate of its
+    # source's family (the shape read here), so rate_name's name says the
+    # family, and nothing names the source beside a rate
+    keys = {rate for e in _doc()["engines"]["9.4.1"]["modulators"].values()
+            for rate in [*e["rates"], *e["rates_refused"]]}
+    named = {hqp_atlas.rate_name(int(rate)) for rate in keys}
+    assert named == {"DSD128", "DSD256", "DSD512", "DSD256 (48k)"}
+    results = _everything(atlas)
+    cards = [c for c in results if isinstance(c, dict) and "sections" in c]
+    labels = {r["label"] for c in cards for s in c["sections"] for it in s["items"]
+              if "table" in it and it["table"]["corner"] == hqp_atlas.RATE for r in it["table"]["rows"]}
+    refused = {plain(it["line"]).split(": “")[0] for c in cards for s in c["sections"] if s["head"] == hqp_atlas.REFUSED
+               for it in s["items"][1:]}
+    assert labels and refused and labels | refused <= named
+    assert not any("· from" in text for text in [*_strings(results), *_constants()])
 
 
 def test_a_modulator_pairs_size_per_rate_in_the_words_of_the_atlas_pages(tmp_path, atlas):

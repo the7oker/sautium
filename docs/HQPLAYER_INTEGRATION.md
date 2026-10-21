@@ -298,7 +298,10 @@ The module also holds the node's one rate namer (since 2026-10-17):
 `hqp_atlas.rate_name` names a rate HQPlayer reports as the screen's
 `fmtRateLabel` does — kHz up to 768 kHz, a DSD rate as "DSD256" or "DSD512
 (48k)", anything else in MHz. The benchmark's point labels (the run's
-progress), a verdict's DSP line and the assistant's lists of rates use it.
+progress), a verdict's DSP line, the assistant's lists of rates and, since
+2026-10-21, a modulator's rates on its card and its row use it — never with
+the source beside a rate: a file's rate is a DSD rate of its source's family,
+which the name says.
 
 ### Answers: `result` and HQPlayer's reason
 Setters and transport commands echo their element with `result="OK"` or

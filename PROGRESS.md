@@ -2825,9 +2825,10 @@ atlas's pages name it — "DSD256", "DSD512 (48k)" — wherever the app words a
 rate itself: the Rate row and its picker, the rate playing, the Benchmark's
 results, a cut-short run's line and the notice of a run that stayed in
 another mode; and wherever the node words one, through one namer
-(`hqp_atlas.rate_name`): the benchmark's progress, a verdict's DSP line and
-the assistant's lists of rates, which call rate 0 "Auto" as the Rate knob
-does.
+(`hqp_atlas.rate_name`): the benchmark's progress, a verdict's DSP line, the
+assistant's lists of rates, which call rate 0 "Auto" as the Rate knob does,
+and, since 2026-10-21, a modulator's rates on its card and its row
+("DSD128 · from 44.1k" there before), as the tools name them.
 
 Open (2026-10-18): a row of either sheet takes the second click of a
 double-click on the knob that opened it as a pick — the sheet covers the

@@ -461,6 +461,17 @@ def test_ab_pair_offers_the_approved_pairs_with_their_size_and_the_steps(tmp_pat
         "Left out, as this HQPlayer does not list them now: DMX5, DMX7EC-a."
 
 
+def test_ab_pair_offers_only_the_pairs_the_shown_engines_entries_list(tmp_path):
+    # A pair no entry of the engine lists is no pair of that engine's: never
+    # offered, whatever its members' names
+    doc = json.loads(FIXTURE.read_text(encoding="utf-8"))
+    doc["releases"] = {"9.4.1/pcm": "2001-05-06", "9.4.1/sdm": "2001-05-06"}
+    for e in doc["engines"]["9.4.1"]["modulators"].values():
+        e["pairs"] = [ref for ref in e["pairs"] if not ref.startswith("order:")]
+    atlas = _shipped(tmp_path, json.dumps(doc, ensure_ascii=False))
+    assert atlas is not None and _say("ab_pair", _read(atlas, "sdm"), axis="order") == hqp_assistant.AB_NONE
+
+
 # -- The rate check (Q6) -------------------------------------------------------------------
 
 
