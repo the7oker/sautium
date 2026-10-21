@@ -4768,10 +4768,11 @@ class HqpBackend(PlayerBackend):
         file's entries whose release has a date — a verdict leaves the node
         (backend.log, a warrant's playback scope), and neither the node's own
         copy of the atlas nor a file put at the shipped path before its
-        release may. The source: the rate HQPlayer reported, else the slot's
-        file row; and the PCM rates of the queue from that slot to its end,
-        in the same one query — the verdict names a rate to pick only when
-        every one of them is refused. None without the reads."""
+        release may. The source: the rate HQPlayer reported, a DSD one or
+        not as it said, else the slot's file row; and the PCM rates of the
+        queue from that slot to its end, in the same one query — the verdict
+        names a rate to pick only when every one of them is refused. None
+        without the reads."""
         import hqp_library
         state, lists = (reads or {}).get("state"), (reads or {}).get("lists") or {}
         if state is None or any(lists.get(k) is None for k in ("modes", "rates", "filters", "shapers")):
@@ -4786,7 +4787,8 @@ class HqpBackend(PlayerBackend):
             state, lists["modes"], lists["rates"], lists["filters"], lists["shapers"],
             adaptive=None if _stream_mode() else hqp_library.local_engine().adaptive_rate,
             atlas=hqp_atlas.read(hqp_atlas.SHIPPED, None), engine=self._info.get("engine"), published=True)
-        source = next((t["src_rate"] for t in ticks if t.get("src_rate")), None)
+        said = next((t for t in ticks if t.get("src_rate")), None)
+        source, dsd = (said["src_rate"], bool(said.get("sdm"))) if said else (None, False)
         queue = None
         if item is not None:
             slot = self._queue.index_of(item)
@@ -4798,9 +4800,10 @@ class HqpBackend(PlayerBackend):
                 # and its rate to pick, never the poll: it is not HQPlayer failing
                 logger.warning("A stopped track's source rates not read: %s", e)
             else:
-                source = source or ahead.first
+                if source is None:
+                    source, dsd = (ahead.first, False) if ahead.first else (ahead.first_dsd, bool(ahead.first_dsd))
                 queue = ahead.pcm if slot is not None else None
-        return diag.rate_facts(inputs, source, queue)
+        return diag.rate_facts(inputs, source, queue, dsd)
 
     def _queue_refs(self) -> set:
         """Every path and verbatim URI the queue hands over, as HQPlayer's

@@ -2,9 +2,11 @@
 output rate from the tracks still to play, and its words — on HQPlayer-shaped
 lists with invented names and the synthetic atlas
 (fixtures/hqp_atlas/app-synthetic.json: invented modulators refused at
-invented rates on the invented engine 9.4.1). Pure: no database, no
-HQPlayer."""
+invented rates on the invented engine 9.4.1), and on engine 6.2.4's own PCM
+lists (fixtures/hqp_lists/desktop_6.2.4.json) for what was measured there
+(UP_MATRIX). Pure: no database, no HQPlayer."""
 
+import json
 import sys
 from pathlib import Path
 
@@ -17,8 +19,37 @@ import pytest  # noqa: E402
 import hqp_rate_check as rc  # noqa: E402
 from hqp_atlas import plain  # noqa: E402
 from hqp_rate_check import Filter, Inputs, Sources  # noqa: E402
+from hqplayer_client import parse_filter_description  # noqa: E402
 
 from test_hqp_atlas import BANNED, MODULATORS, PCM, SDM, _another_engine, _doc, _read, _rows  # noqa: E402
+
+LISTS_624 = Path(__file__).resolve().parent / "fixtures" / "hqp_lists" / "desktop_6.2.4.json"
+DSD64 = 2822400
+# The rate HQPlayer 6.2.4's log named for a DSD64 track in PCM mode ("Rate: 176400")
+STAGE = 176400
+# What HQPlayer engine 6.2.4 did (Desktop, PCM mode, the filter in both slots,
+# the adaptive output rate off, 2026-10-19), per filter and cell — a source and
+# the output rate fixed: "plays"; "silent": not refused, its engine started,
+# its Status at 0 for eight seconds (where watched longer, it played on);
+# "own": it played at the source's own rate; "stops":
+# refused before the engine started ("Requested filter not possible with this
+# rate combination A/B, stop", A the source's rate, a DSD64 track's 176.4 kHz);
+# "builds": the filter built, then the engine refused ("clHQPlayerEngine::
+# Execute(): lInRate > lOutRate").
+UP_CELLS = {"44.1k->88.2k": (44100, 88200), "44.1k->44.1k": (44100, 44100), "88.2k->88.2k": (88200, 88200),
+            "352.8k->352.8k": (352800, 352800), "88.2k->44.1k": (88200, 44100),
+            "352.8k->176.4k": (352800, 176400), "DSD64->352.8k": (DSD64, 352800), "DSD64->88.2k": (DSD64, 88200)}
+UP_MATRIX = {name: dict(zip(UP_CELLS, row.split())) for name, row in {
+    "sinc-M": "silent silent silent silent silent silent silent silent",
+    "closed-form": "plays plays plays plays stops stops plays stops",
+    "FFT": "plays stops stops stops plays plays plays plays",
+    "sinc-medium": "plays plays plays plays builds builds plays builds",
+    "poly-sinc-ext2": "plays plays plays plays plays plays plays plays",
+    "poly-sinc-ext2-short": "plays plays plays plays stops stops plays stops",
+    "FIR": "plays stops stops stops plays plays plays plays",
+    "none": "own plays plays plays own own stops stops",
+}.items()}
+STOPS = ("stops", "builds")
 
 SOURCES = (22050, 32000, 44100, 48000, 88200, 96000, 176400, 192000)
 # The sources each class does not reach, by output rate: 705.6 kHz, 768 kHz,
@@ -93,7 +124,8 @@ def test_each_class_reaches_what_its_arithmetic_does(ratio, up):
     for rate in (705600, 768000, 5644800, 6144000, 11289600):
         c = rc.check(_inp(ratio, rate, up=up), _src(*SOURCES))
         assert _refused(c) == NOT_REACHED.get(ratio, {}).get(rate, set()), (ratio, rate)
-    # an output under the source is not judged here
+    # an output under the source: judged only by what was measured, on its
+    # engine's major (below) — here no engine is known
     assert _refused(rc.check(_inp(ratio, 88200, up=up), _src(*SOURCES))) == \
         ({32000, 48000} if ratio in ("2^x", "Int") else set())
 
@@ -217,6 +249,163 @@ def test_hqplayer_5_describes_no_class_and_knows_no_atlas_engine(tmp_path):
     assert not c.groups and rc.lines(c) == {} and rc.verdict(c, 48000, None) is None
 
 
+# -- What was measured on engine 6.2.4 ------------------------------------------------
+
+def _measured(name, out, *, engine="6.2.4", adaptive="not checked"):
+    """HQPlayer 6.2.4's PCM lists, `name` in both filter slots at the fixed
+    output rate `out`."""
+    lists = json.loads(LISTS_624.read_text(encoding="utf-8"))["pcm"]
+    filters = [{**f, "parsed": parse_filter_description(f["description"])} for f in lists["filters"]]
+    index = next(f["index"] for f in filters if f["name"] == name)
+    rate = next(r["index"] for r in lists["rates"] if r["rate"] == out)
+    return rc.inputs({"mode": 1, "rate": rate, "filterNx": index, "filter1x": index, "shaper": 7}, MODES,
+                     lists["rates"], filters, lists["shapers"], adaptive=adaptive, engine=engine)
+
+
+def _cell(name, cell, **kw):
+    """The check at an UP_CELLS cell: a PCM source as the queue holds it; a
+    DSD64 one as a verdict sees it, at the rate HQPlayer's log named."""
+    src, out = UP_CELLS[cell]
+    inp = _measured(name, out, **kw)
+    if src == DSD64:
+        return rc.check(inp, Sources({STAGE: 1}, first=STAGE, of_dsd=DSD64))
+    return rc.check(inp, Sources({src: 1}, first=src))
+
+
+@pytest.mark.parametrize("name", UP_MATRIX)
+def test_a_stop_is_said_exactly_where_engine_6_2_4_stopped(name):
+    for cell, (src, out) in UP_CELLS.items():
+        did, c = UP_MATRIX[name][cell], _cell(name, cell)
+        if name == "none":
+            # 1:1 is never judged: with a DSD track HQPlayer's line speaks alone
+            assert not c.groups, cell
+        else:
+            assert bool(c.groups) == (did in STOPS), (cell, did, c.groups)
+        # sinc-M under the source's rate: its words, no stop
+        assert bool(c.notes) == (name == "sinc-M" and out < (STAGE if src == DSD64 else src)), cell
+        # before Play a DSD track is not checked: the rate it reaches the filter at is HQPlayer's to name
+        if src == DSD64:
+            assert not rc.check(_measured(name, out), Sources({}, dsd=1)).groups
+
+
+def test_what_was_measured_speaks_on_its_engines_major_alone():
+    assert [rc.measured_on(e) for e in ("6.2.4", "6.0.0", "6.3.12", "7.0.1", "5.17.0", None, "")] == \
+        ["6.2.4", "6.2.4", "6.2.4", None, None, None, None]
+    for engine in ("7.0.1", None):
+        for name, cell in (("closed-form", "88.2k->44.1k"), ("FFT", "44.1k->44.1k"), ("FIR", "352.8k->352.8k"),
+                           ("sinc-medium", "352.8k->176.4k")):
+            assert not _cell(name, cell, engine=engine).groups, (engine, name)
+        assert not _cell("sinc-M", "88.2k->44.1k", engine=engine).notes
+        # the class's arithmetic needs no measurement: 2^x up across families still speaks
+        c = rc.check(_measured("closed-form", 705600, engine=engine), Sources({48000: 1}))
+        assert [(g.why, g.sources) for g in c.groups] == [("class", (48000,))]
+    # the measured engine is named, whichever of its major HQPlayer runs
+    c = _cell("closed-form", "88.2k->44.1k", engine="6.0.0")
+    assert c.measured == "6.2.4" and " tried on engine 6.2.4, " in plain(rc.lines(c)["filter"][0])
+
+
+def test_an_up_filter_not_tried_follows_the_rule_and_the_others_without_up_are_not_judged_at_1_to_1():
+    # "up" filters not tried — sinc-short, poly-sinc-gauss-short — refused under the source's rate
+    for name in ("sinc-short", "poly-sinc-gauss-short"):
+        assert [g.why for g in _cell(name, "352.8k->176.4k").groups] == ["down"], name
+    # sinc-Mx, sinc-M's twin, never tried there: neither a stop nor sinc-M's words
+    c = _cell("sinc-Mx", "352.8k->176.4k")
+    assert not c.groups and not c.notes and rc.lines(c) == {}
+    # the 2^x and Int filters without "up" other than FFT and FIR: 1:1 not tried, nothing said
+    for name in ("IIR", "IIR2", "asymFIR", "minphaseFIR", "poly-sinc-ext"):
+        assert not _cell(name, "88.2k->88.2k").groups, name
+
+
+def test_the_words_of_each_measured_stop_and_of_sinc_m():
+    said = {k: [plain(p) for p in v] for k, v in rc.lines(_cell("closed-form", "88.2k->44.1k")).items()}
+    assert said == {"filter": [
+        "HQPlayer describes closed-form as 2^x up. Of the “up” filters tried on engine 6.2.4, it stopped all but "
+        "sinc-M under the source's rate, so it will stop on the 88.2 kHz tracks in the queue at 44.1 kHz.",
+        "Filters described with “up” are made for upsampling, not for decimation: pick one HQPlayer describes "
+        "without “up”, or as the output rate the tracks' own or a power-of-two multiple of it."]}
+    said = {k: [plain(p) for p in v] for k, v in rc.lines(_cell("FFT", "44.1k->44.1k")).items()}
+    assert said == {"filter": [
+        "HQPlayer refused FFT at the source's own rate (1:1) on engine 6.2.4, so it will stop on the 44.1 kHz "
+        "tracks in the queue.",
+        "Pick another filter, or another output rate."]}
+    # sinc-M: the screen's words alone — no notice, no verdict, nothing the queue cannot play
+    c = _cell("sinc-M", "352.8k->176.4k")
+    assert [plain(p) for p in rc.lines(c)["filter"]] == [
+        "HQPlayer describes sinc-M as 2^x up, and the 352.8 kHz tracks in the queue are above 176.4 kHz. Filters "
+        "described with “up” are made for upsampling, not for decimation; on engine 6.2.4 HQPlayer converted "
+        "352.8 kHz to 176.4 kHz with sinc-M and did not stop."]
+    assert rc.notice(c) is None and rc.verdict(c, 352800, None) is None and not c.started_refused
+    # downward across the families, as from 96 to 44.1 kHz, nothing was measured: nothing said
+    c = rc.check(_measured("sinc-M", 44100), Sources({96000: 1, 88200: 1}))
+    assert not c.groups and [g.sources for g in c.notes] == [(88200,)]
+    # the notice names the queue's tracks that cannot play; hedged when the adaptive output rate is not known
+    hedged = rc.check(_measured("poly-sinc-ext2-short", 44100, adaptive=None), Sources({88200: 2, 44100: 1}))
+    assert plain(rc.notice(hedged)["title"]) == "Some tracks in the queue cannot play at 44.1 kHz"
+    assert plain(rc.notice(hedged)["text"][0]).endswith(
+        "so it will stop on the 88.2 kHz tracks in the queue at 44.1 kHz unless its adaptive output rate is on.")
+
+
+def test_a_verdict_names_the_measured_stop_and_a_dsd_tracks_rate_as_hqplayer_named_it():
+    line = "Requested filter not possible with this rate combination 88200/44100, stop"
+    v = rc.verdict(_cell("closed-form", "88.2k->44.1k"), 88200, line)
+    assert v == {"title": "HQPlayer refused the rate combination",
+                 "sentence": "HQPlayer describes closed-form as 2^x up: 44.1 kHz is under 88.2 kHz, and HQPlayer "
+                             f"stopped on this track. HQPlayer's log: “{line}”.",
+                 "next": "Filters described with “up” are made for upsampling, not for decimation: pick one "
+                         "HQPlayer describes without “up”, or as the output rate 88.2 kHz or a power-of-two "
+                         "multiple of it."}
+    v = rc.verdict(_cell("FIR", "88.2k->88.2k"), 88200, None)
+    assert (v["sentence"], v["next"]) == (
+        "HQPlayer refused FIR at the source's own rate (1:1) on engine 6.2.4, and it stopped on this 88.2 kHz "
+        "track.",
+        "Pick another filter, or another output rate.")
+    # a DSD64 track: by the rate HQPlayer's log named, never its own
+    v = rc.verdict(_cell("sinc-medium", "DSD64->88.2k"), STAGE, "clHQPlayerEngine::Execute(): lInRate > lOutRate",
+                   dsd=DSD64)
+    assert v["sentence"] == (
+        "HQPlayer describes sinc-medium as Any up: 88.2 kHz is under the 176.4 kHz HQPlayer converted this DSD64 "
+        "track to, and HQPlayer stopped on this track. HQPlayer's log: “clHQPlayerEngine::Execute(): lInRate > "
+        "lOutRate”.")
+    # the class's arithmetic from that rate too; the 1:1 measured from PCM sources alone
+    stage = rc.check(_measured("closed-form", 768000), Sources({STAGE: 1}, first=STAGE, of_dsd=DSD64))
+    assert rc.verdict(stage, STAGE, None, dsd=DSD64)["sentence"] == (
+        "HQPlayer describes closed-form as 2^x up: 768 kHz is no power-of-two multiple of the 176.4 kHz HQPlayer "
+        "converted this DSD64 track to, and HQPlayer stopped on this track.")
+    assert not rc.check(_measured("FFT", 176400), Sources({STAGE: 1}, first=STAGE, of_dsd=DSD64)).groups
+    # a DSD file whose tags give a PCM-looking rate (WavPack's 352.8 kHz for DSD64): named DSD alone
+    assert rc.verdict(stage, STAGE, None, dsd=352800)["sentence"].endswith(
+        "the 176.4 kHz HQPlayer converted this DSD track to, and HQPlayer stopped on this track.")
+
+
+def test_a_queue_with_several_kinds_of_stop_gives_each_its_fix_once():
+    # closed-form at 88.2 kHz: 48 kHz no power-of-two step below it, 176.4 kHz and 192 kHz above it
+    c = rc.check(_measured("closed-form", 88200), Sources({44100: 1, 48000: 2, 176400: 1, 192000: 1}))
+    assert [(g.why, g.sources) for g in c.groups] == [("class", (48000,)), ("down", (176400, 192000))]
+    assert c.fix_rate is None
+    said = [plain(p) for p in rc.lines(c)["filter"]]
+    assert said[2:] == ["Pick a filter HQPlayer describes as Any, or turn on adaptive output rate in HQPlayer's "
+                        "own settings (Output).",
+                        "Filters described with “up” are made for upsampling, not for decimation: pick one HQPlayer "
+                        "describes without “up”, or as the output rate the tracks' own or a power-of-two multiple of "
+                        "it."]
+    # FFT at 44.1 kHz: the 44.1 kHz tracks at 1:1, and nothing for those above it
+    c = rc.check(_measured("FFT", 44100), Sources({44100: 3, 88200: 1, 96000: 1}, first=88200))
+    assert [(g.why, g.sources) for g in c.groups] == [("one", (44100,))] and not c.started_refused
+
+
+def test_the_rate_to_pick_is_never_one_a_measured_refusal_stops_at():
+    # FIR at 48 kHz, a queue of 44.1 kHz tracks: the class's fix would name 44.1 kHz — FIR's 1:1
+    rates = tuple(r for r in (44100, 48000, 88200, 96000))
+    c = rc.check(_measured("FIR", 48000)._replace(rates=rates), Sources({44100: 2}, first=44100))
+    assert [(g.why, g.sources) for g in c.groups] == [("class", (44100,))] and c.fix_rate is None
+    # FFT at 96 kHz, the 88.2 kHz tracks alone: not 88.2 kHz either
+    c = rc.check(_measured("FFT", 96000)._replace(rates=rates), Sources({88200: 1}, first=88200))
+    assert c.fix_rate is None
+    # where nothing measured stops there, the rate is still named: another engine's major
+    c = rc.check(_measured("FIR", 48000, engine="7.0.1")._replace(rates=rates), Sources({44100: 2}, first=44100))
+    assert c.fix_rate == 44100
+
+
 # -- The queue ---------------------------------------------------------------------
 
 def test_the_rates_are_named_ascending_and_the_tracks_not_checked_are_said_last():
@@ -302,6 +491,9 @@ def _states(tmp_path):
         for ratio in ("2^x", "Int"):
             yield rc.check(_inp(ratio, adaptive=adaptive, rates=(705600, 768000)), _src(44100, 88200))
             yield rc.check(_inp(ratio, adaptive=adaptive), src)
+        # what was measured on engine 6.2.4: a stop under the source's rate, at 1:1, and sinc-M's words
+        for name, out in (("closed-form", 88200), ("FFT", 44100), ("sinc-M", 44100)):
+            yield rc.check(_measured(name, out, adaptive=adaptive), Sources({44100: 1, 48000: 1, 176400: 1}))
 
 
 def test_the_modulator_is_said_refused_at_exactly_the_rate_the_file_holds(tmp_path):

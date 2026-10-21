@@ -3728,7 +3728,10 @@ refused for that track's family — with HQPlayer's log line once its log is
 read, or that line alone. The next step names a filter HQPlayer describes as
 Any, the adaptive output rate in HQPlayer's own settings, or a rate of
 HQPlayer's list the tracks reach; for a modulator, another modulator or
-rate. The adaptive output rate is read in its three states, by the manual's
+rate (since 2026-10-21 also, below, a filter described without "up", or the
+track's own rate or a power-of-two multiple of it — a DSD track's, twice the
+rate HQPlayer converted it to or more — and another filter or rate after a
+1:1 refusal). The adaptive output rate is read in its three states, by the manual's
 names — not checked, grayed, checked (`settings.xml`'s `adaptive_rate` and
 `auto_family`); grayed took a lower rate the filter reaches, as the manual
 says, so the rule says nothing there, as in checked (2026-10-18). The rule
@@ -3759,10 +3762,51 @@ stopped tick plus twice the output delay plus 11 s (the longest build
 measured), or at once on HQPlayer's refusal line where its log is read here;
 a start on the same take after that withdraws the verdict.
 
-Open (2026-10-19), not yet fixed: a DSD track HQPlayer stopped on is
-judged as a PCM rate (the trace keeps no `src_sdm`), though the rule leaves
-DSD tracks unchecked; the facts keep the Nx slot's filter alone, so with no
-filter reported in the ticks a base-rate source is judged by it; a log line
+**HQPlayer's "up": measured 2026-10-19, the rule since 2026-10-21.** The rule
+said nothing of an output rate under the source's — "HQPlayer's own stop for
+every class" was wrong. Measured on engine 6.2.4 (Desktop, PCM mode, each
+filter in both slots, the adaptive output rate off): FFT, FIR and
+poly-sinc-ext2 converted 88.2 → 44.1 kHz and 352.8 → 176.4 kHz; of the four
+filters tried that HQPlayer describes "up", closed-form, sinc-medium and
+poly-sinc-ext2-short played 1:1 and upward and were stopped in every
+downward cell, a DSD64 track's included (converted to 176.4 kHz first) — ×½
+the one downward ratio tried — and sinc-M converted downward and was never
+stopped; FFT and FIR were refused at 1:1. The rule drawn from it speaks on
+an HQPlayer of that major alone, naming the engine (another major may change
+what a name does, as the atlas keeps its modulators to theirs): every filter
+described "up" stops under the source's rate — the others not tried
+included, by their class, at any downward ratio — but sinc-M, which gets the
+class's words ("made for upsampling, not for decimation") and its one
+measured conversion, 352.8 → 176.4 kHz, without a stop, on the screen alone
+and for a source of its family only (nothing was measured across the
+families), and sinc-Mx, its twin (one output, bit for bit, where the atlas
+compared them), which was never tried downward and gets nothing: the one
+measurement nearest to it did not stop. FFT and FIR stop at 1:1, by name,
+the other 2^x and Int filters not having been tried there. "For upsampling,
+not decimation" is the plain sense of what was measured, said as Sautium's
+beside HQPlayer's description, never inside it. A rate the fix would name is
+dropped where a measured refusal stops (FFT or FIR at 1:1). sinc-medium's
+refusal comes after its filter built ("lInRate > lOutRate", one playing
+status at 0 s between): the refused-rate log cause too, and an advance
+closed on it is judged by it even when that status came last. A refused
+rate is a play's, so where the first cause from the file's add on is one,
+the log read after a close takes the newest refusal from there — a queue
+handed over at once logged every add before any play, and the first one
+after the add was another track's — while another cause found first still
+answers as before (an earlier track's decode error can); an advance keeps
+the refusal its follower heard since the stop, as the sheet's cause too. A
+DSD track reaches
+the filter at a PCM rate HQPlayer names only in its log, so it is never
+judged by its DSD rate and never by an assumed ratio: unchecked before a
+play, judged after one by the rate the log names for that play, in PCM mode;
+a file of one bit a sample counts as DSD whatever its format (WavPack holds
+DSD too, its tags a PCM-looking rate, so a verdict calls it a DSD track).
+That closes 2026-10-19's open item of a DSD track judged as a PCM rate: the
+trace keeps `sdm`, and the facts say whether the source is DSD.
+
+Open (2026-10-19), not yet fixed: the facts keep the Nx slot's filter alone,
+so with no filter reported in the ticks a base-rate source is judged by it;
+a log line
 naming another cause (a file not opened) does not take `rate_refused` back;
 nothing wakes the notices channel on an output switch, so the rate check's
 notice stays until another wake, and while HQPlayer answers nothing it

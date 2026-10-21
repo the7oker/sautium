@@ -82,7 +82,7 @@ from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple
 import psycopg2
 
 from db_pool import db_execute, db_query, db_query_one
-from hqp_rate_check import BASE_LIMIT, mode_kind, reaches, same_family
+from hqp_rate_check import BASE_LIMIT, Filter as RateFilter, mode_kind, refusal, same_family
 
 from playback import hqp_ab_search as search
 from playback import hqp_meter
@@ -1453,8 +1453,10 @@ def _screen(s: Sitting, filters: List[dict], own: str, shaper: str, mode_name: s
                 ident = atlas.identical(found)
                 group = ident[0]["id"] if ident else None
         out.append(search.Filter(f["name"], f["index"], mark.get("speed"), mark.get("class"),
-                                 reaches((f.get("parsed") or {}).get("ratio"), s.ctx["src_rate"],
-                                         s.ctx["rate_out"]), group, at))
+                                 # the class's arithmetic alone (no measurement passed): a stop
+                                 # HQPlayer was measured making is the rate check's to say
+                                 refusal(RateFilter(f["name"], (f.get("parsed") or {}).get("ratio")),
+                                         s.ctx["src_rate"], s.ctx["rate_out"], None) is None, group, at))
     s.all_filters = out
     champion = next(f for f in out if f.name == own)
     return (atlas, search.screen(out, champion, atlas=atlas is not None),

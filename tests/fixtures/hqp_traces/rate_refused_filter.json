@@ -120,9 +120,11 @@
     ],
     "modulator": null,
     "refused": {},
-    "engine": null
+    "engine": null,
+    "measured": null
    },
    "source": 44100,
+   "dsd": false,
    "queue": {
     "44100": 3
    }

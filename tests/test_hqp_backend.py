@@ -41,6 +41,11 @@ from playback.hqp_backend import HqpBackend  # noqa: E402
 from streaming.base import StreamProvider  # noqa: E402
 from playback.manager import PlaybackManager  # noqa: E402
 from playback.queue import CanonicalQueue, QueueItem  # noqa: E402
+# The HQPlayer router binds the manager singleton as it is first imported:
+# here, before a fixture (output) can put a test's manager in its place for
+# good — the tests reach it with `from routers import hqplayer` and set its
+# `manager` themselves
+from routers import hqplayer as _hqp_router  # noqa: E402,F401
 from streaming import service as streaming_service  # noqa: E402
 from streaming.proxy import MediaProxy  # noqa: E402
 
@@ -182,6 +187,19 @@ class FakeHqp:
         # connection ends there instead, once: no answer, nothing carried out.
         self.probe_holds: dict = {}
         self.probe_drops: set = set()
+        # The source an entry holds, by a part of its URI: (rate, DSD or not)
+        # — its <metadata samplerate … sdm> while something plays, as Desktop
+        # sends it, and what `cells` judges it by
+        self.sources: dict[str, tuple] = {}
+        # What it does at a Play onto such an entry, by its active filter and
+        # output rate — cells(filter, rate, dsd, out): "stops" (refused before
+        # the engine starts), "builds" (the filter built, one PLAYING read at
+        # 0 s, then refused), anything else plays (Desktop 6.2.4's two
+        # refusals); None: no entry is judged
+        self.cells = None
+        # Its log, appended as it acts (a path), in Desktop's line form
+        self.log_path = None
+        self._refusing = None
         # (time.time(), command) as each command ARRIVES — `commands` logs
         # them as they are carried out, after any silence, in the order they
         # arrived on whichever connection: HQPlayer's one control thread
@@ -412,14 +430,47 @@ class FakeHqp:
 
     def _stops_if_refused(self) -> None:
         """The entry a Play went to is one it refuses at Play (refuse_play):
-        stopped on at once — resting on no entry where `rests_nowhere`.
-        Under the lock."""
-        if (1 <= self.track <= len(self.playlist)
-                and any(part in self.playlist[self.track - 1] for part in self.refuse_play)):
+        stopped on at once — resting on no entry where `rests_nowhere` — or
+        one its `cells` refuse: stopped on at once, or after one PLAYING read
+        of the filter it built. Under the lock."""
+        self._refusing = None
+        if not 1 <= self.track <= len(self.playlist):
+            return
+        if any(part in self.playlist[self.track - 1] for part in self.refuse_play):
             self.state = int(PlaybackState.STOPPED)
             self.position = 0.0
             if self.rests_nowhere:
                 self.track = 0
+            return
+        src = self._source()
+        if self.cells is None or src is None:
+            return
+        rate, dsd = src
+        # the rate its engine takes in: a DSD64 track's 176.4 kHz (Desktop 6.2.4's log)
+        took, out = rate // 16 if dsd else rate, self.active["rate"]
+        did = self.cells(self.active["filter"], rate, dsd, out)
+        if did == "stops":
+            self.state, self.position = int(PlaybackState.STOPPED), 0.0
+            self._log(f"Requested filter not possible with this rate combination {took}/{out}, stop",
+                      "Stop request (tail)")
+        elif did == "builds":
+            self._refusing = 1
+            self._log(f"Rate: {took}, block size: 8192, frame size: 32768",
+                      f"Playback engine ratio: {out / took:g}", f"Filter: {self.active['filter']}",
+                      "clHQPlayerEngine::Execute(): lInRate > lOutRate", "Stop request (reset)")
+        else:
+            self._log(f"Rate: {took}, block size: 8192, frame size: 32768",
+                      f"Playback engine ratio: {out / took:g}", f"Filter: {self.active['filter']}")
+
+    def _source(self):
+        """The source of the entry it reads (sources), or None. Under the lock."""
+        uri = self.playlist[self.track - 1] if 1 <= self.track <= len(self.playlist) else ""
+        return next((src for part, src in self.sources.items() if part in uri), None)
+
+    def _log(self, *lines: str) -> None:
+        if self.log_path is not None:
+            with open(self.log_path, "a", encoding="utf-8") as f:
+                f.writelines(f"I 2001/05/06 10:00:01 {line}\n" for line in lines)
 
     def _dispatch(self, cmd: str, attrs: dict) -> str:
         with self._lock:
@@ -454,7 +505,14 @@ class FakeHqp:
                 elif opening:
                     self.opening -= 1
                 elif self.state == int(PlaybackState.PLAYING):
-                    if self._starting:
+                    if self._refusing is not None:
+                        # the one PLAYING read of a filter it built, then its refusal
+                        if self._refusing:
+                            self._refusing -= 1
+                        else:
+                            self._refusing = None
+                            self.state, self.position = int(PlaybackState.STOPPED), 0.0
+                    elif self._starting:
                         self._starting -= 1
                     else:
                         self.position += 1.0
@@ -474,6 +532,10 @@ class FakeHqp:
                 uri = (f' uri="{self._uri_out(self.playlist[self.track - 1])}"'
                        if 1 <= self.track <= len(self.playlist)
                        and not (raw and self.raw_streams == "bare") else "")
+                src = self._source()
+                if src is not None and self.state != int(PlaybackState.STOPPED):
+                    uri += (f' samplerate="{src[0]}" bits="{1 if src[1] else 24}" channels="2" '
+                            f'sdm="{int(src[1])}"')
                 track, length = (0, 0) if opening else (self.track, 0 if raw else self.length)
                 if self._transit is not None:
                     track, shown, length = self._transit[:3]
@@ -2435,7 +2497,10 @@ class HqpMeterPort:
             return None
         f = self.fake
         with f._lock:
-            if f.state == int(PlaybackState.PLAYING) and f.track >= 1 and f._advancing is None:
+            # a filter HQPlayer builds and then refuses (`cells`' "builds") says
+            # PLAYING once while it builds: nothing leaves then
+            if (f.state == int(PlaybackState.PLAYING) and f.track >= 1 and f._advancing is None
+                    and f._refusing is None):
                 return self.SILENCE if self.digital_silence else self.SOUND
             if f.ended_at is not None and time.monotonic() - f.ended_at < self.tail_s:
                 return self.SILENCE
@@ -3112,6 +3177,172 @@ def test_no_advance_at_the_playlists_end_nor_for_a_stop_hqplayer_did_not_move_on
         fake.state, fake.track = int(PlaybackState.STOPPED), 0
     _polls(fake, 2)
     assert traced._attempt is None and [a.intent for a in diag.attempts()] == ["select"] * 3
+
+
+# -- What was measured on engine 6.2.4 (hqp_rate_check): "up", and FFT and FIR at 1:1 -------
+# The fake plays HQPlayer 6.2.4 as it was measured (test_hqp_rate_check.UP_MATRIX):
+# its own PCM lists, a filter in both slots at a fixed output rate, the queue's
+# first file the cell's source — a DSD64 one taken in at 176.4 kHz — and its log
+# written as it acts, read here after the close.
+
+def _measured_hqp(backend, fake, monkeypatch, tmp_path, name, cell):
+    import hqp_atlas
+    from hqp_rate_check import Sources
+    from playback import hqp_load
+    from test_hqp_rate_check import DSD64, UP_CELLS, UP_MATRIX
+    lists = json.loads(_LISTS_624.read_text(encoding="utf-8"))
+    pcm = lists["pcm"]
+    src, out = UP_CELLS[cell]
+    _settings_xml(tmp_path, ("0", "0"), 1)
+    fake.log_path = tmp_path / "HQPlayer6Desktop.log"
+    fake.log_path.write_text("", encoding="utf-8")
+    monkeypatch.setattr(diag, "local_log_dir", lambda: tmp_path)
+    monkeypatch.setattr(hqp_atlas, "SHIPPED", tmp_path / "shipped.json")
+    monkeypatch.setattr(settings, "hqp_atlas_overlay", "")
+    dsd = src == DSD64
+    monkeypatch.setattr(hqp_load, "sources", lambda openers: (Sources({}, dsd=1, first_dsd=DSD64) if dsd
+                                                              else Sources({src: 1}, first=src)))
+    fake.sources["A [TR24]/01.flac"] = (src, dsd)
+    fake.cells = lambda f, rate, d, o: next((UP_MATRIX[f][c] for c, (s, r) in UP_CELLS.items()
+                                             if (s, r) == (DSD64 if d else rate, o)), "plays")
+    fake.replies["GetInfo"] = ('<GetInfo name="fake" product="Signalyst HQPlayer Desktop" version="6" '
+                               'platform="Linux" engine="6.2.4"/>')
+    fake.replies["GetModes"] = ("<GetModes>" + "".join(f'<ModesItem index="{m["index"]}" name="{m["name"]}" '
+                                                       f'value="{m["value"]}"/>' for m in lists["modes"])
+                                + "</GetModes>")
+    fake.replies["GetRates"] = ("<GetRates>" + "".join(f'<RatesItem index="{r["index"]}" rate="{r["rate"]}"/>'
+                                                       for r in pcm["rates"]) + "</GetRates>")
+    fake.replies["GetFilters"] = ("<GetFilters>" + "".join(
+        f'<FiltersItem index="{f["index"]}" name="{f["name"]}" value="{f["value"]}" arg="{f["arg"]}" '
+        f'description="{f["description"]}"/>' for f in pcm["filters"]) + "</GetFilters>")
+    fake.replies["GetShapers"] = ("<GetShapers>" + "".join(
+        f'<ShapersItem index="{s["index"]}" name="{s["name"]}" value="{s["value"]}" description=""/>'
+        for s in pcm["shapers"]) + "</GetShapers>")
+    index = next(f["index"] for f in pcm["filters"] if f["name"] == name)
+    rate = next(r["index"] for r in pcm["rates"] if r["rate"] == out)
+    fake.replies["State"] = (f'<State mode="1" rate="{rate}" filter="{index}" filter1x="{index}" '
+                             f'filterNx="{index}" shaper="7" volume="-3"/>')
+    fake.active.update(mode="PCM", filter=name, shaper="TPDF", rate=out)
+    backend._info_due = True
+    backend.poke()
+    assert _wait(lambda: backend.info.get("engine") == "6.2.4", 5.0)
+
+
+# (filter, cell) → the verdict's code and cause, closed at HQPlayer's first stop or
+# watched to the window, and its sentence once the log is read
+_CELLS_624 = {
+    ("closed-form", "88.2k->44.1k"): (
+        "rate_refused", "filter", "refused",
+        "HQPlayer describes closed-form as 2^x up: 44.1 kHz is under 88.2 kHz, and HQPlayer stopped on this track. "
+        "HQPlayer's log: “Requested filter not possible with this rate combination 88200/44100, stop”."),
+    ("sinc-medium", "352.8k->176.4k"): (
+        "rate_refused", "filter", "refused",
+        "HQPlayer describes sinc-medium as Any up: 176.4 kHz is under 352.8 kHz, and HQPlayer stopped on this "
+        "track. HQPlayer's log: “clHQPlayerEngine::Execute(): lInRate > lOutRate”."),
+    ("FFT", "44.1k->44.1k"): (
+        "rate_refused", "filter", "refused",
+        "HQPlayer refused FFT at the source's own rate (1:1) on engine 6.2.4, and it stopped on this 44.1 kHz "
+        "track. HQPlayer's log: “Requested filter not possible with this rate combination 44100/44100, stop”."),
+    ("poly-sinc-ext2-short", "DSD64->88.2k"): (
+        "rate_refused", "filter", "window",
+        "HQPlayer describes poly-sinc-ext2-short as Int up: 88.2 kHz is under the 176.4 kHz HQPlayer converted "
+        "this DSD64 track to, and HQPlayer stopped on this track. HQPlayer's log: “Requested filter not possible "
+        "with this rate combination 176400/88200, stop”."),
+    ("sinc-medium", "DSD64->88.2k"): (
+        "rate_refused", "filter", "window",
+        "HQPlayer describes sinc-medium as Any up: 88.2 kHz is under the 176.4 kHz HQPlayer converted this DSD64 "
+        "track to, and HQPlayer stopped on this track. HQPlayer's log: “clHQPlayerEngine::Execute(): lInRate > "
+        "lOutRate”."),
+    # 1:1 is never judged: with a DSD track HQPlayer's line speaks alone
+    ("none", "DSD64->352.8k"): (
+        "rate_refused", "line", "window",
+        "HQPlayer stopped on it: “Requested filter not possible with this rate combination 176400/352800, stop”."),
+}
+
+
+@pytest.mark.parametrize("name,cell", list(_CELLS_624), ids=lambda v: str(v))
+def test_engine_6_2_4s_stops_are_judged_as_measured(traced, fake, monkeypatch, tmp_path, name, cell):
+    code, cause, end, sentence = _CELLS_624[name, cell]
+    _measured_hqp(traced, fake, monkeypatch, tmp_path, name, cell)
+    monkeypatch.setattr(diag, "OBSERVE_S", 3.0)
+    assert traced.select(1)
+    a = _closed(timeout=10.0)
+    # a PCM track's stop the rule names closes at once; a DSD track's waits: only the log names its rate
+    assert a.end == end, a.verdict
+    assert _wait(lambda: a.hqp_log is not None and "HQPlayer" in a.verdict["sentence"]
+                 and (a.verdict["code"], a.verdict.get("cause")) == (code, cause), 5.0), a.verdict
+    assert _wait(lambda: a.verdict["sentence"] == sentence, 5.0), a.verdict["sentence"]
+    # a DSD track is known as one — from Status where it played a moment (sinc-medium's build), else from its
+    # file row: stopped, HQPlayer sends no source
+    if cell.startswith("DSD64"):
+        assert (a.facts["rate"]["source"], a.facts["rate"]["dsd"]) == (2822400, True)
+    else:
+        assert not a.facts["rate"]["dsd"]
+
+
+@pytest.mark.parametrize("name,cell", [("poly-sinc-ext2", "88.2k->44.1k"), ("FFT", "352.8k->176.4k"),
+                                       ("FIR", "44.1k->88.2k"), ("closed-form", "DSD64->352.8k"),
+                                       ("none", "44.1k->88.2k"), ("sinc-M", "352.8k->176.4k")], ids=str)
+def test_engine_6_2_4s_plays_are_played_and_nothing_names_a_stop(traced, fake, monkeypatch, tmp_path, name, cell):
+    _measured_hqp(traced, fake, monkeypatch, tmp_path, name, cell)
+    if name == "sinc-M":
+        fake.start_polls = 3            # its Status still at 0 for a while after the Play
+    assert traced.select(1)
+    a = _closed(timeout=10.0)
+    assert a.verdict["code"] == "played", a.verdict
+    # the rule over the slot's facts names no stop either
+    assert not diag.names_cause(a.facts["rate"])
+
+
+def test_a_filter_hqplayer_builds_and_then_refuses_is_no_start_with_its_meter_open(traced, fake, monkeypatch,
+                                                                                    tmp_path, metered):
+    # sinc-medium at 176.4 kHz from 352.8 kHz: one PLAYING status at 0 s while it builds, nothing on the meter,
+    # then its refusal — judged at HQPlayer's first stop, as without the meter
+    code, cause, end, _ = _CELLS_624["sinc-medium", "352.8k->176.4k"]
+    _measured_hqp(traced, fake, monkeypatch, tmp_path, "sinc-medium", "352.8k->176.4k")
+    assert traced.select(1)
+    a = _closed(timeout=10.0)
+    assert (a.end, a.verdict["code"], a.verdict.get("cause")) == (end, code, cause), a.verdict
+    assert a.facts["meter"]["runs"] == []
+
+
+def test_the_screen_says_what_engine_6_2_4_did_before_play(fake, output, monkeypatch, tmp_path):
+    from hqp_rate_check import Sources
+    from playback import hqp_load
+    mgr, b = output
+    hqp_router = _screen(monkeypatch)
+    monkeypatch.setattr(hqp_router, "manager", mgr)
+    _measured_hqp(b, fake, monkeypatch, tmp_path, "closed-form", "88.2k->44.1k")
+    monkeypatch.setattr(hqp_load, "sources", lambda openers: Sources({44100: 1, 88200: 2, 96000: 1}, dsd=1,
+                                                                    first=44100))
+    assert _rate_said(hqp_router.get_state(dsp=True)) == {"filter": [
+        "HQPlayer describes closed-form as 2^x up. Of the “up” filters tried on engine 6.2.4, it stopped all but "
+        "sinc-M under the source's rate, so it will stop on the 88.2 kHz and 96 kHz tracks in the queue at 44.1 kHz.",
+        "Filters described with “up” are made for upsampling, not for decimation: pick one HQPlayer describes "
+        "without “up”, or as the output rate the tracks' own or a power-of-two multiple of it.",
+        "The DSD tracks in the queue are not checked."]}
+    # sinc-M there: its words for the tracks of its family, no stop, nothing to pick; of the 96 kHz ones,
+    # downward across the families, nothing was measured
+    fake.replies["State"] = fake.replies["State"].replace('filter="50" filter1x="50" filterNx="50"',
+                                                          'filter="54" filter1x="54" filterNx="54"')
+    assert _rate_said(hqp_router.get_state(dsp=True)) == {"filter": [
+        "HQPlayer describes sinc-M as 2^x up, and the 88.2 kHz tracks in the queue are above 44.1 kHz. Filters "
+        "described with “up” are made for upsampling, not for decimation; on engine 6.2.4 HQPlayer converted "
+        "352.8 kHz to 176.4 kHz with sinc-M and did not stop.",
+        "The DSD tracks in the queue are not checked."]}
+    # FFT at 44.1 kHz: the 44.1 kHz tracks at 1:1; nothing is said of those above it
+    fake.replies["State"] = fake.replies["State"].replace('filter="54" filter1x="54" filterNx="54"',
+                                                          'filter="6" filter1x="6" filterNx="6"')
+    assert _rate_said(hqp_router.get_state(dsp=True))["filter"][:2] == [
+        "HQPlayer refused FFT at the source's own rate (1:1) on engine 6.2.4, so it will stop on the 44.1 kHz "
+        "tracks in the queue.",
+        "Pick another filter, or another output rate."]
+    # another major: nothing of what was measured on 6.2.4
+    fake.replies["GetInfo"] = fake.replies["GetInfo"].replace('engine="6.2.4"', 'engine="7.0.1"')
+    b._info_due = True
+    b.poke()
+    assert _wait(lambda: b.info.get("engine") == "7.0.1", 5.0)
+    assert "rate_check" not in hqp_router.get_state(dsp=True)
 
 
 def test_hqplayers_error_text_reaches_the_caller(fake):

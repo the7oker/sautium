@@ -1747,7 +1747,7 @@ checked in this order — positive evidence before any absence of it:
 | `proxy_error` | the media proxy answered 404 (token not registered — the restart race), 500 (file gone, CUE cut failed), 502/504 (provider), 401/403 (a bug) | play again / check the music folder |
 | `no_fetch` | an http hand-over HQPlayer never requested (none from the hand-over to 5 s after Play) | same LAN, the firewall for the media port, the Docker forward — host and port named |
 | `rejected` | PlaylistAdd or Play refused (HQPlayer's words quoted; "Empty transport" = nothing was taken), or the expected entry missing from its playlist | the file must be readable here; a copy in HQPlayer's library: Rescan it |
-| `rate_refused` | taken, then stopped at its start without moving, where the rate check (`backend/hqp_rate_check.py`) names why — the filter HQPlayer ran, by the ratio class HQPlayer describes it with; in SDM first the modulator, at a rate the atlas as published (the shipped file, its release dated) measured it refused for the track's family — or HQPlayer's log names a refused rate combination (its line quoted, attributed to nothing); judged at HQPlayer's first stop when the check names a cause without a hedge — a hedged one, the adaptive output rate not known, at the window; HQPlayer's own advance at its deadline, or at once on its log line here | a filter HQPlayer describes as Any, the adaptive output rate in HQPlayer's own settings, a rate of HQPlayer's list every track still to play reaches (named only when every one is refused, all of one family); another modulator or rate |
+| `rate_refused` | taken, then stopped at its start without moving, where the rate check (`backend/hqp_rate_check.py`) names why — the filter HQPlayer ran, by the ratio class HQPlayer describes it with and, on an engine of 6.2.4's major, the rule drawn from what was measured there: a filter described "up" under the track's rate (sinc-M and sinc-Mx aside), FFT or FIR at 1:1; a DSD track by the PCM rate HQPlayer's log names it converted the track to, never by its own (PCM mode only, since 2026-10-21); in SDM first the modulator, at a rate the atlas as published (the shipped file, its release dated) measured it refused for the track's family — or HQPlayer's log names a refused rate combination (its line quoted, attributed to nothing); judged at HQPlayer's first stop when the check names a cause without a hedge — a hedged one, the adaptive output rate not known, and a DSD track's, at the window; HQPlayer's own advance at its deadline, or at once on its log line here | a filter HQPlayer describes as Any, the adaptive output rate in HQPlayer's own settings, a rate of HQPlayer's list every track still to play reaches (named only when every one is refused, all of one family); after an "up" filter's stop, a filter described without "up", or the track's own rate or a power-of-two multiple of it (a DSD track: twice the rate HQPlayer converted it to, or a higher power-of-two multiple); after a 1:1 refusal, another filter or rate; another modulator or rate |
 | `not_played` | taken (bytes served, or a path) but never `playing`, or it stopped again | HQPlayer's log, the DSP line |
 | `unknown` / `interrupted` | nothing explains it / another action took over first (not counted) | HQPlayer's log |
 
@@ -1953,6 +1953,41 @@ the manual names them. Grayed or checked, HQPlayer picks the rate as it plays
 (grayed took 705.6 kHz for a 44.1 kHz track under a 768 kHz default and a 2^x
 filter), so the check says nothing; another pair, or an HQPlayer elsewhere,
 reads as not known.
+
+Since 2026-10-21 the check also says what Sautium measured of HQPlayer's
+"up" on engine 6.2.4 (Desktop, PCM mode, each filter in both slots, the
+adaptive output rate off, 2026-10-19), on an HQPlayer of that major alone,
+naming the engine. **Measured:** of the four filters described "up" that
+were tried, closed-form, sinc-medium and poly-sinc-ext2-short played 1:1 and
+upward and were stopped in every downward cell — 88.2 → 44.1 kHz,
+352.8 → 176.4 kHz, and DSD64 → 88.2 kHz, the DSD track converted to
+176.4 kHz first; ×½ was the one downward ratio tried — while sinc-M
+converted downward and was never stopped. FFT and FIR, without "up", were
+refused at 1:1 (44.1, 88.2 and 352.8 kHz) and played every downward cell,
+as poly-sinc-ext2 did. **The rule:** every filter described "up" is said to
+stop under the source's rate — the others not tried included, at any
+downward ratio — but sinc-M, which the screen gives the class's words and
+its one measured conversion (352.8 → 176.4 kHz) without a stop, for a
+source of its family only (no notice, no verdict), and sinc-Mx, its twin,
+never tried downward, of which nothing is said; the 1:1 is said of FFT and
+FIR by name, the other 2^x and Int filters not having been tried there.
+HQPlayer refuses in two ways: "Requested filter not possible with this rate
+combination A/B, stop" before its engine starts, and, from a filter it built
+first (sinc-medium), one playing status at 0 s, then
+"clHQPlayerEngine::Execute(): lInRate > lOutRate" — a log cause of the same
+kind since 2026-10-21, and an advance closed on it is judged by it even when
+that playing status came last. A refused rate is a play's: where the first
+cause read after the close from the file's add on is one, the newest refusal
+from there is the attempt's (a queue handed over at once logs every add
+before any play) — another cause found first still answers, as before — and
+an advance keeps the refusal its follower heard since the stop, on the
+sheet as in the verdict. A DSD track reaches the filter at
+a PCM rate HQPlayer names only in its log ("Rate: 176400, block size: …",
+the refused play's own; a refusal before the engine starts names it), so
+before a play it is not checked, and a verdict judges it by that rate in PCM
+mode, never by its DSD rate; the trace keeps whether the source is DSD
+(Status `sdm` while it plays, else its file row: DSF, DFF, or one bit a
+sample).
 
 Before a play the check speaks on the HQPlayer screen (since 2026-10-18):
 `GET /api/hqplayer/state?dsp=1` carries `rate_check`, `{"filter": […],
