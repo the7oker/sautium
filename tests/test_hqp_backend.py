@@ -5349,7 +5349,9 @@ def test_a_lost_mirror_still_owes_the_switch_away_stop(fake, output, monkeypatch
     mgr.activate(None)
     mgr.activate("browser")
     assert _wait(lambda: "Stop" in [c for _, c in fake.arrivals[n:]], timeout=5)
-    assert fake.state == int(PlaybackState.STOPPED)
+    # The fake logs a command as it arrives and carries it out after: the
+    # Stop is waited for until done (red 4 in 30 under one CPU, before)
+    assert _wait(lambda: fake.state == int(PlaybackState.STOPPED), timeout=5)
 
 
 def test_a_tap_on_a_lost_mirror_rebuilds_and_plays_the_queues_track(fake, output, monkeypatch):
