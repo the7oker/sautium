@@ -922,6 +922,7 @@ def _windows_session_window(on_end) -> None:
             return 1
         if msg == WM_ENDSESSION:
             if wparam:
+                logger.info("Windows ends the session: the launcher stops its services first")
                 try:
                     on_end()
                 except Exception:
@@ -948,3 +949,97 @@ def _windows_session_window(on_end) -> None:
     message = wintypes.MSG()
     while user32.GetMessageW(ctypes.byref(message), None, 0, 0) > 0:
         user32.DispatchMessageW(ctypes.byref(message))
+
+
+# The console handler Windows calls for as long as the process lives: a ctypes
+# callback no reference holds is freed under it
+_console_handler = None
+
+
+def watch_signals(quit, stop_now) -> None:
+    """The launcher told to end from outside, said in its log first: SIGTERM,
+    SIGHUP and SIGINT on macOS and Linux (a kill, a closed terminal, Ctrl+C),
+    heard on the main thread between Tk's events; on Windows the console's
+    Ctrl+C, Ctrl+Break and close, when there is a console — a run from a
+    terminal; the installed launcher has none — heard on the thread Windows
+    calls in on. The first calls `quit` (the quit Quit makes); the same
+    interrupt or termination again ends the process at once, the backend
+    and PostgreSQL left to the next start to clear. A hangup never does: a
+    closed terminal sends one twice — its shell's, then the kernel's as the
+    shell exits, a tenth of a millisecond apart — and, like a stop's
+    companion (systemd's SIGHUP beside its SIGTERM), it changes nothing
+    while the launcher quits. A signal the launcher was started ignoring
+    stays ignored — nohup's hangup, a shell's background job's interrupt —
+    as CPython keeps an ignored SIGINT. The console's close, after which
+    Windows ends the process within seconds, calls `stop_now` instead,
+    which stops what must stop before it returns. Python's default ended
+    the launcher on SIGTERM and SIGHUP without a word in launcher.log or a
+    stop of what it had started (2026-10-18); a session's end is
+    watch_session_end's."""
+    seen: set = set()
+    quitting = False
+
+    def heard(what: str, again_ends: Optional[int]) -> None:
+        """`again_ends`: the exit status the same one again ends the process
+        with, None for a hangup."""
+        nonlocal quitting
+        if what in seen and again_ends is not None:
+            logger.warning("%s again while the launcher quits: it ends now", what)
+            os._exit(again_ends)
+        if quitting:
+            logger.info("%s while the launcher quits: it goes on quitting", what)
+        else:
+            quitting = True
+            logger.info("%s: the launcher quits as Quit does", what)
+            quit()
+        # Once heard through: CPython runs a handler between any two
+        # bytecodes, this one's too, and one run inside it is no repeat
+        seen.add(what)
+
+    if sys.platform == "win32":
+        _windows_console_events(heard, stop_now)
+        return
+    import signal
+
+    def handler(signum, frame) -> None:
+        heard(signal.Signals(signum).name, None if signum == signal.SIGHUP else 128 + signum)
+    for sig in (signal.SIGTERM, signal.SIGHUP, signal.SIGINT):
+        if signal.getsignal(sig) is not signal.SIG_IGN:
+            signal.signal(sig, handler)
+
+
+def _windows_console_events(heard, stop_now) -> None:
+    """The console's events, when the launcher has a console: Ctrl+C and
+    Ctrl+Break as a signal is heard, the close by `stop_now`; a log-off and a
+    shutdown reach services only."""
+    global _console_handler
+    import ctypes
+    from ctypes import wintypes
+
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    kernel32.GetConsoleWindow.restype = wintypes.HWND
+    if not kernel32.GetConsoleWindow():
+        return
+    HANDLER = ctypes.WINFUNCTYPE(wintypes.BOOL, wintypes.DWORD)
+    CTRL_C, CTRL_BREAK, CTRL_CLOSE = 0, 1, 2
+
+    def handler(event):
+        if event not in (CTRL_C, CTRL_BREAK, CTRL_CLOSE):
+            return False
+        try:
+            if event == CTRL_CLOSE:
+                logger.info("The console window closes: the launcher stops its services and ends")
+                stop_now()
+            else:
+                heard("Ctrl+C" if event == CTRL_C else "Ctrl+Break", 1)
+        except Exception:
+            # ctypes prints what escapes a callback to stderr, of a console
+            # that may be going
+            logger.exception("Acting on the console's event %d failed", event)
+        return True
+
+    _console_handler = HANDLER(handler)
+    kernel32.SetConsoleCtrlHandler.argtypes = (HANDLER, wintypes.BOOL)
+    if not kernel32.SetConsoleCtrlHandler(_console_handler, True):
+        logger.warning("Console events not watched: SetConsoleCtrlHandler failed (%d)",
+                       ctypes.get_last_error())

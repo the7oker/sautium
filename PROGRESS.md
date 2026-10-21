@@ -3004,6 +3004,44 @@ removed when its pass ends, failed or not.
   the shutdown now starts 2–3 s in; the benchmark's put-back, first in it,
   is done in a second, and the steps after it (DHT, walks, models — none
   of them logs) still ran past 10 s.
+- **A signal is said before the end** (2026-10-21). The launcher had no
+  handler at all, so SIGTERM and SIGHUP ended it at Python's default —
+  nothing in launcher.log, the backend and PostgreSQL left running — and
+  the backend's uvicorn handles SIGINT and SIGTERM without naming either
+  and no SIGHUP, so a closed terminal ended it with no word and no lifespan
+  shutdown. A stop found later only in the OS's own log (a SIGKILL, which
+  nothing can log) looked the same. Now the launcher says SIGTERM, SIGHUP
+  or SIGINT and quits as Quit does (`utils.watch_signals`); the same
+  interrupt or termination again ends it at once, the backend left to the
+  next start to clear. A hangup never does — a closed terminal sends two,
+  its shell's and the kernel's — nor does another signal meanwhile:
+  systemd's SIGTERM and SIGHUP arrive together, and the one CPython runs
+  first, by number SIGHUP, is the one said. On Windows the console's
+  Ctrl+C, Ctrl+Break and close do the same when it has a console, the
+  close stopping the services at once as a session's end does. The
+  backend's servers (`serving.Server`: the Docker entrypoint's, the
+  launcher's, the peer surface; not the development reload mode) say the
+  signal that stops them, a hangup stops them as SIGTERM does, and a
+  signal while they stop changes nothing — a session's end signals each of
+  its processes, and the launcher's own SIGINT, sent once its goodbyes
+  were said, made uvicorn force its exit and skip the lifespan's shutdown;
+  the launcher also takes the stop for its own the moment it begins to
+  quit, or to relaunch after an update, so the backend's earlier end is no
+  crash to report and restart. The launcher's backend and its backup jobs
+  run in sessions of their own: a terminal's signal no longer reaches them,
+  and one ignored at the launcher's start, nohup's hangup, stays ignored.
+  The Docker entrypoint
+  hears a stop once its imports are done (PID 1 has no default action for
+  SIGTERM, so the wait for the database ignored one until the SIGKILL; the
+  shell entrypoint before Python, the imports' first tenth of a second and
+  the two milliseconds between the wait and the server's own handlers still
+  drop one) and builds its server itself: `uvicorn.run` imported the app
+  before the server held the signals. Tested on Linux with real processes
+  and signals — the launcher's watch, the server, the entrypoint's and the
+  launcher's backend's own `main()` with a fake app, and the service
+  manager taking a backend's end once the quit began for none; the
+  launcher's Tk paths (its quit, a relaunch's) hold by construction, macOS
+  takes the same POSIX path, and the Windows console path is untested.
 
 - **A range past the end is 416, never the whole file.** HQPlayer resumes
   a stream cut short with `Range: bytes=<offset>-` and appends what comes

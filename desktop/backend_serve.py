@@ -43,10 +43,12 @@ def announce_ready(dsn: str, token: str) -> None:
 
 def main() -> None:
     import uvicorn
+    from config import LOGGING_CONFIG
+    from serving import Server, served
 
     token = os.environ["SAUTIUM_START_TOKEN"]
 
-    class AnnouncingServer(uvicorn.Server):
+    class AnnouncingServer(Server):
         async def startup(self, sockets=None):
             # Lifespan first (migrations, the model imports a pre-warming
             # profile holds the loop for), then the bind: when this returns
@@ -56,9 +58,18 @@ def main() -> None:
                 from config import settings
                 announce_ready(settings.database_url, token)
 
+    served()
+    # The app's logging from the start, not from main.py's import: a stop
+    # the server hears during the import is said too
     config = uvicorn.Config("main:app", host="0.0.0.0", port=int(sys.argv[1]),
-                            timeout_graceful_shutdown=5)
-    AnnouncingServer(config).run()
+                            timeout_graceful_shutdown=5, log_config=LOGGING_CONFIG)
+    try:
+        AnnouncingServer(config).run()
+    except KeyboardInterrupt:
+        # The launcher stops the backend with SIGINT, which uvicorn raises
+        # again as it leaves, stopped in order: a traceback in backend.log at
+        # every stop otherwise
+        pass
 
 
 if __name__ == "__main__":

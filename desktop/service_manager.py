@@ -509,6 +509,13 @@ class ServiceManager:
             }
             if sys.platform == "win32":
                 kwargs["creationflags"] = subprocess.CREATE_NO_WINDOW
+            else:
+                # A session of its own: a terminal's Ctrl+C or hangup does not
+                # reach the backend, and the launcher, which says it, stops
+                # the backend in order (utils.watch_signals). A session's end
+                # still signals each of its processes, the backend among them:
+                # closing() and serving.Server keep that stop whole.
+                kwargs["start_new_session"] = True
 
             try:
                 self._backend_stopping = False
@@ -644,11 +651,12 @@ class ServiceManager:
 
     def _watch_backend(self, proc: subprocess.Popen) -> None:
         """Event-driven death watch: blocks on the process handle, no
-        polling. A deliberate stop/replace exits silently; a crash logs the
+        polling. A deliberate stop/replace exits silently, and so does a
+        death once the launcher is quitting (closing); a crash logs the
         log tail, notifies the UI and restarts — fast deaths burn a limited
         budget so a boot-loop can't spin forever."""
         proc.wait()
-        if self._backend_stopping or proc is not self.backend_proc:
+        if self._backend_stopping or self._closed or proc is not self.backend_proc:
             return
         uptime = time.time() - self._backend_started_at
         tail = self._read_backend_log_tail()
@@ -753,9 +761,21 @@ class ServiceManager:
             self._closed = True
         self.stop_all()
 
+    def closing(self) -> None:
+        """The launcher began to quit, and stops the services once its
+        goodbyes are said (close()): from now no start begins, and a backend
+        that stops by itself meanwhile is no death to restart
+        (_watch_backend). A session's end signals each of its processes, the
+        backend among them, and the watch otherwise took the backend's own
+        stop for a crash — reported, and restarted while the launcher quit.
+        Not under the lifecycle lock: a PostgreSQL start holds it for up to a
+        minute, and a quit calls this on the Tk thread. A start already past
+        its check spawns all the same, and close() stops it."""
+        self._closed = True
+
     def reopen(self) -> None:
-        """Undo close(), for the one caller that stays after all: an update
-        relaunch whose successor could not be started."""
+        """Undo close() and closing(), for the one caller that stays after
+        all: an update relaunch whose successor could not be started."""
         with self._lifecycle:
             self._closed = False
 

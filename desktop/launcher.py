@@ -24,7 +24,7 @@ from desktop.api_client import BackendAPIClient
 from desktop.config_manager import load_config, save_config, update_config
 from desktop.service_manager import ServiceManager
 from desktop.utils import (get_local_ip, get_project_root, get_tailscale_ip,
-                           generate_qr_ctk, watch_session_end)
+                           generate_qr_ctk, watch_session_end, watch_signals)
 
 logger = logging.getLogger(__name__)
 
@@ -81,9 +81,12 @@ class LauncherApp(ctk.CTk):
         self._update_thread = None
         self._update_in_progress = False
         self._shutting_down = False   # gates the stats worker from touching Tk after the loop is torn down
+        self._quit_asked = False      # a quit came: an update relaunch under way ends instead
         # Cross-thread UI marshaling (see ui_call): started before any worker
-        # thread exists, drained on the Tk thread's own timer.
-        self._ui_queue: queue.Queue = queue.Queue()
+        # thread exists, drained on the Tk thread's own timer. A SimpleQueue:
+        # a signal handler puts into it on the Tk thread, maybe in the middle
+        # of that thread's own get — a Queue's lock would deadlock there.
+        self._ui_queue: queue.SimpleQueue = queue.SimpleQueue()
         self.after(100, self._drain_ui_queue)
         self._streams_started = False
         self._scan_active = False     # a Library wake is only ours while a scan we started runs
@@ -113,6 +116,10 @@ class LauncherApp(ctk.CTk):
         # Windows ends a session by killing its processes: the database
         # stops first (see utils.watch_session_end).
         watch_session_end(self._stop_for_session_end)
+        # A kill, a closed terminal, Ctrl+C: said in launcher.log, then the
+        # quit Quit makes; the console's close stops the services at once
+        # (utils.watch_signals)
+        watch_signals(lambda: self.ui_call(self._quit), self._stop_for_session_end)
 
     def _pin_window_size(self):
         """Lock the launcher to its design size — min/max, not just the
@@ -1681,11 +1688,18 @@ class LauncherApp(ctk.CTk):
 
     def _quit(self):
         """Full quit: stop services and exit. Every way in — the button,
-        Cmd+Q and the Dock, the tray — lands here, and a second one while
-        the first is stopping things is the same quit."""
+        Cmd+Q and the Dock, the tray, a signal — lands here, and a second one
+        while the first is stopping things is the same quit; one during an
+        update relaunch ends it there unless its successor's start had
+        begun."""
+        self._quit_asked = True
         if self._shutting_down:
             return
         self._shutting_down = True   # stop the stats worker from rescheduling onto a dying loop
+        # At once, not after the goodbyes: a backend that stops by itself
+        # meanwhile (a session's end signals each of its processes) is no
+        # crash
+        self.service_manager.closing()
         self._cover("Shutting down — stopping services…")
         # SSE readers block on a socket that is never going to close by
         # itself — unblock them before anything waits on their threads.
@@ -1693,8 +1707,13 @@ class LauncherApp(ctk.CTk):
         self.update()
 
         def _shutdown():
-            self._stop_everything()
-            self.ui_call(self._final_quit)
+            try:
+                self._stop_everything()
+            finally:
+                # The window goes whatever the stop met: one that raised (no
+                # PostgreSQL to stop, at the first-run wizard) left a process
+                # with no window, which only the same signal again would end
+                self.ui_call(self._final_quit)
 
         threading.Thread(target=_shutdown, daemon=True).start()
 
@@ -1747,10 +1766,13 @@ class LauncherApp(ctk.CTk):
         diag_events.clear_session_marker(get_data_dir())
 
     def _stop_for_session_end(self) -> None:
-        """Windows is ending the session: the backend and PostgreSQL stop
-        before its processes are terminated. Runs on the session-end thread
-        inside WM_ENDSESSION, and never touches Tk. Windows waits seconds, not
-        the 17 a P2P goodbye can take — the rest dies with the process."""
+        """Windows is ending the session, or closing the launcher's console:
+        the backend and PostgreSQL stop before its processes are terminated.
+        Runs on the session-end thread inside WM_ENDSESSION, or the thread
+        Windows calls the console's close in on, and never touches Tk.
+        Windows waits seconds, not the 17 a P2P goodbye can take — the rest
+        dies with the process."""
+        self._quit_asked = True       # a relaunch under way ends, starts nothing again
         self._shutting_down = True
         self.service_manager.close()
         from desktop.config_manager import get_data_dir
@@ -1788,12 +1810,26 @@ class LauncherApp(ctk.CTk):
         if self._shutting_down:
             return      # Quit came during the update and wins; the next start shows the changelog
         self._shutting_down = True
+        self.service_manager.closing()      # as a quit does: see _quit
         self._cover("Restarting Sautium…")
         self.api_client.close_streams()
         self.update()
 
         def _relaunch():
-            self._stop_everything()
+            try:
+                self._stop_everything()
+            except Exception:
+                # The successor would start beside what did not stop: this
+                # process stays, or quits if a quit came (_stay_after_all)
+                logger.exception("Relaunch given up: the stop before it failed")
+                self.ui_call(self._stay_after_all)
+                return
+            if self._quit_asked:
+                # A quit came meanwhile — a signal, a Quit the cover hid: this
+                # process ends here, and the next start shows the changelog
+                logger.info("Relaunch given up: a quit came during it")
+                self.ui_call(self._final_quit)
+                return
             bootstrap = os.environ.get("SAUTIUM_BOOTSTRAP")
             if bootstrap and sys.platform == "darwin":
                 # .../Sautium.app/Contents/Resources/bootstrap.py; -n because
@@ -1815,28 +1851,61 @@ class LauncherApp(ctk.CTk):
                                      start_new_session=True)
             except (OSError, subprocess.SubprocessError) as e:
                 logger.error(f"Relaunch failed: {e}")
-                # This process stays after all. _stop_everything closed the
-                # services (PostgreSQL included, which the backend needs), P2P
-                # and the session marker, _restart_self the event streams: all
-                # of it comes back as at a start — not quitting any more first,
-                # so the start's "up" or "down" meets a window that knows it.
-                from desktop.config_manager import get_data_dir
-                from desktop.p2p import diag_events
-                self._shutting_down = False
-                diag_events.write_session_marker(get_data_dir())
-                self.service_manager.reopen()
-                self._streams_started = False
-                self.p2p_manager = None
-                ok = self.service_manager.start_all()
-                self.ui_call(self._uncover)
-                if ok:
-                    self.ui_call(lambda: self._set_status(
-                        "error", "Restart failed — the update applies on the next start"))
-                self.ui_call(self._update_flow_idle)
+                self.ui_call(self._stay_after_all)
                 return
             self.ui_call(self._final_quit)
 
         threading.Thread(target=_relaunch, daemon=True).start()
+
+    def _stay_after_all(self) -> None:
+        """An update relaunch that started no successor — its stop or the
+        start failed: this process stays, unless a quit came meanwhile, which
+        goes on as the quit it is. On the Tk thread, where _quit runs: one
+        of the two comes first, and a quit after this is an ordinary one.
+        _stop_everything closed the services (PostgreSQL included, which the
+        backend needs), P2P and the session marker, or what it got to before
+        it failed, _restart_self the event streams: all of it comes back as at
+        a start — not quitting any more first, so the start's "up" or "down"
+        meets a window that knows it."""
+        if self._quit_asked:
+            logger.info("Relaunch failed, and a quit came during it: the launcher ends")
+            self._final_quit()
+            return
+        from desktop.config_manager import get_data_dir
+        from desktop.p2p import diag_events
+        self._shutting_down = False
+        try:
+            diag_events.write_session_marker(get_data_dir())
+        except OSError as e:
+            logger.warning(f"diag: session marker not written — {e}")
+        self.service_manager.reopen()
+        self._streams_started = False
+        self.p2p_manager = None
+
+        def _shown():
+            if not self._shutting_down:         # a quit meanwhile keeps its own cover
+                self._uncover()
+
+        def _start():
+            try:
+                ok = self.service_manager.start_all()
+            except Exception as e:
+                logger.error(f"Start after a failed relaunch failed: {e}", exc_info=True)
+                detail = str(e)[:200]
+                self.ui_call(_shown)
+                self.ui_call(lambda: self._show_node_down("Restart failed", detail))
+                self.ui_call(self._update_flow_idle)
+                # Last, as at a start: the spool writes to the disk that may be what failed
+                diag_events.spool(get_data_dir(), "service.start_failed",
+                                  {"step": "start_all", "error": str(e)[:500]})
+                return
+            self.ui_call(_shown)
+            if ok:
+                self.ui_call(lambda: self._set_status(
+                    "error", "Restart failed — the update applies on the next start"))
+            self.ui_call(self._update_flow_idle)
+
+        threading.Thread(target=_start, daemon=True).start()
 
     def _final_quit(self):
         if self._qr_timer:

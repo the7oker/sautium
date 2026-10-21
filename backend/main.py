@@ -254,6 +254,7 @@ async def _serve_p2p(port: int) -> None:
     import socket
 
     import uvicorn
+    from serving import Server
     from tls_gen import ensure_cert
     from p2p_app import app as peer_app
 
@@ -295,7 +296,7 @@ async def _serve_p2p(port: int) -> None:
             timeout_graceful_shutdown=_PEER_GRACE_S,
         )
     try:
-        await uvicorn.Server(config).serve()
+        await Server(config, what="the peer surface").serve()
     except asyncio.CancelledError:
         raise
     except SystemExit as e:

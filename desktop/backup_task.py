@@ -198,6 +198,11 @@ class CliRun:
                   "errors": "replace", "bufsize": 1}
         if sys.platform == "win32":
             kwargs["creationflags"] = subprocess.CREATE_NO_WINDOW
+        else:
+            # A session of its own, as the backend's (service_manager): a
+            # terminal's Ctrl+C or hangup reaches the launcher alone, whose
+            # quit cancels the job in order
+            kwargs["start_new_session"] = True
         self._proc = subprocess.Popen(cmd, **kwargs)
         logger.info("%s started (PID %d): backup %s", self.job, self._proc.pid, self._args[0])
         self._thread = threading.Thread(target=self._pump, daemon=True, name="backup-cli")

@@ -6,6 +6,7 @@ every credential exchange is boxed end to end instead. The peer surface
 (p2p_app.py, port 8801) keeps its own TLS, pinned to the node key.
 """
 
+import logging.config
 import os
 import sys
 import time
@@ -13,8 +14,10 @@ from pathlib import Path
 
 import psycopg2
 import uvicorn
+from uvicorn.main import STARTUP_FAILURE
 
-from config import settings
+from config import LOGGING_CONFIG, settings
+from serving import Server, heard_until_served, served
 
 HOST = os.getenv("UVICORN_HOST", "0.0.0.0")
 PORT = int(os.getenv("UVICORN_PORT", "8000"))
@@ -88,23 +91,35 @@ def _wait_for_database() -> None:
 
 
 def main() -> int:
+    # The app's own logging from the first line, as main.py sets it at its
+    # import: a stop heard before then is said too
+    logging.config.dictConfig(LOGGING_CONFIG)
+    heard_until_served()
     _enable_hf_offline_if_cached()
     _wait_for_database()
     print(f"[entrypoint] uvicorn HTTP on {HOST}:{PORT} (reload={RELOAD})", flush=True)
+    served()
     # The Web UI's event streams never end on their own: without a limit
     # uvicorn waits on them until Docker kills the process, and the
     # lifespan's shutdown — a benchmark run putting the owner's HQPlayer
     # back — never runs (exit 137, 2026-10-03). The compose files give the
     # stop 10 s (stop_grace_period); these 2 are the open requests' share,
     # after the peer surface's 1 (main._PEER_GRACE_S: SIGTERM reaches it first).
-    uvicorn.run(
-        "main:app",
-        host=HOST,
-        port=PORT,
-        reload=RELOAD,
-        timeout_graceful_shutdown=2,
-    )
-    return 0
+    if RELOAD:
+        # The development path: the reload supervisor runs the server in a
+        # process of its own
+        uvicorn.run("main:app", host=HOST, port=PORT, reload=True, timeout_graceful_shutdown=2)
+        return 0
+    # Built here, not by uvicorn.run, which imports the app before its server
+    # holds the signals: PID 1 has no default action for SIGTERM, so a stop
+    # during the import was not heard at all
+    server = Server(uvicorn.Config("main:app", host=HOST, port=PORT, timeout_graceful_shutdown=2,
+                                   log_config=LOGGING_CONFIG))
+    try:
+        server.run()
+    except KeyboardInterrupt:
+        pass            # SIGINT, raised again as the server leaves, once stopped in order
+    return 0 if server.started else STARTUP_FAILURE
 
 
 if __name__ == "__main__":
