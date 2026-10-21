@@ -1634,7 +1634,8 @@ def _enrich_worker(limit: Optional[int], local_analysis: bool):
         af_s = gpu_s.get("audio_features", {})
         text_s = result.get("text_embeddings", {})
         lyrics_emb_s = result.get("lyrics_embeddings", {})
-        bio_emb_s = result.get("enrichment_embeddings", {}).get("artist_bios", {})
+        enrich_emb_s = result.get("enrichment_embeddings", {})
+        bio_emb_s = enrich_emb_s.get("artist_bios", {})
         parts = [
             f"Emb: {emb_s.get('success', 0)}",
             f"Features: {af_s.get('success', 0)}",
@@ -1642,10 +1643,19 @@ def _enrich_worker(limit: Optional[int], local_analysis: bool):
             f"Lyrics emb: {lyrics_emb_s.get('success', 0)}",
             f"Bio emb: {bio_emb_s.get('success', 0)}",
         ]
+        # A text pass the device's memory stopped, or one that failed outright,
+        # is no success of the run: what it left waits for the next one
+        unfinished = [f"{name} {'stopped (out of memory)' if part.get('stopped') else 'failed'}"
+                      for name, part in (("text", text_s), ("lyrics emb", lyrics_emb_s),
+                                         ("enrichment emb", enrich_emb_s), ("bio emb", bio_emb_s),
+                                         ("genre emb", enrich_emb_s.get("genre_descs", {})))
+                      if part.get("stopped") or part.get("error")]
+        if unfinished:
+            parts.append("not finished: " + ", ".join(unfinished))
         if result.get("note"):
             parts.append(result["note"])
         state["progress"] = " | ".join(parts)
-        state["result"] = {"success": True, "statistics": result}
+        state["result"] = {"success": not unfinished, "statistics": result}
         # Signing moved into run_parallel_enrichment (right after the audio
         # pipeline commits) so it survives a manual cancel of the slow lyrics
         # tail and is not gated on the whole run finishing.

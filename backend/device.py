@@ -94,6 +94,22 @@ def empty_cache(device: Optional[str] = None) -> None:
         torch.mps.empty_cache()
 
 
+# What torch's RuntimeErrors say of memory it could not have (torch 2.12): CUDA
+# and MPS out of memory, an MPS buffer over the device's largest, cuBLAS's
+# workspace, the CPU allocator on POSIX and on Windows
+_OUT_OF_MEMORY = ("out of memory", "invalid buffer size", "cublas_status_alloc_failed",
+                  "can't allocate memory", "not enough memory")
+
+
+def out_of_memory(exc: BaseException) -> bool:
+    """Whether `exc` is the device out of memory for what was asked: CUDA's
+    own error, Python's, or one of torch's RuntimeErrors that says so."""
+    if isinstance(exc, (torch.cuda.OutOfMemoryError, MemoryError)):
+        return True
+    text = str(exc).lower()
+    return isinstance(exc, RuntimeError) and any(s in text for s in _OUT_OF_MEMORY)
+
+
 def available_accel_memory_gb() -> float:
     """Memory actually usable for a batch, in GB.
 

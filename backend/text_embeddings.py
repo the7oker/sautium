@@ -7,7 +7,7 @@ and enrichment data (artist_bios, tags) to compose descriptive text.
 """
 
 import logging
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Set, Tuple
 
 import numpy as np
 from sqlalchemy import text as sa_text
@@ -46,7 +46,7 @@ class TextEmbeddingGenerator:
         from text_embedder import get_text_embedder
         self.model = get_text_embedder(self.model_name, self.device)
 
-    def encode(self, texts: List[str]) -> np.ndarray:
+    def encode(self, texts: List[str]) -> Tuple[List[Optional[np.ndarray]], Set[int]]:
         """
         Encode a list of texts into embeddings.
 
@@ -54,15 +54,12 @@ class TextEmbeddingGenerator:
             texts: List of text strings.
 
         Returns:
-            numpy array of shape (len(texts), 1024).
+            a 1024-d vector per text, None for one the device could not
+            take, and the indices of those (text_embedder.encode).
         """
         self.load_model()
-        return self.model.encode(
-            texts,
-            batch_size=self.batch_size,
-            show_progress_bar=False,
-            normalize_embeddings=True,
-        )
+        from text_embedder import encode
+        return encode(self.model, texts, batch_size=self.batch_size, device=self.device)
 
     def query_to_embedding(self, query: str) -> np.ndarray:
         """Encode a search query into a 1024d embedding vector."""
@@ -83,9 +80,9 @@ class TextEmbeddingGenerator:
         if not track_ids:
             return {}
 
-        # NOTE: artist bios and genre descriptions are now in separate embedding
-        # tables (artist_bio_embeddings, genre_desc_embeddings) to avoid exceeding
-        # the 128-token model limit.
+        # NOTE: artist bios and genre descriptions are embedded apart, chunked
+        # (artist_bio_embeddings, genre_desc_embeddings: enrichment_embeddings),
+        # never in this text.
         query = sa_text("""
             SELECT
                 t.id as track_id,
@@ -186,7 +183,7 @@ class TextEmbeddingGenerator:
         worker_id: Optional[int] = None,
         worker_count: Optional[int] = None,
         cancel_flag=None,
-    ) -> Dict[str, int]:
+    ) -> Dict[str, Any]:
         """
         Generate text embeddings for all tracks (or those missing them).
 
@@ -269,6 +266,8 @@ class TextEmbeddingGenerator:
             )
             db.flush()
 
+        from text_embedder import OutOfMemory
+        stopped = None
         # Process in batches
         batch_size = self.batch_size
         for batch_start in tqdm(
@@ -311,14 +310,22 @@ class TextEmbeddingGenerator:
 
             # Encode batch
             try:
-                embeddings = self.encode(ordered_texts)
+                embeddings, left_out = self.encode(ordered_texts)
+            except OutOfMemory as e:
+                # Every later batch would meet the same full device
+                stats["failed"] += len(ordered_ids)
+                stopped = str(e)
+                break
             except Exception as e:
                 logger.error(f"Encoding failed for batch starting at {batch_start}: {e}")
                 stats["failed"] += len(ordered_ids)
                 continue
 
             # Create text embeddings linked to tracks
-            for sid, vector in zip(ordered_ids, embeddings):
+            for i, (sid, vector) in enumerate(zip(ordered_ids, embeddings)):
+                if i in left_out:
+                    stats["failed"] += 1        # its text did not fit on the device even alone
+                    continue
                 try:
                     text_embedding = TextEmbedding(
                         vector=vector.tolist(),
@@ -337,10 +344,16 @@ class TextEmbeddingGenerator:
             # Commit after each batch
             db.commit()
 
-        logger.info(
-            f"Text embedding generation complete: "
-            f"{stats['success']} success, {stats['failed']} failed"
-        )
+        said = f"{stats['success']} success, {stats['failed']} failed"
+        if stopped is not None:
+            # A pass that stopped is not complete: what it left is selected again next time
+            stats["stopped"] = stopped
+            logger.error(f"Text embedding generation stopped: {said}, the rest left for the next "
+                         f"pass — {stopped}")
+        elif stats["failed"]:
+            logger.warning(f"Text embedding generation finished with failures: {said}")
+        else:
+            logger.info(f"Text embedding generation complete: {said}")
 
         return stats
 
@@ -355,7 +368,7 @@ def generate_text_embeddings(
     worker_id: Optional[int] = None,
     worker_count: Optional[int] = None,
     cancel_flag=None,
-) -> Dict[str, int]:
+) -> Dict[str, Any]:
     """
     Convenience function to generate text embeddings.
 

@@ -525,12 +525,12 @@ def _model_cancel() -> bool:
     return _cancel_flag() or _playback_hold() is not None
 
 
-def _step_text_embeddings(limit: int) -> Dict[str, int]:
+def _step_text_embeddings(limit: int) -> Dict[str, Any]:
     from text_embeddings import generate_text_embeddings
     return generate_text_embeddings(limit=limit, cancel_flag=_model_cancel)
 
 
-def _step_lyrics_embeddings(limit: int) -> Dict[str, int]:
+def _step_lyrics_embeddings(limit: int) -> Dict[str, Any]:
     from lyrics_embeddings import generate_lyrics_embeddings
     return generate_lyrics_embeddings(limit=limit, cancel_flag=_model_cancel)
 

@@ -253,6 +253,23 @@ implementation details live in the code, DB and git history.
   inside the container is the WSL VM's, and HQPlayer runs on the Windows
   side of it. Playback is the proxy because it is the one signal every
   runtime can observe.
+- **A pass the device's memory stops is not done (2026-10-21).** The four
+  text passes caught a failed encode per batch, logged it and went on: out
+  of memory, every later batch met the same full device — 314 error lines
+  in one pass on a Mac (MPS) — and the pass then said "done: 0 genres, 0
+  chunks", the analysis run "success". Now one encode for all four
+  (`text_embedder.encode`): out of memory, the device's cache is freed and
+  the batch goes one text at a time (said once a process). A text that does
+  not fit alone fails its own row and the rest are written: stopping there
+  would have held every later pass at the same batch, the selection being
+  ordered. Whether the device is full is asked of a text of a few tokens
+  after such a failure, never of a text of the batch, whose fit depends on
+  the batch (one of long texts only stopped every pass): when that does not
+  fit either, the pass stops with one line and `stopped` in its stats, and
+  the run that held it is no success. Nothing marks a
+  row as tried: each pass selects what is still unembedded, so what a
+  stopped pass left comes back at the next one, and a stopped pass holds
+  `failed`, which `_wants_more` reads as waiting out the interval.
 - **A failed Last.fm fetch means one of three things (2026-09-22).** The
   source's verdict about the entity (a `WSError` that reaches the caller:
   not found, or another per-entity refusal) is cached in

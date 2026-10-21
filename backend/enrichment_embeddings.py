@@ -2,7 +2,7 @@
 Enrichment embedding generation for artist bios and genre descriptions.
 
 Generates 1024-dimensional text embeddings at entity level (not track level).
-Uses chunking to handle texts longer than the model's 128-token limit.
+Long texts are chunked to MAX_TOKENS_PER_CHUNK, well within the model's 8192 tokens.
 
 Pipeline:
   1. Fetch text from artist_bios / genre_descriptions
@@ -16,7 +16,7 @@ import logging
 import math
 import re
 import time
-from typing import Any, Callable, Dict, List, Optional
+from typing import Any, Callable, Dict, List, Optional, Set, Tuple
 
 import numpy as np
 from sqlalchemy import text as sa_text
@@ -101,14 +101,10 @@ class _BaseEnrichmentGenerator:
         from text_embedder import get_text_embedder
         self.model = get_text_embedder(self.model_name, self.device)
 
-    def encode(self, texts: List[str]) -> np.ndarray:
+    def encode(self, texts: List[str]) -> Tuple[List[Optional[np.ndarray]], Set[int]]:
         self.load_model()
-        return self.model.encode(
-            texts,
-            batch_size=self.batch_size,
-            show_progress_bar=False,
-            normalize_embeddings=True,
-        )
+        from text_embedder import encode
+        return encode(self.model, texts, batch_size=self.batch_size, device=self.device)
 
     def _get_or_create_model_record(self, db: Session) -> EmbeddingModel:
         mid = embedding_model_uuid(self.model_name)
@@ -136,7 +132,7 @@ class ArtistBioEmbeddingGenerator(_BaseEnrichmentGenerator):
         force: bool = False,
         progress_cb: Optional[Callable] = None,
         cancel_flag: Optional[Callable] = None,
-    ) -> Dict[str, int]:
+    ) -> Dict[str, Any]:
         stats = {"processed": 0, "success": 0, "skipped": 0, "failed": 0, "chunks": 0}
         start = time.time()
 
@@ -176,6 +172,8 @@ class ArtistBioEmbeddingGenerator(_BaseEnrichmentGenerator):
             )
             db.flush()
 
+        from text_embedder import OutOfMemory
+        stopped = None
         # Process in batches
         for batch_start in tqdm(
             range(0, len(rows), self.batch_size),
@@ -206,13 +204,20 @@ class ArtistBioEmbeddingGenerator(_BaseEnrichmentGenerator):
                 continue
 
             try:
-                embeddings = self.encode([c[2] for c in all_chunks])
+                embeddings, left_out = self.encode([c[2] for c in all_chunks])
+            except OutOfMemory as e:
+                # Every later batch would meet the same full device
+                stats["failed"] += len(batch_rows)
+                stopped = str(e)
+                break
             except Exception as e:
                 logger.error(f"Encoding failed: {e}")
                 stats["failed"] += len(batch_rows)
                 continue
 
-            batch_failed = set()
+            # An artist a text of which did not fit on the device even alone fails
+            # whole, the rest of the batch is written
+            batch_failed = {all_chunks[i][0] for i in left_out}
             for (artist_id, chunk_index, chunk_text), vector in zip(all_chunks, embeddings):
                 if artist_id in batch_failed:
                     continue
@@ -241,10 +246,17 @@ class ArtistBioEmbeddingGenerator(_BaseEnrichmentGenerator):
                 progress_cb(f"Phase 2: artist bios {done}/{len(rows)}")
 
         elapsed = time.time() - start
-        logger.info(
-            f"Artist bio embeddings done: {stats['success']} artists, "
-            f"{stats['chunks']} chunks ({elapsed:.1f}s)"
-        )
+        said = (f"{stats['success']} artists, {stats['chunks']} chunks, {stats['failed']} failed "
+                f"({elapsed:.1f}s)")
+        if stopped is not None:
+            # A pass that stopped is not done: what it left is selected again next time
+            stats["stopped"] = stopped
+            logger.error(f"Artist bio embeddings stopped: {said}, the rest left for the next pass — "
+                         f"{stopped}")
+        elif stats["failed"]:
+            logger.warning(f"Artist bio embeddings finished with failures: {said}")
+        else:
+            logger.info(f"Artist bio embeddings done: {said}")
         return stats
 
 
@@ -258,7 +270,7 @@ class GenreDescEmbeddingGenerator(_BaseEnrichmentGenerator):
         force: bool = False,
         progress_cb: Optional[Callable] = None,
         cancel_flag: Optional[Callable] = None,
-    ) -> Dict[str, int]:
+    ) -> Dict[str, Any]:
         stats = {"processed": 0, "success": 0, "skipped": 0, "failed": 0, "chunks": 0}
         start = time.time()
 
@@ -297,6 +309,8 @@ class GenreDescEmbeddingGenerator(_BaseEnrichmentGenerator):
             )
             db.flush()
 
+        from text_embedder import OutOfMemory
+        stopped = None
         for batch_start in tqdm(
             range(0, len(rows), self.batch_size),
             desc="Genre desc embeddings",
@@ -324,13 +338,20 @@ class GenreDescEmbeddingGenerator(_BaseEnrichmentGenerator):
                 continue
 
             try:
-                embeddings = self.encode([c[2] for c in all_chunks])
+                embeddings, left_out = self.encode([c[2] for c in all_chunks])
+            except OutOfMemory as e:
+                # Every later batch would meet the same full device
+                stats["failed"] += len(batch_rows)
+                stopped = str(e)
+                break
             except Exception as e:
                 logger.error(f"Encoding failed: {e}")
                 stats["failed"] += len(batch_rows)
                 continue
 
-            batch_failed = set()
+            # A genre a text of which did not fit on the device even alone fails
+            # whole, the rest of the batch is written
+            batch_failed = {all_chunks[i][0] for i in left_out}
             for (genre_id, chunk_index, chunk_text), vector in zip(all_chunks, embeddings):
                 if genre_id in batch_failed:
                     continue
@@ -359,10 +380,17 @@ class GenreDescEmbeddingGenerator(_BaseEnrichmentGenerator):
                 progress_cb(f"Phase 2: genre descriptions {done}/{len(rows)}")
 
         elapsed = time.time() - start
-        logger.info(
-            f"Genre desc embeddings done: {stats['success']} genres, "
-            f"{stats['chunks']} chunks ({elapsed:.1f}s)"
-        )
+        said = (f"{stats['success']} genres, {stats['chunks']} chunks, {stats['failed']} failed "
+                f"({elapsed:.1f}s)")
+        if stopped is not None:
+            # A pass that stopped is not done: what it left is selected again next time
+            stats["stopped"] = stopped
+            logger.error(f"Genre desc embeddings stopped: {said}, the rest left for the next pass — "
+                         f"{stopped}")
+        elif stats["failed"]:
+            logger.warning(f"Genre desc embeddings finished with failures: {said}")
+        else:
+            logger.info(f"Genre desc embeddings done: {said}")
         return stats
 
 
@@ -370,7 +398,7 @@ class GenreDescEmbeddingGenerator(_BaseEnrichmentGenerator):
 
 def generate_artist_bio_embeddings(
     limit: Optional[int] = None, batch_size: Optional[int] = None, force: bool = False,
-) -> Dict[str, int]:
+) -> Dict[str, Any]:
     gen = ArtistBioEmbeddingGenerator(batch_size=batch_size)
     with get_db_context() as db:
         return gen.generate_all(db, limit=limit, force=force)
@@ -378,7 +406,7 @@ def generate_artist_bio_embeddings(
 
 def generate_genre_desc_embeddings(
     limit: Optional[int] = None, batch_size: Optional[int] = None, force: bool = False,
-) -> Dict[str, int]:
+) -> Dict[str, Any]:
     gen = GenreDescEmbeddingGenerator(batch_size=batch_size)
     with get_db_context() as db:
         return gen.generate_all(db, limit=limit, force=force)
@@ -388,9 +416,9 @@ def generate_all_enrichment_embeddings(
     limit: Optional[int] = None, batch_size: Optional[int] = None, force: bool = False,
     progress_cb: Optional[Callable] = None,
     cancel_flag: Optional[Callable] = None,
-) -> Dict[str, Dict[str, int]]:
-    """Generate all three enrichment embedding types."""
-    results: Dict[str, Dict[str, int]] = {}
+) -> Dict[str, Dict[str, Any]]:
+    """Generate both enrichment embedding types: artist bios, genre descriptions."""
+    results: Dict[str, Dict[str, Any]] = {}
     for cls, key in (
         (ArtistBioEmbeddingGenerator, "artist_bios"),
         (GenreDescEmbeddingGenerator, "genre_descs"),

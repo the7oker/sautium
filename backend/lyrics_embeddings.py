@@ -13,7 +13,7 @@ Pipeline:
 
 import logging
 import math
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Set, Tuple
 
 import numpy as np
 from sqlalchemy import text as sa_text
@@ -154,15 +154,11 @@ class LyricsEmbeddingGenerator:
         from text_embedder import get_text_embedder
         self.model = get_text_embedder(self.model_name, self.device)
 
-    def encode(self, texts: List[str]) -> np.ndarray:
+    def encode(self, texts: List[str]) -> Tuple[List[Optional[np.ndarray]], Set[int]]:
         """Encode a list of texts into embeddings."""
         self.load_model()
-        return self.model.encode(
-            texts,
-            batch_size=self.batch_size,
-            show_progress_bar=False,
-            normalize_embeddings=True,
-        )
+        from text_embedder import encode
+        return encode(self.model, texts, batch_size=self.batch_size, device=self.device)
 
     def query_to_embedding(self, query: str) -> np.ndarray:
         """Encode a search query into a 1024d embedding vector."""
@@ -199,7 +195,7 @@ class LyricsEmbeddingGenerator:
         worker_count: Optional[int] = None,
         progress_cb=None,
         cancel_flag=None,
-    ) -> Dict[str, int]:
+    ) -> Dict[str, Any]:
         """
         Generate lyrics embeddings for tracks with lyrics.
 
@@ -306,6 +302,8 @@ class LyricsEmbeddingGenerator:
             )
             db.flush()
 
+        from text_embedder import OutOfMemory
+        stopped = None
         # Process in batches
         batch_size = self.batch_size
 
@@ -364,7 +362,12 @@ class LyricsEmbeddingGenerator:
             # Encode all chunks at once
             chunk_texts = [c[2] for c in all_chunks]
             try:
-                embeddings = self.encode(chunk_texts)
+                embeddings, left_out = self.encode(chunk_texts)
+            except OutOfMemory as e:
+                # Every later batch would meet the same full device
+                stats["failed"] += len(batch_rows)
+                stopped = str(e)
+                break
             except Exception as e:
                 logger.error(f"Encoding failed for batch at {batch_start}: {e}")
                 stats["failed"] += len(batch_rows)
@@ -373,8 +376,12 @@ class LyricsEmbeddingGenerator:
             # Save embeddings
             current_track = None
             track_ok = True
-            batch_failed_tracks = set()
+            # A track a chunk of which did not fit on the device even alone
+            # fails whole, the rest of the batch is written
+            batch_failed_tracks = {all_chunks[i][0] for i in left_out}
             for (track_id, chunk_index, chunk_text), vector in zip(all_chunks, embeddings):
+                if track_id in batch_failed_tracks:
+                    continue
                 if track_id != current_track:
                     current_track = track_id
                     track_ok = True
@@ -409,12 +416,17 @@ class LyricsEmbeddingGenerator:
             db.commit()
 
         elapsed = time.time() - start_time
-        logger.info(
-            f"Lyrics embedding generation complete: "
-            f"{stats['success']} tracks, {stats['chunks']} chunks, "
-            f"{stats['failed']} failed, {stats['skipped']} skipped "
-            f"({elapsed:.1f}s)"
-        )
+        said = (f"{stats['success']} tracks, {stats['chunks']} chunks, {stats['failed']} failed, "
+                f"{stats['skipped']} skipped ({elapsed:.1f}s)")
+        if stopped is not None:
+            # A pass that stopped is not complete: what it left is selected again next time
+            stats["stopped"] = stopped
+            logger.error(f"Lyrics embedding generation stopped: {said}, the rest left for the next "
+                         f"pass — {stopped}")
+        elif stats["failed"]:
+            logger.warning(f"Lyrics embedding generation finished with failures: {said}")
+        else:
+            logger.info(f"Lyrics embedding generation complete: {said}")
 
         return stats
 
@@ -429,7 +441,7 @@ def generate_lyrics_embeddings(
     worker_count: Optional[int] = None,
     progress_cb=None,
     cancel_flag=None,
-) -> Dict[str, int]:
+) -> Dict[str, Any]:
     """
     Convenience function to generate lyrics embeddings.
 
