@@ -161,6 +161,15 @@ def _literal(host: str) -> bool:
     return True
 
 
+def _socket_error(err: int) -> OSError:
+    """A socket's error code in the OS's words: os.strerror knows no WinSock
+    code — a refusal on Windows (10061) would read "Unknown error"."""
+    if os.name == "nt":
+        import ctypes
+        return OSError(err, ctypes.FormatError(err))
+    return OSError(err, os.strerror(err))
+
+
 def open_connection(address: Tuple[str, int], timeout: float,
                     wait: Callable[[socket.socket, int, Optional[float]], str]) -> socket.socket:
     """A TCP connection to `address`, its name looked up (_lookup) and the
@@ -176,7 +185,7 @@ def open_connection(address: Tuple[str, int], timeout: float,
         sock.setblocking(False)
         err = sock.connect_ex((host, port))
         if err not in (0, *_CONNECTING):
-            raise OSError(err, os.strerror(err))
+            raise _socket_error(err)
         if err:
             got = wait(sock, selectors.EVENT_WRITE, max(deadline - time.monotonic(), 0.0))
             if got == "woken":
@@ -185,7 +194,7 @@ def open_connection(address: Tuple[str, int], timeout: float,
                 raise TimeoutError("timed out")
             err = sock.getsockopt(socket.SOL_SOCKET, socket.SO_ERROR)
             if err:
-                raise OSError(err, os.strerror(err))
+                raise _socket_error(err)
         sock.setblocking(True)
         return sock
     except BaseException:
@@ -645,8 +654,9 @@ class HQPlayerClient:
 
     def _outcome(self, command: str, attributes: Optional[Dict[str, str]],
                  result: Optional[str], message: str = "",
-                 during: Optional[str] = None) -> None:
-        outcome = CommandOutcome(ts=time.time(), host=self.host, port=self.port,
+                 during: Optional[str] = None, at: Optional[Tuple[str, int]] = None) -> None:
+        host, port = at or (self.host, self.port)
+        outcome = CommandOutcome(ts=time.time(), host=host, port=port,
                                  command=command, attributes=dict(attributes or {}),
                                  result=result, message=message, during=during)
         if outcome.failed:
@@ -664,25 +674,29 @@ class HQPlayerClient:
         Returns:
             True if connected successfully
         """
-        sock = self.dial()
+        at = (self.host, self.port)
+        sock = self.dial(at)
         if sock is None:
             self.socket = None
             return False
-        self.use(sock)
+        self.use(sock, at)
         return True
 
-    def use(self, sock: socket.socket) -> None:
-        """Talk to HQPlayer on `sock`, a connection `dial` made."""
+    def use(self, sock: socket.socket, at: Tuple[str, int]) -> None:
+        """Talk to HQPlayer on `sock`, the connection `dial` made to `at`."""
         self.socket = sock
         self.buffer = bytearray()
         self.connections += 1
-        logger.info(f"Connected to HQPlayer at {self.host}:{self.port}")
+        logger.info(f"Connected to HQPlayer at {at[0]}:{at[1]}")
 
-    def dial(self) -> Optional[socket.socket]:
-        """A new connection to HQPlayer, set up for this client's reads — not
-        yet the one it talks on (use) — or None, the outcome saying why. Its
-        connect is a wait like a read's: another thread ends it
-        (interrupt, close)."""
+    def dial(self, address: Tuple[str, int]) -> Optional[socket.socket]:
+        """A new connection to HQPlayer at `address`, set up for this client's
+        reads — not yet the one it talks on (use) — or None, the outcome
+        saying why, at that address. Its caller reads the address once:
+        another thread may readdress the client meanwhile
+        (HqpLink.readdress). The connect is a wait like a read's: another
+        thread ends it (interrupt, close)."""
+        host, port = address
         self.timed_out = False      # a failed connect is HQPlayer away, never its silence
         sock = None
         try:
@@ -690,7 +704,7 @@ class HQPlayerClient:
             # accepts SYN slowly would otherwise burn the full read timeout on
             # every reconnect attempt. Cap connect at 2s, then restore the
             # full timeout for reads (commands can legitimately take seconds).
-            sock = open_connection((connect_address(self.host), self.port),
+            sock = open_connection((connect_address(host), port),
                                    min(self.timeout, 2.0), self._wait)
             sock.settimeout(self.timeout)
             # Tight TCP keepalive: the WSL2→Windows NAT silently drops idle
@@ -716,16 +730,20 @@ class HQPlayerClient:
             return sock
         except Interrupted as e:
             # Let go by this node (a close, a cancel): no loss of HQPlayer's
-            self._outcome("<connection>", None, "interrupted",
-                          f"connect to {self.host}:{self.port}: {e}")
+            self._outcome("<connection>", None, "interrupted", f"connect to {host}:{port}: {e}",
+                          at=(host, port))
             return None
         except Exception as e:
-            logger.error(f"Failed to connect to HQPlayer: {e}")
+            # Per try, at debug: the reason goes in the outcome (refusal), and
+            # the caller says what the try comes to — the link that HQPlayer
+            # became unreachable (hqp_link._unreachable, said again at a
+            # doubling interval), the benchmark that its own connection failed
+            logger.debug(f"Failed to connect to HQPlayer at {host}:{port}: {e}")
             self.losses += 1
             if sock is not None:
                 sock.close()
-            self._outcome("<connection>", None, "refused",
-                          f"connect to {self.host}:{self.port}: {e}")
+            self._outcome("<connection>", None, "refused", f"connect to {host}:{port}: {e}",
+                          at=(host, port))
             return None
 
     def disconnect(self):
@@ -1577,7 +1595,7 @@ class HQPlayerConnection:
 
     def __enter__(self) -> HQPlayerClient:
         if not self.client.connect():
-            raise ConnectionError(f"Failed to connect to HQPlayer at {self.client.host}:{self.client.port}")
+            raise ConnectionError(f"Failed to connect to HQPlayer: {self.client.refusal()}")
         return self.client
 
     def __exit__(self, exc_type, exc_val, exc_tb):

@@ -827,6 +827,11 @@ class _Link:
             if self.c.connect():
                 logger.info("HQPlayer benchmark: connected again after %s", why)
                 raise (_Silent if silent else _Reopened)(why)
+        if not self.wait(0):
+            # The tries ran out, and nothing let them go — a cancel or a halt,
+            # one during the last try included, is no failed connect to say:
+            # the last connect's own reason, which dial() keeps at debug
+            logger.warning("HQPlayer benchmark: not connected again: %s", self.c.refusal())
         raise _Lost(f"HQPlayer stopped answering ({why})")
 
 
@@ -1116,6 +1121,7 @@ def _measure(ep: dict, kind: str, gave: Callable[[str], bool],
     global _live
     link = _Link(_cancel.wait, answer_s=ANSWER_WAIT_S)
     if not link.connect():
+        logger.warning("HQPlayer benchmark: no connection to HQPlayer: %s", link.refusal())
         return "failed", "HQPlayer is not answering"
     _live = link
     try:

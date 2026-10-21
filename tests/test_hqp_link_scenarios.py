@@ -1065,7 +1065,7 @@ class World:
             self.rec("step-refused", why=why)
             if not (hqp._down or hqp.mute or hqp._silent_until > time.monotonic()
                     or link.build.silent() is not None or link.silent_since is not None
-                    or link._unreachable_until > time.monotonic()):
+                    or link._circuit_open((link.host, link.port))):
                 self.violate(f"I13: at rest a play press was refused — {why} — with "
                              f"HQPlayer up, answering and building nothing")
             return False
@@ -1139,7 +1139,8 @@ class World:
             pending = (
                 [f"{f.name} silent" for f in (self.a, self.b) if f._silent_until > now]
                 + [f"{self.lid(ln)} building" for ln in links if ln.build.building() is not None]
-                + [f"{self.lid(ln)} breaker open" for ln in links if ln._unreachable_until > now]
+                + [f"{self.lid(ln)} breaker open" for ln in links
+                   if ln._circuit_open((ln.host, ln.port))]
                 + ([f"{self.lid(driven)} not heard since a build or a silence"]
                    if driven in links and (driven.build.silent() is not None
                                            or driven.silent_since is not None) else [])
@@ -1668,6 +1669,7 @@ def test_a_rest_that_never_comes_names_what_stayed(fake, fake_b, listens, monkey
     with _a_world(fake, fake_b, monkeypatch) as world:
         world.settle_limit = 1.0
         link = world.mgr.active._link
+        link._unreachable_at = (link.host, link.port)
         link._unreachable_until = time.monotonic() + 10 ** 6
         world.settle(full=True)
         assert world.violations == [f"the rest never came: ['{world.lid(link)} breaker open']"]

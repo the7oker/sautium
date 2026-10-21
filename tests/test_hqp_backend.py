@@ -1353,6 +1353,162 @@ def test_the_poll_backs_off_to_15_s_and_survives_a_night_of_misses():
     assert hb._poll_interval(5000) == 15.0
 
 
+def _listening(port: int) -> socket.socket:
+    """A listener on `port`, which takes connections and answers nothing."""
+    srv = socket.socket()
+    srv.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    srv.bind(("127.0.0.1", port))
+    srv.listen(1)
+    return srv
+
+
+def _unreachable_lines(caplog, level):
+    return [r.getMessage() for r in caplog.records
+            if r.name == "playback.hqp_link" and r.levelno == level]
+
+
+def _ask(link) -> None:
+    """One question, as the poller asks at every poll, to an HQPlayer that
+    cannot be reached."""
+    with pytest.raises(ConnectionError):
+        with link.asking() as hqp:
+            hqp.get_status(wait=0.5)
+
+
+def test_an_hqplayer_that_cannot_be_reached_is_said_once_as_it_goes_and_once_as_it_is_back(
+        monkeypatch, caplog):
+    """A closed control port asked as the poller asks it, at every poll (an
+    ERROR line per try, every 15 s, until 2026-10-21): one warning as
+    HQPlayer becomes unreachable, the OS's reason in it; the tries after it
+    are debug lines until the gap has passed (put past here, never waited
+    out), then it is said again with the tries, the gap doubled; and one line
+    once a connect goes through."""
+    monkeypatch.setattr(hl, "CIRCUIT_COOLDOWN_S", 0.0)         # every ask dials
+    port = _closed_port()
+    link = hl.HqpLink(("127.0.0.1", port), "127.0.0.1", port)
+    srv = None
+    caplog.set_level(logging.DEBUG)
+    try:
+        for _ in range(4):
+            _ask(link)
+        said = _unreachable_lines(caplog, logging.WARNING)
+        assert len(said) == 1 and "unreachable since" in said[0], said
+        assert "refused" in said[0].lower(), said
+        link._unreachable_said_next = time.monotonic()        # the gap has passed
+        _ask(link)
+        said = _unreachable_lines(caplog, logging.WARNING)
+        assert len(said) == 2 and ", 5 tries: " in said[1], said
+        assert link._unreachable_gap == 2 * hl.UNREACHABLE_SAID_AGAIN_S
+        _ask(link)                                          # within the doubled gap: debug
+        assert len(_unreachable_lines(caplog, logging.WARNING)) == 2
+        srv = _listening(port)
+        with link.asking() as hqp:
+            hqp.get_status(wait=0.2)                        # taken, never answered: reached all the same
+        back = [m for m in _unreachable_lines(caplog, logging.INFO) if "back after" in m]
+        assert len(back) == 1 and "6 tries" in back[0], back
+        assert not [r for r in caplog.records if r.levelno >= logging.ERROR]
+    finally:
+        link.close("the test is over")
+        if srv is not None:
+            srv.close()
+
+
+def test_an_address_chosen_while_hqplayer_cannot_be_reached_starts_anew(monkeypatch, caplog):
+    """The address the link dials changes while HQPlayer cannot be reached (a
+    Docker node's loopback replaced by the host's): a failure there is said
+    at once, as a start of its own — not an hour later under the old
+    address's start — and a connect there names the address that failed."""
+    monkeypatch.setattr(hl, "CIRCUIT_COOLDOWN_S", 0.0)
+    first, second, third = _closed_port(), _closed_port(), _closed_port()
+    link = hl.HqpLink(("127.0.0.1", first), "127.0.0.1", first)
+    srv = None
+    caplog.set_level(logging.DEBUG)
+    try:
+        _ask(link)
+        _ask(link)
+        link.readdress("127.0.0.1", second)
+        _ask(link)
+        said = _unreachable_lines(caplog, logging.WARNING)
+        assert [m.split(" unreachable since ")[0] for m in said] == [
+            f"HQPlayer at 127.0.0.1:{first}", f"HQPlayer at 127.0.0.1:{second}"], said
+        srv = _listening(third)
+        link.readdress("127.0.0.1", third)
+        with link.asking() as hqp:
+            hqp.get_status(wait=0.2)
+        reached = [m for m in _unreachable_lines(caplog, logging.INFO) if "reached" in m]
+        assert len(reached) == 1 and reached[0].startswith(
+            f"HQPlayer at 127.0.0.1:{third} reached; at 127.0.0.1:{second} it was unreachable "
+            f"for "), reached
+        assert reached[0].endswith(", 1 try)"), reached
+    finally:
+        link.close("the test is over")
+        if srv is not None:
+            srv.close()
+
+
+def test_a_dial_on_its_way_as_the_address_changes_is_said_at_the_address_it_dialled(caplog):
+    """The owner saves another alias of the same HQPlayer while the poller's
+    dial is on its way to the one before: that dial's failure is said, and
+    its breaker opened, at the alias it dialled — the new one is dialled at
+    once, and once it answers, the line names the alias that failed."""
+    port = _closed_port()
+    link = hl.HqpLink(("here", port), "localhost", port)
+    dial = link.client.dial
+
+    def readdressed_meanwhile(address):
+        link.readdress("127.0.0.1", port)           # a PUT's thread, during the dial
+        return dial(address)
+
+    link.client.dial = readdressed_meanwhile
+    srv = None
+    caplog.set_level(logging.DEBUG)
+    try:
+        _ask(link)
+        said = _unreachable_lines(caplog, logging.WARNING)
+        assert len(said) == 1 and said[0].startswith(
+            f"HQPlayer at localhost:{port} unreachable since "), said
+        assert f": connect to localhost:{port}: " in said[0], said
+        filed = HQPlayerClient.last_errors()[0]         # the diagnostics ring's entry
+        assert (filed["host"], filed["port"]) == ("localhost", port), filed
+        link.client.dial = dial
+        srv = _listening(port)
+        with link.asking() as hqp:
+            hqp.get_status(wait=0.2)                # not behind the breaker of the alias before
+        reached = [m for m in _unreachable_lines(caplog, logging.INFO) if "reached" in m]
+        assert len(reached) == 1 and reached[0].startswith(
+            f"HQPlayer at 127.0.0.1:{port} reached; at localhost:{port} it was unreachable "
+            f"for "), reached
+    finally:
+        link.close("the test is over")
+        if srv is not None:
+            srv.close()
+
+
+def test_a_dial_that_goes_through_as_the_address_changes_names_the_alias_it_dialled(caplog):
+    """The same readdress, during a dial that goes through: the connection
+    is the alias dialled's, and its line says so."""
+    port = _closed_port()
+    srv = _listening(port)
+    link = hl.HqpLink(("here", port), "localhost", port)
+    dial = link.client.dial
+
+    def readdressed_meanwhile(address):
+        link.readdress("127.0.0.1", port)
+        return dial(address)
+
+    link.client.dial = readdressed_meanwhile
+    caplog.set_level(logging.INFO, logger="hqplayer_client")
+    try:
+        with link.asking() as hqp:
+            hqp.get_status(wait=0.2)
+        assert [r.getMessage() for r in caplog.records
+                if r.getMessage().startswith("Connected to HQPlayer")] == [
+            f"Connected to HQPlayer at localhost:{port}"]
+    finally:
+        link.close("the test is over")
+        srv.close()
+
+
 def test_a_refusal_before_the_silence_that_stops_the_batch_is_told_apart_from_it(monkeypatch):
     # "a" refused (the file cannot be opened) — final, its connection kept,
     # no retry; "b"'s add met HQPlayer's silence and stops the batch at once —

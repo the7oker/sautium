@@ -55,6 +55,7 @@ that does not read it races the one that does: hqplayer_client.Waker), an
 idle one is closed, and every waiter released.
 """
 
+import datetime
 import logging
 import socket
 import threading
@@ -101,9 +102,19 @@ SHORT_SILENCE_COMMANDS = frozenset({"Stop", "PlaylistClear"})
 # before (a Seek right after the SelectTrack that starts a stopped HQPlayer):
 # a late answer to one of them is a build.
 BUILD_COMMANDS = (HANDOVER_COMMANDS - SHORT_SILENCE_COMMANDS) | {"Seek"}
-# A failed connect fails the next ones fast for this long: a stalled control
-# port would otherwise make every reconnect wait out the connect timeout.
+# A failed connect fails the next ones at its address fast for this long: a
+# stalled control port would otherwise make every reconnect wait out the
+# connect timeout. Another address is dialled at once.
 CIRCUIT_COOLDOWN_S = 6.0
+# An HQPlayer that cannot be reached is said once as it begins and once as it
+# ends; while it lasts, said again after UNREACHABLE_SAID_AGAIN_S, doubling up
+# to UNREACHABLE_SAID_AT_MOST_S — the poller tries it at every poll, and a line
+# per try (5,760 a day) buried a night's stop. How a closed port fails depends
+# on the host: on one Windows host it was refused at once from a Docker node
+# and waited out the connect timeout from WSL, so the OS's own reason goes in
+# the line.
+UNREACHABLE_SAID_AGAIN_S = 60.0
+UNREACHABLE_SAID_AT_MOST_S = 3600.0
 
 UNFINISHED = "HQPlayer did not finish building the filter — restart HQPlayer"
 BUILDING = "HQPlayer is building the filter — it takes commands again once it is done"
@@ -521,6 +532,15 @@ def _closed(sock: socket.socket) -> bool:
         return True
 
 
+def _moment(t: float) -> str:
+    """A wall-clock moment as the link's lines name it."""
+    return time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(t))
+
+
+def _tries(n: int) -> str:
+    return f"{n} try" if n == 1 else f"{n} tries"
+
+
 class _Scope:
     """A command sequence's or a question block's hold on the link
     (HqpLink.command, HqpLink.asking): once a request of it went unanswered
@@ -591,7 +611,17 @@ class HqpLink:
         # asking for the command lock: number → kind
         self._latest: Dict[str, int] = {}
         self._pending: Dict[int, str] = {}
+        # The address the last failed connect dialled, until when the next
+        # ones there fail fast, since when every connect there has failed
+        # (None: reached; the wall clock — a line says it, and the time away
+        # from it), the tries since, and when it is said again. The holder
+        # alone dials (_connect) and touches them.
+        self._unreachable_at: Optional[tuple] = None
         self._unreachable_until = 0.0
+        self._unreachable_since: Optional[float] = None
+        self._unreachable_tries = 0
+        self._unreachable_gap = 0.0
+        self._unreachable_said_next = 0.0
 
     def __repr__(self) -> str:
         return f"HqpLink({self.host}:{self.port}, {self.state})"
@@ -980,8 +1010,10 @@ class HqpLink:
     def _connect(self) -> None:
         """A live socket for the holder: one the peer closed while idle is
         found before the send (_closed), a dropped one reconnected — never
-        once the link closed; a failed connect opens the breaker for
-        CIRCUIT_COOLDOWN_S."""
+        once the link closed. The address is read once: a readdress may come
+        during the dial, and what the dial comes to is the address dialled's —
+        a failure opens the breaker there for CIRCUIT_COOLDOWN_S and says
+        HQPlayer unreachable there (_unreachable)."""
         c = self.client
         sock = c.socket
         if sock is not None and _closed(sock):
@@ -991,22 +1023,74 @@ class HqpLink:
             c.disconnect()
         if c.socket is not None:
             return
-        if time.monotonic() < self._unreachable_until:
-            raise ConnectionError(f"HQPlayer at {self.host}:{self.port} unreachable (circuit open)")
-        sock = c.dial()
+        at = (self.host, self.port)
+        if self._circuit_open(at):
+            raise ConnectionError(f"HQPlayer at {at[0]}:{at[1]} unreachable (circuit open)")
+        sock = c.dial(at)
         if sock is None:
             with self._state_lock:
                 if self.state == "closed":
                     # let go while it connected (the close woke the connect)
                     raise Dropped(self.why or "HQPlayer was let go")
-            self._unreachable_until = time.monotonic() + CIRCUIT_COOLDOWN_S
-            raise ConnectionError(f"Cannot connect to HQPlayer at {self.host}:{self.port}")
-        self._unreachable_until = 0.0
+            self._unreachable(at, c.refusal())
+            raise ConnectionError(f"Cannot connect to HQPlayer at {at[0]}:{at[1]}")
+        self._reached(at)
         with self._state_lock:
             if self.state == "closed":
                 sock.close()
                 raise Dropped(self.why or "HQPlayer was let go")
-            c.use(sock)
+            c.use(sock, at)
+
+    def _circuit_open(self, at: tuple) -> bool:
+        """A connect to `at` fails fast: one there failed less than
+        CIRCUIT_COOLDOWN_S ago (_unreachable)."""
+        return at == self._unreachable_at and time.monotonic() < self._unreachable_until
+
+    def _unreachable(self, at: tuple, why: str) -> None:
+        """A connect to `at` failed (`why`, the OS's reason): the breaker
+        opens there, and HQPlayer is said unreachable there once as it begins
+        — an address chosen meanwhile is a new start — then after
+        UNREACHABLE_SAID_AGAIN_S, doubling up to UNREACHABLE_SAID_AT_MOST_S;
+        every other try is debug."""
+        now = time.monotonic()
+        new = self._unreachable_since is None or self._unreachable_at != at
+        self._unreachable_at, self._unreachable_until = at, now + CIRCUIT_COOLDOWN_S
+        if new:
+            self._unreachable_since = time.time()
+            self._unreachable_tries = 1
+            self._unreachable_gap = UNREACHABLE_SAID_AGAIN_S
+            self._unreachable_said_next = now + self._unreachable_gap
+            logger.warning("HQPlayer at %s:%d unreachable since %s: %s", *at,
+                           _moment(self._unreachable_since), why)
+            return
+        self._unreachable_tries += 1
+        if now >= self._unreachable_said_next:
+            self._unreachable_gap = min(self._unreachable_gap * 2, UNREACHABLE_SAID_AT_MOST_S)
+            self._unreachable_said_next = now + self._unreachable_gap
+            logger.warning("HQPlayer at %s:%d unreachable since %s, %s: %s", *at,
+                           _moment(self._unreachable_since), _tries(self._unreachable_tries), why)
+        else:
+            logger.debug("HQPlayer at %s:%d still unreachable: %s", *at, why)
+
+    def _reached(self, at: tuple) -> None:
+        """A connect to `at` went through: the breaker closes, and an HQPlayer
+        unreachable until now is said back, with how long it was away — or,
+        reached at once at an address chosen since, said reached there, with
+        how long the one before failed (one that failed there first is an
+        episode of its own, _unreachable)."""
+        self._unreachable_until = 0.0
+        since = self._unreachable_since
+        if since is None:
+            return
+        self._unreachable_since = None
+        away = datetime.timedelta(seconds=max(0, round(time.time() - since)))   # a clock set back
+        before, tries = self._unreachable_at, _tries(self._unreachable_tries)
+        if before == at:
+            logger.info("HQPlayer at %s:%d back after %s (unreachable since %s, %s)",
+                        *at, away, _moment(since), tries)
+        else:
+            logger.info("HQPlayer at %s:%d reached; at %s:%d it was unreachable for %s (since %s, "
+                        "%s)", *at, *before, away, _moment(since), tries)
 
     @contextmanager
     def command(self, intent: Optional[str] = None, *, item: Any = None,
@@ -1226,13 +1310,13 @@ class HqpLink:
     def readdress(self, host: str, port: int) -> None:
         """Dial the alias chosen last (the same HQPlayer, `key`): on a Docker
         node the host's address replaces a container loopback that reaches
-        nothing. A live connection stays until it ends; the attached
-        backend's meter follows the alias at once."""
+        nothing. A live connection stays until it ends, a dial on its way
+        goes on to the alias it dials (_connect), and the attached backend's
+        meter follows the alias at once."""
         if (host, port) == (self.host, self.port):
             return
         self.host, self.port = host, port
         self.client.host, self.client.port = host, port
-        self._unreachable_until = 0.0
         logger.info("HQPlayer's link dials %s:%d from now on", host, port)
         attached = self.attached
         if attached is not None:

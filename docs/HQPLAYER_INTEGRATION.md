@@ -1840,8 +1840,24 @@ source supplies the numbers.
 
 ### Connection Refused
 ```
-Failed to connect to HQPlayer at <windows-host-ip>:4321
+HQPlayer at <windows-host-ip>:4321 unreachable since 2026-10-21 08:00:00: connect to <windows-host-ip>:4321: [Errno 111] Connection refused
 ```
+
+Said once as HQPlayer becomes unreachable, again after a minute, then at a
+doubling interval up to hourly while it stays so, and once a connect goes
+through again (`HQPlayer at … back after 0:42:10` — a connection taken,
+which is not yet an answer); every try in between is a debug line
+(`hqp_link.UNREACHABLE_SAID_AGAIN_S`, since 2026-10-21). An address chosen
+meanwhile starts anew: reached at its first try, the line names how long
+the one before failed (`HQPlayer at … reached; at … it was unreachable for
+…`), and a failure there first is said as its own. The warning carries the
+OS's reason, which depends on the host and its firewall: on one Windows
+host measured, a closed HQPlayer port was refused at once from a Docker
+node (after a second or two through the host's LAN address), while from
+WSL in NAT mode the connect waited out its timeout — Windows dropped the
+SYN. On that host itself the refusal of a loopback
+connect came after about two seconds, past the connect's 2 s cap, so a
+launcher there reads `timed out`.
 
 **Solutions**:
 1. Ensure HQPlayer Desktop is running on Windows

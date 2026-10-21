@@ -16,6 +16,7 @@ output is an audible action, not a test.
 """
 
 import json
+import logging
 import os
 import random
 import socket
@@ -43,7 +44,7 @@ from playback.manager import OutputHeld, PlaybackManager  # noqa: E402
 from streaming import service as streaming_service  # noqa: E402
 from streaming.proxy import MediaProxy  # noqa: E402
 
-from test_hqp_backend import FakeHqp, _fresh_links, _item, _wait  # noqa: E402
+from test_hqp_backend import FakeHqp, _closed_port, _fresh_links, _item, _wait  # noqa: E402
 from test_hqp_load import PG, _make_db  # noqa: E402
 
 LISTS = Path(__file__).resolve().parent / "fixtures" / "hqp_lists"
@@ -3282,10 +3283,11 @@ def test_a_start_refused_with_no_mark_left_wakes_no_one(run, monkeypatch):
     assert woken == []
 
 
-def test_a_run_that_ends_before_it_judges_the_mark_says_it(run, monkeypatch):
+def test_a_run_that_ends_before_it_judges_the_mark_says_it(run, monkeypatch, caplog):
     """start()'s quiet put-back leaves PCM marked for the run to judge, and
-    the run ends before it gets there: HQPlayer does not answer the run's
-    own connection. The mark is said once the run is over."""
+    the run ends before it gets there: the run's own connection is refused,
+    which the log says with the OS's reason. The mark is said once the run
+    is over."""
     fake = run.fake
     assert _wait(lambda: len(fake.playlist) == 2, 10)
     run_id = _pcm_run_found_in_sdm(run, [1, 0, 0, 0])
@@ -3293,11 +3295,56 @@ def test_a_run_that_ends_before_it_judges_the_mark_says_it(run, monkeypatch):
         fake.volume = -3.0
         fake.track, fake.state = 1, int(PlaybackState.PLAYING)     # the owner's album
     marked = _marks_at_wakes(monkeypatch, run, run_id)
-    monkeypatch.setattr(bench._Link, "connect", lambda self: False)
+    nobody = _closed_port()
+    monkeypatch.setattr(bench._Link, "connect",
+                        lambda self: self.c.dial(("127.0.0.1", nobody)) is not None)
+    caplog.set_level(logging.WARNING, logger="playback.hqp_benchmark")
     bench.start("pcm")
     assert _wait(lambda: not bench.running(), 15)
     assert bench.state()["note"] == "HQPlayer is not answering", bench.state()
     assert _wait(lambda: True in marked, 5), marked
+    said = [r.getMessage() for r in caplog.records if r.name == "playback.hqp_benchmark"
+            and r.levelno == logging.WARNING and "no connection to HQPlayer: " in r.getMessage()]
+    assert len(said) == 1 and "refused" in said[0].lower(), said
+
+
+def test_the_runs_own_connection_says_why_it_was_not_made_again(monkeypatch, caplog):
+    """A run's connection that cannot be made again says the last connect's
+    reason once its tries ran out — dial() keeps each try's at debug — and
+    nothing when a cancel let it go, in a pause or during the last try: the
+    run's outcome says that."""
+    monkeypatch.setattr(settings, "hqplayer_host", "127.0.0.1")
+    monkeypatch.setattr(settings, "hqplayer_port", _closed_port())
+    monkeypatch.setattr(bench, "_RECONNECT_PAUSES", (0.01,))
+    caplog.set_level(logging.DEBUG, logger="playback.hqp_benchmark")
+    link = bench._Link(lambda pause: False)
+    try:
+        with pytest.raises(bench._Lost):
+            link._reconnect(silent=False)
+        said = [r.getMessage() for r in caplog.records if r.levelno >= logging.WARNING]
+        assert len(said) == 1 and "not connected again: " in said[0], said
+        assert "refused" in said[0].lower(), said
+        caplog.clear()
+        link.wait = lambda pause: True                  # a cancel
+        with pytest.raises(bench._Lost):
+            link._reconnect(silent=False)
+        assert [r for r in caplog.records if r.levelno >= logging.WARNING] == []
+        cancel, tries = threading.Event(), []
+        connect = link.c.connect
+
+        def cancelled_on_its_way():
+            tries.append(1)
+            if len(tries) == 2:                         # the last try
+                cancel.set()
+            return connect()
+
+        link.wait = cancel.wait
+        monkeypatch.setattr(link.c, "connect", cancelled_on_its_way)
+        with pytest.raises(bench._Lost):
+            link._reconnect(silent=False)
+        assert len(tries) == 2 and [r for r in caplog.records if r.levelno >= logging.WARNING] == []
+    finally:
+        link.close()
 
 
 def test_a_put_back_that_outlives_starts_wait_says_the_mark_itself(run, monkeypatch):
