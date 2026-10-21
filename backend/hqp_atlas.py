@@ -12,8 +12,10 @@ breaks it refuses the file whole, and the node then shows HQPlayer's own
 facts alone, as without a file. The refusal is logged in one line naming the
 reason and a place in the file, never a value of it: the logs travel in
 support bundles, and no atlas content may. A key not read here is ignored.
-Each read stats the file and loads it again when its modification time or
-size changed.
+Each read stats the file and reads it again when its modification time or
+size changed — and, while the file's time is less than two seconds before its
+last read or after it, when its bytes differ: a clock's grain (a kernel tick on
+Linux) can leave a rewrite of the same size with the same time.
 
 A number stays the text the file writes (`Num`): nothing here rounds, formats
 or computes a measured value, and nothing ranks by one — every list keeps
@@ -32,10 +34,12 @@ What a screen gets is wire-ready: a phrase is a list of parts, {"t": text} or
 every text the node words about one; it reads no atlas.
 """
 
+import hashlib
 import json
 import logging
 import re
 import threading
+import time
 from pathlib import Path
 from typing import Any, Callable, Dict, Iterable, List, NamedTuple, Optional, Tuple
 
@@ -258,7 +262,23 @@ LINK = "Measured properties ↗"
 # -- Reading ---------------------------------------------------------------------
 
 _ORIGIN = {"shipped": "the shipped atlas file", "overlay": "the node's own atlas copy"}
-_cache: Dict[Path, Tuple[Tuple[int, int], Optional["Atlas"]]] = {}
+# A file's modification time has the grain of its filesystem's clock — a kernel
+# tick on Linux, a second or two on some — so a rewrite of the same size within
+# one grain keeps its key. While the file's time is less than this before the
+# entry's last look, or after it (a clock ahead), a read compares its bytes
+# again (git's "racily clean" entries), and reads them anew only when they
+# differ. An entry holding no bytes — a file not readable — has none to compare.
+_RACY_NS = 2_000_000_000
+
+
+class _Held(NamedTuple):
+    key: Tuple[int, int]          # (mtime, size), or (-1, errno) for a file not to be looked at
+    atlas: Optional["Atlas"]
+    digest: Optional[bytes]       # of the bytes the atlas was read from; None when none were
+    looked: int                   # when the bytes were last read, in ns
+
+
+_cache: Dict[Path, _Held] = {}
 _cache_lock = threading.Lock()
 
 
@@ -280,10 +300,9 @@ def read(shipped: Path, overlay: Optional[Path]) -> Optional["Atlas"]:
             key = (-1, exc.errno or 0)
         with _cache_lock:
             held = _cache.get(path)
-            if held is None or held[0] != key:
-                held = (key, _load(path, origin))
-                _cache[path] = held
-        return held[1]
+            if held is None or held.key != key or (held.digest is not None and key[0] >= held.looked - _RACY_NS):
+                held = _cache[path] = _look(path, origin, key, held)
+        return held.atlas
     return None
 
 
@@ -293,10 +312,24 @@ class _Refused(Exception):
         self.reason, self.at = reason, at
 
 
-def _load(path: Path, origin: str) -> Optional["Atlas"]:
+def _look(path: Path, origin: str, key: Tuple[int, int], held: Optional[_Held]) -> _Held:
+    """The file's bytes read now: the atlas `held` has for the same bytes,
+    else the bytes read as an atlas — None for a file refused."""
+    looked = time.time_ns()
     try:
-        text = path.read_text(encoding="utf-8")
-        atlas = Atlas(json.loads(text, parse_float=Num, parse_int=Num, parse_constant=_constant), origin)
+        data = path.read_bytes()
+    except OSError as exc:
+        return _Held(key, _refuse(origin, f"not readable ({exc.strerror})", "the file"), None, looked)
+    digest = hashlib.blake2b(data, digest_size=16).digest()
+    if held is not None and held.digest == digest:
+        return _Held(key, held.atlas, digest, looked)
+    return _Held(key, _parse(data, origin), digest, looked)
+
+
+def _parse(data: bytes, origin: str) -> Optional["Atlas"]:
+    try:
+        atlas = Atlas(json.loads(data.decode("utf-8"), parse_float=Num, parse_int=Num, parse_constant=_constant),
+                      origin)
     except _Refused as refused:
         reason, at = refused.reason, refused.at
     except json.JSONDecodeError as exc:
@@ -305,11 +338,13 @@ def _load(path: Path, origin: str) -> Optional["Atlas"]:
         reason, at = "nested deeper than JSON is read here", "the file"
     except UnicodeDecodeError:
         reason, at = "not UTF-8 text", "the file"
-    except OSError as exc:
-        reason, at = f"not readable ({exc.strerror})", "the file"
     else:
         logger.info("hqp_atlas: read %s", _ORIGIN[origin])
         return atlas
+    return _refuse(origin, reason, at)
+
+
+def _refuse(origin: str, reason: str, at: str) -> None:
     logger.warning("hqp_atlas: %s refused whole — %s, at %s; the HQPlayer screen shows HQPlayer's own facts alone",
                    _ORIGIN[origin], reason, at)
     return None

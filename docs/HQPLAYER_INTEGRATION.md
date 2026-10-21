@@ -242,7 +242,9 @@ share export, sync or support bundle carries it. The file is read whole and
 checked against the shape the module reads; one that breaks it is refused
 whole, logged in one line that names a place in the file and never a value,
 and the pickers keep HQPlayer's own facts. A changed file is read again on the
-next read; no restart.
+next read; no restart. Since 2026-10-21 that holds for a rewrite of the same
+size within one grain of the filesystem's clock too: a file whose time is less
+than two seconds before its last read, or after it, is compared by its bytes.
 
 The HQPlayer screen's own read, `GET /api/hqplayer/state?dsp=1`, joins it by
 name in HQPlayer's order: each row of the filter and shaper lists gains

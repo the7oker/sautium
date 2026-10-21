@@ -7,10 +7,12 @@ here. Pure: no database, no HQPlayer."""
 import copy
 import json
 import logging
+import os
 import re
 import shutil
 import subprocess
 import sys
+import time
 from pathlib import Path
 
 BACKEND = Path(__file__).resolve().parent.parent / "backend"
@@ -231,6 +233,53 @@ def test_a_changed_file_is_read_again_and_an_unchanged_one_is_not(tmp_path, capl
     found = again.lookup("filter", "demo-sinc-a", "9.4.1", "pcm")
     assert found.entry["contexts"]["1x-44.1k-705.6k"]["phase"] == "minimum"
     assert caplog.text.count("read the node's own atlas copy") == 2
+
+
+def test_a_rewrite_of_the_same_size_within_one_clock_grain_is_read_again(tmp_path, caplog):
+    # A coarse clock gives a quick rewrite the time the file had, so its key
+    # holds: the bytes tell it, and the same bytes are not read anew
+    caplog.set_level(logging.INFO, logger="hqp_atlas")
+    first = _read(tmp_path)
+    overlay = tmp_path / "overlay.json"
+    stamp = overlay.stat().st_mtime_ns
+    overlay.write_bytes(FIXTURE.read_bytes().replace(b"2001-02-03", b"2001-02-04"))
+    os.utime(overlay, ns=(stamp, stamp))
+    again = hqp_atlas.read(tmp_path / "shipped.json", overlay)
+    assert again is not first and again.source("fictional-forum-post")["date"] == "2001-02-04"
+    assert hqp_atlas.read(tmp_path / "shipped.json", overlay) is again
+    assert caplog.text.count("read the node's own atlas copy") == 2
+
+
+def test_a_file_whose_change_is_older_than_the_grain_is_not_read_again(tmp_path, monkeypatch):
+    overlay = tmp_path / "overlay.json"
+    overlay.write_bytes(FIXTURE.read_bytes())
+    old = time.time_ns() - 10 * 10 ** 9
+    os.utime(overlay, ns=(old, old))
+    first = hqp_atlas.read(tmp_path / "shipped.json", overlay)
+    looked = []
+    monkeypatch.setattr(Path, "read_bytes", lambda self: looked.append(self) or b"")
+    assert hqp_atlas.read(tmp_path / "shipped.json", overlay) is first and looked == []
+
+
+def test_a_file_that_cannot_be_read_is_warned_of_once_however_recent(tmp_path, caplog, monkeypatch):
+    # A file stat reaches and open refuses holds no bytes to compare: its
+    # refusal is said once until its key changes, however recent its change
+    caplog.set_level(logging.INFO, logger="hqp_atlas")
+    overlay = tmp_path / "overlay.json"
+    overlay.write_bytes(FIXTURE.read_bytes())
+    ahead = time.time_ns() + 60 * 10 ** 9
+    os.utime(overlay, ns=(ahead, ahead))                 # a clock ahead keeps it recent
+    real = Path.read_bytes
+
+    def refused(self):
+        if self == overlay:
+            raise PermissionError(13, "Permission denied")
+        return real(self)
+    monkeypatch.setattr(Path, "read_bytes", refused)
+    for _ in range(3):
+        assert hqp_atlas.read(tmp_path / "shipped.json", overlay) is None
+    lines = [r.getMessage() for r in caplog.records if r.name == "hqp_atlas" and r.levelno == logging.WARNING]
+    assert len(lines) == 1 and "not readable (Permission denied)" in lines[0]
 
 
 def _break(doc, how):
