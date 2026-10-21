@@ -1906,8 +1906,6 @@ class HqpBackend(PlayerBackend):
                     if att is not None and status is not None:
                         att.tick(status, STATE_NAMES.get(status.state, "unknown"), read_at,
                                  hqp_meter.meter.seen())
-                        if att.moved():
-                            hqp_meter.meter.unwatch(att.id)     # its start window is done
                         if att.due(time.time()) is not None or att.stopped_at_start():
                             # Judged on what HQPlayer holds NOW, read in the
                             # same tick — and a track it stopped on at its
@@ -2380,9 +2378,9 @@ class HqpBackend(PlayerBackend):
         one before."""
         att = diag.Attempt(intent=intent, slot=slot, uris=uris, items=items)
         # Its start window: the meter stream, from before its first command
-        # to the start it shows or the attempt's close (diag.started) —
-        # watched before anyone can see the attempt, so whoever closes it
-        # finds the window to end
+        # to the attempt's close (diag.started) — its sound tells an end the
+        # Status may not show; watched before anyone can see the attempt, so
+        # whoever closes it finds the window to end
         hqp_meter.meter.watch(att.id, self._meter_attachment)
         with self._att_lock:
             old, self._attempt = self._attempt, att

@@ -192,8 +192,10 @@ class Attempt:
     take: Optional[float] = None
     # What HQPlayer's meter stream showed, as the latest tick read it
     # (playback.hqp_meter.HqpMeter.seen): its sessions and runs of sound
-    # since the attempt began; None while no tick brought it
+    # since the attempt began, and when that tick was asked for; None while
+    # no tick brought it
     meter: Optional[dict] = None
+    meter_at: Optional[float] = None
     steps: list = field(default_factory=list)
     adds: dict = field(default_factory=lambda: {"count": 0, "failed": []})
     ticks: list = field(default_factory=list)
@@ -254,7 +256,7 @@ class Attempt:
         questions."""
         with _lock:
             if meter is not None:
-                self.meter = _since(meter, self.started)
+                self.meter, self.meter_at = _since(meter, self.started), read_at
             if self.t0 is None or read_at < self.t0:
                 return
             self.ticks.append(tick_of(status, state, read_at))
@@ -325,17 +327,21 @@ class Attempt:
             return self.end
 
     def _starting(self) -> bool:
-        """No start yet (started), and HQPlayer's last word was that it
-        plays, a state its SDK does not name (Embedded said 5 while it
-        started a play) — or silence: it took the read and said nothing (a
-        build). Refused or closed is HQPlayer away, judged at the window.
-        Called under _lock."""
+        """No start yet, and HQPlayer's last word was silence — it took the
+        read and said nothing (a build) — or, at the latest tick, sound ran
+        on the meter (HQPlayer sounds, and has yet to say what), or it said
+        it plays, or a state its SDK does not name (Embedded said 5 while it
+        started a play). Refused or closed is HQPlayer away, judged at the
+        window. Called under _lock."""
         if started(self.ticks, self._serial(), self.meter, self.take):
             return False
         last_tick = self.ticks[-1] if self.ticks else None
         last_miss = self.misses[-1] if self.misses else None
         if last_miss is not None and (last_tick is None or last_miss["ts"] > last_tick["ts"]):
             return last_miss.get("silent", False)
+        runs = (self.meter or {}).get("runs")
+        if runs and self.meter_at - runs[-1]["last"] <= METER_SLACK_S:
+            return True
         return last_tick is not None and last_tick["state"] in ("playing", "unknown")
 
     def snapshot(self) -> dict:
@@ -786,8 +792,32 @@ def _load(ticks: list) -> Optional[dict]:
     return None
 
 
-def _ran_out(tick: dict) -> bool:
-    return bool(tick.get("length")) and tick["position"] >= tick["length"] - 2.0
+def _heard(meter: Optional[dict], take: Optional[float]) -> list:
+    """The meter's runs of sound of the take's entry (`meter`: what the
+    stream showed, started): those that went on METER_GAP_S past the take
+    (`take`) — sound that stopped within it is the entry a jump left."""
+    if take is None:
+        return []
+    return [r for r in (meter or {}).get("runs") or () if r["last"] - take >= METER_GAP_S]
+
+
+def _ran_out(tick: dict, meter: Optional[dict] = None, take: Optional[float] = None,
+             moved: bool = True) -> bool:
+    """The entry the last playing `tick` read ran out: the position near its
+    end — or, where no status saw its position move (`moved`), the meter
+    heard the entry's length: its sound from its first after the take to
+    the last that began by that tick, the silences between included
+    (_heard). A build or a tail before the entry's first sound is none of
+    it; sound the take did not stop counts from the take. A position that
+    moves judges the end itself."""
+    length = tick.get("length")
+    if not length:
+        return False
+    if tick["position"] >= length - 2.0:
+        return True
+    runs = [r for r in _heard(meter, take) if r["start"] <= tick["ts"] + METER_SLACK_S]
+    return (not moved and bool(runs)
+            and max(r["last"] for r in runs) - max(take, min(r["start"] for r in runs)) >= length - 2.0)
 
 
 def _dsp_changed(ticks: list) -> bool:
@@ -824,9 +854,18 @@ def verdict(f: dict, log: Optional[dict] = None) -> dict:
              and (not pl.get("read") or (pl.get("at_slot_ours")
                                          and (not f.get("expected_uri") or pl.get("at_slot_expected"))))
              and (hits is None or any(h.get("bytes", 0) > 0 for h in hits)))
-    # a start the meter saw and no status called playing has no stop of its own to judge
-    stopped_after = (began and bool(playing) and ticks[-1]["state"] == "stopped"
-                     and not _ran_out(playing[-1]))
+    # a start the meter saw and no status called playing, or none naming an
+    # entry, has no stop of its own to judge
+    named = [t for t in playing if t["track"] >= 1]
+    last = named[-1] if named else None
+    # whether its position moved: the statuses from the entry's first sound
+    # after the take on (_heard), on the take (an advance's serial) — one of
+    # the entry a jump left, read before it, moves nothing
+    heard = _heard(f.get("meter"), f.get("take"))
+    since = max(f["take"], min(r["start"] for r in heard)) - METER_SLACK_S if heard else None
+    moved = _moved([t for t in _playing(ticks, adv.get("serial")) if since is None or t["ts"] >= since])
+    stopped_after = (began and last is not None and ticks[-1]["state"] == "stopped"
+                     and not _ran_out(last, f.get("meter"), f.get("take"), moved))
     owner = f["end"] in ("owner", "superseded", "shutdown") or _dsp_changed(ticks)
     if began:
         load = _load(ticks)

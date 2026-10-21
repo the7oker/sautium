@@ -304,6 +304,12 @@ class FakeHqp:
         if nxt <= len(self.playlist) and not any(part in self.playlist[nxt - 1] for part in self.refuse_play):
             self._advancing = [nxt, self.advance_polls]
 
+    def end_now(self) -> None:
+        """The entry it plays ends now, whatever its Status says of the
+        position — a short one whose position its Status kept at 0."""
+        with self._lock:
+            self._end_of_track()
+
     def _took(self) -> None:
         """A Play or a jump took an entry: track_serial one more. Under the lock."""
         self._advancing = None
@@ -1990,9 +1996,34 @@ def test_a_start_its_meter_shows_while_its_status_keeps_the_position_at_0_is_pla
     a = _closed(timeout=10.0)
     assert a.verdict["code"] == "played", a.verdict
     assert all(t["position"] == 0.0 for t in a.facts["ticks"]) and a.facts["meter"]["runs"]
-    # the start window is let go once its start is seen, before the attempt closes
+    # a Status that keeps the position at 0 cannot tell a stop short of the
+    # entry's end: the meter watches on, to the attempt's close
     (session,) = a.facts["meter"]["sessions"]
-    assert session["closed"] is not None and session["closed"] < a.facts["closed"]
+    assert session["closed"] is None
+
+
+def test_the_start_window_lasts_to_the_attempts_close(traced, fake, metered):
+    # the start is seen at once, the position moving: the meter stays to the
+    # close all the same, for an end the Status may not show
+    assert traced.select(2)
+    a = _closed(timeout=10.0)
+    assert a.verdict["code"] == "played", a.verdict
+    (session,) = a.facts["meter"]["sessions"]
+    assert session["closed"] is None and metered.accepts == 1
+    assert _wait(lambda: not hqp_meter.meter.metering(), 5.0)
+
+
+def test_a_short_entry_whose_end_its_status_never_shows_is_played(traced, fake, monkeypatch, metered):
+    # The Status keeps the position at 0 to the entry's end; the meter's frames
+    # ran its length. Without them the stop reads as HQPlayer giving up
+    monkeypatch.setattr(diag, "OBSERVE_S", 6.0)
+    fake.start_polls, fake.length = 100, 4
+    threading.Timer(4.2, fake.end_now).start()
+    assert traced.select(2)
+    a = _closed(timeout=15.0)
+    ticks = a.facts["ticks"]
+    assert ticks[-1]["state"] == "stopped" and all(t["position"] == 0.0 for t in ticks), ticks
+    assert a.verdict["code"] == "played", a.verdict
 
 
 def test_an_attempts_start_window_is_watched_before_anyone_can_close_it(traced, monkeypatch):

@@ -39,8 +39,7 @@ The stream costs HQPlayer an FFT per frame and the link ~0.7 MB/s per
 backend is attached and someone wants it: a page with the meter open, or
 a play attempt's start window (watch — hqp_diagnostics.started reads the
 start off the frames, playback.hqp_backend holds the window from the
-intent, or HQPlayer's own advance, until the start is seen or the attempt
-closes). A page states its interest through PUT /api/hqplayer/meter for
+intent, or HQPlayer's own advance, to the attempt's close). A page states its interest through PUT /api/hqplayer/meter for
 the /api/events connection it holds; the interest dies with that
 connection, and a reconnect of the same page takes the registration over
 (the browser renderer's rule). One thread owns the socket and does every
@@ -342,8 +341,8 @@ class HqpMeter:
                 self._cond.notify()
 
     def unwatch(self, key) -> None:
-        """The start window `key` is over: its start was seen, or its attempt
-        closed. Nothing happens for one that never watched or was let go."""
+        """The start window `key` is over: its attempt closed. Nothing
+        happens for one that never watched or was let go."""
         with self._cond:
             if key not in self._watches:
                 return

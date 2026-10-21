@@ -1300,8 +1300,8 @@ run, `client_errors`), `…/hqplayer/{id}` (one whole trace), `…/hqplayer/log`
 
 **The start, on the meter stream** (since 2026-10-22). Every attempt opens
 the meter's socket for its start window — from the intent, or HQPlayer's
-own advance, until its start is seen or it closes — and the poller hands
-it what the stream showed: the sessions and the runs of sound in them, frames whose spectra
+own advance, to its close — and the poller hands it what the stream
+showed: the sessions and the runs of sound in them, frames whose spectra
 are not all zero, no further apart than half a second. HQPlayer sends a
 burst every 160 ms while it plays; all-zero frames are silence: a pause, a
 source's digital silence, and the tail it plays out after an entry's end
@@ -1318,8 +1318,19 @@ name the next, and a socket opened then meets that sound at once. Or
 HQPlayer said it played and the position moved, as before: a source's
 digital silence shows on the meter as none. A position that has not moved
 judges nothing where the meter heard the start: a start whose position
-stays at 0 for seconds while the meter shows sound is still started. A
-start window does not ask a port that refused at this attach again (HQPlayer's return or the next attach does),
+stays at 0 for seconds while the meter shows sound is still started; an
+attempt whose sound runs on unnamed is still starting at the window's end
+or an advance's deadline, up to the minute a start is given; and a short
+entry whose end its Status never shows is played: where its position
+stays at 0, its sound from its first after the take that ran its length
+(less two seconds) is its end, not HQPlayer giving up; a position that
+moves judges the end itself. The entry a jump leaves, sounding on for a
+moment past the take, and a build or a tail before the entry's first
+sound are none of it, and a status of that entry read before the new
+one's first sound moves no position. So the window lasts to the
+attempt's close: the meter sees an
+end its Status may not show. A start window does not ask a port that
+refused at this attach again (HQPlayer's return or the next attach does),
 and one made after its backend let go holds no later attachment's socket.
 
 HQPlayer's own advance is an attempt too (`advance`, since 2026-10-18).

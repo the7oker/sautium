@@ -741,3 +741,94 @@ def test_a_start_the_meter_saw_and_no_status_called_playing_is_played():
          "closed": 111.0}
     assert diag.verdict(f)["code"] == "played"
     assert diag.verdict({**f, "meter": None})["code"] == "not_played"
+
+
+def test_frames_that_run_on_unnamed_keep_the_window_open_until_they_stop():
+    """A session opened after the take whose frames came at once, while the status still says stopped: HQPlayer
+    sounds and has yet to say what. The window waits while they run, up to its limit, and never calls it not
+    played meanwhile."""
+    att = diag.Attempt(intent="play", slot=2, started=99.0)
+    att.t0, att.take = 100.0, 100.0
+    shown = {"sessions": [{"open": 100.3, "first": 100.4, "closed": None}],
+             "runs": [{"since": 100.3, "start": 100.4, "last": 110.9, "frames": 66}]}
+    att.tick(_stopped_status(), "stopped", 111.0, shown)
+    assert not att.moved()
+    assert att.due(111.0) is None                     # past the window: the frames still ran at the last tick
+    quiet = {**shown, "runs": [{**shown["runs"][0], "last": 109.0}]}
+    att.tick(_stopped_status(), "stopped", 111.5, quiet)
+    assert att.due(111.5) == "window"
+
+
+def test_the_meter_hears_an_entry_run_out_from_its_first_sound_after_the_take():
+    """A Status that keeps the position at 0: the sound from the entry's first after the take to the last that began
+    by the last playing status, its silences included, against the entry's length. Sound the take stopped, the entry a
+    jump left, is none of it, nor the build before the entry's first sound."""
+    last = {"ts": 112.0, "position": 0.0, "length": 12.0}
+    heard = dict(take=100.0, moved=False)
+    assert diag._ran_out(last, _seen((99.0, 100.5, 106.0), (106.0, 106.8, 112.2)), **heard)   # a silence inside
+    assert not diag._ran_out(last, _seen((99.0, 100.5, 105.0)), **heard)                      # it stopped early
+    # a page's meter heard the album before this entry, gaplessly: 3 s of the entry are no 200 s
+    assert not diag._ran_out({"ts": 303.0, "position": 0.0, "length": 200.0}, _seen((0.0, 0.5, 303.0)), take=300.0,
+                             moved=False)
+    assert not diag._ran_out(last, _seen((99.0, 100.5, 112.2)), take=None, moved=False)
+    # the entry a jump left sounded 80 ms past the take, then a 3 s build: the 10 s entry stopped 6 s in
+    short = {"ts": 109.0, "position": 0.0, "length": 10.0}
+    assert not diag._ran_out(short, _seen((90.0, 90.5, 100.08), (100.08, 103.0, 109.0)), **heard)
+    assert diag._ran_out({**short, "ts": 111.0}, _seen((90.0, 90.5, 100.08), (100.08, 103.0, 111.0)), **heard)
+
+
+def _played_ticks(*rows, length=10.0):
+    """Ticks as the poller records them: (ts, state, track, position); one naming no entry has no length."""
+    return [{**_tick(t, state, track, position), "length": length if state == "playing" and track else 0.0, "speed": 1.0,
+             "in_fill": -1.0, "out_fill": 0.9, "tracks_total": 2, "mode": "PCM", "filter": "poly-sinc-gauss-long",
+             "shaper": "TPDF", "rate": 88200} for t, state, track, position in rows]
+
+
+def _select(ticks, meter):
+    return {"intent": "select", "started": 99.0, "t0": 100.0, "take": 100.0, "end": "stopped", "error": None,
+            "slot": 2, "steps": [{"ts": 100.0, "command": "SelectTrack", "result": "OK", "message": "", "attributes": {}}],
+            "adds": {"count": 1, "failed": []}, "misses": [], "proxy": None, "playlist": None, "handover": None,
+            "mode": "path", "closed": 111.0, "ticks": ticks, "meter": meter}
+
+
+def test_a_position_that_moved_judges_the_end_without_the_meter():
+    """Where the position moves, the meter never measures the entry from the take: the stop 6 s into a 10 s entry
+    is HQPlayer's, the build before its first sound in the meter's run or not."""
+    assert not diag._ran_out({"ts": 112.0, "position": 5.0, "length": 12.0}, _seen((99.0, 100.5, 112.2)), take=100.0)
+    stopped_short = _seen((90.0, 90.5, 103.0), (103.0, 103.6, 109.0))     # the page's run went on into the build
+    ticks = _played_ticks((103.8, "playing", 2, 0.0), (106.0, "playing", 2, 2.5), (108.5, "playing", 2, 5.0),
+                          (109.5, "stopped", 0, 0.0))
+    assert diag.verdict(_select(ticks, stopped_short))["code"] == "not_played"
+
+
+def test_an_entry_cut_short_then_hqplayers_own_next_is_judged_on_its_own_moved_position():
+    """The entry played 3 s of 10 and its stream was cut; HQPlayer's own Next went on into the next entry, whose
+    Status kept its position at 0 until it stopped too. The take's entry moved: its stop is HQPlayer's."""
+    ticks = _played_ticks((101.0, "playing", 2, 0.5), (102.0, "playing", 2, 1.5), (103.0, "playing", 2, 2.5),
+                          (104.0, "playing", 3, 0.0), (105.5, "stopped", 0, 0.0), length=6.0)
+    assert diag.verdict(_select(ticks, _seen((100.0, 100.5, 105.0))))["code"] == "not_played"
+
+
+def test_a_status_of_the_entry_tapped_again_read_before_its_restart_is_no_move():
+    """The owner taps the entry that plays, at 4 s: a status read after the take still shows it there; the restart's
+    own Status keeps 0 to its end while the meter hears it play out."""
+    ticks = _played_ticks((100.1, "playing", 2, 4.1), (101.0, "playing", 2, 0.0), (103.0, "playing", 2, 0.0),
+                          (106.0, "playing", 2, 0.0), (107.5, "stopped", 0, 0.0), length=6.0)
+    meter = _seen((90.0, 90.5, 100.1), (100.1, 100.9, 106.9))
+    assert diag.verdict(_select(ticks, meter))["code"] == "played"
+
+
+def test_a_start_whose_only_playing_status_names_no_entry_has_no_stop_to_judge():
+    """HQPlayer said it plays while it opened the entry (track 0), then no status until it stopped; the meter heard
+    the entry from a quiet it watched."""
+    ticks = _played_ticks((100.2, "playing", 0, 0.0), (107.5, "stopped", 0, 0.0))
+    assert diag.verdict(_select(ticks, _seen((99.9, 100.5, 106.5))))["code"] == "played"
+
+
+def test_a_status_of_the_entry_a_jump_left_is_no_move_of_the_new_one():
+    """One status after the take still names the entry left behind, far into it; the new 6 s entry's own position
+    stays at 0 while the meter hears it play out: played."""
+    ticks = _played_ticks((100.3, "playing", 1, 120.0), (101.0, "playing", 2, 0.0), (103.0, "playing", 2, 0.0),
+                          (106.0, "playing", 2, 0.0), (107.5, "stopped", 0, 0.0), length=6.0)
+    meter = _seen((90.0, 90.5, 100.1), (100.1, 100.9, 107.0))
+    assert diag.verdict(_select(ticks, meter))["code"] == "played"
