@@ -1657,10 +1657,12 @@ def _side(key: str, x: Any, used: set) -> List[Any]:
 def _filter_pair(p: Dict[str, Any], i: int, used: set) -> Optional[List[Any]]:
     """A filter pair at its default context: each difference and what else
     differs, member `i`'s value first. A difference without words here, or a
-    value of a shape not read, leaves the line out."""
+    value of a shape not read, leaves the line out, and with it the marks its
+    values would have used."""
     name, other = p["members"][i], p["members"][1 - i]
     c = p["contexts"][p["default_context"]]
     items: Dict[str, List[List[Any]]] = {"difference": [], "also_differs": []}
+    marks: set = set()
     for part in items:
         for key, values in c[part].items():
             if key == "process_speed_min":
@@ -1670,12 +1672,13 @@ def _filter_pair(p: Dict[str, Any], i: int, used: set) -> Optional[List[Any]]:
                 _no_words("difference", key)
                 return None
             label, unit = worded
-            items[part].append(_phrase(DIFF_ITEM, label=label, a=_side(key, values[i], used),
-                                       b=_side(key, values[1 - i], used), unit=unit))
+            items[part].append(_phrase(DIFF_ITEM, label=label, a=_side(key, values[i], marks),
+                                       b=_side(key, values[1 - i], marks), unit=unit))
     out = _phrase(PAIR_AT, context=context_label(p["default_context"]), name=name, other=other,
                   diffs=_join(items["difference"], "; "))
     if items["also_differs"]:
         out += _phrase(PAIR_ALSO, diffs=_join(items["also_differs"], "; "))
+    used |= marks
     return out
 
 
@@ -1698,18 +1701,19 @@ def _modulator_pair(p: Dict[str, Any], i: int, used: set) -> List[List[Any]]:
 def _rate_differences(c: Dict[str, Any], i: int, used: set) -> Optional[Tuple[List[Any], List[Any]]]:
     """A modulator pair's differences at one rate, and what else differs;
     None for a difference without words here or a value of a shape not
-    read."""
+    read. The marks its values use go into `used` only with the line."""
     diffs: List[List[Any]] = []
     also: List[List[Any]] = []
+    marks: set = set()
     for key, values in c["difference"].items():
         if key in PAIR_NOT_SHOWN:
             continue
         if key in PAIR_ONE and _one_reading(values):
-            diffs.append(_phrase(PAIR_ONE[key], v=_value(values, used)))
+            diffs.append(_phrase(PAIR_ONE[key], v=_value(values, marks)))
         elif key in PAIR_DIFF and _two_readings(values, bounds=True):
             label, unit = PAIR_DIFF[key]
-            diffs.append(_phrase(DIFF_ITEM, label=label, a=_side(key, values[i], used),
-                                 b=_side(key, values[1 - i], used), unit=unit))
+            diffs.append(_phrase(DIFF_ITEM, label=label, a=_side(key, values[i], marks),
+                                 b=_side(key, values[1 - i], marks), unit=unit))
         else:
             _no_words("difference", key)
             return None
@@ -1720,9 +1724,12 @@ def _rate_differences(c: Dict[str, Any], i: int, used: set) -> Optional[Tuple[Li
             _no_words("difference", key)
             return None
         label, unit = DIFF[key]
-        also.append(_phrase(DIFF_ITEM, label=label, a=_side(key, values[i], used),
-                            b=_side(key, values[1 - i], used), unit=unit))
-    return (diffs, also) if diffs else None
+        also.append(_phrase(DIFF_ITEM, label=label, a=_side(key, values[i], marks),
+                            b=_side(key, values[1 - i], marks), unit=unit))
+    if not diffs:
+        return None
+    used |= marks
+    return diffs, also
 
 
 def _reading(x: Any, bounds: bool = False) -> bool:
@@ -1742,15 +1749,15 @@ def _one_reading(value: Any) -> bool:
     return isinstance(value, Num)
 
 
-def pair_detail(p: Dict[str, Any], i: int, used: set, *, sizes: bool = False) -> List[List[Any]]:
+def pair_detail(p: Dict[str, Any], i: int, used: set) -> List[List[Any]]:
     """An approved pair's size, member `i`'s side first: a filter pair's at
-    its default context; with `sizes`, a modulator pair's at each rate it
-    holds — the card shows none of those yet. Phrases; the marks a value
-    uses go into `used`."""
+    its default context, a modulator pair's at each rate it holds — what the
+    card and the assistant's tools both say. Phrases; the marks a value uses
+    go into `used`."""
     if p["kind"] == "filter":
         detail = _filter_pair(p, i, used)
         return [detail] if detail else []
-    return _modulator_pair(p, i, used) if sizes else []
+    return _modulator_pair(p, i, used)
 
 
 def pair_tail(atlas: Atlas, p: Dict[str, Any]) -> List[Any]:
@@ -1764,8 +1771,7 @@ def pair_tail(atlas: Atlas, p: Dict[str, Any]) -> List[Any]:
     return tail
 
 
-def pair_items(atlas: Atlas, found: Found, p: Dict[str, Any], used: set, *,
-               sizes: bool = False) -> List[Dict[str, Any]]:
+def pair_items(atlas: Atlas, found: Found, p: Dict[str, Any], used: set) -> List[Dict[str, Any]]:
     """One approved pair as the card's "Differs only in" says it of the
     entry: its axis and the other member, its size (pair_detail), what was
     not measured and its sources. Empty for an axis without words."""
@@ -1775,7 +1781,7 @@ def pair_items(atlas: Atlas, found: Found, p: Dict[str, Any], used: set, *,
         return []
     i = p["members"].index(found.entry["name"])
     items = [_line(_phrase(PAIR_LEAD, axis=axis, other=p["members"][1 - i]))]
-    items += [_note(detail) for detail in pair_detail(p, i, used, sizes=sizes)]
+    items += [_note(detail) for detail in pair_detail(p, i, used)]
     tail = pair_tail(atlas, p)
     return items + ([_note(tail)] if tail else [])
 

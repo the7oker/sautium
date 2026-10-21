@@ -423,6 +423,10 @@ def test_differs_only_in_gives_a_modulator_pairs_size_per_rate_in_the_sites_word
         "  At DSD128, DMX7EC-a / DMX5: idle noise: −91.25 / −81.75 dB; the noise shaping's largest difference: "
         "9.25 dB. Also differs: HQPlayer's generation field: Gen9 / Gen1.",
         "  From Fictional Author, 2001-02-03."]
+    # filter_facts prints the card, which says the pair in the same lines
+    facts = _say("filter_facts", _read(_dated(tmp_path), "sdm"), name="DMX7EC-a").split("\n")
+    at = facts.index("Differs only in:")
+    assert facts[at:at + 4] == text[2:]
 
 
 def test_differs_only_in_narrows_by_axis_and_names_what_it_left_out(tmp_path):

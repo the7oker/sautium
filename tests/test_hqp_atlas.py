@@ -940,7 +940,10 @@ def test_pairs_in_the_card_never_carry_the_measuring_hosts_speed_or_a_note(atlas
     assert "Same magnitude as demo-poly-lp — one magnitude with two phases, in this fictional file." in text
     text = _card_text(_card(atlas, "modulator", "DMX5", MODULATORS, mode="sdm"))
     assert text[text.index("## Differs only in") + 1:text.index("## Sources")] == [
-        "Order — from DMX7EC-a.", "From Fictional Author, 2001-02-03."]
+        "Order — from DMX7EC-a.",
+        "At DSD128, DMX5 / DMX7EC-a: idle noise: −81.75 / −91.25 dB; the noise shaping's largest difference: "
+        "9.25 dB. Also differs: HQPlayer's generation field: Gen1 / Gen9.",
+        "From Fictional Author, 2001-02-03."]
     every = json.dumps(_everything(atlas), ensure_ascii=False)
     for token in ("987.65", "876.54", "98.765", "9.8765", "process_speed", "not comparable", "card never shows"):
         assert token not in every
@@ -988,6 +991,8 @@ def test_a_modulators_card(atlas):
         "Tone: one sine; pair: two tones together. Not tested: no play at that volume.",
         "## Differs only in",
         "Order — from DMX5.",
+        "At DSD128, DMX7EC-a / DMX5: idle noise: −91.25 / −81.75 dB; the noise shaping's largest difference: "
+        "9.25 dB. Also differs: HQPlayer's generation field: Gen9 / Gen1.",
         "From Fictional Author, 2001-02-03.",
         "## History",
         "Introduced in HQPlayer Desktop 9.1.0 — Fictional Author, 2001-02-03.",
@@ -1137,16 +1142,18 @@ def test_a_modulator_pairs_size_per_rate_in_the_words_of_the_atlas_pages(tmp_pat
     found = atlas.lookup("modulator", "DMX7EC-a", "9.4.1", "sdm")
     pair = atlas.pairs(found)[0]
     used: set = set()
-    lines = [plain(it.get("line") or it["note"]) for it in hqp_atlas.pair_items(atlas, found, pair, used, sizes=True)]
+    lines = [plain(it.get("line") or it["note"]) for it in hqp_atlas.pair_items(atlas, found, pair, used)]
     assert lines == [
         "Order — from DMX5.",
         "At DSD128, DMX7EC-a / DMX5: idle noise: −91.25 / −81.75 dB; the noise shaping's largest difference: "
         "9.25 dB. Also differs: HQPlayer's generation field: Gen9 / Gen1.",
         "From Fictional Author, 2001-02-03."]
-    # The card shows none of it yet; a bound is drawn with its mark, and the
-    # highest stable levels and the measuring host's speed stay out
-    assert [plain(it.get("line") or it["note"]) for it in hqp_atlas.pair_items(atlas, found, pair, set())] == \
-        ["Order — from DMX5.", "From Fictional Author, 2001-02-03."]
+    # The card says the pair in these words: one builder for the card and the
+    # assistant's tools
+    text = _card_text(_card(atlas, "modulator", "DMX7EC-a", MODULATORS, mode="sdm"))
+    assert text[text.index("## Differs only in") + 1:text.index("## History")] == lines
+    # A bound is drawn with its mark; the highest stable levels and the
+    # measuring host's speed stay out
     doc = _doc()
     diff = doc["pairs"][3]["contexts"]["5644800"]["difference"]
     diff["tone_m1_noise_db"] = [-77.5, {"v": -80.25, "b": "le", "routes": "both"}]
@@ -1154,7 +1161,7 @@ def test_a_modulator_pairs_size_per_rate_in_the_words_of_the_atlas_pages(tmp_pat
     bound = _read(tmp_path, doc)
     found = bound.lookup("modulator", "DMX5", "9.4.1", "sdm")
     used = set()
-    detail = hqp_atlas.pair_detail(bound.pairs(found)[0], 0, used, sizes=True)
+    detail = hqp_atlas.pair_detail(bound.pairs(found)[0], 0, used)
     assert [plain(hqp_atlas.wire(d)) for d in detail] == [
         "At DSD128, DMX5 / DMX7EC-a: idle noise: −81.75 / −91.25 dB; the noise shaping's largest difference: "
         "9.25 dB; the −1 dBFS tone's noise: −77.5 / ≤ −80.25 dB. Also differs: HQPlayer's generation field: "
@@ -1162,7 +1169,25 @@ def test_a_modulator_pairs_size_per_rate_in_the_words_of_the_atlas_pages(tmp_pat
     assert used == {"bound"}
     diff["unknown_db"] = [1.5, 2.5]
     found = _read(tmp_path, doc).lookup("modulator", "DMX5", "9.4.1", "sdm")
-    assert hqp_atlas.pair_detail(_read(tmp_path, doc).pairs(found)[0], 0, set(), sizes=True) == []
+    used = set()
+    assert hqp_atlas.pair_detail(_read(tmp_path, doc).pairs(found)[0], 0, used) == []
+    assert used == set()                             # the line left out takes its bound's mark with it
+
+
+def test_a_pairs_marks_are_noted_only_with_the_line_they_explain(tmp_path):
+    # A line left out for a difference without words leaves no note under
+    # "Differs only in" for a mark no line there shows
+    doc = _doc()
+    mod = next(p for p in doc["pairs"] if p["kind"] == "modulator")
+    mod["contexts"]["5644800"]["difference"] = {"idle_db": [{"v": -80.25, "b": "le"}, -91.25], "unknown_db": [1, 2]}
+    flt = next(p for p in doc["pairs"] if p["axis"] == "apodizing")
+    flt["contexts"][flt["default_context"]]["difference"] = {"f_3db_khz": [None, 14.5], "ripple_db": [0.5, 0.25]}
+    atlas = _read(tmp_path, doc)
+    for kind, name, spec, mode in (("modulator", "DMX5", MODULATORS, "sdm"), ("filter", "demo-gauss-x", PCM, "pcm")):
+        differs = next(s for s in _card(atlas, kind, name, spec, mode=mode)["sections"]
+                       if s["head"] == hqp_atlas.DIFFERS)
+        said = [plain(it.get("line") or it["note"]) for it in differs["items"]]
+        assert not set(said) & set(hqp_atlas.NOTES.values()), said
 
 
 def test_where_the_atlas_was_read_from_travels_with_every_result(tmp_path, atlas):

@@ -500,7 +500,7 @@ def _relation(read: Read, a: Named, fa: Facts, b: Named) -> List[str]:
     if pair is None:
         return [NEITHER]
     used: set = set()
-    items = hqp_atlas.pair_items(atlas, fa.found, pair, used, sizes=True)
+    items = hqp_atlas.pair_items(atlas, fa.found, pair, used)
     return [f"{hqp_atlas.DIFFERS}:"] + _items(items + hqp_atlas.notes(used), INDENT) if items else []
 
 
@@ -723,7 +723,7 @@ def _differs_only_in(args: Mapping[str, str], read: Read) -> List[str]:
     shown = [p for p in pairs if _listed(read, p)]
     left = [m for p in pairs if p not in shown for m in p["members"] if m != n.name]
     used: set = set()
-    items = [it for p in shown for it in hqp_atlas.pair_items(atlas, f.found, p, used, sizes=True)]
+    items = [it for p in shown for it in hqp_atlas.pair_items(atlas, f.found, p, used)]
     if items:
         out += [f"{hqp_atlas.DIFFERS}:"] + _items(items + hqp_atlas.notes(used), INDENT)
     elif not left:
@@ -792,7 +792,7 @@ def _current(read: Read) -> set:
 def _ab_one(read: Read, atlas: Any, p: Dict[str, Any], used: set) -> List[str]:
     a, b = p["members"]
     out = [SIDES.format(a=a, b=b)]
-    out += [INDENT + plain(wire(detail)) for detail in hqp_atlas.pair_detail(p, 0, used, sizes=True)]
+    out += [INDENT + plain(wire(detail)) for detail in hqp_atlas.pair_detail(p, 0, used)]
     where = [hqp_atlas.context_label(k) if p["kind"] == "filter" else rate_name(int(k)) for k in p["contexts"]]
     out.append(INDENT + AB_WHERE.format(where=", ".join(where)))
     if p["kind"] == "filter":
