@@ -368,11 +368,14 @@ are Signalyst's text, and this file does not reproduce them.
     operating systems, and other engines. Each cell ran once, but sinc-M's
     44.1 → 88.2 kHz three times.
   - Sautium's check before Play applies this as a rule of its own, naming
-    engine 6.2.4, on an HQPlayer of engine 6 alone: a filter described `up`
-    stops under the source's rate — the others not tried included, at any
-    downward ratio — but sinc-M, said without a stop for a source of its
-    family, and sinc-Mx, its twin, of which it says nothing; FFT and FIR stop
-    at 1:1.
+    engine 6.2.4, on an HQPlayer of engine 6 alone, and says "will stop"
+    only of a filter measured stopping: under the source's rate, at any
+    downward ratio, closed-form, sinc-medium and poly-sinc-ext2-short will
+    stop, and a filter described `up` that was not tried may stop; for a
+    source of its family, sinc-M is said without a stop, and sinc-Mx, its
+    twin, not tried there, with the class's plain sense and sinc-M's
+    conversion, no stop — across the families nothing of either; FFT and
+    FIR stop at 1:1.
 - **A rate combination HQPlayer refuses** is named in its log: "Requested
   filter not possible with this rate combination", the source rate over the
   output rate, then "stop" — or, after it has built the filter (sinc-medium

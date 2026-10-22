@@ -315,10 +315,10 @@ class Attempt:
         stopped at 0 s, nothing having played yet: how a rate HQPlayer
         refuses looks — it takes the Play and stops at once. True once: the
         close's questions are asked then, and an attempt the rate check
-        names a cause for without a hedge closes at that tick (end
-        "refused") instead of at the window (names_cause). Never while
-        HQPlayer has yet to take the start (_yet_to_take): it decides after
-        its build."""
+        names a stop for, without a hedge and not as one that may come,
+        closes at that tick (end "refused") instead of at the window
+        (names_cause). Never while HQPlayer has yet to take the start
+        (_yet_to_take): it decides after its build."""
         with _lock:
             # An advance stops by its first tick: HQPlayer decides after its tail
             if (self.stop_asked or self.t0 is None or self.advance is not None or not self.ticks
@@ -1256,11 +1256,12 @@ def names_cause(rate: Optional[dict]) -> bool:
     stopped at its start — the attempt then closes at once
     (Attempt.stopped_at_start). A hedged claim, the adaptive output rate not
     known, waits for the window: HQPlayer may yet pick a rate it reaches. So
-    does a DSD track: the rate it reaches the filter at is HQPlayer's log's
-    to name."""
+    does an "up" filter not tried under the source's rate, which only may
+    stop; so does a DSD track: the rate it reaches the filter at is
+    HQPlayer's log's to name."""
     rate = rate or {}
     check = None if rate.get("dsd") else _rate_check(rate, rate.get("source"))
-    return bool(check and check.groups and not check.hedged)
+    return bool(check and not check.hedged and any(g.why != "may" for g in check.groups))
 
 
 def _rate_refused(f: dict, log: Optional[dict]) -> Optional[dict]:

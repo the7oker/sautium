@@ -222,9 +222,11 @@ class Read(NamedTuple):
     # The file at the shipped path (hqp_atlas.read(SHIPPED, None))
     atlas: Any = None
     # The rate check's own inputs (hqp_rate_check): the adaptive output rate,
-    # and the queue's sources — None when the queue is not checked
+    # and the queue's sources — None when the queue is not checked; and the
+    # "may" rates HQPlayer was heard playing, by setting (HqpBackend.rate_heard)
     adaptive: Optional[str] = None
     sources: Any = None
+    heard: Optional[Callable[[tuple], frozenset]] = None
     # compare: this HQPlayer's endpoint row, and the picker's marks with the
     # setting and source they are for (routers.hqplayer._headroom)
     endpoint: Optional[dict] = None
@@ -384,7 +386,8 @@ def _table(t: Dict[str, Any], pad: str) -> List[str]:
 def _check(read: Read, n: Named) -> List[str]:
     """The rate check's own lines for the name as if set — a filter in both
     filter slots, a modulator as the modulator — at the current rate, mode
-    and queue; its modulator half from the published atlas alone."""
+    and queue; its modulator half from the published atlas alone, and a
+    "may" HQPlayer disproved at that setting not said (read.heard)."""
     lists = read.lists
     if (read.sources is None or n.kind not in CHECK or not read.state
             or any(lists.get(k) is None for k in ("modes", "rates", "filters", "shapers"))):
@@ -394,7 +397,8 @@ def _check(read: Read, n: Named) -> List[str]:
     inputs = hqp_rate_check.inputs({**read.state, **slots}, lists["modes"], lists["rates"], lists["filters"],
                                    lists["shapers"], adaptive=read.adaptive, atlas=read.atlas,
                                    engine=_engine(read), published=True)
-    said = hqp_rate_check.lines(hqp_rate_check.check(inputs, read.sources))
+    check = hqp_rate_check.check(inputs, read.sources)
+    said = hqp_rate_check.lines(check, read.heard(check.key) if read.heard else frozenset())
     lines = [plain(p) for cause in ("modulator", "filter") for p in said.get(cause, ())]
     return [CHECK[n.kind].format(name=n.name)] + [INDENT + line for line in lines] if lines else []
 

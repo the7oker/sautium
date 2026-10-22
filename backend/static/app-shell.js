@@ -10029,9 +10029,10 @@
       const rateName = rateNameFromState(st, s.rates);
       const activeFilter = hqpFilterSet(st, s.filters);
       const filterName = activeFilter ? activeFilter.name : '—';
-      // When the queue meets a rate HQPlayer cannot reach: the server's
-      // phrases (hqp_rate_check), each under the row it names — the filter's
-      // after its facts, the modulator's under its row
+      // When the queue meets a rate HQPlayer cannot reach, or may not: the
+      // server's phrases (hqp_rate_check), each under the row it names — the
+      // filter's after its facts, the modulator's under its row; sinc-M's and
+      // sinc-Mx's notes, which name no stop, are drawn there too
       const rateCheck = s.rate_check || {};
       const rateLine = (row) => (rateCheck[row] || []).length
         ? `<p class="hqp-row-hint is-left is-refused" data-hqp-rate-check="${row}">${
@@ -13111,7 +13112,7 @@
       text: `${escapeHtml(d.what || 'Tracks')} — <span class="num">${d.count || 1}</span> of <span class="num">${d.total || 1}</span> not taken: ${reach}, or the files themselves cannot be opened (format, permissions).`,
     };
   };
-  // A queue that meets a rate HQPlayer cannot reach (backend/hqp_rate_check.py):
+  // A queue that meets a rate HQPlayer cannot reach, or may not (backend/hqp_rate_check.py):
   // its words are the rate check's own, carried in the notice's data and drawn
   // as phrases — one place for them — and its Why?, on the toast and on the
   // row, leads to the HQPlayer screen, where the line and the knobs are.

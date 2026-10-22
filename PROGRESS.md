@@ -3742,7 +3742,8 @@ there as on every screen of the node's; while a track of such a queue that
 can play plays or is paused, a notice says it, its toast once per onset in
 a tab — the onset new whenever the HQPlayer backend serves the notice for
 a queue and setting other than the last it served it for, or first since
-HQPlayer was attached; since 2026-10-19
+HQPlayer was attached (and since 2026-10-22 a "cannot play" while its onset
+is a "may not play" one, once); since 2026-10-19
 the tab remembers the onsets it has met, toasted or painted at connect, so
 neither a gap in the notice nor (while sessionStorage keeps them) a reload
 toasts one again — its Why? leading to that screen, from the toast and
@@ -3762,8 +3763,9 @@ stopped tick plus twice the output delay plus 11 s (the longest build
 measured), or at once on HQPlayer's refusal line where its log is read here;
 a start on the same take after that withdraws the verdict.
 
-**HQPlayer's "up": measured 2026-10-19, the rule since 2026-10-21.** The rule
-said nothing of an output rate under the source's — "HQPlayer's own stop for
+**HQPlayer's "up": measured 2026-10-19, the rule since 2026-10-21, "will
+stop" only of a filter measured stopping since 2026-10-22.** The rule said
+nothing of an output rate under the source's — "HQPlayer's own stop for
 every class" was wrong. Measured on engine 6.2.4 (Desktop, PCM mode, each
 filter in both slots, the adaptive output rate off): FFT, FIR and
 poly-sinc-ext2 converted 88.2 → 44.1 kHz and 352.8 → 176.4 kHz; of the four
@@ -3773,41 +3775,67 @@ downward cell, a DSD64 track's included (converted to 176.4 kHz first) — ×½
 the one downward ratio tried — and sinc-M converted downward and was never
 stopped; FFT and FIR were refused at 1:1. The rule drawn from it speaks on
 an HQPlayer of that major alone, naming the engine (another major may change
-what a name does, as the atlas keeps its modulators to theirs): every filter
-described "up" stops under the source's rate — the others not tried
-included, by their class, at any downward ratio — but sinc-M, which gets the
+what a name does, as the atlas keeps its modulators to theirs). Under the
+source's rate, at any downward ratio, the three HQPlayer stopped will stop,
+and a filter described "up" that was not tried may: under the source's rate
+"HQPlayer will stop" is said only of a filter measured stopping (until
+2026-10-22 the untried were said to stop by their class). A queue whose
+findings are all such filters "may not play" in the notice's title, and an
+attempt with one waits for the window instead of closing at HQPlayer's first
+stop; once it stopped, the verdict says so as for the measured. While the
+take of the slot a "may" names starts — under a second past where its first
+status read it (a start at a spot, as a resume after a rebuild is, reads the
+spot at once; a Seek sent after that status was asked starts the take anew,
+since it moves the position with nothing heard; and a filter HQPlayer builds
+before it refuses shows one playing status) — what the tick before served for that queue and setting
+stands, and none is served otherwise — as on any tick whose slot is not yet
+the one the check was judged for (a skip, a row tapped); past it the take
+plays, and the notice leaves its rate out, heard or not — a stop is the
+verdict's, and a rate said there would be withdrawn as soon as a status
+heard it (after one slow status, or a pause), a toast for nothing. A "may"
+HQPlayer disproves by playing — that take, HQPlayer's own Status naming that
+source rate, the output rate checked and the filter the "may" names, with
+the DSP keeping up — is said no more at that setting and engine while
+HQPlayer stays attached (what was heard is the backend's, not the
+database's), on the screen, in the notice and by the assistant, while the
+other tracks' findings still stand. A "cannot play" while the onset is a
+"may not play" one is a notice anew, once per queue and setting, and only
+that. A later measurement moves a name from "may" to "will". sinc-M gets the
 class's words ("made for upsampling, not for decimation") and its one
-measured conversion, 352.8 → 176.4 kHz, without a stop, on the screen alone
+measured conversion, 352.8 → 176.4 kHz, without a stop, where the check's
+lines are said (the screen, the assistant), never as a notice or a verdict,
 and for a source of its family only (nothing was measured across the
-families), and sinc-Mx, its twin (one output, bit for bit, where the atlas
-compared them), which was never tried downward and gets nothing: the one
-measurement nearest to it did not stop. FFT and FIR stop at 1:1, by name,
-the other 2^x and Int filters not having been tried there. "For upsampling,
-not decimation" is the plain sense of what was measured, said as Sautium's
-beside HQPlayer's description, never inside it. A rate the fix would name is
-dropped where a measured refusal stops (FFT or FIR at 1:1). sinc-medium's
-refusal comes after its filter built ("lInRate > lOutRate", one playing
-status at 0 s between): the refused-rate log cause too, and an advance
-closed on it is judged by it even when that status came last. A refused
-rate is a play's, so where the first cause from the file's add on is one,
-the log read after a close takes the newest refusal from there — a queue
-handed over at once logged every add before any play, and the first one
-after the add was another track's — while another cause found first still
-answers as before (an earlier track's decode error can); an advance keeps
-the refusal its follower heard since the stop, as the sheet's cause too. A
-DSD track reaches
-the filter at a PCM rate HQPlayer names only in its log, so it is never
-judged by its DSD rate and never by an assumed ratio: unchecked before a
-play, judged after one by the rate the log names for that play, in PCM mode;
-a file of one bit a sample counts as DSD whatever its format (WavPack holds
-DSD too, its tags a PCM-looking rate, so a verdict calls it a DSD track).
-That closes 2026-10-19's open item of a DSD track judged as a PCM rate: the
-trace keeps `sdm`, and the facts say whether the source is DSD.
+families, so nothing is said there of either twin); sinc-Mx, its twin (one
+output, bit for bit, where the atlas compared them), never tried downward,
+gets the class's words and sinc-M's conversion, without a stop, where sinc-M
+gets its own: the one measurement nearest to it did not stop. FFT and FIR
+stop at 1:1, by name, the other 2^x and Int filters not having been tried
+there. "For upsampling, not decimation" is the plain sense of what was
+measured, said as Sautium's beside HQPlayer's description, never inside it.
+A rate the fix would name is dropped where a measured refusal stops (FFT or
+FIR at 1:1). sinc-medium's refusal comes after its filter built ("lInRate >
+lOutRate", one playing status at 0 s between): the refused-rate log cause
+too, and an advance closed on it is judged by it even when that status came
+last. A refused rate is a play's, so where the first cause from the file's
+add on is one, the log read after a close takes the newest refusal from
+there — a queue handed over at once logged every add before any play, and
+the first one after the add was another track's — while another cause found
+first still answers as before (an earlier track's decode error can); an
+advance keeps the refusal its follower heard since the stop, as the sheet's
+cause too. A DSD track reaches the filter at a PCM rate HQPlayer names only
+in its log, so it is never judged by its DSD rate and never by an assumed
+ratio: unchecked before a play, judged after one by the rate the log names
+for that play, in PCM mode; a file of one bit a sample counts as DSD
+whatever its format (WavPack holds DSD too, its tags a PCM-looking rate, so
+a verdict calls it a DSD track). That closes 2026-10-19's open item of a DSD
+track judged as a PCM rate: the trace keeps `sdm`, and the facts say whether
+the source is DSD.
 
 Open (2026-10-19), not yet fixed: the facts keep the Nx slot's filter alone,
 so with no filter reported in the ticks a base-rate source is judged by it;
 a log line
-naming another cause (a file not opened) does not take `rate_refused` back;
+naming another cause (a file not opened) does not take `rate_refused` back,
+an "up" filter not tried included;
 nothing wakes the notices channel on an output switch, so the rate check's
 notice stays until another wake, and while HQPlayer answers nothing it
 stays as last judged, served at every wake until the poller judges it
@@ -3824,10 +3852,16 @@ five go one at a time, so those still to go pass between the commands of a
 press, a mutation or an intent that begins meanwhile — between a replace and
 its owed Play too; a database error in its judgement drops it until another
 event — the next tick raises one itself while the slot HQPlayer reads is not
-the one judged last, a warning each time — and the judgement before is
+the one judged last, a warning each time — and what was served before is
 served meanwhile while the queue generation holds; and the verdict's queue
 rates read the slot and the queue in two looks, so a track removed or added
-before that slot between them shifts them by one.
+before that slot between them shifts them by one. Open too (2026-10-22): the
+HQPlayer screen's rate-check lines are as read when it opened or was last
+refreshed — a "may" heard since, like the queue moved to another slot, shows
+at Refresh; nothing wakes the screen when the check's words change. And
+while a refused list parks the check, a slot moved to is not judged: the
+notice keeps what the tick before served until the park ends, as it does
+while a judgement fails.
 
 ### The assistant speaks of filters and modulators from what was published (2026-10-20)
 

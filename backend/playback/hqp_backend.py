@@ -1440,6 +1440,14 @@ class HqpBackend(PlayerBackend):
         self._rate_gen: Optional[int] = None
         self._rate_slot: Optional[int] = None
         self._rate_onset: Optional[tuple] = None
+        # The source rates a "may" of the check named that HQPlayer was heard
+        # playing, by the setting (Check.key) and engine they were heard at
+        self._rate_heard: Dict[tuple, frozenset] = {}
+        # The take of the slot a "may" names (queue, slot, setting,
+        # track_serial), the position its first status read and when that
+        # status was asked: its first second counts from there, and a Seek
+        # sent after it starts the take anew
+        self._rate_take: Optional[tuple] = None
         self._rate_served: Optional[dict] = None
         self._info: dict = {}
         # When a listen leaves a DSP sample (playback.hqp_load).
@@ -2791,7 +2799,7 @@ class HqpBackend(PlayerBackend):
                     elif (playing is not None and playing[0] and self._rate_reads is not None
                           and playing[0] != self._rate_slot):
                         self._rate_event()      # the slot of ours HQPlayer reads moved
-                    served = self._rate_notice_now(status, playing)
+                    served = self._rate_notice_now(status, playing, read_at)
                     if served != self._rate_served:
                         self._rate_served = served
                         _notify_notices()
@@ -3012,27 +3020,77 @@ class HqpBackend(PlayerBackend):
             engine=self._info.get("engine"))
         self._rate_check, self._rate_gen, self._rate_slot = hqp_rate_check.check(inputs, src), generation, slot
 
-    def _rate_notice_now(self, status, playing: Optional[tuple]) -> Optional[dict]:
+    def _rate_notice_now(self, status, playing: Optional[tuple], read_at: float) -> Optional[dict]:
         """What the notices channel serves of the held check: while HQPlayer
-        plays or pauses a slot of ours that can play and refused tracks lie
-        ahead — a started slot refused speaks through its verdict instead,
-        another controller's playlist through nothing — with its onset, new
-        whenever this backend serves the notice for a queue generation and
-        setting (Check.key) other than the last it served it for, its first
-        serving included (an attach is a new backend), and the same while it
-        serves it for that one, a gap included (a source rate joining the
-        refused ones in the same generation changes the words only), and the
-        module's words."""
+        plays or pauses a slot of ours that can play and tracks it will or
+        may refuse lie ahead — a started slot a finding says will stop
+        speaks through its verdict instead, another controller's playlist
+        through nothing. On a tick whose slot is not the one the check was
+        judged for (judged again at a later tick, unless the check is parked
+        or its judgement fails), what the tick before served for this queue
+        and setting stands, and none is served otherwise. The slot a "may"
+        names: while its take starts — under a second past the position the
+        take's first status read (a start at a spot, as a resume after a
+        rebuild is, reads the spot at once; a Seek sent after that status was
+        asked moves the position with nothing heard, and the take starts anew
+        at the status after it; a filter HQPlayer builds before it refuses
+        shows one playing status) — what the tick before served
+        stands in the same way; past it the take plays, and
+        the notice says the other tracks' findings, never that rate's "may":
+        a stop is the verdict's. A "may" HQPlayer disproved is said no more
+        anywhere at that setting and engine while HQPlayer stays attached
+        (rate_heard): heard once its own Status names that source rate, the
+        check's output rate and the filter the "may" names, playing past
+        that second with the DSP keeping up. Its onset is new whenever this
+        backend serves the notice for a queue generation and setting
+        (Check.key) other than the last it served it for, its first serving
+        included (an attach is a new backend), or a "cannot play" while the
+        onset is a "may not play" one — once for them — and the same while
+        it serves it for that one, a gap included (a source rate joining
+        the refused ones in the same generation changes the words only, but
+        for that turn), and the module's words."""
         check = self._rate_check
         if (check is None or not check.groups or check.started_refused
                 or self._rate_gen != self._queue.generation
                 or status.state not in (PlaybackState.PLAYING, PlaybackState.PAUSED)
                 or playing is None or playing[1] is None or playing[2] or self.drift):
             return None
-        key = (self._rate_gen, check.key)
-        if self._rate_onset is None or self._rate_onset[0] != key:
-            self._rate_onset = (key, datetime.now(timezone.utc).isoformat())
-        return {"since": self._rate_onset[1], "data": hqp_rate_check.notice(check)}
+        kept = (self._rate_served if self._rate_onset is not None
+                and self._rate_onset[0] == (self._rate_gen, check.key) else None)
+        if playing[0] != self._rate_slot:
+            return kept
+        unsaid = self.rate_heard(check.key)
+        if check.started_may and check.first not in unsaid:
+            take, seek = (self._rate_gen, playing[0], check.key, status.track_serial), self._seek_mark
+            if (self._rate_take is None or self._rate_take[0] != take or status.position < self._rate_take[1]
+                    or seek is not None and seek[1] > self._rate_take[2]):
+                # a position read earlier starts it anew, and so does a Seek
+                # sent after the first status was asked: a resume's own, or
+                # one while HQPlayer builds, moves it with no sound out
+                self._rate_take = (take, status.position, read_at)
+            if status.position - self._rate_take[1] < 1.0:
+                return kept
+            if (status.state == PlaybackState.PLAYING
+                    and (status.process_speed is None or status.process_speed >= 1.0)
+                    and status.src_rate == check.first and not status.src_sdm
+                    and status.active_rate == check.rate and status.active_filter == check.started_may):
+                unsaid = unsaid | {check.first}
+                self._rate_heard[(check.key, self._info.get("engine"))] = unsaid
+            unsaid = unsaid | {check.first}     # the take plays: the notice leaves its rate to the verdict
+        data = hqp_rate_check.notice(check, unsaid)
+        if data is None:
+            return None
+        key, may = (self._rate_gen, check.key), all(g.why == "may" for g in check.groups)
+        if self._rate_onset is None or self._rate_onset[0] != key or (self._rate_onset[2] and not may):
+            self._rate_onset = (key, datetime.now(timezone.utc).isoformat(), may)
+        return {"since": self._rate_onset[1], "data": data}
+
+    def rate_heard(self, key: tuple) -> frozenset:
+        """The source rates a "may" of the rate check named that HQPlayer was
+        heard playing at the setting `key` (Check.key) on the engine it runs
+        now, since this backend attached: disproved there, said no more on
+        the screen, in the notice or by the assistant."""
+        return self._rate_heard.get((key, self._info.get("engine")), frozenset())
 
     def rate_notice(self) -> Optional[dict]:
         """The rate check's notice as the poller last judged it, for the

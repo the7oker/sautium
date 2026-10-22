@@ -1345,7 +1345,7 @@ def _notice_items() -> List[Dict[str, Any]]:
         items.append({"key": "hqplayer.refused", "kind": "warning",
                       "since": refused["since"], "until": None,
                       "data": {k: refused[k] for k in ("what", "count", "total", "stream")}})
-    # A queue that meets a rate HQPlayer cannot reach (hqp_rate_check): said
+    # A queue that meets a rate HQPlayer cannot reach, or may not (hqp_rate_check): said
     # while a track of it that can play plays or is paused, with the onset
     # the HQPlayer backend keeps (its _rate_notice_now) — the backend holds
     # the check; the words are the module's own, drawn as phrases, and

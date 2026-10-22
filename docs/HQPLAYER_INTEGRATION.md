@@ -1747,7 +1747,7 @@ checked in this order — positive evidence before any absence of it:
 | `proxy_error` | the media proxy answered 404 (token not registered — the restart race), 500 (file gone, CUE cut failed), 502/504 (provider), 401/403 (a bug) | play again / check the music folder |
 | `no_fetch` | an http hand-over HQPlayer never requested (none from the hand-over to 5 s after Play) | same LAN, the firewall for the media port, the Docker forward — host and port named |
 | `rejected` | PlaylistAdd or Play refused (HQPlayer's words quoted; "Empty transport" = nothing was taken), or the expected entry missing from its playlist | the file must be readable here; a copy in HQPlayer's library: Rescan it |
-| `rate_refused` | taken, then stopped at its start without moving, where the rate check (`backend/hqp_rate_check.py`) names why — the filter HQPlayer ran, by the ratio class HQPlayer describes it with and, on an engine of 6.2.4's major, the rule drawn from what was measured there: a filter described "up" under the track's rate (sinc-M and sinc-Mx aside), FFT or FIR at 1:1; a DSD track by the PCM rate HQPlayer's log names it converted the track to, never by its own (PCM mode only, since 2026-10-21); in SDM first the modulator, at a rate the atlas as published (the shipped file, its release dated) measured it refused for the track's family — or HQPlayer's log names a refused rate combination (its line quoted, attributed to nothing); judged at HQPlayer's first stop when the check names a cause without a hedge — a hedged one, the adaptive output rate not known, and a DSD track's, at the window; HQPlayer's own advance at its deadline, or at once on its log line here | a filter HQPlayer describes as Any, the adaptive output rate in HQPlayer's own settings, a rate of HQPlayer's list every track still to play reaches (named only when every one is refused, all of one family); after an "up" filter's stop, a filter described without "up", or the track's own rate or a power-of-two multiple of it (a DSD track: twice the rate HQPlayer converted it to, or a higher power-of-two multiple); after a 1:1 refusal, another filter or rate; another modulator or rate |
+| `rate_refused` | taken, then stopped at its start without moving, where the rate check (`backend/hqp_rate_check.py`) names why — the filter HQPlayer ran, by the ratio class HQPlayer describes it with and, on an engine of 6.2.4's major, the rule drawn from what was measured there: a filter described "up" under the track's rate (sinc-M and sinc-Mx aside; one HQPlayer stopped will stop, one not tried may), FFT or FIR at 1:1; a DSD track by the PCM rate HQPlayer's log names it converted the track to, never by its own (PCM mode only, since 2026-10-21); in SDM first the modulator, at a rate the atlas as published (the shipped file, its release dated) measured it refused for the track's family — or HQPlayer's log names a refused rate combination (its line quoted, attributed to nothing); judged at HQPlayer's first stop when the check names a cause without a hedge — a hedged one, the adaptive output rate not known, an "up" filter not tried, and a DSD track's, at the window; HQPlayer's own advance at its deadline, or at once on its log line here | a filter HQPlayer describes as Any, the adaptive output rate in HQPlayer's own settings, a rate of HQPlayer's list every track still to play reaches (named only when every one is refused, all of one family); after an "up" filter's stop, a filter described without "up", or the track's own rate or a power-of-two multiple of it (a DSD track: twice the rate HQPlayer converted it to, or a higher power-of-two multiple); after a 1:1 refusal, another filter or rate; another modulator or rate |
 | `not_played` | taken (bytes served, or a path) but never `playing`, or it stopped again | HQPlayer's log, the DSP line |
 | `unknown` / `interrupted` | nothing explains it / another action took over first (not counted) | HQPlayer's log |
 
@@ -1959,35 +1959,52 @@ Since 2026-10-21 the check also says what Sautium measured of HQPlayer's
 adaptive output rate off, 2026-10-19), on an HQPlayer of that major alone,
 naming the engine. **Measured:** of the four filters described "up" that
 were tried, closed-form, sinc-medium and poly-sinc-ext2-short played 1:1 and
-upward and were stopped in every downward cell — 88.2 → 44.1 kHz,
-352.8 → 176.4 kHz, and DSD64 → 88.2 kHz, the DSD track converted to
-176.4 kHz first; ×½ was the one downward ratio tried — while sinc-M
-converted downward and was never stopped. FFT and FIR, without "up", were
-refused at 1:1 (44.1, 88.2 and 352.8 kHz) and played every downward cell,
-as poly-sinc-ext2 did. **The rule:** every filter described "up" is said to
-stop under the source's rate — the others not tried included, at any
-downward ratio — but sinc-M, which the screen gives the class's words and
-its one measured conversion (352.8 → 176.4 kHz) without a stop, for a
-source of its family only (no notice, no verdict), and sinc-Mx, its twin,
-never tried downward, of which nothing is said; the 1:1 is said of FFT and
-FIR by name, the other 2^x and Int filters not having been tried there.
-HQPlayer refuses in two ways: "Requested filter not possible with this rate
-combination A/B, stop" before its engine starts, and, from a filter it built
-first (sinc-medium), one playing status at 0 s, then
-"clHQPlayerEngine::Execute(): lInRate > lOutRate" — a log cause of the same
-kind since 2026-10-21, and an advance closed on it is judged by it even when
-that playing status came last. A refused rate is a play's: where the first
-cause read after the close from the file's add on is one, the newest refusal
-from there is the attempt's (a queue handed over at once logs every add
-before any play) — another cause found first still answers, as before — and
-an advance keeps the refusal its follower heard since the stop, on the
-sheet as in the verdict. A DSD track reaches the filter at
-a PCM rate HQPlayer names only in its log ("Rate: 176400, block size: …",
-the refused play's own; a refusal before the engine starts names it), so
-before a play it is not checked, and a verdict judges it by that rate in PCM
-mode, never by its DSD rate; the trace keeps whether the source is DSD
-(Status `sdm` while it plays, else its file row: DSF, DFF, or one bit a
-sample).
+upward and were stopped in every downward cell — 88.2 → 44.1 kHz, 352.8 →
+176.4 kHz, and DSD64 → 88.2 kHz, the DSD track converted to 176.4 kHz first;
+×½ was the one downward ratio tried — while sinc-M converted downward and
+was never stopped. FFT and FIR, without "up", were refused at 1:1 (44.1,
+88.2 and 352.8 kHz) and played every downward cell, as poly-sinc-ext2 did.
+**The rule** (since 2026-10-22, "will stop" only of a filter measured
+stopping): under the source's rate, at any downward ratio, the three
+HQPlayer stopped will stop, and a filter described "up" that was not tried
+may stop — "may not play" in the notice's title when such filters are all it
+names, and its attempt judged at the window, not at HQPlayer's first stop.
+While the take of the slot a "may" names starts — under a second past where
+its first status read it (a start at a spot, as a resume after a rebuild is,
+reads the spot at once; a Seek sent after that status was asked — a resume's
+own, one while HQPlayer builds — starts the take anew at the status after
+it; and a filter HQPlayer builds and then refuses shows one playing status) — what the tick before served for that queue and setting
+stands, and none is served otherwise — as on any tick whose slot is not yet
+the one the check was judged for (a skip, a row tapped); past it the take
+plays, and the notice leaves its rate out, heard or not (a stop is the
+verdict's). A "may" HQPlayer disproves by playing — that take, HQPlayer's
+own Status naming that source rate, the output rate checked and the filter
+the "may" names, with the DSP keeping up — is said no more at that setting
+and engine while HQPlayer stays attached, on the screen, in the notice and
+by the assistant. A later measurement moves a name from "may" to "will".
+sinc-M gets the class's words and its one measured conversion (352.8 → 176.4
+kHz) without a stop, and sinc-Mx, its twin, never tried downward, the
+class's words and sinc-M's conversion, without a stop — where the check's
+lines are said (the HQPlayer screen, the assistant), for a source of its
+family only, never as a notice or a verdict; across the families nothing is
+said of either twin. The 1:1 is said of FFT and FIR by name, the other 2^x
+and Int filters not having been tried there. HQPlayer refuses in two ways:
+"Requested filter not possible with this rate combination A/B, stop" before
+its engine starts, and, from a filter it built first (sinc-medium), one
+playing status at 0 s, then "clHQPlayerEngine::Execute(): lInRate >
+lOutRate" — a log cause of the same kind since 2026-10-21, and an advance
+closed on it is judged by it even when that playing status came last. A
+refused rate is a play's: where the first cause read after the close from
+the file's add on is one, the newest refusal from there is the attempt's (a
+queue handed over at once logs every add before any play) — another cause
+found first still answers, as before — and an advance keeps the refusal its
+follower heard since the stop, on the sheet as in the verdict. A DSD track
+reaches the filter at a PCM rate HQPlayer names only in its log ("Rate:
+176400, block size: …", the refused play's own; a refusal before the engine
+starts names it), so before a play it is not checked, and a verdict judges
+it by that rate in PCM mode, never by its DSD rate; the trace keeps whether
+the source is DSD (Status `sdm` while it plays, else its file row: DSF, DFF,
+or one bit a sample).
 
 Before a play the check speaks on the HQPlayer screen (since 2026-10-18):
 `GET /api/hqplayer/state?dsp=1` carries `rate_check`, `{"filter": […],
@@ -1998,45 +2015,45 @@ speaks too, the screen being the node's own. The key is absent with nothing
 to say, while HQPlayer is not the output, and while another controller's
 playlist plays (an entry not ours, a mirror that drifted). The screen draws
 the phrases in the limiter line's colour, the filter's after its facts, the
-modulator's under its row. While a track of such a queue that can play
-plays or is paused, the same is said as the notice `hqplayer.rate_check`,
-its toast once per onset in a tab — the onset new whenever the HQPlayer
-backend serves the notice for a queue and setting other than the last it
-served it for, and the same while it serves it for that one, a gap
-included. The setting is the mode, the output rate, both filters, the
-adaptive output rate and, in SDM, the modulator (a PCM dither is not part
-of it), so a setting left and returned to keeps the onset unless the
-notice was served in between, and HQPlayer attached anew as the output
-(any attach, such as a switch back to it, another HQPlayer picked, a
-benchmark run's end, a play after one that found it offline or a restart
-of the node) takes a new one. The notice is served only while such a
-track plays or is paused,
-as the poller last judged it (an HQPlayer that stops answering leaves it
-as it was), and since 2026-10-19 the tab remembers the onsets it has met:
-one toasts the first
-time the tab meets it, however old, unless that is in the connect-time
-snapshot, which paints it only; so neither a gap (an advance's tail, a
-Stop) nor, while sessionStorage keeps them, a reload toasts one again.
-Why? is on the toast and, since 2026-10-21, on the notice's row on Sync &
-P2P, opening the HQPlayer screen, whose line says it in place; the row names
-the reason in its own text too. The
-HQPlayer backend holds the check, judged again on the poller's tick after an
-event — a queue change, a DSP change of this node's, HQPlayer coming back,
-the attach, the slot read moving, a sampled State that differs — reading
-State for a new queue, a DSP change, a return, the attach or a park's first
-play (below) and the lists when none are held, the mode moved or HQPlayer
-came back, begun never while
-a mutation or a play press runs nor before a watched intent's first transport
-command — checked once, before its questions go one at a time, so what
-begins meanwhile has the rest pass between its commands. A list HQPlayer
-refuses (no output device) parks the check: it is asked again only after an
-event that can change the answer — HQPlayer back, a DSP change of this
-node's, the mode moving as sampled while HQPlayer plays, or the first status
-asked for since the park in which HQPlayer plays a slot of ours, its output
-answering then (once a park) — while a question left unanswered or a build
-asks again on the next tick; the park and its end are logged once each
-(since 2026-10-19). A started track that cannot play
-speaks through its verdict alone.
+modulator's under its row. While a track of such a queue that can play plays
+or is paused, the same is said as the notice `hqplayer.rate_check`, its
+toast once per onset in a tab — the onset new whenever the HQPlayer backend
+serves the notice for a queue and setting other than the last it served it
+for, or (since 2026-10-22) a "cannot play" while the onset is a "may not
+play" one — once for them — and the same while it serves it for that one, a
+gap included. The setting is the mode, the output rate, both filters (an
+unset 1x slot counts as the Nx filter, which then runs every source), the
+adaptive output rate and, in SDM, the modulator (a PCM dither is not part of
+it), so a setting left and returned to keeps the onset unless the notice was
+served in between, and HQPlayer attached anew as the output (any attach,
+such as a switch back to it, another HQPlayer picked, a benchmark run's end,
+a play after one that found it offline or a restart of the node) takes a new
+one. The notice is served only while such a track plays or is paused, as the
+poller last judged it (an HQPlayer that stops answering leaves it as it
+was), and since 2026-10-19 the tab remembers the onsets it has met: one
+toasts the first time the tab meets it, however old, unless that is in the
+connect-time snapshot, which paints it only; so neither a gap (an advance's
+tail, a Stop) nor, while sessionStorage keeps them, a reload toasts one
+again. Why? is on the toast and, since 2026-10-21, on the notice's row on
+Sync & P2P, opening the HQPlayer screen, whose line says it in place; the
+row names the reason in its own text too. The HQPlayer backend holds the
+check, judged again on the poller's tick after an event — a queue change, a
+DSP change of this node's, HQPlayer coming back, the attach, the slot read
+moving, a sampled State that differs — reading State for a new queue, a DSP
+change, a return, the attach or a park's first play (below) and the lists
+when none are held, the mode moved or HQPlayer came back, begun never while
+a mutation or a play press runs nor before a watched intent's first
+transport command — checked once, before its questions go one at a time, so
+what begins meanwhile has the rest pass between its commands. A list
+HQPlayer refuses (no output device) parks the check: it is asked again only
+after an event that can change the answer — HQPlayer back, a DSP change of
+this node's, the mode moving as sampled while HQPlayer plays, or the first
+status asked for since the park in which HQPlayer plays a slot of ours, its
+output answering then (once a park) — while a question left unanswered or a
+build asks again on the next tick; the park and its end are logged once each
+(since 2026-10-19). A started track that cannot play speaks through its
+verdict alone; a "may" HQPlayer disproved by playing is said no more at that
+setting (since 2026-10-22).
 
 **HQPlayer's own log** is read on demand — the Diagnostics screen, an
 attempt that ends `not_played` / `unknown` / `rate_refused` / `rejected`

@@ -490,6 +490,27 @@ def test_filter_facts_adds_the_rate_checks_lines_for_the_name_as_if_set(tmp_path
     assert "in both filter slots" not in _say("filter_facts", read, name="demo-gauss-x")   # Any
 
 
+def test_the_assistant_says_no_may_hqplayer_disproved_at_the_setting(tmp_path):
+    # demo-gauss-xa (2^x up, never tried) at 705.6 kHz on an HQPlayer of engine 6, 768 kHz tracks in the queue: it
+    # may stop on them — until HQPlayer was heard playing one at that setting (the backend's rate_heard)
+    read = _read(_dated(tmp_path), engine="6.2.4", adaptive="not checked", sources=Sources({768000: 1}, first=768000))
+    assert "so HQPlayer may stop on the 768 kHz tracks in the queue at 705.6 kHz." in _say("filter_facts", read,
+                                                                                            name="demo-gauss-xa")
+    heard = read._replace(heard=lambda key: frozenset({768000}))
+    assert "in both filter slots" not in _say("filter_facts", heard, name="demo-gauss-xa")
+    # heard with demo-gauss-xa in the Nx slot and none in the 1x one, which leaves it running every source: the
+    # setting the assistant asks of
+    import hqp_rate_check
+    nx = next(f["index"] for f in read.lists["filters"] if f["name"] == "demo-gauss-xa")
+    state = {**read.state, "filterNx": nx, "filter1x": -1}
+    lists = read.lists
+    real = hqp_rate_check.check(hqp_rate_check.inputs(state, lists["modes"], lists["rates"], lists["filters"],
+                                                      lists["shapers"], adaptive=read.adaptive, engine="6.2.4"),
+                                read.sources).key
+    heard = read._replace(state=state, heard=lambda key: frozenset({768000}) if key == real else frozenset())
+    assert "in both filter slots" not in _say("filter_facts", heard, name="demo-gauss-xa")
+
+
 def test_an_empty_line_of_the_file_is_an_empty_line_never_an_error(tmp_path):
     # The file's shape takes an empty text: the card's line of it is empty,
     # as on the screen

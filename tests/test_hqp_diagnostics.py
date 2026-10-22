@@ -298,7 +298,8 @@ def _dsd(out=88200, filter=("sinc-medium", "Any", True), mode="pcm", measured="6
 
 def test_a_dsd_track_is_judged_by_the_rate_hqplayers_log_names_never_its_own():
     facts, log = _dsd(), {"cause": diag.classify(_DSD_REFUSED, "file:///E:/Music/D/01.dsf")}
-    # by its own 2.8 MHz every "up" filter would read as stopped at any PCM rate: nothing until the log names one
+    # by its own 2.8 MHz every "up" filter would read as one that stops, or may, at any PCM rate: nothing until the
+    # log names the rate
     assert not diag.names_cause(facts["rate"])
     assert diag.verdict(facts)["code"] == "not_played"
     v = diag.verdict(facts, log)
@@ -348,9 +349,17 @@ def test_a_pcm_track_an_up_filter_stopped_under_its_rate_closes_at_the_first_sto
     assert (v["code"], v["cause"]) == ("rate_refused", "filter")
     assert v["sentence"] == ("HQPlayer describes sinc-medium as Any up: 44.1 kHz is under 88.2 kHz, and HQPlayer "
                              "stopped on this track.")
-    # sinc-M: never stopped there, nothing named
-    m = {**down, "inputs": {**down["inputs"], "filter": {"name": "sinc-M", "ratio": "2^x", "up": True}}}
-    assert not diag.names_cause(m) and diag.verdict({**facts, "rate": m})["code"] == "not_played"
+    # sinc-M: never stopped there, nothing named; sinc-Mx, its twin, neither
+    for twin in ("sinc-M", "sinc-Mx"):
+        m = {**down, "inputs": {**down["inputs"], "filter": {"name": twin, "ratio": "2^x", "up": True}}}
+        assert not diag.names_cause(m) and diag.verdict({**facts, "rate": m})["code"] == "not_played", twin
+    # an "up" filter not tried may stop: its attempt waits for the window, and the stop, once seen, is said
+    may = {**down, "inputs": {**down["inputs"], "filter": {"name": "sinc-short", "ratio": "Any", "up": True}}}
+    assert not diag.names_cause(may)
+    v = diag.verdict({**facts, "rate": may})
+    assert (v["code"], v["cause"]) == ("rate_refused", "filter")
+    assert v["sentence"] == ("HQPlayer describes sinc-short as Any up: 44.1 kHz is under 88.2 kHz, and HQPlayer "
+                             "stopped on this track.")
 
 
 def test_an_advance_closed_on_the_refusal_of_a_filter_hqplayer_built_is_judged_by_it():

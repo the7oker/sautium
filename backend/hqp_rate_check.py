@@ -32,15 +32,18 @@ play:
   PCM mode, 2026-10-19), said on an HQPlayer of that major alone, naming
   the engine: of the four filters tried whose class HQPlayer writes with
   "up", none was refused at 1:1 or upward, and every one but sinc-M was
-  stopped under the source's rate (×½, the one downward ratio tried). As a
-  rule, then, an "up" filter under the source's rate is refused ("down"),
-  the others not tried included — but sinc-M, which converted 352.8 kHz to
-  176.4 kHz and was never stopped, gets the class's words without a stop
-  under a source of its family (`Check.notes`), and sinc-Mx, its twin,
-  never tried there, nothing. FFT and FIR, without "up", were refused at
-  1:1: said of those two names alone ("one"). Under the source's rate a
-  filter without "up" is not judged: FFT, FIR and poly-sinc-ext2 played
-  there.
+  stopped under the source's rate (×½, the one downward ratio tried).
+  "Will stop" is said of a filter measured stopping alone: under the
+  source's rate, at any downward ratio, the three HQPlayer stopped
+  (UP_REFUSED) will stop ("down"), and an "up" filter not tried may
+  ("may") — until a measurement moves its name. sinc-M, which converted
+  352.8 kHz to 176.4 kHz and was never stopped, gets the class's words and
+  that conversion without a stop under a source of its family
+  (`Check.notes`), and sinc-Mx, its twin, never tried there, the class's
+  words and sinc-M's conversion, without a stop. FFT and FIR, without
+  "up", were refused at 1:1: said of those two names alone ("one"). Under
+  the source's rate a filter without "up" is not judged: FFT, FIR and
+  poly-sinc-ext2 played there.
 
 Where the adaptive output rate is not known (an HQPlayer on another
 machine), every claim is hedged. DSD and streamed tracks are not checked
@@ -74,16 +77,26 @@ FILTER_LINE = {
 }
 # What was measured on UP_ENGINE: an "up" filter under the source's rate, and
 # FFT or FIR at 1:1 — the measurement said as such, its plain sense ("made for
-# upsampling, not for decimation") Sautium's, never inside HQPlayer's description
-DOWN_LINE = ("HQPlayer describes {filter} as {ratio}. Of the “up” filters tried on engine {engine}, it stopped "
-             "all but sinc-M under the source's rate, so it will stop on the {tracks} tracks in the queue at {out}")
+# upsampling, not for decimation") Sautium's, never inside HQPlayer's
+# description. "Will stop" from the filter's own measured stop, "may" for one
+# not tried, from the others'
+DOWN_LINE = ("HQPlayer describes {filter} as {ratio}. On engine {engine} HQPlayer stopped with {filter} under the "
+             "source's rate, so it will stop on the {tracks} tracks in the queue at {out}")
+MAY_LINE = ("HQPlayer describes {filter} as {ratio}. Of the “up” filters tried on engine {engine}, HQPlayer stopped "
+            "with all but sinc-M under the source's rate; {filter} was not tried there, so HQPlayer may stop on the "
+            "{tracks} tracks in the queue at {out}")
 ONE_LINE = ("HQPlayer refused {filter} at the source's own rate (1:1) on engine {engine}, so it will stop on the "
             "{tracks} tracks in the queue")
-# sinc-M under the source's rate, within its family: the class's words, the
-# one downward conversion measured, and no stop
+# Under the source's rate, within its family: sinc-M the class's words, the
+# one downward conversion measured, and no stop; sinc-Mx, its twin, never
+# tried there, the class's words and sinc-M's conversion, no stop
 DOWN_NOTE = ("HQPlayer describes {filter} as {ratio}, and the {tracks} tracks in the queue are above {out}. "
              "Filters described with “up” are made for upsampling, not for decimation; on engine {engine} "
              "HQPlayer converted 352.8 kHz to 176.4 kHz with {filter} and did not stop.")
+TWIN_NOTE = ("HQPlayer describes {filter} as {ratio}, and the {tracks} tracks in the queue are above {out}. "
+             "Filters described with “up” are made for upsampling, not for decimation; on engine {engine} "
+             "{filter} was not tried under the source's rate, and sinc-M, its twin, converted 352.8 kHz to "
+             "176.4 kHz and did not stop.")
 MODULATOR_LINE = ("HQPlayer refused {modulator} at {rate} on engine {engine}, so it will stop on the "
                   "{tracks} tracks in the queue")
 FILTER_UNLESS = " unless its adaptive output rate is on"
@@ -95,8 +108,9 @@ IF_OFF = " if it is off"
 OR_RATE = ", or pick {rate}"
 DOWN_FIX = ("Filters described with “up” are made for upsampling, not for decimation: pick one HQPlayer "
             "describes without “up”, or as the output rate the tracks' own or a power-of-two multiple of it.")
-# A verdict's: its one track, by the rate that reached the filter — its own (played
-# 1:1 and ×2), or a DSD track's converted rate ×2 or more (1:1 from it was not tried)
+# A verdict's: its one track, by the rate that reached the filter — its own (the "up"
+# filters tried played 1:1 and ×2), or a DSD track's converted rate ×2 or more (1:1
+# from it was not tried)
 VERDICT_DOWN_FIX = ("Filters described with “up” are made for upsampling, not for decimation: pick one HQPlayer "
                     "describes without “up”, or as the output rate {rates}.")
 OWN_RATES = "{rate} or a power-of-two multiple of it"
@@ -109,6 +123,8 @@ NOT_CHECKED = {
     (True, True): "The DSD and streamed tracks in the queue are not checked.",
 }
 NOTICE_TITLE = "Some tracks in the queue cannot play at {out}"
+# A queue whose every finding is an "up" filter not tried
+NOTICE_TITLE_MAY = "Some tracks in the queue may not play at {out}"
 VERDICT_TITLE = "HQPlayer refused the rate combination"
 VERDICT_FILTER = {
     "2^x": "HQPlayer describes {filter} as {ratio}: {out} is no power-of-two multiple of {of}, "
@@ -141,11 +157,18 @@ PICKS_RATE = frozenset({"grayed", "checked"})
 # ("up"), FFT, FIR, poly-sinc-ext2 and none in both filter slots, the
 # adaptive output rate off
 UP_ENGINE = "6.2.4"
+# The "up" filters HQPlayer stopped under the source's rate: they will stop. An
+# "up" filter not tried may, until a measurement moves its name here
+UP_REFUSED = frozenset({"closed-form", "sinc-medium", "poly-sinc-ext2-short"})
 # The one "up" filter HQPlayer converted downward with and never stopped there
 UP_PLAYS = frozenset({"sinc-M"})
 # sinc-M's twin — the same output, bit for bit, at the ratios the atlas
-# measured — never tried downward: neither a stop nor sinc-M's words
+# measured — never tried downward: no stop, the class's words and sinc-M's
+# conversion
 UP_UNTRIED_TWIN = frozenset({"sinc-Mx"})
+# The two findings under the source's rate — a stop measured and one that may
+# come — given one fix, and said alike once HQPlayer stopped
+DOWNWARD = frozenset({"down", "may"})
 # The filters without "up" HQPlayer refused at 1:1 — the others of their
 # classes (2^x, Int) were not tried
 REFUSES_ONE = frozenset({"FFT", "FIR"})
@@ -207,13 +230,15 @@ def refusal(f: Filter, src_rate: int, rate_out: int, measured: Optional[str], st
     """Why HQPlayer stops `f` converting `src_rate` to `rate_out`, by the
     class it describes `f` with and what `measured` (measured_on) holds:
     "class" — the class's arithmetic does not reach an output above the
-    source; "down" — an "up" filter under the source's rate, sinc-M and its
-    twin aside; "one" — FFT or FIR at 1:1, from a PCM source (`stage`: the
-    rate HQPlayer converted a DSD track to, never tried at 1:1). None:
-    nothing says it stops."""
+    source; "down" — an "up" filter HQPlayer stopped under the source's
+    rate; "may" — an "up" filter not tried there, sinc-M and its twin aside;
+    "one" — FFT or FIR at 1:1, from a PCM source (`stage`: the rate HQPlayer
+    converted a DSD track to, never tried at 1:1). None: nothing says it
+    stops."""
     if rate_out < src_rate:
-        return ("down" if measured and f.up and f.name not in UP_PLAYS and f.name not in UP_UNTRIED_TWIN
-                else None)
+        if not (measured and f.up) or f.name in UP_PLAYS or f.name in UP_UNTRIED_TWIN:
+            return None
+        return "down" if f.name in UP_REFUSED else "may"
     if rate_out == src_rate:
         return "one" if measured and not stage and f.name in REFUSES_ONE else None
     if f.ratio == "2^x" and not same_family(rate_out, src_rate):
@@ -254,7 +279,8 @@ class Group(NamedTuple):
     name: str
     ratio: str                           # the class as HQPlayer writes it; "" for a modulator
     sources: Tuple[int, ...]             # ascending
-    why: str = ""                        # a filter's: "class", "down", "one" (refusal)
+    why: str = ""                        # a filter's: "class", "down", "may", "one" (refusal); a note's:
+                                         # "plays" (sinc-M), "twin" (sinc-Mx)
 
 
 class Check(NamedTuple):
@@ -264,18 +290,25 @@ class Check(NamedTuple):
     hedged: bool                         # the adaptive output rate not known
     dsd: bool                            # DSD tracks still to play, not checked
     streamed: bool                       # streamed ones, not checked
-    started_refused: bool                # the slot HQPlayer reads is among the refused
+    started_refused: bool                # the slot HQPlayer reads is among those a finding says will stop
+    # (started_may, below: the filter a "may" names for it)
     fix_rate: Optional[int]              # a rate of HQPlayer's list every refused track reaches
     engine: Optional[str]
-    key: tuple                           # the setting: mode, rate, both slots, modulator, adaptive
+    key: tuple                           # the setting: mode, rate, both slots (1x unset = Nx's), modulator,
+    #                                      adaptive
     measured: Optional[str] = None       # UP_ENGINE where its measurements speak
-    notes: Tuple[Group, ...] = ()        # sinc-M under the source's rate: the screen's words, no stop
+    notes: Tuple[Group, ...] = ()        # sinc-M, sinc-Mx under the source's rate: the screen's words, no stop
+    first: Optional[int] = None          # the PCM rate of the slot HQPlayer reads (Sources.first)
+    started_may: Optional[str] = None
 
 
 def check(inp: Inputs, src: Sources) -> Check:
     """The rule (the module's docstring) over the source rates still to play."""
-    key = (inp.mode, inp.rate, inp.x1.name if inp.x1 else None, inp.nx.name if inp.nx else None,
-           inp.modulator, inp.adaptive)
+    # An unset 1x slot leaves the Nx filter running every source (running_slot): the
+    # setting of that filter in both
+    x1 = inp.x1 or inp.nx
+    key = (inp.mode, inp.rate, x1.name if x1 else None, inp.nx.name if inp.nx else None, inp.modulator,
+           inp.adaptive)
     silent = inp.mode is None or not inp.rate or inp.adaptive in PICKS_RATE
     fs_in = inp.refused.get(inp.rate) if inp.mode == "sdm" and inp.modulator else None
     found: Dict[tuple, List[int]] = {}
@@ -290,15 +323,18 @@ def check(inp: Inputs, src: Sources) -> Check:
         why = refusal(f, s, inp.rate, inp.measured, stage=src.of_dsd is not None)
         if why:
             found.setdefault(("filter", f.name, f.described(), why), []).append(s)
-        elif inp.measured and f.up and f.name in UP_PLAYS and inp.rate < s and same_family(inp.rate, s):
-            noted.setdefault(("filter", f.name, f.described(), "down"), []).append(s)
+        elif (inp.measured and f.up and (f.name in UP_PLAYS or f.name in UP_UNTRIED_TWIN) and inp.rate < s
+              and same_family(inp.rate, s)):
+            note = "plays" if f.name in UP_PLAYS else "twin"
+            noted.setdefault(("filter", f.name, f.described(), note), []).append(s)
     groups = sorted((Group(*k[:3], tuple(v), k[3]) for k, v in found.items()),
                     key=lambda g: (g.cause != "modulator", g.sources[0]))
-    refused = {s for g in groups for s in g.sources}
+    will = {s for g in groups if g.why != "may" for s in g.sources}
+    may = {s: g.name for g in groups if g.why == "may" for s in g.sources}
     return Check(inp.mode, inp.rate, tuple(groups), inp.adaptive is None,
                  not silent and src.dsd > 0, not silent and src.streamed > 0,
-                 src.first in refused, _fix_rate(inp, src, groups), inp.engine, key, inp.measured,
-                 tuple(Group(*k[:3], tuple(v), k[3]) for k, v in noted.items()))
+                 src.first in will, _fix_rate(inp, src, groups), inp.engine, key, inp.measured,
+                 tuple(Group(*k[:3], tuple(v), k[3]) for k, v in noted.items()), src.first, may.get(src.first))
 
 
 def _base(hz: int) -> Optional[int]:
@@ -391,9 +427,9 @@ def _claim(c: Check, g: Group) -> str:
         return text + (MODULATOR_UNLESS if c.hedged else "") + END
     if g.why == "one":
         text = ONE_LINE.format(filter=g.name, engine=c.measured, tracks=_names(g.sources, AND))
-    elif g.why == "down":
-        text = DOWN_LINE.format(filter=g.name, ratio=g.ratio, engine=c.measured, out=rate_name(c.rate),
-                                of=_names(g.sources, AND), tracks=_names(g.sources, AND))
+    elif g.why in DOWNWARD:
+        text = (DOWN_LINE if g.why == "down" else MAY_LINE).format(
+            filter=g.name, ratio=g.ratio, engine=c.measured, out=rate_name(c.rate), tracks=_names(g.sources, AND))
     else:
         text = FILTER_LINE[g.ratio.split(" ")[0]].format(filter=g.name, ratio=g.ratio, out=rate_name(c.rate),
                                                          of=_names(g.sources, OR), tracks=_names(g.sources, AND))
@@ -401,7 +437,7 @@ def _claim(c: Check, g: Group) -> str:
 
 
 def _filter_fix(c: Check, why: str, hedged: bool) -> str:
-    if why == "down":
+    if why in DOWNWARD:
         return DOWN_FIX
     if why == "one":
         return ONE_FIX
@@ -409,21 +445,30 @@ def _filter_fix(c: Check, why: str, hedged: bool) -> str:
                              or_rate=OR_RATE.format(rate=rate_name(c.fix_rate)) if c.fix_rate else "")
 
 
-def lines(c: Check) -> Dict[str, List[List[Dict[str, str]]]]:
+def _standing(c: Check, unsaid: frozenset) -> List[Group]:
+    """The check's findings but the rates a "may" names that are `unsaid`;
+    a "may" left with no rate goes."""
+    return [g for g in (g._replace(sources=tuple(s for s in g.sources if s not in unsaid)) if g.why == "may"
+                        else g for g in c.groups) if g.sources]
+
+
+def lines(c: Check, heard: frozenset = frozenset()) -> Dict[str, List[List[Dict[str, str]]]]:
     """The HQPlayer screen's phrases, each list under the row it names —
     {"filter": [...], "modulator": [...]}; empty when there is nothing to
-    say. A filter's claims come before their fixes, one a kind of refusal,
-    and sinc-M's words after them; the tracks not checked are said after
-    the last line."""
+    say. A filter's claims come before their fixes, each fix once, and the
+    words of sinc-M or sinc-Mx after them; the tracks not checked are said
+    after the last line. A "may" HQPlayer disproved (`heard`: the rates the
+    HQPlayer backend heard it play at this setting) is not said."""
     out: Dict[str, List[List[Dict[str, str]]]] = {}
-    for g in c.groups:
+    groups = _standing(c, heard)
+    for g in groups:
         out.setdefault(g.cause, []).append(wire([_claim(c, g)]))
     if "modulator" in out:
         out["modulator"].append(wire([MODULATOR_FIX]))
-    for why in dict.fromkeys(g.why for g in c.groups if g.cause == "filter"):
-        out["filter"].append(wire([_filter_fix(c, why, c.hedged)]))
+    for fix in dict.fromkeys(_filter_fix(c, g.why, c.hedged) for g in groups if g.cause == "filter"):
+        out["filter"].append(wire([fix]))
     for g in c.notes:
-        out.setdefault("filter", []).append(wire([DOWN_NOTE.format(
+        out.setdefault("filter", []).append(wire([(DOWN_NOTE if g.why == "plays" else TWIN_NOTE).format(
             filter=g.name, ratio=g.ratio, out=rate_name(c.rate), tracks=_names(g.sources, AND),
             engine=c.measured)]))
     if out and (c.dsd or c.streamed):
@@ -431,15 +476,21 @@ def lines(c: Check) -> Dict[str, List[List[Dict[str, str]]]]:
     return out
 
 
-def notice(c: Check) -> Optional[Dict[str, Any]]:
-    """The notice's words, served by the HQPlayer backend while a track of
-    such a queue that can play plays or is paused: its title and the
-    claims, the modulator's first; the fix is on the screen its Why? opens.
-    None when there is nothing to say."""
-    if not c.groups:
+def notice(c: Check, unsaid: frozenset = frozenset()) -> Optional[Dict[str, Any]]:
+    """The notice's words, served by the HQPlayer backend while the slot
+    HQPlayer reads plays or is paused: its title and the claims, the
+    modulator's first; the fix is on the screen its Why? opens. A "may" of a
+    rate `unsaid` is not said — one HQPlayer was heard playing at this
+    setting, or the rate of the slot playing once its take has played past
+    its first second, heard or not (the HQPlayer backend's). A queue whose
+    every finding left is an "up" filter not tried may not play, the others
+    cannot. None when there is nothing to say."""
+    groups = _standing(c, unsaid)
+    if not groups:
         return None
-    return {"title": wire([NOTICE_TITLE.format(out=rate_name(c.rate))]),
-            "text": [wire([_claim(c, g)]) for g in c.groups]}
+    title = NOTICE_TITLE_MAY if all(g.why == "may" for g in groups) else NOTICE_TITLE
+    return {"title": wire([title.format(out=rate_name(c.rate))]),
+            "text": [wire([_claim(c, g)]) for g in groups]}
 
 
 def verdict(c: Check, source: Optional[int], line: Optional[str],
@@ -447,9 +498,10 @@ def verdict(c: Check, source: Optional[int], line: Optional[str],
     """The words of `rate_refused` for an attempt that never moved and
     stopped (playback.hqp_diagnostics): the rule's cause over its one source,
     with HQPlayer's log line when it was read, or that line alone; None with
-    neither. Nothing is hedged: the stop is the evidence. `dsd`: a DSD
-    track's own rate, `source` then the PCM rate HQPlayer's log named it
-    converted the track to."""
+    neither. Nothing is hedged: the stop is the evidence, so an "up" filter
+    not tried is said as one measured stopping. `dsd`: a DSD track's own
+    rate, `source` then the PCM rate HQPlayer's log named it converted the
+    track to."""
     if not c.groups:
         if not line:
             return None
@@ -468,9 +520,9 @@ def verdict(c: Check, source: Optional[int], line: Optional[str],
         sentence = VERDICT_ONE.format(filter=g.name, engine=c.measured, source=rate_name(source))
         nxt = ONE_FIX
     else:
-        sentence = VERDICT_FILTER["down" if g.why == "down" else g.ratio.split(" ")[0]].format(
+        sentence = VERDICT_FILTER["down" if g.why in DOWNWARD else g.ratio.split(" ")[0]].format(
             filter=g.name, ratio=g.ratio, out=rate_name(c.rate), of=of)
         nxt = (VERDICT_DOWN_FIX.format(rates=(STAGE_RATES if dsd else OWN_RATES).format(rate=rate_name(source)))
-               if g.why == "down" else _filter_fix(c, g.why, False))
+               if g.why in DOWNWARD else _filter_fix(c, g.why, False))
     return {"title": VERDICT_TITLE, "sentence": sentence + (VERDICT_LOG.format(line=line) if line else ""),
             "next": nxt}

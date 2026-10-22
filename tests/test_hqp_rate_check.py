@@ -281,6 +281,8 @@ def test_a_stop_is_said_exactly_where_engine_6_2_4_stopped(name):
             assert not c.groups, cell
         else:
             assert bool(c.groups) == (did in STOPS), (cell, did, c.groups)
+            # a stop measured is said as one: "will", never "may"
+            assert all(g.why != "may" for g in c.groups), (cell, c.groups)
         # sinc-M under the source's rate: its words, no stop
         assert bool(c.notes) == (name == "sinc-M" and out < (STAGE if src == DSD64 else src)), cell
         # before Play a DSD track is not checked: the rate it reaches the filter at is HQPlayer's to name
@@ -301,26 +303,105 @@ def test_what_was_measured_speaks_on_its_engines_major_alone():
         assert [(g.why, g.sources) for g in c.groups] == [("class", (48000,))]
     # the measured engine is named, whichever of its major HQPlayer runs
     c = _cell("closed-form", "88.2k->44.1k", engine="6.0.0")
-    assert c.measured == "6.2.4" and " tried on engine 6.2.4, " in plain(rc.lines(c)["filter"][0])
+    assert c.measured == "6.2.4"
+    assert " On engine 6.2.4 HQPlayer stopped with closed-form " in plain(rc.lines(c)["filter"][0])
 
 
-def test_an_up_filter_not_tried_follows_the_rule_and_the_others_without_up_are_not_judged_at_1_to_1():
-    # "up" filters not tried — sinc-short, poly-sinc-gauss-short — refused under the source's rate
-    for name in ("sinc-short", "poly-sinc-gauss-short"):
-        assert [g.why for g in _cell(name, "352.8k->176.4k").groups] == ["down"], name
-    # sinc-Mx, sinc-M's twin, never tried there: neither a stop nor sinc-M's words
+def test_an_up_filter_not_tried_may_stop_and_the_others_without_up_are_not_judged_at_1_to_1():
+    # "will stop" only for the three HQPlayer stopped; "up" filters not tried — sinc-short,
+    # poly-sinc-gauss-short, closed-form-fast — may stop under the source's rate, at any downward ratio
+    assert rc.UP_REFUSED == {name for name, row in UP_MATRIX.items()
+                             if any(row[cell] in STOPS for cell in ("88.2k->44.1k", "352.8k->176.4k"))}
+    for name in ("sinc-short", "poly-sinc-gauss-short", "closed-form-fast"):
+        assert [g.why for g in _cell(name, "352.8k->176.4k").groups] == ["may"], name
+        c = rc.check(_measured(name, 44100), Sources({96000: 1, 352800: 1}))
+        assert [(g.why, g.sources) for g in c.groups] == [("may", (96000, 352800))], name
+    # sinc-Mx, sinc-M's twin, never tried there: no stop, the class's words and sinc-M's conversion — where
+    # sinc-M gets its own, under a source of its family
     c = _cell("sinc-Mx", "352.8k->176.4k")
-    assert not c.groups and not c.notes and rc.lines(c) == {}
+    assert not c.groups and [(g.why, g.sources) for g in c.notes] == [("twin", (352800,))]
+    assert [plain(p) for p in rc.lines(c)["filter"]] == [
+        "HQPlayer describes sinc-Mx as 2^x up, and the 352.8 kHz tracks in the queue are above 176.4 kHz. Filters "
+        "described with “up” are made for upsampling, not for decimation; on engine 6.2.4 sinc-Mx was not tried "
+        "under the source's rate, and sinc-M, its twin, converted 352.8 kHz to 176.4 kHz and did not stop."]
+    assert rc.notice(c) is None and rc.verdict(c, 352800, None) is None and not c.started_refused
+    c = rc.check(_measured("sinc-Mx", 44100), Sources({96000: 1}))
+    assert not c.groups and not c.notes
+    # another major: nothing of either twin
+    assert not _cell("sinc-Mx", "352.8k->176.4k", engine="7.0.1").notes
     # the 2^x and Int filters without "up" other than FFT and FIR: 1:1 not tried, nothing said
     for name in ("IIR", "IIR2", "asymFIR", "minphaseFIR", "poly-sinc-ext"):
         assert not _cell(name, "88.2k->88.2k").groups, name
 
 
+def test_the_words_of_an_up_filter_not_tried():
+    c = _cell("sinc-short", "88.2k->44.1k")
+    assert [plain(p) for p in rc.lines(c)["filter"]] == [
+        "HQPlayer describes sinc-short as Any up. Of the “up” filters tried on engine 6.2.4, HQPlayer stopped with "
+        "all but sinc-M under the source's rate; sinc-short was not tried there, so HQPlayer may stop on the "
+        "88.2 kHz tracks in the queue at 44.1 kHz.",
+        "Filters described with “up” are made for upsampling, not for decimation: pick one HQPlayer describes "
+        "without “up”, or as the output rate the tracks' own or a power-of-two multiple of it."]
+    # a queue whose only finding is such a filter may not play; hedged as any other claim
+    hedged = rc.check(_measured("sinc-short", 44100, adaptive=None), Sources({88200: 2, 44100: 1}))
+    notice = rc.notice(hedged)
+    assert plain(notice["title"]) == "Some tracks in the queue may not play at 44.1 kHz"
+    assert plain(notice["text"][0]).endswith(
+        "so HQPlayer may stop on the 88.2 kHz tracks in the queue at 44.1 kHz unless its adaptive output rate is on.")
+    # after the stop it is said as a stop: the stop is the evidence
+    assert rc.verdict(c, 88200, None) == {
+        "title": "HQPlayer refused the rate combination",
+        "sentence": "HQPlayer describes sinc-short as Any up: 44.1 kHz is under 88.2 kHz, and HQPlayer stopped on "
+                    "this track.",
+        "next": "Filters described with “up” are made for upsampling, not for decimation: pick one HQPlayer "
+                "describes without “up”, or as the output rate 88.2 kHz or a power-of-two multiple of it."}
+
+
+def test_a_queue_with_a_stop_measured_and_one_not_tried_cannot_play_and_gives_its_fix_once():
+    # closed-form in the Nx slot (88.2 kHz tracks), sinc-short in the 1x slot (48 kHz ones), at 44.1 kHz
+    inp = rc.Inputs("pcm", 44100, "not checked", Filter("closed-form", "2^x", True), Filter("sinc-short", "Any", True),
+                    measured="6.2.4")
+    c = rc.check(inp, Sources({48000: 1, 88200: 1}))
+    assert [(g.name, g.why) for g in c.groups] == [("sinc-short", "may"), ("closed-form", "down")]
+    said = [plain(p) for p in rc.lines(c)["filter"]]
+    assert len(said) == 3 and said[0].endswith("so HQPlayer may stop on the 48 kHz tracks in the queue at 44.1 kHz.")
+    assert said[1].endswith("so it will stop on the 88.2 kHz tracks in the queue at 44.1 kHz.")
+    assert said[2].startswith("Filters described with “up” are made for upsampling, not for decimation")
+    assert plain(rc.notice(c)["title"]) == "Some tracks in the queue cannot play at 44.1 kHz"
+
+
+def test_a_may_hqplayer_disproved_is_said_no_more_and_the_rest_still_is():
+    # sinc-short in the Nx slot at 44.1 kHz, closed-form in the 1x one: the 48 kHz tracks will stop, the 88.2 and
+    # 96 kHz ones may
+    inp = rc.Inputs("pcm", 44100, "not checked", Filter("sinc-short", "Any", True), Filter("closed-form", "2^x", True),
+                    measured="6.2.4")
+    c = rc.check(inp, Sources({88200: 1, 96000: 1, 48000: 1}, first=88200))
+    assert not c.started_refused and c.started_may and c.first == 88200
+    # an 88.2 kHz track heard playing at this setting (the backend's word): no verdict comes, and its "may" is said
+    # no more, in the notice as on the screen; the 48 kHz tracks still will stop, the 96 kHz ones still may
+    heard = frozenset({88200})
+    notice = rc.notice(c, heard)
+    assert plain(notice["title"]) == "Some tracks in the queue cannot play at 44.1 kHz"
+    said = [plain(t) for t in notice["text"]]
+    assert len(said) == 2 and said[0].endswith("so it will stop on the 48 kHz tracks in the queue at 44.1 kHz.")
+    assert said[1].endswith("so HQPlayer may stop on the 96 kHz tracks in the queue at 44.1 kHz."), said
+    assert plain(rc.lines(c, heard)["filter"][1]).endswith("may stop on the 96 kHz tracks in the queue at 44.1 kHz.")
+    # nothing heard yet: the whole check
+    assert "88.2 kHz and 96 kHz tracks" in plain(rc.lines(c)["filter"][1])
+    assert "88.2 kHz and 96 kHz tracks" in plain(rc.notice(c)["text"][1])
+    # a queue whose only other finding is a "may": that title; every "may" disproved, no notice and no line
+    c = rc.check(inp, Sources({88200: 1, 96000: 1}, first=88200))
+    assert plain(rc.notice(c, heard)["title"]) == "Some tracks in the queue may not play at 44.1 kHz"
+    assert rc.notice(c, frozenset({88200, 96000})) is None and rc.lines(c, frozenset({88200, 96000})) == {}
+    # a track a finding says will stop, playing at its start: its verdict speaks, not the notice
+    assert rc.check(inp, Sources({48000: 1, 88200: 1}, first=48000)).started_refused
+
+
 def test_the_words_of_each_measured_stop_and_of_sinc_m():
     said = {k: [plain(p) for p in v] for k, v in rc.lines(_cell("closed-form", "88.2k->44.1k")).items()}
     assert said == {"filter": [
-        "HQPlayer describes closed-form as 2^x up. Of the “up” filters tried on engine 6.2.4, it stopped all but "
-        "sinc-M under the source's rate, so it will stop on the 88.2 kHz tracks in the queue at 44.1 kHz.",
+        "HQPlayer describes closed-form as 2^x up. On engine 6.2.4 HQPlayer stopped with closed-form under the "
+        "source's rate, so it will stop on the 88.2 kHz tracks in the queue at 44.1 kHz.",
         "Filters described with “up” are made for upsampling, not for decimation: pick one HQPlayer describes "
         "without “up”, or as the output rate the tracks' own or a power-of-two multiple of it."]}
     said = {k: [plain(p) for p in v] for k, v in rc.lines(_cell("FFT", "44.1k->44.1k")).items()}
@@ -449,8 +530,10 @@ def test_the_setting_key_is_the_mode_rate_slots_modulator_and_adaptive_state():
     assert rc.check(_inp(), _src(44100)).key == ("pcm", 768000, "demo-sinc-a", "demo-sinc-a", None,
                                                  "not checked")
     assert rc.check(_inp(adaptive="grayed"), _src(44100)).key[-1] == "grayed"
+    # an unset 1x slot leaves the Nx filter running every source: the setting of that filter in both
     assert rc.check(_inp(adaptive=None, x1=False), _src()).key == \
-        ("pcm", 768000, None, "demo-sinc-a", None, None)
+        ("pcm", 768000, "demo-sinc-a", "demo-sinc-a", None, None)
+    assert rc.check(_inp(adaptive=None, x1=False), _src()).key == rc.check(_inp(adaptive=None), _src()).key
 
 
 # -- After the fact ----------------------------------------------------------------
@@ -491,8 +574,10 @@ def _states(tmp_path):
         for ratio in ("2^x", "Int"):
             yield rc.check(_inp(ratio, adaptive=adaptive, rates=(705600, 768000)), _src(44100, 88200))
             yield rc.check(_inp(ratio, adaptive=adaptive), src)
-        # what was measured on engine 6.2.4: a stop under the source's rate, at 1:1, and sinc-M's words
-        for name, out in (("closed-form", 88200), ("FFT", 44100), ("sinc-M", 44100)):
+        # what was measured on engine 6.2.4: a stop under the source's rate, at 1:1, sinc-M's words; an "up"
+        # filter not tried, and sinc-Mx's words
+        for name, out in (("closed-form", 88200), ("FFT", 44100), ("sinc-M", 44100), ("sinc-short", 44100),
+                          ("sinc-Mx", 44100)):
             yield rc.check(_measured(name, out, adaptive=adaptive), Sources({44100: 1, 48000: 1, 176400: 1}))
 
 

@@ -298,10 +298,11 @@ def _rate_queue(state: Optional[dict], lists: dict) -> Optional[Tuple[Optional[s
 
 
 def _rate_lines(info: Optional[dict], state: Optional[dict], lists: dict) -> Dict[str, list]:
-    """What the screen says when the queue meets a rate HQPlayer cannot reach
-    (hqp_rate_check): each phrase under the row it names, for the queue
-    _rate_queue reads. The node's own atlas copy speaks here, on the node's
-    own screen."""
+    """What the screen says when the queue meets a rate HQPlayer cannot reach,
+    or may not (hqp_rate_check): each phrase under the row it names, for the
+    queue _rate_queue reads. The node's own atlas copy speaks here, on the
+    node's own screen; a "may" HQPlayer disproved at this setting is said no
+    more, as in the notice."""
     import hqp_rate_check
     queue = _rate_queue(state, lists)
     if queue is None:
@@ -309,7 +310,10 @@ def _rate_lines(info: Optional[dict], state: Optional[dict], lists: dict) -> Dic
     adaptive, sources = queue
     inputs = hqp_rate_check.inputs(state, lists["modes"], lists["rates"], lists["filters"], lists["shapers"],
                                    adaptive=adaptive, atlas=_atlas(), engine=(info or {}).get("engine"))
-    return hqp_rate_check.lines(hqp_rate_check.check(inputs, sources))
+    check = hqp_rate_check.check(inputs, sources)
+    active = manager.active
+    heard = active.rate_heard(check.key) if active is not None and active.id == "hqplayer" else frozenset()
+    return hqp_rate_check.lines(check, heard)
 
 
 @router.get("/facts")
@@ -539,7 +543,9 @@ def _assistant_read(tool: str, args: Dict[str, str]) -> hqp_assistant.Read:
     if tool in ("filter_facts", "compare"):
         queue = _rate_queue(state, lists)
         if queue is not None:
-            read = read._replace(adaptive=queue[0], sources=queue[1])
+            active = manager.active
+            heard = active.rate_heard if active is not None and active.id == "hqplayer" else None
+            read = read._replace(adaptive=queue[0], sources=queue[1], heard=heard)
     if tool == "compare":
         import hqp_library
         ep = hqp_library.endpoint_by_address(settings.hqplayer_host, settings.hqplayer_port)

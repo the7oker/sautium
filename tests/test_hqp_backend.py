@@ -3280,6 +3280,22 @@ def test_engine_6_2_4s_stops_are_judged_as_measured(traced, fake, monkeypatch, t
         assert not a.facts["rate"]["dsd"]
 
 
+def test_an_up_filter_not_tried_that_stops_is_judged_at_the_window_and_said_as_a_stop(traced, fake, monkeypatch,
+                                                                                       tmp_path):
+    # sinc-short, described "up", was never tried under the source's rate: HQPlayer may stop there. Here it does,
+    # as the three tried did, and nothing in its log says so: the attempt waits for the window, then says the stop
+    _measured_hqp(traced, fake, monkeypatch, tmp_path, "sinc-short", "88.2k->44.1k")
+    fake.cells = lambda f, rate, dsd, out: "stops" if (f, rate, out) == ("sinc-short", 88200, 44100) else "plays"
+    fake.log_path = None
+    monkeypatch.setattr(diag, "OBSERVE_S", 3.0)
+    assert traced.select(1)
+    a = _closed(timeout=10.0)
+    assert a.end == "window" and a.facts["closed"] - a.facts["t0"] >= 3.0, a.verdict
+    assert (a.verdict["code"], a.verdict["cause"]) == ("rate_refused", "filter")
+    assert a.verdict["sentence"] == ("HQPlayer describes sinc-short as Any up: 44.1 kHz is under 88.2 kHz, and "
+                                     "HQPlayer stopped on this track.")
+
+
 @pytest.mark.parametrize("name,cell", [("poly-sinc-ext2", "88.2k->44.1k"), ("FFT", "352.8k->176.4k"),
                                        ("FIR", "44.1k->88.2k"), ("closed-form", "DSD64->352.8k"),
                                        ("none", "44.1k->88.2k"), ("sinc-M", "352.8k->176.4k")], ids=str)
@@ -3316,8 +3332,8 @@ def test_the_screen_says_what_engine_6_2_4_did_before_play(fake, output, monkeyp
     monkeypatch.setattr(hqp_load, "sources", lambda openers: Sources({44100: 1, 88200: 2, 96000: 1}, dsd=1,
                                                                     first=44100))
     assert _rate_said(hqp_router.get_state(dsp=True)) == {"filter": [
-        "HQPlayer describes closed-form as 2^x up. Of the “up” filters tried on engine 6.2.4, it stopped all but "
-        "sinc-M under the source's rate, so it will stop on the 88.2 kHz and 96 kHz tracks in the queue at 44.1 kHz.",
+        "HQPlayer describes closed-form as 2^x up. On engine 6.2.4 HQPlayer stopped with closed-form under the "
+        "source's rate, so it will stop on the 88.2 kHz and 96 kHz tracks in the queue at 44.1 kHz.",
         "Filters described with “up” are made for upsampling, not for decimation: pick one HQPlayer describes "
         "without “up”, or as the output rate the tracks' own or a power-of-two multiple of it.",
         "The DSD tracks in the queue are not checked."]}
@@ -5651,6 +5667,166 @@ def test_a_started_track_hqplayer_cannot_reach_speaks_through_its_verdict_alone(
     assert _wait(lambda: b._rate_check is not None and b._rate_check.started_refused, 5.0)
     _polls(fake, 2)
     assert b._rate_check.groups and b.rate_notice() is None
+
+
+def test_a_track_an_up_filter_not_tried_may_stop_on_plays_and_the_notice_warns_of_the_others(
+        fake, output, monkeypatch, tmp_path):
+    # demo-sinc-a (2^x up, never tried) at 44.1 kHz on an HQPlayer of engine 6, an 88.2 kHz track playing as
+    # HQPlayer reports it: no verdict comes while it plays on, so the notice warns of the 96 kHz tracks it may stop
+    # on and says nothing of the rate playing, nor do the screen and the assistant; a "may not play" turned
+    # "cannot play" is a notice anew
+    from hqp_rate_check import Sources
+    from playback import hqp_load
+    hqp_router = _screen(monkeypatch)
+    monkeypatch.setattr(hqp_router, "manager", output[0])
+    fake.sources["A/01.flac"] = (88200, False)
+    fake.active.update(rate=44100, filter="demo-sinc-a")
+    mgr, b = _rate_queue(fake, output, monkeypatch, tmp_path, Sources({88200: 1, 96000: 1}, first=88200))
+    fake.replies["State"] = _RATE_PCM[0].replace('rate="3"', 'rate="1"')
+    b._rate_event("state", "lists")
+    b.poke()
+    said = lambda: _rate_notice_said(b) or ("", [])                                     # noqa: E731
+    assert _wait(lambda: said()[0] == "Some tracks in the queue may not play at 44.1 kHz", 5.0), said()
+    assert not b._rate_check.started_refused and len(said()[1]) == 1
+    assert said()[1][0].endswith("so HQPlayer may stop on the 96 kHz tracks in the queue at 44.1 kHz.")
+    assert _rate_said(hqp_router.get_state(dsp=True))["filter"][0].endswith(
+        "so HQPlayer may stop on the 96 kHz tracks in the queue at 44.1 kHz.")
+    # nor does the assistant, through its route: both slots hold demo-sinc-a, the setting it asks of
+    _picker(monkeypatch, fake)
+    told = hqp_router.assistant("filter_facts", name="demo-sinc-a")["text"].split("\n")
+    at = told.index("With demo-sinc-a in both filter slots, at this output rate and queue:")
+    assert told[at + 1].endswith("so HQPlayer may stop on the 96 kHz tracks in the queue at 44.1 kHz.")
+    assert sum("may stop" in line for line in told) == 1
+    since = b.rate_notice()["since"]
+    # a 32 kHz track appended: 44.1 kHz is no power-of-two multiple of it, a stop that will come
+    monkeypatch.setattr(hqp_load, "sources", lambda openers: Sources({88200: 1, 96000: 1, 32000: 1}, first=88200))
+    b.queue_changed("append")
+    assert _wait(lambda: said()[0] == "Some tracks in the queue cannot play at 44.1 kHz", 5.0), said()
+    assert b.rate_notice()["since"] != since and len(said()[1]) == 2
+
+
+def test_a_may_hqplayer_disproves_by_playing_is_said_no_more_at_that_setting(monkeypatch):
+    # sinc-short (not tried) in the Nx slot, closed-form in the 1x one, at 44.1 kHz on engine 6: a queue of 88.2,
+    # 96, 88.2 and 48 kHz tracks. While the take of the slot a "may" names starts — under a second past where its
+    # first status read it (a filter HQPlayer builds before it refuses shows one playing status) — the notice
+    # stands as it was, as on a tick whose slot is not the one judged; past it the take plays and the notice
+    # leaves its rate out. Heard — its own Status naming that source rate, the output rate checked and the filter
+    # the "may" names, with the DSP keeping up — the rate is said no more at that setting. A Seek sent after the
+    # take's first status was asked (a resume's own, one while HQPlayer builds) moves the position with nothing
+    # heard: the take starts anew at the status after it
+    import hqp_rate_check as rc
+    from datetime import datetime, timedelta, timezone
+    from hqp_atlas import plain
+    q = CanonicalQueue()
+    q.replace([_item(f"E:/Music/A/0{n}.flac", n) for n in range(1, 5)])
+    b = HqpBackend(emit=lambda *_: None, queue=q)
+    clock = (datetime(2026, 10, 22, tzinfo=timezone.utc) + timedelta(seconds=n) for n in itertools.count())
+    monkeypatch.setattr(hb, "datetime", types.SimpleNamespace(now=lambda tz: next(clock)))   # each onset its own
+    inp = rc.Inputs("pcm", 44100, "not checked", rc.Filter("sinc-short", "Any", True),
+                    rc.Filter("closed-form", "2^x", True), measured="6.2.4")
+
+    def tick(queue, slot, position, speed=None, src=None, out=44100, active="sinc-short", judged=None,
+             state=PlaybackState.PLAYING, sdm=False, serial=1):
+        judged = judged or slot                                 # the slot the check was judged for
+        ahead = queue[judged - 1:]
+        b._rate_check = rc.check(inp, rc.Sources({r: ahead.count(r) for r in ahead}, first=ahead[0]))
+        b._rate_gen, b._rate_slot = q.generation, judged
+        status = TrackStatus(state=state, track_index=slot, track_id="", position=position, length=300.0,
+                             volume=-3.0, process_speed=speed, src_rate=src or queue[slot - 1], src_sdm=sdm,
+                             active_rate=out, active_filter=active, track_serial=serial)
+        b._rate_served = b._rate_notice_now(status, (slot, q.item_at(slot), False), next(asked))  # as the poller does
+        n = b._rate_served
+        return n and (n["since"], plain(n["data"]["title"]), [plain(t) for t in n["data"]["text"]])
+
+    def reset():
+        b._rate_heard, b._rate_onset, b._rate_served = {}, None, None
+
+    asked = itertools.count(1000.0)                             # when each tick's Status was asked
+
+    queue = [88200, 96000, 88200, 48000]
+    will = "will stop on the 48 kHz tracks in the queue at 44.1 kHz."
+    may96 = ("HQPlayer describes sinc-short as Any up. Of the “up” filters tried on engine 6.2.4, HQPlayer stopped "
+             "with all but sinc-M under the source's rate; sinc-short was not tried there, so HQPlayer may stop on "
+             "the 96 kHz tracks in the queue at 44.1 kHz.")
+    assert tick(queue, 1, 0.0) is None                                  # starting: nothing served before
+    b._seek_mark = (120.0, b._rate_take[2] + 0.5, None)                 # a resume's Seek, after that status
+    assert tick(queue, 1, 120.0, speed=1.6) is None                     # moved, nothing heard: it starts anew
+    assert tick(queue, 1, 120.5, speed=1.6) is None and b.rate_heard(b._rate_check.key) == frozenset()
+    b._rate_take = b._seek_mark = None
+    assert tick(queue, 1, 0.0) is None
+    # past the second, not heard as HQPlayer reports it — the DSP behind, another source rate, output rate or
+    # filter, paused, a DSD source: the take plays all the same, and its rate is not said
+    for kw in ({"speed": 0.4}, {"src": 96000}, {"out": 88200}, {"active": "poly-sinc-ext2"},
+               {"state": PlaybackState.PAUSED}, {"sdm": True}):
+        since, title, said = tick(queue, 1, 5.0, **kw)
+        assert title == "Some tracks in the queue cannot play at 44.1 kHz" and said[1] == may96, kw
+        assert said[0].endswith(will) and len(said) == 2, kw
+        assert b.rate_heard(b._rate_check.key) == frozenset(), kw
+    assert tick(queue, 1, 5.0, speed=1.6) == (since, title, said)       # heard: the same words
+    assert b.rate_heard(b._rate_check.key) == {88200}
+    # the slot moved, the check not judged for it yet: nothing of the slot playing is taken as heard
+    assert tick(queue, 2, 5.0, judged=1) == (since, title, said)
+    assert b.rate_heard(b._rate_check.key) == {88200}
+    assert tick(queue, 2, 0.0, serial=2) == (since, title, said)        # the 96 kHz track starting: as it was
+    assert tick(queue, 2, 3.0, serial=2) == (since, title, [said[0]])   # heard: neither "may" is said
+    assert tick(queue, 3, 0.0, serial=3) == (since, title, [said[0]])   # 88.2 kHz again: heard already
+    assert tick(queue, 4, 0.0, serial=4) is None                        # the 48 kHz one: its verdict speaks
+    assert b.rate_heard(b._rate_check.key) == {88200, 96000}
+    assert b.rate_heard(rc.check(inp._replace(rate=48000), rc.Sources({88200: 1})).key) == frozenset()
+    # another engine: what was heard on this one is not taken for it
+    b._info = {"engine": "6.2.5"}
+    assert b.rate_heard(b._rate_check.key) == frozenset()
+    # "may not play" turned "cannot play" is a notice anew; back to "may" and to "cannot" again, it is not
+    reset()
+    assert tick([88200, 96000], 1, 0.0, serial=5) is None
+    may_since = tick([88200, 96000], 1, 5.0, serial=5)[0]
+    cannot_since = tick([88200, 96000, 48000], 1, 6.0, serial=5)[0]
+    assert cannot_since != may_since
+    assert tick([88200, 96000], 1, 7.0, serial=5)[0] == cannot_since
+    assert tick([88200, 96000, 48000], 1, 8.0, serial=5)[0] == cannot_since
+    # a take started at a spot (a resume after a rebuild) reads the spot at once: one playing status there, the
+    # DSP keeping up, proves nothing — a second past it does
+    reset()
+    assert tick([88200, 96000], 1, 120.0, speed=1.6, serial=6) is None
+    assert tick([88200, 96000], 1, 120.6, speed=1.6, serial=6) is None
+    assert b.rate_heard(b._rate_check.key) == frozenset()
+    assert tick([88200, 96000], 1, 121.2, speed=1.6, serial=6)[2] == [may96]
+    assert b.rate_heard(b._rate_check.key) == {88200}
+    # a position read earlier than the take's first starts the take anew (a seek back, a restart)
+    reset()
+    assert tick([88200, 96000], 1, 30.0, speed=0.4, serial=7) is None
+    played = tick([88200, 96000], 1, 31.5, speed=0.4, serial=7)         # the DSP behind: plays, not heard
+    assert played[2] == [may96] and b.rate_heard(b._rate_check.key) == frozenset()
+    assert tick([88200, 96000], 1, 0.2, speed=1.6, serial=7) == played   # back to the start: starting again
+    assert tick([88200, 96000], 1, 1.3, speed=1.6, serial=7) == played
+    assert b.rate_heard(b._rate_check.key) == {88200}
+    # a tick whose slot is not the one the check was judged for serves what was served: after a take that played
+    # unheard, within a take's first second (a skip), and for a row tapped after a check judged at rest
+    reset()
+    assert tick([88200, 96000], 1, 0.0, speed=0.4, serial=8) is None
+    played = tick([88200, 96000], 1, 2.0, speed=0.4, serial=8)
+    assert tick([88200, 96000], 2, 0.0, judged=1, serial=9) == played and played[2] == [may96]
+    reset()
+    assert tick([88200, 88200], 1, 0.0, serial=10) is None
+    assert tick([88200, 88200], 1, 0.8, serial=10) is None
+    assert tick([88200, 88200], 2, 0.0, judged=1, serial=11) is None
+    assert tick([88200, 48000], 1, 0.0, serial=15) is None
+    assert tick([88200, 48000], 2, 0.0, judged=1, serial=16) is None      # onto one that will stop: its verdict's
+    reset()
+    assert tick([44100, 96000, 96000], 2, 0.0, judged=1, serial=12) is None
+    # a queue of that rate alone: a slow tick past the second, or a pause there, says nothing, nor does a heard one
+    reset()
+    assert tick([88200, 88200], 1, 0.0, serial=13) is None
+    assert tick([88200, 88200], 1, 1.3, state=PlaybackState.PAUSED, serial=13) is None
+    assert tick([88200, 88200], 1, 2.5, speed=0.93, serial=13) is None
+    assert tick([88200, 88200], 1, 3.5, speed=1.6, serial=13) is None
+    assert b.rate_heard(b._rate_check.key) == {88200}
+    # a slot starting at another setting holds no notice served for the one before
+    b._rate_check = rc.check(inp._replace(rate=88200), rc.Sources({176400: 1, 48000: 1}, first=176400))
+    status = TrackStatus(state=PlaybackState.PLAYING, track_index=1, track_id="", position=0.0, length=300.0,
+                         volume=-3.0, src_rate=176400, src_sdm=False, active_rate=88200, active_filter="sinc-short",
+                         track_serial=14)
+    assert b._rate_check.started_may == "sinc-short" and b._rate_notice_now(status, (1, q.item_at(1), False), 0.0) is None
 
 
 def test_the_held_rate_check_asks_nothing_on_a_plays_path(fake, output, monkeypatch, tmp_path):
