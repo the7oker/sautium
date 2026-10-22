@@ -31,7 +31,9 @@ What a screen gets is wire-ready: a phrase is a list of parts, {"t": text} or
 `plain` prints the same phrase as text.
 
 `rate_name` names a rate HQPlayer reports as the HQPlayer screen does, for
-every text the node words about one; it reads no atlas.
+every text the node words about one; it reads no atlas. `near_full_scale`
+reads the published near-full-scale table for the peak meter's SDM arc and
+says no word: the meter's words are its sheet's own.
 """
 
 import hashlib
@@ -40,6 +42,7 @@ import logging
 import re
 import threading
 import time
+from decimal import Decimal
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, NamedTuple, Optional, Tuple
 
@@ -374,6 +377,9 @@ _FAMILY = ("44100", "48000")
 # digits int() reads: fs_in reaches int() only as one of _FAMILY's bases
 _INT = re.compile(r"-?[0-9]{1,10}")
 _VOLUME = re.compile(r"-?[0-9]+(?:\.[0-9]+)?")
+# A level near full scale, in dBFS, as the export writes one: near_full_scale
+# reads its value, so a number of another shape (an exponent) refuses the file
+_LEVEL = re.compile(r"-?[0-9]{1,4}(?:\.[0-9]{1,6})?")
 _GROUP_ID = re.compile(r"[a-z0-9-]+(?:\+[a-z0-9-]+)+")
 _PAIR_ID = re.compile(r"[a-z_]+:[a-z0-9-]+\|[a-z0-9-]+")
 _NAME = re.compile(r"[A-Za-z0-9]+(?:-[A-Za-z0-9]+)*(?:/[A-Za-z0-9]+(?:-[A-Za-z0-9]+)*)?(?: [0-9]+\+fs)?")
@@ -681,7 +687,9 @@ def _check_engine(body: Any, engine: str, at: str, releases: Dict[str, Any], reg
                 _obj(cell, f"{fat}.{rate}.{volume}")
                 for key, _ in TONE_PAIR:
                     if key in cell:
-                        _num(cell[key], f"{fat}.{rate}.{volume}.{key}", null=True)
+                        cat = f"{fat}.{rate}.{volume}.{key}"
+                        _num(cell[key], cat, null=True)
+                        _need(cell[key] is None or _LEVEL.fullmatch(cell[key]), "not a level of its shape", cat)
 
 
 def _check_common(e: Any, at: str, sources: Dict[str, Any]) -> None:
@@ -1642,6 +1650,42 @@ def _fullscale(atlas: Atlas, found: Found) -> Optional[Dict[str, Any]]:
     columns = [VOLUME.format(volume=_minus(volume)) for volume in volumes]
     return _section(FULLSCALE, [_line([FULLSCALE_LEAD]), _table(columns, rows, corner=RATE),
                                 _note([FULLSCALE_NOTE])])
+
+
+# The two volumes the peak meter's SDM arc reads off the near-full-scale table:
+# HQPlayer's 0 dB, and the −3 dB the manual asks for the modulator (§2.15)
+FULL_VOLUME, ROOM_VOLUME = "0", "-3"
+
+
+def near_full_scale(atlas: Optional[Atlas], user_engine: Optional[str], modulator: str,
+                    rate: int) -> Optional[str]:
+    """What the published near-full-scale table says of `modulator` at the
+    output `rate` (Hz), on the engine this HQPlayer is shown its modulators
+    from (engine_for, of a dated SDM release alone), for the peak meter's
+    arc: "advised" — not stable to full scale at HQPlayer's volume 0 dB and
+    stable at −3 dB; "holds" — stable to full scale at 0 dB; None where the
+    table says neither: no file, no such engine, a name or a rate it has no
+    cell for, a volume not tested. A cell holds at its volume when every
+    reading it has is that volume: the file's 0 dBFS reached the modulator
+    stable (a cell is the file's level plus HQPlayer's volume); a reading
+    lower, or none ("none of the tested levels"), does not. A volume is read
+    by its value, as a reading is: "-3" and "-3.0" are one."""
+    if atlas is None or not modulator or not rate:
+        return None
+    engine = atlas.engine_for(user_engine, "modulator", published=True)
+    found = atlas.lookup("modulator", modulator, engine, "sdm", published=True) if engine else None
+    cells = (atlas.fullscale(found) or {}).get(str(rate), {}) if found is not None and found.entry else {}
+
+    def holds(volume: str) -> Optional[bool]:
+        cell = next((c for v, c in cells.items() if Decimal(v) == Decimal(volume)), None)
+        readings = [cell[key] for key, _ in TONE_PAIR if key in cell] if cell is not None else []
+        if not readings:
+            return None
+        return all(x is not None and Decimal(x) == Decimal(volume) for x in readings)
+
+    if holds(FULL_VOLUME):
+        return "holds"
+    return "advised" if holds(FULL_VOLUME) is False and holds(ROOM_VOLUME) else None
 
 
 def _side(key: str, x: Any, used: set) -> List[Any]:

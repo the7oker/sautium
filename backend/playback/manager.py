@@ -713,6 +713,10 @@ class PlaybackManager:
         # the selected one may be [source]; the peak meter marks SDM's room.
         if s.extra.get("active_mode"):
             new_data["active_mode"] = s.extra["active_mode"]
+        # What the published atlas says of the modulator and rate playing near
+        # full scale, for that mark (hqp_atlas.near_full_scale)
+        if s.extra.get("sdm_room"):
+            new_data["sdm_room"] = s.extra["sdm_room"]
         # HQPlayer 6's further readings (the Apod counter, the output's bits
         # and channels, its delay…): additive, each while HQPlayer gives it.
         new_data.update({k: s.extra[k] for k in STATUS_READINGS if s.extra.get(k) is not None})

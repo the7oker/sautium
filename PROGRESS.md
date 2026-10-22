@@ -2723,6 +2723,19 @@ Lesson: a meter's numbers are only as good as the point they are read at —
 measure where a stream's levels sit against something known (here, the
 file) before building on what they seem to say.
 
+**The SDM arc follows the published table (2026-10-22).** The amber arc
+marked −3…0 dBTP in every SDM play, the manual's general advice (§2.15).
+The atlas measures each modulator near full scale per rate at HQPlayer's
+volume 0 dB, and some at −3 dB too, so where its published table speaks
+for the modulator and the rate playing the arc follows it: it stays, with
+"−3 dB or lower recommended", where the modulator was not stable to full
+scale at 0 dB and was at −3 dB, and goes where it was stable at 0 dB;
+anywhere else it is the manual's, as before. The advice keeps the manual's
+soft word and never gives a reason. Only the shipped file's dated SDM
+release speaks — the node's own copy publishes nothing — read for an
+HQPlayer of the major it was measured on, so another major's HQPlayer keeps
+the manual's arc.
+
 ### HQPlayer settings are described, not ranked (2026-10-09)
 
 `docs/HQPLAYER_KNOWLEDGE_BASE.md` had grown advice no source gave: quality

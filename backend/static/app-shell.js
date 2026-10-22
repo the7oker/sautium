@@ -9988,11 +9988,11 @@
     return (v > 0 ? '+' : v < 0 ? '−' : '') + Math.abs(v).toFixed(1);
   }
 
-  function pmFace(label, sdm) {
+  function pmFace(label, arc) {
     let s = `<svg class="pm-face" viewBox="0 0 320 150" role="img" aria-label="${label === 'L' ? 'Left' : label === 'R' ? 'Right' : 'Mono'} channel">`
       + '<rect x="0.5" y="0.5" width="319" height="149" rx="8" class="pm-win"/>'
       + `<path d="${pmArc(-20, 0, PM.R)}" class="pm-base"/>`
-      + (sdm ? `<path d="${pmArc(-3, 0, PM.R + 2.5)}" class="pm-sdm"/>` : '')
+      + (arc ? `<path d="${pmArc(-3, 0, PM.R + 2.5)}" class="pm-sdm"/>` : '')
       + `<path d="${pmArc(0, 3, PM.R + 2.5)}" class="pm-red"/>`;
     for (const db of PM_MAJORS) s += pmTick(db, PM.R, PM.R + 8, 'pm-tick' + (db > 0 ? ' is-over' : ''));
     for (const db of PM_MINORS) s += pmTick(db, PM.R, PM.R + 4, 'pm-tick is-minor' + (db > 0 ? ' is-over' : ''));
@@ -10088,6 +10088,15 @@
     let chans = [];
     let faces = [];
     let sdm = false;
+    // What the published atlas's near-full-scale table says of the
+    // modulator and rate playing (status.sdm_room, hqp_atlas.near_full_scale):
+    // 'advised' keeps the arc with the table's advice, 'holds' takes it away,
+    // nothing leaves it the manual's (§2.15). An SDM tick that does not name
+    // the modulator and the rate carries none and keeps the last word; a PCM
+    // one ends it.
+    let room = null;
+    const arcShown = () => sdm && !(room && room.room === 'holds');
+    const roomOf = st => ('sdm_room' in st ? (st.sdm_room.room ? st.sdm_room : null) : room);
     let meter = { state: 'connecting' };
     let status = window.currentStatus || {};
     let volume = Number.isFinite(status.volume) ? status.volume : undefined;
@@ -10104,7 +10113,7 @@
 
     function drawFaces() {
       const labels = chans.length === 1 ? ['M'] : ['L', 'R'];
-      $('[data-pm-faces]').innerHTML = labels.map(l => pmFace(l, sdm)).join('');
+      $('[data-pm-faces]').innerHTML = labels.map(l => pmFace(l, arcShown())).join('');
       faces = Array.from(sheet.querySelectorAll('.pm-face'));
       paint();
     }
@@ -10150,8 +10159,10 @@
         advice = st.volume_fixed
           ? `Over by <span class="mono">${worst.toFixed(1)} dB</span>. HQPlayer holds its volume fixed; the −6 dB state of its fixed volume (HQPlayer's settings) leaves 3 dB more.`
           : `Over by <span class="mono">${worst.toFixed(1)} dB</span>. Lower the volume by <span class="mono">${Math.ceil(worst)} dB</span>.`;
-      } else if (sdm && worst > -3) {
-        advice = 'SDM output: HQPlayer advises keeping <span class="mono is-sdm">3 dB</span> below full scale for the modulator.';
+      } else if (arcShown() && worst > -3) {
+        advice = room && room.room === 'advised'
+          ? `SDM output: <span class="mono is-sdm">−3 dB</span> or lower recommended for ${escapeHtml(room.modulator)} at ${escapeHtml(room.rate)}.`
+          : 'SDM output: HQPlayer advises keeping <span class="mono is-sdm">3 dB</span> below full scale for the modulator.';
       }
       const adviceEl = $('[data-pm-advice]');
       if (adviceEl.innerHTML !== advice) adviceEl.innerHTML = advice;
@@ -10237,9 +10248,13 @@
       if (hqpTick(status)) {
         if (Number.isFinite(status.volume)) volume = status.volume;
         const nowSdm = /SDM|DSD/i.test(status.active_mode);
-        if (nowSdm !== sdm) {
+        const nowRoom = nowSdm ? roomOf(status) : null;
+        if (nowSdm !== sdm || JSON.stringify(nowRoom) !== JSON.stringify(room)) {
+          const shown = arcShown();
           sdm = nowSdm;
-          drawFaces();                                  // the arc; the holds stay
+          room = nowRoom;
+          if (arcShown() !== shown) drawFaces();        // the arc; the holds stay
+          else paint();                                 // the advice's words
         }
       }
       if (status.state !== 'playing' && status.state !== 'paused') {
@@ -10287,6 +10302,7 @@
     window.addEventListener('sautium:route', close);
 
     sdm = /SDM|DSD/i.test(status.active_mode || '');
+    room = roomOf(status);
     setChannels(2);
     onStatus({ detail: status });
     window.meterWanted(true);

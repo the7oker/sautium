@@ -2323,6 +2323,18 @@ class HqpBackend(PlayerBackend):
         if item is None or not _http_served(item):
             extra.update(artist=status.artist, album=status.album,
                          song=status.song)
+        # The peak meter's SDM arc: what the published near-full-scale table
+        # says of the modulator and the rate playing (None: nothing, the arc
+        # the manual's), the modulator as HQPlayer names it and the rate as
+        # the screen does. An SDM tick that does not name both says nothing
+        # and the sheet keeps its last word; leaving SDM ends it
+        if (hqp_rate_check.mode_kind(status.active_mode) == "sdm" and status.active_shaper
+                and status.active_rate):
+            extra["sdm_room"] = {
+                "room": hqp_atlas.near_full_scale(hqp_atlas.read(hqp_atlas.SHIPPED, None),
+                                                  self._info.get("engine"), status.active_shaper,
+                                                  status.active_rate),
+                "modulator": status.active_shaper, "rate": hqp_atlas.rate_name(status.active_rate)}
         diagnosis = self._diagnosis(status)
         if diagnosis is not None:
             extra["diagnosis"] = diagnosis

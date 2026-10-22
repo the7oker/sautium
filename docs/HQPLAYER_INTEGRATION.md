@@ -143,8 +143,12 @@ no internet access ("not authenticated and no internet access").
     length, `active_mode` / `active_filter` / `active_shaper` / `active_rate` -
     what the engine runs right now, by name (read since 2026-10-02 for the
     playback trace; `active_mode` rides the player status since 2026-10-07,
-    for the peak meter's SDM arc; `<Status>` carries more still: `track_serial`,
-    `transport_serial`, `queued`)
+    for the peak meter's SDM arc, and since 2026-10-22, in SDM mode, what the
+    published atlas says of `active_shaper` at `active_rate` near full scale
+    as `sdm_room` — `{room, modulator, rate}`, `room` "advised", "holds" or
+    null, none while HQPlayer names no modulator or rate (§ "The peak
+    meter"); `<Status>` carries more still:
+    `track_serial`, `transport_serial`, `queued`)
   - HQPlayer 6's further readings (since 2026-10-11, `STATUS_READINGS`):
     `apod` (the Apod counter of the track playing), `active_bits` and
     `active_channels` (the OUTPUT), `output_delay` (in seconds — HQPlayer
@@ -845,7 +849,20 @@ highest peak since the sheet opened (Reset, or a change of the gain each
 reading carries — a volume step, another track's adaptive gain — clears it);
 Limited is `limited`, counted from the last volume step. In SDM mode an amber
 arc marks −3…0 dBTP: the manual asks for 3 dB of room for the modulator
-(§2.15). The design reference is `docs/design/reference/hqp-meter/`.
+(§2.15). Since 2026-10-22 the arc follows the atlas's near-full-scale table
+where the published atlas — the shipped file, its SDM release dated, on the
+engine it shows this HQPlayer's modulators from — holds cells for the
+modulator and the rate playing (`hqp_atlas.near_full_scale`, the status's
+`sdm_room`): the arc stays, with "−3 dB or lower recommended for
+<modulator> at <rate>" once Max enters it, where the table has the modulator
+not stable to full scale at HQPlayer's volume 0 dB and stable at −3 dB, and
+goes where it is stable to full scale at 0 dB. A cell is stable to full
+scale at its volume when every reading it holds is that volume (a reading is
+the file's level plus HQPlayer's volume). Anywhere else — that volume not
+tested, another major's engine, no shipped file — the arc marks the
+manual's advice, as before; an SDM tick that names no modulator or rate
+keeps the last word, and a PCM tick ends it. The design reference is
+`docs/design/reference/hqp-meter/`.
 
 The socket to 4322 exists only while some page shows the sheet, or a play
 attempt's start window wants it (§ "Diagnostics": the start on the meter

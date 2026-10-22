@@ -947,6 +947,61 @@ def test_hqplayers_limiter_count_reaches_the_status(fake, listens):
         b.shutdown()
 
 
+def test_the_published_near_full_scale_table_reaches_the_status_for_the_meters_arc(fake, listens, monkeypatch,
+                                                                                  tmp_path):
+    # DMX7EC-a at DSD128 in the synthetic atlas: not stable to full scale at HQPlayer's volume 0 dB, stable at
+    # −3 dB. The node's own copy says so with its SDM release dated, and publishes nothing; nor does a file at
+    # the shipped path before its release
+    import hqp_atlas
+    doc = json.loads(_ATLAS.read_text(encoding="utf-8"))
+    cells = {"0": {"tone_dbfs": -0.5}, "-3": {"tone_dbfs": -3}}
+    doc["engines"]["9.4.1"]["fullscale"]["dmx7ec-a"] = {"5644800": cells}
+    dated = {**doc, "releases": {**doc["releases"], "9.4.1/sdm": "2001-05-06"}}
+    (tmp_path / "overlay.json").write_text(json.dumps(dated), encoding="utf-8")
+    monkeypatch.setattr(settings, "hqp_atlas_overlay", str(tmp_path / "overlay.json"))
+    assert hqp_atlas.near_full_scale(hqp_atlas.read(tmp_path / "overlay.json", None), "9.4.1", "DMX7EC-a",
+                                     5644800) == "advised"
+    shipped = tmp_path / "shipped.json"
+    monkeypatch.setattr(hqp_atlas, "SHIPPED", shipped)
+    fake.replies["GetInfo"] = ('<GetInfo name="fake" product="Signalyst HQPlayer Fake" version="9" '
+                               'platform="Linux" engine="9.4.1"/>')
+    fake.active.update(mode="SDM (DSD)", shaper="DMX7EC-a", rate=5644800)
+    mgr = PlaybackManager()
+    mgr.queue.replace([_item("E:/Music/A/01.flac", 1)])
+    b = _attach(mgr)
+    nothing = {"room": None, "modulator": "DMX7EC-a", "rate": "DSD128"}
+
+    def said_after_a_while():
+        n = len(fake.commands)
+        assert _wait(lambda: _statuses_after(fake, n))
+        return mgr._latest_status.get("sdm_room")
+
+    try:
+        with fake._lock:
+            fake.state, fake.track = int(PlaybackState.PLAYING), 1
+        assert _wait(lambda: b.info.get("engine") == "9.4.1" and mgr._latest_status.get("state") == "playing")
+        assert said_after_a_while() == nothing
+        shipped.write_text(json.dumps(doc), encoding="utf-8")
+        assert said_after_a_while() == nothing
+        shipped.write_text(json.dumps(dated), encoding="utf-8")
+        assert _wait(lambda: mgr._latest_status.get("sdm_room") == {**nothing, "room": "advised"})
+        cells["0"] = {"tone_dbfs": 0}           # stable to full scale at 0 dB: the arc goes (one dict, both docs)
+        shipped.write_text(json.dumps(dated), encoding="utf-8")
+        assert _wait(lambda: (mgr._latest_status.get("sdm_room") or {}).get("room") == "holds")
+        with fake._lock:                        # a rate the table has no cell for: the manual's arc
+            fake.active.update(rate=12288000)
+        assert _wait(lambda: mgr._latest_status.get("sdm_room") == {**nothing, "rate": "DSD256 (48k)"})
+        with fake._lock:                        # no rate named: no word, the sheet keeps its last
+            fake.active.update(rate=0)
+        assert _wait(lambda: "sdm_room" not in mgr._latest_status)
+        with fake._lock:                        # PCM: no modulator, nothing said
+            fake.active.update(mode="PCM", shaper="DEMO-TPDF", rate=705600)
+        assert said_after_a_while() is None
+        assert mgr._latest_status["active_mode"] == "PCM"
+    finally:
+        b.shutdown()
+
+
 def test_the_meter_lives_at_the_control_port_plus_one_while_attached(fake):
     from playback.hqp_meter import meter
     mgr = PlaybackManager()

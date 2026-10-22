@@ -1200,6 +1200,71 @@ def test_where_the_atlas_was_read_from_travels_with_every_result(tmp_path, atlas
     assert hqp_atlas.read(shipped, None).lookup("modulator", "DMX5", "9.4.1", "sdm").origin == "shipped"
 
 
+# -- The peak meter's SDM arc ------------------------------------------------------
+
+
+def _cells(tmp_path, cells, release="2001-05-06"):
+    """The fixture at the shipped path, DMX7EC-a's near-full-scale cells at
+    DSD128 as given (its only rate with cells), its SDM release dated
+    `release`."""
+    doc = _doc()
+    doc["releases"]["9.4.1/sdm"] = release
+    doc["engines"]["9.4.1"]["fullscale"]["dmx7ec-a"] = {"5644800": cells}
+    return hqp_atlas.read(_write(tmp_path / "shipped.json", doc), None)
+
+
+def test_the_meters_arc_reads_the_published_table_for_the_modulator_and_rate_playing(tmp_path):
+    def said(cells, **kw):
+        return hqp_atlas.near_full_scale(_cells(tmp_path, cells, **kw), "9.4.1", "DMX7EC-a", 5644800)
+
+    # not stable to full scale at HQPlayer's volume 0 dB, stable at −3 dB: the manual's −3 dB stands for it
+    assert said({"0": {"tone_dbfs": -0.5}, "-3": {"tone_dbfs": -3}}) == "advised"
+    assert said({"0": {"tone_dbfs": -0.2}, "-3": {"tone_dbfs": -3.0, "pair_dbfs": -3}}) == "advised"
+    assert said({"0": {"tone_dbfs": None}, "-3": {"pair_dbfs": -3}}) == "advised"     # none of the tested levels
+    # every reading of a cell counts: a two-tone below full scale is no hold
+    assert said({"0": {"tone_dbfs": 0, "pair_dbfs": -0.5}, "-3": {"tone_dbfs": -3}}) == "advised"
+    # stable to full scale at 0 dB, whatever −3 dB says; a number's text is read as its value
+    assert said({"0": {"tone_dbfs": 0}}) == "holds"
+    assert said({"0": {"tone_dbfs": 0.0, "pair_dbfs": 0}, "-3": {"tone_dbfs": -3.5}}) == "holds"
+    # neither: −3 dB not tested or not stable there either, 0 dB not tested, a cell without a reading
+    for cells in ({"0": {"tone_dbfs": -0.5}}, {"0": {"tone_dbfs": -0.5}, "-3": {"tone_dbfs": -3.5}},
+                  {"0": {"tone_dbfs": -0.5}, "-3": {"tone_dbfs": -3, "pair_dbfs": None}},
+                  {"-3": {"tone_dbfs": -3}}, {"0": {}, "-3": {"tone_dbfs": -3}}, {"-6": {"tone_dbfs": -6}}):
+        assert said(cells) is None, cells
+    # a volume read by its value, as a reading is
+    assert said({"0.0": {"tone_dbfs": -0.5}, "-3.0": {"tone_dbfs": -3}}) == "advised"
+    assert said({"-0": {"tone_dbfs": 0}}) == "holds"
+    # a release without a date publishes nothing, wherever the file stands
+    assert said({"0": {"tone_dbfs": 0}}, release=None) is None
+
+
+def test_a_level_near_full_scale_of_another_shape_is_refused_whole(tmp_path, caplog):
+    # near_full_scale reads a level by its value: one written otherwise than the export writes it — with an
+    # exponent, or past any value it reads — refuses the file whole, and never a status tick that reads it
+    caplog.set_level(logging.INFO, logger="hqp_atlas")
+    text = FIXTURE.read_text(encoding="utf-8")
+    for token in ("-5e-1", "1e9999999999999999999"):
+        (tmp_path / "overlay.json").write_text(text.replace('"tone_dbfs": -0.5', f'"tone_dbfs": {token}', 1),
+                                               encoding="utf-8")
+        assert hqp_atlas.read(tmp_path / "shipped.json", tmp_path / "overlay.json") is None, token
+    assert caplog.text.count("not a level of its shape") == 2
+
+
+def test_the_meters_arc_reads_the_engine_the_modulators_are_shown_from(tmp_path):
+    atlas = _cells(tmp_path, {"0": {"tone_dbfs": 0}})
+    assert hqp_atlas.near_full_scale(atlas, "9.4.1", "DMX7EC-a", 5644800) == "holds"
+    # an HQPlayer of the major reads it as the screen's modulator card does; another major, or none, nothing
+    assert hqp_atlas.near_full_scale(atlas, "9.6.2", "DMX7EC-a", 5644800) == "holds"
+    for engine in ("10.0.0", "8.0.0", None, ""):
+        assert hqp_atlas.near_full_scale(atlas, engine, "DMX7EC-a", 5644800) is None, engine
+    # a rate with no cell, a modulator with none, a name the atlas does not measure, nothing playing, no file
+    assert hqp_atlas.near_full_scale(atlas, "9.4.1", "DMX7EC-a", 12288000) is None
+    assert hqp_atlas.near_full_scale(atlas, "9.4.1", "DMX5", 5644800) is None
+    assert hqp_atlas.near_full_scale(atlas, "9.4.1", "DMX-new", 5644800) is None
+    assert hqp_atlas.near_full_scale(atlas, "9.4.1", "", 0) is None
+    assert hqp_atlas.near_full_scale(None, "9.4.1", "DMX7EC-a", 5644800) is None
+
+
 # -- The words -------------------------------------------------------------------
 
 
