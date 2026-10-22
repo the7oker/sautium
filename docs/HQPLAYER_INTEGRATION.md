@@ -246,6 +246,23 @@ next read; no restart. Since 2026-10-21 that holds for a rewrite of the same
 size within one grain of the filesystem's clock too: a file whose time is less
 than two seconds before its last read, or after it, is compared by its bytes.
 
+The shipped file comes from the atlas's published set alone, by
+`scripts/sync-atlas.sh` (since 2026-10-22): sautium-private's
+`atlas/v1/public/app/hqp-atlas.json` (`SAUTIUM_PRIVATE_DIR`, by default the
+repository's sibling) becomes `backend/hqp_atlas.json`, and
+`backend/hqp_atlas.version.json` beside it names the set — the dataset, its
+schema, the manifest's sha256 and the copied file's, the commit the manifest
+names its code by, its dated releases. Every file of `public/` must be the one
+its `manifest.json` lists, by size and sha256; a file or a link it does not
+list or a listed one missing or different, a set without the app subset (no
+release dated), a subset this module would refuse, or one whose releases are
+not each dated as the manifest dates them (an entry without a published date
+among them) refuses the sync, and nothing is written; the bytes checked are
+the bytes copied, and each file is replaced whole, the data first (a version
+file is the data's when its `app_sha256` is). It publishes nothing: both files
+stay out of git (`.gitignore`) and out of an image (`backend/.dockerignore`)
+until the release that ships them.
+
 The HQPlayer screen's own read, `GET /api/hqplayer/state?dsp=1`, joins it by
 name in HQPlayer's order: each row of the filter and shaper lists gains
 `facts` (its chips, the rating tag, a caption, a twin's line, an identical

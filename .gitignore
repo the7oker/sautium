@@ -136,7 +136,11 @@ data/export/
 data/seed/
 backend/seed/*.json.gz
 # The node's own copy of the HQPlayer atlas (backend/hqp_atlas.py) stays on
-# the node. The shipped file enters the tree with its release, never before:
-# a copy put where it goes stays out until then.
+# the node. The shipped file, and the version scripts/sync-atlas.sh writes
+# beside it, enter the tree with their release, never before: a copy put
+# where they go stays out until then.
 data/atlas/
 backend/hqp_atlas.json
+backend/hqp_atlas.version.json
+# its staging files, left behind only when the sync is killed
+backend/.hqp_atlas*
