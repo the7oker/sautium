@@ -6244,6 +6244,138 @@ def _tail(mgr, b, fake):
     fake.commands.clear()
 
 
+def test_a_removal_of_the_slot_hqplayer_plays_lets_it_play_out(fake, output, listens, monkeypatch):
+    """HQPlayer plays the queue's first slot, and the person removes that
+    slot — the sheet a moment behind HQPlayer, or the assistant. Nothing
+    goes to HQPlayer: the track plays out, the queue already without it, and
+    the node knows the entry for its own — the canary, reading at every tick,
+    calls nothing an external edit, the listen goes on, Now Playing says no
+    other controller plays. Once HQPlayer moves on, the queue's next track
+    plays, and its playlist is a tail mirror."""
+    monkeypatch.setattr(hb, "DRIFT_CHECK_EVERY", 1)
+    mgr, b = output
+    writes, _ = listens
+    fake.commands.clear()
+    assert mgr.remove(1, "track-1")
+    assert [it.track_id for it in mgr.queue.snapshot()] == ["track-2", "track-3"]
+    assert "PlaylistRemove" not in [c for c, _ in fake.commands], fake.commands
+    assert b._mirror == "tail" and fake.state == int(PlaybackState.PLAYING) and fake.track == 1
+    n = len(fake.commands)
+    assert _wait(lambda: _statuses_after(fake, n, 3), timeout=8)
+    st = mgr._latest_status
+    assert b._mirror == "tail" and st.get("state") == "playing" and not st.get("source"), (b._mirror, st)
+    assert tracker._play_session is not None and tracker._play_session.track_id == "track-1"
+    assert not [p for sql, p in writes if "INSERT INTO listening_history" in sql]
+    fake.end_now()                          # it played out: HQPlayer's own Next
+    assert _wait(lambda: mgr._latest_status.get("track_id") == "track-2", timeout=8), mgr._latest_status
+    n = len(fake.commands)
+    assert _wait(lambda: _statuses_after(fake, n, 3), timeout=8)
+    assert b._mirror == "tail" and b._passing is None
+    assert "PlaylistRemove" not in [c for c, _ in fake.commands]
+
+
+def test_a_removal_of_the_slot_hqplayer_pauses_on_sends_nothing(fake, output, monkeypatch):
+    monkeypatch.setattr(hb, "DRIFT_CHECK_EVERY", 1)
+    mgr, b = output
+    assert b.pause()
+    assert _wait(lambda: mgr._latest_status.get("state") == "paused", timeout=5)
+    fake.commands.clear()
+    assert mgr.remove(1, "track-1")
+    assert "PlaylistRemove" not in [c for c, _ in fake.commands] and b._mirror == "tail"
+    n = len(fake.commands)
+    assert _wait(lambda: _statuses_after(fake, n, 3), timeout=8)
+    st = mgr._latest_status
+    assert b._mirror == "tail" and st.get("state") == "paused" and not st.get("source"), (b._mirror, st)
+
+
+def test_a_removal_of_a_slot_hqplayer_does_not_read_goes_to_it(fake, output):
+    mgr, b = output
+    fake.commands.clear()
+    assert mgr.remove(2, "track-2")
+    assert "PlaylistRemove" in [c for c, _ in fake.commands] and b._mirror == "step"
+    assert fake.playlist == ["file:///E:/Music/A/01.flac", "file:///E:/Music/A/03.flac"]
+
+
+def test_a_removal_that_reads_no_entry_it_may_go_by_removes_nothing(fake, output, monkeypatch):
+    """The removal's own Status says a state the SDK does not name: no
+    entry an edit may go by. Nothing is removed from HQPlayer — what it
+    plays may be that very slot — the slot leaves the queue alone, and the
+    mirror is lost, for HQPlayer to get the queue back."""
+    mgr, b = output
+    real, caller = HQPlayerClient.get_status, threading.current_thread()
+
+    def unnamed(self, **kw):
+        st = real(self, **kw)
+        if st is None or threading.current_thread() is not caller:
+            return st
+        return types.SimpleNamespace(**{**vars(st), "state": PlaybackState(5)})
+    monkeypatch.setattr(HQPlayerClient, "get_status", unnamed)
+    fake.commands.clear()
+    assert mgr.remove(2, "track-2")
+    assert "PlaylistRemove" not in [c for c, _ in fake.commands]
+    assert [it.track_id for it in mgr.queue.snapshot()] == ["track-1", "track-3"]
+    assert b._mirror == "lost" or b._lost_by == "silence", b._mirror
+
+
+def test_a_removal_of_the_slot_a_tail_mirror_reads_is_no_external_edit(fake, output, listens, monkeypatch):
+    """On a tail mirror HQPlayer plays the queue's second slot, and the
+    person removes it: the queue's alone, as before — and the canary no
+    longer calls the node's own removal an external edit. Behind the entry
+    playing out lies what came after it; once HQPlayer moves on, the tail
+    holds."""
+    monkeypatch.setattr(hb, "DRIFT_CHECK_EVERY", 1)
+    mgr, b = output
+    _tail(mgr, b, fake)
+    assert mgr.remove(2, "track-2")
+    assert "PlaylistRemove" not in [c for c, _ in fake.commands]
+    n = len(fake.commands)
+    assert _wait(lambda: _statuses_after(fake, n, 3), timeout=8)
+    assert b._mirror == "tail" and not mgr._latest_status.get("source"), (b._mirror, mgr._latest_status)
+    with fake._lock:                        # HQPlayer's own advance: entry 4, the queue's second slot now
+        fake.track, fake.position = 4, 0.0
+    assert _wait(lambda: mgr._latest_status.get("track_id") == "track-3", timeout=5), mgr._latest_status
+    n = len(fake.commands)
+    assert _wait(lambda: _statuses_after(fake, n, 3), timeout=8)
+    assert b._mirror == "tail" and b._passing is None
+
+
+def test_an_empty_queue_taken_afresh_clears_hqplayers_playlist(fake, output):
+    """The clear rides on the first add: with none, the queue emptied and
+    HQPlayer stopped on what it still held — a removal that played out —
+    the reconverge takes it afresh as a PlaylistClear of its own, never
+    calling HQPlayer's old playlist the queue's. A replace with nothing is
+    none: the manager commits no empty queue, and HQPlayer is handed
+    nothing."""
+    mgr, b = output
+    fake.commands.clear()
+    assert mgr.replace_queue([], play=False, archive=lambda: None)[0] == 0
+    assert not [c for c, _ in fake.commands if c not in _QUESTIONS], fake.commands
+    assert len(mgr.queue) == 3 and len(fake.playlist) == 3
+    with mgr._mutate_lock:
+        mgr.queue.replace([])
+    with fake._lock:
+        fake.playlist = ["file:///E:/Music/A/01.flac"]
+        fake.state, fake.track = int(PlaybackState.STOPPED), 1
+    b.lose_mirror("HQPlayer did not answer a removal (test)")
+    assert _wait(lambda: fake.playlist == [] and b._mirror == "step", timeout=8), (fake.playlist, b._mirror)
+
+
+def test_a_play_on_an_empty_queue_plays_nothing_hqplayer_still_holds(fake, output):
+    """The queue is empty while HQPlayer's playlist is no mirror and still
+    holds an entry — a removal that played out: Play starts none of it, and
+    says why."""
+    mgr, b = output
+    with mgr._mutate_lock:
+        mgr.queue.replace([])
+    with fake._lock:
+        fake.state, fake.track = int(PlaybackState.STOPPED), 1
+    b._move_mirror("tail")
+    assert _wait(lambda: b._last_tick is not None and b._last_tick.state == "stopped", timeout=5)
+    fake.commands.clear()
+    assert not b.play() and b.refusal() == "the queue is empty"
+    assert "Play" not in [c for c, _ in fake.commands] and fake.state == int(PlaybackState.STOPPED)
+
+
 def test_a_tail_mirror_follows_two_natural_advances(fake, output, listens):
     """I14: in a tail mirror HQPlayer's own advances play the queue's next
     tracks — the slot is read off the entry, never HQPlayer's index — and

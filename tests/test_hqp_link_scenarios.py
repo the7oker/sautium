@@ -247,6 +247,7 @@ class World:
         # (queue generation, a batch the queue took whole): a replace, a play next
         self.batches: list = []
         self.removed: set = set()       # id() of the items people removed
+        self.removed_uris: set = set()  # and the URIs HQPlayer was handed them as
         self.refused: set = set()       # the paths an HQPlayer was made to refuse for good
         self.mgr: Optional[PlaybackManager] = None
         self.settings_router = None
@@ -707,8 +708,10 @@ class World:
         mgr = self.mgr
         k = self.rng.randint(1, max(len(mgr.queue), 1))
         item = mgr.queue.item_at(k)
+        uri = mgr.active._uri_of(item)[0] if item is not None and isinstance(mgr.active, HqpBackend) else None
         if item is not None and mgr.remove(k, item.track_id):
             self.removed.add(id(item))
+            self.removed_uris.add(uri)
 
     def dsp(self) -> None:
         hb.change_dsp(self.rng.choice([{"filter": 57, "filter1x": 57}, {"shaper": 2},
@@ -971,7 +974,8 @@ class World:
             want = [b._uri_of(it)[0] for it in b._layout(snapshot).handed]
             if playlist == want:
                 return
-            holds = _tail_holds(playlist, want, track, state)
+            holds = (_tail_holds(playlist, want, track, state)
+                     or _plays_out(playlist, want, track, state, self.removed_uris))
             if b._mirror == "tail" and not pressed and tail and not holds:
                 self.violate(f"I14: at rest after the tail step HQPlayer holds {playlist} and "
                              f"reads entry {track}, the queue {want}")
@@ -1348,14 +1352,18 @@ class World:
 
     def _radio_order(self, log: list) -> None:
         """I12, the radio's half: history rotates before HQPlayer's playlist
-        is cleared — no PlaylistClear the rotation did not come before."""
+        is cleared — no PlaylistClear of a radio step's the rotation did not
+        come before. An empty queue taken afresh clears it too, on its own
+        step's thread or a reconverge's: no radio's."""
         archived: set = set()
+        radio: set = set()
         for e in log:
             if e.kind == "step":
                 archived.discard(e.tid)         # a radio's mark is its own step's
+                (radio.add if e.data.get("name") == "radio" else radio.discard)(e.tid)
             elif e.kind == "archive":
                 archived.add(e.tid)
-            elif e.kind == "send" and e.data["command"] == "PlaylistClear":
+            elif e.kind == "send" and e.data["command"] == "PlaylistClear" and e.tid in radio:
                 # The rotation and the clear are one step's, on its thread
                 if e.tid not in archived:
                     self._once(e, "I12: a radio's PlaylistClear went before history rotated")
@@ -1364,6 +1372,18 @@ class World:
     def _once(self, e: _Event, what: str) -> None:
         if e.seq >= self.checked:
             self.violate(f"{what} (event {e.seq})")
+
+
+def _plays_out(playlist: list, want: list, track: int, state: int, removed: set) -> bool:
+    """A removal of the entry HQPlayer reads plays out (the node sends none):
+    HQPlayer plays or pauses an entry a person removed, and what lies behind
+    it is the queue's own last slots."""
+    if state not in (int(PlaybackState.PLAYING), int(PlaybackState.PAUSED)):
+        return False
+    if not 1 <= track <= len(playlist) or playlist[track - 1] not in removed:
+        return False
+    rest = playlist[track:]
+    return want[len(want) - len(rest):] == rest if rest else True
 
 
 def _tail_holds(playlist: list, want: list, track: int, state: int) -> bool:
@@ -1545,6 +1565,33 @@ def test_two_radios_on_threads_of_one_name_keep_their_own_marks(fake, fake_b, li
         first.join(5)
         second.join(5)
         fake.service.pop("Status", None)
+        world.check()
+        assert not world.violations, world.violations
+
+
+def test_the_radio_order_judges_the_radios_own_clear(fake, fake_b, listens, monkeypatch):
+    """I12's radio half judges a radio step's own clear: one sent before its
+    rotation breaks it; the clear an empty queue taken afresh sends — another
+    step's, or a reconverge's — is none of the radio's."""
+    with _a_world(fake, fake_b, monkeypatch) as world:
+        def late():
+            world.mgr.clear_for_radio(lambda: None)
+            world.rec("archive")
+        world.run_step("radio", late)
+        world.check()
+        assert [v for v in world.violations if v.startswith("I12: a radio's")], world.violations
+        world.violations.clear()
+        b = world.mgr.active
+
+        def emptied():                          # the queue emptied, the reconverge clears HQPlayer
+            with world.mgr._mutate_lock:
+                world.mgr.queue.replace([])
+            with fake._lock:
+                fake.state = int(PlaybackState.STOPPED)
+            b.lose_mirror("a removal unanswered (test)")
+        world.run_step("remove", emptied)
+        assert _wait(lambda: fake.playlist == [] and b._mirror == "step", timeout=8), (fake.playlist,
+                                                                                         b._mirror)
         world.check()
         assert not world.violations, world.violations
 

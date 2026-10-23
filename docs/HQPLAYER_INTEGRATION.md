@@ -601,10 +601,17 @@ comes after the control port answers again — so neither can end the wait.
     piece before it; what touches the part before it is the queue's alone.
     An edit behind it while HQPlayer reads no slot of the queue's, or a file
     queued at more than one slot it holds, lands on no entry by a guess: it
-    is the queue's, the mirror lost. A radio begun on it while HQPlayer
-    reads the slot the queue keeps leaves it in step — the clear keeps the
-    entry HQPlayer reads, the queue the slot it reads; begun once HQPlayer
-    moved on from that slot, it loses it.
+    is the queue's, the mirror lost. The slot HQPlayer plays or pauses is
+    never removed from it, on a tail mirror as in step (since 2026-10-23):
+    read in the removal's own sequence, it leaves the queue alone, the track
+    plays out, and the node knows the entry for its own until HQPlayer
+    passes it — the canary reads behind it what came after it, the status
+    names it at no slot and as no other controller's, and a mirror in step
+    is a tail mirror from then on; a removal whose Status names no entry it
+    may go by removes nothing, the mirror lost. A radio begun on it while
+    HQPlayer reads the slot the queue keeps leaves it in step — the clear
+    keeps the entry HQPlayer reads, the queue the slot it reads; begun once
+    HQPlayer moved on from that slot, it loses it.
   - **Drifted** by an edit made outside this node or a mirror step HQPlayer
     did not take: never reconciled on its own, and never edited by the
     queue's places — a remove, a reorder, a "play next" are the queue's

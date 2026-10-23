@@ -1234,7 +1234,9 @@ implementation details live in the code, DB and git history.
   narrowed drift explanation reports it (decided: the removal stays the
   queue's alone, the track playing out, and the node remembers it until
   HQPlayer passes that entry, so the canary never calls it an external
-  edit — the oracle excuses nothing); with two HQPlayers, a seen
+  edit — the oracle excuses nothing; done 2026-10-23, in step too, where
+  the removal had gone to HQPlayer: read in its own sequence, the entry
+  HQPlayer plays or pauses is never removed); with two HQPlayers, a seen
   restored-run report comes back once the other HQPlayer's newer report is
   cleared (the seen map keeps one onset per key); and a held Play that
   meets a build is recorded as an unreachable attempt with nothing sent
