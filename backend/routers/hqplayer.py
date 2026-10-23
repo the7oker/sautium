@@ -692,7 +692,7 @@ def leave_benchmark_mark(req: LeaveRequest) -> Dict[str, Any]:
         left = hqp_benchmark.leave_as_it_is(req.run)
     except hqp_benchmark.BenchmarkRefused as e:
         raise HTTPException(status_code=409, detail=str(e))
-    except LookupError:
+    except hqp_benchmark.RunNotFound:
         raise HTTPException(status_code=404, detail="No such benchmark run")
     if not left:
         raise HTTPException(status_code=409, detail="That run's settings are checked, or about to be")

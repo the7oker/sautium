@@ -456,7 +456,8 @@ CREATE TABLE IF NOT EXISTS hqp_benchmark_runs (
     measured_from_filter1x TEXT,
     measured_from_shaper TEXT,
     -- When the return point was kept: the onset of the notice that HQPlayer
-    -- stayed in the measured mode, its own; NULL with the point
+    -- stayed in the measured mode, its own — or HQPlayer at rest refusing
+    -- it later, the newer; NULL with the point
     measured_from_at TIMESTAMPTZ,
     CONSTRAINT chk_hqp_benchmark_runs_finished CHECK ((finished_at IS NULL) = (outcome IS NULL))
 );

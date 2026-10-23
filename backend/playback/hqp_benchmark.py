@@ -246,6 +246,10 @@ class BenchmarkRefused(RuntimeError):
     """Why a benchmark cannot start now, in words for the owner."""
 
 
+class RunNotFound(LookupError):
+    """No benchmark run of that id (leave_as_it_is)."""
+
+
 def state() -> Dict[str, Any]:
     with _lock:
         return dict(_state)
@@ -2778,7 +2782,7 @@ def leave_as_it_is(run_id: int) -> bool:
     the owner's. True once the run holds no mark: left now, or judged or
     left before (a second press, another tab); False while it holds one
     HQPlayer at rest has not refused yet, its check still to come. Refused
-    while a run measures; LookupError for a run there is none of."""
+    while a run measures; RunNotFound for a run there is none of."""
     note = "the mode it measured left as it is at the owner's word"
     # Under the lock a run's start takes: a run that starts judges the mark
     # itself, and never meets it half left
@@ -2797,7 +2801,7 @@ def leave_as_it_is(run_id: int) -> bool:
             run = db_query_one("""SELECT measured_unchecked_at IS NOT NULL AS marked
                                     FROM hqp_benchmark_runs WHERE id = %(id)s""", {"id": run_id})
             if run is None:
-                raise LookupError(f"no benchmark run {run_id}")
+                raise RunNotFound(f"no benchmark run {run_id}")
             return not run["marked"]
         _unchecked.pop(row["hqp_endpoint_id"], None)
         _busy_at.pop(row["hqp_endpoint_id"], None)
