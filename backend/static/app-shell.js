@@ -2058,9 +2058,9 @@
         return;
       }
       // A slot the output does not take (a gap) is refused in its words —
-      // one toast with the attempt's diagnosis, which takes it over (firstSaid)
+      // one toast with the attempt's diagnosis, which takes it over (answerSays)
       const out = await resp.json();
-      if (out.ok === false && out.refusal && firstSaid(out.attempt)) {
+      if (out.ok === false && out.refusal && answerSays(out.attempt)) {
         notices.toast({ kind: 'info', key: out.attempt != null ? 'hqplayer.diagnosis' : 'queue.refused',
                         title: 'Not played',
                         text: escapeHtml(out.refusal.charAt(0).toUpperCase() + out.refusal.slice(1)) });
@@ -6265,22 +6265,24 @@
                     text: escapeProfileHtml(err) });
   });
 
-  // The play attempts whose failure this tab has said: HQPlayer's words in a
-  // route's answer (`attempt`) and the attempt's diagnosis say one failure in
-  // one toast — the answer's goes under the diagnosis's key, and the
-  // diagnosis, when it comes, takes it over in place with its Why?; an
-  // answer that comes after the diagnosis says nothing more
-  const saidAttempts = new Set();
-  function firstSaid(attempt) {
+  // The play attempts whose failure this tab has said, and by what: HQPlayer's
+  // words in a route's answer (`attempt`) and the attempt's diagnosis say one
+  // failure in one toast — the answer's goes under the diagnosis's key, and
+  // the diagnosis, when it comes, takes it over in place with its Why?, once;
+  // an answer that comes after the diagnosis says nothing more
+  const saidAttempts = new Map();     // attempt → 'answer' | 'diagnosis'
+  function answerSays(attempt) {
     if (attempt == null) return true;
     if (saidAttempts.has(attempt)) return false;
-    saidAttempts.add(attempt);
+    saidAttempts.set(attempt, 'answer');
     return true;
   }
 
   // A play the HQPlayer output judged failed (playback/hqp_diagnostics.py):
   // one toast per attempt, with the way to its explanation — the toast its
-  // route's answer opened, taken over in place (firstSaid). Not when the
+  // route's answer opened, taken over in place (answerSays), and never again
+  // once said — a status that loses the diagnosis and gets it back is no new
+  // failure. Not when the
   // same failure repeats on a dead output — the `hqplayer.failing` notice
   // speaks then (`failing`, decided by the server) — and not for an
   // HQPlayer that did not answer: the play route's 503 already said so.
@@ -6292,8 +6294,9 @@
     const first = lastDiagnosisSeen === undefined;
     if (id === lastDiagnosisSeen) return;
     lastDiagnosisSeen = id;
-    if (!d || first || d.failing || d.code === 'unreachable') return;
-    firstSaid(d.id);
+    if (!d || first || d.failing || d.code === 'unreachable'
+        || saidAttempts.get(d.id) === 'diagnosis') return;
+    saidAttempts.set(d.id, 'diagnosis');
     notices.toast({ kind: 'error', key: 'hqplayer.diagnosis', title: escapeHtml(d.title),
                     text: escapeHtml(d.next || ''),
                     action: { label: 'Why?', run: () => openHqpDiagnosis(d.id) } });
@@ -6327,7 +6330,7 @@
   // provider side, `resp` null a fetch that threw (network), anything else
   // the route's own verdict; and a transport `word` the route handed the
   // output that refused it in its own words (HTTP 200, `ok: false` with its
-  // `refusal`), once with the attempt's diagnosis (firstSaid). An output
+  // `refusal`), once with the attempt's diagnosis (answerSays). An output
   // with no words of its own says why in its status (`error`), or nothing
   // was refused — a Next past the queue's end: no words, no toast. Returns
   // true on success so callers can skip follow-up work.
@@ -6336,7 +6339,7 @@
   async function reportPlaybackResult(resp, body, word) {
     if (resp && resp.ok) {
       if (!body || body.ok !== false) return true;
-      if (!body.refusal || !firstSaid(body.attempt)) return false;
+      if (!body.refusal || !answerSays(body.attempt)) return false;
       // The output's name is a device's own (a renderer's friendlyName): escaped
       const out = window.currentStatus && window.currentStatus.output;
       const name = (out && out.label) || 'The output';

@@ -126,9 +126,11 @@ const cut = (from, to) => {
 };
 const spec = JSON.parse(fs.readFileSync(0, 'utf8'));
 const npHandlers = [], toasts = [];
+let calls = 0;
 // notices.toast as it shows them: one with the key of a toast still up
-// takes it over in place
+// takes it over in place (`calls` counts every one asked for)
 const toast = t => {
+  calls += 1;
   const i = t.key ? toasts.findIndex(x => x.key === t.key) : -1;
   if (i >= 0) toasts[i] = t; else toasts.push(t);
 };
@@ -164,13 +166,17 @@ vm.runInContext([
     else if (ev.seek != null) await ctx.window.playerSeek(ev.seek);
     else if (ev.jump != null) await ctx.__sheet.jumpTo(ev.jump);
   }
-  process.stdout.write(JSON.stringify(toasts.map(t => ({
-    key: t.key, kind: t.kind, title: t.title, text: t.text, action: t.action ? t.action.label : null }))));
+  process.stdout.write(JSON.stringify({ calls, toasts: toasts.map(t => ({
+    key: t.key, kind: t.kind, title: t.title, text: t.text, action: t.action ? t.action.label : null })) }));
 })().catch(e => { process.stderr.write(String(e && e.stack)); process.exit(1); });
 """
 
 
 def _ui(events, answers, tracks=None):
+    return _ui_run(events, answers, tracks)["toasts"]
+
+
+def _ui_run(events, answers, tracks=None):
     proc = subprocess.run(
         [NODE, "-e", _SHELL, "--", str(REPO_ROOT / "backend" / "static" / "player.js"),
          str(REPO_ROOT / "backend" / "static" / "app-shell.js")],
@@ -228,6 +234,30 @@ def test_a_play_hqplayer_refused_is_said_once_with_its_diagnosis(traced, fake, m
         events = [events[0], diagnosed, events[1]]
     toasts = _ui(events, {"/api/player/play": {"status": 200, "body": answer}})
     assert len(toasts) == 1 and toasts[0]["action"] == "Why?", toasts
+
+
+def test_a_failure_said_is_not_said_again_when_its_diagnosis_comes_back(traced, fake, monkeypatch):
+    """A refused Play said with its Why?; the status then loses the
+    diagnosis — HQPlayer away a while, or another entry played and stopped —
+    and gets it back: no new failure, nothing said again."""
+    import routers.player as player
+
+    fake.replies["Play"] = '<Play result="Error">Empty transport</Play>'
+    monkeypatch.setattr(player, "manager", types.SimpleNamespace(
+        ensure_active=lambda: traced, backend=lambda: traced))
+    answer = player.play()
+    a = _closed(timeout=5.0)
+    assert _wait(lambda: traced._last_closed is a, 5.0)
+    stopped = TrackStatus(state=PlaybackState.STOPPED, track_index=1, track_id="", position=0.0,
+                          length=300.0, volume=-3.0)
+    d = traced._diagnosis(stopped)
+    out = {"type": "hqplayer", "label": "HQPlayer", "attached": True}
+    diagnosed = {"np": {"state": "stopped", "output": out, "diagnosis": d}}
+    run = _ui_run([{"np": {"state": "stopped", "output": out}}, {"cmd": "play"}, diagnosed,
+                   {"np": {"state": "stopped", "output": out}}, diagnosed],
+                  {"/api/player/play": {"status": 200, "body": answer}})
+    # the answer, then the diagnosis taking it over: two asked, none after
+    assert run["calls"] == 2 and run["toasts"][0]["action"] == "Why?", run
 
 
 @pytest.mark.parametrize("diagnosis_first", [False, True])
