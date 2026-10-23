@@ -1218,15 +1218,20 @@ implementation details live in the code, DB and git history.
   that held the meter before changes nothing once it closes — so Now
   Playing stopped and then jumped, and an entry that ended inside that
   stretch was recorded short of its end: a skip, no scrobble. Once the meter
-  heard a take's start, the position handed on runs on the clock from that
-  start while Status's stands still: held while paused, set by this node's
-  own Seek, and Status's takes over whenever it moves; no further than the
-  output delay and two seconds past the last time it was set, since a
-  longer stand is a stall. Keeping the meter open whenever HQPlayer plays
-  was set aside: what it costs HQPlayer near the real-time limit is not
-  measured. Lesson: a reading that stopped refreshing is not one that says
-  "stopped" — tell them apart by what else is known (here the start the
-  meter heard), and bound the guess by what is measured of the refresh.
+  heard a take's start, the position handed on runs on the clock inside
+  that stretch — to the output delay and two seconds past the start heard —
+  while Status's stands still: held while paused, set by a Seek, and
+  Status's takes over whenever it moves; a stand after the stretch is a
+  stall, never a listen. A Seek counts for the take it was sent in: the
+  first cut ran the clock over the whole take, bounded only past the last
+  time it was set, so a stall minutes in counted as listening, and a Seek
+  made in one entry seeded the clock of the next one HQPlayer moved on to,
+  a false completed listen and scrobble. Keeping the meter open whenever
+  HQPlayer plays was set aside: what it costs HQPlayer near the real-time
+  limit is not measured. Lesson: a reading that stopped refreshing is not
+  one that says "stopped" — tell them apart by what else is known (here
+  the start the meter heard), and bound the guess by what is measured of
+  the refresh.
 - **Open after the series' review** (2026-10-14), found in code the series
   did not change, left for the next slice: a removal of the very slot
   HQPlayer reads on a tail mirror is the queue's alone, and the canary then

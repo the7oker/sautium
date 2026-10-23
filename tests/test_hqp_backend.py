@@ -2145,7 +2145,8 @@ def test_an_advance_whose_status_lags_is_started_by_the_frames_after_its_tail(tr
 # -- the position on the clock (HqpBackend._clocked) -------------------------------------
 # With the meter stream closed a filter whose start takes seconds keeps Status's
 # position standing still. What Now Playing and the play tracker read runs on
-# the clock from the start the meter heard, and Status's takes over as it moves.
+# the clock inside that stretch after the start the meter heard, and Status's
+# takes over as it moves.
 
 @pytest.fixture
 def clocked(traced, monkeypatch):
@@ -2198,6 +2199,7 @@ def test_status_takes_over_as_soon_as_its_position_moves(traced, fake, metered, 
 
 def test_a_position_that_stands_still_after_it_moved_runs_on_the_clock_from_where_it_stood(traced, fake, metered,
                                                                                           clocked):
+    fake.status_extra["output_delay"] = "20000000"           # 20 s: it stands still inside the stretch
     assert traced.select(2)
     assert _wait(lambda: any(raw >= 3.0 for _, _, raw, _ in clocked), 10.0)
     n = len(clocked)
@@ -2213,7 +2215,22 @@ def test_a_position_that_stands_still_after_it_moved_runs_on_the_clock_from_wher
     assert all(p == raw for _, _, raw, p in ticks[after:])           # its own again: it takes over
 
 
+def test_a_position_that_stands_still_after_the_stretch_is_a_stall(traced, fake, metered, clocked, monkeypatch):
+    monkeypatch.setattr(hb, "CLOCK_SLACK_S", 0.5)
+    fake.status_extra["output_delay"] = "1000000"            # the stretch: 1.5 s past the start heard
+    t = time.time()
+    assert traced.select(2)
+    assert _wait(lambda: clocked and clocked[-1][0] > t + 2.5, 10.0)     # past it
+    n = len(clocked)
+    fake.held_polls = 4
+    assert _wait(lambda: len(clocked) >= n + 5 and fake.held_polls == 0, 20.0)
+    ticks = clocked[n - 1:]
+    assert any(b[2] == a[2] for a, b in zip(ticks, ticks[1:]))       # it stood
+    assert all(p == raw for _, _, raw, p in ticks)                   # Status's all along
+
+
 def test_the_clock_holds_while_hqplayer_pauses_and_runs_on_after_it(traced, fake, metered, clocked):
+    fake.status_extra["output_delay"] = "20000000"           # 20 s: the pause falls inside the stretch
     fake.start_polls = 100
     assert traced.select(2)
     assert _wait(lambda: any(p >= 2.0 for *_, p in clocked), 10.0)
@@ -2241,8 +2258,8 @@ def test_this_nodes_own_seek_sets_the_clock(traced, fake, metered, clocked):
     assert raw == 0.0 and 120.0 < p <= 120.0 + (at - t)
 
 
-def test_the_clock_runs_no_further_than_the_output_delay_past_where_it_was_set(traced, fake, metered, clocked,
-                                                                              monkeypatch):
+def test_the_clock_runs_no_further_than_the_output_delay_past_the_start_it_heard(traced, fake, metered, clocked,
+                                                                                monkeypatch):
     monkeypatch.setattr(hb, "CLOCK_SLACK_S", 0.5)
     fake.status_extra["output_delay"] = "1000000"            # 1 s: a stall past 1.5 s
     fake.start_polls = 100
@@ -2275,7 +2292,8 @@ def test_a_take_hqplayer_moves_on_to_inside_a_window_runs_from_where_it_began(tr
         fake.track_serial += 1
     assert _wait(lambda: clocked[-1][0] > t + 2.5 and clocked[-1][1] == PlaybackState.PLAYING, 8.0)
     after = [(at, p) for at, state, _, p in clocked if at > t and state == PlaybackState.PLAYING]
-    assert after and all(p <= at - t + 1.1 for at, p in after)     # the tick before it at most
+    # from the tick before it at most — a poll and its work — never from the take before
+    assert after and all(p <= at - t + 2.0 for at, p in after)
 
 
 def test_a_take_hqplayer_says_it_plays_and_does_not_sound_has_no_clock_yet(traced, fake, metered, clocked,
@@ -2312,6 +2330,219 @@ def test_now_playing_and_the_play_tracker_read_the_position_on_the_clock(fake, l
     finally:
         b.shutdown()
         port.close()
+
+
+def test_a_resume_runs_the_clock_from_its_second(traced, fake, metered, clocked):
+    fake.start_polls = 100
+    traced._set_spot(traced._queue.item_at(2), 60)
+    t = time.time()
+    assert traced.play()
+    assert ("Seek", {"position": "60"}) in fake.commands
+    assert _wait(lambda: any(p >= 61.0 for *_, p in clocked), 10.0)
+    playing = [(at, p) for at, state, _, p in clocked if at > t and state == PlaybackState.PLAYING]
+    assert all(p == 0.0 or 60.0 <= p <= 60.0 + (at - t) for at, p in playing), playing
+
+
+def test_a_resume_near_the_end_seeds_no_clock_of_the_entry_hqplayer_moves_on_to(traced, fake, metered, clocked,
+                                                                                 monkeypatch):
+    monkeypatch.setattr(diag, "OBSERVE_S", 10.0)        # the resume's window outlasts its entry
+    fake.length = 200
+    traced._set_spot(traced._queue.item_at(1), 197)
+    assert traced.play()
+    assert ("Seek", {"position": "197"}) in fake.commands
+    with fake._lock:
+        fake.position = 197.0                           # HQPlayer goes there (the fake takes no Seek)
+        serial = fake.track_serial
+    # three seconds on the entry ends, and HQPlayer moves on by itself
+    assert _wait(lambda: fake.track_serial == serial + 1 and fake.position >= 4.0, 15.0)
+    back = next(i for i in range(1, len(clocked)) if clocked[i][2] < clocked[i - 1][2])
+    after = [p for _, state, _, p in clocked[back:] if state == PlaybackState.PLAYING]
+    assert after and all(p < 10.0 for p in after), clocked[back:]   # from its own start
+
+
+def test_a_seek_near_an_entrys_end_is_no_listen_of_the_entry_after_it(fake, listens, monkeypatch):
+    monkeypatch.setattr(diag, "OBSERVE_S", 30.0)        # the tap's window outlasts its entry
+    writes, _ = listens
+    mgr = PlaybackManager()
+    mgr.queue.replace([_item("E:/Music/A/01.flac", 1), _item("E:/Music/A/02.flac", 2)])
+    b = _attach(mgr)
+    port = HqpMeterPort(fake)
+    b._meter_attachment = hqp_meter.meter.attach("127.0.0.1", port.port, b._sound_began)
+    try:
+        fake.length = 200
+        assert b.select(1)
+        assert _wait(lambda: tracker._play_session is not None and tracker._play_session.max_position >= 2.0,
+                     10.0)
+        assert b.seek(197)
+        with fake._lock:
+            fake.position = 197.0                       # HQPlayer goes there (the fake takes no Seek)
+        assert _wait(lambda: tracker._play_session is not None and tracker._play_session.track_id == "track-2"
+                     and fake.track == 2 and fake.position >= 5.0, 20.0)
+        # five seconds into the entry after it: no listen of it closed, nothing near its end
+        assert not [q for sql, q in writes if "listening_history" in sql and q.get("tid") == "track-2"]
+        assert tracker._play_session.max_position < 10.0
+    finally:
+        b.shutdown()
+        port.close()
+
+
+def test_a_stall_long_after_the_start_is_no_listen(fake, listens, monkeypatch):
+    monkeypatch.setattr(diag, "OBSERVE_S", 1.5)
+    writes, _ = listens
+    mgr = PlaybackManager()
+    mgr.queue.replace([_item("E:/Music/A/01.flac", 1), _item("E:/Music/A/02.flac", 2)])
+    b = _attach(mgr)
+    port = HqpMeterPort(fake)
+    b._meter_attachment = hqp_meter.meter.attach("127.0.0.1", port.port, b._sound_began)
+    try:
+        fake.length = 300
+        assert b.select(1)
+        assert _wait(lambda: tracker._play_session is not None and tracker._play_session.max_position >= 2.0,
+                     10.0)
+        assert _wait(lambda: b._attempt is None and not hqp_meter.meter.metering(), 10.0)
+        with fake._lock:
+            fake.position = 146.0                       # minutes into the entry
+        assert _wait(lambda: tracker._play_session.max_position >= 147.0, 5.0)
+        with fake._lock:
+            fake._starting = 8                          # a stall: HQPlayer says it plays, nothing moves
+        n = len([c for c, _ in fake.commands if c == "Status"])
+        assert _wait(lambda: len([c for c, _ in fake.commands if c == "Status"]) >= n + 7, 15.0)
+        assert b.select(2)                              # the listener skips on
+        assert _wait(lambda: any("listening_history" in sql and q.get("tid") == "track-1" for sql, q in writes),
+                     10.0)
+        row = next(q for sql, q in writes if "listening_history" in sql and q.get("tid") == "track-1")
+        # Status never passed 148 s of 300: a skip, never a completed listen
+        assert row["dur"] < 150.0 and not row["comp"], row
+    finally:
+        b.shutdown()
+        port.close()
+
+
+# _clocked driven directly: Status ticks made up, the meter's sound as the
+# attempt keeps it
+
+_URI_A, _URI_B = "file:///E:/Music/A/01.flac", "file:///E:/Music/A/02.flac"
+
+
+def _status(state, serial, position, *, uri=_URI_A, delay=None):
+    return TrackStatus(state=state, track_index=1 if uri == _URI_A else 2, track_id="", position=position,
+                       length=300.0, volume=-3.0, uri=uri, track_serial=serial, output_delay=delay)
+
+
+def _sound(t0, start, last=None):
+    """What the meter showed by a tick: sound from `start` on — to `last`, or still."""
+    return lambda at: {"sessions": [{"open": t0, "first": t0 + 0.05, "closed": None}],
+                       "runs": [{"since": t0, "start": start, "last": at + 0.05 if last is None else last,
+                                 "frames": 100}]}
+
+
+def _attempt_at(t0):
+    att = diag.Attempt(intent="select", slot=1)
+    att.started, att.t0, att.take = t0 - 1.0, t0, t0
+    return att
+
+
+def _clock_tick(b, att, sound, status, at):
+    att.tick(status, hb.STATE_NAMES.get(status.state, "unknown"), at, sound(at))
+    return b._clocked(status, at, att)
+
+
+@pytest.fixture
+def bare(fake):
+    return HqpBackend(emit=lambda *_: None, queue=CanonicalQueue())
+
+
+def test_a_seek_sent_after_a_tick_was_asked_moves_nothing_that_tick_read(bare):
+    t0 = time.time() - 30.0
+    att, sound = _attempt_at(t0), _sound(t0, t0 + 0.2)
+    for k in (1, 2, 3):
+        _clock_tick(bare, att, sound, _status(PlaybackState.PLAYING, 5, 0.0), t0 + k)
+    before = _clock_tick(bare, att, sound, _status(PlaybackState.PLAYING, 5, 0.0), t0 + 4)
+    # the start of another entry at 200 s, its Seek sent after the next
+    # tick's Status was asked and before that tick reached the clock
+    bare._seek_mark = (200.0, t0 + 5.2, None)
+    assert _clock_tick(bare, att, sound, _status(PlaybackState.PLAYING, 5, 0.0), t0 + 5) == pytest.approx(
+        before + 1.0)
+
+
+def test_a_starts_own_seek_moves_no_clock_of_the_take_that_plays(bare):
+    t0 = time.time() - 30.0
+    att, sound = _attempt_at(t0), _sound(t0, t0 + 0.2)
+    for k in (1, 2, 3):
+        _clock_tick(bare, att, sound, _status(PlaybackState.PLAYING, 5, 0.0), t0 + k)
+    # another entry's start at 200 s took its Seek; the next tick still
+    # reads the take that played
+    bare._seek_mark = (200.0, t0 + 3.5, diag.Attempt(intent="select", slot=2))
+    assert _clock_tick(bare, att, sound, _status(PlaybackState.PLAYING, 5, 0.0), t0 + 4) == pytest.approx(3.8)
+
+
+def test_a_seek_of_the_persons_before_the_start_was_heard_seeds_no_clock(bare):
+    t0 = time.time() - 30.0
+    att, sound = _attempt_at(t0), _sound(t0, t0 + 0.2)
+    bare._seek_mark = (197.0, t0 + 0.1, None)           # it may be the entry's before
+    _clock_tick(bare, att, sound, _status(PlaybackState.PLAYING, 5, 0.0), t0 + 1)
+    assert _clock_tick(bare, att, sound, _status(PlaybackState.PLAYING, 5, 0.0), t0 + 2) == pytest.approx(1.8)
+
+
+def test_a_seek_of_the_persons_after_the_start_was_heard_sets_the_clock_it_begins(bare):
+    t0 = time.time() - 30.0
+    att, sound = _attempt_at(t0), _sound(t0, t0 + 0.2)
+    _clock_tick(bare, att, sound, _status(PlaybackState.PLAYING, 5, 0.0), t0 + 1)
+    assert bare._clock is None                          # the start not heard yet
+    bare._seek_mark = (60.0, t0 + 1.5, None)
+    assert _clock_tick(bare, att, sound, _status(PlaybackState.PLAYING, 5, 0.0), t0 + 2) == pytest.approx(60.5)
+
+
+def test_a_seek_of_the_persons_inside_the_stretch_sets_the_clock_and_the_stretch_stays(bare):
+    t0 = time.time() - 30.0
+    att, sound = _attempt_at(t0), _sound(t0, t0 + 0.2)
+    for k in (1, 2):
+        _clock_tick(bare, att, sound, _status(PlaybackState.PLAYING, 5, 0.0), t0 + k)
+    bare._seek_mark = (120.0, t0 + 2.5, None)
+    assert _clock_tick(bare, att, sound, _status(PlaybackState.PLAYING, 5, 0.0), t0 + 3) == pytest.approx(120.5)
+    # the stretch ends 3.5 s (no output delay given) and 2 s past the start
+    # heard, t0 + 0.2: the clock goes no further than 120 + 3.2
+    later = [_clock_tick(bare, att, sound, _status(PlaybackState.PLAYING, 5, 0.0), t0 + k) for k in (4, 5, 6, 7, 8)]
+    assert later[-1] == pytest.approx(123.2) and later[-1] == later[-2]
+
+
+def test_on_hqplayer_5_the_same_entry_played_again_runs_no_clock_before_its_start_is_heard(bare):
+    t0 = time.time() - 60.0
+    att, sound = _attempt_at(t0), _sound(t0, t0 + 0.2)
+    for k in range(1, 6):               # a 19 s delay: the first take's stretch lasts to t0 + 21.2
+        _clock_tick(bare, att, sound, _status(PlaybackState.PLAYING, None, float(k), delay=19.0), t0 + k)
+    assert bare._clock is not None
+    # played again (a tap on the same slot): HQPlayer builds it, nothing
+    # sounds after t0 + 6, and Status stands at 0
+    again, quiet = _attempt_at(t0 + 6.5), _sound(t0, t0 + 0.2, last=t0 + 6.0)
+    out = [_clock_tick(bare, again, quiet, _status(PlaybackState.PLAYING, None, 0.0, delay=19.0), t0 + 7 + k)
+           for k in range(4)]
+    assert out == [0.0] * 4
+
+
+def test_a_pause_holds_what_the_last_playing_tick_handed_on(bare):
+    t0 = time.time() - 60.0
+    att, sound = _attempt_at(t0), _sound(t0, t0 + 0.2)
+    last = [_clock_tick(bare, att, sound, _status(PlaybackState.PLAYING, 5, 0.0, delay=19.0), t0 + k)
+            for k in range(1, 13)][-1]
+    # the paused Status gives no output delay: the take's longest still bounds the stretch
+    paused = _clock_tick(bare, att, sound, _status(PlaybackState.PAUSED, 5, 0.0), t0 + 13)
+    assert last == pytest.approx(11.8) and paused == pytest.approx(last)
+
+
+def test_a_pause_and_a_play_on_run_the_clock_no_further_than_the_stretch(bare):
+    t0 = time.time() - 60.0
+    att, sound = _attempt_at(t0), _sound(t0, t0 + 0.2)
+    outs = [_clock_tick(bare, att, sound, _status(PlaybackState.PLAYING, 5, 0.0, delay=1.0), t0 + k)
+            for k in (1, 2)]
+    outs.append(_clock_tick(bare, att, sound, _status(PlaybackState.PAUSED, 5, 0.0, delay=1.0), t0 + 2.5))
+    outs += [_clock_tick(bare, att, sound, _status(PlaybackState.PLAYING, 5, 0.0, delay=1.0), t0 + k)
+             for k in (3, 4, 5, 6)]
+    # the start heard by the second tick; held over the pause where the last
+    # playing tick read it, run on from the play on to the end of the
+    # stretch — the 1 s delay and 2 s past the start heard, t0 + 0.2 — and no
+    # further
+    assert outs == pytest.approx([0.0, 1.8, 1.8, 1.8, 2.0, 2.0, 2.0])
 
 
 def test_no_advance_at_the_playlists_end_nor_for_a_stop_hqplayer_did_not_move_on_from(traced, fake,

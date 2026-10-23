@@ -773,42 +773,52 @@ STATUS_FAILURE_THRESHOLD = 5
 # HQPlayer reads (_playing).
 DRIFT_CHECK_EVERY = 30
 
-# With the meter stream closed, a filter whose start takes seconds can keep
-# Status's position standing still for up to about the output delay HQPlayer
-# reports: the clock (_Clock) runs that long past the last time it was set,
-# and this much more — a position that stands still longer is a stall
+# With the meter stream closed, a filter whose start takes seconds keeps
+# Status's position standing still from the take's start until about a
+# second past the output delay HQPlayer reports, whether the meter was open
+# before or not: the clock (_Clock) runs from the start it heard to that
+# delay and this much more — a position that stands still after it is a
+# stall
 CLOCK_SLACK_S = 2.0
 
 
 class _Clock:
     """Where the entry HQPlayer plays is while its Status's position stands
-    still: one take of one entry (`take`: Status's track_serial and URI),
-    from the start the meter heard. It holds while HQPlayer pauses, this
-    node's own Seek sets it, and a Status position that moved sets it again
-    — Status's position takes over as soon as it moves. It runs no further
-    than the output delay and CLOCK_SLACK_S past the last time it was set,
-    and holds there. A pause holds it where the last tick that found
+    still inside the stretch a filter whose start takes seconds keeps it so:
+    one take of one entry (`take`: Status's track_serial and URI), from the
+    start the meter heard (`since`) to the longest output delay Status gave
+    for the take (ADVANCE_DELAY_S while it gave none) and CLOCK_SLACK_S past
+    it (`until`). Inside it the clock runs from where it was last set — by a
+    Status position that moved, Status's taking over as soon as it moves, or
+    a Seek — and holds while HQPlayer pauses, where the last tick that found
     HQPlayer playing read it: the Pause came after that tick, at most a poll
-    later, and a held clock never runs ahead of where HQPlayer stopped."""
+    later. After `until` it runs no further: a position standing still then
+    is a stall, never a listen."""
 
-    def __init__(self, take: tuple, position: float, at: float, status: float, marked: float):
+    def __init__(self, take: tuple, since: float, status: float, delay: Optional[float]):
         self.take = take
-        self.position, self.at = position, at       # it read `position` at `at`
+        self.since = since                          # the start the meter heard
+        self.position, self.at = 0.0, since         # it read `position` at `at`
         self.status = status                        # the Status position it last met
-        self.marked = marked                        # the newest Seek of ours it took (sent at)
+        self.delay = delay                          # the longest output delay Status gave
+        self.marked = 0.0                           # the newest Seek it knows of (sent at)
         self.held = False
-        self.playing_at = at                        # the last tick that found HQPlayer playing
+        self.playing_at = since                     # the last tick that found HQPlayer playing
 
-    def read(self, at: float, delay: float) -> float:
+    @property
+    def until(self) -> float:
+        return self.since + (self.delay or diag.ADVANCE_DELAY_S) + CLOCK_SLACK_S
+
+    def read(self, at: float) -> float:
         if self.held:
             return self.position
-        return self.position + min(max(at - self.at, 0.0), delay + CLOCK_SLACK_S)
+        return self.position + max(min(at, self.until) - self.at, 0.0)
 
     def set(self, position: float, at: float) -> None:
         self.position, self.at = position, at
 
-    def hold(self, at: float, delay: float) -> None:
-        self.position, self.held = self.read(at, delay), True
+    def hold(self, at: float) -> None:
+        self.position, self.held = self.read(at), True
 
     def run(self, at: float) -> None:
         self.at, self.held = at, False
@@ -1080,7 +1090,8 @@ class HqpBackend(PlayerBackend):
         self._last_tick: Optional[PlaybackStatus] = None
         # The position on the clock of the take HQPlayer plays (_clocked):
         # the poller's alone; and this node's newest Seek HQPlayer took, as
-        # (second, sent at), which it reads (_on_outcome)
+        # (second, sent at, the attempt whose start sent it — None for the
+        # person's own), which it reads (_on_outcome)
         self._clock: Optional[_Clock] = None
         self._seek_mark: Optional[tuple] = None
         # The take the last tick read, (track_serial, URI), and when the tick
@@ -2426,22 +2437,31 @@ class HqpBackend(PlayerBackend):
 
     def _clocked(self, status, read_at: float, att: Optional[diag.Attempt]) -> float:
         """The position this tick hands on, which Now Playing and the play
-        tracker read alike: Status's — or, while it stands still once the
-        meter heard this take's start, the clock's (_Clock), never less than
-        Status's nor past the entry's length. The clock begins with the
-        start of this take `att` heard, at the second of a Seek of ours its
-        start sent (a resume) else at 0, and ends with the take. Called on
-        the poller, which alone keeps it."""
+        tracker read alike: Status's — or, while it stands still inside the
+        stretch after this take's start the meter heard, the clock's
+        (_Clock), never less than Status's nor past the entry's length. The
+        clock begins with the start of this take `att` heard, at 0 or at the
+        second of the Seek its start sent (a resume), and ends with the take.
+        A Seek counts for the take it was sent in, from the tick asked after
+        it: a start's own for the take that start makes — never one HQPlayer
+        moved on to by itself — and the person's for the take that sounds,
+        once its start was heard (one sent before may be the entry's before).
+        Called on the poller, which alone keeps it."""
         busy = status.state in (PlaybackState.PLAYING, PlaybackState.PAUSED)
         take = (status.track_serial, status.uri)
-        if take != self._take[0]:
+        clock = self._clock
+        # HQPlayer 5 names no take: the same entry played again is its
+        # position back at the start
+        again = (status.track_serial is None and clock is not None and clock.take == take
+                 and status.position < 1.0 <= clock.status)
+        if take != self._take[0] or again:
             self._take = (take, self._take_read)
         self._take_read = read_at
-        delay = status.output_delay or diag.ADVANCE_DELAY_S
-        clock = self._clock
-        if clock is not None and (not busy or clock.take != take):
+        if clock is not None and (not busy or clock.take != take or again):
             clock = self._clock = None
         seek = self._seek_mark
+        if seek is not None and not self._take[1] <= seek[1] <= read_at:
+            seek = None                 # sent before this take, or after this tick was asked
         if clock is None:
             heard = att.heard_at(status.track_serial) if busy and att is not None else None
             if heard is None:
@@ -2449,22 +2469,25 @@ class HqpBackend(PlayerBackend):
             # Never before the take began: HQPlayer moves on inside a window,
             # and the sound of the entry before may run on into this one's
             heard = max(heard, self._take[1])
-            ours = seek is not None and att.take is not None and seek[1] >= att.take
-            clock = self._clock = _Clock(take, float(seek[0]) if ours else 0.0,
-                                         max(heard, seek[1]) if ours else heard, status.position,
-                                         seek[1] if seek is not None else 0.0)
-            if status.position > clock.read(read_at, delay):
+            clock = self._clock = _Clock(take, heard, status.position, status.output_delay)
+            if seek is not None:
+                clock.marked = seek[1]
+                if seek[2] is att or (seek[2] is None and seek[1] >= heard):
+                    clock.set(seek[0], max(heard, seek[1]))
+            if status.position > clock.read(read_at):
                 clock.set(status.position, read_at)     # Status moved ahead of it already
-        elif seek is not None and seek[1] > clock.marked:
-            clock.set(float(seek[0]), seek[1])
+        elif seek is not None and seek[2] is None and seek[1] > clock.marked:
+            clock.set(seek[0], seek[1])
             clock.marked = seek[1]
+        if status.output_delay is not None and status.output_delay > (clock.delay or 0.0):
+            clock.delay = status.output_delay
         moved = status.position != clock.status
         clock.status = status.position
         if status.state == PlaybackState.PAUSED:
             if moved:
                 clock.set(status.position, read_at)
             elif not clock.held:
-                clock.hold(clock.playing_at, delay)
+                clock.hold(clock.playing_at)
             clock.held = True
             position = max(status.position, clock.position)
         else:
@@ -2474,7 +2497,7 @@ class HqpBackend(PlayerBackend):
             if moved:
                 clock.set(status.position, read_at)
                 return status.position
-            position = max(status.position, clock.read(read_at, delay))
+            position = max(status.position, clock.read(read_at))
         return min(position, status.length) if status.length > 0 else position
 
     def _status_of(self, status, playing: tuple, position: Optional[float] = None) -> PlaybackStatus:
@@ -2971,9 +2994,10 @@ class HqpBackend(PlayerBackend):
         a pause, a DSP change or a replaced playlist HQPlayer took means the
         owner moved on — one it refused changed nothing. A Seek HQPlayer took
         sets the position's clock (_clocked)."""
-        if outcome.command == "Seek" and not outcome.failed:
-            self._seek_mark = (float(outcome.attributes.get("position") or 0), outcome.sent or outcome.ts)
         mine = getattr(self._local, "attempt", None)
+        if outcome.command == "Seek" and not outcome.failed:
+            self._seek_mark = (float(outcome.attributes.get("position") or 0), outcome.sent or outcome.ts,
+                               mine)
         if mine is not None:
             mine.record(outcome)
             return
