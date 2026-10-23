@@ -391,22 +391,27 @@ are Signalyst's text, and this file does not reproduce them.
 - **sinc-MGa**: APODIZING, a variant of poly-sinc-gauss-xla
 - Both: extremely high attenuation
 
-#### Length: constant in output samples
+#### Length, measured into 705.6 and 768 kHz
 Measured on engine 6.2.3 (the impulse response's non-zero samples, from
-44.1 and 48 kHz at ×16, from 88.2 and 96 kHz at ×8):
+44.1 and 48 kHz at ×16 and from 88.2 and 96 kHz at ×8, each into 705.6 or
+768 kHz):
 - [**sinc-M and sinc-Mx**](https://sautium.net/hqplayer/filters/sinc-m-mx/)
-  (one output, bit for bit, where the atlas compared them): about 0.80–0.82
-  million output samples — 1158.8 ms at 705.6 kHz from 44.1 kHz, 1130.7 ms
-  at 705.6 kHz from 88.2 kHz.
+  (one group in the atlas: the same output, bit for bit, in every
+  comparison made, each into 705.6 or 768 kHz; not compared from 88.2 kHz,
+  where their readings agree): about 0.80–0.82 million output samples —
+  1158.8 ms at 705.6 kHz from 44.1 kHz, 1130.7 ms at 705.6 kHz from
+  88.2 kHz.
 - [**sinc-MG**](https://sautium.net/hqplayer/filters/sinc-mg/) and
   [**sinc-MGa**](https://sautium.net/hqplayer/filters/sinc-mga/): about
   0.58–0.60 million output samples — 851.3 ms at 705.6 kHz from 44.1 kHz,
   824.0 ms (sinc-MGa: 824.1 ms) from 88.2 kHz.
 
 At ×8 they are about as long, in output samples, as at ×16 (2–3 % shorter):
-their length did not grow with the conversion ratio from ×8 to ×16, the two
-ratios measured — "65536 × the conversion ratio", which this file gave
-before, would double it. HQPlayer's log names sinc-M "sinc (1M taps)".
+into the same output rate, their length did not grow with the conversion
+ratio from ×8 to ×16, the two ratios measured — "65536 × the conversion
+ratio", which this file gave before, would double it. No length was
+measured into another output rate. HQPlayer's log names sinc-M "sinc (1M
+taps)" and sinc-Mx "sinc (constant time M)".
 
 ### Apodizing
 
