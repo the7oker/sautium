@@ -1222,13 +1222,15 @@ implementation details live in the code, DB and git history.
   that stretch — to the output delay and two seconds past the start heard —
   while Status's stands still: held while paused, set by a Seek, and
   Status's takes over whenever it moves; a stand after the stretch is a
-  stall, never a listen. A Seek counts for the take it was sent in: the
-  first cut ran the clock over the whole take, bounded only past the last
-  time it was set, so a stall minutes in counted as listening, and a Seek
-  made in one entry seeded the clock of the next one HQPlayer moved on to,
-  a false completed listen and scrobble. Keeping the meter open whenever
-  HQPlayer plays was set aside: what it costs HQPlayer near the real-time
-  limit is not measured. Lesson: a reading that stopped refreshing is not
+  stall, never a listen. A Seek counts for the take it was sent in — the
+  person's once a tick read that take, a start's own at the entry it
+  selected: the first cut ran the clock over the whole take, bounded only
+  past the last time it was set, so a stall minutes in counted as
+  listening, and a Seek made in one entry seeded the clock of the next one
+  HQPlayer moved on to — on a gapless move still, until the person's Seek
+  waited for a tick of the take — a false completed listen and scrobble.
+  Keeping the meter open whenever HQPlayer plays was set aside: what it
+  costs HQPlayer near the real-time limit is not measured. Lesson: a reading that stopped refreshing is not
   one that says "stopped" — tell them apart by what else is known (here
   the start the meter heard), and bound the guess by what is measured of
   the refresh.

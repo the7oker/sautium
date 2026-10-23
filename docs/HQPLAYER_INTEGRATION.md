@@ -1389,10 +1389,11 @@ and one made after its backend let go holds no later attachment's socket.
 
 **The position on the clock** (since 2026-10-23). With the meter stream
 closed, a filter whose start takes seconds keeps Status's position standing
-still from the take's start until about a second past the output delay
-HQPlayer reports, whether a start window held the meter before or not: Now
-Playing stopped and then jumped, and an entry that ended inside that
-stretch was a listen recorded short of its end. So once the meter heard a
+still until about a second past the output delay HQPlayer reports, counted
+from the take's start — from the start itself, or from the meter's close
+when a start window held it open: Now Playing stopped and then jumped, and
+an entry that ended inside that stretch was a listen recorded short of its
+end. So once the meter heard a
 take's start, the position the poller hands on — the one Now Playing shows
 and the play tracker records (`max_position`: the percent listened, a skip,
 the scrobble) — runs on the clock inside that stretch while Status's
@@ -1407,10 +1408,12 @@ clock runs no further. Never less than Status's, nor past the entry's
 length. One take of one entry, its `track_serial` and URI — on HQPlayer 5,
 which names none, the same entry's position back at the start is another —
 and a stop ends it. A Seek counts for the take it was sent in, from the
-tick asked after it: a start's own for the take that start makes, never
-one HQPlayer moved on to by itself; the person's for the take that sounds,
-once its start was heard. Without a start the meter heard the position is
-Status's, as before.
+tick asked after it: a start's own for the take that start makes, at the
+entry it selected — never one HQPlayer moved on to by itself; the person's
+for the take that sounds, once a tick read it and its start was heard —
+one sent before may belong to the entry before, which HQPlayer can leave
+gapless before a tick reads it. Without a start the meter heard the
+position is Status's, as before.
 
 HQPlayer's own advance is an attempt too (`advance`, since 2026-10-18).
 Onto an entry of another rate HQPlayer stops on no entry at the end of the

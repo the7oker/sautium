@@ -774,11 +774,11 @@ STATUS_FAILURE_THRESHOLD = 5
 DRIFT_CHECK_EVERY = 30
 
 # With the meter stream closed, a filter whose start takes seconds keeps
-# Status's position standing still from the take's start until about a
-# second past the output delay HQPlayer reports, whether the meter was open
-# before or not: the clock (_Clock) runs from the start it heard to that
-# delay and this much more — a position that stands still after it is a
-# stall
+# Status's position standing still until about a second past the output
+# delay HQPlayer reports, counted from the take's start — from the start
+# itself, or from the meter's close when a start window held it open: the
+# clock (_Clock) runs from the start it heard to that delay and this much
+# more — a position that stands still after it is a stall
 CLOCK_SLACK_S = 2.0
 
 
@@ -1138,9 +1138,10 @@ class HqpBackend(PlayerBackend):
         # person's own), which it reads (_on_outcome)
         self._clock: Optional[_Clock] = None
         self._seek_mark: Optional[tuple] = None
-        # The take the last tick read, (track_serial, URI), and when the tick
-        # before it was asked for: the take began after that (_clocked)
-        self._take: tuple = (None, 0.0)
+        # The take the last tick read, (track_serial, URI), when the tick
+        # before it was asked for — the take began after that — and when the
+        # first tick that read it was (_clocked)
+        self._take: tuple = (None, 0.0, 0.0)
         self._take_read = 0.0
         # The node's own removal of the slot HQPlayer reads, which plays out
         # (queue_remove): _Passing, until HQPlayer passes that entry — set by
@@ -2526,9 +2527,11 @@ class HqpBackend(PlayerBackend):
         clock begins with the start of this take `att` heard, at 0 or at the
         second of the Seek its start sent (a resume), and ends with the take.
         A Seek counts for the take it was sent in, from the tick asked after
-        it: a start's own for the take that start makes — never one HQPlayer
-        moved on to by itself — and the person's for the take that sounds,
-        once its start was heard (one sent before may be the entry's before).
+        it: a start's own for the take that start makes, at the entry it
+        selected — never one HQPlayer moved on to by itself — and the
+        person's for the take that sounds, once a tick read it and its start
+        was heard (one sent before may be the entry's before, left gapless
+        before a tick read it).
         Called on the poller, which alone keeps it."""
         busy = status.state in (PlaybackState.PLAYING, PlaybackState.PAUSED)
         take = (status.track_serial, status.uri)
@@ -2538,7 +2541,7 @@ class HqpBackend(PlayerBackend):
         again = (status.track_serial is None and clock is not None and clock.take == take
                  and status.position < 1.0 <= clock.status)
         if take != self._take[0] or again:
-            self._take = (take, self._take_read)
+            self._take = (take, self._take_read, read_at)
         self._take_read = read_at
         if clock is not None and (not busy or clock.take != take or again):
             clock = self._clock = None
@@ -2555,7 +2558,13 @@ class HqpBackend(PlayerBackend):
             clock = self._clock = _Clock(take, heard, status.position, status.output_delay)
             if seek is not None:
                 clock.marked = seek[1]
-                if seek[2] is att or (seek[2] is None and seek[1] >= heard):
+                # A start's own Seek, for the entry that start selected; the
+                # person's, once a tick read this take and its start was
+                # heard — one sent before may be the entry's before, which
+                # HQPlayer may leave gapless before a tick reads it
+                own = (seek[2] is att and att.slot is not None
+                       and Entry.read(status) == Entry(att.slot))
+                if own or (seek[2] is None and seek[1] >= max(heard, self._take[2])):
                     clock.set(seek[0], max(heard, seek[1]))
             if status.position > clock.read(read_at):
                 clock.set(status.position, read_at)     # Status moved ahead of it already

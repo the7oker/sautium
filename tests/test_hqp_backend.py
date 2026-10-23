@@ -2401,6 +2401,41 @@ def test_a_seek_near_an_entrys_end_is_no_listen_of_the_entry_after_it(fake, list
         port.close()
 
 
+def test_a_seek_to_an_entrys_end_is_no_listen_of_the_entry_after_it_gapless(fake, listens, monkeypatch):
+    """Inside a tap's window the person drags to the end of the entry right
+    after a tick was asked, and HQPlayer moves on at once, gapless, before
+    a tick reads the entry again: the next one is no listen of that Seek."""
+    monkeypatch.setattr(diag, "OBSERVE_S", 10.0)
+    writes, _ = listens
+    mgr = PlaybackManager()
+    mgr.queue.replace([_item("E:/Music/A/01.flac", 1), _item("E:/Music/A/02.flac", 2)])
+    b = _attach(mgr)
+    port = HqpMeterPort(fake)
+    b._meter_attachment = hqp_meter.meter.attach("127.0.0.1", port.port, b._sound_began)
+
+    def statuses():
+        with fake._lock:
+            return sum(1 for c, _ in fake.commands if c == "Status")
+    try:
+        fake.length = 200
+        assert b.select(1)
+        assert _wait(lambda: tracker._play_session is not None and tracker._play_session.max_position >= 2.0,
+                     10.0)
+        n = statuses()
+        assert _wait(lambda: statuses() > n, 5.0)       # a tick was just asked
+        assert b.seek(200)
+        with fake._lock:                                # the fake takes no Seek: HQPlayer's Next, gapless
+            fake.track, fake.position, fake._starting = 2, 0.0, 0
+            fake.track_serial += 1
+        assert _wait(lambda: tracker._play_session is not None and tracker._play_session.track_id == "track-2"
+                     and fake.position >= 5.0, 15.0)
+        assert not [q for sql, q in writes if "listening_history" in sql and q.get("tid") == "track-2"]
+        assert tracker._play_session.max_position < 10.0
+    finally:
+        b.shutdown()
+        port.close()
+
+
 def test_a_stall_long_after_the_start_is_no_listen(fake, listens, monkeypatch):
     monkeypatch.setattr(diag, "OBSERVE_S", 1.5)
     writes, _ = listens
@@ -2497,6 +2532,8 @@ def test_a_seek_of_the_persons_before_the_start_was_heard_seeds_no_clock(bare):
     bare._seek_mark = (197.0, t0 + 0.1, None)           # it may be the entry's before
     _clock_tick(bare, att, sound, _status(PlaybackState.PLAYING, 5, 0.0), t0 + 1)
     assert _clock_tick(bare, att, sound, _status(PlaybackState.PLAYING, 5, 0.0), t0 + 2) == pytest.approx(1.8)
+    # nor does a tick after it take it
+    assert _clock_tick(bare, att, sound, _status(PlaybackState.PLAYING, 5, 0.0), t0 + 3) == pytest.approx(2.8)
 
 
 def test_a_seek_of_the_persons_after_the_start_was_heard_sets_the_clock_it_begins(bare):
@@ -2506,6 +2543,49 @@ def test_a_seek_of_the_persons_after_the_start_was_heard_sets_the_clock_it_begin
     assert bare._clock is None                          # the start not heard yet
     bare._seek_mark = (60.0, t0 + 1.5, None)
     assert _clock_tick(bare, att, sound, _status(PlaybackState.PLAYING, 5, 0.0), t0 + 2) == pytest.approx(60.5)
+
+
+def test_a_seek_to_an_entrys_end_seeds_no_clock_of_the_entry_hqplayer_moves_on_to_gapless(bare):
+    """The person drags to the end of entry A after the tick at t0 + 5 was
+    asked; HQPlayer moves on to B at once, one run of sound, before a tick
+    reads A again: B's clock begins at its own start."""
+    t0 = time.time() - 60.0
+    att, sound = _attempt_at(t0), _sound(t0, t0 + 0.2)
+    for k in range(1, 6):
+        _clock_tick(bare, att, sound, _status(PlaybackState.PLAYING, 5, float(k)), t0 + k)
+    bare._seek_mark = (300.0, t0 + 5.3, None)
+    out = [_clock_tick(bare, att, sound, _status(PlaybackState.PLAYING, 6, float(k), uri=_URI_B), t0 + 6 + k)
+           for k in range(4)]
+    assert all(p < 10.0 for p in out), out
+
+
+@pytest.mark.parametrize("read", [True, False])
+def test_a_resumes_own_seek_seeds_only_the_entry_it_selected(bare, read):
+    """A resume near the end of entry A — its SelectTrack, Seek 297, Play —
+    then HQPlayer's gapless move onto B, whether a tick read A first or
+    not: B's clock begins at 0, A's at the resume's second."""
+    t0 = time.time() - 60.0
+    _clock_tick(bare, _attempt_at(t0 - 5.0), _sound(t0 - 6.0, t0 - 5.8, last=t0 - 5.0),
+                _status(PlaybackState.STOPPED, 4, 0.0, uri=""), t0 - 0.5)
+    att, sound = _attempt_at(t0), _sound(t0, t0 + 0.2)
+    bare._seek_mark = (297.0, t0 + 0.1, att)            # the resume's own Seek
+    if read:
+        out_a = [_clock_tick(bare, att, sound, _status(PlaybackState.PLAYING, 5, 0.0), t0 + k) for k in (1, 2, 3)]
+        assert out_a[-1] == pytest.approx(297.0 + 2.8)    # set at the start heard, t0 + 0.2
+    out_b = [_clock_tick(bare, att, sound, _status(PlaybackState.PLAYING, 6, 0.0, uri=_URI_B), t0 + k)
+             for k in (4, 5, 6)]
+    assert all(p < 10.0 for p in out_b), out_b
+
+
+def test_a_superseded_starts_seek_seeds_no_clock_of_the_take_that_plays(bare):
+    t0 = time.time() - 60.0
+    _clock_tick(bare, _attempt_at(t0 - 5.0), _sound(t0 - 6.0, t0 - 5.8, last=t0 - 5.0),
+                _status(PlaybackState.STOPPED, 4, 0.0, uri=""), t0 - 0.5)
+    att, sound = _attempt_at(t0), _sound(t0, t0 + 0.2)
+    bare._seek_mark = (60.0, t0 + 0.05, diag.Attempt(intent="select", slot=1))
+    out = [_clock_tick(bare, att, sound, _status(PlaybackState.PLAYING, 6, 0.0, uri=_URI_B), t0 + k)
+           for k in (1, 2, 3)]
+    assert out == pytest.approx([0.0, 1.8, 2.8]), out
 
 
 def test_a_seek_of_the_persons_inside_the_stretch_sets_the_clock_and_the_stretch_stays(bare):
