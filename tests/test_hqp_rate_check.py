@@ -309,26 +309,29 @@ def test_what_was_measured_speaks_on_its_engines_major_alone():
 
 def test_an_up_filter_not_tried_may_stop_and_the_others_without_up_are_not_judged_at_1_to_1():
     # "will stop" only for the three HQPlayer stopped; "up" filters not tried — sinc-short,
-    # poly-sinc-gauss-short, closed-form-fast — may stop under the source's rate, at any downward ratio
+    # poly-sinc-gauss-short, closed-form-fast, sinc-Mx — may stop under the source's rate, at any downward ratio
     assert rc.UP_REFUSED == {name for name, row in UP_MATRIX.items()
                              if any(row[cell] in STOPS for cell in ("88.2k->44.1k", "352.8k->176.4k"))}
-    for name in ("sinc-short", "poly-sinc-gauss-short", "closed-form-fast"):
+    for name in ("sinc-short", "poly-sinc-gauss-short", "closed-form-fast", "sinc-Mx"):
         assert [g.why for g in _cell(name, "352.8k->176.4k").groups] == ["may"], name
         c = rc.check(_measured(name, 44100), Sources({96000: 1, 352800: 1}))
         assert [(g.why, g.sources) for g in c.groups] == [("may", (96000, 352800))], name
-    # sinc-Mx, sinc-M's twin, never tried there: no stop, the class's words and sinc-M's conversion — where
-    # sinc-M gets its own, under a source of its family
+    # sinc-Mx, compared with sinc-M only into 705.6 and 768 kHz, never tried under the source's rate: its own
+    # "may", and nothing of sinc-M's conversion — until 2026-10-23 it got sinc-M's note, as its twin
     c = _cell("sinc-Mx", "352.8k->176.4k")
-    assert not c.groups and [(g.why, g.sources) for g in c.notes] == [("twin", (352800,))]
+    assert not c.notes and [(g.why, g.sources) for g in c.groups] == [("may", (352800,))]
     assert [plain(p) for p in rc.lines(c)["filter"]] == [
-        "HQPlayer describes sinc-Mx as 2^x up, and the 352.8 kHz tracks in the queue are above 176.4 kHz. Filters "
-        "described with “up” are made for upsampling, not for decimation; on engine 6.2.4 sinc-Mx was not tried "
-        "under the source's rate, and sinc-M, its twin, converted 352.8 kHz to 176.4 kHz and did not stop."]
-    assert rc.notice(c) is None and rc.verdict(c, 352800, None) is None and not c.started_refused
-    c = rc.check(_measured("sinc-Mx", 44100), Sources({96000: 1}))
-    assert not c.groups and not c.notes
-    # another major: nothing of either twin
-    assert not _cell("sinc-Mx", "352.8k->176.4k", engine="7.0.1").notes
+        "HQPlayer describes sinc-Mx as 2^x up. Of the “up” filters tried on engine 6.2.4, HQPlayer stopped with "
+        "all but sinc-M under the source's rate; sinc-Mx was not tried there, so HQPlayer may stop on the "
+        "352.8 kHz tracks in the queue at 176.4 kHz.",
+        "Filters described with “up” are made for upsampling, not for decimation: pick one HQPlayer describes "
+        "without “up”, or as the output rate the tracks' own or a power-of-two multiple of it."]
+    assert plain(rc.notice(c)["title"]) == "Some tracks in the queue may not play at 176.4 kHz"
+    assert rc.verdict(c, 352800, None)["sentence"] == (
+        "HQPlayer describes sinc-Mx as 2^x up: 176.4 kHz is under 352.8 kHz, and HQPlayer stopped on this track.")
+    assert not c.started_refused and c.started_may == "sinc-Mx"
+    # another major: nothing of it
+    assert not _cell("sinc-Mx", "352.8k->176.4k", engine="7.0.1").groups
     # the 2^x and Int filters without "up" other than FFT and FIR: 1:1 not tried, nothing said
     for name in ("IIR", "IIR2", "asymFIR", "minphaseFIR", "poly-sinc-ext"):
         assert not _cell(name, "88.2k->88.2k").groups, name
@@ -575,7 +578,7 @@ def _states(tmp_path):
             yield rc.check(_inp(ratio, adaptive=adaptive, rates=(705600, 768000)), _src(44100, 88200))
             yield rc.check(_inp(ratio, adaptive=adaptive), src)
         # what was measured on engine 6.2.4: a stop under the source's rate, at 1:1, sinc-M's words; an "up"
-        # filter not tried, and sinc-Mx's words
+        # filter not tried, sinc-Mx among them
         for name, out in (("closed-form", 88200), ("FFT", 44100), ("sinc-M", 44100), ("sinc-short", 44100),
                           ("sinc-Mx", 44100)):
             yield rc.check(_measured(name, out, adaptive=adaptive), Sources({44100: 1, 48000: 1, 176400: 1}))

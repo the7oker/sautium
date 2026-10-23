@@ -3815,13 +3815,15 @@ class's words ("made for upsampling, not for decimation") and its one
 measured conversion, 352.8 → 176.4 kHz, without a stop, where the check's
 lines are said (the screen, the assistant), never as a notice or a verdict,
 and for a source of its family only (nothing was measured across the
-families, so nothing is said there of either twin); sinc-Mx, its twin (one
-output, bit for bit, where the atlas compared them), never tried downward,
-gets the class's words and sinc-M's conversion, without a stop, where sinc-M
-gets its own: the one measurement nearest to it did not stop. FFT and FIR
-stop at 1:1, by name, the other 2^x and Int filters not having been tried
-there. "For upsampling, not decimation" is the plain sense of what was
-measured, said as Sautium's beside HQPlayer's description, never inside it.
+families, so nothing is said there of it). sinc-Mx, never tried downward,
+is an "up" filter not tried, and may stop (since 2026-10-23): the atlas
+compared it with sinc-M only into 705.6 and 768 kHz, so sinc-M's
+conversion says nothing of it under the source's rate — until then it got
+the class's words and sinc-M's conversion, without a stop, as sinc-M's
+twin. FFT and FIR stop at 1:1, by name, the other 2^x and Int filters not
+having been tried there. "For upsampling, not decimation" is the plain
+sense of what was measured, said as Sautium's beside HQPlayer's
+description, never inside it.
 A rate the fix would name is dropped where a measured refusal stops (FFT or
 FIR at 1:1). sinc-medium's refusal comes after its filter built ("lInRate >
 lOutRate", one playing status at 0 s between): the refused-rate log cause

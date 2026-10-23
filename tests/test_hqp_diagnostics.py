@@ -349,17 +349,18 @@ def test_a_pcm_track_an_up_filter_stopped_under_its_rate_closes_at_the_first_sto
     assert (v["code"], v["cause"]) == ("rate_refused", "filter")
     assert v["sentence"] == ("HQPlayer describes sinc-medium as Any up: 44.1 kHz is under 88.2 kHz, and HQPlayer "
                              "stopped on this track.")
-    # sinc-M: never stopped there, nothing named; sinc-Mx, its twin, neither
-    for twin in ("sinc-M", "sinc-Mx"):
-        m = {**down, "inputs": {**down["inputs"], "filter": {"name": twin, "ratio": "2^x", "up": True}}}
-        assert not diag.names_cause(m) and diag.verdict({**facts, "rate": m})["code"] == "not_played", twin
-    # an "up" filter not tried may stop: its attempt waits for the window, and the stop, once seen, is said
-    may = {**down, "inputs": {**down["inputs"], "filter": {"name": "sinc-short", "ratio": "Any", "up": True}}}
-    assert not diag.names_cause(may)
-    v = diag.verdict({**facts, "rate": may})
-    assert (v["code"], v["cause"]) == ("rate_refused", "filter")
-    assert v["sentence"] == ("HQPlayer describes sinc-short as Any up: 44.1 kHz is under 88.2 kHz, and HQPlayer "
-                             "stopped on this track.")
+    # sinc-M: never stopped there, nothing named
+    m = {**down, "inputs": {**down["inputs"], "filter": {"name": "sinc-M", "ratio": "2^x", "up": True}}}
+    assert not diag.names_cause(m) and diag.verdict({**facts, "rate": m})["code"] == "not_played"
+    # an "up" filter not tried may stop — sinc-Mx among them, compared with sinc-M only into 705.6 and 768 kHz:
+    # its attempt waits for the window, and the stop, once seen, is said
+    for name, ratio in (("sinc-short", "Any"), ("sinc-Mx", "2^x")):
+        may = {**down, "inputs": {**down["inputs"], "filter": {"name": name, "ratio": ratio, "up": True}}}
+        assert not diag.names_cause(may), name
+        v = diag.verdict({**facts, "rate": may})
+        assert (v["code"], v["cause"]) == ("rate_refused", "filter"), name
+        assert v["sentence"] == (f"HQPlayer describes {name} as {ratio} up: 44.1 kHz is under 88.2 kHz, and "
+                                 "HQPlayer stopped on this track.")
 
 
 def test_an_advance_closed_on_the_refusal_of_a_filter_hqplayer_built_is_judged_by_it():

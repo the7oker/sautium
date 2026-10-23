@@ -1751,7 +1751,7 @@ checked in this order — positive evidence before any absence of it:
 | `proxy_error` | the media proxy answered 404 (token not registered — the restart race), 500 (file gone, CUE cut failed), 502/504 (provider), 401/403 (a bug) | play again / check the music folder |
 | `no_fetch` | an http hand-over HQPlayer never requested (none from the hand-over to 5 s after Play) | same LAN, the firewall for the media port, the Docker forward — host and port named |
 | `rejected` | PlaylistAdd or Play refused (HQPlayer's words quoted; "Empty transport" = nothing was taken), or the expected entry missing from its playlist | the file must be readable here; a copy in HQPlayer's library: Rescan it |
-| `rate_refused` | taken, then stopped at its start without moving, where the rate check (`backend/hqp_rate_check.py`) names why — the filter HQPlayer ran, by the ratio class HQPlayer describes it with and, on an engine of 6.2.4's major, the rule drawn from what was measured there: a filter described "up" under the track's rate (sinc-M and sinc-Mx aside; one HQPlayer stopped will stop, one not tried may), FFT or FIR at 1:1; a DSD track by the PCM rate HQPlayer's log names it converted the track to, never by its own (PCM mode only, since 2026-10-21); in SDM first the modulator, at a rate the atlas as published (the shipped file, its release dated) measured it refused for the track's family — or HQPlayer's log names a refused rate combination (its line quoted, attributed to nothing); judged at HQPlayer's first stop when the check names a cause without a hedge — a hedged one, the adaptive output rate not known, an "up" filter not tried, and a DSD track's, at the window; HQPlayer's own advance at its deadline, or at once on its log line here | a filter HQPlayer describes as Any, the adaptive output rate in HQPlayer's own settings, a rate of HQPlayer's list every track still to play reaches (named only when every one is refused, all of one family); after an "up" filter's stop, a filter described without "up", or the track's own rate or a power-of-two multiple of it (a DSD track: twice the rate HQPlayer converted it to, or a higher power-of-two multiple); after a 1:1 refusal, another filter or rate; another modulator or rate |
+| `rate_refused` | taken, then stopped at its start without moving, where the rate check (`backend/hqp_rate_check.py`) names why — the filter HQPlayer ran, by the ratio class HQPlayer describes it with and, on an engine of 6.2.4's major, the rule drawn from what was measured there: a filter described "up" under the track's rate (sinc-M aside; one HQPlayer stopped will stop, one not tried may — sinc-Mx too, since 2026-10-23), FFT or FIR at 1:1; a DSD track by the PCM rate HQPlayer's log names it converted the track to, never by its own (PCM mode only, since 2026-10-21); in SDM first the modulator, at a rate the atlas as published (the shipped file, its release dated) measured it refused for the track's family — or HQPlayer's log names a refused rate combination (its line quoted, attributed to nothing); judged at HQPlayer's first stop when the check names a cause without a hedge — a hedged one, the adaptive output rate not known, an "up" filter not tried, and a DSD track's, at the window; HQPlayer's own advance at its deadline, or at once on its log line here | a filter HQPlayer describes as Any, the adaptive output rate in HQPlayer's own settings, a rate of HQPlayer's list every track still to play reaches (named only when every one is refused, all of one family); after an "up" filter's stop, a filter described without "up", or the track's own rate or a power-of-two multiple of it (a DSD track: twice the rate HQPlayer converted it to, or a higher power-of-two multiple); after a 1:1 refusal, another filter or rate; another modulator or rate |
 | `not_played` | taken (bytes served, or a path) but never `playing`, or it stopped again | HQPlayer's log, the DSP line |
 | `unknown` / `interrupted` | nothing explains it / another action took over first (not counted) | HQPlayer's log |
 
@@ -1987,12 +1987,14 @@ the "may" names, with the DSP keeping up — is said no more at that setting
 and engine while HQPlayer stays attached, on the screen, in the notice and
 by the assistant. A later measurement moves a name from "may" to "will".
 sinc-M gets the class's words and its one measured conversion (352.8 → 176.4
-kHz) without a stop, and sinc-Mx, its twin, never tried downward, the
-class's words and sinc-M's conversion, without a stop — where the check's
-lines are said (the HQPlayer screen, the assistant), for a source of its
-family only, never as a notice or a verdict; across the families nothing is
-said of either twin. The 1:1 is said of FFT and FIR by name, the other 2^x
-and Int filters not having been tried there. HQPlayer refuses in two ways:
+kHz) without a stop — where the check's lines are said (the HQPlayer screen,
+the assistant), for a source of its family only, never as a notice or a
+verdict; across the families nothing is said of it. sinc-Mx, never tried
+downward, is, since 2026-10-23, an "up" filter not tried: the atlas compared
+it with sinc-M only into 705.6 and 768 kHz, and until then it was said with
+sinc-M's conversion, as its twin. The 1:1 is said of FFT and FIR by name,
+the other 2^x and Int filters not having been tried there. HQPlayer refuses
+in two ways:
 "Requested filter not possible with this rate combination A/B, stop" before
 its engine starts, and, from a filter it built first (sinc-medium), one
 playing status at 0 s, then "clHQPlayerEngine::Execute(): lInRate >

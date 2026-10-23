@@ -10031,8 +10031,8 @@
       const filterName = activeFilter ? activeFilter.name : '—';
       // When the queue meets a rate HQPlayer cannot reach, or may not: the
       // server's phrases (hqp_rate_check), each under the row it names — the
-      // filter's after its facts, the modulator's under its row; sinc-M's and
-      // sinc-Mx's notes, which name no stop, are drawn there too
+      // filter's after its facts, the modulator's under its row; sinc-M's
+      // note, which names no stop, is drawn there too
       const rateCheck = s.rate_check || {};
       const rateLine = (row) => (rateCheck[row] || []).length
         ? `<p class="hqp-row-hint is-left is-refused" data-hqp-rate-check="${row}">${

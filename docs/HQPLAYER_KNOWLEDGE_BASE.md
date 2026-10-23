@@ -371,11 +371,10 @@ are Signalyst's text, and this file does not reproduce them.
     engine 6.2.4, on an HQPlayer of engine 6 alone, and says "will stop"
     only of a filter measured stopping: under the source's rate, at any
     downward ratio, closed-form, sinc-medium and poly-sinc-ext2-short will
-    stop, and a filter described `up` that was not tried may stop; for a
-    source of its family, sinc-M is said without a stop, and sinc-Mx, its
-    twin, not tried there, with the class's plain sense and sinc-M's
-    conversion, no stop — across the families nothing of either; FFT and
-    FIR stop at 1:1.
+    stop, and a filter described `up` that was not tried may stop, sinc-Mx
+    among them (the atlas compared it with sinc-M only into 705.6 and
+    768 kHz); for a source of its family, sinc-M is said without a stop,
+    across the families nothing of it; FFT and FIR stop at 1:1.
 - **A rate combination HQPlayer refuses** is named in its log: "Requested
   filter not possible with this rate combination", the source rate over the
   output rate, then "stop" — or, after it has built the filter (sinc-medium
