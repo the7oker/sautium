@@ -20,7 +20,7 @@ from hqplayer_client import PlaybackState, TrackStatus  # noqa: E402
 from playback.manager import PlaybackManager  # noqa: E402
 from playback.queue import QueueItem  # noqa: E402
 from tests.test_hqp_backend import (_closed, _queue_stays_in_memory, _wait, fake,  # noqa: E402,F401
-                                    traced)
+                                    listens, output, traced)
 
 NODE = shutil.which("node")
 pytestmark = pytest.mark.skipif(NODE is None, reason="node not installed")
@@ -126,6 +126,12 @@ const cut = (from, to) => {
 };
 const spec = JSON.parse(fs.readFileSync(0, 'utf8'));
 const npHandlers = [], toasts = [];
+// notices.toast as it shows them: one with the key of a toast still up
+// takes it over in place
+const toast = t => {
+  const i = t.key ? toasts.findIndex(x => x.key === t.key) : -1;
+  if (i >= 0) toasts[i] = t; else toasts.push(t);
+};
 const ctx = {
   window: { addEventListener() {}, dispatchEvent() {} },
   document: { readyState: 'loading', visibilityState: 'visible',
@@ -136,7 +142,7 @@ const ctx = {
   },
   crypto: require('node:crypto').webcrypto, CustomEvent: class {},
   console: { warn() {}, log() {}, error() {}, debug() {} }, setTimeout, clearTimeout,
-  notices: { toast: t => toasts.push(t) },
+  notices: { toast }, __tracks: spec.tracks || [],
   openHqpDiagnosis() {}, navigate() {},
 };
 vm.createContext(ctx);
@@ -147,24 +153,29 @@ vm.runInContext([
   cut('  // Playback 503 = the configured output', '\n  // Backend-async playback failures ride'),
   cut('  // Backend-async playback failures ride', '\n  // A DSP change that went through a build'),
   cut('  // Surface a queue/play failure as a toast', '\n  // Grey out + disable the phantom track rows'),
+  // the queue sheet's tap, as the sheet calls it
+  'const __sheet = { tracks: __tracks, ' + cut('    async jumpTo(index) {', '\n    // Pointer-events drag') + ' };',
+  'this.__sheet = __sheet;',
 ].join('\n'), ctx);
 (async () => {
   for (const ev of spec.events) {
     if (ev.np) { ctx.window.currentStatus = ev.np; npHandlers.forEach(h => h({ detail: ev.np })); }
     else if (ev.cmd) await ctx.window.playerCmd(ev.cmd);
     else if (ev.seek != null) await ctx.window.playerSeek(ev.seek);
+    else if (ev.jump != null) await ctx.__sheet.jumpTo(ev.jump);
   }
-  process.stdout.write(JSON.stringify(toasts.map(t => ({ key: t.key, kind: t.kind,
-                                                         title: t.title, text: t.text }))));
+  process.stdout.write(JSON.stringify(toasts.map(t => ({
+    key: t.key, kind: t.kind, title: t.title, text: t.text, action: t.action ? t.action.label : null }))));
 })().catch(e => { process.stderr.write(String(e && e.stack)); process.exit(1); });
 """
 
 
-def _ui(events, answers):
+def _ui(events, answers, tracks=None):
     proc = subprocess.run(
         [NODE, "-e", _SHELL, "--", str(REPO_ROOT / "backend" / "static" / "player.js"),
          str(REPO_ROOT / "backend" / "static" / "app-shell.js")],
-        input=json.dumps({"events": events, "answers": answers}, default=str).encode(),
+        input=json.dumps({"events": events, "answers": answers, "tracks": tracks or []},
+                         default=str).encode(),
         capture_output=True)
     assert proc.returncode == 0, proc.stderr.decode()
     return json.loads(proc.stdout)
@@ -182,14 +193,13 @@ def test_a_pause_and_a_seek_hqplayer_refused_are_each_said_once_in_its_words(tra
     assert paused == {"ok": False, "refusal": "HQPlayer refused Pause"}, paused
     assert sought == {"ok": False, "refusal": "Not seekable"}, sought
     out = {"type": "hqplayer", "label": "Study <HQP>", "attached": True}     # a name of its own: escaped
-    toasts = _ui([{"np": {"state": "playing", "output": out}}, {"cmd": "pause"}, {"seek": 60}],
-                 {"/api/player/pause": {"status": 200, "body": paused},
-                  "/api/player/seek": {"status": 200, "body": sought}})
-    assert toasts == [
+    np = {"np": {"state": "playing", "output": out}}
+    assert _ui([np, {"cmd": "pause"}], {"/api/player/pause": {"status": 200, "body": paused}}) == [
         {"key": "player.refused", "kind": "error", "title": "Study &lt;HQP&gt; did not take the Pause",
-         "text": "HQPlayer refused Pause"},
+         "text": "HQPlayer refused Pause", "action": None}]
+    assert _ui([np, {"seek": 60}], {"/api/player/seek": {"status": 200, "body": sought}}) == [
         {"key": "player.refused", "kind": "error", "title": "Study &lt;HQP&gt; did not take the Seek",
-         "text": "Not seekable"}], toasts
+         "text": "Not seekable", "action": None}]
 
 
 @pytest.mark.parametrize("diagnosis_first", [False, True])
@@ -217,7 +227,55 @@ def test_a_play_hqplayer_refused_is_said_once_with_its_diagnosis(traced, fake, m
     if diagnosis_first:
         events = [events[0], diagnosed, events[1]]
     toasts = _ui(events, {"/api/player/play": {"status": 200, "body": answer}})
-    assert len(toasts) == 1, toasts
+    assert len(toasts) == 1 and toasts[0]["action"] == "Why?", toasts
+
+
+@pytest.mark.parametrize("diagnosis_first", [False, True])
+def test_a_tap_hqplayer_refused_is_said_once_with_its_why(traced, fake, monkeypatch, diagnosis_first):
+    """A queue tap HQPlayer refuses: its answer comes before the attempt's
+    diagnosis, which names the tapped track while Now Playing stands on
+    another — the one toast keeps the way to Why?."""
+    import routers.player as player
+
+    fake.replies["SelectTrack"] = '<SelectTrack result="Error">No such track</SelectTrack>'
+    monkeypatch.setattr(player, "manager", types.SimpleNamespace(
+        ensure_active=lambda: traced, backend=lambda: traced, active=traced, queue=traced._queue))
+    answer = player.jump(player.JumpRequest(index=2, track_id="track-2"))
+    assert answer["ok"] is False and answer["refusal"] == "No such track" and answer["attempt"], answer
+    assert _wait(lambda: traced._last_closed is not None
+                 and traced._last_closed.id == answer["attempt"], 5.0)
+    stopped = TrackStatus(state=PlaybackState.STOPPED, track_index=1, track_id="", position=0.0,
+                          length=300.0, volume=-3.0)
+    d = traced._diagnosis(stopped)
+    assert d is not None and d["id"] == answer["attempt"] and not d["failing"], d
+    out = {"type": "hqplayer", "label": "HQPlayer", "attached": True}
+    diagnosed = {"np": {"state": "stopped", "output": out, "diagnosis": d}}
+    events = [{"np": {"state": "stopped", "output": out}}, {"jump": 2}, diagnosed]
+    if diagnosis_first:
+        events = [events[0], diagnosed, events[1]]
+    toasts = _ui(events, {"/api/player/jump": {"status": 200, "body": answer}},
+                 [{"track_id": "track-1"}, {"track_id": "track-2"}])
+    assert len(toasts) == 1 and toasts[0]["action"] == "Why?", toasts
+
+
+def test_a_next_hqplayer_refused_while_it_plays_is_said_in_its_words(fake, output, monkeypatch):
+    """HQPlayer plays on after a Next it refused: no diagnosis shows, and the
+    answer's toast stands, in HQPlayer's words."""
+    import routers.player as player
+
+    mgr, b = output
+    monkeypatch.setattr(player, "manager", mgr)
+    fake.replies["Next"] = '<Next result="Error">No next track</Next>'
+    before = dict(mgr.latest_status)
+    answer = player.next_track()
+    a = _closed(timeout=5.0)
+    assert answer == {"ok": False, "refusal": "No next track", "attempt": a.id}, answer
+    assert _wait(lambda: b._last_closed is a, 5.0)
+    after = dict(mgr.latest_status)
+    assert after["state"] == "playing" and "diagnosis" not in after, after
+    toasts = _ui([{"np": before}, {"cmd": "next"}, {"np": after}],
+                 {"/api/player/next": {"status": 200, "body": answer}})
+    assert [(t["key"], t["text"]) for t in toasts] == [("hqplayer.diagnosis", "No next track")], toasts
 
 
 def test_a_pause_a_dlna_renderer_failed_is_said_once(monkeypatch):

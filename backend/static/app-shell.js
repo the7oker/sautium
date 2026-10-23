@@ -2058,10 +2058,11 @@
         return;
       }
       // A slot the output does not take (a gap) is refused in its words —
-      // once with the attempt's diagnosis (firstSaid)
+      // one toast with the attempt's diagnosis, which takes it over (firstSaid)
       const out = await resp.json();
       if (out.ok === false && out.refusal && firstSaid(out.attempt)) {
-        notices.toast({ kind: 'info', key: 'queue.refused', title: 'Not played',
+        notices.toast({ kind: 'info', key: out.attempt != null ? 'hqplayer.diagnosis' : 'queue.refused',
+                        title: 'Not played',
                         text: escapeHtml(out.refusal.charAt(0).toUpperCase() + out.refusal.slice(1)) });
       }
       // The queue sheet stays open — user typically wants to keep
@@ -6265,8 +6266,10 @@
   });
 
   // The play attempts whose failure this tab has said: HQPlayer's words in a
-  // route's answer (`attempt`) and the attempt's diagnosis say one failure,
-  // and the one that comes first speaks — Now Playing's tag still offers Why?
+  // route's answer (`attempt`) and the attempt's diagnosis say one failure in
+  // one toast — the answer's goes under the diagnosis's key, and the
+  // diagnosis, when it comes, takes it over in place with its Why?; an
+  // answer that comes after the diagnosis says nothing more
   const saidAttempts = new Set();
   function firstSaid(attempt) {
     if (attempt == null) return true;
@@ -6276,11 +6279,11 @@
   }
 
   // A play the HQPlayer output judged failed (playback/hqp_diagnostics.py):
-  // one toast per attempt, with the way to its explanation. Not when the
+  // one toast per attempt, with the way to its explanation — the toast its
+  // route's answer opened, taken over in place (firstSaid). Not when the
   // same failure repeats on a dead output — the `hqplayer.failing` notice
-  // speaks then (`failing`, decided by the server) — not for an HQPlayer
-  // that did not answer: the play route's 503 already said so — and not
-  // when this tab said the attempt's refusal already (firstSaid).
+  // speaks then (`failing`, decided by the server) — and not for an
+  // HQPlayer that did not answer: the play route's 503 already said so.
   // The status a tab connects with paints the tag only, never a stale toast.
   let lastDiagnosisSeen;
   document.addEventListener('np-update', (e) => {
@@ -6289,7 +6292,8 @@
     const first = lastDiagnosisSeen === undefined;
     if (id === lastDiagnosisSeen) return;
     lastDiagnosisSeen = id;
-    if (!d || first || d.failing || d.code === 'unreachable' || !firstSaid(d.id)) return;
+    if (!d || first || d.failing || d.code === 'unreachable') return;
+    firstSaid(d.id);
     notices.toast({ kind: 'error', key: 'hqplayer.diagnosis', title: escapeHtml(d.title),
                     text: escapeHtml(d.next || ''),
                     action: { label: 'Why?', run: () => openHqpDiagnosis(d.id) } });
@@ -6336,7 +6340,7 @@
       // The output's name is a device's own (a renderer's friendlyName): escaped
       const out = window.currentStatus && window.currentStatus.output;
       const name = (out && out.label) || 'The output';
-      notices.toast({ kind: 'error', key: 'player.refused',
+      notices.toast({ kind: 'error', key: body.attempt != null ? 'hqplayer.diagnosis' : 'player.refused',
                       title: escapeProfileHtml(`${name} did not take the ${TRANSPORT_WORDS[word] || 'command'}`),
                       text: escapeProfileHtml(body.refusal) });
       return false;

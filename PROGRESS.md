@@ -1260,8 +1260,9 @@ implementation details live in the code, DB and git history.
   2026-10-23: the shell's one reporter toasts the output's refusal in its
   own words for a Play, Pause, Stop, Next, Previous and Seek, and the
   Seek's route answers it as the others do; a refusal that was a play
-  attempt's step names that attempt, so the tab says it once with the
-  attempt's diagnosis, whichever comes first; an output with no words of
+  attempt's step names that attempt, and the tab says it in one toast with
+  the attempt's diagnosis, which takes it over in place with its Why?
+  whichever comes first; an output with no words of
   its own says why on its status, and a Next past the queue's end is no
   refusal — the first cut toasted those again, "It gave no reason"); and
   on a tail mirror a "play next", a removal and a new order still take an entry
