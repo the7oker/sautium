@@ -1400,10 +1400,10 @@ def _transport(intent: bool, command: str, *args) -> dict:
     """One transport command on the active output — a play intent through
     the gate that (re)attaches it — and whether it was taken; one that was
     not carries the output's own words (`refusal`), which the assistant
-    quotes. While a play intent goes on behind the answer (HQPlayer taking
-    the queue again, or a queue mutation in flight) `starts` names the track
-    it will start — null when a Pause, a Stop or any newer intent that
-    supersedes it dropped it."""
+    quotes and the shell says (reportPlaybackResult). While a play intent
+    goes on behind the answer (HQPlayer taking the queue again, or a queue
+    mutation in flight) `starts` names the track it will start — null when
+    a Pause, a Stop or any newer intent that supersedes it dropped it."""
     try:
         b = manager.ensure_active() if intent else manager.backend()
         ok = getattr(b, command)(*args)
@@ -1462,7 +1462,8 @@ def set_volume(req: VolumeRequest):
 @router.post("/seek")
 def seek(req: SeekRequest):
     """Seek within the current track (outputs whose capabilities().seek is
-    true — the built-in engine and HQPlayer both support it)."""
+    true — the built-in engine and HQPlayer both support it); one the output
+    did not take carries its words, as a transport command does."""
     if req.position < 0:
         raise HTTPException(status_code=400, detail="position must be >= 0")
     try:
@@ -1470,7 +1471,7 @@ def seek(req: SeekRequest):
         ok = b.seek(int(req.position))
     except Exception as e:
         raise _output_error(e)
-    return _starting(b, {"ok": ok})
+    return _starting(b, {"ok": True} if ok else {"ok": False, "refusal": b.refusal()})
 
 
 # -- Smart play ----------------------------------------------------------------

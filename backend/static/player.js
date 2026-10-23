@@ -333,27 +333,37 @@
     if (cmd === 'play') maybeClaimRenderer();
     try {
       const resp = await fetch('/api/player/' + cmd, { method: 'POST' }).catch(() => null);
-      if (resp && resp.ok) return;
-      // A word the route refused gets its explanation from the shell's one
+      const body = await taken(resp);
+      if (resp && resp.ok && !(body && body.ok === false)) return;
+      // A word the route refused, or the output refused in its own words
+      // (HTTP 200, ok false), gets its explanation from the shell's one
       // reporter (a dozing output, streaming, HQPlayer held, building or not
-      // answering) instead of dying in the console: after a Pause or a Stop
-      // the music goes on, and the person must know.
+      // answering, the output's refusal) instead of dying in the console:
+      // after a Pause or a Stop the music goes on, and the person must know.
       if (['play', 'next', 'previous', 'pause', 'stop'].includes(cmd)) {
-        await window.reportPlaybackResult(resp);
+        await window.reportPlaybackResult(resp, body, cmd);
       } else {
         console.warn('Player command failed:', cmd, resp ? 'HTTP ' + resp.status : 'no response');
       }
     } finally { _cmdInFlight.delete(cmd); }
   }
 
-  // A Seek the route refused is said, as a Pause is (playerCmd).
+  // The route's answer to a word it handed the output, {ok, refusal}: read
+  // here, a body reads once. None for a status the reporter reads itself.
+  async function taken(resp) {
+    if (!resp || !resp.ok) return undefined;
+    try { return await resp.json(); } catch (_) { return null; }
+  }
+
+  // A Seek the route or the output refused is said, as a Pause is (playerCmd).
   async function playerSeek(position) {
     const resp = await fetch('/api/player/seek', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ position }),
     }).catch(() => null);
-    if (!resp || !resp.ok) await window.reportPlaybackResult(resp);
+    const body = await taken(resp);
+    if (!resp || !resp.ok || (body && body.ok === false)) await window.reportPlaybackResult(resp, body, 'seek');
   }
 
   function togglePlayPause() {

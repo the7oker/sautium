@@ -162,3 +162,22 @@ def test_a_next_block_that_rolls_in_keeps_its_order(monkeypatch):
 
     assert [it.track_id for it in mgr.queue.snapshot()] == [
         "t1", "t10", "t11", "t12", "t2"]
+
+
+def test_a_seek_the_output_refused_answers_in_its_words(monkeypatch):
+    """The output refused the Seek in its own words: the route answers ok
+    false with them, as it does a Pause, so the person is told what it said."""
+    import routers.player as player
+
+    class Refusing:
+        def seek(self, seconds):
+            return False
+
+        def refusal(self):
+            return "HQPlayer refused Seek"
+
+        def pressing(self):
+            return None
+
+    monkeypatch.setattr(player, "manager", types.SimpleNamespace(backend=Refusing))
+    assert player.seek(player.SeekRequest(position=30)) == {"ok": False, "refusal": "HQPlayer refused Seek"}

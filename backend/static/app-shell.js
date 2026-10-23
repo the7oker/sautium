@@ -6308,10 +6308,22 @@
   // commands in player.js included (window.reportPlaybackResult): a 503 is
   // the output not taking the command, a structured streaming 503 the
   // provider side, `resp` null a fetch that threw (network), anything else
-  // the route's own verdict. Returns true on success so callers can skip
-  // follow-up work.
-  async function reportPlaybackResult(resp, body) {
-    if (resp && resp.ok) return true;
+  // the route's own verdict; and a transport `word` the route handed the
+  // output that refused it in its own words (HTTP 200, `ok: false` with its
+  // `refusal`). Returns true on success so callers can skip follow-up work.
+  const TRANSPORT_WORDS = { play: 'Play', pause: 'Pause', stop: 'Stop', next: 'Next',
+                            previous: 'Previous', seek: 'Seek' };
+  async function reportPlaybackResult(resp, body, word) {
+    if (resp && resp.ok) {
+      if (!body || body.ok !== false) return true;
+      // The output's name is a device's own (a renderer's friendlyName): escaped
+      const out = window.currentStatus && window.currentStatus.output;
+      const name = (out && out.label) || 'The output';
+      notices.toast({ kind: 'error', key: 'player.refused',
+                      title: escapeProfileHtml(`${name} did not take the ${TRANSPORT_WORDS[word] || 'command'}`),
+                      text: escapeProfileHtml(body.refusal || 'It gave no reason.') });
+      return false;
+    }
     // A Response body is one-shot: callers that already read resp.json() must
     // pass it here, else our re-read throws and we'd wrongly blame HQPlayer.
     let detail = (body && body.detail) || '';

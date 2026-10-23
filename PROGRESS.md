@@ -1242,7 +1242,10 @@ implementation details live in the code, DB and git history.
 - **Open after the second look at the fixes** (2026-10-15), left for the
   next slice: a Pause, a Stop or a Seek HQPlayer refuses in its own words
   (an Error answer: the route says HTTP 200 with `ok: false`) is said to
-  nobody — the UI says only what the route itself refused; and on a tail
+  nobody — the UI says only what the route itself refused (said since
+  2026-10-23: the shell's one reporter toasts the output's refusal for a
+  Play, Pause, Stop, Next, Previous and Seek, and the Seek's route answers
+  it as the others do); and on a tail
   mirror a "play next", a removal and a new order still take an entry
   HQPlayer reads in a state the SDK does not name, or with a stop under way,
   for a reading (the entry read is never touched); when the output no longer
