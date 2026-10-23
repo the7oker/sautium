@@ -1257,9 +1257,12 @@ implementation details live in the code, DB and git history.
   Pause made while its play press prepares joins that press: a full
   hand-over to the tapped track, or HQPlayer stopped with Now Playing on it,
   a track it does not play. Done: a press none of whose starts is live lets
-  go as it decides, so a word made after that goes on its own; left: a start
-  a newer word superseded takes no more words, and a Pause or a Stop such a
-  press holds goes on its own. And two Nexts at a spot with a "play next"
+  go as it decides, so a word made after that goes on its own; and since
+  2026-10-23 a start a newer word superseded takes no more words: held
+  words count from what played, and a press none of whose starts is live
+  takes no word but a tap, so a Pause, a Stop, a Seek, a Play, Next or
+  Previous made while it prepares goes on what plays — nothing rebuilt, Now
+  Playing on what HQPlayer plays. And two Nexts at a spot with a "play next"
   inside one status skip the inserted track: the spot a held Next moved was
   counted on the layout before the insert read HQPlayer, and is kept;
   counting such a step again from the spot the insert reads belongs, with

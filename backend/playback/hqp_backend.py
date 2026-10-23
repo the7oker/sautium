@@ -926,6 +926,16 @@ class _InFlight(_Words):
         return max(self.halts) > max([start.item.n if start is not None else 0]
                                      + [n for n, _, _ in self.plain])
 
+    def leading(self) -> Optional[_Start]:
+        """The newest start, unless a word that names no track came after it:
+        a start a newer word superseded takes no more words. A tap that
+        waited its turn while a Play or a Seek was made on what played
+        yielded to them, and the words after count from what played."""
+        start = self.newest()
+        if start is not None and any(n > start.item.n for n, _, _ in self.plain):
+            return None
+        return start
+
     def index(self, item: QueueItem) -> Optional[int]:
         """`item`'s place (1-based) among what HQPlayer is handed."""
         return next((i for i, it in enumerate(self.items, 1) if it is item), None)
@@ -2715,9 +2725,7 @@ class HqpBackend(PlayerBackend):
         came. Returns what could not go, in words: a start whose track the
         queue does not hold (a new queue that did not commit)."""
         owed = getattr(self._local, "start", None)
-        newest = words.newest()
-        if newest is not None and any(n > newest.item.n for n, _, _ in words.plain):
-            newest = None
+        newest = words.leading()
         last = max(words.halts, default=0)
         # A Seek of what plays, made before the halt with no start to move,
         # still holds
@@ -3340,7 +3348,8 @@ class HqpBackend(PlayerBackend):
         nothing stops HQPlayer at its end, and a mutation that leaves
         HQPlayer playing sends it once the queue stands (_carry_out) — until
         then HQPlayer plays only because it is held (halt_owed). False when
-        neither runs."""
+        neither runs, or the press takes no word (_leading): the Pause or the
+        Stop goes now, on what plays."""
         with self._press_lock:
             words = self._inflight
             if words is not None:
@@ -3349,7 +3358,7 @@ class HqpBackend(PlayerBackend):
                 words.halt_command = command
                 self._halt_n = n
             else:
-                press = self._live(self._pressed)
+                press = self._leading()
                 if press is None:
                     return False
                 press.halts.append(self._link.accept("transport"))
@@ -3370,7 +3379,7 @@ class HqpBackend(PlayerBackend):
                 return False
             moved = words.halt_second if words.halted() else None
             n = self._link.accept("transport")
-            newest = words.newest()
+            newest = words.leading()
             if newest is not None:
                 words.starts.append(_Start(
                     self._link.item("start", n), newest.target,
@@ -3399,22 +3408,23 @@ class HqpBackend(PlayerBackend):
                           last is not None and last > Entry(1))
 
     def _step(self, by: int, name: str, send, watched: bool) -> bool:
-        """Next and Previous. While a play press runs they move its target,
-        counted from the newest one — the slot after or before that this
-        HQPlayer holds, at its start: a start of their own (_press); at
-        either end of the queue it stays. Stopped at the spot, they only
-        move it, as far: no command, no sound (at either end of the queue it
-        stays). Otherwise HQPlayer's own Next or Previous — onto the entry
-        beside, the slot it holds beside — a start taken that spends a spot.
-        On a playlist that is no mirror the slot beside is started by a play
-        press, and at either end of the queue nothing is sent: HQPlayer's own
-        Next would move it in a playlist that is not the queue's."""
+        """Next and Previous. While a play press runs that takes words
+        (_leading) they move its target, counted from the newest one — the
+        slot after or before that this HQPlayer holds, at its start: a start
+        of their own (_press); at either end of the queue it stays. Stopped
+        at the spot, they only move it, as far: no command, no sound (at
+        either end of the queue it stays). Otherwise HQPlayer's own Next or
+        Previous — onto the entry beside, the slot it holds beside — a start
+        taken that spends a spot. On a playlist that is no mirror the slot
+        beside is started by a play press, and at either end of the queue
+        nothing is sent: HQPlayer's own Next would move it in a playlist
+        that is not the queue's."""
         with self._press_lock:
             if self._inflight is not None:
                 return self._held_step(self._inflight, by)
         layout = self._layout()
         with self._press_lock:
-            press = self._live(self._pressed)
+            press = self._leading()
             newest = press.newest() if press is not None else None
         if newest is not None:
             now = self._resolved(newest)
@@ -3464,8 +3474,9 @@ class HqpBackend(PlayerBackend):
         spot, as _step does there: nothing is sent. With nothing to count
         from — no start, no base, no spot (HQPlayer back from a restart, its
         queue handed afresh) — it moves nothing. Under the press lock, with
-        the words read: none goes to a mutation that ended meanwhile."""
-        newest = words.newest()
+        the words read: none goes to a mutation that ended meanwhile. A start
+        a word that names no track superseded counts for nothing (leading)."""
+        newest = words.leading()
         last = self._last_tick
         spot = self._spot
         at_spot = newest is None and not words.owes and (
@@ -3598,7 +3609,8 @@ class HqpBackend(PlayerBackend):
         """Play while a play press runs: its newest target again, at the
         second it was asked for — after a Pause or a Stop, at the one a Seek
         after it gave — a start of its own (_press); a press a new queue
-        overtook is none (_live). Otherwise Play
+        overtook is none (_live), nor one that takes no word (_leading).
+        Otherwise Play
         on a playlist that is no mirror (lost, drifted, a tail): on a pause
         it only resumes — the sound never stops for a rebuild — and what lies
         behind the entry HQPlayer reads is repaired as the reconverge does.
@@ -3607,7 +3619,7 @@ class HqpBackend(PlayerBackend):
         Play after a Stop replays the entry it stopped on — else at the
         first (_press). `word`: a held Play carried out (_play)."""
         with self._press_lock:
-            press = self._live(self._pressed)
+            press = self._leading()
             newest = press.newest() if press is not None else None
             moved = press.halt_second if press is not None and press.halted() else None
         if newest is not None:
@@ -3725,9 +3737,10 @@ class HqpBackend(PlayerBackend):
         press none of whose starts is live as its rebuild would go, holding
         no Pause or Stop — a word made before it began, without it, came
         first (a tap that waited its turn) — rebuilds nothing, and is let go
-        as it decides: a word made from then on goes as on a playlist that
-        is no mirror, the playlist stays no mirror, and HQPlayer gets the
-        queue back at its next answer without a stop."""
+        as it decides; from the moment none of its starts is live it takes no
+        word but a tap (_leading): the rest go as on a playlist that is no
+        mirror, the playlist stays no mirror, and HQPlayer gets the queue
+        back at its next answer without a stop."""
         from playback.manager import manager
         taking = manager.mirror_locked(self, lambda: self._press_begin(press))
         if taking is None:
@@ -3911,6 +3924,19 @@ class HqpBackend(PlayerBackend):
             return None
         return press
 
+    def _leading(self) -> Optional[_Press]:
+        """The play press a Pause, a Stop, a Play, a Seek, Next or Previous
+        joins: the live one (_live), unless none of its starts is live and it
+        holds no Pause or Stop — a word made on what played came first (a tap
+        that waited its turn) — which takes no more words: a start a newer
+        word superseded takes none, and each goes as on a playlist that is no
+        mirror. A tap still joins it (_press): it names a track of its own.
+        Under _press_lock."""
+        press = self._live(self._pressed)
+        if press is not None and press.live(self._link) is None and not press.halted():
+            return None
+        return press
+
     def _left_at(self, press: _Press) -> Optional[tuple]:
         """Where a press that started nothing leaves the spot: its newest
         start's track, at the second a Seek after a Pause or a Stop gave it
@@ -4079,7 +4105,7 @@ class HqpBackend(PlayerBackend):
                 words.halt_second = seconds
                 return True
             n = self._link.accept("transport")
-            newest = words.newest()
+            newest = words.leading()
             if newest is not None:
                 words.starts.append(_Start(self._link.item("start", n), newest.target, seconds,
                                            newest.following, None, steps=newest.steps))
@@ -4104,9 +4130,10 @@ class HqpBackend(PlayerBackend):
         held Play its batch made a press of — no intent of its own: that
         start takes the second, unless a start made after the Seek leads the
         press by then (the Seek is dropped, as a request a newer intent
-        superseded is). False when no press runs."""
+        superseded is). False when no press runs, or one that takes no word
+        (_leading): the Seek goes, on what plays."""
         with self._press_lock:
-            press = self._live(self._pressed)
+            press = self._leading()
             if press is None:
                 return False
             if press.halted():

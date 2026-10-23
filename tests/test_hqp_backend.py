@@ -11851,6 +11851,120 @@ def test_the_reconverge_a_yielded_press_arms_mends_the_playlist(fake, output, mo
     assert "Stop" not in [c for c, _ in sent], sent
 
 
+def _a_tap_held_after_a_play_on_what_played(mgr, b, fake) -> tuple:
+    """HQPlayer is paused on track 1. A tap on the third row waits its turn;
+    a track queued to play next holds the person's words, its hand-over slow
+    — a Play made on what played, then the tap, held as its turn comes: the
+    older word, it yielded to the Play. (the threads to join, the command
+    count before the words)."""
+    assert b.pause()
+    assert _wait(lambda: mgr._latest_status.get("state") == "paused", timeout=5)
+    link = _link()
+    tapper, said, vol = _a_tap_waiting_behind_a_slow_volume(b, link, fake)
+    tapper.start()
+    assert _wait(lambda: len(link.lock._waiting) == 1, timeout=3)
+    fake.service["PlaylistAdd"] = 1.0
+    inserting = _a_play_next_holding_words_behind(mgr, b, link)
+    n = len(fake.commands)
+    assert _quick(b.play)
+    assert _wait(lambda: b._inflight is not None and b._inflight.starts, timeout=10)
+    return (tapper, inserting, vol), n
+
+
+@pytest.mark.parametrize("word", ["seek", "next"])
+def test_a_word_after_the_play_a_held_tap_yielded_to_counts_from_what_played(fake, output, word):
+    """A Seek to 60 s, or Next, made once the yielded tap is held: a start a
+    newer word superseded takes no more words — they count from what played,
+    and the tapped track never starts."""
+    mgr, b = output
+    threads, n = _a_tap_held_after_a_play_on_what_played(mgr, b, fake)
+    assert _quick(lambda: b.seek(60) if word == "seek" else b.next())
+    for t in threads:
+        t.join(15)
+    _settled()
+    sent = [(c, a) for c, a in fake.commands[n:] if c not in _QUESTIONS]
+    if word == "seek":
+        assert ("Seek", {"position": "60"}) in sent and "SelectTrack" not in [c for c, _ in sent], sent
+        _shows_what_plays(mgr, b, fake)
+    else:
+        def plays(path):
+            with fake._lock:
+                return (fake.state == int(PlaybackState.PLAYING) and 1 <= fake.track <= len(fake.playlist)
+                        and fake.playlist[fake.track - 1] == path)
+        # the track after what played: the one queued to play next
+        assert _wait(lambda: plays("file:///E:/Music/N/01.flac"), timeout=8), (fake.track, fake.playlist,
+                                                                               sent)
+
+
+def _as_the_yielded_press_begins(b, monkeypatch, word) -> dict:
+    """`word` made while the yielded tap's press prepares, before its first
+    step — once the word it yielded to holds, its start dead: what it
+    returned."""
+    begin = b._press_begin
+    out = {}
+
+    def word_first(press):
+        if not out:
+            assert _wait(lambda: press.live(b._link) is None, timeout=5)
+            t = threading.Thread(target=lambda: out.update(ok=word()), daemon=True)
+            t.start()
+            t.join(5)
+        return begin(press)
+    monkeypatch.setattr(b, "_press_begin", word_first)
+    return out
+
+
+def test_a_seek_made_while_a_yielded_press_prepares_seeks_what_plays(fake, output, monkeypatch):
+    """The yielded tap's press is over in all but its decision; the person
+    drags the position to 90 s, on what the earlier Seek kept playing. The
+    press takes no word: the Seek goes on what plays — never a full
+    hand-over to the tapped track at that second."""
+    mgr, b = output
+    sought = _as_the_yielded_press_begins(b, monkeypatch, lambda: b.seek(90))
+    said, done, sent = _a_tap_whose_press_yields(b, fake, monkeypatch, lambda: b.seek(60))
+    assert sought.get("ok"), sought
+    assert ("Seek", "90") in sent and "Stop" not in [c for c, _ in sent], sent
+    _shows_what_plays(mgr, b, fake)
+
+
+def test_a_pause_made_while_a_yielded_press_prepares_pauses_what_plays(fake, output, monkeypatch):
+    """The same moment, Pause: it goes on what plays, nothing rebuilt —
+    HQPlayer paused, never stopped, and Now Playing on what it pauses, never
+    the tapped track."""
+    mgr, b = output
+    paused = _as_the_yielded_press_begins(b, monkeypatch, b.pause)
+    said, done, sent = _a_tap_whose_press_yields(b, fake, monkeypatch, lambda: b.seek(60))
+    assert paused.get("ok"), paused
+    assert ("Pause", None) in sent and "Stop" not in [c for c, _ in sent], sent
+
+    def shown():
+        st = mgr._latest_status
+        item = mgr.queue.item_at(st.get("track_index") or 0)
+        with fake._lock:
+            reads = (fake.playlist[fake.track - 1]
+                     if 1 <= fake.track <= len(fake.playlist) else None)
+        return (fake.state == int(PlaybackState.PAUSED) and st.get("state") == "paused"
+                and item is not None and item.track_id != "track-3" and b._uri_of(item)[0] == reads
+                and not st.get("resume") and not st.get("rebuilding"))
+    assert _wait(shown, timeout=5), (mgr._latest_status, fake.state, fake.track, sent)
+
+
+def test_a_next_made_while_a_yielded_press_prepares_counts_from_what_plays(fake, output, monkeypatch):
+    """The same moment, Next: it counts from what plays, never from the
+    tapped track — track 2 starts (from track 3 the queue's end would keep
+    the word, and nothing would go)."""
+    mgr, b = output
+    stepped = _as_the_yielded_press_begins(b, monkeypatch, b.next)
+    said, done, sent = _a_tap_whose_press_yields(b, fake, monkeypatch, lambda: b.seek(60))
+    assert stepped.get("ok"), stepped
+
+    def plays_track_2():
+        with fake._lock:
+            return (fake.state == int(PlaybackState.PLAYING) and 1 <= fake.track <= len(fake.playlist)
+                    and fake.playlist[fake.track - 1] == "file:///E:/Music/A/02.flac")
+    assert _wait(plays_track_2, timeout=8), (fake.state, fake.track, fake.playlist, sent)
+
+
 def test_a_pause_during_a_play_press_still_hands_hqplayer_the_queue(fake, output):
     """A Pause made while a play press waits to begin halts it: the press
     rebuilds all the same — HQPlayer takes the queue — and nothing starts,
