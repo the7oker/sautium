@@ -6860,6 +6860,37 @@ def test_a_removal_before_the_tracks_first_tick_keeps_both_listens_apart(fake, o
     assert rows["track-1"][0] < 100 and not rows["track-1"][1] and "track-2" in rows, rows
 
 
+def test_previous_while_a_removal_plays_out_never_brings_the_removed_track_back(fake, output):
+    """Previous while slot 2's removal plays out starts track 1, as a press:
+    HQPlayer holds the queue — never the removed entry behind it — and after
+    track 1 comes track 3."""
+    mgr, b = output
+    _removed_at_slot_2(mgr, b, fake)
+    assert b.previous()
+    assert _wait(lambda: mgr._latest_status.get("track_id") == "track-1"
+                 and mgr._latest_status.get("state") == "playing", timeout=8), mgr._latest_status
+    _settled()
+    assert fake.playlist == [_A.format(i) for i in (1, 3, 4)], fake.playlist
+    fake.end_now()
+    assert _wait(lambda: mgr._latest_status.get("track_id") == "track-3", timeout=8), mgr._latest_status
+
+
+def test_a_play_next_right_after_a_removal_played_out_goes_behind_what_plays(fake, output, monkeypatch):
+    """The removed track ended and HQPlayer moved on before a tick said so:
+    a play next anchored on the place it stood goes behind what HQPlayer
+    plays now — in the queue and in HQPlayer's playlist."""
+    mgr, b = output
+    _removed_at_slot_2(mgr, b, fake)
+    monkeypatch.setattr(hb, "_poll_interval", lambda failures: 60.0)
+    time.sleep(1.5)                                 # the poller now waits for a poke
+    fake.end_now()                                  # it played out: track 3 plays, no tick yet
+    assert mgr._latest_status.get("plays_out_after") == 1
+    assert mgr.append([_item("E:/Music/A/05.flac", 5)], position="next") == 1
+    assert [it.track_id for it in mgr.queue.snapshot()] == ["track-1", "track-3", "track-5", "track-4"]
+    assert fake.playlist == [_A.format(i) for i in (1, 2, 3, 5, 4)] and fake.track == 3, (
+        fake.playlist, fake.track)
+
+
 def test_a_stop_and_play_while_a_removal_plays_out_go_on_with_what_followed_it(fake, output):
     mgr, b = output
     _removed_at_slot_2(mgr, b, fake)

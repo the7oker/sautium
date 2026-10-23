@@ -3613,7 +3613,10 @@ class HqpBackend(PlayerBackend):
         taken that spends a spot. On a playlist that is no mirror the slot
         beside is started by a play press, and at either end of the queue
         nothing is sent: HQPlayer's own Next would move it in a playlist
-        that is not the queue's."""
+        that is not the queue's. While the node's own removal plays out,
+        Previous starts the slot before its place as a press — HQPlayer's
+        own would leave the removed entry behind the one it lands on — and
+        Next goes as HQPlayer's own, onto the slot after it."""
         with self._press_lock:
             if self._inflight is not None:
                 return self._held_step(self._inflight, by)
@@ -3640,6 +3643,15 @@ class HqpBackend(PlayerBackend):
                         self._spot_gen += 1
             self.poke()
             return True
+        if by < 0 and last is not None and last.out_after is not None:
+            # The node's own removal plays out: HQPlayer's own Previous would
+            # land on the entry before it with the removed one still behind
+            # that — the slot before its place starts, as a press
+            target = self._queue.item_at(layout.held(last.out_after, by))
+            if target is None:
+                self.poke()
+                return True                     # the queue's head: nowhere to go
+            return self._press(target, 0)
         reading = last.item if last is not None and self._mirror != "step" else None
         index = self._queue.index_of(reading) if reading is not None else None
         if index is not None:
@@ -4902,7 +4914,10 @@ class HqpBackend(PlayerBackend):
         if read.entry.n > len(raw):
             return None, lambda: self.lose_mirror("HQPlayer reads past its own playlist")
         if slot < read.slot:
-            return None, lambda: None       # the part before the entry read: the queue's
+            # HQPlayer moved on past the anchor since the status it came
+            # from (a removal that played out, its own Next): the tracks go
+            # behind what it reads, as in step
+            slot = read.slot
         # A removal playing out is no slot of the queue's to count words from
         return (read.entry.n + layout.upto(slot) - layout.upto(read.slot), slot,
                 None if read.out else self._queue.item_at(read.slot)), None

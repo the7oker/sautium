@@ -1230,10 +1230,10 @@ implementation details live in the code, DB and git history.
   HQPlayer moved on to — on a gapless move still, until the person's Seek
   waited for a tick of the take — a false completed listen and scrobble.
   Keeping the meter open whenever HQPlayer plays was set aside: what it
-  costs HQPlayer near the real-time limit is not measured. Lesson: a reading that stopped refreshing is not
-  one that says "stopped" — tell them apart by what else is known (here
-  the start the meter heard), and bound the guess by what is measured of
-  the refresh.
+  costs HQPlayer near the real-time limit is not measured. Lesson: a
+  reading that stopped refreshing is not one that says "stopped" — tell
+  them apart by what else is known (here the start the meter heard), and
+  bound the guess by what is measured of the refresh.
 - **Open after the series' review** (2026-10-14), found in code the series
   did not change, left for the next slice: a removal of the very slot
   HQPlayer reads on a tail mirror is the queue's alone, and the canary then
@@ -1249,8 +1249,20 @@ implementation details live in the code, DB and git history.
   radio count from, and its listen is its own: the first cut named it
   slot 0, which older code reads as no slot of the queue's, so a second
   edit put the queue's head behind it, a play next went to the end, a
-  radio claimed step, and its seconds went to the listen before it); with
-  two HQPlayers, a seen
+  radio claimed step, and its seconds went to the listen before it;
+  Previous from it starts the slot before its place as a press, since
+  HQPlayer's own left the removed entry behind the one it landed on, and
+  a play next HQPlayer moved past goes behind what plays on a tail mirror
+  too. Left with it: a new order while it plays out is refused (the
+  reorder route asks for a playing slot; the row snaps back); on HQPlayer
+  5, which names no take, a radio's clear answered late — or a tick read
+  just before it — loses it, reported as another controller's with a short
+  skip written; a Next or a Previous held during a play next or a removal
+  while it plays out counts from nothing and goes nowhere; a DSP change
+  that leaves HQPlayer stopped meanwhile resumes nothing; the preview
+  window anchors at the queue's first slot; and the end-of-queue archive
+  does not run when the queue's last slot played out); with two
+  HQPlayers, a seen
   restored-run report comes back once the other HQPlayer's newer report is
   cleared (the seen map keeps one onset per key); and a held Play that
   meets a build is recorded as an unreachable attempt with nothing sent

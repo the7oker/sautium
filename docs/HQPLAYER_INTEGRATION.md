@@ -601,19 +601,25 @@ comes after the control port answers again — so neither can end the wait.
     piece before it; what touches the part before it is the queue's alone.
     An edit behind it while HQPlayer reads no slot of the queue's, or a file
     queued at more than one slot it holds, lands on no entry by a guess: it
-    is the queue's, the mirror lost. The slot HQPlayer plays or pauses is
+    is the queue's, the mirror lost. A play next whose anchor HQPlayer
+    moved past since the status it came from goes behind what HQPlayer
+    reads, on a tail mirror as in step (since 2026-10-24). The slot
+    HQPlayer plays or pauses is
     never removed from it, on a tail mirror as in step (since 2026-10-23):
     read in the removal's own sequence, it leaves the queue alone, the track
     plays out, and the node knows it for its own — by its take, the
     track_serial its Status gives there — until HQPlayer passes it. It keeps
     a place in the queue's order, behind the last of the slots that were
     before it still queued: behind it HQPlayer holds the queue from there,
-    an append included, and every edit counts from that place — a second
+    an append included, and these count from that place — a second
     removal, a play next (right behind it), the canary, the reconverge's
-    repair; a radio's clear keeps it, HQPlayer's first entry then, the radio
-    behind it. The status names it at no slot and as no other controller's,
-    and its listen goes on; stopped on it, the play press goes on with what
-    followed it. A mirror in step is a tail mirror from then on; a removal
+    repair, Previous (the slot before it, as a press: HQPlayer's own would
+    leave the removed entry behind the one it lands on) and Next (HQPlayer's
+    own, onto the slot after it); a radio's clear keeps it, HQPlayer's first
+    entry then, the radio behind it. A new order waits until it has played
+    out: the reorder route still asks for a playing slot. The status names
+    it at no slot and as no other controller's, and its listen goes on;
+    stopped on it, the play press goes on with what followed it. A mirror in step is a tail mirror from then on; a removal
     whose Status names no entry it may go by removes nothing, the mirror
     lost. A radio begun on it while
     HQPlayer reads the slot the queue keeps leaves it in step — the clear
