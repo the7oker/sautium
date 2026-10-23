@@ -3719,6 +3719,13 @@ group's too. Before, the line was the relation's word alone ("Same output as
 sinc-Mx (bit for bit)"), as was the card's lead without a say, which said
 more than any comparison the atlas made.
 
+What HQPlayer did across the rate families a card says in the past and of
+the one conversion the atlas tried, as the site's box does (since
+2026-10-23; "plays" before, a rule from one try): "Across rate families, in
+the one conversion the atlas tried: sinc-Lh: refused; sinc-long-h: played."
+A member the file holds no word for reads "not tried", and the file may hold
+words for some members only, as the export writes them.
+
 Open (2026-10-18): a row of either sheet takes the second click of a
 double-click on the knob that opened it as a pick — the sheet covers the
 knob at once, so that click lands on whatever row is under it — as the

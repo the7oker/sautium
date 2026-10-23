@@ -21,10 +21,10 @@ A number stays the text the file writes (`Num`): nothing here rounds, formats
 or computes a measured value, and nothing ranks by one — every list keeps
 HQPlayer's order or the file's. A name is looked up in the file's registry,
 never turned into a slug, so a name the registry lacks is not measured. A
-relation, an axis or a difference without words here shows nothing and is
-logged by its name, once. A source not re-read in full (status other than O)
-is never quoted or cited, and no link is given while an entry's release has
-no date.
+relation, an axis, a difference or a word across the rate families without
+words here shows nothing and is logged by its name, once. A source not
+re-read in full (status other than O) is never quoted or cited, and no link
+is given while an entry's release has no date.
 
 What a screen gets is wire-ready: a phrase is a list of parts, {"t": text} or
 {"n": a number's token}, so a number reaches the screen as the file wrote it;
@@ -167,8 +167,14 @@ RELATION = {
 # any comparison made
 GROUP_LEAD = "{relation} {others} — {say}."
 GROUP_LEAD_PLAIN = "{names}."
-ACROSS = "Across rate families: {families}."
+# What HQPlayer did with each member in the one conversion across the rate
+# families the atlas tried, in the past tense, as the site's box says it: a
+# member the file holds no word for was not tried there, and a word without
+# its past tense here shows no line
+ACROSS = "Across rate families, in the one conversion the atlas tried: {families}."
 ACROSS_ONE = "{name}: {what}"
+PLAYED = {"plays": "played", "refused": "refused"}
+NOT_TRIED = "not tried"
 PROPERTIES = "Properties"
 OTHER_CONTEXTS = "The other contexts"
 ROWS = (
@@ -540,8 +546,9 @@ def _check(doc: Any) -> None:
             fs_out = c.get("fs_out")
             _need(isinstance(fs_out, Num) and _RATE.fullmatch(fs_out), "not a rate", f"{at}.comparisons[{j}].fs_out")
         if "cross_family" in g:
+            # As the export writes it: a word for each member the try named, none for the others
             across = _obj(g["cross_family"], f"{at}.cross_family")
-            _need(sorted(across) == sorted(members), "not one word per member", f"{at}.cross_family")
+            _need(set(across) <= set(members), "a word for a name that is no member", f"{at}.cross_family")
             for what in across.values():
                 _one_of(what, ("plays", "refused", "void", "substituted"), f"{at}.cross_family")
         _need(gid not in groups, "a group id held twice", at)
@@ -1521,8 +1528,13 @@ def group_section(g: Dict[str, Any], name: str, order: Dict[str, int]) -> Option
     others = ", ".join(m for m in members if m != name)
     items = [_line(_phrase(GROUP_LEAD, relation=relation, others=others, say=g["say"]) if g.get("say")
                    else _phrase(GROUP_LEAD_PLAIN, names=_group_names(members, order)))]
-    if "cross_family" in g:
-        across = "; ".join(ACROSS_ONE.format(name=m, what=g["cross_family"][m]) for m in members)
+    tried = g.get("cross_family") or {}
+    unworded = sorted({word for word in tried.values() if word not in PLAYED})
+    for word in unworded:
+        _no_words("cross_family word", word)
+    if tried and not unworded:
+        across = "; ".join(ACROSS_ONE.format(name=m, what=PLAYED[tried[m]] if m in tried else NOT_TRIED)
+                           for m in members)
         items.append(_line(_phrase(ACROSS, families=across)))
     if g.get("choose_by"):
         items.append(_line(_phrase(CHOOSE_BY, choose_by=g["choose_by"])))

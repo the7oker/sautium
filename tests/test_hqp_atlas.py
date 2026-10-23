@@ -365,6 +365,8 @@ def _break(doc, how):
         _filter(doc, "demo-sinc-b")["release"] = "9.4.1/sdm"
     elif how == "a comparison into no rate":
         doc["groups"][0]["comparisons"][1]["fs_out"] = 768000.5
+    elif how == "a word across the families for a name that is no member":
+        doc["groups"][0]["cross_family"]["demo-sinc-z"] = "plays"
     return doc
 
 
@@ -381,7 +383,7 @@ BREAKS = ("another schema", "a missing key", "a wrong type deep inside", "an unr
           "an idle bound set by no excitation the words name", "a range without its min",
           "a rate longer than int() reads", "an engine longer than int() reads", "a release of another engine",
           "a filter pair keyed by a rate", "a modulator pair keyed by a context", "a group of two releases",
-          "a comparison into no rate")
+          "a comparison into no rate", "a word across the families for a name that is no member")
 
 
 @pytest.mark.parametrize("how", BREAKS)
@@ -890,6 +892,27 @@ def test_a_group_without_a_say_claims_nothing_on_its_card_its_members_are_named(
             assert names in text and not any(re.search(r"\bSame (output|magnitude)\b", t) for t in text), (mode, name)
 
 
+@pytest.mark.parametrize("across, line", [
+    ({"demo-sinc-a": "plays", "demo-sinc-b": "refused"},
+     "Across rate families, in the one conversion the atlas tried: demo-sinc-a: played; demo-sinc-b: refused."),
+    ({"demo-sinc-b": "refused"},
+     "Across rate families, in the one conversion the atlas tried: demo-sinc-a: not tried; demo-sinc-b: refused."),
+    ({}, None), ({"demo-sinc-a": "void", "demo-sinc-b": "refused"}, None)])
+def test_what_hqplayer_did_across_the_families_is_said_in_the_past_of_the_one_conversion_tried(tmp_path, caplog,
+                                                                                                across, line):
+    # As the export writes it: a word for each member the try named, none for
+    # the others; "plays" was a rule from one conversion (until 2026-10-23).
+    # A word with no past tense here shows no line, logged by its name once
+    caplog.set_level(logging.INFO, logger="hqp_atlas")
+    doc = _doc()
+    doc["groups"][0]["cross_family"] = across
+    text = _card_text(_card(_read(tmp_path, doc), "filter", "demo-sinc-a", PCM))
+    assert "Same output as demo-sinc-b — the same output within one step, in this fictional file." in text  # read
+    said = [t for t in text if t.startswith("Across rate families")]
+    assert said == ([line] if line else [])
+    assert caplog.text.count("no words for the cross_family word void") == (1 if "void" in across.values() else 0)
+
+
 def test_a_relation_without_words_shows_nothing_and_is_logged_by_its_name(tmp_path, caplog):
     caplog.set_level(logging.INFO, logger="hqp_atlas")
     doc = _doc()
@@ -926,7 +949,7 @@ def test_a_filters_card(atlas):
         "A variant of, per the manual (§9.9): demo-gauss-x",
         "## None",
         "Same output as demo-sinc-b — the same output within one step, in this fictional file.",
-        "Across rate families: demo-sinc-a: plays; demo-sinc-b: refused.",
+        "Across rate families, in the one conversion the atlas tried: demo-sinc-a: played; demo-sinc-b: refused.",
         "Choose by the fictional listener's own ears.",
         "A fictional note on how the two were compared.",
         "## Properties",
