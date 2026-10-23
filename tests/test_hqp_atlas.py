@@ -363,6 +363,8 @@ def _break(doc, how):
         p["contexts"]["1x-44.1k-705.6k"] = next(iter(p["contexts"].values()))
     elif how == "a group of two releases":
         _filter(doc, "demo-sinc-b")["release"] = "9.4.1/sdm"
+    elif how == "a comparison into no rate":
+        doc["groups"][0]["comparisons"][1]["fs_out"] = 768000.5
     return doc
 
 
@@ -378,7 +380,8 @@ BREAKS = ("another schema", "a missing key", "a wrong type deep inside", "an unr
           "a source it cites that the file does not hold", "no engine", "a group figure's bound set by a list",
           "an idle bound set by no excitation the words name", "a range without its min",
           "a rate longer than int() reads", "an engine longer than int() reads", "a release of another engine",
-          "a filter pair keyed by a rate", "a modulator pair keyed by a context", "a group of two releases")
+          "a filter pair keyed by a rate", "a modulator pair keyed by a context", "a group of two releases",
+          "a comparison into no rate")
 
 
 @pytest.mark.parametrize("how", BREAKS)
@@ -623,8 +626,7 @@ def test_a_measured_filter_row(atlas):
     assert a["chips"][1]["parts"] == [{"t": "±"}, {"n": "12.346"}, {"t": " ms"}]
     assert a["tag"]["text"] == "Signalyst 4/5" and a["words"] is None and a["card"] is True
     assert plain(a["caption"]) == "Apod Y per the manual"
-    assert plain(a["line3"]) == \
-        "Same output as demo-sinc-b — the same output within one step, in this fictional file."
+    assert plain(a["line3"]) == "Same output as demo-sinc-b (within one step, compared into 705.6k and 768k)"
     assert f["demo-sinc-b"]["caption"] is None  # the manual's N says nothing on the row
     assert _chips(f["demo-poly-mp"]) == ["minimum phase", "0.0 ms before · 0.300 ms after", "Any"]
     assert _chips(f["demo-gauss-x"]) == ["intermediate phase", "1.5 ms before · 2.5 ms after", "position-dependent",
@@ -818,33 +820,59 @@ def test_an_identical_group_of_three_draws_one_bracket_in_hqplayers_order(atlas)
     assert f["DMX5"]["bracket"] is None and f["DMX7EC-a"]["line3"] is None
 
 
-@pytest.mark.parametrize("relation, say, line", [
-    ("bit_identical", "the same output, bit for bit, in every fictional comparison",
-     "Same output as demo-sinc-b — the same output, bit for bit, in every fictional comparison."),
-    ("within_1_lsb", "the same output within one step, in every fictional comparison",
-     "Same output as demo-sinc-b — the same output within one step, in every fictional comparison."),
-    ("same_figures_within_precision", "the same figures within this fictional file's precision",
-     "Same figures as demo-sinc-b — the same figures within this fictional file's precision.")])
-def test_a_twins_line_is_its_cards_lead_with_the_groups_say(tmp_path, relation, say, line):
-    # The say states where the two were compared; the relation's word alone,
-    # "(bit for bit)" until 2026-10-23, said more than any comparison made.
+@pytest.mark.parametrize("relation, line", [
+    ("bit_identical", "Same output as demo-sinc-b (bit for bit, compared into 705.6k and 768k)"),
+    ("within_1_lsb", "Same output as demo-sinc-b (within one step, compared into 705.6k and 768k)"),
+    ("same_figures_within_precision", "Same figures as demo-sinc-b (within the measurement's precision)")])
+def test_a_twins_line_names_its_relation_and_where_its_comparisons_went(tmp_path, relation, line):
+    # One short line: the output rates the comparisons went into, each once and
+    # ascending, as the site's index says them; the group's say on the card
+    # alone (the row carried it 2026-10-23, three or four lines at 360 px).
     # In SDM mode, where a row shows its PCM facts, the same line.
     doc = _doc()
-    doc["groups"][0].update(relation=relation, say=say)
+    doc["groups"][0]["relation"] = relation
     doc["engines"]["9.4.1"]["identity_groups"][0]["relation"] = relation
     atlas = _read(tmp_path, doc)
+    say = doc["groups"][0]["say"]
     for spec, mode in ((PCM, "pcm"), (SDM, "sdm")):
         f = _facts_of(atlas, "filter", spec, "9.4.1", mode)
         assert plain(f["demo-sinc-a"]["line3"]) == line, mode
         assert plain(f["demo-sinc-b"]["line3"]) == line.replace("demo-sinc-b", "demo-sinc-a"), mode
-        assert line in _card_text(_card(atlas, "filter", "demo-sinc-a", spec, mode=mode)), mode
+        text = _card_text(_card(atlas, "filter", "demo-sinc-a", spec, mode=mode))
+        assert f"{line.split(' (')[0]} — {say}." in text, mode
+
+
+def test_a_twin_compared_sample_by_sample_with_no_comparison_has_no_line(tmp_path):
+    doc = _doc()
+    rows = doc["groups"][0]["comparisons"]
+    rows.append({**rows[0], "fs_out": 352800})
+    assert plain(_facts_of(_read(tmp_path, doc), "filter", PCM, "9.4.1", "pcm")["demo-sinc-a"]["line3"]) == \
+        "Same output as demo-sinc-b (within one step, compared into 352.8k, 705.6k and 768k)"
+    for relation in ("within_1_lsb", "bit_identical", "same_figures_within_precision"):
+        doc = _doc()
+        doc["groups"][0].update(relation=relation, comparisons=[])
+        doc["engines"]["9.4.1"]["identity_groups"][0]["relation"] = relation
+        for at in ("empty", "absent"):
+            if at == "absent":
+                del doc["groups"][0]["comparisons"]
+            (tmp_path / relation / at).mkdir(parents=True)
+            atlas = _read(tmp_path / relation / at, doc)
+            for spec, mode in ((PCM, "pcm"), (SDM, "sdm")):
+                f = _facts_of(atlas, "filter", spec, "9.4.1", mode)
+                lines = [f[n]["line3"] and plain(f[n]["line3"]) for n in ("demo-sinc-a", "demo-sinc-b")]
+                # the same figures were never a sample-by-sample claim: their line needs no comparison
+                assert lines == ([None, None] if relation != "same_figures_within_precision" else
+                                 ["Same figures as demo-sinc-b (within the measurement's precision)",
+                                  "Same figures as demo-sinc-a (within the measurement's precision)"]), \
+                    (relation, at, mode)
 
 
 @pytest.mark.parametrize("unsaid", [None, ""])
-def test_a_group_without_a_say_claims_nothing_its_members_are_named(tmp_path, unsaid):
-    # No row line for the twin, and its card, as a magnitude group's, names
+def test_a_group_without_a_say_claims_nothing_on_its_card_its_members_are_named(tmp_path, unsaid):
+    # The card of a group without a say, a magnitude group's as a twin's, names
     # the members alone: "Same output as demo-sinc-b." said more than any
-    # comparison made (until 2026-10-23)
+    # comparison made (until 2026-10-23). The row's line comes from the
+    # comparisons, so a twin keeps it
     doc = _doc()
     for g in doc["groups"][:2]:
         if unsaid is None:
@@ -854,7 +882,8 @@ def test_a_group_without_a_say_claims_nothing_its_members_are_named(tmp_path, un
     atlas = _read(tmp_path, doc)
     for spec, mode in ((PCM, "pcm"), (SDM, "sdm")):
         f = _facts_of(atlas, "filter", spec, "9.4.1", mode)
-        assert f["demo-sinc-a"]["line3"] is None and f["demo-sinc-b"]["line3"] is None, mode
+        assert plain(f["demo-sinc-a"]["line3"]) == \
+            "Same output as demo-sinc-b (within one step, compared into 705.6k and 768k)", mode
         for name, names in (("demo-sinc-a", "demo-sinc-a and demo-sinc-b."),
                             ("demo-poly-mp", "demo-poly-lp and demo-poly-mp.")):
             text = _card_text(_card(atlas, "filter", name, spec, mode=mode))

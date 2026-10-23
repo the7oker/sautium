@@ -308,10 +308,12 @@ name in HQPlayer's order: each row of the filter and shaper lists gains
 group's bracket, whether it has a card), and while the node holds an atlas
 file `atlas` carries the sheets' head lines and where the file was read from
 — without a file there is no `atlas` key and `facts` are HQPlayer's alone.
-A twin's line is the lead its card gives the group, the group's say with it
-— where the two were compared — and a twin whose group has no say gets none;
-a card names any group without a say by its members alone (since
-2026-10-23).
+A twin's line names the relation and, for a group compared sample by
+sample, the output rates its comparisons went into ("Same output as sinc-Mx
+(bit for bit, compared into 705.6k and 768k)"), none when the file holds no
+comparison for it; a same-figures twin's says "within the measurement's
+precision". The group's say stands on its card, which names any group
+without a say by its members alone (since 2026-10-23).
 A file's releases are per engine and family — the filters' PCM, the
 modulators' SDM — and a shipped file holds the dated ones alone. Each sheet
 is shown the newest engine of HQPlayer's own major that holds its family's
@@ -361,7 +363,9 @@ The module also holds the node's one rate namer (since 2026-10-17):
 progress), a verdict's DSP line, the assistant's lists of rates and, since
 2026-10-21, a modulator's rates on its card and its row use it — never with
 the source beside a rate: a file's rate is a DSD rate of its source's family,
-which the name says.
+which the name says. The atlas's own rates — a measured context's, a twin's
+comparisons' (since 2026-10-23) — are written as its pages write them
+("44.1k → 705.6k", "705.6k").
 
 ### Answers: `result` and HQPlayer's reason
 Setters and transport commands echo their element with `result="OK"` or

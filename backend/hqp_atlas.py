@@ -96,6 +96,15 @@ APOD_CLAUSE = "Apod {mark} per the manual"
 CLAUSES = " · "
 NOT_MEASURED = "not measured on engine {engine}"
 NOT_MEASURED_TITLE = "Listed by HQPlayer, not measured on engine {engine}"
+# A twin's line, short: the relation and, for a group compared sample by
+# sample, the output rates its comparisons went into, as the site's index
+# words them — "compared into", since "into" alone reads as every conversion
+# into those rates. The group's say stands on its card
+TWIN = {
+    "bit_identical": "Same output as {other} (bit for bit, compared into {rates})",
+    "within_1_lsb": "Same output as {other} (within one step, compared into {rates})",
+    "same_figures_within_precision": "Same figures as {other} (within the measurement's precision)",
+}
 ORDER = {"5": "fifth", "7": "seventh"}
 ORDER_WORD = "{order} order"
 ORDER_NUMBER = "order {order}"
@@ -152,10 +161,10 @@ RELATION = {
     "same_figures_within_precision": "Same figures as",
     "same_magnitude": "Same magnitude as",
 }
-# A group's lead on its card, and a twin's line on its row, as the site's
-# member box says it: the say carries the group's scope (a twin's: where the
-# two were compared). Without a say the card names the members alone — the
-# relation's word says more than any comparison made — and the row says none
+# A group's lead on its card, as the site's member box says it: the say
+# carries the group's scope (a twin's: where the two were compared). Without a
+# say the card names the members alone — the relation's word says more than
+# any comparison made
 GROUP_LEAD = "{relation} {others} — {say}."
 GROUP_LEAD_PLAIN = "{names}."
 ACROSS = "Across rate families: {families}."
@@ -525,6 +534,11 @@ def _check(doc: Any) -> None:
             _text(g["choose_by"], f"{at}.choose_by")
         if "sources" in g:
             _cites(g["sources"], f"{at}.sources", sources, 0)
+        # A twin's line names the output rates its comparisons went into
+        for j, c in enumerate(_arr(g.get("comparisons", []), f"{at}.comparisons")):
+            _obj(c, f"{at}.comparisons[{j}]")
+            fs_out = c.get("fs_out")
+            _need(isinstance(fs_out, Num) and _RATE.fullmatch(fs_out), "not a rate", f"{at}.comparisons[{j}].fs_out")
         if "cross_family" in g:
             across = _obj(g["cross_family"], f"{at}.cross_family")
             _need(sorted(across) == sorted(members), "not one word per member", f"{at}.cross_family")
@@ -1113,10 +1127,17 @@ def context_label(key: str) -> str:
     return CONTEXT_LABEL.format(slot="Nx" if slot == "nx" else "1x", source=source, output=output)
 
 
+def _k_rate(hz: int) -> str:
+    """A rate of the atlas's comparisons as its pages write it, as a context
+    does: "705.6k", "768k". A rate HQPlayer reports is rate_name's."""
+    return f"{Decimal(hz) / 1000}k"
+
+
 def rate_name(hz: int) -> str:
     """A rate HQPlayer reports, named as the HQPlayer screen names it
     (app-shell.js fmtRateLabel) — the one namer for every text the node
-    words: kHz up to 768 kHz; above, a DSD rate by its power-of-two multiple
+    words of one (the atlas's own rates are its pages': context_label,
+    _k_rate): kHz up to 768 kHz; above, a DSD rate by its power-of-two multiple
     (64 and up) of a 44.1k, 48k or 32k base, any base but 44.1k said beside
     it ("DSD256", "DSD512 (48k)", "DSD64 (32k)"); anything else — the PCM
     rates 1.4112 and 1.536 MHz among them — in MHz. "—" for none."""
@@ -1336,15 +1357,21 @@ def _modulator_chips(found: Found) -> List[Dict[str, Any]]:
 
 
 def _twin(atlas: Atlas, found: Found) -> Optional[List[Dict[str, str]]]:
-    """A twin's line: the other member of an identical group of two, in the
-    words its card leads the group with. None for a group without a say: the
-    relation alone says more than any comparison made."""
+    """A twin's line: the other member of an identical group of two, in
+    TWIN's words — for a group compared sample by sample, with the output
+    rates its comparisons went into; None for such a group with no comparison,
+    as the relation alone says more than any comparison made."""
     ident = atlas.identical(found)
     g = ident[1] if ident else None
-    if g is None or len(g["members"]) != 2 or not g.get("say"):
+    if g is None or len(g["members"]) != 2:
         return None
     other = next(m for m in g["members"] if m != found.entry["name"])
-    return wire(_phrase(GROUP_LEAD, relation=RELATION[g["relation"]], others=other, say=g["say"]))
+    if g["relation"] == "same_figures_within_precision":
+        return wire(_phrase(TWIN[g["relation"]], other=other))
+    rates = sorted({int(c["fs_out"]) for c in g.get("comparisons", ())})
+    if not rates:
+        return None
+    return wire(_phrase(TWIN[g["relation"]], other=other, rates=words([_k_rate(hz) for hz in rates])))
 
 
 def _bracket(atlas: Atlas, found: Found, rows: List[Dict[str, Any]],
