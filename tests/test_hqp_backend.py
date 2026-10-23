@@ -101,6 +101,11 @@ class FakeHqp:
         # Status polls after its own advance during which the position stays
         # at 0 while the entry sounds on the meter
         self.advance_lag_polls = 0
+        # Status polls during which the position it gives stands still while
+        # the entry plays on — the meter stream closed under a filter whose
+        # start takes seconds — and then it gives the entry's own again
+        self.held_polls = 0
+        self._held_at = None
         # When its own Next at an entry's end came (time.monotonic()): the
         # tail of its output delay plays on from there (HqpMeterPort)
         self.ended_at = None
@@ -347,6 +352,14 @@ class FakeHqp:
                         self.position += 1.0
                         if self.position >= self.length:
                             self._end_of_track()
+                shown = self.position
+                if self.held_polls > 0 and self.state == int(PlaybackState.PLAYING):
+                    self.held_polls -= 1
+                    if self._held_at is None:
+                        self._held_at = self.position
+                    shown = self._held_at
+                else:
+                    self._held_at = None
                 # The entry it reads, named as its playlist names it (Desktop
                 # 6.2.3 sends it to an unauthenticated client).
                 uri = (f' uri="{self._uri_out(self.playlist[self.track - 1])}"'
@@ -357,7 +370,7 @@ class FakeHqp:
                 if self.track_serial is not None:
                     extra += f' track_serial="{self.track_serial}"'
                 return (f'<Status state="{self.state}" track="{track}" '
-                        f'position="{self.position}" length="{length}" volume="-3"{clips} '
+                        f'position="{shown}" length="{length}" volume="-3"{clips} '
                         f'tracks_total="{len(self.playlist)}" process_speed="1.6" '
                         f'input_fill="0.9" output_fill="0.9" active_mode="{self.active["mode"]}" '
                         f'active_filter="{self.active["filter"]}" active_shaper="{self.active["shaper"]}" '
@@ -1992,6 +2005,8 @@ class HqpMeterPort:
 
     def __init__(self, fake: FakeHqp, tail_s: float = 0.3):
         self.fake, self.tail_s = fake, tail_s
+        # Nothing at all while set: HQPlayer building the entry it says it plays
+        self.quiet = False
         self._srv = socket.create_server(("127.0.0.1", 0))
         self.port = self._srv.getsockname()[1]
         self.accepts = 0
@@ -2008,6 +2023,8 @@ class HqpMeterPort:
             threading.Thread(target=self._stream, args=(conn,), daemon=True).start()
 
     def _frame(self):
+        if self.quiet:
+            return None
         f = self.fake
         with f._lock:
             if f.state == int(PlaybackState.PLAYING) and f.track >= 1 and f._advancing is None:
@@ -2123,6 +2140,178 @@ def test_an_advance_whose_status_lags_is_started_by_the_frames_after_its_tail(tr
     assert att.verdict["code"] == "played", att.verdict
     assert all(t["position"] == 0.0 for t in att.facts["ticks"])
     assert [a.intent for a in diag.attempts()] == ["select"]     # played: not kept
+
+
+# -- the position on the clock (HqpBackend._clocked) -------------------------------------
+# With the meter stream closed a filter whose start takes seconds keeps Status's
+# position standing still. What Now Playing and the play tracker read runs on
+# the clock from the start the meter heard, and Status's takes over as it moves.
+
+@pytest.fixture
+def clocked(traced, monkeypatch):
+    """Every tick of the traced backend as (when its status was asked for, the
+    state, Status's position, the position handed on)."""
+    ticks = []
+    clock = HqpBackend._clocked
+
+    def recorded(self, status, read_at, att):
+        position = clock(self, status, read_at, att)
+        ticks.append((read_at, status.state, status.position, position))
+        return position
+    monkeypatch.setattr(HqpBackend, "_clocked", recorded)
+    return ticks
+
+
+def _playing_ticks(ticks):
+    return [t for t in ticks if t[1] == PlaybackState.PLAYING]
+
+
+def test_a_position_kept_at_0_after_the_start_the_meter_heard_runs_on_the_clock(traced, fake, metered, clocked):
+    fake.start_polls = 100
+    t0 = time.time()
+    assert traced.select(2)
+    assert _wait(lambda: any(p >= 3.0 for *_, p in clocked), 10.0)
+    playing = _playing_ticks(clocked)
+    assert all(raw == 0.0 for _, _, raw, _ in playing)
+    # the time since the start the meter heard, never more than since the tap
+    assert all(p <= at - t0 for at, _, _, p in playing)
+    assert [p for *_, p in playing] == sorted(p for *_, p in playing)
+
+
+def test_no_clock_without_a_start_the_meter_heard(traced, fake, clocked):
+    fake.start_polls = 100
+    assert traced.select(2)
+    assert _wait(lambda: len(_playing_ticks(clocked)) >= 4, 10.0)
+    assert all(p == raw == 0.0 for _, _, raw, p in _playing_ticks(clocked))
+
+
+def test_status_takes_over_as_soon_as_its_position_moves(traced, fake, metered, clocked):
+    fake.start_polls = 100
+    assert traced.select(2)
+    assert _wait(lambda: any(p >= 2.0 for *_, p in clocked), 10.0)       # the clock ran ahead
+    with fake._lock:
+        fake._starting = 0                  # Status gives its position: 1 s, while the clock reads 2 or more
+    assert _wait(lambda: any(raw >= 3.0 for _, _, raw, _ in clocked), 10.0)
+    moved = next(i for i, (_, _, raw, _) in enumerate(clocked) if raw > 0)
+    assert all(p == raw for _, _, raw, p in clocked[moved:]) and clocked[moved][3] < clocked[moved - 1][3]
+
+
+def test_a_position_that_stands_still_after_it_moved_runs_on_the_clock_from_where_it_stood(traced, fake, metered,
+                                                                                          clocked):
+    assert traced.select(2)
+    assert _wait(lambda: any(raw >= 3.0 for _, _, raw, _ in clocked), 10.0)
+    n = len(clocked)
+    fake.held_polls = 5
+    assert _wait(lambda: len(clocked) >= n + 7 and fake.held_polls == 0, 20.0)
+    ticks = clocked[n - 1:]
+    stood = [(a, b) for a, b in zip(ticks, ticks[1:]) if b[2] == a[2]]
+    assert len(stood) >= 3
+    for (at0, _, raw0, p0), (at, _, raw, p) in stood:
+        assert p > raw and p > p0 and p - p0 == pytest.approx(at - at0, abs=0.05)
+    after = next(i for i, ((_, _, a, _), (_, _, b, _)) in enumerate(zip(ticks, ticks[1:]), 1)
+                 if b != a and i > ticks.index(stood[-1][1]))
+    assert all(p == raw for _, _, raw, p in ticks[after:])           # its own again: it takes over
+
+
+def test_the_clock_holds_while_hqplayer_pauses_and_runs_on_after_it(traced, fake, metered, clocked):
+    fake.start_polls = 100
+    assert traced.select(2)
+    assert _wait(lambda: any(p >= 2.0 for *_, p in clocked), 10.0)
+    assert traced.pause()
+    assert _wait(lambda: clocked[-1][1] == PlaybackState.PAUSED, 5.0)
+    n = len(clocked)
+    assert _wait(lambda: len(clocked) >= n + 2, 8.0)
+    paused = [p for _, state, _, p in clocked if state == PlaybackState.PAUSED]
+    assert len(set(paused)) == 1 and paused[0] >= 2.0
+    assert traced.play()
+    assert _wait(lambda: clocked[-1][1] == PlaybackState.PLAYING and clocked[-1][3] >= paused[0] + 1.0, 8.0)
+    after = [(at, p) for at, state, _, p in clocked[n:] if state == PlaybackState.PLAYING]
+    # from the position it held, never back to 0, nor with the paused seconds in it
+    assert all(p >= paused[0] for _, p in after) and after[0][1] <= paused[0] + 1.1
+
+
+def test_this_nodes_own_seek_sets_the_clock(traced, fake, metered, clocked):
+    fake.start_polls = 100
+    assert traced.select(2)
+    assert _wait(lambda: any(p >= 1.0 for *_, p in clocked), 10.0)
+    t = time.time()
+    assert traced.seek(120)
+    assert _wait(lambda: clocked[-1][0] > t + 1.0, 5.0)
+    at, _, raw, p = clocked[-1]
+    assert raw == 0.0 and 120.0 < p <= 120.0 + (at - t)
+
+
+def test_the_clock_runs_no_further_than_the_output_delay_past_where_it_was_set(traced, fake, metered, clocked,
+                                                                              monkeypatch):
+    monkeypatch.setattr(hb, "CLOCK_SLACK_S", 0.5)
+    fake.status_extra["output_delay"] = "1000000"            # 1 s: a stall past 1.5 s
+    fake.start_polls = 100
+    assert traced.select(2)
+    assert _wait(lambda: len(_playing_ticks(clocked)) >= 6, 12.0)
+    positions = [p for *_, p in _playing_ticks(clocked)]
+    assert max(positions) == pytest.approx(1.5) and positions[-1] == pytest.approx(1.5)
+
+
+def test_a_new_take_begins_a_clock_of_its_own(traced, fake, metered, clocked):
+    fake.start_polls = 100
+    assert traced.select(2)
+    assert _wait(lambda: any(p >= 3.0 for *_, p in clocked), 10.0)
+    t = time.time()
+    assert traced.select(1)
+    assert _wait(lambda: clocked[-1][0] > t + 1.5 and clocked[-1][1] == PlaybackState.PLAYING, 8.0)
+    after = [(at, p) for at, state, _, p in clocked if at > t and state == PlaybackState.PLAYING]
+    assert all(p <= at - t for at, p in after)
+
+
+def test_a_take_hqplayer_moves_on_to_inside_a_window_runs_from_where_it_began(traced, fake, metered, clocked,
+                                                                             monkeypatch):
+    monkeypatch.setattr(diag, "OBSERVE_S", 30.0)        # the tap's window outlasts its entry
+    fake.start_polls = 100                              # both entries' positions kept at 0
+    assert traced.select(1)
+    assert _wait(lambda: any(p >= 3.0 for *_, p in clocked), 10.0)
+    with fake._lock:                                    # its own Next with no gap: the sound runs on
+        t = time.time()
+        fake.track, fake.position, fake._starting = 2, 0.0, 100
+        fake.track_serial += 1
+    assert _wait(lambda: clocked[-1][0] > t + 2.5 and clocked[-1][1] == PlaybackState.PLAYING, 8.0)
+    after = [(at, p) for at, state, _, p in clocked if at > t and state == PlaybackState.PLAYING]
+    assert after and all(p <= at - t + 1.1 for at, p in after)     # the tick before it at most
+
+
+def test_a_take_hqplayer_says_it_plays_and_does_not_sound_has_no_clock_yet(traced, fake, metered, clocked,
+                                                                          monkeypatch):
+    monkeypatch.setattr(diag, "OBSERVE_S", 30.0)
+    fake.start_polls = 100
+    assert traced.select(1)
+    assert _wait(lambda: any(p >= 2.0 for *_, p in clocked), 10.0)
+    with fake._lock:                                    # its own Next onto an entry it builds, silent
+        metered.quiet = True
+        t = time.time()
+        fake.track, fake.position, fake._starting = 2, 0.0, 100
+        fake.track_serial += 1
+    assert _wait(lambda: clocked[-1][0] > t + 2.0, 8.0)
+    assert all(p == 0.0 for at, _, _, p in clocked if at > t)        # no start heard on it yet
+    metered.quiet = False
+    loud = time.time()
+    assert _wait(lambda: clocked[-1][3] >= 1.0, 8.0)
+    assert all(p <= at - loud for at, _, _, p in clocked if at > loud)
+
+
+def test_now_playing_and_the_play_tracker_read_the_position_on_the_clock(fake, listens):
+    mgr = PlaybackManager()
+    mgr.queue.replace([_item("E:/Music/A/01.flac", 1), _item("E:/Music/A/02.flac", 2)])
+    b = _attach(mgr)
+    port = HqpMeterPort(fake)
+    b._meter_attachment = hqp_meter.meter.attach("127.0.0.1", port.port, b._sound_began)
+    try:
+        fake.start_polls = 100
+        assert b.select(1)
+        assert _wait(lambda: tracker._play_session is not None and tracker._play_session.max_position >= 3.0,
+                     10.0)
+        assert mgr._latest_status["position"] >= 2.0 and fake.position == 0.0
+    finally:
+        b.shutdown()
+        port.close()
 
 
 def test_no_advance_at_the_playlists_end_nor_for_a_stop_hqplayer_did_not_move_on_from(traced, fake,

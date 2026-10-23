@@ -1367,6 +1367,26 @@ end its Status may not show. A start window does not ask a port that
 refused at this attach again (HQPlayer's return or the next attach does),
 and one made after its backend let go holds no later attachment's socket.
 
+**The position on the clock** (since 2026-10-23). With the meter stream
+closed, a filter whose start takes seconds keeps Status's position standing
+still for up to about the output delay HQPlayer reports, from the take's
+start, whether a start window held the meter before or not: Now Playing
+stopped and then jumped, and an entry that ended inside that stretch was a
+listen recorded short of its end. So once the meter heard a take's start,
+the position the poller hands on — the one Now Playing shows and the play
+tracker records (`max_position`: the percent listened, a skip, the
+scrobble) — runs on the clock from that start while Status's stands still:
+from 0, or from the second of a Seek this node sent with the start (a
+resume); held while HQPlayer pauses, where the last tick that found it
+playing read it; set by a Seek of this node's HQPlayer took; set again by
+every Status position that moved — Status's takes over as soon as it
+moves. Never less than Status's, nor past the entry's length, nor further
+than the output delay (3.5 s where HQPlayer reports none) and two seconds
+past the last time it was set: a position that stands still longer is a
+stall, and the clock holds there. One take of one entry, its
+`track_serial` and URI: another ends it, and so does a stop. Without a
+start the meter heard the position is Status's, as before.
+
 HQPlayer's own advance is an attempt too (`advance`, since 2026-10-18).
 Onto an entry of another rate HQPlayer stops on no entry at the end of the
 one before — `track` 0, its `track_serial` one more (Desktop 6.2.4: one more

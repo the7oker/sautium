@@ -1211,6 +1211,22 @@ implementation details live in the code, DB and git history.
   finds its entry before the command lock — the same window, left open
   (2026-10-14). Lesson: a check and the act it guards belong to one
   critical section.
+- **The position runs on the clock while Status stands still** (2026-10-23).
+  Now Playing and the play tracker read Status's position. With the meter
+  stream closed, a filter whose start takes seconds keeps it standing still
+  for up to about the output delay from the take's start — a start window
+  that held the meter before changes nothing once it closes — so Now
+  Playing stopped and then jumped, and an entry that ended inside that
+  stretch was recorded short of its end: a skip, no scrobble. Once the meter
+  heard a take's start, the position handed on runs on the clock from that
+  start while Status's stands still: held while paused, set by this node's
+  own Seek, and Status's takes over whenever it moves; no further than the
+  output delay and two seconds past the last time it was set, since a
+  longer stand is a stall. Keeping the meter open whenever HQPlayer plays
+  was set aside: what it costs HQPlayer near the real-time limit is not
+  measured. Lesson: a reading that stopped refreshing is not one that says
+  "stopped" — tell them apart by what else is known (here the start the
+  meter heard), and bound the guess by what is measured of the refresh.
 - **Open after the series' review** (2026-10-14), found in code the series
   did not change, left for the next slice: a removal of the very slot
   HQPlayer reads on a tail mirror is the queue's alone, and the canary then

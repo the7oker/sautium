@@ -773,6 +773,46 @@ STATUS_FAILURE_THRESHOLD = 5
 # HQPlayer reads (_playing).
 DRIFT_CHECK_EVERY = 30
 
+# With the meter stream closed, a filter whose start takes seconds can keep
+# Status's position standing still for up to about the output delay HQPlayer
+# reports: the clock (_Clock) runs that long past the last time it was set,
+# and this much more — a position that stands still longer is a stall
+CLOCK_SLACK_S = 2.0
+
+
+class _Clock:
+    """Where the entry HQPlayer plays is while its Status's position stands
+    still: one take of one entry (`take`: Status's track_serial and URI),
+    from the start the meter heard. It holds while HQPlayer pauses, this
+    node's own Seek sets it, and a Status position that moved sets it again
+    — Status's position takes over as soon as it moves. It runs no further
+    than the output delay and CLOCK_SLACK_S past the last time it was set,
+    and holds there. A pause holds it where the last tick that found
+    HQPlayer playing read it: the Pause came after that tick, at most a poll
+    later, and a held clock never runs ahead of where HQPlayer stopped."""
+
+    def __init__(self, take: tuple, position: float, at: float, status: float, marked: float):
+        self.take = take
+        self.position, self.at = position, at       # it read `position` at `at`
+        self.status = status                        # the Status position it last met
+        self.marked = marked                        # the newest Seek of ours it took (sent at)
+        self.held = False
+        self.playing_at = at                        # the last tick that found HQPlayer playing
+
+    def read(self, at: float, delay: float) -> float:
+        if self.held:
+            return self.position
+        return self.position + min(max(at - self.at, 0.0), delay + CLOCK_SLACK_S)
+
+    def set(self, position: float, at: float) -> None:
+        self.position, self.at = position, at
+
+    def hold(self, at: float, delay: float) -> None:
+        self.position, self.held = self.read(at, delay), True
+
+    def run(self, at: float) -> None:
+        self.at, self.held = at, False
+
 
 @dataclass
 class _Start:
@@ -1011,6 +1051,15 @@ class HqpBackend(PlayerBackend):
         # The latest status emitted: what the poller says again, with the
         # build, while HQPlayer is building and answers nothing.
         self._last_tick: Optional[PlaybackStatus] = None
+        # The position on the clock of the take HQPlayer plays (_clocked):
+        # the poller's alone; and this node's newest Seek HQPlayer took, as
+        # (second, sent at), which it reads (_on_outcome)
+        self._clock: Optional[_Clock] = None
+        self._seek_mark: Optional[tuple] = None
+        # The take the last tick read, (track_serial, URI), and when the tick
+        # before it was asked for: the take began after that (_clocked)
+        self._take: tuple = (None, 0.0)
+        self._take_read = 0.0
         # The play intent being watched (playback.hqp_diagnostics), and the
         # ones an intent superseded or the owner ended, waiting for the
         # poller to judge them.
@@ -1996,6 +2045,7 @@ class HqpBackend(PlayerBackend):
                             diag.tick_of(status, "playing", read_at), self._queue.generation,
                             hqp_meter.meter.seen()):
                         _notify_notices()
+                    position = self._clocked(status, read_at, att)
                     if playing is not None:
                         # The slot playing on, its position moving and the DSP
                         # keeping up: a failure judged on it explains nothing now.
@@ -2004,7 +2054,7 @@ class HqpBackend(PlayerBackend):
                                 and (status.process_speed is None or status.process_speed >= 1.0)
                                 and diag.note_playing(playing[0], self._queue.generation)):
                             _notify_notices()
-                        self._last_tick = self._status_of(status, playing)
+                        self._last_tick = self._status_of(status, playing, position)
                         self._emit(self._last_tick)
                     if diag.note_answered():
                         _notify_notices()
@@ -2306,14 +2356,68 @@ class HqpBackend(PlayerBackend):
         playing = self._playing(status)
         return playing is not None and playing[2]
 
-    def _status_of(self, status, playing: tuple) -> PlaybackStatus:
+    def _clocked(self, status, read_at: float, att: Optional[diag.Attempt]) -> float:
+        """The position this tick hands on, which Now Playing and the play
+        tracker read alike: Status's — or, while it stands still once the
+        meter heard this take's start, the clock's (_Clock), never less than
+        Status's nor past the entry's length. The clock begins with the
+        start of this take `att` heard, at the second of a Seek of ours its
+        start sent (a resume) else at 0, and ends with the take. Called on
+        the poller, which alone keeps it."""
+        busy = status.state in (PlaybackState.PLAYING, PlaybackState.PAUSED)
+        take = (status.track_serial, status.uri)
+        if take != self._take[0]:
+            self._take = (take, self._take_read)
+        self._take_read = read_at
+        delay = status.output_delay or diag.ADVANCE_DELAY_S
+        clock = self._clock
+        if clock is not None and (not busy or clock.take != take):
+            clock = self._clock = None
+        seek = self._seek_mark
+        if clock is None:
+            heard = att.heard_at(status.track_serial) if busy and att is not None else None
+            if heard is None:
+                return status.position
+            # Never before the take began: HQPlayer moves on inside a window,
+            # and the sound of the entry before may run on into this one's
+            heard = max(heard, self._take[1])
+            ours = seek is not None and att.take is not None and seek[1] >= att.take
+            clock = self._clock = _Clock(take, float(seek[0]) if ours else 0.0,
+                                         max(heard, seek[1]) if ours else heard, status.position,
+                                         seek[1] if seek is not None else 0.0)
+            if status.position > clock.read(read_at, delay):
+                clock.set(status.position, read_at)     # Status moved ahead of it already
+        elif seek is not None and seek[1] > clock.marked:
+            clock.set(float(seek[0]), seek[1])
+            clock.marked = seek[1]
+        moved = status.position != clock.status
+        clock.status = status.position
+        if status.state == PlaybackState.PAUSED:
+            if moved:
+                clock.set(status.position, read_at)
+            elif not clock.held:
+                clock.hold(clock.playing_at, delay)
+            clock.held = True
+            position = max(status.position, clock.position)
+        else:
+            if clock.held:
+                clock.run(read_at)
+            clock.playing_at = read_at
+            if moved:
+                clock.set(status.position, read_at)
+                return status.position
+            position = max(status.position, clock.read(read_at, delay))
+        return min(position, status.length) if status.length > 0 else position
+
+    def _status_of(self, status, playing: tuple, position: Optional[float] = None) -> PlaybackStatus:
         """One status tick as the manager reads it, at the slot `_playing`
-        found. HQPlayer's own tags are authoritative only for a slot it
-        opened as a file; an http-served slot (a preview, a transcode, every
-        owned file for an HQPlayer elsewhere) is described by the queue item,
-        so those keys are left out and the manager falls back to it. An entry
-        that is not ours is reported as external playback (slot 0), so
-        nothing is tracked against a queued track."""
+        found and at `position` (_clocked; Status's when not given).
+        HQPlayer's own tags are authoritative only for a slot it opened as a
+        file; an http-served slot (a preview, a transcode, every owned file
+        for an HQPlayer elsewhere) is described by the queue item, so those
+        keys are left out and the manager falls back to it. An entry that is
+        not ours is reported as external playback (slot 0), so nothing is
+        tracked against a queued track."""
         idx, item, foreign = playing
         extra = {"genre": status.genre, "process_speed": status.process_speed,
                  "limited": status.limited, "active_mode": status.active_mode,
@@ -2355,7 +2459,7 @@ class HqpBackend(PlayerBackend):
             extra["rebuilding"] = True      # a play press: HQPlayer takes the queue again
         return PlaybackStatus(
             state=STATE_NAMES.get(status.state, "unknown"),
-            position=status.position, length=status.length,
+            position=status.position if position is None else position, length=status.length,
             queue_index=idx, volume=status.volume, extra=extra, item=item)
 
     def _diagnosis(self, status) -> Optional[dict]:
@@ -2796,7 +2900,10 @@ class HqpBackend(PlayerBackend):
         """An answer on the link's client. Sent by an intent, it is a step of
         that intent's attempt (superseded or not); from anywhere else a stop,
         a pause, a DSP change or a replaced playlist HQPlayer took means the
-        owner moved on — one it refused changed nothing."""
+        owner moved on — one it refused changed nothing. A Seek HQPlayer took
+        sets the position's clock (_clocked)."""
+        if outcome.command == "Seek" and not outcome.failed:
+            self._seek_mark = (float(outcome.attributes.get("position") or 0), outcome.sent or outcome.ts)
         mine = getattr(self._local, "attempt", None)
         if mine is not None:
             mine.record(outcome)

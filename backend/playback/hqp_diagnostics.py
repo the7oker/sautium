@@ -361,6 +361,14 @@ class Attempt:
         with _lock:
             return started(self.ticks, self._serial(), self.meter, self.take)
 
+    def heard_at(self, serial: Optional[int]) -> Optional[float]:
+        """When the meter heard the start of the take `serial` names
+        (heard_start) — HQPlayer may move on to another entry inside the
+        window — or None. A serial None (HQPlayer 5 reports none) is any
+        take of the window."""
+        with _lock:
+            return heard_start(self.ticks, serial, self.meter, self.take)
+
     def _serial(self) -> Optional[int]:
         """An advance's take; None for a play. Called under _lock."""
         return self.advance["serial"] if self.advance else None
@@ -428,13 +436,23 @@ def started(ticks: list, serial: Optional[int] = None, meter: Optional[dict] = N
     counts only on its take (`serial`: HQPlayer's track_serial at its first
     stopped tick) — a Play of that entry afterwards takes it again, one
     more, and is an attempt of its own."""
+    return heard_start(ticks, serial, meter, take) is not None or _moved(_playing(ticks, serial))
+
+
+def heard_start(ticks: list, serial: Optional[int] = None, meter: Optional[dict] = None,
+                take: Optional[float] = None) -> Optional[float]:
+    """When the meter heard the start (started's meter clauses), on its
+    clock (time.time()): the earliest run of sound that makes one — from the
+    take where that run began before it (the entry a jump left sounding on
+    into the new one). None while the meter heard none: a position that
+    moved says that audio left, not when."""
     runs = (meter or {}).get("runs") or ()
-    if runs and any(r["start"] - METER_SLACK_S <= t["ts"] <= r["last"] - METER_SLACK_S
-                    for t in _playing(ticks, serial) if t["track"] >= 1 for r in runs):
-        return True
-    if take is not None and any(_resumed(r, take) and not _other_take(ticks, serial, r) for r in runs):
-        return True
-    return _moved(_playing(ticks, serial))
+    heard = [r["start"] if take is None else max(r["start"], take) for r in runs
+             if any(r["start"] - METER_SLACK_S <= t["ts"] <= r["last"] - METER_SLACK_S
+                    for t in _playing(ticks, serial) if t["track"] >= 1)]
+    if take is not None:
+        heard += [r["start"] for r in runs if _resumed(r, take) and not _other_take(ticks, serial, r)]
+    return min(heard, default=None)
 
 
 def _moved(playing: list) -> bool:
