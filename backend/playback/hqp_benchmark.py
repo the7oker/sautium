@@ -2538,15 +2538,18 @@ def unchecked_notice() -> Optional[dict]:
     owner's selection there back — HQPlayer back where the check found it:
     the newest, on any HQPlayer, until that mode is judged at HQPlayer's
     nearest rest or a new run's start. Its onset is `measured_unchecked_at`;
-    `mode` names the mode measured."""
-    run = db_query_one("""SELECT measured_unchecked_at, mode
+    `mode` names the mode measured, `run` the run, and `refused` whether
+    HQPlayer at rest did not let it be read — the owner may then leave it as
+    it is (leave_as_it_is)."""
+    run = db_query_one("""SELECT id, measured_unchecked_at, measured_refused_at, mode
                             FROM hqp_benchmark_runs
                            WHERE finished_at IS NOT NULL AND measured_unchecked_at IS NOT NULL
                              AND measured_from_mode IS NULL
                            ORDER BY measured_unchecked_at DESC LIMIT 1""")
     if run is None:
         return None
-    return {"since": run["measured_unchecked_at"], "mode": run["mode"]}
+    return {"since": run["measured_unchecked_at"], "mode": run["mode"], "run": run["id"],
+            "refused": run["measured_refused_at"] is not None}
 
 
 def stayed_notice() -> Optional[dict]:
@@ -2556,8 +2559,9 @@ def stayed_notice() -> Optional[dict]:
     the point's own (`measured_from_at`): a new condition, said anew even
     over a "not checked yet" already seen. `back_to`: the mode found and its
     selection, by name (the rate in Hz); `unchecked` and `refused` as the
-    mark stands. A run still owed is in its put-back's hands: none."""
-    run = db_query_one("""SELECT measured_from_at, measured_unchecked_at, measured_refused_at,
+    mark stands, `run` the run. A run still owed is in its put-back's hands:
+    none."""
+    run = db_query_one("""SELECT id, measured_from_at, measured_unchecked_at, measured_refused_at,
                                  mode, measured_from_mode_name, measured_from_rate,
                                  measured_from_filter, measured_from_filter1x,
                                  measured_from_shaper
@@ -2566,7 +2570,7 @@ def stayed_notice() -> Optional[dict]:
                            ORDER BY measured_from_at DESC LIMIT 1""")
     if run is None:
         return None
-    return {"since": run["measured_from_at"], "mode": run["mode"],
+    return {"since": run["measured_from_at"], "mode": run["mode"], "run": run["id"],
             "unchecked": run["measured_unchecked_at"] is not None,
             "refused": run["measured_refused_at"] is not None,
             "back_to": {"mode": run["measured_from_mode_name"], "rate": run["measured_from_rate"],
@@ -2754,6 +2758,40 @@ def _measured_refused(run: dict, why: str) -> None:
         logger.info("HQPlayer benchmark run %s: the mode it measured not let be read at rest "
                     "(%s): tried again before the next run", run["id"], why)
         _notify()
+
+
+def leave_as_it_is(run_id: int) -> bool:
+    """The owner's word on a mark HQPlayer at rest did not let be judged — a
+    mode the output no longer offers among its causes, which no check would
+    ever get past: the mode the run measured is left as it is. The mark, a
+    return point still standing and their notices go, the run's note says
+    whose word it was, and no rest or run's start tries that mode again: what
+    HQPlayer holds there, and the mode it stayed in, are the owner's. False
+    when the run holds no such mark — judged meanwhile, or not refused at
+    rest so far, its check still to come. Refused while a run measures."""
+    note = "the mode it measured left as it is at the owner's word"
+    # Under the lock a run's start takes: a run that starts judges the mark
+    # itself, and never meets it half left
+    with _lock:
+        if _state["running"]:
+            raise BenchmarkRefused(LABEL)
+        row = db_execute("""UPDATE hqp_benchmark_runs SET measured_unchecked_at = NULL,
+                                   measured_refused_at = NULL, measured_from_mode = NULL,
+                                   measured_from_mode_name = NULL, measured_from_rate = NULL,
+                                   measured_from_filter = NULL, measured_from_filter1x = NULL,
+                                   measured_from_shaper = NULL, measured_from_at = NULL,
+                                   note = concat_ws('; ', note, %(n)s::text)
+                             WHERE id = %(id)s AND measured_refused_at IS NOT NULL
+                            RETURNING hqp_endpoint_id""", {"n": note, "id": run_id})
+        if row is None:
+            return False
+        _unchecked.pop(row["hqp_endpoint_id"], None)
+        _busy_at.pop(row["hqp_endpoint_id"], None)
+        _point_rows.pop(row["hqp_endpoint_id"], None)
+        _bump()
+    logger.info("HQPlayer benchmark run %s: %s", run_id, note)
+    _notify()
+    return True
 
 
 def _left_volume(link, run: dict, st: dict) -> str:

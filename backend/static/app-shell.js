@@ -11533,6 +11533,7 @@
     return {
       title: 'Benchmark settings not checked yet',
       text: `The ${escapeHtml(d.mode)} settings are not checked yet — HQPlayer did not let them be read or set back. They are checked again before the next run at the latest.`,
+      ...hqpLeaveAction(d),
     };
   };
   // A check that left HQPlayer in the measured mode names where it was found
@@ -11553,8 +11554,32 @@
     return {
       title: `HQPlayer stayed in ${mode}`,
       text: `HQPlayer stayed in ${mode}; before the check it was in ${was.join(', ')}. It goes back there ${when}${d.unchecked ? `, and the settings of ${mode} are checked then` : ''}.`,
+      ...hqpLeaveAction(d),
     };
   };
+  // A mark HQPlayer at rest did not let be judged (`refused`) — a mode the
+  // output no longer offers among the causes, which no check gets past —
+  // the owner may leave as it is: the mark and its notices go, and what
+  // HQPlayer holds there is theirs (POST /api/hqplayer/benchmark/leave)
+  function hqpLeaveAction(d) {
+    if (!d.refused || d.run == null) return {};
+    const said = text => notices.toast({ kind: 'error', key: 'hqplayer.leave',
+                                         title: 'Not left as it is', text });
+    return { action: { label: 'Leave it as it is', run: async () => {
+      try {
+        const resp = await fetch('/api/hqplayer/benchmark/leave', {
+          method: 'POST', headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ run: d.run }),
+        });
+        if (resp.ok) return;
+        const out = await resp.json().catch(() => ({}));
+        said(escapeProfileHtml(out.detail || 'The node did not take it.'));
+      } catch (err) {
+        console.warn('leave as it is failed', err);
+        said('The node is not answering right now. Try again.');
+      }
+    } } };
+  }
   // HQPlayer refused files of a batch it was handed: one notice per batch,
   // naming both causes it may have — never asserting one.
   NOTICE_COPY['hqplayer.refused'] = n => {

@@ -93,6 +93,10 @@ class BenchmarkRequest(BaseModel):
     fixed_volume_ok: bool = False       # the owner turned the amplifier down: HQPlayer cannot
 
 
+class LeaveRequest(BaseModel):
+    run: int                            # the benchmark run whose mark the owner leaves as it is
+
+
 class CudaRequest(BaseModel):
     value: Optional[str] = None         # 'off' | 'full' | 'convolution'; None = not known
 
@@ -674,6 +678,22 @@ def start_benchmark(req: BenchmarkRequest) -> Dict[str, Any]:
 def cancel_benchmark() -> Dict[str, Any]:
     from playback import hqp_benchmark
     return {"cancelled": hqp_benchmark.cancel()}
+
+
+@router.post("/benchmark/leave")
+def leave_benchmark_mark(req: LeaveRequest) -> Dict[str, Any]:
+    """The owner's word on a run's mark HQPlayer at rest did not let be
+    judged: the mode it measured is left as it is
+    (hqp_benchmark.leave_as_it_is). 409 while a run measures, and for a run
+    that holds no such mark."""
+    from playback import hqp_benchmark
+    try:
+        left = hqp_benchmark.leave_as_it_is(req.run)
+    except hqp_benchmark.BenchmarkRefused as e:
+        raise HTTPException(status_code=409, detail=str(e))
+    if not left:
+        raise HTTPException(status_code=409, detail="That run's settings are checked, or about to be")
+    return {"left": True}
 
 
 @router.put("/cuda")

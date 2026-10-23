@@ -1270,12 +1270,15 @@ def _notice_items() -> List[Dict[str, Any]]:
     # One whose put-back could not read the mode it measured, or set the
     # owner's selection there back — HQPlayer did not let it — until that
     # mode is judged at HQPlayer's nearest rest or the next run's start (only
-    # the next run's, once HQPlayer at rest did not let it be read)
+    # the next run's, once HQPlayer at rest did not let it be read), or the
+    # owner leaves it as it is (`refused`: a mode the output no longer offers
+    # is never judged)
     unchecked = hqp_benchmark.unchecked_notice()
     if unchecked is not None:
         items.append({"key": "hqplayer.run_unchecked", "kind": "info",
                       "since": unchecked["since"].isoformat(), "until": None,
-                      "data": {"mode": unchecked["mode"]}})
+                      "data": {"mode": unchecked["mode"], "run": unchecked["run"],
+                               "refused": unchecked["refused"]}})
     # One whose check left HQPlayer in that mode, until it is back where it
     # was found (`back_to`) — its own key and onset: a new condition, said
     # even over a "not checked yet" already seen
@@ -1283,8 +1286,9 @@ def _notice_items() -> List[Dict[str, Any]]:
     if stayed is not None:
         items.append({"key": "hqplayer.run_stayed", "kind": "warning",
                       "since": stayed["since"].isoformat(), "until": None,
-                      "data": {"mode": stayed["mode"], "unchecked": stayed["unchecked"],
-                               "refused": stayed["refused"], "back_to": stayed["back_to"]}})
+                      "data": {"mode": stayed["mode"], "run": stayed["run"],
+                               "unchecked": stayed["unchecked"], "refused": stayed["refused"],
+                               "back_to": stayed["back_to"]}})
     # A CLI agent signed out while something needs it: the assistant runs on
     # it, or — Claude Code only — gear research waits for it (the drain
     # claims nothing until the sign-in returns). Each verdict is the CLI's

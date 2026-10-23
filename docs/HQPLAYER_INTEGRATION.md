@@ -1819,8 +1819,13 @@ cooling — so Sautium measures it instead of predicting it
   (`measured_refused_at`, migration 040), and one that still does not
   refuses only a run that would read that mode — a run of it, or HQPlayer
   found in it — while a run of another mode goes, the mark standing
-  (2026-10-15). Before a check leaves the mode it found, that mode and its
-  selection by name go on the run's row as the return point
+  (2026-10-15). Such a mark — a mode the output no longer offers among its
+  causes, which no check gets past — the owner may leave as it is from its
+  notice (since 2026-10-23): the mark, a return point still standing and
+  their notices go, the run's note says whose word it was, and no rest or
+  run's start tries that mode again. Before a check leaves the mode it
+  found, that mode and its selection by name go on the run's row as the
+  return point
   (`measured_from_*`, migration 041): the next check — a put-back's own too
   — or run start takes HQPlayer back there first, on a stopped HQPlayer, and
   only then judges — after a node restart too — and a run never reads the

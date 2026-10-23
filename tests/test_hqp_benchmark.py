@@ -3691,6 +3691,79 @@ def test_hqplayer_switched_back_by_the_owner_ends_the_notice_without_a_setmode(
     assert seen == [], seen
 
 
+def test_a_mark_hqplayer_at_rest_did_not_let_be_judged_is_left_as_it_is_at_the_owners_word(
+        run, monkeypatch):
+    """HQPlayer at rest refuses the SetMode into PCM, as an output that no
+    longer offers PCM does: the mark waits for the next run's start, which
+    would try PCM again and again. The owner leaves it as it is: the mark and
+    its notice go, the run's note says whose word it was, and neither a
+    later rest nor a run's start tries PCM again."""
+    fake = run.fake
+    run_id = _marked_while_busy(run)
+    refused = _refuses_pcm(monkeypatch, fake)
+    with fake._lock:
+        fake.track, fake.state = 1, int(PlaybackState.STOPPED)
+    assert _wait(lambda: (run.mgr.active.poke(), _refused_at_rest(run, run_id))[1], 10)
+    said = next(n for n in _notices() if n["key"] == "hqplayer.run_unchecked")
+    assert said["data"]["run"] == run_id and said["data"]["refused"] is True
+    assert bench.leave_as_it_is(run_id)
+    assert not _unchecked(run, run_id) and not _refused_at_rest(run, run_id)
+    assert bench.unchecked_notice() is None
+    assert not [n for n in _notices() if n["key"] in ("hqplayer.run_unchecked", "hqplayer.run_stayed")]
+    note = run.q("SELECT note FROM hqp_benchmark_runs WHERE id = %s", run_id)[0][0]
+    assert note.endswith("the mode it measured left as it is at the owner's word"), note
+    with fake._lock:                    # a later rest, on another entry
+        fake.track = 2
+    _ticks(run)
+    bench.start("sdm")
+    assert _wait(lambda: run.q("SELECT count(*) FROM hqp_benchmark_runs WHERE id > %s", run_id)
+                 == [(1,)], 30), bench.state()
+    _end_the_run()
+    assert len(refused) == 1, refused   # PCM never tried again
+
+
+def test_hqplayer_a_check_left_in_the_measured_mode_stays_there_at_the_owners_word(
+        run, monkeypatch):
+    """A check left HQPlayer in PCM, its way back to SDM refused at rest: the
+    next run's start would take HQPlayer back. The owner leaves it as it is:
+    the return point and the notice go, no SetMode of Sautium's is sent, and
+    the next run reads PCM as the owner's."""
+    fake = run.fake
+    run_id = _left_in_pcm(run, refused=True)
+    seen = _set_modes(monkeypatch, fake)
+    _ticks(run)
+    stayed = bench.stayed_notice()
+    assert stayed["run"] == run_id and stayed["refused"]
+    assert bench.leave_as_it_is(run_id)
+    assert bench.stayed_notice() is None and not _point(run, run_id)
+    assert not bench.point_pending(run.endpoint_id)     # the poller reads State for it no more
+    _ticks(run)
+    assert seen == [], seen
+    bench.start("pcm")
+    assert _wait(lambda: run.q("SELECT pre_mode FROM hqp_benchmark_runs WHERE id > %s", run_id)
+                 == [(1,)], 30), (run.q("SELECT id, note FROM hqp_benchmark_runs"), bench.state())
+    _end_the_run()
+    assert "2" not in [v for v, _ in seen], seen        # never back to SDM
+
+
+def test_a_mark_still_to_be_checked_is_not_left_as_it_is(run, monkeypatch):
+    """A mark HQPlayer at rest has not refused yet — its check still to come
+    — is not the owner's to leave: refused, and so is any while a run
+    measures."""
+    from fastapi import HTTPException
+    from routers import hqplayer as hqp_router
+    run_id = _marked_while_busy(run)
+    assert bench.unchecked_notice()["refused"] is False
+    assert not bench.leave_as_it_is(run_id)
+    with pytest.raises(HTTPException) as e:
+        hqp_router.leave_benchmark_mark(hqp_router.LeaveRequest(run=run_id))
+    assert e.value.status_code == 409
+    assert _unchecked(run, run_id)
+    monkeypatch.setitem(bench._state, "running", True)
+    with pytest.raises(bench.BenchmarkRefused):
+        bench.leave_as_it_is(run_id)
+
+
 def test_a_way_back_refused_keeps_the_return_point_and_sets_nothing_in_the_wrong_mode(
         run, monkeypatch):
     """At rest, PCM the run's only mark: the put-back enters PCM and puts the
