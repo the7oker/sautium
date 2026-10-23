@@ -1250,10 +1250,14 @@ implementation details live in the code, DB and git history.
   next slice: a Pause, a Stop or a Seek HQPlayer refuses in its own words
   (an Error answer: the route says HTTP 200 with `ok: false`) is said to
   nobody — the UI says only what the route itself refused (said since
-  2026-10-23: the shell's one reporter toasts the output's refusal for a
-  Play, Pause, Stop, Next, Previous and Seek, and the Seek's route answers
-  it as the others do); and on a tail
-  mirror a "play next", a removal and a new order still take an entry
+  2026-10-23: the shell's one reporter toasts the output's refusal in its
+  own words for a Play, Pause, Stop, Next, Previous and Seek, and the
+  Seek's route answers it as the others do; a refusal that was a play
+  attempt's step names that attempt, so the tab says it once with the
+  attempt's diagnosis, whichever comes first; an output with no words of
+  its own says why on its status, and a Next past the queue's end is no
+  refusal — the first cut toasted those again, "It gave no reason"); and
+  on a tail mirror a "play next", a removal and a new order still take an entry
   HQPlayer reads in a state the SDK does not name, or with a stop under way,
   for a reading (the entry read is never touched); when the output no longer
   offers a mode a run left unchecked, its mark and notice stand for good —

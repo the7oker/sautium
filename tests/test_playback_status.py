@@ -176,6 +176,9 @@ def test_a_seek_the_output_refused_answers_in_its_words(monkeypatch):
         def refusal(self):
             return "HQPlayer refused Seek"
 
+        def refused_attempt(self):
+            return None
+
         def pressing(self):
             return None
 

@@ -2057,9 +2057,10 @@
         await reportPlaybackResult(resp);
         return;
       }
-      // A slot the output does not take (a gap) is refused in its words
+      // A slot the output does not take (a gap) is refused in its words —
+      // once with the attempt's diagnosis (firstSaid)
       const out = await resp.json();
-      if (out.ok === false && out.refusal) {
+      if (out.ok === false && out.refusal && firstSaid(out.attempt)) {
         notices.toast({ kind: 'info', key: 'queue.refused', title: 'Not played',
                         text: escapeHtml(out.refusal.charAt(0).toUpperCase() + out.refusal.slice(1)) });
       }
@@ -6263,11 +6264,23 @@
                     text: escapeProfileHtml(err) });
   });
 
+  // The play attempts whose failure this tab has said: HQPlayer's words in a
+  // route's answer (`attempt`) and the attempt's diagnosis say one failure,
+  // and the one that comes first speaks — Now Playing's tag still offers Why?
+  const saidAttempts = new Set();
+  function firstSaid(attempt) {
+    if (attempt == null) return true;
+    if (saidAttempts.has(attempt)) return false;
+    saidAttempts.add(attempt);
+    return true;
+  }
+
   // A play the HQPlayer output judged failed (playback/hqp_diagnostics.py):
   // one toast per attempt, with the way to its explanation. Not when the
   // same failure repeats on a dead output — the `hqplayer.failing` notice
-  // speaks then (`failing`, decided by the server) — and not for an
-  // HQPlayer that did not answer: the play route's 503 already said so.
+  // speaks then (`failing`, decided by the server) — not for an HQPlayer
+  // that did not answer: the play route's 503 already said so — and not
+  // when this tab said the attempt's refusal already (firstSaid).
   // The status a tab connects with paints the tag only, never a stale toast.
   let lastDiagnosisSeen;
   document.addEventListener('np-update', (e) => {
@@ -6276,7 +6289,7 @@
     const first = lastDiagnosisSeen === undefined;
     if (id === lastDiagnosisSeen) return;
     lastDiagnosisSeen = id;
-    if (!d || first || d.failing || d.code === 'unreachable') return;
+    if (!d || first || d.failing || d.code === 'unreachable' || !firstSaid(d.id)) return;
     notices.toast({ kind: 'error', key: 'hqplayer.diagnosis', title: escapeHtml(d.title),
                     text: escapeHtml(d.next || ''),
                     action: { label: 'Why?', run: () => openHqpDiagnosis(d.id) } });
@@ -6310,18 +6323,22 @@
   // provider side, `resp` null a fetch that threw (network), anything else
   // the route's own verdict; and a transport `word` the route handed the
   // output that refused it in its own words (HTTP 200, `ok: false` with its
-  // `refusal`). Returns true on success so callers can skip follow-up work.
+  // `refusal`), once with the attempt's diagnosis (firstSaid). An output
+  // with no words of its own says why in its status (`error`), or nothing
+  // was refused — a Next past the queue's end: no words, no toast. Returns
+  // true on success so callers can skip follow-up work.
   const TRANSPORT_WORDS = { play: 'Play', pause: 'Pause', stop: 'Stop', next: 'Next',
                             previous: 'Previous', seek: 'Seek' };
   async function reportPlaybackResult(resp, body, word) {
     if (resp && resp.ok) {
       if (!body || body.ok !== false) return true;
+      if (!body.refusal || !firstSaid(body.attempt)) return false;
       // The output's name is a device's own (a renderer's friendlyName): escaped
       const out = window.currentStatus && window.currentStatus.output;
       const name = (out && out.label) || 'The output';
       notices.toast({ kind: 'error', key: 'player.refused',
                       title: escapeProfileHtml(`${name} did not take the ${TRANSPORT_WORDS[word] || 'command'}`),
-                      text: escapeProfileHtml(body.refusal || 'It gave no reason.') });
+                      text: escapeProfileHtml(body.refusal) });
       return false;
     }
     // A Response body is one-shot: callers that already read resp.json() must

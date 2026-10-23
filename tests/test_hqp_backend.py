@@ -1651,6 +1651,21 @@ def test_a_refused_play_is_judged_at_once_in_hqplayers_words(traced, fake):
     assert HQPlayerClient.last_errors()[0]["message"] == "Empty transport"
 
 
+def test_a_refusal_in_hqplayers_words_names_the_attempt_whose_step_it_was(traced, fake):
+    """The attempt goes with HQPlayer's words (refused_attempt): its
+    diagnosis says the same, and the shell says it once. A word no intent
+    watched names none, and neither does a refusal after it on the thread."""
+    fake.replies["Play"] = '<Play result="Error">Empty transport</Play>'
+    assert traced.play() is False
+    assert traced.refused_attempt() == _closed(timeout=5.0).id
+    fake.replies["SelectTrack"] = '<SelectTrack result="Error">No such track</SelectTrack>'
+    assert traced.select(2) is False                # a tap: its start refused
+    assert _wait(lambda: any(a.intent == "select" for a in diag.attempts()), 5.0)
+    assert traced.refused_attempt() == next(a.id for a in diag.attempts() if a.intent == "select")
+    fake.replies["Pause"] = '<Pause result="Error"/>'
+    assert traced.pause() is False and traced.refused_attempt() is None
+
+
 def test_an_unanswered_play_intent_is_an_unreachable_attempt(traced, fake):
     fake.close()
     assert traced.reachable() is False

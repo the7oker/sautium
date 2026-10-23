@@ -169,6 +169,9 @@ class _Elsewhere:
     def refusal(self) -> str:
         return ""
 
+    def refused_attempt(self) -> None:
+        return None
+
     def pressing(self) -> None:
         return None
 

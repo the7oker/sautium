@@ -164,6 +164,13 @@ class PlayerBackend(ABC):
         device's own words when it gave any — what the assistant quotes."""
         return ""
 
+    def refused_attempt(self) -> Optional[int]:
+        """The play attempt whose step that refused command was, when the
+        output's own diagnosis of the attempt says the same refusal to every
+        tab: the tab that asked says it once, as either comes first. None
+        when no attempt watched it."""
+        return None
+
     def pressing(self) -> Optional[dict]:
         """While a play intent goes on behind its answer — HQPlayer taking
         the queue again, or a queue mutation it is held for — the track it

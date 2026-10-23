@@ -1409,7 +1409,16 @@ def _transport(intent: bool, command: str, *args) -> dict:
         ok = getattr(b, command)(*args)
     except Exception as e:
         raise _output_error(e)
-    return _starting(b, {"ok": True} if ok else {"ok": False, "refusal": b.refusal()})
+    return _starting(b, {"ok": True} if ok else _refused(b))
+
+
+def _refused(b) -> dict:
+    """A command the output did not take: its own words (`refusal`) and, when
+    a play attempt watched it, that attempt (`attempt`), whose diagnosis says
+    the same to every tab — the shell says it once."""
+    attempt = b.refused_attempt()
+    answer = {"ok": False, "refusal": b.refusal()}
+    return answer if attempt is None else {**answer, "attempt": attempt}
 
 
 def _starting(b, answer: dict) -> dict:
@@ -1471,7 +1480,7 @@ def seek(req: SeekRequest):
         ok = b.seek(int(req.position))
     except Exception as e:
         raise _output_error(e)
-    return _starting(b, {"ok": True} if ok else {"ok": False, "refusal": b.refusal()})
+    return _starting(b, {"ok": True} if ok else _refused(b))
 
 
 # -- Smart play ----------------------------------------------------------------
@@ -1673,8 +1682,7 @@ def jump(req: JumpRequest):
         ok = b.select(slot, req.track_id)
     except Exception as e:
         raise _output_error(e)
-    answer = {"ok": True, "index": slot} if ok else {
-        "ok": False, "index": slot, "refusal": b.refusal()}
+    answer = {"ok": True, "index": slot} if ok else {**_refused(b), "index": slot}
     return _starting(b, answer)
 
 

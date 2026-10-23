@@ -824,6 +824,21 @@ class _Clock:
         self.at, self.held = at, False
 
 
+class _Refusal(str):
+    """HQPlayer's words for a command it did not take, and the play attempt
+    whose step that command was (None: no intent watched it) — the attempt
+    whose diagnosis says the same words (refused_attempt)."""
+    attempt: Optional[diag.Attempt] = None
+
+
+def _worded(words: Optional[str], attempt: Optional[diag.Attempt]) -> Optional[str]:
+    if words is None:
+        return None
+    refusal = _Refusal(words)
+    refusal.attempt = attempt
+    return refusal
+
+
 @dataclass
 class _Passing:
     """A slot the queue let go while HQPlayer reads it (queue_remove): the
@@ -3049,8 +3064,9 @@ class HqpBackend(PlayerBackend):
         default: None when HQPlayer took it. Kept for refusal()."""
         def run(h):
             return None if fn(h) else (why or HQPlayerClient.refusal)(h)
-        refusal = self._local.refusal = (self._cmd(run, intent) if word is None
-                                         else self._cmd(run, item=word))
+        refusal = self._local.refusal = _worded(self._cmd(run, intent) if word is None
+                                                else self._cmd(run, item=word),
+                                                getattr(self._local, "attempt", None))
         if refusal is not None:
             logger.warning("HQPlayer did not take %s: %s", name, diag.redact_text(refusal))
         return refusal
@@ -3059,6 +3075,10 @@ class HqpBackend(PlayerBackend):
         """Why the last command this thread sent was not taken, in
         HQPlayer's words — what the assistant quotes."""
         return getattr(self._local, "refusal", None) or "HQPlayer did not confirm it"
+
+    def refused_attempt(self) -> Optional[int]:
+        attempt = getattr(getattr(self._local, "refusal", None), "attempt", None)
+        return attempt.id if attempt is not None else None
 
     def _close_reads(self, hqp: HQPlayerClient, att: diag.Attempt) -> dict:
         """What HQPlayer holds as the attempt closes — its playlist (whose
@@ -4133,7 +4153,7 @@ class HqpBackend(PlayerBackend):
         return refusal if h.play() else h.refusal()
 
     def _started(self, entry: Optional[Entry], refusal: Optional[str]) -> bool:
-        self._local.refusal = refusal
+        self._local.refusal = _worded(refusal, getattr(self._local, "attempt", None))
         if refusal is not None:
             logger.warning("HQPlayer did not take the start at entry %s: %s",
                            entry.n if entry is not None else "-", diag.redact_text(refusal))
