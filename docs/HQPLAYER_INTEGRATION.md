@@ -308,6 +308,10 @@ name in HQPlayer's order: each row of the filter and shaper lists gains
 group's bracket, whether it has a card), and while the node holds an atlas
 file `atlas` carries the sheets' head lines and where the file was read from
 — without a file there is no `atlas` key and `facts` are HQPlayer's alone.
+A twin's line is the lead its card gives the group, the group's say with it
+— where the two were compared — and a twin whose group has no say gets none;
+a card names any group without a say by its members alone (since
+2026-10-23).
 A file's releases are per engine and family — the filters' PCM, the
 modulators' SDM — and a shipped file holds the dated ones alone. Each sheet
 is shown the newest engine of HQPlayer's own major that holds its family's

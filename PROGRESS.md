@@ -3707,6 +3707,16 @@ assistant's lists of rates, which call rate 0 "Auto" as the Rate knob does,
 and, since 2026-10-21, a modulator's rates on its card and its row
 ("DSD128 · from 44.1k" there before), as the tools name them.
 
+A twin's line, since 2026-10-23, is the lead its card gives the group: the
+relation's word, the other member and the group's say, which states where
+the two were compared ("in every comparison made, each into …"), the words
+of the site's member box — on every twin's row, in SDM mode too. A twin
+whose group has no say gets no line, and a card names any group without a
+say by its members alone, a magnitude group's too. Before, the line was the
+relation's word alone ("Same output as sinc-Mx (bit for bit)"), as was the
+card's lead without a say, which said more than any comparison the atlas
+made.
+
 Open (2026-10-18): a row of either sheet takes the second click of a
 double-click on the knob that opened it as a pick — the sheet covers the
 knob at once, so that click lands on whatever row is under it — as the

@@ -623,7 +623,8 @@ def test_a_measured_filter_row(atlas):
     assert a["chips"][1]["parts"] == [{"t": "±"}, {"n": "12.346"}, {"t": " ms"}]
     assert a["tag"]["text"] == "Signalyst 4/5" and a["words"] is None and a["card"] is True
     assert plain(a["caption"]) == "Apod Y per the manual"
-    assert plain(a["line3"]) == "Same output as demo-sinc-b (within one step)"
+    assert plain(a["line3"]) == \
+        "Same output as demo-sinc-b — the same output within one step, in this fictional file."
     assert f["demo-sinc-b"]["caption"] is None  # the manual's N says nothing on the row
     assert _chips(f["demo-poly-mp"]) == ["minimum phase", "0.0 ms before · 0.300 ms after", "Any"]
     assert _chips(f["demo-gauss-x"]) == ["intermediate phase", "1.5 ms before · 2.5 ms after", "position-dependent",
@@ -817,16 +818,47 @@ def test_an_identical_group_of_three_draws_one_bracket_in_hqplayers_order(atlas)
     assert f["DMX5"]["bracket"] is None and f["DMX7EC-a"]["line3"] is None
 
 
-@pytest.mark.parametrize("relation, line", [
-    ("bit_identical", "Same output as demo-sinc-b (bit for bit)"),
-    ("within_1_lsb", "Same output as demo-sinc-b (within one step)"),
-    ("same_figures_within_precision", "Same figures as demo-sinc-b (within the measurement's precision)")])
-def test_a_twins_line_in_its_relations_words(tmp_path, relation, line):
+@pytest.mark.parametrize("relation, say, line", [
+    ("bit_identical", "the same output, bit for bit, in every fictional comparison",
+     "Same output as demo-sinc-b — the same output, bit for bit, in every fictional comparison."),
+    ("within_1_lsb", "the same output within one step, in every fictional comparison",
+     "Same output as demo-sinc-b — the same output within one step, in every fictional comparison."),
+    ("same_figures_within_precision", "the same figures within this fictional file's precision",
+     "Same figures as demo-sinc-b — the same figures within this fictional file's precision.")])
+def test_a_twins_line_is_its_cards_lead_with_the_groups_say(tmp_path, relation, say, line):
+    # The say states where the two were compared; the relation's word alone,
+    # "(bit for bit)" until 2026-10-23, said more than any comparison made.
+    # In SDM mode, where a row shows its PCM facts, the same line.
     doc = _doc()
-    doc["groups"][0]["relation"] = relation
+    doc["groups"][0].update(relation=relation, say=say)
     doc["engines"]["9.4.1"]["identity_groups"][0]["relation"] = relation
     atlas = _read(tmp_path, doc)
-    assert plain(_facts_of(atlas, "filter", PCM, "9.4.1", "pcm")["demo-sinc-a"]["line3"]) == line
+    for spec, mode in ((PCM, "pcm"), (SDM, "sdm")):
+        f = _facts_of(atlas, "filter", spec, "9.4.1", mode)
+        assert plain(f["demo-sinc-a"]["line3"]) == line, mode
+        assert plain(f["demo-sinc-b"]["line3"]) == line.replace("demo-sinc-b", "demo-sinc-a"), mode
+        assert line in _card_text(_card(atlas, "filter", "demo-sinc-a", spec, mode=mode)), mode
+
+
+@pytest.mark.parametrize("unsaid", [None, ""])
+def test_a_group_without_a_say_claims_nothing_its_members_are_named(tmp_path, unsaid):
+    # No row line for the twin, and its card, as a magnitude group's, names
+    # the members alone: "Same output as demo-sinc-b." said more than any
+    # comparison made (until 2026-10-23)
+    doc = _doc()
+    for g in doc["groups"][:2]:
+        if unsaid is None:
+            del g["say"]
+        else:
+            g["say"] = unsaid
+    atlas = _read(tmp_path, doc)
+    for spec, mode in ((PCM, "pcm"), (SDM, "sdm")):
+        f = _facts_of(atlas, "filter", spec, "9.4.1", mode)
+        assert f["demo-sinc-a"]["line3"] is None and f["demo-sinc-b"]["line3"] is None, mode
+        for name, names in (("demo-sinc-a", "demo-sinc-a and demo-sinc-b."),
+                            ("demo-poly-mp", "demo-poly-lp and demo-poly-mp.")):
+            text = _card_text(_card(atlas, "filter", name, spec, mode=mode))
+            assert names in text and not any(re.search(r"\bSame (output|magnitude)\b", t) for t in text), (mode, name)
 
 
 def test_a_relation_without_words_shows_nothing_and_is_logged_by_its_name(tmp_path, caplog):

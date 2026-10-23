@@ -96,11 +96,6 @@ APOD_CLAUSE = "Apod {mark} per the manual"
 CLAUSES = " · "
 NOT_MEASURED = "not measured on engine {engine}"
 NOT_MEASURED_TITLE = "Listed by HQPlayer, not measured on engine {engine}"
-TWIN = {
-    "bit_identical": "Same output as {other} (bit for bit)",
-    "within_1_lsb": "Same output as {other} (within one step)",
-    "same_figures_within_precision": "Same figures as {other} (within the measurement's precision)",
-}
 ORDER = {"5": "fifth", "7": "seventh"}
 ORDER_WORD = "{order} order"
 ORDER_NUMBER = "order {order}"
@@ -157,8 +152,12 @@ RELATION = {
     "same_figures_within_precision": "Same figures as",
     "same_magnitude": "Same magnitude as",
 }
+# A group's lead on its card, and a twin's line on its row, as the site's
+# member box says it: the say carries the group's scope (a twin's: where the
+# two were compared). Without a say the card names the members alone — the
+# relation's word says more than any comparison made — and the row says none
 GROUP_LEAD = "{relation} {others} — {say}."
-GROUP_LEAD_PLAIN = "{relation} {others}."
+GROUP_LEAD_PLAIN = "{names}."
 ACROSS = "Across rate families: {families}."
 ACROSS_ONE = "{name}: {what}"
 PROPERTIES = "Properties"
@@ -1337,12 +1336,15 @@ def _modulator_chips(found: Found) -> List[Dict[str, Any]]:
 
 
 def _twin(atlas: Atlas, found: Found) -> Optional[List[Dict[str, str]]]:
-    """A twin's line: the other member of an identical group of two."""
+    """A twin's line: the other member of an identical group of two, in the
+    words its card leads the group with. None for a group without a say: the
+    relation alone says more than any comparison made."""
     ident = atlas.identical(found)
-    if ident is None or len(ident[0]["members"]) != 2:
+    g = ident[1] if ident else None
+    if g is None or len(g["members"]) != 2 or not g.get("say"):
         return None
-    other = next(m for m in ident[0]["members"] if m != found.entry["name"])
-    return wire(_phrase(TWIN[ident[0]["relation"]], other=other))
+    other = next(m for m in g["members"] if m != found.entry["name"])
+    return wire(_phrase(GROUP_LEAD, relation=RELATION[g["relation"]], others=other, say=g["say"]))
 
 
 def _bracket(atlas: Atlas, found: Found, rows: List[Dict[str, Any]],
@@ -1491,7 +1493,7 @@ def group_section(g: Dict[str, Any], name: str, order: Dict[str, int]) -> Option
     members = _in_order(g["members"], order)
     others = ", ".join(m for m in members if m != name)
     items = [_line(_phrase(GROUP_LEAD, relation=relation, others=others, say=g["say"]) if g.get("say")
-                   else _phrase(GROUP_LEAD_PLAIN, relation=relation, others=others))]
+                   else _phrase(GROUP_LEAD_PLAIN, names=_group_names(members, order)))]
     if "cross_family" in g:
         across = "; ".join(ACROSS_ONE.format(name=m, what=g["cross_family"][m]) for m in members)
         items.append(_line(_phrase(ACROSS, families=across)))

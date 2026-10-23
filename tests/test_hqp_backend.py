@@ -5410,8 +5410,9 @@ def test_with_the_nodes_atlas_the_rows_carry_its_facts_by_name_in_hqplayers_orde
     rows = {r["name"]: r for r in s["filters"]}
     assert _facts_text(rows["demo-new"]) == (["1:1", "not measured on engine 9.4.1"], None)
     assert rows["demo-new"]["facts"]["chips"][-1]["muted"] is True
-    assert _facts_text(rows["demo-sinc-a"]) == (["linear phase", "±12.346 ms", "2^x up"],
-                                                "Same output as demo-sinc-b (within one step)")
+    assert _facts_text(rows["demo-sinc-a"]) == (
+        ["linear phase", "±12.346 ms", "2^x up"],
+        "Same output as demo-sinc-b — the same output within one step, in this fictional file.")
     assert _facts_text(rows["demo-gauss-x"])[0] == ["intermediate phase", "1.5 ms before · 2.5 ms after",
                                                     "position-dependent", "Any"]
     # Every key HQPlayer gave stays as it gave it; only `facts` is added.
