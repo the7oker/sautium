@@ -604,11 +604,18 @@ comes after the control port answers again — so neither can end the wait.
     is the queue's, the mirror lost. The slot HQPlayer plays or pauses is
     never removed from it, on a tail mirror as in step (since 2026-10-23):
     read in the removal's own sequence, it leaves the queue alone, the track
-    plays out, and the node knows the entry for its own until HQPlayer
-    passes it — the canary reads behind it what came after it, the status
-    names it at no slot and as no other controller's, and a mirror in step
-    is a tail mirror from then on; a removal whose Status names no entry it
-    may go by removes nothing, the mirror lost. A radio begun on it while
+    plays out, and the node knows it for its own — by its take, the
+    track_serial its Status gives there — until HQPlayer passes it. It keeps
+    a place in the queue's order, behind the last of the slots that were
+    before it still queued: behind it HQPlayer holds the queue from there,
+    an append included, and every edit counts from that place — a second
+    removal, a play next (right behind it), the canary, the reconverge's
+    repair; a radio's clear keeps it, HQPlayer's first entry then, the radio
+    behind it. The status names it at no slot and as no other controller's,
+    and its listen goes on; stopped on it, the play press goes on with what
+    followed it. A mirror in step is a tail mirror from then on; a removal
+    whose Status names no entry it may go by removes nothing, the mirror
+    lost. A radio begun on it while
     HQPlayer reads the slot the queue keeps leaves it in step — the clear
     keeps the entry HQPlayer reads, the queue the slot it reads; begun once
     HQPlayer moved on from that slot, it loses it.

@@ -6518,6 +6518,8 @@ def test_a_removal_of_the_slot_hqplayer_plays_lets_it_play_out(fake, output, lis
     assert _wait(lambda: _statuses_after(fake, n, 3), timeout=8)
     assert b._mirror == "tail" and b._passing is None
     assert "PlaylistRemove" not in [c for c, _ in fake.commands]
+    # its listen, whole: written as HQPlayer moved on
+    assert [p["tid"] for sql, p in writes if "INSERT INTO listening_history" in sql] == ["track-1"]
 
 
 def test_a_removal_of_the_slot_hqplayer_pauses_on_sends_nothing(fake, output, monkeypatch):
@@ -6583,6 +6585,260 @@ def test_a_removal_of_the_slot_a_tail_mirror_reads_is_no_external_edit(fake, out
     n = len(fake.commands)
     assert _wait(lambda: _statuses_after(fake, n, 3), timeout=8)
     assert b._mirror == "tail" and b._passing is None
+
+
+_A = "file:///E:/Music/A/0{}.flac"
+
+
+def _at_slot_2(mgr, b, fake):
+    """In step, HQPlayer plays slot 2 of four (its own advance onto it)."""
+    assert mgr.append([_item("E:/Music/A/04.flac", 4)]) == 1
+    assert fake.playlist == [_A.format(i) for i in range(1, 5)], fake.playlist
+    fake.end_now()                                  # HQPlayer's own Next: entry 2
+    assert _wait(lambda: mgr._latest_status.get("track_id") == "track-2"
+                 and mgr._latest_status.get("state") == "playing", timeout=8), mgr._latest_status
+    n = len(fake.commands)
+    assert _wait(lambda: _statuses_after(fake, n, 2), timeout=8)
+    assert b._mirror == "step" and fake.track == 2
+
+
+def _removed_at_slot_2(mgr, b, fake, *, tail=False):
+    """HQPlayer plays slot 2 of four — in step, or on a tail mirror — and the
+    person removes it: it plays out."""
+    _at_slot_2(mgr, b, fake)
+    if tail:
+        b._move_mirror("tail")
+    assert mgr.remove(2, "track-2")
+    assert b._mirror == "tail" and b._passing is not None
+    n = len(fake.commands)
+    assert _wait(lambda: _statuses_after(fake, n, 2), timeout=8)
+
+
+@pytest.mark.parametrize("tail", [False, True])
+def test_a_second_removal_while_the_first_plays_out_keeps_what_followed_it(fake, output, tail):
+    """The second removal counts from the place of the first, playing out:
+    HQPlayer drops the very entry, and after the removed track the one that
+    followed it plays — never the queue's head again."""
+    mgr, b = output
+    _removed_at_slot_2(mgr, b, fake, tail=tail)
+    assert mgr.remove(3, "track-4")
+    assert [it.track_id for it in mgr.queue.snapshot()] == ["track-1", "track-3"]
+    assert fake.playlist == [_A.format(i) for i in (1, 2, 3)] and b._mirror == "tail", (
+        fake.playlist, b._mirror)
+    fake.end_now()                                  # it played out: HQPlayer's own Next
+    assert _wait(lambda: mgr._latest_status.get("track_id") == "track-3", timeout=8), mgr._latest_status
+
+
+def test_the_reconverge_repairs_behind_a_removal_playing_out_from_its_place(fake, output):
+    """The mirror lost while a removed track plays out: HQPlayer gets the
+    queue back behind it from its place — what followed it, never the
+    queue's head again — a tail mirror still."""
+    mgr, b = output
+    _removed_at_slot_2(mgr, b, fake)
+    with fake._lock:
+        fake.playlist = fake.playlist[:3]           # it lost the last entry
+    b.lose_mirror("HQPlayer did not answer an append (test)")
+    assert _wait(lambda: fake.playlist == [_A.format(i) for i in (1, 2, 3, 4)]
+                 and b._mirror == "tail", timeout=8), (fake.playlist, b._mirror)
+    assert fake.track == 2
+
+
+def test_a_play_next_while_a_removal_plays_out_goes_right_behind_it(fake, output):
+    """A play next while a removed track plays out goes right behind it,
+    before what followed it — a run that lands track by track, the second
+    extending the first, alike — in the queue and in HQPlayer's playlist."""
+    mgr, b = output
+    _removed_at_slot_2(mgr, b, fake)
+    assert mgr._latest_status.get("plays_out_after") == 1
+    first = _item("E:/Music/A/05.flac", 5)
+    assert mgr.append([first], position="next") == 1
+    assert mgr.append([_item("E:/Music/A/06.flac", 6)], position="next", after=first) == 1
+    assert [it.track_id for it in mgr.queue.snapshot()] == [
+        "track-1", "track-5", "track-6", "track-3", "track-4"]
+    assert fake.playlist == [_A.format(i) for i in (1, 2, 5, 6, 3, 4)] and fake.track == 2, (
+        fake.playlist, fake.track)
+    assert b._mirror == "tail"
+
+
+def test_a_play_next_while_the_queues_first_slot_plays_out_goes_at_its_head(fake, output):
+    mgr, b = output
+    assert mgr.remove(1, "track-1")
+    n = len(fake.commands)
+    assert _wait(lambda: _statuses_after(fake, n, 2), timeout=8)
+    assert mgr._latest_status.get("plays_out_after") == 0
+    assert mgr.append([_item("E:/Music/A/05.flac", 5)], position="next") == 1
+    assert [it.track_id for it in mgr.queue.snapshot()] == ["track-5", "track-2", "track-3"]
+    assert fake.playlist == [_A.format(i) for i in (1, 5, 2, 3)] and fake.track == 1, fake.playlist
+
+
+def test_an_append_behind_a_removal_of_the_last_slot_is_no_external_edit(fake, output, monkeypatch):
+    """The queue's last slot removed while it plays: what is added later
+    goes behind it in HQPlayer, and the canary calls none of it an
+    external edit."""
+    monkeypatch.setattr(hb, "DRIFT_CHECK_EVERY", 1)
+    mgr, b = output
+    fake.end_now()
+    assert _wait(lambda: mgr._latest_status.get("track_id") == "track-2", timeout=8)
+    fake.end_now()
+    assert _wait(lambda: mgr._latest_status.get("track_id") == "track-3"
+                 and mgr._latest_status.get("state") == "playing", timeout=8)
+    assert mgr.remove(3, "track-3")
+    n = len(fake.commands)
+    assert _wait(lambda: _statuses_after(fake, n, 2), timeout=8)
+    assert mgr.append([_item("E:/Music/A/04.flac", 4)]) == 1
+    assert fake.playlist == [_A.format(i) for i in (1, 2, 3, 4)], fake.playlist
+    n = len(fake.commands)
+    assert _wait(lambda: _statuses_after(fake, n, 4), timeout=8)
+    assert b._mirror == "tail", b._mirror
+
+
+@pytest.mark.parametrize("tail", [False, True])
+def test_a_radio_begun_while_a_removal_plays_out_keeps_it_and_its_listen(fake, output, listens, tail):
+    """A radio begun from the removed track playing out (Now Playing keeps
+    its identity): the clear keeps its entry — HQPlayer's first now — which
+    the queue no longer holds: a tail mirror, never in step. It still plays
+    out as the node's own, its listen going on, and a tap on the radio's
+    second track plays that track."""
+    mgr, b = output
+    writes, _ = listens
+    _removed_at_slot_2(mgr, b, fake, tail=tail)
+    assert tracker._play_session is not None and tracker._play_session.track_id == "track-2"
+    assert mgr._latest_status.get("track_id") == "track-2"
+    mgr.clear_for_radio(lambda: None)
+    assert fake.playlist == [_A.format(2)] and fake.track == 1, (fake.playlist, fake.track)
+    assert b._mirror == "tail" and len(mgr.queue) == 0
+    assert mgr.append([_item("E:/Music/R/01.flac", 11), _item("E:/Music/R/02.flac", 12)]) == 2
+    n = len(fake.commands)
+    assert _wait(lambda: _statuses_after(fake, n, 3), timeout=8)
+    st = mgr._latest_status
+    assert not st.get("source") and st.get("track_id") == "track-2" and b._mirror == "tail", (st, b._mirror)
+    assert tracker._play_session is not None and tracker._play_session.track_id == "track-2"
+    assert not [p for sql, p in writes if "INSERT INTO listening_history" in sql and p["tid"] == "track-2"]
+    assert b.select(2, "track-12")
+    n = len(fake.commands)
+    assert _wait(lambda: _statuses_after(fake, n, 2), timeout=8)
+    assert fake.playlist[fake.track - 1] == "file:///E:/Music/R/02.flac", (fake.playlist, fake.track)
+
+
+def test_a_radio_begun_while_a_removal_plays_out_on_a_drifted_playlist_goes_behind_it(fake, output):
+    """The playlist drifted while a removed track plays out; a radio begun
+    from it clears HQPlayer to that entry alone: a tail mirror again, and
+    the radio's tracks go behind it."""
+    mgr, b = output
+    _removed_at_slot_2(mgr, b, fake)
+    b._drifted("HQPlayer's playlist drifted from the canonical queue (test)")
+    assert b._mirror == "drift"
+    mgr.clear_for_radio(lambda: None)
+    assert b._mirror == "tail"
+    assert mgr.append([_item("E:/Music/R/01.flac", 11), _item("E:/Music/R/02.flac", 12)]) == 2
+    assert fake.playlist == [_A.format(2), "file:///E:/Music/R/01.flac",
+                             "file:///E:/Music/R/02.flac"], fake.playlist
+
+
+def test_on_hqplayer_5_a_radio_keeps_the_removal_playing_out(fake, output):
+    """HQPlayer 5 names no take: the removal playing out is known by its
+    entry, which the radio's clear makes the first — still the node's own."""
+    mgr, b = output
+    with fake._lock:
+        fake.track_serial = None
+    _removed_at_slot_2(mgr, b, fake)
+    mgr.clear_for_radio(lambda: None)
+    assert fake.playlist == [_A.format(2)] and fake.track == 1
+    n = len(fake.commands)
+    assert _wait(lambda: _statuses_after(fake, n, 3), timeout=8)
+    assert b._passing is not None and not mgr._latest_status.get("source"), (
+        b._passing, mgr._latest_status.get("source"))
+
+
+def test_a_removal_before_the_tracks_first_tick_keeps_both_listens_apart(fake, output, listens,
+                                                                         monkeypatch):
+    """The sheet a moment behind HQPlayer: HQPlayer moved on to slot 2 by
+    itself, and before the poller's next tick the person removes slot 2. It
+    plays out at no slot, still its own listen: slot 1's, skipped at 45 s of
+    300, is a skip, and slot 2's is written once it ends."""
+    mgr, b = output
+    writes, _ = listens
+    assert tracker._play_session is not None and tracker._play_session.track_id == "track-1"
+    monkeypatch.setattr(hb, "_poll_interval", lambda failures: 60.0)
+    time.sleep(1.5)                                 # the poller now waits for a poke
+    fake.end_now()                                  # HQPlayer's own Next, unseen yet
+    assert mgr.remove(2, "track-2")                 # its own Status reads entry 2 playing
+    assert b._passing is not None and b._passing.item.track_id == "track-2"
+    with fake._lock:
+        fake.position = 200.0                       # track 2 plays on, to 200 s
+
+    def ticks(k):
+        for _ in range(k):
+            n = len(fake.commands)
+            b.poke()
+            assert _wait(lambda: _statuses_after(fake, n, 1), timeout=5)
+    ticks(3)
+    assert tracker._play_session is not None and tracker._play_session.track_id == "track-2"
+    fake.end_now()                                  # track 2 played out: track 3
+    ticks(3)
+    rows = {p["tid"]: (p["dur"], p["comp"]) for sql, p in writes if "INSERT INTO listening_history" in sql}
+    assert rows["track-1"][0] < 100 and not rows["track-1"][1] and "track-2" in rows, rows
+
+
+def test_a_stop_and_play_while_a_removal_plays_out_go_on_with_what_followed_it(fake, output):
+    mgr, b = output
+    _removed_at_slot_2(mgr, b, fake)
+    assert b.stop()
+    assert _wait(lambda: mgr._latest_status.get("state") == "stopped", timeout=8)
+    assert _wait(lambda: b._spot is not None, timeout=8)
+    assert b._spot == (mgr.queue.item_at(2), 0) and mgr.queue.item_at(2).track_id == "track-3"
+    assert b.play()
+    assert _wait(lambda: mgr._latest_status.get("state") == "playing"
+                 and mgr._latest_status.get("track_id") == "track-3", timeout=8), mgr._latest_status
+
+
+def test_an_empty_queues_clear_hqplayer_refuses_waits_for_the_next_press(fake, output):
+    """The queue empty, HQPlayer stopped on an entry it still holds, and it
+    refuses PlaylistClear in its own words — an answer, no silence: the
+    reconverge does not ask again at every poll; the next play press does."""
+    mgr, b = output
+    with mgr._mutate_lock:
+        mgr.queue.replace([])
+    with fake._lock:
+        fake.playlist = [_A.format(1)]
+        fake.state, fake.track = int(PlaybackState.STOPPED), 1
+        fake.replies["PlaylistClear"] = '<PlaylistClear result="Error">Not now</PlaylistClear>'
+    fake.commands.clear()
+    b.lose_mirror("HQPlayer did not answer a removal (test)")
+    assert _wait(lambda: b._lost_by == "refusal", timeout=8), (b._mirror, b._lost_by)
+    n = len(fake.commands)
+    assert _wait(lambda: _statuses_after(fake, n, 4), timeout=10)
+    assert [c for c, _ in fake.commands].count("PlaylistClear") == 1, fake.commands
+
+
+def test_the_pollers_let_go_never_drops_a_removal_recorded_meanwhile(fake, output, monkeypatch):
+    """The poller finds HQPlayer past the first removal's entry and is about
+    to let it go, when the person removes the slot HQPlayer now plays: that
+    newer record stays, and its track plays out as the node's own."""
+    mgr, b = output
+    _removed_at_slot_2(mgr, b, fake)
+    first = b._passing
+    real = HqpBackend._plays_out
+    blocked, go = threading.Event(), threading.Event()
+
+    def plays_out(self, status):
+        out = real(self, status)
+        if (sys._getframe(1).f_code.co_name == "_pass_by" and self._passing is first
+                and out is None and not go.is_set()):
+            blocked.set()
+            go.wait(10)
+        return out
+    monkeypatch.setattr(HqpBackend, "_plays_out", plays_out)
+    fake.end_now()                                  # track 2 played out: entry 3, track 3
+    assert blocked.wait(8)
+    assert mgr.remove(2, "track-3")                 # the slot HQPlayer now plays: it plays out
+    second = b._passing
+    assert second is not first and second.item.track_id == "track-3"
+    go.set()
+    n = len(fake.commands)
+    assert _wait(lambda: _statuses_after(fake, n, 3), timeout=8)
+    assert b._passing is second and not mgr._latest_status.get("source"), (
+        b._passing, mgr._latest_status.get("source"))
 
 
 def test_an_empty_queue_taken_afresh_clears_hqplayers_playlist(fake, output):

@@ -629,9 +629,11 @@ class PlaybackManager:
 
         if s.item is not None:
             # Identified by the backend: its slot is wherever it sits now —
-            # gone with a mutation that committed meanwhile, it is no slot.
+            # gone with a mutation that committed meanwhile, it is no slot;
+            # a slot the queue let go that plays out (`out_after`) is no slot
+            # either, and still the listen it was.
             idx = self.queue.index_of(s.item) or 0
-            item = s.item if idx else None
+            item = s.item if idx or s.out_after is not None else None
         else:
             idx = s.queue_index
             item = self.queue.item_at(idx)
@@ -701,6 +703,10 @@ class PlaybackManager:
         # the slot above is 0 so nothing is tracked against a wrong track.
         if s.extra.get("source"):
             new_data["source"] = s.extra["source"]
+        # A slot the queue let go plays out behind this many of its slots:
+        # where a "play next" goes
+        if s.out_after is not None:
+            new_data["plays_out_after"] = s.out_after
         # Why the slot did not play (HQPlayer's playback trace): its own key —
         # `error` is a string the UI toasts as it stands.
         if s.extra.get("diagnosis"):
@@ -860,6 +866,9 @@ class PlaybackManager:
                 anchor = self._latest_status.get("track_index")
                 anchor = anchor if (isinstance(anchor, int)
                                     and 1 <= anchor <= len(self.queue)) else None
+                out = self._latest_status.get("plays_out_after")
+                if anchor is None and isinstance(out, int) and 0 <= out <= len(self.queue):
+                    anchor = out            # right behind a removed track playing out
                 run = self.queue.index_of(after) if after is not None else None
                 if run is not None:
                     anchor = run if anchor is None else max(anchor, run)

@@ -250,7 +250,10 @@ class World:
         # (queue generation, a batch the queue took whole): a replace, a play next
         self.batches: list = []
         self.removed: set = set()       # id() of the items people removed
-        self.removed_uris: set = set()  # and the URIs HQPlayer was handed them as
+        # By the URI HQPlayer was handed a removed slot as, the slots before
+        # it as it went: a removal that plays out stands behind the last of
+        # them still queued (_out_want)
+        self.removed_heads: dict = {}
         self.refused: set = set()       # the paths an HQPlayer was made to refuse for good
         self.mgr: Optional[PlaybackManager] = None
         self.settings_router = None
@@ -712,9 +715,10 @@ class World:
         k = self.rng.randint(1, max(len(mgr.queue), 1))
         item = mgr.queue.item_at(k)
         uri = mgr.active._uri_of(item)[0] if item is not None and isinstance(mgr.active, HqpBackend) else None
+        head = {id(it) for it in mgr.queue.snapshot()[:k - 1]}
         if item is not None and mgr.remove(k, item.track_id):
             self.removed.add(id(item))
-            self.removed_uris.add(uri)
+            self.removed_heads[uri] = head
 
     def dsp(self) -> None:
         hb.change_dsp(self.rng.choice([{"filter": 57, "filter1x": 57}, {"shaper": 2},
@@ -978,7 +982,7 @@ class World:
             if playlist == want:
                 return
             holds = (_tail_holds(playlist, want, track, state)
-                     or _plays_out(playlist, want, track, state, self.removed_uris))
+                     or _plays_out(playlist, track, state, self._out_want(b, snapshot, playlist, track)))
             if b._mirror == "tail" and not pressed and tail and not holds:
                 self.violate(f"I14: at rest after the tail step HQPlayer holds {playlist} and "
                              f"reads entry {track}, the queue {want}")
@@ -1353,6 +1357,17 @@ class World:
                 if d["not_answering"] and d["building"]:
                     self._once(e, "I9: not answering said together with a build")
 
+    def _out_want(self, b, snapshot: list, playlist: list, track: int) -> Optional[list]:
+        """What HQPlayer must hold behind the entry it reads when that entry
+        is a removal playing out: the queue's handed slots after the last of
+        the slots that were before it still queued — the node's own place
+        for it; None when the entry is no removal's."""
+        if not 1 <= track <= len(playlist) or playlist[track - 1] not in self.removed_heads:
+            return None
+        head = self.removed_heads[playlist[track - 1]]
+        k = max((i for i, it in enumerate(snapshot, 1) if id(it) in head), default=0)
+        return [b._uri_of(it)[0] for it in b._layout(snapshot).behind(k)]
+
     def _radio_order(self, log: list) -> None:
         """I12, the radio's half: history rotates before HQPlayer's playlist
         is cleared — no PlaylistClear of a radio step's the rotation did not
@@ -1377,16 +1392,14 @@ class World:
             self.violate(f"{what} (event {e.seq})")
 
 
-def _plays_out(playlist: list, want: list, track: int, state: int, removed: set) -> bool:
+def _plays_out(playlist: list, track: int, state: int, behind: Optional[list]) -> bool:
     """A removal of the entry HQPlayer reads plays out (the node sends none):
     HQPlayer plays or pauses an entry a person removed, and what lies behind
-    it is the queue's own last slots."""
-    if state not in (int(PlaybackState.PLAYING), int(PlaybackState.PAUSED)):
+    it is exactly `behind` — the queue's handed slots after its place
+    (World._out_want); None: no removal of that entry."""
+    if state not in (int(PlaybackState.PLAYING), int(PlaybackState.PAUSED)) or behind is None:
         return False
-    if not 1 <= track <= len(playlist) or playlist[track - 1] not in removed:
-        return False
-    rest = playlist[track:]
-    return want[len(want) - len(rest):] == rest if rest else True
+    return 1 <= track <= len(playlist) and playlist[track:] == behind
 
 
 def _tail_holds(playlist: list, want: list, track: int, state: int) -> bool:
@@ -1696,6 +1709,19 @@ def test_a_tail_that_does_not_hold_at_rest_breaks_invariant_14(fake, fake_b, lis
         _a_tail_that_does_not_hold(world, fake)
         world.at_rest(tail=True)
         assert [v for v in world.violations if v.startswith("I14:")], world.violations
+
+
+def test_the_play_out_excuse_is_exactly_what_followed_the_removed_entry():
+    """I14's excuse for a removal playing out is the node's own rule: behind
+    the removed entry, the queue from its place — never the queue's head
+    again, nor nothing where something followed it."""
+    playing = int(PlaybackState.PLAYING)
+    a, b, c = "file:///a", "file:///b", "file:///c"
+    assert _plays_out([a, b, c], 2, playing, [c])
+    assert not _plays_out([a, b, a, c], 2, playing, [c])        # the head again
+    assert not _plays_out([a, b], 2, playing, [c])              # what followed lost
+    assert not _plays_out([a, b, c], 2, playing, None)          # no removal of it
+    assert not _plays_out([a, b, c], 2, int(PlaybackState.STOPPED), [c])
 
 
 def test_a_tails_drift_is_not_explained_by_the_entry_before_it(fake, fake_b, listens,

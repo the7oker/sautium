@@ -1241,7 +1241,14 @@ implementation details live in the code, DB and git history.
   HQPlayer passes that entry, so the canary never calls it an external
   edit — the oracle excuses nothing; done 2026-10-23, in step too, where
   the removal had gone to HQPlayer: read in its own sequence, the entry
-  HQPlayer plays or pauses is never removed); with two HQPlayers, a seen
+  HQPlayer plays or pauses is never removed; it keeps a place in the
+  queue's order — behind the last of the slots that were before it still
+  queued — which every edit, the canary, the repair, a play next and a
+  radio count from, and its listen is its own: the first cut named it
+  slot 0, which older code reads as no slot of the queue's, so a second
+  edit put the queue's head behind it, a play next went to the end, a
+  radio claimed step, and its seconds went to the listen before it); with
+  two HQPlayers, a seen
   restored-run report comes back once the other HQPlayer's newer report is
   cleared (the seen map keeps one onset per key); and a held Play that
   meets a build is recorded as an unreachable attempt with nothing sent

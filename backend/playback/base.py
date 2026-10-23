@@ -45,6 +45,10 @@ class PlaybackStatus:
     # it — a mutation may have committed between the backend's look and the
     # manager's, and an index looked up again would name another item.
     item: Optional["QueueItem"] = None
+    # A slot the queue let go that plays out (`item`, at no slot — HQPlayer's
+    # own removal record): it stands behind this many of the queue's slots,
+    # where a "play next" goes; its listen goes on all the same.
+    out_after: Optional[int] = None
 
 
 @dataclass

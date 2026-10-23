@@ -40,7 +40,7 @@ from contextlib import contextmanager, nullcontext
 from dataclasses import dataclass, replace
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Callable, Dict, Optional
+from typing import Any, Callable, Dict, NamedTuple, Optional
 from urllib.parse import urlsplit
 
 import psycopg2
@@ -844,16 +844,31 @@ class _Passing:
     """A slot the queue let go while HQPlayer reads it (queue_remove): the
     track plays out, the queue already without it, and the node knows it
     for its own until HQPlayer passes that entry — no external edit, and no
-    listen cut short (HqpBackend._plays_out). `item` the slot, `entry`
-    HQPlayer's entry for it, `following` the next slot HQPlayer holds after
-    it (None for none), `read_at` when the removal's own Status was asked
-    for — a tick asked before it says nothing of it — and the take's
-    track_serial once a tick has read it there."""
+    listen cut short (HqpBackend._plays_out). `item` the slot; `head` the
+    queue's slots before it as it went — it stands behind the last of them
+    still queued (HqpBackend._out_at), and behind it HQPlayer holds the
+    queue from there: what an edit, the canary, the repair, a play next and
+    a radio count from; `take` its Status's track_serial there (None:
+    HQPlayer 5 names none) and `entry` the entry it reads — kept as HQPlayer
+    renumbers it (a radio's clear makes it the first), the take naming it
+    meanwhile; `read_at` when the removal's own Status was asked for — a
+    tick asked before it says nothing of it."""
     item: QueueItem
+    head: tuple
+    take: Optional[int]
     entry: "Entry"
-    following: Optional[QueueItem]
     read_at: float
-    serial: Optional[int] = None
+
+
+class _Read(NamedTuple):
+    """What a tail edit's own Status read (HqpBackend._tail_read): the slot
+    HQPlayer reads and its entry — or, `out`, the node's own removal
+    playing out at that entry, behind `slot` of the queue's slots — and the
+    take's track_serial."""
+    slot: int
+    entry: "Entry"
+    out: bool
+    take: Optional[int]
 
 
 @dataclass
@@ -1114,8 +1129,10 @@ class HqpBackend(PlayerBackend):
         self._take: tuple = (None, 0.0)
         self._take_read = 0.0
         # The node's own removal of the slot HQPlayer reads, which plays out
-        # (queue_remove): _Passing, until HQPlayer passes that entry
+        # (queue_remove): _Passing, until HQPlayer passes that entry — set by
+        # a removal, let go by the poller or a full hand-over, under its lock
         self._passing: Optional[_Passing] = None
+        self._passing_lock = threading.Lock()
         # The play intent being watched (playback.hqp_diagnostics), and the
         # ones an intent superseded or the owner ended, waiting for the
         # poller to judge them.
@@ -1706,6 +1723,12 @@ class HqpBackend(PlayerBackend):
         twice = len(self._named(status, layout.handed)) > 1
         if status.state in (PlaybackState.PLAYING, PlaybackState.PAUSED):
             reads = Entry.read(status)
+            passing = self._plays_out(status)
+            if passing is not None and reads is not None and reads.n <= len(playlist):
+                # The node's own removal plays out: behind it, the queue from its place
+                self._repair_tail(reads, self._out_at(passing, layout.items), playlist, layout,
+                                  plays_out=True)
+                return
             if (playing is None or playing[2] or twice or reads is None
                     or reads.n > len(playlist)):
                 return              # not one entry of ours: the play press re-mirrors
@@ -1722,8 +1745,11 @@ class HqpBackend(PlayerBackend):
         readings = self._readings(status.uri)
         return [s for s, it in enumerate(items, 1) if any(_reads_item(r, it) for r in readings)]
 
-    def _repair_tail(self, reads: Entry, q: int, playlist: list, layout: _Layout) -> None:
-        """HQPlayer reads our slot `q` at its entry `reads`: what lies behind
+    def _repair_tail(self, reads: Entry, q: int, playlist: list, layout: _Layout, *,
+                     plays_out: bool = False) -> None:
+        """HQPlayer reads our slot `q` at its entry `reads` — or, `plays_out`, the
+        node's own removal playing out there, behind `q` of the queue's slots
+        (never in step then): what lies behind
         that entry is made what HQPlayer holds of the queue behind the slot —
         removed from the first entry that differs and added again, as
         play-next does: the entry read is never touched, the sound never
@@ -1769,7 +1795,7 @@ class HqpBackend(PlayerBackend):
             self._drifted("HQPlayer did not take a removal behind the entry it reads")
         elif self._took(items, *out, "behind the entry it reads"):
             before = layout.before(q)
-            head = (reads == layout.entry(q)
+            head = (not plays_out and reads == layout.entry(q)
                     and self._first_divergence(playlist[:reads.n - 1], before) is None)
             if head:
                 self._in_step()
@@ -1795,7 +1821,16 @@ class HqpBackend(PlayerBackend):
                            intent="rebuild", yields=True) as n:
             if n is None:
                 return False        # a play press asked meanwhile takes the queue to it
-            fresh = self._afresh([self._uri_for(it) for it in layout.handed], "rebuild", number=n)
+            refused = None
+            try:
+                fresh = self._afresh([self._uri_for(it) for it in layout.handed], "rebuild",
+                                     number=n)
+            except OutputRefused as e:
+                fresh, refused = None, e
+        if refused is not None:
+            # An answer, no silence: the next play press tries again
+            self.lose_mirror(f"{refused} for an empty queue", by="refusal")
+            return False
         if fresh is None:
             self.lose_mirror("HQPlayer did not clear its playlist for an empty queue")
             return False
@@ -2404,31 +2439,50 @@ class HqpBackend(PlayerBackend):
 
     def _plays_out(self, status) -> Optional[_Passing]:
         """The node's own removal HQPlayer still plays or pauses as `status`
-        finds it (_Passing): at the entry it was removed at, in the take it
-        was removed in, naming that track (where the entry names anything);
-        None otherwise."""
+        finds it (_Passing): in the take it was removed in — at the entry it
+        reads where HQPlayer names no take (HQPlayer 5) — naming that track
+        (where the entry names anything); None otherwise."""
         passing = self._passing
         if (passing is None or status.state not in (PlaybackState.PLAYING, PlaybackState.PAUSED)
-                or Entry.read(status) != passing.entry
-                or (passing.serial is not None and status.track_serial != passing.serial)):
+                or (status.track_serial != passing.take if passing.take is not None
+                    else Entry.read(status) != passing.entry)):
             return None
         readings = self._readings(status.uri)
         if readings and not any(_reads_item(r, passing.item) for r in readings):
             return None
         return passing
 
+    def _out_at(self, passing: _Passing, items: list) -> int:
+        """How many of the queue's slots (`items`) the node's own removal
+        playing out stands behind: up to the last of the slots that were
+        before it still queued — none, at the queue's head."""
+        head = {id(it) for it in passing.head}
+        return max((i for i, it in enumerate(items, 1) if id(it) in head), default=0)
+
     def _pass_by(self, status, read_at: float) -> None:
         """The poller's word on the node's own removal playing out: a tick
-        asked after the removal's own read that finds HQPlayer there pins
-        its take; one that finds it elsewhere, or at rest, lets it go —
-        HQPlayer passed it."""
+        asked after the removal's own read that finds HQPlayer there keeps
+        the entry it reads; one that finds it elsewhere, or at rest, lets it
+        go — HQPlayer passed it, unless a newer removal took its place
+        meanwhile. Stopped on it (a Stop, HQPlayer's own), the play press
+        goes on with what followed it: the spot, unless one stands."""
         passing = self._passing
         if passing is None or read_at <= passing.read_at or not status.state.known:
             return
-        if self._plays_out(status) is None:
+        if self._plays_out(status) is not None:
+            passing.entry = Entry.read(status) or passing.entry
+            return
+        with self._passing_lock:
+            if self._passing is not passing:
+                return
             self._passing = None
-        elif passing.serial is None:
-            passing.serial = status.track_serial
+        if (status.state == PlaybackState.STOPPED and Entry.read(status) == passing.entry
+                and any(_reads_item(r, passing.item) for r in self._readings(status.uri))):
+            after = self._queue.item_at(self._out_at(passing, self._queue.snapshot()) + 1)
+            if after is not None:
+                with self._spot_lock:
+                    if self._spot is None:
+                        self._spot, self._spot_gen = (after, 0), self._spot_gen + 1
 
     def _foreign_in_step(self, status) -> Optional[tuple]:
         """Does HQPlayer read an entry of no queue slot while its playlist is
@@ -2536,6 +2590,9 @@ class HqpBackend(PlayerBackend):
         elif not idx:
             # The node's own removal playing out: the queue names it no more
             extra.update(artist=item.artist, album=item.album or "", song=item.title)
+        passing = self._passing if not idx and item is not None and not foreign else None
+        out_after = (self._out_at(passing, self._queue.snapshot())
+                     if passing is not None and passing.item is item else None)
         # The peak meter's SDM arc: what the published near-full-scale table
         # says of the modulator and the rate playing (None: nothing, the arc
         # the manual's), the modulator as HQPlayer names it and the rate as
@@ -2569,7 +2626,7 @@ class HqpBackend(PlayerBackend):
         return PlaybackStatus(
             state=STATE_NAMES.get(status.state, "unknown"),
             position=status.position if position is None else position, length=status.length,
-            queue_index=idx, volume=status.volume, extra=extra, item=item)
+            queue_index=idx, volume=status.volume, extra=extra, item=item, out_after=out_after)
 
     def _diagnosis(self, status) -> Optional[dict]:
         """The failed attempt Now Playing offers to explain: this backend's
@@ -3403,9 +3460,8 @@ class HqpBackend(PlayerBackend):
             return False
         passing = self._plays_out(status) if not playing[0] else None
         if passing is not None:
-            # The node's own removal plays out: behind it, what came after it
-            at = next((i for i, it in enumerate(layout.handed) if it is passing.following), None)
-            want = [passing.item] + (layout.handed[at:] if at is not None else [])
+            # The node's own removal plays out: behind it, the queue from its place
+            want = [passing.item] + layout.behind(self._out_at(passing, layout.items))
         else:
             want = [playing[1]] + layout.behind(playing[0])
         return (len(playlist) - reads.n + 1 == len(want)
@@ -4468,7 +4524,7 @@ class HqpBackend(PlayerBackend):
                 self.poke()
         except Building:
             raise
-        except (BrokenPipeError, ConnectionError, OSError) as e:
+        except (BrokenPipeError, ConnectionError, OSError, OutputRefused) as e:
             logger.warning("re-bound slots: HQPlayer's playlist could not follow (%s)", e)
             converged = None
         if converged:
@@ -4609,9 +4665,10 @@ class HqpBackend(PlayerBackend):
         from then. `reading`: the entry HQPlayer must still play, read first
         — another, or none said (_still_reads), and nothing is sent (None).
         The clear rides on the first add: an empty queue is a PlaylistClear
-        of its own, and one HQPlayer did not take is None too — its playlist
-        is not the queue. Returns (taken, unsent) as _add_uris_with_retry
-        does, and the intent's number."""
+        of its own — one HQPlayer refuses in its words raises (OutputRefused),
+        one it leaves unanswered is None too: its playlist is not the queue.
+        Returns (taken, unsent) as _add_uris_with_retry does, and the
+        intent's number."""
         with self._link.command(intent, number=number) as n:
             self._check_attached()
             if reading is not None:
@@ -4624,7 +4681,17 @@ class HqpBackend(PlayerBackend):
                     if self._inflight is not None:
                         self._inflight.stopped = True
             if not uris:
-                if not _hqp_safe(self._link, lambda h: h.playlist_clear(), "PlaylistClear"):
+                refusal = None
+
+                def clear(c: HQPlayerClient) -> bool:
+                    nonlocal refusal
+                    took = c.playlist_clear()
+                    if not took and (c.answered or not c.timed_out):
+                        refusal = c.refusal()
+                    return took
+                if not _hqp_safe(self._link, clear, "PlaylistClear"):
+                    if refusal is not None:
+                        raise OutputRefused(f"HQPlayer did not clear its playlist: {refusal}")
                     return None
                 return [], 0, n
             taken, unsent = _add_uris_with_retry(self._link, uris, clear_first=True)
@@ -4696,9 +4763,8 @@ class HqpBackend(PlayerBackend):
             return list(items), anchor_index
         handed = _Layout(items, self.gap).handed
         uris = [self._uri_for(it) for it in handed]
-        anchor = self._queue.item_at(anchor_index) if anchor_index else None
         queue = self._queue.snapshot()
-        at = anchor_index or len(queue)
+        at = len(queue) if anchor_index is None else anchor_index
         self._hold_around(queue[:at] + list(items) + queue[at:])
         unplaced = None
         behind = anchor_index
@@ -4713,7 +4779,7 @@ class HqpBackend(PlayerBackend):
                 why = f"HQPlayer's playlist was not read for a play next ({h.refusal()})"
                 unplaced = lambda: self.lose_mirror(why)
                 return [], 0, True
-            placed, unplaced = self._place_after(h, raw, anchor)
+            placed, unplaced = self._place_after(h, raw, anchor_index)
             if placed is None:
                 return [], 0, True
             place, behind, reads = placed
@@ -4750,13 +4816,13 @@ class HqpBackend(PlayerBackend):
             return list(items), anchor_index
         return self._queue_takes(items, handed, taken, unsent, "tracks to play next"), behind
 
-    def _place_after(self, h: HQPlayerClient, raw: list,
-                     item: Optional[QueueItem]) -> tuple:
+    def _place_after(self, h: HQPlayerClient, raw: list, slot: Optional[int]) -> tuple:
         """How many of HQPlayer's entries the tracks played after the queue's
-        `item` go behind — every entry holding a slot up to `item`'s, `item`
-        a gap or not, or up to the slot HQPlayer reads, read again here, when
-        it moved on past `item`; in a tail mirror counted from the entry that
-        reads the playing slot. No anchor: behind them all. Returns ((that
+        `slot` go behind — every entry holding a slot up to it, a gap or not,
+        or up to the slot HQPlayer reads, read again here, when it moved on
+        past it; in a tail mirror counted from the entry that reads the
+        playing slot — or the node's own removal playing out, which a slot 0
+        names at the queue's head. No anchor: behind them all. Returns ((that
         number, the queue slot they go behind, the queue's track HQPlayer
         reads as read here — None with no anchor, or in step with HQPlayer
         stopped on no slot of the queue's), None),
@@ -4766,10 +4832,9 @@ class HqpBackend(PlayerBackend):
         opening, a stop under way or a state the SDK does not name, which
         gives no verdict (_still_reads) — or reading a file queued at more
         than one slot it holds (no verdict which)."""
-        if item is None:
+        if slot is None:
             return (len(raw), None, None), None
         layout = self._layout()
-        slot = self._queue.index_of(item)
         if self._mirror != "tail":
             # The slot it plays, read now: moved on past the anchor since the
             # status the anchor came from, the tracks go behind what it reads
@@ -4796,29 +4861,34 @@ class HqpBackend(PlayerBackend):
         read, why = self._tail_read(h, layout)
         if read is None:
             return None, lambda: self.lose_mirror(why)
-        playing, reads = read
-        if reads.n > len(raw):
+        if read.entry.n > len(raw):
             return None, lambda: self.lose_mirror("HQPlayer reads past its own playlist")
-        if slot < playing:
+        if slot < read.slot:
             return None, lambda: None       # the part before the entry read: the queue's
-        return (reads.n + layout.upto(slot) - layout.upto(playing), slot,
-                self._queue.item_at(playing)), None
+        # A removal playing out is no slot of the queue's to count words from
+        return (read.entry.n + layout.upto(slot) - layout.upto(read.slot), slot,
+                None if read.out else self._queue.item_at(read.slot)), None
 
     def _tail_read(self, h: HQPlayerClient, layout: _Layout) -> tuple:
         """In a tail mirror, the queue slot HQPlayer reads and its entry, read
-        inside the edit's own sequence: ((slot, entry), None) — or (None, why)
-        when the entry names no slot of the queue's (stopped on an entry not
-        the queue's included: slot 0), or a file queued at more than one slot
+        inside the edit's own sequence — or the node's own removal playing
+        out there, behind the queue's slots up to its place (_out_at): an
+        edit counts from that place: (_Read, None) — or (None, why) when the
+        entry names no slot of the queue's (stopped on an entry not the
+        queue's included: slot 0), or a file queued at more than one slot
         HQPlayer holds (no verdict which one it reads: an edit behind a guess
         would land on the wrong copy)."""
         now = h.get_status()
-        playing = self._playing(now, mutating=True) if now is not None else None
+        passing = self._plays_out(now) if now is not None else None
         reads = Entry.read(now) if now is not None else None
+        if passing is not None and reads is not None:
+            return _Read(self._out_at(passing, layout.items), reads, True, now.track_serial), None
+        playing = self._playing(now, mutating=True) if now is not None else None
         if playing is None or playing[2] or not playing[0] or reads is None:
             return None, "HQPlayer reads no slot of the queue's"
         if len(self._named(now, layout.handed)) > 1:
             return None, "HQPlayer reads a file queued at more than one slot"
-        return (playing[0], reads), None
+        return _Read(playing[0], reads, False, now.track_serial), None
 
     def queue_remove(self, index: int) -> bool:
         """Mirror-first while HQPlayer's playlist mirrors the queue: the slot
@@ -4846,7 +4916,7 @@ class HqpBackend(PlayerBackend):
             return True                                 # a gap: never handed over
         queue = self._queue.snapshot()
         self._hold_around(queue[:index - 1] + queue[index:])
-        after = layout.behind(index)
+        head = tuple(queue[:index - 1])
         passing = None
         if self._mirror == "tail":
             unread = None
@@ -4854,19 +4924,19 @@ class HqpBackend(PlayerBackend):
             def at_offset(h: HQPlayerClient) -> Optional[Entry]:
                 nonlocal unread, passing
                 read, unread = self._tail_read(h, layout)
-                if read is None or index < read[0]:
+                if read is None or index < read.slot or (read.out and index == read.slot):
                     return None                         # the part before: the queue's
-                if index == read[0]:
-                    passing = _Passing(queue[index - 1], read[1], after[0] if after else None,
-                                       h.sent_at)
+                if index == read.slot:
+                    passing = _Passing(queue[index - 1], head, read.take, read.entry, h.sent_at)
                     return None                         # what HQPlayer reads plays out
                 # Behind the entry read, HQPlayer holds the queue's slots in order
-                return read[1] + (layout.upto(index) - layout.upto(read[0]))
+                return read.entry + (layout.upto(index) - layout.upto(read.slot))
             target = self._cmd(at_offset, intent=None)
             if unread is not None:
                 self.lose_mirror(unread)
             if passing is not None:
-                self._passing = passing
+                with self._passing_lock:
+                    self._passing = passing
             if target is None:
                 return True
             remove = (lambda h: _remove(h, target))
@@ -4882,7 +4952,7 @@ class HqpBackend(PlayerBackend):
                     unread = "HQPlayer did not say what it reads as a removal went"
                     return True                         # the queue's alone
                 if now.state != PlaybackState.STOPPED and Entry.read(now) == target:
-                    passing = _Passing(queue[index - 1], target, after[0] if after else None,
+                    passing = _Passing(queue[index - 1], head, now.track_serial, target,
                                        h.sent_at)
                     return True                         # what HQPlayer reads plays out
                 return _remove(h, target)
@@ -4894,7 +4964,8 @@ class HqpBackend(PlayerBackend):
             return h.refusal()
         refusal = self._refusal_of("PlaylistRemove", remove, why, intent=None)
         if passing is not None:
-            self._passing = passing
+            with self._passing_lock:
+                self._passing = passing
             self._move_mirror("tail", only_from=("step",))
         if unread is not None:
             self.lose_mirror(unread)
@@ -4929,6 +5000,8 @@ class HqpBackend(PlayerBackend):
             archive()
             now = h.get_status()
             playing = self._playing(now, mutating=True) if now is not None else None
+            if now is not None and self._plays_out(now) is not None:
+                playing = None                  # the node's own removal: no slot it keeps
             unanswered = False
 
             def clear_it(c: HQPlayerClient) -> bool:
@@ -4951,9 +5024,16 @@ class HqpBackend(PlayerBackend):
             self.poke()
             return True
         busy = now is not None and now.state in (PlaybackState.PLAYING, PlaybackState.PAUSED)
+        passing = self._plays_out(now) if busy else None
         # The queue keeps the slot its last status named (clear_for_radio)
         kept = self._last_tick.queue_index if self._last_tick is not None else None
-        if cleared and busy and playing is not None and not playing[2] and playing[0] == kept:
+        if cleared and passing is not None:
+            # The node's own removal plays out: the clear kept its entry —
+            # HQPlayer's first now — and what the radio adds goes behind it
+            # (the queue keeps nothing before it): a tail mirror, never in step
+            passing.entry = Entry(1)
+            self._move_mirror("tail")
+        elif cleared and busy and playing is not None and not playing[2] and playing[0] == kept:
             # It kept the entry it reads, the slot the queue keeps: whatever
             # the mirror was (a tail), HQPlayer holds the queue now
             self._in_step()
@@ -5033,10 +5113,10 @@ class HqpBackend(PlayerBackend):
                     read, unplaced = self._tail_read(hqp, self._layout())
                     if read is None:
                         return None
-                    if read[0] != plan.status_idx:
+                    if read.out or read.slot != plan.status_idx:
                         unplaced = "HQPlayer reads another entry than the playing slot"
                         return None
-                    k = read[1]
+                    k = read.entry
                 else:
                     # In step too, the entry HQPlayer reads now: it may have
                     # moved on since the status the plan was made on
