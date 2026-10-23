@@ -684,13 +684,16 @@ def cancel_benchmark() -> Dict[str, Any]:
 def leave_benchmark_mark(req: LeaveRequest) -> Dict[str, Any]:
     """The owner's word on a run's mark HQPlayer at rest did not let be
     judged: the mode it measured is left as it is
-    (hqp_benchmark.leave_as_it_is). 409 while a run measures, and for a run
-    that holds no such mark."""
+    (hqp_benchmark.leave_as_it_is) — said again, it is still left. 409 while
+    a run measures, and for a mark still to be checked; 404 for a run there
+    is none of."""
     from playback import hqp_benchmark
     try:
         left = hqp_benchmark.leave_as_it_is(req.run)
     except hqp_benchmark.BenchmarkRefused as e:
         raise HTTPException(status_code=409, detail=str(e))
+    except LookupError:
+        raise HTTPException(status_code=404, detail="No such benchmark run")
     if not left:
         raise HTTPException(status_code=409, detail="That run's settings are checked, or about to be")
     return {"left": True}

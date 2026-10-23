@@ -3698,15 +3698,23 @@ def test_a_mark_hqplayer_at_rest_did_not_let_be_judged_is_left_as_it_is_at_the_o
     would try PCM again and again. The owner leaves it as it is: the mark and
     its notice go, the run's note says whose word it was, and neither a
     later rest nor a run's start tries PCM again."""
+    from routers import hqplayer as hqp_router
     fake = run.fake
     run_id = _marked_while_busy(run)
+    held = _held(_notices())                # the tab's, the mark said while HQPlayer was busy
+    snaps = _wakes(monkeypatch)
     refused = _refuses_pcm(monkeypatch, fake)
     with fake._lock:
         fake.track, fake.state = 1, int(PlaybackState.STOPPED)
     assert _wait(lambda: (run.mgr.active.poke(), _refused_at_rest(run, run_id))[1], 10)
     said = next(n for n in _notices() if n["key"] == "hqplayer.run_unchecked")
     assert said["data"]["run"] == run_id and said["data"]["refused"] is True
-    assert bench.leave_as_it_is(run_id)
+    # the refusal is news: the toast that offers the owner's word
+    assert "hqplayer.run_unchecked" in _toasted(held, snaps), (held, snaps)
+    del snaps[:]
+    assert hqp_router.leave_benchmark_mark(hqp_router.LeaveRequest(run=run_id)) == {"left": True}
+    assert snaps and "hqplayer.run_unchecked" not in snaps[-1]      # every tab told
+    assert hqp_router.leave_benchmark_mark(hqp_router.LeaveRequest(run=run_id)) == {"left": True}
     assert not _unchecked(run, run_id) and not _refused_at_rest(run, run_id)
     assert bench.unchecked_notice() is None
     assert not [n for n in _notices() if n["key"] in ("hqplayer.run_unchecked", "hqplayer.run_stayed")]
@@ -3731,6 +3739,14 @@ def test_hqplayer_a_check_left_in_the_measured_mode_stays_there_at_the_owners_wo
     fake = run.fake
     run_id = _left_in_pcm(run, refused=True)
     seen = _set_modes(monkeypatch, fake)
+    held = _held(_notices())                # the tab's, as the point was kept
+    snaps = _wakes(monkeypatch)
+    # HQPlayer at rest refused the way back a moment later: news, the toast
+    # that offers the owner's word
+    run.q("UPDATE hqp_benchmark_runs SET measured_refused_at = measured_from_at + interval '1 second' "
+          "WHERE id = %s RETURNING id", run_id)
+    bench._notify()
+    assert "hqplayer.run_stayed" in _toasted(held, snaps), (held, snaps)
     _ticks(run)
     stayed = bench.stayed_notice()
     assert stayed["run"] == run_id and stayed["refused"]
@@ -3759,9 +3775,13 @@ def test_a_mark_still_to_be_checked_is_not_left_as_it_is(run, monkeypatch):
         hqp_router.leave_benchmark_mark(hqp_router.LeaveRequest(run=run_id))
     assert e.value.status_code == 409
     assert _unchecked(run, run_id)
-    monkeypatch.setitem(bench._state, "running", True)
-    with pytest.raises(bench.BenchmarkRefused):
-        bench.leave_as_it_is(run_id)
+    with monkeypatch.context() as m:        # undone before the run fixture ends
+        m.setitem(bench._state, "running", True)
+        with pytest.raises(bench.BenchmarkRefused):
+            bench.leave_as_it_is(run_id)
+    with pytest.raises(HTTPException) as e:
+        hqp_router.leave_benchmark_mark(hqp_router.LeaveRequest(run=run_id + 1000))
+    assert e.value.status_code == 404
 
 
 def test_a_way_back_refused_keeps_the_return_point_and_sets_nothing_in_the_wrong_mode(

@@ -433,21 +433,22 @@ CREATE TABLE IF NOT EXISTS hqp_benchmark_runs (
     -- at rest — SetMode restarts its output. It is checked at HQPlayer's
     -- nearest rest (stopped, reading no other controller's entry) or at a
     -- new run's start (stopped by the run, on whatever entry), before that
-    -- run reads the owner's selection; NULL once checked
+    -- run reads the owner's selection; NULL once checked, or left as it is
+    -- at the owner's word
     measured_unchecked_at TIMESTAMPTZ,
     -- When HQPlayer at rest did not let it be read (a SetMode refused or not
     -- shown, no State there, a selection or the way back refused, the lists
     -- of the mode it was found in not given): only a new run's start tries
-    -- it again; NULL — busy so far, tried at HQPlayer's nearest rest — and
-    -- NULL once checked
+    -- it again, or the owner leaves it as it is; NULL — busy so far, tried
+    -- at HQPlayer's nearest rest — and NULL once checked or left
     measured_refused_at TIMESTAMPTZ,
     -- The return point of a check of the measured mode: the mode HQPlayer was
     -- found in when the check left it (the index SetMode takes) and that
     -- mode's selection by name, as HQPlayer lists it there, the rate in Hz.
     -- Written before the check's first SetMode; the next check or run start
     -- goes back there first. NULL once HQPlayer is back in that mode (the
-    -- check's way back, a return, the owner's own switch) or a person's
-    -- change made HQPlayer theirs
+    -- check's way back, a return, the owner's own switch), a person's
+    -- change made HQPlayer theirs, or the owner left it as it is
     measured_from_mode INTEGER,
     measured_from_mode_name TEXT,
     measured_from_rate INTEGER,

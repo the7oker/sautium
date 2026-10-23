@@ -1271,11 +1271,11 @@ implementation details live in the code, DB and git history.
   offers a mode a run left unchecked, its mark and notice stand for good —
   the owner is to close them with a word ("leave it as it is"), the run then
   left to them (done 2026-10-23: a mark HQPlayer at rest did not let be
-  judged offers "Leave it as it is" on its notice; the mark, a return point
-  and their notices go, the run's note says whose word it was — the left
-  notice is not raised, since it names the knobs from the lists of the mode
-  measured, which such an output no longer gives; the return after a node
-  restart was already the return point's, 2026-10-15); and a tap that
+  judged offers "Leave it as it is" on its notice, toasted as the refusal
+  comes; the mark, a return point and their notices go, the run's note says
+  whose word it was, and what HQPlayer holds in that mode — a test point
+  too — is the owner's by that word, no left notice raised; the return
+  after a node restart was already the return point's, 2026-10-15); and a tap that
   yielded to the words made after it comes back
   with the person's second word. Held words count on from the yielded tap's
   start (a tap, a Play, then a Seek plays the tapped track), and a Seek or a

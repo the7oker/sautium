@@ -227,8 +227,9 @@ _checking: set = set()
 # gone, or one kept anew, may stand: that run's end says what stands (_run)
 _left_to_run: set = set()
 # By endpoint, the run row holding a return point — the mode a check of a
-# measured mode found HQPlayer in, kept until HQPlayer is back there
-# (_keep_point) — or None: none; read from the database once, then kept
+# measured mode found HQPlayer in, kept until HQPlayer is back there or the
+# owner leaves it as it is (_keep_point, leave_as_it_is) — or None: none;
+# read from the database once, then kept
 _point_rows: Dict[int, Optional[dict]] = {}
 _state: Dict[str, Any] = {"running": False, "cancel_requested": False, "endpoint_id": None,
                           "mode": None, "point": 0, "total": 0, "point_label": "",
@@ -2173,9 +2174,10 @@ def unchecked_run(endpoint_id: int) -> Optional[dict]:
     """The run whose put-back left the measured mode of this HQPlayer
     unchecked — HQPlayer busy, or not taking the owner's selection there
     back — the mark HQPlayer's nearest rest tries (its row; None: none; one
-    HQPlayer refused at rest waits for a new run's start), read from the
-    database once, then known (_close_owed, _close_run, _measured_checked,
-    _measured_refused keep it). A read the database fails, or a close or a
+    HQPlayer refused at rest waits for a new run's start, or the owner's word
+    that leaves it as it is), read from the database once, then known
+    (_close_owed, _close_run, _measured_checked, _measured_refused,
+    leave_as_it_is keep it). A read the database fails, or a close or a
     check overtook, is asked again at the poller's next answer: it costs
     the check, never the poll."""
     with _lock:
@@ -2537,31 +2539,36 @@ def unchecked_notice() -> Optional[dict]:
     unchecked — HQPlayer did not let it be read, or did not take the
     owner's selection there back — HQPlayer back where the check found it:
     the newest, on any HQPlayer, until that mode is judged at HQPlayer's
-    nearest rest or a new run's start. Its onset is `measured_unchecked_at`;
+    nearest rest or a new run's start, or the owner leaves it as it is.
     `mode` names the mode measured, `run` the run, and `refused` whether
     HQPlayer at rest did not let it be read — the owner may then leave it as
-    it is (leave_as_it_is)."""
-    run = db_query_one("""SELECT id, measured_unchecked_at, measured_refused_at, mode
+    it is (leave_as_it_is). Its onset is `measured_unchecked_at`, or the
+    refusal's: news, the toast that offers the owner's word."""
+    run = db_query_one("""SELECT id, COALESCE(measured_refused_at, measured_unchecked_at) AS since,
+                                 measured_refused_at, mode
                             FROM hqp_benchmark_runs
                            WHERE finished_at IS NOT NULL AND measured_unchecked_at IS NOT NULL
                              AND measured_from_mode IS NULL
                            ORDER BY measured_unchecked_at DESC LIMIT 1""")
     if run is None:
         return None
-    return {"since": run["measured_unchecked_at"], "mode": run["mode"], "run": run["id"],
+    return {"since": run["since"], "mode": run["mode"], "run": run["id"],
             "refused": run["measured_refused_at"] is not None}
 
 
 def stayed_notice() -> Optional[dict]:
     """The notice of a run whose check left HQPlayer in the mode it measured
     (a return point, _keep_point), the run closed: the newest, on any
-    HQPlayer, until HQPlayer is back where the check found it. Its onset is
-    the point's own (`measured_from_at`): a new condition, said anew even
-    over a "not checked yet" already seen. `back_to`: the mode found and its
+    HQPlayer, until HQPlayer is back where the check found it or the owner
+    leaves it as it is. Its onset is the point's own (`measured_from_at`): a
+    new condition, said anew even over a "not checked yet" already seen —
+    and so is HQPlayer at rest refusing it after (`measured_refused_at`),
+    the toast that offers the owner's word. `back_to`: the mode found and its
     selection, by name (the rate in Hz); `unchecked` and `refused` as the
     mark stands, `run` the run. A run still owed is in its put-back's hands:
     none."""
-    run = db_query_one("""SELECT id, measured_from_at, measured_unchecked_at, measured_refused_at,
+    run = db_query_one("""SELECT id, GREATEST(measured_from_at, measured_refused_at) AS since,
+                                 measured_unchecked_at, measured_refused_at,
                                  mode, measured_from_mode_name, measured_from_rate,
                                  measured_from_filter, measured_from_filter1x,
                                  measured_from_shaper
@@ -2570,7 +2577,7 @@ def stayed_notice() -> Optional[dict]:
                            ORDER BY measured_from_at DESC LIMIT 1""")
     if run is None:
         return None
-    return {"since": run["measured_from_at"], "mode": run["mode"], "run": run["id"],
+    return {"since": run["since"], "mode": run["mode"], "run": run["id"],
             "unchecked": run["measured_unchecked_at"] is not None,
             "refused": run["measured_refused_at"] is not None,
             "back_to": {"mode": run["measured_from_mode_name"], "rate": run["measured_from_rate"],
@@ -2743,7 +2750,8 @@ def _measured_refused(run: dict, why: str) -> None:
     """HQPlayer at rest did not let the mode a run measured be read (a
     SetMode refused or not shown, no State there, a selection or the way
     back refused, the lists of the mode it was found in not given): no later
-    rest tries it — only a new run's start; why, in the run's note."""
+    rest tries it — only a new run's start, unless the owner leaves it as it
+    is; why, in the run's note."""
     row = db_execute("""UPDATE hqp_benchmark_runs SET measured_refused_at = now(),
                                note = concat_ws('; ', note, %(n)s::text)
                          WHERE id = %(id)s AND measured_unchecked_at IS NOT NULL
@@ -2766,9 +2774,11 @@ def leave_as_it_is(run_id: int) -> bool:
     ever get past: the mode the run measured is left as it is. The mark, a
     return point still standing and their notices go, the run's note says
     whose word it was, and no rest or run's start tries that mode again: what
-    HQPlayer holds there, and the mode it stayed in, are the owner's. False
-    when the run holds no such mark — judged meanwhile, or not refused at
-    rest so far, its check still to come. Refused while a run measures."""
+    HQPlayer holds there — a test point too — and the mode it stayed in are
+    the owner's. True once the run holds no mark: left now, or judged or
+    left before (a second press, another tab); False while it holds one
+    HQPlayer at rest has not refused yet, its check still to come. Refused
+    while a run measures; LookupError for a run there is none of."""
     note = "the mode it measured left as it is at the owner's word"
     # Under the lock a run's start takes: a run that starts judges the mark
     # itself, and never meets it half left
@@ -2784,7 +2794,11 @@ def leave_as_it_is(run_id: int) -> bool:
                              WHERE id = %(id)s AND measured_refused_at IS NOT NULL
                             RETURNING hqp_endpoint_id""", {"n": note, "id": run_id})
         if row is None:
-            return False
+            run = db_query_one("""SELECT measured_unchecked_at IS NOT NULL AS marked
+                                    FROM hqp_benchmark_runs WHERE id = %(id)s""", {"id": run_id})
+            if run is None:
+                raise LookupError(f"no benchmark run {run_id}")
+            return not run["marked"]
         _unchecked.pop(row["hqp_endpoint_id"], None)
         _busy_at.pop(row["hqp_endpoint_id"], None)
         _point_rows.pop(row["hqp_endpoint_id"], None)
@@ -2818,7 +2832,8 @@ def _keep_point(link, run: dict, found: dict) -> Optional[str]:
     """Before a check of the mode `run` measured leaves the mode HQPlayer is
     in (`found`): that mode and its selection, named from its own lists —
     names hold across a restart, an index is read again there — kept on the
-    run's row as the return point, until HQPlayer is back there. The mode's
+    run's row as the return point, until HQPlayer is back there or the owner
+    leaves it as it is. The mode's
     name; None when HQPlayer did not give a list to name them by: no round
     trip without a way back."""
     modes, filters = link("get_modes"), link("get_filters")
@@ -2908,7 +2923,7 @@ def _go_back(link, point: dict) -> Optional[str]:
 
 def point_pending(endpoint_id: int) -> bool:
     """Does a return point stand on this HQPlayer — read from the database
-    once, then known (_keep_point, _point_cleared keep it)? The poller then
+    once, then known (_keep_point, _point_cleared, leave_as_it_is keep it)? The poller then
     reads State at each answer (note_point). A read the database fails, or
     a change overtook, is asked again at the next answer."""
     with _lock:

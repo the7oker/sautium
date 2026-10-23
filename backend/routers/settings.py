@@ -1280,8 +1280,9 @@ def _notice_items() -> List[Dict[str, Any]]:
                       "data": {"mode": unchecked["mode"], "run": unchecked["run"],
                                "refused": unchecked["refused"]}})
     # One whose check left HQPlayer in that mode, until it is back where it
-    # was found (`back_to`) — its own key and onset: a new condition, said
-    # even over a "not checked yet" already seen
+    # was found (`back_to`) or the owner leaves it as it is — its own key and
+    # onset: a new condition, said even over a "not checked yet" already
+    # seen, and anew once HQPlayer at rest refused it (`refused`)
     stayed = hqp_benchmark.stayed_notice()
     if stayed is not None:
         items.append({"key": "hqplayer.run_stayed", "kind": "warning",
