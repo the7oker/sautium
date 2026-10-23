@@ -642,7 +642,9 @@ comes after the control port answers again — so neither can end the wait.
     Seek's made meanwhile), a tap its track, Next and Previous count from
     the newest target — those three from 0 s. A Pause or a Stop drops the
     start and the hand-over still completes — HQPlayer stopped at the
-    target, the next Play starting there without one; a press that found
+    target, the next Play starting there without one — while a start of the
+    press is live; one made once none is (a tap that yielded) goes on what
+    plays, and the press rebuilds nothing; a press that found
     the playlist the
     queue's again (a reconverge got there first) hands nothing over and
     stops HQPlayer for a Pause or a Stop made meanwhile. A Seek decides

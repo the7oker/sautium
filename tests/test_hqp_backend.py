@@ -12488,8 +12488,8 @@ def test_the_reconverge_a_yielded_press_arms_mends_the_playlist(fake, output, mo
 def _a_tap_held_after_a_play_on_what_played(mgr, b, fake) -> tuple:
     """HQPlayer is paused on track 1. A tap on the third row waits its turn;
     a track queued to play next holds the person's words, its hand-over slow
-    — a Play made on what played, then the tap, held as its turn comes: the
-    older word, it yielded to the Play. (the threads to join, the command
+    — a Play made on what played, then the tap's turn: the older word, it
+    yielded to the Play, held as nothing. (the threads to join, the command
     count before the words)."""
     assert b.pause()
     assert _wait(lambda: mgr._latest_status.get("state") == "paused", timeout=5)
@@ -12501,7 +12501,8 @@ def _a_tap_held_after_a_play_on_what_played(mgr, b, fake) -> tuple:
     inserting = _a_play_next_holding_words_behind(mgr, b, link)
     n = len(fake.commands)
     assert _quick(b.play)
-    assert _wait(lambda: b._inflight is not None and b._inflight.starts, timeout=10)
+    tapper.join(10)                                 # the tap's turn came
+    assert b._inflight is not None and not b._inflight.starts, "the tap yielded"
     return (tapper, inserting, vol), n
 
 
@@ -12597,6 +12598,150 @@ def test_a_next_made_while_a_yielded_press_prepares_counts_from_what_plays(fake,
             return (fake.state == int(PlaybackState.PLAYING) and 1 <= fake.track <= len(fake.playlist)
                     and fake.playlist[fake.track - 1] == "file:///E:/Music/A/02.flac")
     assert _wait(plays_track_2, timeout=8), (fake.state, fake.track, fake.playlist, sent)
+
+
+def _plays(fake, path) -> bool:
+    with fake._lock:
+        return (fake.state == int(PlaybackState.PLAYING) and 1 <= fake.track <= len(fake.playlist)
+                and fake.playlist[fake.track - 1] == path)
+
+
+def _reads(fake) -> tuple:
+    with fake._lock:
+        return fake.state, fake.track, list(fake.playlist)
+
+
+def _a_play_next_holding_words_behind_a_waiting_tap(mgr, b, fake) -> tuple:
+    """Track 1 plays; a tap on track 3 waits its turn behind a slow volume,
+    and a play next whose adds take a second each begins: it holds words."""
+    link = _link()
+    tapper, said, vol = _a_tap_waiting_behind_a_slow_volume(b, link, fake)
+    tapper.start()
+    assert _wait(lambda: len(link.lock._waiting) == 1, timeout=3)
+    fake.service["PlaylistAdd"] = 1.0
+    inserting = threading.Thread(target=lambda: mgr.append(
+        [_item("E:/Music/N/01.flac", 31)], "next"), daemon=True)
+    inserting.start()
+    assert _wait(lambda: b._inflight is not None and len(link.lock._waiting) == 2, timeout=3)
+    return link, said, (tapper, inserting, vol)
+
+
+@pytest.mark.parametrize("word", ["play", "next"])
+def test_a_tap_that_waited_while_a_pause_was_held_yields_to_it(fake, output, word):
+    """The tap's turn comes after the person's Pause, held: the tap yields
+    to it, held as nothing. A Play after resumes what played; Next counts
+    from it — never from the tapped track."""
+    mgr, b = output
+    link, said, threads = _a_play_next_holding_words_behind_a_waiting_tap(mgr, b, fake)
+    assert _quick(b.pause)
+    threads[0].join(10)                             # the tap's turn came
+    assert b._inflight is not None and not b._inflight.starts, "the tap yielded"
+    n = len(fake.commands)
+    assert _quick({"play": b.play, "next": b.next}[word])
+    for t in threads:
+        t.join(15)
+    _settled()
+    sent = [(c, a) for c, a in fake.commands[n:] if c not in _QUESTIONS]
+    want = "file:///E:/Music/A/01.flac" if word == "play" else "file:///E:/Music/N/01.flac"
+    assert _wait(lambda: _plays(fake, want), timeout=8), (said, _reads(fake), sent)
+    _shows_what_plays(mgr, b, fake)
+
+
+@pytest.mark.parametrize("word", ["play", "seek", "next"])
+def test_a_tap_that_waited_while_a_seek_went_on_what_plays_yields_to_it(fake, output, word):
+    """A Seek asked behind the waiting tap, before the play next began, goes
+    on what plays once its turn comes: the tap held before it yields, and
+    the words held after count from what played."""
+    mgr, b = output
+    link = _link()
+    tapper, said, vol = _a_tap_waiting_behind_a_slow_volume(b, link, fake)
+    tapper.start()
+    assert _wait(lambda: len(link.lock._waiting) == 1, timeout=3)
+    sought = {}
+    seeker = threading.Thread(target=lambda: sought.update(ok=b.seek(60)), daemon=True)
+    seeker.start()
+    assert _wait(lambda: len(link.lock._waiting) == 2, timeout=3)
+    fake.service["PlaylistAdd"] = 1.0
+    inserting = threading.Thread(target=lambda: mgr.append(
+        [_item("E:/Music/N/01.flac", 31)], "next"), daemon=True)
+    inserting.start()
+    assert _wait(lambda: b._inflight is not None and len(link.lock._waiting) == 3, timeout=3)
+    assert _wait(lambda: ("Seek", {"position": "60"}) in fake.commands, timeout=10)
+    n = len(fake.commands)
+    assert _quick({"play": b.play, "seek": lambda: b.seek(90), "next": b.next}[word])
+    for t in (tapper, seeker, inserting, vol):
+        t.join(15)
+    _settled()
+    sent = [(c, a) for c, a in fake.commands[n:] if c not in _QUESTIONS]
+    assert sought.get("ok"), sought
+    if word == "next":
+        assert _wait(lambda: _plays(fake, "file:///E:/Music/N/01.flac"), timeout=8), (
+            said, _reads(fake), sent)
+        return
+    assert not _plays(fake, "file:///E:/Music/A/03.flac"), (said, _reads(fake), sent)
+    assert "SelectTrack" not in [c for c, _ in sent], sent
+    _shows_what_plays(mgr, b, fake)
+
+
+@pytest.mark.parametrize("tap", [True, False])
+def test_a_stopping_mutation_a_pause_was_held_in_leaves_the_spot_on_what_played(fake, output,
+                                                                                monkeypatch, tap):
+    """A new order that needs a rebuild stops HQPlayer; the person pauses
+    while it runs, a tap that waited its turn yielding to the Pause: the
+    spot — Now Playing — stays on what played, and the next Play resumes
+    it, as with no tap at all."""
+    mgr, b = output
+    player_router = _routes_on(monkeypatch, mgr)
+    link = _link()
+    if tap:
+        tapper, said, vol = _a_tap_waiting_behind_a_slow_volume(b, link, fake)
+        tapper.start()
+        assert _wait(lambda: len(link.lock._waiting) == 1, timeout=3)
+    else:
+        fake.service["Volume"] = 1.5
+        vol = threading.Thread(target=lambda: b.set_volume(-10), daemon=True)
+        vol.start()
+        assert _wait(lambda: link.lock.owner is not None, timeout=3)
+    reordering = threading.Thread(target=lambda: player_router.reorder(player_router.ReorderRequest(
+        order=["track-2", "track-1", "track-3"])), daemon=True)
+    reordering.start()
+    assert _wait(lambda: b._inflight is not None and len(link.lock._waiting) == (2 if tap else 1),
+                 timeout=5)
+    assert _quick(b.pause)
+    for t in ([tapper] if tap else []) + [reordering, vol]:
+        t.join(15)
+    _settled()
+    assert _wait(lambda: mgr._latest_status.get("state") == "stopped"
+                 and mgr._latest_status.get("track_id") == "track-1", timeout=8), (
+        {k: mgr._latest_status.get(k) for k in ("state", "track_index", "track_id", "resume")},
+        _reads(fake))
+    n = len(fake.commands)
+    assert b.play()
+    _settled()
+    sent = [(c, a) for c, a in fake.commands[n:] if c not in _QUESTIONS]
+    assert _wait(lambda: _plays(fake, "file:///E:/Music/A/01.flac"), timeout=5), (_reads(fake), sent)
+
+
+def test_a_held_pause_and_play_after_the_yielded_tap_resume_what_played(fake, output):
+    mgr, b = output
+    threads, n = _a_tap_held_after_a_play_on_what_played(mgr, b, fake)
+    assert _quick(b.pause)
+    assert _quick(b.play)
+    for t in threads:
+        t.join(15)
+    _settled()
+    sent = [(c, a) for c, a in fake.commands[n:] if c not in _QUESTIONS]
+    assert "SelectTrack" not in [c for c, _ in sent], sent
+    assert _plays(fake, "file:///E:/Music/A/01.flac"), (_reads(fake), sent)
+
+
+def test_a_play_made_while_a_yielded_press_prepares_resumes_what_played(fake, output, monkeypatch):
+    mgr, b = output
+    played = _as_the_yielded_press_begins(b, monkeypatch, b.play)
+    said, done, sent = _a_tap_whose_press_yields(b, fake, monkeypatch, b.pause)
+    assert played.get("ok"), played
+    assert "Stop" not in [c for c, _ in sent], sent
+    assert _wait(lambda: _plays(fake, "file:///E:/Music/A/01.flac"), timeout=5), (_reads(fake), sent)
 
 
 def test_a_pause_during_a_play_press_still_hands_hqplayer_the_queue(fake, output):

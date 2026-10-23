@@ -973,6 +973,9 @@ class _InFlight(_Words):
         # unless the mutation's own Stop stopped HQPlayer (`stopped`)
         self.halt_command: Optional[str] = None
         self.stopped = False
+        # The numbers of the person's words that went on what plays meanwhile
+        # — asked before the mutation began, their turn came behind it (_cmd)
+        self.went: list = []
 
     def halted(self) -> bool:
         """Was a Pause or a Stop the newest word — newer than every start and
@@ -984,14 +987,25 @@ class _InFlight(_Words):
                                      + [n for n, _, _ in self.plain])
 
     def leading(self) -> Optional[_Start]:
-        """The newest start, unless a word that names no track came after it:
-        a start a newer word superseded takes no more words. A tap that
-        waited its turn while a Play or a Seek was made on what played
-        yielded to them, and the words after count from what played."""
+        """The newest start, unless a word that names no track came after it
+        — one held, or one that went on what plays meanwhile: a start a newer
+        word superseded takes no more words. A tap that waited its turn while
+        a Play or a Seek was made on what played yielded to them, and the
+        words after count from what played."""
         start = self.newest()
-        if start is not None and any(n > start.item.n for n, _, _ in self.plain):
+        if start is not None and any(n > start.item.n for n in
+                                     [n for n, _, _ in self.plain] + self.went):
             return None
         return start
+
+    def yielded(self, n: int) -> bool:
+        """Has a word newer than a start numbered `n` come already — held
+        (a start, a Pause or a Stop, a word that names no track) or gone on
+        what plays? A tap that waited its turn meanwhile yields to it: held
+        now, it would lead the words after, or leave the spot, on a track
+        the person moved on from."""
+        return any(m > n for m in [w[0] for w in self.plain] + self.halts + self.went
+                   + [s.item.n for s in self.starts])
 
     def index(self, item: QueueItem) -> Optional[int]:
         """`item`'s place (1-based) among what HQPlayer is handed."""
@@ -3103,8 +3117,13 @@ class HqpBackend(PlayerBackend):
         (HqpLink.command) —
         `intent` the person's or this node's (`number`: the early one a
         mutation took as it began holding words), `item` what it serves."""
-        with self._link.command(intent, item=item, number=number):
+        with self._link.command(intent, item=item, number=number) as n:
             self._check_attached()
+            words = self._inflight
+            if intent == "transport" and words is not None:
+                # A word asked before a queue mutation began, its turn come
+                # while the mutation holds words: it goes on what plays
+                words.went.append(n)
             return func(self._link.client)
 
     def _command(self, name: str, fn, why=None, intent: Optional[str] = "transport", *,
@@ -3746,8 +3765,10 @@ class HqpBackend(PlayerBackend):
         the person saw in the slot — `track_id`, else the slot's track as the
         queue stands, the sheet's — wherever the mutation puts it among what
         HQPlayer is handed, from its start, numbered as it comes — or, held
-        in its own command sequence, as it was asked (`number`). A track it
-        is not handed is refused in words, numbered nothing; the words before
+        in its own command sequence, as it was asked (`number`): one that
+        waited its turn while a newer word was held or went on what plays
+        yields to it (_InFlight.yielded), held as nothing. A track it is not
+        handed is refused in words, numbered nothing; the words before
         stand. Under the press lock, with the words read: none goes to a
         mutation that ended meanwhile."""
         shown = self._queue.item_at(index)
@@ -3765,6 +3786,9 @@ class HqpBackend(PlayerBackend):
             return False
         if number is None:
             number = self._link.accept("transport")
+        elif words.yielded(number):
+            self.poke()
+            return True
         else:
             self._link.publish("transport", number)
         words.starts.append(_Start(self._link.item("start", number), target, 0,
@@ -3840,6 +3864,9 @@ class HqpBackend(PlayerBackend):
                 if held is None:
                     self._local.refusal = "it is not in the queue being loaded"
                     return False
+                if item is not None and words.yielded(item.n):
+                    self.poke()
+                    return True     # a tap that waited its turn: it yielded
                 words.starts.append(_Start(
                     item or self._link.item("start", self._link.accept("transport")), held,
                     position, words.items[words.index(held) - 1:], None))
@@ -3908,10 +3935,12 @@ class HqpBackend(PlayerBackend):
         press none of whose starts is live as its rebuild would go, holding
         no Pause or Stop — a word made before it began, without it, came
         first (a tap that waited its turn) — rebuilds nothing, and is let go
-        as it decides; from the moment none of its starts is live it takes no
-        word but a tap (_leading): the rest go as on a playlist that is no
-        mirror, the playlist stays no mirror, and HQPlayer gets the queue
-        back at its next answer without a stop."""
+        as it decides; from the moment none of its starts is live, holding no
+        Pause or Stop, it takes no word but a start of its own — a tap, Next,
+        Previous, a Play from a stop (_press), which it hands over as a press
+        does (_leading): the rest go as on a playlist that is no mirror, the
+        playlist stays no mirror, and HQPlayer gets the queue back at its
+        next answer without a stop."""
         from playback.manager import manager
         taking = manager.mirror_locked(self, lambda: self._press_begin(press))
         if taking is None:

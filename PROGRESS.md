@@ -1283,16 +1283,23 @@ implementation details live in the code, DB and git history.
   hand-over to the tapped track, or HQPlayer stopped with Now Playing on it,
   a track it does not play. Done: a press none of whose starts is live lets
   go as it decides, so a word made after that goes on its own; and since
-  2026-10-23 a start a newer word superseded takes no more words: held
-  words count from what played, and a press none of whose starts is live
-  takes no word but a tap, so a Pause, a Stop, a Seek, a Play, Next or
-  Previous made while it prepares goes on what plays — nothing rebuilt, Now
-  Playing on what HQPlayer plays. And two Nexts at a spot with a "play next"
-  inside one status skip the inserted track: the spot a held Next moved was
+  2026-10-23 a start a newer word superseded takes no more words: a tap
+  that waited its turn while a newer word was held — a Pause or a Stop too
+  — or went on what plays yields to it, held as nothing, so it leads no
+  word and leaves no spot; held words count from what played; and a press
+  none of whose starts is live, holding no Pause or Stop, takes no word but
+  a start of its own — a Pause, a Stop or a Seek made while it prepares
+  goes on what plays, nothing rebuilt, Now Playing on what HQPlayer plays;
+  a tap, Next, Previous or a Play from a stop is a start, handed over as a
+  press does. Left: a Pause or a Stop that joins the tapped track's press
+  while its start is still live, before the word the tap yields to takes
+  hold — a command that takes no number between them, a race of
+  milliseconds — still has the press stop HQPlayer at the tapped track
+  after its hand-over. And two Nexts at a spot with a "play next" inside
+  one status skip the inserted track: the spot a held Next moved was
   counted on the layout before the insert read HQPlayer, and is kept;
   counting such a step again from the spot the insert reads belongs, with
-  the held words above and a held step that finds no slot, to words held
-  from the ask.
+  a held step that finds no slot, to words held from the ask.
 - **Open after the fixes' review** (2026-10-14), in code the fixes did not
   change: a "play next" on a tail mirror whose anchor HQPlayer moved past
   goes to the queue alone, before the entry HQPlayer reads, and never plays
