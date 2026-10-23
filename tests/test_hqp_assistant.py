@@ -618,6 +618,31 @@ def test_no_word_ranks_and_no_rate_is_said_as_a_label(tmp_path):
     assert {m for text in said for m in re.findall(r"(?:1x|Nx) · [0-9.]+k → [0-9.]+k", text)} == contexts
 
 
+def test_every_same_output_the_tools_say_carries_where_it_was_compared(tmp_path):
+    # The atlas compared its twins only where its groups say: a tool's own words
+    # say "the same output" with "where the atlas compared them", and an answer
+    # says it in a group's lead alone, the group's say — the curation's scope —
+    # with it ("whether they give the same output" until 2026-10-23)
+    own = list(_constants()) + [t.description for t in hqp_assistant.TOOLS] + [
+        p.description for t in hqp_assistant.TOOLS for p in t.params]
+    for text in own:
+        for m in re.finditer(r"same output", text, re.IGNORECASE):
+            assert text[m.end():].startswith(" where the atlas compared them"), text
+    leads = {f"Same output as {other} — the same output within one step, in this fictional file."
+             for other in ("demo-sinc-a", "demo-sinc-b")}
+    said = [line.strip() for text in _every_output(_dated(tmp_path)) for line in text.split("\n")
+            if re.search(r"same output", line, re.IGNORECASE)]
+    assert set(said) == leads
+    # A group without a say: its card names the members alone, so no answer says it
+    doc = json.loads(FIXTURE.read_text(encoding="utf-8"))
+    del doc["groups"][0]["say"]
+    doc["releases"] = {"9.4.1/pcm": "2001-05-06", "9.4.1/sdm": "2001-05-06"}
+    (tmp_path / "unsaid").mkdir()
+    unsaid = _shipped(tmp_path / "unsaid", json.dumps(doc, ensure_ascii=False))
+    assert not [line for text in _every_output(unsaid) for line in text.split("\n")
+                if re.search(r"same output", line, re.IGNORECASE)]
+
+
 def test_both_prompts_carry_the_block_once_and_it_ranks_nothing_and_names_no_finding():
     import assistant_prompt
     block = assistant_prompt._HQPLAYER_FILTERS
@@ -629,6 +654,12 @@ def test_both_prompts_carry_the_block_once_and_it_ranks_nothing_and_names_no_fin
     # A model told to "offer a pair" offered two names with the same output,
     # on a property no axis holds: the block names the tool's pairs alone
     assert "approved pairs hqplayer_ab_pair returns" in block and "are no pair to listen to" in block
+    # A sameness holds as exact as, and where, it was compared: the model says it with the tool's scope, never
+    # wider ("within one LSB" kept), and beyond it says that nothing measured tells whether it holds
+    assert "within the scope the tool gives that sameness — for the same output, its precision, the comparisons" \
+        in block
+    assert "Say the sameness only with that scope" in block
+    assert "beyond it nothing measured says whether that sameness holds" in block
     # No engine number, no address and no measured value: the block is public text
     assert re.search(r"\d|sautium\.net|https?:", block.replace("n/5", "")) is None
     for tool in hqp_assistant.TOOLS:

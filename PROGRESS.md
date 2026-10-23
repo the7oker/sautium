@@ -3900,13 +3900,18 @@ the chat's replies, which a backup, a life merge and a support warrant's
 this host's speeds and "Sautium has published no measurement of it".
 Nothing ranks: lists keep HQPlayer's order, the file's or their labels',
 two values stand side by side, and "the same output" comes only from the
-file's own groups. A number is the token the file wrote; a rate that
+file's own groups — in a group's lead with its say, where the members were
+compared, and in the tools' descriptions "where the atlas compared them"
+(since 2026-10-23). A number is the token the file wrote; a rate that
 stands alone is named as the HQPlayer screen names it, and a filter's
 measured context as the site names it. This host's speeds are the
 Benchmark's and the listens' own, grouped by the source they were measured
 from — never another machine's. The prompt tells the model to call them
-first, to rank nothing, to give each number as the tool writes it, and
-that Sautium holds no rules that tie a DAC to these settings yet; the
+first, to rank nothing, to give each number as the tool writes it, to say
+a sameness only with the scope the tool gives it (its precision, where it
+was compared) and that beyond it nothing measured says whether it holds
+(since 2026-10-23), and that Sautium holds no rules that tie a DAC to these
+settings yet; the
 chat's pip says "looking up filters and modulators…" while one runs, not
 "controlling playback…".
 

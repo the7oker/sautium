@@ -159,14 +159,14 @@ TOOLS = (
     Tool("hqplayer_filter_facts",
          "What HQPlayer says of one of its filters or modulators — Signalyst's technical rating, the author's "
          "focus, the ratio class, a modulator's generation — and what Sautium has published of its measurements on "
-         "the HQPlayer engine they were made on: properties per context or per rate, the names with the same "
-         "output, the approved pairs it belongs to, history and the author's stated purpose with their sources, "
-         "and the page's address. Refuses while HQPlayer is not the selected output.",
+         "the HQPlayer engine they were made on: properties per context or per rate, the names that gave the same "
+         "output where the atlas compared them, the approved pairs it belongs to, history and the author's stated "
+         "purpose with their sources, and the page's address. Refuses while HQPlayer is not the selected output.",
          (Param("name", "A filter or modulator name as HQPlayer lists it (hqplayer_get_settings).", True),)),
     Tool("hqplayer_compare",
          "Two filters, or two modulators, side by side: what HQPlayer says of each, what Sautium has published of "
-         "their measurements, whether they give the same output, and how each runs on this HQPlayer. States "
-         "differences; never ranks.",
+         "their measurements, whether they gave the same output where the atlas compared them, and how each runs "
+         "on this HQPlayer. States differences; never ranks.",
          (Param("name_a", "The first filter or modulator, as HQPlayer lists it.", True),
           Param("name_b", "The second, of the same kind.", True))),
     Tool("hqplayer_differs_only_in",
