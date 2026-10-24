@@ -35,12 +35,15 @@ edits the resources of the copied `pythonw.exe`).
 
 ## Carried in the tree (Web UI)
 
-The one exception to "nothing is vendored": a single-file JavaScript library
-the browser loads as-is, because the Web UI has no build step.
+The exceptions to "nothing is vendored": a single-file JavaScript library and
+the two typefaces, which the browser loads as they are from the node — the
+Web UI has no build step, and asks no font service for its type.
 
 | Component | Source | Licence | Notes |
 |---|---|---|---|
 | TweetNaCl.js 1.0.3 (`nacl-fast.min.js`) | github.com/dchest/tweetnacl-js | Unlicense (public domain) | `backend/static/vendor/nacl-fast.min.js`, unmodified (SHA-256 `3ec535c0…a5131` matches the npm release); the browser side of the boxed credential exchange — X25519 + XSalsa20-Poly1305, Ed25519 verification |
+| Inter Tight, as packaged by fontsource 5.3.0 (`@fontsource/inter-tight`) | github.com/rsms/inter-tight | OFL-1.1 | `backend/static/fonts/inter-tight-*.woff2`, unmodified: weights 400–700, the Latin, Latin Extended and Cyrillic subsets; the licence beside them (`LICENSE-inter-tight.txt`) |
+| JetBrains Mono, as packaged by fontsource 5.3.0 (`@fontsource/jetbrains-mono`) | github.com/JetBrains/JetBrainsMono | OFL-1.1 | `backend/static/fonts/jetbrains-mono-*.woff2`, unmodified: weights 400–600, the same subsets; the licence beside them (`LICENSE-jetbrains-mono.txt`) |
 
 ## Models (downloaded from Hugging Face on first use)
 
@@ -140,6 +143,3 @@ Sautium. Source: https://github.com/quodlibet/mutagen.
   gear registry, fetched as `metadata.json` when the owner refreshes it;
   **AutoEq** — headphone measurements, imported from a clone the owner
   mounts. Neither is redistributed.
-- **Google Fonts** — the Web UI page loads Inter Tight and JetBrains Mono
-  from `fonts.googleapis.com`: the one request the browser makes to a third
-  party on its own.

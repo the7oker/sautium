@@ -153,7 +153,8 @@ Rules:
 
 ### Typography
 
-Two font families, loaded via `<link>` in `<head>`:
+Two font families, served by the node (`fonts.css`, the woff2 files and
+their OFL licences in `fonts/`) — never from a font service:
 
 - **Inter Tight** (sans) — all UI prose, titles, labels.
 - **JetBrains Mono** — numeric readouts only: BPM, sample rate, bit

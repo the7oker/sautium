@@ -245,9 +245,6 @@ and by design; the report should list them as matches, not discrepancies:
   diagnostics with support" in Settings; the reports are content-free events,
   and a bundle answers only a warrant the node received from the pinned
   master.
-- The Web UI page pulls its two typefaces from **Google Fonts**
-  (`backend/static/index.html`) — the one third-party request the browser
-  makes on its own; the node itself never talks to Google.
 - The peer network bootstraps through the **public BitTorrent DHT routers**
   named in `desktop/p2p/dht_service.py` — the DHT is what makes the network
   serverless; the routers see the node's address and the announce keys.
