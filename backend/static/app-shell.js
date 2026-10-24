@@ -6265,16 +6265,18 @@
                     text: escapeProfileHtml(err) });
   });
 
-  // The play attempts whose failure this tab has said, and by what: HQPlayer's
-  // words in a route's answer (`attempt`) and the attempt's diagnosis say one
-  // failure in one toast — the answer's goes under the diagnosis's key, and
-  // the diagnosis, when it comes, takes it over in place with its Why?, once;
-  // an answer that comes after the diagnosis says nothing more
-  const saidAttempts = new Map();     // attempt → 'answer' | 'diagnosis'
+  // The play attempts whose failure this tab has said: HQPlayer's words in a
+  // route's answer (`attempt`) and the attempt's diagnosis say one failure in
+  // one toast — the answer's goes under the diagnosis's key, and the
+  // diagnosis, when it comes, takes it over in place with its Why?, once; an
+  // answer that comes after the diagnosis toasted says nothing more. A
+  // diagnosis met but not toasted — at connect, in a failing run — leaves
+  // the answer its word.
+  const saidAttempts = new Set();
   function answerSays(attempt) {
     if (attempt == null) return true;
     if (saidAttempts.has(attempt)) return false;
-    saidAttempts.set(attempt, 'answer');
+    saidAttempts.add(attempt);
     return true;
   }
 
@@ -6300,7 +6302,7 @@
     if (!d || metDiagnoses.has(d.id)) return;
     metDiagnoses.add(d.id);
     if (first || d.failing || d.code === 'unreachable') return;
-    saidAttempts.set(d.id, 'diagnosis');
+    saidAttempts.add(d.id);
     notices.toast({ kind: 'error', key: 'hqplayer.diagnosis', title: escapeHtml(d.title),
                     text: escapeHtml(d.next || ''),
                     action: { label: 'Why?', run: () => openHqpDiagnosis(d.id) } });

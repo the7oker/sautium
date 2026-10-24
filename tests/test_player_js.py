@@ -308,6 +308,30 @@ def test_a_failure_met_in_a_failing_run_is_not_said_when_the_run_ends(traced, fa
     assert run["calls"] == 2 and [t["action"] for t in run["toasts"]] == ["Why?"], run
 
 
+def test_a_refused_play_whose_diagnosis_came_first_in_a_failing_run_is_said(traced, fake, monkeypatch):
+    """The fourth Play HQPlayer refuses in a row: its diagnosis comes first,
+    in the failing run — met, not toasted: the run's notice speaks — and
+    the person's own answer after it is still said."""
+    import routers.player as player
+
+    fake.replies["Play"] = '<Play result="Error">Empty transport</Play>'
+    monkeypatch.setattr(player, "manager", types.SimpleNamespace(
+        ensure_active=lambda: traced, backend=lambda: traced))
+    stopped = TrackStatus(state=PlaybackState.STOPPED, track_index=1, track_id="", position=0.0,
+                          length=300.0, volume=-3.0)
+    for _ in range(4):
+        answer = player.play()
+        assert _wait(lambda: traced._last_closed is not None
+                     and traced._last_closed.id == answer["attempt"], 5.0)
+    d = traced._diagnosis(stopped)
+    assert d["id"] == answer["attempt"] and d["failing"], d
+    out = {"type": "hqplayer", "label": "HQPlayer", "attached": True}
+    run = _ui_run([{"np": {"state": "stopped", "output": out}},
+                   {"np": {"state": "stopped", "output": out, "diagnosis": d}}, {"cmd": "play"}],
+                  {"/api/player/play": {"status": 200, "body": answer}})
+    assert run["calls"] == 1 and run["toasts"][0]["text"] == "Empty transport", run
+
+
 @pytest.mark.parametrize("diagnosis_first", [False, True])
 def test_a_tap_hqplayer_refused_is_said_once_with_its_why(traced, fake, monkeypatch, diagnosis_first):
     """A queue tap HQPlayer refuses: its answer comes before the attempt's
