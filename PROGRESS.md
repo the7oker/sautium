@@ -1322,7 +1322,16 @@ implementation details live in the code, DB and git history.
   one status skip the inserted track: the spot a held Next moved was
   counted on the layout before the insert read HQPlayer, and is kept;
   counting such a step again from the spot the insert reads belongs, with
-  a held step that finds no slot, to words held from the ask.
+  a held step that finds no slot, to words held from the ask. Left too
+  (2026-10-24): a Next or a Previous at a stopped spot made before a
+  mutation began moves the spot with no number, so a tap that waited its
+  turn behind the lock still plays, as it does with no mutation at all —
+  whether such a step is numbered, the tap yielding to it, is the owner's
+  call; after a held Stop, a step held at a spot keeps the halt's second
+  on the track it steps to (a rebuild) or is lost (a seamless edit) — only
+  the assistant sends a Stop; and the jump's answer for a tap that yielded
+  to a Seek or a step that moved the spot carries no `starts`, where its
+  contract says null — nothing reads it.
 - **Open after the fixes' review** (2026-10-14), in code the fixes did not
   change: a "play next" on a tail mirror whose anchor HQPlayer moved past
   goes to the queue alone, before the entry HQPlayer reads, and never plays
