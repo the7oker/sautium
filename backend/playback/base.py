@@ -152,6 +152,11 @@ class PlayerBackend(ABC):
     @abstractmethod
     def play(self) -> bool: ...
 
+    def play_on(self) -> bool:
+        """The play press that carries playing over an output switch
+        (routers.settings.put_output_prefs). Default: a play press."""
+        return self.play()
+
     @abstractmethod
     def pause(self) -> bool: ...
 
@@ -263,8 +268,9 @@ class PlayerBackend(ABC):
 
     def slot_ready(self, index: int) -> None:
         """A slot this output could not open when it was reached now can —
-        a stream substitute landed on it (playback.substitute). Default:
-        nothing; an output that parked a play there starts it."""
+        a stream substitute landed on it — or never will: it was found
+        unplayable here (playback.substitute). Default: nothing; an output
+        that parked a play there starts it, or walks past it."""
 
     def gap(self, item) -> Optional[str]:
         """Why this output does not hold the queue's slot `item` — it stays

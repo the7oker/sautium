@@ -846,7 +846,7 @@ def _on_renderer(manager, r: FakeRenderer, items: list) -> None:
 
 
 def _lost_mid_track(r: FakeRenderer, manager) -> float:
-    """The renderer stops answering two seconds into slot 1 (12 s long, room
+    """The renderer stops answering two seconds into slot 1 (20 s long, room
     for three missed polls on a loaded machine) and plays on — across into
     slot 2 by its armed NextURI, its events still sent. Returns the second
     the node was left at."""
@@ -859,7 +859,7 @@ def _lost_mid_track(r: FakeRenderer, manager) -> float:
     assert manager.latest_status["resume"]["index"] == 1 and r.uri == first, "lost on slot 1"
     lost = manager.latest_status["resume"]["position"]
     wait_for(lambda: r.position() < 3 and r.uri == r.called("SetNextAVTransportURI")[0]["NextURI"],
-             timeout=15, what="the renderer playing slot 2 on its own")
+             timeout=25, what="the renderer playing slot 2 on its own")
     time.sleep(1.5)     # its events for slot 2 reach the node
     return lost
 
@@ -873,13 +873,13 @@ def test_a_renderer_that_stops_answering_leaves_the_queue_and_the_spot(tmp_path,
     the second it was left at once it plays. The play press used to start
     the slot from 0:00, after the phone had already played the next."""
     r = renderers(sink=PHONE_SINK)
-    items = [track(tmp_path, 1, seconds=12.0), track(tmp_path, 2, seconds=30.0),
+    items = [track(tmp_path, 1, seconds=20.0), track(tmp_path, 2, seconds=30.0),
              track(tmp_path, 3, seconds=30.0)]
     _on_renderer(manager, r, items)
     lost = _lost_mid_track(r, manager)
     st = manager.latest_status
     assert (st["state"], st["track_index"], st["position"]) == ("stopped", 1, lost)
-    assert 2 <= lost <= 11 and "stopped responding" in st["error"]
+    assert 2 <= lost <= 19 and "stopped responding" in st["error"]
     assert manager.queue.snapshot() == items
     r.answer_again()
     seeks = len(r.called("Seek"))
@@ -901,7 +901,7 @@ def test_an_opus_stream_resumes_where_the_renderer_was_lost(tmp_path, proxy, ren
     monkeypatch.setattr(transcode, "opus_path_for_file", lambda path, q, ss=0.0: path)
     quality["q"] = "opus_96"
     r = renderers(sink=PHONE_SINK)
-    items = [track(tmp_path, 1, seconds=12.0), track(tmp_path, 2, seconds=30.0)]
+    items = [track(tmp_path, 1, seconds=20.0), track(tmp_path, 2, seconds=30.0)]
     _on_renderer(manager, r, items)
     lost = _lost_mid_track(r, manager)
     r.answer_again()
@@ -1131,6 +1131,9 @@ def test_a_switch_to_the_browser_starts_its_tab_at_the_second(tmp_path, proxy, r
     _on_renderer(manager, a, [track(tmp_path, 1, seconds=40.0)])
     _playing_at(manager, a, 3)
     switch(type="browser")
+    # No tab holds the output yet: the start waits for the one that chose
+    # it, and no "no playback device" is said meanwhile
+    assert "error" not in manager.latest_status, manager.latest_status
     browser = manager.backend()
     tab = Tab(browser)
     try:
@@ -1163,6 +1166,29 @@ def test_a_switch_from_the_browser_keeps_its_second_on_a_renderer(tmp_path, prox
     assert (st["state"], st["track_index"], st["position"]) == ("paused", 2, 21.0)
 
 
+def test_the_browser_starts_its_last_track_over_after_the_end(tmp_path, manager, monkeypatch):
+    """The second a tab holds carries into the play press — but the end of
+    the queue is no spot: Play starts the last track over."""
+    import media_urls
+    monkeypatch.setattr(media_urls, "signed_media_url", lambda kind, ident, q=None: f"/m/{kind}/{ident}")
+    manager.activate("browser")
+    manager.queue.replace([track(tmp_path, 1, seconds=40.0)])
+    browser = manager.backend()
+    tab = Tab(browser)
+    try:
+        browser.select(1)
+        epoch = browser._epoch
+        browser.on_client_event("tab-1", "playing", 0.0, 40.0, queue_index=1, epoch=epoch)
+        browser.on_client_event("tab-1", "ended", 40.0, 40.0, queue_index=1, epoch=epoch)
+        assert manager.latest_status["state"] == "stopped" and manager.spot() is None
+        tab.directives()
+        browser.play()
+        load = [d for d in tab.directives() if d["cmd"] == "load"][-1]
+        assert load["play"] is True and load["position"] == 0.0
+    finally:
+        tab.close()
+
+
 def test_a_seeded_slot_starts_the_local_engine_at_its_second(tmp_path):
     """N-14: the built-in engine shows a carried-over spot paused, opens
     nothing, and its play command starts the slot at that second."""
@@ -1178,6 +1204,99 @@ def test_a_seeded_slot_starts_the_local_engine_at_its_second(tmp_path):
     assert (st.state, st.queue_index, st.position, st.length) == ("paused", 2, 33.0, 40.0)
     engine._handle(Command("play"))
     assert started == [(2, 33.0)]
+
+
+def test_a_stop_the_lost_renderer_never_answers_leaves_no_spot(tmp_path, proxy, renderers, manager,
+                                                               quality):
+    """A person's Stop lets the spot go, also on a renderer that does not
+    answer it: the clock it was left by does not bring the spot back."""
+    r = renderers(sink=PHONE_SINK)
+    _on_renderer(manager, r, [track(tmp_path, 1, seconds=40.0)])
+    _playing_at(manager, r, 2)
+    r.stop_answering()
+    wait_for(lambda: manager.latest_status.get("resume"), timeout=15, what="the renderer lost")
+    manager.backend().stop()
+    st = manager.latest_status
+    assert st["state"] == "stopped" and "resume" not in st and manager.spot() is None, st
+
+
+def test_a_track_change_the_renderer_never_takes_is_left_at_its_own_start(tmp_path, proxy, renderers,
+                                                                          manager, quality):
+    """A tap on slot 3 the renderer does not answer (its listener just
+    closed): the spot is slot 3 from its start, never slot 3 at the second
+    slot 1 was at."""
+    r = renderers(sink=PHONE_SINK)
+    items = [track(tmp_path, i, seconds=40.0) for i in (1, 2, 3)]
+    _on_renderer(manager, r, items)
+    _playing_at(manager, r, 4)
+    r.stop_answering()
+    manager.backend().select(3)
+    wait_for(lambda: manager.latest_status.get("resume"), timeout=15, what="the renderer lost")
+    assert manager.latest_status["resume"] == {"index": 3, "position": 0.0}
+
+
+def test_a_play_waits_on_a_slot_whose_stream_is_on_its_way(tmp_path, proxy, renderers, nodes, quality):
+    """A slot only a stream can serve here (a copy in an HQPlayer's own
+    library) is `pending` while its stream is fetched: the play waits on it
+    and goes when it lands — at the second it was asked at — and a slot
+    found unplayable sends it on to the next. It used to be walked past."""
+    r = renderers(sink=PHONE_SINK)
+    q = CanonicalQueue()
+    waiting, after = track(tmp_path, 1, seconds=40.0), track(tmp_path, 2, seconds=40.0)
+    waiting.play = {"kind": "pending"}
+    q.replace([waiting, after])
+    n = nodes(q, r)
+    n.backend.resume_at(1, 12.0)
+    assert n.backend.play()
+    wait_for(lambda: n.last.state == "loading" and n.last.queue_index == 1, what="waiting on slot 1")
+    assert not r.called("SetAVTransportURI")
+    landed = streamed(proxy, 1, cover_url="")
+    waiting.play = landed.source
+    n.backend.slot_ready(1)
+    wait_for(lambda: r.called("Seek"), what="slot 1 started at its second")
+    assert r.called("SetAVTransportURI")[0]["CurrentURI"].endswith("/preview/stream1")
+    assert r.called("Seek")[-1]["Target"] == "0:00:12"
+    # Unplayable: the play walks on
+    nothing = track(tmp_path, 3, seconds=40.0)
+    nothing.play = {"kind": "pending"}
+    q.replace([nothing, after])
+    assert n.backend.select(1)
+    wait_for(lambda: n.last.state == "loading" and n.last.queue_index == 1, what="waiting again")
+    nothing.play = {"kind": "unplayable", "reason": "no provider has it"}
+    n.backend.slot_ready(1)
+    wait_for(lambda: n.last.queue_index == 2 and r.state == "PLAYING", what="slot 2 instead")
+
+
+def test_the_local_engine_waits_on_a_slot_whose_stream_is_on_its_way(tmp_path):
+    """The built-in engine: a start on a pending slot waits there, a seek
+    moves the second it will start at, and the landed stream starts it."""
+    from playback.local.engine import Command, Engine
+    q = CanonicalQueue()
+    waiting = track(tmp_path, 1, seconds=40.0)
+    waiting.play = {"kind": "pending"}
+    q.replace([waiting])
+    statuses = []
+    engine = Engine(q, statuses.append, None, False)
+    engine._handle(Command("seed", index=1, seconds=20.0))
+    engine._handle(Command("play"))
+    assert (statuses[-1].state, statuses[-1].position) == ("loading", 20.0)
+    engine._handle(Command("seek", seconds=25.0))
+    assert statuses[-1].position == 25.0
+    started = []
+    engine._start_at = lambda index, seek_to=0.0: started.append((index, seek_to))
+    engine._handle(Command("slot_ready", index=1))
+    assert started == [(1, 25.0)]
+
+
+def test_a_transcode_larger_than_the_cache_is_kept_for_its_consumer(tmp_path, monkeypatch):
+    """The file just made is never what the cache's own eviction takes."""
+    monkeypatch.setattr(transcode, "_CACHE_DIR", tmp_path)
+    monkeypatch.setattr(transcode, "_BUDGET_BYTES", 1000)
+    old, new = tmp_path / "old.flac", tmp_path / "new.flac"
+    old.write_bytes(b"x" * 600)
+    new.write_bytes(b"y" * 1500)
+    transcode._evict_if_needed(new)
+    assert new.exists() and not old.exists()
 
 
 def test_the_fake_renderer_plays_a_queue_through(tmp_path, proxy, renderers, nodes, quality):

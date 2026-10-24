@@ -3114,9 +3114,13 @@ nothing it still says moves it. The play gate reads that spot
 the attach (`activate(spot=)`, `resume_at(slot, position)`): an Opus stream
 reloads from the second (`?ss=`), any other format is sought there once the
 renderer plays our load (a Seek in STOPPED is refused). A person's Stop lets
-the spot go, as a renderer's own Stop does. Lesson: a device the node has
-lost has no word on the queue — what it does meanwhile is unknowable, and
-the place it was lost at is the only one the person saw.
+the spot go, as a renderer's own Stop does. What it was doing when lost is
+what the instance last SAID (`_said`), never the renderer's transport state,
+stale by then: a Stop it never answered left a spot rebuilt from a clock
+still running (the review, 2026-10-24), and a tap it never took paired the
+new slot with the old track's second. Lesson: a device the node has lost has
+no word on the queue — what it does meanwhile is unknowable, and the place
+it was lost at is the only one the person saw.
 
 ### One picker row per renderer, and Play where it answers now (2026-10-24)
 
@@ -3155,8 +3159,13 @@ one found playing keeps its own place, as the attach always had it. When the
 old output played, the route then presses Play as the person would, through
 the play gate and once its locks are let go — never inside `activate`,
 which an HQPlayer start may outlast — and a press the new output does not
-take is said with the switch (`resume_refused`). Lesson: a switch moves
-the listening, not just the list.
+take is said with the switch (`resume_refused`); onto the browser it waits
+for the tab that chose it (`play_on`), no "no playback device" meanwhile. A
+slot only a stream can serve there (an HQPlayer's own copy) is `pending` while
+its stream comes: the renderer and the built-in engine walked past it, and
+the switch's press met that at once — now they wait on it as the browser did
+(`slot_ready`), told also when it turns out unplayable, so the wait walks on.
+Lesson: a switch moves the listening, not just the list.
 
 ## Known Gotchas
 

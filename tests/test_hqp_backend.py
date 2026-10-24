@@ -11347,8 +11347,8 @@ def test_a_new_order_planned_on_one_hqplayer_is_refused_on_another(fake, fake_b,
                                                                    monkeypatch, order):
     """A plays; a new order is planned while it does, and the person picks
     HQPlayer B before the order is applied. The plan's position and resume
-    were A's: on B it is refused whole (409), and B stays stopped as a
-    switch leaves it."""
+    were A's: on B it is refused whole (409). B plays on where A was, as the
+    switch carries it, and the refused order changes nothing there."""
     from fastapi import HTTPException
     mgr, b = output                                 # A plays slot 1
     settings_router = _picker(monkeypatch, fake)
@@ -11358,7 +11358,7 @@ def test_a_new_order_planned_on_one_hqplayer_is_refused_on_another(fake, fake_b,
     def switched_first(plan):
         _pick(settings_router, type="hqplayer", hqplayer={"host": "127.0.0.1",
                                                           "port": fake_b.port})
-        assert mgr.active is not b and fake_b.state == int(PlaybackState.STOPPED)
+        assert mgr.active is not b
         return apply(plan)
     monkeypatch.setattr(mgr, "apply_reorder", switched_first)
     try:
@@ -11366,7 +11366,9 @@ def test_a_new_order_planned_on_one_hqplayer_is_refused_on_another(fake, fake_b,
             player_router.reorder(player_router.ReorderRequest(order=order))
         assert refused.value.status_code == 409, refused.value.detail
         _settled()
-        assert fake_b.state == int(PlaybackState.STOPPED), (fake_b.track, fake_b.position)
+        assert fake_b.state == int(PlaybackState.PLAYING) and fake_b.track == 1, (
+            fake_b.state, fake_b.track, fake_b.position)
+        assert fake_b.playlist == [_A.format(i) for i in (1, 2, 3)], fake_b.playlist
         assert [it.track_id for it in mgr.queue.snapshot()] == ["track-1", "track-2", "track-3"]
     finally:
         if mgr.active is not None:

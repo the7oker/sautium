@@ -63,9 +63,12 @@ def _key_lock(key: str) -> threading.Lock:
         return lk
 
 
-def _evict_if_needed() -> None:
+def _evict_if_needed(keep: Path) -> None:
     """LRU by access time — drop the least-recently-served cache files until
-    the cache is back under budget. Runs under _index_lock."""
+    the cache is back under budget, never `keep`, the file just made for a
+    consumer waiting on it: a long DSD track's FLAC alone can pass the
+    budget, and was deleted the moment it was written. Runs under
+    _index_lock."""
     files = []
     total = 0
     for pattern in ("*.ogg", "*.flac"):
@@ -79,6 +82,8 @@ def _evict_if_needed() -> None:
     if total <= _BUDGET_BYTES:
         return
     for _atime, size, p in sorted(files):        # oldest access first
+        if p == keep:
+            continue
         try:
             p.unlink()
         except OSError:
@@ -206,5 +211,5 @@ def _produce(key: str, *, suffix: str, label: str, args_in: list,
         logger.info("%s transcode in %.1fs (%s)", label,
                     time.monotonic() - started, out.name)
     with _index_lock:
-        _evict_if_needed()
+        _evict_if_needed(out)
     return str(out)

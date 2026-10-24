@@ -2183,7 +2183,7 @@ def _play_on() -> Optional[str]:
     output took it, else what it said."""
     from routers.player import _transport
     try:
-        answer = _transport(True, "play")
+        answer = _transport(True, "play_on")
     except HTTPException as e:
         return str(e.detail)
     return None if answer.get("ok") else (answer.get("refusal") or "the output did not take Play")

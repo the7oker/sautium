@@ -135,7 +135,7 @@ class _Ring:
 
 @dataclass
 class Command:
-    kind: str                        # play|pause|stop|select|seek|seed|volume|resync|quit
+    kind: str                        # play|pause|stop|select|seek|seed|slot_ready|volume|resync|quit
     index: Optional[int] = None      # select, seed: 1-based queue slot
     seconds: Optional[float] = None  # seek target; seed: the second play starts at
     level: Optional[float] = None    # volume 0..100
@@ -162,6 +162,9 @@ class Engine:
         self._length: float = 0.0
         self._position_offset = 0.0      # seek base of the active track
         self._resume = 0.0               # the second the next play starts the slot at (seed)
+        # A start waiting on a slot whose stream is on its way
+        # (playback.substitute): (slot, second); slot_ready starts it.
+        self._parked: Optional[tuple[int, float]] = None
         self._volume: float = 100.0
         self._error: Optional[str] = None
 
@@ -258,7 +261,7 @@ class Engine:
                 self._set_state("paused")
         elif cmd.kind == "stop":
             self._teardown_pipeline()
-            self._resume = 0.0
+            self._resume, self._parked = 0.0, None
             self._set_state("stopped")
         elif cmd.kind == "select":
             self._start_at(cmd.index)
@@ -272,6 +275,11 @@ class Engine:
             self._length = (item.duration_seconds or 0.0) if item is not None else 0.0
             self._resume = cmd.seconds or 0.0
             self._set_state("paused" if self._resume else "stopped")
+        elif cmd.kind == "slot_ready":
+            # The parked slot's stream landed, or it is unplayable here:
+            # the start goes on — there, or past it
+            if self._parked is not None and self._parked[0] == cmd.index:
+                self._start_at(*self._parked)
         elif cmd.kind == "volume":
             self._volume = max(0.0, min(100.0, cmd.level))
             self._emit_status()
@@ -283,13 +291,22 @@ class Engine:
     def _start_at(self, index: int, seek_to: float = 0.0) -> None:
         """(Re)start playback from queue slot `index` (1-based). Skips
         unplayable tracks forward, stopping loudly after the failure cap."""
-        self._resume = 0.0
+        self._resume, self._parked = 0.0, None
         self._teardown_pipeline()
         self._track_failures = 0
         while True:
             item = self._queue.item_at(index)
             if item is None:
                 self._set_state("stopped")
+                return
+            if (item.opener() or {}).get("kind") == "pending":
+                # Its stream is on its way (playback.substitute): the start
+                # waits on the slot, slot_ready sends it on — walked past, an
+                # output switch's play skipped every slot only a stream serves
+                self._index, self._current = index, None
+                self._length = item.duration_seconds or 0.0
+                self._resume, self._parked = seek_to, (index, seek_to)
+                self._set_state("loading")
                 return
             src = self._source_url(item)
             probed = _probe(src) if src else None
@@ -550,7 +567,16 @@ class Engine:
             self._pending_switch = index
 
     def _seek(self, seconds: float) -> None:
-        if self._current is None or self._index < 1:
+        if self._current is None:
+            # A seeded spot, or a slot waiting for its stream: nothing open
+            # to seek in — the second it starts at moves
+            if self._index >= 1 and self._state in ("paused", "loading"):
+                self._resume = max(0.0, seconds)
+                if self._parked is not None:
+                    self._parked = (self._parked[0], self._resume)
+                self._emit_status()
+            return
+        if self._index < 1:
             return
         was_playing = self._state == "playing"
         index = self._index

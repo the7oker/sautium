@@ -92,13 +92,15 @@ def test_substitutes_fetch_a_lead_window_and_land_on_their_slots(monkeypatch):
 
     def notify(index):
         ready.append(index)
-        if len(ready) >= 3:
+        if len(ready) >= 4:
             landed.set()
 
     subs = Substitutes(q, notify)
     subs.maintain(1)                       # slots 1 .. 1 + LEAD
     assert landed.wait(5)
-    assert sorted(ready) == [1, 2, 4]      # slot 3's fetch failed, the rest stream
+    # Each slot that settled is told — slot 3, whose fetch failed, too: a
+    # play parked there walks on instead of waiting for nothing
+    assert sorted(ready) == [1, 2, 3, 4]
     assert q.item_at(1).opener() == {"kind": "proxy", "token": "tok-held-1"}
     assert q.item_at(3).opener()["kind"] == "unplayable"
     assert q.item_at(5).opener() == {"kind": "pending"}

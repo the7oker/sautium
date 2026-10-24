@@ -14,7 +14,8 @@ Streams are resolved LAZILY, a lead window ahead of the playhead
 (`Substitutes.maintain` runs on every status tick and right after the
 switch), submitted to the proxy front of the fetch queue, and land on the
 slot as `play` when buffered; the output that parked a play on that slot is
-told (`PlayerBackend.slot_ready`). Nothing is fetched for a queue nobody
+told (`PlayerBackend.slot_ready`) — also when the slot turns out unplayable
+here, so the play walks on instead of waiting for nothing. Nothing is fetched for a queue nobody
 listens on past the window, and a queue that moves on retires its tokens
 through the proxy's generation binding.
 
@@ -212,7 +213,9 @@ class Substitutes:
             return
         if play["kind"] == "proxy":
             logger.info("queue slot %d streams %s — %s", index, item.artist, item.title)
-            self._notify(index)
         else:
             logger.info("queue slot %d unplayable here: %s (%s — %s)", index,
                         play["reason"], item.artist, item.title)
+        # Either way: a play the output parked on the slot goes on — the
+        # stream, or past the slot
+        self._notify(index)

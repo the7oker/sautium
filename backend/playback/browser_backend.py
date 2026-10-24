@@ -67,6 +67,9 @@ class BrowserBackend(PlayerBackend):
         # (e.g. the previous renderer closed): honored the moment a tab
         # claims the output, instead of silently playing into the void.
         self._pending_play_index: Optional[int] = None
+        # That intent is an output switch's (play_on): the tab that chose
+        # this output claims it a moment later — no "no playback device".
+        self._handover = False
 
     @property
     def renderer_attached(self) -> bool:
@@ -137,6 +140,7 @@ class BrowserBackend(PlayerBackend):
             # it was asked at.
             index = self._pending_play_index
             self._pending_play_index = None
+            self._handover = False
             self._start_at(index, play=True, position=self._position)
             return
         # (Re)prime the tab with the current slot, paused — the user
@@ -276,7 +280,10 @@ class BrowserBackend(PlayerBackend):
         nxt_index = self._index + 1
         item = self._queue.item_at(nxt_index)
         if item is None:
+            # The end of the queue: the play press starts the last track
+            # over, never at its last second
             self._state = "stopped"
+            self._position = 0.0
             self._emit_now()
             return None
         self._index = nxt_index
@@ -443,7 +450,21 @@ class BrowserBackend(PlayerBackend):
 
     # -- transport ---------------------------------------------------------------------
 
+    def play_on(self) -> bool:
+        """An output switch carries playing over to this output. The tab
+        that chose it claims it a moment later — its channel opens once the
+        switch has answered — so with no tab yet the start waits for that
+        one, and no "no playback device" is said meanwhile: that error is a
+        play press's with no tab (play)."""
+        if self._channel is not None:
+            return self.play()
+        self._pending_play_index = self._index if self._index >= 1 else 1
+        self._handover = True
+        self._emit_now()
+        return True
+
     def play(self) -> bool:
+        self._handover = False
         if self._state in ("playing", "paused") and self._channel is not None:
             # Resume / ensure-playing — never reload the current slot. A jump
             # is select()+play(): reloading here would restart the track and
@@ -468,6 +489,7 @@ class BrowserBackend(PlayerBackend):
         return True
 
     def stop(self) -> bool:
+        self._pending_play_index, self._handover = None, False
         self._push({"cmd": "stop"})
         self._state = "stopped"
         self._position = 0.0
@@ -547,8 +569,8 @@ class BrowserBackend(PlayerBackend):
 
     def _emit_now(self) -> None:
         extra = {}
-        if self._channel is None and (self._state != "stopped"
-                                      or self._pending_play_index is not None):
+        if self._channel is None and not self._handover and (
+                self._state != "stopped" or self._pending_play_index is not None):
             extra["error"] = ("no playback device — open Sautium on the "
                               "device that should play and press play")
         elif self._unplayable:

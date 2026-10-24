@@ -774,9 +774,8 @@ async def _scan_run():
     _hqp_discovered = hqps
 
     fresh: dict[str, dict] = {}
-    known = {**_dlna_discovered, **_dlna_pins()}
-    from routers.settings import _read
-    active = _read("output.dlna_renderer") or {}
+    pins = _dlna_pins()
+    known = {**_dlna_discovered, **pins}
     for loc in sorted(set(found.values())):
         try:
             info = await _dlna_describe(loc)
@@ -799,9 +798,12 @@ async def _scan_run():
             continue
         fresh[key] = {**remember_location(known.get(key, {}), info), "udn": key}
     _dlna_discovered = fresh
-    for key, info in fresh.items():
-        if key in known or udn_key(active.get("udn")) == key:
-            note_renderer_location(key, info["location"])
+    if fresh:
+        from routers.settings import _read
+        chosen = udn_key((_read("output.dlna_renderer") or {}).get("udn"))
+        for key, info in fresh.items():
+            if key in pins or key == chosen:
+                note_renderer_location(key, info["location"])
     renderers = list(fresh.values())
     return {"renderers": renderers, "hqplayers": _hqplayer_entries()}
 
