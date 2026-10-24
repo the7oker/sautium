@@ -3137,6 +3137,27 @@ is known now — one that answers only elsewhere is let go and attached again
 there, its spot carried (`DlnaBackend.reachable`). Lesson: what a scan
 learns about a device is the device's, not the scan's.
 
+### An output switch keeps the place in the queue (2026-10-24)
+
+Moving the music from a phone to the Mac's speakers and back restarted the
+track from 0:00, stopped: a switch kept the slot only. The switch route now
+reads where the output it leaves stands — the slot, the second, playing or
+not (`PlaybackManager.spot`, from its latest word: a stopped HQPlayer's or a
+lost renderer's resume spot included) — before the detach, whose
+"disconnected" wipes it, and hands it to the attach (`activate(spot=)`):
+every output's `resume_at(slot, position)` takes the second. A renderer
+holds it paused with nothing loaded and starts there at Play (Opus by
+`?ss=`, any other by a Seek once it plays); the browser primes the tab
+that claims the output there; the built-in engine is seeded in its own
+command order and opens nothing until Play; HQPlayer, found stopped at the
+attach, keeps it as its resume spot ("Stopped at … — Play resumes here") —
+one found playing keeps its own place, as the attach always had it. When the
+old output played, the route then presses Play as the person would, through
+the play gate and once its locks are let go — never inside `activate`,
+which an HQPlayer start may outlast — and a press the new output does not
+take is said with the switch (`resume_refused`). Lesson: a switch moves
+the listening, not just the list.
+
 ## Known Gotchas
 
 - **The Docker image took the node's secrets.** `./backend` is the build

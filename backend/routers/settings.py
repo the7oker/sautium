@@ -2156,21 +2156,43 @@ def put_output_prefs(req: OutputPrefs) -> Dict[str, Any]:
     """Select the playback output (Output picker). Persisted, then applied
     live: the old backend stops what it plays (an HQPlayer building or not
     answering is stopped once it answers, and `hqplayer_stop` tells the
-    person so), the canonical queue survives, playback does not auto-resume
-    — the user presses play on the new output. The HQPlayer already driven,
-    picked again, stays the output as it is."""
+    person so), the canonical queue survives, and the new output takes the
+    old one's place in it — the track, the second, playing or paused as it
+    was: a play press once the change is over, through the play gate as any
+    other (one it did not take is said in `resume_refused`). The HQPlayer
+    already driven, picked again, stays the output as it is."""
     from playback.manager import OutputHeld, manager
 
     # Not while the benchmark has the output: checked under the lock a hold
     # takes, so nothing of the change is written while one lasts.
     try:
         with manager.output_change():
-            return _put_output_prefs(req)
+            out, spot = _put_output_prefs(req)
     except OutputHeld as e:
         raise HTTPException(status_code=409, detail=str(e))
+    if spot is not None and spot.playing:
+        refused = _play_on()
+        if refused:
+            out["resume_refused"] = refused
+    return out
 
 
-def _put_output_prefs(req: OutputPrefs) -> Dict[str, Any]:
+def _play_on() -> Optional[str]:
+    """The play press that carries playing across an output switch, as the
+    person's own would go (routers.player._transport): None when the new
+    output took it, else what it said."""
+    from routers.player import _transport
+    try:
+        answer = _transport(True, "play")
+    except HTTPException as e:
+        return str(e.detail)
+    return None if answer.get("ok") else (answer.get("refusal") or "the output did not take Play")
+
+
+def _put_output_prefs(req: OutputPrefs) -> tuple:
+    """The change itself, under the output-change locks. Returns the answer
+    and where the output left switched from stood (PlaybackManager.spot),
+    None when the output did not change."""
     from playback.manager import manager
     # Every field is checked before anything is written or chosen: a 400
     # after the HQPlayer address was applied left the output on a link the
@@ -2226,22 +2248,25 @@ def _put_output_prefs(req: OutputPrefs) -> Dict[str, Any]:
     if not (req.type is not None or req.device_id is not None
             or req.exclusive is not None or req.renderer is not None
             or req.hqplayer is not None):
-        return get_output_prefs()
+        return get_output_prefs(), None
 
     otype = _read("output.type")
     told = None         # what the person is told of a Stop the old output still owes
+    # Where the music is — read before the detach, whose "disconnected"
+    # wipes it: the new output starts there
+    spot = manager.spot()
     try:
         if otype == "browser":
             told = manager.activate(None)
-            manager.activate("browser")
+            manager.activate("browser", spot=spot)
         elif otype == "dlna":
             told = manager.activate(None)
-            manager.activate("dlna", renderer=_read("output.dlna_renderer"))
+            manager.activate("dlna", spot=spot, renderer=_read("output.dlna_renderer"))
         elif otype == "local":
             # Deactivate first — re-selecting "local" with a different device
             # must reconstruct the engine, and activate() is idempotent per type.
             told = manager.activate(None)
-            manager.activate("local",
+            manager.activate("local", spot=spot,
                              device_id=_read("output.local_device"),
                              exclusive=bool(_read("output.local_exclusive")))
         elif otype == "hqplayer":
@@ -2273,7 +2298,9 @@ def _put_output_prefs(req: OutputPrefs) -> Dict[str, Any]:
                 # answers while the output it switched to is let go
                 link.accept("attach")
                 told = manager.activate(None)
-                manager.activate("hqplayer")
+                manager.activate("hqplayer", spot=spot)
+            else:
+                spot = None     # no change: the HQPlayer plays on as it does
     except HTTPException:
         raise
     except Exception as e:
@@ -2282,7 +2309,7 @@ def _put_output_prefs(req: OutputPrefs) -> Dict[str, Any]:
     out = get_output_prefs()
     if told:
         out["hqplayer_stop"] = told
-    return out
+    return out, spot
 
 
 def load_hqplayer_from_db() -> None:

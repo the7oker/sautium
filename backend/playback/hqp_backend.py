@@ -1567,12 +1567,13 @@ class HqpBackend(PlayerBackend):
     def resume_at(self, index: int, position: float = 0.0) -> None:
         # HQPlayer owns its playlist pointer, and a select fired straight
         # after the attach mirror does not stick (verified live) — defer it
-        # to the play press, where select+play is the proven jump sequence.
-        # Only for an HQPlayer the attach found stopped: one that plays or
-        # builds keeps its own place.
+        # to the play press, where select+play is the proven jump sequence,
+        # and its seek to the second the output before it was at. Only for
+        # an HQPlayer the attach found stopped: one that plays or builds
+        # keeps its own place.
         item = self._queue.item_at(index)
         if self._stopped_at_attach and item is not None:
-            self._set_spot(item, 0)
+            self._set_spot(item, int(position))
 
     def _set_spot(self, item: QueueItem, position: int) -> None:
         with self._spot_lock:

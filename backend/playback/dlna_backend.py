@@ -1627,6 +1627,12 @@ class DlnaBackend(PlayerBackend):
         return self._call_async(self._load_and_play(index))
 
     def seek(self, seconds: int) -> bool:
+        if self._current_url is None and self._resume is not None:
+            # A carried-over spot, nothing of it loaded: the play press
+            # starts the slot at the new second (a Seek now finds no media)
+            self._resume = self._position = float(seconds)
+            self._emit_now()
+            return True
         # Decide by the CURRENTLY-PLAYING stream's format, not the global
         # quality setting: a mid-track quality switch leaves the current
         # track playing its ORIGINAL format (the change applies from the

@@ -299,10 +299,11 @@ class PlaybackManager:
                  **cfg) -> Optional[str]:
         """Switch the active output. The old backend is stopped (while it
         still believes its device reachable) and shut down; the canonical
-        queue survives the switch; playback does NOT auto-resume — the user
-        presses play on the new output. Returns what the person is told when
-        the old output's stop is left for later (HQPlayer building, or not
-        answering), else None.
+        queue survives the switch; playback does NOT resume here — a
+        person's switch plays on once its locks are let go, as their play
+        press would (routers.settings.put_output_prefs). Returns what the
+        person is told when the old output's stop is left for later
+        (HQPlayer building, or not answering), else None.
 
         `stop_old=False` detaches without touching playback — app shutdown
         and clearing the HQPlayer host must leave an externally-running

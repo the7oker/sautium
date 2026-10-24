@@ -135,9 +135,9 @@ class _Ring:
 
 @dataclass
 class Command:
-    kind: str                        # play|pause|stop|select|seek|volume|resync|quit
-    index: Optional[int] = None      # select: 1-based queue slot
-    seconds: Optional[float] = None  # seek target
+    kind: str                        # play|pause|stop|select|seek|seed|volume|resync|quit
+    index: Optional[int] = None      # select, seed: 1-based queue slot
+    seconds: Optional[float] = None  # seek target; seed: the second play starts at
     level: Optional[float] = None    # volume 0..100
 
 
@@ -161,6 +161,7 @@ class Engine:
         self._index = 0                  # 1-based; 0 = nothing selected
         self._length: float = 0.0
         self._position_offset = 0.0      # seek base of the active track
+        self._resume = 0.0               # the second the next play starts the slot at (seed)
         self._volume: float = 100.0
         self._error: Optional[str] = None
 
@@ -249,7 +250,7 @@ class Engine:
                     self._stream.start()
                 self._set_state("playing")
             elif self._state != "playing":
-                self._start_at(self._index if self._index >= 1 else 1)
+                self._start_at(self._index if self._index >= 1 else 1, seek_to=self._resume)
         elif cmd.kind == "pause":
             if self._state == "playing" and self._stream is not None:
                 with devices_mod.pa_lock:
@@ -257,11 +258,20 @@ class Engine:
                 self._set_state("paused")
         elif cmd.kind == "stop":
             self._teardown_pipeline()
+            self._resume = 0.0
             self._set_state("stopped")
         elif cmd.kind == "select":
             self._start_at(cmd.index)
         elif cmd.kind == "seek":
             self._seek(cmd.seconds or 0.0)
+        elif cmd.kind == "seed":
+            # An output switch's spot: shown paused there, nothing opened
+            # until the play press, which starts the slot at that second
+            item = self._queue.item_at(cmd.index)
+            self._index = cmd.index
+            self._length = (item.duration_seconds or 0.0) if item is not None else 0.0
+            self._resume = cmd.seconds or 0.0
+            self._set_state("paused" if self._resume else "stopped")
         elif cmd.kind == "volume":
             self._volume = max(0.0, min(100.0, cmd.level))
             self._emit_status()
@@ -273,6 +283,7 @@ class Engine:
     def _start_at(self, index: int, seek_to: float = 0.0) -> None:
         """(Re)start playback from queue slot `index` (1-based). Skips
         unplayable tracks forward, stopping loudly after the failure cap."""
+        self._resume = 0.0
         self._teardown_pipeline()
         self._track_failures = 0
         while True:
@@ -614,7 +625,7 @@ class Engine:
 
     def _position(self) -> float:
         if self._ring is None:
-            return 0.0
+            return self._resume         # a seeded spot, else 0
         start = None
         for b in self._boundaries:
             if b[0] == self._index:

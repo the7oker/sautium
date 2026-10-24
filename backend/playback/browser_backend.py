@@ -97,7 +97,9 @@ class BrowserBackend(PlayerBackend):
         self._index = index
         self._current_ident = self._item_ident(item)
         self._length = item.duration_seconds or 0.0
-        self._position = 0.0
+        # The tab that claims the output is primed there (attach_tab), and
+        # the play press starts there
+        self._position = position
         self._emit_now()
 
     def slot_ready(self, index: int) -> None:
@@ -131,10 +133,11 @@ class BrowserBackend(PlayerBackend):
                     tab[:8], self._pending_play_index)
         if self._pending_play_index is not None:
             # A play intent queued up while no renderer existed — honor it
-            # now on the tab that just claimed the output.
+            # now on the tab that just claimed the output, from the second
+            # it was asked at.
             index = self._pending_play_index
             self._pending_play_index = None
-            self._start_at(index, play=True)
+            self._start_at(index, play=True, position=self._position)
             return
         # (Re)prime the tab with the current slot, paused — the user
         # presses play (that tap is also the autoplay-unlock gesture).
@@ -144,14 +147,15 @@ class BrowserBackend(PlayerBackend):
         if item is not None:
             self._push(self._load_directive(self._index, item, play=False,
                                             position=self._position))
-            if self._state == "playing":
+            if self._state == "playing" or (self._state == "stopped" and self._position > 0):
                 # A freshly primed element is paused by definition (a
                 # reloaded page cannot resume without a user gesture).
                 # Claiming "playing" here deadlocks the UI: the pause the
                 # play/pause button then sends is a no-op on an already
                 # paused element and no event ever corrects the state. If
                 # this was a live SSE blip instead (audio still running),
-                # the tab's next timeupdate flips the state right back.
+                # the tab's next timeupdate flips the state right back. A
+                # spot an output switch carried over is primed paused too.
                 self._state = "paused"
                 self._emit_now()
 
@@ -380,7 +384,7 @@ class BrowserBackend(PlayerBackend):
         return (f"None of the {skipped} queued item(s) can be played on this "
                 f"device ({held} live in the HQPlayer's own library).")
 
-    def _start_at(self, index: int, *, play: bool) -> bool:
+    def _start_at(self, index: int, *, play: bool, position: float = 0.0) -> bool:
         first = index
         while True:
             item = self._queue.item_at(index)
@@ -412,10 +416,12 @@ class BrowserBackend(PlayerBackend):
                 index += 1
                 continue
             break
+        if index != first:
+            position = 0.0      # the second asked for was the first slot's
         self._unplayable = None
         self._index = index
         self._current_ident = self._item_ident(item)
-        self._position = 0.0
+        self._position = position
         self._length = item.duration_seconds or 0.0
         if self._channel is None:
             # No renderer tab: don't pretend to play — park the intent (the
@@ -429,7 +435,7 @@ class BrowserBackend(PlayerBackend):
         self._epoch += 1
         logger.info("renderer directive: load slot %d play=%s (%s — %s)",
                     index, play, item.artist, item.title)
-        self._push(self._load_directive(index, item, play=play))
+        self._push(self._load_directive(index, item, play=play, position=position))
         if play:
             self._state = "playing"
         self._emit_now()
@@ -445,8 +451,11 @@ class BrowserBackend(PlayerBackend):
             self._push({"cmd": "play"})
             return True
         # Without a renderer this parks the intent (see _start_at) instead
-        # of failing — the claiming tab will start right here.
-        return self._start_at(self._index if self._index >= 1 else 1, play=True)
+        # of failing — the claiming tab will start right here, at the second
+        # the slot holds (a spot carried over, a tab gone mid-track; a Stop
+        # sets it back to 0).
+        return self._start_at(self._index if self._index >= 1 else 1, play=True,
+                              position=self._position)
 
     def pause(self) -> bool:
         self._push({"cmd": "pause"})

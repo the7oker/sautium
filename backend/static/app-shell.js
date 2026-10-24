@@ -14251,6 +14251,12 @@
             notices.toast({ kind: 'info', key: 'output.hqp-stop', title: 'HQPlayer',
                             text: escapeProfileHtml(out.hqplayer_stop) });
           }
+          // The music played and the new output did not take it on: its
+          // words, said once — the track waits there at the same second
+          if (out.resume_refused) {
+            notices.toast({ kind: 'info', key: 'output.resume', title: 'Audio output',
+                            text: escapeProfileHtml('Playback did not go on here: ' + out.resume_refused) });
+          }
         }
       } catch (e) {
         // The node did not answer, or answered what cannot be read: said —

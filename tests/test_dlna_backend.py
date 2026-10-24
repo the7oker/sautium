@@ -1017,6 +1017,169 @@ def test_play_with_no_renderer_attached_goes_where_it_answers_now(tmp_path, prox
     wait_for(lambda: new.state == "PLAYING", what="playing at the new address")
 
 
+def test_the_spot_is_read_from_the_outputs_latest_word(manager):
+    """N-14: where an output stands — the slot, the second, whether it plays
+    — is its latest status: a track it plays, starts or holds paused, or a
+    stopped one's resume spot."""
+    from playback.base import Spot
+    for status, spot in (
+            ({"state": "playing", "track_index": 3, "position": 42.5}, Spot(3, 42.5, True)),
+            ({"state": "loading", "track_index": 2, "position": 0.0}, Spot(2, 0.0, True)),
+            ({"state": "paused", "track_index": 2, "position": 61.0}, Spot(2, 61.0, False)),
+            ({"state": "stopped", "track_index": 2, "position": 0.0,
+              "resume": {"index": 2, "position": 150}}, Spot(2, 150.0, False)),
+            ({"state": "stopped", "track_index": 2, "position": 0.0}, None),
+            ({"state": "disconnected"}, None)):
+        manager._latest_status = status
+        assert manager.spot() == spot, status
+
+
+@pytest.fixture
+def switch(manager, picker, monkeypatch):
+    """The Output picker's switch (PUT /api/settings/output) on the
+    in-memory settings."""
+    import routers.settings as settings_router
+    from playback import manager as manager_mod
+    monkeypatch.setattr(manager_mod, "manager", manager)
+    monkeypatch.setattr(settings_router, "notify_library_subscribers", lambda: None)
+    monkeypatch.setattr(settings_router, "get_output_prefs", lambda: {})
+
+    def to(**prefs) -> dict:
+        return settings_router.put_output_prefs(settings_router.OutputPrefs(**prefs))
+    return to
+
+
+def _playing_at(manager, r: FakeRenderer, second: float) -> None:
+    wait_for(lambda: manager.latest_status.get("state") == "playing"
+             and manager.latest_status.get("position", 0) >= second, what=f"playing past {second}")
+
+
+def test_a_switch_between_renderers_plays_on_at_the_second(tmp_path, proxy, renderers, manager,
+                                                           switch, quality):
+    """N-14: the music moves to another room: the new renderer starts the
+    track at the second the old one was at, playing — the switch used to
+    restart it from 0:00, stopped."""
+    a, b = renderers(name="Kitchen"), renderers(name="Study")
+    items = [track(tmp_path, 1, seconds=40.0), track(tmp_path, 2, seconds=40.0)]
+    _on_renderer(manager, a, items)
+    _playing_at(manager, a, 3)
+    out = switch(type="dlna", renderer=b.record)
+    assert "resume_refused" not in out
+    wait_for(lambda: b.called("Seek"), what="the new renderer sought")
+    assert a.state == "STOPPED"
+    second = _seconds(b.called("Seek")[-1]["Target"])
+    assert 3 <= second <= 6
+    assert b.called("SetAVTransportURI")[0]["CurrentURI"].split("/file/")[1] == \
+        a.called("SetAVTransportURI")[0]["CurrentURI"].split("/file/")[1]
+    wait_for(lambda: manager.latest_status.get("state") == "playing", what="playing on")
+    assert manager.latest_status["track_index"] == 1 and manager.latest_status["position"] >= second
+
+
+def test_a_switch_from_a_paused_renderer_stays_paused_there(tmp_path, proxy, renderers, manager,
+                                                            switch, quality):
+    """N-14: paused on one renderer, paused on the next at the same second —
+    nothing loaded there until Play, which starts the track at it."""
+    a, b = renderers(name="Kitchen"), renderers(name="Study")
+    _on_renderer(manager, a, [track(tmp_path, 1, seconds=40.0)])
+    _playing_at(manager, a, 3)
+    manager.backend().pause()
+    wait_for(lambda: manager.latest_status.get("state") == "paused", what="paused")
+    paused_at = manager.latest_status["position"]
+    switch(type="dlna", renderer=b.record)
+    st = manager.latest_status
+    assert (st["state"], st["track_index"], st["position"]) == ("paused", 1, paused_at)
+    assert not b.called("SetAVTransportURI") and not b.called("Play")
+    import routers.player as player_router
+    assert player_router.play()["ok"]
+    wait_for(lambda: b.called("Seek"), what="sought on Play")
+    assert b.called("Seek")[-1]["Target"] == f"0:00:{int(paused_at):02d}"
+
+
+class Tab:
+    """A browser tab holding the output's command channel."""
+
+    def __init__(self, backend, name: str = "tab-1"):
+        self.loop = asyncio.new_event_loop()
+        threading.Thread(target=self.loop.run_forever, daemon=True, name=name).start()
+        self.channel = asyncio.run_coroutine_threadsafe(self._queue(), self.loop).result(5)
+        backend.attach_tab(name, self.channel, self.loop)
+
+    @staticmethod
+    async def _queue():
+        return asyncio.Queue()
+
+    def directives(self) -> list:
+        async def drain():
+            await asyncio.sleep(0.05)
+            out = []
+            while not self.channel.empty():
+                out.append(self.channel.get_nowait())
+            return out
+        return asyncio.run_coroutine_threadsafe(drain(), self.loop).result(5)
+
+    def close(self):
+        self.loop.call_soon_threadsafe(self.loop.stop)
+
+
+def test_a_switch_to_the_browser_starts_its_tab_at_the_second(tmp_path, proxy, renderers, manager,
+                                                              switch, quality, monkeypatch):
+    """N-14: playing on a renderer, then "This device": the play press waits
+    for the tab that claims the output and starts it at the second."""
+    import media_urls
+    monkeypatch.setattr(media_urls, "signed_media_url", lambda kind, ident, q=None: f"/m/{kind}/{ident}")
+    a = renderers()
+    _on_renderer(manager, a, [track(tmp_path, 1, seconds=40.0)])
+    _playing_at(manager, a, 3)
+    switch(type="browser")
+    browser = manager.backend()
+    tab = Tab(browser)
+    try:
+        load = [d for d in tab.directives() if d["cmd"] == "load"][-1]
+        assert load["play"] is True and load["queue_index"] == 1 and 3 <= load["position"] <= 6
+    finally:
+        tab.close()
+
+
+def test_a_switch_from_the_browser_keeps_its_second_on_a_renderer(tmp_path, proxy, renderers, manager,
+                                                                  switch, quality, monkeypatch):
+    """N-14: a tab paused at 0:21 hands the next output that second, paused."""
+    import media_urls
+    monkeypatch.setattr(media_urls, "signed_media_url", lambda kind, ident, q=None: f"/m/{kind}/{ident}")
+    b = renderers()
+    manager.store.update({"output.type": "browser"})
+    manager.activate("browser")
+    manager.queue.replace([track(tmp_path, 1, seconds=40.0), track(tmp_path, 2, seconds=40.0)])
+    browser = manager.backend()
+    tab = Tab(browser)
+    try:
+        browser.select(2)
+        epoch = browser._epoch
+        browser.on_client_event("tab-1", "playing", 0.0, 40.0, queue_index=2, epoch=epoch)
+        browser.on_client_event("tab-1", "paused", 21.0, 40.0, queue_index=2, epoch=epoch)
+        switch(type="dlna", renderer=b.record)
+    finally:
+        tab.close()
+    st = manager.latest_status
+    assert (st["state"], st["track_index"], st["position"]) == ("paused", 2, 21.0)
+
+
+def test_a_seeded_slot_starts_the_local_engine_at_its_second(tmp_path):
+    """N-14: the built-in engine shows a carried-over spot paused, opens
+    nothing, and its play command starts the slot at that second."""
+    from playback.local.engine import Command, Engine
+    q = CanonicalQueue()
+    q.replace([track(tmp_path, 1, seconds=40.0), track(tmp_path, 2, seconds=40.0)])
+    statuses = []
+    engine = Engine(q, statuses.append, None, False)
+    started = []
+    engine._start_at = lambda index, seek_to=0.0: started.append((index, seek_to))
+    engine._handle(Command("seed", index=2, seconds=33.0))
+    st = statuses[-1]
+    assert (st.state, st.queue_index, st.position, st.length) == ("paused", 2, 33.0, 40.0)
+    engine._handle(Command("play"))
+    assert started == [(2, 33.0)]
+
+
 def test_the_fake_renderer_plays_a_queue_through(tmp_path, proxy, renderers, nodes, quality):
     """The harness itself: attach, load, play, the gapless boundary by the
     armed NextURI, and the stop at the end of the queue."""

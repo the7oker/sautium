@@ -13384,3 +13384,40 @@ def test_compare_and_host_fit_read_this_hosts_own_speeds(fake, monkeypatch, tmp_
     assert asked["headroom"]["engine"] == "9.3.0"
     hqp_router.assistant("host_fit", name="demo-sinc-a")
     assert asked["names"]["engine"] == "9.3.0"
+
+
+def test_hqplayer_taking_the_output_resumes_at_the_second_the_one_before_was_at(fake, listens):
+    """An output switch to an HQPlayer it finds stopped hands it the second
+    the output before it was at: its resume spot — Now Playing's "Stopped at
+    … — Play resumes here" — and the play press selects the slot and seeks
+    there, by the link's own way in. One it finds playing keeps its place."""
+    mgr = _album(3)
+    b = _attach(mgr)
+    try:
+        b.resume_at(2, 95.0)
+        assert b._spot == (mgr.queue.item_at(2), 95)
+        fake.commands.clear()
+        assert b.play()
+        assert _wait(lambda: ("Seek", {"position": "95"}) in fake.commands, timeout=8), fake.commands
+        assert fake.state == int(PlaybackState.PLAYING) and fake.track == 2
+    finally:
+        b.shutdown()
+
+
+def test_a_switch_away_from_a_playing_hqplayer_plays_on_at_its_second(fake, output, monkeypatch):
+    """HQPlayer playing slot 1 at 0:42, the output switched to the browser:
+    HQPlayer stops, and the play press that carries playing over waits for
+    the tab that claims the output, at that second."""
+    from routers import settings as settings_router
+    import routers.player as player_router
+    mgr, b = output
+    saved = {"output.type": "hqplayer", "hqplayer.host": "127.0.0.1", "hqplayer.port": fake.port}
+    monkeypatch.setattr(settings_router, "_read", lambda key: saved.get(key))
+    monkeypatch.setattr(settings_router, "_write", lambda key, value: saved.__setitem__(key, value))
+    monkeypatch.setattr(settings_router, "notify_library_subscribers", lambda: None)
+    monkeypatch.setattr(player_router, "manager", mgr)
+    at = mgr._latest_status["position"]
+    settings_router.put_output_prefs(settings_router.OutputPrefs(type="browser"))
+    browser = mgr.active
+    assert browser.id == "browser" and browser._pending_play_index == 1 and browser._position >= at
+    assert _wait(lambda: fake.state == int(PlaybackState.STOPPED), timeout=8)
