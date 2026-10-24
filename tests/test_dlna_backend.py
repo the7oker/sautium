@@ -769,6 +769,53 @@ def test_a_format_listed_under_another_spelling_goes_as_it_is(tmp_path, proxy, r
     assert 'protocolInfo="http-get:*:audio/flac:' in nxt["NextURIMetaData"]
 
 
+def _opus_seek_node(tmp_path, proxy, renderers, nodes, quality, monkeypatch, seconds):
+    """A phone renderer playing one owned track in opus_96: it reports, as
+    its TrackDuration, what its decoder measured of the stream it was given."""
+    monkeypatch.setattr(transcode, "opus_path_for_file", lambda path, q, ss=0.0: path)
+    quality["q"] = "opus_96"
+    r = renderers(sink=PHONE_SINK,
+                  reports=lambda uri, didl: (didl or 40.0) - FakeRenderer.offset(uri))
+    q = CanonicalQueue()
+    q.replace([track(tmp_path, 1, seconds=seconds)])
+    n = nodes(q, r)
+    assert n.backend.select(1)
+    wait_for(lambda: n.last.state == "playing" and n.last.position >= 1, what="playing")
+    return r, n
+
+
+def _seek_to(r: FakeRenderer, n: Node, target: int) -> None:
+    assert n.backend.seek(target)
+    wait_for(lambda: f"ss={target}" in r.uri and r.state == "PLAYING", what=f"reloaded at {target}")
+    wait_for(lambda: n.last.state == "playing" and n.last.position >= target + 1.5,
+             what=f"playing on past {target}")
+
+
+def test_an_opus_seek_keeps_the_track_length(tmp_path, proxy, renderers, nodes, quality, monkeypatch):
+    """N-13: an Opus seek reloads the stream from the target, and the phone
+    reports that stream's own length (30 s of a 40-s track after ss=10). The
+    track keeps the length the node knows, so the next seek lands where it
+    is asked — the slider's scale used to shrink to the stream's."""
+    r, n = _opus_seek_node(tmp_path, proxy, renderers, nodes, quality, monkeypatch, 40.0)
+    assert n.last.length == 40
+    _seek_to(r, n, 10)
+    assert r.reported_length() == 30
+    assert n.last.length == 40
+    _seek_to(r, n, 25)
+    assert n.last.length == 40 and 26 <= n.last.position <= 29
+
+
+def test_a_length_only_the_renderer_knows_is_read_from_the_seek(tmp_path, proxy, renderers, nodes,
+                                                                quality, monkeypatch):
+    """N-13: a track whose length the node does not know takes the renderer's
+    word — on an offset stream read 0-based, like RelTime: the offset plus
+    the rest the decoder measured."""
+    r, n = _opus_seek_node(tmp_path, proxy, renderers, nodes, quality, monkeypatch, None)
+    wait_for(lambda: n.last.length == 40, what="the renderer's length")
+    _seek_to(r, n, 10)
+    assert n.last.length == 40
+
+
 def test_the_fake_renderer_plays_a_queue_through(tmp_path, proxy, renderers, nodes, quality):
     """The harness itself: attach, load, play, the gapless boundary by the
     armed NextURI, and the stop at the end of the queue."""

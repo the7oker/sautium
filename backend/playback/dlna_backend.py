@@ -553,6 +553,21 @@ class DlnaBackend(PlayerBackend):
         self._rel_stray = (real, now)
         self._position = self._wall_estimate()
 
+    def _adopt_length(self, reported: float) -> None:
+        """The renderer's TrackDuration is the length of the STREAM it plays:
+        the whole track on a fresh one — truer than a catalog length for a
+        streamed track — but only the rest of it after an Opus seek's `ss=`.
+        There the track keeps the length the node knows; one it does not know
+        is read 0-based, like RelTime. A phone reports what its decoder
+        measured (4:45 of a 6:32 track after ss=107): taken for the track's,
+        it shrank the slider's scale and every later seek landed off."""
+        if self._pos_offset <= 0:
+            self._length = reported
+            return
+        item = self._queue.item_at(self._index)
+        self._length = ((item.duration_seconds if item is not None else None)
+                        or self._pos_offset + reported)
+
     @staticmethod
     def _clock() -> float:
         """The clock the position estimate runs on: REALTIME, not monotonic.
@@ -734,7 +749,7 @@ class DlnaBackend(PlayerBackend):
                     and (not cur or cur == self._current_url))
                 dur = self._dmr.media_duration if fresh else None
                 if dur:
-                    self._length = float(dur)
+                    self._adopt_length(float(dur))
                 # Position: trust the renderer's RelTime when it advances, but
                 # some renderers (KANN on VBR Opus, live) play fine yet report
                 # RelTime 00:00:00 forever. So keep a wall-clock estimate and
