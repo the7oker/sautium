@@ -1233,7 +1233,8 @@ implementation details live in the code, DB and git history.
   while Status still stands under 1 s keeps the old clock running through
   its build, and a Seek to the start inside a window begins a stretch
   anew; and a start's own Seek is not taken by a clock made on HQPlayer's
-  opening tick (track 0) — it under-reads for a tick, never a listen.
+  opening tick (track 0) — it under-reads until Status's position moves,
+  at most the output delay and 2 s past the start heard, never a listen.
   Keeping the meter open whenever HQPlayer plays was set aside: what it
   costs HQPlayer near the real-time limit is not measured. Lesson: a
   reading that stopped refreshing is not one that says "stopped" — tell
