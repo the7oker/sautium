@@ -1265,9 +1265,10 @@ implementation details live in the code, DB and git history.
   just before it — loses it, reported as another controller's with a short
   skip written, and the radio plays after it only once Play is pressed;
   Previous pressed in HQPlayer's own window replays the removed track
-  after the one it lands on, as another controller's, untracked; a
-  Previous made before the tick that names what HQPlayer reads past it
-  (its opening tick, a pending edit) counts from the removal's place even
+  after the one it lands on, as another controller's, untracked; since
+  the removal is let go with the tick that names what HQPlayer reads past
+  it (2026-10-24), a Previous made before that tick (HQPlayer's opening
+  tick, a pending edit) counts from the removal's place even
   when HQPlayer went further meanwhile (its own Next or window: track 1
   where 3 is right), and on HQPlayer 5 its own Previous back onto the
   removed entry in that window brings the play-out back as the node's
@@ -1335,10 +1336,11 @@ implementation details live in the code, DB and git history.
   turn behind the lock still plays, as it does with no mutation at all —
   whether such a step is numbered, the tap yielding to it, is the owner's
   call; after a held Stop, a step held at a spot is lost (a seamless edit)
-  or, with a Seek after the Stop, keeps that second on the track it steps
-  to (a rebuild) — only the assistant sends a Stop; and the jump's answer
-  for a tap that yielded to a Seek or a step that moved the spot carries
-  no `starts`, where its contract says null — nothing reads it.
+  or, with a Seek between the Stop and the step, keeps that second on the
+  track it steps to (a rebuild) — only the assistant sends a Stop; and the
+  jump's answer for a tap that yielded to a Seek or a step that moved the
+  spot carries no `starts`, where its contract says null — nothing reads
+  it.
 - **Open after the fixes' review** (2026-10-14), in code the fixes did not
   change: a "play next" on a tail mirror whose anchor HQPlayer moved past
   goes to the queue alone, before the entry HQPlayer reads, and never plays
