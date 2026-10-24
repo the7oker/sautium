@@ -619,12 +619,12 @@ comes after the control port answers again — so neither can end the wait.
     entry then, the radio behind it. A new order waits until it has played
     out: the reorder route still asks for a playing slot. The status names
     it at no slot and as no other controller's, and its listen goes on;
-    stopped on it, the play press goes on with what followed it. A mirror in step is a tail mirror from then on; a removal
-    whose Status names no entry it may go by removes nothing, the mirror
-    lost. A radio begun on it while
-    HQPlayer reads the slot the queue keeps leaves it in step — the clear
-    keeps the entry HQPlayer reads, the queue the slot it reads; begun once
-    HQPlayer moved on from that slot, it loses it.
+    stopped on it, the play press goes on with what followed it. A mirror
+    in step is a tail mirror from then on; a removal whose Status names no
+    entry it may go by removes nothing, the mirror lost. A radio begun on
+    it while HQPlayer reads the slot the queue keeps leaves it in step — the
+    clear keeps the entry HQPlayer reads, the queue the slot it reads; begun
+    once HQPlayer moved on from that slot, it loses it.
   - **Drifted** by an edit made outside this node or a mirror step HQPlayer
     did not take: never reconciled on its own, and never edited by the
     queue's places — a remove, a reorder, a "play next" are the queue's
