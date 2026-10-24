@@ -163,8 +163,9 @@ class Engine:
         self._position_offset = 0.0      # seek base of the active track
         self._resume = 0.0               # the second the next play starts the slot at (seed)
         # A start waiting on a slot whose stream is on its way
-        # (playback.substitute): (slot, second); slot_ready starts it.
-        self._parked: Optional[tuple[int, float]] = None
+        # (playback.substitute): (its item — the slot follows it through
+        # queue edits — and the second); slot_ready starts it.
+        self._parked: Optional[tuple[QueueItem, float]] = None
         self._volume: float = 100.0
         self._error: Optional[str] = None
 
@@ -259,6 +260,10 @@ class Engine:
                 with devices_mod.pa_lock:
                     self._stream.stop()
                 self._set_state("paused")
+            elif self._parked is not None:
+                # The wait for the slot's stream ends: paused at its second
+                self._parked = None
+                self._set_state("paused")
         elif cmd.kind == "stop":
             self._teardown_pipeline()
             self._resume, self._parked = 0.0, None
@@ -278,8 +283,8 @@ class Engine:
         elif cmd.kind == "slot_ready":
             # The parked slot's stream landed, or it is unplayable here:
             # the start goes on — there, or past it
-            if self._parked is not None and self._parked[0] == cmd.index:
-                self._start_at(*self._parked)
+            if self._parked is not None and self._queue.index_of(self._parked[0]) == cmd.index:
+                self._start_at(cmd.index, seek_to=self._parked[1])
         elif cmd.kind == "volume":
             self._volume = max(0.0, min(100.0, cmd.level))
             self._emit_status()
@@ -305,7 +310,7 @@ class Engine:
                 # output switch's play skipped every slot only a stream serves
                 self._index, self._current = index, None
                 self._length = item.duration_seconds or 0.0
-                self._resume, self._parked = seek_to, (index, seek_to)
+                self._resume, self._parked = seek_to, (item, seek_to)
                 self._set_state("loading")
                 return
             src = self._source_url(item)
@@ -593,6 +598,15 @@ class Engine:
         current item was removed play whatever took its slot — or stop at
         the queue end."""
         if self._current is None:
+            if self._parked is not None:
+                # A start waiting on its stream: its slot follows its track
+                slot = self._queue.index_of(self._parked[0])
+                if slot is None:
+                    self._parked, self._resume = None, 0.0
+                    self._set_state("stopped")
+                elif slot != self._index:
+                    self._index = slot
+                    self._emit_status()
             return
         snapshot = self._queue.snapshot()
         located = None

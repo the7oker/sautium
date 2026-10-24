@@ -198,6 +198,7 @@ class FakeRenderer:
         self.uri = self.meta = self.next_uri = self.next_meta = ""
         self.volume = 50
         self.notifying = True             # False: its events stop too
+        self.faults: dict[str, list] = {}  # action → UPnP error codes to answer it with, in turn
         self._base = 0.0                  # position at _t0
         self._t0: Optional[float] = None  # monotonic start while PLAYING
         self._subs: dict[str, tuple[str, str]] = {}   # sid → (service key, callback)
@@ -426,6 +427,8 @@ class FakeRenderer:
         self.calls.append((action, args))
         before = self._avt_state()
         try:
+            if self.faults.get(action):
+                raise Fault(self.faults[action].pop(0), "Current state of service prevents invoking that action")
             out = self._act(svc, action, args)
         except Fault as f:
             fault = (f'<?xml version="1.0"?><s:Envelope xmlns:s="{SOAP_NS}" '
@@ -1143,6 +1146,34 @@ def test_a_switch_to_the_browser_starts_its_tab_at_the_second(tmp_path, proxy, r
         tab.close()
 
 
+def test_the_browser_keeps_a_carried_second_on_a_slot_whose_stream_is_coming(tmp_path, manager,
+                                                                            monkeypatch):
+    """A switch to "This device" at 0:21 of a track only a stream serves
+    there: the tab that claims the output starts it at 0:21 once its stream
+    lands."""
+    import media_urls
+    monkeypatch.setattr(media_urls, "signed_media_url", lambda kind, ident, q=None: f"/m/{kind}/{ident}")
+    manager.activate("browser")
+    # The stream lands when the test says so: no provider resolves it here
+    monkeypatch.setattr(manager._subs, "maintain", lambda idx: None)
+    waiting = track(tmp_path, 1, seconds=40.0)
+    waiting.play = {"kind": "pending"}
+    manager.queue.replace([waiting])
+    browser = manager.backend()
+    browser.resume_at(1, 21.0)
+    assert browser.play_on()
+    tab = Tab(browser)
+    try:
+        assert manager.latest_status["state"] == "loading"
+        tab.directives()
+        waiting.play = {"kind": "proxy", "token": "tok-1"}
+        browser.slot_ready(1)
+        load = [d for d in tab.directives() if d["cmd"] == "load"][-1]
+        assert load["play"] is True and load["position"] == 21.0
+    finally:
+        tab.close()
+
+
 def test_a_switch_from_the_browser_keeps_its_second_on_a_renderer(tmp_path, proxy, renderers, manager,
                                                                   switch, quality, monkeypatch):
     """N-14: a tab paused at 0:21 hands the next output that second, paused."""
@@ -1250,12 +1281,25 @@ def test_a_play_waits_on_a_slot_whose_stream_is_on_its_way(tmp_path, proxy, rend
     assert n.backend.play()
     wait_for(lambda: n.last.state == "loading" and n.last.queue_index == 1, what="waiting on slot 1")
     assert not r.called("SetAVTransportURI")
+    # Waiting: a second Play keeps the second, a volume change keeps
+    # "loading", a seek moves the second without asking the renderer
+    assert n.backend.play()
+    assert n.backend.set_volume(40)
+    wait_for(lambda: r.volume == 40, what="the volume set")
+    assert n.last.state == "loading"
+    assert n.backend.seek(14) and not r.called("Seek")
+    assert n.last.state == "loading" and n.last.position == 14
+    n.backend._error = "an earlier word"
+    n.backend.slot_ready(2)                        # a slot nobody waits on
+    time.sleep(0.3)
+    assert n.backend._error == "an earlier word"
+    n.backend._error = None
     landed = streamed(proxy, 1, cover_url="")
     waiting.play = landed.source
     n.backend.slot_ready(1)
     wait_for(lambda: r.called("Seek"), what="slot 1 started at its second")
     assert r.called("SetAVTransportURI")[0]["CurrentURI"].endswith("/preview/stream1")
-    assert r.called("Seek")[-1]["Target"] == "0:00:12"
+    assert r.called("Seek")[-1]["Target"] == "0:00:14"
     # Unplayable: the play walks on
     nothing = track(tmp_path, 3, seconds=40.0)
     nothing.play = {"kind": "pending"}
@@ -1265,6 +1309,56 @@ def test_a_play_waits_on_a_slot_whose_stream_is_on_its_way(tmp_path, proxy, rend
     nothing.play = {"kind": "unplayable", "reason": "no provider has it"}
     n.backend.slot_ready(1)
     wait_for(lambda: n.last.queue_index == 2 and r.state == "PLAYING", what="slot 2 instead")
+
+
+def test_a_wait_follows_its_track_and_ends_at_a_pause(tmp_path, proxy, renderers, nodes, quality):
+    """The slot a play waits on follows its track through a removal before
+    it; a Pause ends the wait (paused at its second), and the stream's
+    landing then starts nothing."""
+    r = renderers(sink=PHONE_SINK)
+    q = CanonicalQueue()
+    first, waiting = track(tmp_path, 1, seconds=40.0), track(tmp_path, 2, seconds=40.0)
+    waiting.play = {"kind": "pending"}
+    q.replace([first, waiting])
+    n = nodes(q, r)
+    assert n.backend.select(2)
+    wait_for(lambda: n.last.state == "loading" and n.last.queue_index == 2, what="waiting on slot 2")
+    q.remove(1)
+    n.backend.queue_changed("remove")
+    assert n.last.queue_index == 1 and n.last.state == "loading"
+    waiting.play = streamed(proxy, 2, cover_url="").source
+    n.backend.slot_ready(1)
+    wait_for(lambda: r.state == "PLAYING", what="the track that waited, at its new slot")
+    assert r.uri.endswith("/preview/stream2")
+    # A Pause ends a wait
+    other = track(tmp_path, 3, seconds=40.0)
+    other.play = {"kind": "pending"}
+    q.replace([other])
+    assert n.backend.select(1)
+    wait_for(lambda: n.last.state == "loading" and n.last.queue_index == 1, what="waiting again")
+    assert n.backend.pause()
+    assert n.last.state == "paused"
+    loads = len(r.called("SetAVTransportURI"))
+    other.play = streamed(proxy, 3, cover_url="").source
+    n.backend.slot_ready(1)
+    time.sleep(0.5)
+    assert len(r.called("SetAVTransportURI")) == loads
+
+
+def test_a_stop_the_renderer_refuses_once_is_sent_again(tmp_path, proxy, renderers, nodes, quality):
+    """A transient 501 on Stop (a freshly selected AK Connect stack) is
+    retried once, as a load's actions are, and the stop is said once it is
+    taken."""
+    r = renderers(sink=AK_CONNECT_SINK)
+    q = CanonicalQueue()
+    q.replace([track(tmp_path, 1, seconds=40.0)])
+    n = nodes(q, r)
+    assert n.backend.select(1)
+    wait_for(lambda: n.last.state == "playing", what="playing")
+    r.faults["Stop"] = [501]
+    assert n.backend.stop()
+    assert r.state == "STOPPED" and len(r.called("Stop")) == 2
+    assert n.last.state == "stopped" and not n.backend._error
 
 
 def test_the_local_engine_waits_on_a_slot_whose_stream_is_on_its_way(tmp_path):
@@ -1283,6 +1377,17 @@ def test_the_local_engine_waits_on_a_slot_whose_stream_is_on_its_way(tmp_path):
     engine._handle(Command("seek", seconds=25.0))
     assert statuses[-1].position == 25.0
     started = []
+    real_start = engine._start_at
+    engine._start_at = lambda index, seek_to=0.0: started.append((index, seek_to))
+    engine._handle(Command("slot_ready", index=1))
+    assert started == [(1, 25.0)]
+    # A Pause ends a wait: the landing starts nothing
+    engine._start_at = real_start
+    waiting.play = {"kind": "pending"}
+    engine._handle(Command("play"))
+    assert statuses[-1].state == "loading"
+    engine._handle(Command("pause"))
+    assert (statuses[-1].state, engine._parked) == ("paused", None)
     engine._start_at = lambda index, seek_to=0.0: started.append((index, seek_to))
     engine._handle(Command("slot_ready", index=1))
     assert started == [(1, 25.0)]

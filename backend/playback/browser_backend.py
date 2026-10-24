@@ -111,7 +111,7 @@ class BrowserBackend(PlayerBackend):
         learns the slot is loadable on its next status."""
         if self._pending_play_index == index and self._index == index:
             self._pending_play_index = None
-            self._start_at(index, play=True)
+            self._start_at(index, play=True, position=self._position)
         elif self._index == index and self._state != "playing":
             self._emit_now()
 
@@ -410,7 +410,7 @@ class BrowserBackend(PlayerBackend):
                     self._unplayable = None
                     self._index = index
                     self._current_ident = None
-                    self._position = 0.0
+                    self._position = position if index == first else 0.0
                     self._length = item.duration_seconds or 0.0
                     self._pending_play_index = index if play else None
                     self._state = "loading" if play else "stopped"
@@ -480,6 +480,13 @@ class BrowserBackend(PlayerBackend):
 
     def pause(self) -> bool:
         self._push({"cmd": "pause"})
+        if self._pending_play_index is not None:
+            # A start waiting — for a tab, or for its slot's stream — ends:
+            # paused at its second, the play press starts it there
+            self._pending_play_index, self._handover = None, False
+            if self._state == "loading":
+                self._state = "paused"
+                self._emit_now()
         if self._state == "playing":
             # Optimistic: pausing an already-paused element fires no event,
             # so waiting for one can leave a stale "playing" forever. The

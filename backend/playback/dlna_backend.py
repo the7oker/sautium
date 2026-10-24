@@ -303,12 +303,13 @@ class DlnaBackend(PlayerBackend):
         # playing our load (_confirmed) — a Seek in STOPPED is refused.
         self._seek_on_start: Optional[float] = None
         # A play press waiting on a slot whose stream is on its way
-        # (playback.substitute): (slot, the second it starts at); slot_ready
-        # starts it.
-        self._parked: Optional[tuple[int, float]] = None
-        # The state this instance last told the manager: what a renderer
-        # that stops answering was doing, as far as the node knows it — its
-        # own transport state is stale by then (_lose).
+        # (playback.substitute): (its item — the slot follows it through
+        # queue edits — and the second it starts at); slot_ready starts it.
+        self._parked: Optional[tuple[QueueItem, float]] = None
+        # The state this instance last told the manager, or a Stop it has
+        # decided: what a renderer that stops answering was doing, as far as
+        # the node knows it — its own transport state is stale by then
+        # (_lose).
         self._said: Optional[str] = None
         # A RelTime reading that disagreed with the clock, kept until the
         # next one confirms it (a device-side seek) or the clock wins.
@@ -429,11 +430,20 @@ class DlnaBackend(PlayerBackend):
         loop, where the park is made."""
         async def _parked_start():
             parked = self._parked
-            if parked is None or parked[0] != index:
+            if parked is None or self._queue.index_of(parked[0]) != index:
                 return
             self._parked = None
             await self._load_and_play(index, start_at=parked[1])
-        self._call_async(_parked_start())
+        if self._loop is None:
+            return
+        # Not through _call_async: a slot nobody waits on must not clear
+        # the renderer's error (a load that does go clears its own)
+        fut = asyncio.run_coroutine_threadsafe(_parked_start(), self._loop)
+
+        def _done(f):
+            if not f.cancelled() and f.exception() is not None:
+                self._cmd_failed(f.exception(), "load and play")
+        fut.add_done_callback(_done)
 
     def resume_at(self, index: int, position: float = 0.0) -> None:
         item = self._queue.item_at(index)
@@ -564,6 +574,8 @@ class DlnaBackend(PlayerBackend):
             if self._resume is not None:
                 position = self._resume
                 extra["resume"] = {"index": self._index, "position": self._resume}
+        elif state is None and self._parked is not None:
+            state = "loading"         # a play waiting on its slot's stream
         elif state is None and self._current_url is None and self._resume is not None:
             state = "paused"          # a spot carried over, nothing of it loaded yet
         state = state or self._state_name()
@@ -1301,12 +1313,22 @@ class DlnaBackend(PlayerBackend):
                 # stream could serve was skipped while its fetch ran — an
                 # output switch's play press met that at once.
                 self._stop_poll()
+                if self._preload_task is not None:
+                    self._preload_task.cancel()   # its "next" is not this wait's
                 self._index = index
                 self._load_gen += 1
                 self._current_url = self._next_url = None
                 self._awaiting_play = False
-                self._resume = None
-                self._parked = (index, start_at)
+                # The second it starts at stays the slot's: a Play or a seek
+                # meanwhile keeps or moves it
+                self._resume = start_at if start_at > 0 else None
+                self._parked = (item, start_at)
+                try:
+                    # What plays now plays out; the next it had armed is no
+                    # longer what follows it
+                    await self._avt("SetNextAVTransportURI", NextURI="", NextURIMetaData="")
+                except Exception as e:
+                    logger.debug("SetNext disarm unsupported/failed: %s", e)
                 self._position, self._length = start_at, item.duration_seconds or 0.0
                 self._error = None
                 logger.info("DLNA: slot %d waits for its stream (%s — %s)",
@@ -1650,6 +1672,15 @@ class DlnaBackend(PlayerBackend):
 
     def pause(self) -> bool:
         async def _p():
+            if self._parked is not None:
+                # A wait for a slot's stream ends: paused at its second, the
+                # play press starts it there — and only what the renderer
+                # still plays (the track tapped away from) is paused
+                self._parked = None
+                if self._state_name() == "playing":
+                    await self._avt("Pause")
+                self._emit_now("paused")
+                return
             await self._avt("Pause")
             self._emit_now("paused")
         return self._call(_p())
@@ -1658,12 +1689,14 @@ class DlnaBackend(PlayerBackend):
         async def _s():
             self._stop_poll()
             self._awaiting_play = False
-            # A Stop starts the slot over, as a renderer's own Stop does —
-            # said before it goes: one a lost renderer does not answer leaves
-            # no spot behind (_lose)
+            # A Stop starts the slot over, as a renderer's own Stop does. It
+            # is this instance's word from here: a lost renderer that never
+            # answers it leaves no spot behind (_lose) — said once taken, so
+            # one the renderer refuses never reads as a stop of the listen
             self._resume = self._seek_on_start = self._parked = None
+            self._said = "stopped"
+            await self._avt_retry("Stop")
             self._emit_now("stopped")
-            await self._avt("Stop")
         return self._call(_s())
 
     def next(self) -> bool:
@@ -1678,10 +1711,13 @@ class DlnaBackend(PlayerBackend):
         return self._call_async(self._load_and_play(index))
 
     def seek(self, seconds: int) -> bool:
-        if self._current_url is None and self._resume is not None:
-            # A carried-over spot, nothing of it loaded: the play press
-            # starts the slot at the new second (a Seek now finds no media)
+        if self._current_url is None and (self._resume is not None or self._parked is not None):
+            # A carried-over spot, or a slot waiting for its stream — nothing
+            # of it loaded: the start goes to the new second (a Seek now
+            # finds no media)
             self._resume = self._position = float(seconds)
+            if self._parked is not None:
+                self._parked = (self._parked[0], float(seconds))
             self._emit_now()
             return True
         # Decide by the CURRENTLY-PLAYING stream's format, not the global
@@ -1734,6 +1770,18 @@ class DlnaBackend(PlayerBackend):
             return
 
         async def _resync():
+            if self._parked is not None:
+                # A play waiting on its stream: its slot follows its track,
+                # and nothing is armed after it — the renderer may still play
+                # the track tapped away from, and would roll into that
+                slot = self._queue.index_of(self._parked[0])
+                if slot is None:
+                    self._parked = self._resume = None   # its track left the queue
+                    self._emit_now("stopped")
+                    return
+                self._index = slot
+                self._emit_now()
+                return
             # The queue mutated around the playing slot: re-locate the
             # current index by media URL (file tokens are idempotent per
             # path, preview tokens stable — URLs survive mutations), then
