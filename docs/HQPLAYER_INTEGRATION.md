@@ -704,8 +704,8 @@ comes after the control port answers again — so neither can end the wait.
   tap yields to it — a held tap is not carried out, and a play press it
   became, holding no Pause or Stop, rebuilds nothing, never leaving HQPlayer
   stopped (since 2026-10-14). Not to a Next or a Previous at a stopped spot
-  made with nothing in flight: it moves the spot through no lock and takes
-  no number, and the tap still plays (left, PROGRESS). A start so
+  made with nothing in flight: it moves the spot without the command lock
+  and takes no number, and the tap still plays (left, PROGRESS). A start so
   superseded takes no more words (since 2026-10-23): the words held after
   it count from what played, and the press, holding no Pause or Stop,
   takes none but a start of its own — a Pause, a Stop or a Seek made
