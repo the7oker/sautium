@@ -616,8 +616,9 @@ comes after the control port answers again — so neither can end the wait.
     repair, Previous (the slot before it, as a press: HQPlayer's own would
     leave the removed entry behind the one it lands on) and Next (HQPlayer's
     own, onto the slot after it); a radio's clear keeps it, HQPlayer's first
-    entry then, the radio behind it. A new order waits until it has played
-    out: the reorder route still asks for a playing slot. The status names
+    entry then, the radio behind it. A new order made while it plays out is
+    refused: the reorder route asks for a playing slot (409). What stays
+    left with it is listed in PROGRESS. The status names
     it at no slot and as no other controller's, and its listen goes on;
     stopped on it, the play press goes on with what followed it. A mirror
     in step is a tail mirror from then on; a removal whose Status names no

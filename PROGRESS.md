@@ -1229,6 +1229,11 @@ implementation details live in the code, DB and git history.
   listening, and a Seek made in one entry seeded the clock of the next one
   HQPlayer moved on to — on a gapless move still, until the person's Seek
   waited for a tick of the take — a false completed listen and scrobble.
+  Left: on HQPlayer 5, which names no take, the same entry played again
+  while Status still stands under 1 s keeps the old clock running through
+  its build, and a Seek to the start inside a window begins a stretch
+  anew; and a start's own Seek is not taken by a clock made on HQPlayer's
+  opening tick (track 0) — it under-reads for a tick, never a listen.
   Keeping the meter open whenever HQPlayer plays was set aside: what it
   costs HQPlayer near the real-time limit is not measured. Lesson: a
   reading that stopped refreshing is not one that says "stopped" — tell
@@ -1257,7 +1262,10 @@ implementation details live in the code, DB and git history.
   reorder route asks for a playing slot; the row snaps back); on HQPlayer
   5, which names no take, a radio's clear answered late — or a tick read
   just before it — loses it, reported as another controller's with a short
-  skip written; a Next or a Previous held during a play next or a removal
+  skip written, and the radio plays after it only once Play is pressed;
+  Previous pressed in HQPlayer's own window replays the removed track
+  after the one it lands on, as another controller's, untracked; a Next
+  or a Previous held during a play next or a removal
   while it plays out counts from nothing and goes nowhere; a DSP change
   that leaves HQPlayer stopped meanwhile resumes nothing; the preview
   window anchors at the queue's first slot; and the end-of-queue archive

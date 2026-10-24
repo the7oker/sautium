@@ -3646,11 +3646,12 @@ class HqpBackend(PlayerBackend):
                         self._spot_gen += 1
             self.poke()
             return True
-        if by < 0 and last is not None and last.out_after is not None:
+        passing = self._passing
+        if by < 0 and passing is not None:
             # The node's own removal plays out: HQPlayer's own Previous would
             # land on the entry before it with the removed one still behind
             # that — the slot before its place starts, as a press
-            target = self._queue.item_at(layout.held(last.out_after, by))
+            target = self._queue.item_at(layout.held(self._out_at(passing, layout.items), by))
             if target is None:
                 self.poke()
                 return True                     # the queue's head: nowhere to go
