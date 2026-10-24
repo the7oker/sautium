@@ -260,6 +260,26 @@ def test_a_failure_said_is_not_said_again_when_its_diagnosis_comes_back(traced, 
     assert run["calls"] == 2 and run["toasts"][0]["action"] == "Why?", run
 
 
+def test_a_tab_opened_after_a_failure_never_says_it(traced, fake, monkeypatch):
+    """The tab's first status already carries a diagnosis: it paints the
+    tag and says nothing — nor when the status loses it and gets it back."""
+    import routers.player as player
+
+    fake.replies["Play"] = '<Play result="Error">Empty transport</Play>'
+    monkeypatch.setattr(player, "manager", types.SimpleNamespace(
+        ensure_active=lambda: traced, backend=lambda: traced))
+    player.play()
+    a = _closed(timeout=5.0)
+    assert _wait(lambda: traced._last_closed is a, 5.0)
+    stopped = TrackStatus(state=PlaybackState.STOPPED, track_index=1, track_id="", position=0.0,
+                          length=300.0, volume=-3.0)
+    d = traced._diagnosis(stopped)
+    out = {"type": "hqplayer", "label": "HQPlayer", "attached": True}
+    diagnosed = {"np": {"state": "stopped", "output": out, "diagnosis": d}}
+    run = _ui_run([diagnosed, {"np": {"state": "stopped", "output": out}}, diagnosed], {})
+    assert run["calls"] == 0, run
+
+
 @pytest.mark.parametrize("diagnosis_first", [False, True])
 def test_a_tap_hqplayer_refused_is_said_once_with_its_why(traced, fake, monkeypatch, diagnosis_first):
     """A queue tap HQPlayer refuses: its answer comes before the attempt's

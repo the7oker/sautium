@@ -6294,6 +6294,7 @@
     const first = lastDiagnosisSeen === undefined;
     if (id === lastDiagnosisSeen) return;
     lastDiagnosisSeen = id;
+    if (d && first) saidAttempts.set(d.id, 'diagnosis');     // said before this tab: never again
     if (!d || first || d.failing || d.code === 'unreachable'
         || saidAttempts.get(d.id) === 'diagnosis') return;
     saidAttempts.set(d.id, 'diagnosis');
