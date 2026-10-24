@@ -547,12 +547,14 @@ class MediaProxy:
     def materialize_file(self, token: str, q: Optional[str],
                          ss: float = 0.0) -> tuple[str, str, int]:
         """The on-disk resource ``/file/{token}?q=&ss=`` serves — the raw
-        file, the cached CUE cut, or the cached Opus of either — produced NOW
-        when not cached yet. Returns (path, mime, size); KeyError for an
-        unknown token, RuntimeError when a CUE cut cannot be made (a cut has
-        no lossless fallback — the raw image would play the whole disc),
-        OSError when the file is gone (moved since the scan, the library's
-        drive unmounted).
+        file, the cached CUE cut, the cached Opus of either, or the cached
+        FLAC of a whole file (``q=flac``, for a renderer that lists no format
+        of the file's own) — produced NOW when not cached yet. Returns (path,
+        mime, size); KeyError for an unknown token, RuntimeError when a CUE
+        cut or a FLAC cannot be made (a cut has no lossless fallback — the raw
+        image would play the whole disc — and the renderer asked for FLAC
+        does not take the raw file), OSError when the file is gone (moved
+        since the scan, the library's drive unmounted).
 
         The DLNA backend calls this before a URL is handed to a renderer:
         KANN probes the URI inside SetAVTransportURI and its control channel
@@ -569,6 +571,8 @@ class MediaProxy:
             path = transcode.flac_slice_path_for_file(
                 fe.path, fe.start, fe.end, fe.tags or {})
             mime = transcode.FLAC_MIME
+        elif q == transcode.FLAC_TIER:
+            path, mime = transcode.flac_path_for_file(path), transcode.FLAC_MIME
         if transcode.wants_opus(q):
             try:
                 # For a slice `path` is already the cut, so the Opus tier
@@ -853,6 +857,7 @@ def _make_handler(proxy: MediaProxy):
             fe = proxy.file_entry(token)
             self._open_hit(token, "opus" if transcode.wants_opus(self._q())
                            else "cut" if fe is not None and fe.start is not None
+                           else "flac" if self._q() == transcode.FLAC_TIER
                            else "file")
             try:
                 path, mime, size = proxy.materialize_file(

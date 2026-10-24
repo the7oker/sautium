@@ -28,6 +28,7 @@ from config import settings
 
 from playback.base import Capabilities, PlaybackStatus, PlayerBackend
 from playback.queue import CanonicalQueue, QueueItem
+from streaming import transcode
 from streaming.media_host import media_host
 from streaming.proxy import MIME_BY_FORMAT
 
@@ -55,6 +56,52 @@ _PROBE_TIMEOUT = 5.0
 _TRACK_END_SLACK = 3.0      # STOPPED within this many seconds of the length = track finished
 _RELTIME_TOLERANCE = 3.0    # a RelTime this close to our clock is the renderer's word on it
 _PENDING_PLAY_DEADLINE = 20.0   # a Play unconfirmed this long stops claiming `loading`
+
+# One audio format's spellings across sink lists. The node names each format
+# as MIME_BY_FORMAT does; a renderer may list it otherwise — a DAP's list
+# names DSF audio/dsf and WAV audio/x-wav — and a match by the exact string
+# read those as formats it cannot play. Ogg holds the Opus tiers.
+_FORMATS = (
+    ("audio/flac", "audio/x-flac"),
+    ("audio/mpeg", "audio/mp3", "audio/x-mpeg"),
+    ("audio/wav", "audio/x-wav", "audio/wave", "audio/vnd.wave"),
+    ("audio/aiff", "audio/x-aiff"),
+    ("audio/mp4", "audio/x-m4a", "audio/m4a"),
+    ("audio/ogg", "application/ogg", "audio/x-ogg", "audio/opus"),
+    ("audio/x-dsf", "audio/dsf"),
+    ("audio/x-dff", "audio/dff"),
+    ("audio/x-wavpack", "audio/wavpack"),
+    ("audio/x-ape", "audio/ape", "audio/x-monkeys-audio"),
+)
+
+
+def _spellings(mime: str) -> tuple:
+    """`mime`'s format under each of its spellings, `mime` itself first."""
+    mime = mime.lower()
+    group = next((g for g in _FORMATS if mime in g), ())
+    return (mime, *(m for m in group if m != mime))
+
+
+def sink_formats(entries: list) -> Optional[dict]:
+    """What a renderer's sink ProtocolInfo says it plays over HTTP: each MIME
+    type it names, lower-cased, to the spelling it uses. None when it says
+    nothing — no list, an empty one, or a `*` that takes anything."""
+    listed = {}
+    for entry in entries:
+        parts = entry.split(":")
+        if len(parts) < 3 or parts[0].strip().lower() not in ("http-get", "*"):
+            continue
+        mime = parts[2].split(";")[0].strip()
+        if mime == "*" or mime.endswith("/*"):
+            return None
+        listed.setdefault(mime.lower(), mime)
+    return listed or None
+
+
+def sink_spelling(mime: str, formats: dict) -> Optional[str]:
+    """How a sink list (sink_formats) spells `mime`'s format — `mime` itself
+    when it is listed — None when it names it under no spelling."""
+    return next((formats[m] for m in _spellings(mime) if m in formats), None)
 
 
 class DlnaAttachError(RuntimeError):
@@ -780,7 +827,7 @@ class DlnaBackend(PlayerBackend):
 
     # -- queue walking -----------------------------------------------------------
 
-    def _url_for(self, item: QueueItem, *, qs: Optional[str] = None) -> Optional[str]:
+    def _url_for(self, item: QueueItem, *, quality: Optional[str] = None) -> Optional[str]:
         from streaming import service as streaming_service
         # What THIS output opens (QueueItem.play, playback.substitute): a rip
         # here, or the stream standing in for a copy held elsewhere.
@@ -790,8 +837,8 @@ class DlnaBackend(PlayerBackend):
         # transcodes to Opus for the remote/bandwidth tiers. HQPlayer's own
         # _url_for equivalent never appends this, so its previews (same
         # /preview route) stay lossless.
-        if qs is None:
-            qs = self._quality_suffix()
+        if quality is None:
+            quality = self._quality()
         if src["kind"] == "file":
             proxy = streaming_service.ensure_proxy()
             path = settings.translate_to_local_path(src["path"])
@@ -799,29 +846,63 @@ class DlnaBackend(PlayerBackend):
                 # CUE slice: the proxy serves a cached FLAC cut (produced
                 # lazily on the renderer's first GET); distinct (path, span)
                 # keys keep slice URLs distinct for URI-based auto-advance.
-                from streaming import transcode
                 tok = proxy.register_file(
                     path, transcode.FLAC_MIME,
                     start=src["cue_start"], end=src.get("cue_end"),
                     tags={"title": item.title, "artist": item.artist,
                           "album": item.album, "track": item.track_number})
-                return proxy.file_url(tok, host=host) + qs
+                return proxy.file_url(tok, host=host) + self._tier(
+                    transcode.FLAC_MIME, quality, recode=False)
             mime = MIME_BY_FORMAT.get((src.get("format") or "").upper(),
                                       "application/octet-stream")
             tok = proxy.register_file(path, mime)
-            return proxy.file_url(tok, host=host) + qs
+            return proxy.file_url(tok, host=host) + self._tier(mime, quality, recode=True)
         if src["kind"] == "proxy":
             proxy = streaming_service.get_proxy()
             if proxy is None:
                 return None
-            return proxy.url_for(src["token"], host=host) + qs
+            # A stream's buffer is FLAC or MP3, which every renderer seen
+            # lists: only its Opus tier is the sink list's to decide.
+            return proxy.url_for(src["token"], host=host) + self._tier(
+                None, quality, recode=False)
         return None   # foreign URIs (file:// passthrough) aren't renderer-reachable
 
     @staticmethod
-    def _quality_suffix() -> str:
+    def _quality() -> str:
         from routers.settings import _read
-        q = _read("output.stream_quality")
-        return f"?q={q}" if q and q != "lossless" else ""
+        return _read("output.stream_quality") or "lossless"
+
+    def _sink(self) -> Optional[dict]:
+        """The renderer's sink list as sink_formats reads it. The library
+        asks GetProtocolInfo on the first update, and ConnectionManager
+        events keep it current."""
+        return sink_formats(self._dmr.sink_protocol_info if self._dmr is not None else [])
+
+    def _tier(self, mime: Optional[str], quality: str, *, recode: bool) -> str:
+        """The `?q=` a stream of `mime` (None: the stream's own, FLAC or MP3)
+        goes to this renderer with — the quality chosen, as far as its sink
+        list allows. Opus only where the list names Ogg; the format as it is
+        where the list names it; else, for a whole owned file (`recode`), a
+        lossless FLAC of it, and failing that the Opus tier. A list that says
+        nothing keeps the quality chosen; one that names none of these sends
+        the format as it is, and the renderer's own refusal says why.
+
+        A list was there to read before: the node handed every renderer the
+        file as it is, and a phone that decodes no DSD refused the first DSD
+        file of a queue (714), which stopped the queue there."""
+        opus = transcode.wants_opus(quality)
+        formats = self._sink()
+        if formats is None:
+            return f"?q={quality}" if opus else ""
+        if opus and sink_spelling(transcode.MIME, formats):
+            return f"?q={quality}"
+        if mime is None or sink_spelling(mime, formats):
+            return ""
+        if recode and sink_spelling(transcode.FLAC_MIME, formats):
+            return f"?q={transcode.FLAC_TIER}"
+        if sink_spelling(transcode.MIME, formats):
+            return "?q=opus_192"
+        return ""
 
     @staticmethod
     def _didl_meta(item: QueueItem) -> dict:
@@ -922,15 +1003,19 @@ class DlnaBackend(PlayerBackend):
             return proxy.art_url(tok, host=media_host(self._peer_host))
         return None
 
-    async def _transport_meta(self, url: str, item: QueueItem) -> str:
+    async def _transport_meta(self, url: str, item: QueueItem, mime: str) -> str:
         """DIDL with the class FORCED to musicTrack: the library derives the
         class from the mime type and lands on plain audioItem, whose didl
         type silently drops artist/album/track-number on serialization
         (verified by reading CurrentURIMetaData back off the renderer).
         albumArtURI is injected manually — this didl_lite version has no such
-        property on MusicTrack at all."""
+        property on MusicTrack at all. The format (`mime`, what the proxy
+        serves) is named as the renderer's sink list spells it: a renderer
+        holds the DIDL's protocolInfo against its own list."""
+        formats = self._sink()
         xml = await self._dmr.construct_play_media_metadata(
             url, item.title or "Sautium",
+            override_mime_type=(formats and sink_spelling(mime, formats)) or mime,
             override_upnp_class="object.item.audioItem.musicTrack",
             meta_data=self._didl_meta(item))
         # Declare the track duration on <res>. Lossless (FLAC/PCM) renderers
@@ -1083,7 +1168,8 @@ class DlnaBackend(PlayerBackend):
                 asyncio.ensure_future(self._resubscribe(), loop=self._loop)
             if self._preload_task is not None:
                 self._preload_task.cancel()   # its "next" is not this load's next
-            if await self._serve_ready(item, url, front=True):
+            mime = await self._serve_ready(item, url, front=True)
+            if mime is not None:
                 break
             index, ss, url_override = index + 1, 0.0, None
         # The wait may have (re)fetched the stream — as an excerpt, or from
@@ -1111,7 +1197,7 @@ class DlnaBackend(PlayerBackend):
         # SetAVTransportURI/Play here meant next/prev committed the new
         # index while the renderer kept playing the old track.
         await self._avt_retry("SetAVTransportURI", CurrentURI=url,
-                              CurrentURIMetaData=await self._transport_meta(url, item))
+                              CurrentURIMetaData=await self._transport_meta(url, item, mime))
         self._current_url = url
         if play:
             await self._avt_retry("Play", Speed="1")
@@ -1132,12 +1218,12 @@ class DlnaBackend(PlayerBackend):
         return True
 
     async def _serve_ready(self, item: QueueItem, url: str, *,
-                           front: bool) -> bool:
+                           front: bool) -> Optional[str]:
         """Wait (off the loop) until the proxy can serve `url` at once —
-        the preview fetched, and the CUE cut / Opus tier the URL's ?q and
-        ?ss ask for produced on disk. False when it never will (provider
-        failure, expired token, a file gone from disk, a cut that cannot be
-        made).
+        the preview fetched, and the CUE cut / FLAC / Opus tier the URL's ?q
+        and ?ss ask for produced on disk. Returns the MIME type it serves
+        `url` as; None when it never will (provider failure, expired token, a
+        file gone from disk, a cut or a transcode that cannot be made).
 
         KANN probes the URI INSIDE SetAVTransportURI, and its control channel
         answers nothing until the probe returns: a preview still being fetched
@@ -1151,7 +1237,7 @@ class DlnaBackend(PlayerBackend):
         from streaming import service as streaming_service
         proxy = streaming_service.get_proxy()
         if proxy is None:
-            return False
+            return None
         parsed = urlparse(url)
         query = parse_qs(parsed.query)
         q = query.get("q", [None])[0]
@@ -1161,22 +1247,20 @@ class DlnaBackend(PlayerBackend):
             ss = 0.0
         route, _, tok = parsed.path.rpartition("/")
 
-        def materialize() -> None:
+        def materialize() -> str:
             if route.endswith("/preview"):
                 e = proxy.wait_ready(tok, front=front)
                 if e.error or e.audio is None:
                     raise RuntimeError(e.error or "no audio")
-                proxy.materialize_preview(tok, q, ss)
-            else:
-                proxy.materialize_file(tok, q, ss)
+                return transcode.MIME if proxy.materialize_preview(tok, q, ss) else e.audio.mime
+            return proxy.materialize_file(tok, q, ss)[1]
 
         try:
-            await asyncio.to_thread(materialize)
+            return await asyncio.to_thread(materialize)
         except (KeyError, TimeoutError, RuntimeError, OSError) as ex:
             logger.warning("DLNA: stream for %s — %s unavailable: %s",
                            item.artist, item.title, ex)
-            return False
-        return True
+            return None
 
     def _arm_preload(self) -> None:
         """SetNextAVTransportURI runs as its own task: it waits for the next
@@ -1193,7 +1277,8 @@ class DlnaBackend(PlayerBackend):
         self._next_url = None
         nxt = self._queue.item_at(self._index + 1)
         url = self._url_for(nxt) if nxt is not None else None
-        if url is not None and not await self._serve_ready(nxt, url, front=False):
+        mime = await self._serve_ready(nxt, url, front=False) if url is not None else None
+        if mime is None:
             url = None      # a next the proxy cannot serve is disarmed, not handed over
         if url is None:
             # DISARM, don't just skip: the renderer still holds the last
@@ -1211,7 +1296,7 @@ class DlnaBackend(PlayerBackend):
             return
         try:
             await self._avt("SetNextAVTransportURI", NextURI=url,
-                            NextURIMetaData=await self._transport_meta(url, nxt))
+                            NextURIMetaData=await self._transport_meta(url, nxt, mime))
             self._next_url = url
         except Exception as e:
             logger.debug("SetNextAVTransportURI unsupported/failed: %s", e)
@@ -1221,9 +1306,9 @@ class DlnaBackend(PlayerBackend):
         per path, preview tokens stable — URLs survive queue edits)."""
         if not url:
             return None
-        qs = self._quality_suffix()
+        quality = self._quality()
         for i, it in enumerate(self._queue.snapshot(), start=1):
-            if self._url_for(it, qs=qs) == url:
+            if self._url_for(it, quality=quality) == url:
                 return i
         return None
 

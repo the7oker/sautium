@@ -20,7 +20,8 @@ The same cache also holds lossless FLAC cuts of CUE image slices
 (`flac_slice_path_for_file`) — the slice's file-shaped identity for every
 HTTP consumer (HQPlayer, DLNA, browser). The Opus tiers chain off the cut
 (cut first, then Opus-of-cut), so slicing has exactly one implementation.
-FLAC cuts are ~10× Opus size, hence the budget.
+And whole files in FLAC (`flac_path_for_file`), for a DLNA renderer whose
+sink list lacks their own format. FLAC is ~10× Opus size, hence the budget.
 """
 
 import hashlib
@@ -40,9 +41,12 @@ logger = logging.getLogger(__name__)
 OPUS_BITRATES = {"opus_192": 192, "opus_96": 96}
 MIME = "audio/ogg"
 FLAC_MIME = "audio/flac"
+# The lossless tier a renderer gets a whole file in when its sink list lacks
+# the file's own format (playback.dlna_backend); never a quality setting.
+FLAC_TIER = "flac"
 
 _CACHE_DIR = Path(__file__).parent.parent / "data" / "transcode_cache"
-_BUDGET_BYTES = 1024 * 1024 * 1024       # Opus tracks + FLAC slice cuts
+_BUDGET_BYTES = 1024 * 1024 * 1024       # Opus tracks, FLAC cuts and whole FLACs
 _index_lock = threading.Lock()
 _key_locks: dict[str, threading.Lock] = {}
 
@@ -144,6 +148,24 @@ def opus_path_for_bytes(token: str, source_bytes: bytes, quality: str,
     return _produce(key, suffix=".ogg", label=f"opus {bitrate}k",
                     args_in=_seek_args(ss, ["-i", "pipe:0"]),
                     out_args=_opus_args(bitrate), stdin_bytes=source_bytes)
+
+
+def flac_path_for_file(source_path: str) -> str:
+    """Cached lossless FLAC of a whole owned file, for a renderer whose sink
+    list lacks the file's own format (DSD, WavPack, APE): decoded and encoded
+    again whole, its tags kept, its pictures not. DSD becomes 24-bit PCM at
+    88.2 kHz: ffmpeg decodes it at an eighth of the DSD rate (352.8 kHz for
+    DSD64), which made a five-minute track hundreds of MB against this
+    cache's 1 GB. The level is ffmpeg's — full modulation at 0 dBFS, a SACD's
+    highest peaks a few dB below it — so nothing clips."""
+    mtime = int(os.path.getmtime(source_path))
+    key = hashlib.sha1(f"{source_path}|{mtime}|{FLAC_TIER}".encode()).hexdigest()
+    out_args = ["-map", "0:a:0"]
+    if Path(source_path).suffix.lower() in (".dsf", ".dff"):
+        out_args += ["-ar", "88200", "-sample_fmt", "s32"]
+    out_args += ["-c:a", "flac", "-f", "flac"]
+    return _produce(key, suffix=".flac", label="flac", args_in=["-i", source_path],
+                    out_args=out_args, stdin_bytes=None)
 
 
 def flac_slice_path_for_file(source_path: str, start: float,

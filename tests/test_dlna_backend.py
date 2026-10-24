@@ -180,7 +180,8 @@ class Fault(Exception):
 class FakeRenderer:
     """A MediaRenderer on 127.0.0.1. `sink`: its GetProtocolInfo sink list —
     a SetAVTransportURI whose DIDL names a MIME the list lacks is refused
-    with 714, as the phone does. `reports`: the length its decoder reports
+    with 714, as the phone does, and such a NextURI is not played at the
+    boundary: the renderer stops there instead. `reports`: the length its decoder reports
     for a URI, given the DIDL's res@duration (the default echoes the DIDL,
     as BubbleUPnP does). The stream itself plays for the DIDL's length less
     the URI's `ss` offset."""
@@ -281,6 +282,10 @@ class FakeRenderer:
         m = re.search(r'protocolInfo="[^:"]*:[^:"]*:([^:"]+):', meta or "")
         return m.group(1) if m else None
 
+    def takes(self, meta: str) -> bool:
+        mime = self.didl_mime(meta)
+        return not (self.sink and mime and not any(e.split(":")[2] == mime for e in self.sink))
+
     @staticmethod
     def offset(uri: str) -> float:
         return float(parse_qs(urlparse(uri).query).get("ss", ["0"])[0])
@@ -302,12 +307,13 @@ class FakeRenderer:
             await asyncio.sleep(0.05)
             length = self.stream_length()
             if self.state == "PLAYING" and length is not None and self.position() >= length:
-                if self.next_uri:
+                if self.next_uri and self.takes(self.next_meta):
                     self.uri, self.meta = self.next_uri, self.next_meta
                     self.next_uri = self.next_meta = ""
                     self._base, self._t0 = 0.0, time.monotonic()
                 else:
                     self.state, self._base, self._t0 = "STOPPED", 0.0, None
+                    self.next_uri = self.next_meta = ""
                 await self._changed()
 
     def _avt_state(self) -> dict:
@@ -342,8 +348,7 @@ class FakeRenderer:
                 return {}
             return {"CurrentMute": "0"} if action == "GetMute" else {}
         if action == "SetAVTransportURI":
-            mime = self.didl_mime(args.get("CurrentURIMetaData", ""))
-            if self.sink and mime and not any(e.split(":")[2] == mime for e in self.sink):
+            if not self.takes(args.get("CurrentURIMetaData", "")):
                 raise Fault(714, "Illegal MIME-type")
             self.uri, self.meta = args["CurrentURI"], args.get("CurrentURIMetaData", "")
             self.state, self.status, self._base, self._t0 = "STOPPED", "OK", 0.0, None
@@ -548,8 +553,7 @@ def renderers():
 def quality(monkeypatch):
     """output.stream_quality as the backend reads it (no database here)."""
     value = {"q": "lossless"}
-    monkeypatch.setattr(DlnaBackend, "_quality_suffix", staticmethod(
-        lambda: "" if value["q"] == "lossless" else f"?q={value['q']}"))
+    monkeypatch.setattr(DlnaBackend, "_quality", staticmethod(lambda: value["q"]))
     return value
 
 
@@ -649,6 +653,120 @@ def _tiny_png() -> bytes:
     out = io.BytesIO()
     Image.new("RGB", (2, 2), (200, 100, 50)).save(out, format="PNG")
     return out.getvalue()
+
+
+def dsf_bytes(seconds: float = 0.5) -> bytes:
+    """A DSD64 stereo DSF file of digital silence (the 0x69 idle pattern)."""
+    import struct
+    rate, block = 2822400, 4096
+    samples = int(rate * seconds)
+    blocks = -(-samples // 8 // block)
+    data = b"\x69" * (block * 2 * blocks)
+    fmt = struct.pack("<4sQIIIIIIQII", b"fmt ", 52, 1, 0, 2, 2, rate, 1, samples, block, 0)
+    chunk = struct.pack("<4sQ", b"data", 12 + len(data)) + data
+    return struct.pack("<4sQQQ", b"DSD ", 28, 28 + len(fmt) + len(chunk), 0) + fmt + chunk
+
+
+def wavpack_bytes(tmp_path: Path, seconds: float = 0.5) -> bytes:
+    import subprocess
+    out = tmp_path / "source.wv"
+    subprocess.run(["ffmpeg", "-hide_banner", "-loglevel", "error", "-y", "-f", "lavfi", "-i",
+                    f"sine=frequency=1000:sample_rate=44100:duration={seconds}",
+                    "-ac", "2", "-c:a", "wavpack", str(out)], check=True)
+    return out.read_bytes()
+
+
+def probe(url: str) -> dict:
+    """ffprobe's word on what the proxy serves at `url`."""
+    import json
+    import subprocess
+    out = subprocess.run(["ffprobe", "-hide_banner", "-v", "error", "-show_entries",
+                          "stream=codec_name,sample_rate,bits_per_raw_sample", "-of", "json", url],
+                         check=True, capture_output=True, text=True).stdout
+    return json.loads(out)["streams"][0]
+
+
+needs_ffmpeg = pytest.mark.skipif(shutil.which("ffmpeg") is None, reason="no ffmpeg here")
+
+
+def _tier_of(sink: list, fmt: str, quality: str) -> str:
+    """The query a renderer with `sink` is sent an owned `fmt` file with."""
+    from types import SimpleNamespace
+    from streaming.proxy import MIME_BY_FORMAT
+    backend = DlnaBackend(emit=lambda b, s: None, queue=CanonicalQueue(),
+                          renderer={"udn": "uuid:x", "name": "R", "location": "http://127.0.0.1:9/d"})
+    backend._dmr = SimpleNamespace(sink_protocol_info=list(sink))
+    return backend._tier(MIME_BY_FORMAT[fmt], quality, recode=True)
+
+
+def test_the_sink_list_decides_the_stream_format():
+    """N-1: a format the renderer lists goes as it is, under whichever of its
+    spellings the list uses; one it lacks goes as a whole-file FLAC, failing
+    that as Opus; Opus only to a renderer that lists Ogg; a list that says
+    nothing keeps today's choice."""
+    assert _tier_of(AK_CONNECT_SINK, "DSF", "lossless") == ""     # listed as audio/dsf
+    assert _tier_of(AK_CONNECT_SINK, "DFF", "lossless") == ""     # listed as audio/dff
+    assert _tier_of(AK_CONNECT_SINK, "WAV", "lossless") == ""     # listed as audio/x-wav
+    assert _tier_of(AK_CONNECT_SINK, "WV", "lossless") == "?q=flac"
+    assert _tier_of(AK_CONNECT_SINK, "FLAC", "opus_96") == "?q=opus_96"
+    for fmt in ("DSF", "DFF", "WV", "APE"):
+        assert _tier_of(PHONE_SINK, fmt, "lossless") == "?q=flac", fmt
+    assert _tier_of(PHONE_SINK, "MP3", "lossless") == ""
+    no_ogg = ["http-get:*:audio/flac:*", "http-get:*:audio/mpeg:*"]
+    assert _tier_of(no_ogg, "FLAC", "opus_96") == ""
+    assert _tier_of(no_ogg, "DSF", "opus_192") == "?q=flac"
+    no_flac = ["http-get:*:audio/mpeg:*", "http-get:*:audio/ogg:*"]
+    assert _tier_of(no_flac, "DSF", "lossless") == "?q=opus_192"
+    assert _tier_of(["http-get:*:audio/mpeg:*"], "DSF", "lossless") == ""
+    for silent in ([], ["http-get:*:*:*"], ["http-get:*:audio/*:*"]):
+        assert _tier_of(silent, "DSF", "lossless") == ""
+        assert _tier_of(silent, "FLAC", "opus_96") == "?q=opus_96"
+
+
+@needs_ffmpeg
+def test_a_queue_with_formats_a_phone_lacks_plays_through(tmp_path, proxy, renderers, nodes, quality):
+    """N-1: the phone renderer decodes no DSD or WavPack and refuses a DIDL
+    naming one (714). Each goes to it as a FLAC of the whole file, 24-bit at
+    88.2 kHz for DSD, and the queue plays to its end — it used to stop at
+    the first DSD file."""
+    r = renderers(sink=PHONE_SINK)
+    q = CanonicalQueue()
+    q.replace([track(tmp_path, 1, seconds=1.5),
+               track(tmp_path, 2, fmt="DSF", seconds=1.5, data=dsf_bytes()),
+               track(tmp_path, 3, fmt="WV", seconds=1.5, data=wavpack_bytes(tmp_path))])
+    n = nodes(q, r)
+    assert n.backend.select(1)
+    wait_for(lambda: n.last.queue_index == 3 and n.last.state == "playing", timeout=20,
+             what="slot 3 playing")
+    wait_for(lambda: r.state == "STOPPED", what="the end of the queue")
+    handed = [(a["NextURI"], a["NextURIMetaData"]) for a in r.called("SetNextAVTransportURI")
+              if a["NextURI"]]
+    assert [u.endswith("?q=flac") for u, _m in handed] == [True, True]
+    assert all('protocolInfo="http-get:*:audio/flac:' in m for _u, m in handed)
+    dsd, wv = (probe(u) for u, _m in handed)
+    assert (dsd["codec_name"], dsd["sample_rate"], dsd["bits_per_raw_sample"]) == ("flac", "88200", "24")
+    assert (wv["codec_name"], wv["sample_rate"]) == ("flac", "44100")
+
+
+@needs_ffmpeg
+def test_a_format_listed_under_another_spelling_goes_as_it_is(tmp_path, proxy, renderers, nodes,
+                                                              quality):
+    """N-1: a DAP that lists DSF as audio/dsf plays the file itself, named in
+    the DIDL as its list names it; only what it lists under no spelling
+    (WavPack) is turned into FLAC."""
+    r = renderers(sink=AK_CONNECT_SINK)
+    q = CanonicalQueue()
+    q.replace([track(tmp_path, 1, fmt="DSF", seconds=1.5, data=dsf_bytes()),
+               track(tmp_path, 2, fmt="WV", seconds=1.5, data=wavpack_bytes(tmp_path))])
+    n = nodes(q, r)
+    assert n.backend.select(1)
+    wait_for(lambda: r.called("SetNextAVTransportURI"), what="the next track armed")
+    load = r.called("SetAVTransportURI")[0]
+    assert "?q=" not in load["CurrentURI"]
+    assert 'protocolInfo="http-get:*:audio/dsf:' in load["CurrentURIMetaData"]
+    nxt = r.called("SetNextAVTransportURI")[-1]
+    assert nxt["NextURI"].endswith("?q=flac")
+    assert 'protocolInfo="http-get:*:audio/flac:' in nxt["NextURIMetaData"]
 
 
 def test_the_fake_renderer_plays_a_queue_through(tmp_path, proxy, renderers, nodes, quality):

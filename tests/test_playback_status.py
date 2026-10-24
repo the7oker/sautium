@@ -99,7 +99,7 @@ def test_a_library_gone_from_disk_is_walked_past_without_recursing(monkeypatch):
     monkeypatch.setattr(streaming_service, "_proxy",
                         MediaProxy(port=0, advertised_host="127.0.0.1",
                                    file_token_key=b"test-key"))
-    monkeypatch.setattr(DlnaBackend, "_quality_suffix", staticmethod(lambda: ""))
+    monkeypatch.setattr(DlnaBackend, "_quality", staticmethod(lambda: "lossless"))
     queue = CanonicalQueue()
     # Every owned slot of an unmounted library is one to skip, and a queue
     # longer than the old per-slot recursion could go (~1000) must end in
@@ -114,7 +114,7 @@ def test_a_library_gone_from_disk_is_walked_past_without_recursing(monkeypatch):
                           renderer={"udn": "uuid:stub", "name": "KANN_ULTRA",
                                     "location": "http://127.0.0.1:9/desc.xml"})
     backend._dmr = types.SimpleNamespace(is_subscribed=True, transport_state=None,
-                                         volume_level=None)
+                                         volume_level=None, sink_protocol_info=[])
     assert asyncio.run(backend._load_seq(1)) is False
     assert backend._error.startswith("1200 queued track(s) could not be read")
     assert backend._gone is False
