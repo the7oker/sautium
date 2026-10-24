@@ -3095,6 +3095,29 @@ a later load that got past the table would have rebuilt them from the DDL
 snapshot. The drop now runs inside that transaction, and a spooled member is
 removed when its pass ends, failed or not.
 
+### A DLNA renderer that stops answering leaves its spot (2026-10-24)
+
+A phone renderer whose listener stopped (its app's bug, with Wi-Fi coming
+back over a tunnel) played on through the NextURI the node had armed, and
+went on sending its events. The node marked it gone after three missed
+polls, but its events still moved this instance on — the next slot by URL,
+a poll restarted that missed three more — the position was dropped, and the
+play press attached the renderer again and loaded the slot it was left at
+from 0:00: the second track played again after the phone had finished the
+third, which read as the queue gaining a track. The queue itself never
+changed (no output path adds a slot); reproduced on a fake renderer in
+`tests/test_dlna_backend.py`. Now losing a renderer freezes its spot — the
+slot, and the second by the clock when it played — and its status says
+"stopped" with `resume` (Now Playing's "Stopped at … — Play resumes here");
+nothing it still says moves it. The play gate reads that spot
+(`PlaybackManager.spot`) before it detaches the lost instance and hands it to
+the attach (`activate(spot=)`, `resume_at(slot, position)`): an Opus stream
+reloads from the second (`?ss=`), any other format is sought there once the
+renderer plays our load (a Seek in STOPPED is refused). A person's Stop lets
+the spot go, as a renderer's own Stop does. Lesson: a device the node has
+lost has no word on the queue — what it does meanwhile is unknowable, and
+the place it was lost at is the only one the person saw.
+
 ## Known Gotchas
 
 - **The Docker image took the node's secrets.** `./backend` is the build

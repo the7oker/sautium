@@ -197,6 +197,7 @@ class FakeRenderer:
         self.status = "OK"
         self.uri = self.meta = self.next_uri = self.next_meta = ""
         self.volume = 50
+        self.notifying = True             # False: its events stop too
         self._base = 0.0                  # position at _t0
         self._t0: Optional[float] = None  # monotonic start while PLAYING
         self._subs: dict[str, tuple[str, str]] = {}   # sid → (service key, callback)
@@ -479,7 +480,7 @@ class FakeRenderer:
 
     async def _notify(self, sid: str, values: dict):
         _svc, callback = self._subs.get(sid, (None, None))
-        if not callback:
+        if not callback or not self.notifying:
             return
         props = "".join(f"<e:property><{k}>{escape(str(v))}</{k}></e:property>"
                         for k, v in values.items())
@@ -814,6 +815,103 @@ def test_a_length_only_the_renderer_knows_is_read_from_the_seek(tmp_path, proxy,
     wait_for(lambda: n.last.length == 40, what="the renderer's length")
     _seek_to(r, n, 10)
     assert n.last.length == 40
+
+
+@pytest.fixture
+def manager(monkeypatch):
+    """The real PlaybackManager with the node's settings in memory and no
+    database: no listen is recorded, no queue persisted, every slot opened
+    as it was queued (substitute.native_plays)."""
+    import routers.player as player_router
+    import routers.settings as settings_router
+    from playback import substitute, tracker
+    from playback.manager import PlaybackManager
+    store = {}
+    monkeypatch.setattr(settings_router, "_read", lambda key: store.get(key))
+    monkeypatch.setattr(settings_router, "_write", lambda key, value: store.__setitem__(key, value))
+    monkeypatch.setattr(player_router, "note_renderer_location", lambda udn, location: None)
+    monkeypatch.setattr(tracker, "track_play_event", lambda *a, **k: None)
+    monkeypatch.setattr(substitute, "native_plays", lambda items, output, endpoint: [None] * len(items))
+    m = PlaybackManager()
+    monkeypatch.setattr(m, "_schedule_persist", lambda: None)
+    m.store = store
+    yield m
+    if m.active is not None:
+        m.activate(None, stop_old=False)
+
+
+def _on_renderer(manager, r: FakeRenderer, items: list) -> None:
+    manager.store.update({"output.type": "dlna", "output.dlna_renderer": r.record})
+    manager.activate("dlna", renderer=r.record)
+    added, _gen = manager.replace_queue(items, play=True)
+    assert added == len(items)
+
+
+def _lost_mid_track(r: FakeRenderer, manager) -> float:
+    """The renderer stops answering two seconds into slot 1 (12 s long, room
+    for three missed polls on a loaded machine) and plays on — across into
+    slot 2 by its armed NextURI, its events still sent. Returns the second
+    the node was left at."""
+    wait_for(lambda: r.called("SetAVTransportURI"), what="slot 1 loaded")
+    first = r.called("SetAVTransportURI")[0]["CurrentURI"]
+    wait_for(lambda: manager.latest_status.get("state") == "playing" and r.next_uri
+             and r.uri == first and r.position() >= 2, what="slot 1 playing, slot 2 armed")
+    r.stop_answering()
+    wait_for(lambda: manager.latest_status.get("resume"), timeout=15, what="the renderer lost")
+    assert manager.latest_status["resume"]["index"] == 1 and r.uri == first, "lost on slot 1"
+    lost = manager.latest_status["resume"]["position"]
+    wait_for(lambda: r.position() < 3 and r.uri == r.called("SetNextAVTransportURI")[0]["NextURI"],
+             timeout=15, what="the renderer playing slot 2 on its own")
+    time.sleep(1.5)     # its events for slot 2 reach the node
+    return lost
+
+
+def test_a_renderer_that_stops_answering_leaves_the_queue_and_the_spot(tmp_path, proxy, renderers,
+                                                                       manager, quality):
+    """N-17: a phone that lost its listener played on through its armed
+    NextURI and kept sending events. The node stays where it lost it — the
+    slot, the second, the queue as it was — and the next play intent
+    attaches the renderer again and resumes there: the track is sought to
+    the second it was left at once it plays. The play press used to start
+    the slot from 0:00, after the phone had already played the next."""
+    r = renderers(sink=PHONE_SINK)
+    items = [track(tmp_path, 1, seconds=12.0), track(tmp_path, 2, seconds=30.0),
+             track(tmp_path, 3, seconds=30.0)]
+    _on_renderer(manager, r, items)
+    lost = _lost_mid_track(r, manager)
+    st = manager.latest_status
+    assert (st["state"], st["track_index"], st["position"]) == ("stopped", 1, lost)
+    assert 2 <= lost <= 11 and "stopped responding" in st["error"]
+    assert manager.queue.snapshot() == items
+    r.answer_again()
+    seeks = len(r.called("Seek"))
+    assert manager.ensure_active().play()
+    wait_for(lambda: len(r.called("Seek")) > seeks, what="the start sought")
+    assert r.called("Seek")[-1]["Target"] == f"0:00:{int(lost):02d}"
+    assert r.uri == r.called("SetAVTransportURI")[-1]["CurrentURI"]
+    assert r.uri.split("?")[0] == r.called("SetAVTransportURI")[0]["CurrentURI"].split("?")[0]
+    wait_for(lambda: manager.latest_status.get("state") == "playing", what="playing again")
+    st = manager.latest_status
+    assert st["track_index"] == 1 and st["position"] >= int(lost)
+    assert manager.queue.snapshot() == items
+
+
+def test_an_opus_stream_resumes_where_the_renderer_was_lost(tmp_path, proxy, renderers, manager,
+                                                            quality, monkeypatch):
+    """N-17: an Opus stream starts at the second it was left at by its own
+    reload from there (?ss=)."""
+    monkeypatch.setattr(transcode, "opus_path_for_file", lambda path, q, ss=0.0: path)
+    quality["q"] = "opus_96"
+    r = renderers(sink=PHONE_SINK)
+    items = [track(tmp_path, 1, seconds=12.0), track(tmp_path, 2, seconds=30.0)]
+    _on_renderer(manager, r, items)
+    lost = _lost_mid_track(r, manager)
+    r.answer_again()
+    assert manager.ensure_active().play()
+    wait_for(lambda: r.state == "PLAYING" and f"ss={int(lost)}" in r.uri, what="reloaded at the spot")
+    assert "q=opus_96" in r.uri and not r.called("Seek")
+    wait_for(lambda: manager.latest_status.get("state") == "playing", what="playing again")
+    assert manager.latest_status["position"] >= int(lost)
 
 
 def test_the_fake_renderer_plays_a_queue_through(tmp_path, proxy, renderers, nodes, quality):

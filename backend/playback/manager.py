@@ -34,7 +34,7 @@ from config import settings, ui_build
 from hqplayer_client import STATUS_READINGS, format_time
 
 from playback import sessions, tracker
-from playback.base import PlaybackStatus, PlayerBackend, ReorderPlan
+from playback.base import PlaybackStatus, PlayerBackend, ReorderPlan, Spot
 from playback.queue import CanonicalQueue, QueueItem, resolved_artwork
 
 logger = logging.getLogger(__name__)
@@ -242,11 +242,15 @@ class PlaybackManager:
                         "Settings → Audio output")
             logger.info("play intent on %s '%s' output — (re)attaching",
                         "unhealthy" if b is not None else "inactive", otype)
+            spot = None
             if b is not None:
+                # Where the lost instance left the queue: the attach resumes
+                # there, the queue and the second as they were
+                spot = self.spot()
                 # A clean detach of the dead instance — no Stop, and no switch
                 # away: the same output is attached again
                 self.activate(None, stop_old=False)
-            self.activate(otype,
+            self.activate(otype, spot=spot,
                           device_id=_read("output.local_device"),
                           exclusive=bool(_read("output.local_exclusive")),
                           renderer=_read("output.dlna_renderer"))
@@ -271,8 +275,24 @@ class PlaybackManager:
     def active(self) -> Optional[PlayerBackend]:
         return self._active
 
+    def spot(self) -> Optional[Spot]:
+        """Where the output stands in the queue, from its latest word: a
+        track it plays, starts or holds paused, or the spot a stopped one's
+        play press resumes (`resume`: an HQPlayer's, a renderer's that
+        stopped answering). None when it stands nowhere — stopped, or no
+        output."""
+        st = self._latest_status
+        state, slot = st.get("state"), st.get("track_index")
+        if state in ("playing", "loading", "paused") and isinstance(slot, int) and slot >= 1:
+            return Spot(slot, float(st.get("position") or 0.0), state != "paused")
+        resume = st.get("resume")
+        if state == "stopped" and resume and resume.get("index"):
+            return Spot(resume["index"], float(resume.get("position") or 0.0), False)
+        return None
+
     def activate(self, output_type: Optional[str], *, stop_old: bool = True,
-                 by_hold: bool = False, **cfg) -> Optional[str]:
+                 by_hold: bool = False, spot: Optional[Spot] = None,
+                 **cfg) -> Optional[str]:
         """Switch the active output. The old backend is stopped (while it
         still believes its device reachable) and shut down; the canonical
         queue survives the switch; playback does NOT auto-resume — the user
@@ -291,7 +311,11 @@ class PlaybackManager:
         does.
 
         While the output is lent (hold) only the hold itself switches it
-        (`by_hold`); anyone else gets OutputHeld."""
+        (`by_hold`); anyone else gets OutputHeld.
+
+        `spot` — where the output before it stood (spot(), read by the
+        caller before the detach) — is where the new one resumes, the second
+        in the track included; without it, the last slot from 0."""
         with self._active_lock, self._changing_output():
             if not by_hold:
                 self._refuse_if_held()
@@ -363,13 +387,16 @@ class PlaybackManager:
                     logger.debug("rollback shutdown failed: %s", e)
                 self._push_status({"state": "disconnected"})
                 raise
-            if prev_idx >= 1 and self.queue.item_at(prev_idx) is not None:
+            if spot is None:
+                spot = Spot(prev_idx, 0.0, False)
+            if spot.slot >= 1 and self.queue.item_at(spot.slot) is not None:
+                prev_idx = spot.slot
                 try:
-                    backend.resume_at(prev_idx)
-                    logger.info("output switch keeps slot %d on %s",
-                                prev_idx, backend.id)
+                    backend.resume_at(spot.slot, spot.position)
+                    logger.info("output switch keeps slot %d at %.0f s on %s",
+                                spot.slot, spot.position, backend.id)
                 except Exception as e:
-                    logger.debug("resume_at(%d) failed: %s", prev_idx, e)
+                    logger.debug("resume_at(%d) failed: %s", spot.slot, e)
             # The streams for what this output cannot open natively, from
             # the slot it resumes at — the play press finds them buffering.
             self._subs.maintain(prev_idx if prev_idx >= 1 else 1)

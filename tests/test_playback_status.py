@@ -79,6 +79,7 @@ def test_renderer_online_is_decided_by_the_first_address_that_answers():
 def test_a_disk_failure_is_not_the_renderer_leaving():
     backend = types.SimpleNamespace(label="KANN_ULTRA", _gone=False, _error=None,
                                     _emit_now=lambda state=None: None)
+    backend._lose = lambda: setattr(backend, "_gone", True)
     # The library's drive unmounted under the node: the load cannot read the
     # file. The renderer answered nothing wrong — detaching it and telling
     # the user to wake it sent them after a device that was on.

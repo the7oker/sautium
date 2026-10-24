@@ -6154,7 +6154,7 @@ class _Away:
     def reachable(self):
         return True
 
-    def resume_at(self, index):
+    def resume_at(self, index, position=0.0):
         pass
 
     def queue_replace(self, items, *, play):

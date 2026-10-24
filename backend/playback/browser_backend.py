@@ -90,7 +90,7 @@ class BrowserBackend(PlayerBackend):
         return Capabilities(volume=True, volume_kind="percent", seek=True,
                             gapless=False)
 
-    def resume_at(self, index: int) -> None:
+    def resume_at(self, index: int, position: float = 0.0) -> None:
         item = self._queue.item_at(index)
         if item is None:
             return

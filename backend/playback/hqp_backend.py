@@ -1564,7 +1564,7 @@ class HqpBackend(PlayerBackend):
         logger.info("re-registered %d owned file(s) behind HQPlayer's running "
                     "playlist", len(items))
 
-    def resume_at(self, index: int) -> None:
+    def resume_at(self, index: int, position: float = 0.0) -> None:
         # HQPlayer owns its playlist pointer, and a select fired straight
         # after the attach mirror does not stick (verified live) — defer it
         # to the play press, where select+play is the proven jump sequence.

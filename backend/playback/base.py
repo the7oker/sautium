@@ -19,7 +19,7 @@ import logging
 from abc import ABC, abstractmethod
 from contextlib import contextmanager
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, Callable, Optional
+from typing import TYPE_CHECKING, Callable, NamedTuple, Optional
 
 if TYPE_CHECKING:
     from playback.queue import QueueItem
@@ -49,6 +49,15 @@ class PlaybackStatus:
     # own removal record): it stands behind this many of the queue's slots,
     # where a "play next" goes; its listen goes on all the same.
     out_after: Optional[int] = None
+
+
+class Spot(NamedTuple):
+    """Where an output stands in the queue — its slot, the second in it,
+    and whether it plays (PlaybackManager.spot): what the output attached
+    after it resumes at (PlayerBackend.resume_at)."""
+    slot: int
+    position: float
+    playing: bool
 
 
 @dataclass
@@ -114,11 +123,12 @@ class PlayerBackend(ABC):
     def shutdown(self) -> None:
         """Stop status acquisition and release the output."""
 
-    def resume_at(self, index: int) -> None:
+    def resume_at(self, index: int, position: float = 0.0) -> None:
         """Seed the current queue slot right after attach, WITHOUT starting
         playback — an output switch keeps the queue AND the position in it:
         the play press on the new output continues from the track that was
-        active on the old one, not from slot 1."""
+        active on the old one, not from slot 1, and from `position` seconds
+        into it where the output can start there."""
 
     def healthy(self) -> bool:
         """Is the attached device still believed reachable? Backends whose
