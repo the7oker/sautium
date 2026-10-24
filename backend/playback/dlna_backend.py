@@ -1323,17 +1323,19 @@ class DlnaBackend(PlayerBackend):
                 # meanwhile keeps or moves it
                 self._resume = start_at if start_at > 0 else None
                 self._parked = (item, start_at)
+                self._position, self._length = start_at, item.duration_seconds or 0.0
+                self._error = None
+                logger.info("DLNA: slot %d waits for its stream (%s — %s)",
+                            index, item.artist, item.title)
+                # Said before the disarm's round trip: a Stop or a Pause made
+                # meanwhile says its own state last
+                self._emit_now("loading")
                 try:
                     # What plays now plays out; the next it had armed is no
                     # longer what follows it
                     await self._avt("SetNextAVTransportURI", NextURI="", NextURIMetaData="")
                 except Exception as e:
                     logger.debug("SetNext disarm unsupported/failed: %s", e)
-                self._position, self._length = start_at, item.duration_seconds or 0.0
-                self._error = None
-                logger.info("DLNA: slot %d waits for its stream (%s — %s)",
-                            index, item.artist, item.title)
-                self._emit_now("loading")
                 return True
             if url is None:
                 logger.warning("DLNA: skipping unreachable item %s — %s",
@@ -1692,10 +1694,12 @@ class DlnaBackend(PlayerBackend):
             # A Stop starts the slot over, as a renderer's own Stop does. It
             # is this instance's word from here: a lost renderer that never
             # answers it leaves no spot behind (_lose) — said once taken, so
-            # one the renderer refuses never reads as a stop of the listen
+            # one the renderer refuses never reads as a stop of the listen.
+            # No retry: a slow refusal and its retry could outlast the
+            # command's window, read as the renderer gone
             self._resume = self._seek_on_start = self._parked = None
             self._said = "stopped"
-            await self._avt_retry("Stop")
+            await self._avt("Stop")
             self._emit_now("stopped")
         return self._call(_s())
 

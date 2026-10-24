@@ -1345,20 +1345,25 @@ def test_a_wait_follows_its_track_and_ends_at_a_pause(tmp_path, proxy, renderers
     assert len(r.called("SetAVTransportURI")) == loads
 
 
-def test_a_stop_the_renderer_refuses_once_is_sent_again(tmp_path, proxy, renderers, nodes, quality):
-    """A transient 501 on Stop (a freshly selected AK Connect stack) is
-    retried once, as a load's actions are, and the stop is said once it is
-    taken."""
+def test_a_stop_the_renderer_refuses_is_no_stop_of_the_listen(tmp_path, proxy, renderers, nodes,
+                                                              quality):
+    """A Stop the renderer refuses (a transient 501 of a freshly selected AK
+    Connect stack) says its words, and the status stays what the renderer
+    plays: "stopped" is said only of a Stop it took, so the listen is not
+    closed and opened again; the renderer is not taken for lost."""
     r = renderers(sink=AK_CONNECT_SINK)
     q = CanonicalQueue()
     q.replace([track(tmp_path, 1, seconds=40.0)])
     n = nodes(q, r)
     assert n.backend.select(1)
     wait_for(lambda: n.last.state == "playing", what="playing")
+    said = len(n.statuses)
     r.faults["Stop"] = [501]
-    assert n.backend.stop()
-    assert r.state == "STOPPED" and len(r.called("Stop")) == 2
-    assert n.last.state == "stopped" and not n.backend._error
+    assert not n.backend.stop()
+    assert "stopped" not in [st.state for st in n.statuses[said:]]
+    assert n.last.state == "playing" and "stop failed" in n.backend._error
+    assert n.backend.healthy()
+    assert n.backend.stop() and r.state == "STOPPED" and n.last.state == "stopped"
 
 
 def test_the_local_engine_waits_on_a_slot_whose_stream_is_on_its_way(tmp_path):
