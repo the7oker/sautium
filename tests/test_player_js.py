@@ -462,3 +462,83 @@ def test_a_next_with_nothing_after_it_is_no_refusal(monkeypatch):
     assert answer == {"ok": False, "refusal": ""}
     assert _ui([{"np": dict(mgr.latest_status)}, {"cmd": "next"}],
                {"/api/player/next": {"status": 200, "body": answer}}) == []
+
+
+# The transport button of Now Playing and of the mini player, as their own
+# status handlers in app-shell.js set its class: `.is-loading` spins it and
+# takes no tap (style.css) — the mini player's takes it and does nothing,
+# so it never lands on the bar beneath — and a click that comes some other
+# way (a key, assistive tech) sends no word from either
+
+_BUTTONS = r"""
+const fs = require('node:fs'), vm = require('node:vm');
+const shell = fs.readFileSync(process.argv[process.argv.length - 1], 'utf8');
+const cut = (from, to, after = '') => {
+  const s = shell.indexOf(after), a = shell.indexOf(from, s), b = shell.indexOf(to, a);
+  if (s < 0 || a < 0 || b < 0) throw new Error('marker not found: ' + (s < 0 ? after : a < 0 ? from : to));
+  return shell.slice(a, b);
+};
+const button = () => {
+  const classes = new Set(), on = {};
+  return { classes, on, addEventListener(type, fn) { on[type] = fn; },
+           classList: { toggle(c, x) { if (x) classes.add(c); else classes.delete(c); },
+                        contains: c => classes.has(c) } };
+};
+const el = () => ({ hidden: false, textContent: '', dataset: {}, setAttribute() {} });
+const npBtn = button(), mpBtn = button();
+const np = { excerptBadge: el(), whyBtn: el(), hqpTag: el(), timeCurrent: el(), timeTotal: el(), radioBtn: el(),
+             playPauseIcon: { setAttribute() {}, closest: () => npBtn },
+             _paintProgress() {}, tryFetchDetail() {}, lastTrackKey: 'Song|Artist' };
+const mp = { el: el(), title: el(), artist: el(), playPauseIcon: { setAttribute() {}, closest: () => mpBtn },
+             lastSongKey: 'Song|Album' };
+let toggled = 0;
+const ctx = { document: { body: { classList: { add() {}, remove() {} } } },
+              window: { togglePlayPause() { toggled += 1; } } };
+vm.createContext(ctx);
+vm.runInContext([
+  cut('  function transportBusy(data) {', '\n  const sheet = {'),
+  'this.__np = { ' + cut('    onStatus(data) {', '\n    // One similar path for owned AND preview') + ' };',
+  'this.__mp = { ' + cut('    update(data) {', '\n    setCover(detail) {') + ' };',
+  'this.__npWire = function () { ' + cut("      this.playPause.addEventListener('click', e => {",
+                                         "\n      this._wireScrub();") + ' };',
+  'this.__mpWire = function () { ' + cut("      this.playPause.addEventListener('click', e => {",
+                                         "\n      this.next.addEventListener('click'",
+                                         "getElementById('mpPlayPause')") + ' };',
+].join('\n'), ctx);
+ctx.__npWire.call({ playPause: npBtn });
+ctx.__mpWire.call({ playPause: mpBtn });
+const out = [];
+for (const status of JSON.parse(fs.readFileSync(0, 'utf8'))) {
+  ctx.__np.onStatus.call(np, status);
+  ctx.__mp.update.call(mp, status);
+  let before = toggled;
+  npBtn.on.click({ stopPropagation() {} });
+  const npSent = toggled > before;
+  before = toggled;
+  let kept = false;
+  mpBtn.on.click({ stopPropagation() { kept = true; } });
+  out.push([npBtn.classes.has('is-loading'), mpBtn.classes.has('is-loading'), npSent, toggled > before, kept]);
+}
+process.stdout.write(JSON.stringify(out));
+"""
+
+
+def test_the_transport_button_spins_while_a_start_is_in_flight_in_now_playing_and_the_mini_player():
+    """HQPlayer's start under way (`starting`, whatever state its Status
+    says meanwhile) and a renderer's track change (`loading`) spin both
+    buttons; a status without either stops them. A click of either spinning
+    button sends nothing, and the mini player's goes no further than the
+    button."""
+    base = {"song": "Song", "artist": "Artist", "album": "Album", "track_id": "t", "progress_percent": 0,
+            "position_formatted": "0:00", "length_formatted": "5:00"}
+    statuses = [{**base, "state": "playing", "starting": True},
+                {**base, "state": "stopped", "starting": True},
+                {**base, "state": "playing"},
+                {**base, "state": "loading"},
+                {**base, "state": "paused"}]
+    proc = subprocess.run([NODE, "-e", _BUTTONS, "--", str(REPO_ROOT / "backend" / "static" / "app-shell.js")],
+                          input=json.dumps(statuses).encode(), capture_output=True)
+    assert proc.returncode == 0, proc.stderr.decode()
+    assert json.loads(proc.stdout) == [[True, True, False, False, True], [True, True, False, False, True],
+                                       [False, False, True, True, True], [True, True, False, False, True],
+                                       [False, False, True, True, True]]

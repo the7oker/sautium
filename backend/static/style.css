@@ -434,6 +434,9 @@ body.sautium-base {
   color: var(--color-text);
 }
 #mpPlayPause { color: var(--color-amber); }
+/* Spinning (.is-loading) it still takes the tap, and does nothing with it:
+   a tap let through would land on the bar and open Now Playing. */
+#mpPlayPause.is-loading { pointer-events: auto; cursor: default; }
 
 /* =====================================================================
  * AI FAB
@@ -7059,10 +7062,11 @@ html { -webkit-tap-highlight-color: transparent; }
   white-space: nowrap;
 }
 
-/* Track-change in flight on a slow output (DLNA: SOAP round-trips + the
-   renderer buffering the new file). The tapped track shows immediately;
-   the transport button spins until the audio actually switches — honest
-   feedback without pretending, and no urge to re-tap. */
+/* A start in flight on a slow output (DLNA: SOAP round-trips + the
+   renderer buffering the new file; HQPlayer: a filter built before any
+   sound leaves). The tapped track shows immediately; the transport button
+   spins until the audio actually starts — honest feedback without
+   pretending, and no urge to re-tap. */
 .is-loading {
   position: relative;
   pointer-events: none;

@@ -1240,6 +1240,48 @@ implementation details live in the code, DB and git history.
   reading that stopped refreshing is not one that says "stopped" — tell
   them apart by what else is known (here the start the meter heard), and
   bound the guess by what is measured of the refresh.
+- **A start under way spins the transport button** (2026-10-24). HQPlayer
+  may answer a Play at once and build a heavy filter for seconds before any
+  sound leaves, its control port answering meanwhile: no build of ours to
+  say, the entry at 0:00, and a second press sent a second Play, which makes
+  HQPlayer take the entry again and build it anew. The status now says
+  `starting` from the play intent, or HQPlayer's own advance, until the
+  attempt's start rule hears the entry or sees its position move, and ends
+  with every other end of the attempt; the transport button spins meanwhile
+  and takes no tap, as for a renderer's `loading` — no words: a label needs
+  time to be read, the spin is the loader the app already shows for a track
+  change. The backend guards the start as well: a Play, or a tap of the
+  track starting, sends nothing and is taken as that start; Next, Previous,
+  another track, a Pause and a Stop go as ever. The flag is worked out as
+  each status is said, never stored on the tick: a silence says the last
+  tick again (a build, HQPlayer not answering), and a flag kept with it
+  would have spun through a DSP change that ended the start; the poller says
+  the last status again when the answer changes after its pass, or an
+  attempt closed on a read HQPlayer did not answer spun on until the five
+  misses that say it disconnected. Its reviews found more. A stop is a build
+  or an end by HQPlayer's take and by what it played as the start itself
+  went out: a heavy filter on CUDA answered the Play from a stop and said
+  stopped, `track_serial` unmoved, until its engine ran, while a stop after
+  the take (refused, or from its own window) ends the start; a Next while
+  HQPlayer played moves the serial at once and stops it between the two
+  entries for the tail and the build, as its own advance does — but a new
+  queue's own Stop before its Play leaves nothing to play out, so a stop
+  after that Play is its end. A flag that knew only "stopped" either stopped
+  spinning at once or spun through the end. A guard decided as the word is
+  asked ran ahead of words still waiting their turn on the command lock — a
+  Play swallowed while a Pause waited left HQPlayer paused, a Play that
+  waited behind a tap sent the very second Play the guard exists for — so
+  every word is decided as its turn comes, and a Play holds its number only
+  once it goes: published at its turn regardless, it would drop the start
+  owed and not yet sent that it was answered as. And a guard that named the
+  start by its track alone took a tap from 0 for a resume at 1:30, while one
+  aimed at an entry no status named swallowed a tap of a track that was not
+  starting: the start is named by its queue slot and second, and only where
+  the node knows it. Lessons: a state derived from something else is derived
+  where it is said, not copied with the message that last carried it; a
+  guard against a repeat compares what the word asks for with what is under
+  way, named the same way, at the moment the word is carried out — and
+  changes nothing until it decides to let the word go.
 - **Open after the series' review** (2026-10-14), found in code the series
   did not change, left for the next slice: a removal of the very slot
   HQPlayer reads on a tail mirror is the queue's alone, and the canary then

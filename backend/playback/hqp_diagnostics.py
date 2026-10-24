@@ -230,6 +230,10 @@ class Attempt:
     # serial moved is then the tail of that entry and the build of the next
     # (_stopped_after_take)
     from_playing: bool = False
+    # What its start is for, where the node knows it (aim): the queue item
+    # and the second it starts at — its start's own, or the entry HQPlayer's
+    # own advance moves on to, from 0
+    target: Optional[tuple] = None
 
     def record(self, o: CommandOutcome) -> None:
         """A command this intent sent, with HQPlayer's answer."""
@@ -257,11 +261,20 @@ class Attempt:
             self.steps.append({"ts": o.ts, "command": command, "result": o.result,
                                "message": o.message, "attributes": dict(o.attributes)})
 
+    def aim(self, item, second: float = 0.0) -> None:
+        """The queue item its start is for, and the second (target)."""
+        with _lock:
+            self.target = (item, float(second))
+
     def sought(self, o: CommandOutcome) -> None:
         """A Seek HQPlayer took from outside this intent while it is watched
-        — the person's, made while the start was under way."""
+        — the person's, made while the start was under way: the start goes
+        on at its second (target)."""
         with _lock:
-            self.seeks.append((o.ts, float(o.attributes.get("position") or 0)))
+            second = float(o.attributes.get("position") or 0)
+            self.seeks.append((o.ts, second))
+            if self.target is not None:
+                self.target = (self.target[0], second)
 
     def refused(self, command: str, message: str) -> None:
         """A command that never reached HQPlayer (no connection to send it on)."""
@@ -435,16 +448,21 @@ class Attempt:
         with _lock:
             return started(self.ticks, self._serial(), self.meter, self.take, self.seeks)
 
-    def under_way(self) -> bool:
+    def under_way(self, of: Optional[tuple] = None) -> bool:
         """Its start is under way: nothing ended it, HQPlayer has not started
         it (started), and HQPlayer, as its latest tick read it, does not
         pause — a Pause made in HQPlayer's own window holds no start — nor
         stopped what it took (_stopped_after_take): a stop where it has yet
         to take the start is its build (_yet_to_take), one between the entry
-        it played and the next its tail and build."""
+        it played and the next its tail and build. `of`: (a queue item, a
+        second), and the start is that very one (target) — the item by
+        identity, a track queued twice being two."""
         with _lock:
             if (self.end is not None or (self.ticks and self.ticks[-1]["state"] == "paused")
                     or self._stopped_after_take()):
+                return False
+            if of is not None and (self.target is None or self.target[0] is not of[0]
+                                   or self.target[1] != float(of[1])):
                 return False
             return not started(self.ticks, self._serial(), self.meter, self.take, self.seeks)
 

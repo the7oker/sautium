@@ -3471,6 +3471,874 @@ def test_a_pause_a_play_press_holds_leaves_no_start_under_way(fake, output, monk
     assert "starting" not in mgr._latest_status
 
 
+# -- a word for the start under way asks nothing more (_play, select) --------------------
+# A second phone, a double tap, the assistant: a Play, or a tap of the track
+# whose start is under way, sends HQPlayer nothing and is taken as that
+# start. Next, Previous, another track and a Stop are newer words.
+
+def _starts_sent(fake, n=0) -> list:
+    with fake._lock:
+        return [c for c, _ in fake.commands[n:] if c in ("SelectTrack", "Seek", "Play")]
+
+
+def test_a_second_tap_or_a_play_during_the_start_sends_nothing(traced, fake, metered):
+    metered.quiet = True                                # building: nothing on the meter
+    fake.start_polls = 100
+    assert traced.select(2)
+    n = len(fake.commands)
+    assert traced.select(2)                             # a double tap, a second phone
+    assert traced.play()                                # the assistant's Play
+    _polls(fake, 2)
+    assert _starts_sent(fake, n) == []
+    assert traced._attempt.under_way(of=(traced._queue.item_at(2), 0))
+
+
+def test_two_taps_of_one_track_waiting_their_turn_start_it_once(traced, fake, metered):
+    """A slow command holds the command lock, and two taps of the same track
+    wait their turn behind it, each finding nothing under way as it asks:
+    the first starts it, the second — decided as its turn comes — sends
+    nothing."""
+    metered.quiet = True
+    fake.start_polls = 100
+    link = _link()
+    n = len(fake.commands)
+    fake.service["Volume"] = 1.0
+    vol = threading.Thread(target=lambda: traced.set_volume(-10), daemon=True)
+    vol.start()
+    assert _wait(lambda: link.lock.owner is not None, timeout=3)
+    said = []
+    taps = [threading.Thread(target=lambda: said.append(traced.select(2)), daemon=True) for _ in range(2)]
+    for t in taps:
+        t.start()
+    assert _wait(lambda: len(link.lock._waiting) == 2, timeout=3)
+    for t in [vol] + taps:
+        t.join(10)
+    _polls(fake, 1)
+    assert said == [True, True]
+    assert _starts_sent(fake, n).count("SelectTrack") == 1
+
+
+def test_a_tap_whose_turn_finds_the_mirror_lost_and_its_track_starting_rebuilds_nothing(fake, output,
+                                                                                       monkeypatch):
+    """Two taps of the same track wait their turn; the first starts it, and
+    the mirror is lost meanwhile: the second, its turn come, would be a play
+    press — its track's start is under way, so it is none."""
+    mgr, b = output
+    _stopped(mgr, fake)
+    fake.start_polls = 100
+    link = _link()
+    start_held = b._start_held
+
+    def started_then_lost(*a, **kw):
+        out = start_held(*a, **kw)
+        b.lose_mirror("HQPlayer refused all 3 tracks of a new queue", by="refusal")
+        return out
+    monkeypatch.setattr(b, "_start_held", started_then_lost)
+    n = len(fake.commands)
+    fake.service["Volume"] = 1.0
+    vol = threading.Thread(target=lambda: b.set_volume(-10), daemon=True)
+    vol.start()
+    assert _wait(lambda: link.lock.owner is not None, timeout=3)
+    said = []
+    taps = [threading.Thread(target=lambda: said.append(b.select(2, "track-2")), daemon=True) for _ in range(2)]
+    for t in taps:
+        t.start()
+    assert _wait(lambda: len(link.lock._waiting) == 2, timeout=3)
+    for t in [vol] + taps:
+        t.join(10)
+    _settled()
+    assert said == [True, True]
+    assert b._mirror == "lost" and _starts_sent(fake, n).count("SelectTrack") == 1
+    assert "Stop" not in [c for c, _ in fake.commands[n:]]
+
+
+def test_a_tap_of_the_track_starting_joins_a_play_press_begun_since(fake, output, monkeypatch):
+    """A play press begun after the start — Next on a playlist that is no
+    mirror — decides what starts: a tap of the track whose start was under
+    way is its newest word, and that track starts."""
+    mgr, b = output
+    _stopped(mgr, fake)
+    fake.start_polls = 100
+    assert b.select(2)
+    assert _wait(lambda: mgr._latest_status.get("starting") is True, 5.0)
+    b.lose_mirror("HQPlayer refused all 3 tracks of a new queue", by="refusal")
+    begin = threading.Event()
+    _presses_held(monkeypatch, b, begin)
+    try:
+        assert b.next()                                 # a press of track 3, held before it begins
+        assert b.pressing()["track_id"] == "track-3"
+        assert b.select(2, "track-2")                   # the newest word
+        assert b.pressing()["track_id"] == "track-2"
+    finally:
+        begin.set()
+    _settled()
+
+    def plays_track_2():
+        with fake._lock:
+            return (fake.state == int(PlaybackState.PLAYING) and 1 <= fake.track <= len(fake.playlist)
+                    and fake.playlist[fake.track - 1] == "file:///E:/Music/A/02.flac")
+    assert _wait(plays_track_2, 5.0), (fake.state, fake.track, fake.playlist)
+
+
+def test_next_another_track_and_a_stop_during_the_start_go_as_ever(traced, fake, metered):
+    metered.quiet = True
+    fake.start_polls = 100
+    assert traced.select(1)
+    n = len(fake.commands)
+    assert traced.select(2)                             # another track: a newer word
+    assert ("SelectTrack", {"index": "2"}) in fake.commands[n:]
+    n = len(fake.commands)
+    assert traced.previous()
+    assert "Previous" in [c for c, _ in fake.commands[n:]]
+    n = len(fake.commands)
+    assert traced.next()
+    assert "Next" in [c for c, _ in fake.commands[n:]]
+    n = len(fake.commands)
+    assert traced.stop()                                # the HQPlayer screen's Stop
+    assert "Stop" in [c for c, _ in fake.commands[n:]]
+
+
+def test_a_tap_of_the_entry_hqplayers_own_advance_moves_on_to_sends_nothing(traced, fake, monkeypatch,
+                                                                           tmp_path, metered):
+    att = _advancing(traced, fake, monkeypatch, tmp_path, build=5.0, polls=100, refused=None, log=False)
+    assert att.under_way(of=(traced._queue.item_at(2), 0))
+    n = len(fake.commands)
+    assert traced.select(2)
+    assert traced.play()
+    _polls(fake, 2)
+    assert _starts_sent(fake, n) == []
+    assert traced.select(1)                             # the entry before it: a newer word
+    assert ("SelectTrack", {"index": "1"}) in fake.commands[n:]
+
+
+def test_a_tap_of_the_track_starting_on_a_playlist_that_is_no_mirror_rebuilds_nothing(fake, output):
+    """The mirror lost while the start goes on: a tap of that very track is
+    no play press — its Stop and hand-over would take the entry from under
+    its build — nor is a Play."""
+    mgr, b = output
+    _stopped(mgr, fake)
+    fake.start_polls = 100
+    assert b.select(2)
+    assert _wait(lambda: mgr._latest_status.get("starting") is True, 5.0)
+    b.lose_mirror("HQPlayer refused all 3 tracks of a new queue", by="refusal")
+    n = len(fake.commands)
+    assert b.select(2, "track-2")
+    assert b.play()
+    _polls(fake, 2)
+    assert [c for c, _ in fake.commands[n:] if c not in _QUESTIONS] == []
+    assert b._pressed is None
+
+
+def test_the_routes_answer_a_word_for_the_start_under_way_as_that_start(fake, output, monkeypatch):
+    mgr, b = output
+    player_router = _routes_on(monkeypatch, mgr)
+    _stopped(mgr, fake)
+    fake.start_polls = 100
+    tap = player_router.JumpRequest(index=2, track_id="track-2")
+    assert player_router.jump(tap)["ok"]
+    assert _wait(lambda: mgr._latest_status.get("starting") is True, 5.0)
+    n = len(fake.commands)
+    assert player_router.play() == {"ok": True}
+    assert player_router.jump(tap) == {"ok": True, "index": 2}
+    _polls(fake, 2)
+    assert _starts_sent(fake, n) == []
+
+
+def test_a_play_waiting_its_turn_behind_a_tap_is_the_start_the_tap_made(traced, fake, metered):
+    """A slow command holds the command lock; a tap of track 2 waits its
+    turn, and a Play made after it waits behind it — neither found a start
+    under way as it asked. The tap starts track 2; the Play, its turn come
+    with that start under way, sends nothing."""
+    metered.quiet = True
+    fake.start_polls = 100
+    link = _link()
+    n = len(fake.commands)
+    fake.service["Volume"] = 1.0
+    vol = threading.Thread(target=lambda: traced.set_volume(-10), daemon=True)
+    vol.start()
+    assert _wait(lambda: link.lock.owner is not None, timeout=3)
+    said = []
+    tap = threading.Thread(target=lambda: said.append(("tap", traced.select(2))), daemon=True)
+    tap.start()
+    assert _wait(lambda: len(link.lock._waiting) == 1, timeout=3)
+    play = threading.Thread(target=lambda: said.append(("play", traced.play())), daemon=True)
+    play.start()
+    assert _wait(lambda: len(link.lock._waiting) == 2, timeout=3)
+    for t in (vol, tap, play):
+        t.join(10)
+    _polls(fake, 1)
+    assert sorted(said) == [("play", True), ("tap", True)]
+    assert traced._attempt.under_way(of=(traced._queue.item_at(2), 0))
+    assert _starts_sent(fake, n) == ["SelectTrack", "Play"]
+
+
+def test_a_resume_waiting_its_turn_behind_a_tap_is_the_start_the_tap_made(traced, fake, metered):
+    """Stopped at 0:30 of track 2; a tap of track 1 waits its turn, and a
+    Play made after it — the resume of 0:30 — waits behind it: the tap
+    spends the spot as its start is taken, and the Play is that start."""
+    metered.quiet = True
+    fake.start_polls = 100
+    traced._set_spot(traced._queue.item_at(2), 30)
+    link = _link()
+    n = len(fake.commands)
+    fake.service["Volume"] = 1.0
+    vol = threading.Thread(target=lambda: traced.set_volume(-10), daemon=True)
+    vol.start()
+    assert _wait(lambda: link.lock.owner is not None, timeout=3)
+    tap = threading.Thread(target=lambda: traced.select(1), daemon=True)
+    tap.start()
+    assert _wait(lambda: len(link.lock._waiting) == 1, timeout=3)
+    play = threading.Thread(target=traced.play, daemon=True)
+    play.start()
+    assert _wait(lambda: len(link.lock._waiting) == 2, timeout=3)
+    for t in (vol, tap, play):
+        t.join(10)
+    _polls(fake, 1)
+    assert traced._attempt.under_way(of=(traced._queue.item_at(1), 0))
+    assert _starts_sent(fake, n) == ["SelectTrack", "Play"]
+
+
+def test_a_play_whose_turn_finds_a_play_press_begun_meanwhile_sends_nothing(fake, output):
+    """Paused on a playlist that is no mirror, a Play only resumes. One that
+    waited its turn while a tap began a play press is that press's start:
+    no Play before the press's own Stop."""
+    mgr, b = output
+    _stopped(mgr, fake)
+    assert b.select(1, "track-1")
+    assert _wait(lambda: mgr._latest_status.get("state") == "playing", 5.0)
+    assert b.pause()
+    assert _wait(lambda: mgr._latest_status.get("state") == "paused", 5.0)
+    b.lose_mirror("HQPlayer refused all 3 tracks of a new queue", by="refusal")
+    link = _link()
+    n = len(fake.commands)
+    fake.service["Volume"] = 1.0
+    vol = threading.Thread(target=lambda: b.set_volume(-10), daemon=True)
+    vol.start()
+    assert _wait(lambda: link.lock.owner is not None, timeout=3)
+    play = threading.Thread(target=b.play, daemon=True)
+    play.start()
+    assert _wait(lambda: len(link.lock._waiting) == 1, timeout=3)
+    assert b.select(2, "track-2")                       # a play press, its start under way
+    for t in (vol, play):
+        t.join(10)
+    _settled()
+    sent = [c for c, _ in fake.commands[n:] if c not in _QUESTIONS]
+    assert "Stop" in sent and "Play" not in sent[:sent.index("Stop")], sent
+
+
+def test_a_tap_of_the_entry_a_play_or_a_next_starts_sends_nothing(traced, fake, metered, monkeypatch):
+    """Stopped on entry 1 with no spot, a Play is HQPlayer's own Play of that
+    entry, from 0: a tap of track 1 meanwhile is that start. Next starts the
+    entry after: a tap of track 2 meanwhile is that one."""
+    metered.quiet = True
+    fake.start_polls = 100
+    with fake._lock:
+        fake.track = 1
+    assert _wait(lambda: traced._last_tick is not None and traced._last_tick.item is traced._queue.item_at(1), 5.0)
+    assert traced._spot is None
+    assert traced.play()
+    _polls(fake, 1)
+    n = len(fake.commands)
+    assert traced.select(1)
+    _polls(fake, 2)
+    assert _starts_sent(fake, n) == []
+    _moving_transport(fake, monkeypatch)
+    assert traced.next()
+    _polls(fake, 1)
+    n = len(fake.commands)
+    assert traced.select(2)
+    _polls(fake, 2)
+    assert _starts_sent(fake, n) == []
+
+
+def test_a_tap_from_its_beginning_during_a_resume_at_a_second_starts_it(traced, fake, metered):
+    """Stopped at 1:30 of track 2, Play resumes it there while HQPlayer
+    builds; a tap of track 2 — from the beginning, as a tap always is — is
+    another start, and goes."""
+    metered.quiet = True
+    fake.start_polls = 100
+    traced._set_spot(traced._queue.item_at(2), 90)
+    assert traced.play()
+    assert ("Seek", {"position": "90"}) in fake.commands
+    n = len(fake.commands)
+    assert traced.select(2)
+    _polls(fake, 2)
+    assert "SelectTrack" in _starts_sent(fake, n)
+
+
+def test_a_play_after_hqplayer_took_the_start_and_was_stopped_in_its_own_window_goes(traced, fake, metered,
+                                                                                      monkeypatch):
+    """The start of track 2 under way, HQPlayer playing it at 0:00; stopped
+    from its own window (or another controller), what it took has stopped:
+    no start is under way, and a Play goes."""
+    monkeypatch.setattr(diag, "OBSERVE_S", 10.0)        # the production window
+    metered.quiet = True
+    fake.start_polls = 100
+    assert traced.select(2)
+    _polls(fake, 1)
+    with fake._lock:
+        fake.state = int(PlaybackState.STOPPED)
+    _polls(fake, 2)
+    assert traced._last_tick.state == "stopped" and not traced._start_under_way()
+    n = len(fake.commands)
+    assert traced.play()
+    _polls(fake, 1)
+    assert _starts_sent(fake, n)
+
+
+def test_a_tap_a_removal_holds_of_the_track_starting_sends_nothing(fake, output):
+    """The start of track 2 under way, a removal of track 3 holds the
+    person's words while HQPlayer takes it, and a second phone taps track 2
+    meanwhile: carried out once the queue stands, the tap is that start."""
+    mgr, b = output
+    _stopped(mgr, fake)
+    fake.start_polls = 100
+    assert b.select(2, "track-2")
+    assert _wait(lambda: mgr._latest_status.get("starting") is True, 5.0)
+    n = len(fake.commands)
+    fake.service["PlaylistRemove"] = 1.5
+    rm = threading.Thread(target=lambda: mgr.remove(3, "track-3"), daemon=True)
+    rm.start()
+    assert _wait(lambda: b._inflight is not None, 3.0)
+    assert b.select(2, "track-2")
+    rm.join(10)
+    _settled()
+    _polls(fake, 1)
+    assert [it.track_id for it in mgr.queue.snapshot()] == ["track-1", "track-2"]
+    assert _starts_sent(fake, n) == []
+
+
+def test_a_tap_of_the_first_track_a_new_queue_starts_sends_nothing(fake, output):
+    mgr, b = output
+    _stopped(mgr, fake)
+    fake.start_polls = 100
+    mgr.replace_queue([_item(f"E:/Music/B/0{i}.flac", 10 + i) for i in range(1, 4)], play=True)
+    assert _wait(lambda: mgr._latest_status.get("starting") is True, 5.0)
+    n = len(fake.commands)
+    assert b.select(1, "track-11")
+    _polls(fake, 2)
+    assert _starts_sent(fake, n) == []
+
+
+def test_a_tap_a_new_queue_held_names_the_start_it_owes_from_then_on(fake, output, monkeypatch):
+    """A tap of track 2 made while a new queue is handed over is carried out
+    in place of the queue's own Play: from then on the start owed is track
+    2's, and a tap of the first track before it goes is another track."""
+    mgr, b = output
+    _stopped(mgr, fake)
+    fake.start_polls = 100
+    owed, go = threading.Event(), threading.Event()
+    start_item = b._start_item
+
+    def held_back(*a, **kw):
+        owed.set()
+        go.wait(10)
+        return start_item(*a, **kw)
+    monkeypatch.setattr(b, "_start_item", held_back)
+    fake.service["PlaylistAdd"] = 0.3
+    items = [_item(f"E:/Music/B/0{i}.flac", 10 + i) for i in range(1, 4)]
+    replace = threading.Thread(target=lambda: mgr.replace_queue(items, play=True), daemon=True)
+    replace.start()
+    assert _wait(lambda: b._inflight is not None, 3.0)
+    assert b.select(2, "track-12")                      # held by the hand-over
+    assert owed.wait(10)                                # carried out: its start not sent yet
+    n = len(fake.commands)
+    try:
+        assert b.select(1, "track-11")
+    finally:
+        go.set()
+    replace.join(10)
+    _settled()
+    assert ("SelectTrack", {"index": "1"}) in fake.commands[n:]
+
+
+def test_a_tap_of_the_track_a_play_press_owes_before_its_start_goes_is_that_start(fake, output, monkeypatch):
+    """A play press has handed HQPlayer the queue afresh and owes its start,
+    sent once the queue lock is let go: a tap of that track meanwhile is that
+    start — no intent of its own — and so is a Play, which holds no number
+    that would drop the start owed: one start."""
+    mgr, b = output
+    _stopped(mgr, fake)
+    fake.start_polls = 100
+    b.lose_mirror("HQPlayer refused all 3 tracks of a new queue", by="refusal")
+    owed, go = threading.Event(), threading.Event()
+    start_item = b._start_item
+
+    def held_back(*a, **kw):
+        owed.set()
+        go.wait(10)
+        return start_item(*a, **kw)
+    monkeypatch.setattr(b, "_start_item", held_back)
+    n = len(fake.commands)
+    assert b.select(2, "track-2")                       # a play press
+    assert owed.wait(10)
+    att = b._attempt
+    try:
+        assert b.select(2, "track-2")
+        assert b.play()
+    finally:
+        go.set()
+    _settled()
+    assert b._attempt is att and _starts_sent(fake, n).count("SelectTrack") == 1
+
+
+def test_on_a_playlist_that_is_no_mirror_a_tap_behind_a_word_waiting_its_turn_is_a_play_press(fake, output):
+    """The start of track 2 under way, the mirror lost meanwhile; a slow
+    command holds the command lock and a Pause waits its turn. A tap of
+    track 2 — a play press, which waits for no turn — is not decided ahead
+    of the Pause: it is a press, which starts track 2 once the Pause went."""
+    mgr, b = output
+    _stopped(mgr, fake)
+    fake.start_polls = 100
+    assert b.select(2, "track-2")
+    assert _wait(lambda: mgr._latest_status.get("starting") is True, 5.0)
+    b.lose_mirror("HQPlayer refused all 3 tracks of a new queue", by="refusal")
+    link = _link()
+    n = len(fake.commands)
+    fake.service["Volume"] = 1.0
+    vol = threading.Thread(target=lambda: b.set_volume(-10), daemon=True)
+    vol.start()
+    assert _wait(lambda: link.lock.owner is not None, timeout=3)
+    pause = threading.Thread(target=b.pause, daemon=True)
+    pause.start()
+    assert _wait(lambda: len(link.lock._waiting) == 1, timeout=3)
+    assert b.select(2, "track-2")
+    for t in (vol, pause):
+        t.join(10)
+    _settled()
+    sent = [c for c, _ in fake.commands[n:] if c not in _QUESTIONS]
+    assert "Pause" in sent and "SelectTrack" in sent[sent.index("Pause"):], sent
+
+
+def test_on_a_playlist_that_is_no_mirror_a_play_behind_a_word_waiting_its_turn_is_a_play_press(fake, output):
+    """HQPlayer builds the start of track 2 stopped (its serial as it was),
+    the mirror lost meanwhile; a slow command holds the command lock and a
+    Stop waits its turn. Play from that stop — a play press — is not decided
+    ahead of the Stop: it is a press, which starts once the Stop went."""
+    mgr, b = output
+    _stopped(mgr, fake)
+    assert _wait(lambda: b._before is not None, 5.0)
+    fake.cuda_polls = 100
+    assert b.select(2, "track-2")
+    assert _wait(lambda: mgr._latest_status.get("starting") is True, 5.0)
+    b.lose_mirror("HQPlayer refused all 3 tracks of a new queue", by="refusal")
+    link = _link()
+    n = len(fake.commands)
+    fake.service["Volume"] = 1.0
+    vol = threading.Thread(target=lambda: b.set_volume(-10), daemon=True)
+    vol.start()
+    assert _wait(lambda: link.lock.owner is not None, timeout=3)
+    stop = threading.Thread(target=b.stop, daemon=True)
+    stop.start()
+    assert _wait(lambda: len(link.lock._waiting) == 1, timeout=3)
+    assert b.play()
+    for t in (vol, stop):
+        t.join(10)
+    _settled()
+    sent = [c for c, _ in fake.commands[n:] if c not in _QUESTIONS]
+    assert "Stop" in sent and "SelectTrack" in sent[sent.index("Stop"):], sent
+
+
+def test_hqplayers_own_advance_seen_after_a_removal_before_its_entry_starts_the_track_after_it(fake):
+    """HQPlayer plays slot C to its last seconds; the track ends and slot A
+    is removed (HQPlayer's entry 1 with it) before the next tick reads the
+    stop. HQPlayer moves on to D — its entry 3 now, as the stale index 3 + 1
+    is E's: the start under way is D's, found by C's item in the queue as it
+    stands."""
+    items = [_item(f"E:/Music/A/0{i}.flac", i) for i in range(1, 6)]
+    q = CanonicalQueue()
+    q.replace(items)
+    b = HqpBackend(emit=lambda *_: None, queue=q)
+    A, _, C, D, E = items
+    before = TrackStatus(state=PlaybackState.PLAYING, track_index=3, track_id="", position=297.0,
+                         length=300.0, volume=-3.0, uri="file:///E:/Music/A/03.flac", tracks_total=5,
+                         track_serial=10)
+    b._before = (before, (3, C, False))
+    assert q.remove(1) is A
+    stopped = TrackStatus(state=PlaybackState.STOPPED, track_index=0, track_id="", position=0.0,
+                          length=0.0, volume=-3.0, tracks_total=4, track_serial=11)
+    att = b._advance(stopped, time.time())
+    try:
+        assert att is not None and att.intent == "advance"
+        assert (b._starts_already(D), b._starts_already(E)) == (True, False)
+    finally:
+        b._attempt = None
+        att.request_end("superseded")
+        hqp_meter.meter.unwatch(att.id)
+
+
+def test_hqplayers_own_advance_on_a_tail_mirror_starts_the_track_after_it(fake):
+    """On a tail mirror HQPlayer's playlist from the entry it reads to its end
+    is the queue from that slot: its own advance from C moves on to D."""
+    items = [_item(f"E:/Music/A/0{i}.flac", i) for i in range(1, 6)]
+    q = CanonicalQueue()
+    q.replace(items)
+    b = HqpBackend(emit=lambda *_: None, queue=q)
+    _, _, C, D, _ = items
+    b._mirror = "tail"
+    before = TrackStatus(state=PlaybackState.PLAYING, track_index=2, track_id="", position=297.0,
+                         length=300.0, volume=-3.0, uri="file:///E:/Music/A/03.flac", tracks_total=4,
+                         track_serial=10)
+    b._before = (before, (3, C, False))
+    stopped = TrackStatus(state=PlaybackState.STOPPED, track_index=0, track_id="", position=0.0,
+                          length=0.0, volume=-3.0, tracks_total=4, track_serial=11)
+    att = b._advance(stopped, time.time())
+    try:
+        assert att is not None and att.intent == "advance" and b._starts_already(D)
+    finally:
+        b._attempt = None
+        att.request_end("superseded")
+        hqp_meter.meter.unwatch(att.id)
+
+
+def test_a_tap_of_the_track_starting_made_after_a_tap_still_waiting_its_turn_goes(traced, fake, metered):
+    """The start of track 2 under way; a slow command holds the command lock,
+    a tap of track 1 waits its turn, then track 2 is tapped again — the
+    newest word, decided as its turn comes behind the first: HQPlayer ends
+    on track 2."""
+    metered.quiet = True
+    fake.start_polls = 100
+    assert traced.select(2)
+    _polls(fake, 1)
+    link = _link()
+    fake.service["Volume"] = 1.0
+    vol = threading.Thread(target=lambda: traced.set_volume(-10), daemon=True)
+    vol.start()
+    assert _wait(lambda: link.lock.owner is not None, timeout=3)
+    tap = threading.Thread(target=lambda: traced.select(1), daemon=True)
+    tap.start()
+    assert _wait(lambda: len(link.lock._waiting) == 1, timeout=3)
+    assert traced.select(2)
+    for t in (vol, tap):
+        t.join(10)
+    _polls(fake, 1)
+    with fake._lock:
+        assert fake.track == 2
+
+
+def test_a_play_made_after_a_pause_still_waiting_its_turn_goes(traced, fake, metered):
+    """The start of track 2 under way; a slow command holds the command lock,
+    a Pause waits its turn, then Play — the newest word, decided as its turn
+    comes: the Pause ended the start, and HQPlayer plays."""
+    metered.quiet = True
+    fake.start_polls = 100
+    assert traced.select(2)
+    _polls(fake, 1)
+    link = _link()
+    fake.service["Volume"] = 1.0
+    vol = threading.Thread(target=lambda: traced.set_volume(-10), daemon=True)
+    vol.start()
+    assert _wait(lambda: link.lock.owner is not None, timeout=3)
+    pause = threading.Thread(target=traced.pause, daemon=True)
+    pause.start()
+    assert _wait(lambda: len(link.lock._waiting) == 1, timeout=3)
+    assert traced.play()
+    for t in (vol, pause):
+        t.join(10)
+    _polls(fake, 2)
+    with fake._lock:
+        assert fake.state == int(PlaybackState.PLAYING)
+
+
+def test_a_next_while_a_start_no_tick_named_yet_is_under_way_starts_the_entry_beside_that_start(
+        fake, output, monkeypatch):
+    """HQPlayer plays track 2; a tap of track 1, and before any tick names it,
+    Next: HQPlayer's own Next goes from the entry of the start under way —
+    track 1's — onto track 2, whatever the last tick named, so a tap of
+    track 2 during that start is that start."""
+    mgr, b = output
+    _moving_transport(fake, monkeypatch)
+    assert b.select(2, "track-2")
+    assert _wait(lambda: b._last_entry == hb.Entry(2), 5.0)
+    fake.start_polls = 100
+    go = _holding_ticks(monkeypatch)
+    try:
+        assert b.select(1, "track-1")
+        assert b._last_entry == hb.Entry(2)
+        assert b.next()
+    finally:
+        go.set()
+    _polls(fake, 1)
+    n = len(fake.commands)
+    assert b.select(2, "track-2")
+    _polls(fake, 2)
+    assert _starts_sent(fake, n) == []
+
+
+def test_a_previous_while_a_tap_no_tick_named_yet_is_under_way_moves_from_the_tapped_entry(
+        fake, output, monkeypatch):
+    """HQPlayer plays track 1; a tap of track 3 and, before any tick names it,
+    Previous: watched as its turn comes, from the entry of the start under way
+    — HQPlayer's own Previous moves from entry 3 to entry 2, which starts. A
+    tap of track 2 during that start is that start; one of track 3 is another
+    track, and goes."""
+    mgr, b = output
+    _moving_transport(fake, monkeypatch)
+    fake.start_polls = 100
+    go = _holding_ticks(monkeypatch)
+    try:
+        assert b.select(3, "track-3")
+        assert b._last_entry == hb.Entry(1)
+        assert b.previous()
+    finally:
+        go.set()
+    _polls(fake, 2)
+    with fake._lock:
+        assert fake.track == 2
+    n = len(fake.commands)
+    assert b.select(2, "track-2")
+    _polls(fake, 2)
+    assert _starts_sent(fake, n) == []
+    assert b.select(3, "track-3")
+    _polls(fake, 2)
+    with fake._lock:
+        assert fake.track == 3
+
+
+def test_a_tap_from_its_beginning_after_a_seek_during_the_start_goes(traced, fake, metered):
+    """The start of track 2 under way from 0; the person seeks to 2:00 during
+    the build, and the start goes on at 2:00: a tap of track 2, from its
+    beginning, is another start."""
+    metered.quiet = True
+    fake.start_polls = 100
+    fake.takes_seek = True
+    assert traced.select(2)
+    _polls(fake, 1)
+    assert traced.seek(120)
+    _polls(fake, 2)
+    assert traced._start_under_way()
+    n = len(fake.commands)
+    assert traced.select(2)
+    _polls(fake, 1)
+    assert "SelectTrack" in _starts_sent(fake, n)
+
+
+def test_a_next_asked_behind_a_tap_waiting_its_turn_moves_from_the_tapped_entry(fake, output, monkeypatch):
+    """HQPlayer plays slot 2 of four; a slow command holds the command lock, a
+    tap of track 1 waits its turn, then Next is asked: each is watched as its
+    turn comes, so Next moves from the tap's entry onto track 2 — the start
+    under way — and a tap of track 1 then is another track, and goes."""
+    mgr, b = output
+    _at_slot_2(mgr, b, fake)
+    _moving_transport(fake, monkeypatch)
+    fake.start_polls = 100
+    link = _link()
+    fake.service["Volume"] = 1.0
+    vol = threading.Thread(target=lambda: b.set_volume(-10), daemon=True)
+    vol.start()
+    assert _wait(lambda: link.lock.owner is not None, timeout=3)
+    tap = threading.Thread(target=lambda: b.select(1, "track-1"), daemon=True)
+    tap.start()
+    assert _wait(lambda: len(link.lock._waiting) == 1, timeout=3)
+    nxt = threading.Thread(target=b.next, daemon=True)
+    nxt.start()
+    assert _wait(lambda: len(link.lock._waiting) == 2, timeout=3)
+    for t in (vol, tap, nxt):
+        t.join(10)
+    _polls(fake, 2)
+    with fake._lock:
+        assert fake.track == 2
+    assert b._starts_already(mgr.queue.item_at(2))
+    assert b.select(1, "track-1")
+    _polls(fake, 2)
+    with fake._lock:
+        assert fake.track == 1
+
+
+def test_a_play_waiting_its_turn_before_a_next_goes(fake, output, monkeypatch):
+    """Paused on track 1; a slow command holds the command lock; Play waits
+    its turn, then Next is asked. The Play's turn comes first, with no start
+    under way — the Next is watched only at its own turn — so the Play goes,
+    and the Next after it."""
+    mgr, b = output
+    assert b.pause()
+    assert _wait(lambda: mgr._latest_status.get("state") == "paused", 5.0)
+    link = _link()
+    n = len(fake.commands)
+    fake.service["Volume"] = 1.0
+    vol = threading.Thread(target=lambda: b.set_volume(-10), daemon=True)
+    vol.start()
+    assert _wait(lambda: link.lock.owner is not None, timeout=3)
+    play = threading.Thread(target=b.play, daemon=True)
+    play.start()
+    assert _wait(lambda: len(link.lock._waiting) == 1, timeout=3)
+    nxt = threading.Thread(target=b.next, daemon=True)
+    nxt.start()
+    assert _wait(lambda: len(link.lock._waiting) == 2, timeout=3)
+    for t in (vol, play, nxt):
+        t.join(10)
+    assert [c for c, _ in fake.commands[n:] if c not in _QUESTIONS] == ["Volume", "Play", "Next"]
+
+
+def test_on_a_playlist_that_is_no_mirror_a_tap_behind_a_play_waiting_its_turn_rebuilds_nothing(fake, output):
+    """The start of track 2 under way, the mirror lost meanwhile; a slow
+    command holds the command lock and a Play — itself that start — waits
+    its turn. A Play changes nothing of what starts, so it is no word the tap
+    waits behind: a tap of track 2 is that start too, and nothing goes."""
+    mgr, b = output
+    _stopped(mgr, fake)
+    fake.start_polls = 100
+    assert b.select(2, "track-2")
+    assert _wait(lambda: mgr._latest_status.get("starting") is True
+                 and mgr._latest_status.get("state") == "playing", 5.0)
+    b.lose_mirror("HQPlayer refused all 3 tracks of a new queue", by="refusal")
+    link = _link()
+    n = len(fake.commands)
+    fake.service["Volume"] = 1.0
+    vol = threading.Thread(target=lambda: b.set_volume(-10), daemon=True)
+    vol.start()
+    assert _wait(lambda: link.lock.owner is not None, timeout=3)
+    play = threading.Thread(target=b.play, daemon=True)
+    play.start()
+    assert _wait(lambda: len(link.lock._waiting) == 1, timeout=3)
+    assert b.select(2, "track-2")
+    for t in (vol, play):
+        t.join(10)
+    _settled()
+    assert [c for c, _ in fake.commands[n:] if c not in _QUESTIONS] == ["Volume"]
+
+
+def test_a_play_asked_on_the_mirror_and_waiting_its_turn_is_no_word_a_press_waits_behind(fake, output):
+    """The start of track 2 under way; a slow command holds the command lock,
+    a Play is asked while the playlist is the mirror and waits its turn, and
+    the mirror is lost meanwhile. A tap of track 2 is a play press then: no
+    word that would change what starts waits ahead of it, so it is that
+    start, and nothing goes."""
+    mgr, b = output
+    _stopped(mgr, fake)
+    fake.start_polls = 100
+    assert b.select(2, "track-2")
+    assert _wait(lambda: mgr._latest_status.get("starting") is True
+                 and mgr._latest_status.get("state") == "playing", 5.0)
+    link = _link()
+    n = len(fake.commands)
+    fake.service["Volume"] = 1.0
+    vol = threading.Thread(target=lambda: b.set_volume(-10), daemon=True)
+    vol.start()
+    assert _wait(lambda: link.lock.owner is not None, timeout=3)
+    play = threading.Thread(target=b.play, daemon=True)
+    play.start()
+    assert _wait(lambda: len(link.lock._waiting) == 1, timeout=3)
+    b.lose_mirror("HQPlayer refused all 3 tracks of a new queue", by="refusal")
+    assert b.select(2, "track-2")
+    for t in (vol, play):
+        t.join(10)
+    _settled()
+    assert [c for c, _ in fake.commands[n:] if c not in _QUESTIONS] == ["Volume"]
+
+
+def test_a_play_whose_turn_comes_while_a_removal_holds_words_is_the_start_under_way(fake, output):
+    """The start of track 2 under way; a slow command holds the command lock,
+    a second phone's Play waits its turn, and a removal of track 3 begins —
+    it holds the person's words and starts nothing of its own. The Play's
+    turn comes while it holds them: the start under way is still the tap's,
+    and the Play sends nothing."""
+    mgr, b = output
+    _stopped(mgr, fake)
+    fake.start_polls = 100
+    assert b.select(2, "track-2")
+    assert _wait(lambda: mgr._latest_status.get("starting") is True, 5.0)
+    link = _link()
+    n = len(fake.commands)
+    fake.service["Volume"] = 1.0
+    vol = threading.Thread(target=lambda: b.set_volume(-10), daemon=True)
+    vol.start()
+    assert _wait(lambda: link.lock.owner is not None, timeout=3)
+    play = threading.Thread(target=b.play, daemon=True)
+    play.start()
+    assert _wait(lambda: len(link.lock._waiting) == 1, timeout=3)
+    rm = threading.Thread(target=lambda: mgr.remove(3, "track-3"), daemon=True)
+    rm.start()
+    assert _wait(lambda: b._inflight is not None and len(link.lock._waiting) == 2, timeout=3)
+    for t in (vol, play, rm):
+        t.join(10)
+    _settled()
+    _polls(fake, 1)
+    assert [it.track_id for it in mgr.queue.snapshot()] == ["track-1", "track-2"]
+    assert _starts_sent(fake, n) == []
+
+
+def test_next_while_the_nodes_own_removal_plays_out_is_a_start_under_way(fake, output, monkeypatch):
+    """HQPlayer plays slot 2 of four; the person removes it — it plays out,
+    the playlist a tail mirror — and presses Next: HQPlayer's own Next from
+    the removal's place onto track 3, watched as any start, aimed there."""
+    _moving_transport(fake, monkeypatch)
+    mgr, b = output
+    _removed_at_slot_2(mgr, b, fake)
+    fake.start_polls = 100                              # track 3 builds before any sound
+    n = len(fake.commands)
+    assert b.next()
+    assert "Next" in [c for c, _ in fake.commands[n:]]
+    assert b._attempt.intent == "next" and b._start_under_way()
+    assert b._starts_already(mgr.queue.item_at(2))      # track 3, the queue's slot 2 now
+
+
+def test_hqplayers_own_advance_out_of_the_nodes_own_removal_starts_the_track_after_it(fake, output):
+    """Slot 2 removed while it plays: it plays out to its end, and HQPlayer's
+    own advance moves on to the entry after it — track 3, the queue's slot 2
+    now, found from the removal's place."""
+    mgr, b = output
+    _removed_at_slot_2(mgr, b, fake)
+    with fake._lock:
+        fake.advance_polls = 100                        # the tail and the next one's build
+        fake.length = int(fake.position) + 2            # it ends two reads from now
+    assert _wait(lambda: b._attempt is not None and b._attempt.intent == "advance", 10.0)
+    assert b._starts_already(mgr.queue.item_at(2))
+
+
+def test_a_previous_during_hqplayers_own_advance_ends_that_start(traced, fake, monkeypatch, tmp_path, metered):
+    """Track 1 played to its end: HQPlayer's own advance onto track 2 is under
+    way, the last entry named the first. Previous then is watched from the
+    advance's entry: HQPlayer's own Previous takes entry 1 again and plays it,
+    and the advance's start is under way no more."""
+    monkeypatch.setattr(diag, "START_LIMIT_S", 30.0)
+    att = _advancing(traced, fake, monkeypatch, tmp_path, build=2.0, polls=100, refused=None, log=False)
+    assert traced._last_entry == hb.Entry(1)
+    metered.quiet = True
+    dispatch = fake._dispatch
+
+    def previous_takes_entry_1(cmd, attrs):
+        if cmd != "Previous":
+            return dispatch(cmd, attrs)
+        with fake._lock:
+            fake.commands.append((cmd, attrs))
+            fake._advancing = None
+            fake.track, fake.position, fake.state = 1, 0.0, int(PlaybackState.PLAYING)
+            fake._starting = 3                          # at 0:00 while it builds
+            fake._took()
+        return '<Previous result="OK"/>'
+    monkeypatch.setattr(fake, "_dispatch", previous_takes_entry_1)
+    assert traced.previous()
+    assert traced._attempt is not att and traced._attempt.intent == "previous"
+    _polls(fake, 2)
+    metered.quiet = False                               # track 1 sounds
+    _polls(fake, 5)
+    with fake._lock:
+        assert fake.track == 1 and fake.position >= 2.0
+    assert not traced._start_under_way()
+
+
+def test_a_tap_during_a_play_from_a_stop_on_no_entry_goes(traced, fake, metered):
+    """The queue played to its end: HQPlayer stopped on no entry, the last it
+    read the queue's last. A Play from there names no entry HQPlayer starts,
+    so a tap of the queue's last track meanwhile is no start under way: it
+    goes."""
+    assert traced.select(2)
+    _closed()
+    fake.end_now()
+    _polls(fake, 3)
+    assert traced._last_tick.state == "stopped" and traced._spot_at() is None
+    metered.quiet = True
+    fake.start_polls = 100
+    assert traced.play()
+    _polls(fake, 1)
+    assert traced._start_under_way() and traced._attempt.target is None
+    assert traced.select(2)
+    _polls(fake, 2)
+    with fake._lock:
+        assert fake.track == 2
+
+
 # -- HQPlayer 6's readings, its lists and their descriptions (hqplayer_client) ----------
 
 _LISTS_624 = Path(__file__).parent / "fixtures" / "hqp_lists" / "desktop_6.2.4.json"
@@ -7375,7 +8243,8 @@ def test_previous_while_a_removal_plays_out_never_brings_the_removed_track_back(
 
 def _moving_transport(fake, monkeypatch):
     """Next and Previous move as HQPlayer's own do — onto the entry beside,
-    a new take, playing — where the fake's answer and stay."""
+    a new take, playing (its position held for start_polls reads, as a
+    Play's) — where the fake's answer and stay."""
     real = fake._dispatch
 
     def dispatch(cmd, attrs):
@@ -7386,6 +8255,7 @@ def _moving_transport(fake, monkeypatch):
             to = fake.track + (1 if cmd == "Next" else -1)
             if 1 <= to <= len(fake.playlist):
                 fake.track, fake.position, fake.state = to, 0.0, int(PlaybackState.PLAYING)
+                fake._starting = fake.start_polls
                 fake._took()
         return f'<{cmd} result="OK"/>'
     monkeypatch.setattr(fake, "_dispatch", dispatch)

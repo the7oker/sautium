@@ -2391,6 +2391,17 @@ class HqpBackend(PlayerBackend):
                 or self._pressed is not None or self._queue.view()[2]):
             return None
         att = diag.advance(before.track_index, status.track_serial, before.output_delay, read_at)
+        if self._mirror in ("step", "tail"):
+            # The slot after the one it played, found by its item in the queue
+            # as it stands (a removal before it moves the entries): only a
+            # mirror — the whole playlist, or its tail from the entry read —
+            # names the entry it moves on to
+            layout = self._layout()
+            index = self._queue.index_of(playing[1])
+            passing = self._passing
+            if index is None and passing is not None and passing.item is playing[1]:
+                index = self._out_at(passing, layout.items)     # the node's own removal played out
+            att.aim(self._queue.item_at(layout.held(index + 1) if index is not None else None))
         hqp_meter.meter.watch(att.id, self._meter_attachment)       # before anyone can close it (_watch)
         with self._att_lock:
             began = self._attempt is not None
@@ -2786,7 +2797,10 @@ class HqpBackend(PlayerBackend):
         resumes if the start does not go — unless a start was taken or a
         spot set since it was owed (_put_back); `patient`: the start is
         background work (a re-bind), so one that fails is logged, never
-        raised."""
+        raised. The attempt starts the spot's track at its second
+        (diag.Attempt.aim) from the moment the start is owed."""
+        if att is not None and spot is not None:
+            att.aim(*spot)
         self._local.start = (att, item, start, spot, patient, self._spot_gen)
 
     def queue_start(self) -> Optional[str]:
@@ -2997,11 +3011,16 @@ class HqpBackend(PlayerBackend):
                     "— not played")
             logger.info("%s", said)
             return said
+        if (owed is None or owed[0] is not self._attempt) and self._starts_already(target, start.position):
+            # A start sent before the mutation, under way: the word is that
+            # start (a start the mutation owes and has not sent is replaced)
+            return None
         if self._mirror != "step":
             self._press(target, start.position, item=start.item)
             return None
-        self._local.start = (owed[0] if owed is not None else self._watch("play"), start.item,
-                             lambda it: self._start_item(target, start.position, it),
+        att = owed[0] if owed is not None else self._watch("play")
+        att.aim(target, start.position)
+        self._local.start = (att, start.item, lambda it: self._start_item(target, start.position, it),
                              (target, start.position), True, self._spot_gen)
         return None
 
@@ -3167,13 +3186,15 @@ class HqpBackend(PlayerBackend):
             raise Dropped("HQPlayer was detached from playback")
 
     def _cmd(self, func, intent: Optional[str] = None, *, item: Any = None,
-             number: Optional[int] = None):
+             number: Optional[int] = None, word: Optional[int] = None):
         """One command sequence of this backend: `func(client)` under the
         link's command lock, each request taking the connection for itself
         (HqpLink.command) —
         `intent` the person's or this node's (`number`: the early one a
-        mutation took as it began holding words), `item` what it serves."""
-        with self._link.command(intent, item=item, number=number) as n:
+        mutation took as it began holding words), `item` what it serves,
+        `word` the number a tap or a Play took as it was asked, which holds
+        once it decides to go."""
+        with self._link.command(intent, item=item, number=number, word=word) as n:
             self._check_attached()
             words = self._inflight
             if intent == "transport" and words is not None:
@@ -3486,6 +3507,60 @@ class HqpBackend(PlayerBackend):
         att = self._attempt
         return att is not None and att.under_way()
 
+    def _start_is_this_play(self, n: Optional[int]) -> bool:
+        """A Play numbered `n` (None: a held one carried out), its turn come:
+        is it the start under way? A start a play press or a queue mutation
+        holds is, where a word newer than this Play made it; one an older word
+        made yields to the Play, the newest word, as it would to any (a press
+        none of whose starts is live rebuilds nothing: _press_once). Otherwise
+        the attempt watched, until HQPlayer starts it or anything ends it."""
+        with self._press_lock:
+            words = self._inflight
+            if words is not None:
+                start = words.live(self._link)
+                if start is not None:
+                    return n is None or start.item.n > n
+                if words.owes and words.base is not None and not (words.halted() or words.starts):
+                    return True
+            else:
+                press = self._live(self._pressed)
+                if press is not None:
+                    start = press.live(self._link)
+                    return start is not None and (n is None or start.item.n > n)
+        # No start of a mutation's, which holds words that start nothing — a
+        # play next, a removal, a reorder: the attempt watched decides
+        att = self._attempt
+        return att is not None and att.under_way()
+
+    def _here(self, layout: _Layout) -> Optional[int]:
+        """The queue's slot HQPlayer stands on as a word's turn comes, where a
+        mirror names it: the start under way's, where it is aimed — no tick may
+        name it yet — else, while the node's own removal plays out, its place
+        (_out_at: HQPlayer moves on from there to the slot after), else, on the
+        whole mirror, the one the last tick named."""
+        if self._mirror not in ("step", "tail"):
+            return None
+        att = self._attempt
+        if att is not None and att.under_way():
+            item = att.target[0] if att.target is not None else None
+            return self._queue.index_of(item) if item is not None else None
+        passing = self._passing
+        if passing is not None:
+            return self._out_at(passing, layout.items)
+        return layout.slot(self._last_entry) if self._mirror == "step" else None
+
+    def _starts_already(self, item: QueueItem, second: float = 0.0) -> bool:
+        """Is a start of `item` at `second` under way — the track and second
+        a person's word names are the ones the attempt watched starts
+        (diag.Attempt.target: the start this node chose, or the entry a Play,
+        Next, Previous or HQPlayer's own advance moves to, from 0) — and no
+        play press or queue mutation holds words, whose own start is theirs
+        to decide? Then the word asks nothing more: a second start would make
+        HQPlayer take the entry again and build it anew. A tap is from 0: on
+        a resume at a second it is another start."""
+        att = self._attempt
+        return att is not None and att.under_way(of=(item, second)) and self.pressing() is None
+
     def _embedded(self) -> bool:
         import hqp_library
         return hqp_library.is_embedded(self._info.get("product"))
@@ -3573,21 +3648,43 @@ class HqpBackend(PlayerBackend):
 
     def _play(self, word: Optional[Item]) -> bool:
         """Play — or, `word`, a held Play carried out under the number it was
-        held with (_send_words): no intent of its own."""
+        held with (_send_words): no intent of its own. Decided as its turn on
+        the command lock comes: a start under way then (_start_under_way) —
+        one a word asked before it made, or one already going as it was
+        asked — is this Play, and nothing is sent: a second Play would make
+        HQPlayer take the entry again and build it anew. Its number, taken
+        as it is asked, holds only once it goes, so a Play that is that
+        start supersedes nothing — a start owed and not yet sent goes on —
+        and its attempt is watched from its turn, as a tap's is."""
         if word is None and self._held_play():
             return True
         if self._mirror != "step" or self._live(self._pressed) is not None:
             return self._press_play(word)
         held, spot = self._spot, self._spot_at()
         start = self._start_point(*spot) if spot is not None else None
-        with self._intent("play", slot=start[0].n if start is not None else None):
-            if spot is not None:
-                logger.info("play: honoring resume slot %d at %d s", *spot)
-                ok = self._start_at(*spot, fallback=True,
-                                    intent="transport" if word is None else None,
-                                    item="start" if word is None else word, spends=held)
-            else:
-                ok = self._command("Play", lambda h: self._play_spending(h, held), word=word)
+        n = self._link.reserve() if word is None else None
+
+        def play(h: HQPlayerClient) -> bool:
+            if self._start_is_this_play(n):
+                logger.info("play: a start is under way — no second Play")
+                return True
+            self._goes(n, "start" if start is not None else None)
+            with self._intent("play", slot=start[0].n if start is not None else None) as att:
+                if spot is not None:
+                    logger.info("play: honoring resume slot %d at %d s", *spot)
+                    if start is None:
+                        return self._started(None, f"nothing from slot {spot[0]} on is on this HQPlayer")
+                    return self._started(start[0], self._start_held(h, *start, fallback=True, spends=held))
+                last = self._last_tick
+                if last is not None and last.state == "stopped" and last.item is not None:
+                    # From a stop HQPlayer starts the entry it rests on, from 0
+                    att.aim(last.item)
+                refusal = None if self._play_spending(h, held) else HQPlayerClient.refusal(h)
+                self._local.refusal = _worded(refusal, att)
+                if refusal is not None:
+                    logger.warning("HQPlayer did not take Play: %s", diag.redact_text(refusal))
+                return refusal is None
+        ok = self._cmd(play, item=word)
         self.poke()
         return ok
 
@@ -3663,17 +3760,12 @@ class HqpBackend(PlayerBackend):
         return True
 
     def next(self) -> bool:
-        # Watched only when there is a next entry to land on.
-        last = self._last_entry
-        return self._step(1, "Next", lambda h: h.next(),
-                          last is not None and last < Entry(len(self._layout().slots)))
+        return self._step(1, "Next", lambda h: h.next())
 
     def previous(self) -> bool:
-        last = self._last_entry
-        return self._step(-1, "Previous", lambda h: h.previous(),
-                          last is not None and last > Entry(1))
+        return self._step(-1, "Previous", lambda h: h.previous())
 
-    def _step(self, by: int, name: str, send, watched: bool) -> bool:
+    def _step(self, by: int, name: str, send) -> bool:
         """Next and Previous. While a play press runs that takes words
         (_leading) they move its target, counted from the newest one — the
         slot after or before that this HQPlayer holds, at its start: a start
@@ -3733,15 +3825,26 @@ class HqpBackend(PlayerBackend):
                 return True                     # the queue's end: nowhere to go
             return self._press(target, 0)
 
-        def step(h: HQPlayerClient) -> bool:
-            if not send(h):
-                return False
-            self._spent(held)
-            return True
-        with self._intent(name.lower()) if watched else nullcontext():
-            ok = self._command(name, step)
+        def step(h: HQPlayerClient) -> Optional[str]:
+            # Watched, as its turn comes, only where HQPlayer has an entry
+            # beside the one it stands on to land on (_here)
+            now = self._layout()
+            here = self._here(now)
+            beside = now.held(here + by, by) if here is not None else None
+            with self._intent(name.lower()) if beside is not None else nullcontext() as att:
+                if att is not None:
+                    # HQPlayer's own Next or Previous starts the entry beside, from 0
+                    att.aim(self._queue.item_at(beside))
+                refusal = None if send(h) else HQPlayerClient.refusal(h)
+                if refusal is None:
+                    self._spent(held)
+                self._local.refusal = _worded(refusal, att)
+                return refusal
+        refusal = self._cmd(step, "transport")
+        if refusal is not None:
+            logger.warning("HQPlayer did not take %s: %s", name, diag.redact_text(refusal))
         self.poke()
-        return ok
+        return refusal is None
 
     def _held_step(self, words: _InFlight, by: int) -> bool:
         """Next or Previous while a queue mutation hands HQPlayer its playlist:
@@ -3804,7 +3907,13 @@ class HqpBackend(PlayerBackend):
         only once it goes, so a tap refused there supersedes nothing and a
         word made after it stays newer. The attempt is watched from the
         start the tap itself sends (a held one is the mutation's to
-        judge)."""
+        judge). A tap of the track whose start is under way as its turn
+        comes (_starts_already) — a second phone, a double tap, one that
+        waited its turn behind it — sends nothing and holds no number: it is
+        that start. One that is a play press waits for no turn and is decided
+        as it is asked, unless a person's word asked before it still waits
+        its turn on the lock (HqpLink.word_waiting): a word that would change
+        what plays goes first, and the press after it."""
         with self._press_lock:
             if self._inflight is not None:
                 return self._held_tap(self._inflight, index, track_id)
@@ -3818,6 +3927,8 @@ class HqpBackend(PlayerBackend):
             self._local.refusal = f"it is not on this HQPlayer — {why}"
             return False
         if self._mirror != "step" or self._live(self._pressed) is not None:
+            if not self._link.word_waiting() and self._starts_already(item):
+                return True                 # decided as it is asked: a press waits for no turn
             return self._press(item, 0)     # never behind the command lock
         held, tid = self._spot, item.track_id
         n = self._link.reserve()
@@ -3836,17 +3947,21 @@ class HqpBackend(PlayerBackend):
             start = self._start_point(slot, 0)
             if start is None:
                 return self._started(None, f"nothing from slot {slot} on is on this HQPlayer")
+            if self._starts_already(start[2]):
+                return True         # a tap before this one waited its turn ahead of it
             self._link.hold_as("transport", n, "start")
             with self._intent("select", slot=start[0].n):
                 return self._started(start[0], self._start_held(h, *start, fallback=False,
                                                                 spends=held))
-        ok = self._cmd(tap)
+        ok = self._cmd(tap, word=n)
         if ok is None:
             slot = self._queue.slot_of(index, tid)
             target = self._queue.item_at(slot) if slot is not None else None
             if target is None:
                 self._local.refusal = "it is no longer in the queue"
                 return False
+            if self._starts_already(target):
+                return True
             self._link.publish("transport", n)
             return self._press(target, 0, item=self._link.item(
                 "start", n, queue=self._queue, generation=self._queue.generation))
@@ -3890,6 +4005,23 @@ class HqpBackend(PlayerBackend):
         self.poke()
         return True
 
+    def _goes(self, n: Optional[int], item: Optional[str] = None) -> None:
+        """A Play numbered `n` as it was asked decided, its turn come, to go:
+        the number holds from now — each request serving `item`, where it
+        names one (hold_as) — and, asked before a queue mutation began whose
+        words hold now, it went on what plays (_InFlight.went), as a transport
+        intent's sequence does (_cmd). None: a held Play carried out, under
+        its own number."""
+        if n is None:
+            return
+        if item is not None:
+            self._link.hold_as("transport", n, item)
+        else:
+            self._link.publish("transport", n)
+        words = self._inflight
+        if words is not None:
+            words.went.append(n)
+
     def _press_play(self, word: Optional[Item] = None) -> bool:
         """Play while a play press runs: its newest target again, at the
         second it was asked for — after a Pause or a Stop, at the one a Seek
@@ -3915,7 +4047,17 @@ class HqpBackend(PlayerBackend):
             return self._press(target, position, item=word)
         last = self._last_tick
         if last is not None and last.state in ("paused", "playing"):
-            ok = self._command("Play", lambda h: h.play(), word=word)
+            n = self._link.reserve() if word is None else None
+
+            def play(h: HQPlayerClient) -> Optional[str]:
+                if self._start_is_this_play(n):
+                    return None                 # the start under way, as its turn came: this Play
+                self._goes(n)
+                return None if h.play() else HQPlayerClient.refusal(h)
+            refusal = self._local.refusal = _worded(self._cmd(play, item=word), None)
+            if refusal is not None:
+                logger.warning("HQPlayer did not take Play: %s", diag.redact_text(refusal))
+            ok = refusal is None
             if ok and last.state == "paused" and self._mirror in ("lost", "drift"):
                 threading.Thread(target=self._reconverge, kwargs={"press": True}, daemon=True,
                                  name="hqp-reconverge").start()
@@ -3931,6 +4073,10 @@ class HqpBackend(PlayerBackend):
             # it (a removal that played out), never played as it stands
             self._local.refusal = "the queue is empty"
             return False
+        if not self._link.word_waiting() and self._start_under_way():
+            # A press is never behind the command lock: decided as it is
+            # asked, unless a word asked before it still waits its turn there
+            return True
         return self._press(target, spot[1] if spot is not None else 0, item=word)
 
     def _press(self, target: QueueItem, position: int, *, item: Optional[Item] = None) -> bool:
@@ -4262,30 +4408,25 @@ class HqpBackend(PlayerBackend):
             return None
         return layout.entry(held), (position if held == slot else 0), layout.items[held - 1]
 
-    def _start_at(self, slot: int, position: int, *, fallback: bool,
-                  intent: Optional[str] = None, item: Any = None,
+    def _start_at(self, slot: int, position: int, *, fallback: bool, item: Any = None,
                   spends: Optional[tuple] = None) -> bool:
         """The queue's slot, from `position` on — where it lands on this
-        HQPlayer (_start_point) — as one command sequence serving `item`: a
-        person's jump or play press (intent transport, whose Seek and Play
-        after the SelectTrack are its start), or a start made earlier.
-        `spends`: the spot it resumes (_start_held). Returns whether HQPlayer
-        took the start."""
+        HQPlayer (_start_point) — as one command sequence serving `item`, a
+        start made earlier (a rebuild's, a play press's). `spends`: the spot
+        it resumes (_start_held). Returns whether HQPlayer took the start."""
         start = self._start_point(slot, position)
         if start is None:
             return self._started(None, f"nothing from slot {slot} on is on this HQPlayer")
-        return self._start_entry(*start, fallback=fallback, intent=intent, item=item,
-                                 spends=spends)
+        return self._start_entry(*start, fallback=fallback, item=item, spends=spends)
 
     def _start_entry(self, entry: Entry, position: int, target: QueueItem, *, fallback: bool,
-                     intent: Optional[str] = None, item: Any = None,
-                     spends: Optional[tuple] = None) -> bool:
+                     item: Any = None, spends: Optional[tuple] = None) -> bool:
         """The start at HQPlayer's `entry` — the queue's `target` — as one
         command sequence (_start_held) serving `item`."""
         return self._started(entry, self._cmd(
             lambda h: self._start_held(h, entry, position, target, fallback=fallback,
                                        spends=spends),
-            intent, item=item))
+            item=item))
 
     def _start_held(self, h: HQPlayerClient, entry: Entry, position: int,
                     target: QueueItem, *, fallback: bool,
@@ -4295,7 +4436,12 @@ class HqpBackend(PlayerBackend):
         when it read none — before a start dropped meanwhile could put one
         back; given up on — HQPlayer answered nothing past the build limit —
         whether it took it is judged at HQPlayer's next answer
-        (_judge_start). Returns HQPlayer's refusal, or None."""
+        (_judge_start). The attempt it is a step of starts `target` at
+        `position` (diag.Attempt.aim). Returns HQPlayer's refusal, or
+        None."""
+        att = getattr(self._local, "attempt", None)
+        if att is not None:
+            att.aim(target, position)
         try:
             refusal = self._start_on(h, entry, position, fallback=fallback)
         except Building:
@@ -4782,6 +4928,8 @@ class HqpBackend(PlayerBackend):
                 self._took(layout.handed, taken, unsent, "of a new queue")
                 accepted = list(items)
                 if play:
+                    # Its Play starts the first track HQPlayer took
+                    att.aim(next(it for it, t in zip(layout.handed, taken) if t))
                     self._owe_start(att, self._link.item("start", n), self._play_replaced)
         self.poke()
         return accepted

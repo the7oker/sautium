@@ -1487,6 +1487,36 @@ disconnected). A queue edit while HQPlayer is stopped keeps it on the
 stopped status the node says for the queue, until the next status says
 whether it still holds.
 
+Now Playing and the mini player spin their transport button meanwhile, as
+for a renderer's `loading`, and it takes no tap or click. Behind it the
+backend guards the start too: a Play — a second phone's, the assistant's —
+or a tap of the track whose start is under way sends HQPlayer nothing and is
+answered as that start: a second Play, or the entry selected again, would
+make HQPlayer take it again and build it anew. The track is the queue slot
+the start is for (a track queued twice is two) and the second it starts at
+(a Seek made meanwhile moves it): the slot and second this node chose; the
+entry a Play from a stop starts, where the last status names the one
+HQPlayer rests on (none named, none known); the one HQPlayer's own Next or
+Previous moves to, from the entry the start under way is for, else from the
+place of the node's own removal playing out, else, on the whole mirror, from
+what the last status named; or the one its own advance moves on to (out of
+such a removal, the slot after its place) — from 0. So a tap, always from 0,
+of a track resuming at 1:30 is another start, and goes. Every word is
+decided as its turn on the command lock comes — taps, Plays, Next and
+Previous are watched from there — so a Play, or a tap of its track, that
+waited behind a start is that start, and one that waited behind a Pause, a
+Stop or another track goes as the newest word it is; a word a queue mutation
+held is decided as it is carried out once the queue stands. A Play holds its
+number, taken as it was asked, only once it goes: one that is the start
+under way drops no start owed and not yet sent. A start a play press or a
+queue mutation holds is a Play's only where a newer word made it; one an
+older word made yields to the Play, as to any newer word. A word that is a
+play press waits for no turn and is decided as it is asked — unless a word
+that would change what starts (a tap, Next, Previous, a Pause, a Stop, a
+Seek) still waits its turn on the lock: then it is a press, after that word.
+Next, Previous, another track, a Pause and a Stop are newer words and go as
+ever; while a play press runs, its newest word decides what starts.
+
 The rate check reads the adaptive output rate of an HQPlayer on this machine
 from its `settings.xml`: the three-state box is two values of `<engine>`,
 `adaptive_rate` and `auto_family` — `"0"`/`"0"` not checked, `"1"`/`"0"`

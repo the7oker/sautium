@@ -611,6 +611,9 @@ class HqpLink:
         # asking for the command lock: number → kind
         self._latest: Dict[str, int] = {}
         self._pending: Dict[int, str] = {}
+        # The person's words asked and still waiting their turn on the
+        # command lock (word_waiting): their numbers
+        self._asking: set = set()
         # The address the last failed connect dialled, until when the next
         # ones there fail fast, since when every connect there has failed
         # (None: reached; the wall clock — a line says it, and the time away
@@ -681,6 +684,16 @@ class HqpLink:
         from now (a no-op once it was published)."""
         with self._state_lock:
             self._pending.pop(n, None)
+
+    def word_waiting(self) -> bool:
+        """Does a person's word that would change what starts — a transport
+        intent (a Pause, a Stop, a Seek, Next, Previous), a tap — still wait
+        its turn on the command lock, asked and not holding it yet? A word
+        that would be decided as it is asked is decided behind it instead. A
+        Play is none: at its turn it is the start under way, or the newest
+        word, and goes."""
+        with self._state_lock:
+            return bool(self._asking)
 
     def newest(self, *kinds: str) -> int:
         """The newest number that holds among intents of `kinds` (0: none)."""
@@ -1094,7 +1107,7 @@ class HqpLink:
 
     @contextmanager
     def command(self, intent: Optional[str] = None, *, item: Any = None,
-                number: Optional[int] = None):
+                number: Optional[int] = None, word: Optional[int] = None):
         """A command sequence: the command lock (refused while HQPlayer
         builds — Building — or answers nothing past a short silence —
         NotAnswering), each of its requests taking the connection for
@@ -1108,15 +1121,24 @@ class HqpLink:
         `item` is what the sequence serves — an Item made earlier (a start
         left for later, a resume, an owed Stop), or a kind, made here for
         `intent`: each of its requests is dropped once a newer intent
-        supersedes it (Dropped)."""
+        supersedes it (Dropped). A transport intent waiting its turn is a
+        person's word waiting (word_waiting), and so is `word`: the number a
+        tap took as it was asked, which holds only once it goes (hold_as)."""
         outer = getattr(self._local, "item", None)
         if isinstance(item, Item):
             self._local.item = item
         n = number if number is not None else self.reserve() if intent is not None else None
+        asking = n if intent == "transport" else word
+        if asking is not None:
+            with self._state_lock:
+                self._asking.add(asking)
         held = False
         try:
             with self.lock, self._scope():
                 held = True
+                if asking is not None:
+                    with self._state_lock:
+                        self._asking.discard(asking)
                 if intent is not None:
                     self.publish(intent, n)
                 else:
@@ -1126,6 +1148,9 @@ class HqpLink:
                 yield n
         finally:
             self._local.item = outer
+            if not held and asking is not None:
+                with self._state_lock:
+                    self._asking.discard(asking)
             if not held and number is not None:
                 self.withdraw(number)
 

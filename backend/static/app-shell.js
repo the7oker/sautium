@@ -972,6 +972,14 @@
     return energyLevelFromDb(db);
   }
 
+  // The transport button spins while a start is in flight — a slow output's
+  // track change (a renderer's `loading`), HQPlayer making a start before
+  // any sound leaves (`starting`) — and takes no tap meanwhile (.is-loading):
+  // a second press would only ask for it again.
+  function transportBusy(data) {
+    return data.state === 'loading' || !!data.starting;
+  }
+
   const sheet = {
     el: null,
     coverImg: null, coverFallback: null,
@@ -1044,6 +1052,7 @@
       });
       this.playPause.addEventListener('click', e => {
         e.stopPropagation();
+        if (this.playPause.classList.contains('is-loading')) return;    // a start in flight
         if (typeof window.togglePlayPause === 'function') window.togglePlayPause();
       });
       this._wireScrub();
@@ -1341,10 +1350,8 @@
           playing
             ? 'M9 5h4v20H9V5zm8 0h4v20h-4V5z'   // pause bars
             : 'M9 5v20l16-10z');                 // play triangle
-        // Slow outputs (DLNA) report `loading` while a track change is in
-        // flight — spin the transport button so the tap visibly landed.
         const btn = this.playPauseIcon.closest('button');
-        if (btn) btn.classList.toggle('is-loading', data.state === 'loading');
+        if (btn) btn.classList.toggle('is-loading', transportBusy(data));
       }
       // Radio toggle visual reflects backend flag every tick.
       if (this.radioBtn) {
@@ -1639,6 +1646,7 @@
 
       this.playPause.addEventListener('click', e => {
         e.stopPropagation();
+        if (this.playPause.classList.contains('is-loading')) return;    // a start in flight
         if (typeof window.togglePlayPause === 'function') {
           window.togglePlayPause();
         }
@@ -1687,7 +1695,7 @@
             ? 'M6 5h4v14H6V5zm8 0h4v14h-4V5z'   // pause bars
             : 'M8 5v14l11-7z');                  // play triangle
         const btn = this.playPauseIcon.closest('button');
-        if (btn) btn.classList.toggle('is-loading', loading);
+        if (btn) btn.classList.toggle('is-loading', transportBusy(data));
       }
 
       // Reset cover to gradient placeholder only when the track changes,
