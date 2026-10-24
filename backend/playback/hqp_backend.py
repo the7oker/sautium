@@ -2083,8 +2083,7 @@ class HqpBackend(PlayerBackend):
                         # meanwhile has the rest pass between its commands
                         self._rate_read(hqp)
                     now = time.monotonic()
-                    if status is not None:
-                        self._pass_by(status, read_at)
+                    passed = self._pass_by(status, read_at) if status is not None else None
                     playing = self._playing(status) if status is not None else None
                     if playing is not None and self._sampler.due(
                             status, ours=playing[1] is not None,
@@ -2169,6 +2168,7 @@ class HqpBackend(PlayerBackend):
                                 and diag.note_playing(playing[0], self._queue.generation)):
                             _notify_notices()
                         self._last_tick = self._status_of(status, playing, position)
+                        self._let_go(passed)
                         self._emit(self._last_tick)
                     if diag.note_answered():
                         _notify_notices()
@@ -2477,23 +2477,24 @@ class HqpBackend(PlayerBackend):
         head = {id(it) for it in passing.head}
         return max((i for i, it in enumerate(items, 1) if id(it) in head), default=0)
 
-    def _pass_by(self, status, read_at: float) -> None:
+    def _pass_by(self, status, read_at: float) -> Optional[_Passing]:
         """The poller's word on the node's own removal playing out: a tick
         asked after the removal's own read that finds HQPlayer there keeps
-        the entry it reads; one that finds it elsewhere, or at rest, lets it
-        go — HQPlayer passed it, unless a newer removal took its place
-        meanwhile. Stopped on it (a Stop, HQPlayer's own), the play press
-        goes on with what followed it: the spot, unless one stands."""
+        the entry it reads; one that finds it elsewhere, or at rest, finds
+        it passed — unless a newer removal took its place meanwhile — and
+        returns it, for the poller to let go with the tick that names what
+        HQPlayer reads instead (_let_go): till then Previous counts from its
+        place, never from the last tick's slot, the one removed. Stopped on
+        it (a Stop, HQPlayer's own), the play press goes on with what
+        followed it: the spot, unless one stands."""
         passing = self._passing
         if passing is None or read_at <= passing.read_at or not status.state.known:
-            return
+            return None
         if self._plays_out(status) is not None:
             passing.entry = Entry.read(status) or passing.entry
-            return
-        with self._passing_lock:
-            if self._passing is not passing:
-                return
-            self._passing = None
+            return None
+        if self._passing is not passing:
+            return None
         if (status.state == PlaybackState.STOPPED and Entry.read(status) == passing.entry
                 and any(_reads_item(r, passing.item) for r in self._readings(status.uri))):
             after = self._queue.item_at(self._out_at(passing, self._queue.snapshot()) + 1)
@@ -2501,6 +2502,17 @@ class HqpBackend(PlayerBackend):
                 with self._spot_lock:
                     if self._spot is None:
                         self._spot, self._spot_gen = (after, 0), self._spot_gen + 1
+        return passing
+
+    def _let_go(self, passed: Optional[_Passing]) -> None:
+        """The removal HQPlayer passed (_pass_by) is the node's no more — as
+        the tick that names what HQPlayer reads instead becomes the last,
+        unless a newer removal took its place meanwhile."""
+        if passed is None:
+            return
+        with self._passing_lock:
+            if self._passing is passed:
+                self._passing = None
 
     def _foreign_in_step(self, status) -> Optional[tuple]:
         """Does HQPlayer read an entry of no queue slot while its playlist is

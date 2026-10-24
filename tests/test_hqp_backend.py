@@ -6875,6 +6875,137 @@ def test_previous_while_a_removal_plays_out_never_brings_the_removed_track_back(
     assert _wait(lambda: mgr._latest_status.get("track_id") == "track-3", timeout=8), mgr._latest_status
 
 
+def _moving_transport(fake, monkeypatch):
+    """Next and Previous move as HQPlayer's own do — onto the entry beside,
+    a new take, playing — where the fake's answer and stay."""
+    real = fake._dispatch
+
+    def dispatch(cmd, attrs):
+        if cmd not in ("Next", "Previous"):
+            return real(cmd, attrs)
+        with fake._lock:
+            fake.commands.append((cmd, attrs))
+            to = fake.track + (1 if cmd == "Next" else -1)
+            if 1 <= to <= len(fake.playlist):
+                fake.track, fake.position, fake.state = to, 0.0, int(PlaybackState.PLAYING)
+                fake._took()
+        return f'<{cmd} result="OK"/>'
+    monkeypatch.setattr(fake, "_dispatch", dispatch)
+
+
+def _holding_ticks(monkeypatch):
+    """From the poller's next tick on, no tick is the last until `go` is
+    set: the window between a change and the tick that names it, held."""
+    real = HqpBackend._status_of
+    held, go = threading.Event(), threading.Event()
+
+    def status_of(self, *a, **k):
+        if not go.is_set():
+            held.set()
+            go.wait(30)
+        return real(self, *a, **k)
+    monkeypatch.setattr(HqpBackend, "_status_of", status_of)
+    assert held.wait(8)
+    return go
+
+
+def test_previous_right_after_a_removal_before_a_tick_names_it_starts_the_slot_before_it(
+        fake, output, monkeypatch):
+    """Previous before any tick named the removal: as once one did — track
+    1 as a press, the removed entry never left behind it."""
+    _moving_transport(fake, monkeypatch)
+    mgr, b = output
+    _at_slot_2(mgr, b, fake)
+    go = _holding_ticks(monkeypatch)
+    try:
+        assert mgr.remove(2, "track-2")
+        assert b._passing is not None and b._last_tick.out_after is None
+        assert b.previous()
+        _settled()
+        assert fake.playlist == [_A.format(i) for i in (1, 3, 4)], (fake.playlist, fake.track)
+        assert ("Previous", {}) not in fake.commands
+    finally:
+        go.set()
+
+
+def test_previous_after_a_removal_before_the_play_out_counts_from_its_place_now(fake, output, monkeypatch):
+    """Slot 2 plays out behind slot 1, and the person removes track 1: the
+    place is the queue's head now, and Previous before a tick names it has
+    nothing before it — never track 3, which follows it."""
+    _moving_transport(fake, monkeypatch)
+    mgr, b = output
+    _removed_at_slot_2(mgr, b, fake)
+    assert b._last_tick.out_after == 1
+    go = _holding_ticks(monkeypatch)
+    try:
+        assert mgr.remove(1, "track-1")
+        assert [it.track_id for it in mgr.queue.snapshot()] == ["track-3", "track-4"]
+        assert b.previous()
+        _settled()
+        assert fake.track == 2 and fake.playlist[1] == _A.format(2), (fake.playlist, fake.track)
+    finally:
+        go.set()
+
+
+@pytest.mark.parametrize("serial", [0, None])
+def test_previous_while_hqplayer_opens_the_entry_after_a_removal_starts_the_slot_before_it(
+        fake, output, monkeypatch, serial):
+    """Slot 2's removal played out and HQPlayer opens entry 3 by itself: its
+    Status plays and names no entry yet — no verdict, the last tick still
+    the removed track's. Previous then starts track 1, never HQPlayer's own
+    Previous onto the removed entry as another controller's."""
+    _moving_transport(fake, monkeypatch)
+    if serial is None:                              # HQPlayer 5: no take
+        with fake._lock:
+            fake.track_serial = None
+    mgr, b = output
+    _removed_at_slot_2(mgr, b, fake)
+    with fake._lock:                                # it played out: HQPlayer opens entry 3
+        fake.track, fake.position, fake.opening = 3, 0.0, 50
+        fake._took()
+    n = len(fake.commands)
+    assert _wait(lambda: _statuses_after(fake, n, 2), timeout=8)
+    assert b._last_tick.item.track_id == "track-2"
+    assert b.previous()
+    with fake._lock:
+        fake.opening = 0
+    _settled()
+    assert _wait(lambda: mgr._latest_status.get("track_id") == "track-1"
+                 and mgr._latest_status.get("state") == "playing", timeout=8), mgr._latest_status
+    assert fake.playlist[fake.track - 1] != _A.format(2), (fake.track, fake.playlist)
+
+
+def test_previous_inside_the_tick_that_finds_a_removal_passed_starts_the_slot_before_it(
+        fake, output, monkeypatch):
+    """The same inside one tick: the poller found HQPlayer past the removed
+    entry and has not yet made the tick that names track 3 the last — a
+    Previous landing there (held open here) starts track 1."""
+    _moving_transport(fake, monkeypatch)
+    mgr, b = output
+    _removed_at_slot_2(mgr, b, fake)
+    real = HqpBackend._pass_by
+    found, go = threading.Event(), threading.Event()
+
+    def pass_by(self, status, read_at):
+        passed = real(self, status, read_at)
+        if passed is not None and not go.is_set():
+            found.set()
+            go.wait(10)
+        return passed
+    monkeypatch.setattr(HqpBackend, "_pass_by", pass_by)
+    try:
+        fake.end_now()                              # it played out: HQPlayer's own advance onto entry 3
+        assert found.wait(8)
+        assert b._last_tick.item.track_id == "track-2"
+        assert b.previous()
+    finally:
+        go.set()
+    _settled()
+    assert _wait(lambda: mgr._latest_status.get("track_id") == "track-1"
+                 and mgr._latest_status.get("state") == "playing", timeout=8), mgr._latest_status
+    assert fake.playlist[fake.track - 1] != _A.format(2), (fake.track, fake.playlist)
+
+
 def test_a_play_next_right_after_a_removal_played_out_goes_behind_what_plays(fake, output, monkeypatch):
     """The removed track ended and HQPlayer moved on before a tick said so:
     a play next anchored on the place it stood goes behind what HQPlayer
