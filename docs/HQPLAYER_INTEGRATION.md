@@ -1320,8 +1320,13 @@ a minute, while HQPlayer is still making the start: it says it plays, or its
 control port is silent, and the position has not moved (a long filter
 initialises before any audio leaves: sinc-MGa at DSD256 on a laptop's CPU took
 5–7 s, the port answering no Status meanwhile, 2026-10-03; judged at ten
-seconds, those plays read `unknown`) — what HQPlayer's meter stream showed
-meanwhile (the start signal, below), what the media
+seconds, those plays read `unknown`), or, sent a Play or a SelectTrack, it
+says it is stopped with its `track_serial` still the one from before the
+command — it has yet to take the start: Desktop 6.2.4, a heavy SDM filter on
+CUDA, answered the Play at once and said so until its engine ran
+(2026-10-21), where a start it takes moves the serial, one it refuses at once
+included (since 2026-10-24) — what HQPlayer's meter stream showed meanwhile
+(the start signal, below), what the media
 proxy saw for that file's token (each request's status, range and bytes —
 `MediaProxy.hits`), and, read as it closes, HQPlayer's playlist: whether the
 expected entry is in it and whose entry it plays. A stop, a pause, a DSP change
@@ -1359,11 +1364,13 @@ file is never asked for. A failed attempt rides the status as `diagnosis`
 while HQPlayer is not playing: one toast, a "Why didn't it play?" tag on Now
 Playing beside that track, and a sheet with the sentence, the next step and
 the raw trace; the HQPlayer screen lists the recent attempts. Once HQPlayer
-plays that very slot — the position moving, the speed keeping up — the
-failure is cleared and offered no more: before, the end of an album brought
-back a failure from its start. The same failure three plays in a row is the
-`hqplayer.failing` notice (a run ends on HQPlayer's first answer after an
-`unreachable`, or on that slot playing). API: `GET /api/player/diagnostics/hqplayer` (attempts, the failing
+plays that very slot — the position moving from one status to the next of
+the same take, no Seek sent between them (a Seek's second is no move: since
+2026-10-24), the speed keeping up — the failure is cleared and offered no
+more: before, the end of an album brought back a failure from its start. The
+same failure three plays in a row is the `hqplayer.failing` notice (a run
+ends on HQPlayer's first answer after an `unreachable`, or on that slot
+playing). API: `GET /api/player/diagnostics/hqplayer` (attempts, the failing
 run, `client_errors`), `…/hqplayer/{id}` (one whole trace), `…/hqplayer/log`.
 
 **The start, on the meter stream** (since 2026-10-22). Every attempt opens
@@ -1384,7 +1391,11 @@ the meter alone: the entry before HQPlayer's own advance, or the one a jump
 leaves, sounds on for a moment past the take while a status may already
 name the next, and a socket opened then meets that sound at once. Or
 HQPlayer said it played and the position moved, as before: a source's
-digital silence shows on the meter as none. A position that has not moved
+digital silence shows on the meter as none. It moves from where the take
+began — 0, or the second a Seek HQPlayer took set (since 2026-10-24): a
+resume's start puts it at its second, and a Seek made while HQPlayer
+builds moves it with no audio leaving, so neither is a start, and a resume
+that never sounds is no `played`. A position that has not moved
 judges nothing where the meter heard the start: a start whose position
 stays at 0 for seconds while the meter shows sound is still started; an
 attempt whose sound runs on unnamed is still starting at the window's end
@@ -1448,6 +1459,33 @@ stopped tick stays a Play's. An advance that played, or one another action
 took over, is not kept; a start on the same take after the deadline (the
 same `track_serial`) makes it `played` and clears its failure — a Play of
 that entry is another take, an attempt of its own.
+
+**A start under way** (since 2026-10-24). HQPlayer may answer the command
+that starts an entry at once and build its filter before any sound leaves,
+its control port answering meanwhile — no build of ours to say, and the
+entry sat at 0:00 until the sound came. So every status the HQPlayer output
+gives carries `starting` while the attempt watched — a play intent of this
+node's, or HQPlayer's own advance — has not started by the rule above,
+nothing ended it, and HQPlayer, as its latest status read it, neither pauses
+(a Pause from its own window holds no start) nor stopped a start it took —
+refused it, or a Stop from its own window or another controller; a stop with
+its take not yet taken is its build, above, and one between the entry it
+played as the start was sent and the next — its serial moved, nothing of the
+take played yet — that entry's tail and the next one's build, as on its own
+advance; a Stop of the start's own sequence (a new queue's, a play press's),
+or a status it read there (a DSP change's resume), says HQPlayer played
+nothing by then. A play press or a queue mutation holding the person's words
+says it by the start it will send, where it names one: a Pause or a Stop it
+holds, or a newer word that superseded its start, leaves none. It is worked
+out as each status is said, never kept with the status it rides on — a
+silence says the last status again, and the start may have ended since — so
+it ends with the start and with every other end of the attempt: its verdict,
+a Pause or a Stop, another intent, a DSP change (as HQPlayer answers it),
+the output switched, HQPlayer gone (said again as soon as the attempt closes
+on a read HQPlayer did not answer, never only at the five misses that say it
+disconnected). A queue edit while HQPlayer is stopped keeps it on the
+stopped status the node says for the queue, until the next status says
+whether it still holds.
 
 The rate check reads the adaptive output rate of an HQPlayer on this machine
 from its `settings.xml`: the three-state box is two values of `<engine>`,

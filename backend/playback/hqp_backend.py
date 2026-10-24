@@ -1135,6 +1135,10 @@ class HqpBackend(PlayerBackend):
         # The latest status emitted: what the poller says again, with the
         # build, while HQPlayer is building and answers nothing.
         self._last_tick: Optional[PlaybackStatus] = None
+        # The latest status said (_say) — a tick, a silence, a disconnection —
+        # and whether it said a start under way: the poller's alone
+        self._said: Optional[PlaybackStatus] = None
+        self._said_starting = False
         # The position on the clock of the take HQPlayer plays (_clocked):
         # the poller's alone; and this node's newest Seek HQPlayer took, as
         # (second, sent at, the attempt whose start sent it — None for the
@@ -1168,8 +1172,9 @@ class HqpBackend(PlayerBackend):
         self._last_closed: Optional[diag.Attempt] = None
         self._last_entry: Optional[Entry] = None
         # The tick before this one, as (status, playing): HQPlayer's own
-        # advance is told by the two (_advance)
+        # advance is told by the two (_advance); and when it was asked for
         self._before: Optional[tuple] = None
+        self._before_at = 0.0
         # The rate check this backend holds for the queue it plays
         # (hqp_rate_check), the notice's source: what an event asks the next
         # tick to read — "state", "lists", or nothing but judging again —
@@ -2134,7 +2139,8 @@ class HqpBackend(PlayerBackend):
                     hqp_meter.meter.set_gain(None if status.track_gain is None
                                              else status.volume + status.track_gain)
                     self._last_entry = Entry.read(status) or self._last_entry
-                    self._before = (status, playing)
+                    prev, prev_at = self._before, self._before_at
+                    self._before, self._before_at = (status, playing), read_at
                     if (parked and self._rate_refused and not self._rate_woken
                             and status.state == PlaybackState.PLAYING and playing is not None
                             and playing[1] is not None and not playing[2]):
@@ -2161,16 +2167,23 @@ class HqpBackend(PlayerBackend):
                         _notify_notices()
                     position = self._clocked(status, read_at, att)
                     if playing is not None:
-                        # The slot playing on, its position moving and the DSP
-                        # keeping up: a failure judged on it explains nothing now.
+                        # The slot playing on, its position moving since the
+                        # tick before on the same take — a Seek's second, a
+                        # resume's, is no move: none sent since that tick —
+                        # and the DSP keeping up: a failure judged on it
+                        # explains nothing now.
                         if (status.state == PlaybackState.PLAYING and playing[1] is not None
-                                and status.position >= 1.0
+                                and prev is not None and prev[0].state == PlaybackState.PLAYING
+                                and prev[1] is not None and prev[1][1] is playing[1]
+                                and prev[0].track_serial == status.track_serial
+                                and status.position > prev[0].position
+                                and (self._seek_mark is None or self._seek_mark[1] <= prev_at)
                                 and (status.process_speed is None or status.process_speed >= 1.0)
                                 and diag.note_playing(playing[0], self._queue.generation)):
                             _notify_notices()
                         self._last_tick = self._status_of(status, playing, position)
                         self._let_go(passed)
-                        self._emit(self._last_tick)
+                        self._say(self._last_tick)
                     if diag.note_answered():
                         _notify_notices()
                     if sample is not None:
@@ -2198,6 +2211,15 @@ class HqpBackend(PlayerBackend):
                 att.request_end("refused")
             self._settle(att if att is not None and att.due(time.time()) is not None
                          else None, reads)
+            if self._said is not None and self._start_under_way() != self._said_starting:
+                # A start ended, or began, after this pass said the status — an
+                # attempt closed on a read HQPlayer did not answer (gone: five
+                # misses and their back-off before it says so), one closed or
+                # watched while the pass ran: said again now
+                try:
+                    self._say(self._said)
+                except Exception:
+                    logger.exception("HQPlayer's start under way was not said again on the status")
 
             # Back off when HQPlayer stops answering. It accepts the TCP
             # connect but doesn't reply to <Status/> (control thread busy
@@ -2696,8 +2718,13 @@ class HqpBackend(PlayerBackend):
     def _watch(self, intent: str, *, slot: Optional[int] = None,
                uris: Optional[list] = None, items: Optional[list] = None) -> diag.Attempt:
         """A new play intent's attempt: the one watched now, superseding the
-        one before."""
-        att = diag.Attempt(intent=intent, slot=slot, uris=uris, items=items)
+        one before — knowing HQPlayer's track_serial as the poller last read
+        it (a start HQPlayer has yet to take leaves it so), and whether it
+        played an entry then (its tail and the next one's build follow)."""
+        before = self._before
+        att = diag.Attempt(intent=intent, slot=slot, uris=uris, items=items,
+                           serial_before=before[0].track_serial if before is not None else None,
+                           from_playing=before is not None and before[0].state == PlaybackState.PLAYING)
         # Its start window: the meter stream, from before its first command
         # to the attempt's close (diag.started) — its sound tells an end the
         # Status may not show; watched before anyone can see the attempt, so
@@ -3104,7 +3131,8 @@ class HqpBackend(PlayerBackend):
         that intent's attempt (superseded or not); from anywhere else a stop,
         a pause, a DSP change or a replaced playlist HQPlayer took means the
         owner moved on — one it refused changed nothing. A Seek HQPlayer took
-        sets the position's clock (_clocked)."""
+        sets the position's clock (_clocked), and where the attempt watched
+        reads its position from (diag.Attempt.sought)."""
         mine = getattr(self._local, "attempt", None)
         if outcome.command == "Seek" and not outcome.failed:
             self._seek_mark = (float(outcome.attributes.get("position") or 0), outcome.sent or outcome.ts,
@@ -3114,6 +3142,9 @@ class HqpBackend(PlayerBackend):
             return
         att = self._attempt
         if att is None or outcome.failed:
+            return
+        if outcome.command == "Seek":
+            att.sought(outcome)
             return
         a = outcome.attributes
         if (outcome.command in diag.OWNER_COMMANDS
@@ -3419,7 +3450,7 @@ class HqpBackend(PlayerBackend):
         if silent:
             self._emit_silence({"not_answering": NOT_ANSWERING})
         else:
-            self._emit(PlaybackStatus(state="disconnected"))
+            self._say(PlaybackStatus(state="disconnected"))
 
     def _emit_building(self, state: dict) -> None:
         """The last status again, with the build HQPlayer is in."""
@@ -3428,8 +3459,32 @@ class HqpBackend(PlayerBackend):
     def _emit_silence(self, why: dict) -> None:
         """The last status again — HQPlayer said nothing new — with why."""
         last = self._last_tick
-        self._emit(replace(last, extra={**last.extra, **why}) if last is not None
-                   else PlaybackStatus(state="unknown", extra=why))
+        self._say(replace(last, extra={**last.extra, **why}) if last is not None
+                  else PlaybackStatus(state="unknown", extra=why))
+
+    def _say(self, status: PlaybackStatus) -> None:
+        """Hand the manager `status`, with `starting` while a start is under
+        way (_start_under_way) as it stands now — never kept with the tick:
+        a silence says the last tick again, and a Stop may have ended the
+        start since. The poller says it again when that changes after its
+        pass (_poll_loop). Called on the poller."""
+        self._said = status
+        self._said_starting = self._start_under_way()
+        self._emit(replace(status, extra={**status.extra, "starting": True})
+                   if self._said_starting else status)
+
+    def _start_under_way(self) -> bool:
+        """Is a start under way? One a play press or a queue mutation holds,
+        and sends once it stands (pressing) — a Pause or a Stop they hold, or
+        a newer word that superseded their start, leaves none; else the
+        attempt watched, a play intent of this node's or HQPlayer's own
+        advance, until HQPlayer starts it or anything ends it
+        (diag.Attempt.under_way)."""
+        pressed = self.pressing()
+        if pressed is not None:
+            return bool(pressed)
+        att = self._attempt
+        return att is not None and att.under_way()
 
     def _embedded(self) -> bool:
         import hqp_library
@@ -4303,12 +4358,17 @@ class HqpBackend(PlayerBackend):
         at, second, target = start
 
         def resume(h: HQPlayerClient) -> Optional[bool]:
+            asked = time.time()
             now = h.get_status()
             if now is None or now.state != PlaybackState.STOPPED:
                 return False
             if not mirrored:
                 return None         # the press, off this command sequence
-            with self._intent("resume", slot=at.n):
+            with self._intent("resume", slot=at.n) as att:
+                # What HQPlayer held as the resume went, read in its own
+                # sequence: stopped, the serial its build left — the poller
+                # asked nothing while HQPlayer built in silence
+                att.tick(now, "stopped", asked)
                 return self._started(at, self._start_held(h, at, second, target, fallback=True,
                                                           spends=None))
         ok = self._cmd(resume, item=item)

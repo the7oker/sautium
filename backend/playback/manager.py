@@ -761,9 +761,10 @@ class PlaybackManager:
         # The HQPlayer output's own words (playback.hqp_backend): the build it
         # is in, a silence no build of ours explains, the outcome of a DSP
         # change that went through a build, where the play press resumes a
-        # stopped HQPlayer, and a play press taking the queue to it again.
+        # stopped HQPlayer, a play press taking the queue to it again, and a
+        # start under way — HQPlayer has yet to sound it.
         new_data.update({k: s.extra[k] for k in ("building", "not_answering", "dsp_change",
-                                                 "resume", "rebuilding")
+                                                 "resume", "rebuilding", "starting")
                          if s.extra.get(k) is not None})
 
         # Per-track listening history + scrobble (source-agnostic: owned and
@@ -978,9 +979,12 @@ class PlaybackManager:
             "ui_build": ui_build(),
         }
         # A queue edit while stopped keeps the explanation of the last play
-        # on screen; the backend's next tick decides whether it still holds.
+        # on screen, and a start under way (HQPlayer's own advance, a play
+        # press); the backend's next tick decides whether they still hold.
         if self._latest_status.get("diagnosis"):
             idle["diagnosis"] = self._latest_status["diagnosis"]
+        if self._latest_status.get("starting"):
+            idle["starting"] = True
         self._push_status(idle)
 
     def apply_reorder(self, plan: ReorderPlan) -> dict:

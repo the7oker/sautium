@@ -109,6 +109,15 @@ class FakeHqp:
         # When its own Next at an entry's end came (time.monotonic()): the
         # tail of its output delay plays on from there (HqpMeterPort)
         self.ended_at = None
+        # A Seek moves the position to its second, as HQPlayer does; unset,
+        # the fake takes none (the tests that need one set it by hand)
+        self.takes_seek = False
+        # Status polls after a start from stopped during which it builds on
+        # CUDA first, answering: stopped on no entry, its track_serial not one
+        # more yet — then playing the entry, the serial one more (Desktop
+        # 6.2.4, a heavy SDM filter, 2026-10-21); the entry and the polls left
+        self.cuda_polls = 0
+        self._cuda = None
         self.mute = False
         self._down = False
         # Until when it answers nothing, on any connection — busy building a
@@ -336,7 +345,15 @@ class FakeHqp:
                 return self.replies[cmd]
             if cmd == "Status":
                 opening = self.state == int(PlaybackState.PLAYING) and self.opening > 0
-                if self._advancing is not None:
+                if self._cuda is not None:
+                    if self._cuda[1] > 0:
+                        self._cuda[1] -= 1
+                    else:
+                        self.track, self._cuda = self._cuda[0], None
+                        self._took()
+                        self.state, self.position = int(PlaybackState.PLAYING), 0.0
+                        self._starting = self.start_polls
+                elif self._advancing is not None:
                     if self._advancing[1] > 0:
                         self._advancing[1] -= 1
                     else:
@@ -415,6 +432,10 @@ class FakeHqp:
                         self.track = min(self.track, len(self.playlist))
                 return '<PlaylistRemove result="OK"/>'
             if cmd == "Play":
+                if self.playlist and self.state == int(PlaybackState.STOPPED) and self.cuda_polls:
+                    if self._cuda is None:
+                        self._cuda, self.track = [self.track or 1, self.cuda_polls], 0
+                    return '<Play result="OK"/>'
                 if self.playlist:
                     if self.state == int(PlaybackState.STOPPED):
                         self._took()
@@ -426,12 +447,19 @@ class FakeHqp:
                     self._stops_if_refused()
                 return '<Play result="OK"/>'
             if cmd == "Stop":
-                self.state = int(PlaybackState.STOPPED)
+                self.state, self._cuda = int(PlaybackState.STOPPED), None
                 return '<Stop result="OK"/>'
+            if cmd == "Seek" and self.takes_seek:
+                self.position = float(attrs["position"])
+                return '<Seek result="OK"/>'
             if cmd == "Pause":
                 if self.state == int(PlaybackState.PLAYING):
                     self.state = int(PlaybackState.PAUSED)
                 return '<Pause result="OK"/>'
+            if cmd == "SelectTrack" and self.state == int(PlaybackState.STOPPED) and self.cuda_polls:
+                if self.playlist:
+                    self._cuda, self.track, self.position = [int(attrs["index"]), self.cuda_polls], 0, 0.0
+                return '<SelectTrack result="OK"/>'
             if cmd == "SelectTrack":
                 self.track = int(attrs["index"])
                 self.position = 0.0
@@ -455,7 +483,7 @@ class FakeHqp:
             self.playlist = []
             self.state = int(PlaybackState.STOPPED)
             self.track = 0
-            self._advancing = None
+            self._advancing = self._cuda = None
             if self.track_serial is not None:
                 self.track_serial = 0           # counted afresh
             self._builds.clear()
@@ -2022,6 +2050,8 @@ class HqpMeterPort:
         self.fake, self.tail_s = fake, tail_s
         # Nothing at all while set: HQPlayer building the entry it says it plays
         self.quiet = False
+        # All-zero frames while it plays: a source's digital silence
+        self.digital_silence = False
         self._srv = socket.create_server(("127.0.0.1", 0))
         self.port = self._srv.getsockname()[1]
         self.accepts = 0
@@ -2043,7 +2073,7 @@ class HqpMeterPort:
         f = self.fake
         with f._lock:
             if f.state == int(PlaybackState.PLAYING) and f.track >= 1 and f._advancing is None:
-                return self.SOUND
+                return self.SILENCE if self.digital_silence else self.SOUND
             if f.ended_at is not None and time.monotonic() - f.ended_at < self.tail_s:
                 return self.SILENCE
             return None
@@ -2971,6 +3001,474 @@ def test_overlapping_intents_keep_their_own_commands(fake):
     assert nxt.end is None                       # not ended as the owner's
     b._on_outcome(out("Stop"))                   # a Stop from no intent at all is
     assert nxt.end == "owner"
+
+
+# -- a start under way: the status's `starting` (HqpBackend._start_under_way) ------------
+# From a play intent, or HQPlayer's own advance, until HQPlayer starts the
+# entry by the attempt's rule — the meter heard it, or the position moved —
+# or anything ends the attempt. Said as each status is said, never kept with
+# the tick it rides on.
+
+@pytest.fixture
+def said(traced, monkeypatch):
+    """Every status the traced backend says, as (when, the status)."""
+    out = []
+    monkeypatch.setattr(traced, "_emit", lambda s: out.append((time.time(), s)))
+    return out
+
+
+def _starting(s: PlaybackStatus) -> bool:
+    return bool(s.extra.get("starting"))
+
+
+def _said_since(said, t) -> list:
+    return [s for at, s in list(said) if at > t]
+
+
+def test_a_start_is_under_way_from_the_tap_to_the_sound_the_meter_hears(traced, fake, metered, said):
+    """HQPlayer takes the tap at once and builds before any sound leaves —
+    its Status says it plays, the position at 0 — and the meter hears
+    nothing: every status says the start is under way until the meter
+    hears it, and none after."""
+    metered.quiet = True                                # building: nothing on the meter
+    fake.start_polls = 100                              # Status's position kept at 0
+    assert traced.select(2)
+    t = time.time()
+    assert _wait(lambda: len(_said_since(said, t)) >= 3, 8.0)
+    building = _said_since(said, t)
+    # a tick asked before the tap may be said after it: the start under way all the same
+    assert all(_starting(s) for s in building)
+    assert any(s.state == "playing" and s.position == 0.0 for s in building)
+    metered.quiet = False
+    loud = time.time()
+    assert _wait(lambda: not _starting(said[-1][1]), 8.0)
+    # judged at the poller's tick past half a second of sound: within two polls of it
+    first = next(at for at, s in list(said) if at > loud and not _starting(s))
+    assert first - loud < 2.5
+    assert all(_starting(s) for at, s in list(said) if t < at < loud)
+    assert not any(_starting(s) for at, s in list(said) if at > first)
+
+
+def test_without_a_meter_the_start_is_under_way_until_the_position_moves(traced, fake, said):
+    fake.start_polls = 3                                # Status's position at 0 for three reads, then on
+    assert traced.select(2)
+    t = time.time()
+    assert _wait(lambda: any(s.position >= 2.0 for s in _said_since(said, t)), 10.0)
+    after = _said_since(said, t)
+    assert all(_starting(s) for s in after if s.position == 0.0)
+    assert not any(_starting(s) for s in after if s.position >= 1.0)
+
+
+def test_a_start_into_a_sources_digital_silence_is_under_way_until_the_position_moves(traced, fake, metered,
+                                                                                     said):
+    """The meter shows the source's digital silence as none: the position
+    moving starts it, as without a meter."""
+    metered.digital_silence = True
+    fake.start_polls = 3
+    assert traced.select(2)
+    t = time.time()
+    assert _wait(lambda: any(s.position >= 2.0 for s in _said_since(said, t)), 10.0)
+    after = _said_since(said, t)
+    assert any(_starting(s) for s in after)
+    assert all(_starting(s) for s in after if s.position == 0.0)
+    assert not any(_starting(s) for s in after if s.position >= 1.0)
+    a = _closed()
+    assert a.verdict["code"] == "played" and a.facts["meter"]["sessions"] and not a.facts["meter"]["runs"]
+
+
+def test_hqplayers_own_advance_is_a_start_under_way_until_the_next_entry_sounds(traced, fake, monkeypatch,
+                                                                                tmp_path, metered, said):
+    att = _advancing(traced, fake, monkeypatch, tmp_path, build=5.0, polls=3, refused=None, log=False)
+    assert _wait(lambda: att.moved(), 10.0)
+    assert _wait(lambda: not _starting(said[-1][1]), 5.0)
+    stops = [s for at, s in list(said) if at >= att.t0 and s.state == "stopped"]
+    # its first stopped tick on: the next entry's start under way through the stop
+    assert stops and all(_starting(s) for s in stops)
+
+
+def test_a_play_hqplayer_refuses_leaves_no_start_under_way(traced, fake, said):
+    fake.replies["Play"] = '<Play result="Error">Empty transport</Play>'
+    assert traced.play() is False
+    t = time.time()
+    assert _wait(lambda: len(_said_since(said, t)) >= 2, 5.0)
+    assert not any(_starting(s) for s in _said_since(said, t))
+
+
+def test_a_start_hqplayer_takes_and_stops_on_is_under_way_no_more_from_that_stop(traced, fake, monkeypatch,
+                                                                                 tmp_path, said):
+    """A rate HQPlayer refuses: it takes the tap, says it plays at 0 s for a
+    while and stops there. The status that says the stop says no start under
+    way — never a poll later — and the attempt closes on that tick as
+    refused."""
+    _refusing(traced, fake, monkeypatch, tmp_path, refused=None)
+    monkeypatch.setattr(diag, "OBSERVE_S", 60.0)
+    fake.start_polls = 100
+    assert traced.select(1)
+    t = time.time()
+    assert _wait(lambda: len(_said_since(said, t)) >= 2, 5.0)
+    with fake._lock:
+        fake.state = int(PlaybackState.STOPPED)                     # stopped on it at 0 s
+    assert _closed(timeout=8.0).end == "refused"
+    stops = [s for at, s in list(said) if at > t and s.state == "stopped"]
+    assert stops and not any(_starting(s) for s in stops)
+    assert any(_starting(s) for s in _said_since(said, t) if s.state == "playing")
+
+
+def test_a_stop_during_the_start_ends_it_at_once(traced, fake, metered, said, monkeypatch):
+    monkeypatch.setattr(diag, "OBSERVE_S", 60.0)
+    metered.quiet = True
+    fake.start_polls = 100
+    assert traced.select(2)
+    assert _wait(lambda: said and _starting(said[-1][1]), 5.0)
+    assert traced.stop()
+    t = time.time()
+    assert _wait(lambda: len(_said_since(said, t)) >= 2, 5.0)
+    assert not any(_starting(s) for s in _said_since(said, t))
+
+
+def test_a_resume_hqplayer_builds_is_under_way_until_the_meter_hears_it(traced, fake, metered, said):
+    """A resume at 60 s: HQPlayer takes the SelectTrack, the Seek and the Play
+    at once and builds before any sound leaves, its Status at the second the
+    start put it at, standing still. That position is no audio leaving: the
+    start is under way until the meter hears it."""
+    fake.takes_seek = True
+    metered.quiet = True
+    fake.start_polls = 100
+    traced._set_spot(traced._queue.item_at(2), 60)
+    assert traced.play()
+    assert ("Seek", {"position": "60"}) in fake.commands
+    t = time.time()
+    assert _wait(lambda: len(_said_since(said, t)) >= 4, 8.0)
+    after = _said_since(said, t)
+    assert any(s.state == "playing" and s.position == 60.0 for s in after)
+    assert all(_starting(s) for s in after), [(s.state, s.position, _starting(s)) for s in after]
+    metered.quiet = False
+    assert _wait(lambda: not _starting(said[-1][1]), 8.0)
+
+
+def test_a_seek_while_hqplayer_builds_the_start_leaves_it_under_way(traced, fake, metered, said):
+    """The person drags the seek bar while the tap's start spins: HQPlayer
+    goes to 120 s and still builds — nothing on the meter, the position
+    standing there."""
+    fake.takes_seek = True
+    metered.quiet = True
+    fake.start_polls = 100
+    assert traced.select(2)
+    assert _wait(lambda: said and _starting(said[-1][1]), 5.0)
+    assert traced.seek(120)
+    t = time.time()
+    assert _wait(lambda: len(_said_since(said, t)) >= 3, 8.0)
+    after = _said_since(said, t)
+    assert any(s.position == 120.0 for s in after)
+    assert all(_starting(s) for s in after), [(s.state, s.position, _starting(s)) for s in after]
+
+
+def test_a_resume_hqplayer_never_sounds_is_judged_without_playing(traced, fake, metered, monkeypatch):
+    """Its Status at the resume's second, standing still to the start limit,
+    the meter silent: the start rule never saw audio leave, so the verdict is
+    no `played`."""
+    monkeypatch.setattr(diag, "START_LIMIT_S", 3.0)
+    fake.takes_seek = True
+    metered.quiet = True
+    fake.start_polls = 100
+    traced._set_spot(traced._queue.item_at(2), 60)
+    assert traced.play()
+    a = _closed(timeout=10.0)
+    assert a.intent == "play" and a.facts["seeks"] and a.facts["seeks"][0][1] == 60.0
+    assert all(t["position"] == 60.0 for t in a.facts["ticks"] if t["state"] == "playing")
+    assert a.verdict["code"] != "played", a.verdict
+    _polls(fake, 3)
+    assert not a.cleared                    # a position standing at its resume's second plays nothing on
+    assert traced.seek(120)                 # the person drags forward: still nothing sounds
+    _polls(fake, 3)
+    with fake._lock:
+        assert fake.position == 120.0
+    assert not a.cleared                    # a Seek's jump is no move either
+
+
+def test_a_start_hqplayer_builds_stopped_is_under_way_past_the_window_until_it_sounds(traced, fake, metered,
+                                                                                     said):
+    """HQPlayer answers the tap at once and builds on CUDA first, saying it is
+    stopped on no entry, its track_serial as it was, for longer than the
+    attempt's window: no stop of HQPlayer's — it has yet to take the start —
+    so the start is under way through it until the meter hears the entry,
+    and the attempt is played."""
+    fake.cuda_polls = 7                                 # stopped statuses for seconds: past the 1.5 s window
+    assert _wait(lambda: traced._before is not None, 5.0)       # the poller has read HQPlayer: its serial known
+    assert traced.select(2)
+    t = time.time()
+    assert _wait(lambda: fake._cuda is None and fake.state == int(PlaybackState.PLAYING), 15.0)
+    builds = [(at, s) for at, s in list(said) if at > t and s.state == "stopped"]
+    assert any(at > t + diag.OBSERVE_S + 1.0 for at, _ in builds)         # some well past the window
+    assert all(_starting(s) for _, s in builds)                         # every one a start under way
+    a = _closed(timeout=10.0)
+    assert a.verdict["code"] == "played", a.verdict
+    assert a.facts["serial_before"] is not None
+
+
+def test_a_start_hqplayer_builds_stopped_is_no_refusal_the_rate_check_could_name(traced, fake, monkeypatch,
+                                                                                tmp_path, metered):
+    """A setting the rate check calls refused at HQPlayer's first stop, built
+    on CUDA first: stopped with its serial as it was, HQPlayer has yet to take
+    the start, and its stop is no refusal — the entry plays."""
+    _refusing(traced, fake, monkeypatch, tmp_path, refused=None)
+    fake.cuda_polls = 3
+    assert traced.select(1)
+    a = _closed(timeout=12.0)
+    assert (a.end, a.verdict["code"]) == ("window", "played"), (a.end, a.verdict)
+
+
+def test_a_start_hqplayer_stopped_once_it_took_it_is_under_way_no_more(traced, fake, metered, said, monkeypatch):
+    """HQPlayer said it plays the tap's entry at 0 s, building, then stops —
+    from its own window, a refusal its words do not name: the start it took is
+    under way no more, while the attempt waits for its window."""
+    monkeypatch.setattr(diag, "OBSERVE_S", 60.0)
+    metered.quiet = True
+    fake.start_polls = 100
+    assert traced.select(2)
+    assert _wait(lambda: said and _starting(said[-1][1]) and said[-1][1].state == "playing", 5.0)
+    with fake._lock:
+        fake.state = int(PlaybackState.STOPPED)
+    assert _wait(lambda: said[-1][1].state == "stopped", 5.0)
+    assert not _starting(said[-1][1]) and traced._attempt is not None
+
+
+def test_hqplayers_own_advance_stopped_once_it_took_the_next_entry_is_under_way_no_more(
+        traced, fake, monkeypatch, tmp_path, metered, said):
+    """HQPlayer's own advance took the next entry — it says it plays it at
+    0 s while it builds — then a Stop from its own window: under way no
+    more, though the advance waits for its deadline."""
+    metered.quiet = True
+    fake.advance_lag_polls = 100                        # the next entry's position kept at 0 once taken
+    att = _advancing(traced, fake, monkeypatch, tmp_path, polls=2, refused=None, log=False)
+    assert _wait(lambda: said and said[-1][1].state == "playing" and _starting(said[-1][1]), 10.0)
+    with fake._lock:
+        fake.state = int(PlaybackState.STOPPED)
+    t = time.time()
+    assert _wait(lambda: said[-1][0] > t and said[-1][1].state == "stopped", 5.0)
+    assert att.end is None and not _starting(said[-1][1])
+
+
+def test_a_next_onto_an_entry_of_another_rate_is_under_way_through_its_tail_and_build(
+        traced, fake, monkeypatch, said):
+    """The node's Next while HQPlayer plays, onto an entry of another rate,
+    goes as HQPlayer's own advance does there: stopped on no entry, its
+    serial one more, through the tail and the build, then playing the next
+    entry. No stop of the start it took: under way throughout."""
+    monkeypatch.setattr(diag, "OBSERVE_S", 10.0)
+    dispatch = fake._dispatch
+
+    def next_as_its_own_advance(cmd, attrs):
+        if cmd != "Next":
+            return dispatch(cmd, attrs)
+        with fake._lock:
+            fake.commands.append((cmd, attrs))
+            fake._end_of_track()
+        return '<Next result="OK"/>'
+    monkeypatch.setattr(fake, "_dispatch", next_as_its_own_advance)
+    assert traced.select(1)
+    assert _wait(lambda: said and said[-1][1].state == "playing" and said[-1][1].position >= 1.0
+                 and not _starting(said[-1][1]), 10.0)
+    fake.advance_polls = 5                              # its tail and the next entry's build: five reads
+    t = time.time()
+    assert traced.next()
+    assert _wait(lambda: fake._advancing is None and fake.track == 2, 15.0)
+    stops = [s for at, s in list(said) if at > t and s.state == "stopped"]
+    assert stops and all(_starting(s) for s in stops), [(s.state, _starting(s)) for s in stops]
+
+
+def test_a_next_hqplayer_builds_silent_after_its_first_stop_is_under_way_through_the_silence(
+        traced, fake, monkeypatch, said):
+    """The node's Next onto an entry of another rate: stopped on no entry,
+    its serial one more, then HQPlayer silent while it builds — the attempt
+    held open as a start still being made, and the status says so."""
+    monkeypatch.setattr(diag, "OBSERVE_S", 10.0)
+    dispatch = fake._dispatch
+
+    def next_as_its_own_advance(cmd, attrs):
+        if cmd != "Next":
+            return dispatch(cmd, attrs)
+        with fake._lock:
+            fake.commands.append((cmd, attrs))
+            fake._end_of_track()
+        return '<Next result="OK"/>'
+    monkeypatch.setattr(fake, "_dispatch", next_as_its_own_advance)
+    assert traced.select(1)
+    assert _wait(lambda: said and said[-1][1].state == "playing" and said[-1][1].position >= 2.0
+                 and not _starting(said[-1][1]), 10.0)
+    fake.advance_polls = 4
+    t = time.time()
+    assert traced.next()
+    att = traced._attempt
+    assert att is not None and att.intent == "next"
+    assert _wait(lambda: any(s.state == "stopped" for at, s in list(said) if at > t), 5.0)
+    _polls(fake, 1)
+    fake.silence(7.0)
+    assert _wait(lambda: att.snapshot()["misses"], 8.0)
+    assert traced._attempt is att and att.end is None
+    assert _starting(said[-1][1])
+
+
+def test_a_new_queue_hqplayer_refuses_at_its_play_while_it_played_is_under_way_no_more_from_that_stop(
+        fake, output):
+    """HQPlayer plays; another album is played: the replace stops HQPlayer
+    itself, hands it the queue and sends the Play — HQPlayer takes it and
+    stops at once on an entry it refuses, its serial one more. After the
+    replace's own Stop no entry plays out: that stop is the refusal."""
+    mgr, b = output
+    with fake._lock:
+        serial = fake.track_serial
+    fake.refuse_play.add("D/01.flac")
+    mgr.replace_queue([_item(f"E:/Music/D/0{i}.flac", 300 + i) for i in range(1, 4)], play=True)
+    assert _wait(lambda: fake.track_serial > serial and fake.state == int(PlaybackState.STOPPED), 5.0)
+    _polls(fake, 3)
+    assert not b._attempt.snapshot()["from_playing"] and not mgr._latest_status.get("starting")
+
+
+def test_a_dsp_changes_resume_hqplayer_refuses_at_once_is_under_way_no_more_from_that_stop(fake, output):
+    """HQPlayer stops for a DSP change's build (6.2.3 on Windows did) while the
+    poller asks nothing, and the new setting refuses the resume at once: the
+    resume read HQPlayer stopped in its own sequence, so that stop is the
+    refusal, whatever the last tick before the build said."""
+    mgr, b = output
+    fake.build("SetFilter", 1.0, stops=True)
+    with fake._lock:
+        serial = fake.track_serial
+    fake.refuse_play.add("A/01.flac")
+    hb.change_dsp({"filter": 57, "filter1x": 57})
+    assert _wait(lambda: any(c == "SelectTrack" for c, _ in fake.commands) and fake.track_serial > serial
+                 and fake.state == int(PlaybackState.STOPPED), 10.0)
+    att = b._attempt
+    _polls(fake, 3)
+    assert att.intent == "resume" and not att.snapshot()["from_playing"]
+    assert not mgr._latest_status.get("starting")
+
+
+def test_a_next_a_stopped_hqplayer_answers_by_staying_put_ends_with_its_window(traced, fake, said):
+    """Stopped with no spot of ours, Next is HQPlayer's own; this one stays
+    stopped, its serial as it was. A build is known only after a Play or a
+    SelectTrack: the start under way ends with the attempt's window, never
+    held to the start limit."""
+    with fake._lock:
+        fake.track = 1
+    assert _wait(lambda: traced._before is not None and traced._last_entry is not None, 5.0)
+    assert traced._spot is None
+    assert traced.next()
+    att = traced._attempt
+    assert att is not None and att.intent == "next"
+    assert _wait(lambda: att.end is not None, diag.OBSERVE_S + 3.0)
+    t = time.time()
+    _polls(fake, 1)
+    assert att.end == "window" and not any(_starting(s) for at, s in list(said) if at > t)
+
+
+def test_an_append_while_a_play_press_holds_a_start_keeps_it_on_the_status(fake, output, monkeypatch):
+    """HQPlayer stopped, a play press holding a start; a track appended
+    meanwhile — a filler streaming an album in, the person — makes the
+    manager say its own stopped status, which keeps the start under way."""
+    mgr, b = output
+    _stopped(mgr, fake)
+    b.lose_mirror("HQPlayer came back with a different playlist (restarted?)", by="refusal")
+    begin = threading.Event()
+    _presses_held(monkeypatch, b, begin)
+    try:
+        assert b.play()
+        assert _wait(lambda: mgr._latest_status.get("starting") is True, 5.0)
+        assert mgr.append([_item("E:/Music/B/09.flac", 19)]) == 1
+        assert mgr._latest_status.get("starting") is True
+    finally:
+        begin.set()
+    _settled()
+
+
+def test_a_status_said_again_that_the_manager_fails_on_ends_no_poller(traced, fake, monkeypatch, tmp_path):
+    """The start's end said again after the pass that closed it: a status the
+    manager fails on there (the database restarting) is logged, and the
+    poller goes on, as it does for a tick's."""
+    _refusing(traced, fake, monkeypatch, tmp_path, refused=None)
+    monkeypatch.setattr(diag, "OBSERVE_S", 60.0)
+    fake.start_polls = 100
+    armed = threading.Event()
+    statuses = []
+
+    def emit(s):
+        statuses.append(s)
+        if armed.is_set() and not s.extra.get("starting"):
+            armed.clear()
+            raise RuntimeError("the manager could not take it")
+    monkeypatch.setattr(traced, "_emit", emit)
+    assert traced.select(1)
+    assert _wait(lambda: statuses and statuses[-1].extra.get("starting"), 5.0)
+    armed.set()
+    with fake._lock:
+        fake.state = int(PlaybackState.STOPPED)         # stopped on it at 0 s: closed as refused, said again
+    assert _closed(timeout=8.0).end == "refused"
+    n = len(statuses)
+    _polls(fake, 2)
+    assert traced._thread.is_alive() and len(statuses) > n
+
+
+def test_a_pause_from_hqplayers_own_window_holds_no_start(traced, fake, metered, said, monkeypatch):
+    monkeypatch.setattr(diag, "OBSERVE_S", 60.0)
+    metered.quiet = True
+    fake.start_polls = 100
+    assert traced.select(2)
+    assert _wait(lambda: said and _starting(said[-1][1]), 5.0)
+    with fake._lock:
+        fake.state = int(PlaybackState.PAUSED)          # its own window: nothing of ours sent it
+    assert _wait(lambda: said[-1][1].state == "paused", 5.0)
+    assert not _starting(said[-1][1])
+
+
+def test_a_start_hqplayer_went_away_in_ends_with_its_attempt_long_before_the_disconnection(traced, fake,
+                                                                                         metered, said):
+    """HQPlayer gone mid-start: the attempt closes at its window on a read
+    HQPlayer did not answer, and that is said then — not after the five
+    misses and their back-off that say it disconnected."""
+    metered.quiet = True
+    fake.start_polls = 100
+    assert traced.select(2)
+    assert _wait(lambda: said and _starting(said[-1][1]), 5.0)
+    fake.close()
+    assert _wait(lambda: traced._attempt is None and not _starting(said[-1][1]), 10.0)
+    assert all(s.state != "disconnected" for _, s in list(said))
+
+
+def test_a_dsp_change_during_the_start_ends_it_and_its_build_says_no_start(fake, output, monkeypatch):
+    """A DSP change is the owner moving on: the start's attempt ends, and the
+    build HQPlayer answers nothing in is said again and again from the last
+    tick — never with the start that tick said."""
+    mgr, b = output
+    monkeypatch.setattr(diag, "OBSERVE_S", 60.0)
+    starting, buildings = _seen(mgr, "starting"), _seen(mgr, "building")
+    _stopped(mgr, fake)
+    fake.start_polls = 100                              # the tap's start: its position kept at 0
+    assert b.select(2)
+    assert _wait(lambda: mgr._latest_status.get("starting") is True, 5.0)
+    fake.build("SetFilter", 2.0)                        # answered, then silent (6.2.4)
+    n = len(starting)
+    assert hb.change_dsp({"filter": 57, "filter1x": 57})["building"] is not None
+    assert _wait(lambda: mgr._latest_status.get("building") is not None, 5.0)
+    assert _wait(lambda: "building" not in mgr._latest_status, 10.0)
+    during = [s for s, x in zip(starting[n:], buildings[n:]) if x is not None]
+    assert during and not any(during)
+
+
+def test_a_pause_a_play_press_holds_leaves_no_start_under_way(fake, output, monkeypatch):
+    mgr, b = output
+    _stopped(mgr, fake)
+    b.lose_mirror("HQPlayer came back with a different playlist (restarted?)", by="refusal")
+    begin = threading.Event()
+    _presses_held(monkeypatch, b, begin)
+    try:
+        assert b.play()                                 # a play press: the start it will send
+        assert _wait(lambda: mgr._latest_status.get("starting") is True, 5.0)
+        assert b.pause()                                # held by the press: no start goes
+        assert _wait(lambda: "starting" not in mgr._latest_status, 5.0)
+    finally:
+        begin.set()
+    _settled()
+    assert "starting" not in mgr._latest_status
 
 
 # -- HQPlayer 6's readings, its lists and their descriptions (hqplayer_client) ----------

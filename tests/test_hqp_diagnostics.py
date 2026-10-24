@@ -170,6 +170,40 @@ def test_the_start_signal_counts_an_advances_own_take_only():
     assert not diag.started([tick("stopped", 0.0, 5), tick("playing", 2.0, 6)], 5)
 
 
+def test_a_start_hqplayer_has_yet_to_take_is_watched_past_the_window_and_one_it_stopped_is_under_way_no_more():
+    def playing(serial):
+        return SimpleNamespace(**{**vars(_stopped_status(serial)), "track_index": 1})
+    # its track_serial before the command, from a status read before it, then a Play answered at 10.0
+    att = diag.Attempt(intent="play", serial_before=3)
+    att.tick(_stopped_status(4), "stopped", 9.0)
+    att.record(SimpleNamespace(during=None, command="Play", ts=10.0, sent=9.99, failed=False, result="OK",
+                               message="", attributes={}))
+    assert att.serial_before == 4
+    # building on CUDA first: stopped, the serial as it was — a start, not a stop, past the window
+    att.tick(_stopped_status(4), "stopped", 10.5)
+    att.tick(_stopped_status(4), "stopped", 19.0)
+    assert att.under_way() and not att.stopped_at_start()
+    assert att.due(10.0 + diag.OBSERVE_S + 1.0) is None
+    # the engine runs: the serial one more, HQPlayer plays at 0 s
+    att.tick(playing(5), "playing", 20.0)
+    assert att.under_way()
+    # then it stops what it took: no start under way, judged at once past the window
+    att.tick(_stopped_status(5), "stopped", 21.0)
+    assert not att.under_way() and att.due(21.0) == "window"
+    # a start it takes and refuses at once moves the serial: that stop is the refusal look
+    refused = diag.Attempt(intent="play", serial_before=4)
+    refused.record(SimpleNamespace(during=None, command="Play", ts=10.0, sent=9.99, failed=False, result="OK",
+                                   message="", attributes={}))
+    refused.tick(_stopped_status(5), "stopped", 10.5)
+    assert not refused.under_way() and refused.stopped_at_start()
+    # HQPlayer 5 names no serial: a stop at its start waits for the window, as ever
+    old = diag.Attempt(intent="play")
+    old.record(SimpleNamespace(during=None, command="Play", ts=10.0, sent=9.99, failed=False, result="OK",
+                               message="", attributes={}))
+    old.tick(_stopped_status(None), "stopped", 10.5)
+    assert old.under_way() and old.due(10.0 + diag.OBSERVE_S + 1.0) == "window"
+
+
 def test_an_advance_is_watched_from_its_first_stop_to_its_deadline():
     att = diag.advance(1, 5, 1.04, 1000.0)
     assert (att.intent, att.slot, att.t0) == ("advance", 2, 1000.0)
@@ -241,6 +275,20 @@ def test_a_burst_a_stalled_stream_delivers_at_once_is_no_resume():
     assert diag.started(stale, meter=_seen((9.4, 10.5, 11.2)), take=10.0)
 
 
+def test_a_position_a_seek_set_is_no_start_and_a_move_from_it_is():
+    # a resume at 60 s: Status at the second its start's Seek (answered at 10.0) set, standing there while it builds
+    ticks = [_tick(9.5, "stopped", 1, 0.0), _tick(10.5, position=60.0), _tick(11.5, position=60.0)]
+    assert not diag.started(ticks, seeks=[(10.0, 60.0)])
+    assert diag.started(ticks + [_tick(12.5, position=60.4)], seeks=[(10.0, 60.0)])     # it moves from there
+    assert diag.started(ticks[:2] + [_tick(11.5, position=61.0)], seeks=[(10.0, 60.0)])
+    assert diag.started(ticks)                          # with no Seek, 60 s is a move from 0
+    # a move before a Seek made since stands; a Seek made since sets where the move is read from
+    moving = [_tick(5.0, position=0.0), _tick(6.0, position=1.0), _tick(10.5, position=120.0)]
+    assert diag.started(moving, seeks=[(10.0, 120.0)])
+    assert not diag.started([_tick(5.0, position=0.4), _tick(10.5, position=120.0), _tick(11.5, position=120.0)],
+                            seeks=[(10.0, 120.0)])
+
+
 def test_sound_after_a_status_of_another_take_is_no_start_of_the_advance():
     ticks = [_tick(100.0, "stopped", 0, serial=6), _tick(101.0, "playing", 0, serial=7)]    # a Play since, its own take
     assert not diag.started(ticks, 6, _seen((40.0, 101.5, 105.0)), take=100.0)
@@ -289,7 +337,8 @@ def test_a_status_asked_for_before_the_transport_command_is_no_tick_of_the_attem
     # asked for before the Play went: what HQPlayer held then, stopped at 0 after a replace's Stop
     att.tick(_stopped_status(), "stopped", 999.9)
     assert att.snapshot()["ticks"] == [] and not att.stopped_at_start()
-    att.tick(_stopped_status(), "stopped", 1000.2)
+    # taken and stopped at once (Desktop 6.2.4 counts a refused Play's take too): the refusal look
+    att.tick(_stopped_status(6), "stopped", 1000.2)
     assert [t["ts"] for t in att.snapshot()["ticks"]] == [1000.2] and att.stopped_at_start()
 
 

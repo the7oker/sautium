@@ -216,6 +216,20 @@ class Attempt:
     # none started) — and the refusal it named (heard): the trace's "advance"
     advance: Optional[dict] = None
     follower: Optional["LogFollower"] = None
+    # The Seeks HQPlayer took while it was watched — its start's own (a
+    # resume's), and anyone's since (sought) — as (when answered, the
+    # second): the position each sets is no audio leaving (started)
+    seeks: list = field(default_factory=list)
+    # HQPlayer's track_serial before its first transport command: the
+    # latest status read before it, else the one read before it was watched;
+    # None where HQPlayer names none (HQPlayer 5). A start HQPlayer has yet
+    # to take leaves it so (_yet_to_take)
+    serial_before: Optional[int] = None
+    # HQPlayer played an entry as the command was sent — the same latest
+    # status before it — as before HQPlayer's own advance: a stop with the
+    # serial moved is then the tail of that entry and the build of the next
+    # (_stopped_after_take)
+    from_playing: bool = False
 
     def record(self, o: CommandOutcome) -> None:
         """A command this intent sent, with HQPlayer's answer."""
@@ -229,13 +243,25 @@ class Attempt:
                 return
             if command not in STEP_COMMANDS and not o.failed:
                 return
+            if command == "Stop" and not o.failed and self.t0 is None:
+                # Its own Stop before its start (a new queue's, a play
+                # press's): the start goes to a stopped HQPlayer
+                self.from_playing = False
             if command in TRANSPORT and self.t0 is None:
                 self.t0 = o.ts
                 self.take = o.sent or o.ts
             if command == "SelectTrack" and o.result == "OK":
                 self.slot = int(o.attributes.get("index") or 0) or self.slot
+            if command == "Seek" and not o.failed:
+                self.seeks.append((o.ts, float(o.attributes.get("position") or 0)))
             self.steps.append({"ts": o.ts, "command": command, "result": o.result,
                                "message": o.message, "attributes": dict(o.attributes)})
+
+    def sought(self, o: CommandOutcome) -> None:
+        """A Seek HQPlayer took from outside this intent while it is watched
+        — the person's, made while the start was under way."""
+        with _lock:
+            self.seeks.append((o.ts, float(o.attributes.get("position") or 0)))
 
     def refused(self, command: str, message: str) -> None:
         """A command that never reached HQPlayer (no connection to send it on)."""
@@ -253,11 +279,16 @@ class Attempt:
         an advance's, when its own first stopped status was asked for — is
         no tick of the attempt: it says what HQPlayer held before the
         command, which another thread may send between the poller's
-        questions."""
+        questions — its track_serial is the one before (serial_before), and
+        whether it played (from_playing). The attempt's own sequence may
+        hand it the status it read before its command, too."""
         with _lock:
             if meter is not None:
                 self.meter, self.meter_at = _since(meter, self.started), read_at
             if self.t0 is None or read_at < self.t0:
+                if status.track_serial is not None:
+                    self.serial_before = status.track_serial
+                self.from_playing = state == "playing"
                 return
             self.ticks.append(tick_of(status, state, read_at))
             follower = self.follower
@@ -270,11 +301,14 @@ class Attempt:
         refuses looks — it takes the Play and stops at once. True once: the
         close's questions are asked then, and an attempt the rate check
         names a cause for without a hedge closes at that tick (end
-        "refused") instead of at the window (names_cause)."""
+        "refused") instead of at the window (names_cause). Never while
+        HQPlayer has yet to take the start (_yet_to_take): it decides after
+        its build."""
         with _lock:
             # An advance stops by its first tick: HQPlayer decides after its tail
             if (self.stop_asked or self.t0 is None or self.advance is not None or not self.ticks
-                    or started(self.ticks, None, self.meter, self.take)):
+                    or started(self.ticks, None, self.meter, self.take, self.seeks)
+                    or self._yet_to_take()):
                 return False
             last = self.ticks[-1]
             if last["state"] != "stopped" or last["position"] > 0:
@@ -331,9 +365,10 @@ class Attempt:
         read and said nothing (a build) — or, at the latest tick, sound ran
         on the meter (HQPlayer sounds, and has yet to say what), or it said
         it plays, or a state its SDK does not name (Embedded said 5 while it
-        started a play). Refused or closed is HQPlayer away, judged at the
-        window. Called under _lock."""
-        if started(self.ticks, self._serial(), self.meter, self.take):
+        started a play), or it has yet to take the start (_yet_to_take: a
+        build it answers through). Refused or closed is HQPlayer away, judged
+        at the window. Called under _lock."""
+        if started(self.ticks, self._serial(), self.meter, self.take, self.seeks):
             return False
         last_tick = self.ticks[-1] if self.ticks else None
         last_miss = self.misses[-1] if self.misses else None
@@ -342,7 +377,44 @@ class Attempt:
         runs = (self.meter or {}).get("runs")
         if runs and self.meter_at - runs[-1]["last"] <= METER_SLACK_S:
             return True
-        return last_tick is not None and last_tick["state"] in ("playing", "unknown")
+        return last_tick is not None and (last_tick["state"] in ("playing", "unknown")
+                                          or self._yet_to_take())
+
+    def _yet_to_take(self) -> bool:
+        """Has HQPlayer yet to take this play's start — one it was sent as a
+        Play or a SelectTrack? Stopped at its latest tick, nothing played,
+        its track_serial still the one from before the command: a start it
+        builds first while it answers — Desktop 6.2.4, a heavy SDM filter on
+        CUDA, answered the Play at once and said stopped, track 0, the
+        serial unchanged, until its engine ran (2026-10-21). A start it
+        takes moves the serial, one it refuses at once too. Unknown where
+        HQPlayer names no serial, and for a Next or a Previous sent to a
+        stopped HQPlayer, never seen. Called under _lock."""
+        last = self.ticks[-1] if self.ticks else None
+        return (self.advance is None and last is not None and last["state"] == "stopped"
+                and self.serial_before is not None and last.get("serial") == self.serial_before
+                and not any(t["state"] == "playing" for t in self.ticks)
+                and any(s["command"] in ("Play", "SelectTrack") for s in self.steps))
+
+    def _stopped_after_take(self) -> bool:
+        """Did HQPlayer stop this start once it had taken it — refused it, or
+        stopped from its own window or another controller? Taken once it said
+        it plays the take — a status past serial_before: the entry it played
+        before the command is none of it — or, sent to a stopped HQPlayer,
+        once the serial moved: it moves it as it takes a start there or
+        refuses one. From an entry it played, a stop with the serial moved
+        and nothing of the take played is HQPlayer between the two — the tail
+        of the one before, then the build of the next, as on its own advance
+        (from_playing) — and the attempt's own close ends it. Called under
+        _lock."""
+        last = self.ticks[-1] if self.ticks else None
+        if last is None or last["state"] != "stopped":
+            return False
+        if any(t["state"] == "playing" and (self.serial_before is None or t.get("serial") != self.serial_before)
+               for t in self.ticks):
+            return True
+        return (not self.from_playing and self.serial_before is not None
+                and last.get("serial") not in (None, self.serial_before))
 
     def snapshot(self) -> dict:
         with _lock:
@@ -351,7 +423,9 @@ class Attempt:
                    "end": self.end, "error": self.error, "slot": self.slot,
                    "uris": list(self.uris) if self.uris else None,
                    "steps": copy.deepcopy(self.steps), "adds": copy.deepcopy(self.adds),
-                   "ticks": copy.deepcopy(self.ticks), "misses": list(self.misses)}
+                   "ticks": copy.deepcopy(self.ticks), "misses": list(self.misses),
+                   "seeks": list(self.seeks), "serial_before": self.serial_before,
+                   "from_playing": self.from_playing}
             if self.advance is not None:
                 out["advance"] = dict(self.advance)
             return out
@@ -359,7 +433,20 @@ class Attempt:
     def moved(self) -> bool:
         """HQPlayer started it: audio left (started)."""
         with _lock:
-            return started(self.ticks, self._serial(), self.meter, self.take)
+            return started(self.ticks, self._serial(), self.meter, self.take, self.seeks)
+
+    def under_way(self) -> bool:
+        """Its start is under way: nothing ended it, HQPlayer has not started
+        it (started), and HQPlayer, as its latest tick read it, does not
+        pause — a Pause made in HQPlayer's own window holds no start — nor
+        stopped what it took (_stopped_after_take): a stop where it has yet
+        to take the start is its build (_yet_to_take), one between the entry
+        it played and the next its tail and build."""
+        with _lock:
+            if (self.end is not None or (self.ticks and self.ticks[-1]["state"] == "paused")
+                    or self._stopped_after_take()):
+                return False
+            return not started(self.ticks, self._serial(), self.meter, self.take, self.seeks)
 
     def heard_at(self, serial: Optional[int]) -> Optional[float]:
         """When the meter heard the start of the take `serial` names
@@ -415,7 +502,7 @@ def tick_of(status, state: str, read_at: float) -> dict:
 
 
 def started(ticks: list, serial: Optional[int] = None, meter: Optional[dict] = None,
-            take: Optional[float] = None) -> bool:
+            take: Optional[float] = None, seeks=()) -> bool:
     """The start signal, asked of this one place by every attempt, a play's
     and an advance's. `meter` is what HQPlayer's meter stream showed (its
     runs of sound: playback.hqp_meter.HqpMeter.seen), `take` when the
@@ -432,11 +519,13 @@ def started(ticks: list, serial: Optional[int] = None, meter: Optional[dict] = N
     played and the position moved: audio left, a source's digital silence
     too, which the meter shows as none. A position that has not moved
     judges nothing where the meter heard the start: one may stay at 0 for
-    seconds while the meter shows sound. For an advance, a status
-    counts only on its take (`serial`: HQPlayer's track_serial at its first
-    stopped tick) — a Play of that entry afterwards takes it again, one
+    seconds while the meter shows sound. Nor does one a Seek set (`seeks`,
+    the attempt's): a resume's start puts it at its second, and a Seek made
+    while HQPlayer builds moves it with no audio leaving. For an advance, a
+    status counts only on its take (`serial`: HQPlayer's track_serial at its
+    first stopped tick) — a Play of that entry afterwards takes it again, one
     more, and is an attempt of its own."""
-    return heard_start(ticks, serial, meter, take) is not None or _moved(_playing(ticks, serial))
+    return heard_start(ticks, serial, meter, take) is not None or _moved(_playing(ticks, serial), seeks)
 
 
 def heard_start(ticks: list, serial: Optional[int] = None, meter: Optional[dict] = None,
@@ -455,10 +544,20 @@ def heard_start(ticks: list, serial: Optional[int] = None, meter: Optional[dict]
     return min(heard, default=None)
 
 
-def _moved(playing: list) -> bool:
-    """The position these playing statuses read moved: audio left."""
-    return (any(t["position"] >= 1.0 for t in playing)
-            or (len(playing) >= 2 and playing[-1]["position"] > playing[0]["position"]))
+def _moved(playing: list, seeks=()) -> bool:
+    """The position these playing statuses read moved: audio left. It moves
+    from where the take began, 0, or from the second the newest Seek before
+    a status set — read by the statuses asked after that Seek's answer
+    (`seeks`: (answered, second)); a status asked before it says nothing of
+    it, the link answering one request at a time."""
+    runs, rest, origin = [], list(playing), 0.0
+    for answered, second in sorted(seeks):
+        runs.append((origin, [t for t in rest if t["ts"] < answered]))
+        rest, origin = [t for t in rest if t["ts"] >= answered], second
+    runs.append((origin, rest))
+    return any(any(t["position"] >= origin + 1.0 for t in run)
+               or (len(run) >= 2 and run[-1]["position"] > run[0]["position"])
+               for origin, run in runs)
 
 
 def _playing(ticks: list, serial: Optional[int]) -> list:
@@ -493,7 +592,7 @@ def advance(entry: int, serial: int, output_delay: Optional[float], now: float) 
     (`now`, its track_serial `serial`): an attempt on the entry after it,
     watched from that tick to its deadline (ADVANCE_DELAYS)."""
     delay = output_delay or ADVANCE_DELAY_S
-    return Attempt(intent="advance", slot=entry + 1, t0=now, take=now,
+    return Attempt(intent="advance", slot=entry + 1, t0=now, take=now, from_playing=True,
                    advance={"from": entry, "serial": serial, "output_delay": delay,
                             "delay_assumed": not output_delay,
                             "deadline": now + ADVANCE_DELAYS * delay + ADVANCE_BUILD_S,
@@ -650,7 +749,8 @@ def late_start(tick: dict, generation: int, meter: Optional[dict] = None) -> boo
                 and a.verdict["code"] not in ("played", "interrupted")
                 and a.advance["serial"] == tick.get("serial")
                 and (a.facts or {}).get("generation") == generation
-                and started([tick], a.advance["serial"], meter and _since(meter, a.started), a.take)]
+                and started([tick], a.advance["serial"], meter and _since(meter, a.started), a.take,
+                            a.seeks)]
         for a in late:
             a.verdict = _v("played", a.facts, late_s=round(tick["ts"] - a.t0, 1))
             a.cleared = True
@@ -868,7 +968,8 @@ def verdict(f: dict, log: Optional[dict] = None) -> dict:
     hits = ([h for h in f["proxy"] if h["ts"] >= since]
             if mode in HTTP_MODES and f.get("proxy") is not None else None)
     playing = [t for t in ticks if t["state"] == "playing"]
-    began = (started(ticks, adv.get("serial"), f.get("meter"), f.get("take"))
+    seeks = f.get("seeks") or ()
+    began = (started(ticks, adv.get("serial"), f.get("meter"), f.get("take"), seeks)
              and (not pl.get("read") or (pl.get("at_slot_ours")
                                          and (not f.get("expected_uri") or pl.get("at_slot_expected"))))
              and (hits is None or any(h.get("bytes", 0) > 0 for h in hits)))
@@ -881,7 +982,7 @@ def verdict(f: dict, log: Optional[dict] = None) -> dict:
     # the entry a jump left, read before it, moves nothing
     heard = _heard(f.get("meter"), f.get("take"))
     since = max(f["take"], min(r["start"] for r in heard)) - METER_SLACK_S if heard else None
-    moved = _moved([t for t in _playing(ticks, adv.get("serial")) if since is None or t["ts"] >= since])
+    moved = _moved([t for t in _playing(ticks, adv.get("serial")) if since is None or t["ts"] >= since], seeks)
     stopped_after = (began and last is not None and ticks[-1]["state"] == "stopped"
                      and not _ran_out(last, f.get("meter"), f.get("take"), moved))
     owner = f["end"] in ("owner", "superseded", "shutdown") or _dsp_changed(ticks)
