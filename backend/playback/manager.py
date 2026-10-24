@@ -211,18 +211,22 @@ class PlaybackManager:
         from the persisted settings right here; pause/stop/volume keep
         using backend() and never wake a device. An output believed healthy
         is only probed: no lock, so a play intent never waits for a queue
-        edit or a play press's rebuild. An attach takes the queue lock
+        edit or a play press's rebuild — unless the probe finds it moved (a
+        renderer answering at another address now), which attaches it again. An attach takes the queue lock
         first, in the order the hold takes both: it mirrors the queue with
         no mutation in flight."""
         self._refuse_if_held()
-        b = self._active
+        b = probed = self._active
         if b is not None and b.healthy():
             self._probe(b)
-            return b
+            if b.healthy():
+                return b
+        else:
+            probed = None
         with self._mutate_lock, self._ensure_lock:
             self._refuse_if_held()
             b = self._active
-            if b is not None:
+            if b is not None and b is not probed:
                 self._probe(b)
             if b is not None and b.healthy():
                 return b

@@ -822,14 +822,12 @@ def manager(monkeypatch):
     """The real PlaybackManager with the node's settings in memory and no
     database: no listen is recorded, no queue persisted, every slot opened
     as it was queued (substitute.native_plays)."""
-    import routers.player as player_router
     import routers.settings as settings_router
     from playback import substitute, tracker
     from playback.manager import PlaybackManager
     store = {}
     monkeypatch.setattr(settings_router, "_read", lambda key: store.get(key))
     monkeypatch.setattr(settings_router, "_write", lambda key, value: store.__setitem__(key, value))
-    monkeypatch.setattr(player_router, "note_renderer_location", lambda udn, location: None)
     monkeypatch.setattr(tracker, "track_play_event", lambda *a, **k: None)
     monkeypatch.setattr(substitute, "native_plays", lambda items, output, endpoint: [None] * len(items))
     m = PlaybackManager()
@@ -912,6 +910,111 @@ def test_an_opus_stream_resumes_where_the_renderer_was_lost(tmp_path, proxy, ren
     assert "q=opus_96" in r.uri and not r.called("Seek")
     wait_for(lambda: manager.latest_status.get("state") == "playing", what="playing again")
     assert manager.latest_status["position"] >= int(lost)
+
+
+@pytest.fixture
+def picker(manager, monkeypatch):
+    """The Output picker's routes on the in-memory settings: no local
+    devices, no HQPlayer rows, and a network scan that finds what the test
+    says it finds (`found`: description URLs)."""
+    import async_upnp_client.search
+    import routers.player as player_router
+    import tls_gen
+    from playback.local import devices
+    found: list[str] = []
+
+    async def search(callback, **kw):
+        for loc in found:
+            await callback({"location": loc, "usn": "uuid:x::urn:schemas-upnp-org:device:MediaRenderer:1"})
+
+    async def sweep(found_dlna, found_hqp):
+        return None
+    monkeypatch.setattr(async_upnp_client.search, "async_search", search)
+    monkeypatch.setattr(player_router, "_unicast_sweep", sweep)
+    monkeypatch.setattr(tls_gen, "detect_private_host_ips", lambda: [])
+    monkeypatch.setattr(player_router, "_hqplayer_entries", lambda: [])
+    monkeypatch.setattr(devices, "list_devices", lambda: [])
+    monkeypatch.setattr(player_router, "_dlna_discovered", {})
+    monkeypatch.setattr(player_router, "manager", manager)
+    player_router.found = found
+    return player_router
+
+
+def _rows(picker) -> list:
+    return next(o for o in picker.get_outputs()["outputs"] if o["type"] == "dlna")["renderers"]
+
+
+def test_one_renderer_at_two_addresses_is_one_row(renderers, manager, picker):
+    """N-16: a phone pinned at its LAN address and found by a scan through a
+    tunnel is one row — where the scan reached it, the pinned address kept
+    behind it — not two, whichever case its UDN was written in."""
+    lan, tunnel = renderers(name="Phone"), renderers(name="Phone")
+    tunnel.udn = lan.udn
+    pinned = {**lan.record, "udn": lan.udn.upper()}
+    manager.store.update({"output.dlna_pinned": [pinned], "output.type": "dlna",
+                          "output.dlna_renderer": pinned})
+    picker.found[:] = [tunnel.location]
+    asyncio.run(picker._scan_run())
+    rows = _rows(picker)
+    assert len(rows) == 1
+    row = rows[0]
+    assert (row["udn"], row["location"], row["pinned"]) == (lan.udn, tunnel.location, True)
+    assert row["locations"][:2] == [tunnel.location, lan.location]
+    assert picker.get_outputs()["active"]["renderer_udn"] == row["udn"]
+
+
+def test_a_scan_teaches_the_remembered_renderer_where_it_answers(renderers, manager, picker):
+    """N-16: every address a scan reaches a remembered renderer at joins its
+    pin and the chosen output's record, newest first; the old one stays a
+    fallback."""
+    lan, tunnel = renderers(), renderers()
+    tunnel.udn = lan.udn
+    manager.store.update({"output.dlna_pinned": [lan.record], "output.type": "dlna",
+                          "output.dlna_renderer": tunnel.record})
+    picker.found[:] = [lan.location]
+    asyncio.run(picker._scan_run())
+    pin = manager.store["output.dlna_pinned"][0]
+    chosen = manager.store["output.dlna_renderer"]
+    assert pin["location"] == chosen["location"] == lan.location
+    assert chosen["locations"] == [lan.location, tunnel.location]
+
+
+def test_play_on_the_remembered_renderer_goes_where_it_answers_now(tmp_path, proxy, renderers,
+                                                                   manager, picker, quality):
+    """N-16: the output was chosen at one address and the renderer moved (a
+    phone back on the LAN from a tunnel). A scan found it at the other; the
+    play press attaches it there and plays — it used to answer "output
+    unavailable", or go to the old address and fail."""
+    old, new = renderers(), renderers()
+    new.udn = old.udn
+    items = [track(tmp_path, 1, seconds=20.0)]
+    _on_renderer(manager, old, items)
+    wait_for(lambda: manager.latest_status.get("state") == "playing", what="playing at the old address")
+    manager.backend().pause()
+    wait_for(lambda: old.state == "PAUSED_PLAYBACK", what="paused")
+    old.stop_answering()
+    picker.found[:] = [new.location]
+    asyncio.run(picker._scan_run())
+    assert manager.ensure_active().play()
+    wait_for(lambda: new.state == "PLAYING", what="playing at the new address")
+    assert new.called("SetAVTransportURI") and manager.backend()._renderer["location"] == new.location
+    wait_for(lambda: manager.latest_status.get("state") == "playing", what="the node says playing")
+
+
+def test_play_with_no_renderer_attached_goes_where_it_answers_now(tmp_path, proxy, renderers,
+                                                                  manager, picker, quality):
+    """N-16: nothing attached (a node started while the phone was away), the
+    chosen record naming the old address only: once a scan has found the
+    renderer elsewhere, the play press attaches it there."""
+    old, new = renderers(), renderers()
+    new.udn = old.udn
+    old.stop_answering()
+    manager.store.update({"output.type": "dlna", "output.dlna_renderer": old.record})
+    manager.queue.replace([track(tmp_path, 1, seconds=20.0)])
+    picker.found[:] = [new.location]
+    asyncio.run(picker._scan_run())
+    assert manager.ensure_active().play()
+    wait_for(lambda: new.state == "PLAYING", what="playing at the new address")
 
 
 def test_the_fake_renderer_plays_a_queue_through(tmp_path, proxy, renderers, nodes, quality):

@@ -3118,6 +3118,25 @@ the spot go, as a renderer's own Stop does. Lesson: a device the node has
 lost has no word on the queue — what it does meanwhile is unknowable, and
 the place it was lost at is the only one the person saw.
 
+### One picker row per renderer, and Play where it answers now (2026-10-24)
+
+A phone pinned by its LAN address and found by a scan through a tunnel was
+two rows in the Output picker (a UDN is a UUID, which reads the same in
+either case — the rows were keyed by the string), and the first taps chose
+the one that no longer answered. Back on the LAN a day later, the output
+chosen through the tunnel answered "output unavailable" to Play although
+that session's scans had found the phone at its LAN address: a scan
+updated only its own snapshot, never the pin nor the chosen record, and an
+attached instance's probe looked at the addresses it was attached with.
+Now the rows merge by `udn_key` (`_dlna_rows`): the scan's address first,
+every address the renderer was pinned or chosen at kept behind it as a
+fallback. Every address a scan reaches a remembered renderer at joins its
+pin and the chosen record (`note_renderer_location`), and the play gate's
+probe of an attached renderer asks both where it is attached and where it
+is known now — one that answers only elsewhere is let go and attached again
+there, its spot carried (`DlnaBackend.reachable`). Lesson: what a scan
+learns about a device is the device's, not the scan's.
+
 ## Known Gotchas
 
 - **The Docker image took the node's secrets.** `./backend` is the build

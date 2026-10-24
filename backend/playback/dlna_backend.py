@@ -376,7 +376,44 @@ class DlnaBackend(PlayerBackend):
         return self._dmr is not None and not self._gone
 
     def reachable(self) -> bool:
-        return renderer_online(self._renderer)
+        """The play gate's probe: does the renderer answer where this
+        instance talks to it — or, moved since, at another address it is
+        known at now (a scan or a pin added it: _record)? Then this instance
+        is let go and the gate attaches the renderer again where it answers:
+        a phone back on the LAN from a tunnel failed its first Play on the
+        tunnel address it had been chosen at. False when it answers nowhere.
+        The two probes run at once."""
+        attached = self._renderer.get("location")
+        record = self._record()
+        elsewhere = {"locations": [loc for loc in known_locations(record) if loc != attached]}
+        pool = ThreadPoolExecutor(max_workers=2)
+        try:
+            here = pool.submit(renderer_reachable, attached)
+            there = pool.submit(renderer_online, elsewhere)
+            if here.result():
+                return True
+            if not there.result():
+                return False
+        finally:
+            pool.shutdown(wait=False, cancel_futures=True)
+        logger.info("renderer %s answers at another address now — attaching it there", self.label)
+        self._lose()
+        self._emit_now()
+        return True
+
+    def _record(self) -> dict:
+        """The renderer as the node remembers it now: the chosen output's
+        record, which every address a scan reaches it at joins
+        (routers.player.note_renderer_location), with the addresses this
+        instance was attached with behind it."""
+        from routers.player import udn_key
+        from routers.settings import _read
+        chosen = _read("output.dlna_renderer") or {}
+        if udn_key(chosen.get("udn")) != udn_key(self._renderer.get("udn")):
+            return self._renderer
+        locations = known_locations(chosen)
+        return {**chosen, "locations": [*locations, *(
+            loc for loc in known_locations(self._renderer) if loc not in locations)]}
 
     def resume_at(self, index: int, position: float = 0.0) -> None:
         item = self._queue.item_at(index)
@@ -666,9 +703,13 @@ class DlnaBackend(PlayerBackend):
         moved this instance on; the play press then started the slot it was
         left at from 0:00, after the phone had played the next one."""
         self._gone = True
-        if self._resume is None:
-            playing = self._state_name() == "playing" and not self._awaiting_play
-            self._resume = self._wall_estimate() if playing else self._position
+        if self._resume is not None or self._current_url is None:
+            return              # a spot already, or nothing of ours loaded
+        state = self._state_name()
+        if self._awaiting_play or state == "paused":
+            self._resume = self._position
+        elif state == "playing":
+            self._resume = self._wall_estimate()
 
     def _confirmed(self) -> None:
         """The renderer was seen acting on our Play: the pending play is
@@ -756,7 +797,7 @@ class DlnaBackend(PlayerBackend):
                                        "(deep sleep / Wi-Fi off)")
                         logger.warning("DLNA renderer unreachable after "
                                        "%d poll misses — stopped at slot %d, %.0f s",
-                                       misses, self._index, self._resume)
+                                       misses, self._index, self._resume or 0.0)
                         self._emit_now("stopped")
                         return
                     continue

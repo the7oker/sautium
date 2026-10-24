@@ -200,17 +200,14 @@ def get_outputs(rescan: bool = False):
     except ImportError:
         dlna_available = False
     persisted_renderer = _read("output.dlna_renderer")
-    renderers = {**_dlna_discovered,
-                 **{u: {**r, "pinned": True} for u, r in _dlna_pins().items()}}
-    # The renderer of the ACTIVE dlna output is configuration — it stays
-    # listed even when unreachable (like the HQPlayer row when HQP is off).
-    # Once another output is selected it must earn its place via scan/pin.
-    if persisted_renderer and _read("output.type") == "dlna":
-        renderers.setdefault(persisted_renderer.get("udn"), persisted_renderer)
     outputs.append({
         "type": "dlna",
         "available": dlna_available,
-        "renderers": list(renderers.values()),
+        # The renderer of the ACTIVE dlna output is configuration — it stays
+        # listed even when unreachable (like the HQPlayer row when HQP is
+        # off). Once another output is selected it must earn its place via
+        # scan/pin.
+        "renderers": _dlna_rows(persisted_renderer if _read("output.type") == "dlna" else None),
     })
     outputs.append({"type": "browser", "available": True})
 
@@ -223,7 +220,7 @@ def get_outputs(rescan: bool = False):
             **manager.output_info,
             "device_id": _read("output.local_device"),
             "exclusive": bool(_read("output.local_exclusive")),
-            "renderer_udn": (persisted_renderer or {}).get("udn"),
+            "renderer_udn": udn_key((persisted_renderer or {}).get("udn")),
             "stream_quality": _read("output.stream_quality") or "lossless",
         },
         "outputs": outputs,
@@ -262,9 +259,41 @@ def get_outputs(rescan: bool = False):
 _dlna_discovered: dict[str, dict] = {}
 
 
+def udn_key(udn: Optional[str]) -> Optional[str]:
+    """A renderer's identity as one string: a UDN is a UUID, and a UUID
+    reads the same in either case (RFC 4122)."""
+    return udn.strip().lower() if udn else udn
+
+
 def _dlna_pins() -> dict[str, dict]:
     from routers.settings import _read
-    return {r["udn"]: r for r in (_read("output.dlna_pinned") or [])}
+    return {udn_key(r["udn"]): r for r in (_read("output.dlna_pinned") or [])}
+
+
+def _dlna_rows(active: Optional[dict]) -> list:
+    """One picker row per renderer, by UDN: where the last scan reached it,
+    with every other address it was pinned or chosen at kept behind as a
+    fallback, never as a row of its own. A phone added by its LAN address
+    and found by a scan through the tunnel was listed twice, and the first
+    taps chose the address that no longer answered."""
+    rows: dict[str, dict] = {}
+    pins = _dlna_pins()
+    for record in [*_dlna_discovered.values(), *pins.values(), *([active] if active else [])]:
+        key = udn_key(record.get("udn"))
+        if not key:
+            continue
+        seen = rows.get(key)
+        # The record seen first wins the row (the scan's, then the pin's);
+        # the others add their addresses behind its own
+        rows[key] = (remember_location(record) if seen is None
+                     else {**seen, "locations": [*seen["locations"], *(
+                         loc for loc in remember_location(record)["locations"]
+                         if loc not in seen["locations"])][:4]})
+        rows[key]["udn"] = key
+    for key, row in rows.items():
+        if key in pins:
+            row["pinned"] = True
+    return list(rows.values())
 
 
 # -- HQPlayer discovery -----------------------------------------------------------
@@ -367,21 +396,26 @@ def remember_location(record: dict, seen: dict | None = None) -> dict:
 
 def note_renderer_location(udn: str, location: str) -> None:
     """Promote the address a renderer actually answered on, wherever that
-    renderer is remembered. Called from the DLNA backend after an attach
-    lands on something other than the stored address."""
+    renderer is remembered — its pin, the chosen output — the address it
+    had kept behind it. Called from the DLNA backend after an attach lands
+    on something other than the stored address, and by a scan for every
+    remembered renderer it reaches: the play press then tries the address
+    that answers now (a phone back on the LAN from a tunnel failed its
+    first Play on the tunnel address it was chosen at)."""
     global _dlna_discovered
     from routers.settings import _read, _write
+    key = udn_key(udn)
     pins = _dlna_pins()
-    if udn in pins:
-        pins[udn] = remember_location(pins[udn], {"location": location})
+    if key in pins and pins[key].get("location") != location:
+        pins[key] = remember_location(pins[key], {"location": location})
         _dlna_save_pins(pins)
     active = _read("output.dlna_renderer")
-    if active and active.get("udn") == udn:
+    if active and udn_key(active.get("udn")) == key and active.get("location") != location:
         _write("output.dlna_renderer",
                remember_location(active, {"location": location}))
-    if udn in _dlna_discovered:
+    if key in _dlna_discovered:
         _dlna_discovered = {**_dlna_discovered,
-                            udn: remember_location(_dlna_discovered[udn], {"location": location})}
+                            key: remember_location(_dlna_discovered[key], {"location": location})}
 
 
 def _dlna_save_pins(pins: dict[str, dict]) -> None:
@@ -739,9 +773,10 @@ async def _scan_run():
     global _hqp_discovered, _dlna_discovered
     _hqp_discovered = hqps
 
-    renderers = []
     fresh: dict[str, dict] = {}
     known = {**_dlna_discovered, **_dlna_pins()}
+    from routers.settings import _read
+    active = _read("output.dlna_renderer") or {}
     for loc in sorted(set(found.values())):
         try:
             info = await _dlna_describe(loc)
@@ -753,10 +788,21 @@ async def _scan_run():
         # A scan finds the device where it is TODAY; whatever we knew about
         # where it used to be stays attached to it, so a phone found on the
         # LAN keeps its tunnel address as a fallback and vice versa.
-        info = remember_location(known.get(info["udn"], {}), info)
-        fresh[info["udn"]] = info
-        renderers.append(info)
+        key = udn_key(info["udn"])
+        if key in fresh:
+            # The same renderer at another address in the same scan (a phone
+            # answering on the LAN and through the tunnel): one record, the
+            # address found first its own, this one behind it
+            row = fresh[key]
+            if info["location"] not in row["locations"]:
+                fresh[key] = {**row, "locations": [*row["locations"], info["location"]][:4]}
+            continue
+        fresh[key] = {**remember_location(known.get(key, {}), info), "udn": key}
     _dlna_discovered = fresh
+    for key, info in fresh.items():
+        if key in known or udn_key(active.get("udn")) == key:
+            note_renderer_location(key, info["location"])
+    renderers = list(fresh.values())
     return {"renderers": renderers, "hqplayers": _hqplayer_entries()}
 
 
@@ -849,9 +895,10 @@ async def add_device(req: AddDeviceRequest):
     except Exception as e:
         raise HTTPException(status_code=502, detail=f"renderer not reachable: {e}")
     pins = _dlna_pins()
-    prior = pins.get(info["udn"]) or _dlna_discovered.get(info["udn"]) or {}
-    info = remember_location(prior, info) if prior else remember_location(info)
-    pins[info["udn"]] = info
+    key = udn_key(info["udn"])
+    prior = pins.get(key) or _dlna_discovered.get(key) or {}
+    info = {**(remember_location(prior, info) if prior else remember_location(info)), "udn": key}
+    pins[key] = info
     _dlna_save_pins(pins)
     return {"kind": "dlna", **info}
 
@@ -868,15 +915,16 @@ async def dlna_remove(req: DlnaRemoveRequest):
     stays visible while its device is off, which also meant a stale entry
     could not be got rid of by any means the UI offered."""
     from routers.settings import _read, _write
+    key = udn_key(req.udn)
     pins = _dlna_pins()
-    removed = pins.pop(req.udn, None) is not None
+    removed = pins.pop(key, None) is not None
     _dlna_save_pins(pins)
     global _dlna_discovered
-    if req.udn in _dlna_discovered:
-        _dlna_discovered = {k: v for k, v in _dlna_discovered.items() if k != req.udn}
+    if key in _dlna_discovered:
+        _dlna_discovered = {k: v for k, v in _dlna_discovered.items() if k != key}
         removed = True
     active = _read("output.dlna_renderer")
-    if active and active.get("udn") == req.udn:
+    if active and udn_key(active.get("udn")) == key:
         _write("output.dlna_renderer", None)
         removed = True
     return {"ok": True, "removed": removed}
