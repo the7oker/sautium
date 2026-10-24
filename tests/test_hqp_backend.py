@@ -12833,6 +12833,74 @@ def test_a_stopping_mutation_a_pause_was_held_in_leaves_the_spot_on_what_played(
     assert _wait(lambda: _plays(fake, "file:///E:/Music/A/01.flac"), timeout=5), (_reads(fake), sent)
 
 
+def _spot_of(b):
+    s = b._spot
+    return None if s is None else (s[0].track_id, s[1])
+
+
+@pytest.mark.parametrize("after", ["none", "pause", "play"])
+def test_a_tap_that_waited_while_a_seek_moved_the_spot_yields_to_it(fake, output, monkeypatch, after):
+    """Paused on track 1 at 42 s; a tap waits its turn while a new order
+    that needs a rebuild runs — it owes no start, it leaves a spot — and
+    the person drags to 90 s: held, it moves the spot's second. The tap,
+    whose turn comes after, yields to it: the spot stays what played at
+    90 s, and a Pause or a Play after counts from there."""
+    mgr, b = output
+    player_router = _routes_on(monkeypatch, mgr)
+    with fake._lock:
+        fake.position = 41.0
+    assert _wait(lambda: (mgr._latest_status.get("position") or 0) >= 42, timeout=5)
+    assert b.pause()
+    assert _wait(lambda: mgr._latest_status.get("state") == "paused", timeout=5)
+    link = _link()
+    tapper, said, vol = _a_tap_waiting_behind_a_slow_volume(b, link, fake)
+    tapper.start()
+    assert _wait(lambda: len(link.lock._waiting) == 1, timeout=3)
+    fake.service["PlaylistAdd"] = 1.0
+    reordering = threading.Thread(target=lambda: player_router.reorder(player_router.ReorderRequest(
+        order=["track-2", "track-1", "track-3"])), daemon=True)
+    reordering.start()
+    assert _wait(lambda: b._inflight is not None and len(link.lock._waiting) == 2, timeout=5)
+    assert _quick(lambda: b.seek(90))                   # held: before the tap's turn
+    tapper.join(10)                                     # the tap's turn came
+    if after != "none":
+        assert b._inflight is not None, "the rebuild still hands over"
+        assert _quick({"pause": b.pause, "play": b.play}[after])
+    for t in (reordering, vol):
+        t.join(20)
+    _settled()
+    if after == "play":
+        assert _wait(lambda: _plays(fake, "file:///E:/Music/A/01.flac"), timeout=8), (_reads(fake), said)
+        return
+    assert _wait(lambda: _spot_of(b) == ("track-1", 90), timeout=5), (_spot_of(b), _reads(fake), said)
+
+
+def test_a_tap_that_waited_while_a_next_moved_the_spot_yields_to_it(fake, output):
+    """Stopped at a spot on track 1; a tap waits its turn while a play next
+    holds the words, and the person presses Next — held at the spot, it
+    moves it on. The tap, whose turn comes after, yields: nothing plays."""
+    mgr, b = output
+    assert b.stop()
+    assert _wait(lambda: mgr._latest_status.get("state") == "stopped", timeout=5)
+    b._set_spot(mgr.queue.item_at(1), 42)
+    assert _wait(lambda: (mgr._latest_status.get("resume") or {}).get("index") == 1, timeout=5)
+    link = _link()
+    tapper, said, vol = _a_tap_waiting_behind_a_slow_volume(b, link, fake)
+    tapper.start()
+    assert _wait(lambda: len(link.lock._waiting) == 1, timeout=3)
+    fake.service["PlaylistAdd"] = 1.0
+    inserting = threading.Thread(target=lambda: mgr.append(
+        [_item("E:/Music/N/01.flac", 31)], "next"), daemon=True)
+    inserting.start()
+    assert _wait(lambda: b._inflight is not None and len(link.lock._waiting) == 2, timeout=5)
+    assert _quick(b.next)                               # held at the spot, before the tap's turn
+    for t in (tapper, inserting, vol):
+        t.join(20)
+    _settled()
+    assert not _plays(fake, "file:///E:/Music/A/03.flac"), (_spot_of(b), _reads(fake), said)
+    assert fake.state == int(PlaybackState.STOPPED), (_spot_of(b), _reads(fake), said)
+
+
 def test_a_held_pause_and_play_after_the_yielded_tap_resume_what_played(fake, output):
     mgr, b = output
     threads, n = _a_tap_held_after_a_play_on_what_played(mgr, b, fake)

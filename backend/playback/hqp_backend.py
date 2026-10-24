@@ -976,6 +976,9 @@ class _InFlight(_Words):
         # The numbers of the person's words that went on what plays meanwhile
         # — asked before the mutation began, their turn came behind it (_cmd)
         self.went: list = []
+        # The numbers of held words that moved the spot the mutation leaves —
+        # a Seek of its second, a Next or a Previous at it — and took no start
+        self.moved: list = []
 
     def halted(self) -> bool:
         """Was a Pause or a Stop the newest word — newer than every start and
@@ -1004,7 +1007,7 @@ class _InFlight(_Words):
         what plays? A tap that waited its turn meanwhile yields to it: held
         now, it would lead the words after, or leave the spot, on a track
         the person moved on from."""
-        return any(m > n for m in [w[0] for w in self.plain] + self.halts + self.went
+        return any(m > n for m in [w[0] for w in self.plain] + self.halts + self.went + self.moved
                    + [s.item.n for s in self.starts])
 
     def index(self, item: QueueItem) -> Optional[int]:
@@ -3698,6 +3701,7 @@ class HqpBackend(PlayerBackend):
         slot = _Layout(words.items, self.gap).held(i + by, by) if i is not None else None
         if slot is not None and at_spot:
             words.base, words.base_moved = (words.items[slot - 1], 0), True
+            words.moved.append(self._link.reserve())    # its place among the words, no intent
         elif slot is not None:
             steps = (None if newest is not None and newest.steps is None
                      else by + (newest.steps if newest is not None else 0))
@@ -4336,6 +4340,7 @@ class HqpBackend(PlayerBackend):
                                            words.items[words.index(target) - 1:], None))
             elif words.stops and words.base is not None:
                 words.base, words.base_moved = (words.base[0], seconds), True
+                words.moved.append(n)
             else:
                 words.plain.append((n, "Seek", seconds))
         return True

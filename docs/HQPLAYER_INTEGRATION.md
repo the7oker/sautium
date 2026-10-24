@@ -704,8 +704,12 @@ comes after the control port answers again — so neither can end the wait.
   became, holding no Pause or Stop, rebuilds nothing, never leaving HQPlayer
   stopped (since 2026-10-14). A start so superseded takes no more words
   (since 2026-10-23): the words held after it count from what played, and
-  the press takes none but a tap — a Pause, a Stop, a Seek, a Play, Next or
-  Previous made while it prepares goes on what plays. An output that holds
+  the press, holding no Pause or Stop, takes none but a start of its own —
+  a Pause, a Stop or a Seek made while it prepares goes on what plays; a
+  tap, Next, Previous or a Play from a stop is a start, handed over as a
+  press does. A tap whose turn comes after a newer word was held — a
+  Seek or a step that moved the spot a mutation leaves among them — or
+  went on what plays is held as nothing. An output that holds
   no words (a renderer, the browser) is handed that slot even while a
   mutation is in flight
   (`PlayerBackend.holds_words`). A Play asks again for the start the
