@@ -889,13 +889,14 @@ class DlnaBackend(PlayerBackend):
     async def _art_url(self, item: QueueItem) -> Optional[str]:
         """Renderer-fetchable cover URL: art is re-served as JPEG on the
         plain-http proxy (/art/{token}) — owned covers from the covers table,
-        phantom covers fetched once from their provider/CAA URL (which stays
-        the fallback when that fetch fails)."""
+        phantom covers fetched once from their provider/CAA URL. A cover the
+        node could not fetch itself is none at all: its provider's address
+        would send the renderer to the internet, which a phone renderer must
+        never reach and a DAP's stack cannot (HTTPS, a redirect)."""
         from streaming import service as streaming_service
         proxy = streaming_service.ensure_proxy()
         if item.cover_id:
             sources = [(item.cover_id, self._load_cover_jpeg)]
-            fallback = None
         elif item.preview:
             from playback.queue import resolved_artwork
             # Same order as the web UI's coverUrl(): the queued album's own
@@ -907,7 +908,6 @@ class DlnaBackend(PlayerBackend):
             urls = [u for u in (item.cover_url, resolved_artwork.get(item.track_id))
                     if u and u not in self._art_misses]
             sources = [(u, self._fetch_cover_jpeg) for u in urls]
-            fallback = urls[0] if urls else None
         else:
             return None
         for key, loader in sources:
@@ -920,7 +920,7 @@ class DlnaBackend(PlayerBackend):
                     continue
                 tok = proxy.register_blob(key, data, "image/jpeg")
             return proxy.art_url(tok, host=media_host(self._peer_host))
-        return fallback
+        return None
 
     async def _transport_meta(self, url: str, item: QueueItem) -> str:
         """DIDL with the class FORCED to musicTrack: the library derives the
