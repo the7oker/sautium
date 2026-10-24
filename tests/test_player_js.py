@@ -17,6 +17,7 @@ if str(REPO_ROOT / "backend") not in sys.path:
     sys.path.insert(0, str(REPO_ROOT / "backend"))
 
 from hqplayer_client import PlaybackState, TrackStatus  # noqa: E402
+from playback import hqp_diagnostics as diag  # noqa: E402
 from playback.manager import PlaybackManager  # noqa: E402
 from playback.queue import QueueItem  # noqa: E402
 from tests.test_hqp_backend import (_closed, _queue_stays_in_memory, _wait, fake,  # noqa: E402,F401
@@ -278,6 +279,33 @@ def test_a_tab_opened_after_a_failure_never_says_it(traced, fake, monkeypatch):
     diagnosed = {"np": {"state": "stopped", "output": out, "diagnosis": d}}
     run = _ui_run([diagnosed, {"np": {"state": "stopped", "output": out}}, diagnosed], {})
     assert run["calls"] == 0, run
+
+
+def test_a_failure_met_in_a_failing_run_is_not_said_when_the_run_ends(traced, fake):
+    """Three taps HQPlayer refuses, on slots 1, 2 and 1: the first two are
+    said with their Why?, the third is the failing run's — its notice
+    speaks. HQPlayer then plays slot 2 from its own window and stops: the
+    run is over, and the third attempt comes back without `failing` —
+    met already, it is no news."""
+    fake.replies["SelectTrack"] = '<SelectTrack result="Error">No such track</SelectTrack>'
+    stopped = TrackStatus(state=PlaybackState.STOPPED, track_index=1, track_id="", position=0.0,
+                          length=300.0, volume=-3.0)
+    seen = []
+    for slot in (1, 2, 1):
+        assert traced.select(slot) is False
+        attempt = traced.refused_attempt()
+        assert _wait(lambda: traced._last_closed is not None and traced._last_closed.id == attempt, 5.0)
+        seen.append(traced._diagnosis(stopped))
+    assert [d["failing"] for d in seen] == [False, False, True], seen
+    assert diag.note_playing(2, traced._queue.generation)
+    ended = traced._diagnosis(stopped)
+    assert ended["id"] == seen[2]["id"] and not ended["failing"], ended
+    out = {"type": "hqplayer", "label": "HQPlayer", "attached": True}
+    bare = {"np": {"state": "stopped", "output": out}}
+    run = _ui_run([bare] + [{"np": {"state": "stopped", "output": out, "diagnosis": d}} for d in seen]
+                  + [{"np": {"state": "playing", "output": out}},
+                     {"np": {"state": "stopped", "output": out, "diagnosis": ended}}], {})
+    assert run["calls"] == 2 and [t["action"] for t in run["toasts"]] == ["Why?"], run
 
 
 @pytest.mark.parametrize("diagnosis_first", [False, True])

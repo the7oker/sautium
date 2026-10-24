@@ -6280,23 +6280,26 @@
 
   // A play the HQPlayer output judged failed (playback/hqp_diagnostics.py):
   // one toast per attempt, with the way to its explanation — the toast its
-  // route's answer opened, taken over in place (answerSays), and never again
-  // once said — a status that loses the diagnosis and gets it back is no new
-  // failure. Not when the
-  // same failure repeats on a dead output — the `hqplayer.failing` notice
-  // speaks then (`failing`, decided by the server) — and not for an
-  // HQPlayer that did not answer: the play route's 503 already said so.
-  // The status a tab connects with paints the tag only, never a stale toast.
+  // route's answer opened, taken over in place (answerSays). An attempt's
+  // diagnosis is news only the first time this tab meets it: a status that
+  // loses it and gets it back says nothing, whatever the first meeting said.
+  // Not when the same failure repeats on a dead output — the
+  // `hqplayer.failing` notice speaks then (`failing`, decided by the server,
+  // a flag of the run: when the run ends the same attempt comes back
+  // without it) — and not for an HQPlayer that did not answer: the play
+  // route's 503 already said so. The status a tab connects with paints the
+  // tag only, never a stale toast.
   let lastDiagnosisSeen;
+  const metDiagnoses = new Set();
   document.addEventListener('np-update', (e) => {
     const d = e.detail && e.detail.diagnosis;
     const id = d ? d.id : null;
     const first = lastDiagnosisSeen === undefined;
     if (id === lastDiagnosisSeen) return;
     lastDiagnosisSeen = id;
-    if (d && first) saidAttempts.set(d.id, 'diagnosis');     // said before this tab: never again
-    if (!d || first || d.failing || d.code === 'unreachable'
-        || saidAttempts.get(d.id) === 'diagnosis') return;
+    if (!d || metDiagnoses.has(d.id)) return;
+    metDiagnoses.add(d.id);
+    if (first || d.failing || d.code === 'unreachable') return;
     saidAttempts.set(d.id, 'diagnosis');
     notices.toast({ kind: 'error', key: 'hqplayer.diagnosis', title: escapeHtml(d.title),
                     text: escapeHtml(d.next || ''),
