@@ -958,7 +958,9 @@ class ServiceManager:
 
     @staticmethod
     def _kill_orphan_on_port(port: int) -> None:
-        """Kill any process listening on the given port (orphan from previous session).
+        """Kill any process listening on the given port (orphan from previous
+        session). Never fails the start: what the sweep cannot settle, the
+        backend's own bind says ("stopped while starting", its log tail).
 
         Enumerated per process rather than through psutil.net_connections():
         that call needs root on macOS and raises AccessDenied for the WHOLE
@@ -967,31 +969,50 @@ class ServiceManager:
         /health — a "started successfully" that ran the previous session's
         code. Per-process sockets are readable without privileges for
         processes this user owns, which the orphan always is.
+
+        A process whose sockets cannot be read is not the orphan, whatever
+        psutil says: AccessDenied for another user's, NoSuchProcess for one
+        that ended (a zombie's ZombieProcess among them — it holds no socket),
+        an OSError for an errno it passes on, and on macOS a RuntimeError for
+        a live process of this user's whose descriptors the kernel will not
+        list. Xcode's DTServiceHub raised it on every read (psutil 7.2.2,
+        macOS 27, 2026-10-25), and every start failed while it ran. The
+        Process is made inside the same guard: a process gone between the
+        table and the read is not the orphan either.
         """
-        for proc in psutil.process_iter(["pid", "name"]):
+        readable = 0
+        for pid in psutil.pids():
             try:
-                listening = any(
-                    conn.status == psutil.CONN_LISTEN and conn.laddr.port == port
-                    for conn in proc.net_connections(kind="tcp")
-                )
-            except (psutil.NoSuchProcess, psutil.AccessDenied):
+                proc = psutil.Process(pid)
+                conns = proc.net_connections(kind="tcp")
+            except (psutil.NoSuchProcess, psutil.AccessDenied, RuntimeError, OSError):
                 continue
-            if not listening:
+            readable += 1
+            if not any(conn.status == psutil.CONN_LISTEN and conn.laddr.port == port
+                       for conn in conns):
                 continue
-            logger.warning(
-                f"Killing orphan process on port {port}: "
-                f"PID {proc.pid} ({proc.info.get('name')})"
-            )
+            try:
+                name = proc.name()
+            except (psutil.Error, RuntimeError, OSError):
+                name = "name unreadable"        # only the log line's: the orphan is stopped all the same
+            logger.warning(f"Killing orphan process on port {port}: PID {pid} ({name})")
             try:
                 proc.terminate()
-                proc.wait(timeout=5)
+                try:
+                    proc.wait(timeout=5)
+                except psutil.TimeoutExpired:
+                    proc.kill()
+                    proc.wait(timeout=5)
             except psutil.NoSuchProcess:
                 pass
-            except psutil.TimeoutExpired:
-                try:
-                    proc.kill()
-                except psutil.NoSuchProcess:
-                    pass
+            except (psutil.AccessDenied, psutil.TimeoutExpired) as e:
+                # Another user's process, which Windows lists with the rest
+                # (its sockets come from the system's table, not the
+                # process), or one that outlives its kill
+                logger.warning(f"Orphan PID {pid} on port {port} not stopped: {e!r}")
+        if not readable:
+            logger.warning(f"Orphan sweep: no process's sockets could be read — "
+                           f"nothing on port {port} was checked")
 
     def backend_env(self, tool_dirs: Optional[list] = None) -> dict:
         """Environment for a process on the backend interpreter — the backend

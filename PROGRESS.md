@@ -3281,6 +3281,25 @@ Lesson: a switch moves the listening, not just the list.
   manager taking a backend's end once the quit began for none; the
   launcher's Tk paths (its quit, a relaunch's) hold by construction, macOS
   takes the same POSIX path, and the Windows console path is untested.
+- **The orphan sweep never fails a start** (2026-10-25). Before each
+  backend start the launcher stops what a previous session left on the
+  web port, reading every process's sockets
+  (`service_manager._kill_orphan_on_port`). On a Mac every start failed
+  with `RuntimeError: proc_pidinfo(PROC_PIDLISTFDS) 2/2 syscall failed`:
+  psutil 7.2.2 on macOS 27 raises it, on every read, for Xcode's
+  DTServiceHub — a live process of the user's whose descriptors the kernel
+  will not list — and the sweep passed over only NoSuchProcess and
+  AccessDenied. Read on that Mac the same day: a zombie raises
+  ZombieProcess (a NoSuchProcess), a process exiting under the read
+  NoSuchProcess and then ZombieProcess, the user's setuid `login`
+  processes AccessDenied. Now whatever psutil raises for one process — a
+  RuntimeError and an OSError among it, and a Process that cannot be made
+  — means "not this one"; the orphan's name is read for the log line
+  alone; an orphan that cannot be stopped (another user's service, which
+  Windows lists with the rest because its sockets come from the system's
+  table, not the process; one that outlives its kill) is said and left to
+  the backend's bind; one killed is waited for; a sweep that could read no
+  process says so once.
 
 - **A range past the end is 416, never the whole file.** HQPlayer resumes
   a stream cut short with `Range: bytes=<offset>-` and appends what comes
