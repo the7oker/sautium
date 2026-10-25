@@ -99,10 +99,12 @@ _ART_MISS_MAX_AGE = 86400
 _ART_CACHE_ENTRIES = 512
 _ART_CACHE_BYTES = 24 * 2**20   # ≈ 400 covers at CAA's front-500 and Deezer's 1000 px
 _ART_MISS_ENTRIES = 4096        # kept apart from the covers: misses never evict one
-# Upstream fetches at once, every source together. The routes take no
-# signature (an <img> cannot sign), so this bounds what anyone on the LAN can
-# make the node open; a cover beyond it defers like upstream trouble.
-_ART_MAX_FETCHES = 32
+# Upstream fetches at once, per source. The routes take no signature (an
+# <img> cannot sign), so this bounds what anyone on the LAN can make the node
+# open, and a source that stalls — before its breaker has heard enough to
+# trip — leaves the others their share. A cover beyond it defers like
+# upstream trouble.
+_ART_MAX_FETCHES = 16
 
 _art_cache: "OrderedDict[str, tuple[float, str, bytes]]" = OrderedDict()   # url -> (until, mime, body)
 _art_misses: "OrderedDict[str, float]" = OrderedDict()                    # url -> until
@@ -187,10 +189,9 @@ async def _art_lookup(source: str, url: str) -> tuple[int, str, bytes]:
         return 404, "", b""
     pending = _art_inflight.get(url)
     if pending is None:
-        if len(_art_inflight) >= _ART_MAX_FETCHES:
-            return 503, "", b""     # enough is being fetched: defer
-        if source in _art_open and any(s == source for s, _ in _art_inflight.values()):
-            return 503, "", b""     # the probe is already in flight
+        asked = sum(s == source for s, _ in _art_inflight.values())
+        if asked >= _ART_MAX_FETCHES or (asked and source in _art_open):
+            return 503, "", b""     # enough is asked of the source, or its probe is out: defer
         pending = _art_inflight[url] = (source, asyncio.create_task(_art_fetch_settled(source, url)))
     return await asyncio.shield(pending[1])
 

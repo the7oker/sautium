@@ -27,6 +27,7 @@ Public entry points:
   art_source(url) / fetch_art(source, url)   # outside art, by ART_SOURCES only
 """
 
+import asyncio
 import hashlib
 import logging
 import re
@@ -460,6 +461,7 @@ ART_SOURCES = {
 }
 _ART_MAX_BYTES = 2 * 2**20      # one image; a provider's largest is ~0.3 MB
 _ART_MAX_HOPS = 3               # CAA takes two
+_ART_DEADLINE = 10.0            # seconds for the whole chain; CAA's takes about 2
 _RASTER = frozenset({"image/jpeg", "image/png", "image/webp", "image/gif", "image/avif"})
 
 
@@ -471,18 +473,20 @@ def art_source(url: str) -> Optional[str]:
     return None
 
 
-async def fetch_art(source: str, url: str, quiet: bool = False) -> Tuple[int, str, bytes]:
+async def fetch_art(source: str, url: str, quiet: bool = False,
+                    deadline: float = _ART_DEADLINE) -> Tuple[int, str, bytes]:
     """(status, mime, body) for a URL of `source`'s shape: 200 with the
     image; 404 for no art at that URL — the host's 404, a redirect off the
     source's hosts, an image over the size cap; 502 for anything else
-    (unreachable, a 5xx, a body that is no raster image) — never raises.
-    Nothing of the client goes upstream: the node asks with no cookie, no
-    referrer and its own address. `quiet` logs the upstream's failures at
-    debug: the caller's breaker is open, its opening was the warning."""
+    (unreachable, a 5xx, a body that is no raster image, no answer within
+    `deadline` seconds for the whole chain) — never raises. Nothing of the
+    client goes upstream: the node asks with no cookie, no referrer and its
+    own address. `quiet` logs the upstream's failures at debug: the caller's
+    breaker is open, its opening was the warning."""
     hops = ART_SOURCES[source][1]
     level = logging.DEBUG if quiet else logging.WARNING
     try:
-        async with httpx.AsyncClient(timeout=10.0) as client:
+        async with asyncio.timeout(deadline), httpx.AsyncClient(timeout=deadline) as client:
             for _ in range(_ART_MAX_HOPS + 1):
                 async with client.stream("GET", url) as resp:
                     nxt = resp.next_request
@@ -509,6 +513,9 @@ async def fetch_art(source: str, url: str, quiet: bool = False) -> Tuple[int, st
                         logger.log(level, "%s answered an empty image for %s", source, url)
                         return 502, "", b""
                     return 200, mime, bytes(body)
+    except TimeoutError:
+        logger.log(level, "%s gave no cover within %.0f s for %s", source, deadline, url)
+        return 502, "", b""
     except httpx.HTTPError as e:
         logger.log(level, "%s fetch failed for %s: %s %s", source, url, type(e).__name__, e)
         return 502, "", b""

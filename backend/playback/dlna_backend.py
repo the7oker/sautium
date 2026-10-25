@@ -57,6 +57,7 @@ _PROBE_TIMEOUT = 5.0
 _TRACK_END_SLACK = 3.0      # STOPPED within this many seconds of the length = track finished
 _RELTIME_TOLERANCE = 3.0    # a RelTime this close to our clock is the renderer's word on it
 _PENDING_PLAY_DEADLINE = 20.0   # a Play unconfirmed this long stops claiming `loading`
+_COVER_DEADLINE_S = 5.0     # a phantom's cover fetch, which the track's start waits for (CAA's ~2 s)
 
 # One audio format's spellings across sink lists. The node names each format
 # as MIME_BY_FORMAT does; a renderer may list it otherwise — a DAP's list
@@ -1113,12 +1114,13 @@ class DlnaBackend(PlayerBackend):
         top, neither of which a DAP's UPnP stack follows. Fetched by the rule
         of every outside cover the node shows (covers.fetch_art: the URL
         shapes and hosts of ART_SOURCES, the size cap); a URL of no source's
-        shape is no cover, and nothing is fetched for it."""
+        shape is no cover, and nothing is fetched for it. The renderer is
+        handed its track only once this answers, so the wait is short."""
         from covers import art_source, fetch_art
         source = art_source(url)
         if source is None:
             return None
-        status, _mime, body = await fetch_art(source, url)
+        status, _mime, body = await fetch_art(source, url, deadline=_COVER_DEADLINE_S)
         if status != 200:
             return None
         return await asyncio.to_thread(DlnaBackend._to_jpeg, body, url)
@@ -1152,6 +1154,9 @@ class DlnaBackend(PlayerBackend):
             if tok is None:
                 data = await loader(key)
                 if data is None:
+                    # A cover not fetched is none for this renderer from now
+                    # on, the host's trouble included: every track start
+                    # would wait for it again, and the art is the lesser part.
                     if loader is self._fetch_cover_jpeg:
                         self._art_misses.add(key)
                     continue

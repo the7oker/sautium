@@ -15,7 +15,7 @@ import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
-from covers import _ART_MAX_BYTES
+from covers import _ART_MAX_BYTES, fetch_art
 from routers import covers
 
 RG = "f5093c06-23e3-404f-aeaa-40f72885ee3a"
@@ -329,22 +329,39 @@ def test_a_source_down_holds_back_no_other(monkeypatch):
     _run(scenario())
 
 
-def test_the_node_fetches_so_many_covers_at_once_and_defers_the_rest(monkeypatch):
+def test_the_node_asks_a_source_so_much_at_once_and_defers_the_rest(monkeypatch):
+    """A source that stalls before its breaker has heard enough to trip holds
+    its own share of the fetches, never the others'."""
     async def scenario():
         gate = asyncio.Event()
-        up = _Upstream(*[(gate, 200)] * covers._ART_MAX_FETCHES)
+        up = _Upstream(*[(gate, 200)] * covers._ART_MAX_FETCHES, 200)
         monkeypatch.setattr(covers, "fetch_art", up)
-        held = [asyncio.create_task(covers._art_lookup("youtube", f"v{n}"))
+        held = [asyncio.create_task(covers._art_lookup("caa", f"rg{n}"))
                 for n in range(covers._ART_MAX_FETCHES)]
         await asyncio.sleep(0)
-        assert (await covers._art_lookup("youtube", "one more"))[0] == 503
+        assert (await covers._art_lookup("caa", "one more"))[0] == 503
         await asyncio.sleep(0)                   # the held fetches reach the host
         assert len(up.calls) == covers._ART_MAX_FETCHES
+        assert (await covers._art_lookup("deezer", "art"))[0] == 200     # another source's share
         gate.set()
         assert {r[0] for r in await asyncio.gather(*held)} == {200}
-        assert not covers._art_failures.get("youtube")           # deferring is no failure of the host
+        assert not covers._art_failures.get("caa")           # deferring is no failure of the host
 
     _run(scenario())
+
+
+def test_a_chain_that_outlasts_its_deadline_is_trouble(monkeypatch):
+    """The deadline is the whole chain's, whatever each hop's own timeout."""
+    async def stall(request):
+        await asyncio.sleep(5)
+        return _image()
+
+    real = httpx.AsyncClient
+    monkeypatch.setattr(httpx, "AsyncClient",
+                        lambda **kw: real(transport=httpx.MockTransport(stall), **kw))
+    started = time.monotonic()
+    assert asyncio.run(fetch_art("youtube", YOUTUBE, deadline=0.2)) == (502, "", b"")
+    assert time.monotonic() - started < 2
 
 
 def test_a_browser_that_leaves_mid_fetch_strands_no_one(monkeypatch):

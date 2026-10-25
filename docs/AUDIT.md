@@ -263,7 +263,7 @@ and by design; the report should list them as matches, not discrepancies:
   thumbnail, each by its exact URL shape (`ART_SOURCES` in
   `backend/covers.py`, which the DLNA output's covers follow too), redirects
   only within Cover Art Archive and the Internet Archive, raster images up to
-  2 MiB, at most 32 fetches at once.
+  2 MiB, at most 16 fetches at once from each source.
 - The audition downloader (yt-dlp) **updates itself from PyPI** at every
   backend start (`backend/streaming/service.py`) — a supply-chain channel
   the project accepts knowingly, because the tool breaks weekly otherwise.
